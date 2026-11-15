@@ -69,6 +69,7 @@ class Invocation:
     runner: str
     timeout: int = 300
     expected_kind: str = "simulated"
+    consumer: str | None = None
 
 
 @dataclass(frozen=True)
@@ -495,6 +496,7 @@ def invoke(
     runner: str,
     run: Executor,
     expected_kind: str = "simulated",
+    consumer: str | None = None,
 ) -> dict[str, Any]:
     """Retain an attempted step even when its report/configuration is invalid."""
     from tools import schema_validate
@@ -507,7 +509,7 @@ def invoke(
         return process
 
     try:
-        return _invoke(argv, root, target, runner, recorded, expected_kind)
+        return _invoke(argv, root, target, runner, recorded, expected_kind, consumer)
     except (CommandError, schema_validate.SchemaError) as exc:
         code, reason = (
             (exc.code, exc.reason)
@@ -532,6 +534,7 @@ def _invoke(
     runner: str,
     run: Executor,
     expected_kind: str,
+    consumer: str | None,
 ) -> dict[str, Any]:
     from tools import schema_validate
 
@@ -541,7 +544,9 @@ def _invoke(
         env = environment(root, uuid.uuid4().hex)
         env.update({"OPENTOUR_RESULT_FILE": str(report_path), "OPENTOUR_TEST_TARGET": target})
         args = list(argv)
-        if runner == "pytest":
+        if consumer == "local_harness":
+            args.extend(["--result-file", str(report_path)])
+        elif runner == "pytest":
             guard = schema_validate.local_file(root, f"{COMMON}/python-unit/sitecustomize.py")
             try:
                 compile(guard.read_text(encoding="utf-8"), str(guard), "exec")
@@ -582,7 +587,14 @@ def _invoke(
         elif runner == "setup":
             env.pop("UV_OFFLINE", None)
         invocation = Invocation(
-            tuple(args), root, env, report_path, target, runner, expected_kind=expected_kind
+            tuple(args),
+            root,
+            env,
+            report_path,
+            target,
+            runner,
+            expected_kind=expected_kind,
+            consumer=consumer,
         )
         process = run(invocation)
         report: dict[str, Any] | None = None
@@ -619,9 +631,9 @@ def _invoke(
                 report = vitest_report(report, invocation)
             code, reason = validate_report(report, invocation, process, root)
             # Pytest codes are not the wrapper's public code vocabulary.
-            if runner == "pytest" and process.returncode in {2, 3, 4}:
+            if runner == "pytest" and consumer is None and process.returncode in {2, 3, 4}:
                 code, reason = 2, "INVALID_CONFIGURATION"
-            elif runner == "pytest" and process.returncode == 5:
+            elif runner == "pytest" and consumer is None and process.returncode == 5:
                 code, reason = 2, "NO_TESTS"
         elif runner == "setup":
             try:
@@ -660,6 +672,34 @@ def _invoke(
                     for test in report["tests"]
                 ],
             }
+        if consumer == "local_harness" and report:
+            if code == 0 and not set(MODES).issubset({test["mode"] for test in report["tests"]}):
+                raise CommandError(
+                    "Local harness must report actual tests in both deployment modes."
+                )
+            sidecar = report_path.with_name(report_path.name + ".observations.json")
+            if sidecar.exists() or code == 0:
+                if (
+                    not sidecar.is_file()
+                    or sidecar.is_symlink()
+                    or sidecar.resolve().parent != private_dir
+                    or sidecar.stat().st_size > 1_048_576
+                ):
+                    raise CommandError("Local harness observation sidecar is missing or unsafe.")
+                observations = schema_validate.read_json(sidecar)
+                if not schema_validate.valid_bound_document(
+                    root, f"{COMMON}/local-observations-binding.json", observations
+                ):
+                    raise CommandError("Local harness observations violate their owning schema.")
+                if code == 0 and not observations["observations"]:
+                    raise CommandError("Passing local harness produced no observations.")
+                summary["artifacts"] = [
+                    {
+                        "type": "c03-observations",
+                        "sha256": hashlib.sha256(sidecar.read_bytes()).hexdigest(),
+                        "content": observations,
+                    }
+                ]
         summary["output_sha256"] = hashlib.sha256(
             json.dumps(summary, sort_keys=True).encode()
         ).hexdigest()
@@ -762,6 +802,31 @@ def dispatch(
             if not re.fullmatch(r"[A-Za-z0-9_ .-]+", option) or option.startswith("-"):
                 raise CommandError("Invalid integration filter.")
         entry = registry[key][selector]
+        if command == "test-integration" and selector == "local":
+            if option != "harness-smoke":
+                raise CommandError(
+                    "Local profile accepts only the registered harness-smoke filter."
+                )
+            target = "tests/integration/test_failure_harness.py"
+            if (
+                entry["kind"] != "local_integration"
+                or entry["path"] != target
+                or entry["owner"] != "OPE-124"
+            ):
+                raise CommandError("Local profile does not match the admitted OPE-124 consumer.")
+            path_target(root, "tools/fixtures/local_harness.py")
+            path_target(root, target)
+            return [
+                invoke(
+                    (*uv_python(root), "-m", "tools.fixtures.local_harness", "harness-smoke"),
+                    root,
+                    target,
+                    "pytest",
+                    run,
+                    expected_kind="local_integration",
+                    consumer="local_harness",
+                )
+            ]
         # Providers and customer gates have no admitted adapters at bootstrap. Credentials alone
         # would not prove environment authority or required evidence, so never infer readiness.
         if entry.get("kind") != "simulated" or not entry.get("path"):
@@ -887,7 +952,14 @@ def run_command(
         ],
         "fixture_id": "bootstrap-command-contract",
         "fixture_version": registry.get("fixture_version", "1"),
-        "kind": "simulated",
+        "kind": next(
+            (
+                step["tests"]["kind"]
+                for step in reversed(steps)
+                if isinstance(step.get("tests"), dict) and "kind" in step["tests"]
+            ),
+            "simulated",
+        ),
         "mode": (
             args[-1]
             if command in {"test-isolation", "test-acceptance"} and args and args[-1] in MODES

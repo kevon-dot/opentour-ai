@@ -1,0 +1,6 @@
+{
+  "schema_version": "opentour.owned-schema-binding.v1",
+  "id": "urn:opentour:c03-observations:1.0",
+  "file": "tools/fixtures/observation.schema.json",
+  "sha256": "c25acad9bc6499d334b95db2259593cfdbacb1950422c45c54bfff79f03f00d4"
+}

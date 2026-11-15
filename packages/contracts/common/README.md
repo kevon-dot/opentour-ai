@@ -20,16 +20,18 @@ the public exit code. The accepted setup entry emits its OPE-122 receipt directl
 | `just test-browser PATH` | Declared `.spec.ts` file/suite with an admitted profile and actual OPE-127 adapter |
 | `just test-contract` | Hash-verified local schema examples, then actual contract tests |
 | `just validate-spec` | Exit 2/NOT_RUN until OPE-126 validator integration |
-| `just test-integration PROFILE FILTER` | `bootstrap-contract all` only; other integrations require their owning harness integration |
+| `just test-integration PROFILE FILTER` | `bootstrap-contract all`, or registered OPE-124 `local harness-smoke` with actual local prerequisites |
 | `just test-isolation SUITE MODE` | Declared ISO suites remain BLOCKED without owning real environment/harness |
-| `just test-acceptance GATE MODE` | G1–G6 remain BLOCKED without owning actual environment/customer evidence |
+| `just test-acceptance GATE MODE` | G1–G6 and declared OPS-02/OPS-03 remain BLOCKED without owning actual environment/customer evidence |
 
 Exit 0 means actual passing checks; 1 means assertion/execution/required-skip failure;
 2 means invalid arguments, configuration or zero collection; 3 means a verified
 missing external prerequisite. Unknown profiles are configuration errors. A runtime
 credential string cannot upgrade an unimplemented integration or gate to PASS.
-The fixture kind in command receipts describes the command/transport fixture only;
-`product_acceptance` remains `NOT_RUN`.
+The fixture kind in command receipts is bound to the admitted execution profile;
+`product_acceptance` remains `NOT_RUN`. The local profile's real PostgreSQL and
+local-cell checks are `local_integration`; its separately retained scripted provider
+observations remain `simulated`.
 
 The initial Vitest configuration is a bounded Node unit profile with exact file
 selection and no automatic project/config discovery. Application-specific Vite
@@ -64,6 +66,10 @@ declared paths are not executed or reclassified as simulated merely by existing.
 `schema-registry.json` binds the exact approved common and authority schema bytes.
 It also binds the owned runner transport schema; malformed, mismatched or unresolved
 transport schemas produce a structured configuration failure.
+`local-observations-binding.json` pins OPE-124's owned observation schema without
+copying it. Local execution retains the bounded, schema-validated observation
+sidecar content and exact SHA-256 in its command receipt before temporary cleanup.
+Passing local execution must include both deployment modes and nonempty observations.
 References resolve only through this local registry; HTTP/file fallback is denied.
 The canonical ResourceRevision pattern enforces positive decimal strings through
 `9223372036854775807`, distinct from JSON-safe event/epoch integers. Examples cover
@@ -88,10 +94,12 @@ cover wrong selection, stale identity, count mismatch, cleanup, process descenda
 schema resolution and evidence privacy.
 
 Foundation review is separate from full acceptance. OPE-127 must run the actual
-browser consumer checks. OPE-124's `local harness-smoke` needs a serialized wrapper
-extension tied to its owned `tools/fixtures/local_harness.py` and
-`tests/integration/test_failure_harness.py`, with actual prerequisites, filter/path,
-mode/kind transport and cleanup evidence. Merely editing the current registry cannot
-admit that authority. OPE-126 validator/evidence and actual CI coverage also remain
+browser consumer checks. The finite OPE-124 `local harness-smoke` integration invokes
+only `tools.fixtures.local_harness` and binds the exact target
+`tests/integration/test_failure_harness.py`. That adapter owns exact PostgreSQL
+prerequisites, foreground fixture lifecycle and actual pytest mode/kind observations.
+Its explicit BLOCKED exit3 is preserved separately from raw pytest internal-error
+codes. Other local/provider adapters cannot gain authority by editing registry
+text alone. OPE-126 validator/evidence and actual CI coverage also remain
 open. A reviewed foundation may admit compatible dependent work while OPE-123 stays
 In Progress; it does not waive any acceptance criterion.
