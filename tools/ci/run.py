@@ -106,6 +106,26 @@ def stage_report(root: Path, name: str, report: dict[str, Any]) -> Path:
     return file
 
 
+def run_browser(root: Path, env: dict[str, str]) -> dict[str, Any]:
+    result = run_one(
+        ["just", "test-browser", "apps/web/tests/browser-harness.browser.spec.ts"], root, env=env
+    )
+    # A failed actual test may still have valuable, nonce-bound failure evidence.
+    # Retain it before propagating failure; an absent/invalid manifest cannot pass.
+    try:
+        result["browser_artifacts"] = retain_browser_evidence(
+            root, result.get("command_evidence", {})
+        )
+    except (KeyError, TypeError, ValueError, OSError):
+        result["browser_artifacts"] = {
+            "available": False,
+            "reason": "MISSING_OR_INVALID_BROWSER_EVIDENCE",
+            "raw_artifacts_uploaded": False,
+        }
+        result["status"] = "FAIL"
+    return result
+
+
 def run_check(name: str, root: Path) -> dict[str, Any]:
     if name not in CHECKS:
         raise ValueError("Unknown required check")
@@ -148,10 +168,10 @@ def run_check(name: str, root: Path) -> dict[str, Any]:
         elif name == "browser-fixtures":
             env["PLAYWRIGHT_BROWSERS_PATH"] = str(root / ".toolchain/playwright")
             run(["pnpm", "exec", "playwright", "install", "--only-shell", "chromium"])
-            run(["just", "test-browser", "apps/web/tests/browser-harness.browser.spec.ts"])
-            steps[-1]["browser_artifacts"] = retain_browser_evidence(
-                root, steps[-1]["command_evidence"]
-            )
+            browser = run_browser(root, env)
+            steps.append(browser)
+            if browser["status"] != "PASS":
+                raise CommandError("Browser check failed", 1)
         elif name == "contract":
             run(["just", "test-contract"])
         elif name == "local-integration":
