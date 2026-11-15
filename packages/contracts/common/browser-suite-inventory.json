@@ -1,0 +1,331 @@
+{
+  "paths": {
+    "apps/web/tests/browser-harness.browser.spec.ts": [
+      "OPE-127",
+      "OPE-5"
+    ],
+    "apps/web/tests/coverage/ot-p22-c01.spec.ts": [
+      "OPE-232"
+    ],
+    "apps/web/tests/coverage/ot-p22-c02.spec.ts": [
+      "OPE-233"
+    ],
+    "apps/web/tests/coverage/ot-p22-c03.spec.ts": [
+      "OPE-234"
+    ],
+    "apps/web/tests/coverage/ot-p22-c04.spec.ts": [
+      "OPE-235"
+    ],
+    "apps/web/tests/coverage/ot-p22-c05.spec.ts": [
+      "OPE-236"
+    ],
+    "apps/web/tests/coverage/ot-p22-c06.spec.ts": [
+      "OPE-237"
+    ],
+    "apps/web/tests/coverage/ot-p22-c07.spec.ts": [
+      "OPE-238"
+    ],
+    "apps/web/tests/coverage/ot-p23-c01.spec.ts": [
+      "OPE-239"
+    ],
+    "apps/web/tests/context-switch.browser.spec.ts": [
+      "OPE-239"
+    ],
+    "apps/web/tests/coverage/ot-p23-c02.spec.ts": [
+      "OPE-240"
+    ],
+    "apps/web/tests/coverage/ot-p23-c03.spec.ts": [
+      "OPE-241"
+    ],
+    "apps/web/tests/coverage/ot-p23-c04.spec.ts": [
+      "OPE-242"
+    ],
+    "apps/web/tests/coverage/ot-p23-c05.spec.ts": [
+      "OPE-243"
+    ],
+    "apps/web/tests/coverage/ot-p23-c06.spec.ts": [
+      "OPE-244"
+    ],
+    "apps/web/tests/coverage/ot-p23-c07.spec.ts": [
+      "OPE-245"
+    ],
+    "apps/web/tests/coverage/ot-p23-c08.spec.ts": [
+      "OPE-246"
+    ],
+    "apps/web/tests/coverage/ot-p23-c09.spec.ts": [
+      "OPE-247"
+    ],
+    "apps/web/tests/coverage/ot-p23-c10.spec.ts": [
+      "OPE-248"
+    ],
+    "apps/web/components/foundation/tokens/visual.spec.ts": [
+      "OPE-253"
+    ],
+    "apps/web/components/foundation/forms/visual.spec.ts": [
+      "OPE-254"
+    ],
+    "apps/web/components/foundation/data-display/visual.spec.ts": [
+      "OPE-255"
+    ],
+    "apps/web/components/foundation/async-state/visual.spec.ts": [
+      "OPE-256"
+    ],
+    "apps/web/features/product-surfaces/workflow-contract/visual.spec.ts": [
+      "OPE-257"
+    ],
+    "apps/web/features/product-surfaces/source-authority/visual.spec.ts": [
+      "OPE-258"
+    ],
+    "apps/web/features/product-surfaces/case-inspector/visual.spec.ts": [
+      "OPE-259"
+    ],
+    "apps/web/features/product-surfaces/verifier-console/visual.spec.ts": [
+      "OPE-260"
+    ],
+    "apps/web/features/product-surfaces/scope-opportunities/visual.spec.ts": [
+      "OPE-261"
+    ],
+    "apps/web/features/product-surfaces/repair-comparator/visual.spec.ts": [
+      "OPE-262"
+    ],
+    "apps/web/features/product-surfaces/synthetic-planner/visual.spec.ts": [
+      "OPE-263"
+    ],
+    "apps/web/features/product-surfaces/benchmark-builder/visual.spec.ts": [
+      "OPE-264"
+    ],
+    "apps/web/features/product-surfaces/artifact-registry/visual.spec.ts": [
+      "OPE-265"
+    ],
+    "apps/web/tests/customer-journeys.spec.ts": [
+      "OPE-266"
+    ],
+    "apps/web/tests/accessibility.spec.ts": [
+      "OPE-266"
+    ],
+    "apps/web/tests/coverage/ot-p23-c11.spec.ts": [
+      "OPE-266"
+    ],
+    "apps/web/features/product-surfaces/environment-fleet/visual.spec.ts": [
+      "OPE-267"
+    ],
+    "apps/web/features/product-surfaces/billing-detail/visual.spec.ts": [
+      "OPE-268"
+    ],
+    "apps/web/features/product-surfaces/quota-console/visual.spec.ts": [
+      "OPE-269"
+    ],
+    "apps/web/features/product-surfaces/developer-settings/visual.spec.ts": [
+      "OPE-270"
+    ],
+    "apps/web/features/product-surfaces/support-center/visual.spec.ts": [
+      "OPE-271"
+    ],
+    "apps/web/features/product-surfaces/data-administration/visual.spec.ts": [
+      "OPE-272"
+    ],
+    "apps/web/features/product-surfaces/platform-release-view/visual.spec.ts": [
+      "OPE-273"
+    ],
+    "apps/web/features/support-case-private/visual.spec.ts": [
+      "OPE-274"
+    ],
+    "apps/web/features/support-case-private/privacy.spec.ts": [
+      "OPE-274"
+    ],
+    "apps/web/tests/autonomy-status.spec.ts": [
+      "OPE-278",
+      "OPE-296"
+    ],
+    "apps/web/components/foundation/forms/field-semantics.visual.spec.ts": [
+      "OPE-279"
+    ],
+    "apps/web/components/foundation/forms/mutation-intent.visual.spec.ts": [
+      "OPE-280"
+    ],
+    "apps/web/components/foundation/forms/dialogs-focus.visual.spec.ts": [
+      "OPE-281"
+    ],
+    "apps/web/components/foundation/forms/permission-controls.visual.spec.ts": [
+      "OPE-282"
+    ],
+    "apps/web/components/foundation/data-display/metric-semantics.visual.spec.ts": [
+      "OPE-283"
+    ],
+    "apps/web/components/foundation/data-display/table-populations.visual.spec.ts": [
+      "OPE-284"
+    ],
+    "apps/web/components/foundation/data-display/chart-evidence.visual.spec.ts": [
+      "OPE-285"
+    ],
+    "apps/web/components/foundation/data-display/graph-projections.visual.spec.ts": [
+      "OPE-286"
+    ],
+    "apps/web/components/foundation/data-display/scenario-conformance.visual.spec.ts": [
+      "OPE-287"
+    ],
+    "apps/web/components/foundation/async-state/operation-state.visual.spec.ts": [
+      "OPE-288"
+    ],
+    "apps/web/components/foundation/async-state/cancel-revoke.visual.spec.ts": [
+      "OPE-289"
+    ],
+    "apps/web/components/foundation/async-state/freshness-context.visual.spec.ts": [
+      "OPE-290"
+    ],
+    "apps/web/components/foundation/async-state/status-copy.visual.spec.ts": [
+      "OPE-291"
+    ],
+    "apps/web/features/autonomy/status-panel.visual.spec.ts": [
+      "OPE-294"
+    ],
+    "apps/web/features/autonomy/control-actions.visual.spec.ts": [
+      "OPE-295"
+    ],
+    "apps/web/tests/autonomy-status.visual.spec.ts": [
+      "OPE-296"
+    ],
+    "apps/web/tests/account-entry.browser.spec.ts": [
+      "OPE-297"
+    ],
+    "apps/web/tests/workspace-lifecycle.browser.spec.ts": [
+      "OPE-298"
+    ]
+  },
+  "distinct_paths": 63,
+  "issue_count": 60,
+  "affected_old_wrapper_paths": {
+    "apps/web/tests/coverage/ot-p22-c01.spec.ts": [
+      "OPE-232"
+    ],
+    "apps/web/tests/coverage/ot-p22-c02.spec.ts": [
+      "OPE-233"
+    ],
+    "apps/web/tests/coverage/ot-p22-c03.spec.ts": [
+      "OPE-234"
+    ],
+    "apps/web/tests/coverage/ot-p22-c04.spec.ts": [
+      "OPE-235"
+    ],
+    "apps/web/tests/coverage/ot-p22-c05.spec.ts": [
+      "OPE-236"
+    ],
+    "apps/web/tests/coverage/ot-p22-c06.spec.ts": [
+      "OPE-237"
+    ],
+    "apps/web/tests/coverage/ot-p22-c07.spec.ts": [
+      "OPE-238"
+    ],
+    "apps/web/tests/coverage/ot-p23-c01.spec.ts": [
+      "OPE-239"
+    ],
+    "apps/web/tests/coverage/ot-p23-c02.spec.ts": [
+      "OPE-240"
+    ],
+    "apps/web/tests/coverage/ot-p23-c03.spec.ts": [
+      "OPE-241"
+    ],
+    "apps/web/tests/coverage/ot-p23-c04.spec.ts": [
+      "OPE-242"
+    ],
+    "apps/web/tests/coverage/ot-p23-c05.spec.ts": [
+      "OPE-243"
+    ],
+    "apps/web/tests/coverage/ot-p23-c06.spec.ts": [
+      "OPE-244"
+    ],
+    "apps/web/tests/coverage/ot-p23-c07.spec.ts": [
+      "OPE-245"
+    ],
+    "apps/web/tests/coverage/ot-p23-c08.spec.ts": [
+      "OPE-246"
+    ],
+    "apps/web/tests/coverage/ot-p23-c09.spec.ts": [
+      "OPE-247"
+    ],
+    "apps/web/tests/coverage/ot-p23-c10.spec.ts": [
+      "OPE-248"
+    ],
+    "apps/web/components/foundation/tokens/visual.spec.ts": [
+      "OPE-253"
+    ],
+    "apps/web/components/foundation/forms/visual.spec.ts": [
+      "OPE-254"
+    ],
+    "apps/web/components/foundation/data-display/visual.spec.ts": [
+      "OPE-255"
+    ],
+    "apps/web/components/foundation/async-state/visual.spec.ts": [
+      "OPE-256"
+    ],
+    "apps/web/features/product-surfaces/workflow-contract/visual.spec.ts": [
+      "OPE-257"
+    ],
+    "apps/web/features/product-surfaces/source-authority/visual.spec.ts": [
+      "OPE-258"
+    ],
+    "apps/web/features/product-surfaces/case-inspector/visual.spec.ts": [
+      "OPE-259"
+    ],
+    "apps/web/features/product-surfaces/verifier-console/visual.spec.ts": [
+      "OPE-260"
+    ],
+    "apps/web/features/product-surfaces/scope-opportunities/visual.spec.ts": [
+      "OPE-261"
+    ],
+    "apps/web/features/product-surfaces/repair-comparator/visual.spec.ts": [
+      "OPE-262"
+    ],
+    "apps/web/features/product-surfaces/synthetic-planner/visual.spec.ts": [
+      "OPE-263"
+    ],
+    "apps/web/features/product-surfaces/benchmark-builder/visual.spec.ts": [
+      "OPE-264"
+    ],
+    "apps/web/features/product-surfaces/artifact-registry/visual.spec.ts": [
+      "OPE-265"
+    ],
+    "apps/web/tests/customer-journeys.spec.ts": [
+      "OPE-266"
+    ],
+    "apps/web/tests/accessibility.spec.ts": [
+      "OPE-266"
+    ],
+    "apps/web/tests/coverage/ot-p23-c11.spec.ts": [
+      "OPE-266"
+    ],
+    "apps/web/features/product-surfaces/environment-fleet/visual.spec.ts": [
+      "OPE-267"
+    ],
+    "apps/web/features/product-surfaces/billing-detail/visual.spec.ts": [
+      "OPE-268"
+    ],
+    "apps/web/features/product-surfaces/quota-console/visual.spec.ts": [
+      "OPE-269"
+    ],
+    "apps/web/features/product-surfaces/developer-settings/visual.spec.ts": [
+      "OPE-270"
+    ],
+    "apps/web/features/product-surfaces/support-center/visual.spec.ts": [
+      "OPE-271"
+    ],
+    "apps/web/features/product-surfaces/data-administration/visual.spec.ts": [
+      "OPE-272"
+    ],
+    "apps/web/features/product-surfaces/platform-release-view/visual.spec.ts": [
+      "OPE-273"
+    ],
+    "apps/web/features/support-case-private/visual.spec.ts": [
+      "OPE-274"
+    ],
+    "apps/web/features/support-case-private/privacy.spec.ts": [
+      "OPE-274"
+    ],
+    "apps/web/tests/autonomy-status.spec.ts": [
+      "OPE-278",
+      "OPE-296"
+    ]
+  },
+  "affected_path_count": 43,
+  "affected_issue_count": 41
+}

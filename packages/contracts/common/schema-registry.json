@@ -1,0 +1,18 @@
+{
+  "schema_version": "opentour.local-schema-registry.v1",
+  "issue_key": "OPE-123",
+  "schemas": [
+    {
+      "id": "urn:opentour:common-contract:1.0",
+      "file": "common-contract.schema.json",
+      "sha256": "2d78b380cf3c924683d11549a1c455e2287ac5d1b30eb4007b24eb2aa48775fe",
+      "source_path": "specification/2026-11-12/schemas/common-contract.schema.json"
+    },
+    {
+      "id": "urn:opentour:authority:1.0",
+      "file": "authority.schema.json",
+      "sha256": "a4bb5447eea425113f8cdfde46101db753a25b3a1538068fc388a7cec7d1a340",
+      "source_path": "specification/2026-11-12/schemas/authority.schema.json"
+    }
+  ]
+}

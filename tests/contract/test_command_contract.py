@@ -1,0 +1,739 @@
+"""OPE-123 acceptance/adverse fixtures. Fake adapters never establish product acceptance."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import shutil
+import signal
+import subprocess
+import sys
+from dataclasses import replace
+
+import pytest
+
+from tools import schema_validate
+from tools import test_runner as runner
+
+
+@pytest.fixture
+def checkout(tmp_path):
+    root = tmp_path / "checkout with spaces"
+    root.mkdir()
+    shutil.copytree(runner.ROOT / "packages/contracts", root / "packages/contracts")
+    shutil.copyfile(runner.ROOT / "pyproject.toml", root / "pyproject.toml")
+    (root / "tools").mkdir()
+    for name in ("__init__.py", "test_runner.py", "schema_validate.py"):
+        shutil.copyfile(runner.ROOT / "tools" / name, root / "tools" / name)
+    for member in ("control-api", "cell-runtime", "audit-journal"):
+        directory = root / "services" / member
+        directory.mkdir(parents=True)
+        shutil.copyfile(
+            runner.ROOT / "services" / member / "pyproject.toml", directory / "pyproject.toml"
+        )
+    write(root, "tests/contract/test_one.py", "def test_one():\n    assert 1 + 1 == 2\n")
+    write(
+        root, "tests/contract/test_command_contract.py", "def test_registered():\n    assert True\n"
+    )
+    return root
+
+
+def write(root, path, content=""):
+    target = root / path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(content)
+    return target
+
+
+def update_manifest(root, edit):
+    path = root / runner.COMMON / "command-manifest.json"
+    value = json.loads(path.read_text())
+    edit(value)
+    path.write_text(json.dumps(value))
+
+
+class FixtureRunner:
+    def __init__(self, status="passed", raw_exit=0, mutate=None):
+        self.calls = []
+        self.status = status
+        self.raw_exit = raw_exit
+        self.mutate = mutate
+
+    def __call__(self, invocation):
+        self.calls.append(invocation)
+        if invocation.runner == "setup":
+            return runner.ProcessResult(
+                self.raw_exit,
+                json.dumps(
+                    {
+                        "issue_key": "OPE-122",
+                        "exit_code": self.raw_exit,
+                        "status": "PASS" if self.raw_exit == 0 else "FAIL",
+                    }
+                ),
+            )
+        if invocation.runner in {"pytest", "playwright", "vitest"}:
+            target = invocation.cwd / invocation.target
+            file = (
+                invocation.target
+                if target.is_file()
+                else next(target.rglob("*.py")).relative_to(invocation.cwd).as_posix()
+            )
+            tests = (
+                []
+                if self.status is None
+                else [
+                    {
+                        "id": "sentinel-one",
+                        "file": file,
+                        "status": self.status,
+                        "mode": None,
+                    }
+                ]
+            )
+            report = runner.report_envelope(
+                invocation.runner, invocation.target, invocation.environment, tests
+            )
+            if invocation.runner == "vitest":
+                report = {
+                    "numTotalTests": len(tests),
+                    "numPassedTests": int(self.status == "passed"),
+                    "numFailedTests": int(self.status == "failed"),
+                    "numPendingTests": int(self.status == "skipped"),
+                    "numTodoTests": 0,
+                    "success": self.status == "passed",
+                    "testResults": [
+                        {
+                            "name": str(target),
+                            "assertionResults": [
+                                {"status": self.status, "fullName": "sentinel-one"}
+                            ]
+                            if tests
+                            else [],
+                        }
+                    ],
+                }
+            if self.mutate:
+                self.mutate(report, invocation)
+            invocation.report.write_text(json.dumps(report))
+        return runner.ProcessResult(self.raw_exit)
+
+
+COMMAND_CASES = [
+    ("setup", [], 0),
+    ("lint", [], 0),
+    ("typecheck", [], 0),
+    ("test-python", ["tests/contract/test_one.py"], 0),
+    ("test-web", ["apps/web/tests/one.test.ts"], 0),
+    ("test-browser", ["apps/web/tests/browser-harness.browser.spec.ts"], 0),
+    ("test-contract", [], 0),
+    ("validate-spec", [], 2),
+    ("test-integration", ["bootstrap-contract", "all"], 0),
+    ("test-isolation", ["ISO-01", "customer_controlled"], 3),
+    ("test-acceptance", ["G1", "opentour_managed"], 3),
+]
+
+
+@pytest.mark.parametrize("command,args,expected", COMMAND_CASES)
+def test_ac01_smoke_every_public_command(checkout, command, args, expected):
+    write(checkout, "apps/web/tests/one.test.ts")
+    write(checkout, "apps/web/tests/browser-harness.browser.spec.ts")
+    write(checkout, "tools/browser-test-runner.ts")
+    fixture = FixtureRunner()
+    result = runner.run_command(command, args, checkout, fixture)
+    assert result["exit_code"] == expected
+    assert result["status"] == ("PASS" if expected == 0 else "BLOCKED" if expected == 3 else "FAIL")
+    assert result["kind"] == "simulated"
+    assert result["product_acceptance"] == "NOT_RUN"
+    if expected == 0:
+        assert fixture.calls
+    else:
+        assert fixture.calls == []
+
+
+def test_every_command_has_exact_smoke_case():
+    assert set(runner.COMMAND_ARITY) == {case[0] for case in COMMAND_CASES}
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "../sentinel.py",
+        "tests/../../sentinel.py",
+        "/tmp/sentinel.py",
+        "tests/./x.py",
+        "",
+        "tests/x.py;touch sentinel",
+        "tests/$(touch sentinel).py",
+        "tests/`touch sentinel`.py",
+        "tests/x.py|cat",
+        "tests/x.py&cat",
+        "tests/test_*.py",
+        "--collect-only",
+        "tests/-x.py",
+        "tests/x.py::test_one",
+        "tests/x.py\n",
+        "tests/x.py\x00",
+        "tests/x.py>sentinel",
+    ],
+)
+def test_ac02_badpath_and_shell_syntax_rejected_before_child(checkout, path):
+    fixture = FixtureRunner()
+    result = runner.run_command("test-python", [path], checkout, fixture)
+    assert result["exit_code"] == 2
+    assert fixture.calls == []
+    assert not (checkout / "sentinel").exists()
+
+
+def test_ac02_symlink_escape_and_nested_symlink_rejected_before_read(checkout, tmp_path):
+    external = tmp_path / "external"
+    external.mkdir()
+    (external / "test_private.py").write_text("raise RuntimeError('MUST_NOT_BE_READ')")
+    (checkout / "tests/link").symlink_to(external, target_is_directory=True)
+    fixture = FixtureRunner()
+    for selection in ("tests/link/test_private.py", "tests"):
+        result = runner.run_command("test-python", [selection], checkout, fixture)
+        assert result["exit_code"] == 2
+        assert "MUST_NOT_BE_READ" not in json.dumps(result)
+    assert fixture.calls == []
+
+
+@pytest.mark.parametrize(
+    "command,args",
+    [
+        ("unknown", []),
+        ("lint", ["extra"]),
+        ("test-python", []),
+        ("test-integration", ["unregistered", "all"]),
+        ("test-isolation", ["ISO-99", "customer_controlled"]),
+        ("test-acceptance", ["G99", "opentour_managed"]),
+        ("test-acceptance", ["G1", "unknown"]),
+        ("test-integration", ["bootstrap-contract", "x;touch sentinel"]),
+    ],
+)
+def test_unknown_suite_profile_mode_and_arity(checkout, command, args):
+    fixture = FixtureRunner()
+    assert runner.run_command(command, args, checkout, fixture)["exit_code"] == 2
+    assert fixture.calls == []
+
+
+@pytest.mark.parametrize("gate", ["G1", "G6"])
+@pytest.mark.parametrize("mode", runner.MODES)
+def test_ac03_missing_environment_customer_evidence_never_passes(checkout, gate, mode, monkeypatch):
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "sentinel-not-a-real-credential")
+    monkeypatch.setenv("CUSTOMER_EVIDENCE", "a-string-is-not-a-receipt")
+    fixture = FixtureRunner()
+    result = runner.run_command("test-acceptance", [gate, mode], checkout, fixture)
+    assert result["exit_code"] == 3
+    assert result["status"] == "BLOCKED" and result["product_acceptance"] == "NOT_RUN"
+    assert result["mode"] == mode and fixture.calls == []
+    assert "sentinel-not" not in json.dumps(result)
+
+
+def test_missing_provider_credentials_profile_is_blocked_before_dispatch(checkout):
+    def add(value):
+        value["integration_profiles"]["provider-fixture"] = {
+            "kind": "provider_integration",
+            "path": None,
+            "owner": "fixture-only",
+            "prerequisites": ["authorized-environment", "provider-credentials"],
+        }
+
+    update_manifest(checkout, add)
+    fixture = FixtureRunner()
+    result = runner.run_command("test-integration", ["provider-fixture", "all"], checkout, fixture)
+    assert result["exit_code"] == 3 and fixture.calls == []
+
+
+@pytest.mark.parametrize(
+    "command,target",
+    [
+        ("test-web", "apps/web/tests/customer-journeys.spec.ts"),
+        ("test-browser", "apps/web/tests/one.test.ts"),
+    ],
+)
+def test_cross_runner_input_fails_with_guidance(checkout, command, target):
+    write(checkout, target)
+    fixture = FixtureRunner()
+    result = runner.run_command(command, [target], checkout, fixture)
+    assert result["exit_code"] == 2
+    assert "test-browser" in result["message"] and "test-web" in result["message"]
+    assert fixture.calls == []
+
+
+def test_exact_canonical_browser_inventory_preserved(checkout):
+    manifest = runner.manifest(checkout)
+    source = json.loads((checkout / runner.COMMON / "browser-suite-inventory.json").read_text())
+    assert set(manifest["browser_suites"]) == set(source["paths"])
+    assert len(manifest["browser_suites"]) == source["distinct_paths"] == 63
+
+
+@pytest.mark.parametrize(
+    "target",
+    [
+        "apps/web/tests/customer-journeys.spec.ts",
+        "apps/web/tests/accessibility.spec.ts",
+        "apps/web/tests/autonomy-status.spec.ts",
+        "apps/web/features/support-case-private/privacy.spec.ts",
+        "apps/web/components/foundation/tokens/visual.spec.ts",
+        "apps/web/tests/coverage/ot-p22-c01.spec.ts",
+    ],
+)
+def test_plain_declared_browser_names_are_accepted(checkout, target):
+    write(checkout, target)
+    write(checkout, "tools/browser-test-runner.ts")
+    update_manifest(
+        checkout,
+        lambda value: value["browser_profiles"].update(
+            {target: {"kind": "simulated", "owner": "generated-transport-fixture"}}
+        ),
+    )
+    fixture = FixtureRunner()
+    result = runner.run_command("test-browser", [target], checkout, fixture)
+    assert result["exit_code"] == 0
+    assert fixture.calls[0].argv[:3] == ("node", "tools/browser-test-runner.ts", target)
+
+
+def test_declared_directory_and_filename_spaces_are_single_arguments(checkout):
+    target = "apps/web/tests/suite with spaces"
+    write(checkout, f"{target}/test_fixture.py")
+    write(checkout, "tools/browser-test-runner.ts")
+    update_manifest(checkout, lambda value: value["browser_suites"].append(target))
+    update_manifest(
+        checkout,
+        lambda value: value["browser_profiles"].update(
+            {target: {"kind": "simulated", "owner": "generated-transport-fixture"}}
+        ),
+    )
+    fixture = FixtureRunner()
+    assert runner.run_command("test-browser", [target], checkout, fixture)["exit_code"] == 0
+    assert fixture.calls[0].argv[2] == target
+
+
+def test_undeclared_browser_suite_and_missing_harness_are_truthful(checkout):
+    target = "apps/web/tests/browser-harness.browser.spec.ts"
+    fixture = FixtureRunner()
+    assert runner.run_command("test-browser", [target], checkout, fixture)["exit_code"] == 2
+    write(checkout, target)
+    result = runner.run_command("test-browser", [target], checkout, fixture)
+    assert result["reason_code"] == "MISSING_APPLICATION"
+    write(checkout, "apps/web/tests/undeclared.spec.ts")
+    assert (
+        runner.run_command(
+            "test-browser", ["apps/web/tests/undeclared.spec.ts"], checkout, fixture
+        )["exit_code"]
+        == 2
+    )
+    assert fixture.calls == []
+
+
+@pytest.mark.parametrize(
+    "status,raw,code", [("passed", 0, 0), ("failed", 1, 1), ("skipped", 0, 1), (None, 5, 2)]
+)
+def test_child_outcomes_normalize_without_false_pass(checkout, status, raw, code):
+    fixture = FixtureRunner(status, raw)
+    result = runner.run_command("test-python", ["tests/contract/test_one.py"], checkout, fixture)
+    assert result["exit_code"] == code
+    assert result["steps"][0]["raw_exit_code"] == raw
+
+
+@pytest.mark.parametrize("raw", [2, 3, 4])
+def test_pytest_internal_and_collection_errors_are_not_external_blocked(checkout, raw):
+    result = runner.run_command(
+        "test-python", ["tests/contract/test_one.py"], checkout, FixtureRunner("passed", raw)
+    )
+    assert result["exit_code"] == 2
+    assert result["status"] == "FAIL"
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        lambda r, i: r.update(binding_nonce="0" * 32),
+        lambda r, i: r.update(target="tests/contract/other.py"),
+        lambda r, i: r.update(runner="playwright"),
+        lambda r, i: r.update(kind="provider_integration"),
+        lambda r, i: r.update(collected=2),
+        lambda r, i: r.update(passed=True),
+        lambda r, i: r.update(extra="unknown"),
+        lambda r, i: r["tests"].append(r["tests"][0]),
+        lambda r, i: r["tests"][0].update(file="tests/contract/test_command_contract.py"),
+    ],
+)
+def test_forged_stale_malformed_out_of_target_reports_fail(checkout, mutation):
+    result = runner.run_command(
+        "test-python", ["tests/contract/test_one.py"], checkout, FixtureRunner(mutate=mutation)
+    )
+    assert result["exit_code"] == 2
+    assert result["status"] == "FAIL"
+
+
+def test_cleanup_failure_blocks_success(checkout):
+    result = runner.run_command(
+        "test-python",
+        ["tests/contract/test_one.py"],
+        checkout,
+        FixtureRunner(mutate=lambda r, i: r.update(cleanup_complete=False)),
+    )
+    assert result["exit_code"] == 1 and result["reason_code"] == "CLEANUP_FAILED"
+
+
+def test_missing_report_and_timeout_never_pass(checkout):
+    assert (
+        runner.run_command(
+            "test-python",
+            ["tests/contract/test_one.py"],
+            checkout,
+            lambda i: runner.ProcessResult(0),
+        )["exit_code"]
+        == 2
+    )
+    result = runner.run_command(
+        "test-python",
+        ["tests/contract/test_one.py"],
+        checkout,
+        lambda i: runner.ProcessResult(-9, timed_out=True),
+    )
+    assert result["exit_code"] == 1 and result["reason_code"] == "RUNNER_TIMEOUT"
+
+
+def test_typecheck_failure_stops_dependent_steps(checkout):
+    fixture = FixtureRunner(raw_exit=1)
+    result = runner.run_command("typecheck", [], checkout, fixture)
+    assert result["exit_code"] == 1 and len(fixture.calls) == 1
+    assert "mypy" in fixture.calls[0].argv
+
+
+def test_credentials_and_runner_overrides_not_inherited(checkout, monkeypatch):
+    for key in ("AWS_SECRET_ACCESS_KEY", "STRIPE_SECRET_KEY", "PYTEST_ADDOPTS", "NODE_OPTIONS"):
+        monkeypatch.setenv(key, "sentinel-secret")
+    fixture = FixtureRunner()
+    runner.run_command("test-python", ["tests/contract/test_one.py"], checkout, fixture)
+    assert "sentinel-secret" not in json.dumps(fixture.calls[0].environment)
+
+
+def local_pytest(invocation):
+    """Exercise real pytest in the current pinned interpreter; no uv install or provider calls."""
+    index = invocation.argv.index("-m")
+    return runner.execute(
+        replace(invocation, argv=(sys.executable, *invocation.argv[index:]), timeout=20)
+    )
+
+
+@pytest.mark.parametrize(
+    "body,expected",
+    [
+        ("def test_one():\n    assert 2 + 2 == 4\n", 0),
+        ("def test_one():\n    assert False\n", 1),
+        ("pass\n", 2),
+        (
+            "import pytest\n@pytest.mark.skip(reason='required fixture unavailable')\n"
+            "def test_one(): pass\n",
+            1,
+        ),
+        (
+            "import socket\ndef test_network():\n"
+            "    socket.create_connection(('127.0.0.1', 9), timeout=0.1)\n",
+            1,
+        ),
+        (
+            "import pytest\n@pytest.mark.xfail(reason='must remain nonpassing')\n"
+            "def test_one(): assert False\n",
+            1,
+        ),
+    ],
+)
+def test_actual_pytest_one_pass_failure_zero_skip_and_forbidden_network(checkout, body, expected):
+    target = "tests/contract/test with spaces.py"
+    write(checkout, target, body)
+    result = runner.run_command("test-python", [target], checkout, local_pytest)
+    assert result["exit_code"] == expected, result
+    assert result["product_acceptance"] == "NOT_RUN"
+
+
+def test_package_routing_consumes_workspace_and_keeps_training_separate(checkout):
+    assert "opentour-control" in runner.uv_python(
+        checkout, "services/control-api/tests/test_one.py"
+    )
+    assert "opentour-cell" in runner.uv_python(checkout, "services/cell-runtime/tests/test_one.py")
+    assert "opentour-audit" in runner.uv_python(
+        checkout, "services/audit-journal/tests/test_one.py"
+    )
+    training = runner.uv_python(checkout, "training/tests/test_one.py")
+    assert training[training.index("--project") + 1] == "training"
+    assert "--package" not in training
+
+
+def test_schema_shapes_semantic_revision_bounds_and_authority_aliases(checkout):
+    result = schema_validate.validate_examples(checkout)
+    assert result["collected"] >= 29 and result["failed"] == 0
+    assert result["product_acceptance"] == "NOT_RUN"
+
+
+@pytest.mark.parametrize(
+    "reference",
+    ["https://example.invalid/schema.json", "file:///etc/passwd", "urn:opentour:missing:1"],
+)
+def test_unknown_schema_never_resolves_network_or_file(checkout, reference, monkeypatch):
+    registry = schema_validate.schema_registry(checkout)
+    monkeypatch.setattr("socket.socket.connect", lambda *args: pytest.fail("Network forbidden"))
+    with pytest.raises(schema_validate.SchemaError):
+        schema_validate.valid_instance(reference, {}, registry)
+
+
+def test_changed_canonical_schema_hash_is_rejected(checkout):
+    path = checkout / runner.COMMON / "common-contract.schema.json"
+    path.write_text(path.read_text() + " ")
+    with pytest.raises(schema_validate.SchemaError, match="hash mismatch"):
+        schema_validate.schema_registry(checkout)
+
+
+def test_duplicate_json_keys_and_nonfinite_numbers_are_rejected(tmp_path):
+    for text in ('{"a":1,"a":2}', '{"a":NaN}', '{"a":Infinity}'):
+        path = tmp_path / "invalid.json"
+        path.write_text(text)
+        with pytest.raises(schema_validate.SchemaError):
+            schema_validate.read_json(path)
+
+
+def test_cli_json_nonzero_invalid_command():
+    result = subprocess.run(
+        [sys.executable, "-m", "tools.test_runner", "unknown"],
+        cwd=runner.ROOT,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert result.returncode == 2
+    receipt = json.loads(result.stdout)
+    assert receipt["exit_code"] == 2 and receipt["output_digests"]["summary"]
+    assert receipt["git_worktree_dirty"] is True or receipt["commit_sha"]
+
+
+def test_declared_future_browser_path_has_no_implicit_simulated_profile(checkout):
+    target = "apps/web/tests/customer-journeys.spec.ts"
+    write(checkout, target)
+    write(checkout, "tools/browser-test-runner.ts")
+    fixture = FixtureRunner()
+    assert runner.run_command("test-browser", [target], checkout, fixture)["exit_code"] == 2
+    assert not fixture.calls
+
+
+@pytest.mark.parametrize("state", ["passed", "failed", "skipped"])
+def test_blocked_report_cannot_hide_executed_or_skipped_inventory(checkout, state):
+    target = "apps/web/tests/browser-harness.browser.spec.ts"
+    write(checkout, target)
+    write(checkout, "tools/browser-test-runner.ts")
+    fixture = FixtureRunner(
+        state,
+        3,
+        lambda r, i: r.update(status="BLOCKED", reason_code="MISSING_EXTERNAL_PREREQUISITE"),
+    )
+    result = runner.run_command("test-browser", [target], checkout, fixture)
+    assert result["exit_code"] == 2 and result["status"] == "FAIL"
+    assert result["steps"][0]["raw_exit_code"] == 3
+
+
+def test_malformed_child_report_retains_attempted_step_without_raw_data(checkout):
+    def malformed(invocation):
+        invocation.report.write_text('{"private":"sentinel-secret"')
+        return runner.ProcessResult(1)
+
+    result = runner.run_command("test-python", ["tests/contract/test_one.py"], checkout, malformed)
+    assert result["exit_code"] == 2
+    assert result["steps"][0]["raw_exit_code"] == 1
+    assert "sentinel-secret" not in json.dumps(result)
+
+
+def test_typecheck_retains_completed_step_if_second_executable_is_missing(checkout):
+    calls = []
+
+    def missing_second(invocation):
+        calls.append(invocation)
+        if len(calls) == 2:
+            raise runner.CommandError("Missing pinned tool", 3, "MISSING_EXTERNAL_PREREQUISITE")
+        return runner.ProcessResult(0)
+
+    result = runner.run_command("typecheck", [], checkout, missing_second)
+    assert result["exit_code"] == 3
+    assert [step["exit_code"] for step in result["steps"]] == [0, 3]
+
+
+def test_invalid_arguments_and_parameterized_ids_are_not_copied_to_evidence(checkout):
+    secret = "sentinel-private-value"
+    invalid = runner.run_command("test-python", ["tests/no.py;api_key=" + secret], checkout)
+    assert invalid["exit_code"] == 2 and secret not in json.dumps(invalid)
+    fixture = FixtureRunner(mutate=lambda r, i: r["tests"][0].update(id="test[" + secret + "]"))
+    result = runner.run_command("test-python", ["tests/contract/test_one.py"], checkout, fixture)
+    assert result["exit_code"] == 0 and secret not in json.dumps(result)
+    assert result["steps"][0]["tests"]["tests"][0]["id"].startswith("sha256:")
+
+
+@pytest.mark.parametrize("document", [[], None, "invalid schema"])
+def test_nonobject_canonical_schema_is_structured_configuration_failure(checkout, document):
+    path = checkout / runner.COMMON / "common-contract.schema.json"
+    path.write_text(json.dumps(document))
+    registry_path = checkout / runner.COMMON / "schema-registry.json"
+    registry = json.loads(registry_path.read_text())
+    registry["schemas"][0]["sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
+    registry_path.write_text(json.dumps(registry))
+    result = runner.run_command("test-contract", [], checkout, FixtureRunner())
+    assert result["exit_code"] == 2
+
+
+def test_schema_and_test_path_symlink_loops_fail_without_traceback(checkout):
+    path = checkout / runner.COMMON / "common-contract.schema.json"
+    path.unlink()
+    path.symlink_to(path.name)
+    assert runner.run_command("test-contract", [], checkout)["exit_code"] == 2
+    target = checkout / "tests/loop.py"
+    target.symlink_to(target.name)
+    assert runner.run_command("test-python", ["tests/loop.py"], checkout)["exit_code"] == 2
+
+
+def test_source_dirty_before_execution_cannot_be_erased_from_receipt(checkout):
+    def git(*args):
+        subprocess.run(["git", *args], cwd=checkout, check=True, capture_output=True, timeout=5)
+
+    git("init", "-q")
+    git("add", ".")
+    git(
+        "-c",
+        "user.name=Contract Fixture",
+        "-c",
+        "user.email=fixture@example.invalid",
+        "commit",
+        "-qm",
+        "Generated fixture",
+    )
+    target = checkout / "tests/contract/test_one.py"
+    original = target.read_text()
+    target.write_text(original + "# dirty sentinel\n")
+    fixture = FixtureRunner()
+
+    def restore_then_execute(invocation):
+        target.write_text(original)
+        return fixture(invocation)
+
+    result = runner.run_command(
+        "test-python", ["tests/contract/test_one.py"], checkout, restore_then_execute
+    )
+    assert result["exit_code"] == 0
+    assert result["git_worktree_dirty"] and result["git_worktree_dirty_before"]
+    assert not result["git_worktree_dirty_after"]
+
+
+def test_runner_kills_descendants_even_when_leader_exits_successfully(checkout):
+    pid_file = checkout / "descendant.pid"
+    program = (
+        "import subprocess,sys,pathlib; "
+        "p=subprocess.Popen([sys.executable,'-c','import time; time.sleep(30)'],"
+        "stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL); "
+        f"pathlib.Path({str(pid_file)!r}).write_text(str(p.pid))"
+    )
+    invocation = runner.Invocation(
+        (sys.executable, "-c", program),
+        checkout,
+        dict(os.environ),
+        checkout / "unused-report",
+        "probe",
+        "probe",
+        timeout=5,
+    )
+    try:
+        result = runner.execute(invocation)
+        assert result.returncode == 0 and not result.cleanup_complete
+    finally:
+        if pid_file.exists():
+            try:
+                os.kill(int(pid_file.read_text()), signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+
+@pytest.mark.parametrize(
+    "operation",
+    [
+        "socket.getaddrinfo('example.invalid', 80)",
+        "socket.socket(socket.AF_INET, socket.SOCK_DGRAM).sendto(b'x', ('127.0.0.1', 9))",
+    ],
+)
+def test_actual_python_dns_and_udp_are_denied(checkout, operation):
+    target = "tests/contract/test_network.py"
+    write(checkout, target, "import socket\ndef test_network():\n    " + operation + "\n")
+    result = runner.run_command("test-python", [target], checkout, local_pytest)
+    assert result["exit_code"] == 1
+
+
+@pytest.mark.parametrize(
+    "operation",
+    [
+        "require('node:net').connect(9,'127.0.0.1')",
+        "require('node:dns').lookup('example.invalid',()=>{})",
+        "require('node:dgram').createSocket('udp4').send('x',9,'127.0.0.1')",
+    ],
+)
+def test_actual_node_network_preload_denies_tcp_dns_and_udp(checkout, operation):
+    node = shutil.which("node")
+    assert node, "Pinned Node is required; run qualified setup and use its PATH"
+    guard = checkout / runner.COMMON / "unit-network-guard.cjs"
+    env = runner.environment(checkout, "0" * 32)
+    env["NODE_OPTIONS"] = "--require=" + json.dumps(str(guard))
+    result = subprocess.run(
+        [node, "-e", operation], cwd=checkout, env=env, capture_output=True, text=True, timeout=10
+    )
+    assert result.returncode != 0 and "OPENTOUR_NETWORK_DENIED" in result.stderr
+
+
+def local_vitest(invocation):
+    node = shutil.which("node")
+    assert node, "Pinned Node is required; run qualified setup and use its PATH"
+    entry = runner.ROOT / "node_modules/vitest/vitest.mjs"
+    assert entry.is_file(), "Frozen Vitest installation is required; no skip/pass fallback"
+    (invocation.cwd / "node_modules").symlink_to(
+        runner.ROOT / "node_modules", target_is_directory=True
+    )
+    return runner.execute(
+        replace(invocation, argv=(node, str(entry), *invocation.argv[3:]), timeout=30)
+    )
+
+
+@pytest.mark.parametrize(
+    "body,expected",
+    [
+        ("import {test,expect} from 'vitest'; test('one',()=>expect(2+2).toBe(4));", 0),
+        (
+            "import {test} from 'vitest'; import net from 'node:net'; import fs from 'node:fs'; "
+            "test('network',()=>{try{net.connect(9,'127.0.0.1')}catch(error){"
+            "if(error.code==='OPENTOUR_NETWORK_DENIED')fs.writeFileSync('NETWORK_DENIED','yes');"
+            "throw error}});",
+            1,
+        ),
+        ("import {test} from 'vitest'; test.skip('required',()=>{});", 1),
+    ],
+)
+def test_actual_vitest_exact_file_network_and_required_skip(checkout, body, expected):
+    target = "apps/web/tests/test with spaces.test.ts"
+    write(checkout, target, body)
+    write(
+        checkout,
+        "backup/" + target,
+        "import fs from 'node:fs'; fs.writeFileSync('UNREQUESTED_EXECUTED','bad'); "
+        "throw new Error('Unrequested test executed');",
+    )
+    result = runner.run_command("test-web", [target], checkout, local_vitest)
+    assert not (checkout / "UNREQUESTED_EXECUTED").exists()
+    assert result["exit_code"] == expected, result
+    assert result["steps"][0]["tests"]["collected"] == 1
+    if "net.connect" in body:
+        assert (checkout / "NETWORK_DENIED").read_text() == "yes"
+
+
+@pytest.mark.parametrize("key", ["browser_profiles", "integration_profiles"])
+def test_invalid_unhashable_profile_kind_is_configuration_failure(checkout, key):
+    def malformed(value):
+        next(iter(value[key].values()))["kind"] = []
+
+    update_manifest(checkout, malformed)
+    assert runner.run_command("lint", [], checkout, FixtureRunner())["exit_code"] == 2

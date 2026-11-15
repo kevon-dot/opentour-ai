@@ -1,0 +1,144 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:opentour:test-result:1.0",
+  "title": "Bootstrap runner transport, not product acceptance evidence",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "runner",
+    "target",
+    "binding_nonce",
+    "kind",
+    "mode",
+    "collected",
+    "passed",
+    "failed",
+    "skipped",
+    "tests",
+    "status",
+    "reason_code",
+    "cleanup_complete"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "opentour.test-result.v1"
+    },
+    "runner": {
+      "enum": [
+        "pytest",
+        "vitest",
+        "playwright"
+      ]
+    },
+    "target": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 2048
+    },
+    "binding_nonce": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{32}$"
+    },
+    "kind": {
+      "enum": [
+        "simulated",
+        "local_integration",
+        "provider_integration",
+        "customer_evidence"
+      ]
+    },
+    "mode": {
+      "enum": [
+        "customer_controlled",
+        "opentour_managed",
+        null
+      ]
+    },
+    "collected": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "passed": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "failed": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "skipped": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "tests": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "file",
+          "status",
+          "mode"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2048
+          },
+          "file": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2048
+          },
+          "status": {
+            "enum": [
+              "passed",
+              "failed",
+              "skipped"
+            ]
+          },
+          "mode": {
+            "enum": [
+              "customer_controlled",
+              "opentour_managed",
+              null
+            ]
+          }
+        }
+      }
+    },
+    "status": {
+      "enum": [
+        "PASS",
+        "FAIL",
+        "BLOCKED"
+      ]
+    },
+    "reason_code": {
+      "enum": [
+        "ASSERTION_FAILED",
+        "REQUIRED_TEST_SKIPPED",
+        "NO_TESTS",
+        "INVALID_CONFIGURATION",
+        "MISSING_BROWSER",
+        "MISSING_APPLICATION",
+        "MISSING_EXTERNAL_PREREQUISITE",
+        "RUNNER_TIMEOUT",
+        "RUNNER_INTERRUPTED",
+        "CLEANUP_FAILED",
+        "RUNNER_ERROR",
+        null
+      ]
+    },
+    "cleanup_complete": {
+      "type": "boolean"
+    }
+  }
+}
