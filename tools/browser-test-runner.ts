@@ -9,7 +9,7 @@ import { createHash, randomBytes } from 'node:crypto';
 type Mode = 'customer_controlled' | 'opentour_managed' | null;
 type Case = { id: string; file: string; status: 'passed' | 'failed' | 'skipped'; mode: Mode };
 type Report = { schema_version: string; runner: string; target: string; binding_nonce: string; kind: string; mode: Mode; collected: number; passed: number; failed: number; skipped: number; tests: Case[]; status: 'PASS' | 'FAIL'; reason_code: string | null; cleanup_complete: boolean };
-export type Probe = 'directory' | 'hold' | 'pass' | 'fail' | 'zero' | 'skip' | 'expected_failure' | 'timeout' | 'interrupt' | 'cleanup' | 'network' | 'missing_browser' | 'missing_application';
+export type Probe = 'post_report_interrupt' | 'directory' | 'hold' | 'pass' | 'fail' | 'zero' | 'skip' | 'expected_failure' | 'timeout' | 'interrupt' | 'cleanup' | 'network' | 'missing_browser' | 'missing_application';
 const harness = 'apps/web/tests/fixtures/harness';
 const sha = (bytes: string | Buffer) => createHash('sha256').update(bytes).digest('hex');
 function validateDestination(path: string) {
@@ -95,7 +95,7 @@ export async function executeBrowser(options: { root: string; target: string; de
       report.collected = report.tests.length;
       if (!report.collected) report.reason_code = value.noTests || !value.errors ? 'NO_TESTS' : 'INVALID_CONFIGURATION';
       else if (value.errors && report.failed === 0) report.reason_code = 'RUNNER_ERROR';
-      else report.reason_code = report.failed ? 'ASSERTION_FAILED' : report.skipped ? 'REQUIRED_TEST_SKIPPED' : !report.collected ? 'NO_TESTS' : rawExit || value.status !== 'passed' ? 'RUNNER_ERROR' : null;
+      else report.reason_code = report.failed ? 'ASSERTION_FAILED' : report.skipped ? 'REQUIRED_TEST_SKIPPED' : !report.collected ? 'NO_TESTS' : rawExit !== 0 || value.status !== 'passed' ? 'RUNNER_ERROR' : null;
     } else report.reason_code = 'RUNNER_ERROR';
     if (timedOut) report.reason_code = 'RUNNER_TIMEOUT';
     if (interrupted) report.reason_code = 'RUNNER_INTERRUPTED';

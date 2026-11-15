@@ -144,7 +144,7 @@ runnerTest('BH-DISPATCH @runner: exact selection rejects unsafe paths and substr
   try { symlinkSync('/tmp',join(directory,'escape.spec.ts')); expect(() => validateTarget(root,`${directory.slice(root.length+1)}/escape.spec.ts`,true)).toThrow(); } finally { rmSync(directory,{recursive:true,force:true}); }
 });
 for (const [probe, expectedCode, reason] of [
-  ['pass',0,null],['directory',0,null],['fail',1,'ASSERTION_FAILED'],['zero',2,'NO_TESTS'],['skip',1,'REQUIRED_TEST_SKIPPED'],['expected_failure',1,'ASSERTION_FAILED'],['network',1,'ASSERTION_FAILED'],['missing_browser',2,'MISSING_BROWSER'],['missing_application',2,'MISSING_APPLICATION'],['timeout',1,'RUNNER_TIMEOUT'],['interrupt',1,'RUNNER_INTERRUPTED'],['cleanup',1,'CLEANUP_FAILED'],
+  ['pass',0,null],['post_report_interrupt',1,'RUNNER_ERROR'],['directory',0,null],['fail',1,'ASSERTION_FAILED'],['zero',2,'NO_TESTS'],['skip',1,'REQUIRED_TEST_SKIPPED'],['expected_failure',1,'ASSERTION_FAILED'],['network',1,'ASSERTION_FAILED'],['missing_browser',2,'MISSING_BROWSER'],['missing_application',2,'MISSING_APPLICATION'],['timeout',1,'RUNNER_TIMEOUT'],['interrupt',1,'RUNNER_INTERRUPTED'],['cleanup',1,'CLEANUP_FAILED'],
 ] as const) {
   runnerTest(`BH-LIFECYCLE @runner: real subprocess ${probe}`, async () => {
     runnerTest.setTimeout(45_000);
