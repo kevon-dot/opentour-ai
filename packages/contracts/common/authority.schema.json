@@ -1,0 +1,1638 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:opentour:authority:1.0",
+  "title": "OpenTour authority protocol integration candidate",
+  "description": "Documentation-only candidate for coordinator merge. Structural validation does not prove signing, isolation, ordering, provider reconciliation or product behavior. Root contract and semantic invariants accompany this schema.",
+  "$defs": {
+    "Id": {
+      "$ref": "urn:opentour:common-contract:1.0#/$defs/Id"
+    },
+    "Timestamp": {
+      "$ref": "urn:opentour:common-contract:1.0#/$defs/Timestamp"
+    },
+    "Sha256": {
+      "$ref": "urn:opentour:common-contract:1.0#/$defs/Sha256"
+    },
+    "ArtifactRef": {
+      "$ref": "urn:opentour:common-contract:1.0#/$defs/ArtifactRef"
+    },
+    "ResourceRevision": {
+      "$ref": "urn:opentour:common-contract:1.0#/$defs/ResourceRevision"
+    },
+    "SafeCounter": {
+      "$ref": "urn:opentour:common-contract:1.0#/$defs/SafeNonnegativeInteger"
+    },
+    "PositiveCounter": {
+      "$ref": "urn:opentour:common-contract:1.0#/$defs/SafePositiveInteger"
+    },
+    "SnapshotTuple": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "revocation_epoch": {
+          "$ref": "#/$defs/SafeCounter"
+        },
+        "snapshot_sequence": {
+          "$ref": "#/$defs/PositiveCounter"
+        }
+      },
+      "required": [
+        "revocation_epoch",
+        "snapshot_sequence"
+      ]
+    },
+    "JournalFrontier": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "sequence": {
+          "$ref": "#/$defs/SafeCounter"
+        },
+        "chain_sha256": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "head_revision": {
+          "$ref": "#/$defs/ResourceRevision"
+        },
+        "verified_frontier_receipt_ref": {
+          "$ref": "#/$defs/ArtifactRef"
+        }
+      },
+      "required": [
+        "sequence",
+        "chain_sha256",
+        "head_revision",
+        "verified_frontier_receipt_ref"
+      ],
+      "description": "Exact live independent journal head plus immutable verified contiguous replay receipt. A number or hash supplied by a cell is insufficient without verification."
+    },
+    "GrantTombstone": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "grant_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "operation_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "revoked_at_epoch": {
+          "$ref": "#/$defs/PositiveCounter"
+        },
+        "restrictive_intent_sequence": {
+          "$ref": "#/$defs/PositiveCounter"
+        },
+        "restrictive_intent_sha256": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "committed_outcome_sequence": {
+          "$ref": "#/$defs/PositiveCounter"
+        },
+        "committed_outcome_sha256": {
+          "$ref": "#/$defs/Sha256"
+        }
+      },
+      "required": [
+        "grant_id",
+        "operation_id",
+        "revoked_at_epoch",
+        "restrictive_intent_sequence",
+        "restrictive_intent_sha256",
+        "committed_outcome_sequence",
+        "committed_outcome_sha256"
+      ],
+      "description": "Exact grant ID remains revoked; a later legitimate grant uses a different ID. Dependencies/ancestry are evaluated by the complete grant resolver."
+    },
+    "SignedAuthoritySnapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "organization_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "environment_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "cell_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "runner_identity_epoch": {
+          "$ref": "#/$defs/SafeCounter"
+        },
+        "issuance_generation": {
+          "$ref": "#/$defs/Id"
+        },
+        "authority_revision": {
+          "$ref": "#/$defs/Id"
+        },
+        "revocation_epoch": {
+          "$ref": "#/$defs/SafeCounter"
+        },
+        "snapshot_sequence": {
+          "$ref": "#/$defs/PositiveCounter"
+        },
+        "journal_frontier": {
+          "$ref": "#/$defs/JournalFrontier"
+        },
+        "grant_snapshot_sha256": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "effective_grants_ref": {
+          "$ref": "#/$defs/ArtifactRef"
+        },
+        "tombstones_ref": {
+          "$ref": "#/$defs/ArtifactRef"
+        },
+        "issued_at": {
+          "$ref": "#/$defs/Timestamp"
+        },
+        "valid_until": {
+          "$ref": "#/$defs/Timestamp"
+        },
+        "signed_content_sha256": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "signer_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "signature_ref": {
+          "$ref": "#/$defs/ArtifactRef"
+        }
+      },
+      "required": [
+        "organization_id",
+        "environment_id",
+        "cell_id",
+        "runner_identity_epoch",
+        "issuance_generation",
+        "authority_revision",
+        "revocation_epoch",
+        "snapshot_sequence",
+        "journal_frontier",
+        "grant_snapshot_sha256",
+        "effective_grants_ref",
+        "tombstones_ref",
+        "issued_at",
+        "valid_until",
+        "signed_content_sha256",
+        "signer_id",
+        "signature_ref"
+      ],
+      "description": "Canonical digest excludes signed_content_sha256 and signature_ref to avoid a self hash; the signature binds that digest and the approved signature context. All other fields are authenticated under the approved signing/canonicalization contract. Refs resolve immutable artifacts under authority service access, not a browser user grant. Grant/snapshot contents stay local; central logs retain allowlisted metadata only. grant_snapshot_sha256 equals effective_grants_ref.sha256. signed_content_sha256 is the authenticated payload digest, excluding itself and signature_ref; stored signed-envelope ArtifactRef.sha256 hashes the complete envelope. Equal tuple comparison uses the authenticated payload digest, not randomized signature bytes. Exact signing profile: AuthoritySigningTranscript purpose opentour.authority.snapshot.v1 and DetachedAuthoritySignature signer_role control_authority_issuer."
+    },
+    "LocalAuthorityGuard": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "organization_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "environment_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "cell_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "authority_revision": {
+          "$ref": "#/$defs/Id"
+        },
+        "revocation_epoch": {
+          "$ref": "#/$defs/SafeCounter"
+        },
+        "grant_snapshot_sha256": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "signed_snapshot_ref": {
+          "$ref": "#/$defs/ArtifactRef"
+        },
+        "valid_until": {
+          "$ref": "#/$defs/Timestamp"
+        },
+        "installed_at": {
+          "$ref": "#/$defs/Timestamp"
+        },
+        "mode": {
+          "enum": [
+            "active",
+            "draining",
+            "blocked",
+            "recovery_hold"
+          ]
+        },
+        "barrier_operation_id": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/Id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "snapshot_sequence": {
+          "$ref": "#/$defs/PositiveCounter"
+        },
+        "issuance_generation": {
+          "$ref": "#/$defs/Id"
+        },
+        "journal_frontier_sequence": {
+          "$ref": "#/$defs/SafeCounter"
+        },
+        "journal_frontier_digest": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "runner_identity_epoch": {
+          "$ref": "#/$defs/SafeCounter"
+        },
+        "revision": {
+          "$ref": "#/$defs/ResourceRevision"
+        }
+      },
+      "required": [
+        "organization_id",
+        "environment_id",
+        "cell_id",
+        "authority_revision",
+        "revocation_epoch",
+        "grant_snapshot_sha256",
+        "signed_snapshot_ref",
+        "valid_until",
+        "installed_at",
+        "mode",
+        "barrier_operation_id",
+        "snapshot_sequence",
+        "issuance_generation",
+        "journal_frontier_sequence",
+        "journal_frontier_digest",
+        "runner_identity_epoch",
+        "revision"
+      ],
+      "description": "barrier_operation_id is only a nullable diagnostic pointer. An active guard MAY retain this pointer while independent older barriers drain. Its presence neither denies current valid grants nor proves any barrier complete."
+    },
+    "SealedAdmissionFrontier": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "organization_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "environment_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "cell_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "operation_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "required_epoch": {
+          "$ref": "#/$defs/PositiveCounter"
+        },
+        "sealed_at": {
+          "$ref": "#/$defs/Timestamp"
+        },
+        "admission_through_sequence": {
+          "$ref": "#/$defs/SafeCounter"
+        },
+        "effect_ledger_manifest_ref": {
+          "$ref": "#/$defs/ArtifactRef"
+        },
+        "session_ledger_manifest_ref": {
+          "$ref": "#/$defs/ArtifactRef"
+        },
+        "external_capability_manifest_ref": {
+          "$ref": "#/$defs/ArtifactRef"
+        },
+        "frontier_sha256": {
+          "$ref": "#/$defs/Sha256"
+        }
+      },
+      "required": [
+        "organization_id",
+        "environment_id",
+        "cell_id",
+        "operation_id",
+        "required_epoch",
+        "sealed_at",
+        "admission_through_sequence",
+        "effect_ledger_manifest_ref",
+        "session_ledger_manifest_ref",
+        "external_capability_manifest_ref",
+        "frontier_sha256"
+      ],
+      "description": "Immutable population of effects/sessions/capabilities admitted below required_epoch, materialized after the admission sequence/fence is sealed atomically in local metadata. S3 manifest writes are not atomic with DynamoDB; until all pages are verified, BarrierState keeps this field null. The stable manifests enumerate every page, including an explicit empty manifest. The finalized digest binds scope, operation, epoch, admission sequence and all three manifest digests; newer work never replaces this population."
+    },
+    "RestrictiveEventInclusionProof": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "operation_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "organization_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "restrictive_intent_sequence": {
+          "$ref": "#/$defs/PositiveCounter"
+        },
+        "restrictive_intent_sha256": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "committed_outcome_sequence": {
+          "$ref": "#/$defs/PositiveCounter"
+        },
+        "committed_outcome_sha256": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "verified_from_sequence": {
+          "$ref": "#/$defs/SafeCounter"
+        },
+        "verified_through_sequence": {
+          "$ref": "#/$defs/SafeCounter"
+        },
+        "journal_frontier": {
+          "$ref": "#/$defs/JournalFrontier"
+        },
+        "contiguous_replay_receipt_ref": {
+          "$ref": "#/$defs/ArtifactRef"
+        }
+      },
+      "required": [
+        "operation_id",
+        "organization_id",
+        "restrictive_intent_sequence",
+        "restrictive_intent_sha256",
+        "committed_outcome_sequence",
+        "committed_outcome_sha256",
+        "verified_from_sequence",
+        "verified_through_sequence",
+        "journal_frontier",
+        "contiguous_replay_receipt_ref"
+      ],
+      "description": "Proof receipt attests a contiguous verified journal chain from a trusted checkpoint through the stated live frontier, including the exact restrictive intent and committed outcome. No new snapshot/journal counter is introduced. Verify bytes/signature/ownership and source intent/outcome; boolean client assertions are not evidence."
+    },
+    "BarrierState": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "organization_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "environment_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "cell_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "operation_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "required_epoch": {
+          "$ref": "#/$defs/PositiveCounter"
+        },
+        "original_required_authority_revision": {
+          "$ref": "#/$defs/Id"
+        },
+        "revoked_grant_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Id"
+          },
+          "minItems": 1,
+          "uniqueItems": true
+        },
+        "restrictive_journal_sequence": {
+          "$ref": "#/$defs/PositiveCounter"
+        },
+        "restrictive_journal_digest": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "sealed_admission_frontier": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/SealedAdmissionFrontier"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "state": {
+          "enum": [
+            "pending_install",
+            "installed_draining",
+            "enforced",
+            "unknown"
+          ]
+        },
+        "last_verified_snapshot_tuple": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/SnapshotTuple"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "last_verified_snapshot_digest": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/Sha256"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "issuance_generation": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/Id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "journal_frontier": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/JournalFrontier"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "unresolved_effect_count": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/SafeCounter"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "open_export_session_count": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/SafeCounter"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "unresolved_external_capability_count": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/SafeCounter"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "external_capability_evidence_ref": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/ArtifactRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "last_receipt_ref": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/ArtifactRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "observed_at": {
+          "$ref": "#/$defs/Timestamp"
+        },
+        "unknown_reason": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/Id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "revision": {
+          "$ref": "#/$defs/ResourceRevision"
+        }
+      },
+      "required": [
+        "organization_id",
+        "environment_id",
+        "cell_id",
+        "operation_id",
+        "required_epoch",
+        "original_required_authority_revision",
+        "revoked_grant_ids",
+        "restrictive_journal_sequence",
+        "restrictive_journal_digest",
+        "sealed_admission_frontier",
+        "state",
+        "last_verified_snapshot_tuple",
+        "last_verified_snapshot_digest",
+        "issuance_generation",
+        "journal_frontier",
+        "unresolved_effect_count",
+        "open_export_session_count",
+        "unresolved_external_capability_count",
+        "external_capability_evidence_ref",
+        "last_receipt_ref",
+        "observed_at",
+        "unknown_reason",
+        "revision"
+      ],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "const": "enforced"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "sealed_admission_frontier": {
+                "$ref": "#/$defs/SealedAdmissionFrontier"
+              },
+              "last_verified_snapshot_tuple": {
+                "$ref": "#/$defs/SnapshotTuple"
+              },
+              "last_verified_snapshot_digest": {
+                "$ref": "#/$defs/Sha256"
+              },
+              "issuance_generation": {
+                "$ref": "#/$defs/Id"
+              },
+              "journal_frontier": {
+                "$ref": "#/$defs/JournalFrontier"
+              },
+              "unresolved_effect_count": {
+                "const": 0
+              },
+              "open_export_session_count": {
+                "const": 0
+              },
+              "unresolved_external_capability_count": {
+                "const": 0
+              },
+              "external_capability_evidence_ref": {
+                "$ref": "#/$defs/ArtifactRef"
+              },
+              "last_receipt_ref": {
+                "$ref": "#/$defs/ArtifactRef"
+              },
+              "unknown_reason": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "const": "unknown"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "unknown_reason": {
+                "$ref": "#/$defs/Id"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "unresolved_effect_count": {
+                "type": "null"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "unknown_reason": {
+                "$ref": "#/$defs/Id"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "open_export_session_count": {
+                "type": "null"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "unknown_reason": {
+                "$ref": "#/$defs/Id"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "unresolved_external_capability_count": {
+                "type": "null"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "unknown_reason": {
+                "$ref": "#/$defs/Id"
+              }
+            }
+          }
+        }
+      ],
+      "description": "One row per operation/cell. Before installation, frontier and counts may be null, never fake zero. A superseding installed snapshot may prove this operation, but the sealed frontier stays fixed."
+    },
+    "ExternalCapabilityEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "capability_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "kind": {
+          "enum": [
+            "tracked_gateway_session",
+            "approved_bucket_copy",
+            "provider_effect"
+          ]
+        },
+        "source_effect_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "state": {
+          "enum": [
+            "closed",
+            "completed",
+            "cancelled",
+            "compensated",
+            "outcome_unknown",
+            "reconciling"
+          ]
+        },
+        "expires_at": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/Timestamp"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "terminal_receipt_ref": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/ArtifactRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "customer_custody": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "capability_id",
+        "kind",
+        "source_effect_id",
+        "state",
+        "expires_at",
+        "terminal_receipt_ref",
+        "customer_custody"
+      ],
+      "description": "Version1 does not issue browser presigned S3 download URLs. Approved destination copies require exact terminal transfer receipts. Customer-custody bytes cannot be recalled. Future expiry alone does not settle an unknown transfer."
+    },
+    "CellBarrierReceipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "receipt_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "operation_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "organization_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "environment_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "cell_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "required_epoch": {
+          "$ref": "#/$defs/PositiveCounter"
+        },
+        "original_required_authority_revision": {
+          "$ref": "#/$defs/Id"
+        },
+        "revoked_grant_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Id"
+          },
+          "minItems": 1,
+          "uniqueItems": true
+        },
+        "installed_epoch": {
+          "$ref": "#/$defs/SafeCounter"
+        },
+        "installed_snapshot_sequence": {
+          "$ref": "#/$defs/PositiveCounter"
+        },
+        "installed_authority_revision": {
+          "$ref": "#/$defs/Id"
+        },
+        "installed_snapshot_sha256": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "installed_snapshot_ref": {
+          "$ref": "#/$defs/ArtifactRef"
+        },
+        "issuance_generation": {
+          "$ref": "#/$defs/Id"
+        },
+        "runner_identity_epoch": {
+          "$ref": "#/$defs/SafeCounter"
+        },
+        "guard_revision": {
+          "$ref": "#/$defs/ResourceRevision"
+        },
+        "guard_installed_at": {
+          "$ref": "#/$defs/Timestamp"
+        },
+        "journal_inclusion_proof": {
+          "$ref": "#/$defs/RestrictiveEventInclusionProof"
+        },
+        "sealed_admission_frontier": {
+          "$ref": "#/$defs/SealedAdmissionFrontier"
+        },
+        "effective_grant_exclusion_receipt_ref": {
+          "$ref": "#/$defs/ArtifactRef"
+        },
+        "unresolved_effect_count": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/SafeCounter"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "resolved_effect_receipt_refs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ArtifactRef"
+          },
+          "minItems": 0,
+          "uniqueItems": true
+        },
+        "open_export_session_count": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/SafeCounter"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "unresolved_external_capability_count": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/SafeCounter"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "external_capability_evidence": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ExternalCapabilityEvidence"
+          },
+          "minItems": 0,
+          "uniqueItems": true
+        },
+        "effect_population_reconciliation_ref": {
+          "$ref": "#/$defs/ArtifactRef"
+        },
+        "enforcement_state": {
+          "enum": [
+            "installed_draining",
+            "enforced",
+            "unknown"
+          ]
+        },
+        "unknown_reason": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/Id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "observed_at": {
+          "$ref": "#/$defs/Timestamp"
+        },
+        "signer_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "signature_ref": {
+          "$ref": "#/$defs/ArtifactRef"
+        },
+        "assurance_class": {
+          "enum": [
+            "runner_reported"
+          ]
+        }
+      },
+      "required": [
+        "receipt_id",
+        "operation_id",
+        "organization_id",
+        "environment_id",
+        "cell_id",
+        "required_epoch",
+        "original_required_authority_revision",
+        "revoked_grant_ids",
+        "installed_epoch",
+        "installed_snapshot_sequence",
+        "installed_authority_revision",
+        "installed_snapshot_sha256",
+        "installed_snapshot_ref",
+        "issuance_generation",
+        "runner_identity_epoch",
+        "guard_revision",
+        "guard_installed_at",
+        "journal_inclusion_proof",
+        "sealed_admission_frontier",
+        "effective_grant_exclusion_receipt_ref",
+        "unresolved_effect_count",
+        "resolved_effect_receipt_refs",
+        "open_export_session_count",
+        "unresolved_external_capability_count",
+        "external_capability_evidence",
+        "effect_population_reconciliation_ref",
+        "enforcement_state",
+        "unknown_reason",
+        "observed_at",
+        "signer_id",
+        "signature_ref",
+        "assurance_class"
+      ],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "enforcement_state": {
+                "const": "enforced"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "unresolved_effect_count": {
+                "const": 0
+              },
+              "open_export_session_count": {
+                "const": 0
+              },
+              "unresolved_external_capability_count": {
+                "const": 0
+              },
+              "unknown_reason": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "enforcement_state": {
+                "const": "unknown"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "unknown_reason": {
+                "$ref": "#/$defs/Id"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "unresolved_effect_count": {
+                "type": "null"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "unknown_reason": {
+                "$ref": "#/$defs/Id"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "open_export_session_count": {
+                "type": "null"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "unknown_reason": {
+                "$ref": "#/$defs/Id"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "unresolved_external_capability_count": {
+                "type": "null"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "unknown_reason": {
+                "$ref": "#/$defs/Id"
+              }
+            }
+          }
+        }
+      ],
+      "description": "The first release permits only runner_reported assurance, not an invented stronger attestation. Proof validation additionally checks exact enrolled signer, current generation, tombstone ancestry, operation-specific sealed population, all terminal evidence and frozen affected-cell inventory. Receipt signature alone does not prove execution correctness. installed_snapshot_sha256 equals SignedAuthoritySnapshot.signed_content_sha256; installed_snapshot_ref.sha256 identifies the stored complete signed envelope and need not equal the payload digest. Exact signing profile: AuthoritySigningTranscript purpose opentour.authority.barrier-receipt.v1 and DetachedAuthoritySignature signer_role enrolled_cell_runner bound to current cell identity."
+    },
+    "RevocationOperation": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "operation_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "organization_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "revoked_grant_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Id"
+          },
+          "minItems": 1,
+          "uniqueItems": true
+        },
+        "reason_code": {
+          "$ref": "#/$defs/Id"
+        },
+        "requested_by": {
+          "$ref": "#/$defs/Id"
+        },
+        "requested_at": {
+          "$ref": "#/$defs/Timestamp"
+        },
+        "previous_epoch": {
+          "$ref": "#/$defs/SafeCounter"
+        },
+        "required_epoch": {
+          "$ref": "#/$defs/PositiveCounter"
+        },
+        "required_authority_revision": {
+          "$ref": "#/$defs/Id"
+        },
+        "affected_cell_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Id"
+          },
+          "minItems": 0,
+          "uniqueItems": true
+        },
+        "affected_cell_inventory_revision": {
+          "$ref": "#/$defs/ResourceRevision"
+        },
+        "affected_cell_inventory_ref": {
+          "$ref": "#/$defs/ArtifactRef"
+        },
+        "restrictive_intent_sequence": {
+          "$ref": "#/$defs/PositiveCounter"
+        },
+        "restrictive_intent_sha256": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "committed_outcome_sequence": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/PositiveCounter"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "committed_outcome_sha256": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/Sha256"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "state": {
+          "enum": [
+            "control_blocked",
+            "pending_cells",
+            "draining",
+            "confirmed",
+            "reconciliation_required"
+          ]
+        },
+        "control_blocked_at": {
+          "$ref": "#/$defs/Timestamp"
+        },
+        "confirmed_at": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/Timestamp"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "cell_receipt_refs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ArtifactRef"
+          },
+          "minItems": 0,
+          "uniqueItems": true
+        },
+        "unresolved_effect_count": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/SafeCounter"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "unknown_reason": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/Id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "revision": {
+          "$ref": "#/$defs/ResourceRevision"
+        }
+      },
+      "required": [
+        "operation_id",
+        "organization_id",
+        "revoked_grant_ids",
+        "reason_code",
+        "requested_by",
+        "requested_at",
+        "previous_epoch",
+        "required_epoch",
+        "required_authority_revision",
+        "affected_cell_ids",
+        "affected_cell_inventory_revision",
+        "affected_cell_inventory_ref",
+        "restrictive_intent_sequence",
+        "restrictive_intent_sha256",
+        "committed_outcome_sequence",
+        "committed_outcome_sha256",
+        "state",
+        "control_blocked_at",
+        "confirmed_at",
+        "cell_receipt_refs",
+        "unresolved_effect_count",
+        "unknown_reason",
+        "revision"
+      ],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "const": "confirmed"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "confirmed_at": {
+                "$ref": "#/$defs/Timestamp"
+              },
+              "committed_outcome_sequence": {
+                "$ref": "#/$defs/PositiveCounter"
+              },
+              "committed_outcome_sha256": {
+                "$ref": "#/$defs/Sha256"
+              },
+              "unresolved_effect_count": {
+                "const": 0
+              },
+              "unknown_reason": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      ],
+      "description": "reason_code is a registered domain reason resolved by the invoking revoke endpoint, not arbitrary prose. Endpoint may revoke one grant but wire representation is a nonempty revoked_grant_ids array. Confirmed is immutable historical outcome; later new grants do not undo it. Empty enrolled-cell inventory is allowed only with an independently verified inventory, not inferred from failed discovery."
+    },
+    "AuthoritySnapshotSigningPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "organization_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "environment_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "cell_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "runner_identity_epoch": {
+          "$ref": "#/$defs/SafeCounter"
+        },
+        "issuance_generation": {
+          "$ref": "#/$defs/Id"
+        },
+        "authority_revision": {
+          "$ref": "#/$defs/Id"
+        },
+        "revocation_epoch": {
+          "$ref": "#/$defs/SafeCounter"
+        },
+        "snapshot_sequence": {
+          "$ref": "#/$defs/PositiveCounter"
+        },
+        "journal_frontier": {
+          "$ref": "#/$defs/JournalFrontier"
+        },
+        "grant_snapshot_sha256": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "effective_grants_ref": {
+          "$ref": "#/$defs/ArtifactRef"
+        },
+        "tombstones_ref": {
+          "$ref": "#/$defs/ArtifactRef"
+        },
+        "issued_at": {
+          "$ref": "#/$defs/Timestamp"
+        },
+        "valid_until": {
+          "$ref": "#/$defs/Timestamp"
+        },
+        "signer_id": {
+          "$ref": "#/$defs/Id"
+        }
+      },
+      "required": [
+        "organization_id",
+        "environment_id",
+        "cell_id",
+        "runner_identity_epoch",
+        "issuance_generation",
+        "authority_revision",
+        "revocation_epoch",
+        "snapshot_sequence",
+        "journal_frontier",
+        "grant_snapshot_sha256",
+        "effective_grants_ref",
+        "tombstones_ref",
+        "issued_at",
+        "valid_until",
+        "signer_id"
+      ],
+      "description": "Exact unsigned snapshot payload. Compute signed_content_sha256 over RFC8785 canonical bytes of this object. The detached signature signs the domain-separated transcript instead of this payload in isolation."
+    },
+    "BarrierReceiptSigningPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "receipt_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "operation_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "organization_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "environment_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "cell_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "required_epoch": {
+          "$ref": "#/$defs/PositiveCounter"
+        },
+        "original_required_authority_revision": {
+          "$ref": "#/$defs/Id"
+        },
+        "revoked_grant_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Id"
+          },
+          "minItems": 1,
+          "uniqueItems": true
+        },
+        "installed_epoch": {
+          "$ref": "#/$defs/SafeCounter"
+        },
+        "installed_snapshot_sequence": {
+          "$ref": "#/$defs/PositiveCounter"
+        },
+        "installed_authority_revision": {
+          "$ref": "#/$defs/Id"
+        },
+        "installed_snapshot_sha256": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "installed_snapshot_ref": {
+          "$ref": "#/$defs/ArtifactRef"
+        },
+        "issuance_generation": {
+          "$ref": "#/$defs/Id"
+        },
+        "runner_identity_epoch": {
+          "$ref": "#/$defs/SafeCounter"
+        },
+        "guard_revision": {
+          "$ref": "#/$defs/ResourceRevision"
+        },
+        "guard_installed_at": {
+          "$ref": "#/$defs/Timestamp"
+        },
+        "journal_inclusion_proof": {
+          "$ref": "#/$defs/RestrictiveEventInclusionProof"
+        },
+        "sealed_admission_frontier": {
+          "$ref": "#/$defs/SealedAdmissionFrontier"
+        },
+        "effective_grant_exclusion_receipt_ref": {
+          "$ref": "#/$defs/ArtifactRef"
+        },
+        "unresolved_effect_count": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/SafeCounter"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "resolved_effect_receipt_refs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ArtifactRef"
+          },
+          "minItems": 0,
+          "uniqueItems": true
+        },
+        "open_export_session_count": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/SafeCounter"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "unresolved_external_capability_count": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/SafeCounter"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "external_capability_evidence": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ExternalCapabilityEvidence"
+          },
+          "minItems": 0,
+          "uniqueItems": true
+        },
+        "effect_population_reconciliation_ref": {
+          "$ref": "#/$defs/ArtifactRef"
+        },
+        "enforcement_state": {
+          "enum": [
+            "installed_draining",
+            "enforced",
+            "unknown"
+          ]
+        },
+        "unknown_reason": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/Id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "observed_at": {
+          "$ref": "#/$defs/Timestamp"
+        },
+        "signer_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "assurance_class": {
+          "enum": [
+            "runner_reported"
+          ]
+        }
+      },
+      "required": [
+        "receipt_id",
+        "operation_id",
+        "organization_id",
+        "environment_id",
+        "cell_id",
+        "required_epoch",
+        "original_required_authority_revision",
+        "revoked_grant_ids",
+        "installed_epoch",
+        "installed_snapshot_sequence",
+        "installed_authority_revision",
+        "installed_snapshot_sha256",
+        "installed_snapshot_ref",
+        "issuance_generation",
+        "runner_identity_epoch",
+        "guard_revision",
+        "guard_installed_at",
+        "journal_inclusion_proof",
+        "sealed_admission_frontier",
+        "effective_grant_exclusion_receipt_ref",
+        "unresolved_effect_count",
+        "resolved_effect_receipt_refs",
+        "open_export_session_count",
+        "unresolved_external_capability_count",
+        "external_capability_evidence",
+        "effect_population_reconciliation_ref",
+        "enforcement_state",
+        "unknown_reason",
+        "observed_at",
+        "signer_id",
+        "assurance_class"
+      ],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "enforcement_state": {
+                "const": "enforced"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "unresolved_effect_count": {
+                "const": 0
+              },
+              "open_export_session_count": {
+                "const": 0
+              },
+              "unresolved_external_capability_count": {
+                "const": 0
+              },
+              "unknown_reason": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "enforcement_state": {
+                "const": "unknown"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "unknown_reason": {
+                "$ref": "#/$defs/Id"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "unresolved_effect_count": {
+                "type": "null"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "unknown_reason": {
+                "$ref": "#/$defs/Id"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "open_export_session_count": {
+                "type": "null"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "unknown_reason": {
+                "$ref": "#/$defs/Id"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "unresolved_external_capability_count": {
+                "type": "null"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "unknown_reason": {
+                "$ref": "#/$defs/Id"
+              }
+            }
+          }
+        }
+      ],
+      "description": "Exact receipt payload excluding signature_ref. No signature artifact or stored-envelope hash is included recursively."
+    },
+    "AuthoritySigningTranscript": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "purpose": {
+              "const": "opentour.authority.snapshot.v1"
+            },
+            "payload": {
+              "$ref": "#/$defs/AuthoritySnapshotSigningPayload"
+            }
+          },
+          "required": [
+            "purpose",
+            "payload"
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "purpose": {
+              "const": "opentour.authority.barrier-receipt.v1"
+            },
+            "payload": {
+              "$ref": "#/$defs/BarrierReceiptSigningPayload"
+            }
+          },
+          "required": [
+            "purpose",
+            "payload"
+          ]
+        }
+      ]
+    },
+    "DetachedAuthoritySignature": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "profile_version": {
+          "const": "1.0"
+        },
+        "algorithm": {
+          "const": "ES256"
+        },
+        "encoding": {
+          "const": "base64url_unpadded_r_s_64"
+        },
+        "purpose": {
+          "enum": [
+            "opentour.authority.snapshot.v1",
+            "opentour.authority.barrier-receipt.v1"
+          ]
+        },
+        "key_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "key_registry_revision": {
+          "$ref": "#/$defs/Id"
+        },
+        "signer_role": {
+          "enum": [
+            "control_authority_issuer",
+            "enrolled_cell_runner"
+          ]
+        },
+        "payload_sha256": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "transcript_sha256": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "signature": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{86}$",
+          "minLength": 86,
+          "maxLength": 86
+        }
+      },
+      "required": [
+        "profile_version",
+        "algorithm",
+        "encoding",
+        "purpose",
+        "key_id",
+        "key_registry_revision",
+        "signer_role",
+        "payload_sha256",
+        "transcript_sha256",
+        "signature"
+      ],
+      "description": "Reuse PRD27 qualified RFC8785/ES256 KMS-to-JOSE conversion: exactly64 R||S bytes, canonical unpadded base64url re-encoding, each scalar valid for P-256. Verify pinned approved key/purpose/role/current enrollment, not any caller JWK or URL. Signature signs RFC8785 AuthoritySigningTranscript using ES256; payload and transcript digests are separate. Unknown profile/algorithm/key denies authority."
+    }
+  },
+  "$comment": "Canonical authority contracts imported from the independently reviewed isolated package. Primitive aliases resolve only in the local schema registry. Shape validation is not cryptographic, runtime or provider evidence."
+}

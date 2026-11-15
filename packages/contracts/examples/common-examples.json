@@ -1,0 +1,261 @@
+[
+  {
+    "id": "resource-revision-minimum",
+    "schema_ref": "urn:opentour:common-contract:1.0#/$defs/ResourceRevision",
+    "value": "1",
+    "valid": true
+  },
+  {
+    "id": "resource-revision-above-js-safe",
+    "schema_ref": "urn:opentour:common-contract:1.0#/$defs/ResourceRevision",
+    "value": "9007199254740993",
+    "valid": true
+  },
+  {
+    "id": "resource-revision-maximum",
+    "schema_ref": "urn:opentour:common-contract:1.0#/$defs/ResourceRevision",
+    "value": "9223372036854775807",
+    "valid": true
+  },
+  {
+    "id": "resource-revision-zero",
+    "schema_ref": "urn:opentour:common-contract:1.0#/$defs/ResourceRevision",
+    "value": "0",
+    "valid": false
+  },
+  {
+    "id": "resource-revision-leading-zero",
+    "schema_ref": "urn:opentour:common-contract:1.0#/$defs/ResourceRevision",
+    "value": "01",
+    "valid": false
+  },
+  {
+    "id": "resource-revision-overflow",
+    "schema_ref": "urn:opentour:common-contract:1.0#/$defs/ResourceRevision",
+    "value": "9223372036854775808",
+    "valid": false
+  },
+  {
+    "id": "resource-revision-numeric",
+    "schema_ref": "urn:opentour:common-contract:1.0#/$defs/ResourceRevision",
+    "value": 1,
+    "valid": false
+  },
+  {
+    "id": "resource-revision-negative",
+    "schema_ref": "urn:opentour:common-contract:1.0#/$defs/ResourceRevision",
+    "value": "-1",
+    "valid": false
+  },
+  {
+    "id": "resource-revision-float",
+    "schema_ref": "urn:opentour:common-contract:1.0#/$defs/ResourceRevision",
+    "value": "1.0",
+    "valid": false
+  },
+  {
+    "id": "resource-revision-exponent",
+    "schema_ref": "urn:opentour:common-contract:1.0#/$defs/ResourceRevision",
+    "value": "1e2",
+    "valid": false
+  },
+  {
+    "id": "resource-revision-whitespace",
+    "schema_ref": "urn:opentour:common-contract:1.0#/$defs/ResourceRevision",
+    "value": " 1",
+    "valid": false
+  },
+  {
+    "id": "resource-revision-newline",
+    "schema_ref": "urn:opentour:common-contract:1.0#/$defs/ResourceRevision",
+    "value": "1\n",
+    "valid": false
+  },
+  {
+    "id": "resource-revision-null",
+    "schema_ref": "urn:opentour:common-contract:1.0#/$defs/ResourceRevision",
+    "value": null,
+    "valid": false
+  },
+  {
+    "id": "counter-safe-max",
+    "schema_ref": "urn:opentour:common-contract:1.0#/$defs/SafeNonnegativeInteger",
+    "value": 9007199254740991,
+    "valid": true
+  },
+  {
+    "id": "counter-unsafe",
+    "schema_ref": "urn:opentour:common-contract:1.0#/$defs/SafeNonnegativeInteger",
+    "value": 9007199254740992,
+    "valid": false
+  },
+  {
+    "id": "counter-string",
+    "schema_ref": "urn:opentour:common-contract:1.0#/$defs/SafeNonnegativeInteger",
+    "value": "2",
+    "valid": false
+  },
+  {
+    "id": "counter-negative",
+    "schema_ref": "urn:opentour:common-contract:1.0#/$defs/SafeNonnegativeInteger",
+    "value": -1,
+    "valid": false
+  },
+  {
+    "id": "counter-zero",
+    "schema_ref": "urn:opentour:common-contract:1.0#/$defs/SafeNonnegativeInteger",
+    "value": 0,
+    "valid": true
+  },
+  {
+    "id": "timestamp-utc",
+    "schema_ref": "urn:opentour:common-contract:1.0#/$defs/Timestamp",
+    "value": "2026-11-15T00:00:00Z",
+    "valid": true
+  },
+  {
+    "id": "timestamp-invalid-calendar",
+    "schema_ref": "urn:opentour:common-contract:1.0#/$defs/Timestamp",
+    "value": "2026-02-30T00:00:00Z",
+    "valid": false
+  },
+  {
+    "id": "timestamp-offset",
+    "schema_ref": "urn:opentour:common-contract:1.0#/$defs/Timestamp",
+    "value": "2026-11-15T00:00:00+00:00",
+    "valid": false
+  },
+  {
+    "id": "canonical-error",
+    "schema_ref": "urn:opentour:common-contract:1.0#/$defs/Error",
+    "value": {
+      "code": "STALE_REVISION",
+      "message": "The resource changed.",
+      "request_id": "req-sentinel",
+      "retryable": false,
+      "field_errors": [],
+      "current_revision": "9007199254740993"
+    },
+    "valid": true
+  },
+  {
+    "id": "unauthorized-revision-not-disclosed-shape",
+    "schema_ref": "urn:opentour:common-contract:1.0#/$defs/Error",
+    "value": {
+      "code": "STALE_REVISION",
+      "message": "The resource changed.",
+      "request_id": "req-sentinel",
+      "retryable": false,
+      "field_errors": [],
+      "current_revision": null
+    },
+    "valid": true
+  },
+  {
+    "id": "error-revision-numeric",
+    "schema_ref": "urn:opentour:common-contract:1.0#/$defs/Error",
+    "value": {
+      "code": "STALE_REVISION",
+      "message": "The resource changed.",
+      "request_id": "req-sentinel",
+      "retryable": false,
+      "field_errors": [],
+      "current_revision": 1
+    },
+    "valid": false
+  },
+  {
+    "id": "error-extra-field",
+    "schema_ref": "urn:opentour:common-contract:1.0#/$defs/Error",
+    "value": {
+      "code": "STALE_REVISION",
+      "message": "The resource changed.",
+      "request_id": "req-sentinel",
+      "retryable": false,
+      "field_errors": [],
+      "current_revision": "9007199254740993",
+      "private_detail": "sentinel"
+    },
+    "valid": false
+  },
+  {
+    "id": "error-required-field",
+    "schema_ref": "urn:opentour:common-contract:1.0#/$defs/Error",
+    "value": {
+      "code": "STALE_REVISION",
+      "message": "The resource changed.",
+      "retryable": false,
+      "field_errors": [],
+      "current_revision": "9007199254740993"
+    },
+    "valid": false
+  },
+  {
+    "id": "authority-local-common-alias",
+    "schema_ref": "urn:opentour:authority:1.0#/$defs/ResourceRevision",
+    "value": "9223372036854775807",
+    "valid": true
+  },
+  {
+    "id": "authority-alias-overflow",
+    "schema_ref": "urn:opentour:authority:1.0#/$defs/ResourceRevision",
+    "value": "9223372036854775808",
+    "valid": false
+  },
+  {
+    "id": "opaque-authority-id",
+    "schema_ref": "urn:opentour:common-contract:1.0#/$defs/Id",
+    "value": "policy-v1",
+    "valid": true
+  },
+  {
+    "id": "resource-revision-largest-nineteen-digits",
+    "schema_ref": "urn:opentour:common-contract:1.0#/$defs/ResourceRevision",
+    "value": "9999999999999999999",
+    "valid": false
+  },
+  {
+    "id": "nested-ref-overflow-9223372036854775808",
+    "schema_ref": "urn:opentour:common-contract:1.0#/$defs/VersionedResourceRef",
+    "value": {
+      "id": "resource-sentinel",
+      "revision": "9223372036854775808"
+    },
+    "valid": false
+  },
+  {
+    "id": "nested-error-overflow-9223372036854775808",
+    "schema_ref": "urn:opentour:common-contract:1.0#/$defs/Error",
+    "value": {
+      "code": "STALE_REVISION",
+      "message": "The resource changed.",
+      "request_id": "req-sentinel",
+      "retryable": false,
+      "field_errors": [],
+      "current_revision": "9223372036854775808"
+    },
+    "valid": false
+  },
+  {
+    "id": "nested-ref-overflow-9999999999999999999",
+    "schema_ref": "urn:opentour:common-contract:1.0#/$defs/VersionedResourceRef",
+    "value": {
+      "id": "resource-sentinel",
+      "revision": "9999999999999999999"
+    },
+    "valid": false
+  },
+  {
+    "id": "nested-error-overflow-9999999999999999999",
+    "schema_ref": "urn:opentour:common-contract:1.0#/$defs/Error",
+    "value": {
+      "code": "STALE_REVISION",
+      "message": "The resource changed.",
+      "request_id": "req-sentinel",
+      "retryable": false,
+      "field_errors": [],
+      "current_revision": "9999999999999999999"
+    },
+    "valid": false
+  }
+]

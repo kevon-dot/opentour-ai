@@ -1,0 +1,243 @@
+{
+  "schema_version": "opentour.command-manifest.v1",
+  "issue_key": "OPE-123",
+  "spec_sha256": "4a6a51b61c31899a59c38c4d4dbeaa3e941292349cc4369744b03d16996d5b67",
+  "native_issue_updated_at": "2026-11-15T20:57:13.808Z",
+  "fixture_version": "1",
+  "browser_suites": [
+    "apps/web/components/foundation/async-state/cancel-revoke.visual.spec.ts",
+    "apps/web/components/foundation/async-state/freshness-context.visual.spec.ts",
+    "apps/web/components/foundation/async-state/operation-state.visual.spec.ts",
+    "apps/web/components/foundation/async-state/status-copy.visual.spec.ts",
+    "apps/web/components/foundation/async-state/visual.spec.ts",
+    "apps/web/components/foundation/data-display/chart-evidence.visual.spec.ts",
+    "apps/web/components/foundation/data-display/graph-projections.visual.spec.ts",
+    "apps/web/components/foundation/data-display/metric-semantics.visual.spec.ts",
+    "apps/web/components/foundation/data-display/scenario-conformance.visual.spec.ts",
+    "apps/web/components/foundation/data-display/table-populations.visual.spec.ts",
+    "apps/web/components/foundation/data-display/visual.spec.ts",
+    "apps/web/components/foundation/forms/dialogs-focus.visual.spec.ts",
+    "apps/web/components/foundation/forms/field-semantics.visual.spec.ts",
+    "apps/web/components/foundation/forms/mutation-intent.visual.spec.ts",
+    "apps/web/components/foundation/forms/permission-controls.visual.spec.ts",
+    "apps/web/components/foundation/forms/visual.spec.ts",
+    "apps/web/components/foundation/tokens/visual.spec.ts",
+    "apps/web/features/autonomy/control-actions.visual.spec.ts",
+    "apps/web/features/autonomy/status-panel.visual.spec.ts",
+    "apps/web/features/product-surfaces/artifact-registry/visual.spec.ts",
+    "apps/web/features/product-surfaces/benchmark-builder/visual.spec.ts",
+    "apps/web/features/product-surfaces/billing-detail/visual.spec.ts",
+    "apps/web/features/product-surfaces/case-inspector/visual.spec.ts",
+    "apps/web/features/product-surfaces/data-administration/visual.spec.ts",
+    "apps/web/features/product-surfaces/developer-settings/visual.spec.ts",
+    "apps/web/features/product-surfaces/environment-fleet/visual.spec.ts",
+    "apps/web/features/product-surfaces/platform-release-view/visual.spec.ts",
+    "apps/web/features/product-surfaces/quota-console/visual.spec.ts",
+    "apps/web/features/product-surfaces/repair-comparator/visual.spec.ts",
+    "apps/web/features/product-surfaces/scope-opportunities/visual.spec.ts",
+    "apps/web/features/product-surfaces/source-authority/visual.spec.ts",
+    "apps/web/features/product-surfaces/support-center/visual.spec.ts",
+    "apps/web/features/product-surfaces/synthetic-planner/visual.spec.ts",
+    "apps/web/features/product-surfaces/verifier-console/visual.spec.ts",
+    "apps/web/features/product-surfaces/workflow-contract/visual.spec.ts",
+    "apps/web/features/support-case-private/privacy.spec.ts",
+    "apps/web/features/support-case-private/visual.spec.ts",
+    "apps/web/tests/accessibility.spec.ts",
+    "apps/web/tests/account-entry.browser.spec.ts",
+    "apps/web/tests/autonomy-status.spec.ts",
+    "apps/web/tests/autonomy-status.visual.spec.ts",
+    "apps/web/tests/browser-harness.browser.spec.ts",
+    "apps/web/tests/context-switch.browser.spec.ts",
+    "apps/web/tests/coverage/ot-p22-c01.spec.ts",
+    "apps/web/tests/coverage/ot-p22-c02.spec.ts",
+    "apps/web/tests/coverage/ot-p22-c03.spec.ts",
+    "apps/web/tests/coverage/ot-p22-c04.spec.ts",
+    "apps/web/tests/coverage/ot-p22-c05.spec.ts",
+    "apps/web/tests/coverage/ot-p22-c06.spec.ts",
+    "apps/web/tests/coverage/ot-p22-c07.spec.ts",
+    "apps/web/tests/coverage/ot-p23-c01.spec.ts",
+    "apps/web/tests/coverage/ot-p23-c02.spec.ts",
+    "apps/web/tests/coverage/ot-p23-c03.spec.ts",
+    "apps/web/tests/coverage/ot-p23-c04.spec.ts",
+    "apps/web/tests/coverage/ot-p23-c05.spec.ts",
+    "apps/web/tests/coverage/ot-p23-c06.spec.ts",
+    "apps/web/tests/coverage/ot-p23-c07.spec.ts",
+    "apps/web/tests/coverage/ot-p23-c08.spec.ts",
+    "apps/web/tests/coverage/ot-p23-c09.spec.ts",
+    "apps/web/tests/coverage/ot-p23-c10.spec.ts",
+    "apps/web/tests/coverage/ot-p23-c11.spec.ts",
+    "apps/web/tests/customer-journeys.spec.ts",
+    "apps/web/tests/workspace-lifecycle.browser.spec.ts"
+  ],
+  "integration_profiles": {
+    "bootstrap-contract": {
+      "kind": "simulated",
+      "path": "tests/contract/test_command_contract.py",
+      "prerequisites": [],
+      "owner": "OPE-123"
+    }
+  },
+  "isolation_suites": {
+    "ISO-01": {
+      "kind": "provider_integration",
+      "path": null,
+      "prerequisites": [
+        "qualified-isolation-environment",
+        "authorized-provider-credentials"
+      ],
+      "owner": "acceptance-gate-owner"
+    },
+    "ISO-02": {
+      "kind": "provider_integration",
+      "path": null,
+      "prerequisites": [
+        "qualified-isolation-environment",
+        "authorized-provider-credentials"
+      ],
+      "owner": "acceptance-gate-owner"
+    },
+    "ISO-03": {
+      "kind": "provider_integration",
+      "path": null,
+      "prerequisites": [
+        "qualified-isolation-environment",
+        "authorized-provider-credentials"
+      ],
+      "owner": "acceptance-gate-owner"
+    },
+    "ISO-04": {
+      "kind": "provider_integration",
+      "path": null,
+      "prerequisites": [
+        "qualified-isolation-environment",
+        "authorized-provider-credentials"
+      ],
+      "owner": "acceptance-gate-owner"
+    },
+    "ISO-05": {
+      "kind": "provider_integration",
+      "path": null,
+      "prerequisites": [
+        "qualified-isolation-environment",
+        "authorized-provider-credentials"
+      ],
+      "owner": "acceptance-gate-owner"
+    },
+    "ISO-06": {
+      "kind": "provider_integration",
+      "path": null,
+      "prerequisites": [
+        "qualified-isolation-environment",
+        "authorized-provider-credentials"
+      ],
+      "owner": "acceptance-gate-owner"
+    },
+    "ISO-07": {
+      "kind": "provider_integration",
+      "path": null,
+      "prerequisites": [
+        "qualified-isolation-environment",
+        "authorized-provider-credentials"
+      ],
+      "owner": "acceptance-gate-owner"
+    },
+    "ISO-08": {
+      "kind": "provider_integration",
+      "path": null,
+      "prerequisites": [
+        "qualified-isolation-environment",
+        "authorized-provider-credentials"
+      ],
+      "owner": "acceptance-gate-owner"
+    },
+    "ISO-09": {
+      "kind": "provider_integration",
+      "path": null,
+      "prerequisites": [
+        "qualified-isolation-environment",
+        "authorized-provider-credentials"
+      ],
+      "owner": "acceptance-gate-owner"
+    },
+    "ISO-10": {
+      "kind": "provider_integration",
+      "path": null,
+      "prerequisites": [
+        "qualified-isolation-environment",
+        "authorized-provider-credentials"
+      ],
+      "owner": "acceptance-gate-owner"
+    },
+    "ISO-11": {
+      "kind": "provider_integration",
+      "path": null,
+      "prerequisites": [
+        "qualified-isolation-environment",
+        "authorized-provider-credentials"
+      ],
+      "owner": "acceptance-gate-owner"
+    }
+  },
+  "acceptance_gates": {
+    "G1": {
+      "kind": "provider_integration",
+      "path": null,
+      "prerequisites": [
+        "authorized-environment",
+        "actual-provider-evidence"
+      ],
+      "owner": "acceptance-gate-owner"
+    },
+    "G2": {
+      "kind": "provider_integration",
+      "path": null,
+      "prerequisites": [
+        "authorized-environment",
+        "actual-provider-evidence"
+      ],
+      "owner": "acceptance-gate-owner"
+    },
+    "G3": {
+      "kind": "provider_integration",
+      "path": null,
+      "prerequisites": [
+        "authorized-environment",
+        "actual-provider-evidence"
+      ],
+      "owner": "acceptance-gate-owner"
+    },
+    "G4": {
+      "kind": "provider_integration",
+      "path": null,
+      "prerequisites": [
+        "authorized-environment",
+        "actual-provider-evidence"
+      ],
+      "owner": "acceptance-gate-owner"
+    },
+    "G5": {
+      "kind": "provider_integration",
+      "path": null,
+      "prerequisites": [
+        "authorized-environment",
+        "actual-provider-evidence"
+      ],
+      "owner": "acceptance-gate-owner"
+    },
+    "G6": {
+      "kind": "customer_evidence",
+      "path": null,
+      "prerequisites": [
+        "authorized-environment",
+        "actual-customer-evidence"
+      ],
+      "owner": "acceptance-gate-owner"
+    }
+  },
+  "browser_profiles": {
+    "apps/web/tests/browser-harness.browser.spec.ts": {
+      "kind": "simulated",
+      "owner": "OPE-127"
+    }
+  }
+}
