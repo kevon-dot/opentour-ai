@@ -4,7 +4,7 @@ set positional-arguments
 
 # Keep the accepted OPE-122 setup entry usable before dependencies exist.
 setup:
-    python3 tools/bootstrap.py
+    @python3 tools/bootstrap.py
 
 lint *args:
     @uv run --no-sync --offline --no-python-downloads python -m tools.test_runner lint "$@"

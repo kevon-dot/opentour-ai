@@ -191,6 +191,28 @@ def test_every_command_has_exact_smoke_case():
     assert set(runner.COMMAND_ARITY) == {case[0] for case in COMMAND_CASES}
 
 
+def test_actual_setup_recipe_preserves_json_in_merged_output(checkout):
+    """Run the actual recipe with a generated bootstrap producer, without reinstalling tools."""
+    shutil.copyfile(runner.ROOT / "justfile", checkout / "justfile")
+    receipt = {"issue_key": "OPE-122", "status": "PASS", "exit_code": 0}
+    expected = json.dumps(receipt, sort_keys=True) + "\n"
+    write(checkout, "tools/bootstrap.py", f"print({expected.rstrip()!r})\n")
+    invocation = runner.Invocation(
+        ("just", "setup"),
+        checkout,
+        runner.environment(checkout, "a" * 32),
+        checkout / "unused-result.json",
+        "setup",
+        "setup",
+        timeout=10,
+    )
+    observed = runner.execute(invocation)
+    assert observed.returncode == 0
+    assert observed.cleanup_complete is True
+    assert observed.stdout == expected
+    assert json.loads(observed.stdout) == receipt
+
+
 @pytest.mark.parametrize(
     "path",
     [
