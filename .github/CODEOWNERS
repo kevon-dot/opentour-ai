@@ -1,0 +1,9 @@
+# Human accountability; agent path claims are recorded in Linear before editing.
+* @kevon-dot
+/justfile @kevon-dot
+/tools/ @kevon-dot
+/packages/contracts/ @kevon-dot
+/packages/client-ts/ @kevon-dot
+/infrastructure/ @kevon-dot
+/training/ @kevon-dot
+/.github/ @kevon-dot

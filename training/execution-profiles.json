@@ -1,0 +1,20 @@
+{
+  "schema_version": "opentour.bootstrap-learning-profiles.v1",
+  "dependency_lock": "training/uv.lock",
+  "qualification_status": "NOT_RUN",
+  "profiles": {
+    "trainer": {
+      "module": "opentour_training.training",
+      "principal_class": "trainer",
+      "host_class": "training",
+      "protected_answers_allowed": false
+    },
+    "protected_evaluator": {
+      "module": "opentour_training.evaluation",
+      "principal_class": "protected_evaluator",
+      "host_class": "protected_evaluation",
+      "training_dispatch_allowed": false
+    }
+  },
+  "qualification_boundary": "CPU import/package smoke only. CUDA, drivers, framework versions, workload IAM and model/route compatibility are qualified by their owning ML/platform issues before execution."
+}
