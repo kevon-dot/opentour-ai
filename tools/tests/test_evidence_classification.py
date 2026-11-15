@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -20,7 +23,7 @@ from tools.evidence_manifest import (
 from tools.validate_spec import ROOT, TARGET, digest
 
 
-def record(kind="simulated", mode="customer_controlled"):
+def record(kind: str = "simulated", mode: str = "customer_controlled") -> dict[str, Any]:
     return {
         "requirement_ids": ["SENTINEL-AC01", "SENTINEL-SECURITY"],
         "issue_key": "OPE-126",
@@ -41,7 +44,7 @@ def record(kind="simulated", mode="customer_controlled"):
     }
 
 
-def policy(**changes):
+def policy(**changes: Any) -> dict[str, Any]:
     return {
         "commit": "a" * 40,
         "spec": "b" * 64,
@@ -53,7 +56,7 @@ def policy(**changes):
     }
 
 
-def test_imported_pass_is_never_observed_authority(tmp_path):
+def test_imported_pass_is_never_observed_authority(tmp_path: Path) -> None:
     store = EvidenceStore(tmp_path / "history")
     value = record()
     store.import_history("first", value)
@@ -65,7 +68,9 @@ def test_imported_pass_is_never_observed_authority(tmp_path):
 @pytest.mark.parametrize(
     "kind", ["simulated", "local_integration", "provider_integration", "customer_evidence"]
 )
-def test_self_claimed_kind_or_runtime_receipt_cannot_authenticate(kind, tmp_path):
+def test_self_claimed_kind_or_runtime_receipt_cannot_authenticate(
+    kind: str, tmp_path: Path
+) -> None:
     value = record(kind)
     store = EvidenceStore(tmp_path / "history")
     store.import_history("forged", value)
@@ -88,7 +93,9 @@ def test_self_claimed_kind_or_runtime_receipt_cannot_authenticate(kind, tmp_path
         ({"mode": "opentour_managed"}, "TEST_OR_MODE_MISMATCH"),
     ],
 )
-def test_ac03_current_readiness_invalidation_preserves_history(tmp_path, changes, reason):
+def test_ac03_current_readiness_invalidation_preserves_history(
+    tmp_path: Path, changes: Any, reason: str
+) -> None:
     store = EvidenceStore(tmp_path / "history")
     path = store.import_history("historical", record())
     before = path.read_bytes()
@@ -98,7 +105,7 @@ def test_ac03_current_readiness_invalidation_preserves_history(tmp_path, changes
 
 @pytest.mark.parametrize("gate", ["G1", "G2", "G3", "G4", "G5", "G6"])
 @pytest.mark.parametrize("kind", ["simulated", "local_integration"])
-def test_unit_or_local_fake_cannot_close_any_empirical_gate(gate, kind):
+def test_unit_or_local_fake_cannot_close_any_empirical_gate(gate: str, kind: str) -> None:
     values = [record(kind, mode) for mode in ("customer_controlled", "opentour_managed")]
     result = gate_run(
         gate,
@@ -117,7 +124,7 @@ def test_unit_or_local_fake_cannot_close_any_empirical_gate(gate, kind):
 
 
 @pytest.mark.parametrize("kind", ["provider_integration", "customer_evidence"])
-def test_missing_gpu_or_customer_verifier_records_blocked(kind, tmp_path):
+def test_missing_gpu_or_customer_verifier_records_blocked(kind: str, tmp_path: Path) -> None:
     store = EvidenceStore(tmp_path / "history")
     store.missing_prerequisite("missing", record(kind))
     result = store.read("missing")["record"]
@@ -126,7 +133,7 @@ def test_missing_gpu_or_customer_verifier_records_blocked(kind, tmp_path):
     assert not store.eligible("missing", **policy(required_kind=kind))["eligible"]
 
 
-def test_parent_requires_all_compatible_children_and_actual_integration():
+def test_parent_requires_all_compatible_children_and_actual_integration() -> None:
     expected = {"child-a": "a" * 40, "integration-child": "b" * 40}
     assert parent_completion(expected, {"child-a": "a" * 40}, integration_eligible=True)[
         "missing_or_incompatible_children"
@@ -136,7 +143,7 @@ def test_parent_requires_all_compatible_children_and_actual_integration():
     assert parent_completion({}, {}, integration_eligible=True)["status"] == "BLOCKED"
 
 
-def test_replay_is_idempotent_and_changed_same_attempt_conflicts(tmp_path):
+def test_replay_is_idempotent_and_changed_same_attempt_conflicts(tmp_path: Path) -> None:
     store = EvidenceStore(tmp_path / "history")
     first = store.import_history("replay", record())
     assert store.import_history("replay", record()) == first
@@ -147,7 +154,7 @@ def test_replay_is_idempotent_and_changed_same_attempt_conflicts(tmp_path):
     assert store.read("replay")["record"] == record()
 
 
-def test_concurrent_identical_publication_is_one_complete_record(tmp_path):
+def test_concurrent_identical_publication_is_one_complete_record(tmp_path: Path) -> None:
     store = EvidenceStore(tmp_path / "history")
     with ThreadPoolExecutor(max_workers=4) as pool:
         paths = list(pool.map(lambda _: store.import_history("concurrent", record()), range(8)))
@@ -155,7 +162,9 @@ def test_concurrent_identical_publication_is_one_complete_record(tmp_path):
     assert [p.name for p in store.directory.iterdir()] == ["concurrent.json"]
 
 
-def test_interrupted_publication_keeps_old_history_and_no_partial_record(tmp_path, monkeypatch):
+def test_interrupted_publication_keeps_old_history_and_no_partial_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     store = EvidenceStore(tmp_path / "history")
     store.import_history("old", record())
     import os
@@ -168,7 +177,7 @@ def test_interrupted_publication_keeps_old_history_and_no_partial_record(tmp_pat
     assert not list(store.directory.glob(".pending-*"))
 
 
-def test_historical_tampering_and_symlink_are_refused(tmp_path):
+def test_historical_tampering_and_symlink_are_refused(tmp_path: Path) -> None:
     store = EvidenceStore(tmp_path / "history")
     path = store.import_history("tamper", record())
     value = json.loads(path.read_text())
@@ -195,20 +204,20 @@ def test_historical_tampering_and_symlink_are_refused(tmp_path):
         ("output_digests", {}),
     ],
 )
-def test_closed_record_and_separate_status_vocabulary(field, value):
+def test_closed_record_and_separate_status_vocabulary(field: str, value: Any) -> None:
     current = record()
     current[field] = value
     with pytest.raises(EvidenceError):
         validate_record(current)
 
 
-def test_timestamp_precision_does_not_change_order():
+def test_timestamp_precision_does_not_change_order() -> None:
     value = record()
     value["finished_at"] = "2026-11-15T00:00:00.000Z"
     validate_record(value)
 
 
-def observation_arguments():
+def observation_arguments() -> dict[str, Any]:
     m = schema_validate.read_json(ROOT / TARGET)
     source = next(i for i in m["source_projection"]["issues"] if i["issue_key"] == "OPE-126")
     return {
@@ -227,7 +236,7 @@ def observation_arguments():
     }
 
 
-def producer_fixture(args):
+def producer_fixture(args: Any) -> dict[str, Any]:
     return {
         "status": "PASS",
         "exit_code": 0,
@@ -235,7 +244,18 @@ def producer_fixture(args):
         "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1",
         "steps": [
-            {"tests": {"tests": [{"id": args["test_id"], "mode": None, "status": "passed"}]}}
+            {
+                "tests": {
+                    "tests": [
+                        {
+                            "id": "sha256:" + hashlib.sha256(args["test_id"].encode()).hexdigest(),
+                            "file": args["test_id"].split("::", 1)[0],
+                            "mode": None,
+                            "status": "passed",
+                        }
+                    ]
+                }
+            }
         ],
         "git_worktree_dirty": False,
         "git_head_changed": False,
@@ -247,9 +267,9 @@ def producer_fixture(args):
 
 
 @pytest.mark.parametrize("mutation", ["none", "zero", "skip", "dirty", "provider", "fixture"])
-def test_supervised_producer_boundary_and_required_inventory(tmp_path, monkeypatch, mutation):
-    # Controlled adapter behavior exercises policy only; actual runner qualification
-    # is separately executed and retained at the final candidate.
+def test_supervised_producer_boundary_and_required_inventory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mutation: str
+) -> None:
     from tools import test_runner
 
     args = observation_arguments()
@@ -281,7 +301,7 @@ def test_supervised_producer_boundary_and_required_inventory(tmp_path, monkeypat
     assert stored["output_digests"]["command_receipt"] == digest(receipt)
 
 
-def test_arbitrary_requirement_or_test_cannot_be_attached_to_success(tmp_path):
+def test_arbitrary_requirement_or_test_cannot_be_attached_to_success(tmp_path: Path) -> None:
     store = EvidenceStore(tmp_path / "history")
     args = observation_arguments()
     args["requirement_ids"] = ["UNOWNED-SECURITY"]
@@ -289,7 +309,7 @@ def test_arbitrary_requirement_or_test_cannot_be_attached_to_success(tmp_path):
         store.observe_command("unowned", **args)
 
 
-def test_provider_shaped_receipt_and_private_provenance_flag_still_cannot_qualify():
+def test_provider_shaped_receipt_and_private_provenance_flag_still_cannot_qualify() -> None:
     value = record("provider_integration")
     receipt = {"status": "PASS", "trusted": True}
     value["output_digests"] = {"command_receipt": digest(receipt)}
@@ -301,14 +321,16 @@ def test_provider_shaped_receipt_and_private_provenance_flag_still_cannot_qualif
     assert "UNVERIFIED_PRODUCER" in result["reasons"]
 
 
-def test_observed_retry_reuses_original_receipt_without_running_again(tmp_path, monkeypatch):
+def test_observed_retry_reuses_original_receipt_without_running_again(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     from tools import test_runner
 
     args = observation_arguments()
     receipt = producer_fixture(args)
     calls = []
 
-    def execute(*a, **k):
+    def execute(*a: Any, **k: Any) -> dict[str, Any]:
         calls.append(1)
         return copy.deepcopy(receipt)
 

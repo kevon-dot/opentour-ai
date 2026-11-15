@@ -5,6 +5,8 @@ from __future__ import annotations
 import copy
 import hashlib
 import shutil
+from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -20,7 +22,7 @@ from tools.validate_spec import (
 )
 
 
-def report():
+def report() -> dict[str, Any]:
     return {
         "manifest_digest": "a" * 64,
         "provider_schema_digest": "b" * 64,
@@ -33,7 +35,7 @@ def report():
     }
 
 
-def check_report(value):
+def check_report(value: Any) -> list[str]:
     return validate_ui_report(
         value,
         expected_actions={"UI-SENTINEL-A01", "UI-SENTINEL-A02"},
@@ -44,12 +46,12 @@ def check_report(value):
     )
 
 
-def test_generated_report_conforms_without_runtime_acceptance():
+def test_generated_report_conforms_without_runtime_acceptance() -> None:
     assert check_report(report()) == []
 
 
 @pytest.mark.parametrize("field", ["expected_actions", "checked_actions"])
-def test_exact_action_set_cannot_be_replaced_by_count_or_duplicate(field):
+def test_exact_action_set_cannot_be_replaced_by_count_or_duplicate(field: str) -> None:
     value = report()
     value[field] = 2
     with pytest.raises(ConfigurationError):
@@ -64,13 +66,13 @@ def test_exact_action_set_cannot_be_replaced_by_count_or_duplicate(field):
 @pytest.mark.parametrize(
     "field", ["manifest_digest", "provider_schema_digest", "figma_revision", "checked_commit"]
 )
-def test_stale_source_or_design_or_tested_commit_fails(field):
+def test_stale_source_or_design_or_tested_commit_fails(field: str) -> None:
     value = report()
     value[field] = "stale"
     assert f"STALE_{field.upper()}" in check_report(value)
 
 
-def test_lost_action_assertion_or_explicit_failure_is_nonpassing():
+def test_lost_action_assertion_or_explicit_failure_is_nonpassing() -> None:
     value = report()
     value["checked_actions"].pop()
     value["failures"] = [
@@ -83,7 +85,7 @@ def test_lost_action_assertion_or_explicit_failure_is_nonpassing():
     assert set(check_report(value)) == {"ACTION_SET_MISMATCH", "ACTION_ASSERTIONS_FAILED"}
 
 
-def operation():
+def operation() -> dict[str, Any]:
     return {
         "method": "POST",
         "path_template": "/v1/invitations:accept",
@@ -107,7 +109,7 @@ def operation():
         ("response_schema_refs", {"200": "urn:sentinel:wrong:1"}),
     ],
 )
-def test_provider_route_body_plane_and_schema_drift_fail(field, replacement):
+def test_provider_route_body_plane_and_schema_drift_fail(field: str, replacement: Any) -> None:
     binding, provider = operation(), operation()
     binding[field] = replacement
     assert compare_action_binding(
@@ -119,7 +121,7 @@ def test_provider_route_body_plane_and_schema_drift_fail(field, replacement):
     )
 
 
-def test_explicit_bijective_placeholder_mapping_preserves_literal_path():
+def test_explicit_bijective_placeholder_mapping_preserves_literal_path() -> None:
     binding, provider = operation(), operation()
     binding["path_template"] = "/v1/resources/{resource_id}"
     provider["path_template"] = "/v1/resources/{id}"
@@ -137,7 +139,7 @@ def test_explicit_bijective_placeholder_mapping_preserves_literal_path():
     )
 
 
-def test_lost_required_adverse_assertion_is_not_hidden_by_other_passes():
+def test_lost_required_adverse_assertion_is_not_hidden_by_other_passes() -> None:
     assert compare_action_binding(
         operation(),
         operation(),
@@ -147,12 +149,12 @@ def test_lost_required_adverse_assertion_is_not_hidden_by_other_passes():
     ) == ["MISSING_REQUIRED_ADVERSE_ASSERTION"]
 
 
-def test_parent_containment_is_not_a_dependency_edge():
+def test_parent_containment_is_not_a_dependency_edge() -> None:
     assert cycle_path({"parent": [], "child": ["parent"]}) == []
     assert cycle_path({"a": ["b"], "b": ["c"], "c": ["a"]}) == ["a", "b", "c", "a"]
 
 
-def test_actual_diagram_asset_hash_and_missing_asset(tmp_path):
+def test_actual_diagram_asset_hash_and_missing_asset(tmp_path: Path) -> None:
     value = schema_validate.read_json(ROOT / TARGET)
     asset = tmp_path / "diagram.mmd"
     asset.write_text("graph TD\n A-->B\n")
@@ -183,7 +185,7 @@ def test_actual_diagram_asset_hash_and_missing_asset(tmp_path):
     )
 
 
-def test_closed_inputs_refuse_unknown_fields():
+def test_closed_inputs_refuse_unknown_fields() -> None:
     value = report()
     value["trusted_signature"] = True
     with pytest.raises(ConfigurationError):

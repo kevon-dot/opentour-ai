@@ -7,6 +7,7 @@ here. This local store is not a tamper-proof audit journal or a signing service.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -271,7 +272,13 @@ class EvidenceStore:
             if isinstance(step.get("tests"), dict)
             for t in step["tests"].get("tests", [])
         ]
-        selected = [t for t in tests if t["id"] == test_id and t["mode"] == mode]
+        selected = [
+            t
+            for t in tests
+            if t["id"] == "sha256:" + hashlib.sha256(test_id.encode()).hexdigest()
+            and t["file"] == test_id.split("::", 1)[0]
+            and t["mode"] == mode
+        ]
         if status == "PASS" and (len(selected) != 1 or selected[0]["status"] != "passed"):
             status, exit_code = "FAIL", 1
             limitations.append("REQUESTED_TEST_NOT_OBSERVED")
