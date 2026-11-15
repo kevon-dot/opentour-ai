@@ -19,6 +19,12 @@
       "file": "test-result.schema.json",
       "sha256": "efaa4b57c71651c7879f36423049b8db8052d7952365e5160388de2291b8d137",
       "source_path": "packages/contracts/common/test-result.schema.json"
+    },
+    {
+      "id": "urn:opentour:python-postgres-observation:1.0",
+      "file": "python-postgres-observation.schema.json",
+      "sha256": "72a5fc2e7c7ef446cf9000f1bf773e51e8cfc748fce58edf6541dfcaa4f5075d",
+      "source_path": "packages/contracts/common/python-postgres-observation.schema.json"
     }
   ]
 }
