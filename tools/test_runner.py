@@ -20,8 +20,6 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from tools import schema_validate
-
 ROOT = Path(__file__).resolve().parents[1]
 _MANAGED_POPEN = getattr(subprocess, "_opentour_managed_popen", subprocess.Popen)
 COMMON = "packages/contracts/common"
@@ -210,6 +208,8 @@ def path_target(root: Path, supplied: str, *, require_exists: bool = True) -> st
 
 
 def manifest(root: Path) -> dict[str, Any]:
+    from tools import schema_validate
+
     try:
         value = schema_validate.read_json(
             schema_validate.local_file(root, f"{COMMON}/command-manifest.json")
@@ -313,6 +313,8 @@ def environment(root: Path, nonce: str) -> dict[str, str]:
 
 
 def uv_python(root: Path, target: str | None = None) -> tuple[str, ...]:
+    from tools import schema_validate
+
     argv = ("uv", "run", "--no-sync", "--offline", "--no-python-downloads")
     if target:
         try:
@@ -338,6 +340,8 @@ def validate_report(
     process: ProcessResult,
     root: Path,
 ) -> tuple[int, str | None]:
+    from tools import schema_validate
+
     registry = schema_validate.schema_registry(root)
     if not schema_validate.valid_instance("urn:opentour:test-result:1.0", report, registry):
         raise CommandError("Runner report is missing required fields or has an invalid shape.")
@@ -476,6 +480,8 @@ def invoke(
     expected_kind: str = "simulated",
 ) -> dict[str, Any]:
     """Retain an attempted step even when its report/configuration is invalid."""
+    from tools import schema_validate
+
     process: ProcessResult | None = None
 
     def recorded(invocation: Invocation) -> ProcessResult:
@@ -510,6 +516,8 @@ def _invoke(
     run: Executor,
     expected_kind: str,
 ) -> dict[str, Any]:
+    from tools import schema_validate
+
     with tempfile.TemporaryDirectory(prefix="opentour-command-") as temporary:
         private_dir = Path(temporary).resolve()
         report_path = private_dir / "result.json"
@@ -655,6 +663,8 @@ def python_test(root: Path, target: str, run: Executor) -> dict[str, Any]:
 def dispatch(
     command: str, args: list[str], root: Path, registry: dict[str, Any], run: Executor
 ) -> list[dict[str, Any]]:
+    from tools import schema_validate
+
     if command not in COMMAND_ARITY or len(args) != COMMAND_ARITY[command]:
         raise CommandError("Unknown command or incorrect number of arguments.")
     if command == "setup":
@@ -825,6 +835,8 @@ def source_identity(root: Path) -> tuple[str | None, bool]:
 def run_command(
     command: str, args: Sequence[str], root: Path = ROOT, run: Executor = execute
 ) -> dict[str, Any]:
+    from tools import schema_validate
+
     started = datetime.now(UTC).isoformat().replace("+00:00", "Z")
     root = root.resolve()
     commit_before, dirty_before = source_identity(root)

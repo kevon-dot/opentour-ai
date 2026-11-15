@@ -50,6 +50,11 @@ This does not establish containment of arbitrary native programs deliberately
 bypassing those process APIs. A future local service adapter must supply its own
 explicit lifecycle authority and exact cleanup evidence; it does not inherit a
 general network/process override from a unit receipt.
+The pytest reporting plugin itself also imports only the standard library. Schema
+libraries load only in the parent command wrapper, so separate training routing
+executes with its approved pytest-only development dependencies. Actual training
+pass/failure/required-skip fixtures verify the interpreter environment and absence
+of jsonschema; no training dependency expansion is required.
 
 `browser-adapter-v1.md` and `test-result.schema.json` define the OPE-127 seam.
 The exact 63-path source inventory is preserved separately from admitted execution

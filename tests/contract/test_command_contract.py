@@ -466,6 +466,55 @@ def test_package_routing_consumes_workspace_and_keeps_training_separate(checkout
     assert "--package" not in training
 
 
+@pytest.mark.parametrize(
+    "outcome,expected,counts",
+    [("pass", 0, (1, 0, 0)), ("fail", 1, (0, 1, 0)), ("skip", 1, (0, 0, 1))],
+)
+def test_actual_training_route_uses_separate_pytest_only_environment(
+    checkout, outcome, expected, counts
+):
+    qualified_environment = runner.ROOT / "training/.venv"
+    assert (qualified_environment / "bin/python").is_file(), "Run qualified separate training setup"
+    training = checkout / "training"
+    training.mkdir()
+    for name in ("pyproject.toml", "uv.lock"):
+        shutil.copyfile(runner.ROOT / "training" / name, training / name)
+    shutil.copytree(runner.ROOT / "training/src", training / "src")
+    (training / ".venv").symlink_to(qualified_environment.resolve(), target_is_directory=True)
+    tail = {
+        "pass": "assert True",
+        "fail": "assert False",
+        "skip": "pytest.skip('required sentinel')",
+    }[outcome]
+    target = "training/tests/test route with spaces.py"
+    write(
+        checkout,
+        target,
+        "import importlib.util,sys\nfrom pathlib import Path\nimport pytest\n"
+        "def test_training_route():\n"
+        f"    assert Path(sys.prefix).resolve() == Path({str(qualified_environment.resolve())!r})\n"
+        "    assert importlib.util.find_spec('jsonschema') is None\n"
+        "    assert 'jsonschema' not in sys.modules\n"
+        "    assert pytest.__version__ == '9.2.0'\n"
+        "    Path('TRAINING_ENV_CHECKED').touch()\n"
+        f"    {tail}\n",
+    )
+    calls = []
+
+    def actual_training(invocation):
+        calls.append(invocation)
+        return runner.execute(replace(invocation, timeout=20))
+
+    result = runner.run_command("test-python", [target], checkout, actual_training)
+    assert result["exit_code"] == expected, result
+    assert (checkout / "TRAINING_ENV_CHECKED").exists()
+    assert calls[0].argv[calls[0].argv.index("--project") + 1] == "training"
+    report = result["steps"][0]["tests"]
+    assert report["collected"] == 1
+    assert (report["passed"], report["failed"], report["skipped"]) == counts
+    assert result["product_acceptance"] == "NOT_RUN"
+
+
 def test_schema_shapes_semantic_revision_bounds_and_authority_aliases(checkout):
     result = schema_validate.validate_examples(checkout)
     assert result["collected"] >= 29 and result["failed"] == 0
