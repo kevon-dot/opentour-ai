@@ -911,6 +911,8 @@ def dispatch(
                 "NodeNext",
                 "--moduleResolution",
                 "NodeNext",
+                "--types",
+                "node",
                 "packages/client-ts/src/index.d.ts",
                 "packages/contracts/examples/web-command-smoke.test.ts",
             ),
