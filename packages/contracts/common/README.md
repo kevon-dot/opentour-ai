@@ -21,8 +21,8 @@ the public exit code. The accepted setup entry emits its OPE-122 receipt directl
 | `just test-contract` | Hash-verified local schema examples, then actual contract tests |
 | `just validate-spec` | Exit 2/NOT_RUN until OPE-126 validator integration |
 | `just test-integration PROFILE FILTER` | `bootstrap-contract all`, or registered OPE-124 `local harness-smoke` with actual local prerequisites |
-| `just test-isolation SUITE MODE` | Declared ISO suites remain BLOCKED without owning real environment/harness |
-| `just test-acceptance GATE MODE` | G1–G6 and declared OPS-02/OPS-03 remain BLOCKED without owning actual environment/customer evidence |
+| `just test-isolation SUITE MODE` | Declared ISO and OPS-02/OPS-03 suites remain BLOCKED without owning real environment/harness |
+| `just test-acceptance GATE MODE` | G1–G6 remain BLOCKED without owning actual environment/customer evidence |
 
 Exit 0 means actual passing checks; 1 means assertion/execution/required-skip failure;
 2 means invalid arguments, configuration or zero collection; 3 means a verified

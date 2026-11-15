@@ -185,6 +185,24 @@
         "authorized-provider-credentials"
       ],
       "owner": "acceptance-gate-owner"
+    },
+    "OPS-02": {
+      "kind": "provider_integration",
+      "path": null,
+      "prerequisites": [
+        "authorized-environment",
+        "actual-provider-evidence"
+      ],
+      "owner": "acceptance-gate-owner"
+    },
+    "OPS-03": {
+      "kind": "provider_integration",
+      "path": null,
+      "prerequisites": [
+        "authorized-environment",
+        "actual-provider-evidence"
+      ],
+      "owner": "acceptance-gate-owner"
     }
   },
   "acceptance_gates": {
@@ -239,24 +257,6 @@
       "prerequisites": [
         "authorized-environment",
         "actual-customer-evidence"
-      ],
-      "owner": "acceptance-gate-owner"
-    },
-    "OPS-02": {
-      "kind": "provider_integration",
-      "path": null,
-      "prerequisites": [
-        "authorized-environment",
-        "actual-provider-evidence"
-      ],
-      "owner": "acceptance-gate-owner"
-    },
-    "OPS-03": {
-      "kind": "provider_integration",
-      "path": null,
-      "prerequisites": [
-        "authorized-environment",
-        "actual-provider-evidence"
       ],
       "owner": "acceptance-gate-owner"
     }
