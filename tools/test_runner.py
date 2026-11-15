@@ -109,7 +109,25 @@ def execute(invocation: Invocation) -> ProcessResult:
     timed_out = False
     interrupted = False
     cleanup_complete = True
+    group_permission_denied = False
     deadline = time.monotonic() + invocation.timeout
+
+    def signal_owned_group(sig: int) -> bool:
+        nonlocal cleanup_complete, group_permission_denied
+        if group_permission_denied:
+            return False
+        try:
+            os.killpg(process.pid, sig)
+        except ProcessLookupError:
+            return False
+        except OSError:
+            # EPERM/unknown ownership is not evidence that the group is gone. Stop
+            # signalling it and preserve a nonpassing, bounded cleanup outcome.
+            cleanup_complete = False
+            group_permission_denied = True
+            return False
+        return True
+
     with selectors.DefaultSelector() as selector:
         selector.register(process.stdout, selectors.EVENT_READ)
         try:
@@ -137,29 +155,28 @@ def execute(invocation: Invocation) -> ProcessResult:
             if process.poll() is None and (
                 timed_out or interrupted or byte_count > 1_048_576 or selector.get_map()
             ):
-                try:
-                    os.killpg(process.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
+                signal_owned_group(signal.SIGKILL)
             try:
-                process.wait(timeout=max(0.1, deadline - time.monotonic()))
+                process.wait(
+                    timeout=0.1
+                    if group_permission_denied
+                    else max(0.1, deadline - time.monotonic())
+                )
             except subprocess.TimeoutExpired:
                 timed_out = True
-                os.killpg(process.pid, signal.SIGKILL)
-                process.wait()
+                signal_owned_group(signal.SIGKILL)
+                try:
+                    process.wait(timeout=1)
+                except subprocess.TimeoutExpired:
+                    cleanup_complete = False
             process.stdout.close()
             # A leader can exit while descendants keep running with redirected stdio. The
             # private session is ours: terminate leftovers and refuse successful cleanup.
-            try:
-                os.killpg(process.pid, 0)
-            except ProcessLookupError:
-                pass
-            else:
+            if signal_owned_group(0):
                 cleanup_complete = False
-                try:
-                    os.killpg(process.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
+                signal_owned_group(signal.SIGKILL)
+    if process.returncode is None:
+        raise CommandError("Owned runner cleanup could not be confirmed.", 1, "CLEANUP_FAILED")
     if byte_count > 1_048_576:
         raise CommandError("Runner output exceeded the one MiB limit.", 1, "RUNNER_ERROR")
     return ProcessResult(
@@ -630,6 +647,7 @@ def _invoke(
             "raw_exit_code": process.returncode,
             "exit_code": code,
             "reason_code": reason,
+            "process_cleanup_complete": process.cleanup_complete,
             "tests": report,
         }
         if report:
