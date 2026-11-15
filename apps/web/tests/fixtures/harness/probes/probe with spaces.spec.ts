@@ -8,7 +8,9 @@ test('actual one-browser probe', async ({ page, context }) => {
   const violations = await guard(context);
   await page.goto('/__harness/ready');
   await expect(page.locator('body')).toContainText('simulated-browser-harness');
-  if (process.env.OPENTOUR_BROWSER_READY_FILE) writeFileSync(process.env.OPENTOUR_BROWSER_READY_FILE, JSON.stringify({ origin: process.env.OPENTOUR_FIXTURE_ORIGIN }));
+  // Deliberately outlast the former 1.5-second startup timer: interruption must await readiness.
+  if (probe === 'interrupt') await new Promise(resolve => setTimeout(resolve, 1750));
+  if (process.env.OPENTOUR_BROWSER_READY_FILE) writeFileSync(process.env.OPENTOUR_BROWSER_READY_FILE, JSON.stringify({ origin: process.env.OPENTOUR_FIXTURE_ORIGIN, nonce: process.env.OPENTOUR_RESULT_NONCE }));
   if (probe === 'hold' || probe === 'timeout' || probe === 'interrupt') { test.setTimeout(30_000); await new Promise(() => {}); }
   if (probe === 'network') await page.evaluate(async () => { try { await fetch('https://forbidden.invalid/sentinel'); } catch { /* Guard still records the attempt. */ } });
   expect(violations).toEqual([]);

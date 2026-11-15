@@ -47,7 +47,8 @@ export async function executeBrowser(options: { root: string; target: string; de
   let cleanupDiagnostic = '';
   let child: ReturnType<typeof spawn> | undefined;
   const known = new Map<number, string>();
-  const signal = () => { interrupted = true; child?.kill('SIGTERM'); };
+  // Pinned Playwright's SIGINT handler drains workers and writes its interrupted report.
+  const signal = () => { interrupted = true; child?.kill('SIGINT'); };
   process.on('SIGINT', signal); process.on('SIGTERM', signal);
   try {
     const selection = validateTarget(root, target, !!probe);
@@ -80,10 +81,19 @@ export async function executeBrowser(options: { root: string; target: string; de
     child.stdout?.on('data', capture); child.stderr?.on('data', capture);
     const track = setInterval(() => { if (!child?.pid) return; try { descendants(child.pid).forEach((stamp, pid) => known.set(pid, stamp)); } catch (error) { processCleanup = false; cleanupDiagnostic = error instanceof Error ? error.message : 'process_inspection'; } }, 200);
     const timeout = setTimeout(() => { timedOut = true; child?.kill('SIGTERM'); }, options.timeoutMs ?? 250_000);
-    const interrupt = probe === 'interrupt' ? setTimeout(signal, 1500) : undefined;
+    // Interrupt an established browser, not an arbitrary point in CLI startup.
+    // The overall deadline still fails closed if the nonce-bound ready signal never arrives.
+    const interrupt = probe === 'interrupt' ? setInterval(() => {
+      const readyPath = `${destination}.ready`;
+      if (!existsSync(readyPath)) return;
+      try {
+        const ready = JSON.parse(readFileSync(readyPath, 'utf8'));
+        if (ready.nonce === nonce && ready.origin === server!.origin) { clearInterval(interrupt); signal(); }
+      } catch { /* A partial readiness write is retried within the existing deadline. */ }
+    }, 50) : undefined;
     let rawExit: number | null;
     try { rawExit = await new Promise<number | null>((resolveExit, reject) => { child!.once('error', reject); child!.once('close', resolveExit); }); }
-    finally { clearInterval(track); clearTimeout(timeout); if (interrupt) clearTimeout(interrupt); }
+    finally { clearInterval(track); clearTimeout(timeout); if (interrupt) clearInterval(interrupt); }
     // Only synthetic fixture logs are retained locally; no inherited credential/config environment.
     writeFileSync(join(artifactDirectory, 'runner.log'), log);
     // Do not signal sampled PIDs: only launch-time child handles and the outer owned group may be killed.

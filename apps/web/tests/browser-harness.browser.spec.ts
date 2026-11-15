@@ -157,6 +157,7 @@ for (const [probe, expectedCode, reason] of [
       expect(code,diagnostic).toBe(expectedCode);
       const report = JSON.parse(readFileSync(destination,'utf8')); expect(report.reason_code).toBe(reason); expect(report.binding_nonce).toBe(nonce); expect(report.cleanup_complete).toBe(probe !== 'cleanup');
       if (probe === 'pass') { expect(report.collected).toBe(1); expect(report.tests[0].file).toContain('probe with spaces.spec.ts'); }
+      if (probe === 'interrupt') { expect(report.collected).toBe(1); expect(report.failed).toBe(1); expect(JSON.parse(readFileSync(`${destination}.ready`, 'utf8')).nonce).toBe(nonce); }
     } finally { rmSync(directory,{recursive:true,force:true}); }
   });
 }
