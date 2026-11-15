@@ -46,6 +46,7 @@ def run_one(argv: list[str], root: Path, *, env: dict[str, str] | None = None) -
                 "ci-check",
                 "setup",
                 660,
+                output_limit_bytes=2_097_152 if argv == ["just", "validate-spec"] else 1_048_576,
             )
         )
     raw = result.stdout.encode()

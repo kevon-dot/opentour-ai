@@ -178,6 +178,27 @@ def test_missing_structured_command_result_cannot_pass(
     assert run_one(["just", "lint"], root)["status"] == "FAIL"
 
 
+def test_only_exact_traceability_command_uses_measured_larger_capture(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from tools import test_runner
+    from tools.ci import run as ci_run
+
+    seen: list[int] = []
+
+    def capture(invocation: test_runner.Invocation) -> test_runner.ProcessResult:
+        seen.append(invocation.output_limit_bytes)
+        return test_runner.ProcessResult(0, '{"status":"PASS","exit_code":0}')
+
+    root = policy_root(tmp_path)
+    monkeypatch.setattr(ci_run, "execute", capture)
+    for command in (
+        ["just", "validate-spec"], ["just", "lint"], ["just", "validate-spec", "extra"]
+    ):
+        run_one(command, root)
+    assert seen == [2_097_152, 1_048_576, 1_048_576]
+
+
 def test_exact_screened_report_and_fresh_publication_only(tmp_path: Path) -> None:
     root = policy_root(tmp_path)
     report = {"status": "PASS", "fixture": "generated", "product_acceptance": "NOT_RUN"}
