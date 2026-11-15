@@ -13,8 +13,8 @@
     "Linux-x86_64"
   ],
   "platform_constraints": {
-    "Darwin": "macOS 12+; arm64 only; x86_64 is planned and not admitted",
-    "Linux": "glibc 2.28+; aarch64 or x86_64; GNU/Linux only",
+    "Darwin": "macOS 13.5+; arm64 only; x86_64 is planned and not admitted",
+    "Linux": "kernel 4.18+; glibc 2.28+; libstdc++ GLIBCXX_3.4.25+; aarch64 or x86_64; GNU/Linux only",
     "Windows": "Not qualified by C01; use a supported Linux development environment"
   },
   "tools": {
@@ -312,5 +312,6 @@
         }
       }
     }
-  }
+  },
+  "platform_constraints_source": "https://github.com/nodejs/node/blob/v24.22.3/BUILDING.md#platform-list"
 }

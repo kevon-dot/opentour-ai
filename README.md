@@ -4,7 +4,7 @@ OpenTour autonomously fine-tunes supported open-weight models and verifies impro
 
 ## Development setup
 
-Supported developer profiles are macOS arm64 and Linux glibc arm64/x86_64. macOS x86_64 is planned but unqualified and setup rejects it; its download pins are retained separately for future qualification. Install the exact Python 3.12.16, Node 24.22.3, uv 0.13.8, pnpm 12.18.0 and just 1.59.0 pins in `tools/toolchain.json`. Use the published artifact URLs/checksums there, not a floating installer. The initial Python invocation needs Python 3.12 or newer; uv locates the exact project interpreter without silently selecting a different patch.
+Supported developer profiles are macOS 13.5+ arm64 and Linux arm64/x86_64 with kernel 4.18+, glibc 2.28+ and libstdc++ providing GLIBCXX_3.4.25. These match the [pinned Node runtime requirements](https://github.com/nodejs/node/blob/v24.22.3/BUILDING.md#platform-list); executing Node during preflight also checks that its shared libraries load. macOS x86_64 is planned but unqualified and setup rejects it; its download pins are retained separately for future qualification. Install the exact Python 3.12.16, Node 24.22.3, uv 0.13.8, pnpm 12.18.0 and just 1.59.0 pins in `tools/toolchain.json`. Use the published artifact URLs/checksums there, not a floating installer. The initial Python invocation needs Python 3.12 or newer; uv locates the exact project interpreter without silently selecting a different patch.
 
 ```sh
 uv python install 3.12.16

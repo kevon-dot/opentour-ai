@@ -197,6 +197,7 @@ def preflight(
     machine: str | None = None,
     libc: tuple[str, str] | None = None,
     macos_version: str | None = None,
+    kernel_release: str | None = None,
 ) -> tuple[dict[str, Any], str, dict[str, str]]:
     manifest = toolchain(root)
     target = f"{system or platform.system()}-{machine or platform.machine()}"
@@ -217,12 +218,21 @@ def preflight(
                 3,
                 "supported-platform",
             )
+        kernel = kernel_release if kernel_release is not None else platform.release()
+        match = re.match(r"^(\d+)\.(\d+)", kernel)
+        kernel_parts = tuple(map(int, match.groups())) if match else ()
+        if kernel_parts < (4, 18):
+            raise BootstrapError(
+                f"Linux kernel 4.18+ is required; found {kernel or 'unknown'}",
+                3,
+                "supported-platform",
+            )
     if target.startswith("Darwin-"):
         version = macos_version if macos_version is not None else platform.mac_ver()[0]
         parts = tuple(int(part) for part in version.split(".") if part.isdigit())
-        if parts < (12,):
+        if parts < (13, 5):
             raise BootstrapError(
-                f"macOS 12+ is required; found {version or 'unknown'}", 3, "supported-platform"
+                f"macOS 13.5+ is required; found {version or 'unknown'}", 3, "supported-platform"
             )
     actual: dict[str, str] = {}
     for name in ("uv", "node", "pnpm", "just"):

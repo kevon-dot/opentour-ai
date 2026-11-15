@@ -105,11 +105,35 @@ def test_unsupported_linux_library_is_refused(checkout, libc):
     assert runner.calls == []
 
 
-def test_unsupported_macos_version_is_refused(checkout):
+@pytest.mark.parametrize("version", ["11.7.10", "12.7", "13.0", "13.4.9", ""])
+def test_unsupported_macos_version_is_refused(checkout, version):
     runner = RecordedRunner()
-    with pytest.raises(bootstrap.BootstrapError, match="macOS 12"):
-        bootstrap.preflight(checkout, runner, "Darwin", "arm64", macos_version="11.7.10")
+    with pytest.raises(bootstrap.BootstrapError, match="macOS 13.5"):
+        bootstrap.preflight(checkout, runner, "Darwin", "arm64", macos_version=version)
     assert runner.calls == []
+
+
+@pytest.mark.parametrize("version", ["13.5", "13.5.1", "14.0"])
+def test_supported_macos_version_boundary(checkout, version):
+    bootstrap.preflight(checkout, RecordedRunner(), "Darwin", "arm64", macos_version=version)
+
+
+@pytest.mark.parametrize("kernel", ["3.10.0", "4.17.99", "unknown", ""])
+def test_unsupported_linux_kernel_is_refused(checkout, kernel):
+    runner = RecordedRunner()
+    with pytest.raises(bootstrap.BootstrapError, match="Linux kernel 4.18"):
+        bootstrap.preflight(
+            checkout, runner, "Linux", "x86_64", libc=("glibc", "2.28"), kernel_release=kernel
+        )
+    assert runner.calls == []
+
+
+@pytest.mark.parametrize("kernel", ["4.18.0", "5.15.0-1092-azure", "6.12.0-linuxkit"])
+def test_supported_linux_kernel_boundary(checkout, kernel):
+    bootstrap.preflight(
+        checkout, RecordedRunner(), "Linux", "x86_64",
+        libc=("glibc", "2.28"), kernel_release=kernel,
+    )
 
 
 @pytest.mark.parametrize("tool", ["uv", "node", "pnpm", "just"])
