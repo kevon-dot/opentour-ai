@@ -1,0 +1,648 @@
+[
+  {
+    "fixture_id": "c03:after_local_commit",
+    "version": "1",
+    "seed": 124,
+    "clock": "2026-01-01T00:00:00.000Z",
+    "organization_id": "simulated:customer_controlled:tenant-1",
+    "environment_id": "simulated:customer_controlled:tenant-1:environment",
+    "cell_id": "simulated:customer_controlled:tenant-1:cell",
+    "mode": "customer_controlled",
+    "provider_behavior_script": [
+      "after_local_commit"
+    ],
+    "expected_effects": [
+      "after_local_commit",
+      "prepared"
+    ],
+    "expected_ledger_entries": [
+      "prepared"
+    ]
+  },
+  {
+    "fixture_id": "c03:before_local_commit",
+    "version": "1",
+    "seed": 124,
+    "clock": "2026-01-01T00:00:00.000Z",
+    "organization_id": "simulated:customer_controlled:tenant-1",
+    "environment_id": "simulated:customer_controlled:tenant-1:environment",
+    "cell_id": "simulated:customer_controlled:tenant-1:cell",
+    "mode": "customer_controlled",
+    "provider_behavior_script": [
+      "before_local_commit"
+    ],
+    "expected_effects": [
+      "before_local_commit"
+    ],
+    "expected_ledger_entries": []
+  },
+  {
+    "fixture_id": "c03:cleanup_failure",
+    "version": "1",
+    "seed": 124,
+    "clock": "2026-01-01T00:00:00.000Z",
+    "organization_id": "simulated:customer_controlled:tenant-1",
+    "environment_id": "simulated:customer_controlled:tenant-1:environment",
+    "cell_id": "simulated:customer_controlled:tenant-1:cell",
+    "mode": "customer_controlled",
+    "provider_behavior_script": [
+      "cleanup_failure"
+    ],
+    "expected_effects": [
+      "quarantined"
+    ],
+    "expected_ledger_entries": []
+  },
+  {
+    "fixture_id": "c03:cross_tenant",
+    "version": "1",
+    "seed": 124,
+    "clock": "2026-01-01T00:00:00.000Z",
+    "organization_id": "simulated:customer_controlled:tenant-1",
+    "environment_id": "simulated:customer_controlled:tenant-1:environment",
+    "cell_id": "simulated:customer_controlled:tenant-1:cell",
+    "mode": "customer_controlled",
+    "provider_behavior_script": [
+      "cross_tenant"
+    ],
+    "expected_effects": [
+      "RESOURCE_NOT_FOUND"
+    ],
+    "expected_ledger_entries": []
+  },
+  {
+    "fixture_id": "c03:delayed_source_outcome",
+    "version": "1",
+    "seed": 124,
+    "clock": "2026-01-01T00:00:00.000Z",
+    "organization_id": "simulated:customer_controlled:tenant-1",
+    "environment_id": "simulated:customer_controlled:tenant-1:environment",
+    "cell_id": "simulated:customer_controlled:tenant-1:cell",
+    "mode": "customer_controlled",
+    "provider_behavior_script": [
+      "delayed_source_outcome"
+    ],
+    "expected_effects": [
+      "unknown",
+      "available"
+    ],
+    "expected_ledger_entries": []
+  },
+  {
+    "fixture_id": "c03:duplicate_event",
+    "version": "1",
+    "seed": 124,
+    "clock": "2026-01-01T00:00:00.000Z",
+    "organization_id": "simulated:customer_controlled:tenant-1",
+    "environment_id": "simulated:customer_controlled:tenant-1:environment",
+    "cell_id": "simulated:customer_controlled:tenant-1:cell",
+    "mode": "customer_controlled",
+    "provider_behavior_script": [
+      "duplicate_event"
+    ],
+    "expected_effects": [
+      "created",
+      "duplicate"
+    ],
+    "expected_ledger_entries": []
+  },
+  {
+    "fixture_id": "c03:duplicate_provider_acceptance",
+    "version": "1",
+    "seed": 124,
+    "clock": "2026-01-01T00:00:00.000Z",
+    "organization_id": "simulated:customer_controlled:tenant-1",
+    "environment_id": "simulated:customer_controlled:tenant-1:environment",
+    "cell_id": "simulated:customer_controlled:tenant-1:cell",
+    "mode": "customer_controlled",
+    "provider_behavior_script": [
+      "duplicate_provider_acceptance"
+    ],
+    "expected_effects": [
+      "outcome_unknown",
+      "reconciling"
+    ],
+    "expected_ledger_entries": [
+      "prepared",
+      "dispatching",
+      "outcome_unknown",
+      "reconciling"
+    ]
+  },
+  {
+    "fixture_id": "c03:expired_guard",
+    "version": "1",
+    "seed": 124,
+    "clock": "2026-01-01T00:00:00.000Z",
+    "organization_id": "simulated:customer_controlled:tenant-1",
+    "environment_id": "simulated:customer_controlled:tenant-1:environment",
+    "cell_id": "simulated:customer_controlled:tenant-1:cell",
+    "mode": "customer_controlled",
+    "provider_behavior_script": [
+      "expired_guard"
+    ],
+    "expected_effects": [
+      "AUTHORITY_STALE"
+    ],
+    "expected_ledger_entries": []
+  },
+  {
+    "fixture_id": "c03:late_receipt",
+    "version": "1",
+    "seed": 124,
+    "clock": "2026-01-01T00:00:00.000Z",
+    "organization_id": "simulated:customer_controlled:tenant-1",
+    "environment_id": "simulated:customer_controlled:tenant-1:environment",
+    "cell_id": "simulated:customer_controlled:tenant-1:cell",
+    "mode": "customer_controlled",
+    "provider_behavior_script": [
+      "late_receipt"
+    ],
+    "expected_effects": [
+      "outcome_unknown",
+      "applied",
+      "AUTHORITY_STALE"
+    ],
+    "expected_ledger_entries": [
+      "prepared",
+      "dispatching",
+      "outcome_unknown",
+      "applied"
+    ]
+  },
+  {
+    "fixture_id": "c03:lost_heartbeat",
+    "version": "1",
+    "seed": 124,
+    "clock": "2026-01-01T00:00:00.000Z",
+    "organization_id": "simulated:customer_controlled:tenant-1",
+    "environment_id": "simulated:customer_controlled:tenant-1:environment",
+    "cell_id": "simulated:customer_controlled:tenant-1:cell",
+    "mode": "customer_controlled",
+    "provider_behavior_script": [
+      "lost_heartbeat"
+    ],
+    "expected_effects": [
+      "outcome_unknown"
+    ],
+    "expected_ledger_entries": [
+      "prepared",
+      "dispatching",
+      "outcome_unknown"
+    ]
+  },
+  {
+    "fixture_id": "c03:missing_ledger_sequence",
+    "version": "1",
+    "seed": 124,
+    "clock": "2026-01-01T00:00:00.000Z",
+    "organization_id": "simulated:customer_controlled:tenant-1",
+    "environment_id": "simulated:customer_controlled:tenant-1:environment",
+    "cell_id": "simulated:customer_controlled:tenant-1:cell",
+    "mode": "customer_controlled",
+    "provider_behavior_script": [
+      "missing_ledger_sequence"
+    ],
+    "expected_effects": [
+      "AUTHORITY_UNAVAILABLE"
+    ],
+    "expected_ledger_entries": []
+  },
+  {
+    "fixture_id": "c03:normal",
+    "version": "1",
+    "seed": 124,
+    "clock": "2026-01-01T00:00:00.000Z",
+    "organization_id": "simulated:customer_controlled:tenant-1",
+    "environment_id": "simulated:customer_controlled:tenant-1:environment",
+    "cell_id": "simulated:customer_controlled:tenant-1:cell",
+    "mode": "customer_controlled",
+    "provider_behavior_script": [
+      "normal"
+    ],
+    "expected_effects": [
+      "applied"
+    ],
+    "expected_ledger_entries": [
+      "prepared",
+      "dispatching",
+      "applied"
+    ]
+  },
+  {
+    "fixture_id": "c03:out_of_order_event",
+    "version": "1",
+    "seed": 124,
+    "clock": "2026-01-01T00:00:00.000Z",
+    "organization_id": "simulated:customer_controlled:tenant-1",
+    "environment_id": "simulated:customer_controlled:tenant-1:environment",
+    "cell_id": "simulated:customer_controlled:tenant-1:cell",
+    "mode": "customer_controlled",
+    "provider_behavior_script": [
+      "out_of_order_event"
+    ],
+    "expected_effects": [
+      "removed",
+      "removed"
+    ],
+    "expected_ledger_entries": []
+  },
+  {
+    "fixture_id": "c03:provider_accept_before_ack",
+    "version": "1",
+    "seed": 124,
+    "clock": "2026-01-01T00:00:00.000Z",
+    "organization_id": "simulated:customer_controlled:tenant-1",
+    "environment_id": "simulated:customer_controlled:tenant-1:environment",
+    "cell_id": "simulated:customer_controlled:tenant-1:cell",
+    "mode": "customer_controlled",
+    "provider_behavior_script": [
+      "provider_accept_before_ack"
+    ],
+    "expected_effects": [
+      "outcome_unknown",
+      "applied"
+    ],
+    "expected_ledger_entries": [
+      "prepared",
+      "dispatching",
+      "outcome_unknown",
+      "applied"
+    ]
+  },
+  {
+    "fixture_id": "c03:revoked_epoch",
+    "version": "1",
+    "seed": 124,
+    "clock": "2026-01-01T00:00:00.000Z",
+    "organization_id": "simulated:customer_controlled:tenant-1",
+    "environment_id": "simulated:customer_controlled:tenant-1:environment",
+    "cell_id": "simulated:customer_controlled:tenant-1:cell",
+    "mode": "customer_controlled",
+    "provider_behavior_script": [
+      "revoked_epoch"
+    ],
+    "expected_effects": [
+      "AUTHORITY_STALE"
+    ],
+    "expected_ledger_entries": []
+  },
+  {
+    "fixture_id": "c03:unavailable_journal_head",
+    "version": "1",
+    "seed": 124,
+    "clock": "2026-01-01T00:00:00.000Z",
+    "organization_id": "simulated:customer_controlled:tenant-1",
+    "environment_id": "simulated:customer_controlled:tenant-1:environment",
+    "cell_id": "simulated:customer_controlled:tenant-1:cell",
+    "mode": "customer_controlled",
+    "provider_behavior_script": [
+      "unavailable_journal_head"
+    ],
+    "expected_effects": [
+      "AUTHORITY_UNAVAILABLE"
+    ],
+    "expected_ledger_entries": []
+  },
+  {
+    "fixture_id": "c03:unknown_membership",
+    "version": "1",
+    "seed": 124,
+    "clock": "2026-01-01T00:00:00.000Z",
+    "organization_id": "simulated:customer_controlled:tenant-1",
+    "environment_id": "simulated:customer_controlled:tenant-1:environment",
+    "cell_id": "simulated:customer_controlled:tenant-1:cell",
+    "mode": "customer_controlled",
+    "provider_behavior_script": [
+      "unknown_membership"
+    ],
+    "expected_effects": [
+      "reconciliation_unknown",
+      "IDENTITY_FRESHNESS_UNAVAILABLE"
+    ],
+    "expected_ledger_entries": []
+  },
+  {
+    "fixture_id": "c03:after_local_commit",
+    "version": "1",
+    "seed": 124,
+    "clock": "2026-01-01T00:00:00.000Z",
+    "organization_id": "simulated:opentour_managed:tenant-1",
+    "environment_id": "simulated:opentour_managed:tenant-1:environment",
+    "cell_id": "simulated:opentour_managed:tenant-1:cell",
+    "mode": "opentour_managed",
+    "provider_behavior_script": [
+      "after_local_commit"
+    ],
+    "expected_effects": [
+      "after_local_commit",
+      "prepared"
+    ],
+    "expected_ledger_entries": [
+      "prepared"
+    ]
+  },
+  {
+    "fixture_id": "c03:before_local_commit",
+    "version": "1",
+    "seed": 124,
+    "clock": "2026-01-01T00:00:00.000Z",
+    "organization_id": "simulated:opentour_managed:tenant-1",
+    "environment_id": "simulated:opentour_managed:tenant-1:environment",
+    "cell_id": "simulated:opentour_managed:tenant-1:cell",
+    "mode": "opentour_managed",
+    "provider_behavior_script": [
+      "before_local_commit"
+    ],
+    "expected_effects": [
+      "before_local_commit"
+    ],
+    "expected_ledger_entries": []
+  },
+  {
+    "fixture_id": "c03:cleanup_failure",
+    "version": "1",
+    "seed": 124,
+    "clock": "2026-01-01T00:00:00.000Z",
+    "organization_id": "simulated:opentour_managed:tenant-1",
+    "environment_id": "simulated:opentour_managed:tenant-1:environment",
+    "cell_id": "simulated:opentour_managed:tenant-1:cell",
+    "mode": "opentour_managed",
+    "provider_behavior_script": [
+      "cleanup_failure"
+    ],
+    "expected_effects": [
+      "quarantined"
+    ],
+    "expected_ledger_entries": []
+  },
+  {
+    "fixture_id": "c03:cross_tenant",
+    "version": "1",
+    "seed": 124,
+    "clock": "2026-01-01T00:00:00.000Z",
+    "organization_id": "simulated:opentour_managed:tenant-1",
+    "environment_id": "simulated:opentour_managed:tenant-1:environment",
+    "cell_id": "simulated:opentour_managed:tenant-1:cell",
+    "mode": "opentour_managed",
+    "provider_behavior_script": [
+      "cross_tenant"
+    ],
+    "expected_effects": [
+      "RESOURCE_NOT_FOUND"
+    ],
+    "expected_ledger_entries": []
+  },
+  {
+    "fixture_id": "c03:delayed_source_outcome",
+    "version": "1",
+    "seed": 124,
+    "clock": "2026-01-01T00:00:00.000Z",
+    "organization_id": "simulated:opentour_managed:tenant-1",
+    "environment_id": "simulated:opentour_managed:tenant-1:environment",
+    "cell_id": "simulated:opentour_managed:tenant-1:cell",
+    "mode": "opentour_managed",
+    "provider_behavior_script": [
+      "delayed_source_outcome"
+    ],
+    "expected_effects": [
+      "unknown",
+      "available"
+    ],
+    "expected_ledger_entries": []
+  },
+  {
+    "fixture_id": "c03:duplicate_event",
+    "version": "1",
+    "seed": 124,
+    "clock": "2026-01-01T00:00:00.000Z",
+    "organization_id": "simulated:opentour_managed:tenant-1",
+    "environment_id": "simulated:opentour_managed:tenant-1:environment",
+    "cell_id": "simulated:opentour_managed:tenant-1:cell",
+    "mode": "opentour_managed",
+    "provider_behavior_script": [
+      "duplicate_event"
+    ],
+    "expected_effects": [
+      "created",
+      "duplicate"
+    ],
+    "expected_ledger_entries": []
+  },
+  {
+    "fixture_id": "c03:duplicate_provider_acceptance",
+    "version": "1",
+    "seed": 124,
+    "clock": "2026-01-01T00:00:00.000Z",
+    "organization_id": "simulated:opentour_managed:tenant-1",
+    "environment_id": "simulated:opentour_managed:tenant-1:environment",
+    "cell_id": "simulated:opentour_managed:tenant-1:cell",
+    "mode": "opentour_managed",
+    "provider_behavior_script": [
+      "duplicate_provider_acceptance"
+    ],
+    "expected_effects": [
+      "outcome_unknown",
+      "reconciling"
+    ],
+    "expected_ledger_entries": [
+      "prepared",
+      "dispatching",
+      "outcome_unknown",
+      "reconciling"
+    ]
+  },
+  {
+    "fixture_id": "c03:expired_guard",
+    "version": "1",
+    "seed": 124,
+    "clock": "2026-01-01T00:00:00.000Z",
+    "organization_id": "simulated:opentour_managed:tenant-1",
+    "environment_id": "simulated:opentour_managed:tenant-1:environment",
+    "cell_id": "simulated:opentour_managed:tenant-1:cell",
+    "mode": "opentour_managed",
+    "provider_behavior_script": [
+      "expired_guard"
+    ],
+    "expected_effects": [
+      "AUTHORITY_STALE"
+    ],
+    "expected_ledger_entries": []
+  },
+  {
+    "fixture_id": "c03:late_receipt",
+    "version": "1",
+    "seed": 124,
+    "clock": "2026-01-01T00:00:00.000Z",
+    "organization_id": "simulated:opentour_managed:tenant-1",
+    "environment_id": "simulated:opentour_managed:tenant-1:environment",
+    "cell_id": "simulated:opentour_managed:tenant-1:cell",
+    "mode": "opentour_managed",
+    "provider_behavior_script": [
+      "late_receipt"
+    ],
+    "expected_effects": [
+      "outcome_unknown",
+      "applied",
+      "AUTHORITY_STALE"
+    ],
+    "expected_ledger_entries": [
+      "prepared",
+      "dispatching",
+      "outcome_unknown",
+      "applied"
+    ]
+  },
+  {
+    "fixture_id": "c03:lost_heartbeat",
+    "version": "1",
+    "seed": 124,
+    "clock": "2026-01-01T00:00:00.000Z",
+    "organization_id": "simulated:opentour_managed:tenant-1",
+    "environment_id": "simulated:opentour_managed:tenant-1:environment",
+    "cell_id": "simulated:opentour_managed:tenant-1:cell",
+    "mode": "opentour_managed",
+    "provider_behavior_script": [
+      "lost_heartbeat"
+    ],
+    "expected_effects": [
+      "outcome_unknown"
+    ],
+    "expected_ledger_entries": [
+      "prepared",
+      "dispatching",
+      "outcome_unknown"
+    ]
+  },
+  {
+    "fixture_id": "c03:missing_ledger_sequence",
+    "version": "1",
+    "seed": 124,
+    "clock": "2026-01-01T00:00:00.000Z",
+    "organization_id": "simulated:opentour_managed:tenant-1",
+    "environment_id": "simulated:opentour_managed:tenant-1:environment",
+    "cell_id": "simulated:opentour_managed:tenant-1:cell",
+    "mode": "opentour_managed",
+    "provider_behavior_script": [
+      "missing_ledger_sequence"
+    ],
+    "expected_effects": [
+      "AUTHORITY_UNAVAILABLE"
+    ],
+    "expected_ledger_entries": []
+  },
+  {
+    "fixture_id": "c03:normal",
+    "version": "1",
+    "seed": 124,
+    "clock": "2026-01-01T00:00:00.000Z",
+    "organization_id": "simulated:opentour_managed:tenant-1",
+    "environment_id": "simulated:opentour_managed:tenant-1:environment",
+    "cell_id": "simulated:opentour_managed:tenant-1:cell",
+    "mode": "opentour_managed",
+    "provider_behavior_script": [
+      "normal"
+    ],
+    "expected_effects": [
+      "applied"
+    ],
+    "expected_ledger_entries": [
+      "prepared",
+      "dispatching",
+      "applied"
+    ]
+  },
+  {
+    "fixture_id": "c03:out_of_order_event",
+    "version": "1",
+    "seed": 124,
+    "clock": "2026-01-01T00:00:00.000Z",
+    "organization_id": "simulated:opentour_managed:tenant-1",
+    "environment_id": "simulated:opentour_managed:tenant-1:environment",
+    "cell_id": "simulated:opentour_managed:tenant-1:cell",
+    "mode": "opentour_managed",
+    "provider_behavior_script": [
+      "out_of_order_event"
+    ],
+    "expected_effects": [
+      "removed",
+      "removed"
+    ],
+    "expected_ledger_entries": []
+  },
+  {
+    "fixture_id": "c03:provider_accept_before_ack",
+    "version": "1",
+    "seed": 124,
+    "clock": "2026-01-01T00:00:00.000Z",
+    "organization_id": "simulated:opentour_managed:tenant-1",
+    "environment_id": "simulated:opentour_managed:tenant-1:environment",
+    "cell_id": "simulated:opentour_managed:tenant-1:cell",
+    "mode": "opentour_managed",
+    "provider_behavior_script": [
+      "provider_accept_before_ack"
+    ],
+    "expected_effects": [
+      "outcome_unknown",
+      "applied"
+    ],
+    "expected_ledger_entries": [
+      "prepared",
+      "dispatching",
+      "outcome_unknown",
+      "applied"
+    ]
+  },
+  {
+    "fixture_id": "c03:revoked_epoch",
+    "version": "1",
+    "seed": 124,
+    "clock": "2026-01-01T00:00:00.000Z",
+    "organization_id": "simulated:opentour_managed:tenant-1",
+    "environment_id": "simulated:opentour_managed:tenant-1:environment",
+    "cell_id": "simulated:opentour_managed:tenant-1:cell",
+    "mode": "opentour_managed",
+    "provider_behavior_script": [
+      "revoked_epoch"
+    ],
+    "expected_effects": [
+      "AUTHORITY_STALE"
+    ],
+    "expected_ledger_entries": []
+  },
+  {
+    "fixture_id": "c03:unavailable_journal_head",
+    "version": "1",
+    "seed": 124,
+    "clock": "2026-01-01T00:00:00.000Z",
+    "organization_id": "simulated:opentour_managed:tenant-1",
+    "environment_id": "simulated:opentour_managed:tenant-1:environment",
+    "cell_id": "simulated:opentour_managed:tenant-1:cell",
+    "mode": "opentour_managed",
+    "provider_behavior_script": [
+      "unavailable_journal_head"
+    ],
+    "expected_effects": [
+      "AUTHORITY_UNAVAILABLE"
+    ],
+    "expected_ledger_entries": []
+  },
+  {
+    "fixture_id": "c03:unknown_membership",
+    "version": "1",
+    "seed": 124,
+    "clock": "2026-01-01T00:00:00.000Z",
+    "organization_id": "simulated:opentour_managed:tenant-1",
+    "environment_id": "simulated:opentour_managed:tenant-1:environment",
+    "cell_id": "simulated:opentour_managed:tenant-1:cell",
+    "mode": "opentour_managed",
+    "provider_behavior_script": [
+      "unknown_membership"
+    ],
+    "expected_effects": [
+      "reconciliation_unknown",
+      "IDENTITY_FRESHNESS_UNAVAILABLE"
+    ],
+    "expected_ledger_entries": []
+  }
+]
