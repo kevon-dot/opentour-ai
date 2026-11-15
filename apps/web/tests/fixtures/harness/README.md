@@ -13,6 +13,8 @@ PLAYWRIGHT_BROWSERS_PATH="$PWD/.toolchain/playwright" pnpm exec playwright insta
 ```
 
 The runner requires the wrapper's nonce, exact target and fresh report destination.
+Temporary browser profiles live inside that private result directory, so the
+surviving wrapper removes them even when the adapter cannot run its finally block.
 It starts a unique loopback fixture listener, checks its run identity, uses one
 worker and no retries, and writes the closed transport report after cleanup.
 Missing application/browser, zero tests and required skips are failures. Internal

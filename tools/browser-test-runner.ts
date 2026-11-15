@@ -4,7 +4,6 @@ import { existsSync, lstatSync, realpathSync, readFileSync, writeFileSync, mkdir
 import { resolve, dirname, relative, join } from 'node:path';
 import { createRequire } from 'node:module';
 import { pathToFileURL } from 'node:url';
-import { tmpdir } from 'node:os';
 import { createHash, randomBytes } from 'node:crypto';
 
 type Mode = 'customer_controlled' | 'opentour_managed' | null;
@@ -57,7 +56,7 @@ export async function executeBrowser(options: { root: string; target: string; de
     const require = createRequire(join(root, 'package.json'));
     const { chromium } = require('@playwright/test');
     if (probe === 'missing_browser' || !existsSync(chromium.executablePath())) throw new Error('MISSING_BROWSER');
-    runDirectory = mkdtempSync(join(tmpdir(), 'opentour-browser-'));
+    runDirectory = mkdtempSync(join(dirname(destination), 'browser-'));
     mkdirSync(join(runDirectory, 'home'));
     artifactDirectory = join(root, 'evidence/OT-BOOT-C06/runs', nonce); mkdirSync(artifactDirectory, { recursive: true });
     const raw = join(runDirectory, 'raw.json');
