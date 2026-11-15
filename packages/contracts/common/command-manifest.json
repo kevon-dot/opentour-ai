@@ -75,6 +75,15 @@
       "path": "tests/contract/test_command_contract.py",
       "prerequisites": [],
       "owner": "OPE-123"
+    },
+    "local": {
+      "kind": "local_integration",
+      "path": "tests/integration/test_failure_harness.py",
+      "prerequisites": [
+        "owned-local-harness",
+        "postgresql-18.4-local-fixture"
+      ],
+      "owner": "OPE-124"
     }
   },
   "isolation_suites": {
@@ -230,6 +239,24 @@
       "prerequisites": [
         "authorized-environment",
         "actual-customer-evidence"
+      ],
+      "owner": "acceptance-gate-owner"
+    },
+    "OPS-02": {
+      "kind": "provider_integration",
+      "path": null,
+      "prerequisites": [
+        "authorized-environment",
+        "actual-provider-evidence"
+      ],
+      "owner": "acceptance-gate-owner"
+    },
+    "OPS-03": {
+      "kind": "provider_integration",
+      "path": null,
+      "prerequisites": [
+        "authorized-environment",
+        "actual-provider-evidence"
       ],
       "owner": "acceptance-gate-owner"
     }

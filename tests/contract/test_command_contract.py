@@ -96,6 +96,38 @@ class FixtureRunner:
             report = runner.report_envelope(
                 invocation.runner, invocation.target, invocation.environment, tests
             )
+            if invocation.consumer == "local_harness":
+                tests = (
+                    [
+                        {"id": "local-" + mode, "file": file, "status": self.status, "mode": mode}
+                        for mode in runner.MODES
+                    ]
+                    if self.status
+                    else []
+                )
+                report = runner.report_envelope(
+                    invocation.runner, invocation.target, invocation.environment, tests
+                )
+                report["kind"] = invocation.expected_kind
+                sidecar = invocation.report.with_name(invocation.report.name + ".observations.json")
+                if tests:
+                    sidecar.write_text(
+                        json.dumps(
+                            {
+                                "issue_key": "OPE-124",
+                                "fixture_version": "1",
+                                "product_acceptance": "NOT_RUN",
+                                "observations": [
+                                    {
+                                        "kind": "local_integration",
+                                        "mode": mode,
+                                        "product_acceptance": "NOT_RUN",
+                                    }
+                                    for mode in runner.MODES
+                                ],
+                            }
+                        )
+                    )
             if invocation.runner == "vitest":
                 report = {
                     "numTotalTests": len(tests),
@@ -984,3 +1016,143 @@ def test_startup_guard_installation_failure_stops_before_test_code(checkout):
     assert result["exit_code"] == 2 and result["steps"][0]["raw_exit_code"] == 2
     assert not (checkout / "UNGUARDED_EXECUTED").exists()
     assert "sentinel-private-startup" not in json.dumps(result)
+
+
+@pytest.fixture
+def local_consumer(checkout):
+    """Controlled transport only; actual C03 owns/qualifies its full observation schema."""
+    write(checkout, "tools/fixtures/local_harness.py")
+    write(checkout, "tests/integration/test_failure_harness.py", "def test_owned(): pass\n")
+    schema = {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$id": "urn:opentour:c03-observations:1.0",
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["issue_key", "fixture_version", "product_acceptance", "observations"],
+        "properties": {
+            "issue_key": {"const": "OPE-124"},
+            "fixture_version": {"const": "1"},
+            "product_acceptance": {"const": "NOT_RUN"},
+            "observations": {
+                "type": "array",
+                "maxItems": 128,
+                "items": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["kind", "mode", "product_acceptance"],
+                    "properties": {
+                        "kind": {"enum": ["simulated", "local_integration"]},
+                        "mode": {"enum": list(runner.MODES)},
+                        "product_acceptance": {"const": "NOT_RUN"},
+                    },
+                },
+            },
+        },
+    }
+    path = write(checkout, "tools/fixtures/observation.schema.json", json.dumps(schema))
+    binding = checkout / runner.COMMON / "local-observations-binding.json"
+    value = json.loads(binding.read_text())
+    value["sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
+    binding.write_text(json.dumps(value))
+    return checkout
+
+
+def test_local_profile_dispatch_binds_kind_modes_and_retains_owned_sidecar(local_consumer):
+    fixture = FixtureRunner()
+    result = runner.run_command(
+        "test-integration", ["local", "harness-smoke"], local_consumer, fixture
+    )
+    assert result["exit_code"] == 0 and result["kind"] == "local_integration"
+    invocation = fixture.calls[0]
+    assert (
+        invocation.consumer == "local_harness" and invocation.expected_kind == "local_integration"
+    )
+    assert invocation.argv[-4:-2] == ("tools.fixtures.local_harness", "harness-smoke")
+    assert invocation.argv[-2:] == ("--result-file", str(invocation.report))
+    assert "OPENTOUR_UNIT_GUARD" not in invocation.environment
+    artifact = result["steps"][0]["artifacts"][0]
+    assert artifact["sha256"] and artifact["content"]["product_acceptance"] == "NOT_RUN"
+    assert {t["mode"] for t in result["steps"][0]["tests"]["tests"]} == set(runner.MODES)
+    assert not invocation.report.exists(), "Private report cleanup must not lose retained content"
+
+
+def test_local_missing_postgres_preserves_explicit_blocked_three(local_consumer):
+    fixture = FixtureRunner(
+        None,
+        3,
+        lambda r, i: r.update(status="BLOCKED", reason_code="MISSING_EXTERNAL_PREREQUISITE"),
+    )
+    result = runner.run_command(
+        "test-integration", ["local", "harness-smoke"], local_consumer, fixture
+    )
+    assert result["exit_code"] == 3 and result["status"] == "BLOCKED"
+    assert result["steps"][0]["raw_exit_code"] == 3
+    assert result["product_acceptance"] == "NOT_RUN"
+
+
+def test_local_mode_inapplicable_lifecycle_probe_preserves_both_mode_evidence(local_consumer):
+    def add_probe(report, invocation):
+        report["tests"].append(
+            {"id": "cleanup-probe", "file": invocation.target, "status": "passed", "mode": None}
+        )
+        report["collected"] += 1
+        report["passed"] += 1
+
+    result = runner.run_command(
+        "test-integration",
+        ["local", "harness-smoke"],
+        local_consumer,
+        FixtureRunner(mutate=add_probe),
+    )
+    assert result["exit_code"] == 0
+
+
+@pytest.mark.parametrize("gate", ["OPS-02", "OPS-03"])
+@pytest.mark.parametrize("mode", runner.MODES)
+def test_c03_external_ops_gates_remain_registered_blocked(checkout, gate, mode):
+    fixture = FixtureRunner()
+    result = runner.run_command("test-acceptance", [gate, mode], checkout, fixture)
+    assert result["exit_code"] == 3 and result["status"] == "BLOCKED"
+    assert not fixture.calls
+
+
+@pytest.mark.parametrize("state,raw,expected", [("failed", 1, 1), ("skipped", 0, 1), (None, 2, 2)])
+def test_local_assertion_skip_and_zero_never_pass(local_consumer, state, raw, expected):
+    result = runner.run_command(
+        "test-integration", ["local", "harness-smoke"], local_consumer, FixtureRunner(state, raw)
+    )
+    assert result["exit_code"] == expected
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        lambda r, i: r.update(kind="provider_integration"),
+        lambda r, i: r["tests"][1].update(mode="customer_controlled"),
+        lambda r, i: i.report.with_name(i.report.name + ".observations.json").unlink(),
+        lambda r, i: i.report.with_name(i.report.name + ".observations.json").write_text(
+            '{"private":"sentinel"}'
+        ),
+        lambda r, i: (i.cwd / "tools/fixtures/observation.schema.json").write_text("{}"),
+    ],
+)
+def test_local_wrong_kind_mode_or_unbound_sidecar_fails(local_consumer, mutation):
+    result = runner.run_command(
+        "test-integration",
+        ["local", "harness-smoke"],
+        local_consumer,
+        FixtureRunner(mutate=mutation),
+    )
+    assert result["exit_code"] == 2 and result["status"] == "FAIL"
+
+
+def test_local_profile_rejects_filter_and_absent_adapter_before_execution(checkout):
+    fixture = FixtureRunner()
+    for option in ("all", "harness-smoke;touch sentinel", "harness-smoke"):
+        assert (
+            runner.run_command("test-integration", ["local", option], checkout, fixture)[
+                "exit_code"
+            ]
+            == 2
+        )
+    assert not fixture.calls

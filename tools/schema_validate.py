@@ -148,6 +148,34 @@ def valid_instance(reference: str, value: Any, registry: Registry[Any]) -> bool:
         raise SchemaError("Unregistered or invalid local schema reference") from exc
 
 
+def valid_bound_document(root: Path, binding_path: str, value: Any) -> bool:
+    """Consume an owning harness's exact local schema without copying or remote resolution."""
+    binding = read_json(local_file(root, binding_path))
+    if (
+        not isinstance(binding, dict)
+        or set(binding) != {"schema_version", "id", "file", "sha256"}
+        or any(not isinstance(item, str) for item in binding.values())
+        or binding["schema_version"] != "opentour.owned-schema-binding.v1"
+        or not re.fullmatch(r"[a-f0-9]{64}", binding["sha256"])
+        or not binding["id"].startswith("urn:opentour:")
+    ):
+        raise SchemaError("Invalid owning-harness schema binding")
+    path = local_file(root, binding["file"])
+    if hashlib.sha256(path.read_bytes()).hexdigest() != binding["sha256"]:
+        raise SchemaError("Owning-harness schema hash mismatch")
+    document = read_json(path)
+    if not isinstance(document, dict) or document.get("$id") != binding["id"]:
+        raise SchemaError("Invalid owning-harness schema identity")
+    try:
+        Draft202012Validator.check_schema(document)
+        registry = schema_registry(root).with_resource(
+            binding["id"], Resource.from_contents(document)
+        )
+    except Exception as exc:
+        raise SchemaError("Invalid owning-harness schema") from exc
+    return valid_instance(binding["id"], value, registry)
+
+
 def validate_examples(root: Path = ROOT) -> dict[str, Any]:
     registry = schema_registry(root)
     examples = read_json(local_file(root, "packages/contracts/examples/common-examples.json"))
