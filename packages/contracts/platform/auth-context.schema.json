@@ -1,0 +1,262 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:opentour:auth-context:1.0",
+  "title": "Verified human session contexts",
+  "description": "OPE-142. Server-derived identity and context only; no capability or provider acceptance proof.",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/VerifiedIdentityContext"
+    },
+    {
+      "$ref": "#/$defs/AuthContext"
+    },
+    {
+      "$ref": "#/$defs/SessionContextView"
+    }
+  ],
+  "$defs": {
+    "VerifiedIdentityContext": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "actor",
+        "session_id",
+        "session_generation",
+        "identity_checked_at",
+        "authentication_time",
+        "assurance_level"
+      ],
+      "properties": {
+        "actor": {
+          "allOf": [
+            {
+              "$ref": "urn:opentour:common-contract:1.0#/$defs/Actor"
+            },
+            {
+              "properties": {
+                "kind": {
+                  "const": "human"
+                }
+              },
+              "not": {
+                "required": [
+                  "delegated_grant_id"
+                ]
+              }
+            }
+          ]
+        },
+        "session_id": {
+          "$ref": "urn:opentour:common-contract:1.0#/$defs/Id"
+        },
+        "session_generation": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "identity_checked_at": {
+          "allOf": [
+            {
+              "$ref": "urn:opentour:common-contract:1.0#/$defs/Timestamp"
+            },
+            {
+              "not": {
+                "pattern": "[\\r\\n]"
+              }
+            }
+          ]
+        },
+        "authentication_time": {
+          "allOf": [
+            {
+              "$ref": "urn:opentour:common-contract:1.0#/$defs/Timestamp"
+            },
+            {
+              "not": {
+                "pattern": "[\\r\\n]"
+              }
+            }
+          ]
+        },
+        "assurance_level": {
+          "const": "unknown",
+          "description": "Unqualified identity metadata; never satisfies strong-auth authorization."
+        }
+      }
+    },
+    "AuthContext": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "actor",
+        "session_id",
+        "session_generation",
+        "identity_checked_at",
+        "authentication_time",
+        "assurance_level",
+        "organization_id",
+        "membership_id",
+        "membership_status",
+        "authority_revision",
+        "revocation_epoch",
+        "delegated_grant_id"
+      ],
+      "properties": {
+        "actor": {
+          "allOf": [
+            {
+              "$ref": "urn:opentour:common-contract:1.0#/$defs/Actor"
+            },
+            {
+              "properties": {
+                "kind": {
+                  "const": "human"
+                }
+              },
+              "not": {
+                "required": [
+                  "delegated_grant_id"
+                ]
+              }
+            }
+          ]
+        },
+        "session_id": {
+          "$ref": "urn:opentour:common-contract:1.0#/$defs/Id"
+        },
+        "session_generation": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "identity_checked_at": {
+          "allOf": [
+            {
+              "$ref": "urn:opentour:common-contract:1.0#/$defs/Timestamp"
+            },
+            {
+              "not": {
+                "pattern": "[\\r\\n]"
+              }
+            }
+          ]
+        },
+        "authentication_time": {
+          "allOf": [
+            {
+              "$ref": "urn:opentour:common-contract:1.0#/$defs/Timestamp"
+            },
+            {
+              "not": {
+                "pattern": "[\\r\\n]"
+              }
+            }
+          ]
+        },
+        "assurance_level": {
+          "const": "unknown",
+          "description": "Unqualified identity metadata; never satisfies strong-auth authorization."
+        },
+        "organization_id": {
+          "$ref": "urn:opentour:common-contract:1.0#/$defs/Id"
+        },
+        "membership_id": {
+          "$ref": "urn:opentour:common-contract:1.0#/$defs/Id"
+        },
+        "membership_status": {
+          "const": "active"
+        },
+        "authority_revision": {
+          "$ref": "urn:opentour:common-contract:1.0#/$defs/Id"
+        },
+        "revocation_epoch": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "delegated_grant_id": {
+          "type": "null"
+        }
+      }
+    },
+    "SessionContextView": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "state",
+        "organization_id",
+        "membership_id",
+        "session_generation",
+        "request_id"
+      ],
+      "properties": {
+        "state": {
+          "enum": [
+            "unselected",
+            "active",
+            "reconciliation_required"
+          ]
+        },
+        "organization_id": {
+          "anyOf": [
+            {
+              "$ref": "urn:opentour:common-contract:1.0#/$defs/Id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "membership_id": {
+          "anyOf": [
+            {
+              "$ref": "urn:opentour:common-contract:1.0#/$defs/Id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "session_generation": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "request_id": {
+          "$ref": "urn:opentour:common-contract:1.0#/$defs/Id"
+        }
+      },
+      "oneOf": [
+        {
+          "properties": {
+            "state": {
+              "const": "active"
+            },
+            "organization_id": {
+              "$ref": "urn:opentour:common-contract:1.0#/$defs/Id"
+            },
+            "membership_id": {
+              "$ref": "urn:opentour:common-contract:1.0#/$defs/Id"
+            }
+          }
+        },
+        {
+          "properties": {
+            "state": {
+              "enum": [
+                "unselected",
+                "reconciliation_required"
+              ]
+            },
+            "organization_id": {
+              "type": "null"
+            },
+            "membership_id": {
+              "type": "null"
+            }
+          }
+        }
+      ]
+    }
+  }
+}
