@@ -46,7 +46,8 @@
     "apps/web/tests/fixtures/harness/baselines/darwin-customer-controlled/billing-1440.png": "809c3eb26e60d233cdabccdf5ad86bfc385aa2aa0a1c3eb29437d9daa5043605",
     "apps/web/tests/fixtures/harness/baselines/darwin-customer-controlled/billing-1280.png": "3ea180ddea6ddbb70c5afd36703f1eebd8a2cedb98621aceb91d02a4ee85bb98",
     "apps/web/tests/fixtures/harness/baselines/darwin-customer-controlled/billing-768.png": "420684839d93502677969d66f2fff19c3242bc1b7f04f0b2a932a94d10d00183",
-    "apps/web/tests/fixtures/harness/assets/inter-latin-400-normal.woff2": "8909904ab6c872eb994093482a88a28eca2cd95912d7b6fecd72103b0dc07edc"
+    "apps/web/tests/fixtures/harness/assets/inter-latin-400-normal.woff2": "8909904ab6c872eb994093482a88a28eca2cd95912d7b6fecd72103b0dc07edc",
+    "docs/specification/assets/ARCH-01.png": "df052f8168db3535a065525f85fa9b161a2871e899d68acde8d97b284a9a6180"
   },
   "approved_synthetic_matches": {
     "tests/contract/test_bootstrap.py": [
