@@ -1111,7 +1111,7 @@ def test_local_mode_inapplicable_lifecycle_probe_preserves_both_mode_evidence(lo
 @pytest.mark.parametrize("mode", runner.MODES)
 def test_c03_external_ops_gates_remain_registered_blocked(checkout, gate, mode):
     fixture = FixtureRunner()
-    result = runner.run_command("test-acceptance", [gate, mode], checkout, fixture)
+    result = runner.run_command("test-isolation", [gate, mode], checkout, fixture)
     assert result["exit_code"] == 3 and result["status"] == "BLOCKED"
     assert not fixture.calls
 
