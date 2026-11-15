@@ -910,6 +910,85 @@ def test_runner_kills_descendants_even_when_leader_exits_successfully(checkout):
                 pass
 
 
+@pytest.mark.parametrize(
+    "limit,size,passes",
+    [
+        (None, 1_048_576, True),
+        (None, 1_048_577, False),
+        (2_097_152, 1_048_577, True),
+        (2_097_152, 2_097_152, True),
+        (2_097_152, 2_097_153, False),
+    ],
+)
+def test_actual_runner_output_limit_counts_both_streams(checkout, limit, size, passes):
+    first = size // 2
+    invocation = runner.Invocation(
+        (
+            sys.executable,
+            "-c",
+            "import sys;"
+            f"sys.stdout.buffer.write(b'a'*{first});sys.stdout.flush();"
+            f"sys.stderr.buffer.write(b'b'*{size - first});sys.stderr.flush()",
+        ),
+        checkout,
+        runner.environment(checkout, "a" * 32),
+        checkout / "unused.json",
+        "controlled-output",
+        "setup",
+        timeout=10,
+    )
+    assert invocation.output_limit_bytes == 1_048_576
+    if limit is not None:
+        invocation = replace(invocation, output_limit_bytes=limit)
+    if passes:
+        result = runner.execute(invocation)
+        assert result.returncode == 0 and result.cleanup_complete
+        assert len(result.stdout.encode()) == size
+        assert result.stdout == "a" * first + "b" * (size - first)
+    else:
+        with pytest.raises(runner.CommandError) as error:
+            runner.execute(invocation)
+        assert error.value.code == 1 and error.value.reason == "RUNNER_ERROR"
+
+
+@pytest.mark.parametrize("limit,passes", [(4, True), (3, False)])
+def test_actual_runner_output_limit_counts_utf8_bytes(checkout, limit, passes):
+    invocation = runner.Invocation(
+        (sys.executable, "-c", "import sys;sys.stdout.buffer.write(bytes([195,169])*2)"),
+        checkout,
+        runner.environment(checkout, "a" * 32),
+        checkout / "unused.json",
+        "controlled-output",
+        "setup",
+        timeout=10,
+        output_limit_bytes=limit,
+    )
+    if passes:
+        result = runner.execute(invocation)
+        assert result.stdout == "éé" and len(result.stdout.encode()) == 4
+    else:
+        with pytest.raises(runner.CommandError) as error:
+            runner.execute(invocation)
+        assert error.value.code == 1
+
+
+@pytest.mark.parametrize("limit", [0, -1, 2_097_153, True, 1.5, "2097152"])
+def test_invalid_runner_output_limit_refuses_before_launch(checkout, monkeypatch, limit):
+    monkeypatch.setattr(runner, "_MANAGED_POPEN", lambda *a, **k: pytest.fail("Child was launched"))
+    invocation = runner.Invocation(
+        (sys.executable, "-c", "pass"),
+        checkout,
+        {},
+        checkout / "unused.json",
+        "controlled-output",
+        "setup",
+        output_limit_bytes=limit,
+    )
+    with pytest.raises(runner.CommandError) as error:
+        runner.execute(invocation)
+    assert error.value.code == 2
+
+
 def test_process_group_permission_uncertainty_is_structured_nonpass(checkout, monkeypatch):
     signals = []
 

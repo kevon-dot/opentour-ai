@@ -71,6 +71,7 @@ class Invocation:
     timeout: int = 300
     expected_kind: str = "simulated"
     consumer: str | None = None
+    output_limit_bytes: int = 1_048_576
 
 
 @dataclass(frozen=True)
@@ -87,6 +88,11 @@ Executor = Callable[[Invocation], ProcessResult]
 
 def execute(invocation: Invocation) -> ProcessResult:
     """Bound child lifetime and output without shell interpolation or unbounded log files."""
+    if (
+        type(invocation.output_limit_bytes) is not int
+        or not 1 <= invocation.output_limit_bytes <= 2_097_152
+    ):
+        raise CommandError("Runner output limit must be an integer from one byte through two MiB.")
     try:
         process = _MANAGED_POPEN(
             invocation.argv,
@@ -145,17 +151,20 @@ def execute(invocation: Invocation) -> ProcessResult:
                         selector.unregister(key.fileobj)
                         continue
                     byte_count += len(chunk)
-                    if byte_count > 1_048_576:
+                    if byte_count > invocation.output_limit_bytes:
                         break
                     if invocation.runner == "setup":
                         output.extend(chunk)
-                if byte_count > 1_048_576:
+                if byte_count > invocation.output_limit_bytes:
                     break
         except KeyboardInterrupt:
             interrupted = True
         finally:
             if process.poll() is None and (
-                timed_out or interrupted or byte_count > 1_048_576 or selector.get_map()
+                timed_out
+                or interrupted
+                or byte_count > invocation.output_limit_bytes
+                or selector.get_map()
             ):
                 signal_owned_group(signal.SIGKILL)
             try:
@@ -179,8 +188,8 @@ def execute(invocation: Invocation) -> ProcessResult:
                 signal_owned_group(signal.SIGKILL)
     if process.returncode is None:
         raise CommandError("Owned runner cleanup could not be confirmed.", 1, "CLEANUP_FAILED")
-    if byte_count > 1_048_576:
-        raise CommandError("Runner output exceeded the one MiB limit.", 1, "RUNNER_ERROR")
+    if byte_count > invocation.output_limit_bytes:
+        raise CommandError("Runner output exceeded its configured limit.", 1, "RUNNER_ERROR")
     return ProcessResult(
         process.returncode,
         output.decode("utf-8", errors="replace"),
