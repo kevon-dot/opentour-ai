@@ -114,6 +114,9 @@ test('BH-DETERMINISM, BH-RESPONSIVE and BH-BILLING: reviewed zero-pixel route ba
     expect(baseline.platform).toBe(process.platform);
     expect(baseline.architecture).toBe(process.arch);
   }
+  // Start the cold document at the first reviewed viewport; resizing its initial wide
+  // paint can retain a different rounded-border raster in pinned Chromium.
+  await page.setViewportSize({ width: 320, height: 1100 });
   await harness.open(); await expect(page.getByRole('status')).toHaveText('Ready');
   expect(await page.evaluate(() => new Date().toISOString())).toBe(FIXTURE.clock);
   for (const width of [320,768,1280,1440]) {
