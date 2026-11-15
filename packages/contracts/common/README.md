@@ -13,8 +13,8 @@ the public exit code. The accepted setup entry emits its OPE-122 receipt directl
 | Command | Current execution |
 | --- | --- |
 | `just setup` | Accepted OPE-122 setup; no provider provisioning |
-| `just lint` | Pinned Ruff over the repository |
-| `just typecheck` | Pinned mypy service/training/tools check and the existing TypeScript boundary |
+| `just lint` | Pinned Ruff; when C06 source is present, actual owned Oxlint configuration over the harness/runner and contract web smoke |
+| `just typecheck` | Pinned mypy, TypeScript client/contract-smoke boundary, and actual C06 tsconfig when harness source is present |
 | `just test-python PATH` | Exact existing Python file/directory; declared uv workspace package, separate training project, or root contract scope |
 | `just test-web PATH` | Existing `.test.ts`/`.test.tsx` file; private exact-include Vitest configuration, no retries/only/zero-test pass |
 | `just test-browser PATH` | Declared `.spec.ts` file/suite with an admitted profile and actual OPE-127 adapter |
@@ -41,6 +41,14 @@ Python unit/contract calls deny TCP, UDP and DNS through a test-process guard.
 Vitest receives only the wrapper-owned Node network preload. These are test
 discipline boundaries, not protection against hostile code. Browser local fixture
 networking belongs to OPE-127; actual provider integration belongs to its owner.
+The committed bootstrap web-unit smoke is
+`just test-web packages/contracts/examples/web-command-smoke.test.ts`: one actual
+Vitest case consumes the canonical revision-string example and exercises its JSON
+wire preservation. It is available to CI without a future application test. The
+TypeScript check also covers this source. When any C06 harness entry/config exists,
+lint/typecheck require the complete owned configuration set and execute its real
+Oxlint/TypeScript commands; missing configuration or a failed check cannot silently
+pass. C06 lint additionally includes this contract smoke source.
 The standard-library-only Python startup preload loads before initial conftest
 imports, remains active through teardown and propagates to ordinary Python helpers
 through the wrapper-owned PYTHONPATH. A failed installation exits before user code;
