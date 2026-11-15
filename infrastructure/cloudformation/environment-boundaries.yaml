@@ -1,0 +1,986 @@
+{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Description": "OPE-213 environment IAM boundaries. No journal administration or application grant issuance.",
+  "Metadata": {
+    "OpenTour": {
+      "issue": "OPE-213",
+      "product_acceptance": "NOT_RUN",
+      "sequence": "Create empty control stack, validate output inventory, create role boundaries. OPE-217 owns independent audit stores and roles.",
+      "unscoped_action_exception": "ecr:GetAuthorizationToken requires Resource *. Image reads remain repository-scoped."
+    }
+  },
+  "Parameters": {
+    "Environment": {
+      "Type": "String",
+      "AllowedValues": [
+        "dev",
+        "test",
+        "prod"
+      ]
+    },
+    "ExpectedAccountId": {
+      "Type": "String",
+      "AllowedPattern": "[0-9]{12}"
+    },
+    "DatabaseResourceId": {
+      "Type": "String",
+      "AllowedPattern": "db-[A-Z0-9]+"
+    },
+    "ApplicationSecretArn": {
+      "Type": "String",
+      "AllowedPattern": "arn:[a-z-]+:secretsmanager:[a-z0-9-]+:[0-9]{12}:secret:.+"
+    },
+    "DataKeyArn": {
+      "Type": "String",
+      "AllowedPattern": "arn:[a-z-]+:kms:[a-z0-9-]+:[0-9]{12}:key/[a-f0-9-]+"
+    },
+    "WakeupQueueArn": {
+      "Type": "String",
+      "AllowedPattern": "arn:[a-z-]+:sqs:[a-z0-9-]+:[0-9]{12}:[A-Za-z0-9_-]+"
+    },
+    "RepositoryArns": {
+      "Type": "CommaDelimitedList"
+    },
+    "DeclaredServiceArns": {
+      "Type": "CommaDelimitedList"
+    },
+    "BffLogGroupArn": {
+      "Type": "String",
+      "AllowedPattern": "arn:[a-z-]+:logs:[a-z0-9-]+:[0-9]{12}:log-group:[A-Za-z0-9_./-]+"
+    },
+    "ApiLogGroupArn": {
+      "Type": "String",
+      "AllowedPattern": "arn:[a-z-]+:logs:[a-z0-9-]+:[0-9]{12}:log-group:[A-Za-z0-9_./-]+"
+    },
+    "WorkerLogGroupArn": {
+      "Type": "String",
+      "AllowedPattern": "arn:[a-z-]+:logs:[a-z0-9-]+:[0-9]{12}:log-group:[A-Za-z0-9_./-]+"
+    },
+    "OidcProviderArn": {
+      "Type": "String",
+      "AllowedPattern": "arn:[a-z-]+:iam::[0-9]{12}:oidc-provider/token.actions.githubusercontent.com"
+    },
+    "ApprovedDeployWorkflow": {
+      "Type": "String",
+      "AllowedPattern": "kevon-dot/opentour-ai/\\.github/workflows/[a-zA-Z0-9_-]+\\.ya?ml@[a-f0-9]{40}"
+    },
+    "ApprovedMigrationWorkflow": {
+      "Type": "String",
+      "AllowedPattern": "kevon-dot/opentour-ai/\\.github/workflows/[a-zA-Z0-9_-]+\\.ya?ml@[a-f0-9]{40}"
+    }
+  },
+  "Rules": {
+    "CorrectAccount": {
+      "Assertions": [
+        {
+          "Assert": {
+            "Fn::Equals": [
+              {
+                "Ref": "ExpectedAccountId"
+              },
+              {
+                "Ref": "AWS::AccountId"
+              }
+            ]
+          },
+          "AssertDescription": "Use the explicitly approved target account."
+        }
+      ]
+    }
+  },
+  "Resources": {
+    "BffBoundary": {
+      "Type": "AWS::IAM::ManagedPolicy",
+      "Properties": {
+        "Description": "Bff maximum environment permissions",
+        "PolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Action": [
+                "secretsmanager:GetSecretValue"
+              ],
+              "Resource": {
+                "Ref": "ApplicationSecretArn"
+              }
+            },
+            {
+              "Effect": "Allow",
+              "Action": [
+                "kms:Decrypt"
+              ],
+              "Resource": {
+                "Ref": "DataKeyArn"
+              },
+              "Condition": {
+                "StringEquals": {
+                  "kms:ViaService": {
+                    "Fn::Sub": "secretsmanager.${AWS::Region}.${AWS::URLSuffix}"
+                  },
+                  "kms:EncryptionContext:SecretARN": {
+                    "Ref": "ApplicationSecretArn"
+                  }
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "BffRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "ecs-tasks.amazonaws.com"
+              },
+              "Action": "sts:AssumeRole",
+              "Condition": {
+                "StringEquals": {
+                  "aws:SourceAccount": {
+                    "Ref": "AWS::AccountId"
+                  }
+                },
+                "ArnLike": {
+                  "aws:SourceArn": {
+                    "Fn::Sub": "arn:${AWS::Partition}:ecs:${AWS::Region}:${AWS::AccountId}:*"
+                  }
+                }
+              }
+            }
+          ]
+        },
+        "PermissionsBoundary": {
+          "Ref": "BffBoundary"
+        },
+        "Policies": [
+          {
+            "PolicyName": "EnvironmentOnly",
+            "PolicyDocument": {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "secretsmanager:GetSecretValue"
+                  ],
+                  "Resource": {
+                    "Ref": "ApplicationSecretArn"
+                  }
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "kms:Decrypt"
+                  ],
+                  "Resource": {
+                    "Ref": "DataKeyArn"
+                  },
+                  "Condition": {
+                    "StringEquals": {
+                      "kms:ViaService": {
+                        "Fn::Sub": "secretsmanager.${AWS::Region}.${AWS::URLSuffix}"
+                      },
+                      "kms:EncryptionContext:SecretARN": {
+                        "Ref": "ApplicationSecretArn"
+                      }
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        ],
+        "MaxSessionDuration": 3600,
+        "Tags": [
+          {
+            "Key": "opentour:environment",
+            "Value": {
+              "Ref": "Environment"
+            }
+          }
+        ]
+      }
+    },
+    "ApiBoundary": {
+      "Type": "AWS::IAM::ManagedPolicy",
+      "Properties": {
+        "Description": "Api maximum environment permissions",
+        "PolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Action": [
+                "secretsmanager:GetSecretValue"
+              ],
+              "Resource": {
+                "Ref": "ApplicationSecretArn"
+              }
+            },
+            {
+              "Effect": "Allow",
+              "Action": [
+                "kms:Decrypt"
+              ],
+              "Resource": {
+                "Ref": "DataKeyArn"
+              },
+              "Condition": {
+                "StringEquals": {
+                  "kms:ViaService": {
+                    "Fn::Sub": "secretsmanager.${AWS::Region}.${AWS::URLSuffix}"
+                  },
+                  "kms:EncryptionContext:SecretARN": {
+                    "Ref": "ApplicationSecretArn"
+                  }
+                }
+              }
+            },
+            {
+              "Effect": "Allow",
+              "Action": [
+                "rds-db:connect"
+              ],
+              "Resource": {
+                "Fn::Sub": "arn:${AWS::Partition}:rds-db:${AWS::Region}:${AWS::AccountId}:dbuser/${DatabaseResourceId}/opentour_runtime"
+              }
+            },
+            {
+              "Effect": "Allow",
+              "Action": [
+                "sqs:SendMessage",
+                "sqs:GetQueueAttributes"
+              ],
+              "Resource": {
+                "Ref": "WakeupQueueArn"
+              }
+            },
+            {
+              "Effect": "Allow",
+              "Action": [
+                "kms:GenerateDataKey",
+                "kms:Decrypt"
+              ],
+              "Resource": {
+                "Ref": "DataKeyArn"
+              },
+              "Condition": {
+                "StringEquals": {
+                  "kms:ViaService": {
+                    "Fn::Sub": "sqs.${AWS::Region}.${AWS::URLSuffix}"
+                  }
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "ApiRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "ecs-tasks.amazonaws.com"
+              },
+              "Action": "sts:AssumeRole",
+              "Condition": {
+                "StringEquals": {
+                  "aws:SourceAccount": {
+                    "Ref": "AWS::AccountId"
+                  }
+                },
+                "ArnLike": {
+                  "aws:SourceArn": {
+                    "Fn::Sub": "arn:${AWS::Partition}:ecs:${AWS::Region}:${AWS::AccountId}:*"
+                  }
+                }
+              }
+            }
+          ]
+        },
+        "PermissionsBoundary": {
+          "Ref": "ApiBoundary"
+        },
+        "Policies": [
+          {
+            "PolicyName": "EnvironmentOnly",
+            "PolicyDocument": {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "secretsmanager:GetSecretValue"
+                  ],
+                  "Resource": {
+                    "Ref": "ApplicationSecretArn"
+                  }
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "kms:Decrypt"
+                  ],
+                  "Resource": {
+                    "Ref": "DataKeyArn"
+                  },
+                  "Condition": {
+                    "StringEquals": {
+                      "kms:ViaService": {
+                        "Fn::Sub": "secretsmanager.${AWS::Region}.${AWS::URLSuffix}"
+                      },
+                      "kms:EncryptionContext:SecretARN": {
+                        "Ref": "ApplicationSecretArn"
+                      }
+                    }
+                  }
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "rds-db:connect"
+                  ],
+                  "Resource": {
+                    "Fn::Sub": "arn:${AWS::Partition}:rds-db:${AWS::Region}:${AWS::AccountId}:dbuser/${DatabaseResourceId}/opentour_runtime"
+                  }
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "sqs:SendMessage",
+                    "sqs:GetQueueAttributes"
+                  ],
+                  "Resource": {
+                    "Ref": "WakeupQueueArn"
+                  }
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "kms:GenerateDataKey",
+                    "kms:Decrypt"
+                  ],
+                  "Resource": {
+                    "Ref": "DataKeyArn"
+                  },
+                  "Condition": {
+                    "StringEquals": {
+                      "kms:ViaService": {
+                        "Fn::Sub": "sqs.${AWS::Region}.${AWS::URLSuffix}"
+                      }
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        ],
+        "MaxSessionDuration": 3600,
+        "Tags": [
+          {
+            "Key": "opentour:environment",
+            "Value": {
+              "Ref": "Environment"
+            }
+          }
+        ]
+      }
+    },
+    "WorkerBoundary": {
+      "Type": "AWS::IAM::ManagedPolicy",
+      "Properties": {
+        "Description": "Worker maximum environment permissions",
+        "PolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Action": [
+                "rds-db:connect"
+              ],
+              "Resource": {
+                "Fn::Sub": "arn:${AWS::Partition}:rds-db:${AWS::Region}:${AWS::AccountId}:dbuser/${DatabaseResourceId}/opentour_worker"
+              }
+            },
+            {
+              "Effect": "Allow",
+              "Action": [
+                "sqs:ReceiveMessage",
+                "sqs:DeleteMessage",
+                "sqs:ChangeMessageVisibility",
+                "sqs:GetQueueAttributes"
+              ],
+              "Resource": {
+                "Ref": "WakeupQueueArn"
+              }
+            },
+            {
+              "Effect": "Allow",
+              "Action": [
+                "kms:Decrypt"
+              ],
+              "Resource": {
+                "Ref": "DataKeyArn"
+              },
+              "Condition": {
+                "StringEquals": {
+                  "kms:ViaService": {
+                    "Fn::Sub": "sqs.${AWS::Region}.${AWS::URLSuffix}"
+                  }
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "WorkerRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "ecs-tasks.amazonaws.com"
+              },
+              "Action": "sts:AssumeRole",
+              "Condition": {
+                "StringEquals": {
+                  "aws:SourceAccount": {
+                    "Ref": "AWS::AccountId"
+                  }
+                },
+                "ArnLike": {
+                  "aws:SourceArn": {
+                    "Fn::Sub": "arn:${AWS::Partition}:ecs:${AWS::Region}:${AWS::AccountId}:*"
+                  }
+                }
+              }
+            }
+          ]
+        },
+        "PermissionsBoundary": {
+          "Ref": "WorkerBoundary"
+        },
+        "Policies": [
+          {
+            "PolicyName": "EnvironmentOnly",
+            "PolicyDocument": {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "rds-db:connect"
+                  ],
+                  "Resource": {
+                    "Fn::Sub": "arn:${AWS::Partition}:rds-db:${AWS::Region}:${AWS::AccountId}:dbuser/${DatabaseResourceId}/opentour_worker"
+                  }
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "sqs:ReceiveMessage",
+                    "sqs:DeleteMessage",
+                    "sqs:ChangeMessageVisibility",
+                    "sqs:GetQueueAttributes"
+                  ],
+                  "Resource": {
+                    "Ref": "WakeupQueueArn"
+                  }
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "kms:Decrypt"
+                  ],
+                  "Resource": {
+                    "Ref": "DataKeyArn"
+                  },
+                  "Condition": {
+                    "StringEquals": {
+                      "kms:ViaService": {
+                        "Fn::Sub": "sqs.${AWS::Region}.${AWS::URLSuffix}"
+                      }
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        ],
+        "MaxSessionDuration": 3600,
+        "Tags": [
+          {
+            "Key": "opentour:environment",
+            "Value": {
+              "Ref": "Environment"
+            }
+          }
+        ]
+      }
+    },
+    "MigrationTaskBoundary": {
+      "Type": "AWS::IAM::ManagedPolicy",
+      "Properties": {
+        "Description": "MigrationTask maximum environment permissions",
+        "PolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Action": [
+                "rds-db:connect"
+              ],
+              "Resource": {
+                "Fn::Sub": "arn:${AWS::Partition}:rds-db:${AWS::Region}:${AWS::AccountId}:dbuser/${DatabaseResourceId}/opentour_migrator"
+              }
+            }
+          ]
+        }
+      }
+    },
+    "MigrationTaskRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "ecs-tasks.amazonaws.com"
+              },
+              "Action": "sts:AssumeRole",
+              "Condition": {
+                "StringEquals": {
+                  "aws:SourceAccount": {
+                    "Ref": "AWS::AccountId"
+                  }
+                },
+                "ArnLike": {
+                  "aws:SourceArn": {
+                    "Fn::Sub": "arn:${AWS::Partition}:ecs:${AWS::Region}:${AWS::AccountId}:*"
+                  }
+                }
+              }
+            }
+          ]
+        },
+        "PermissionsBoundary": {
+          "Ref": "MigrationTaskBoundary"
+        },
+        "Policies": [
+          {
+            "PolicyName": "EnvironmentOnly",
+            "PolicyDocument": {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "rds-db:connect"
+                  ],
+                  "Resource": {
+                    "Fn::Sub": "arn:${AWS::Partition}:rds-db:${AWS::Region}:${AWS::AccountId}:dbuser/${DatabaseResourceId}/opentour_migrator"
+                  }
+                }
+              ]
+            }
+          }
+        ],
+        "MaxSessionDuration": 3600,
+        "Tags": [
+          {
+            "Key": "opentour:environment",
+            "Value": {
+              "Ref": "Environment"
+            }
+          }
+        ]
+      }
+    },
+    "TaskExecutionBoundary": {
+      "Type": "AWS::IAM::ManagedPolicy",
+      "Properties": {
+        "Description": "TaskExecution maximum environment permissions",
+        "PolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Action": [
+                "ecr:GetAuthorizationToken"
+              ],
+              "Resource": "*"
+            },
+            {
+              "Effect": "Allow",
+              "Action": [
+                "ecr:BatchGetImage",
+                "ecr:GetDownloadUrlForLayer",
+                "ecr:BatchCheckLayerAvailability"
+              ],
+              "Resource": {
+                "Ref": "RepositoryArns"
+              }
+            },
+            {
+              "Effect": "Allow",
+              "Action": [
+                "logs:CreateLogStream",
+                "logs:PutLogEvents"
+              ],
+              "Resource": [
+                {
+                  "Fn::Sub": "${BffLogGroupArn}:log-stream:*"
+                },
+                {
+                  "Fn::Sub": "${ApiLogGroupArn}:log-stream:*"
+                },
+                {
+                  "Fn::Sub": "${WorkerLogGroupArn}:log-stream:*"
+                }
+              ]
+            }
+          ]
+        }
+      }
+    },
+    "TaskExecutionRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "ecs-tasks.amazonaws.com"
+              },
+              "Action": "sts:AssumeRole",
+              "Condition": {
+                "StringEquals": {
+                  "aws:SourceAccount": {
+                    "Ref": "AWS::AccountId"
+                  }
+                },
+                "ArnLike": {
+                  "aws:SourceArn": {
+                    "Fn::Sub": "arn:${AWS::Partition}:ecs:${AWS::Region}:${AWS::AccountId}:*"
+                  }
+                }
+              }
+            }
+          ]
+        },
+        "PermissionsBoundary": {
+          "Ref": "TaskExecutionBoundary"
+        },
+        "Policies": [
+          {
+            "PolicyName": "EnvironmentOnly",
+            "PolicyDocument": {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "ecr:GetAuthorizationToken"
+                  ],
+                  "Resource": "*"
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "ecr:BatchGetImage",
+                    "ecr:GetDownloadUrlForLayer",
+                    "ecr:BatchCheckLayerAvailability"
+                  ],
+                  "Resource": {
+                    "Ref": "RepositoryArns"
+                  }
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "logs:CreateLogStream",
+                    "logs:PutLogEvents"
+                  ],
+                  "Resource": [
+                    {
+                      "Fn::Sub": "${BffLogGroupArn}:log-stream:*"
+                    },
+                    {
+                      "Fn::Sub": "${ApiLogGroupArn}:log-stream:*"
+                    },
+                    {
+                      "Fn::Sub": "${WorkerLogGroupArn}:log-stream:*"
+                    }
+                  ]
+                }
+              ]
+            }
+          }
+        ],
+        "MaxSessionDuration": 3600,
+        "Tags": [
+          {
+            "Key": "opentour:environment",
+            "Value": {
+              "Ref": "Environment"
+            }
+          }
+        ]
+      }
+    },
+    "DeployRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "Federated": {
+                  "Ref": "OidcProviderArn"
+                }
+              },
+              "Action": "sts:AssumeRoleWithWebIdentity",
+              "Condition": {
+                "StringEquals": {
+                  "token.actions.githubusercontent.com:aud": "sts.amazonaws.com",
+                  "token.actions.githubusercontent.com:sub": {
+                    "Fn::Sub": "repo:kevon-dot/opentour-ai:environment:${Environment}"
+                  },
+                  "token.actions.githubusercontent.com:repository_id": "1455972360",
+                  "token.actions.githubusercontent.com:job_workflow_ref": {
+                    "Ref": "ApprovedDeployWorkflow"
+                  },
+                  "token.actions.githubusercontent.com:ref": "refs/heads/main",
+                  "token.actions.githubusercontent.com:environment": {
+                    "Ref": "Environment"
+                  }
+                },
+                "NumericLessThanEquals": {
+                  "sts:DurationSeconds": 900
+                }
+              }
+            }
+          ]
+        },
+        "MaxSessionDuration": 3600,
+        "Policies": [
+          {
+            "PolicyName": "ScopedDeploy",
+            "PolicyDocument": {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "ecs:UpdateService",
+                    "ecs:DescribeServices"
+                  ],
+                  "Resource": {
+                    "Ref": "DeclaredServiceArns"
+                  }
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "iam:PassRole"
+                  ],
+                  "Resource": [
+                    {
+                      "Fn::GetAtt": [
+                        "BffRole",
+                        "Arn"
+                      ]
+                    },
+                    {
+                      "Fn::GetAtt": [
+                        "ApiRole",
+                        "Arn"
+                      ]
+                    },
+                    {
+                      "Fn::GetAtt": [
+                        "WorkerRole",
+                        "Arn"
+                      ]
+                    },
+                    {
+                      "Fn::GetAtt": [
+                        "TaskExecutionRole",
+                        "Arn"
+                      ]
+                    }
+                  ],
+                  "Condition": {
+                    "StringEquals": {
+                      "iam:PassedToService": "ecs-tasks.amazonaws.com"
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        ],
+        "Tags": [
+          {
+            "Key": "opentour:environment",
+            "Value": {
+              "Ref": "Environment"
+            }
+          }
+        ]
+      }
+    },
+    "MigrationRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "Federated": {
+                  "Ref": "OidcProviderArn"
+                }
+              },
+              "Action": "sts:AssumeRoleWithWebIdentity",
+              "Condition": {
+                "StringEquals": {
+                  "token.actions.githubusercontent.com:aud": "sts.amazonaws.com",
+                  "token.actions.githubusercontent.com:sub": {
+                    "Fn::Sub": "repo:kevon-dot/opentour-ai:environment:${Environment}"
+                  },
+                  "token.actions.githubusercontent.com:repository_id": "1455972360",
+                  "token.actions.githubusercontent.com:job_workflow_ref": {
+                    "Ref": "ApprovedMigrationWorkflow"
+                  },
+                  "token.actions.githubusercontent.com:ref": "refs/heads/main",
+                  "token.actions.githubusercontent.com:environment": {
+                    "Ref": "Environment"
+                  }
+                },
+                "NumericLessThanEquals": {
+                  "sts:DurationSeconds": 900
+                }
+              }
+            }
+          ]
+        },
+        "MaxSessionDuration": 3600,
+        "Policies": [
+          {
+            "PolicyName": "ScopedMigration",
+            "PolicyDocument": {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "rds-db:connect"
+                  ],
+                  "Resource": {
+                    "Fn::Sub": "arn:${AWS::Partition}:rds-db:${AWS::Region}:${AWS::AccountId}:dbuser/${DatabaseResourceId}/opentour_migrator"
+                  }
+                }
+              ]
+            }
+          }
+        ],
+        "Tags": [
+          {
+            "Key": "opentour:environment",
+            "Value": {
+              "Ref": "Environment"
+            }
+          }
+        ]
+      }
+    }
+  },
+  "Outputs": {
+    "BffRoleArn": {
+      "Description": "Exact Bff role; no independent audit administration.",
+      "Value": {
+        "Fn::GetAtt": [
+          "BffRole",
+          "Arn"
+        ]
+      }
+    },
+    "ApiRoleArn": {
+      "Description": "Exact Api role; no independent audit administration.",
+      "Value": {
+        "Fn::GetAtt": [
+          "ApiRole",
+          "Arn"
+        ]
+      }
+    },
+    "WorkerRoleArn": {
+      "Description": "Exact Worker role; no independent audit administration.",
+      "Value": {
+        "Fn::GetAtt": [
+          "WorkerRole",
+          "Arn"
+        ]
+      }
+    },
+    "MigrationTaskRoleArn": {
+      "Description": "Exact MigrationTask role; no independent audit administration.",
+      "Value": {
+        "Fn::GetAtt": [
+          "MigrationTaskRole",
+          "Arn"
+        ]
+      }
+    },
+    "TaskExecutionRoleArn": {
+      "Description": "Exact TaskExecution role; no independent audit administration.",
+      "Value": {
+        "Fn::GetAtt": [
+          "TaskExecutionRole",
+          "Arn"
+        ]
+      }
+    },
+    "DeployRoleArn": {
+      "Description": "Exact Deploy role; no independent audit administration.",
+      "Value": {
+        "Fn::GetAtt": [
+          "DeployRole",
+          "Arn"
+        ]
+      }
+    },
+    "MigrationRoleArn": {
+      "Description": "Exact Migration role; no independent audit administration.",
+      "Value": {
+        "Fn::GetAtt": [
+          "MigrationRole",
+          "Arn"
+        ]
+      }
+    }
+  }
+}
