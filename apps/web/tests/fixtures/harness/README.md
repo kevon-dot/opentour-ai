@@ -72,6 +72,11 @@ for this suite's actual Chromium execution.
 `baseline-review.json` binds initial candidates to the fixture design revision,
 font, browser and exact image hashes. Ordinary runs use `updateSnapshots: none`,
 zero changed pixels, zero pixel threshold and no masks. Missing baselines fail.
+Pinned Chromium launches with `--disable-skia-runtime-opts` to avoid observed
+CPU-optimization rounding differences at card corners. The qualified raster path
+retains all sixteen approved images byte-for-byte, including both modes and all
+four widths. The browser version, font and comparison settings remain pinned.
+
 Baseline authoring is a separate, explicit operation:
 
 ```sh

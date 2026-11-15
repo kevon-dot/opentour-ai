@@ -3,12 +3,18 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "scripts": { "bootstrap:smoke": "node bootstrap-smoke.mjs" },
+  "scripts": {
+    "bootstrap:smoke": "node bootstrap-smoke.mjs"
+  },
   "dependencies": {
     "@opentour/client": "workspace:*",
     "next": "16.4.6",
     "react": "19.3.1",
-    "react-dom": "19.3.1"
+    "react-dom": "19.3.1",
+    "@workos-inc/node": "12.3.0",
+    "@workos-inc/authkit-nextjs": "4.6.3",
+    "jose": "5.10.0",
+    "server-only": "0.0.1"
   },
   "devDependencies": {
     "@types/react": "19.3.0",
