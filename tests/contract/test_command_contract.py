@@ -551,6 +551,76 @@ def test_package_routing_consumes_workspace_and_keeps_training_separate(checkout
 
 
 @pytest.mark.parametrize(
+    "target",
+    [
+        "infrastructure/tests/test_ci_oidc_trust.py",
+        "infrastructure/tests",
+        "infrastructure/tests/nested/test with spaces.py",
+    ],
+)
+def test_infrastructure_test_scope_uses_root_workspace(checkout, target):
+    file = target if target.endswith(".py") else target + "/test_ci_oidc_trust.py"
+    write(checkout, file, "def test_one(): assert True\n")
+    fixture = FixtureRunner()
+    result = runner.run_command("test-python", [target], checkout, fixture)
+    assert result["exit_code"] == 0
+    assert fixture.calls[0].argv[:6] == runner.uv_python(checkout)
+    assert fixture.calls[0].argv[-2:] == ("--", target)
+
+
+@pytest.mark.parametrize(
+    "target",
+    [
+        "infrastructure",
+        "infrastructure/test_ci_oidc_trust.py",
+        "infrastructure/tests.py",
+        "infrastructure/tests-extra/test_ci_oidc_trust.py",
+        "infrastructure/tests/../test_ci_oidc_trust.py",
+    ],
+)
+def test_infrastructure_non_test_scope_rejected_before_execution(checkout, target):
+    write(checkout, "infrastructure/tests/test_ci_oidc_trust.py")
+    if target.endswith(".py") and ".." not in target:
+        write(checkout, target)
+    fixture = FixtureRunner()
+    result = runner.run_command("test-python", [target], checkout, fixture)
+    assert result["exit_code"] == 2
+    assert fixture.calls == []
+
+
+def test_infrastructure_test_scope_rejects_symlink_escape(checkout):
+    external_scope = write(checkout, "infrastructure/runtime.py")
+    link = checkout / "infrastructure/tests/test_ci_oidc_trust.py"
+    link.parent.mkdir()
+    link.symlink_to(external_scope)
+    fixture = FixtureRunner()
+    result = runner.run_command(
+        "test-python", [link.relative_to(checkout).as_posix()], checkout, fixture
+    )
+    assert result["exit_code"] == 2
+    assert fixture.calls == []
+
+
+def test_actual_infrastructure_route_uses_root_environment(checkout):
+    qualified_environment = runner.ROOT / ".venv"
+    shutil.copyfile(runner.ROOT / "uv.lock", checkout / "uv.lock")
+    (checkout / ".venv").symlink_to(qualified_environment.resolve(), target_is_directory=True)
+    target = "infrastructure/tests/test_ci_oidc_trust.py"
+    write(
+        checkout,
+        target,
+        "import sys\nfrom pathlib import Path\n"
+        f"EXPECTED_ENVIRONMENT = Path({str(qualified_environment.resolve())!r})\n"
+        "def test_root_environment():\n"
+        "    assert Path(sys.prefix).resolve() == EXPECTED_ENVIRONMENT\n",
+    )
+    result = runner.run_command("test-python", [target], checkout)
+    assert result["exit_code"] == 0, result
+    assert result["steps"][0]["tests"]["collected"] == 1
+    assert result["steps"][0]["tests"]["passed"] == 1
+
+
+@pytest.mark.parametrize(
     "outcome,expected,counts",
     [("pass", 0, (1, 0, 0)), ("fail", 1, (0, 1, 0)), ("skip", 1, (0, 0, 1))],
 )

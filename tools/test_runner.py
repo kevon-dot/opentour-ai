@@ -345,7 +345,10 @@ def uv_python(root: Path, target: str | None = None) -> tuple[str, ...]:
                     return (*argv, "--package", package, "python")
             if target.startswith("training/"):
                 return (*argv, "--project", "training", "python")
-            if not target.startswith(("tests/", "tools/", "packages/contracts/examples/")):
+            root_test_scope = target == "infrastructure/tests" or target.startswith(
+                ("tests/", "tools/", "packages/contracts/examples/", "infrastructure/tests/")
+            )
+            if not root_test_scope:
                 raise CommandError("Test path has no declared Python workspace/package mapping.")
         except (OSError, ValueError, KeyError, TypeError) as exc:
             raise CommandError("Invalid Python workspace/package mapping.") from exc
