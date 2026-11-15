@@ -1,0 +1,26 @@
+{
+  "schema_version": "opentour.ci-policy.v1",
+  "repository": "kevon-dot/opentour-ai",
+  "required_checks": ["lint", "typecheck", "python-unit", "web-unit", "browser-fixtures", "contract", "local-integration", "spec-traceability", "secret-scan", "dependency-scan", "iac-policy"],
+  "independent_review_context": "independent-review",
+  "production_oidc_profiles": [],
+  "artifact_retention_days": 7,
+  "postgres": {
+    "version": "18.4",
+    "url": "https://ftp.postgresql.org/pub/source/v18.4/postgresql-18.4.tar.bz2",
+    "sha256": "81a81ec695fb0c7901407defaa1d2f7973617154cf27ba74e3a7ab8e64436094",
+    "source": "https://ftp.postgresql.org/pub/source/v18.4/postgresql-18.4.tar.bz2.sha256"
+  },
+  "osv_scanner": {
+    "version": "2.7.1",
+    "url": "https://github.com/google/osv-scanner/releases/download/v2.7.1/osv-scanner_linux_amd64",
+    "sha256": "fb7dab19a8bd9bbe5c3189f09d4b7ee1820c9553a23bac202648a56efd2f6ee8",
+    "source": "https://github.com/google/osv-scanner/releases/tag/v2.7.1"
+  },
+  "sources": [
+    "https://docs.github.com/en/actions/reference/runners/github-hosted-runners",
+    "https://docs.github.com/en/actions/reference/security/secure-use",
+    "https://github.com/actions/upload-artifact/releases/tag/v7.0.2",
+    "https://google.github.io/osv-scanner/"
+  ]
+}

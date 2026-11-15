@@ -1,0 +1,64 @@
+{
+  "schema_version": "opentour.public-content.v1",
+  "technical_roots": [
+    ".github",
+    "apps",
+    "packages",
+    "services",
+    "training",
+    "tools",
+    "tests",
+    "infrastructure",
+    "docs",
+    "containers"
+  ],
+  "root_files": [
+    "AGENTS.md",
+    "README.md",
+    "LICENSE",
+    "justfile",
+    ".gitignore",
+    ".dockerignore",
+    ".node-version",
+    ".python-version",
+    "package.json",
+    "pnpm-lock.yaml",
+    "pnpm-workspace.yaml",
+    "pyproject.toml",
+    "uv.lock",
+    "playwright.config.ts",
+    ".env.example"
+  ],
+  "reviewed_binary_sha256": {
+    "apps/web/tests/fixtures/harness/baselines/darwin-opentour-managed/workspace-1440.png": "0d2305c1c193faa7e352e9311eb72607db96412ccfd7e8fadd0793839d4afd8e",
+    "apps/web/tests/fixtures/harness/baselines/darwin-opentour-managed/workspace-1280.png": "e8e97627346dad39a915b79d7f6f251dcd306dc54c09a9e984e7e71c7b29ace4",
+    "apps/web/tests/fixtures/harness/baselines/darwin-opentour-managed/billing-320.png": "ce25ba226df511280f42b7fca0453cdff7bbc0ef7ade4354fb9701ff418cc1ed",
+    "apps/web/tests/fixtures/harness/baselines/darwin-opentour-managed/workspace-768.png": "672563148286f375e467b312c7f9d6004f669c6e136dfe9b9c32d946762c29ea",
+    "apps/web/tests/fixtures/harness/baselines/darwin-opentour-managed/workspace-320.png": "29b7a648e7c707b863be68f3abd3de80efaa5cb8c2c2028c0f133612c69df2f2",
+    "apps/web/tests/fixtures/harness/baselines/darwin-opentour-managed/billing-1440.png": "ee75966cedc9d5867a255a5284394cc9ba733e713e5e8dc9b572da8c4067bd4a",
+    "apps/web/tests/fixtures/harness/baselines/darwin-opentour-managed/billing-1280.png": "97210e797a969f8568135131ec3f283bd0a1c895e658d7bb95896ce35089b3ea",
+    "apps/web/tests/fixtures/harness/baselines/darwin-opentour-managed/billing-768.png": "d9d7e6ff9f8e5b14787f0624611f249deac378bd28e00b8c75e0063450313696",
+    "apps/web/tests/fixtures/harness/baselines/darwin-customer-controlled/workspace-1440.png": "b454d80ae3174da4785713af97b83163df292ff69f5559f454f55434fba8704c",
+    "apps/web/tests/fixtures/harness/baselines/darwin-customer-controlled/workspace-1280.png": "bd2f3969e730343272a667bafad11f73bc401e159e9767de0cd86e523e92e656",
+    "apps/web/tests/fixtures/harness/baselines/darwin-customer-controlled/billing-320.png": "0c47cbdbfa75fdf7b2ae2bd7fc69ef675172e2fd9aac4161d7528710bf774588",
+    "apps/web/tests/fixtures/harness/baselines/darwin-customer-controlled/workspace-768.png": "796e4c0544e2ce60405ff1148fdfe260bf4deddf5730ec426c8a1c225a26aa27",
+    "apps/web/tests/fixtures/harness/baselines/darwin-customer-controlled/workspace-320.png": "edae17bc734e84dd93527c800ce19bb886b51ef2539dd3d7649600f916a5626f",
+    "apps/web/tests/fixtures/harness/baselines/darwin-customer-controlled/billing-1440.png": "809c3eb26e60d233cdabccdf5ad86bfc385aa2aa0a1c3eb29437d9daa5043605",
+    "apps/web/tests/fixtures/harness/baselines/darwin-customer-controlled/billing-1280.png": "3ea180ddea6ddbb70c5afd36703f1eebd8a2cedb98621aceb91d02a4ee85bb98",
+    "apps/web/tests/fixtures/harness/baselines/darwin-customer-controlled/billing-768.png": "420684839d93502677969d66f2fff19c3242bc1b7f04f0b2a932a94d10d00183",
+    "apps/web/tests/fixtures/harness/assets/inter-latin-400-normal.woff2": "8909904ab6c872eb994093482a88a28eca2cd95912d7b6fecd72103b0dc07edc"
+  },
+  "approved_synthetic_matches": {
+    "tests/contract/test_bootstrap.py": [
+      "093866188144b0216fb125431572e8ac2df8980dfeeb6ebeb3d9f3987d1e4c1d",
+      "457643f44d19aed85fd756aa50cc0cd6b57376d4e8f5a72f9f85972a522002a3",
+      "4a47010d04bcbac534af00e870762c03b94c137c63de4b054dbd41262a4658d9",
+      "7a8a75af0f288fea9f3b96ae0f670cd762b1dee66f4c3971e7de303daa24d82e",
+      "d1cd4ab1d18d5e47bed525fe498db93f2a1e1df80ddc385ec3d2f453d751c4e1"
+    ],
+    "tests/contract/test_command_contract.py": [
+      "be88de129f1a497c0cdc3e10788f7c49e90420c4a32ae14d779ae00c2b2939cc",
+      "fe30d081c6f71159e2bacefa2223288bd4040a047f097d40c860fa68311a47a3"
+    ]
+  }
+}
