@@ -59,7 +59,7 @@ async function mutate(action: 'mutate' | 'revoke', replay = false) {
     const response = await fetch(`/control/${session}/${action}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(intent) });
     const data = await response.json(); if (mine !== generation) return;
     if (!response.ok) { showError(data); return; }
-    button('retry').disabled = false;
+    button('retry').disabled = action === 'revoke';
     if (typeof data.revision !== 'string') { showError(null); return; }
     input('expected').value = data.revision;
     await refresh();

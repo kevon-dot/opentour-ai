@@ -82,12 +82,12 @@ export async function startFixtureServer(runId: string, cleanupObservationFault 
     if (Object.keys(input).some(key => !['expected_revision', 'intent', 'value', 'resource'].includes(key)) || !isRevision(input.expected_revision) || typeof input.intent !== 'string' || typeof input.value !== 'string') { error(res, 422, 'SCHEMA_INVALID', 'Review the highlighted revision field.'); return; }
     if (input.resource !== session.organization) { error(res, 404, 'RESOURCE_NOT_FOUND', 'Resource unavailable.'); return; }
     if (!session.authority || session.role === 'viewer') { error(res, 403, 'CAPABILITY_DENIED', 'Current authority does not permit this action.'); return; }
-    const digest = JSON.stringify(input); const prior = session.intents.get(input.intent);
+    const digest = JSON.stringify({ action, ...input }); const prior = session.intents.get(input.intent);
     if (prior) { if (prior.body !== digest) error(res, 409, 'IDEMPOTENCY_CONFLICT', 'This intent was already used with different content.'); else json(res, 200, { revision: prior.revision, operation_id: session.operation }); return; }
     if (input.expected_revision !== session.revision || session.scenario === 'stale') { error(res, 409, 'STALE_REVISION', 'State changed. Review your draft before submitting a new intent.', session.revision); return; }
     if (session.revision === '9223372036854775807') { error(res, 409, 'REVISION_EXHAUSTED', 'Revision limit reached.'); return; }
     session.revision = (BigInt(session.revision) + 1n).toString(); session.effects++;
-    if (action === 'revoke') { session.operation = 'simulated-revocation-127'; session.scenario = 'pending'; }
+    if (action === 'revoke') { session.operation = 'simulated-revocation-127'; session.scenario = 'pending'; session.authority = false; }
     session.intents.set(input.intent, { body: digest, revision: session.revision });
     if (session.scenario === 'lost_ack') { res.destroy(); return; }
     json(res, action === 'revoke' ? 202 : 200, { revision: session.revision, operation_id: session.operation });

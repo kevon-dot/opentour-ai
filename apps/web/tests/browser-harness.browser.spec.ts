@@ -42,6 +42,9 @@ test('BH-REVOCATION: HTTP202 remains pending and refresh retains operation', asy
   await expect(page.locator('#detail')).toContainText('1 of 2 cells'); await expect(page.locator('#detail')).toContainText('simulated-revocation-127');
   await page.getByRole('button', { name: 'Refresh status' }).click(); await expect(page.getByRole('status')).toHaveText('Waiting for cells');
   expect((await harness.inspect()).effects).toBe(1);
+  await expect(page.getByRole('button', { name: 'Retry same intent' })).toBeDisabled();
+  const refused = await harness.call('mutate', { expected_revision: '9007199254740994', intent: 'simulated-after-revoke', value: 'new effect', resource: 'simulated-org-a' });
+  expect(refused.status).toBe(403); expect((await harness.inspect()).effects).toBe(1);
 });
 test('BH-REVISION: exact decimal strings, malformed revisions and stale draft preservation', async ({ page, harness }) => {
   await harness.open(); await expect(page.locator('#revision')).toHaveText('9007199254740993');
