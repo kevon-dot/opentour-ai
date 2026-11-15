@@ -13,6 +13,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from tools.ci.browser_evidence import retain_browser_evidence
 from tools.ci.policy import CHECKS, check
 from tools.ci.prepare import download, postgres
 from tools.public_content_check import digest, inspect_bytes, load_policy, scan_paths, tracked_paths
@@ -148,6 +149,9 @@ def run_check(name: str, root: Path) -> dict[str, Any]:
             env["PLAYWRIGHT_BROWSERS_PATH"] = str(root / ".toolchain/playwright")
             run(["pnpm", "exec", "playwright", "install", "--only-shell", "chromium"])
             run(["just", "test-browser", "apps/web/tests/browser-harness.browser.spec.ts"])
+            steps[-1]["browser_artifacts"] = retain_browser_evidence(
+                root, steps[-1]["command_evidence"]
+            )
         elif name == "contract":
             run(["just", "test-contract"])
         elif name == "local-integration":

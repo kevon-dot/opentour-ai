@@ -33,6 +33,8 @@ def workflow_errors(workflow: dict[str, Any]) -> list[str]:
     if set(jobs) != set(CHECKS):
         errors.append("REQUIRED_CHECK_SET")
     for name, job in jobs.items():
+        if set(job) != {"name", "runs-on", "timeout-minutes", "permissions", "steps"}:
+            errors.append("UNEXPECTED_JOB_CAPABILITY")
         if job.get("name") != name or job.get("if") or job.get("continue-on-error"):
             errors.append("REQUIRED_JOB_CAN_SKIP_OR_SUCCEED_ON_ERROR")
         if job.get("permissions") != {"contents": "read"}:
@@ -42,9 +44,13 @@ def workflow_errors(workflow: dict[str, Any]) -> list[str]:
         if job.get("environment") or job.get("secrets") or job.get("container"):
             errors.append("PRIVILEGED_JOB")
         steps = job.get("steps", [])
+        if len(steps) != 4:
+            errors.append("UNEXPECTED_STEPS")
         if not any(s.get("run") == "python -m tools.ci.run " + name for s in steps):
             errors.append("MISSING_ACTUAL_CHECK")
         for step in steps:
+            if "env" in step or ("if" in step and "upload-artifact@" not in step.get("uses", "")):
+                errors.append("REQUIRED_STEP_CAN_SKIP_OR_CHANGE_ENVIRONMENT")
             if step.get("continue-on-error"):
                 errors.append("IGNORED_FAILURE")
             if "uses" in step and not re.fullmatch(r"actions/[\w-]+@[a-f0-9]{40}", step["uses"]):
@@ -68,7 +74,11 @@ def workflow_errors(workflow: dict[str, Any]) -> list[str]:
         if len(actual) != 1 or actual[0].get("id") != "verify":
             errors.append("MISSING_VERIFIED_PUBLISH_STEP")
     serialized = json.dumps(workflow)
-    if "secrets." in serialized or "id-token" in serialized or "pull_request_target" in serialized:
+    if (
+        re.search(r"\bsecrets\b", serialized)
+        or "id-token" in serialized
+        or "pull_request_target" in serialized
+    ):
         errors.append("PRIVILEGED_CREDENTIAL_ROUTE")
     return sorted(set(errors))
 
