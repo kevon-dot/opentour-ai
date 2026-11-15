@@ -63,7 +63,7 @@ async function mutate(action: 'mutate' | 'revoke', replay = false) {
     if (typeof data.revision !== 'string') { showError(null); return; }
     input('expected').value = data.revision;
     await refresh();
-  } catch { if (mine === generation) { status('Unknown', 'Acknowledgment was lost. Retry only the same intent or refresh its status.'); button('retry').disabled = false; } }
+  } catch { if (mine === generation) { status('Unknown', action === 'revoke' ? 'Revocation acknowledgment was lost. Refresh to reconcile the existing operation.' : 'Acknowledgment was lost. Retry only the same intent or refresh its status.'); button('retry').disabled = action === 'revoke'; } }
 }
 button('refresh').onclick = () => { void refresh(); };
 button('save').onclick = () => { void mutate('mutate'); };

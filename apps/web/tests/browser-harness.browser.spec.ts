@@ -46,6 +46,18 @@ test('BH-REVOCATION: HTTP202 remains pending and refresh retains operation', asy
   const refused = await harness.call('mutate', { expected_revision: '9007199254740994', intent: 'simulated-after-revoke', value: 'new effect', resource: 'simulated-org-a' });
   expect(refused.status).toBe(403); expect((await harness.inspect()).effects).toBe(1);
 });
+test('BH-REVOCATION: lost revoke acknowledgment cannot enable a mutation retry', async ({ page, harness }) => {
+  await harness.open(); await expect(page.getByRole('button', { name: 'Revoke access' })).toBeEnabled();
+  await page.route('**/control/*/revoke', async route => { await route.fetch(); await route.abort('failed'); }, { times: 1 });
+  await page.getByRole('button', { name: 'Revoke access' }).click();
+  await expect(page.getByRole('status')).toHaveText('Unknown');
+  await expect(page.getByRole('button', { name: 'Retry same intent' })).toBeDisabled();
+  expect((await harness.inspect()).effects).toBe(1);
+  await page.getByRole('button', { name: 'Refresh status' }).click();
+  await expect(page.getByRole('status')).toHaveText('Waiting for cells');
+  await expect(page.locator('#detail')).toContainText('simulated-revocation-127');
+  expect((await harness.inspect()).effects).toBe(1);
+});
 test('BH-REVISION: exact decimal strings, malformed revisions and stale draft preservation', async ({ page, harness }) => {
   await harness.open(); await expect(page.locator('#revision')).toHaveText('9007199254740993');
   await page.getByLabel('Draft name').fill('Preserve my generated draft');
