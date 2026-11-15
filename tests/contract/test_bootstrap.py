@@ -385,7 +385,7 @@ def test_container_context_only_includes_explicit_technical_files():
         if line.startswith("!"):
             path = line[1:]
             assert not any(char in path for char in "*?[]")
-            assert (bootstrap.ROOT / path).is_dir() or (bootstrap.ROOT / path).is_file()
+            assert (bootstrap.ROOT / path).is_file()
 
 
 def offline_command(args, cwd, extra_env=None):
