@@ -1,0 +1,142 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:opentour:traceability-report:1.0",
+  "title": "Observed offline metadata checks, not product acceptance",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "runner",
+    "target",
+    "binding_nonce",
+    "commit_sha",
+    "spec_sha256",
+    "kind",
+    "scope",
+    "product_acceptance",
+    "checks",
+    "collected",
+    "passed",
+    "failed",
+    "status",
+    "exit_code",
+    "reason_code",
+    "cleanup_complete"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "opentour.traceability-report.v1"
+    },
+    "runner": {
+      "const": "semantic_validator"
+    },
+    "target": {
+      "const": "docs/specification/manifest.json"
+    },
+    "binding_nonce": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{32}$"
+    },
+    "commit_sha": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{40}$"
+    },
+    "spec_sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "kind": {
+      "const": "simulated"
+    },
+    "scope": {
+      "const": "bootstrap_metadata_conformance"
+    },
+    "product_acceptance": {
+      "const": "NOT_RUN"
+    },
+    "checks": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 20000,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "owner",
+          "status",
+          "code",
+          "subject"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2048
+          },
+          "owner": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2048
+          },
+          "status": {
+            "enum": [
+              "PASS",
+              "FAIL"
+            ]
+          },
+          "code": {
+            "type": "string",
+            "pattern": "^[A-Z_]{1,80}$"
+          },
+          "subject": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2048
+          }
+        }
+      }
+    },
+    "collected": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 20000
+    },
+    "passed": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 20000
+    },
+    "failed": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 20000
+    },
+    "status": {
+      "enum": [
+        "PASS",
+        "FAIL",
+        "BLOCKED"
+      ]
+    },
+    "exit_code": {
+      "enum": [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    "reason_code": {
+      "enum": [
+        null,
+        "INVALID_CONFIGURATION",
+        "TRACEABILITY_FAILED",
+        "MISSING_EXTERNAL_PREREQUISITE"
+      ]
+    },
+    "cleanup_complete": {
+      "type": "boolean"
+    }
+  }
+}

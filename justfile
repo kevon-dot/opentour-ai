@@ -4,34 +4,34 @@ set positional-arguments
 
 # Keep the accepted OPE-122 setup entry usable before dependencies exist.
 setup:
-    python3 tools/bootstrap.py
+    @python3 tools/bootstrap.py
 
 lint *args:
-    @uv run --no-sync --offline --no-python-downloads python -m tools.test_runner lint "$@"
+    @uv run --preview-features build-dependency-hashes --no-sync --offline --no-python-downloads python -m tools.test_runner lint "$@"
 
 typecheck *args:
-    @uv run --no-sync --offline --no-python-downloads python -m tools.test_runner typecheck "$@"
+    @uv run --preview-features build-dependency-hashes --no-sync --offline --no-python-downloads python -m tools.test_runner typecheck "$@"
 
 test-python *args:
-    @uv run --no-sync --offline --no-python-downloads python -m tools.test_runner test-python "$@"
+    @uv run --preview-features build-dependency-hashes --no-sync --offline --no-python-downloads python -m tools.test_runner test-python "$@"
 
 test-web *args:
-    @uv run --no-sync --offline --no-python-downloads python -m tools.test_runner test-web "$@"
+    @uv run --preview-features build-dependency-hashes --no-sync --offline --no-python-downloads python -m tools.test_runner test-web "$@"
 
 test-browser *args:
-    @uv run --no-sync --offline --no-python-downloads python -m tools.test_runner test-browser "$@"
+    @uv run --preview-features build-dependency-hashes --no-sync --offline --no-python-downloads python -m tools.test_runner test-browser "$@"
 
 test-contract *args:
-    @uv run --no-sync --offline --no-python-downloads python -m tools.test_runner test-contract "$@"
+    @uv run --preview-features build-dependency-hashes --no-sync --offline --no-python-downloads python -m tools.test_runner test-contract "$@"
 
 validate-spec *args:
-    @uv run --no-sync --offline --no-python-downloads python -m tools.test_runner validate-spec "$@"
+    @uv run --preview-features build-dependency-hashes --no-sync --offline --no-python-downloads python -m tools.test_runner validate-spec "$@"
 
 test-integration *args:
-    @uv run --no-sync --offline --no-python-downloads python -m tools.test_runner test-integration "$@"
+    @uv run --preview-features build-dependency-hashes --no-sync --offline --no-python-downloads python -m tools.test_runner test-integration "$@"
 
 test-isolation *args:
-    @uv run --no-sync --offline --no-python-downloads python -m tools.test_runner test-isolation "$@"
+    @uv run --preview-features build-dependency-hashes --no-sync --offline --no-python-downloads python -m tools.test_runner test-isolation "$@"
 
 test-acceptance *args:
-    @uv run --no-sync --offline --no-python-downloads python -m tools.test_runner test-acceptance "$@"
+    @uv run --preview-features build-dependency-hashes --no-sync --offline --no-python-downloads python -m tools.test_runner test-acceptance "$@"

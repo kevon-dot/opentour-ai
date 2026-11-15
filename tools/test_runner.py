@@ -23,6 +23,7 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[1]
 _MANAGED_POPEN = getattr(subprocess, "_opentour_managed_popen", subprocess.Popen)
 COMMON = "packages/contracts/common"
+TRACEABILITY_TARGET = "docs/specification/manifest.json"
 MODES = ("customer_controlled", "opentour_managed")
 COMMAND_ARITY = {
     "setup": 0,
@@ -70,6 +71,7 @@ class Invocation:
     timeout: int = 300
     expected_kind: str = "simulated"
     consumer: str | None = None
+    output_limit_bytes: int = 1_048_576
 
 
 @dataclass(frozen=True)
@@ -86,6 +88,11 @@ Executor = Callable[[Invocation], ProcessResult]
 
 def execute(invocation: Invocation) -> ProcessResult:
     """Bound child lifetime and output without shell interpolation or unbounded log files."""
+    if (
+        type(invocation.output_limit_bytes) is not int
+        or not 1 <= invocation.output_limit_bytes <= 2_097_152
+    ):
+        raise CommandError("Runner output limit must be an integer from one byte through two MiB.")
     try:
         process = _MANAGED_POPEN(
             invocation.argv,
@@ -144,17 +151,20 @@ def execute(invocation: Invocation) -> ProcessResult:
                         selector.unregister(key.fileobj)
                         continue
                     byte_count += len(chunk)
-                    if byte_count > 1_048_576:
+                    if byte_count > invocation.output_limit_bytes:
                         break
                     if invocation.runner == "setup":
                         output.extend(chunk)
-                if byte_count > 1_048_576:
+                if byte_count > invocation.output_limit_bytes:
                     break
         except KeyboardInterrupt:
             interrupted = True
         finally:
             if process.poll() is None and (
-                timed_out or interrupted or byte_count > 1_048_576 or selector.get_map()
+                timed_out
+                or interrupted
+                or byte_count > invocation.output_limit_bytes
+                or selector.get_map()
             ):
                 signal_owned_group(signal.SIGKILL)
             try:
@@ -178,8 +188,8 @@ def execute(invocation: Invocation) -> ProcessResult:
                 signal_owned_group(signal.SIGKILL)
     if process.returncode is None:
         raise CommandError("Owned runner cleanup could not be confirmed.", 1, "CLEANUP_FAILED")
-    if byte_count > 1_048_576:
-        raise CommandError("Runner output exceeded the one MiB limit.", 1, "RUNNER_ERROR")
+    if byte_count > invocation.output_limit_bytes:
+        raise CommandError("Runner output exceeded its configured limit.", 1, "RUNNER_ERROR")
     return ProcessResult(
         process.returncode,
         output.decode("utf-8", errors="replace"),
@@ -345,7 +355,10 @@ def uv_python(root: Path, target: str | None = None) -> tuple[str, ...]:
                     return (*argv, "--package", package, "python")
             if target.startswith("training/"):
                 return (*argv, "--project", "training", "python")
-            if not target.startswith(("tests/", "tools/", "packages/contracts/examples/")):
+            root_test_scope = target == "infrastructure/tests" or target.startswith(
+                ("tests/", "tools/", "packages/contracts/examples/", "infrastructure/tests/")
+            )
+            if not root_test_scope:
                 raise CommandError("Test path has no declared Python workspace/package mapping.")
         except (OSError, ValueError, KeyError, TypeError) as exc:
             raise CommandError("Invalid Python workspace/package mapping.") from exc
@@ -527,6 +540,101 @@ def invoke(
         }
 
 
+def traceability_result(
+    invocation: Invocation,
+    process: ProcessResult,
+    expected_commit: str,
+    expected_spec: str,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Validate the owning C05 semantic report without relabeling it as test execution."""
+    from tools import schema_validate
+
+    def read_artifact(path: Path, limit: int) -> bytes:
+        if (
+            not path.is_file()
+            or path.is_symlink()
+            or path.parent.is_symlink()
+            or path.resolve().parent != invocation.report.parent
+            or path.stat().st_size > limit
+        ):
+            raise CommandError("Traceability output is missing, oversized or unsafe.")
+        return path.read_bytes()
+
+    try:
+        machine = read_artifact(invocation.report, 4_194_304)
+        report = schema_validate.read_json(invocation.report)
+        if not schema_validate.valid_bound_document(
+            invocation.cwd, f"{COMMON}/traceability-report-binding.json", report
+        ):
+            raise CommandError("Traceability report violates its owning schema.")
+        readable = read_artifact(invocation.report.with_name("findings.txt"), 1_048_576)
+        findings = readable.decode("utf-8")
+        if not findings.strip():
+            raise CommandError("Traceability validator produced no readable findings.")
+        if any(
+            report[key] != expected
+            for key, expected in (
+                ("target", invocation.target),
+                ("binding_nonce", invocation.environment["OPENTOUR_RESULT_NONCE"]),
+                ("commit_sha", expected_commit),
+                ("spec_sha256", expected_spec),
+            )
+        ):
+            raise CommandError("Traceability report identity does not match this invocation.")
+        if (
+            source_identity(invocation.cwd)[0] != expected_commit
+            or hashlib.sha256((invocation.cwd / invocation.target).read_bytes()).hexdigest()
+            != expected_spec
+        ):
+            raise CommandError("Traceability source changed while validation was running.")
+        checks = report["checks"]
+        failed = [check for check in checks if check["status"] == "FAIL"]
+        if (
+            len({check["id"] for check in checks}) != len(checks)
+            or report["collected"] != len(checks)
+            or report["failed"] != len(failed)
+            or report["passed"] != len(checks) - len(failed)
+        ):
+            raise CommandError("Traceability check identity or counts are inconsistent.")
+        code = process.returncode
+        expected_status = "PASS" if code == 0 else "BLOCKED" if code == 3 else "FAIL"
+        expected_reason = {
+            0: None,
+            1: "TRACEABILITY_FAILED",
+            2: "INVALID_CONFIGURATION",
+            3: "MISSING_EXTERNAL_PREREQUISITE",
+        }.get(code)
+        if (
+            code not in (0, 1, 2, 3)
+            or report["exit_code"] != code
+            or report["status"] != expected_status
+            or report["reason_code"] != expected_reason
+            or (code == 0 and failed)
+            or (code != 0 and not failed)
+            or (
+                code == 3
+                and any(check["code"] != "MISSING_EXTERNAL_PREREQUISITE" for check in failed)
+            )
+        ):
+            raise CommandError("Traceability status does not match the observed check outcome.")
+        if not report["cleanup_complete"]:
+            raise CommandError("Traceability cleanup was not complete.", 1, "CLEANUP_FAILED")
+        return report, [
+            {
+                "type": "c05-traceability-report",
+                "sha256": hashlib.sha256(machine).hexdigest(),
+                "content": report,
+            },
+            {
+                "type": "c05-readable-findings",
+                "sha256": hashlib.sha256(readable).hexdigest(),
+                "content": findings,
+            },
+        ]
+    except (OSError, UnicodeError, RuntimeError) as exc:
+        raise CommandError("Traceability output could not be read safely.") from exc
+
+
 def _invoke(
     argv: Sequence[str],
     root: Path,
@@ -544,9 +652,31 @@ def _invoke(
         env = environment(root, uuid.uuid4().hex)
         env.update({"OPENTOUR_RESULT_FILE": str(report_path), "OPENTOUR_TEST_TARGET": target})
         args = list(argv)
+        expected_commit: str | None = None
+        expected_spec: str | None = None
         if consumer == "local_harness":
             args.extend(["--result-file", str(report_path)])
-        elif runner == "pytest":
+        elif runner in {"pytest", "semantic_validator"}:
+            if runner == "semantic_validator":
+                expected_commit = source_identity(root)[0]
+                if expected_commit is None:
+                    raise CommandError("Traceability requires a readable source commit.")
+                expected_spec = hashlib.sha256(
+                    schema_validate.local_file(root, target).read_bytes()
+                ).hexdigest()
+                # Validate the owned binding before executing the consumer. The empty value
+                # is intentionally not a report; binding/schema errors still fail here.
+                schema_validate.valid_bound_document(
+                    root, f"{COMMON}/traceability-report-binding.json", {}
+                )
+                args.extend(
+                    [
+                        "--result-file",
+                        str(report_path),
+                        "--findings-file",
+                        str(private_dir / "findings.txt"),
+                    ]
+                )
             guard = schema_validate.local_file(root, f"{COMMON}/python-unit/sitecustomize.py")
             try:
                 compile(guard.read_text(encoding="utf-8"), str(guard), "exec")
@@ -598,6 +728,8 @@ def _invoke(
         )
         process = run(invocation)
         report: dict[str, Any] | None = None
+        validation: dict[str, Any] | None = None
+        validation_artifacts: list[dict[str, Any]] = []
         reason: str | None = None
         if process.timed_out:
             code, reason = 1, "RUNNER_TIMEOUT"
@@ -605,6 +737,14 @@ def _invoke(
             code, reason = 1, "RUNNER_INTERRUPTED"
         elif not process.cleanup_complete:
             code, reason = 1, "CLEANUP_FAILED"
+        elif runner == "semantic_validator":
+            if process.returncode < 0:
+                raise CommandError("Traceability runner was interrupted.", 1, "RUNNER_INTERRUPTED")
+            assert expected_commit is not None and expected_spec is not None
+            validation, validation_artifacts = traceability_result(
+                invocation, process, expected_commit, expected_spec
+            )
+            code, reason = validation["exit_code"], validation["reason_code"]
         elif runner in {"pytest", "vitest", "playwright"}:
             if process.returncode < 0 and not report_path.is_file():
                 return {
@@ -662,6 +802,11 @@ def _invoke(
             "process_cleanup_complete": process.cleanup_complete,
             "tests": report,
         }
+        if validation:
+            summary["validation"] = {
+                key: value for key, value in validation.items() if key != "checks"
+            }
+            summary["artifacts"] = validation_artifacts
         if report:
             # Parameterized test names can contain submitted values. Preserve stable identity
             # for correlation without copying those values into the public command receipt.
@@ -873,9 +1018,17 @@ def dispatch(
             raise CommandError("Bootstrap contract profile has only the explicit all filter.")
         return [python_test(root, path_target(root, entry["path"]), run)]
     if command == "validate-spec":
-        raise CommandError(
-            "OPE-126 source/traceability validator is not integrated; no checks ran."
-        )
+        path_target(root, "tools/validate_spec.py")
+        target = path_target(root, TRACEABILITY_TARGET)
+        return [
+            invoke(
+                (*uv_python(root), "-m", "tools.validate_spec"),
+                root,
+                target,
+                "semantic_validator",
+                run,
+            )
+        ]
     if command == "test-contract":
         try:
             shape = schema_validate.validate_examples(root)

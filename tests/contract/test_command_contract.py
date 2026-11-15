@@ -191,6 +191,60 @@ def test_every_command_has_exact_smoke_case():
     assert set(runner.COMMAND_ARITY) == {case[0] for case in COMMAND_CASES}
 
 
+def test_actual_setup_recipe_preserves_json_in_merged_output(checkout):
+    """Run the actual recipe with a generated bootstrap producer, without reinstalling tools."""
+    shutil.copyfile(runner.ROOT / "justfile", checkout / "justfile")
+    receipt = {"issue_key": "OPE-122", "status": "PASS", "exit_code": 0}
+    expected = json.dumps(receipt, sort_keys=True) + "\n"
+    write(checkout, "tools/bootstrap.py", f"print({expected.rstrip()!r})\n")
+    invocation = runner.Invocation(
+        ("just", "setup"),
+        checkout,
+        runner.environment(checkout, "a" * 32),
+        checkout / "unused-result.json",
+        "setup",
+        "setup",
+        timeout=10,
+    )
+    observed = runner.execute(invocation)
+    assert observed.returncode == 0
+    assert observed.cleanup_complete is True
+    assert observed.stdout == expected
+    assert json.loads(observed.stdout) == receipt
+
+
+@pytest.mark.parametrize("command,args,_", [case for case in COMMAND_CASES if case[0] != "setup"])
+def test_actual_uv_recipes_enable_build_hashes_and_preserve_merged_json(checkout, command, args, _):
+    """Actual pinned uv/just transport with a generated producer, not product acceptance."""
+    shutil.copyfile(runner.ROOT / "justfile", checkout / "justfile")
+    shutil.copyfile(runner.ROOT / "uv.lock", checkout / "uv.lock")
+    (checkout / ".venv").symlink_to((runner.ROOT / ".venv").resolve(), target_is_directory=True)
+    assert "require-build-hashes = true" in (checkout / "pyproject.toml").read_text()
+    write(
+        checkout,
+        "tools/test_runner.py",
+        "import json,sys\n"
+        "print(json.dumps({'command':sys.argv[1:],'exit_code':0,'status':'PASS'},sort_keys=True))\n",
+    )
+    expected = json.dumps(
+        {"command": [command, *args], "exit_code": 0, "status": "PASS"}, sort_keys=True
+    )
+    invocation = runner.Invocation(
+        ("just", command, *args),
+        checkout,
+        runner.environment(checkout, "a" * 32),
+        checkout / "unused-result.json",
+        command,
+        "setup",
+        timeout=10,
+    )
+    observed = runner.execute(invocation)
+    assert observed.returncode == 0
+    assert observed.cleanup_complete is True
+    assert observed.stdout == expected + "\n"
+    assert json.loads(observed.stdout)["command"] == [command, *args]
+
+
 @pytest.mark.parametrize(
     "path",
     [
@@ -551,6 +605,76 @@ def test_package_routing_consumes_workspace_and_keeps_training_separate(checkout
 
 
 @pytest.mark.parametrize(
+    "target",
+    [
+        "infrastructure/tests/test_ci_oidc_trust.py",
+        "infrastructure/tests",
+        "infrastructure/tests/nested/test with spaces.py",
+    ],
+)
+def test_infrastructure_test_scope_uses_root_workspace(checkout, target):
+    file = target if target.endswith(".py") else target + "/test_ci_oidc_trust.py"
+    write(checkout, file, "def test_one(): assert True\n")
+    fixture = FixtureRunner()
+    result = runner.run_command("test-python", [target], checkout, fixture)
+    assert result["exit_code"] == 0
+    assert fixture.calls[0].argv[:6] == runner.uv_python(checkout)
+    assert fixture.calls[0].argv[-2:] == ("--", target)
+
+
+@pytest.mark.parametrize(
+    "target",
+    [
+        "infrastructure",
+        "infrastructure/test_ci_oidc_trust.py",
+        "infrastructure/tests.py",
+        "infrastructure/tests-extra/test_ci_oidc_trust.py",
+        "infrastructure/tests/../test_ci_oidc_trust.py",
+    ],
+)
+def test_infrastructure_non_test_scope_rejected_before_execution(checkout, target):
+    write(checkout, "infrastructure/tests/test_ci_oidc_trust.py")
+    if target.endswith(".py") and ".." not in target:
+        write(checkout, target)
+    fixture = FixtureRunner()
+    result = runner.run_command("test-python", [target], checkout, fixture)
+    assert result["exit_code"] == 2
+    assert fixture.calls == []
+
+
+def test_infrastructure_test_scope_rejects_symlink_escape(checkout):
+    external_scope = write(checkout, "infrastructure/runtime.py")
+    link = checkout / "infrastructure/tests/test_ci_oidc_trust.py"
+    link.parent.mkdir()
+    link.symlink_to(external_scope)
+    fixture = FixtureRunner()
+    result = runner.run_command(
+        "test-python", [link.relative_to(checkout).as_posix()], checkout, fixture
+    )
+    assert result["exit_code"] == 2
+    assert fixture.calls == []
+
+
+def test_actual_infrastructure_route_uses_root_environment(checkout):
+    qualified_environment = runner.ROOT / ".venv"
+    shutil.copyfile(runner.ROOT / "uv.lock", checkout / "uv.lock")
+    (checkout / ".venv").symlink_to(qualified_environment.resolve(), target_is_directory=True)
+    target = "infrastructure/tests/test_ci_oidc_trust.py"
+    write(
+        checkout,
+        target,
+        "import sys\nfrom pathlib import Path\n"
+        f"EXPECTED_ENVIRONMENT = Path({str(qualified_environment.resolve())!r})\n"
+        "def test_root_environment():\n"
+        "    assert Path(sys.prefix).resolve() == EXPECTED_ENVIRONMENT\n",
+    )
+    result = runner.run_command("test-python", [target], checkout)
+    assert result["exit_code"] == 0, result
+    assert result["steps"][0]["tests"]["collected"] == 1
+    assert result["steps"][0]["tests"]["passed"] == 1
+
+
+@pytest.mark.parametrize(
     "outcome,expected,counts",
     [("pass", 0, (1, 0, 0)), ("fail", 1, (0, 1, 0)), ("skip", 1, (0, 0, 1))],
 )
@@ -784,6 +908,85 @@ def test_runner_kills_descendants_even_when_leader_exits_successfully(checkout):
                 os.kill(int(pid_file.read_text()), signal.SIGKILL)
             except ProcessLookupError:
                 pass
+
+
+@pytest.mark.parametrize(
+    "limit,size,passes",
+    [
+        (None, 1_048_576, True),
+        (None, 1_048_577, False),
+        (2_097_152, 1_048_577, True),
+        (2_097_152, 2_097_152, True),
+        (2_097_152, 2_097_153, False),
+    ],
+)
+def test_actual_runner_output_limit_counts_both_streams(checkout, limit, size, passes):
+    first = size // 2
+    invocation = runner.Invocation(
+        (
+            sys.executable,
+            "-c",
+            "import sys;"
+            f"sys.stdout.buffer.write(b'a'*{first});sys.stdout.flush();"
+            f"sys.stderr.buffer.write(b'b'*{size - first});sys.stderr.flush()",
+        ),
+        checkout,
+        runner.environment(checkout, "a" * 32),
+        checkout / "unused.json",
+        "controlled-output",
+        "setup",
+        timeout=10,
+    )
+    assert invocation.output_limit_bytes == 1_048_576
+    if limit is not None:
+        invocation = replace(invocation, output_limit_bytes=limit)
+    if passes:
+        result = runner.execute(invocation)
+        assert result.returncode == 0 and result.cleanup_complete
+        assert len(result.stdout.encode()) == size
+        assert result.stdout == "a" * first + "b" * (size - first)
+    else:
+        with pytest.raises(runner.CommandError) as error:
+            runner.execute(invocation)
+        assert error.value.code == 1 and error.value.reason == "RUNNER_ERROR"
+
+
+@pytest.mark.parametrize("limit,passes", [(4, True), (3, False)])
+def test_actual_runner_output_limit_counts_utf8_bytes(checkout, limit, passes):
+    invocation = runner.Invocation(
+        (sys.executable, "-c", "import sys;sys.stdout.buffer.write(bytes([195,169])*2)"),
+        checkout,
+        runner.environment(checkout, "a" * 32),
+        checkout / "unused.json",
+        "controlled-output",
+        "setup",
+        timeout=10,
+        output_limit_bytes=limit,
+    )
+    if passes:
+        result = runner.execute(invocation)
+        assert result.stdout == "éé" and len(result.stdout.encode()) == 4
+    else:
+        with pytest.raises(runner.CommandError) as error:
+            runner.execute(invocation)
+        assert error.value.code == 1
+
+
+@pytest.mark.parametrize("limit", [0, -1, 2_097_153, True, 1.5, "2097152"])
+def test_invalid_runner_output_limit_refuses_before_launch(checkout, monkeypatch, limit):
+    monkeypatch.setattr(runner, "_MANAGED_POPEN", lambda *a, **k: pytest.fail("Child was launched"))
+    invocation = runner.Invocation(
+        (sys.executable, "-c", "pass"),
+        checkout,
+        {},
+        checkout / "unused.json",
+        "controlled-output",
+        "setup",
+        output_limit_bytes=limit,
+    )
+    with pytest.raises(runner.CommandError) as error:
+        runner.execute(invocation)
+    assert error.value.code == 2
 
 
 def test_process_group_permission_uncertainty_is_structured_nonpass(checkout, monkeypatch):
@@ -1208,3 +1411,251 @@ def test_local_profile_rejects_filter_and_absent_adapter_before_execution(checko
             == 2
         )
     assert not fixture.calls
+
+
+@pytest.fixture
+def traceability_checkout(checkout, monkeypatch):
+    """Controlled C05 transport fixtures; the owning validator proves actual metadata checks."""
+    directory = checkout / "docs/specification"
+    directory.mkdir(parents=True)
+    shutil.copyfile(
+        runner.ROOT / "docs/specification/traceability-report.schema.json",
+        directory / "traceability-report.schema.json",
+    )
+    write(checkout, runner.TRACEABILITY_TARGET, "{}\n")
+    write(checkout, "tools/validate_spec.py", "# Controlled protocol fixture only.\n")
+    monkeypatch.setattr(runner, "source_identity", lambda root: ("a" * 40, False))
+    return checkout
+
+
+class TraceabilityRunner:
+    def __init__(self, code=0, mutate=None, artifacts=None):
+        self.code = code
+        self.mutate = mutate
+        self.artifacts = artifacts
+        self.calls = []
+
+    def __call__(self, invocation):
+        self.calls.append(invocation)
+        reason = {
+            0: None,
+            1: "TRACEABILITY_FAILED",
+            2: "INVALID_CONFIGURATION",
+            3: "MISSING_EXTERNAL_PREREQUISITE",
+        }[self.code]
+        report = {
+            "schema_version": "opentour.traceability-report.v1",
+            "runner": "semantic_validator",
+            "target": runner.TRACEABILITY_TARGET,
+            "binding_nonce": invocation.environment["OPENTOUR_RESULT_NONCE"],
+            "commit_sha": "a" * 40,
+            "spec_sha256": hashlib.sha256(
+                (invocation.cwd / runner.TRACEABILITY_TARGET).read_bytes()
+            ).hexdigest(),
+            "kind": "simulated",
+            "scope": "bootstrap_metadata_conformance",
+            "product_acceptance": "NOT_RUN",
+            "checks": [
+                {
+                    "id": "controlled-check",
+                    "owner": "OPE-126",
+                    "status": "FAIL" if self.code else "PASS",
+                    "code": reason or "COMPLETE",
+                    "subject": "generated-sentinel",
+                }
+            ],
+            "collected": 1,
+            "passed": int(self.code == 0),
+            "failed": int(self.code != 0),
+            "status": "PASS" if self.code == 0 else "BLOCKED" if self.code == 3 else "FAIL",
+            "exit_code": self.code,
+            "reason_code": reason,
+            "cleanup_complete": True,
+        }
+        if self.mutate:
+            self.mutate(report, invocation)
+        invocation.report.write_text(json.dumps(report))
+        findings = invocation.report.with_name("findings.txt")
+        findings.write_text("Controlled fixture findings; owner OPE-126.\n")
+        if self.artifacts:
+            self.artifacts(invocation.report, findings)
+        return runner.ProcessResult(self.code)
+
+
+@pytest.mark.parametrize("code", [0, 1, 2, 3])
+def test_traceability_consumer_preserves_semantic_outcomes_and_artifacts(
+    traceability_checkout, code
+):
+    fixture = TraceabilityRunner(code)
+    result = runner.run_command("validate-spec", [], traceability_checkout, fixture)
+    assert result["exit_code"] == code, result
+    invocation = fixture.calls[0]
+    assert invocation.runner == "semantic_validator"
+    assert invocation.argv[:8] == (
+        *runner.uv_python(traceability_checkout),
+        "-m",
+        "tools.validate_spec",
+    )
+    assert invocation.environment["OPENTOUR_UNIT_GUARD"] == "1"
+    step = result["steps"][0]
+    assert step["tests"] is None
+    assert step["validation"]["collected"] == 1
+    assert "checks" not in step["validation"]
+    artifacts = step["artifacts"]
+    assert artifacts[0]["content"]["product_acceptance"] == "NOT_RUN"
+    assert (
+        hashlib.sha256(json.dumps(artifacts[0]["content"]).encode()).hexdigest()
+        == artifacts[0]["sha256"]
+    )
+    assert hashlib.sha256(artifacts[1]["content"].encode()).hexdigest() == artifacts[1]["sha256"]
+    assert not invocation.report.parent.exists()
+    assert result["product_acceptance"] == "NOT_RUN"
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        lambda r, i: r.update(binding_nonce="b" * 32),
+        lambda r, i: r.update(commit_sha="b" * 40),
+        lambda r, i: r.update(spec_sha256="b" * 64),
+        lambda r, i: r.update(target="other.json"),
+        lambda r, i: r.update(passed=2),
+        lambda r, i: r.update(checks=[], collected=0, passed=0),
+        lambda r, i: r.update(checks=r["checks"] * 2, collected=2, passed=2),
+        lambda r, i: r.update(exit_code=1),
+        lambda r, i: r.update(status="FAIL"),
+        lambda r, i: r.update(product_acceptance="PASS"),
+        lambda r, i: r.update(kind="provider_integration"),
+        lambda r, i: r.update(unregistered="field"),
+        lambda r, i: (i.cwd / runner.TRACEABILITY_TARGET).write_text('{"changed":true}'),
+    ],
+)
+def test_traceability_report_identity_counts_and_scope_fail_closed(traceability_checkout, mutation):
+    result = runner.run_command(
+        "validate-spec", [], traceability_checkout, TraceabilityRunner(mutate=mutation)
+    )
+    assert result["exit_code"] == 2, result
+
+
+def test_traceability_blocked_cannot_hide_a_semantic_failure(traceability_checkout):
+    def semantic_failure(report, invocation):
+        report["checks"][0]["code"] = "MISSING_ASSERTION"
+
+    result = runner.run_command(
+        "validate-spec", [], traceability_checkout, TraceabilityRunner(3, semantic_failure)
+    )
+    assert result["exit_code"] == 2
+
+
+def test_traceability_incomplete_cleanup_cannot_pass(traceability_checkout):
+    result = runner.run_command(
+        "validate-spec",
+        [],
+        traceability_checkout,
+        TraceabilityRunner(mutate=lambda r, i: r.update(cleanup_complete=False)),
+    )
+    assert result["exit_code"] == 1
+    assert result["reason_code"] == "CLEANUP_FAILED"
+
+
+@pytest.mark.parametrize("artifact", ["machine", "readable"])
+@pytest.mark.parametrize("defect", ["missing", "empty", "oversize", "symlink", "invalid"])
+def test_traceability_artifacts_must_be_fresh_bounded_valid_files(
+    traceability_checkout, artifact, defect
+):
+    def damage(machine, readable):
+        target = machine if artifact == "machine" else readable
+        if defect == "missing":
+            target.unlink()
+        elif defect == "empty":
+            target.write_bytes(b"")
+        elif defect == "oversize":
+            target.write_bytes(b" " * (4_194_305 if artifact == "machine" else 1_048_577))
+        elif defect == "symlink":
+            target.unlink()
+            target.symlink_to(traceability_checkout / runner.TRACEABILITY_TARGET)
+        else:
+            target.write_bytes(b"\xff")
+
+    result = runner.run_command(
+        "validate-spec", [], traceability_checkout, TraceabilityRunner(artifacts=damage)
+    )
+    assert result["exit_code"] == 2
+
+
+def test_traceability_binding_is_verified_before_child_execution(traceability_checkout):
+    write(traceability_checkout, "docs/specification/traceability-report.schema.json", "[]")
+    fixture = TraceabilityRunner()
+    result = runner.run_command("validate-spec", [], traceability_checkout, fixture)
+    assert result["exit_code"] == 2
+    assert fixture.calls == []
+
+
+def test_traceability_interrupted_child_is_execution_failure(traceability_checkout):
+    result = runner.run_command(
+        "validate-spec", [], traceability_checkout, lambda invocation: runner.ProcessResult(-9)
+    )
+    assert result["exit_code"] == 1
+    assert result["reason_code"] == "RUNNER_INTERRUPTED"
+
+
+def test_traceability_source_commit_change_is_rejected(traceability_checkout, monkeypatch):
+    calls = 0
+
+    def identity(root):
+        nonlocal calls
+        calls += 1
+        return ("a" if calls <= 2 else "b") * 40, False
+
+    monkeypatch.setattr(runner, "source_identity", identity)
+    result = runner.run_command("validate-spec", [], traceability_checkout, TraceabilityRunner())
+    assert result["exit_code"] == 2
+
+
+def test_traceability_passing_status_cannot_hide_failed_checks(traceability_checkout):
+    def false_pass(report, invocation):
+        report["checks"][0]["status"] = "FAIL"
+        report.update(passed=0, failed=1)
+
+    result = runner.run_command(
+        "validate-spec", [], traceability_checkout, TraceabilityRunner(mutate=false_pass)
+    )
+    assert result["exit_code"] == 2
+
+
+@pytest.mark.parametrize("code", [0, 1, 2])
+def test_actual_semantic_transport_with_controlled_child(traceability_checkout, code):
+    """Actual CLI transport/startup guard only; these generated checks are not C05 acceptance."""
+    root = traceability_checkout
+    shutil.copyfile(runner.ROOT / "uv.lock", root / "uv.lock")
+    (root / ".venv").symlink_to((runner.ROOT / ".venv").resolve(), target_is_directory=True)
+
+    def actual(invocation):
+        TraceabilityRunner(code)(invocation)
+        template = invocation.report.read_text()
+        invocation.report.unlink()
+        invocation.report.with_name("findings.txt").unlink()
+        write(
+            root,
+            "tools/validate_spec.py",
+            "import argparse,json,os,subprocess\nfrom pathlib import Path\n"
+            "assert subprocess._opentour_unit_guard_pid == os.getpid()\n"
+            "p=argparse.ArgumentParser()\n"
+            "p.add_argument('--result-file',required=True)\n"
+            "p.add_argument('--findings-file',required=True)\n"
+            "a=p.parse_args()\n"
+            "assert a.result_file == os.environ['OPENTOUR_RESULT_FILE']\n"
+            "assert Path.cwd() == Path(os.environ['OPENTOUR_REPOSITORY_ROOT'])\n"
+            f"report=json.loads({template!r})\n"
+            "report['binding_nonce']=os.environ['OPENTOUR_RESULT_NONCE']\n"
+            "report['target']=os.environ['OPENTOUR_TEST_TARGET']\n"
+            "Path(a.result_file).write_text(json.dumps(report))\n"
+            "Path(a.findings_file).write_text('Generated controlled check: OPE-126.\\n')\n"
+            f"raise SystemExit({code})\n",
+        )
+        return runner.execute(replace(invocation, timeout=20))
+
+    result = runner.run_command("validate-spec", [], root, actual)
+    assert result["exit_code"] == code, result
+    assert result["steps"][0]["process_cleanup_complete"] is True
+    assert result["steps"][0]["validation"]["collected"] == 1
