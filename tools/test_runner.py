@@ -3,13 +3,11 @@
 from __future__ import annotations
 
 import hashlib
-import inspect
 import json
 import os
 import re
 import selectors
 import signal
-import socket
 import subprocess
 import sys
 import tempfile
@@ -25,8 +23,7 @@ from typing import Any
 from tools import schema_validate
 
 ROOT = Path(__file__).resolve().parents[1]
-_MANAGED_POPEN = subprocess.Popen
-_POPEN_SIGNATURE = inspect.signature(_MANAGED_POPEN)
+_MANAGED_POPEN = getattr(subprocess, "_opentour_managed_popen", subprocess.Popen)
 COMMON = "packages/contracts/common"
 MODES = ("customer_controlled", "opentour_managed")
 COMMAND_ARITY = {
@@ -519,7 +516,15 @@ def _invoke(
         env = environment(root, uuid.uuid4().hex)
         env.update({"OPENTOUR_RESULT_FILE": str(report_path), "OPENTOUR_TEST_TARGET": target})
         args = list(argv)
-        if runner == "playwright":
+        if runner == "pytest":
+            guard = schema_validate.local_file(root, f"{COMMON}/python-unit/sitecustomize.py")
+            try:
+                compile(guard.read_text(encoding="utf-8"), str(guard), "exec")
+            except (OSError, UnicodeError, SyntaxError) as exc:
+                raise CommandError("Invalid inherited unit startup guard.") from exc
+            env["PYTHONPATH"] = os.pathsep.join((str(guard.parent), str(root)))
+            env["OPENTOUR_UNIT_GUARD"] = "1"
+        elif runner == "playwright":
             args.extend(["--result-file", str(report_path)])
         elif runner == "vitest":
             args[args.index("REPORT")] = str(report_path)
@@ -896,51 +901,14 @@ def main(argv: Sequence[str] | None = None) -> int:
 # Pytest transport plugin: every collected case appears in the final report, including skipped
 # and unexecuted cases. This is not a provider/isolation harness and never opens network authority.
 _items: dict[str, dict[str, Any]] = {}
-_guard_installed = False
 
 
 def install_unit_guard() -> None:
-    """Install before pytest loads conftest; retain the guard through process teardown."""
-    global _guard_installed
-    if _guard_installed or not os.environ.get("OPENTOUR_RESULT_FILE"):
+    """Verify the inherited startup preload before pytest loads any configuration."""
+    if not os.environ.get("OPENTOUR_RESULT_FILE"):
         return
-    _guard_installed = True
-
-    def denied(*args: Any, **kwargs: Any) -> Any:
-        raise OSError("Network access denied by unit/contract command boundary")
-
-    socket.socket.connect = denied  # type: ignore[method-assign]
-    socket.socket.connect_ex = denied  # type: ignore[method-assign]
-    for name in (
-        "getaddrinfo",
-        "gethostbyname",
-        "gethostbyname_ex",
-        "gethostbyaddr",
-        "getnameinfo",
-    ):
-        setattr(socket, name, denied)
-    for name in ("sendto", "sendmsg"):
-        if hasattr(socket.socket, name):
-            setattr(socket.socket, name, denied)
-
-    def detached_denied(*args: Any, **kwargs: Any) -> Any:
-        raise OSError("Detached child creation denied by unit/contract command boundary")
-
-    def guarded_popen(*args: Any, **kwargs: Any) -> Any:
-        options = _POPEN_SIGNATURE.bind_partial(*args, **kwargs).arguments
-        if (
-            options.get("start_new_session")
-            or options.get("preexec_fn") is not None
-            or options.get("process_group", -1) not in (None, -1)
-            or options.get("creationflags", 0)
-        ):
-            detached_denied()
-        return _MANAGED_POPEN(*args, **kwargs)
-
-    subprocess.Popen = guarded_popen  # type: ignore[assignment,misc]
-    for name in ("setsid", "setpgid"):
-        if hasattr(os, name):
-            setattr(os, name, detached_denied)
+    if getattr(subprocess, "_opentour_unit_guard_pid", None) != os.getpid():
+        raise RuntimeError("Required inherited unit startup guard did not load")
 
 
 def pytest_sessionstart(session: Any) -> None:

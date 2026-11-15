@@ -39,8 +39,11 @@ Python unit/contract calls deny TCP, UDP and DNS through a test-process guard.
 Vitest receives only the wrapper-owned Node network preload. These are test
 discipline boundaries, not protection against hostile code. Browser local fixture
 networking belongs to OPE-127; actual provider integration belongs to its owner.
-The Python guard loads before initial conftest imports and remains active through
-teardown. Python subprocess session/group detachment and Node detached-child APIs
+The standard-library-only Python startup preload loads before initial conftest
+imports, remains active through teardown and propagates to ordinary Python helpers
+through the wrapper-owned PYTHONPATH. A failed installation exits before user code;
+the pytest plugin also verifies the current process loaded the guard. Python
+subprocess session/group detachment and Node detached-child APIs
 are denied in these default unit profiles before configuration/test code executes.
 Wrapper-managed child groups are bounded and leftover group members are killed.
 This does not establish containment of arbitrary native programs deliberately

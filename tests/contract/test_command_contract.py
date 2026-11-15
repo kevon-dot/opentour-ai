@@ -833,3 +833,86 @@ def test_actual_node_detached_child_preload_denies_before_config(checkout):
                 os.kill(int(pid_file.read_text()), signal.SIGKILL)
             except ProcessLookupError:
                 pass
+
+
+@pytest.mark.parametrize("location", ["conftest", "test_body"])
+def test_ordinary_nested_python_helper_inherits_detachment_guard(checkout, location):
+    pid_file = checkout / "ESCAPED_CHILD.pid"
+    write(
+        checkout,
+        "tests/helper.py",
+        "import pathlib,subprocess,sys\n"
+        "p=subprocess.Popen([sys.executable,'-c','import time; time.sleep(10)'],"
+        "start_new_session=True,stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,"
+        "stderr=subprocess.DEVNULL)\n"
+        "pathlib.Path('ESCAPED_CHILD.pid').write_text(str(p.pid))\n",
+    )
+    program = (
+        "import subprocess,sys\nsubprocess.run([sys.executable,'tests/helper.py'],check=True)\n"
+    )
+    target = "tests/contract/test_one.py"
+    if location == "conftest":
+        write(checkout, "tests/conftest.py", program)
+    else:
+        write(
+            checkout,
+            target,
+            "def test_helper():\n"
+            + "\n".join("    " + line for line in program.splitlines())
+            + "\n",
+        )
+    try:
+        result = runner.run_command("test-python", [target], checkout, local_pytest)
+        assert result["exit_code"] == (2 if location == "conftest" else 1)
+        assert not pid_file.exists()
+    finally:
+        if pid_file.exists():
+            try:
+                os.kill(int(pid_file.read_text()), signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+
+def test_ordinary_nested_python_helper_inherits_network_guard(checkout):
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as receiver:
+        receiver.bind(("127.0.0.1", 0))
+        receiver.settimeout(0.1)
+        port = receiver.getsockname()[1]
+        write(
+            checkout,
+            "tests/helper.py",
+            "import socket\nsocket.socket(socket.AF_INET,socket.SOCK_DGRAM).sendto("
+            f"b'sentinel-helper',('127.0.0.1',{port}))\n",
+        )
+        target = "tests/contract/test_helper.py"
+        write(
+            checkout,
+            target,
+            "import subprocess,sys\ndef test_helper():\n"
+            "    subprocess.run([sys.executable,'tests/helper.py'],check=True)\n",
+        )
+        result = runner.run_command("test-python", [target], checkout, local_pytest)
+        assert result["exit_code"] == 1
+        with pytest.raises(TimeoutError):
+            receiver.recvfrom(1024)
+
+
+def test_startup_guard_installation_failure_stops_before_test_code(checkout):
+    guard = checkout / runner.COMMON / "python-unit/sitecustomize.py"
+    guard.write_text(
+        guard.read_text().replace(
+            "def install() -> None:\n",
+            "def install() -> None:\n    raise RuntimeError('sentinel-private-startup')\n",
+        )
+    )
+    target = "tests/contract/test_marker.py"
+    write(
+        checkout,
+        target,
+        "from pathlib import Path\nPath('UNGUARDED_EXECUTED').touch()\n"
+        "def test_one(): assert True\n",
+    )
+    result = runner.run_command("test-python", [target], checkout, local_pytest)
+    assert result["exit_code"] == 2 and result["steps"][0]["raw_exit_code"] == 2
+    assert not (checkout / "UNGUARDED_EXECUTED").exists()
+    assert "sentinel-private-startup" not in json.dumps(result)
