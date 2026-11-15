@@ -23,7 +23,7 @@ members = ["services/control-api", "services/cell-runtime", "services/audit-jour
 exclude = ["training"]
 
 [dependency-groups]
-dev = ["pytest==9.2.0", "ruff==0.17.5", "mypy==2.4.1", "jsonschema==4.26.0"]
+dev = ["pytest==9.2.0", "ruff==0.17.5", "mypy==2.4.1", "jsonschema==4.26.0", "cfn-lint==1.60.1"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests/contract", "services/control-api/tests", "services/cell-runtime/tests", "services/audit-journal/tests"]
