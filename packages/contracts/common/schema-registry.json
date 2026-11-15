@@ -13,6 +13,12 @@
       "file": "authority.schema.json",
       "sha256": "a4bb5447eea425113f8cdfde46101db753a25b3a1538068fc388a7cec7d1a340",
       "source_path": "specification/2026-11-12/schemas/authority.schema.json"
+    },
+    {
+      "id": "urn:opentour:test-result:1.0",
+      "file": "test-result.schema.json",
+      "sha256": "efaa4b57c71651c7879f36423049b8db8052d7952365e5160388de2291b8d137",
+      "source_path": "packages/contracts/common/test-result.schema.json"
     }
   ]
 }

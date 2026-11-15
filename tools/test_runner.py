@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 import os
 import re
@@ -21,11 +22,11 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from jsonschema import Draft202012Validator  # type: ignore[import-untyped]
-
 from tools import schema_validate
 
 ROOT = Path(__file__).resolve().parents[1]
+_MANAGED_POPEN = subprocess.Popen
+_POPEN_SIGNATURE = inspect.signature(_MANAGED_POPEN)
 COMMON = "packages/contracts/common"
 MODES = ("customer_controlled", "opentour_managed")
 COMMAND_ARITY = {
@@ -90,7 +91,7 @@ Executor = Callable[[Invocation], ProcessResult]
 def execute(invocation: Invocation) -> ProcessResult:
     """Bound child lifetime and output without shell interpolation or unbounded log files."""
     try:
-        process = subprocess.Popen(
+        process = _MANAGED_POPEN(
             invocation.argv,
             cwd=invocation.cwd,
             env=invocation.environment,
@@ -340,10 +341,8 @@ def validate_report(
     process: ProcessResult,
     root: Path,
 ) -> tuple[int, str | None]:
-    schema = schema_validate.read_json(
-        schema_validate.local_file(root, f"{COMMON}/test-result.schema.json")
-    )
-    if not Draft202012Validator(schema).is_valid(report):
+    registry = schema_validate.schema_registry(root)
+    if not schema_validate.valid_instance("urn:opentour:test-result:1.0", report, registry):
         raise CommandError("Runner report is missing required fields or has an invalid shape.")
     if any(
         report[key] != expected
@@ -878,7 +877,7 @@ def run_command(
         "limitations": [
             "Command/fixture evidence only; no provider or customer gate acceptance",
             "Dirty sources do not establish reviewed commit qualification",
-            "Python socket guard is a test boundary, not operating-system isolation",
+            "Unit process/network guards are test discipline, not operating-system isolation",
         ],
     }
 
@@ -897,18 +896,15 @@ def main(argv: Sequence[str] | None = None) -> int:
 # Pytest transport plugin: every collected case appears in the final report, including skipped
 # and unexecuted cases. This is not a provider/isolation harness and never opens network authority.
 _items: dict[str, dict[str, Any]] = {}
-_socket_connect: Any = None
-_socket_connect_ex: Any = None
-_network_functions: dict[str, Any] = {}
-_socket_methods: dict[str, Any] = {}
+_guard_installed = False
 
 
-def pytest_sessionstart(session: Any) -> None:
-    global _socket_connect, _socket_connect_ex
-    _items.clear()
-    if not os.environ.get("OPENTOUR_RESULT_FILE"):
+def install_unit_guard() -> None:
+    """Install before pytest loads conftest; retain the guard through process teardown."""
+    global _guard_installed
+    if _guard_installed or not os.environ.get("OPENTOUR_RESULT_FILE"):
         return
-    _socket_connect, _socket_connect_ex = socket.socket.connect, socket.socket.connect_ex
+    _guard_installed = True
 
     def denied(*args: Any, **kwargs: Any) -> Any:
         raise OSError("Network access denied by unit/contract command boundary")
@@ -922,12 +918,34 @@ def pytest_sessionstart(session: Any) -> None:
         "gethostbyaddr",
         "getnameinfo",
     ):
-        _network_functions[name] = getattr(socket, name)
         setattr(socket, name, denied)
     for name in ("sendto", "sendmsg"):
         if hasattr(socket.socket, name):
-            _socket_methods[name] = getattr(socket.socket, name)
             setattr(socket.socket, name, denied)
+
+    def detached_denied(*args: Any, **kwargs: Any) -> Any:
+        raise OSError("Detached child creation denied by unit/contract command boundary")
+
+    def guarded_popen(*args: Any, **kwargs: Any) -> Any:
+        options = _POPEN_SIGNATURE.bind_partial(*args, **kwargs).arguments
+        if (
+            options.get("start_new_session")
+            or options.get("preexec_fn") is not None
+            or options.get("process_group", -1) not in (None, -1)
+            or options.get("creationflags", 0)
+        ):
+            detached_denied()
+        return _MANAGED_POPEN(*args, **kwargs)
+
+    subprocess.Popen = guarded_popen  # type: ignore[assignment,misc]
+    for name in ("setsid", "setpgid"):
+        if hasattr(os, name):
+            setattr(os, name, detached_denied)
+
+
+def pytest_sessionstart(session: Any) -> None:
+    _items.clear()
+    install_unit_guard()
 
 
 def pytest_collection_finish(session: Any) -> None:
@@ -953,15 +971,6 @@ def pytest_runtest_logreport(report: Any) -> None:
 
 
 def pytest_sessionfinish(session: Any, exitstatus: int) -> None:
-    if _socket_connect is not None:
-        socket.socket.connect = _socket_connect  # type: ignore[method-assign]
-        socket.socket.connect_ex = _socket_connect_ex  # type: ignore[method-assign]
-    for name, original in _network_functions.items():
-        setattr(socket, name, original)
-    for name, original in _socket_methods.items():
-        setattr(socket.socket, name, original)
-    _network_functions.clear()
-    _socket_methods.clear()
     destination = os.environ.get("OPENTOUR_RESULT_FILE")
     if not destination:
         return
@@ -973,6 +982,10 @@ def pytest_sessionfinish(session: Any, exitstatus: int) -> None:
     with Path(destination).open("x", encoding="utf-8") as stream:
         json.dump(result, stream, sort_keys=True)
 
+
+# Explicit -p loading happens before initial conftest import. Do not wait for
+# pytest_sessionstart: conftest/module imports are part of the protected unit run.
+install_unit_guard()
 
 if __name__ == "__main__":
     raise SystemExit(main())

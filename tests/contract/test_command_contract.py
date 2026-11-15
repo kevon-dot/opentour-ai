@@ -7,6 +7,7 @@ import json
 import os
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 from dataclasses import replace
@@ -737,3 +738,98 @@ def test_invalid_unhashable_profile_kind_is_configuration_failure(checkout, key)
 
     update_manifest(checkout, malformed)
     assert runner.run_command("lint", [], checkout, FixtureRunner())["exit_code"] == 2
+
+
+@pytest.mark.parametrize("document", [[], None, {"$id": "urn:opentour:test-result:1.0", "type": 7}])
+def test_malformed_transport_schema_emits_configuration_error(checkout, document):
+    path = checkout / runner.COMMON / "test-result.schema.json"
+    path.write_text(json.dumps(document))
+    manifest_path = checkout / runner.COMMON / "schema-registry.json"
+    registry = json.loads(manifest_path.read_text())
+    for entry in registry["schemas"]:
+        if entry["file"] == path.name:
+            entry["sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
+    manifest_path.write_text(json.dumps(registry))
+    result = runner.run_command(
+        "test-python", ["tests/contract/test_one.py"], checkout, FixtureRunner()
+    )
+    assert result["exit_code"] == 2 and result["steps"][0]["raw_exit_code"] == 0
+
+
+def test_actual_network_guard_precedes_initial_conftest_import(checkout):
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as receiver:
+        receiver.bind(("127.0.0.1", 0))
+        receiver.settimeout(0.1)
+        port = receiver.getsockname()[1]
+        write(
+            checkout,
+            "tests/conftest.py",
+            "import socket\nsocket.socket(socket.AF_INET,socket.SOCK_DGRAM).sendto("
+            f"b'sentinel-conftest',('127.0.0.1',{port}))\n",
+        )
+        result = runner.run_command(
+            "test-python", ["tests/contract/test_one.py"], checkout, local_pytest
+        )
+        assert result["exit_code"] == 2
+        with pytest.raises(TimeoutError):
+            receiver.recvfrom(1024)
+
+
+@pytest.mark.parametrize("location", ["conftest", "test_body"])
+@pytest.mark.parametrize("option", ["start_new_session=True", "process_group=0"])
+def test_actual_python_detached_child_creation_is_denied_before_launch(checkout, location, option):
+    pid_file = checkout / "ESCAPED_CHILD.pid"
+    program = (
+        "import pathlib,subprocess,sys\n"
+        f"p=subprocess.Popen([sys.executable,'-c','import time; time.sleep(10)'],{option},"
+        "stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)\n"
+        "pathlib.Path('ESCAPED_CHILD.pid').write_text(str(p.pid))\n"
+    )
+    target = "tests/contract/test_one.py"
+    if location == "conftest":
+        write(checkout, "tests/conftest.py", program)
+    else:
+        write(
+            checkout,
+            target,
+            "def test_detach():\n"
+            + "\n".join("    " + line for line in program.splitlines())
+            + "\n",
+        )
+    try:
+        result = runner.run_command("test-python", [target], checkout, local_pytest)
+        assert result["exit_code"] == (2 if location == "conftest" else 1)
+        assert not pid_file.exists(), "A detached process was created before the guard"
+    finally:
+        if pid_file.exists():
+            try:
+                os.kill(int(pid_file.read_text()), signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+
+def test_actual_node_detached_child_preload_denies_before_config(checkout):
+    node = shutil.which("node")
+    assert node
+    guard = checkout / runner.COMMON / "unit-network-guard.cjs"
+    env = runner.environment(checkout, "0" * 32)
+    env["NODE_OPTIONS"] = "--require=" + json.dumps(str(guard))
+    program = (
+        "const cp=require('node:child_process'),fs=require('node:fs');"
+        "const p=cp.spawn(process.execPath,['-e','setTimeout(()=>{},10000)'],"
+        "{detached:true,stdio:'ignore'});"
+        "fs.writeFileSync('ESCAPED_CHILD.pid',String(p.pid));p.unref();"
+    )
+    pid_file = checkout / "ESCAPED_CHILD.pid"
+    try:
+        result = subprocess.run(
+            [node, "-e", program], cwd=checkout, env=env, capture_output=True, text=True, timeout=5
+        )
+        assert result.returncode != 0 and "OPENTOUR_DETACHED_CHILD_DENIED" in result.stderr
+        assert not pid_file.exists()
+    finally:
+        if pid_file.exists():
+            try:
+                os.kill(int(pid_file.read_text()), signal.SIGKILL)
+            except ProcessLookupError:
+                pass

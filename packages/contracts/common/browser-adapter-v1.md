@@ -64,8 +64,10 @@ failure cannot become green through retries or expected-failure annotations.
 `collected` equals inventory length and `passed + failed + skipped`. All counts are
 nonnegative JSON-safe integers. Missing tests, zero collection and required skips
 never pass. `cleanup_complete` must truthfully cover contexts, fixture processes,
-listeners and temporary resources. The wrapper also kills surviving descendants
-and treats incomplete cleanup as failure.
+listeners and temporary resources. The wrapper also kills surviving members of its
+own process group and treats incomplete cleanup as failure. Detached descendant
+groups require the adapter's explicit lifecycle tracking and cleanup; leader exit
+alone cannot establish that they stopped, especially after abnormal termination.
 
 The raw child exit is retained alongside the normalized public exit. A report never
 converts nonzero exit into PASS. PASS requires exit zero, a nonempty all-passed

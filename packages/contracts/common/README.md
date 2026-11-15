@@ -39,6 +39,14 @@ Python unit/contract calls deny TCP, UDP and DNS through a test-process guard.
 Vitest receives only the wrapper-owned Node network preload. These are test
 discipline boundaries, not protection against hostile code. Browser local fixture
 networking belongs to OPE-127; actual provider integration belongs to its owner.
+The Python guard loads before initial conftest imports and remains active through
+teardown. Python subprocess session/group detachment and Node detached-child APIs
+are denied in these default unit profiles before configuration/test code executes.
+Wrapper-managed child groups are bounded and leftover group members are killed.
+This does not establish containment of arbitrary native programs deliberately
+bypassing those process APIs. A future local service adapter must supply its own
+explicit lifecycle authority and exact cleanup evidence; it does not inherit a
+general network/process override from a unit receipt.
 
 `browser-adapter-v1.md` and `test-result.schema.json` define the OPE-127 seam.
 The exact 63-path source inventory is preserved separately from admitted execution
@@ -46,6 +54,8 @@ profiles; currently only the C06 deterministic harness profile is admitted. Futu
 declared paths are not executed or reclassified as simulated merely by existing.
 
 `schema-registry.json` binds the exact approved common and authority schema bytes.
+It also binds the owned runner transport schema; malformed, mismatched or unresolved
+transport schemas produce a structured configuration failure.
 References resolve only through this local registry; HTTP/file fallback is denied.
 The canonical ResourceRevision pattern enforces positive decimal strings through
 `9223372036854775807`, distinct from JSON-safe event/epoch integers. Examples cover
