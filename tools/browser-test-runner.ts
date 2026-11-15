@@ -51,11 +51,17 @@ export async function executeBrowser(options: { root: string; target: string; de
   process.on('SIGINT', signal); process.on('SIGTERM', signal);
   try {
     const selection = validateTarget(root, target, !!probe);
-    if (probe === 'missing_application' || !existsSync(join(root, harness, 'index.html')) || !existsSync(join(root, harness, 'assets/inter-latin-400-normal.woff2'))) throw new Error('MISSING_APPLICATION');
-    process.env.PLAYWRIGHT_BROWSERS_PATH = join(root, '.toolchain/playwright');
+    const applicationRoot = join(root, harness, probe === 'missing_application' ? 'absent-application' : '');
+    if (['index.html', 'client.ts', 'server.ts', 'contracts.ts', 'assets/inter-latin-400-normal.woff2'].some(file => !existsSync(join(applicationRoot, file)))) throw new Error('MISSING_APPLICATION');
+    const browserDirectory = probe === 'missing_browser' ? join(dirname(destination), 'absent-browser-cache') : join(root, '.toolchain/playwright');
+    process.env.PLAYWRIGHT_BROWSERS_PATH = browserDirectory;
     const require = createRequire(join(root, 'package.json'));
-    const { chromium } = require('@playwright/test');
-    if (probe === 'missing_browser' || !existsSync(chromium.executablePath())) throw new Error('MISSING_BROWSER');
+    const playwrightPackage = createRequire(require.resolve('@playwright/test')).resolve('playwright/package.json');
+    const corePackage = createRequire(playwrightPackage).resolve('playwright-core/package.json');
+    // Qualified against locked Playwright 1.65.1: headless with no channel selects this build.
+    const { registry } = require(join(dirname(corePackage), 'lib/coreBundle.js'));
+    const executable = registry.findExecutable('chromium-headless-shell')?.executablePath();
+    if (!executable || !existsSync(executable)) throw new Error('MISSING_BROWSER');
     runDirectory = mkdtempSync(join(dirname(destination), 'browser-'));
     mkdirSync(join(runDirectory, 'home'));
     artifactDirectory = join(root, 'evidence/OT-BOOT-C06/runs', nonce); mkdirSync(artifactDirectory, { recursive: true });
@@ -64,7 +70,7 @@ export async function executeBrowser(options: { root: string; target: string; de
     server = await startFixtureServer(nonce, probe === 'cleanup');
     const ready = await fetch(`${server!.origin}/__harness/ready`, { signal: AbortSignal.timeout(3000) }).then(response => response.json());
     if (ready.run_id !== nonce) throw new Error('MISSING_APPLICATION');
-    const environment: NodeJS.ProcessEnv = { PATH: process.env.PATH, HOME: join(runDirectory, 'home'), TMPDIR: runDirectory, CI: 'true', TZ: 'UTC', LANG: 'C.UTF-8', NEXT_TELEMETRY_DISABLED: '1', PLAYWRIGHT_BROWSERS_PATH: join(root, '.toolchain/playwright'), OPENTOUR_REPOSITORY_ROOT: root, OPENTOUR_FIXTURE_ORIGIN: server!.origin, OPENTOUR_BROWSER_RAW: raw, OPENTOUR_BROWSER_OUTPUT: join(artifactDirectory, 'artifacts'), OPENTOUR_BROWSER_PROBE: probe, OPENTOUR_BASELINE_REVIEW_REASON: options.baselineReview?.reason, OPENTOUR_BROWSER_READY_FILE: `${destination}.ready`, OPENTOUR_RESULT_NONCE: nonce, NODE_OPTIONS: `--require=${JSON.stringify(join(root, harness, 'network-node.cjs'))}` };
+    const environment: NodeJS.ProcessEnv = { PATH: process.env.PATH, HOME: join(runDirectory, 'home'), TMPDIR: runDirectory, CI: 'true', TZ: 'UTC', LANG: 'C.UTF-8', NEXT_TELEMETRY_DISABLED: '1', PLAYWRIGHT_BROWSERS_PATH: browserDirectory, OPENTOUR_REPOSITORY_ROOT: root, OPENTOUR_FIXTURE_ORIGIN: server!.origin, OPENTOUR_BROWSER_RAW: raw, OPENTOUR_BROWSER_OUTPUT: join(artifactDirectory, 'artifacts'), OPENTOUR_BROWSER_PROBE: probe, OPENTOUR_BASELINE_REVIEW_REASON: options.baselineReview?.reason, OPENTOUR_BROWSER_READY_FILE: `${destination}.ready`, OPENTOUR_RESULT_NONCE: nonce, NODE_OPTIONS: `--require=${JSON.stringify(join(root, harness, 'network-node.cjs'))}` };
     const playwright = join(dirname(createRequire(require.resolve('@playwright/test')).resolve('playwright/package.json')), 'cli.js');
     const argv = [playwright, 'test', '--config', join(root, 'playwright.config.ts'), exactSelector(selection.path, selection.directory)];
     if (options.baselineReview) { if (!options.baselineReview.reason || !options.baselineReview.designRevision || probe) throw new Error('INVALID_CONFIGURATION'); argv.push('--update-snapshots=all'); }
