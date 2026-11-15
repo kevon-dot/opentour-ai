@@ -1,0 +1,9 @@
+packages:
+  - apps/web
+  - packages/client-ts
+
+engineStrict: true
+saveExact: true
+strictPeerDependencies: true
+ignoreScripts: true
+minimumReleaseAge: 1440

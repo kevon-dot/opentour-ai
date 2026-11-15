@@ -1,0 +1,17 @@
+{
+  "name": "@opentour/web",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": { "bootstrap:smoke": "node bootstrap-smoke.mjs" },
+  "dependencies": {
+    "@opentour/client": "workspace:*",
+    "next": "16.4.6",
+    "react": "19.3.1",
+    "react-dom": "19.3.1"
+  },
+  "devDependencies": {
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0"
+  }
+}
