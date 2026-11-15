@@ -702,6 +702,25 @@ def test_runner_kills_descendants_even_when_leader_exits_successfully(checkout):
                 pass
 
 
+def test_process_group_permission_uncertainty_is_structured_nonpass(checkout, monkeypatch):
+    signals = []
+
+    def denied(pid, sig):
+        signals.append((pid, sig))
+        raise PermissionError("sentinel-private-os-detail")
+
+    monkeypatch.setattr(runner.os, "killpg", denied)
+
+    def actual(invocation):
+        return runner.execute(replace(invocation, argv=(sys.executable, "-c", "pass"), timeout=5))
+
+    result = runner.run_command("lint", [], checkout, actual)
+    assert result["exit_code"] == 1 and result["reason_code"] == "CLEANUP_FAILED"
+    assert result["steps"][0]["process_cleanup_complete"] is False
+    assert [sig for _, sig in signals] == [0]
+    assert "sentinel-private-os-detail" not in json.dumps(result)
+
+
 @pytest.mark.parametrize(
     "operation",
     [
