@@ -59,7 +59,7 @@ export async function executeBrowser(options: { root: string; target: string; de
     const playwrightPackage = createRequire(require.resolve('@playwright/test')).resolve('playwright/package.json');
     const corePackage = createRequire(playwrightPackage).resolve('playwright-core/package.json');
     // Qualified against locked Playwright 1.65.1: headless with no channel selects this build.
-    const { registry } = require(join(dirname(corePackage), 'lib/coreBundle.js'));
+    const { registry: { registry } } = require(join(dirname(corePackage), 'lib/coreBundle.js'));
     const executable = registry.findExecutable('chromium-headless-shell')?.executablePath();
     if (!executable || !existsSync(executable)) throw new Error('MISSING_BROWSER');
     runDirectory = mkdtempSync(join(dirname(destination), 'browser-'));
