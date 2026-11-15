@@ -213,6 +213,38 @@ def test_actual_setup_recipe_preserves_json_in_merged_output(checkout):
     assert json.loads(observed.stdout) == receipt
 
 
+@pytest.mark.parametrize("command,args,_", [case for case in COMMAND_CASES if case[0] != "setup"])
+def test_actual_uv_recipes_enable_build_hashes_and_preserve_merged_json(checkout, command, args, _):
+    """Actual pinned uv/just transport with a generated producer, not product acceptance."""
+    shutil.copyfile(runner.ROOT / "justfile", checkout / "justfile")
+    shutil.copyfile(runner.ROOT / "uv.lock", checkout / "uv.lock")
+    (checkout / ".venv").symlink_to((runner.ROOT / ".venv").resolve(), target_is_directory=True)
+    assert "require-build-hashes = true" in (checkout / "pyproject.toml").read_text()
+    write(
+        checkout,
+        "tools/test_runner.py",
+        "import json,sys\n"
+        "print(json.dumps({'command':sys.argv[1:],'exit_code':0,'status':'PASS'},sort_keys=True))\n",
+    )
+    expected = json.dumps(
+        {"command": [command, *args], "exit_code": 0, "status": "PASS"}, sort_keys=True
+    )
+    invocation = runner.Invocation(
+        ("just", command, *args),
+        checkout,
+        runner.environment(checkout, "a" * 32),
+        checkout / "unused-result.json",
+        command,
+        "setup",
+        timeout=10,
+    )
+    observed = runner.execute(invocation)
+    assert observed.returncode == 0
+    assert observed.cleanup_complete is True
+    assert observed.stdout == expected + "\n"
+    assert json.loads(observed.stdout)["command"] == [command, *args]
+
+
 @pytest.mark.parametrize(
     "path",
     [
