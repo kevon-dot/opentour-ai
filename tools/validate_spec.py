@@ -21,7 +21,7 @@ from tools import schema_validate
 
 ROOT = Path(__file__).resolve().parents[1]
 TARGET = "docs/specification/manifest.json"
-APPROVED_PROJECTION = "fe7a428d5ff650ba843466031d4eb9b622c0759e6baee3eac5774baf2244e948"
+APPROVED_PROJECTION = "bf4d8ba30123cf55caa4497ad30da2b9574909f5b66e4a01aa0a2c2fabac6d32"
 REPORT_SCHEMA = "docs/specification/traceability-report.schema.json"
 
 
@@ -60,7 +60,11 @@ def rows(value: Any) -> list[dict[str, Any]]:
 
 def safe_id(value: Any) -> str:
     if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9_./:#-]{1,2048}", value):
-        return "INVALID_IDENTIFIER"
+        return (
+            "sha256:" + hashlib.sha256(value.encode()).hexdigest()
+            if isinstance(value, str)
+            else "INVALID_IDENTIFIER"
+        )
     return value
 
 
@@ -131,7 +135,9 @@ def validate_manifest(
         raise ConfigurationError("INVALID_MANIFEST_VERSION")
     c = Checks()
     c.add(m["product_acceptance"] == "NOT_RUN", "OPE-126", "METADATA_ONLY", TARGET)
-    source = closed(m["source_projection"], "features issues actions required_assets")
+    source = closed(
+        m["source_projection"], "features issues actions required_assets required_test_bindings"
+    )
     c.add(
         digest(source) == m["source_projection_sha256"] == expected_projection,
         "OPE-126",
@@ -424,6 +430,37 @@ def validate_manifest(
     for ident in sorted(set(action_ids) - mapped_actions):
         c.add(False, action_ids[ident], "UNTESTED_ACTION_REQUIREMENT", ident)
     c.add(mapped_actions <= set(action_ids), "OPE-299", "NO_ORPHAN_ACTIONS", "actions")
+    required_bindings = rows(source["required_test_bindings"])
+    supplied_binding_digests = {digest(b) for b in rows(m["test_bindings"])}
+    c.add(
+        len(supplied_binding_digests) == len(m["test_bindings"]),
+        "OPE-126",
+        "UNIQUE_TEST_BINDINGS",
+        "test-bindings",
+    )
+    for binding in required_bindings:
+        c.add(
+            digest(binding) in supplied_binding_digests,
+            binding["issue_key"],
+            "REQUIRED_TEST_BINDING",
+            binding["test_id"],
+        )
+    c.add(
+        supplied_binding_digests == {digest(b) for b in required_bindings},
+        "OPE-126",
+        "EXACT_REQUIRED_TEST_BINDINGS",
+        "test-bindings",
+    )
+    for mapping in rows(m["mappings"]):
+        expected_tests = {
+            b["test_id"] for b in required_bindings if b["issue_key"] == mapping["issue_key"]
+        }
+        c.add(
+            set(mapping["test_ids"]) == expected_tests,
+            mapping["issue_key"],
+            "EXACT_MAPPED_TEST_IDS",
+            mapping["issue_key"],
+        )
     for binding in rows(m["test_bindings"]):
         closed(binding, "issue_key requirement_ids test_id kind mode fixture_id fixture_version")
         key = binding["issue_key"]

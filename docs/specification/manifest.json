@@ -7469,10 +7469,17 @@
             "tools/validate_spec.py",
             "tools/evidence_manifest.py",
             "docs/specification/manifest.json",
-            "tests/contract/test_traceability.py"
+            "tests/contract/test_traceability.py",
+            "docs/specification/traceability-report.schema.json",
+            "tools/tests/test_traceability.py",
+            "tools/tests/test_evidence_classification.py",
+            "tools/tests/__init__.py",
+            "docs/specification/assets/ARCH-01.png"
           ],
           "declared_test_paths": [
-            "tests/contract/test_traceability.py"
+            "tests/contract/test_traceability.py",
+            "tools/tests/test_evidence_classification.py",
+            "tools/tests/test_traceability.py"
           ],
           "parent": "OPE-5",
           "blocked_by": [
@@ -7489,7 +7496,7 @@
             "OPE-5"
           ]
         },
-        "projection_sha256": "25523669404b36d11ce75b7f89681166fd05271383e78d4220385b143fea69b4"
+        "projection_sha256": "7d331abcef61e1dcd97fc847d7dfef5a3b25d4e45562b2c520e05def3dc11830"
       },
       {
         "issue_key": "OPE-127",
@@ -21269,14 +21276,1094 @@
         "schema_id": null,
         "owner": "OPE-126"
       }
+    ],
+    "required_test_bindings": [
+      {
+        "issue_key": "OPE-126",
+        "requirement_ids": [
+          "OT-BOOT-C05-AC01"
+        ],
+        "test_id": "tests/contract/test_traceability.py::test_complete_current_manifest_passes_with_actual_native_ids",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-126",
+        "requirement_ids": [
+          "OT-BOOT-C05-AC01"
+        ],
+        "test_id": "tests/contract/test_traceability.py::test_ac01_exact_unmapped_subfeature_is_reported",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-126",
+        "requirement_ids": [
+          "OT-BOOT-C05-AC02"
+        ],
+        "test_id": "tests/contract/test_traceability.py::test_required_adverse_metadata_fixtures[body-SOURCE_BODY_HASH]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-126",
+        "requirement_ids": [
+          "OT-BOOT-C05-AC02"
+        ],
+        "test_id": "tests/contract/test_traceability.py::test_required_adverse_metadata_fixtures[duplicate-UNIQUE_STABLE_ID]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-126",
+        "requirement_ids": [
+          "OT-BOOT-C05-AC02"
+        ],
+        "test_id": "tests/contract/test_traceability.py::test_required_adverse_metadata_fixtures[cycle-ACYCLIC_BLOCKED_BY]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-126",
+        "requirement_ids": [
+          "OT-BOOT-C05-AC02"
+        ],
+        "test_id": "tests/contract/test_traceability.py::test_required_adverse_metadata_fixtures[ownership-SINGLE_EXCLUSIVE_OWNER]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-126",
+        "requirement_ids": [
+          "OT-BOOT-C05-AC02"
+        ],
+        "test_id": "tests/contract/test_traceability.py::test_required_adverse_metadata_fixtures[unknown_issue-MAPPED_NATIVE_ISSUE]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-126",
+        "requirement_ids": [
+          "OT-BOOT-C05-AC02"
+        ],
+        "test_id": "tests/contract/test_traceability.py::test_required_adverse_metadata_fixtures[source-APPROVED_SOURCE_PROJECTION]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-126",
+        "requirement_ids": [
+          "OT-BOOT-C05-AC02"
+        ],
+        "test_id": "tests/contract/test_traceability.py::test_required_adverse_metadata_fixtures[required-EVERY_ACCEPTANCE_HAS_EVIDENCE]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-126",
+        "requirement_ids": [
+          "OT-BOOT-C05-AC02"
+        ],
+        "test_id": "tests/contract/test_traceability.py::test_required_adverse_metadata_fixtures[action-UNTESTED_ACTION_REQUIREMENT]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-126",
+        "requirement_ids": [
+          "OT-BOOT-C05-AC02"
+        ],
+        "test_id": "tests/contract/test_traceability.py::test_required_adverse_metadata_fixtures[orphan-ACTION_OWNER_AND_ASSERTION_REQUIREMENT]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-126",
+        "requirement_ids": [
+          "OT-BOOT-C05-AC02"
+        ],
+        "test_id": "tests/contract/test_traceability.py::test_required_adverse_metadata_fixtures[snapshot-CURRENT_DESIGN_SNAPSHOT]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-126",
+        "requirement_ids": [
+          "OT-BOOT-C05-AC02"
+        ],
+        "test_id": "tests/contract/test_traceability.py::test_required_adverse_metadata_fixtures[local_hash-LOCAL_ASSET_SOURCE_HASH]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-126",
+        "requirement_ids": [
+          "OT-BOOT-C05-AC02"
+        ],
+        "test_id": "tests/contract/test_traceability.py::test_required_adverse_metadata_fixtures[missing_asset-REQUIRED_SOURCE_ASSET]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-126",
+        "requirement_ids": [
+          "OT-BOOT-C05-AC02"
+        ],
+        "test_id": "tests/contract/test_traceability.py::test_required_adverse_metadata_fixtures[contract_ref-EXACT_DECLARED_CONTRACT_REFERENCES]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-126",
+        "requirement_ids": [
+          "OT-BOOT-C05-AC02"
+        ],
+        "test_id": "tests/contract/test_traceability.py::test_required_adverse_metadata_fixtures[missing_binding-REQUIRED_TEST_BINDING]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-126",
+        "requirement_ids": [
+          "OT-BOOT-C05-AC02"
+        ],
+        "test_id": "tests/contract/test_traceability.py::test_required_adverse_metadata_fixtures[duplicate_binding-UNIQUE_TEST_BINDINGS]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-126",
+        "requirement_ids": [
+          "OT-BOOT-C05-AC02"
+        ],
+        "test_id": "tests/contract/test_traceability.py::test_unknown_and_nested_schema_references_fail_offline[https://example.invalid/schema404]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-126",
+        "requirement_ids": [
+          "OT-BOOT-C05-AC02"
+        ],
+        "test_id": "tests/contract/test_traceability.py::test_unknown_and_nested_schema_references_fail_offline[urn:opentour:missing:1.0]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-126",
+        "requirement_ids": [
+          "OT-BOOT-C05-AC02"
+        ],
+        "test_id": "tests/contract/test_traceability.py::test_unknown_and_nested_schema_references_fail_offline[urn:opentour:common-contract:1.0#/$defs/nonexistent]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-126",
+        "requirement_ids": [
+          "OT-BOOT-C05-AC02"
+        ],
+        "test_id": "tests/contract/test_traceability.py::test_real_cli_emits_bound_machine_and_readable_findings",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-126",
+        "requirement_ids": [
+          "OT-BOOT-C05-AC02"
+        ],
+        "test_id": "tests/contract/test_traceability.py::test_cli_refuses_existing_report_without_overwriting",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-126",
+        "requirement_ids": [
+          "OT-BOOT-C05-AC01"
+        ],
+        "test_id": "tests/contract/test_traceability.py::test_all_current_c05_cases_have_explicit_requirement_bindings",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-126",
+        "requirement_ids": [
+          "OT-BOOT-C05-AC03"
+        ],
+        "test_id": "tools/tests/test_evidence_classification.py::test_imported_pass_is_never_observed_authority",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-126",
+        "requirement_ids": [
+          "OT-BOOT-C05-AC03"
+        ],
+        "test_id": "tools/tests/test_evidence_classification.py::test_self_claimed_kind_or_runtime_receipt_cannot_authenticate[simulated]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-126",
+        "requirement_ids": [
+          "OT-BOOT-C05-AC03"
+        ],
+        "test_id": "tools/tests/test_evidence_classification.py::test_self_claimed_kind_or_runtime_receipt_cannot_authenticate[local_integration]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-126",
+        "requirement_ids": [
+          "OT-BOOT-C05-AC03"
+        ],
+        "test_id": "tools/tests/test_evidence_classification.py::test_self_claimed_kind_or_runtime_receipt_cannot_authenticate[provider_integration]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-126",
+        "requirement_ids": [
+          "OT-BOOT-C05-AC03"
+        ],
+        "test_id": "tools/tests/test_evidence_classification.py::test_self_claimed_kind_or_runtime_receipt_cannot_authenticate[customer_evidence]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-126",
+        "requirement_ids": [
+          "OT-BOOT-C05-AC03"
+        ],
+        "test_id": "tools/tests/test_evidence_classification.py::test_ac03_current_readiness_invalidation_preserves_history[changes0-STALE_TESTED_COMMIT]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-126",
+        "requirement_ids": [
+          "OT-BOOT-C05-AC03"
+        ],
+        "test_id": "tools/tests/test_evidence_classification.py::test_ac03_current_readiness_invalidation_preserves_history[changes1-CHANGED_REQUIREMENT_SOURCE]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-126",
+        "requirement_ids": [
+          "OT-BOOT-C05-AC03"
+        ],
+        "test_id": "tools/tests/test_evidence_classification.py::test_ac03_current_readiness_invalidation_preserves_history[changes2-REQUIRED_EVIDENCE_KIND_MISMATCH]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-126",
+        "requirement_ids": [
+          "OT-BOOT-C05-AC03"
+        ],
+        "test_id": "tools/tests/test_evidence_classification.py::test_ac03_current_readiness_invalidation_preserves_history[changes3-MISSING_REQUIRED_SECURITY_OR_ACCEPTANCE_CHECK]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-126",
+        "requirement_ids": [
+          "OT-BOOT-C05-AC03"
+        ],
+        "test_id": "tools/tests/test_evidence_classification.py::test_ac03_current_readiness_invalidation_preserves_history[changes4-TEST_OR_MODE_MISMATCH]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-126",
+        "requirement_ids": [
+          "OT-BOOT-C05-AC03"
+        ],
+        "test_id": "tools/tests/test_evidence_classification.py::test_unit_or_local_fake_cannot_close_any_empirical_gate[simulated-G1]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-126",
+        "requirement_ids": [
+          "OT-BOOT-C05-AC03"
+        ],
+        "test_id": "tools/tests/test_evidence_classification.py::test_unit_or_local_fake_cannot_close_any_empirical_gate[simulated-G2]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-126",
+        "requirement_ids": [
+          "OT-BOOT-C05-AC03"
+        ],
+        "test_id": "tools/tests/test_evidence_classification.py::test_unit_or_local_fake_cannot_close_any_empirical_gate[simulated-G3]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-126",
+        "requirement_ids": [
+          "OT-BOOT-C05-AC03"
+        ],
+        "test_id": "tools/tests/test_evidence_classification.py::test_unit_or_local_fake_cannot_close_any_empirical_gate[simulated-G4]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-126",
+        "requirement_ids": [
+          "OT-BOOT-C05-AC03"
+        ],
+        "test_id": "tools/tests/test_evidence_classification.py::test_unit_or_local_fake_cannot_close_any_empirical_gate[simulated-G5]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-126",
+        "requirement_ids": [
+          "OT-BOOT-C05-AC03"
+        ],
+        "test_id": "tools/tests/test_evidence_classification.py::test_unit_or_local_fake_cannot_close_any_empirical_gate[simulated-G6]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-126",
+        "requirement_ids": [
+          "OT-BOOT-C05-AC03"
+        ],
+        "test_id": "tools/tests/test_evidence_classification.py::test_unit_or_local_fake_cannot_close_any_empirical_gate[local_integration-G1]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-126",
+        "requirement_ids": [
+          "OT-BOOT-C05-AC03"
+        ],
+        "test_id": "tools/tests/test_evidence_classification.py::test_unit_or_local_fake_cannot_close_any_empirical_gate[local_integration-G2]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-126",
+        "requirement_ids": [
+          "OT-BOOT-C05-AC03"
+        ],
+        "test_id": "tools/tests/test_evidence_classification.py::test_unit_or_local_fake_cannot_close_any_empirical_gate[local_integration-G3]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-126",
+        "requirement_ids": [
+          "OT-BOOT-C05-AC03"
+        ],
+        "test_id": "tools/tests/test_evidence_classification.py::test_unit_or_local_fake_cannot_close_any_empirical_gate[local_integration-G4]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-126",
+        "requirement_ids": [
+          "OT-BOOT-C05-AC03"
+        ],
+        "test_id": "tools/tests/test_evidence_classification.py::test_unit_or_local_fake_cannot_close_any_empirical_gate[local_integration-G5]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-126",
+        "requirement_ids": [
+          "OT-BOOT-C05-AC03"
+        ],
+        "test_id": "tools/tests/test_evidence_classification.py::test_unit_or_local_fake_cannot_close_any_empirical_gate[local_integration-G6]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-126",
+        "requirement_ids": [
+          "OT-BOOT-C05-AC03"
+        ],
+        "test_id": "tools/tests/test_evidence_classification.py::test_missing_gpu_or_customer_verifier_records_blocked[provider_integration]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-126",
+        "requirement_ids": [
+          "OT-BOOT-C05-AC03"
+        ],
+        "test_id": "tools/tests/test_evidence_classification.py::test_missing_gpu_or_customer_verifier_records_blocked[customer_evidence]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-126",
+        "requirement_ids": [
+          "OT-BOOT-C05-AC03"
+        ],
+        "test_id": "tools/tests/test_evidence_classification.py::test_parent_requires_all_compatible_children_and_actual_integration",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-126",
+        "requirement_ids": [
+          "OT-BOOT-C05-AC03"
+        ],
+        "test_id": "tools/tests/test_evidence_classification.py::test_replay_is_idempotent_and_changed_same_attempt_conflicts",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-126",
+        "requirement_ids": [
+          "OT-BOOT-C05-AC03"
+        ],
+        "test_id": "tools/tests/test_evidence_classification.py::test_concurrent_identical_publication_is_one_complete_record",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-126",
+        "requirement_ids": [
+          "OT-BOOT-C05-AC03"
+        ],
+        "test_id": "tools/tests/test_evidence_classification.py::test_interrupted_publication_keeps_old_history_and_no_partial_record",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-126",
+        "requirement_ids": [
+          "OT-BOOT-C05-AC03"
+        ],
+        "test_id": "tools/tests/test_evidence_classification.py::test_historical_tampering_and_symlink_are_refused",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-126",
+        "requirement_ids": [
+          "OT-BOOT-C05-AC03"
+        ],
+        "test_id": "tools/tests/test_evidence_classification.py::test_closed_record_and_separate_status_vocabulary[exit_code-True]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-126",
+        "requirement_ids": [
+          "OT-BOOT-C05-AC03"
+        ],
+        "test_id": "tools/tests/test_evidence_classification.py::test_closed_record_and_separate_status_vocabulary[exit_code-3]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-126",
+        "requirement_ids": [
+          "OT-BOOT-C05-AC03"
+        ],
+        "test_id": "tools/tests/test_evidence_classification.py::test_closed_record_and_separate_status_vocabulary[status-INCOMPLETE]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-126",
+        "requirement_ids": [
+          "OT-BOOT-C05-AC03"
+        ],
+        "test_id": "tools/tests/test_evidence_classification.py::test_closed_record_and_separate_status_vocabulary[kind-real]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-126",
+        "requirement_ids": [
+          "OT-BOOT-C05-AC03"
+        ],
+        "test_id": "tools/tests/test_evidence_classification.py::test_closed_record_and_separate_status_vocabulary[mode-any]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-126",
+        "requirement_ids": [
+          "OT-BOOT-C05-AC03"
+        ],
+        "test_id": "tools/tests/test_evidence_classification.py::test_closed_record_and_separate_status_vocabulary[commit_sha-latest]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-126",
+        "requirement_ids": [
+          "OT-BOOT-C05-AC03"
+        ],
+        "test_id": "tools/tests/test_evidence_classification.py::test_closed_record_and_separate_status_vocabulary[started_at-2026-11-15T01:00:00+01:00]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-126",
+        "requirement_ids": [
+          "OT-BOOT-C05-AC03"
+        ],
+        "test_id": "tools/tests/test_evidence_classification.py::test_closed_record_and_separate_status_vocabulary[finished_at-2026-11-14T23:59:59Z]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-126",
+        "requirement_ids": [
+          "OT-BOOT-C05-AC03"
+        ],
+        "test_id": "tools/tests/test_evidence_classification.py::test_closed_record_and_separate_status_vocabulary[output_digests-value8]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-126",
+        "requirement_ids": [
+          "OT-BOOT-C05-AC03"
+        ],
+        "test_id": "tools/tests/test_evidence_classification.py::test_timestamp_precision_does_not_change_order",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-126",
+        "requirement_ids": [
+          "OT-BOOT-C05-AC03"
+        ],
+        "test_id": "tools/tests/test_evidence_classification.py::test_supervised_producer_boundary_and_required_inventory[none]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-126",
+        "requirement_ids": [
+          "OT-BOOT-C05-AC03"
+        ],
+        "test_id": "tools/tests/test_evidence_classification.py::test_supervised_producer_boundary_and_required_inventory[zero]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-126",
+        "requirement_ids": [
+          "OT-BOOT-C05-AC03"
+        ],
+        "test_id": "tools/tests/test_evidence_classification.py::test_supervised_producer_boundary_and_required_inventory[skip]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-126",
+        "requirement_ids": [
+          "OT-BOOT-C05-AC03"
+        ],
+        "test_id": "tools/tests/test_evidence_classification.py::test_supervised_producer_boundary_and_required_inventory[dirty]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-126",
+        "requirement_ids": [
+          "OT-BOOT-C05-AC03"
+        ],
+        "test_id": "tools/tests/test_evidence_classification.py::test_supervised_producer_boundary_and_required_inventory[provider]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-126",
+        "requirement_ids": [
+          "OT-BOOT-C05-AC03"
+        ],
+        "test_id": "tools/tests/test_evidence_classification.py::test_supervised_producer_boundary_and_required_inventory[fixture]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-126",
+        "requirement_ids": [
+          "OT-BOOT-C05-AC03"
+        ],
+        "test_id": "tools/tests/test_evidence_classification.py::test_arbitrary_requirement_or_test_cannot_be_attached_to_success",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-126",
+        "requirement_ids": [
+          "OT-BOOT-C05-AC03"
+        ],
+        "test_id": "tools/tests/test_evidence_classification.py::test_provider_shaped_receipt_and_private_provenance_flag_still_cannot_qualify",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-126",
+        "requirement_ids": [
+          "OT-BOOT-C05-AC03"
+        ],
+        "test_id": "tools/tests/test_evidence_classification.py::test_observed_retry_reuses_original_receipt_without_running_again",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-126",
+        "requirement_ids": [
+          "OT-BOOT-C05-AC03"
+        ],
+        "test_id": "tools/tests/test_evidence_classification.py::test_malformed_classification_is_a_safe_refusal[kind]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-126",
+        "requirement_ids": [
+          "OT-BOOT-C05-AC03"
+        ],
+        "test_id": "tools/tests/test_evidence_classification.py::test_malformed_classification_is_a_safe_refusal[mode]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-126",
+        "requirement_ids": [
+          "OT-BOOT-C05-AC03"
+        ],
+        "test_id": "tools/tests/test_evidence_classification.py::test_malformed_classification_is_a_safe_refusal[status]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-126",
+        "requirement_ids": [
+          "OT-BOOT-C05-AC03"
+        ],
+        "test_id": "tools/tests/test_evidence_classification.py::test_unqualified_kind_cannot_mask_actual_failure[assertion_failure]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-126",
+        "requirement_ids": [
+          "OT-BOOT-C05-AC03"
+        ],
+        "test_id": "tools/tests/test_evidence_classification.py::test_unqualified_kind_cannot_mask_actual_failure[missing_required_test]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-126",
+        "requirement_ids": [
+          "OT-BOOT-C05-AC03"
+        ],
+        "test_id": "tools/tests/test_evidence_classification.py::test_suite_persists_each_bound_case_and_recovers_partial_publication",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-126",
+        "requirement_ids": [
+          "OT-BOOT-C05-AC03"
+        ],
+        "test_id": "tools/tests/test_evidence_classification.py::test_missing_prerequisite_preserves_an_existing_failure",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-126",
+        "requirement_ids": [
+          "OT-BOOT-C05-AC01"
+        ],
+        "test_id": "tools/tests/test_traceability.py::test_generated_report_conforms_without_runtime_acceptance",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-126",
+        "requirement_ids": [
+          "OT-BOOT-C05-AC01"
+        ],
+        "test_id": "tools/tests/test_traceability.py::test_exact_action_set_cannot_be_replaced_by_count_or_duplicate[expected_actions]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-126",
+        "requirement_ids": [
+          "OT-BOOT-C05-AC01"
+        ],
+        "test_id": "tools/tests/test_traceability.py::test_exact_action_set_cannot_be_replaced_by_count_or_duplicate[checked_actions]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-126",
+        "requirement_ids": [
+          "OT-BOOT-C05-AC02"
+        ],
+        "test_id": "tools/tests/test_traceability.py::test_stale_source_or_design_or_tested_commit_fails[manifest_digest]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-126",
+        "requirement_ids": [
+          "OT-BOOT-C05-AC02"
+        ],
+        "test_id": "tools/tests/test_traceability.py::test_stale_source_or_design_or_tested_commit_fails[provider_schema_digest]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-126",
+        "requirement_ids": [
+          "OT-BOOT-C05-AC02"
+        ],
+        "test_id": "tools/tests/test_traceability.py::test_stale_source_or_design_or_tested_commit_fails[figma_revision]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-126",
+        "requirement_ids": [
+          "OT-BOOT-C05-AC02"
+        ],
+        "test_id": "tools/tests/test_traceability.py::test_stale_source_or_design_or_tested_commit_fails[checked_commit]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-126",
+        "requirement_ids": [
+          "OT-BOOT-C05-AC01"
+        ],
+        "test_id": "tools/tests/test_traceability.py::test_lost_action_assertion_or_explicit_failure_is_nonpassing",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-126",
+        "requirement_ids": [
+          "OT-BOOT-C05-AC02"
+        ],
+        "test_id": "tools/tests/test_traceability.py::test_provider_route_body_plane_and_schema_drift_fail[method-GET]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-126",
+        "requirement_ids": [
+          "OT-BOOT-C05-AC02"
+        ],
+        "test_id": "tools/tests/test_traceability.py::test_provider_route_body_plane_and_schema_drift_fail[path_template-/v1/invitations/{id}:accept]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-126",
+        "requirement_ids": [
+          "OT-BOOT-C05-AC02"
+        ],
+        "test_id": "tools/tests/test_traceability.py::test_provider_route_body_plane_and_schema_drift_fail[request_fields-replacement2]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-126",
+        "requirement_ids": [
+          "OT-BOOT-C05-AC02"
+        ],
+        "test_id": "tools/tests/test_traceability.py::test_provider_route_body_plane_and_schema_drift_fail[plane-hosted-bff]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-126",
+        "requirement_ids": [
+          "OT-BOOT-C05-AC02"
+        ],
+        "test_id": "tools/tests/test_traceability.py::test_provider_route_body_plane_and_schema_drift_fail[capability-members.admin]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-126",
+        "requirement_ids": [
+          "OT-BOOT-C05-AC02"
+        ],
+        "test_id": "tools/tests/test_traceability.py::test_provider_route_body_plane_and_schema_drift_fail[request_schema_ref-urn:sentinel:wrong:1]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-126",
+        "requirement_ids": [
+          "OT-BOOT-C05-AC02"
+        ],
+        "test_id": "tools/tests/test_traceability.py::test_provider_route_body_plane_and_schema_drift_fail[response_schema_refs-replacement6]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-126",
+        "requirement_ids": [
+          "OT-BOOT-C05-AC01"
+        ],
+        "test_id": "tools/tests/test_traceability.py::test_explicit_bijective_placeholder_mapping_preserves_literal_path",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-126",
+        "requirement_ids": [
+          "OT-BOOT-C05-AC01"
+        ],
+        "test_id": "tools/tests/test_traceability.py::test_lost_required_adverse_assertion_is_not_hidden_by_other_passes",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-126",
+        "requirement_ids": [
+          "OT-BOOT-C05-AC02"
+        ],
+        "test_id": "tools/tests/test_traceability.py::test_parent_containment_is_not_a_dependency_edge",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-126",
+        "requirement_ids": [
+          "OT-BOOT-C05-AC02"
+        ],
+        "test_id": "tools/tests/test_traceability.py::test_actual_diagram_asset_hash_and_missing_asset",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-126",
+        "requirement_ids": [
+          "OT-BOOT-C05-AC02"
+        ],
+        "test_id": "tools/tests/test_traceability.py::test_closed_inputs_refuse_unknown_fields",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      }
     ]
   },
-  "source_projection_sha256": "fe7a428d5ff650ba843466031d4eb9b622c0759e6baee3eac5774baf2244e948",
+  "source_projection_sha256": "bf4d8ba30123cf55caa4497ad30da2b9574909f5b66e4a01aa0a2c2fabac6d32",
   "source_bindings": {
     "feature_register_sha256": "f6d1061a103a028b6309928a1c6d96b1c58cb969793a2b9e8a4e36dd50b4602f",
     "figma_snapshot_sha256": "38c3537dd10719a1978873137d34086fa51e284456ed7c5d46d36e77815367a7",
     "figma_revision": "approved-ui-design-index.v4",
-    "native_projection": "Current native technical IDs, relationships, owned paths and acceptance-text digests; excludes full bodies and attachment transport. Original source hashes are provenance, not a claim that omitted source bytes are locally present."
+    "native_projection": "Current native technical IDs, relationships and acceptance-text digests, with reviewed C05 implementation path/test refinements. Excludes full bodies and attachment transport. Original source hashes are provenance, not a claim that omitted source bytes are locally present."
   },
   "mappings": [
     {
@@ -29506,12 +30593,116 @@
         "tools/validate_spec.py",
         "tools/evidence_manifest.py",
         "docs/specification/manifest.json",
-        "tests/contract/test_traceability.py"
+        "tests/contract/test_traceability.py",
+        "docs/specification/traceability-report.schema.json",
+        "tools/tests/test_traceability.py",
+        "tools/tests/test_evidence_classification.py",
+        "tools/tests/__init__.py",
+        "docs/specification/assets/ARCH-01.png"
       ],
       "contract_refs": [
         "urn:opentour:common-contract:1.0"
       ],
-      "test_ids": [],
+      "test_ids": [
+        "tests/contract/test_traceability.py::test_complete_current_manifest_passes_with_actual_native_ids",
+        "tests/contract/test_traceability.py::test_ac01_exact_unmapped_subfeature_is_reported",
+        "tests/contract/test_traceability.py::test_required_adverse_metadata_fixtures[body-SOURCE_BODY_HASH]",
+        "tests/contract/test_traceability.py::test_required_adverse_metadata_fixtures[duplicate-UNIQUE_STABLE_ID]",
+        "tests/contract/test_traceability.py::test_required_adverse_metadata_fixtures[cycle-ACYCLIC_BLOCKED_BY]",
+        "tests/contract/test_traceability.py::test_required_adverse_metadata_fixtures[ownership-SINGLE_EXCLUSIVE_OWNER]",
+        "tests/contract/test_traceability.py::test_required_adverse_metadata_fixtures[unknown_issue-MAPPED_NATIVE_ISSUE]",
+        "tests/contract/test_traceability.py::test_required_adverse_metadata_fixtures[source-APPROVED_SOURCE_PROJECTION]",
+        "tests/contract/test_traceability.py::test_required_adverse_metadata_fixtures[required-EVERY_ACCEPTANCE_HAS_EVIDENCE]",
+        "tests/contract/test_traceability.py::test_required_adverse_metadata_fixtures[action-UNTESTED_ACTION_REQUIREMENT]",
+        "tests/contract/test_traceability.py::test_required_adverse_metadata_fixtures[orphan-ACTION_OWNER_AND_ASSERTION_REQUIREMENT]",
+        "tests/contract/test_traceability.py::test_required_adverse_metadata_fixtures[snapshot-CURRENT_DESIGN_SNAPSHOT]",
+        "tests/contract/test_traceability.py::test_required_adverse_metadata_fixtures[local_hash-LOCAL_ASSET_SOURCE_HASH]",
+        "tests/contract/test_traceability.py::test_required_adverse_metadata_fixtures[missing_asset-REQUIRED_SOURCE_ASSET]",
+        "tests/contract/test_traceability.py::test_required_adverse_metadata_fixtures[contract_ref-EXACT_DECLARED_CONTRACT_REFERENCES]",
+        "tests/contract/test_traceability.py::test_required_adverse_metadata_fixtures[missing_binding-REQUIRED_TEST_BINDING]",
+        "tests/contract/test_traceability.py::test_required_adverse_metadata_fixtures[duplicate_binding-UNIQUE_TEST_BINDINGS]",
+        "tests/contract/test_traceability.py::test_unknown_and_nested_schema_references_fail_offline[https://example.invalid/schema404]",
+        "tests/contract/test_traceability.py::test_unknown_and_nested_schema_references_fail_offline[urn:opentour:missing:1.0]",
+        "tests/contract/test_traceability.py::test_unknown_and_nested_schema_references_fail_offline[urn:opentour:common-contract:1.0#/$defs/nonexistent]",
+        "tests/contract/test_traceability.py::test_real_cli_emits_bound_machine_and_readable_findings",
+        "tests/contract/test_traceability.py::test_cli_refuses_existing_report_without_overwriting",
+        "tests/contract/test_traceability.py::test_all_current_c05_cases_have_explicit_requirement_bindings",
+        "tools/tests/test_evidence_classification.py::test_imported_pass_is_never_observed_authority",
+        "tools/tests/test_evidence_classification.py::test_self_claimed_kind_or_runtime_receipt_cannot_authenticate[simulated]",
+        "tools/tests/test_evidence_classification.py::test_self_claimed_kind_or_runtime_receipt_cannot_authenticate[local_integration]",
+        "tools/tests/test_evidence_classification.py::test_self_claimed_kind_or_runtime_receipt_cannot_authenticate[provider_integration]",
+        "tools/tests/test_evidence_classification.py::test_self_claimed_kind_or_runtime_receipt_cannot_authenticate[customer_evidence]",
+        "tools/tests/test_evidence_classification.py::test_ac03_current_readiness_invalidation_preserves_history[changes0-STALE_TESTED_COMMIT]",
+        "tools/tests/test_evidence_classification.py::test_ac03_current_readiness_invalidation_preserves_history[changes1-CHANGED_REQUIREMENT_SOURCE]",
+        "tools/tests/test_evidence_classification.py::test_ac03_current_readiness_invalidation_preserves_history[changes2-REQUIRED_EVIDENCE_KIND_MISMATCH]",
+        "tools/tests/test_evidence_classification.py::test_ac03_current_readiness_invalidation_preserves_history[changes3-MISSING_REQUIRED_SECURITY_OR_ACCEPTANCE_CHECK]",
+        "tools/tests/test_evidence_classification.py::test_ac03_current_readiness_invalidation_preserves_history[changes4-TEST_OR_MODE_MISMATCH]",
+        "tools/tests/test_evidence_classification.py::test_unit_or_local_fake_cannot_close_any_empirical_gate[simulated-G1]",
+        "tools/tests/test_evidence_classification.py::test_unit_or_local_fake_cannot_close_any_empirical_gate[simulated-G2]",
+        "tools/tests/test_evidence_classification.py::test_unit_or_local_fake_cannot_close_any_empirical_gate[simulated-G3]",
+        "tools/tests/test_evidence_classification.py::test_unit_or_local_fake_cannot_close_any_empirical_gate[simulated-G4]",
+        "tools/tests/test_evidence_classification.py::test_unit_or_local_fake_cannot_close_any_empirical_gate[simulated-G5]",
+        "tools/tests/test_evidence_classification.py::test_unit_or_local_fake_cannot_close_any_empirical_gate[simulated-G6]",
+        "tools/tests/test_evidence_classification.py::test_unit_or_local_fake_cannot_close_any_empirical_gate[local_integration-G1]",
+        "tools/tests/test_evidence_classification.py::test_unit_or_local_fake_cannot_close_any_empirical_gate[local_integration-G2]",
+        "tools/tests/test_evidence_classification.py::test_unit_or_local_fake_cannot_close_any_empirical_gate[local_integration-G3]",
+        "tools/tests/test_evidence_classification.py::test_unit_or_local_fake_cannot_close_any_empirical_gate[local_integration-G4]",
+        "tools/tests/test_evidence_classification.py::test_unit_or_local_fake_cannot_close_any_empirical_gate[local_integration-G5]",
+        "tools/tests/test_evidence_classification.py::test_unit_or_local_fake_cannot_close_any_empirical_gate[local_integration-G6]",
+        "tools/tests/test_evidence_classification.py::test_missing_gpu_or_customer_verifier_records_blocked[provider_integration]",
+        "tools/tests/test_evidence_classification.py::test_missing_gpu_or_customer_verifier_records_blocked[customer_evidence]",
+        "tools/tests/test_evidence_classification.py::test_parent_requires_all_compatible_children_and_actual_integration",
+        "tools/tests/test_evidence_classification.py::test_replay_is_idempotent_and_changed_same_attempt_conflicts",
+        "tools/tests/test_evidence_classification.py::test_concurrent_identical_publication_is_one_complete_record",
+        "tools/tests/test_evidence_classification.py::test_interrupted_publication_keeps_old_history_and_no_partial_record",
+        "tools/tests/test_evidence_classification.py::test_historical_tampering_and_symlink_are_refused",
+        "tools/tests/test_evidence_classification.py::test_closed_record_and_separate_status_vocabulary[exit_code-True]",
+        "tools/tests/test_evidence_classification.py::test_closed_record_and_separate_status_vocabulary[exit_code-3]",
+        "tools/tests/test_evidence_classification.py::test_closed_record_and_separate_status_vocabulary[status-INCOMPLETE]",
+        "tools/tests/test_evidence_classification.py::test_closed_record_and_separate_status_vocabulary[kind-real]",
+        "tools/tests/test_evidence_classification.py::test_closed_record_and_separate_status_vocabulary[mode-any]",
+        "tools/tests/test_evidence_classification.py::test_closed_record_and_separate_status_vocabulary[commit_sha-latest]",
+        "tools/tests/test_evidence_classification.py::test_closed_record_and_separate_status_vocabulary[started_at-2026-11-15T01:00:00+01:00]",
+        "tools/tests/test_evidence_classification.py::test_closed_record_and_separate_status_vocabulary[finished_at-2026-11-14T23:59:59Z]",
+        "tools/tests/test_evidence_classification.py::test_closed_record_and_separate_status_vocabulary[output_digests-value8]",
+        "tools/tests/test_evidence_classification.py::test_timestamp_precision_does_not_change_order",
+        "tools/tests/test_evidence_classification.py::test_supervised_producer_boundary_and_required_inventory[none]",
+        "tools/tests/test_evidence_classification.py::test_supervised_producer_boundary_and_required_inventory[zero]",
+        "tools/tests/test_evidence_classification.py::test_supervised_producer_boundary_and_required_inventory[skip]",
+        "tools/tests/test_evidence_classification.py::test_supervised_producer_boundary_and_required_inventory[dirty]",
+        "tools/tests/test_evidence_classification.py::test_supervised_producer_boundary_and_required_inventory[provider]",
+        "tools/tests/test_evidence_classification.py::test_supervised_producer_boundary_and_required_inventory[fixture]",
+        "tools/tests/test_evidence_classification.py::test_arbitrary_requirement_or_test_cannot_be_attached_to_success",
+        "tools/tests/test_evidence_classification.py::test_provider_shaped_receipt_and_private_provenance_flag_still_cannot_qualify",
+        "tools/tests/test_evidence_classification.py::test_observed_retry_reuses_original_receipt_without_running_again",
+        "tools/tests/test_evidence_classification.py::test_malformed_classification_is_a_safe_refusal[kind]",
+        "tools/tests/test_evidence_classification.py::test_malformed_classification_is_a_safe_refusal[mode]",
+        "tools/tests/test_evidence_classification.py::test_malformed_classification_is_a_safe_refusal[status]",
+        "tools/tests/test_evidence_classification.py::test_unqualified_kind_cannot_mask_actual_failure[assertion_failure]",
+        "tools/tests/test_evidence_classification.py::test_unqualified_kind_cannot_mask_actual_failure[missing_required_test]",
+        "tools/tests/test_evidence_classification.py::test_suite_persists_each_bound_case_and_recovers_partial_publication",
+        "tools/tests/test_evidence_classification.py::test_missing_prerequisite_preserves_an_existing_failure",
+        "tools/tests/test_traceability.py::test_generated_report_conforms_without_runtime_acceptance",
+        "tools/tests/test_traceability.py::test_exact_action_set_cannot_be_replaced_by_count_or_duplicate[expected_actions]",
+        "tools/tests/test_traceability.py::test_exact_action_set_cannot_be_replaced_by_count_or_duplicate[checked_actions]",
+        "tools/tests/test_traceability.py::test_stale_source_or_design_or_tested_commit_fails[manifest_digest]",
+        "tools/tests/test_traceability.py::test_stale_source_or_design_or_tested_commit_fails[provider_schema_digest]",
+        "tools/tests/test_traceability.py::test_stale_source_or_design_or_tested_commit_fails[figma_revision]",
+        "tools/tests/test_traceability.py::test_stale_source_or_design_or_tested_commit_fails[checked_commit]",
+        "tools/tests/test_traceability.py::test_lost_action_assertion_or_explicit_failure_is_nonpassing",
+        "tools/tests/test_traceability.py::test_provider_route_body_plane_and_schema_drift_fail[method-GET]",
+        "tools/tests/test_traceability.py::test_provider_route_body_plane_and_schema_drift_fail[path_template-/v1/invitations/{id}:accept]",
+        "tools/tests/test_traceability.py::test_provider_route_body_plane_and_schema_drift_fail[request_fields-replacement2]",
+        "tools/tests/test_traceability.py::test_provider_route_body_plane_and_schema_drift_fail[plane-hosted-bff]",
+        "tools/tests/test_traceability.py::test_provider_route_body_plane_and_schema_drift_fail[capability-members.admin]",
+        "tools/tests/test_traceability.py::test_provider_route_body_plane_and_schema_drift_fail[request_schema_ref-urn:sentinel:wrong:1]",
+        "tools/tests/test_traceability.py::test_provider_route_body_plane_and_schema_drift_fail[response_schema_refs-replacement6]",
+        "tools/tests/test_traceability.py::test_explicit_bijective_placeholder_mapping_preserves_literal_path",
+        "tools/tests/test_traceability.py::test_lost_required_adverse_assertion_is_not_hidden_by_other_passes",
+        "tools/tests/test_traceability.py::test_parent_containment_is_not_a_dependency_edge",
+        "tools/tests/test_traceability.py::test_actual_diagram_asset_hash_and_missing_asset",
+        "tools/tests/test_traceability.py::test_closed_inputs_refuse_unknown_fields"
+      ],
       "real_evidence_requirements": [
         {
           "requirement_id": "OT-BOOT-C05-AC01",
@@ -44031,6 +45222,26 @@
     {
       "path": "apps/web/tests/coverage/ot-p23-c11.spec.ts",
       "owner": "OPE-266"
+    },
+    {
+      "path": "docs/specification/traceability-report.schema.json",
+      "owner": "OPE-126"
+    },
+    {
+      "path": "tools/tests/test_traceability.py",
+      "owner": "OPE-126"
+    },
+    {
+      "path": "tools/tests/test_evidence_classification.py",
+      "owner": "OPE-126"
+    },
+    {
+      "path": "tools/tests/__init__.py",
+      "owner": "OPE-126"
+    },
+    {
+      "path": "docs/specification/assets/ARCH-01.png",
+      "owner": "OPE-126"
     }
   ],
   "ownership_handoffs": [
@@ -45316,7 +46527,1074 @@
       "requirement_ids": [
         "OT-BOOT-C05-AC01"
       ],
+      "test_id": "tests/contract/test_traceability.py::test_complete_current_manifest_passes_with_actual_native_ids",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-126",
+      "requirement_ids": [
+        "OT-BOOT-C05-AC01"
+      ],
       "test_id": "tests/contract/test_traceability.py::test_ac01_exact_unmapped_subfeature_is_reported",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-126",
+      "requirement_ids": [
+        "OT-BOOT-C05-AC02"
+      ],
+      "test_id": "tests/contract/test_traceability.py::test_required_adverse_metadata_fixtures[body-SOURCE_BODY_HASH]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-126",
+      "requirement_ids": [
+        "OT-BOOT-C05-AC02"
+      ],
+      "test_id": "tests/contract/test_traceability.py::test_required_adverse_metadata_fixtures[duplicate-UNIQUE_STABLE_ID]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-126",
+      "requirement_ids": [
+        "OT-BOOT-C05-AC02"
+      ],
+      "test_id": "tests/contract/test_traceability.py::test_required_adverse_metadata_fixtures[cycle-ACYCLIC_BLOCKED_BY]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-126",
+      "requirement_ids": [
+        "OT-BOOT-C05-AC02"
+      ],
+      "test_id": "tests/contract/test_traceability.py::test_required_adverse_metadata_fixtures[ownership-SINGLE_EXCLUSIVE_OWNER]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-126",
+      "requirement_ids": [
+        "OT-BOOT-C05-AC02"
+      ],
+      "test_id": "tests/contract/test_traceability.py::test_required_adverse_metadata_fixtures[unknown_issue-MAPPED_NATIVE_ISSUE]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-126",
+      "requirement_ids": [
+        "OT-BOOT-C05-AC02"
+      ],
+      "test_id": "tests/contract/test_traceability.py::test_required_adverse_metadata_fixtures[source-APPROVED_SOURCE_PROJECTION]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-126",
+      "requirement_ids": [
+        "OT-BOOT-C05-AC02"
+      ],
+      "test_id": "tests/contract/test_traceability.py::test_required_adverse_metadata_fixtures[required-EVERY_ACCEPTANCE_HAS_EVIDENCE]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-126",
+      "requirement_ids": [
+        "OT-BOOT-C05-AC02"
+      ],
+      "test_id": "tests/contract/test_traceability.py::test_required_adverse_metadata_fixtures[action-UNTESTED_ACTION_REQUIREMENT]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-126",
+      "requirement_ids": [
+        "OT-BOOT-C05-AC02"
+      ],
+      "test_id": "tests/contract/test_traceability.py::test_required_adverse_metadata_fixtures[orphan-ACTION_OWNER_AND_ASSERTION_REQUIREMENT]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-126",
+      "requirement_ids": [
+        "OT-BOOT-C05-AC02"
+      ],
+      "test_id": "tests/contract/test_traceability.py::test_required_adverse_metadata_fixtures[snapshot-CURRENT_DESIGN_SNAPSHOT]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-126",
+      "requirement_ids": [
+        "OT-BOOT-C05-AC02"
+      ],
+      "test_id": "tests/contract/test_traceability.py::test_required_adverse_metadata_fixtures[local_hash-LOCAL_ASSET_SOURCE_HASH]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-126",
+      "requirement_ids": [
+        "OT-BOOT-C05-AC02"
+      ],
+      "test_id": "tests/contract/test_traceability.py::test_required_adverse_metadata_fixtures[missing_asset-REQUIRED_SOURCE_ASSET]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-126",
+      "requirement_ids": [
+        "OT-BOOT-C05-AC02"
+      ],
+      "test_id": "tests/contract/test_traceability.py::test_required_adverse_metadata_fixtures[contract_ref-EXACT_DECLARED_CONTRACT_REFERENCES]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-126",
+      "requirement_ids": [
+        "OT-BOOT-C05-AC02"
+      ],
+      "test_id": "tests/contract/test_traceability.py::test_required_adverse_metadata_fixtures[missing_binding-REQUIRED_TEST_BINDING]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-126",
+      "requirement_ids": [
+        "OT-BOOT-C05-AC02"
+      ],
+      "test_id": "tests/contract/test_traceability.py::test_required_adverse_metadata_fixtures[duplicate_binding-UNIQUE_TEST_BINDINGS]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-126",
+      "requirement_ids": [
+        "OT-BOOT-C05-AC02"
+      ],
+      "test_id": "tests/contract/test_traceability.py::test_unknown_and_nested_schema_references_fail_offline[https://example.invalid/schema404]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-126",
+      "requirement_ids": [
+        "OT-BOOT-C05-AC02"
+      ],
+      "test_id": "tests/contract/test_traceability.py::test_unknown_and_nested_schema_references_fail_offline[urn:opentour:missing:1.0]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-126",
+      "requirement_ids": [
+        "OT-BOOT-C05-AC02"
+      ],
+      "test_id": "tests/contract/test_traceability.py::test_unknown_and_nested_schema_references_fail_offline[urn:opentour:common-contract:1.0#/$defs/nonexistent]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-126",
+      "requirement_ids": [
+        "OT-BOOT-C05-AC02"
+      ],
+      "test_id": "tests/contract/test_traceability.py::test_real_cli_emits_bound_machine_and_readable_findings",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-126",
+      "requirement_ids": [
+        "OT-BOOT-C05-AC02"
+      ],
+      "test_id": "tests/contract/test_traceability.py::test_cli_refuses_existing_report_without_overwriting",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-126",
+      "requirement_ids": [
+        "OT-BOOT-C05-AC01"
+      ],
+      "test_id": "tests/contract/test_traceability.py::test_all_current_c05_cases_have_explicit_requirement_bindings",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-126",
+      "requirement_ids": [
+        "OT-BOOT-C05-AC03"
+      ],
+      "test_id": "tools/tests/test_evidence_classification.py::test_imported_pass_is_never_observed_authority",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-126",
+      "requirement_ids": [
+        "OT-BOOT-C05-AC03"
+      ],
+      "test_id": "tools/tests/test_evidence_classification.py::test_self_claimed_kind_or_runtime_receipt_cannot_authenticate[simulated]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-126",
+      "requirement_ids": [
+        "OT-BOOT-C05-AC03"
+      ],
+      "test_id": "tools/tests/test_evidence_classification.py::test_self_claimed_kind_or_runtime_receipt_cannot_authenticate[local_integration]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-126",
+      "requirement_ids": [
+        "OT-BOOT-C05-AC03"
+      ],
+      "test_id": "tools/tests/test_evidence_classification.py::test_self_claimed_kind_or_runtime_receipt_cannot_authenticate[provider_integration]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-126",
+      "requirement_ids": [
+        "OT-BOOT-C05-AC03"
+      ],
+      "test_id": "tools/tests/test_evidence_classification.py::test_self_claimed_kind_or_runtime_receipt_cannot_authenticate[customer_evidence]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-126",
+      "requirement_ids": [
+        "OT-BOOT-C05-AC03"
+      ],
+      "test_id": "tools/tests/test_evidence_classification.py::test_ac03_current_readiness_invalidation_preserves_history[changes0-STALE_TESTED_COMMIT]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-126",
+      "requirement_ids": [
+        "OT-BOOT-C05-AC03"
+      ],
+      "test_id": "tools/tests/test_evidence_classification.py::test_ac03_current_readiness_invalidation_preserves_history[changes1-CHANGED_REQUIREMENT_SOURCE]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-126",
+      "requirement_ids": [
+        "OT-BOOT-C05-AC03"
+      ],
+      "test_id": "tools/tests/test_evidence_classification.py::test_ac03_current_readiness_invalidation_preserves_history[changes2-REQUIRED_EVIDENCE_KIND_MISMATCH]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-126",
+      "requirement_ids": [
+        "OT-BOOT-C05-AC03"
+      ],
+      "test_id": "tools/tests/test_evidence_classification.py::test_ac03_current_readiness_invalidation_preserves_history[changes3-MISSING_REQUIRED_SECURITY_OR_ACCEPTANCE_CHECK]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-126",
+      "requirement_ids": [
+        "OT-BOOT-C05-AC03"
+      ],
+      "test_id": "tools/tests/test_evidence_classification.py::test_ac03_current_readiness_invalidation_preserves_history[changes4-TEST_OR_MODE_MISMATCH]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-126",
+      "requirement_ids": [
+        "OT-BOOT-C05-AC03"
+      ],
+      "test_id": "tools/tests/test_evidence_classification.py::test_unit_or_local_fake_cannot_close_any_empirical_gate[simulated-G1]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-126",
+      "requirement_ids": [
+        "OT-BOOT-C05-AC03"
+      ],
+      "test_id": "tools/tests/test_evidence_classification.py::test_unit_or_local_fake_cannot_close_any_empirical_gate[simulated-G2]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-126",
+      "requirement_ids": [
+        "OT-BOOT-C05-AC03"
+      ],
+      "test_id": "tools/tests/test_evidence_classification.py::test_unit_or_local_fake_cannot_close_any_empirical_gate[simulated-G3]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-126",
+      "requirement_ids": [
+        "OT-BOOT-C05-AC03"
+      ],
+      "test_id": "tools/tests/test_evidence_classification.py::test_unit_or_local_fake_cannot_close_any_empirical_gate[simulated-G4]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-126",
+      "requirement_ids": [
+        "OT-BOOT-C05-AC03"
+      ],
+      "test_id": "tools/tests/test_evidence_classification.py::test_unit_or_local_fake_cannot_close_any_empirical_gate[simulated-G5]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-126",
+      "requirement_ids": [
+        "OT-BOOT-C05-AC03"
+      ],
+      "test_id": "tools/tests/test_evidence_classification.py::test_unit_or_local_fake_cannot_close_any_empirical_gate[simulated-G6]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-126",
+      "requirement_ids": [
+        "OT-BOOT-C05-AC03"
+      ],
+      "test_id": "tools/tests/test_evidence_classification.py::test_unit_or_local_fake_cannot_close_any_empirical_gate[local_integration-G1]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-126",
+      "requirement_ids": [
+        "OT-BOOT-C05-AC03"
+      ],
+      "test_id": "tools/tests/test_evidence_classification.py::test_unit_or_local_fake_cannot_close_any_empirical_gate[local_integration-G2]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-126",
+      "requirement_ids": [
+        "OT-BOOT-C05-AC03"
+      ],
+      "test_id": "tools/tests/test_evidence_classification.py::test_unit_or_local_fake_cannot_close_any_empirical_gate[local_integration-G3]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-126",
+      "requirement_ids": [
+        "OT-BOOT-C05-AC03"
+      ],
+      "test_id": "tools/tests/test_evidence_classification.py::test_unit_or_local_fake_cannot_close_any_empirical_gate[local_integration-G4]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-126",
+      "requirement_ids": [
+        "OT-BOOT-C05-AC03"
+      ],
+      "test_id": "tools/tests/test_evidence_classification.py::test_unit_or_local_fake_cannot_close_any_empirical_gate[local_integration-G5]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-126",
+      "requirement_ids": [
+        "OT-BOOT-C05-AC03"
+      ],
+      "test_id": "tools/tests/test_evidence_classification.py::test_unit_or_local_fake_cannot_close_any_empirical_gate[local_integration-G6]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-126",
+      "requirement_ids": [
+        "OT-BOOT-C05-AC03"
+      ],
+      "test_id": "tools/tests/test_evidence_classification.py::test_missing_gpu_or_customer_verifier_records_blocked[provider_integration]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-126",
+      "requirement_ids": [
+        "OT-BOOT-C05-AC03"
+      ],
+      "test_id": "tools/tests/test_evidence_classification.py::test_missing_gpu_or_customer_verifier_records_blocked[customer_evidence]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-126",
+      "requirement_ids": [
+        "OT-BOOT-C05-AC03"
+      ],
+      "test_id": "tools/tests/test_evidence_classification.py::test_parent_requires_all_compatible_children_and_actual_integration",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-126",
+      "requirement_ids": [
+        "OT-BOOT-C05-AC03"
+      ],
+      "test_id": "tools/tests/test_evidence_classification.py::test_replay_is_idempotent_and_changed_same_attempt_conflicts",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-126",
+      "requirement_ids": [
+        "OT-BOOT-C05-AC03"
+      ],
+      "test_id": "tools/tests/test_evidence_classification.py::test_concurrent_identical_publication_is_one_complete_record",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-126",
+      "requirement_ids": [
+        "OT-BOOT-C05-AC03"
+      ],
+      "test_id": "tools/tests/test_evidence_classification.py::test_interrupted_publication_keeps_old_history_and_no_partial_record",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-126",
+      "requirement_ids": [
+        "OT-BOOT-C05-AC03"
+      ],
+      "test_id": "tools/tests/test_evidence_classification.py::test_historical_tampering_and_symlink_are_refused",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-126",
+      "requirement_ids": [
+        "OT-BOOT-C05-AC03"
+      ],
+      "test_id": "tools/tests/test_evidence_classification.py::test_closed_record_and_separate_status_vocabulary[exit_code-True]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-126",
+      "requirement_ids": [
+        "OT-BOOT-C05-AC03"
+      ],
+      "test_id": "tools/tests/test_evidence_classification.py::test_closed_record_and_separate_status_vocabulary[exit_code-3]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-126",
+      "requirement_ids": [
+        "OT-BOOT-C05-AC03"
+      ],
+      "test_id": "tools/tests/test_evidence_classification.py::test_closed_record_and_separate_status_vocabulary[status-INCOMPLETE]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-126",
+      "requirement_ids": [
+        "OT-BOOT-C05-AC03"
+      ],
+      "test_id": "tools/tests/test_evidence_classification.py::test_closed_record_and_separate_status_vocabulary[kind-real]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-126",
+      "requirement_ids": [
+        "OT-BOOT-C05-AC03"
+      ],
+      "test_id": "tools/tests/test_evidence_classification.py::test_closed_record_and_separate_status_vocabulary[mode-any]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-126",
+      "requirement_ids": [
+        "OT-BOOT-C05-AC03"
+      ],
+      "test_id": "tools/tests/test_evidence_classification.py::test_closed_record_and_separate_status_vocabulary[commit_sha-latest]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-126",
+      "requirement_ids": [
+        "OT-BOOT-C05-AC03"
+      ],
+      "test_id": "tools/tests/test_evidence_classification.py::test_closed_record_and_separate_status_vocabulary[started_at-2026-11-15T01:00:00+01:00]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-126",
+      "requirement_ids": [
+        "OT-BOOT-C05-AC03"
+      ],
+      "test_id": "tools/tests/test_evidence_classification.py::test_closed_record_and_separate_status_vocabulary[finished_at-2026-11-14T23:59:59Z]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-126",
+      "requirement_ids": [
+        "OT-BOOT-C05-AC03"
+      ],
+      "test_id": "tools/tests/test_evidence_classification.py::test_closed_record_and_separate_status_vocabulary[output_digests-value8]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-126",
+      "requirement_ids": [
+        "OT-BOOT-C05-AC03"
+      ],
+      "test_id": "tools/tests/test_evidence_classification.py::test_timestamp_precision_does_not_change_order",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-126",
+      "requirement_ids": [
+        "OT-BOOT-C05-AC03"
+      ],
+      "test_id": "tools/tests/test_evidence_classification.py::test_supervised_producer_boundary_and_required_inventory[none]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-126",
+      "requirement_ids": [
+        "OT-BOOT-C05-AC03"
+      ],
+      "test_id": "tools/tests/test_evidence_classification.py::test_supervised_producer_boundary_and_required_inventory[zero]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-126",
+      "requirement_ids": [
+        "OT-BOOT-C05-AC03"
+      ],
+      "test_id": "tools/tests/test_evidence_classification.py::test_supervised_producer_boundary_and_required_inventory[skip]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-126",
+      "requirement_ids": [
+        "OT-BOOT-C05-AC03"
+      ],
+      "test_id": "tools/tests/test_evidence_classification.py::test_supervised_producer_boundary_and_required_inventory[dirty]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-126",
+      "requirement_ids": [
+        "OT-BOOT-C05-AC03"
+      ],
+      "test_id": "tools/tests/test_evidence_classification.py::test_supervised_producer_boundary_and_required_inventory[provider]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-126",
+      "requirement_ids": [
+        "OT-BOOT-C05-AC03"
+      ],
+      "test_id": "tools/tests/test_evidence_classification.py::test_supervised_producer_boundary_and_required_inventory[fixture]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-126",
+      "requirement_ids": [
+        "OT-BOOT-C05-AC03"
+      ],
+      "test_id": "tools/tests/test_evidence_classification.py::test_arbitrary_requirement_or_test_cannot_be_attached_to_success",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-126",
+      "requirement_ids": [
+        "OT-BOOT-C05-AC03"
+      ],
+      "test_id": "tools/tests/test_evidence_classification.py::test_provider_shaped_receipt_and_private_provenance_flag_still_cannot_qualify",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-126",
+      "requirement_ids": [
+        "OT-BOOT-C05-AC03"
+      ],
+      "test_id": "tools/tests/test_evidence_classification.py::test_observed_retry_reuses_original_receipt_without_running_again",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-126",
+      "requirement_ids": [
+        "OT-BOOT-C05-AC03"
+      ],
+      "test_id": "tools/tests/test_evidence_classification.py::test_malformed_classification_is_a_safe_refusal[kind]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-126",
+      "requirement_ids": [
+        "OT-BOOT-C05-AC03"
+      ],
+      "test_id": "tools/tests/test_evidence_classification.py::test_malformed_classification_is_a_safe_refusal[mode]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-126",
+      "requirement_ids": [
+        "OT-BOOT-C05-AC03"
+      ],
+      "test_id": "tools/tests/test_evidence_classification.py::test_malformed_classification_is_a_safe_refusal[status]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-126",
+      "requirement_ids": [
+        "OT-BOOT-C05-AC03"
+      ],
+      "test_id": "tools/tests/test_evidence_classification.py::test_unqualified_kind_cannot_mask_actual_failure[assertion_failure]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-126",
+      "requirement_ids": [
+        "OT-BOOT-C05-AC03"
+      ],
+      "test_id": "tools/tests/test_evidence_classification.py::test_unqualified_kind_cannot_mask_actual_failure[missing_required_test]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-126",
+      "requirement_ids": [
+        "OT-BOOT-C05-AC03"
+      ],
+      "test_id": "tools/tests/test_evidence_classification.py::test_suite_persists_each_bound_case_and_recovers_partial_publication",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-126",
+      "requirement_ids": [
+        "OT-BOOT-C05-AC03"
+      ],
+      "test_id": "tools/tests/test_evidence_classification.py::test_missing_prerequisite_preserves_an_existing_failure",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-126",
+      "requirement_ids": [
+        "OT-BOOT-C05-AC01"
+      ],
+      "test_id": "tools/tests/test_traceability.py::test_generated_report_conforms_without_runtime_acceptance",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-126",
+      "requirement_ids": [
+        "OT-BOOT-C05-AC01"
+      ],
+      "test_id": "tools/tests/test_traceability.py::test_exact_action_set_cannot_be_replaced_by_count_or_duplicate[expected_actions]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-126",
+      "requirement_ids": [
+        "OT-BOOT-C05-AC01"
+      ],
+      "test_id": "tools/tests/test_traceability.py::test_exact_action_set_cannot_be_replaced_by_count_or_duplicate[checked_actions]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-126",
+      "requirement_ids": [
+        "OT-BOOT-C05-AC02"
+      ],
+      "test_id": "tools/tests/test_traceability.py::test_stale_source_or_design_or_tested_commit_fails[manifest_digest]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-126",
+      "requirement_ids": [
+        "OT-BOOT-C05-AC02"
+      ],
+      "test_id": "tools/tests/test_traceability.py::test_stale_source_or_design_or_tested_commit_fails[provider_schema_digest]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-126",
+      "requirement_ids": [
+        "OT-BOOT-C05-AC02"
+      ],
+      "test_id": "tools/tests/test_traceability.py::test_stale_source_or_design_or_tested_commit_fails[figma_revision]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-126",
+      "requirement_ids": [
+        "OT-BOOT-C05-AC02"
+      ],
+      "test_id": "tools/tests/test_traceability.py::test_stale_source_or_design_or_tested_commit_fails[checked_commit]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-126",
+      "requirement_ids": [
+        "OT-BOOT-C05-AC01"
+      ],
+      "test_id": "tools/tests/test_traceability.py::test_lost_action_assertion_or_explicit_failure_is_nonpassing",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-126",
+      "requirement_ids": [
+        "OT-BOOT-C05-AC02"
+      ],
+      "test_id": "tools/tests/test_traceability.py::test_provider_route_body_plane_and_schema_drift_fail[method-GET]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-126",
+      "requirement_ids": [
+        "OT-BOOT-C05-AC02"
+      ],
+      "test_id": "tools/tests/test_traceability.py::test_provider_route_body_plane_and_schema_drift_fail[path_template-/v1/invitations/{id}:accept]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-126",
+      "requirement_ids": [
+        "OT-BOOT-C05-AC02"
+      ],
+      "test_id": "tools/tests/test_traceability.py::test_provider_route_body_plane_and_schema_drift_fail[request_fields-replacement2]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-126",
+      "requirement_ids": [
+        "OT-BOOT-C05-AC02"
+      ],
+      "test_id": "tools/tests/test_traceability.py::test_provider_route_body_plane_and_schema_drift_fail[plane-hosted-bff]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-126",
+      "requirement_ids": [
+        "OT-BOOT-C05-AC02"
+      ],
+      "test_id": "tools/tests/test_traceability.py::test_provider_route_body_plane_and_schema_drift_fail[capability-members.admin]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-126",
+      "requirement_ids": [
+        "OT-BOOT-C05-AC02"
+      ],
+      "test_id": "tools/tests/test_traceability.py::test_provider_route_body_plane_and_schema_drift_fail[request_schema_ref-urn:sentinel:wrong:1]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-126",
+      "requirement_ids": [
+        "OT-BOOT-C05-AC02"
+      ],
+      "test_id": "tools/tests/test_traceability.py::test_provider_route_body_plane_and_schema_drift_fail[response_schema_refs-replacement6]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-126",
+      "requirement_ids": [
+        "OT-BOOT-C05-AC01"
+      ],
+      "test_id": "tools/tests/test_traceability.py::test_explicit_bijective_placeholder_mapping_preserves_literal_path",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-126",
+      "requirement_ids": [
+        "OT-BOOT-C05-AC01"
+      ],
+      "test_id": "tools/tests/test_traceability.py::test_lost_required_adverse_assertion_is_not_hidden_by_other_passes",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-126",
+      "requirement_ids": [
+        "OT-BOOT-C05-AC02"
+      ],
+      "test_id": "tools/tests/test_traceability.py::test_parent_containment_is_not_a_dependency_edge",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-126",
+      "requirement_ids": [
+        "OT-BOOT-C05-AC02"
+      ],
+      "test_id": "tools/tests/test_traceability.py::test_actual_diagram_asset_hash_and_missing_asset",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-126",
+      "requirement_ids": [
+        "OT-BOOT-C05-AC02"
+      ],
+      "test_id": "tools/tests/test_traceability.py::test_closed_inputs_refuse_unknown_fields",
       "kind": "simulated",
       "mode": null,
       "fixture_id": "bootstrap-command-contract",

@@ -339,3 +339,87 @@ def test_observed_retry_reuses_original_receipt_without_running_again(
     first = store.observe_command("retry", **args)
     assert store.observe_command("retry", **args) == first
     assert calls == [1]
+
+
+@pytest.mark.parametrize("field", ["kind", "mode", "status"])
+def test_malformed_classification_is_a_safe_refusal(field: str) -> None:
+    value = record()
+    value[field] = {}
+    with pytest.raises(EvidenceError, match="INVALID_EVIDENCE_CLASSIFICATION"):
+        validate_record(value)
+
+
+@pytest.mark.parametrize("initial", ["assertion_failure", "missing_required_test"])
+def test_unqualified_kind_cannot_mask_actual_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    initial: str,
+) -> None:
+    from tools import test_runner
+
+    args = observation_arguments()
+    receipt = producer_fixture(args)
+    receipt["kind"] = "provider_integration"
+    if initial == "assertion_failure":
+        receipt.update(status="FAIL", exit_code=1)
+    else:
+        receipt["steps"][0]["tests"]["tests"] = []
+    monkeypatch.setattr(test_runner, "run_command", lambda *a, **k: receipt)
+    store = EvidenceStore(tmp_path / "history")
+    store.observe_command("failure-precedence", **args)
+    actual = store.read("failure-precedence")["record"]
+    assert actual["status"] == "FAIL" and actual["exit_code"] == 1
+    assert "UNQUALIFIED_PROVIDER_VERIFIER" in actual["limitations"]
+
+
+def test_suite_persists_each_bound_case_and_recovers_partial_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tools import test_runner
+
+    manifest = schema_validate.read_json(ROOT / TARGET)
+    target = "tests/contract/test_traceability.py"
+    bindings = [b for b in manifest["test_bindings"] if b["test_id"].startswith(target + "::")]
+    args = observation_arguments()
+    receipt = producer_fixture(args)
+    receipt["steps"][0]["tests"]["tests"] = [
+        {
+            "id": "sha256:" + hashlib.sha256(b["test_id"].encode()).hexdigest(),
+            "file": target,
+            "mode": b["mode"],
+            "status": "passed",
+        }
+        for b in bindings
+    ]
+    calls: list[int] = []
+
+    def execute(*a: Any, **k: Any) -> dict[str, Any]:
+        calls.append(1)
+        return copy.deepcopy(receipt)
+
+    monkeypatch.setattr(test_runner, "run_command", execute)
+    store = EvidenceStore(tmp_path / "history")
+    ids = store.observe_python_suite("batch", target=target, issue_key="OPE-126", root=ROOT)
+    assert len(ids) == len(bindings) and len(ids) > 1
+    (store.directory / f"{ids[-1]}.json").unlink()
+    assert store.observe_python_suite("batch", target=target, issue_key="OPE-126", root=ROOT) == ids
+    assert calls == [1]  # Recovered from the already retained original supervised receipt.
+    result = store.requirement_completion(
+        ids,
+        issue_key="OPE-126",
+        requirement_ids={"OT-BOOT-C05-AC01", "OT-BOOT-C05-AC02", "OT-BOOT-C05-AC03"},
+        root=ROOT,
+        commit="a" * 40,
+    )
+    assert result["status"] == "BLOCKED"  # The separate tools suite is still required.
+    assert result["missing_cases"] and result["product_acceptance"] == "NOT_RUN"
+
+
+def test_missing_prerequisite_preserves_an_existing_failure(tmp_path: Path) -> None:
+    store = EvidenceStore(tmp_path / "history")
+    value = record("provider_integration")
+    value.update(status="FAIL", exit_code=1)
+    store.missing_prerequisite("failed", value)
+    observed = store.read("failed")["record"]
+    assert observed["status"] == "FAIL" and observed["exit_code"] == 1

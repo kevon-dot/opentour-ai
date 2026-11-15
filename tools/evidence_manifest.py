@@ -70,7 +70,10 @@ def validate_record(record: Any) -> None:
     if datetime.fromisoformat(record["finished_at"]) < datetime.fromisoformat(record["started_at"]):
         raise EvidenceError("REVERSED_EXECUTION_INTERVAL")
     if (
-        record["kind"] not in KINDS
+        not isinstance(record["kind"], str)
+        or not isinstance(record["status"], str)
+        or (record["mode"] is not None and not isinstance(record["mode"], str))
+        or record["kind"] not in KINDS
         or record["mode"] not in MODES | {None}
         or record["status"] not in {"PASS", "FAIL", "BLOCKED", "NOT_RUN"}
         or (record["exit_code"] is not None and type(record["exit_code"]) is not int)
@@ -107,7 +110,12 @@ def eligibility(
 ) -> dict[str, Any]:
     """Pure policy, with provenance supplied by a trusted store observation, never JSON flags."""
     validate_record(record)
-    if required_kind not in KINDS or mode not in MODES | {None}:
+    if (
+        not isinstance(required_kind, str)
+        or required_kind not in KINDS
+        or (mode is not None and not isinstance(mode, str))
+        or mode not in MODES | {None}
+    ):
         raise EvidenceError("INVALID_ELIGIBILITY_POLICY")
     reasons = []
     if (
@@ -261,6 +269,29 @@ class EvidenceStore:
                 raise EvidenceError("ATTEMPT_ID_CONTENT_CONFLICT")
             return existing
         receipt = test_runner.run_command(command, args, root)
+        return self._record_receipt(
+            attempt,
+            receipt,
+            bindings[0],
+            requirement_ids=requirement_ids,
+            spec_sha256=spec_sha256,
+            command=command,
+            args=args,
+        )
+
+    def _record_receipt(
+        self,
+        attempt: str,
+        receipt: dict[str, Any],
+        binding: dict[str, Any],
+        *,
+        requirement_ids: list[str],
+        spec_sha256: str,
+        command: str,
+        args: Sequence[str],
+    ) -> Path:
+        issue_key, test_id, mode = binding["issue_key"], binding["test_id"], binding["mode"]
+        fixture_id, fixture_version = binding["fixture_id"], binding["fixture_version"]
         status, exit_code = receipt["status"], receipt["exit_code"]
         limitations = list(receipt["limitations"])
         if fixture_id != receipt["fixture_id"] or fixture_version != receipt["fixture_version"]:
@@ -287,8 +318,9 @@ class EvidenceStore:
         # Wrapper's C03 kind is local integration, but its scripted observations
         # remain simulated; this records the selected pytest case, not a provider fact.
         kind = receipt["kind"]
-        if kind != bindings[0]["kind"] or kind not in {"simulated", "local_integration"}:
-            status, exit_code = "BLOCKED", 3
+        if kind != binding["kind"] or kind not in {"simulated", "local_integration"}:
+            if status == "PASS":
+                status, exit_code = "BLOCKED", 3
             limitations.append("UNQUALIFIED_PROVIDER_VERIFIER")
         record = {
             "requirement_ids": requirement_ids,
@@ -310,12 +342,147 @@ class EvidenceStore:
         }
         return self._persist(attempt, record, {"origin": "observed_command", "receipt": receipt})
 
+    def observe_python_suite(
+        self,
+        attempt: str,
+        *,
+        target: str,
+        issue_key: str,
+        root: Path,
+    ) -> list[str]:
+        """One existing supervised command, one durable record per exact registered case.
+
+        Interrupted publication recovers missing records from the already retained
+        original receipt. No second process or synthetic test result is created.
+        """
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", attempt):
+            raise EvidenceError("INVALID_ATTEMPT_ID")
+        target = test_runner.path_target(root, target)
+        manifest = schema_validate.read_json(schema_validate.local_file(root, TARGET))
+        if any(c.status != "PASS" for c in validate_manifest(manifest, root)):
+            raise EvidenceError("UNQUALIFIED_TRACEABILITY_MANIFEST")
+        owners = [i for i in manifest["source_projection"]["issues"] if i["issue_key"] == issue_key]
+        bindings = [
+            b
+            for b in manifest["test_bindings"]
+            if b["issue_key"] == issue_key
+            and (b["test_id"].split("::", 1)[0] == target or b["test_id"].startswith(target + "/"))
+        ]
+        if len(owners) != 1 or not bindings:
+            raise EvidenceError("UNBOUND_REQUIREMENT_OR_TEST")
+        spec = owners[0]["technical_capture_sha256"]
+        attempts = [attempt + "-" + digest(b)[:24] for b in bindings]
+        receipt = None
+        for identity in attempts:
+            path = self.directory / f"{identity}.json"
+            if path.exists() or path.is_symlink():
+                history = self.read(identity)
+                record = history["record"]
+                candidate_receipt = history["provenance"]["receipt"]
+                if (
+                    history["provenance"]["origin"] != "observed_command"
+                    or record["command"] != ["test-python", target]
+                    or record["issue_key"] != issue_key
+                    or record["spec_sha256"] != spec
+                    or (receipt is not None and digest(receipt) != digest(candidate_receipt))
+                ):
+                    raise EvidenceError("ATTEMPT_ID_CONTENT_CONFLICT")
+                receipt = candidate_receipt
+        if receipt is None:
+            receipt = test_runner.run_command("test-python", [target], root)
+        for identity, binding in zip(attempts, bindings, strict=True):
+            self._record_receipt(
+                identity,
+                receipt,
+                binding,
+                requirement_ids=binding["requirement_ids"],
+                spec_sha256=spec,
+                command="test-python",
+                args=[target],
+            )
+        return attempts
+
+    def requirement_completion(
+        self,
+        attempts: Sequence[str],
+        *,
+        issue_key: str,
+        requirement_ids: set[str],
+        root: Path,
+        commit: str,
+    ) -> dict[str, Any]:
+        """All registered current cases are required; one passing case is insufficient."""
+        manifest = schema_validate.read_json(schema_validate.local_file(root, TARGET))
+        if any(c.status != "PASS" for c in validate_manifest(manifest, root)):
+            raise EvidenceError("UNQUALIFIED_TRACEABILITY_MANIFEST")
+        owners = [i for i in manifest["source_projection"]["issues"] if i["issue_key"] == issue_key]
+        if (
+            len(owners) != 1
+            or not requirement_ids
+            or not requirement_ids <= set(owners[0]["projection"]["requirement_ids"])
+        ):
+            raise EvidenceError("UNBOUND_REQUIREMENT_OR_TEST")
+        bindings = [
+            b
+            for b in manifest["test_bindings"]
+            if b["issue_key"] == issue_key and requirement_ids & set(b["requirement_ids"])
+        ]
+        histories = [self.read(identity) for identity in attempts]
+        missing: list[str] = []
+        failed: list[str] = []
+        spec = owners[0]["technical_capture_sha256"]
+        for binding in bindings:
+            candidates = [
+                h
+                for h in histories
+                if h["record"]["test_id"] == binding["test_id"]
+                and h["record"]["mode"] == binding["mode"]
+            ]
+            if not any(
+                eligibility(
+                    h["record"],
+                    commit=commit,
+                    spec=spec,
+                    required_kind=binding["kind"],
+                    required_requirements=set(binding["requirement_ids"]),
+                    test_id=binding["test_id"],
+                    mode=binding["mode"],
+                    _provenance=h["provenance"],
+                )["eligible"]
+                for h in candidates
+            ):
+                missing.append(binding["test_id"])
+                if any(
+                    h["provenance"]["origin"] == "observed_command"
+                    and h["record"]["status"] == "FAIL"
+                    and h["record"]["commit_sha"] == commit
+                    and h["record"]["spec_sha256"] == spec
+                    for h in candidates
+                ):
+                    failed.append(binding["test_id"])
+        covered = {r for b in bindings for r in b["requirement_ids"]}
+        unbound = sorted(requirement_ids - covered)
+        return {
+            "status": "FAIL"
+            if failed
+            else "PASS"
+            if bindings and not missing and not unbound
+            else "BLOCKED",
+            "required_case_count": len(bindings),
+            "missing_cases": missing,
+            "failed_cases": failed,
+            "unbound_requirements": unbound,
+            "kinds": sorted({b["kind"] for b in bindings}),
+            "product_acceptance": "NOT_RUN",
+        }
+
     def missing_prerequisite(self, attempt: str, record: dict[str, Any]) -> Path:
         """No provider adapter is implemented here; an asserted signature is insufficient."""
+        validate_record(record)
         blocked = {
             **record,
-            "status": "BLOCKED",
-            "exit_code": 3,
+            "status": "FAIL" if record["status"] == "FAIL" else "BLOCKED",
+            "exit_code": record["exit_code"] if record["status"] == "FAIL" else 3,
             "limitations": [*record["limitations"], "UNQUALIFIED_PROVIDER_VERIFIER"],
         }
         return self._persist(attempt, blocked, {"origin": "missing_prerequisite", "receipt": None})

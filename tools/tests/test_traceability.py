@@ -159,6 +159,9 @@ def test_actual_diagram_asset_hash_and_missing_asset(tmp_path: Path) -> None:
     asset = tmp_path / "diagram.mmd"
     asset.write_text("graph TD\n A-->B\n")
     shutil.copytree(ROOT / "packages/contracts/common", tmp_path / "packages/contracts/common")
+    shutil.copytree(
+        ROOT / "tools/tests", tmp_path / "tools/tests", ignore=shutil.ignore_patterns("__pycache__")
+    )
     (tmp_path / "tests/contract").mkdir(parents=True)
     shutil.copyfile(
         ROOT / "tests/contract/test_traceability.py",

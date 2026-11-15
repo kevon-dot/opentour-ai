@@ -61,6 +61,8 @@ def test_ac01_exact_unmapped_subfeature_is_reported():
         ("local_hash", "LOCAL_ASSET_SOURCE_HASH"),
         ("missing_asset", "REQUIRED_SOURCE_ASSET"),
         ("contract_ref", "EXACT_DECLARED_CONTRACT_REFERENCES"),
+        ("missing_binding", "REQUIRED_TEST_BINDING"),
+        ("duplicate_binding", "UNIQUE_TEST_BINDINGS"),
     ],
 )
 def test_required_adverse_metadata_fixtures(mutation, code):
@@ -92,6 +94,10 @@ def test_required_adverse_metadata_fixtures(mutation, code):
         value["diagram_assets"] = []
     elif mutation == "contract_ref":
         value["mappings"][0]["declared_contract_paths"] = []
+    elif mutation == "missing_binding":
+        value["test_bindings"].pop()
+    elif mutation == "duplicate_binding":
+        value["test_bindings"].append(copy.deepcopy(value["test_bindings"][0]))
     assert any(c.code == code for c in failures(value))
 
 
@@ -176,3 +182,36 @@ def test_cli_refuses_existing_report_without_overwriting(tmp_path):
         timeout=10,
     )
     assert run.returncode == 2 and report.read_text() == "sentinel"
+
+
+def test_all_current_c05_cases_have_explicit_requirement_bindings():
+    run = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "--collect-only",
+            "-q",
+            "tests/contract/test_traceability.py",
+            "tools/tests",
+        ],
+        cwd=ROOT,
+        env={**os.environ, "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1"},
+        capture_output=True,
+        text=True,
+        timeout=20,
+    )
+    assert run.returncode == 0
+    collected = {
+        s
+        for s in run.stdout.splitlines()
+        if s.startswith(("tests/contract/", "tools/tests/")) and "::test_" in s
+    }
+    current = manifest()
+    bindings = [b for b in current["test_bindings"] if b["issue_key"] == "OPE-126"]
+    assert collected == {b["test_id"] for b in bindings}
+    assert {r for b in bindings for r in b["requirement_ids"]} == {
+        "OT-BOOT-C05-AC01",
+        "OT-BOOT-C05-AC02",
+        "OT-BOOT-C05-AC03",
+    }
