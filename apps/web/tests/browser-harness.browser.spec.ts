@@ -63,6 +63,10 @@ test('BH-REPLAY: same intent has one effect; changed body conflicts; lost acknow
   await harness.configure({ scenario: 'lost_ack' }); await page.getByRole('button', { name: 'Save change' }).click();
   await expect(page.getByRole('status')).toHaveText('Unknown'); expect((await harness.inspect()).effects).toBe(1);
   await page.getByRole('button', { name: 'Retry same intent' }).click(); await expect(page.getByRole('status')).toHaveText('Unknown'); expect((await harness.inspect()).effects).toBe(1);
+  const reordered = await harness.call('mutate', { resource: 'simulated-org-a', value: 'Generated draft', intent: 'simulated-intent-1', expected_revision: '9007199254740993' });
+  expect(reordered.status).toBe(200); expect((await harness.inspect()).effects).toBe(1);
+  const changedAction = await harness.call('revoke', { expected_revision: '9007199254740993', intent: 'simulated-intent-1', value: 'Generated draft', resource: 'simulated-org-a' });
+  expect(changedAction.status).toBe(409); expect(changedAction.body.code).toBe('IDEMPOTENCY_CONFLICT'); expect((await harness.inspect()).operation).toBeNull();
   const conflict = await harness.call('mutate', { expected_revision: '9007199254740993', intent: 'simulated-intent-1', value: 'changed', resource: 'simulated-org-a' }); expect(conflict.status).toBe(409); expect(conflict.body.code).toBe('IDEMPOTENCY_CONFLICT');
 });
 test('BH-CELL-OFFLINE and BH-ERROR: actionable help, safe text, malformed payload and 429/503', async ({ page, harness }) => {
