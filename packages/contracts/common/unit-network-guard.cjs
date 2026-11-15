@@ -36,4 +36,16 @@ globalThis.fetch = async () => denied();
 globalThis.WebSocket = class {
   constructor() { denied(); }
 };
+const childProcess = require("node:child_process");
+for (const name of ["spawn", "spawnSync", "fork", "exec", "execSync", "execFile", "execFileSync"]) {
+  const original = childProcess[name];
+  childProcess[name] = function (...args) {
+    if (args.some((arg) => arg && !Array.isArray(arg) && typeof arg === "object" && arg.detached)) {
+      const error = new Error("Detached child creation denied by unit/contract command boundary");
+      error.code = "OPENTOUR_DETACHED_CHILD_DENIED";
+      throw error;
+    }
+    return Reflect.apply(original, this, args);
+  };
+}
 require("node:module").syncBuiltinESMExports();

@@ -7,6 +7,7 @@ import json
 import os
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 from dataclasses import replace
@@ -465,6 +466,55 @@ def test_package_routing_consumes_workspace_and_keeps_training_separate(checkout
     assert "--package" not in training
 
 
+@pytest.mark.parametrize(
+    "outcome,expected,counts",
+    [("pass", 0, (1, 0, 0)), ("fail", 1, (0, 1, 0)), ("skip", 1, (0, 0, 1))],
+)
+def test_actual_training_route_uses_separate_pytest_only_environment(
+    checkout, outcome, expected, counts
+):
+    qualified_environment = runner.ROOT / "training/.venv"
+    assert (qualified_environment / "bin/python").is_file(), "Run qualified separate training setup"
+    training = checkout / "training"
+    training.mkdir()
+    for name in ("pyproject.toml", "uv.lock"):
+        shutil.copyfile(runner.ROOT / "training" / name, training / name)
+    shutil.copytree(runner.ROOT / "training/src", training / "src")
+    (training / ".venv").symlink_to(qualified_environment.resolve(), target_is_directory=True)
+    tail = {
+        "pass": "assert True",
+        "fail": "assert False",
+        "skip": "pytest.skip('required sentinel')",
+    }[outcome]
+    target = "training/tests/test route with spaces.py"
+    write(
+        checkout,
+        target,
+        "import importlib.util,sys\nfrom pathlib import Path\nimport pytest\n"
+        "def test_training_route():\n"
+        f"    assert Path(sys.prefix).resolve() == Path({str(qualified_environment.resolve())!r})\n"
+        "    assert importlib.util.find_spec('jsonschema') is None\n"
+        "    assert 'jsonschema' not in sys.modules\n"
+        "    assert pytest.__version__ == '9.2.0'\n"
+        "    Path('TRAINING_ENV_CHECKED').touch()\n"
+        f"    {tail}\n",
+    )
+    calls = []
+
+    def actual_training(invocation):
+        calls.append(invocation)
+        return runner.execute(replace(invocation, timeout=20))
+
+    result = runner.run_command("test-python", [target], checkout, actual_training)
+    assert result["exit_code"] == expected, result
+    assert (checkout / "TRAINING_ENV_CHECKED").exists()
+    assert calls[0].argv[calls[0].argv.index("--project") + 1] == "training"
+    report = result["steps"][0]["tests"]
+    assert report["collected"] == 1
+    assert (report["passed"], report["failed"], report["skipped"]) == counts
+    assert result["product_acceptance"] == "NOT_RUN"
+
+
 def test_schema_shapes_semantic_revision_bounds_and_authority_aliases(checkout):
     result = schema_validate.validate_examples(checkout)
     assert result["collected"] >= 29 and result["failed"] == 0
@@ -737,3 +787,181 @@ def test_invalid_unhashable_profile_kind_is_configuration_failure(checkout, key)
 
     update_manifest(checkout, malformed)
     assert runner.run_command("lint", [], checkout, FixtureRunner())["exit_code"] == 2
+
+
+@pytest.mark.parametrize("document", [[], None, {"$id": "urn:opentour:test-result:1.0", "type": 7}])
+def test_malformed_transport_schema_emits_configuration_error(checkout, document):
+    path = checkout / runner.COMMON / "test-result.schema.json"
+    path.write_text(json.dumps(document))
+    manifest_path = checkout / runner.COMMON / "schema-registry.json"
+    registry = json.loads(manifest_path.read_text())
+    for entry in registry["schemas"]:
+        if entry["file"] == path.name:
+            entry["sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
+    manifest_path.write_text(json.dumps(registry))
+    result = runner.run_command(
+        "test-python", ["tests/contract/test_one.py"], checkout, FixtureRunner()
+    )
+    assert result["exit_code"] == 2 and result["steps"][0]["raw_exit_code"] == 0
+
+
+def test_actual_network_guard_precedes_initial_conftest_import(checkout):
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as receiver:
+        receiver.bind(("127.0.0.1", 0))
+        receiver.settimeout(0.1)
+        port = receiver.getsockname()[1]
+        write(
+            checkout,
+            "tests/conftest.py",
+            "import socket\nsocket.socket(socket.AF_INET,socket.SOCK_DGRAM).sendto("
+            f"b'sentinel-conftest',('127.0.0.1',{port}))\n",
+        )
+        result = runner.run_command(
+            "test-python", ["tests/contract/test_one.py"], checkout, local_pytest
+        )
+        assert result["exit_code"] == 2
+        with pytest.raises(TimeoutError):
+            receiver.recvfrom(1024)
+
+
+@pytest.mark.parametrize("location", ["conftest", "test_body"])
+@pytest.mark.parametrize("option", ["start_new_session=True", "process_group=0"])
+def test_actual_python_detached_child_creation_is_denied_before_launch(checkout, location, option):
+    pid_file = checkout / "ESCAPED_CHILD.pid"
+    program = (
+        "import pathlib,subprocess,sys\n"
+        f"p=subprocess.Popen([sys.executable,'-c','import time; time.sleep(10)'],{option},"
+        "stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)\n"
+        "pathlib.Path('ESCAPED_CHILD.pid').write_text(str(p.pid))\n"
+    )
+    target = "tests/contract/test_one.py"
+    if location == "conftest":
+        write(checkout, "tests/conftest.py", program)
+    else:
+        write(
+            checkout,
+            target,
+            "def test_detach():\n"
+            + "\n".join("    " + line for line in program.splitlines())
+            + "\n",
+        )
+    try:
+        result = runner.run_command("test-python", [target], checkout, local_pytest)
+        assert result["exit_code"] == (2 if location == "conftest" else 1)
+        assert not pid_file.exists(), "A detached process was created before the guard"
+    finally:
+        if pid_file.exists():
+            try:
+                os.kill(int(pid_file.read_text()), signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+
+def test_actual_node_detached_child_preload_denies_before_config(checkout):
+    node = shutil.which("node")
+    assert node
+    guard = checkout / runner.COMMON / "unit-network-guard.cjs"
+    env = runner.environment(checkout, "0" * 32)
+    env["NODE_OPTIONS"] = "--require=" + json.dumps(str(guard))
+    program = (
+        "const cp=require('node:child_process'),fs=require('node:fs');"
+        "const p=cp.spawn(process.execPath,['-e','setTimeout(()=>{},10000)'],"
+        "{detached:true,stdio:'ignore'});"
+        "fs.writeFileSync('ESCAPED_CHILD.pid',String(p.pid));p.unref();"
+    )
+    pid_file = checkout / "ESCAPED_CHILD.pid"
+    try:
+        result = subprocess.run(
+            [node, "-e", program], cwd=checkout, env=env, capture_output=True, text=True, timeout=5
+        )
+        assert result.returncode != 0 and "OPENTOUR_DETACHED_CHILD_DENIED" in result.stderr
+        assert not pid_file.exists()
+    finally:
+        if pid_file.exists():
+            try:
+                os.kill(int(pid_file.read_text()), signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+
+@pytest.mark.parametrize("location", ["conftest", "test_body"])
+def test_ordinary_nested_python_helper_inherits_detachment_guard(checkout, location):
+    pid_file = checkout / "ESCAPED_CHILD.pid"
+    write(
+        checkout,
+        "tests/helper.py",
+        "import pathlib,subprocess,sys\n"
+        "p=subprocess.Popen([sys.executable,'-c','import time; time.sleep(10)'],"
+        "start_new_session=True,stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,"
+        "stderr=subprocess.DEVNULL)\n"
+        "pathlib.Path('ESCAPED_CHILD.pid').write_text(str(p.pid))\n",
+    )
+    program = (
+        "import subprocess,sys\nsubprocess.run([sys.executable,'tests/helper.py'],check=True)\n"
+    )
+    target = "tests/contract/test_one.py"
+    if location == "conftest":
+        write(checkout, "tests/conftest.py", program)
+    else:
+        write(
+            checkout,
+            target,
+            "def test_helper():\n"
+            + "\n".join("    " + line for line in program.splitlines())
+            + "\n",
+        )
+    try:
+        result = runner.run_command("test-python", [target], checkout, local_pytest)
+        assert result["exit_code"] == (2 if location == "conftest" else 1)
+        assert not pid_file.exists()
+    finally:
+        if pid_file.exists():
+            try:
+                os.kill(int(pid_file.read_text()), signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+
+def test_ordinary_nested_python_helper_inherits_network_guard(checkout):
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as receiver:
+        receiver.bind(("127.0.0.1", 0))
+        receiver.settimeout(0.1)
+        port = receiver.getsockname()[1]
+        write(
+            checkout,
+            "tests/helper.py",
+            "import socket\nsocket.socket(socket.AF_INET,socket.SOCK_DGRAM).sendto("
+            f"b'sentinel-helper',('127.0.0.1',{port}))\n",
+        )
+        target = "tests/contract/test_helper.py"
+        write(
+            checkout,
+            target,
+            "import subprocess,sys\ndef test_helper():\n"
+            "    subprocess.run([sys.executable,'tests/helper.py'],check=True)\n",
+        )
+        result = runner.run_command("test-python", [target], checkout, local_pytest)
+        assert result["exit_code"] == 1
+        with pytest.raises(TimeoutError):
+            receiver.recvfrom(1024)
+
+
+def test_startup_guard_installation_failure_stops_before_test_code(checkout):
+    guard = checkout / runner.COMMON / "python-unit/sitecustomize.py"
+    guard.write_text(
+        guard.read_text().replace(
+            "def install() -> None:\n",
+            "def install() -> None:\n    raise RuntimeError('sentinel-private-startup')\n",
+        )
+    )
+    target = "tests/contract/test_marker.py"
+    write(
+        checkout,
+        target,
+        "from pathlib import Path\nPath('UNGUARDED_EXECUTED').touch()\n"
+        "def test_one(): assert True\n",
+    )
+    result = runner.run_command("test-python", [target], checkout, local_pytest)
+    assert result["exit_code"] == 2 and result["steps"][0]["raw_exit_code"] == 2
+    assert not (checkout / "UNGUARDED_EXECUTED").exists()
+    assert "sentinel-private-startup" not in json.dumps(result)

@@ -8,7 +8,6 @@ import os
 import re
 import selectors
 import signal
-import socket
 import subprocess
 import sys
 import tempfile
@@ -21,11 +20,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from jsonschema import Draft202012Validator  # type: ignore[import-untyped]
-
-from tools import schema_validate
-
 ROOT = Path(__file__).resolve().parents[1]
+_MANAGED_POPEN = getattr(subprocess, "_opentour_managed_popen", subprocess.Popen)
 COMMON = "packages/contracts/common"
 MODES = ("customer_controlled", "opentour_managed")
 COMMAND_ARITY = {
@@ -90,7 +86,7 @@ Executor = Callable[[Invocation], ProcessResult]
 def execute(invocation: Invocation) -> ProcessResult:
     """Bound child lifetime and output without shell interpolation or unbounded log files."""
     try:
-        process = subprocess.Popen(
+        process = _MANAGED_POPEN(
             invocation.argv,
             cwd=invocation.cwd,
             env=invocation.environment,
@@ -212,6 +208,8 @@ def path_target(root: Path, supplied: str, *, require_exists: bool = True) -> st
 
 
 def manifest(root: Path) -> dict[str, Any]:
+    from tools import schema_validate
+
     try:
         value = schema_validate.read_json(
             schema_validate.local_file(root, f"{COMMON}/command-manifest.json")
@@ -315,6 +313,8 @@ def environment(root: Path, nonce: str) -> dict[str, str]:
 
 
 def uv_python(root: Path, target: str | None = None) -> tuple[str, ...]:
+    from tools import schema_validate
+
     argv = ("uv", "run", "--no-sync", "--offline", "--no-python-downloads")
     if target:
         try:
@@ -340,10 +340,10 @@ def validate_report(
     process: ProcessResult,
     root: Path,
 ) -> tuple[int, str | None]:
-    schema = schema_validate.read_json(
-        schema_validate.local_file(root, f"{COMMON}/test-result.schema.json")
-    )
-    if not Draft202012Validator(schema).is_valid(report):
+    from tools import schema_validate
+
+    registry = schema_validate.schema_registry(root)
+    if not schema_validate.valid_instance("urn:opentour:test-result:1.0", report, registry):
         raise CommandError("Runner report is missing required fields or has an invalid shape.")
     if any(
         report[key] != expected
@@ -480,6 +480,8 @@ def invoke(
     expected_kind: str = "simulated",
 ) -> dict[str, Any]:
     """Retain an attempted step even when its report/configuration is invalid."""
+    from tools import schema_validate
+
     process: ProcessResult | None = None
 
     def recorded(invocation: Invocation) -> ProcessResult:
@@ -514,13 +516,23 @@ def _invoke(
     run: Executor,
     expected_kind: str,
 ) -> dict[str, Any]:
+    from tools import schema_validate
+
     with tempfile.TemporaryDirectory(prefix="opentour-command-") as temporary:
         private_dir = Path(temporary).resolve()
         report_path = private_dir / "result.json"
         env = environment(root, uuid.uuid4().hex)
         env.update({"OPENTOUR_RESULT_FILE": str(report_path), "OPENTOUR_TEST_TARGET": target})
         args = list(argv)
-        if runner == "playwright":
+        if runner == "pytest":
+            guard = schema_validate.local_file(root, f"{COMMON}/python-unit/sitecustomize.py")
+            try:
+                compile(guard.read_text(encoding="utf-8"), str(guard), "exec")
+            except (OSError, UnicodeError, SyntaxError) as exc:
+                raise CommandError("Invalid inherited unit startup guard.") from exc
+            env["PYTHONPATH"] = os.pathsep.join((str(guard.parent), str(root)))
+            env["OPENTOUR_UNIT_GUARD"] = "1"
+        elif runner == "playwright":
             args.extend(["--result-file", str(report_path)])
         elif runner == "vitest":
             args[args.index("REPORT")] = str(report_path)
@@ -651,6 +663,8 @@ def python_test(root: Path, target: str, run: Executor) -> dict[str, Any]:
 def dispatch(
     command: str, args: list[str], root: Path, registry: dict[str, Any], run: Executor
 ) -> list[dict[str, Any]]:
+    from tools import schema_validate
+
     if command not in COMMAND_ARITY or len(args) != COMMAND_ARITY[command]:
         raise CommandError("Unknown command or incorrect number of arguments.")
     if command == "setup":
@@ -821,6 +835,8 @@ def source_identity(root: Path) -> tuple[str | None, bool]:
 def run_command(
     command: str, args: Sequence[str], root: Path = ROOT, run: Executor = execute
 ) -> dict[str, Any]:
+    from tools import schema_validate
+
     started = datetime.now(UTC).isoformat().replace("+00:00", "Z")
     root = root.resolve()
     commit_before, dirty_before = source_identity(root)
@@ -878,7 +894,7 @@ def run_command(
         "limitations": [
             "Command/fixture evidence only; no provider or customer gate acceptance",
             "Dirty sources do not establish reviewed commit qualification",
-            "Python socket guard is a test boundary, not operating-system isolation",
+            "Unit process/network guards are test discipline, not operating-system isolation",
         ],
     }
 
@@ -897,37 +913,19 @@ def main(argv: Sequence[str] | None = None) -> int:
 # Pytest transport plugin: every collected case appears in the final report, including skipped
 # and unexecuted cases. This is not a provider/isolation harness and never opens network authority.
 _items: dict[str, dict[str, Any]] = {}
-_socket_connect: Any = None
-_socket_connect_ex: Any = None
-_network_functions: dict[str, Any] = {}
-_socket_methods: dict[str, Any] = {}
+
+
+def install_unit_guard() -> None:
+    """Verify the inherited startup preload before pytest loads any configuration."""
+    if not os.environ.get("OPENTOUR_RESULT_FILE"):
+        return
+    if getattr(subprocess, "_opentour_unit_guard_pid", None) != os.getpid():
+        raise RuntimeError("Required inherited unit startup guard did not load")
 
 
 def pytest_sessionstart(session: Any) -> None:
-    global _socket_connect, _socket_connect_ex
     _items.clear()
-    if not os.environ.get("OPENTOUR_RESULT_FILE"):
-        return
-    _socket_connect, _socket_connect_ex = socket.socket.connect, socket.socket.connect_ex
-
-    def denied(*args: Any, **kwargs: Any) -> Any:
-        raise OSError("Network access denied by unit/contract command boundary")
-
-    socket.socket.connect = denied  # type: ignore[method-assign]
-    socket.socket.connect_ex = denied  # type: ignore[method-assign]
-    for name in (
-        "getaddrinfo",
-        "gethostbyname",
-        "gethostbyname_ex",
-        "gethostbyaddr",
-        "getnameinfo",
-    ):
-        _network_functions[name] = getattr(socket, name)
-        setattr(socket, name, denied)
-    for name in ("sendto", "sendmsg"):
-        if hasattr(socket.socket, name):
-            _socket_methods[name] = getattr(socket.socket, name)
-            setattr(socket.socket, name, denied)
+    install_unit_guard()
 
 
 def pytest_collection_finish(session: Any) -> None:
@@ -953,15 +951,6 @@ def pytest_runtest_logreport(report: Any) -> None:
 
 
 def pytest_sessionfinish(session: Any, exitstatus: int) -> None:
-    if _socket_connect is not None:
-        socket.socket.connect = _socket_connect  # type: ignore[method-assign]
-        socket.socket.connect_ex = _socket_connect_ex  # type: ignore[method-assign]
-    for name, original in _network_functions.items():
-        setattr(socket, name, original)
-    for name, original in _socket_methods.items():
-        setattr(socket.socket, name, original)
-    _network_functions.clear()
-    _socket_methods.clear()
     destination = os.environ.get("OPENTOUR_RESULT_FILE")
     if not destination:
         return
@@ -973,6 +962,10 @@ def pytest_sessionfinish(session: Any, exitstatus: int) -> None:
     with Path(destination).open("x", encoding="utf-8") as stream:
         json.dump(result, stream, sort_keys=True)
 
+
+# Explicit -p loading happens before initial conftest import. Do not wait for
+# pytest_sessionstart: conftest/module imports are part of the protected unit run.
+install_unit_guard()
 
 if __name__ == "__main__":
     raise SystemExit(main())
