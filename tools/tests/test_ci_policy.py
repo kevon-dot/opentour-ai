@@ -13,7 +13,7 @@ import pytest
 from tools.ci.browser_evidence import retain_browser_evidence
 from tools.ci.policy import CHECKS, check, workflow_errors
 from tools.ci.prepare import extract
-from tools.ci.run import run_browser, run_one, stage_report
+from tools.ci.run import python_unit_selection, run_browser, run_one, stage_report
 from tools.public_content_check import digest
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -128,6 +128,33 @@ def test_actual_quiet_recipe_preserves_structured_receipt(tmp_path: Path) -> Non
     quiet = run_one(["just", "--justfile", str(recipe), "proof"], root)
     assert noisy["status"] == "FAIL"
     assert quiet["status"] == "PASS" and quiet["command_evidence"]["exit_code"] == 0
+
+
+def test_actual_just_failure_retains_structured_evidence_without_passing(tmp_path: Path) -> None:
+    root = policy_root(tmp_path)
+    proof = root / "proof.py"
+    proof.write_text("import json\nprint(json.dumps(dict(status='FAIL', exit_code=1)))\nexit(1)\n")
+    recipe = root / "justfile"
+    recipe.write_text("proof:\n    @'" + sys.executable + "' '" + str(proof) + "'\n")
+    result = run_one(["just", "--justfile", str(recipe), "proof"], root)
+    assert result["status"] == "FAIL" and result["exit_code"] != 0
+    assert result["command_evidence"] == {"status": "FAIL", "exit_code": 1}
+    assert result["failure_diagnostic_sha256"] != digest(b"")
+    proof.write_text(
+        "import json\nprint(json.dumps(dict(status='PASS', exit_code=0)))\nprint('noise')"
+    )
+    assert run_one(["just", "--justfile", str(recipe), "proof"], root)["status"] == "FAIL"
+
+
+def test_python_units_run_bootstrap_and_every_present_product_suite(tmp_path: Path) -> None:
+    targets, absent = python_unit_selection(tmp_path)
+    assert "tests/contract/test_bootstrap.py" in targets and "tools/tests" in targets
+    assert len(absent) == 4
+    (tmp_path / "services/control-api/tests").mkdir(parents=True)
+    targets, absent = python_unit_selection(tmp_path)
+    # Even an empty present suite is dispatched: the owning wrapper must reject zero tests.
+    assert "services/control-api/tests" in targets
+    assert "services/control-api/tests" not in absent and len(absent) == 3
 
 
 def test_real_planted_log_credential_is_withheld(tmp_path: Path) -> None:

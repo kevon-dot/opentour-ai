@@ -69,7 +69,14 @@ def run_one(argv: list[str], root: Path, *, env: dict[str, str] | None = None) -
     if not findings:
         parsed = None
         try:
-            parsed = json.loads(result.stdout)
+            if result.returncode != 0 and argv[0] == "just":
+                # Just appends its own failure diagnostic to the merged stream.
+                # Recover the leading structured failure only; it can never pass.
+                text = result.stdout.lstrip()
+                parsed, end = json.JSONDecoder().raw_decode(text)
+                report["failure_diagnostic_sha256"] = digest(text[end:].encode())
+            else:
+                parsed = json.loads(result.stdout)
             if isinstance(parsed, dict):
                 report["command_evidence"] = parsed
                 if parsed.get("status") not in (None, "PASS"):
@@ -126,6 +133,27 @@ def run_browser(root: Path, env: dict[str, str]) -> dict[str, Any]:
     return result
 
 
+def python_unit_selection(root: Path) -> tuple[list[str], list[str]]:
+    targets = [
+        "tests/contract/test_bootstrap.py",
+        "tests/contract/test_harness_modes.py",
+        "tests/contract/test_local_harness_transport.py",
+        "tools/tests",
+    ]
+    absent = []
+    for target in (
+        "services/control-api/tests",
+        "services/cell-runtime/tests",
+        "services/audit-journal/tests",
+        "training/tests",
+    ):
+        if (root / target).exists() or (root / target).is_symlink():
+            targets.append(target)
+        else:
+            absent.append(target)
+    return targets, absent
+
+
 def run_check(name: str, root: Path) -> dict[str, Any]:
     if name not in CHECKS:
         raise ValueError("Unknown required check")
@@ -141,6 +169,7 @@ def run_check(name: str, root: Path) -> dict[str, Any]:
             "content_result": source,
         }
     steps: list[dict[str, Any]] = []
+    not_implemented_test_roots: list[str] = []
     env = safe_environment()
 
     def run(argv: list[str]) -> None:
@@ -156,12 +185,8 @@ def run_check(name: str, root: Path) -> dict[str, Any]:
         if name in {"lint", "typecheck"}:
             run(["just", name])
         elif name == "python-unit":
-            for target in (
-                "services/control-api/tests",
-                "services/cell-runtime/tests",
-                "services/audit-journal/tests",
-                "training/tests",
-            ):
+            targets, not_implemented_test_roots = python_unit_selection(root)
+            for target in targets:
                 run(["just", "test-python", target])
         elif name == "web-unit":
             run(["just", "test-web", "packages/contracts/examples/web-command-smoke.test.ts"])
@@ -229,6 +254,7 @@ def run_check(name: str, root: Path) -> dict[str, Any]:
         "runner_image": os.environ.get("ImageVersion"),
         "fixture_kind": "local_integration" if name == "local-integration" else "simulated",
         "product_acceptance": "NOT_RUN",
+        "not_implemented_product_test_roots": not_implemented_test_roots,
         "steps": steps,
         "limits": [
             "Bootstrap CI only; provider, GPU and customer gates are not qualified",
