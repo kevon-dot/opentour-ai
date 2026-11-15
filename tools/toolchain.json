@@ -251,6 +251,14 @@
           "node": "^20.19.0 || ^22.13.0 || >=24"
         },
         "integrity": "sha512-+5Wg4p+ze3sG1WErYgUO/3H1IQIfFBymVUA0Fo/XTeBOLS6UQIUekpSJ8sdRkn7O7wjh84b55w/roqavH2aScg=="
+      },
+      "oxlint": {
+        "version": "1.93.0",
+        "source": "https://registry.npmjs.org/oxlint/1.93.0",
+        "integrity": "sha512-19JMsQFX+YvEbcUTFQxjTwhvs0Ibg0D6CFneSLgpwnACWcY/6LjhpGpkPodh0T5aIT1pjMTLlYaeBFzaVgugTA==",
+        "engines": {
+          "node": "^20.19.0 || >=22.12.0"
+        }
       }
     }
   },
