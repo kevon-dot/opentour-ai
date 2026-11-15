@@ -1,0 +1,204 @@
+"""Generated local ports and actual ASGI handler; no deployed tenant-isolation claim."""
+
+from dataclasses import replace
+
+import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+from opentour_control.auth.config import AuthError
+from opentour_control.auth.session import IdentityUse, create_session_router
+
+
+def test_valid_session_has_exact_scope(identity):
+    result = identity.service.authorization_context(identity.token(), identity.handle).wire()
+    assert result["organization_id"] == "org_a" and result["membership_id"] == "member_a"
+    assert result["session_generation"] == 0 and result["membership_status"] == "active"
+    assert set(result) == {
+        "actor",
+        "session_id",
+        "session_generation",
+        "organization_id",
+        "membership_id",
+        "membership_status",
+        "identity_checked_at",
+        "authentication_time",
+        "assurance_level",
+        "authority_revision",
+        "revocation_epoch",
+        "delegated_grant_id",
+    }
+
+
+def test_member_of_b_cannot_reuse_a_context(identity):
+    context = identity.service.authorization_context(identity.token(), identity.handle)
+    with pytest.raises(AuthError, match="RESOURCE_NOT_FOUND"):
+        context.require_organization("org_b")
+    with pytest.raises(AuthError, match="CONTEXT_RECONCILIATION_REQUIRED"):
+        identity.service.authorization_context(identity.token(org_id="org_b"), identity.handle)
+
+
+def test_zero_org_identity_has_finite_allowlist(identity):
+    session = identity.repository.sessions["session_a"]
+    identity.repository.sessions["session_a"] = replace(
+        session, selected_organization_id=None, selected_membership_id=None
+    )
+    identity.members.clear()
+    for use in IdentityUse:
+        result = identity.service.verified_identity(identity.token(), identity.handle, use).wire()
+        assert "organization_id" not in result and "delegated_grant_id" not in result
+    with pytest.raises(AuthError, match="CAPABILITY_DENIED"):
+        identity.service.verified_identity(identity.token(), identity.handle, "tenant_read")
+    with pytest.raises(AuthError):
+        identity.service.authorization_context(identity.token(), identity.handle)
+
+
+@pytest.mark.parametrize("state", ["unselected", "mismatch", "pending", "removed"])
+def test_current_context_never_fabricates_selection(identity, state):
+    session = identity.repository.sessions["session_a"]
+    token = identity.token()
+    expected = "reconciliation_required"
+    if state == "unselected":
+        identity.repository.sessions["session_a"] = replace(
+            session, selected_organization_id=None, selected_membership_id=None
+        )
+        expected = "unselected"
+    elif state == "mismatch":
+        token = identity.token(org_id="org_b")
+    elif state == "pending":
+        identity.repository.sessions["session_a"] = replace(session, reconciliation_required=True)
+    else:
+        identity.members["org_a"] = replace(identity.members["org_a"], active=False)
+        expected = "unselected"
+    result = identity.service.current_context(token, identity.handle, "request_a")
+    assert result["state"] == expected
+    assert result["organization_id"] is result["membership_id"] is None
+    assert set(result) == {
+        "state",
+        "organization_id",
+        "membership_id",
+        "session_generation",
+        "request_id",
+    }
+
+
+def test_session_ending_is_idempotent_and_other_sessions_untouched(identity):
+    identity.service.admit(identity.token(sid="session_other"))
+    result = identity.service.end(identity.token(), identity.handle)
+    assert result["local_ended"] is True and result["session_generation"] == 1
+    assert identity.service.end(identity.token(), identity.handle) == result
+    with pytest.raises(AuthError, match="SESSION_ENDED"):
+        identity.service.authorization_context(identity.token(), identity.handle)
+    with pytest.raises(AuthError, match="SESSION_ENDED"):
+        identity.service.admit(identity.token())
+    assert identity.repository.sessions["session_other"].ended_at is None
+    assert identity.members["org_a"].active
+
+
+def test_denial_commit_unknown_is_not_success(identity):
+    identity.repository.fail_commit = True
+    with pytest.raises(AuthError, match="SESSION_END_UNCONFIRMED") as failure:
+        identity.service.end(identity.token(), identity.handle)
+    assert failure.value.status == 503
+    assert identity.repository.sessions["session_a"].ended_at is None
+
+
+def test_forged_or_foreign_binding_cannot_select_session(identity):
+    with pytest.raises(AuthError, match="SESSION_INVALID"):
+        identity.service.current_context(identity.token(), "x" * 43, "request_a")
+    with pytest.raises(AuthError, match="SESSION_INVALID"):
+        identity.service.current_context(identity.token(sub="user_b"), identity.handle, "request_a")
+
+
+def test_old_generation_cannot_admit_delayed_request(identity):
+    identity.repository.sessions["session_a"] = replace(
+        identity.repository.sessions["session_a"], generation=1
+    )
+    with pytest.raises(AuthError, match="STALE_SESSION_CONTEXT"):
+        identity.service.authorization_context(identity.token(), identity.handle)
+
+
+def test_actual_context_route_ignores_forwarded_context(identity):
+    app = FastAPI()
+    app.include_router(create_session_router(identity.service))
+    with TestClient(app) as client:
+        client.cookies.set("opentour-session", identity.handle)
+        response = client.get(
+            "/v1/session/context?organization_id=org_b&subject=user_b",
+            headers={
+                "Authorization": f"Bearer {identity.token()}",
+                "X-Auth-Context": '{"organization_id":"org_b"}',
+                "X-Request-ID": "caller-chosen",
+            },
+        )
+    assert response.status_code == 200
+    assert response.json()["organization_id"] == "org_a"
+    assert response.json()["request_id"] != "caller-chosen"
+    assert response.headers["cache-control"] == "no-store"
+
+
+def test_invalid_route_identity_has_safe_closed_error(identity):
+    app = FastAPI()
+    app.include_router(create_session_router(identity.service))
+    with TestClient(app) as client:
+        response = client.get(
+            "/v1/session/context", headers={"Authorization": "Bearer SECRET_SENTINEL"}
+        )
+    assert response.status_code == 401 and "SECRET_SENTINEL" not in response.text
+    assert set(response.json()) == {
+        "code",
+        "message",
+        "request_id",
+        "retryable",
+        "field_errors",
+        "current_revision",
+    }
+
+
+@pytest.mark.parametrize("method", ["authorization", "current"])
+@pytest.mark.parametrize(
+    "change", ["ended", "generation", "selection", "reconciliation", "removed"]
+)
+def test_provider_wait_cannot_return_old_selected_context(identity, method, change):
+    identity.repository.observations.clear()
+    observed = identity.provider.current_membership("provider_a", identity.now)
+
+    def raced(*args):
+        session = identity.repository.sessions["session_a"]
+        if change == "removed":
+            identity.members["org_a"] = replace(identity.members["org_a"], active=False)
+        elif change == "ended":
+            identity.repository.end_session(session, identity.now)
+        else:
+            changes = {
+                "generation": {"generation": session.generation + 1},
+                "selection": {
+                    "selected_organization_id": "org_b",
+                    "selected_membership_id": "member_b",
+                },
+                "reconciliation": {"reconciliation_required": True},
+            }
+            identity.repository.sessions["session_a"] = replace(session, **changes[change])
+        return observed
+
+    identity.provider.current_membership = raced
+    if method == "current" and change == "removed":
+        result = identity.service.current_context(identity.token(), identity.handle, "request_race")
+        assert result["state"] == "unselected"
+        assert result["organization_id"] is None
+    else:
+        with pytest.raises(AuthError):
+            if method == "current":
+                identity.service.current_context(identity.token(), identity.handle, "request_race")
+            else:
+                identity.service.authorization_context(identity.token(), identity.handle)
+
+
+def test_removed_selection_preserves_only_authenticated_recovery_binding(identity):
+    _, other = identity.service.admit(identity.token())
+    identity.members["org_a"] = replace(identity.members["org_a"], active=False)
+    first = identity.service.current_context(identity.token(), identity.handle, "request_first")
+    second = identity.service.current_context(identity.token(), identity.handle, "request_second")
+    assert first["state"] == second["state"] == "unselected"
+    assert first["session_generation"] == second["session_generation"] == 1
+    with pytest.raises(AuthError, match="STALE_SESSION_CONTEXT"):
+        identity.service.current_context(identity.token(), other, "request_other")
