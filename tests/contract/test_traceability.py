@@ -184,29 +184,27 @@ def test_cli_refuses_existing_report_without_overwriting(tmp_path):
     assert run.returncode == 2 and report.read_text() == "sentinel"
 
 
-def test_all_current_c05_cases_have_explicit_requirement_bindings():
-    run = subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "pytest",
-            "--collect-only",
-            "-q",
-            "tests/contract/test_traceability.py",
-            "tools/tests",
-        ],
-        cwd=ROOT,
-        env={**os.environ, "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1"},
-        capture_output=True,
-        text=True,
-        timeout=20,
+def test_all_current_c05_cases_have_explicit_requirement_bindings(tmp_path):
+    # tools/tests also contains other issues' suites; only C05 owns these files.
+    owned_files = (
+        "tests/contract/test_traceability.py",
+        "tools/tests/test_traceability.py",
+        "tools/tests/test_evidence_classification.py",
     )
-    assert run.returncode == 0
-    collected = {
-        s
-        for s in run.stdout.splitlines()
-        if s.startswith(("tests/contract/", "tools/tests/")) and "::test_" in s
-    }
+
+    def collect(root):
+        run = subprocess.run(
+            [sys.executable, "-m", "pytest", "--collect-only", "-q", *owned_files],
+            cwd=root,
+            env={**os.environ, "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1"},
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+        assert run.returncode == 0, run.stdout + run.stderr
+        return {s for s in run.stdout.splitlines() if "::test_" in s}
+
+    collected = collect(ROOT)
     current = manifest()
     bindings = [b for b in current["test_bindings"] if b["issue_key"] == "OPE-126"]
     assert collected == {b["test_id"] for b in bindings}
@@ -215,3 +213,14 @@ def test_all_current_c05_cases_have_explicit_requirement_bindings():
         "OT-BOOT-C05-AC02",
         "OT-BOOT-C05-AC03",
     }
+
+    # Exercise collection with an unrelated CI module that must never be imported.
+    for relative in owned_files:
+        path = tmp_path / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("def test_owned(): pass\n")
+    (tmp_path / "tools/__init__.py").touch()
+    (tmp_path / "tools/tests/__init__.py").touch()
+    unrelated = tmp_path / "tools/tests/test_ci_policy.py"
+    unrelated.write_text("raise AssertionError('unrelated CI suite was collected')\n")
+    assert collect(tmp_path) == {f"{relative}::test_owned" for relative in owned_files}
