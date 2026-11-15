@@ -173,6 +173,8 @@ def test_ac01_smoke_every_public_command(checkout, command, args, expected):
     write(checkout, "apps/web/tests/one.test.ts")
     write(checkout, "apps/web/tests/browser-harness.browser.spec.ts")
     write(checkout, "tools/browser-test-runner.ts")
+    if command in {"lint", "typecheck"}:
+        quality_harness(checkout)
     fixture = FixtureRunner()
     result = runner.run_command(command, args, checkout, fixture)
     assert result["exit_code"] == expected
@@ -436,6 +438,56 @@ def test_typecheck_failure_stops_dependent_steps(checkout):
     result = runner.run_command("typecheck", [], checkout, fixture)
     assert result["exit_code"] == 1 and len(fixture.calls) == 1
     assert "mypy" in fixture.calls[0].argv
+
+
+def quality_harness(root):
+    for name in (
+        "playwright.config.ts",
+        "tools/browser-test-runner.ts",
+        "apps/web/tests/browser-harness.browser.spec.ts",
+        "apps/web/tests/fixtures/harness/tsconfig.json",
+        "apps/web/tests/fixtures/harness/.oxlintrc.json",
+    ):
+        write(root, name)
+
+
+@pytest.mark.parametrize(
+    "command,expected_steps,tool", [("lint", 2, "oxlint"), ("typecheck", 3, "tsc")]
+)
+def test_browser_quality_runs_actual_owned_config_commands(checkout, command, expected_steps, tool):
+    quality_harness(checkout)
+    fixture = FixtureRunner()
+    result = runner.run_command(command, [], checkout, fixture)
+    assert result["exit_code"] == 0 and len(fixture.calls) == expected_steps
+    assert fixture.calls[-1].argv[:3] == ("pnpm", "exec", tool)
+    if command == "lint":
+        assert "--deny-warnings" in fixture.calls[-1].argv
+        assert "tools/browser-test-runner.ts" in fixture.calls[-1].argv
+    else:
+        assert fixture.calls[-1].argv[-2:] == (
+            "--project",
+            "apps/web/tests/fixtures/harness/tsconfig.json",
+        )
+
+
+@pytest.mark.parametrize("command", ["lint", "typecheck"])
+def test_browser_quality_missing_config_is_not_silently_skipped(checkout, command):
+    write(checkout, "tools/browser-test-runner.ts")
+    fixture = FixtureRunner()
+    assert runner.run_command(command, [], checkout, fixture)["exit_code"] == 2
+    assert not fixture.calls
+
+
+@pytest.mark.parametrize("command", ["lint", "typecheck"])
+def test_browser_quality_failure_propagates(checkout, command):
+    quality_harness(checkout)
+
+    def fail_owned_check(invocation):
+        fail = "oxlint" in invocation.argv or "--project" in invocation.argv
+        return runner.ProcessResult(1 if fail else 0)
+
+    result = runner.run_command(command, [], checkout, fail_owned_check)
+    assert result["exit_code"] == 1 and result["steps"][-1]["exit_code"] == 1
 
 
 def test_credentials_and_runner_overrides_not_inherited(checkout, monkeypatch):

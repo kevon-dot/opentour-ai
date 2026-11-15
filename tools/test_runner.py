@@ -718,6 +718,37 @@ def python_test(root: Path, target: str, run: Executor) -> dict[str, Any]:
     )
 
 
+def browser_quality_commands(root: Path, command: str) -> list[tuple[str, ...]]:
+    """Run the owning C06 configurations when harness source is present; no partial skip."""
+    harness = "apps/web/tests/fixtures/harness"
+    required = (
+        "playwright.config.ts",
+        "tools/browser-test-runner.ts",
+        "apps/web/tests/browser-harness.browser.spec.ts",
+        f"{harness}/tsconfig.json",
+        f"{harness}/.oxlintrc.json",
+    )
+    if not any((root / name).exists() or (root / name).is_symlink() for name in required):
+        return []
+    for name in (*required, harness):
+        path_target(root, name)
+    if command == "lint":
+        return [
+            (
+                "pnpm",
+                "exec",
+                "oxlint",
+                "--config",
+                f"{harness}/.oxlintrc.json",
+                "--deny-warnings",
+                *required[:3],
+                harness,
+                "packages/contracts/examples/web-command-smoke.test.ts",
+            )
+        ]
+    return [("pnpm", "exec", "tsc", "--project", f"{harness}/tsconfig.json")]
+
+
 def dispatch(
     command: str, args: list[str], root: Path, registry: dict[str, Any], run: Executor
 ) -> list[dict[str, Any]]:
@@ -880,9 +911,13 @@ def dispatch(
                 "NodeNext",
                 "--moduleResolution",
                 "NodeNext",
+                "--types",
+                "node",
                 "packages/client-ts/src/index.d.ts",
+                "packages/contracts/examples/web-command-smoke.test.ts",
             ),
         ]
+    commands.extend(browser_quality_commands(root, command))
     steps = []
     for argv in commands:
         step = invoke(argv, root, command, command, run)
