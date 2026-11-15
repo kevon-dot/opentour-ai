@@ -1,0 +1,317 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:opentour:c03-observations:1.0",
+  "title": "C03 generated local and simulated observations; no empirical acceptance",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "issue_key",
+    "fixture_version",
+    "observations",
+    "product_acceptance"
+  ],
+  "properties": {
+    "issue_key": {
+      "const": "OPE-124"
+    },
+    "fixture_version": {
+      "const": "1"
+    },
+    "product_acceptance": {
+      "const": "NOT_RUN"
+    },
+    "observations": {
+      "type": "array",
+      "maxItems": 128,
+      "items": {
+        "oneOf": [
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "fixture_version",
+              "product_acceptance",
+              "fixture_id",
+              "seed",
+              "mode",
+              "kind",
+              "issuer",
+              "resource_namespace",
+              "observed_effects",
+              "observed_ledger_entries",
+              "limitations"
+            ],
+            "properties": {
+              "fixture_version": {
+                "const": "1"
+              },
+              "product_acceptance": {
+                "const": "NOT_RUN"
+              },
+              "fixture_id": {
+                "type": "string",
+                "pattern": "^[a-z0-9:_-]{1,256}$"
+              },
+              "seed": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "mode": {
+                "enum": [
+                  "customer_controlled",
+                  "opentour_managed"
+                ]
+              },
+              "kind": {
+                "enum": [
+                  "simulated",
+                  "local_integration"
+                ]
+              },
+              "issuer": {
+                "const": "simulated:opentour:c03"
+              },
+              "resource_namespace": {
+                "const": "simulated:opentour:c03"
+              },
+              "observed_effects": {
+                "type": "array",
+                "maxItems": 100,
+                "items": {
+                  "type": "string",
+                  "maxLength": 256
+                }
+              },
+              "observed_ledger_entries": {
+                "type": "array",
+                "maxItems": 100,
+                "items": {
+                  "type": "string",
+                  "maxLength": 256
+                }
+              },
+              "limitations": {
+                "type": "array",
+                "maxItems": 100,
+                "items": {
+                  "type": "string",
+                  "maxLength": 256
+                }
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "fixture_version",
+              "product_acceptance",
+              "fixture_id",
+              "mode",
+              "kind",
+              "runtime_role",
+              "unfiltered_query_rows_sha256",
+              "connection_recovery_sha256",
+              "foreign_composite_reference_refused"
+            ],
+            "properties": {
+              "fixture_version": {
+                "const": "1"
+              },
+              "product_acceptance": {
+                "const": "NOT_RUN"
+              },
+              "fixture_id": {
+                "const": "postgres-tenant-isolation"
+              },
+              "mode": {
+                "enum": [
+                  "customer_controlled",
+                  "opentour_managed"
+                ]
+              },
+              "kind": {
+                "const": "local_integration"
+              },
+              "runtime_role": {
+                "const": "c03_runtime"
+              },
+              "unfiltered_query_rows_sha256": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$"
+              },
+              "connection_recovery_sha256": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$"
+              },
+              "foreign_composite_reference_refused": {
+                "const": true
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "fixture_version",
+              "product_acceptance",
+              "fixture_id",
+              "mode",
+              "kind",
+              "before_commit_rollback",
+              "concurrent_mutations_accepted",
+              "after_commit_recovered_revision",
+              "outbox_records"
+            ],
+            "properties": {
+              "fixture_version": {
+                "const": "1"
+              },
+              "product_acceptance": {
+                "const": "NOT_RUN"
+              },
+              "fixture_id": {
+                "const": "postgres-transaction-recovery"
+              },
+              "mode": {
+                "enum": [
+                  "customer_controlled",
+                  "opentour_managed"
+                ]
+              },
+              "kind": {
+                "const": "local_integration"
+              },
+              "before_commit_rollback": {
+                "const": true
+              },
+              "concurrent_mutations_accepted": {
+                "const": 1
+              },
+              "after_commit_recovered_revision": {
+                "const": "10"
+              },
+              "outbox_records": {
+                "const": 1
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "fixture_version",
+              "product_acceptance",
+              "fixture_id",
+              "kind",
+              "postgres_version",
+              "cleanup_complete"
+            ],
+            "properties": {
+              "fixture_version": {
+                "const": "1"
+              },
+              "product_acceptance": {
+                "const": "NOT_RUN"
+              },
+              "fixture_id": {
+                "const": "disposable-postgresql-runtime-role"
+              },
+              "kind": {
+                "const": "local_integration"
+              },
+              "postgres_version": {
+                "const": "18.4"
+              },
+              "binary_sha256": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "postgres",
+                  "initdb",
+                  "psql"
+                ],
+                "properties": {
+                  "postgres": {
+                    "type": "string",
+                    "pattern": "^[a-f0-9]{64}$"
+                  },
+                  "initdb": {
+                    "type": "string",
+                    "pattern": "^[a-f0-9]{64}$"
+                  },
+                  "psql": {
+                    "type": "string",
+                    "pattern": "^[a-f0-9]{64}$"
+                  }
+                }
+              },
+              "configuration_sha256": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$"
+              },
+              "startup": {
+                "const": "PASS"
+              },
+              "cleanup_complete": {
+                "type": "boolean"
+              },
+              "recovery_required": {
+                "const": true
+              },
+              "helper_aborted": {
+                "const": true
+              },
+              "forced_stop": {
+                "const": true
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "fixture_version",
+              "product_acceptance",
+              "fixture_id",
+              "kind",
+              "live_children_observed",
+              "abnormal_cleanup_refused",
+              "directory_retained_until_children_exited",
+              "recovery_cleanup_complete"
+            ],
+            "properties": {
+              "fixture_version": {
+                "const": "1"
+              },
+              "product_acceptance": {
+                "const": "NOT_RUN"
+              },
+              "fixture_id": {
+                "const": "postgres-abnormal-shutdown"
+              },
+              "kind": {
+                "const": "local_integration"
+              },
+              "live_children_observed": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 64
+              },
+              "abnormal_cleanup_refused": {
+                "const": true
+              },
+              "directory_retained_until_children_exited": {
+                "const": true
+              },
+              "recovery_cleanup_complete": {
+                "const": true
+              }
+            }
+          }
+        ]
+      }
+    }
+  }
+}
