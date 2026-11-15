@@ -19,7 +19,7 @@ the public exit code. The accepted setup entry emits its OPE-122 receipt directl
 | `just test-web PATH` | Existing `.test.ts`/`.test.tsx` file; private exact-include Vitest configuration, no retries/only/zero-test pass |
 | `just test-browser PATH` | Declared `.spec.ts` file/suite with an admitted profile and actual OPE-127 adapter |
 | `just test-contract` | Hash-verified local schema examples, then actual contract tests |
-| `just validate-spec` | Exit 2/NOT_RUN until OPE-126 validator integration |
+| `just validate-spec` | Fixed OPE-126 offline semantic validator; missing owned validator/manifest is configuration failure |
 | `just test-integration PROFILE FILTER` | `bootstrap-contract all`, or registered OPE-124 `local harness-smoke` with actual local prerequisites |
 | `just test-isolation SUITE MODE` | Declared ISO and OPS-02/OPS-03 suites remain BLOCKED without owning real environment/harness |
 | `just test-acceptance GATE MODE` | G1–G6 remain BLOCKED without owning actual environment/customer evidence |
@@ -78,6 +78,15 @@ transport schemas produce a structured configuration failure.
 copying it. Local execution retains the bounded, schema-validated observation
 sidecar content and exact SHA-256 in its command receipt before temporary cleanup.
 Passing local execution must include both deployment modes and nonempty observations.
+`traceability-report-binding.json` pins OPE-126's owned semantic report schema.
+The fixed validator consumes `docs/specification/manifest.json` through a fresh
+nonce-bound result/findings pair, with inherited offline Python process discipline.
+The wrapper verifies actual source commit and manifest bytes before and after the
+run, unique nonempty check inventory, counts, exit/status agreement and cleanup.
+Its semantic check report is distinct from pytest results. Machine findings are
+bounded to four MiB and readable UTF-8 findings to one MiB; both contents and exact
+digests are retained once in the command receipt before private temporary cleanup.
+Metadata conformance remains simulated with product acceptance `NOT_RUN`.
 References resolve only through this local registry; HTTP/file fallback is denied.
 The canonical ResourceRevision pattern enforces positive decimal strings through
 `9223372036854775807`, distinct from JSON-safe event/epoch integers. Examples cover
@@ -108,6 +117,6 @@ only `tools.fixtures.local_harness` and binds the exact target
 prerequisites, foreground fixture lifecycle and actual pytest mode/kind observations.
 Its explicit BLOCKED exit3 is preserved separately from raw pytest internal-error
 codes. Other local/provider adapters cannot gain authority by editing registry
-text alone. OPE-126 validator/evidence and actual CI coverage also remain
+text alone. Actual OPE-126 validator/evidence qualification and CI coverage remain
 open. A reviewed foundation may admit compatible dependent work while OPE-123 stays
 In Progress; it does not waive any acceptance criterion.

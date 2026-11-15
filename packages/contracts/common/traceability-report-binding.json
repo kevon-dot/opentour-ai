@@ -1,0 +1,6 @@
+{
+  "schema_version": "opentour.owned-schema-binding.v1",
+  "id": "urn:opentour:traceability-report:1.0",
+  "file": "docs/specification/traceability-report.schema.json",
+  "sha256": "5ce9d592f9c4d7839c88fa73b4f1fcd62e76f97940ad6bfd562959d64752c4e8"
+}
