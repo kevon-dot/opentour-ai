@@ -22,6 +22,7 @@ function port(action, data = {}) {
 }
 let exchanges = 0;
 let admissionUnknown = false;
+let endUnknown = false;
 let nextSid = config.sid;
 const { publicKey, privateKey } = await generateKeyPair('RS256');
 const sdk = createWorkOSProvider(profile, 'generated-api-key', { now: () => config.now,
@@ -45,7 +46,7 @@ const adapter = createAuthkitAdapter({ profile, provider: sdk, now: () => config
     admit: async (credentials, claims) => port(admissionUnknown ? 'admit_unknown' : 'admit', { credentials, claims }),
     current: async (handle) => port('current', { handle }),
     replaceCredentials: async (handle, generation, credentials, claims) => port('replace', { handle, generation, credentials, claims }),
-    end: async (handle, generation) => port('end', { handle, generation }),
+    end: async (handle, generation) => port(endUnknown ? 'end_unknown' : 'end', { handle, generation }),
     requireReconciliation: async (handle, generation) => port('reconcile', { handle, generation }),
   }, selections: {
     authorize: async () => { throw new Error('Selection belongs to172 and is not invoked by signin'); },
@@ -74,6 +75,23 @@ assert.equal('organization_id' in identity, false);
 assert.equal((await adapter.signout(request)).status, 303);
 assert.equal((await adapter.signout(request)).status, 303);
 await assert.rejects(adapter.verifiedIdentity(request, 'session_context'), IdentityFailure);
+nextSid = config.sid + '_end_unknown';
+const endFlow = await signin();
+const endAdmission = await adapter.callback(endFlow);
+assert.equal(endAdmission.status, 303);
+const endCookie = endAdmission.headers.getSetCookie().find((v) => v.startsWith('opentour-session=')).split(';')[0];
+const endHandle = endCookie.split('=')[1];
+const endRequest = new Request(profile.origin + '/auth/operation', { method: 'POST', headers: {
+  cookie: endCookie, origin: profile.origin, 'x-csrf-token': port('current', { handle: endHandle }).csrfToken,
+} });
+endUnknown = true;
+const endUnconfirmed = await adapter.signout(endRequest);
+assert.equal(endUnconfirmed.status, 503);
+assert.equal(endUnconfirmed.headers.get('set-cookie'), null);
+assert.equal(endUnconfirmed.headers.get('location'), null);
+assert.equal(port('current', { handle: endHandle }).ended, true);
+endUnknown = false;
+assert.equal((await adapter.signout(endRequest)).status, 303);
 nextSid = config.sid + '_unknown';
 admissionUnknown = true;
 const uncertainFlow = await signin();
@@ -81,9 +99,10 @@ const uncertain = await adapter.callback(uncertainFlow);
 assert.equal(uncertain.status, 503);
 assert.equal(uncertain.headers.getSetCookie().some((v) => v.startsWith('opentour-session=')), false);
 assert.equal((await adapter.callback(uncertainFlow)).status, 401);
-assert.equal(exchanges, 2);
+assert.equal(exchanges, 3);
 assert.equal(port('inspect').sealed, true);
 console.log(JSON.stringify({ configured_factories: 'PASS', actual_postgresql: true,
   generated_provider: true, provider_acceptance: 'NOT_RUN', exchanges,
   callback_replay_denied: true, durable_end_denied: true, unknown_commit_no_cookie: true,
+  unknown_end_no_cookie_or_redirect: true,
   sealed_rows: true, mode: config.mode }));

@@ -100,14 +100,16 @@ def run(config, command):
         return current(handle)
     if action == "current":
         return current(command["handle"])
-    if action in {"replace", "end", "reconcile"}:
+    if action in {"replace", "end", "end_unknown", "reconcile"}:
         session = repository.load_session(
-            digest(command["handle"]), now, allow_ended=action == "end"
+            digest(command["handle"]), now, allow_ended=action in {"end", "end_unknown"}
         )
         if session.generation != command["generation"] and session.ended_at is None:
             raise AuthError("STALE_SESSION_CONTEXT", 409)
-        if action == "end":
+        if action in {"end", "end_unknown"}:
             ended = repository.end_session(session, now)
+            if action == "end_unknown":
+                raise AuthError("SESSION_END_UNCONFIRMED", 503)
             return {"sessionId": ended.session_id, "generation": ended.generation}
         if action == "reconcile":
             repository.require_reconciliation(session)
