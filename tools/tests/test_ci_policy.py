@@ -259,12 +259,23 @@ def test_web_job_refuses_missing_or_linked_tracked_tests(
 
 
 @pytest.mark.parametrize("job", ["python-unit", "local-integration", "web-unit"])
+@pytest.mark.parametrize(
+    "local",
+    [
+        "services/control-api/tests/auth/test_identity_postgres.py",
+        "tests/integration/authority_journal_recovery.py",
+    ],
+)
 def test_required_jobs_dispatch_every_partition_in_its_own_evidence_class(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, job: str
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, job: str, local: str
 ) -> None:
     from tools.ci import run as ci_run
 
-    local = "services/control-api/tests/auth/test_identity_postgres.py"
+    local_command = (
+        ["just", "test-integration", "local", "authority_journal_recovery"]
+        if local == "tests/integration/authority_journal_recovery.py"
+        else ["just", "test-python", local]
+    )
     unit = "services/control-api/tests/auth/test_session_context.py"
     web = "apps/web/lib/server/authkit-adapter.test.ts"
     for target in (local, unit, web):
@@ -291,7 +302,7 @@ def test_required_jobs_dispatch_every_partition_in_its_own_evidence_class(
             "status": "PASS",
             "exit_code": 0,
             "command_evidence": {
-                "kind": "local_integration" if argv[-1] == local else "simulated"
+                "kind": "local_integration" if argv == local_command else "simulated"
             },
         }
 
@@ -299,11 +310,17 @@ def test_required_jobs_dispatch_every_partition_in_its_own_evidence_class(
     result = ci_run.run_check(job, tmp_path)
     assert result["status"] == "PASS"
     if job == "python-unit":
-        assert ["just", "test-python", unit] in calls
-        assert ["just", "test-python", local] not in calls
+        unit_target = (
+            "services/control-api/tests"
+            if local == "tests/integration/authority_journal_recovery.py"
+            else unit
+        )
+        assert ["just", "test-python", unit_target] in calls
+        assert local_command not in calls
         assert result["registered_local_integration_targets"] == [local]
     elif job == "local-integration":
-        assert ["just", "test-python", local] in calls
+        assert local_command in calls
+        assert calls.count(local_command) == 1
         assert ["just", "test-python", unit] not in calls
         assert result["registered_local_integration_targets"] == [local]
 
@@ -357,7 +374,9 @@ def test_only_exact_traceability_command_uses_measured_larger_capture(
     root = policy_root(tmp_path)
     monkeypatch.setattr(ci_run, "execute", capture)
     for command in (
-        ["just", "validate-spec"], ["just", "lint"], ["just", "validate-spec", "extra"]
+        ["just", "validate-spec"],
+        ["just", "lint"],
+        ["just", "validate-spec", "extra"],
     ):
         run_one(command, root)
     assert seen == [2_097_152, 1_048_576, 1_048_576]

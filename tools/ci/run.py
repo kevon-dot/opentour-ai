@@ -16,7 +16,7 @@ from typing import Any
 from tools.ci.browser_evidence import retain_browser_evidence
 from tools.ci.policy import CHECKS, check
 from tools.ci.prepare import download, postgres
-from tools.fixtures.python_postgres import present_targets
+from tools.fixtures.python_postgres import present_targets, target_command
 from tools.public_content_check import digest, inspect_bytes, load_policy, scan_paths, tracked_paths
 from tools.test_runner import CommandError, Invocation, execute, path_target
 
@@ -241,7 +241,7 @@ def run_check(name: str, root: Path) -> dict[str, Any]:
             run(["just", "test-integration", "local", "harness-smoke"])
             routed_local_targets = list(present_targets(root))
             for target in routed_local_targets:
-                run(["just", "test-python", target])
+                run(list(target_command(target)))
                 if steps[-1].get("command_evidence", {}).get("kind") != "local_integration":
                     steps[-1]["status"] = "FAIL"
                     raise CommandError("PostgreSQL target lacked local integration evidence.", 1)
