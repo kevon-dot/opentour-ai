@@ -19,7 +19,9 @@ test.beforeEach(async ({ page, baseURL }) => {
 test.afterEach(async ({ page }) => { expect(unexpected.get(page)).toEqual([]); });
 
 async function open(page: Page, info: TestInfo, width = 1440, tenant = 'a') {
-  await page.setViewportSize({ width, height: 1100 });
+  const height = new Map([[320, 800], [768, 1024], [1280, 900], [1440, 1024]]).get(width);
+  if (height === undefined) throw new Error('Unknown presentation viewport');
+  await page.setViewportSize({ width, height });
   await page.goto(`/?mode=${info.project.name}&tenant=${tenant}`);
   await expect(page.getByRole('heading', { name: fixtures.title })).toBeVisible();
   await page.evaluate(async () => {

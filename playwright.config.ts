@@ -25,7 +25,7 @@ export default defineConfig({
   snapshotPathTemplate: resolve(root, foundation ? 'apps/web/components/foundation/tokens/testing/baselines/{platform}-{projectName}/{arg}{ext}' : 'apps/web/tests/fixtures/harness/baselines/{platform}-{projectName}/{arg}{ext}'),
   reporter: [[resolve(root, 'apps/web/tests/fixtures/harness/reporter.ts')]],
   // Pin software rendering and Skia's CPU path; cold GPU-backed runs varied corner rounding.
-  use: { launchOptions: { args: ['--disable-gpu', '--disable-skia-runtime-opts'] }, browserName: 'chromium', headless: true, baseURL: origin, viewport: { width: 1440, height: 1100 }, deviceScaleFactor: 1, locale: 'en-US', timezoneId: 'UTC', colorScheme: 'light', reducedMotion: 'reduce', serviceWorkers: 'block', trace: 'on', screenshot: 'only-on-failure', video: 'off', actionTimeout: 5_000, navigationTimeout: 10_000 },
+  use: { launchOptions: { args: ['--disable-gpu', '--disable-skia-runtime-opts'] }, browserName: 'chromium', headless: true, baseURL: origin, viewport: { width: 1440, height: foundation ? 1024 : 1100 }, deviceScaleFactor: 1, locale: 'en-US', timezoneId: 'UTC', colorScheme: 'light', reducedMotion: 'reduce', serviceWorkers: 'block', trace: 'on', screenshot: 'only-on-failure', video: 'off', actionTimeout: 5_000, navigationTimeout: 10_000 },
   projects: probe ? [{ name: 'probe', metadata: { mode: null } }] : [
     { name: 'customer_controlled', grepInvert: /@runner/, metadata: { mode: 'customer_controlled' } },
     { name: 'opentour_managed', grepInvert: /@runner/, metadata: { mode: 'opentour_managed' } },

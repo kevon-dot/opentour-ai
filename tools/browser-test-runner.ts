@@ -95,7 +95,7 @@ export function foundationMetadata(root: string, baselineReview?: { reason: stri
       implementation_profile_id: 'c4865bd5-0fce-4468-b6ea-05003ebfa5a2',
       implementation_profile_sha256: 'b6c396ed2f3a038c6229b597769ebce03877c7a2ef7ecf22a479eaee6bb390f3',
       implementation_profile_updated_at: '2026-11-16T02:23:29.803Z',
-    }, fonts,
+    }, fonts, viewport_sizes: [{ width: 320, height: 800 }, { width: 768, height: 1024 }, { width: 1280, height: 900 }, { width: 1440, height: 1024 }],
     font_manifest_sha256: sha(fontManifest), token_manifest_sha256: sha(tokenManifest), design,
     baseline_manifest_sha256: sha(reviewBytes),
     presentation_sources: inventory(root, join(root, foundationRoot)).filter(item => !item.path.includes('/testing/baselines/')),
