@@ -236,7 +236,7 @@ def backfill(
             return _state(connection)
     except CompatibilityError:
         raise
-    except Exception as exc:
+    except Exception:
         # The failed batch and its effects rolled back. Preserve prior committed cursor.
         with _transaction(connection):
             state = _state(connection, lock=True)
@@ -250,7 +250,7 @@ def backfill(
                     "UPDATE opentour_platform.schema_state SET phase='backfill_failed',"
                     "read_path='legacy',revision=revision+1 WHERE singleton"
                 )
-        raise CompatibilityError("BACKFILL_FAILED") from exc
+        raise CompatibilityError("BACKFILL_FAILED") from None
 
 
 def verify(

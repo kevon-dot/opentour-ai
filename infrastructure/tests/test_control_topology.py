@@ -194,7 +194,9 @@ def test_oidc_trust_requires_every_exact_identity_claim() -> None:
         assert conditions["StringEquals"] == {
             "token.actions.githubusercontent.com:aud": "sts.amazonaws.com",
             "token.actions.githubusercontent.com:sub": {
-                "Fn::Sub": "repo:kevon-dot@276088488/opentour-ai@1455972360:environment:${Environment}"
+                "Fn::Sub": (
+                    "repo:kevon-dot@276088488/opentour-ai@1455972360:environment:${Environment}"
+                )
             },
             "token.actions.githubusercontent.com:repository_id": "1455972360",
             "token.actions.githubusercontent.com:job_workflow_ref": {"Ref": workflow},

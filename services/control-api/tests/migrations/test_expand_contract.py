@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import traceback
 from collections.abc import Iterator
 from contextlib import contextmanager
 from typing import Any
@@ -203,8 +204,11 @@ def test_failed_backfill_rolls_back_batch_and_retains_explicit_progress(
         )
         raise RuntimeError("generated private failure")
 
-    with pytest.raises(guard.CompatibilityError, match="^BACKFILL_FAILED$"):
+    with pytest.raises(guard.CompatibilityError, match="^BACKFILL_FAILED$") as caught:
         guard.backfill(owner, PLAN, fail)
+    rendered = "".join(traceback.format_exception(caught.value))
+    assert "BACKFILL_FAILED" in rendered
+    assert "generated private failure" not in rendered
     failed = guard.readiness(owner, 1)
     assert (failed.phase, failed.read_path, failed.progress_cursor) == (
         "backfill_failed",
