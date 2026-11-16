@@ -19,6 +19,7 @@ from opentour_journal.crypto import (
     transcript,
 )
 from opentour_journal.models import (
+    MAX_MANIFEST_BYTES,
     MAX_REPLAY_ENTRIES,
     AppendIntent,
     AppendOutcome,
@@ -155,6 +156,7 @@ class FrontierVerifier:
         checkpoints: CheckpointAuthority,
         *,
         max_entries: int = MAX_REPLAY_ENTRIES,
+        max_manifest_bytes: int = MAX_MANIFEST_BYTES,
         max_passes: int = 2,
         max_seconds: float = 60.0,
         monotonic: Callable[[], float] = time.monotonic,
@@ -162,6 +164,8 @@ class FrontierVerifier:
         if (
             type(max_entries) is not int
             or not 1 <= max_entries <= MAX_REPLAY_ENTRIES
+            or type(max_manifest_bytes) is not int
+            or not 1 <= max_manifest_bytes <= MAX_MANIFEST_BYTES
             or type(max_passes) is not int
             or not 1 <= max_passes <= 3
             or not math.isfinite(max_seconds)
@@ -171,6 +175,7 @@ class FrontierVerifier:
         self.verifier = verifier
         self.checkpoints = checkpoints
         self.max_entries = max_entries
+        self.max_manifest_bytes = max_manifest_bytes
         self.max_passes = max_passes
         self.max_seconds = max_seconds
         self.monotonic = monotonic
@@ -225,11 +230,17 @@ class FrontierVerifier:
                 head_sequence=head.sequence,
                 observations=observations,
             )
+            manifest_bytes = canonical(manifest.wire())
+            if len(manifest_bytes) > self.max_manifest_bytes:
+                raise JournalError("RECOVERY_HOLD")
+            # No verified frontier may reference evidence our retained parser rejects.
+            ReplayManifest.parse(manifest_bytes)
+            budget()
             manifest_ref = _write_checked(
                 writer,
                 organization_id,
                 "journal_replay_manifest",
-                canonical(manifest.wire()),
+                manifest_bytes,
             )
             budget()
             proof = VerifiedFrontierProof(
@@ -289,9 +300,10 @@ class FrontierVerifier:
                 raise JournalError("RECOVERY_HOLD")
         pending: AppendIntent | None = None
         pending_sequence: int | None = None
-        prior_head_revision: int | None = None
+        prior_head_revision = checkpoint.sequence + 1
         operations: set[str] = set()
         observations: list[ReplayObservation] = []
+        observation_bytes = 0
         for sequence in range(checkpoint.sequence + 1, head.sequence + 1):
             budget()
             response = reader.read_entry(checkpoint.organization_id, sequence)
@@ -307,10 +319,7 @@ class FrontierVerifier:
                 or body.expected_head_digest != chain
                 or entry.previous_chain_sha256 != chain
                 or model_digest(body) != entry.content_sha256
-                or (
-                    prior_head_revision is not None
-                    and int(entry.head_revision) != prior_head_revision + 1
-                )
+                or int(entry.head_revision) != prior_head_revision + 1
             ):
                 raise JournalError("RECOVERY_HOLD")
             if isinstance(body, AppendIntent):
@@ -344,13 +353,17 @@ class FrontierVerifier:
                 epoch, revision = expected
                 pending, pending_sequence = None, None
             chain, prior_head_revision = entry.chain_sha256, int(entry.head_revision)
-            observations.append(ReplayObservation(entry=entry, body=body))
+            observation = ReplayObservation(entry=entry, body=body)
+            observation_bytes += len(canonical(observation.wire())) + bool(observations)
+            if observation_bytes > self.max_manifest_bytes:
+                raise JournalError("RECOVERY_HOLD")
+            observations.append(observation)
         if (
             chain != head.chain_sha256
             or epoch != head.latest_epoch
             or revision != head.latest_authority_revision
             or (pending.operation_id if pending else None) != head.unresolved_operation_id
-            or (prior_head_revision is not None and prior_head_revision != int(head.revision))
+            or prior_head_revision != int(head.revision)
         ):
             raise JournalError("RECOVERY_HOLD")
         return tuple(observations), pending

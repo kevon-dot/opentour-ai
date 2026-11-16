@@ -202,16 +202,15 @@ class JournalClient:
             }
             try:
                 error = strict_json(response.body)
-                code = error.get("code") if isinstance(error, dict) else None
-                if (
-                    isinstance(code, str)
-                    and code in codes
-                    and response.status in {403, 404, 409, 422, 503}
-                ):
-                    raise JournalError(code, response.status)
-            except JournalError as error:
-                if error.code != "SCHEMA_INVALID":
-                    raise
+            except JournalError:
+                raise JournalError("JOURNAL_UNAVAILABLE", 503) from None
+            code = error.get("code") if isinstance(error, dict) else None
+            if (
+                isinstance(code, str)
+                and code in codes
+                and response.status in {403, 404, 409, 422, 503}
+            ):
+                raise JournalError(code, response.status)
             raise JournalError("JOURNAL_UNAVAILABLE", 503)
         return response.body
 

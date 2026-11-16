@@ -532,6 +532,8 @@ class JournalService:
     ) -> LiveHeadEnvelope:
         self._scope(principal, organization_id, "read")
         head = self.store.head(organization_id)
+        if int(head.revision) != head.sequence + 1:
+            raise JournalError("JOURNAL_STATE_INVALID", 503)
         payload = LiveHeadPayload(
             profile_version="1.0",
             journal=self.verifier.trust.journal,
@@ -602,6 +604,8 @@ class JournalService:
             raise JournalError("JOURNAL_HEAD_CONFLICT")
         if head.sequence >= MAX_COUNTER or int(head.revision) >= MAX_REVISION:
             raise JournalError("REVISION_EXHAUSTED")
+        if int(head.revision) != head.sequence + 1:
+            raise JournalError("JOURNAL_STATE_INVALID", 503)
         if isinstance(body, AppendIntent):
             resolved = self.authority.resolve_intent(principal, body)
             if resolved != ResolvedIntent(

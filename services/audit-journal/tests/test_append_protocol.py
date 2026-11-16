@@ -39,6 +39,7 @@ from opentour_journal.crypto import (
     TrustedKey,
     TrustPolicy,
     canonical,
+    create_signature,
     der_to_raw,
     model_digest,
     raw_to_der,
@@ -48,6 +49,7 @@ from opentour_journal.models import (
     APPEND_PURPOSE,
     HEAD_PURPOSE,
     MAX_COUNTER,
+    MAX_MANIFEST_BYTES,
     MAX_REVISION,
     AppendIntent,
     AppendOutcome,
@@ -57,9 +59,10 @@ from opentour_journal.models import (
     JournalIdentity,
     MetadataRef,
     ReplayCheckpoint,
+    ReplayManifest,
     strict_json,
 )
-from opentour_journal.replay import VerifiedAuthorityFrontier
+from opentour_journal.replay import FrontierVerifier, VerifiedAuthorityFrontier
 
 NOW = datetime(2026, 11, 16, tzinfo=UTC)
 ROOT = Path(__file__).resolve().parents[3]
@@ -878,3 +881,128 @@ def test_schema_examples_resolve_only_registered_common_primitives(system):
             registry=registry,
             format_checker=FormatChecker(),
         ).validate(value)
+
+
+def test_twenty_two_entry_manifest_roundtrip_and_exact_evidence_budget(system):
+    for number in range(11):
+        body = intent(system, f"operation-{number}")
+        system.client.append_intent(body)
+        system.client.append_outcome(outcome(system, body))
+    frontier = system.client.verify_frontier("org-a", system.evidence)
+    assert frontier.head.sequence == 22
+    data = next(
+        data for _, kind, data in system.evidence.bytes if kind == "journal_replay_manifest"
+    )
+    assert len(data) > 65536
+    parsed = ReplayManifest.parse(data)
+    assert len(parsed.observations) == 22 and canonical(parsed.wire()) == data
+    verifier = FrontierVerifier(
+        system.client.verifier, system.checkpoints, max_manifest_bytes=len(data)
+    )
+    assert verifier.verify("org-a", system.client, GeneratedEvidence()).head == frontier.head
+    writer = GeneratedEvidence()
+    verifier = FrontierVerifier(
+        system.client.verifier, system.checkpoints, max_manifest_bytes=len(data) - 1
+    )
+    with pytest.raises(JournalError, match="RECOVERY_HOLD"):
+        verifier.verify("org-a", system.client, writer)
+    assert writer.bytes == []
+
+
+def test_manifest_parse_has_separate_finite_boundary(system):
+    system.client.verify_frontier("org-a", system.evidence)
+    data = system.evidence.bytes[0][2]
+    padded = data + b" " * (MAX_MANIFEST_BYTES - len(data))
+    assert ReplayManifest.parse(padded) == ReplayManifest.parse(data)
+    with pytest.raises(JournalError, match="SCHEMA_INVALID"):
+        ReplayManifest.parse(padded + b" ")
+    # The larger evidence budget never applies to the service request parser.
+    with pytest.raises(JournalError, match="SCHEMA_INVALID"):
+        strict_json(data + b" " * 65536)
+
+
+def test_manifest_budget_stops_entry_accumulation_before_evidence(system):
+    body = intent(system)
+    system.client.append_intent(body)
+    system.client.append_outcome(outcome(system, body))
+    reads = []
+    original = system.client.read_entry
+
+    def read(org, sequence):
+        reads.append(sequence)
+        return original(org, sequence)
+
+    system.client.read_entry = read
+    verifier = FrontierVerifier(system.client.verifier, system.checkpoints, max_manifest_bytes=100)
+    with pytest.raises(JournalError, match="RECOVERY_HOLD"):
+        verifier.verify("org-a", system.client, system.evidence)
+    assert reads == [1] and system.evidence.bytes == []
+
+
+@pytest.mark.parametrize("status,code", [(422, "SCHEMA_INVALID"), (409, "JOURNAL_HEAD_CONFLICT")])
+def test_client_preserves_canonical_error_status(system, status, code):
+    system.client.transport.post = lambda *args: TransportResponse(
+        status, canonical({"code": code, "message": "generated diagnostic"})
+    )
+    with pytest.raises(JournalError) as caught:
+        system.client.append_intent(intent(system))
+    assert caught.value.code == code and caught.value.status == status
+    assert "generated diagnostic" not in str(caught.value)
+
+
+@pytest.mark.parametrize("data", [b"[", b'{"code":null}', b'{"code":"not-approved"}'])
+def test_client_malformed_error_remains_unavailable(system, data):
+    system.client.transport.post = lambda *args: TransportResponse(422, data)
+    with pytest.raises(JournalError) as caught:
+        system.client.append_intent(intent(system))
+    assert (caught.value.code, caught.value.status) == ("JOURNAL_UNAVAILABLE", 503)
+
+
+@pytest.mark.parametrize("checkpoint_sequence", [0, 2])
+def test_corrupt_head_revision_cannot_verify_empty_replay(system, checkpoint_sequence):
+    if checkpoint_sequence:
+        body = intent(system)
+        system.client.append_intent(body)
+        system.client.append_outcome(outcome(system, body))
+        system.client.frontier_verifier.checkpoints = GeneratedCheckpoints(
+            system.store.config.trust.journal, [system.store.head("org-a")]
+        )
+    system.ddb.rows["ORG#org-a", "HEAD"]["head"]["revision"] = "99"
+    with pytest.raises(JournalError, match="RECOVERY_HOLD"):
+        system.client.verify_frontier("org-a", system.evidence)
+    assert system.evidence.bytes == []
+    with pytest.raises(JournalError, match="JOURNAL_STATE_INVALID"):
+        system.client.append_intent(intent(system, "new-operation"))
+
+
+def test_first_signed_entry_revision_must_follow_genesis(system):
+    body = intent(system)
+    response = system.client.append_intent(body)
+    payload = response.signed_receipt.payload.model_copy(update={"head_revision": "99"})
+    signed = AppendReceiptEnvelope(
+        payload=payload,
+        signature=create_signature(
+            payload, APPEND_PURPOSE, system.store.config.signing_key, system.store.sign
+        ),
+    )
+    # The trusted signer really signed the wrong revision; signature validity cannot fix it.
+    with pytest.raises(JournalError, match="JOURNAL_BINDING_INVALID"):
+        system.client.verifier.receipt(signed, "org-a", body.operation_id, "intent")
+
+
+def test_signed_genesis_head_revision_must_be_one(system):
+    from opentour_journal.models import LiveHeadEnvelope
+
+    nonce = "a" * 64
+    head = system.client.read_live_head("org-a", nonce)
+    payload = head.payload.model_copy(
+        update={"head": head.payload.head.model_copy(update={"revision": "99"})}
+    )
+    envelope = LiveHeadEnvelope(
+        payload=payload,
+        signature=create_signature(
+            payload, HEAD_PURPOSE, system.store.config.signing_key, system.store.sign
+        ),
+    )
+    with pytest.raises(JournalError, match="JOURNAL_BINDING_INVALID"):
+        system.client.verifier.live_head(envelope, "org-a", nonce)

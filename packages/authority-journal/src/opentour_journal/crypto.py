@@ -247,6 +247,7 @@ class JournalVerifier:
             or payload.organization_id != organization_id
             or payload.operation_id != operation_id
             or payload.phase != phase
+            or int(payload.head_revision) != payload.sequence + 1
             or payload.content_bucket_ref != self.trust.content_bucket
             or payload.content_key
             != content_key(organization_id, operation_id, phase, payload.content_sha256)
@@ -288,6 +289,7 @@ class JournalVerifier:
             payload.journal != self.trust.journal
             or payload.head.organization_id != organization_id
             or payload.request_nonce != nonce
+            or int(payload.head.revision) != payload.head.sequence + 1
         ):
             raise JournalError("JOURNAL_BINDING_INVALID")
         key = self.trust.key_for(envelope.signature, HEAD_PURPOSE)

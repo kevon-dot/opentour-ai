@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import re
 from datetime import datetime
-from typing import Annotated, Final, Literal, Self
+from typing import Annotated, ClassVar, Final, Literal, Self
 
 from pydantic import (
     AfterValidator,
@@ -21,6 +21,8 @@ MAX_COUNTER = 9007199254740991
 MAX_REVISION = 9223372036854775807
 MAX_WIRE_BYTES = 65536
 MAX_REPLAY_ENTRIES = 10000
+# Evidence has a separate finite budget; the entry-count ceiling does not waive it.
+MAX_MANIFEST_BYTES = 32 * 1024 * 1024
 
 
 class JournalError(Exception):
@@ -104,11 +106,12 @@ def _unicode(value: object) -> None:
 
 class WireModel(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True, frozen=True, hide_input_in_errors=True)
+    parse_byte_limit: ClassVar[int] = MAX_WIRE_BYTES
 
     @classmethod
     def parse(cls, data: bytes) -> Self:
         try:
-            return cls.model_validate(strict_json(data))
+            return cls.model_validate(strict_json(data, limit=cls.parse_byte_limit))
         except ValidationError:
             raise JournalError("SCHEMA_INVALID", 422) from None
 
@@ -284,6 +287,7 @@ class ReplayObservation(WireModel):
 
 
 class ReplayManifest(WireModel):
+    parse_byte_limit: ClassVar[int] = MAX_MANIFEST_BYTES
     profile_version: Literal["1.0"]
     journal: JournalIdentity
     organization_id: Id
