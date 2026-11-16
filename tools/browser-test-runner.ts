@@ -164,6 +164,7 @@ export function overlayMetadata(root: string, observed?: ReadonlyArray<Pick<Case
       value.id.startsWith(`${foundationTarget}::${value.mode}::`));
   }
   const bytes = ownedBytes(root, `${foundationRoot}/testing/overlay-baseline-review.json`, 32768);
+  configuration(sha(bytes) === '7fbcd3ce1d2eb362f2d608efe9a9627407d278e9341aae7785fe78b2a63a5d71');
   const review = record(JSON.parse(bytes.toString('utf8')));
   configuration(Object.keys(review).sort().join() === ['schema_version', 'issue_key', 'logical_key', 'spec_sha256',
     'design_image_sha256', 'browser_baseline_status', 'max_diff_pixels', 'threshold', 'masks', 'images',

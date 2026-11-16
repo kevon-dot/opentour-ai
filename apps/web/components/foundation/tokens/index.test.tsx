@@ -3,6 +3,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { readFileSync, mkdtempSync, mkdirSync, writeFileSync, rmSync, realpathSync, symlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import { Badge, Button, Dialog, Drawer, Tabs } from './index';
 import type { ModalPresentationProps } from './contracts';
@@ -225,10 +226,15 @@ describe('finite overlay evidence attribution', () => {
     }
   });
   it('rejects changed, missing or symlinked candidate image bytes without normalizing them', () => {
-    for (const mutation of ['changed', 'missing', 'symlink']) fixture((root, observed) => {
+    for (const mutation of ['changed', 'missing', 'symlink', 'coordinated-map-replacement']) fixture((root, observed) => {
       const review = JSON.parse(readFileSync(join(root, reviewPath), 'utf8'));
       const path = join(root, 'apps/web/components/foundation/tokens', Object.keys(review.images)[0]);
-      if (mutation === 'changed') writeFileSync(path, 'generated invalid image bytes');
+      if (mutation === 'coordinated-map-replacement') {
+        const replacement = Buffer.concat([readFileSync(path), Buffer.from([0])]);
+        writeFileSync(path, replacement);
+        review.images[Object.keys(review.images)[0]] = createHash('sha256').update(replacement).digest('hex');
+        writeFileSync(join(root, reviewPath), JSON.stringify(review, null, 2) + '\n');
+      } else if (mutation === 'changed') writeFileSync(path, 'generated invalid image bytes');
       else { rmSync(path); if (mutation === 'symlink') symlinkSync(join(root, reviewPath), path); }
       expect(() => overlayMetadata(root, observed)).toThrow();
     });
