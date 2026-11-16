@@ -1,11 +1,11 @@
 'use client';
 
-import { useId, useRef, useState } from 'react';
+import { useId, useLayoutEffect, useRef, useState } from 'react';
 import type { KeyboardEvent } from 'react';
-import type { BadgeProps, ButtonProps, TabsProps } from './contracts';
+import type { BadgeProps, ButtonProps, ModalPresentationProps, TabsProps } from './contracts';
 import '../../../styles/product-tokens.css';
 
-export type { BadgeProps, BadgeTone, ButtonProps, ButtonVariant, TabItem, TabsProps } from './contracts';
+export type { BadgeProps, BadgeTone, ButtonProps, ButtonVariant, DismissReason, InitialFocus, ModalPresentationProps, TabItem, TabsProps } from './contracts';
 
 const lightIndicator = new URL('./assets/loading-light.svg', import.meta.url).href;
 const darkIndicator = new URL('./assets/loading-dark.svg', import.meta.url).href;
@@ -93,3 +93,98 @@ export function Tabs({ label, items, selectedKey, onSelectionChange }: TabsProps
     </div>)}
   </div>;
 }
+
+// One owner per document. Nested overlays are intentionally outside this presentation contract.
+const modalOwners = new WeakMap<Document, symbol>();
+
+function availableFocusTarget(node: HTMLElement | null): node is HTMLElement {
+  return !!node && node.isConnected && !node.closest('[hidden], [inert], [aria-hidden="true"], [aria-disabled="true"]') &&
+    !node.matches(':disabled, input[type="hidden"]') && node.checkVisibility({ checkVisibilityCSS: true });
+}
+
+function focusTarget(node: HTMLElement | null): boolean {
+  if (!availableFocusTarget(node)) return false;
+  node.focus({ preventScroll: true });
+  return node.ownerDocument.activeElement === node;
+}
+
+type FocusResolvers = Pick<ModalPresentationProps, 'returnFocus' | 'fallbackFocus'>;
+
+function ModalContent({ title, children, actions, initialFocus, onDismiss, kind, titleId, resolvers }: Omit<ModalPresentationProps, 'open' | 'returnFocus' | 'fallbackFocus'> & {
+  kind: 'dialog' | 'drawer'; titleId: string; resolvers: { current: FocusResolvers };
+}) {
+  const dialogRef = useRef<HTMLDialogElement>(null);
+  const headingRef = useRef<HTMLHeadingElement>(null);
+  const closeRef = useRef<HTMLButtonElement>(null);
+  // Initial focus is sampled only for this opening, never on an ordinary rerender.
+  const openingFocus = useRef(initialFocus);
+  useLayoutEffect(() => {
+    const dialog = dialogRef.current!;
+    const heading = headingRef.current!;
+    const document = dialog.ownerDocument;
+    if (document.querySelector(':modal') && !dialog.matches(':modal')) {
+      throw new Error('Nested modal presentation is not supported.');
+    }
+    const owner = Symbol('foundation-modal');
+    modalOwners.set(document, owner);
+    dialog.setAttribute('closedby', 'none');
+    heading.setAttribute('autofocus', '');
+    if (!dialog.open) {
+      dialog.showModal();
+      const requested = openingFocus.current.kind === 'element' ? openingFocus.current.ref.current :
+        openingFocus.current.kind === 'close-button' ? closeRef.current : heading;
+      if (!requested || !dialog.contains(requested) || !focusTarget(requested)) focusTarget(heading);
+    }
+    return () => {
+      // React removes the dialog after layout cleanup. Native removing steps release the
+      // top layer without close()'s unsafe restoration of its opening-time origin.
+      queueMicrotask(() => {
+        if (dialog.isConnected || modalOwners.get(document) !== owner) return;
+        modalOwners.delete(document);
+        if (document.querySelector(':modal')) return;
+        for (const resolve of [resolvers.current.returnFocus, resolvers.current.fallbackFocus]) {
+          try { if (focusTarget(resolve())) return; } catch { /* Invalid consumer targets cannot prevent teardown. */ }
+        }
+        // Neither target is usable: cleanup still completes. This is not successful
+        // accessible focus return; consumer qualification must detect and correct it.
+      });
+    };
+  }, [resolvers]);
+
+  function handleKey(event: KeyboardEvent<HTMLDialogElement>) {
+    if (event.key === 'Escape') {
+      event.preventDefault(); event.stopPropagation(); onDismiss('escape'); return;
+    }
+    if (event.key !== 'Tab') return;
+    const dialog = event.currentTarget;
+    const stops = [...dialog.querySelectorAll<HTMLElement>('button, a[href], input, select, textarea, [tabindex], [contenteditable="true"]')]
+      .filter(node => node.tabIndex >= 0 && availableFocusTarget(node));
+    const index = stops.indexOf(dialog.ownerDocument.activeElement as HTMLElement);
+    if (!stops.length) { event.preventDefault(); focusTarget(headingRef.current); }
+    else if (event.shiftKey && index <= 0) { event.preventDefault(); focusTarget(stops[stops.length - 1]); }
+    else if (!event.shiftKey && (index < 0 || index === stops.length - 1)) { event.preventDefault(); focusTarget(stops[0]); }
+  }
+
+  return <dialog ref={dialogRef} className={`ot-modal ot-modal--${kind}`} aria-labelledby={titleId}
+    onCancel={event => event.preventDefault()} onKeyDown={handleKey}>
+    <h2 ref={headingRef} id={titleId} tabIndex={-1} className="ot-modal-title">{title}</h2>
+    <div className="ot-modal-body">{children}</div>
+    <div className="ot-modal-actions"><Button ref={closeRef} variant="secondary" label={kind === 'dialog' ? 'Close dialog' : 'Close details'}
+      onPress={() => onDismiss('close-button')} />{actions}</div>
+  </dialog>;
+}
+
+function ModalPresentation({ open, title, children, actions, initialFocus, returnFocus, fallbackFocus, onDismiss, kind }:
+  ModalPresentationProps & { kind: 'dialog' | 'drawer' }) {
+  requireLabel(title);
+  if (!initialFocus || (initialFocus.kind !== 'heading' && initialFocus.kind !== 'close-button' &&
+    (initialFocus.kind !== 'element' || !initialFocus.ref))) throw new Error('An explicit initial focus policy is required.');
+  const titleId = useId();
+  const resolvers = useRef({ returnFocus, fallbackFocus });
+  useLayoutEffect(() => { resolvers.current = { returnFocus, fallbackFocus }; });
+  return open ? <ModalContent kind={kind} titleId={titleId} title={title} initialFocus={initialFocus}
+    onDismiss={onDismiss} actions={actions} resolvers={resolvers}>{children}</ModalContent> : null;
+}
+
+export function Dialog(props: ModalPresentationProps) { return <ModalPresentation {...props} kind="dialog" />; }
+export function Drawer(props: ModalPresentationProps) { return <ModalPresentation {...props} kind="drawer" />; }

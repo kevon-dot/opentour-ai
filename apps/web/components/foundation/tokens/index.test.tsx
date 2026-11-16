@@ -4,7 +4,8 @@ import { readFileSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'nod
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { describe, expect, it } from 'vitest';
-import { Badge, Button, Tabs } from './index';
+import { Badge, Button, Dialog, Drawer, Tabs } from './index';
+import type { ModalPresentationProps } from './contracts';
 import { presentationFixtures as fixtures } from './fixtures';
 import tokens from '../../../styles/product-tokens.json';
 import { foundationMetadata } from '../../../../../tools/browser-test-runner';
@@ -136,5 +137,45 @@ describe('design token integrity', () => {
       const values = [luminance(foreground), luminance(background)].sort((a, b) => b - a);
       expect((values[0] + 0.05) / (values[1] + 0.05)).toBeGreaterThanOrEqual(4.5);
     }
+  });
+});
+
+// Append-only: historical Vitest transport IDs use the collected index.
+describe.each([{ name: 'Dialog', Component: Dialog }, { name: 'Drawer', Component: Drawer }])('$name modal presentation contract', ({ Component, name }) => {
+  const props: ModalPresentationProps = { open: true, title: 'Generated details', children: 'Generated body',
+    initialFocus: { kind: 'heading' }, returnFocus: () => null, fallbackFocus: () => null,
+    onDismiss: () => { throw new Error('Rendering must never request dismissal'); } };
+  it('U01 requires a visible title, associates its heading and removes closed content', () => {
+    expect(renderToStaticMarkup(<Component {...props} open={false} />)).toBe('');
+    expect(() => renderToStaticMarkup(<Component {...props} title=" " />)).toThrow('visible');
+    const html = renderToStaticMarkup(<Component {...props} />);
+    const labelledBy = /aria-labelledby="([^"]+)"/.exec(html)?.[1];
+    expect(labelledBy).toBeTruthy(); expect(html).toContain(`id="${labelledBy}" tabindex="-1"`);
+    expect(html).toContain('Generated details');
+    expect(html).not.toContain('aria-label=');
+  });
+  it('U02 renders only an explicit non-submit close control, without implicit confirmation', () => {
+    const html = renderToStaticMarkup(<Component {...props} />);
+    expect(html).toContain('<button type="button"');
+    expect(html).toContain(name === 'Dialog' ? 'Close dialog' : 'Close details');
+    expect(html).not.toContain('<form'); expect(html).not.toContain('method="dialog"');
+    expect(html).not.toContain('Confirm');
+    const withAction = renderToStaticMarkup(<Component {...props} actions={<Button label="Explicit action" />} />);
+    expect(withAction.indexOf(name === 'Dialog' ? 'Close dialog' : 'Close details')).toBeLessThan(withAction.indexOf('Explicit action'));
+    expect(withAction.match(/<button /g)).toHaveLength(2);
+  });
+  it('U03 requires an explicit initial focus policy and permits an initially empty element ref', () => {
+    expect(() => renderToStaticMarkup(<Component {...props} initialFocus={undefined as never} />)).toThrow('explicit initial focus');
+    expect(() => renderToStaticMarkup(<Component {...props} initialFocus={{ kind: 'unknown' } as never} />)).toThrow('explicit initial focus');
+    expect(renderToStaticMarkup(<Component {...props} initialFocus={{ kind: 'element', ref: { current: null } }} />)).toContain('<dialog');
+    expect(renderToStaticMarkup(<Component {...props} initialFocus={{ kind: 'close-button' }} />)).toContain('<dialog');
+  });
+  it('U04 preserves React content escaping without invoking caller actions', () => {
+    const html = renderToStaticMarkup(<Component {...props} title={'<script>generated</script>'}>
+      {'<img src=x onerror=generated>'}<Button label="Generated action" onPress={() => { throw new Error('No implicit action'); }} />
+    </Component>);
+    expect(html).toContain('&lt;script&gt;generated&lt;/script&gt;');
+    expect(html).toContain('&lt;img src=x onerror=generated&gt;');
+    expect(html).not.toContain('<script>');
   });
 });
