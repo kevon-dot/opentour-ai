@@ -6,6 +6,9 @@ import base64
 import copy
 import io
 import json
+import shutil
+import ssl
+import subprocess
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
@@ -33,6 +36,7 @@ from opentour_audit.journal import (
     create_router,
 )
 from opentour_control.authority.journal_client import (
+    HTTPSJournalTransport,
     JournalClient,
     RetryClaim,
     TransportResponse,
@@ -48,6 +52,7 @@ from opentour_journal.crypto import (
     model_digest,
     raw_to_der,
     sha256,
+    transcript,
 )
 from opentour_journal.models import (
     APPEND_PURPOSE,
@@ -1255,3 +1260,166 @@ def test_telemetry_rejects_unknown_names_and_invalid_values_before_sink(system, 
     with pytest.raises(JournalError, match="JOURNAL_OBSERVABILITY_UNAVAILABLE"):
         emit_metric(system.telemetry, name, value)
     assert system.telemetry.events == []
+
+
+def test_exact_append_transcript_cross_language_jcs_and_es256(system):
+    node = shutil.which("node")
+    assert node, "The pinned Node runtime is required for the cross-language fixture"
+    receipt = system.client.append_intent(intent(system)).signed_receipt
+    key = system.store.config.signing_key
+    payload = {
+        "public_der": base64.b64encode(key.public_key_der).decode(),
+        "transcript": transcript(APPEND_PURPOSE, receipt.payload.wire()).decode(),
+        "signature": receipt.signature.signature,
+        "vector": {"\ue000": "x", "\U0001f600": "y", "a": "\n", "n": MAX_COUNTER},
+        "vector_canonical": canonical(
+            {"\ue000": "x", "\U0001f600": "y", "a": "\n", "n": MAX_COUNTER}
+        ).decode(),
+    }
+    script = r'''
+const fs = require('node:fs');
+const crypto = require('node:crypto');
+const assert = require('node:assert/strict');
+const x = JSON.parse(fs.readFileSync(0, 'utf8'));
+// Restricted integer/object/string test vector; this is not a production canonicalizer.
+const ordered = Object.fromEntries(Object.keys(x.vector).sort().map(k => [k, x.vector[k]]));
+assert.equal(JSON.stringify(ordered), x.vector_canonical);
+const key = crypto.createPublicKey({
+  key: Buffer.from(x.public_der, 'base64'), type:'spki',format:'der'});
+const options = {key, dsaEncoding:'ieee-p1363'};
+const sig = Buffer.from(x.signature, 'base64url');
+assert.equal(sig.length, 64);
+assert.equal(crypto.verify('sha256', Buffer.from(x.transcript), options, sig), true);
+const wrongPurpose = Buffer.from(x.transcript.replace('append-receipt', 'live-head'));
+assert.equal(crypto.verify('sha256', wrongPurpose, options, sig), false);
+sig[0] ^= 1;
+assert.equal(crypto.verify('sha256', Buffer.from(x.transcript), options, sig), false);
+process.stdout.write('cross-language-profile-verified');
+'''
+    result = subprocess.run(
+        [node, "-e", script], input=json.dumps(payload), text=True,
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=10, check=True,
+    )
+    assert result.stdout == "cross-language-profile-verified"
+
+
+def test_original_receipt_survives_signer_rotation_and_ten_minute_window(system):
+    body = intent(system)
+    original = system.client.append_intent(body)
+    private = ec.generate_private_key(ec.SECP256R1())
+    public = private.public_key().public_bytes(
+        serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo
+    )
+    previous = replace(system.store.config.signing_key, live_head_eligible=False)
+    current = replace(
+        previous, key_id=previous.key_id[:-1] + "3", registry_revision="registry-two",
+        public_key_der=public, public_key_sha256=sha256(public), live_head_eligible=True,
+    )
+    trust = replace(system.store.config.trust, keys=(previous, current))
+    system.store.config = replace(system.store.config, trust=trust, signing_key=current)
+    system.kms.private_key = private
+    system.service.verifier = system.client.verifier = JournalVerifier(trust)
+    system.service.clock = lambda: NOW + timedelta(seconds=601)
+    assert canonical(system.client.append_intent(body).wire()) == canonical(original.wire())
+    head = system.client.read_live_head("org-a")
+    assert head.signature.key_id == current.key_id
+    assert original.signed_receipt.signature.key_id == previous.key_id
+    assert system.store.head("org-a").sequence == 1 and len(system.s3.objects) == 1
+
+
+def test_new_valid_signature_does_not_create_an_append(system):
+    body = intent(system)
+    original = system.client.append_intent(body)
+    replacement = AppendReceiptEnvelope(
+        payload=original.signed_receipt.payload,
+        signature=create_signature(
+            original.signed_receipt.payload, APPEND_PURPOSE,
+            system.store.config.signing_key, system.store.sign,
+        ),
+    )
+    assert system.client.verifier.receipt(replacement, "org-a", body.operation_id, "intent") == (
+        original.signed_receipt.payload
+    )
+    assert system.client.append_intent(body) == original
+    assert system.store.head("org-a").sequence == 1
+
+
+def test_conflicting_outcome_cannot_rewrite_proven_abort(system):
+    body = intent(system)
+    system.client.append_intent(body)
+    aborted = outcome(system, body, "aborted")
+    receipt = system.client.append_outcome(aborted)
+    committed = aborted.model_copy(update={
+        "result": "committed", "resulting_epoch": body.proposed_epoch,
+        "resulting_authority_revision": body.proposed_authority_revision,
+    })
+    with pytest.raises(JournalError, match="JOURNAL_OPERATION_CONFLICT"):
+        system.client.append_outcome(committed)
+    assert system.client.append_outcome(aborted) == receipt
+    assert system.store.head("org-a").latest_epoch == 6
+
+
+class GeneratedHTTPSResponse(io.BytesIO):
+    def __init__(self, data=b"{}", status=200, encoding="identity"):
+        super().__init__(data)
+        self.status, self.headers = status, {"Content-Encoding": encoding}
+        self.read_limit = None
+
+    def read(self, limit):
+        self.read_limit = limit
+        return super().read(limit)
+
+
+def https_transport(**changes):
+    values = {
+        "origin": "https://journal.example.invalid",
+        "approved_origin": "https://journal.example.invalid",
+        "configuration_digest": "a" * 64,
+        "approved_configuration_digest": "a" * 64,
+        "authorizer": SimpleNamespace(headers=lambda *args: {"Authorization": "generated"}),
+        "tls": ssl.create_default_context(),
+    }
+    values.update(changes)
+    return HTTPSJournalTransport(**values)
+
+
+@pytest.mark.parametrize("changes", [
+    {"origin": "https://foreign.example.invalid"},
+    {"origin": "http://journal.example.invalid", "approved_origin": "http://journal.example.invalid"},
+    {"origin": "https://user@journal.example.invalid", "approved_origin": "https://user@journal.example.invalid"},
+    {"configuration_digest": "b" * 64}, {"timeout": 0}, {"timeout": 31},
+])
+def test_https_transport_cannot_override_approved_configuration(changes):
+    with pytest.raises(JournalError, match="JOURNAL_CONFIGURATION_INVALID"):
+        https_transport(**changes)
+
+
+@pytest.mark.parametrize("fault", ["oversized", "encoding", "late", "redirect"])
+def test_https_transport_bounds_response_closes_and_refuses_redirect(fault):
+    times = iter([0.0, 11.0 if fault == "late" else 1.0])
+    transport = https_transport(monotonic=lambda: next(times))
+    response = GeneratedHTTPSResponse(
+        b"x" * 65537 if fault == "oversized" else b"{}",
+        status=302 if fault == "redirect" else 200,
+        encoding="gzip" if fault == "encoding" else "identity",
+    )
+    handlers = transport.opener.handlers
+    redirect = next(h for h in handlers if h.__class__.__name__ == "_NoRedirect")
+    assert redirect.redirect_request(None, None, 302, "", {}, "https://foreign.invalid") is None
+    calls = []
+
+    def opened(request, **kwargs):
+        calls.append((request.full_url, kwargs))
+        return response
+
+    transport.opener = SimpleNamespace(open=opened)
+    if fault == "redirect":
+        # The transport exposes status to the finite client; it never follows the Location.
+        assert transport.post("/v1/authority-journal/heads/read", b"{}").status == 302
+    else:
+        with pytest.raises(JournalError, match="JOURNAL_UNAVAILABLE"):
+            transport.post("/v1/authority-journal/heads/read", b"{}")
+    assert response.closed and response.read_limit == 65537
+    assert calls == [
+        ("https://journal.example.invalid/v1/authority-journal/heads/read", {"timeout": 10.0})
+    ]
