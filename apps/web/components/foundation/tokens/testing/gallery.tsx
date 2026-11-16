@@ -25,8 +25,10 @@ function Gallery() {
       <div className="examples">{fixtures.variants.map(variant => <div key={variant} className="example" data-variant={variant}>
         <h3>{variant}</h3>
         <Button variant={variant} label={fixtures.buttonLabel} onPress={() => setEvents(value => value + 1)} />
-        <Button variant={variant} label={fixtures.buttonLabel} disabled disabledReason={fixtures.disabledReason} />
-        <Button variant={variant} label={fixtures.buttonLabel} busy disabledReason={fixtures.busyReason} />
+        <Button variant={variant} label={fixtures.buttonLabel} disabled disabledReason={fixtures.disabledReason}
+          onPress={() => setEvents(value => value + 1)} />
+        <Button variant={variant} label={fixtures.buttonLabel} busy disabledReason={fixtures.busyReason}
+          onPress={() => setEvents(value => value + 1)} />
       </div>)}</div>
       <div className="example" data-example="busy-control">
         <Button label={fixtures.busyLabel} busy={busy} onPress={() => { setBusy(true); setEvents(value => value + 1); }} />
