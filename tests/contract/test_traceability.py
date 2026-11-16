@@ -24,17 +24,64 @@ def failures(value):
     return [c for c in validate_manifest(value) if c.status == "FAIL"]
 
 
-def test_complete_current_manifest_passes_with_actual_native_ids():
+def test_complete_current_manifest_passes_with_actual_native_ids(tmp_path, monkeypatch):
     value = manifest()
     checks = validate_manifest(value)
     assert len(checks) > 1000 and not failures(value)
     source = value["source_projection"]
-    assert len(source["issues"]) == 294
+    assert len(source["issues"]) == 295
     assert len(source["features"]) == 32
     assert len({s for f in source["features"] for s in f["implementation_subfeature_ids"]}) == 173
     assert len(source["actions"]) == 175
     assert value["product_acceptance"] == "NOT_RUN"
     assert all(i["native_uuid"] and i["logical_key"] for i in source["issues"])
+
+    # A separately admitted child must not inherit its parent's observed cases.
+    from tools.evidence_manifest import EvidenceError, EvidenceStore
+    from tools.validate_spec import digest
+
+    child = next(i for i in source["issues"] if i["issue_key"] == "OPE-300")
+    assert child["logical_key"] == "OT-P23-C12-OVERLAY"
+    assert child["projection"]["parent"] == "OPE-253"
+    assert child["projection"]["blocked_by"] == ["OPE-125", "OPE-126", "OPE-127"]
+    parent = next(i for i in source["issues"] if i["issue_key"] == "OPE-253")
+    # Only new child evidence paths are exclusive; existing UI files remain delegated.
+    assert not set(child["projection"]["owned_paths"]) & set(parent["projection"]["owned_paths"])
+    requirements = child["projection"]["requirement_ids"]
+    assert requirements == [f"OT-P23-C12-OVERLAY::acceptance:{n}" for n in range(1, 13)]
+    parent_cases = [b for b in value["test_bindings"] if b["issue_key"] == "OPE-253"]
+    assert len(parent_cases) == 60
+    assert (
+        digest(parent_cases) == "088d624827eb8f3f971b60bb24d4e25e6e284591ce94186c5b78e21a65c35fe7"
+    )
+    child_cases = [b for b in value["test_bindings"] if b["issue_key"] == "OPE-300"]
+    assert not {b["test_id"] for b in parent_cases} & {b["test_id"] for b in child_cases}
+    store = EvidenceStore(tmp_path / "child-evidence")
+    completion = store.requirement_completion(
+        [], issue_key="OPE-300", requirement_ids=set(requirements), root=ROOT, commit="0" * 40
+    )
+    assert completion["status"] == "BLOCKED"
+    if not child_cases:
+        assert completion["unbound_requirements"] == sorted(requirements)
+    monkeypatch.setattr(
+        "tools.evidence_manifest.test_runner.run_command",
+        lambda *_: pytest.fail("Unbound child evidence must not execute a command"),
+    )
+    parent_case = parent_cases[0]
+    with pytest.raises(EvidenceError, match="UNBOUND_REQUIREMENT_OR_TEST"):
+        store.observe_command(
+            "parent-is-not-child",
+            command="test-web",
+            args=[parent_case["test_id"].split("::", 1)[0]],
+            root=ROOT,
+            requirement_ids=[requirements[0]],
+            issue_key="OPE-300",
+            test_id=parent_case["test_id"],
+            spec_sha256=child["technical_capture_sha256"],
+            fixture_id=parent_case["fixture_id"],
+            fixture_version=parent_case["fixture_version"],
+            mode=parent_case["mode"],
+        )
 
 
 def test_ac01_exact_unmapped_subfeature_is_reported():
@@ -99,6 +146,32 @@ def test_required_adverse_metadata_fixtures(mutation, code):
     elif mutation == "duplicate_binding":
         value["test_bindings"].append(copy.deepcopy(value["test_bindings"][0]))
     assert any(c.code == code for c in failures(value))
+    # Exercise the same source/ownership/admission boundaries on the new child.
+    child_value = manifest()
+    child = next(
+        i for i in child_value["source_projection"]["issues"] if i["issue_key"] == "OPE-300"
+    )
+    child_code = None
+    if mutation == "source":
+        child["technical_capture_sha256"] = "0" * 64
+        child_code = "APPROVED_SOURCE_PROJECTION"
+    elif mutation == "unknown_issue":
+        child_value["mappings"] = [
+            m for m in child_value["mappings"] if m["issue_key"] != "OPE-300"
+        ]
+        child_code = "EXACT_NATIVE_ISSUE_SET"
+    elif mutation == "ownership":
+        path = next(
+            p["path"] for p in child_value["exclusive_ownership"] if p["owner"] == "OPE-253"
+        )
+        child_value["exclusive_ownership"].append({"path": path, "owner": "OPE-300"})
+        child_code = "SINGLE_EXCLUSIVE_OWNER"
+    elif mutation == "duplicate_binding":
+        parent = next(b for b in child_value["test_bindings"] if b["issue_key"] == "OPE-253")
+        child_value["test_bindings"].append({**parent, "issue_key": "OPE-300"})
+        child_code = "TEST_REQUIREMENT_BINDING"
+    if child_code:
+        assert any(c.code == child_code for c in failures(child_value))
 
 
 @pytest.mark.parametrize(

@@ -569,7 +569,8 @@
           "OT-P23-C15-C01",
           "OT-P23-C15-C02",
           "OT-P23-C15-C03",
-          "OT-P23-C15-C04"
+          "OT-P23-C15-C04",
+          "OT-P23-C12-OVERLAY"
         ],
         "implementation_subfeature_ids": [
           "PRD-02.01",
@@ -18883,6 +18884,87 @@
           "referenced_issue_keys": []
         },
         "projection_sha256": "39c2a70dd4e4895ac715da1369ce5a0731fcda049498a99ce061ed4e12e42ca7"
+      },
+      {
+        "issue_key": "OPE-300",
+        "native_uuid": "b215de00-fc9e-497b-915f-3dc835614bfa",
+        "logical_key": "OT-P23-C12-OVERLAY",
+        "url": "https://linear.app/opentourai/issue/OPE-300/implement-controlled-dialog-and-drawer-primitives-with-browser",
+        "updated_at": "2026-11-16T04:28:36.979Z",
+        "publication_spec_sha256": "8ff8e1c004bc6f6e8fa33f00181337ea82bb6d58b537280b996bd40312a36142",
+        "technical_capture_sha256": "429990397f6a755551664d50ad0c80116abf65be8ac8e64e35002cbc18923fdf",
+        "projection": {
+          "requirement_ids": [
+            "OT-P23-C12-OVERLAY::acceptance:1",
+            "OT-P23-C12-OVERLAY::acceptance:2",
+            "OT-P23-C12-OVERLAY::acceptance:3",
+            "OT-P23-C12-OVERLAY::acceptance:4",
+            "OT-P23-C12-OVERLAY::acceptance:5",
+            "OT-P23-C12-OVERLAY::acceptance:6",
+            "OT-P23-C12-OVERLAY::acceptance:7",
+            "OT-P23-C12-OVERLAY::acceptance:8",
+            "OT-P23-C12-OVERLAY::acceptance:9",
+            "OT-P23-C12-OVERLAY::acceptance:10",
+            "OT-P23-C12-OVERLAY::acceptance:11",
+            "OT-P23-C12-OVERLAY::acceptance:12"
+          ],
+          "requirement_hashes": {
+            "OT-P23-C12-OVERLAY::acceptance:1": "d2057f0d56352e9efb831114687847818819cd445fd87f1b54c8ac5477683da6",
+            "OT-P23-C12-OVERLAY::acceptance:2": "8244f28e14afb5f5bb4e9914fbe1568db3a235aaffb8c1d1699c6b4ee4f5aa0a",
+            "OT-P23-C12-OVERLAY::acceptance:3": "65fd14339cc2d6265881f1914abb1062aea2b49bb38c956378e44bf14b3558ee",
+            "OT-P23-C12-OVERLAY::acceptance:4": "3b41ed3742f37c29a4dbc6558e9e6602e98d81835d3e90296d4eb0ec74068eb1",
+            "OT-P23-C12-OVERLAY::acceptance:5": "054d24865c1b6633906edd1ae7a849d73f940645a8efc5ead6a133930566c380",
+            "OT-P23-C12-OVERLAY::acceptance:6": "c7f127a37eb4efa7a700d0f0701f4bd2922367ec67356a05bdecd2f2951bbe93",
+            "OT-P23-C12-OVERLAY::acceptance:7": "2eee0a3036bc1b1afc87b744d944a8a3b9de26d2af1d2258c743f6d928dc80f5",
+            "OT-P23-C12-OVERLAY::acceptance:8": "c27432648c0997b1846cc2d6072ce5aca54d262cb34f5a80f33e9ca8ae13fddb",
+            "OT-P23-C12-OVERLAY::acceptance:9": "d2408910567ce4f7e027a1a33ebd81e2063821d2eadb2689928f53ead7cb6660",
+            "OT-P23-C12-OVERLAY::acceptance:10": "843fbcde95707a788e72206e21f5c215a6fc2465a8f2270214af739c17c93185",
+            "OT-P23-C12-OVERLAY::acceptance:11": "b071856cf36943c6e0f9b82a2fbf9a614c368811b35b5f8b7f2d29fb424222b2",
+            "OT-P23-C12-OVERLAY::acceptance:12": "fafdc2b7cbb8ba4586a1c727db8d271aff207d840ff7b0ececcde091986ca623"
+          },
+          "feature_ids": [
+            "PRD-23"
+          ],
+          "subfeature_ids": [],
+          "owned_paths": [
+            "apps/web/components/foundation/tokens/testing/baselines/darwin-customer-controlled/overlay-dialog-1280.png",
+            "apps/web/components/foundation/tokens/testing/baselines/darwin-customer-controlled/overlay-dialog-1440.png",
+            "apps/web/components/foundation/tokens/testing/baselines/darwin-customer-controlled/overlay-dialog-320.png",
+            "apps/web/components/foundation/tokens/testing/baselines/darwin-customer-controlled/overlay-dialog-768.png",
+            "apps/web/components/foundation/tokens/testing/baselines/darwin-customer-controlled/overlay-drawer-1280.png",
+            "apps/web/components/foundation/tokens/testing/baselines/darwin-customer-controlled/overlay-drawer-1440.png",
+            "apps/web/components/foundation/tokens/testing/baselines/darwin-customer-controlled/overlay-drawer-320.png",
+            "apps/web/components/foundation/tokens/testing/baselines/darwin-customer-controlled/overlay-drawer-768.png",
+            "apps/web/components/foundation/tokens/testing/baselines/darwin-opentour-managed/overlay-dialog-1280.png",
+            "apps/web/components/foundation/tokens/testing/baselines/darwin-opentour-managed/overlay-dialog-1440.png",
+            "apps/web/components/foundation/tokens/testing/baselines/darwin-opentour-managed/overlay-dialog-320.png",
+            "apps/web/components/foundation/tokens/testing/baselines/darwin-opentour-managed/overlay-dialog-768.png",
+            "apps/web/components/foundation/tokens/testing/baselines/darwin-opentour-managed/overlay-drawer-1280.png",
+            "apps/web/components/foundation/tokens/testing/baselines/darwin-opentour-managed/overlay-drawer-1440.png",
+            "apps/web/components/foundation/tokens/testing/baselines/darwin-opentour-managed/overlay-drawer-320.png",
+            "apps/web/components/foundation/tokens/testing/baselines/darwin-opentour-managed/overlay-drawer-768.png",
+            "apps/web/components/foundation/tokens/testing/overlay-baseline-review.json"
+          ],
+          "declared_test_paths": [
+            "apps/web/components/foundation/tokens/index.test.tsx",
+            "apps/web/components/foundation/tokens/visual.spec.ts"
+          ],
+          "parent": "OPE-253",
+          "blocked_by": [
+            "OPE-125",
+            "OPE-126",
+            "OPE-127"
+          ],
+          "declared_contract_paths": [],
+          "referenced_issue_keys": [
+            "OPE-125",
+            "OPE-126",
+            "OPE-127",
+            "OPE-253",
+            "OPE-281"
+          ]
+        },
+        "projection_sha256": "f43f306395141453c6647735dcb4073131b84bfa7a562ebbf4fe39d026e3b90c"
       }
     ],
     "actions": [
@@ -31525,15 +31607,1291 @@
         "mode": "opentour_managed",
         "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-300",
+        "requirement_ids": [
+          "OT-P23-C12-OVERLAY::acceptance:1",
+          "OT-P23-C12-OVERLAY::acceptance:12"
+        ],
+        "test_id": "apps/web/components/foundation/tokens/index.test.tsx::24",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-300",
+        "requirement_ids": [
+          "OT-P23-C12-OVERLAY::acceptance:1",
+          "OT-P23-C12-OVERLAY::acceptance:12"
+        ],
+        "test_id": "apps/web/components/foundation/tokens/index.test.tsx::25",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-300",
+        "requirement_ids": [
+          "OT-P23-C12-OVERLAY::acceptance:1",
+          "OT-P23-C12-OVERLAY::acceptance:12"
+        ],
+        "test_id": "apps/web/components/foundation/tokens/index.test.tsx::26",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-300",
+        "requirement_ids": [
+          "OT-P23-C12-OVERLAY::acceptance:1",
+          "OT-P23-C12-OVERLAY::acceptance:12"
+        ],
+        "test_id": "apps/web/components/foundation/tokens/index.test.tsx::27",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-300",
+        "requirement_ids": [
+          "OT-P23-C12-OVERLAY::acceptance:1",
+          "OT-P23-C12-OVERLAY::acceptance:12"
+        ],
+        "test_id": "apps/web/components/foundation/tokens/index.test.tsx::28",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-300",
+        "requirement_ids": [
+          "OT-P23-C12-OVERLAY::acceptance:1",
+          "OT-P23-C12-OVERLAY::acceptance:12"
+        ],
+        "test_id": "apps/web/components/foundation/tokens/index.test.tsx::29",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-300",
+        "requirement_ids": [
+          "OT-P23-C12-OVERLAY::acceptance:1",
+          "OT-P23-C12-OVERLAY::acceptance:12"
+        ],
+        "test_id": "apps/web/components/foundation/tokens/index.test.tsx::30",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-300",
+        "requirement_ids": [
+          "OT-P23-C12-OVERLAY::acceptance:1",
+          "OT-P23-C12-OVERLAY::acceptance:12"
+        ],
+        "test_id": "apps/web/components/foundation/tokens/index.test.tsx::31",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-300",
+        "requirement_ids": [
+          "OT-P23-C12-OVERLAY::acceptance:2",
+          "OT-P23-C12-OVERLAY::acceptance:6",
+          "OT-P23-C12-OVERLAY::acceptance:9",
+          "OT-P23-C12-OVERLAY::acceptance:10",
+          "OT-P23-C12-OVERLAY::acceptance:12"
+        ],
+        "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::customer_controlled::54887c0f79394795e921-a602ee29ee8c7ec0a9c4",
+        "kind": "simulated",
+        "mode": "customer_controlled",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-300",
+        "requirement_ids": [
+          "OT-P23-C12-OVERLAY::acceptance:2",
+          "OT-P23-C12-OVERLAY::acceptance:10",
+          "OT-P23-C12-OVERLAY::acceptance:12"
+        ],
+        "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::customer_controlled::54887c0f79394795e921-2108c7e07afa5fdf98ef",
+        "kind": "simulated",
+        "mode": "customer_controlled",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-300",
+        "requirement_ids": [
+          "OT-P23-C12-OVERLAY::acceptance:3",
+          "OT-P23-C12-OVERLAY::acceptance:10",
+          "OT-P23-C12-OVERLAY::acceptance:12"
+        ],
+        "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::customer_controlled::54887c0f79394795e921-078ea4fcfd0fddb1e618",
+        "kind": "simulated",
+        "mode": "customer_controlled",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-300",
+        "requirement_ids": [
+          "OT-P23-C12-OVERLAY::acceptance:4",
+          "OT-P23-C12-OVERLAY::acceptance:10",
+          "OT-P23-C12-OVERLAY::acceptance:12"
+        ],
+        "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::customer_controlled::54887c0f79394795e921-df31ba56a5baca4a4dd6",
+        "kind": "simulated",
+        "mode": "customer_controlled",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-300",
+        "requirement_ids": [
+          "OT-P23-C12-OVERLAY::acceptance:4",
+          "OT-P23-C12-OVERLAY::acceptance:10",
+          "OT-P23-C12-OVERLAY::acceptance:12"
+        ],
+        "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::customer_controlled::54887c0f79394795e921-8dacfcb05614743c2767",
+        "kind": "simulated",
+        "mode": "customer_controlled",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-300",
+        "requirement_ids": [
+          "OT-P23-C12-OVERLAY::acceptance:5",
+          "OT-P23-C12-OVERLAY::acceptance:10",
+          "OT-P23-C12-OVERLAY::acceptance:12"
+        ],
+        "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::customer_controlled::54887c0f79394795e921-afdd809de311643511e5",
+        "kind": "simulated",
+        "mode": "customer_controlled",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-300",
+        "requirement_ids": [
+          "OT-P23-C12-OVERLAY::acceptance:2",
+          "OT-P23-C12-OVERLAY::acceptance:5",
+          "OT-P23-C12-OVERLAY::acceptance:10",
+          "OT-P23-C12-OVERLAY::acceptance:12"
+        ],
+        "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::customer_controlled::54887c0f79394795e921-2368578ff7a6a2991876",
+        "kind": "simulated",
+        "mode": "customer_controlled",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-300",
+        "requirement_ids": [
+          "OT-P23-C12-OVERLAY::acceptance:7",
+          "OT-P23-C12-OVERLAY::acceptance:10",
+          "OT-P23-C12-OVERLAY::acceptance:12"
+        ],
+        "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::customer_controlled::54887c0f79394795e921-a1ea7eb09a2e339a4fb6",
+        "kind": "simulated",
+        "mode": "customer_controlled",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-300",
+        "requirement_ids": [
+          "OT-P23-C12-OVERLAY::acceptance:6",
+          "OT-P23-C12-OVERLAY::acceptance:10",
+          "OT-P23-C12-OVERLAY::acceptance:12"
+        ],
+        "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::customer_controlled::54887c0f79394795e921-82ec80e724e7539fda71",
+        "kind": "simulated",
+        "mode": "customer_controlled",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-300",
+        "requirement_ids": [
+          "OT-P23-C12-OVERLAY::acceptance:6",
+          "OT-P23-C12-OVERLAY::acceptance:10",
+          "OT-P23-C12-OVERLAY::acceptance:12"
+        ],
+        "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::customer_controlled::54887c0f79394795e921-fec690af9ab68c32dc6c",
+        "kind": "simulated",
+        "mode": "customer_controlled",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-300",
+        "requirement_ids": [
+          "OT-P23-C12-OVERLAY::acceptance:2",
+          "OT-P23-C12-OVERLAY::acceptance:10",
+          "OT-P23-C12-OVERLAY::acceptance:12"
+        ],
+        "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::customer_controlled::54887c0f79394795e921-4b20df9be386b33dfacf",
+        "kind": "simulated",
+        "mode": "customer_controlled",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-300",
+        "requirement_ids": [
+          "OT-P23-C12-OVERLAY::acceptance:7",
+          "OT-P23-C12-OVERLAY::acceptance:10",
+          "OT-P23-C12-OVERLAY::acceptance:12"
+        ],
+        "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::customer_controlled::54887c0f79394795e921-1dfbfd2ed9008e45bae7",
+        "kind": "simulated",
+        "mode": "customer_controlled",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-300",
+        "requirement_ids": [
+          "OT-P23-C12-OVERLAY::acceptance:8",
+          "OT-P23-C12-OVERLAY::acceptance:10",
+          "OT-P23-C12-OVERLAY::acceptance:11",
+          "OT-P23-C12-OVERLAY::acceptance:12"
+        ],
+        "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::customer_controlled::54887c0f79394795e921-23a1b42d00b7640d88f9",
+        "kind": "simulated",
+        "mode": "customer_controlled",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-300",
+        "requirement_ids": [
+          "OT-P23-C12-OVERLAY::acceptance:8",
+          "OT-P23-C12-OVERLAY::acceptance:10",
+          "OT-P23-C12-OVERLAY::acceptance:11",
+          "OT-P23-C12-OVERLAY::acceptance:12"
+        ],
+        "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::customer_controlled::54887c0f79394795e921-ba3c4575c4a8522548f9",
+        "kind": "simulated",
+        "mode": "customer_controlled",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-300",
+        "requirement_ids": [
+          "OT-P23-C12-OVERLAY::acceptance:8",
+          "OT-P23-C12-OVERLAY::acceptance:10",
+          "OT-P23-C12-OVERLAY::acceptance:11",
+          "OT-P23-C12-OVERLAY::acceptance:12"
+        ],
+        "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::customer_controlled::54887c0f79394795e921-0f7ad1aa59793e880fce",
+        "kind": "simulated",
+        "mode": "customer_controlled",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-300",
+        "requirement_ids": [
+          "OT-P23-C12-OVERLAY::acceptance:8",
+          "OT-P23-C12-OVERLAY::acceptance:10",
+          "OT-P23-C12-OVERLAY::acceptance:11",
+          "OT-P23-C12-OVERLAY::acceptance:12"
+        ],
+        "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::customer_controlled::54887c0f79394795e921-92866d2987e70836ee2c",
+        "kind": "simulated",
+        "mode": "customer_controlled",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-300",
+        "requirement_ids": [
+          "OT-P23-C12-OVERLAY::acceptance:8",
+          "OT-P23-C12-OVERLAY::acceptance:10",
+          "OT-P23-C12-OVERLAY::acceptance:12"
+        ],
+        "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::customer_controlled::54887c0f79394795e921-d872c4068f76c1884bdb",
+        "kind": "simulated",
+        "mode": "customer_controlled",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-300",
+        "requirement_ids": [
+          "OT-P23-C12-OVERLAY::acceptance:8",
+          "OT-P23-C12-OVERLAY::acceptance:10",
+          "OT-P23-C12-OVERLAY::acceptance:12"
+        ],
+        "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::customer_controlled::54887c0f79394795e921-b046dbb613bff2acad74",
+        "kind": "simulated",
+        "mode": "customer_controlled",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-300",
+        "requirement_ids": [
+          "OT-P23-C12-OVERLAY::acceptance:9",
+          "OT-P23-C12-OVERLAY::acceptance:10",
+          "OT-P23-C12-OVERLAY::acceptance:12"
+        ],
+        "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::customer_controlled::54887c0f79394795e921-453a8f7635cf62840ac3",
+        "kind": "simulated",
+        "mode": "customer_controlled",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-300",
+        "requirement_ids": [
+          "OT-P23-C12-OVERLAY::acceptance:9",
+          "OT-P23-C12-OVERLAY::acceptance:10",
+          "OT-P23-C12-OVERLAY::acceptance:12"
+        ],
+        "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::customer_controlled::54887c0f79394795e921-774ff107853916f1dc27",
+        "kind": "simulated",
+        "mode": "customer_controlled",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-300",
+        "requirement_ids": [
+          "OT-P23-C12-OVERLAY::acceptance:6",
+          "OT-P23-C12-OVERLAY::acceptance:10",
+          "OT-P23-C12-OVERLAY::acceptance:12"
+        ],
+        "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::customer_controlled::54887c0f79394795e921-8fab438a78b9505636db",
+        "kind": "simulated",
+        "mode": "customer_controlled",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-300",
+        "requirement_ids": [
+          "OT-P23-C12-OVERLAY::acceptance:2",
+          "OT-P23-C12-OVERLAY::acceptance:6",
+          "OT-P23-C12-OVERLAY::acceptance:9",
+          "OT-P23-C12-OVERLAY::acceptance:10",
+          "OT-P23-C12-OVERLAY::acceptance:12"
+        ],
+        "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::customer_controlled::54887c0f79394795e921-0c60289ec28beef9eb00",
+        "kind": "simulated",
+        "mode": "customer_controlled",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-300",
+        "requirement_ids": [
+          "OT-P23-C12-OVERLAY::acceptance:2",
+          "OT-P23-C12-OVERLAY::acceptance:10",
+          "OT-P23-C12-OVERLAY::acceptance:12"
+        ],
+        "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::customer_controlled::54887c0f79394795e921-32321517cf767a28ec6a",
+        "kind": "simulated",
+        "mode": "customer_controlled",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-300",
+        "requirement_ids": [
+          "OT-P23-C12-OVERLAY::acceptance:3",
+          "OT-P23-C12-OVERLAY::acceptance:10",
+          "OT-P23-C12-OVERLAY::acceptance:12"
+        ],
+        "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::customer_controlled::54887c0f79394795e921-924c39b39164bfa278d5",
+        "kind": "simulated",
+        "mode": "customer_controlled",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-300",
+        "requirement_ids": [
+          "OT-P23-C12-OVERLAY::acceptance:4",
+          "OT-P23-C12-OVERLAY::acceptance:10",
+          "OT-P23-C12-OVERLAY::acceptance:12"
+        ],
+        "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::customer_controlled::54887c0f79394795e921-a863bb06768bc9d3ca2a",
+        "kind": "simulated",
+        "mode": "customer_controlled",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-300",
+        "requirement_ids": [
+          "OT-P23-C12-OVERLAY::acceptance:4",
+          "OT-P23-C12-OVERLAY::acceptance:10",
+          "OT-P23-C12-OVERLAY::acceptance:12"
+        ],
+        "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::customer_controlled::54887c0f79394795e921-a378abdd1da66eea94ef",
+        "kind": "simulated",
+        "mode": "customer_controlled",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-300",
+        "requirement_ids": [
+          "OT-P23-C12-OVERLAY::acceptance:5",
+          "OT-P23-C12-OVERLAY::acceptance:10",
+          "OT-P23-C12-OVERLAY::acceptance:12"
+        ],
+        "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::customer_controlled::54887c0f79394795e921-cce39b87ff4b7aa22bc8",
+        "kind": "simulated",
+        "mode": "customer_controlled",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-300",
+        "requirement_ids": [
+          "OT-P23-C12-OVERLAY::acceptance:2",
+          "OT-P23-C12-OVERLAY::acceptance:5",
+          "OT-P23-C12-OVERLAY::acceptance:10",
+          "OT-P23-C12-OVERLAY::acceptance:12"
+        ],
+        "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::customer_controlled::54887c0f79394795e921-429837d06662abdbdbf2",
+        "kind": "simulated",
+        "mode": "customer_controlled",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-300",
+        "requirement_ids": [
+          "OT-P23-C12-OVERLAY::acceptance:7",
+          "OT-P23-C12-OVERLAY::acceptance:10",
+          "OT-P23-C12-OVERLAY::acceptance:12"
+        ],
+        "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::customer_controlled::54887c0f79394795e921-975a879b2d6478d5f8e1",
+        "kind": "simulated",
+        "mode": "customer_controlled",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-300",
+        "requirement_ids": [
+          "OT-P23-C12-OVERLAY::acceptance:6",
+          "OT-P23-C12-OVERLAY::acceptance:10",
+          "OT-P23-C12-OVERLAY::acceptance:12"
+        ],
+        "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::customer_controlled::54887c0f79394795e921-fdbc18535dcbe3a94955",
+        "kind": "simulated",
+        "mode": "customer_controlled",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-300",
+        "requirement_ids": [
+          "OT-P23-C12-OVERLAY::acceptance:6",
+          "OT-P23-C12-OVERLAY::acceptance:10",
+          "OT-P23-C12-OVERLAY::acceptance:12"
+        ],
+        "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::customer_controlled::54887c0f79394795e921-4a123b3c1a740e6e7b8b",
+        "kind": "simulated",
+        "mode": "customer_controlled",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-300",
+        "requirement_ids": [
+          "OT-P23-C12-OVERLAY::acceptance:2",
+          "OT-P23-C12-OVERLAY::acceptance:10",
+          "OT-P23-C12-OVERLAY::acceptance:12"
+        ],
+        "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::customer_controlled::54887c0f79394795e921-ca2f82c345285e1b564a",
+        "kind": "simulated",
+        "mode": "customer_controlled",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-300",
+        "requirement_ids": [
+          "OT-P23-C12-OVERLAY::acceptance:7",
+          "OT-P23-C12-OVERLAY::acceptance:10",
+          "OT-P23-C12-OVERLAY::acceptance:12"
+        ],
+        "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::customer_controlled::54887c0f79394795e921-6fad6a53ba7121335034",
+        "kind": "simulated",
+        "mode": "customer_controlled",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-300",
+        "requirement_ids": [
+          "OT-P23-C12-OVERLAY::acceptance:8",
+          "OT-P23-C12-OVERLAY::acceptance:10",
+          "OT-P23-C12-OVERLAY::acceptance:11",
+          "OT-P23-C12-OVERLAY::acceptance:12"
+        ],
+        "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::customer_controlled::54887c0f79394795e921-15e85c23626ff3dea4af",
+        "kind": "simulated",
+        "mode": "customer_controlled",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-300",
+        "requirement_ids": [
+          "OT-P23-C12-OVERLAY::acceptance:8",
+          "OT-P23-C12-OVERLAY::acceptance:10",
+          "OT-P23-C12-OVERLAY::acceptance:11",
+          "OT-P23-C12-OVERLAY::acceptance:12"
+        ],
+        "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::customer_controlled::54887c0f79394795e921-aab18def991a33c7b57b",
+        "kind": "simulated",
+        "mode": "customer_controlled",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-300",
+        "requirement_ids": [
+          "OT-P23-C12-OVERLAY::acceptance:8",
+          "OT-P23-C12-OVERLAY::acceptance:10",
+          "OT-P23-C12-OVERLAY::acceptance:11",
+          "OT-P23-C12-OVERLAY::acceptance:12"
+        ],
+        "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::customer_controlled::54887c0f79394795e921-95ca2832ba97151a0e61",
+        "kind": "simulated",
+        "mode": "customer_controlled",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-300",
+        "requirement_ids": [
+          "OT-P23-C12-OVERLAY::acceptance:8",
+          "OT-P23-C12-OVERLAY::acceptance:10",
+          "OT-P23-C12-OVERLAY::acceptance:11",
+          "OT-P23-C12-OVERLAY::acceptance:12"
+        ],
+        "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::customer_controlled::54887c0f79394795e921-724f9ba22971ff1e56f6",
+        "kind": "simulated",
+        "mode": "customer_controlled",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-300",
+        "requirement_ids": [
+          "OT-P23-C12-OVERLAY::acceptance:8",
+          "OT-P23-C12-OVERLAY::acceptance:10",
+          "OT-P23-C12-OVERLAY::acceptance:12"
+        ],
+        "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::customer_controlled::54887c0f79394795e921-d88da263cbe27db0bfee",
+        "kind": "simulated",
+        "mode": "customer_controlled",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-300",
+        "requirement_ids": [
+          "OT-P23-C12-OVERLAY::acceptance:8",
+          "OT-P23-C12-OVERLAY::acceptance:10",
+          "OT-P23-C12-OVERLAY::acceptance:12"
+        ],
+        "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::customer_controlled::54887c0f79394795e921-3b8708ead850338904d3",
+        "kind": "simulated",
+        "mode": "customer_controlled",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-300",
+        "requirement_ids": [
+          "OT-P23-C12-OVERLAY::acceptance:9",
+          "OT-P23-C12-OVERLAY::acceptance:10",
+          "OT-P23-C12-OVERLAY::acceptance:12"
+        ],
+        "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::customer_controlled::54887c0f79394795e921-cbfc44b0668a6c98a90e",
+        "kind": "simulated",
+        "mode": "customer_controlled",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-300",
+        "requirement_ids": [
+          "OT-P23-C12-OVERLAY::acceptance:9",
+          "OT-P23-C12-OVERLAY::acceptance:10",
+          "OT-P23-C12-OVERLAY::acceptance:12"
+        ],
+        "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::customer_controlled::54887c0f79394795e921-14a2fc3dee999dfbfb17",
+        "kind": "simulated",
+        "mode": "customer_controlled",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-300",
+        "requirement_ids": [
+          "OT-P23-C12-OVERLAY::acceptance:6",
+          "OT-P23-C12-OVERLAY::acceptance:10",
+          "OT-P23-C12-OVERLAY::acceptance:12"
+        ],
+        "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::customer_controlled::54887c0f79394795e921-e428b349d1bbc7aa95cc",
+        "kind": "simulated",
+        "mode": "customer_controlled",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-300",
+        "requirement_ids": [
+          "OT-P23-C12-OVERLAY::acceptance:2",
+          "OT-P23-C12-OVERLAY::acceptance:6",
+          "OT-P23-C12-OVERLAY::acceptance:9",
+          "OT-P23-C12-OVERLAY::acceptance:10",
+          "OT-P23-C12-OVERLAY::acceptance:12"
+        ],
+        "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::opentour_managed::54887c0f79394795e921-0f9e4cdcfcc4ce80b014",
+        "kind": "simulated",
+        "mode": "opentour_managed",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-300",
+        "requirement_ids": [
+          "OT-P23-C12-OVERLAY::acceptance:2",
+          "OT-P23-C12-OVERLAY::acceptance:10",
+          "OT-P23-C12-OVERLAY::acceptance:12"
+        ],
+        "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::opentour_managed::54887c0f79394795e921-07188025fddef8ef4613",
+        "kind": "simulated",
+        "mode": "opentour_managed",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-300",
+        "requirement_ids": [
+          "OT-P23-C12-OVERLAY::acceptance:3",
+          "OT-P23-C12-OVERLAY::acceptance:10",
+          "OT-P23-C12-OVERLAY::acceptance:12"
+        ],
+        "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::opentour_managed::54887c0f79394795e921-a3ea1ff0595490c107a4",
+        "kind": "simulated",
+        "mode": "opentour_managed",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-300",
+        "requirement_ids": [
+          "OT-P23-C12-OVERLAY::acceptance:4",
+          "OT-P23-C12-OVERLAY::acceptance:10",
+          "OT-P23-C12-OVERLAY::acceptance:12"
+        ],
+        "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::opentour_managed::54887c0f79394795e921-63cd77b111df2229e12a",
+        "kind": "simulated",
+        "mode": "opentour_managed",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-300",
+        "requirement_ids": [
+          "OT-P23-C12-OVERLAY::acceptance:4",
+          "OT-P23-C12-OVERLAY::acceptance:10",
+          "OT-P23-C12-OVERLAY::acceptance:12"
+        ],
+        "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::opentour_managed::54887c0f79394795e921-598c900f6f306be35b72",
+        "kind": "simulated",
+        "mode": "opentour_managed",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-300",
+        "requirement_ids": [
+          "OT-P23-C12-OVERLAY::acceptance:5",
+          "OT-P23-C12-OVERLAY::acceptance:10",
+          "OT-P23-C12-OVERLAY::acceptance:12"
+        ],
+        "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::opentour_managed::54887c0f79394795e921-36fda1a6a3ed5910ee57",
+        "kind": "simulated",
+        "mode": "opentour_managed",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-300",
+        "requirement_ids": [
+          "OT-P23-C12-OVERLAY::acceptance:2",
+          "OT-P23-C12-OVERLAY::acceptance:5",
+          "OT-P23-C12-OVERLAY::acceptance:10",
+          "OT-P23-C12-OVERLAY::acceptance:12"
+        ],
+        "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::opentour_managed::54887c0f79394795e921-826674dbedb32e5d3d64",
+        "kind": "simulated",
+        "mode": "opentour_managed",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-300",
+        "requirement_ids": [
+          "OT-P23-C12-OVERLAY::acceptance:7",
+          "OT-P23-C12-OVERLAY::acceptance:10",
+          "OT-P23-C12-OVERLAY::acceptance:12"
+        ],
+        "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::opentour_managed::54887c0f79394795e921-dd6e84d0766b78320dda",
+        "kind": "simulated",
+        "mode": "opentour_managed",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-300",
+        "requirement_ids": [
+          "OT-P23-C12-OVERLAY::acceptance:6",
+          "OT-P23-C12-OVERLAY::acceptance:10",
+          "OT-P23-C12-OVERLAY::acceptance:12"
+        ],
+        "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::opentour_managed::54887c0f79394795e921-f9057326721afb5a9dba",
+        "kind": "simulated",
+        "mode": "opentour_managed",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-300",
+        "requirement_ids": [
+          "OT-P23-C12-OVERLAY::acceptance:6",
+          "OT-P23-C12-OVERLAY::acceptance:10",
+          "OT-P23-C12-OVERLAY::acceptance:12"
+        ],
+        "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::opentour_managed::54887c0f79394795e921-768de6980bca00a919b9",
+        "kind": "simulated",
+        "mode": "opentour_managed",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-300",
+        "requirement_ids": [
+          "OT-P23-C12-OVERLAY::acceptance:2",
+          "OT-P23-C12-OVERLAY::acceptance:10",
+          "OT-P23-C12-OVERLAY::acceptance:12"
+        ],
+        "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::opentour_managed::54887c0f79394795e921-06a321a9d7942c3b9378",
+        "kind": "simulated",
+        "mode": "opentour_managed",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-300",
+        "requirement_ids": [
+          "OT-P23-C12-OVERLAY::acceptance:7",
+          "OT-P23-C12-OVERLAY::acceptance:10",
+          "OT-P23-C12-OVERLAY::acceptance:12"
+        ],
+        "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::opentour_managed::54887c0f79394795e921-7356245bf7247bf40565",
+        "kind": "simulated",
+        "mode": "opentour_managed",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-300",
+        "requirement_ids": [
+          "OT-P23-C12-OVERLAY::acceptance:8",
+          "OT-P23-C12-OVERLAY::acceptance:10",
+          "OT-P23-C12-OVERLAY::acceptance:11",
+          "OT-P23-C12-OVERLAY::acceptance:12"
+        ],
+        "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::opentour_managed::54887c0f79394795e921-bcc2843c1dd2bc400838",
+        "kind": "simulated",
+        "mode": "opentour_managed",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-300",
+        "requirement_ids": [
+          "OT-P23-C12-OVERLAY::acceptance:8",
+          "OT-P23-C12-OVERLAY::acceptance:10",
+          "OT-P23-C12-OVERLAY::acceptance:11",
+          "OT-P23-C12-OVERLAY::acceptance:12"
+        ],
+        "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::opentour_managed::54887c0f79394795e921-81e899ce31a5a2621985",
+        "kind": "simulated",
+        "mode": "opentour_managed",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-300",
+        "requirement_ids": [
+          "OT-P23-C12-OVERLAY::acceptance:8",
+          "OT-P23-C12-OVERLAY::acceptance:10",
+          "OT-P23-C12-OVERLAY::acceptance:11",
+          "OT-P23-C12-OVERLAY::acceptance:12"
+        ],
+        "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::opentour_managed::54887c0f79394795e921-05462752d8693578ab23",
+        "kind": "simulated",
+        "mode": "opentour_managed",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-300",
+        "requirement_ids": [
+          "OT-P23-C12-OVERLAY::acceptance:8",
+          "OT-P23-C12-OVERLAY::acceptance:10",
+          "OT-P23-C12-OVERLAY::acceptance:11",
+          "OT-P23-C12-OVERLAY::acceptance:12"
+        ],
+        "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::opentour_managed::54887c0f79394795e921-e04c59a60b35d4da0d4c",
+        "kind": "simulated",
+        "mode": "opentour_managed",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-300",
+        "requirement_ids": [
+          "OT-P23-C12-OVERLAY::acceptance:8",
+          "OT-P23-C12-OVERLAY::acceptance:10",
+          "OT-P23-C12-OVERLAY::acceptance:12"
+        ],
+        "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::opentour_managed::54887c0f79394795e921-b82060191bb43e598eb1",
+        "kind": "simulated",
+        "mode": "opentour_managed",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-300",
+        "requirement_ids": [
+          "OT-P23-C12-OVERLAY::acceptance:8",
+          "OT-P23-C12-OVERLAY::acceptance:10",
+          "OT-P23-C12-OVERLAY::acceptance:12"
+        ],
+        "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::opentour_managed::54887c0f79394795e921-ae1c02f9dc6eba4f756e",
+        "kind": "simulated",
+        "mode": "opentour_managed",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-300",
+        "requirement_ids": [
+          "OT-P23-C12-OVERLAY::acceptance:9",
+          "OT-P23-C12-OVERLAY::acceptance:10",
+          "OT-P23-C12-OVERLAY::acceptance:12"
+        ],
+        "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::opentour_managed::54887c0f79394795e921-d4e011b0611b60148753",
+        "kind": "simulated",
+        "mode": "opentour_managed",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-300",
+        "requirement_ids": [
+          "OT-P23-C12-OVERLAY::acceptance:9",
+          "OT-P23-C12-OVERLAY::acceptance:10",
+          "OT-P23-C12-OVERLAY::acceptance:12"
+        ],
+        "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::opentour_managed::54887c0f79394795e921-b9d0a27a4529be8493aa",
+        "kind": "simulated",
+        "mode": "opentour_managed",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-300",
+        "requirement_ids": [
+          "OT-P23-C12-OVERLAY::acceptance:6",
+          "OT-P23-C12-OVERLAY::acceptance:10",
+          "OT-P23-C12-OVERLAY::acceptance:12"
+        ],
+        "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::opentour_managed::54887c0f79394795e921-982d47afa7fb54cb3504",
+        "kind": "simulated",
+        "mode": "opentour_managed",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-300",
+        "requirement_ids": [
+          "OT-P23-C12-OVERLAY::acceptance:2",
+          "OT-P23-C12-OVERLAY::acceptance:6",
+          "OT-P23-C12-OVERLAY::acceptance:9",
+          "OT-P23-C12-OVERLAY::acceptance:10",
+          "OT-P23-C12-OVERLAY::acceptance:12"
+        ],
+        "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::opentour_managed::54887c0f79394795e921-a3bd5686340fade3ce32",
+        "kind": "simulated",
+        "mode": "opentour_managed",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-300",
+        "requirement_ids": [
+          "OT-P23-C12-OVERLAY::acceptance:2",
+          "OT-P23-C12-OVERLAY::acceptance:10",
+          "OT-P23-C12-OVERLAY::acceptance:12"
+        ],
+        "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::opentour_managed::54887c0f79394795e921-de928bc68310a3a4c4bd",
+        "kind": "simulated",
+        "mode": "opentour_managed",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-300",
+        "requirement_ids": [
+          "OT-P23-C12-OVERLAY::acceptance:3",
+          "OT-P23-C12-OVERLAY::acceptance:10",
+          "OT-P23-C12-OVERLAY::acceptance:12"
+        ],
+        "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::opentour_managed::54887c0f79394795e921-22f4c3e333febf0c2cff",
+        "kind": "simulated",
+        "mode": "opentour_managed",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-300",
+        "requirement_ids": [
+          "OT-P23-C12-OVERLAY::acceptance:4",
+          "OT-P23-C12-OVERLAY::acceptance:10",
+          "OT-P23-C12-OVERLAY::acceptance:12"
+        ],
+        "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::opentour_managed::54887c0f79394795e921-93b810c47dc618d81dda",
+        "kind": "simulated",
+        "mode": "opentour_managed",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-300",
+        "requirement_ids": [
+          "OT-P23-C12-OVERLAY::acceptance:4",
+          "OT-P23-C12-OVERLAY::acceptance:10",
+          "OT-P23-C12-OVERLAY::acceptance:12"
+        ],
+        "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::opentour_managed::54887c0f79394795e921-81d373007c2c79fa931a",
+        "kind": "simulated",
+        "mode": "opentour_managed",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-300",
+        "requirement_ids": [
+          "OT-P23-C12-OVERLAY::acceptance:5",
+          "OT-P23-C12-OVERLAY::acceptance:10",
+          "OT-P23-C12-OVERLAY::acceptance:12"
+        ],
+        "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::opentour_managed::54887c0f79394795e921-3f76e2d9289bd3663f69",
+        "kind": "simulated",
+        "mode": "opentour_managed",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-300",
+        "requirement_ids": [
+          "OT-P23-C12-OVERLAY::acceptance:2",
+          "OT-P23-C12-OVERLAY::acceptance:5",
+          "OT-P23-C12-OVERLAY::acceptance:10",
+          "OT-P23-C12-OVERLAY::acceptance:12"
+        ],
+        "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::opentour_managed::54887c0f79394795e921-d9fdad0b0135906cbc90",
+        "kind": "simulated",
+        "mode": "opentour_managed",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-300",
+        "requirement_ids": [
+          "OT-P23-C12-OVERLAY::acceptance:7",
+          "OT-P23-C12-OVERLAY::acceptance:10",
+          "OT-P23-C12-OVERLAY::acceptance:12"
+        ],
+        "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::opentour_managed::54887c0f79394795e921-a0212bb40c3fd3f579f7",
+        "kind": "simulated",
+        "mode": "opentour_managed",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-300",
+        "requirement_ids": [
+          "OT-P23-C12-OVERLAY::acceptance:6",
+          "OT-P23-C12-OVERLAY::acceptance:10",
+          "OT-P23-C12-OVERLAY::acceptance:12"
+        ],
+        "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::opentour_managed::54887c0f79394795e921-c89577b2f53566225e1b",
+        "kind": "simulated",
+        "mode": "opentour_managed",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-300",
+        "requirement_ids": [
+          "OT-P23-C12-OVERLAY::acceptance:6",
+          "OT-P23-C12-OVERLAY::acceptance:10",
+          "OT-P23-C12-OVERLAY::acceptance:12"
+        ],
+        "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::opentour_managed::54887c0f79394795e921-2b8c5f778cbbeb792e25",
+        "kind": "simulated",
+        "mode": "opentour_managed",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-300",
+        "requirement_ids": [
+          "OT-P23-C12-OVERLAY::acceptance:2",
+          "OT-P23-C12-OVERLAY::acceptance:10",
+          "OT-P23-C12-OVERLAY::acceptance:12"
+        ],
+        "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::opentour_managed::54887c0f79394795e921-164bb139ec87718e9b8b",
+        "kind": "simulated",
+        "mode": "opentour_managed",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-300",
+        "requirement_ids": [
+          "OT-P23-C12-OVERLAY::acceptance:7",
+          "OT-P23-C12-OVERLAY::acceptance:10",
+          "OT-P23-C12-OVERLAY::acceptance:12"
+        ],
+        "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::opentour_managed::54887c0f79394795e921-55ef2548009cc67744e9",
+        "kind": "simulated",
+        "mode": "opentour_managed",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-300",
+        "requirement_ids": [
+          "OT-P23-C12-OVERLAY::acceptance:8",
+          "OT-P23-C12-OVERLAY::acceptance:10",
+          "OT-P23-C12-OVERLAY::acceptance:11",
+          "OT-P23-C12-OVERLAY::acceptance:12"
+        ],
+        "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::opentour_managed::54887c0f79394795e921-8e6683249fc217c9dad5",
+        "kind": "simulated",
+        "mode": "opentour_managed",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-300",
+        "requirement_ids": [
+          "OT-P23-C12-OVERLAY::acceptance:8",
+          "OT-P23-C12-OVERLAY::acceptance:10",
+          "OT-P23-C12-OVERLAY::acceptance:11",
+          "OT-P23-C12-OVERLAY::acceptance:12"
+        ],
+        "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::opentour_managed::54887c0f79394795e921-543796dc5f5b34ec0589",
+        "kind": "simulated",
+        "mode": "opentour_managed",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-300",
+        "requirement_ids": [
+          "OT-P23-C12-OVERLAY::acceptance:8",
+          "OT-P23-C12-OVERLAY::acceptance:10",
+          "OT-P23-C12-OVERLAY::acceptance:11",
+          "OT-P23-C12-OVERLAY::acceptance:12"
+        ],
+        "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::opentour_managed::54887c0f79394795e921-2d8cc52e31863d023f6b",
+        "kind": "simulated",
+        "mode": "opentour_managed",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-300",
+        "requirement_ids": [
+          "OT-P23-C12-OVERLAY::acceptance:8",
+          "OT-P23-C12-OVERLAY::acceptance:10",
+          "OT-P23-C12-OVERLAY::acceptance:11",
+          "OT-P23-C12-OVERLAY::acceptance:12"
+        ],
+        "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::opentour_managed::54887c0f79394795e921-6c37d155de14fb253c72",
+        "kind": "simulated",
+        "mode": "opentour_managed",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-300",
+        "requirement_ids": [
+          "OT-P23-C12-OVERLAY::acceptance:8",
+          "OT-P23-C12-OVERLAY::acceptance:10",
+          "OT-P23-C12-OVERLAY::acceptance:12"
+        ],
+        "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::opentour_managed::54887c0f79394795e921-1bfe433955b8007a8693",
+        "kind": "simulated",
+        "mode": "opentour_managed",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-300",
+        "requirement_ids": [
+          "OT-P23-C12-OVERLAY::acceptance:8",
+          "OT-P23-C12-OVERLAY::acceptance:10",
+          "OT-P23-C12-OVERLAY::acceptance:12"
+        ],
+        "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::opentour_managed::54887c0f79394795e921-caeaaf92a3cd907b856a",
+        "kind": "simulated",
+        "mode": "opentour_managed",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-300",
+        "requirement_ids": [
+          "OT-P23-C12-OVERLAY::acceptance:9",
+          "OT-P23-C12-OVERLAY::acceptance:10",
+          "OT-P23-C12-OVERLAY::acceptance:12"
+        ],
+        "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::opentour_managed::54887c0f79394795e921-3f7edd595df380c5c6c1",
+        "kind": "simulated",
+        "mode": "opentour_managed",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-300",
+        "requirement_ids": [
+          "OT-P23-C12-OVERLAY::acceptance:9",
+          "OT-P23-C12-OVERLAY::acceptance:10",
+          "OT-P23-C12-OVERLAY::acceptance:12"
+        ],
+        "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::opentour_managed::54887c0f79394795e921-41e66b5f08955f651f9e",
+        "kind": "simulated",
+        "mode": "opentour_managed",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-300",
+        "requirement_ids": [
+          "OT-P23-C12-OVERLAY::acceptance:6",
+          "OT-P23-C12-OVERLAY::acceptance:10",
+          "OT-P23-C12-OVERLAY::acceptance:12"
+        ],
+        "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::opentour_managed::54887c0f79394795e921-a40c73b6178822ef67a9",
+        "kind": "simulated",
+        "mode": "opentour_managed",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-300",
+        "requirement_ids": [
+          "OT-P23-C12-OVERLAY::acceptance:11",
+          "OT-P23-C12-OVERLAY::acceptance:12"
+        ],
+        "test_id": "apps/web/components/foundation/tokens/index.test.tsx::32",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-300",
+        "requirement_ids": [
+          "OT-P23-C12-OVERLAY::acceptance:11",
+          "OT-P23-C12-OVERLAY::acceptance:12"
+        ],
+        "test_id": "apps/web/components/foundation/tokens/index.test.tsx::33",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-300",
+        "requirement_ids": [
+          "OT-P23-C12-OVERLAY::acceptance:11",
+          "OT-P23-C12-OVERLAY::acceptance:12"
+        ],
+        "test_id": "apps/web/components/foundation/tokens/index.test.tsx::34",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-300",
+        "requirement_ids": [
+          "OT-P23-C12-OVERLAY::acceptance:11",
+          "OT-P23-C12-OVERLAY::acceptance:12"
+        ],
+        "test_id": "apps/web/components/foundation/tokens/index.test.tsx::35",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-300",
+        "requirement_ids": [
+          "OT-P23-C12-OVERLAY::acceptance:11",
+          "OT-P23-C12-OVERLAY::acceptance:12"
+        ],
+        "test_id": "apps/web/components/foundation/tokens/index.test.tsx::36",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
       }
     ]
   },
-  "source_projection_sha256": "6e63baa5e4adcb17480c52c13096fafc608f9a64ab72c620fb86561fd3d8e45d",
+  "source_projection_sha256": "19c22b2f91615ddd11fb2638c948cb1c75311c17b385d9d3b5f9d707c3400c0d",
   "source_bindings": {
     "feature_register_sha256": "f6d1061a103a028b6309928a1c6d96b1c58cb969793a2b9e8a4e36dd50b4602f",
     "figma_snapshot_sha256": "38c3537dd10719a1978873137d34086fa51e284456ed7c5d46d36e77815367a7",
     "figma_revision": "approved-ui-design-index.v4",
-    "native_projection": "Current native technical IDs, relationships and acceptance-text digests, with reviewed C05 implementation path/test refinements. Excludes full bodies and attachment transport. Original source hashes are provenance, not a claim that omitted source bytes are locally present. OPE-213 native admission and reviewed implementation refresh adds its12 owned paths,3 named native test paths and94 exact positive/adverse cases; the updated technical-capture digest binds current native UTF-8 description with terminal newlines excluded. Full native bodies remain outside this public projection. Provider/customer evidence stays NOT_RUN. OPE-142 current native admission and reviewed implementation refresh adds22 owned paths,6 actual named test paths and158 exact positive/adverse cases (140 simulated,18 local PostgreSQL); the technical-capture digest binds current native UTF-8 description with terminal newlines excluded. Provider/ISO and future consumer integration acceptance stays NOT_RUN. OPE-127 current reviewed browser comparison policy and implementation add 49 exact observed-case declarations (39 browser, 10 visual-policy units), all simulated, with complete file/project/native case IDs and the actual outer bootstrap-command-contract/v1 fixture identity. Inner simulated-browser-harness metadata and raw PNG/numeric comparison evidence remain retained. Native UTF-8 capture excludes terminal newlines. Provider/customer/product acceptance stays NOT_RUN. OPE-142 current organization-namespace mapping and shared observation/activation-lock clarification refreshes the exact inventory to194 cases (160 simulated,34 actual local PostgreSQL) and uses the observed public bootstrap-command-contract/v1 fixture identity; earlier case IDs and historical source-bound receipts remain preserved. Imported owner receipts establish mapping only; eligible records require new supervised execution. Real provider/ISO/171/172 consumer gates are not upgraded. OPE-217 binds153 exact component cases (141 simulated,12 actual local PostgreSQL using a test SQL consumer); AC07 has no qualifying provider binding and all full acceptance remains NOT_RUN. Its technical_capture_sha256 uses canonical JSON (sorted keys,compact separators,ensure_ascii=true) over {issue_description,implementation_profile:{id,content}}, with each UTF-8 native text excluding terminal newlines. Profile document d07264ac-d46a-4892-b05a-6ff73cc7a2bd updated2026-11-16T01:37:13.818Z has content SHA256 d456b0264d792a98eb00fba04c3392363e7772ceef6b20185ce03a881b431017. This binds the current closed receipt/replay profile; no143 production SQL,216 generation/cell-effect or undefinedDEL05 gate is promoted. OPE-171 current native issue and mandatory organization setup profile add13 owned paths,4 actual named test paths and206 exact case declarations (142 simulated,64 actual local PostgreSQL,32 per mode), bound to the outer bootstrap-command-contract/v1 fixture identity. Technical capture is SHA256 of canonical JSON (sorted keys, compact separators, ensure_ascii=true) over {issue_description,implementation_profile:{id,content}}, with terminal newlines excluded from both native texts. Mandatory profile4553dd80-66de-48a5-8c4a-5c3979bb9a1d revision 2026-11-16T01:51:19.425Z, UTF-8 content SHA256 ef770be09125c191d648574a995da64ab8cb578c83c532442943c41a564233ae. Historical206-case capture: fixtures25.1-25.4 retained component scope and the then-unresolved fifth/sixth admission-count policy was NOT_RUN; the source-bound current38-case expansion below supersedes that missing-policy statement only. Generated WorkOS observations and injected429 transport never establish real provider or rate-policy acceptance. Actual published terms,143/172/173/297 consumers,G1/ISO01/AC25-01 and full product acceptance remain NOT_RUN. Imported receipts establish mapping only; eligible records require supervised current-source execution. OPE-253 current native issue revision2026-11-16T03:00:30.406Z and mandatory presentation profilec4865bd5-0fce-4468-b6ea-05003ebfa5a2 revision2026-11-16T02:23:29.803Z admit35 owned presentation paths and60 exact case declarations (24 Vitest component/metadata cases and36 actual browser cases,18 per mode), all simulated and bound to outer bootstrap-command-contract/v1. The inner browser presentation-foundation-v1 metadata retains current native968ff7c59d40afa568e5dfd0ea2488a8906531b38bb3daa00b66c58d8a7f8264, fonts, Figma focus revision, exact-rem tokens,16 approved darwin baselines and zero tolerance; it does not replace the outer fixture identity. Technical capture is SHA256 of canonical JSON (sorted keys, compact separators, ensure_ascii=true) over {issue_description,implementation_profile:{id,content}}, excluding terminal newlines from both texts; issue content SHA2566a0b7ab8300e2e4d84a40d4a417f4b27cf6160bb37595604a31489977f6ba079, profile content SHA256b6c396ed2f3a038c6229b597769ebce03877c7a2ef7ecf22a479eaee6bb390f3. All10 full native acceptance criteria remain NOT_RUN: bindings cover only tokens,Button,labelled Badge,controlled Tabs and isolated gallery components. AC03 is local activation suppression only; AC04 has no direct assertion and remains unmapped. AC05 is escaped text/isolated no-egress only, not cell/BFF failure proof; AC06 excludes manual supported screen-reader and later primitives; AC09 is generated mode presentation, not delegated operator trust. Typed API/current authority/revision/recovery consumers202/143/146/151,unimplemented named primitives and provider/customer gates remain open. Three private adverse lifecycle probes are separate harness qualification and add no public case. Imported receipts prove mapping only; eligible records require supervised current-source execution. Existing C06 browser runner/config remain with their coordinated owner and current bounded delegation; no shared ownership is reassigned by this metadata. OPE-171 current native issue revision2026-11-16T03:28:55.581Z and mandatory organization profile4553dd80-66de-48a5-8c4a-5c3979bb9a1d revision2026-11-16T03:07:49.174Z bind the approved five NEW durably admitted attempts per rolling24hours regardless of outcome; exact idempotent replay and actions on existing operations consume no slot. The two reviewed production/test blobs at e76366b721a3cfb3977aeef14516d651606cfdd2 add38 exact actual-PostgreSQL case declarations (19 per mode), preserving the original206 IDs and all historical source-bound receipts. Current171inventory is244:142 simulated units plus102 local PostgreSQL cases (51 per mode), with outer bootstrap-command-contract/v1. Fixture25.3 policy now has actual scoped local fifth/sixth,replay,outcome,rolling-boundary,per-person/concurrent and post-lock clock evidence; it does not prove actualWorkOS,production terms,grants or downstream143/172/173/297/G1/ISO integration. Current native143 creator-policy link supplies an installer contract,not active grants from171 owner membership. Technical capture uses the same canonical JSON recipe over current issue_description and implementation_profile id/content with terminal newlines excluded; current digest ac3a2df31d76e4f45d079bf09a40aed98053cfcad4449ecc2031b4701c8d87b7. All three full native171ACs remain NOT_RUN. Prior206 historical evidence is unchanged and cannot be relabelled current; imported102-case authoredreceipt/independentcollection establish mapping/source proof only,while current eligible EvidenceStore records require supervised final-source execution."
+    "native_projection": "Current native technical IDs, relationships and acceptance-text digests, with reviewed C05 implementation path/test refinements. Excludes full bodies and attachment transport. Original source hashes are provenance, not a claim that omitted source bytes are locally present. OPE-213 native admission and reviewed implementation refresh adds its12 owned paths,3 named native test paths and94 exact positive/adverse cases; the updated technical-capture digest binds current native UTF-8 description with terminal newlines excluded. Full native bodies remain outside this public projection. Provider/customer evidence stays NOT_RUN. OPE-142 current native admission and reviewed implementation refresh adds22 owned paths,6 actual named test paths and158 exact positive/adverse cases (140 simulated,18 local PostgreSQL); the technical-capture digest binds current native UTF-8 description with terminal newlines excluded. Provider/ISO and future consumer integration acceptance stays NOT_RUN. OPE-127 current reviewed browser comparison policy and implementation add 49 exact observed-case declarations (39 browser, 10 visual-policy units), all simulated, with complete file/project/native case IDs and the actual outer bootstrap-command-contract/v1 fixture identity. Inner simulated-browser-harness metadata and raw PNG/numeric comparison evidence remain retained. Native UTF-8 capture excludes terminal newlines. Provider/customer/product acceptance stays NOT_RUN. OPE-142 current organization-namespace mapping and shared observation/activation-lock clarification refreshes the exact inventory to194 cases (160 simulated,34 actual local PostgreSQL) and uses the observed public bootstrap-command-contract/v1 fixture identity; earlier case IDs and historical source-bound receipts remain preserved. Imported owner receipts establish mapping only; eligible records require new supervised execution. Real provider/ISO/171/172 consumer gates are not upgraded. OPE-217 binds153 exact component cases (141 simulated,12 actual local PostgreSQL using a test SQL consumer); AC07 has no qualifying provider binding and all full acceptance remains NOT_RUN. Its technical_capture_sha256 uses canonical JSON (sorted keys,compact separators,ensure_ascii=true) over {issue_description,implementation_profile:{id,content}}, with each UTF-8 native text excluding terminal newlines. Profile document d07264ac-d46a-4892-b05a-6ff73cc7a2bd updated2026-11-16T01:37:13.818Z has content SHA256 d456b0264d792a98eb00fba04c3392363e7772ceef6b20185ce03a881b431017. This binds the current closed receipt/replay profile; no143 production SQL,216 generation/cell-effect or undefinedDEL05 gate is promoted. OPE-171 current native issue and mandatory organization setup profile add13 owned paths,4 actual named test paths and206 exact case declarations (142 simulated,64 actual local PostgreSQL,32 per mode), bound to the outer bootstrap-command-contract/v1 fixture identity. Technical capture is SHA256 of canonical JSON (sorted keys, compact separators, ensure_ascii=true) over {issue_description,implementation_profile:{id,content}}, with terminal newlines excluded from both native texts. Mandatory profile4553dd80-66de-48a5-8c4a-5c3979bb9a1d revision 2026-11-16T01:51:19.425Z, UTF-8 content SHA256 ef770be09125c191d648574a995da64ab8cb578c83c532442943c41a564233ae. Historical206-case capture: fixtures25.1-25.4 retained component scope and the then-unresolved fifth/sixth admission-count policy was NOT_RUN; the source-bound current38-case expansion below supersedes that missing-policy statement only. Generated WorkOS observations and injected429 transport never establish real provider or rate-policy acceptance. Actual published terms,143/172/173/297 consumers,G1/ISO01/AC25-01 and full product acceptance remain NOT_RUN. Imported receipts establish mapping only; eligible records require supervised current-source execution. OPE-253 current native issue revision2026-11-16T03:00:30.406Z and mandatory presentation profilec4865bd5-0fce-4468-b6ea-05003ebfa5a2 revision2026-11-16T02:23:29.803Z admit35 owned presentation paths and60 exact case declarations (24 Vitest component/metadata cases and36 actual browser cases,18 per mode), all simulated and bound to outer bootstrap-command-contract/v1. The inner browser presentation-foundation-v1 metadata retains current native968ff7c59d40afa568e5dfd0ea2488a8906531b38bb3daa00b66c58d8a7f8264, fonts, Figma focus revision, exact-rem tokens,16 approved darwin baselines and zero tolerance; it does not replace the outer fixture identity. Technical capture is SHA256 of canonical JSON (sorted keys, compact separators, ensure_ascii=true) over {issue_description,implementation_profile:{id,content}}, excluding terminal newlines from both texts; issue content SHA2566a0b7ab8300e2e4d84a40d4a417f4b27cf6160bb37595604a31489977f6ba079, profile content SHA256b6c396ed2f3a038c6229b597769ebce03877c7a2ef7ecf22a479eaee6bb390f3. All10 full native acceptance criteria remain NOT_RUN: bindings cover only tokens,Button,labelled Badge,controlled Tabs and isolated gallery components. AC03 is local activation suppression only; AC04 has no direct assertion and remains unmapped. AC05 is escaped text/isolated no-egress only, not cell/BFF failure proof; AC06 excludes manual supported screen-reader and later primitives; AC09 is generated mode presentation, not delegated operator trust. Typed API/current authority/revision/recovery consumers202/143/146/151,unimplemented named primitives and provider/customer gates remain open. Three private adverse lifecycle probes are separate harness qualification and add no public case. Imported receipts prove mapping only; eligible records require supervised current-source execution. Existing C06 browser runner/config remain with their coordinated owner and current bounded delegation; no shared ownership is reassigned by this metadata. OPE-171 current native issue revision2026-11-16T03:28:55.581Z and mandatory organization profile4553dd80-66de-48a5-8c4a-5c3979bb9a1d revision2026-11-16T03:07:49.174Z bind the approved five NEW durably admitted attempts per rolling24hours regardless of outcome; exact idempotent replay and actions on existing operations consume no slot. The two reviewed production/test blobs at e76366b721a3cfb3977aeef14516d651606cfdd2 add38 exact actual-PostgreSQL case declarations (19 per mode), preserving the original206 IDs and all historical source-bound receipts. Current171inventory is244:142 simulated units plus102 local PostgreSQL cases (51 per mode), with outer bootstrap-command-contract/v1. Fixture25.3 policy now has actual scoped local fifth/sixth,replay,outcome,rolling-boundary,per-person/concurrent and post-lock clock evidence; it does not prove actualWorkOS,production terms,grants or downstream143/172/173/297/G1/ISO integration. Current native143 creator-policy link supplies an installer contract,not active grants from171 owner membership. Technical capture uses the same canonical JSON recipe over current issue_description and implementation_profile id/content with terminal newlines excluded; current digest ac3a2df31d76e4f45d079bf09a40aed98053cfcad4449ecc2031b4701c8d87b7. All three full native171ACs remain NOT_RUN. Prior206 historical evidence is unchanged and cannot be relabelled current; imported102-case authoredreceipt/independentcollection establish mapping/source proof only,while current eligible EvidenceStore records require supervised final-source execution. OPE-300 is the newly admitted controlled Dialog/Drawer implementation and browser-qualification child of OPE-253, logical OT-P23-C12-OVERLAY. Its 12 acceptance hashes and compound technical capture bind the current native child plus mandatory presentation profile c4865bd5-0fce-4468-b6ea-05003ebfa5a2; the digest recipe is SHA256 of UTF-8 sorted compact JSON with ASCII escaping and exact native string bytes: {issue_description,implementation_profile:{id,content}}. Existing parent-owned paths are explicitly delegated, not duplicated as exclusive child ownership. The original 892 test bindings, including all 60 OPE-253 bindings and their parent technical capture, remain unchanged. No OPE-300 runtime case is registered before actual source-bound collection and observation. Mixed-gallery runs retain the parent fixture identity; only new observed child cases may bind child requirements. All parent/domain/provider/manual-supported-screen-reader obligations remain open; no metadata field claims implementation acceptance. OPE-300 required-case declaration increment registers92 observed identities:8 structural units and84 browser cases,42 per mode. The original892 bindings and parent253 capture remain byte-value identical. Source7c68462c06101d727c2a1f88d3b37f545b16f169 actually observed these IDs; collection on5af1fdf2f464534507c2728cee535bfaad884364 preserved browser identities while strengthening assertions. The diagnostic browser result was68 child cases passed and16 failed for missing new baselines; its resource preflight omitted a HOLD flag, so the complete run remains nonacceptance history. These declarations do not promote that diagnostic or the shared metadata branch to runtime qualification. AC10 case associations cover isolated no-egress portions, and AC11/12 require additional independent design/source/content and final-command evidence. B19 demonstrates safe cleanup with consumer logical focus return explicitly not accepted. The separately reviewed overlay baseline metadata and16 new images are child-exclusive supporting paths; existing presentation files remain parent-owned under delegation. Final eligible observations require the integrated current source and current child capture429990397f6a755551664d50ad0c80116abf65be8ac8e64e35002cbc18923fdf. New metadata adversarial units remain unbound until actual collection; no unknown IDs are invented. OPE-300 final metadata-unit declaration adds five actual cases at index.test.tsx indices32-36 from clean sourcea2f9c4c00871f49f54d365818ae72fcd38d61a40 and public receipt9f1fdd7e8ece91c85f37d535a17850d16917edb946da4ff379dd06f9611b6a26 (37units passed, zero skipped, fixture/process cleanup true). The current child inventory is97:13units and84browser cases; all prior984 bindings remain unchanged. These five AC11/12 evidence-mechanism assertions reject missing/stale/foreign baseline/capture metadata, modified/missing/symlink images, relabelled cases and incomplete/duplicate/wrong-file/wrong-mode observations. They do not substitute for independent baseline/source review or final ordinary browser/hosted acceptance. Historical browser diagnostic failures remain retained."
   },
   "mappings": [
     {
@@ -53578,6 +54936,223 @@
       "implementation_acceptance": "NOT_RUN",
       "declared_contract_paths": [],
       "referenced_issue_keys": []
+    },
+    {
+      "issue_key": "OPE-300",
+      "requirement_ids": [
+        "OT-P23-C12-OVERLAY::acceptance:1",
+        "OT-P23-C12-OVERLAY::acceptance:2",
+        "OT-P23-C12-OVERLAY::acceptance:3",
+        "OT-P23-C12-OVERLAY::acceptance:4",
+        "OT-P23-C12-OVERLAY::acceptance:5",
+        "OT-P23-C12-OVERLAY::acceptance:6",
+        "OT-P23-C12-OVERLAY::acceptance:7",
+        "OT-P23-C12-OVERLAY::acceptance:8",
+        "OT-P23-C12-OVERLAY::acceptance:9",
+        "OT-P23-C12-OVERLAY::acceptance:10",
+        "OT-P23-C12-OVERLAY::acceptance:11",
+        "OT-P23-C12-OVERLAY::acceptance:12"
+      ],
+      "feature_ids": [
+        "PRD-23"
+      ],
+      "subfeature_ids": [],
+      "owned_paths": [
+        "apps/web/components/foundation/tokens/testing/baselines/darwin-customer-controlled/overlay-dialog-1280.png",
+        "apps/web/components/foundation/tokens/testing/baselines/darwin-customer-controlled/overlay-dialog-1440.png",
+        "apps/web/components/foundation/tokens/testing/baselines/darwin-customer-controlled/overlay-dialog-320.png",
+        "apps/web/components/foundation/tokens/testing/baselines/darwin-customer-controlled/overlay-dialog-768.png",
+        "apps/web/components/foundation/tokens/testing/baselines/darwin-customer-controlled/overlay-drawer-1280.png",
+        "apps/web/components/foundation/tokens/testing/baselines/darwin-customer-controlled/overlay-drawer-1440.png",
+        "apps/web/components/foundation/tokens/testing/baselines/darwin-customer-controlled/overlay-drawer-320.png",
+        "apps/web/components/foundation/tokens/testing/baselines/darwin-customer-controlled/overlay-drawer-768.png",
+        "apps/web/components/foundation/tokens/testing/baselines/darwin-opentour-managed/overlay-dialog-1280.png",
+        "apps/web/components/foundation/tokens/testing/baselines/darwin-opentour-managed/overlay-dialog-1440.png",
+        "apps/web/components/foundation/tokens/testing/baselines/darwin-opentour-managed/overlay-dialog-320.png",
+        "apps/web/components/foundation/tokens/testing/baselines/darwin-opentour-managed/overlay-dialog-768.png",
+        "apps/web/components/foundation/tokens/testing/baselines/darwin-opentour-managed/overlay-drawer-1280.png",
+        "apps/web/components/foundation/tokens/testing/baselines/darwin-opentour-managed/overlay-drawer-1440.png",
+        "apps/web/components/foundation/tokens/testing/baselines/darwin-opentour-managed/overlay-drawer-320.png",
+        "apps/web/components/foundation/tokens/testing/baselines/darwin-opentour-managed/overlay-drawer-768.png",
+        "apps/web/components/foundation/tokens/testing/overlay-baseline-review.json"
+      ],
+      "contract_refs": [
+        "urn:opentour:common-contract:1.0"
+      ],
+      "test_ids": [
+        "apps/web/components/foundation/tokens/index.test.tsx::24",
+        "apps/web/components/foundation/tokens/index.test.tsx::25",
+        "apps/web/components/foundation/tokens/index.test.tsx::26",
+        "apps/web/components/foundation/tokens/index.test.tsx::27",
+        "apps/web/components/foundation/tokens/index.test.tsx::28",
+        "apps/web/components/foundation/tokens/index.test.tsx::29",
+        "apps/web/components/foundation/tokens/index.test.tsx::30",
+        "apps/web/components/foundation/tokens/index.test.tsx::31",
+        "apps/web/components/foundation/tokens/visual.spec.ts::customer_controlled::54887c0f79394795e921-a602ee29ee8c7ec0a9c4",
+        "apps/web/components/foundation/tokens/visual.spec.ts::customer_controlled::54887c0f79394795e921-2108c7e07afa5fdf98ef",
+        "apps/web/components/foundation/tokens/visual.spec.ts::customer_controlled::54887c0f79394795e921-078ea4fcfd0fddb1e618",
+        "apps/web/components/foundation/tokens/visual.spec.ts::customer_controlled::54887c0f79394795e921-df31ba56a5baca4a4dd6",
+        "apps/web/components/foundation/tokens/visual.spec.ts::customer_controlled::54887c0f79394795e921-8dacfcb05614743c2767",
+        "apps/web/components/foundation/tokens/visual.spec.ts::customer_controlled::54887c0f79394795e921-afdd809de311643511e5",
+        "apps/web/components/foundation/tokens/visual.spec.ts::customer_controlled::54887c0f79394795e921-2368578ff7a6a2991876",
+        "apps/web/components/foundation/tokens/visual.spec.ts::customer_controlled::54887c0f79394795e921-a1ea7eb09a2e339a4fb6",
+        "apps/web/components/foundation/tokens/visual.spec.ts::customer_controlled::54887c0f79394795e921-82ec80e724e7539fda71",
+        "apps/web/components/foundation/tokens/visual.spec.ts::customer_controlled::54887c0f79394795e921-fec690af9ab68c32dc6c",
+        "apps/web/components/foundation/tokens/visual.spec.ts::customer_controlled::54887c0f79394795e921-4b20df9be386b33dfacf",
+        "apps/web/components/foundation/tokens/visual.spec.ts::customer_controlled::54887c0f79394795e921-1dfbfd2ed9008e45bae7",
+        "apps/web/components/foundation/tokens/visual.spec.ts::customer_controlled::54887c0f79394795e921-23a1b42d00b7640d88f9",
+        "apps/web/components/foundation/tokens/visual.spec.ts::customer_controlled::54887c0f79394795e921-ba3c4575c4a8522548f9",
+        "apps/web/components/foundation/tokens/visual.spec.ts::customer_controlled::54887c0f79394795e921-0f7ad1aa59793e880fce",
+        "apps/web/components/foundation/tokens/visual.spec.ts::customer_controlled::54887c0f79394795e921-92866d2987e70836ee2c",
+        "apps/web/components/foundation/tokens/visual.spec.ts::customer_controlled::54887c0f79394795e921-d872c4068f76c1884bdb",
+        "apps/web/components/foundation/tokens/visual.spec.ts::customer_controlled::54887c0f79394795e921-b046dbb613bff2acad74",
+        "apps/web/components/foundation/tokens/visual.spec.ts::customer_controlled::54887c0f79394795e921-453a8f7635cf62840ac3",
+        "apps/web/components/foundation/tokens/visual.spec.ts::customer_controlled::54887c0f79394795e921-774ff107853916f1dc27",
+        "apps/web/components/foundation/tokens/visual.spec.ts::customer_controlled::54887c0f79394795e921-8fab438a78b9505636db",
+        "apps/web/components/foundation/tokens/visual.spec.ts::customer_controlled::54887c0f79394795e921-0c60289ec28beef9eb00",
+        "apps/web/components/foundation/tokens/visual.spec.ts::customer_controlled::54887c0f79394795e921-32321517cf767a28ec6a",
+        "apps/web/components/foundation/tokens/visual.spec.ts::customer_controlled::54887c0f79394795e921-924c39b39164bfa278d5",
+        "apps/web/components/foundation/tokens/visual.spec.ts::customer_controlled::54887c0f79394795e921-a863bb06768bc9d3ca2a",
+        "apps/web/components/foundation/tokens/visual.spec.ts::customer_controlled::54887c0f79394795e921-a378abdd1da66eea94ef",
+        "apps/web/components/foundation/tokens/visual.spec.ts::customer_controlled::54887c0f79394795e921-cce39b87ff4b7aa22bc8",
+        "apps/web/components/foundation/tokens/visual.spec.ts::customer_controlled::54887c0f79394795e921-429837d06662abdbdbf2",
+        "apps/web/components/foundation/tokens/visual.spec.ts::customer_controlled::54887c0f79394795e921-975a879b2d6478d5f8e1",
+        "apps/web/components/foundation/tokens/visual.spec.ts::customer_controlled::54887c0f79394795e921-fdbc18535dcbe3a94955",
+        "apps/web/components/foundation/tokens/visual.spec.ts::customer_controlled::54887c0f79394795e921-4a123b3c1a740e6e7b8b",
+        "apps/web/components/foundation/tokens/visual.spec.ts::customer_controlled::54887c0f79394795e921-ca2f82c345285e1b564a",
+        "apps/web/components/foundation/tokens/visual.spec.ts::customer_controlled::54887c0f79394795e921-6fad6a53ba7121335034",
+        "apps/web/components/foundation/tokens/visual.spec.ts::customer_controlled::54887c0f79394795e921-15e85c23626ff3dea4af",
+        "apps/web/components/foundation/tokens/visual.spec.ts::customer_controlled::54887c0f79394795e921-aab18def991a33c7b57b",
+        "apps/web/components/foundation/tokens/visual.spec.ts::customer_controlled::54887c0f79394795e921-95ca2832ba97151a0e61",
+        "apps/web/components/foundation/tokens/visual.spec.ts::customer_controlled::54887c0f79394795e921-724f9ba22971ff1e56f6",
+        "apps/web/components/foundation/tokens/visual.spec.ts::customer_controlled::54887c0f79394795e921-d88da263cbe27db0bfee",
+        "apps/web/components/foundation/tokens/visual.spec.ts::customer_controlled::54887c0f79394795e921-3b8708ead850338904d3",
+        "apps/web/components/foundation/tokens/visual.spec.ts::customer_controlled::54887c0f79394795e921-cbfc44b0668a6c98a90e",
+        "apps/web/components/foundation/tokens/visual.spec.ts::customer_controlled::54887c0f79394795e921-14a2fc3dee999dfbfb17",
+        "apps/web/components/foundation/tokens/visual.spec.ts::customer_controlled::54887c0f79394795e921-e428b349d1bbc7aa95cc",
+        "apps/web/components/foundation/tokens/visual.spec.ts::opentour_managed::54887c0f79394795e921-0f9e4cdcfcc4ce80b014",
+        "apps/web/components/foundation/tokens/visual.spec.ts::opentour_managed::54887c0f79394795e921-07188025fddef8ef4613",
+        "apps/web/components/foundation/tokens/visual.spec.ts::opentour_managed::54887c0f79394795e921-a3ea1ff0595490c107a4",
+        "apps/web/components/foundation/tokens/visual.spec.ts::opentour_managed::54887c0f79394795e921-63cd77b111df2229e12a",
+        "apps/web/components/foundation/tokens/visual.spec.ts::opentour_managed::54887c0f79394795e921-598c900f6f306be35b72",
+        "apps/web/components/foundation/tokens/visual.spec.ts::opentour_managed::54887c0f79394795e921-36fda1a6a3ed5910ee57",
+        "apps/web/components/foundation/tokens/visual.spec.ts::opentour_managed::54887c0f79394795e921-826674dbedb32e5d3d64",
+        "apps/web/components/foundation/tokens/visual.spec.ts::opentour_managed::54887c0f79394795e921-dd6e84d0766b78320dda",
+        "apps/web/components/foundation/tokens/visual.spec.ts::opentour_managed::54887c0f79394795e921-f9057326721afb5a9dba",
+        "apps/web/components/foundation/tokens/visual.spec.ts::opentour_managed::54887c0f79394795e921-768de6980bca00a919b9",
+        "apps/web/components/foundation/tokens/visual.spec.ts::opentour_managed::54887c0f79394795e921-06a321a9d7942c3b9378",
+        "apps/web/components/foundation/tokens/visual.spec.ts::opentour_managed::54887c0f79394795e921-7356245bf7247bf40565",
+        "apps/web/components/foundation/tokens/visual.spec.ts::opentour_managed::54887c0f79394795e921-bcc2843c1dd2bc400838",
+        "apps/web/components/foundation/tokens/visual.spec.ts::opentour_managed::54887c0f79394795e921-81e899ce31a5a2621985",
+        "apps/web/components/foundation/tokens/visual.spec.ts::opentour_managed::54887c0f79394795e921-05462752d8693578ab23",
+        "apps/web/components/foundation/tokens/visual.spec.ts::opentour_managed::54887c0f79394795e921-e04c59a60b35d4da0d4c",
+        "apps/web/components/foundation/tokens/visual.spec.ts::opentour_managed::54887c0f79394795e921-b82060191bb43e598eb1",
+        "apps/web/components/foundation/tokens/visual.spec.ts::opentour_managed::54887c0f79394795e921-ae1c02f9dc6eba4f756e",
+        "apps/web/components/foundation/tokens/visual.spec.ts::opentour_managed::54887c0f79394795e921-d4e011b0611b60148753",
+        "apps/web/components/foundation/tokens/visual.spec.ts::opentour_managed::54887c0f79394795e921-b9d0a27a4529be8493aa",
+        "apps/web/components/foundation/tokens/visual.spec.ts::opentour_managed::54887c0f79394795e921-982d47afa7fb54cb3504",
+        "apps/web/components/foundation/tokens/visual.spec.ts::opentour_managed::54887c0f79394795e921-a3bd5686340fade3ce32",
+        "apps/web/components/foundation/tokens/visual.spec.ts::opentour_managed::54887c0f79394795e921-de928bc68310a3a4c4bd",
+        "apps/web/components/foundation/tokens/visual.spec.ts::opentour_managed::54887c0f79394795e921-22f4c3e333febf0c2cff",
+        "apps/web/components/foundation/tokens/visual.spec.ts::opentour_managed::54887c0f79394795e921-93b810c47dc618d81dda",
+        "apps/web/components/foundation/tokens/visual.spec.ts::opentour_managed::54887c0f79394795e921-81d373007c2c79fa931a",
+        "apps/web/components/foundation/tokens/visual.spec.ts::opentour_managed::54887c0f79394795e921-3f76e2d9289bd3663f69",
+        "apps/web/components/foundation/tokens/visual.spec.ts::opentour_managed::54887c0f79394795e921-d9fdad0b0135906cbc90",
+        "apps/web/components/foundation/tokens/visual.spec.ts::opentour_managed::54887c0f79394795e921-a0212bb40c3fd3f579f7",
+        "apps/web/components/foundation/tokens/visual.spec.ts::opentour_managed::54887c0f79394795e921-c89577b2f53566225e1b",
+        "apps/web/components/foundation/tokens/visual.spec.ts::opentour_managed::54887c0f79394795e921-2b8c5f778cbbeb792e25",
+        "apps/web/components/foundation/tokens/visual.spec.ts::opentour_managed::54887c0f79394795e921-164bb139ec87718e9b8b",
+        "apps/web/components/foundation/tokens/visual.spec.ts::opentour_managed::54887c0f79394795e921-55ef2548009cc67744e9",
+        "apps/web/components/foundation/tokens/visual.spec.ts::opentour_managed::54887c0f79394795e921-8e6683249fc217c9dad5",
+        "apps/web/components/foundation/tokens/visual.spec.ts::opentour_managed::54887c0f79394795e921-543796dc5f5b34ec0589",
+        "apps/web/components/foundation/tokens/visual.spec.ts::opentour_managed::54887c0f79394795e921-2d8cc52e31863d023f6b",
+        "apps/web/components/foundation/tokens/visual.spec.ts::opentour_managed::54887c0f79394795e921-6c37d155de14fb253c72",
+        "apps/web/components/foundation/tokens/visual.spec.ts::opentour_managed::54887c0f79394795e921-1bfe433955b8007a8693",
+        "apps/web/components/foundation/tokens/visual.spec.ts::opentour_managed::54887c0f79394795e921-caeaaf92a3cd907b856a",
+        "apps/web/components/foundation/tokens/visual.spec.ts::opentour_managed::54887c0f79394795e921-3f7edd595df380c5c6c1",
+        "apps/web/components/foundation/tokens/visual.spec.ts::opentour_managed::54887c0f79394795e921-41e66b5f08955f651f9e",
+        "apps/web/components/foundation/tokens/visual.spec.ts::opentour_managed::54887c0f79394795e921-a40c73b6178822ef67a9",
+        "apps/web/components/foundation/tokens/index.test.tsx::32",
+        "apps/web/components/foundation/tokens/index.test.tsx::33",
+        "apps/web/components/foundation/tokens/index.test.tsx::34",
+        "apps/web/components/foundation/tokens/index.test.tsx::35",
+        "apps/web/components/foundation/tokens/index.test.tsx::36"
+      ],
+      "real_evidence_requirements": [
+        {
+          "requirement_id": "OT-P23-C12-OVERLAY::acceptance:1",
+          "name": "OPE-300 complete controlled-overlay software acceptance AC01; required positive/adverse browser and independent review evidence",
+          "status": "NOT_RUN"
+        },
+        {
+          "requirement_id": "OT-P23-C12-OVERLAY::acceptance:2",
+          "name": "OPE-300 complete controlled-overlay software acceptance AC02; required positive/adverse browser and independent review evidence",
+          "status": "NOT_RUN"
+        },
+        {
+          "requirement_id": "OT-P23-C12-OVERLAY::acceptance:3",
+          "name": "OPE-300 complete controlled-overlay software acceptance AC03; required positive/adverse browser and independent review evidence",
+          "status": "NOT_RUN"
+        },
+        {
+          "requirement_id": "OT-P23-C12-OVERLAY::acceptance:4",
+          "name": "OPE-300 complete controlled-overlay software acceptance AC04; required positive/adverse browser and independent review evidence",
+          "status": "NOT_RUN"
+        },
+        {
+          "requirement_id": "OT-P23-C12-OVERLAY::acceptance:5",
+          "name": "OPE-300 complete controlled-overlay software acceptance AC05; required positive/adverse browser and independent review evidence",
+          "status": "NOT_RUN"
+        },
+        {
+          "requirement_id": "OT-P23-C12-OVERLAY::acceptance:6",
+          "name": "OPE-300 complete controlled-overlay software acceptance AC06; required positive/adverse browser and independent review evidence",
+          "status": "NOT_RUN"
+        },
+        {
+          "requirement_id": "OT-P23-C12-OVERLAY::acceptance:7",
+          "name": "OPE-300 complete controlled-overlay software acceptance AC07; required positive/adverse browser and independent review evidence",
+          "status": "NOT_RUN"
+        },
+        {
+          "requirement_id": "OT-P23-C12-OVERLAY::acceptance:8",
+          "name": "OPE-300 complete controlled-overlay software acceptance AC08; required positive/adverse browser and independent review evidence",
+          "status": "NOT_RUN"
+        },
+        {
+          "requirement_id": "OT-P23-C12-OVERLAY::acceptance:9",
+          "name": "OPE-300 complete controlled-overlay software acceptance AC09; required positive/adverse browser and independent review evidence",
+          "status": "NOT_RUN"
+        },
+        {
+          "requirement_id": "OT-P23-C12-OVERLAY::acceptance:10",
+          "name": "OPE-300 complete controlled-overlay software acceptance AC10; required positive/adverse browser and independent review evidence",
+          "status": "NOT_RUN"
+        },
+        {
+          "requirement_id": "OT-P23-C12-OVERLAY::acceptance:11",
+          "name": "OPE-300 complete controlled-overlay software acceptance AC11; required positive/adverse browser and independent review evidence",
+          "status": "NOT_RUN"
+        },
+        {
+          "requirement_id": "OT-P23-C12-OVERLAY::acceptance:12",
+          "name": "OPE-300 complete controlled-overlay software acceptance AC12; required positive/adverse browser and independent review evidence",
+          "status": "NOT_RUN"
+        }
+      ],
+      "evidence_outputs": [
+        "evidence/OT-P23-C12/runs/",
+        "evidence/OT-P23-C12-OVERLAY/"
+      ],
+      "implementation_acceptance": "NOT_RUN",
+      "declared_contract_paths": [],
+      "referenced_issue_keys": [
+        "OPE-125",
+        "OPE-126",
+        "OPE-127",
+        "OPE-253",
+        "OPE-281"
+      ]
     }
   ],
   "exclusive_ownership": [
@@ -55636,6 +57211,74 @@
     {
       "path": "apps/web/styles/product-tokens.json",
       "owner": "OPE-253"
+    },
+    {
+      "path": "apps/web/components/foundation/tokens/testing/baselines/darwin-customer-controlled/overlay-dialog-1280.png",
+      "owner": "OPE-300"
+    },
+    {
+      "path": "apps/web/components/foundation/tokens/testing/baselines/darwin-customer-controlled/overlay-dialog-1440.png",
+      "owner": "OPE-300"
+    },
+    {
+      "path": "apps/web/components/foundation/tokens/testing/baselines/darwin-customer-controlled/overlay-dialog-320.png",
+      "owner": "OPE-300"
+    },
+    {
+      "path": "apps/web/components/foundation/tokens/testing/baselines/darwin-customer-controlled/overlay-dialog-768.png",
+      "owner": "OPE-300"
+    },
+    {
+      "path": "apps/web/components/foundation/tokens/testing/baselines/darwin-customer-controlled/overlay-drawer-1280.png",
+      "owner": "OPE-300"
+    },
+    {
+      "path": "apps/web/components/foundation/tokens/testing/baselines/darwin-customer-controlled/overlay-drawer-1440.png",
+      "owner": "OPE-300"
+    },
+    {
+      "path": "apps/web/components/foundation/tokens/testing/baselines/darwin-customer-controlled/overlay-drawer-320.png",
+      "owner": "OPE-300"
+    },
+    {
+      "path": "apps/web/components/foundation/tokens/testing/baselines/darwin-customer-controlled/overlay-drawer-768.png",
+      "owner": "OPE-300"
+    },
+    {
+      "path": "apps/web/components/foundation/tokens/testing/baselines/darwin-opentour-managed/overlay-dialog-1280.png",
+      "owner": "OPE-300"
+    },
+    {
+      "path": "apps/web/components/foundation/tokens/testing/baselines/darwin-opentour-managed/overlay-dialog-1440.png",
+      "owner": "OPE-300"
+    },
+    {
+      "path": "apps/web/components/foundation/tokens/testing/baselines/darwin-opentour-managed/overlay-dialog-320.png",
+      "owner": "OPE-300"
+    },
+    {
+      "path": "apps/web/components/foundation/tokens/testing/baselines/darwin-opentour-managed/overlay-dialog-768.png",
+      "owner": "OPE-300"
+    },
+    {
+      "path": "apps/web/components/foundation/tokens/testing/baselines/darwin-opentour-managed/overlay-drawer-1280.png",
+      "owner": "OPE-300"
+    },
+    {
+      "path": "apps/web/components/foundation/tokens/testing/baselines/darwin-opentour-managed/overlay-drawer-1440.png",
+      "owner": "OPE-300"
+    },
+    {
+      "path": "apps/web/components/foundation/tokens/testing/baselines/darwin-opentour-managed/overlay-drawer-320.png",
+      "owner": "OPE-300"
+    },
+    {
+      "path": "apps/web/components/foundation/tokens/testing/baselines/darwin-opentour-managed/overlay-drawer-768.png",
+      "owner": "OPE-300"
+    },
+    {
+      "path": "apps/web/components/foundation/tokens/testing/overlay-baseline-review.json",
+      "owner": "OPE-300"
     }
   ],
   "ownership_handoffs": [
@@ -67058,6 +68701,1282 @@
       "test_id": "services/control-api/tests/organizations/test_creation_saga.py::test_request_role_cannot_rewrite_original_admission_time[opentour_managed-provisioning_operations]",
       "kind": "local_integration",
       "mode": "opentour_managed",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-300",
+      "requirement_ids": [
+        "OT-P23-C12-OVERLAY::acceptance:1",
+        "OT-P23-C12-OVERLAY::acceptance:12"
+      ],
+      "test_id": "apps/web/components/foundation/tokens/index.test.tsx::24",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-300",
+      "requirement_ids": [
+        "OT-P23-C12-OVERLAY::acceptance:1",
+        "OT-P23-C12-OVERLAY::acceptance:12"
+      ],
+      "test_id": "apps/web/components/foundation/tokens/index.test.tsx::25",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-300",
+      "requirement_ids": [
+        "OT-P23-C12-OVERLAY::acceptance:1",
+        "OT-P23-C12-OVERLAY::acceptance:12"
+      ],
+      "test_id": "apps/web/components/foundation/tokens/index.test.tsx::26",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-300",
+      "requirement_ids": [
+        "OT-P23-C12-OVERLAY::acceptance:1",
+        "OT-P23-C12-OVERLAY::acceptance:12"
+      ],
+      "test_id": "apps/web/components/foundation/tokens/index.test.tsx::27",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-300",
+      "requirement_ids": [
+        "OT-P23-C12-OVERLAY::acceptance:1",
+        "OT-P23-C12-OVERLAY::acceptance:12"
+      ],
+      "test_id": "apps/web/components/foundation/tokens/index.test.tsx::28",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-300",
+      "requirement_ids": [
+        "OT-P23-C12-OVERLAY::acceptance:1",
+        "OT-P23-C12-OVERLAY::acceptance:12"
+      ],
+      "test_id": "apps/web/components/foundation/tokens/index.test.tsx::29",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-300",
+      "requirement_ids": [
+        "OT-P23-C12-OVERLAY::acceptance:1",
+        "OT-P23-C12-OVERLAY::acceptance:12"
+      ],
+      "test_id": "apps/web/components/foundation/tokens/index.test.tsx::30",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-300",
+      "requirement_ids": [
+        "OT-P23-C12-OVERLAY::acceptance:1",
+        "OT-P23-C12-OVERLAY::acceptance:12"
+      ],
+      "test_id": "apps/web/components/foundation/tokens/index.test.tsx::31",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-300",
+      "requirement_ids": [
+        "OT-P23-C12-OVERLAY::acceptance:2",
+        "OT-P23-C12-OVERLAY::acceptance:6",
+        "OT-P23-C12-OVERLAY::acceptance:9",
+        "OT-P23-C12-OVERLAY::acceptance:10",
+        "OT-P23-C12-OVERLAY::acceptance:12"
+      ],
+      "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::customer_controlled::54887c0f79394795e921-a602ee29ee8c7ec0a9c4",
+      "kind": "simulated",
+      "mode": "customer_controlled",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-300",
+      "requirement_ids": [
+        "OT-P23-C12-OVERLAY::acceptance:2",
+        "OT-P23-C12-OVERLAY::acceptance:10",
+        "OT-P23-C12-OVERLAY::acceptance:12"
+      ],
+      "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::customer_controlled::54887c0f79394795e921-2108c7e07afa5fdf98ef",
+      "kind": "simulated",
+      "mode": "customer_controlled",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-300",
+      "requirement_ids": [
+        "OT-P23-C12-OVERLAY::acceptance:3",
+        "OT-P23-C12-OVERLAY::acceptance:10",
+        "OT-P23-C12-OVERLAY::acceptance:12"
+      ],
+      "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::customer_controlled::54887c0f79394795e921-078ea4fcfd0fddb1e618",
+      "kind": "simulated",
+      "mode": "customer_controlled",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-300",
+      "requirement_ids": [
+        "OT-P23-C12-OVERLAY::acceptance:4",
+        "OT-P23-C12-OVERLAY::acceptance:10",
+        "OT-P23-C12-OVERLAY::acceptance:12"
+      ],
+      "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::customer_controlled::54887c0f79394795e921-df31ba56a5baca4a4dd6",
+      "kind": "simulated",
+      "mode": "customer_controlled",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-300",
+      "requirement_ids": [
+        "OT-P23-C12-OVERLAY::acceptance:4",
+        "OT-P23-C12-OVERLAY::acceptance:10",
+        "OT-P23-C12-OVERLAY::acceptance:12"
+      ],
+      "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::customer_controlled::54887c0f79394795e921-8dacfcb05614743c2767",
+      "kind": "simulated",
+      "mode": "customer_controlled",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-300",
+      "requirement_ids": [
+        "OT-P23-C12-OVERLAY::acceptance:5",
+        "OT-P23-C12-OVERLAY::acceptance:10",
+        "OT-P23-C12-OVERLAY::acceptance:12"
+      ],
+      "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::customer_controlled::54887c0f79394795e921-afdd809de311643511e5",
+      "kind": "simulated",
+      "mode": "customer_controlled",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-300",
+      "requirement_ids": [
+        "OT-P23-C12-OVERLAY::acceptance:2",
+        "OT-P23-C12-OVERLAY::acceptance:5",
+        "OT-P23-C12-OVERLAY::acceptance:10",
+        "OT-P23-C12-OVERLAY::acceptance:12"
+      ],
+      "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::customer_controlled::54887c0f79394795e921-2368578ff7a6a2991876",
+      "kind": "simulated",
+      "mode": "customer_controlled",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-300",
+      "requirement_ids": [
+        "OT-P23-C12-OVERLAY::acceptance:7",
+        "OT-P23-C12-OVERLAY::acceptance:10",
+        "OT-P23-C12-OVERLAY::acceptance:12"
+      ],
+      "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::customer_controlled::54887c0f79394795e921-a1ea7eb09a2e339a4fb6",
+      "kind": "simulated",
+      "mode": "customer_controlled",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-300",
+      "requirement_ids": [
+        "OT-P23-C12-OVERLAY::acceptance:6",
+        "OT-P23-C12-OVERLAY::acceptance:10",
+        "OT-P23-C12-OVERLAY::acceptance:12"
+      ],
+      "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::customer_controlled::54887c0f79394795e921-82ec80e724e7539fda71",
+      "kind": "simulated",
+      "mode": "customer_controlled",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-300",
+      "requirement_ids": [
+        "OT-P23-C12-OVERLAY::acceptance:6",
+        "OT-P23-C12-OVERLAY::acceptance:10",
+        "OT-P23-C12-OVERLAY::acceptance:12"
+      ],
+      "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::customer_controlled::54887c0f79394795e921-fec690af9ab68c32dc6c",
+      "kind": "simulated",
+      "mode": "customer_controlled",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-300",
+      "requirement_ids": [
+        "OT-P23-C12-OVERLAY::acceptance:2",
+        "OT-P23-C12-OVERLAY::acceptance:10",
+        "OT-P23-C12-OVERLAY::acceptance:12"
+      ],
+      "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::customer_controlled::54887c0f79394795e921-4b20df9be386b33dfacf",
+      "kind": "simulated",
+      "mode": "customer_controlled",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-300",
+      "requirement_ids": [
+        "OT-P23-C12-OVERLAY::acceptance:7",
+        "OT-P23-C12-OVERLAY::acceptance:10",
+        "OT-P23-C12-OVERLAY::acceptance:12"
+      ],
+      "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::customer_controlled::54887c0f79394795e921-1dfbfd2ed9008e45bae7",
+      "kind": "simulated",
+      "mode": "customer_controlled",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-300",
+      "requirement_ids": [
+        "OT-P23-C12-OVERLAY::acceptance:8",
+        "OT-P23-C12-OVERLAY::acceptance:10",
+        "OT-P23-C12-OVERLAY::acceptance:11",
+        "OT-P23-C12-OVERLAY::acceptance:12"
+      ],
+      "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::customer_controlled::54887c0f79394795e921-23a1b42d00b7640d88f9",
+      "kind": "simulated",
+      "mode": "customer_controlled",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-300",
+      "requirement_ids": [
+        "OT-P23-C12-OVERLAY::acceptance:8",
+        "OT-P23-C12-OVERLAY::acceptance:10",
+        "OT-P23-C12-OVERLAY::acceptance:11",
+        "OT-P23-C12-OVERLAY::acceptance:12"
+      ],
+      "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::customer_controlled::54887c0f79394795e921-ba3c4575c4a8522548f9",
+      "kind": "simulated",
+      "mode": "customer_controlled",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-300",
+      "requirement_ids": [
+        "OT-P23-C12-OVERLAY::acceptance:8",
+        "OT-P23-C12-OVERLAY::acceptance:10",
+        "OT-P23-C12-OVERLAY::acceptance:11",
+        "OT-P23-C12-OVERLAY::acceptance:12"
+      ],
+      "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::customer_controlled::54887c0f79394795e921-0f7ad1aa59793e880fce",
+      "kind": "simulated",
+      "mode": "customer_controlled",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-300",
+      "requirement_ids": [
+        "OT-P23-C12-OVERLAY::acceptance:8",
+        "OT-P23-C12-OVERLAY::acceptance:10",
+        "OT-P23-C12-OVERLAY::acceptance:11",
+        "OT-P23-C12-OVERLAY::acceptance:12"
+      ],
+      "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::customer_controlled::54887c0f79394795e921-92866d2987e70836ee2c",
+      "kind": "simulated",
+      "mode": "customer_controlled",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-300",
+      "requirement_ids": [
+        "OT-P23-C12-OVERLAY::acceptance:8",
+        "OT-P23-C12-OVERLAY::acceptance:10",
+        "OT-P23-C12-OVERLAY::acceptance:12"
+      ],
+      "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::customer_controlled::54887c0f79394795e921-d872c4068f76c1884bdb",
+      "kind": "simulated",
+      "mode": "customer_controlled",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-300",
+      "requirement_ids": [
+        "OT-P23-C12-OVERLAY::acceptance:8",
+        "OT-P23-C12-OVERLAY::acceptance:10",
+        "OT-P23-C12-OVERLAY::acceptance:12"
+      ],
+      "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::customer_controlled::54887c0f79394795e921-b046dbb613bff2acad74",
+      "kind": "simulated",
+      "mode": "customer_controlled",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-300",
+      "requirement_ids": [
+        "OT-P23-C12-OVERLAY::acceptance:9",
+        "OT-P23-C12-OVERLAY::acceptance:10",
+        "OT-P23-C12-OVERLAY::acceptance:12"
+      ],
+      "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::customer_controlled::54887c0f79394795e921-453a8f7635cf62840ac3",
+      "kind": "simulated",
+      "mode": "customer_controlled",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-300",
+      "requirement_ids": [
+        "OT-P23-C12-OVERLAY::acceptance:9",
+        "OT-P23-C12-OVERLAY::acceptance:10",
+        "OT-P23-C12-OVERLAY::acceptance:12"
+      ],
+      "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::customer_controlled::54887c0f79394795e921-774ff107853916f1dc27",
+      "kind": "simulated",
+      "mode": "customer_controlled",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-300",
+      "requirement_ids": [
+        "OT-P23-C12-OVERLAY::acceptance:6",
+        "OT-P23-C12-OVERLAY::acceptance:10",
+        "OT-P23-C12-OVERLAY::acceptance:12"
+      ],
+      "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::customer_controlled::54887c0f79394795e921-8fab438a78b9505636db",
+      "kind": "simulated",
+      "mode": "customer_controlled",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-300",
+      "requirement_ids": [
+        "OT-P23-C12-OVERLAY::acceptance:2",
+        "OT-P23-C12-OVERLAY::acceptance:6",
+        "OT-P23-C12-OVERLAY::acceptance:9",
+        "OT-P23-C12-OVERLAY::acceptance:10",
+        "OT-P23-C12-OVERLAY::acceptance:12"
+      ],
+      "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::customer_controlled::54887c0f79394795e921-0c60289ec28beef9eb00",
+      "kind": "simulated",
+      "mode": "customer_controlled",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-300",
+      "requirement_ids": [
+        "OT-P23-C12-OVERLAY::acceptance:2",
+        "OT-P23-C12-OVERLAY::acceptance:10",
+        "OT-P23-C12-OVERLAY::acceptance:12"
+      ],
+      "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::customer_controlled::54887c0f79394795e921-32321517cf767a28ec6a",
+      "kind": "simulated",
+      "mode": "customer_controlled",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-300",
+      "requirement_ids": [
+        "OT-P23-C12-OVERLAY::acceptance:3",
+        "OT-P23-C12-OVERLAY::acceptance:10",
+        "OT-P23-C12-OVERLAY::acceptance:12"
+      ],
+      "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::customer_controlled::54887c0f79394795e921-924c39b39164bfa278d5",
+      "kind": "simulated",
+      "mode": "customer_controlled",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-300",
+      "requirement_ids": [
+        "OT-P23-C12-OVERLAY::acceptance:4",
+        "OT-P23-C12-OVERLAY::acceptance:10",
+        "OT-P23-C12-OVERLAY::acceptance:12"
+      ],
+      "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::customer_controlled::54887c0f79394795e921-a863bb06768bc9d3ca2a",
+      "kind": "simulated",
+      "mode": "customer_controlled",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-300",
+      "requirement_ids": [
+        "OT-P23-C12-OVERLAY::acceptance:4",
+        "OT-P23-C12-OVERLAY::acceptance:10",
+        "OT-P23-C12-OVERLAY::acceptance:12"
+      ],
+      "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::customer_controlled::54887c0f79394795e921-a378abdd1da66eea94ef",
+      "kind": "simulated",
+      "mode": "customer_controlled",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-300",
+      "requirement_ids": [
+        "OT-P23-C12-OVERLAY::acceptance:5",
+        "OT-P23-C12-OVERLAY::acceptance:10",
+        "OT-P23-C12-OVERLAY::acceptance:12"
+      ],
+      "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::customer_controlled::54887c0f79394795e921-cce39b87ff4b7aa22bc8",
+      "kind": "simulated",
+      "mode": "customer_controlled",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-300",
+      "requirement_ids": [
+        "OT-P23-C12-OVERLAY::acceptance:2",
+        "OT-P23-C12-OVERLAY::acceptance:5",
+        "OT-P23-C12-OVERLAY::acceptance:10",
+        "OT-P23-C12-OVERLAY::acceptance:12"
+      ],
+      "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::customer_controlled::54887c0f79394795e921-429837d06662abdbdbf2",
+      "kind": "simulated",
+      "mode": "customer_controlled",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-300",
+      "requirement_ids": [
+        "OT-P23-C12-OVERLAY::acceptance:7",
+        "OT-P23-C12-OVERLAY::acceptance:10",
+        "OT-P23-C12-OVERLAY::acceptance:12"
+      ],
+      "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::customer_controlled::54887c0f79394795e921-975a879b2d6478d5f8e1",
+      "kind": "simulated",
+      "mode": "customer_controlled",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-300",
+      "requirement_ids": [
+        "OT-P23-C12-OVERLAY::acceptance:6",
+        "OT-P23-C12-OVERLAY::acceptance:10",
+        "OT-P23-C12-OVERLAY::acceptance:12"
+      ],
+      "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::customer_controlled::54887c0f79394795e921-fdbc18535dcbe3a94955",
+      "kind": "simulated",
+      "mode": "customer_controlled",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-300",
+      "requirement_ids": [
+        "OT-P23-C12-OVERLAY::acceptance:6",
+        "OT-P23-C12-OVERLAY::acceptance:10",
+        "OT-P23-C12-OVERLAY::acceptance:12"
+      ],
+      "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::customer_controlled::54887c0f79394795e921-4a123b3c1a740e6e7b8b",
+      "kind": "simulated",
+      "mode": "customer_controlled",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-300",
+      "requirement_ids": [
+        "OT-P23-C12-OVERLAY::acceptance:2",
+        "OT-P23-C12-OVERLAY::acceptance:10",
+        "OT-P23-C12-OVERLAY::acceptance:12"
+      ],
+      "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::customer_controlled::54887c0f79394795e921-ca2f82c345285e1b564a",
+      "kind": "simulated",
+      "mode": "customer_controlled",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-300",
+      "requirement_ids": [
+        "OT-P23-C12-OVERLAY::acceptance:7",
+        "OT-P23-C12-OVERLAY::acceptance:10",
+        "OT-P23-C12-OVERLAY::acceptance:12"
+      ],
+      "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::customer_controlled::54887c0f79394795e921-6fad6a53ba7121335034",
+      "kind": "simulated",
+      "mode": "customer_controlled",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-300",
+      "requirement_ids": [
+        "OT-P23-C12-OVERLAY::acceptance:8",
+        "OT-P23-C12-OVERLAY::acceptance:10",
+        "OT-P23-C12-OVERLAY::acceptance:11",
+        "OT-P23-C12-OVERLAY::acceptance:12"
+      ],
+      "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::customer_controlled::54887c0f79394795e921-15e85c23626ff3dea4af",
+      "kind": "simulated",
+      "mode": "customer_controlled",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-300",
+      "requirement_ids": [
+        "OT-P23-C12-OVERLAY::acceptance:8",
+        "OT-P23-C12-OVERLAY::acceptance:10",
+        "OT-P23-C12-OVERLAY::acceptance:11",
+        "OT-P23-C12-OVERLAY::acceptance:12"
+      ],
+      "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::customer_controlled::54887c0f79394795e921-aab18def991a33c7b57b",
+      "kind": "simulated",
+      "mode": "customer_controlled",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-300",
+      "requirement_ids": [
+        "OT-P23-C12-OVERLAY::acceptance:8",
+        "OT-P23-C12-OVERLAY::acceptance:10",
+        "OT-P23-C12-OVERLAY::acceptance:11",
+        "OT-P23-C12-OVERLAY::acceptance:12"
+      ],
+      "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::customer_controlled::54887c0f79394795e921-95ca2832ba97151a0e61",
+      "kind": "simulated",
+      "mode": "customer_controlled",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-300",
+      "requirement_ids": [
+        "OT-P23-C12-OVERLAY::acceptance:8",
+        "OT-P23-C12-OVERLAY::acceptance:10",
+        "OT-P23-C12-OVERLAY::acceptance:11",
+        "OT-P23-C12-OVERLAY::acceptance:12"
+      ],
+      "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::customer_controlled::54887c0f79394795e921-724f9ba22971ff1e56f6",
+      "kind": "simulated",
+      "mode": "customer_controlled",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-300",
+      "requirement_ids": [
+        "OT-P23-C12-OVERLAY::acceptance:8",
+        "OT-P23-C12-OVERLAY::acceptance:10",
+        "OT-P23-C12-OVERLAY::acceptance:12"
+      ],
+      "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::customer_controlled::54887c0f79394795e921-d88da263cbe27db0bfee",
+      "kind": "simulated",
+      "mode": "customer_controlled",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-300",
+      "requirement_ids": [
+        "OT-P23-C12-OVERLAY::acceptance:8",
+        "OT-P23-C12-OVERLAY::acceptance:10",
+        "OT-P23-C12-OVERLAY::acceptance:12"
+      ],
+      "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::customer_controlled::54887c0f79394795e921-3b8708ead850338904d3",
+      "kind": "simulated",
+      "mode": "customer_controlled",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-300",
+      "requirement_ids": [
+        "OT-P23-C12-OVERLAY::acceptance:9",
+        "OT-P23-C12-OVERLAY::acceptance:10",
+        "OT-P23-C12-OVERLAY::acceptance:12"
+      ],
+      "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::customer_controlled::54887c0f79394795e921-cbfc44b0668a6c98a90e",
+      "kind": "simulated",
+      "mode": "customer_controlled",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-300",
+      "requirement_ids": [
+        "OT-P23-C12-OVERLAY::acceptance:9",
+        "OT-P23-C12-OVERLAY::acceptance:10",
+        "OT-P23-C12-OVERLAY::acceptance:12"
+      ],
+      "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::customer_controlled::54887c0f79394795e921-14a2fc3dee999dfbfb17",
+      "kind": "simulated",
+      "mode": "customer_controlled",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-300",
+      "requirement_ids": [
+        "OT-P23-C12-OVERLAY::acceptance:6",
+        "OT-P23-C12-OVERLAY::acceptance:10",
+        "OT-P23-C12-OVERLAY::acceptance:12"
+      ],
+      "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::customer_controlled::54887c0f79394795e921-e428b349d1bbc7aa95cc",
+      "kind": "simulated",
+      "mode": "customer_controlled",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-300",
+      "requirement_ids": [
+        "OT-P23-C12-OVERLAY::acceptance:2",
+        "OT-P23-C12-OVERLAY::acceptance:6",
+        "OT-P23-C12-OVERLAY::acceptance:9",
+        "OT-P23-C12-OVERLAY::acceptance:10",
+        "OT-P23-C12-OVERLAY::acceptance:12"
+      ],
+      "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::opentour_managed::54887c0f79394795e921-0f9e4cdcfcc4ce80b014",
+      "kind": "simulated",
+      "mode": "opentour_managed",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-300",
+      "requirement_ids": [
+        "OT-P23-C12-OVERLAY::acceptance:2",
+        "OT-P23-C12-OVERLAY::acceptance:10",
+        "OT-P23-C12-OVERLAY::acceptance:12"
+      ],
+      "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::opentour_managed::54887c0f79394795e921-07188025fddef8ef4613",
+      "kind": "simulated",
+      "mode": "opentour_managed",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-300",
+      "requirement_ids": [
+        "OT-P23-C12-OVERLAY::acceptance:3",
+        "OT-P23-C12-OVERLAY::acceptance:10",
+        "OT-P23-C12-OVERLAY::acceptance:12"
+      ],
+      "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::opentour_managed::54887c0f79394795e921-a3ea1ff0595490c107a4",
+      "kind": "simulated",
+      "mode": "opentour_managed",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-300",
+      "requirement_ids": [
+        "OT-P23-C12-OVERLAY::acceptance:4",
+        "OT-P23-C12-OVERLAY::acceptance:10",
+        "OT-P23-C12-OVERLAY::acceptance:12"
+      ],
+      "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::opentour_managed::54887c0f79394795e921-63cd77b111df2229e12a",
+      "kind": "simulated",
+      "mode": "opentour_managed",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-300",
+      "requirement_ids": [
+        "OT-P23-C12-OVERLAY::acceptance:4",
+        "OT-P23-C12-OVERLAY::acceptance:10",
+        "OT-P23-C12-OVERLAY::acceptance:12"
+      ],
+      "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::opentour_managed::54887c0f79394795e921-598c900f6f306be35b72",
+      "kind": "simulated",
+      "mode": "opentour_managed",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-300",
+      "requirement_ids": [
+        "OT-P23-C12-OVERLAY::acceptance:5",
+        "OT-P23-C12-OVERLAY::acceptance:10",
+        "OT-P23-C12-OVERLAY::acceptance:12"
+      ],
+      "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::opentour_managed::54887c0f79394795e921-36fda1a6a3ed5910ee57",
+      "kind": "simulated",
+      "mode": "opentour_managed",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-300",
+      "requirement_ids": [
+        "OT-P23-C12-OVERLAY::acceptance:2",
+        "OT-P23-C12-OVERLAY::acceptance:5",
+        "OT-P23-C12-OVERLAY::acceptance:10",
+        "OT-P23-C12-OVERLAY::acceptance:12"
+      ],
+      "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::opentour_managed::54887c0f79394795e921-826674dbedb32e5d3d64",
+      "kind": "simulated",
+      "mode": "opentour_managed",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-300",
+      "requirement_ids": [
+        "OT-P23-C12-OVERLAY::acceptance:7",
+        "OT-P23-C12-OVERLAY::acceptance:10",
+        "OT-P23-C12-OVERLAY::acceptance:12"
+      ],
+      "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::opentour_managed::54887c0f79394795e921-dd6e84d0766b78320dda",
+      "kind": "simulated",
+      "mode": "opentour_managed",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-300",
+      "requirement_ids": [
+        "OT-P23-C12-OVERLAY::acceptance:6",
+        "OT-P23-C12-OVERLAY::acceptance:10",
+        "OT-P23-C12-OVERLAY::acceptance:12"
+      ],
+      "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::opentour_managed::54887c0f79394795e921-f9057326721afb5a9dba",
+      "kind": "simulated",
+      "mode": "opentour_managed",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-300",
+      "requirement_ids": [
+        "OT-P23-C12-OVERLAY::acceptance:6",
+        "OT-P23-C12-OVERLAY::acceptance:10",
+        "OT-P23-C12-OVERLAY::acceptance:12"
+      ],
+      "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::opentour_managed::54887c0f79394795e921-768de6980bca00a919b9",
+      "kind": "simulated",
+      "mode": "opentour_managed",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-300",
+      "requirement_ids": [
+        "OT-P23-C12-OVERLAY::acceptance:2",
+        "OT-P23-C12-OVERLAY::acceptance:10",
+        "OT-P23-C12-OVERLAY::acceptance:12"
+      ],
+      "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::opentour_managed::54887c0f79394795e921-06a321a9d7942c3b9378",
+      "kind": "simulated",
+      "mode": "opentour_managed",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-300",
+      "requirement_ids": [
+        "OT-P23-C12-OVERLAY::acceptance:7",
+        "OT-P23-C12-OVERLAY::acceptance:10",
+        "OT-P23-C12-OVERLAY::acceptance:12"
+      ],
+      "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::opentour_managed::54887c0f79394795e921-7356245bf7247bf40565",
+      "kind": "simulated",
+      "mode": "opentour_managed",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-300",
+      "requirement_ids": [
+        "OT-P23-C12-OVERLAY::acceptance:8",
+        "OT-P23-C12-OVERLAY::acceptance:10",
+        "OT-P23-C12-OVERLAY::acceptance:11",
+        "OT-P23-C12-OVERLAY::acceptance:12"
+      ],
+      "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::opentour_managed::54887c0f79394795e921-bcc2843c1dd2bc400838",
+      "kind": "simulated",
+      "mode": "opentour_managed",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-300",
+      "requirement_ids": [
+        "OT-P23-C12-OVERLAY::acceptance:8",
+        "OT-P23-C12-OVERLAY::acceptance:10",
+        "OT-P23-C12-OVERLAY::acceptance:11",
+        "OT-P23-C12-OVERLAY::acceptance:12"
+      ],
+      "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::opentour_managed::54887c0f79394795e921-81e899ce31a5a2621985",
+      "kind": "simulated",
+      "mode": "opentour_managed",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-300",
+      "requirement_ids": [
+        "OT-P23-C12-OVERLAY::acceptance:8",
+        "OT-P23-C12-OVERLAY::acceptance:10",
+        "OT-P23-C12-OVERLAY::acceptance:11",
+        "OT-P23-C12-OVERLAY::acceptance:12"
+      ],
+      "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::opentour_managed::54887c0f79394795e921-05462752d8693578ab23",
+      "kind": "simulated",
+      "mode": "opentour_managed",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-300",
+      "requirement_ids": [
+        "OT-P23-C12-OVERLAY::acceptance:8",
+        "OT-P23-C12-OVERLAY::acceptance:10",
+        "OT-P23-C12-OVERLAY::acceptance:11",
+        "OT-P23-C12-OVERLAY::acceptance:12"
+      ],
+      "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::opentour_managed::54887c0f79394795e921-e04c59a60b35d4da0d4c",
+      "kind": "simulated",
+      "mode": "opentour_managed",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-300",
+      "requirement_ids": [
+        "OT-P23-C12-OVERLAY::acceptance:8",
+        "OT-P23-C12-OVERLAY::acceptance:10",
+        "OT-P23-C12-OVERLAY::acceptance:12"
+      ],
+      "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::opentour_managed::54887c0f79394795e921-b82060191bb43e598eb1",
+      "kind": "simulated",
+      "mode": "opentour_managed",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-300",
+      "requirement_ids": [
+        "OT-P23-C12-OVERLAY::acceptance:8",
+        "OT-P23-C12-OVERLAY::acceptance:10",
+        "OT-P23-C12-OVERLAY::acceptance:12"
+      ],
+      "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::opentour_managed::54887c0f79394795e921-ae1c02f9dc6eba4f756e",
+      "kind": "simulated",
+      "mode": "opentour_managed",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-300",
+      "requirement_ids": [
+        "OT-P23-C12-OVERLAY::acceptance:9",
+        "OT-P23-C12-OVERLAY::acceptance:10",
+        "OT-P23-C12-OVERLAY::acceptance:12"
+      ],
+      "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::opentour_managed::54887c0f79394795e921-d4e011b0611b60148753",
+      "kind": "simulated",
+      "mode": "opentour_managed",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-300",
+      "requirement_ids": [
+        "OT-P23-C12-OVERLAY::acceptance:9",
+        "OT-P23-C12-OVERLAY::acceptance:10",
+        "OT-P23-C12-OVERLAY::acceptance:12"
+      ],
+      "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::opentour_managed::54887c0f79394795e921-b9d0a27a4529be8493aa",
+      "kind": "simulated",
+      "mode": "opentour_managed",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-300",
+      "requirement_ids": [
+        "OT-P23-C12-OVERLAY::acceptance:6",
+        "OT-P23-C12-OVERLAY::acceptance:10",
+        "OT-P23-C12-OVERLAY::acceptance:12"
+      ],
+      "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::opentour_managed::54887c0f79394795e921-982d47afa7fb54cb3504",
+      "kind": "simulated",
+      "mode": "opentour_managed",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-300",
+      "requirement_ids": [
+        "OT-P23-C12-OVERLAY::acceptance:2",
+        "OT-P23-C12-OVERLAY::acceptance:6",
+        "OT-P23-C12-OVERLAY::acceptance:9",
+        "OT-P23-C12-OVERLAY::acceptance:10",
+        "OT-P23-C12-OVERLAY::acceptance:12"
+      ],
+      "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::opentour_managed::54887c0f79394795e921-a3bd5686340fade3ce32",
+      "kind": "simulated",
+      "mode": "opentour_managed",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-300",
+      "requirement_ids": [
+        "OT-P23-C12-OVERLAY::acceptance:2",
+        "OT-P23-C12-OVERLAY::acceptance:10",
+        "OT-P23-C12-OVERLAY::acceptance:12"
+      ],
+      "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::opentour_managed::54887c0f79394795e921-de928bc68310a3a4c4bd",
+      "kind": "simulated",
+      "mode": "opentour_managed",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-300",
+      "requirement_ids": [
+        "OT-P23-C12-OVERLAY::acceptance:3",
+        "OT-P23-C12-OVERLAY::acceptance:10",
+        "OT-P23-C12-OVERLAY::acceptance:12"
+      ],
+      "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::opentour_managed::54887c0f79394795e921-22f4c3e333febf0c2cff",
+      "kind": "simulated",
+      "mode": "opentour_managed",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-300",
+      "requirement_ids": [
+        "OT-P23-C12-OVERLAY::acceptance:4",
+        "OT-P23-C12-OVERLAY::acceptance:10",
+        "OT-P23-C12-OVERLAY::acceptance:12"
+      ],
+      "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::opentour_managed::54887c0f79394795e921-93b810c47dc618d81dda",
+      "kind": "simulated",
+      "mode": "opentour_managed",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-300",
+      "requirement_ids": [
+        "OT-P23-C12-OVERLAY::acceptance:4",
+        "OT-P23-C12-OVERLAY::acceptance:10",
+        "OT-P23-C12-OVERLAY::acceptance:12"
+      ],
+      "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::opentour_managed::54887c0f79394795e921-81d373007c2c79fa931a",
+      "kind": "simulated",
+      "mode": "opentour_managed",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-300",
+      "requirement_ids": [
+        "OT-P23-C12-OVERLAY::acceptance:5",
+        "OT-P23-C12-OVERLAY::acceptance:10",
+        "OT-P23-C12-OVERLAY::acceptance:12"
+      ],
+      "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::opentour_managed::54887c0f79394795e921-3f76e2d9289bd3663f69",
+      "kind": "simulated",
+      "mode": "opentour_managed",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-300",
+      "requirement_ids": [
+        "OT-P23-C12-OVERLAY::acceptance:2",
+        "OT-P23-C12-OVERLAY::acceptance:5",
+        "OT-P23-C12-OVERLAY::acceptance:10",
+        "OT-P23-C12-OVERLAY::acceptance:12"
+      ],
+      "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::opentour_managed::54887c0f79394795e921-d9fdad0b0135906cbc90",
+      "kind": "simulated",
+      "mode": "opentour_managed",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-300",
+      "requirement_ids": [
+        "OT-P23-C12-OVERLAY::acceptance:7",
+        "OT-P23-C12-OVERLAY::acceptance:10",
+        "OT-P23-C12-OVERLAY::acceptance:12"
+      ],
+      "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::opentour_managed::54887c0f79394795e921-a0212bb40c3fd3f579f7",
+      "kind": "simulated",
+      "mode": "opentour_managed",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-300",
+      "requirement_ids": [
+        "OT-P23-C12-OVERLAY::acceptance:6",
+        "OT-P23-C12-OVERLAY::acceptance:10",
+        "OT-P23-C12-OVERLAY::acceptance:12"
+      ],
+      "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::opentour_managed::54887c0f79394795e921-c89577b2f53566225e1b",
+      "kind": "simulated",
+      "mode": "opentour_managed",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-300",
+      "requirement_ids": [
+        "OT-P23-C12-OVERLAY::acceptance:6",
+        "OT-P23-C12-OVERLAY::acceptance:10",
+        "OT-P23-C12-OVERLAY::acceptance:12"
+      ],
+      "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::opentour_managed::54887c0f79394795e921-2b8c5f778cbbeb792e25",
+      "kind": "simulated",
+      "mode": "opentour_managed",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-300",
+      "requirement_ids": [
+        "OT-P23-C12-OVERLAY::acceptance:2",
+        "OT-P23-C12-OVERLAY::acceptance:10",
+        "OT-P23-C12-OVERLAY::acceptance:12"
+      ],
+      "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::opentour_managed::54887c0f79394795e921-164bb139ec87718e9b8b",
+      "kind": "simulated",
+      "mode": "opentour_managed",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-300",
+      "requirement_ids": [
+        "OT-P23-C12-OVERLAY::acceptance:7",
+        "OT-P23-C12-OVERLAY::acceptance:10",
+        "OT-P23-C12-OVERLAY::acceptance:12"
+      ],
+      "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::opentour_managed::54887c0f79394795e921-55ef2548009cc67744e9",
+      "kind": "simulated",
+      "mode": "opentour_managed",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-300",
+      "requirement_ids": [
+        "OT-P23-C12-OVERLAY::acceptance:8",
+        "OT-P23-C12-OVERLAY::acceptance:10",
+        "OT-P23-C12-OVERLAY::acceptance:11",
+        "OT-P23-C12-OVERLAY::acceptance:12"
+      ],
+      "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::opentour_managed::54887c0f79394795e921-8e6683249fc217c9dad5",
+      "kind": "simulated",
+      "mode": "opentour_managed",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-300",
+      "requirement_ids": [
+        "OT-P23-C12-OVERLAY::acceptance:8",
+        "OT-P23-C12-OVERLAY::acceptance:10",
+        "OT-P23-C12-OVERLAY::acceptance:11",
+        "OT-P23-C12-OVERLAY::acceptance:12"
+      ],
+      "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::opentour_managed::54887c0f79394795e921-543796dc5f5b34ec0589",
+      "kind": "simulated",
+      "mode": "opentour_managed",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-300",
+      "requirement_ids": [
+        "OT-P23-C12-OVERLAY::acceptance:8",
+        "OT-P23-C12-OVERLAY::acceptance:10",
+        "OT-P23-C12-OVERLAY::acceptance:11",
+        "OT-P23-C12-OVERLAY::acceptance:12"
+      ],
+      "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::opentour_managed::54887c0f79394795e921-2d8cc52e31863d023f6b",
+      "kind": "simulated",
+      "mode": "opentour_managed",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-300",
+      "requirement_ids": [
+        "OT-P23-C12-OVERLAY::acceptance:8",
+        "OT-P23-C12-OVERLAY::acceptance:10",
+        "OT-P23-C12-OVERLAY::acceptance:11",
+        "OT-P23-C12-OVERLAY::acceptance:12"
+      ],
+      "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::opentour_managed::54887c0f79394795e921-6c37d155de14fb253c72",
+      "kind": "simulated",
+      "mode": "opentour_managed",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-300",
+      "requirement_ids": [
+        "OT-P23-C12-OVERLAY::acceptance:8",
+        "OT-P23-C12-OVERLAY::acceptance:10",
+        "OT-P23-C12-OVERLAY::acceptance:12"
+      ],
+      "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::opentour_managed::54887c0f79394795e921-1bfe433955b8007a8693",
+      "kind": "simulated",
+      "mode": "opentour_managed",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-300",
+      "requirement_ids": [
+        "OT-P23-C12-OVERLAY::acceptance:8",
+        "OT-P23-C12-OVERLAY::acceptance:10",
+        "OT-P23-C12-OVERLAY::acceptance:12"
+      ],
+      "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::opentour_managed::54887c0f79394795e921-caeaaf92a3cd907b856a",
+      "kind": "simulated",
+      "mode": "opentour_managed",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-300",
+      "requirement_ids": [
+        "OT-P23-C12-OVERLAY::acceptance:9",
+        "OT-P23-C12-OVERLAY::acceptance:10",
+        "OT-P23-C12-OVERLAY::acceptance:12"
+      ],
+      "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::opentour_managed::54887c0f79394795e921-3f7edd595df380c5c6c1",
+      "kind": "simulated",
+      "mode": "opentour_managed",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-300",
+      "requirement_ids": [
+        "OT-P23-C12-OVERLAY::acceptance:9",
+        "OT-P23-C12-OVERLAY::acceptance:10",
+        "OT-P23-C12-OVERLAY::acceptance:12"
+      ],
+      "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::opentour_managed::54887c0f79394795e921-41e66b5f08955f651f9e",
+      "kind": "simulated",
+      "mode": "opentour_managed",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-300",
+      "requirement_ids": [
+        "OT-P23-C12-OVERLAY::acceptance:6",
+        "OT-P23-C12-OVERLAY::acceptance:10",
+        "OT-P23-C12-OVERLAY::acceptance:12"
+      ],
+      "test_id": "apps/web/components/foundation/tokens/visual.spec.ts::opentour_managed::54887c0f79394795e921-a40c73b6178822ef67a9",
+      "kind": "simulated",
+      "mode": "opentour_managed",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-300",
+      "requirement_ids": [
+        "OT-P23-C12-OVERLAY::acceptance:11",
+        "OT-P23-C12-OVERLAY::acceptance:12"
+      ],
+      "test_id": "apps/web/components/foundation/tokens/index.test.tsx::32",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-300",
+      "requirement_ids": [
+        "OT-P23-C12-OVERLAY::acceptance:11",
+        "OT-P23-C12-OVERLAY::acceptance:12"
+      ],
+      "test_id": "apps/web/components/foundation/tokens/index.test.tsx::33",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-300",
+      "requirement_ids": [
+        "OT-P23-C12-OVERLAY::acceptance:11",
+        "OT-P23-C12-OVERLAY::acceptance:12"
+      ],
+      "test_id": "apps/web/components/foundation/tokens/index.test.tsx::34",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-300",
+      "requirement_ids": [
+        "OT-P23-C12-OVERLAY::acceptance:11",
+        "OT-P23-C12-OVERLAY::acceptance:12"
+      ],
+      "test_id": "apps/web/components/foundation/tokens/index.test.tsx::35",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-300",
+      "requirement_ids": [
+        "OT-P23-C12-OVERLAY::acceptance:11",
+        "OT-P23-C12-OVERLAY::acceptance:12"
+      ],
+      "test_id": "apps/web/components/foundation/tokens/index.test.tsx::36",
+      "kind": "simulated",
+      "mode": null,
       "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     }

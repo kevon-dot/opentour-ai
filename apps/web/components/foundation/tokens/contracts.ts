@@ -1,4 +1,4 @@
-import type { MouseEvent, ReactNode, Ref } from 'react';
+import type { MouseEvent, ReactNode, Ref, RefObject } from 'react';
 
 /** Presentation inputs only. No prop represents server authority or an operation receipt. */
 export type ButtonVariant = 'primary' | 'secondary' | 'quiet';
@@ -33,4 +33,19 @@ export interface TabsProps {
   items: readonly TabItem[];
   selectedKey: string;
   onSelectionChange: (key: string) => void;
+}
+
+export type DismissReason = 'escape' | 'close-button';
+export type InitialFocus = { kind: 'heading' } | { kind: 'close-button' } | { kind: 'element'; ref: RefObject<HTMLElement | null> };
+
+/** Resolvers must exclude targets from an obsolete caller context. No captured origin is restored. */
+export interface ModalPresentationProps {
+  open: boolean;
+  title: string;
+  children: ReactNode;
+  actions?: ReactNode;
+  initialFocus: InitialFocus;
+  returnFocus: () => HTMLElement | null;
+  fallbackFocus: () => HTMLElement | null;
+  onDismiss: (reason: DismissReason) => void;
 }
