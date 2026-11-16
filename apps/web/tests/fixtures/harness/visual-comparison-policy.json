@@ -1,0 +1,174 @@
+{
+  "schema_version": "opentour.harness-visual-policy.v1",
+  "review_status": "APPROVED",
+  "reviewer": "Independent Codex coordinator",
+  "review_scope": "Exact complete14-pixel alternate antialiasing vector only; source and hosted execution reviewed separately.",
+  "design_revision": "OPE-127-fixture-v1",
+  "reason": "Locked Chromium selected two observed rounded-border raster vectors with identical geometry, styles, font and remaining pixels. Renderer flags alone did not guarantee the initial zero-pixel policy.",
+  "platform": "darwin",
+  "architecture": "arm64",
+  "playwright": "1.65.1",
+  "chromium_build": "1255",
+  "viewport": {
+    "width": 320,
+    "height": 1100
+  },
+  "component": "section[aria-labelledby=\"view-title\"]",
+  "default_comparison": "exact_rgba",
+  "alternate_comparison": "exact_complete_delta_vector",
+  "masks": [],
+  "images": {
+    "baselines/darwin-customer-controlled/billing-320.png": {
+      "baseline_sha256": "0c47cbdbfa75fdf7b2ae2bd7fc69ef675172e2fd9aac4161d7528710bf774588",
+      "observed_alternate_sha256": "529318382216f58f3b822d3a2bd9bd017ca2dd7601cba3167b2bd50ac8305a72"
+    },
+    "baselines/darwin-opentour-managed/billing-320.png": {
+      "baseline_sha256": "ce25ba226df511280f42b7fca0453cdff7bbc0ef7ade4354fb9701ff418cc1ed",
+      "observed_alternate_sha256": "a83a624d3631b30f511902ef3836c4d174ab6ba740686f067a4b9a0980ac5121"
+    }
+  },
+  "vector": [
+    {
+      "x": 290,
+      "y": 627,
+      "delta_rgba": [
+        0,
+        -1,
+        -1,
+        0
+      ]
+    },
+    {
+      "x": 291,
+      "y": 627,
+      "delta_rgba": [
+        0,
+        0,
+        -1,
+        0
+      ]
+    },
+    {
+      "x": 292,
+      "y": 627,
+      "delta_rgba": [
+        0,
+        0,
+        -1,
+        0
+      ]
+    },
+    {
+      "x": 290,
+      "y": 628,
+      "delta_rgba": [
+        0,
+        -1,
+        0,
+        0
+      ]
+    },
+    {
+      "x": 291,
+      "y": 628,
+      "delta_rgba": [
+        -1,
+        -1,
+        0,
+        0
+      ]
+    },
+    {
+      "x": 292,
+      "y": 628,
+      "delta_rgba": [
+        -1,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "x": 293,
+      "y": 628,
+      "delta_rgba": [
+        -1,
+        -1,
+        0,
+        0
+      ]
+    },
+    {
+      "x": 298,
+      "y": 633,
+      "delta_rgba": [
+        -1,
+        0,
+        -1,
+        0
+      ]
+    },
+    {
+      "x": 298,
+      "y": 634,
+      "delta_rgba": [
+        0,
+        0,
+        -1,
+        0
+      ]
+    },
+    {
+      "x": 299,
+      "y": 634,
+      "delta_rgba": [
+        -1,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "x": 298,
+      "y": 635,
+      "delta_rgba": [
+        0,
+        -1,
+        0,
+        0
+      ]
+    },
+    {
+      "x": 299,
+      "y": 635,
+      "delta_rgba": [
+        0,
+        0,
+        -1,
+        0
+      ]
+    },
+    {
+      "x": 298,
+      "y": 636,
+      "delta_rgba": [
+        0,
+        -1,
+        0,
+        0
+      ]
+    },
+    {
+      "x": 299,
+      "y": 636,
+      "delta_rgba": [
+        0,
+        -1,
+        -1,
+        0
+      ]
+    }
+  ],
+  "review_receipt_sha256": "829c889733082e5148749c3ecc9ca9edda0aa5147f1b49931251e65f81bdbbfd",
+  "native_issue_updated_at": "2026-11-16T01:04:20.166Z"
+}

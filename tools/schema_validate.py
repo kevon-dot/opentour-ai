@@ -100,7 +100,13 @@ def schema_registry(root: Path = ROOT) -> Registry[Any]:
             or not re.fullmatch(r"[a-f0-9]{64}", entry["sha256"])
         ):
             raise SchemaError("Invalid local schema registry entry")
-        path = local_file(root, f"{COMMON}/{entry['file']}")
+        # Existing entries are common-directory filenames. Owning contracts may
+        # declare an explicit repository path under packages/contracts instead of
+        # creating a second canonical copy in common. Both remain hash-bound/local.
+        relative = entry["file"]
+        path = local_file(
+            root, relative if relative.startswith("packages/contracts/") else f"{COMMON}/{relative}"
+        )
         if hashlib.sha256(path.read_bytes()).hexdigest() != entry["sha256"]:
             raise SchemaError("Canonical schema source hash mismatch")
         document = read_json(path)

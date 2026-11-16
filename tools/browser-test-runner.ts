@@ -24,6 +24,35 @@ function inventory(root: string, path: string, output: Array<{ path: string; sha
   for (const item of readdirSync(path, { withFileTypes: true })) { const full = join(path, item.name); if (item.isSymbolicLink()) throw new Error('artifact_symlink'); if (item.isDirectory()) inventory(root, full, output); else if (item.isFile()) output.push({ path: relative(root, full), sha256: sha(readFileSync(full)) }); }
   return output;
 }
+export function collectVisualComparisons(root: string, outputs: Array<{ path: string; sha256: string }>) {
+  const names = /\/(billing320-(?:comparison|adverse-(?:position|border-color|radius|text)))\.json$/;
+  const records: Array<{ path: string; sha256: string; png_path: string; png_sha256: string; comparison: Record<string, unknown> }> = [];
+  const seen = new Set<string>();
+  for (const output of outputs) {
+    const match = names.exec(output.path); if (!match) continue;
+    const bytes = readFileSync(join(root, output.path));
+    if (bytes.length > 4096 || sha(bytes) !== output.sha256) throw new Error('RUNNER_ERROR');
+    const value = JSON.parse(bytes.toString('utf8')) as Record<string, unknown>;
+    const positive = match[1] === 'billing320-comparison';
+    const expectedKeys = positive ? ['mode','policy_sha256','baseline_sha256','actual_sha256','variant','changed_pixels','bounds'] : ['mode','expected_rejection','actual_sha256','variant','changed_pixels','bounds'];
+    const pngPath = output.path.replace(/\.json$/, '.png'); const png = outputs.find(item => item.path === pngPath);
+    const identity = `${value.mode}:${match[1]}`;
+    if (Object.keys(value).sort().join() !== expectedKeys.sort().join() || !['customer_controlled','opentour_managed'].includes(value.mode as string) || seen.has(identity) || !png || png.sha256 !== value.actual_sha256 || !Number.isInteger(value.changed_pixels) || Number(value.changed_pixels) < 0 || Number(value.changed_pixels) > 352000) throw new Error('RUNNER_ERROR');
+    if (positive) {
+      const policyBytes = readFileSync(join(root, harness, 'visual-comparison-policy.json'));
+      const policy = JSON.parse(policyBytes.toString('utf8'));
+      const baselineKey = `baselines/darwin-${String(value.mode).replaceAll('_','-')}/billing-320.png`;
+      if (value.policy_sha256 !== sha(policyBytes) || value.baseline_sha256 !== policy.images[baselineKey]?.baseline_sha256 || !['baseline','reviewed_corner_vector',null].includes(value.variant as string | null)) throw new Error('RUNNER_ERROR');
+      if ((value.variant === 'baseline' && value.changed_pixels !== 0) || (value.variant === 'reviewed_corner_vector' && value.changed_pixels !== 14)) throw new Error('RUNNER_ERROR');
+    } else if (value.expected_rejection !== true || value.variant !== null || Number(value.changed_pixels) === 0) throw new Error('RUNNER_ERROR');
+    if (value.bounds !== null) {
+      const bounds = value.bounds as Record<string, unknown>;
+      if (Object.keys(bounds).sort().join() !== 'max_x,max_y,min_x,min_y' || Object.values(bounds).some(number => !Number.isInteger(number) || Number(number) < 0) || Number(bounds.max_x) >= 320 || Number(bounds.max_y) >= 1100 || Number(bounds.min_x) > Number(bounds.max_x) || Number(bounds.min_y) > Number(bounds.max_y)) throw new Error('RUNNER_ERROR');
+    } else if (value.changed_pixels !== 0) throw new Error('RUNNER_ERROR');
+    seen.add(identity); records.push({ ...output, png_path: pngPath, png_sha256: png.sha256, comparison: value });
+  }
+  return records;
+}
 function descendants(pid: number): Map<number, string> {
   const rows = execFileSync('ps', ['-axo', 'pid=,ppid=,lstart='], { encoding: 'utf8', timeout: 2000 }).trim().split('\n').map(line => { const match = /^\s*(\d+)\s+(\d+)\s+(.+)$/.exec(line); return match ? { pid: Number(match[1]), parent: Number(match[2]), stamp: match[3] } : null; }).filter(row => row !== null);
   const result = new Map<number, string>(); let changed = true;
@@ -131,7 +160,13 @@ export async function executeBrowser(options: { root: string; target: string; de
     report.status = code === 0 ? 'PASS' : 'FAIL';
     if (artifactDirectory) {
       let commit: string | null = null; let sourceDirty = true; try { commit = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' }).trim(); sourceDirty = !!execFileSync('git', ['status', '--porcelain', '--untracked-files=normal'], { cwd: root, encoding: 'utf8' }).trim(); } catch { /* Evidence remains explicitly unbound. */ }
-      const evidence = { schema_version: 'opentour.browser-artifacts.v1', issue_key: 'OPE-127', kind: 'simulated', requirement_ids: ['OT-BOOT-C06-AC01', 'OT-BOOT-C06-AC02'], source_refs: ['G1', 'AC-22-01', 'AC-23-01'], product_acceptance: 'NOT_RUN', commit_sha: commit, git_worktree_dirty: sourceDirty, test_source_sha256: sha(lstatSync(join(root, target)).isDirectory() ? JSON.stringify(inventory(root, join(root, target))) : readFileSync(join(root, target))), target, fixture_id: 'simulated-browser-harness', fixture_version: '1', seed: 127, clock: '2026-11-14T12:00:00.000Z', spec_sha256: '96c405228e6e925e3c11ea4d44c0d5cb5b984541bab1a017735e7629ffa72292', cleanup_observation: { processCleanup, applicationCleanup, cleanupDiagnostic }, baseline_review_request: options.baselineReview ?? null, platform: process.platform, architecture: process.arch, playwright_version: JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')).devDependencies['@playwright/test'], viewport_widths: [320, 768, 1280, 1440], locale: 'en-US', timezone: 'UTC', color_scheme: 'light', font_sha256: sha(readFileSync(join(root, harness, 'assets/inter-latin-400-normal.woff2'))), outputs: inventory(root, artifactDirectory), report, limitations: ['Deterministic simulated interaction evidence only.', 'Provider/customer/isolation G1 acceptance NOT_RUN.', 'Canonical Linux visual qualification requires its platform baselines and independent review.'] };
+      const outputs = inventory(root, artifactDirectory);
+      let visualComparisons: ReturnType<typeof collectVisualComparisons> = [];
+      let visualEvidenceValid = true;
+      try { visualComparisons = collectVisualComparisons(root, outputs); } catch { visualEvidenceValid = false; }
+      if (!probe && !options.baselineReview && target === 'apps/web/tests/browser-harness.browser.spec.ts' && report.status === 'PASS' && (visualComparisons.length !== 10 || visualComparisons.some(record => record.path.endsWith('/billing320-comparison.json') && record.comparison.variant === null))) visualEvidenceValid = false;
+      if (!visualEvidenceValid) { code = 1; report.status = 'FAIL'; report.reason_code ??= 'RUNNER_ERROR'; }
+      const evidence = { schema_version: 'opentour.browser-artifacts.v1', issue_key: 'OPE-127', kind: 'simulated', requirement_ids: ['OT-BOOT-C06-AC01', 'OT-BOOT-C06-AC02'], source_refs: ['G1', 'AC-22-01', 'AC-23-01'], product_acceptance: 'NOT_RUN', commit_sha: commit, git_worktree_dirty: sourceDirty, test_source_sha256: sha(lstatSync(join(root, target)).isDirectory() ? JSON.stringify(inventory(root, join(root, target))) : readFileSync(join(root, target))), target, fixture_id: 'simulated-browser-harness', fixture_version: '1', seed: 127, clock: '2026-11-14T12:00:00.000Z', spec_sha256: '96c405228e6e925e3c11ea4d44c0d5cb5b984541bab1a017735e7629ffa72292', cleanup_observation: { processCleanup, applicationCleanup, cleanupDiagnostic }, baseline_review_request: options.baselineReview ?? null, platform: process.platform, architecture: process.arch, playwright_version: JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')).devDependencies['@playwright/test'], viewport_widths: [320, 768, 1280, 1440], locale: 'en-US', timezone: 'UTC', color_scheme: 'light', font_sha256: sha(readFileSync(join(root, harness, 'assets/inter-latin-400-normal.woff2'))), outputs, visual_comparisons: visualComparisons, report, limitations: ['Deterministic simulated interaction evidence only.', 'Provider/customer/isolation G1 acceptance NOT_RUN.', 'Canonical Linux visual qualification requires its platform baselines and independent review.'] };
       writeFileSync(join(artifactDirectory, 'evidence.json'), JSON.stringify(evidence, null, 2));
     }
     atomicReport(destination, report);

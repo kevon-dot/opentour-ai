@@ -14,7 +14,8 @@ export default class HarnessReporter implements Reporter {
     const tests = this.tests.map(test => {
       const attempts = this.attempts.get(test.id) ?? [];
       const status = !attempts.length || attempts.every(a => a.status === 'skipped') ? 'skipped' : test.expectedStatus !== 'passed' || attempts.length !== 1 || attempts.some(a => a.status !== 'passed') ? 'failed' : 'passed';
-      return { id: `${test.parent.project()?.name}:${test.id}`, file: relative(root, test.location.file).split('\\').join('/'), status, mode: test.parent.project()?.metadata.mode ?? null };
+      const file = relative(root, test.location.file).split('\\').join('/');
+      return { id: `${file}::${test.parent.project()?.name}::${test.id}`, file, status, mode: test.parent.project()?.metadata.mode ?? null };
     });
     writeFileSync(process.env.OPENTOUR_BROWSER_RAW!, JSON.stringify({ status: result.status, errors: this.errors, noTests: this.collectionErrors.length > 0 && this.collectionErrors.every(error => error.includes('No tests found')), tests }));
     mkdirSync(process.env.OPENTOUR_BROWSER_OUTPUT!, { recursive: true });

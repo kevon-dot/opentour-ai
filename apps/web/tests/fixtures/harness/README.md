@@ -70,12 +70,27 @@ for this suite's actual Chromium execution.
 ## Visual review and evidence
 
 `baseline-review.json` binds initial candidates to the fixture design revision,
-font, browser and exact image hashes. Ordinary runs use `updateSnapshots: none`,
-zero changed pixels, zero pixel threshold and no masks. Missing baselines fail.
-Pinned Chromium launches with `--disable-skia-runtime-opts` to avoid observed
-CPU-optimization rounding differences at card corners. The qualified raster path
-retains all sixteen approved images byte-for-byte, including both modes and all
-four widths. The browser version, font and comparison settings remain pinned.
+font, browser and exact image hashes. All sixteen approved PNGs remain unchanged.
+Ordinary runs use `updateSnapshots: none`; fourteen images require zero changed
+pixels. Missing baselines fail. No pixels are masked or silently normalized.
+
+The independently reviewed `visual-comparison-policy.json` permits exactly two
+complete RGBA results for billing at320px in each mode: the original baseline or
+one observed14-pixel antialiasing vector at the second section's upper-right
+rounded border. Every listed RGB delta must match exactly; alpha and every other
+pixel remain unchanged. A partial vector, arbitrary channel tolerance or extra
+changed pixel fails. Hard viewport, section geometry, border style/color/radius,
+font, scroll and clock assertions apply before and after capture. Pure comparison
+tests reject malformed/partial/outside/larger/alpha changes, and actual browser
+fixtures reject1px movement, a one-unit CSS border-color change, radius and text
+changes. The original responsive/scroll sequence completes before adverse renders.
+
+Locked Chromium retains `--disable-gpu` and `--disable-skia-runtime-opts`, but those
+flags alone did not establish hosted zero-pixel stability. The reviewed exception
+is explicit; it is not a claim that the renderer is universally deterministic.
+Raw captures and their SHA256s, the comparison-policy hash and matched variant
+are retained without image rewriting. Changing the policy requires a reviewed
+reason and design/baseline binding, just as changing a baseline does.
 
 Baseline authoring is a separate, explicit operation:
 
