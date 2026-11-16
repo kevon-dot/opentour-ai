@@ -159,14 +159,12 @@ def test_actual_diagram_asset_hash_and_missing_asset(tmp_path: Path) -> None:
     asset = tmp_path / "diagram.mmd"
     asset.write_text("graph TD\n A-->B\n")
     shutil.copytree(ROOT / "packages/contracts/common", tmp_path / "packages/contracts/common")
-    shutil.copytree(
-        ROOT / "tools/tests", tmp_path / "tools/tests", ignore=shutil.ignore_patterns("__pycache__")
-    )
-    (tmp_path / "tests/contract").mkdir(parents=True)
-    shutil.copyfile(
-        ROOT / "tests/contract/test_traceability.py",
-        tmp_path / "tests/contract/test_traceability.py",
-    )
+    # The synthetic complete manifest needs every registered file present. Copying
+    # metadata inputs does not collect/import later consumers or weaken C05 parity.
+    for test_path in {binding["test_id"].split("::", 1)[0] for binding in value["test_bindings"]}:
+        destination = tmp_path / test_path
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(schema_validate.local_file(ROOT, test_path), destination)
     entry = {
         "path": "diagram.mmd",
         "sha256": hashlib.sha256(asset.read_bytes()).hexdigest(),

@@ -1,0 +1,96 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:opentour:python-postgres-observation:1.0",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "target",
+    "owner",
+    "binding_nonce",
+    "source_sha256",
+    "report_sha256",
+    "kind",
+    "product_acceptance",
+    "postgres_version",
+    "started_instances",
+    "cleanup_complete",
+    "binary_sha256"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "opentour.python-postgres-observation.v1"
+    },
+    "target": {
+      "enum": [
+        "services/control-api/tests/migrations/test_expand_contract.py",
+        "services/control-api/tests/auth/test_identity_postgres.py"
+      ]
+    },
+    "owner": {
+      "enum": [
+        "OPE-213",
+        "OPE-142"
+      ]
+    },
+    "binding_nonce": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{32}$"
+    },
+    "source_sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "report_sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "kind": {
+      "const": "local_integration"
+    },
+    "product_acceptance": {
+      "const": "NOT_RUN"
+    },
+    "postgres_version": {
+      "const": "18.4"
+    },
+    "started_instances": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 1024
+    },
+    "cleanup_complete": {
+      "type": "boolean"
+    },
+    "binary_sha256": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "postgres",
+            "initdb",
+            "psql"
+          ],
+          "properties": {
+            "postgres": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "initdb": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "psql": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            }
+          }
+        }
+      ]
+    }
+  }
+}

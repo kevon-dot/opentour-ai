@@ -3,6 +3,7 @@
 import copy
 import io
 import json
+import subprocess
 import sys
 import tarfile
 from pathlib import Path
@@ -13,8 +14,15 @@ import pytest
 from tools.ci.browser_evidence import retain_browser_evidence
 from tools.ci.policy import CHECKS, check, workflow_errors
 from tools.ci.prepare import extract
-from tools.ci.run import python_unit_selection, run_browser, run_one, stage_report
+from tools.ci.run import (
+    python_unit_selection,
+    run_browser,
+    run_one,
+    stage_report,
+    web_unit_selection,
+)
 from tools.public_content_check import digest
+from tools.test_runner import CommandError
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -149,12 +157,168 @@ def test_actual_just_failure_retains_structured_evidence_without_passing(tmp_pat
 def test_python_units_run_bootstrap_and_every_present_product_suite(tmp_path: Path) -> None:
     targets, absent = python_unit_selection(tmp_path)
     assert "tests/contract/test_bootstrap.py" in targets and "tools/tests" in targets
-    assert len(absent) == 4
+    assert len(absent) == 5
     (tmp_path / "services/control-api/tests").mkdir(parents=True)
     targets, absent = python_unit_selection(tmp_path)
     # Even an empty present suite is dispatched: the owning wrapper must reject zero tests.
     assert "services/control-api/tests" in targets
-    assert "services/control-api/tests" not in absent and len(absent) == 3
+    assert "services/control-api/tests" not in absent and len(absent) == 4
+
+
+def test_only_registered_database_files_leave_the_unit_job(tmp_path: Path) -> None:
+    from tools.fixtures.python_postgres import present_targets
+
+    files = {
+        "services/control-api/tests/auth/test_identity_postgres.py",
+        "services/control-api/tests/migrations/test_expand_contract.py",
+        "services/control-api/tests/auth/test_session_context.py",
+        "services/control-api/tests/auth/refresh_test.py",
+        "services/control-api/tests/auth/test_unregistered_database.py",
+        "services/control-api/tests/auth/helpers.py",
+        "infrastructure/tests/test_environment_boundaries.py",
+    }
+    for relative in files:
+        path = tmp_path / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("# Generated selection fixture\n")
+    units, absent = python_unit_selection(tmp_path)
+    local = set(present_targets(tmp_path))
+    assert local == {
+        "services/control-api/tests/auth/test_identity_postgres.py",
+        "services/control-api/tests/migrations/test_expand_contract.py",
+    }
+    assert not (set(units) & local)
+    assert {
+        "services/control-api/tests/auth/test_session_context.py",
+        "services/control-api/tests/auth/refresh_test.py",
+        "services/control-api/tests/auth/test_unregistered_database.py",
+        "infrastructure/tests",
+    } <= set(units)
+    assert "services/control-api/tests/auth/helpers.py" not in units
+    assert "services/control-api/tests" not in units + absent
+
+
+@pytest.mark.parametrize("broken", [False, True])
+def test_partition_cannot_hide_a_symlink(tmp_path: Path, broken: bool) -> None:
+    root = tmp_path / "services/control-api/tests/auth"
+    root.mkdir(parents=True)
+    (root / "test_identity_postgres.py").write_text("# Generated local target\n")
+    link = root / "test_aliased.py"
+    link.symlink_to(root / ("absent.py" if broken else "test_identity_postgres.py"))
+    with pytest.raises(CommandError, match="symlink"):
+        python_unit_selection(tmp_path)
+
+
+def test_local_only_product_root_is_not_claimed_as_unit_execution(tmp_path: Path) -> None:
+    from tools.fixtures.python_postgres import present_targets
+
+    relative = "services/control-api/tests/auth/test_identity_postgres.py"
+    path = tmp_path / relative
+    path.parent.mkdir(parents=True)
+    path.write_text("# Generated local target\n")
+    units, absent = python_unit_selection(tmp_path)
+    assert present_targets(tmp_path) == (relative,)
+    assert not any(p.startswith("services/control-api/tests") for p in units + absent)
+
+
+def test_web_job_discovers_colocated_tracked_tests_and_excludes_browser_specs(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from tools.ci import run as ci_run
+
+    files = [
+        "packages/contracts/examples/web-command-smoke.test.ts",
+        "apps/web/lib/server/authkit-adapter.test.ts",
+        "apps/web/components/context.test.tsx",
+        "apps/web/tests/browser-harness.browser.spec.ts",
+    ]
+    for relative in files:
+        path = tmp_path / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("// Generated selection fixture\n")
+    monkeypatch.setattr(ci_run, "tracked_paths", lambda _: files)
+    assert web_unit_selection(tmp_path) == sorted(files[:3])
+    monkeypatch.setattr(ci_run, "tracked_paths", lambda _: [])
+    with pytest.raises(CommandError, match="No tracked"):
+        web_unit_selection(tmp_path)
+
+
+def test_web_job_refuses_missing_or_linked_tracked_tests(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from tools.ci import run as ci_run
+
+    relative = "missing.test.ts"
+    monkeypatch.setattr(ci_run, "tracked_paths", lambda _: [relative])
+    with pytest.raises(CommandError):
+        web_unit_selection(tmp_path)
+    (tmp_path / "target.test.ts").write_text("// Generated fixture\n")
+    (tmp_path / relative).symlink_to(tmp_path / "target.test.ts")
+    with pytest.raises(CommandError, match="symlink"):
+        web_unit_selection(tmp_path)
+
+
+@pytest.mark.parametrize("job", ["python-unit", "local-integration", "web-unit"])
+def test_required_jobs_dispatch_every_partition_in_its_own_evidence_class(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, job: str
+) -> None:
+    from tools.ci import run as ci_run
+
+    local = "services/control-api/tests/auth/test_identity_postgres.py"
+    unit = "services/control-api/tests/auth/test_session_context.py"
+    web = "apps/web/lib/server/authkit-adapter.test.ts"
+    for target in (local, unit, web):
+        path = tmp_path / target
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("# Generated dispatch fixture\n")
+    monkeypatch.setattr(ci_run, "tracked_paths", lambda _: [local, unit, web])
+    monkeypatch.setattr(ci_run, "load_policy", lambda _: {})
+    monkeypatch.setattr(
+        ci_run, "scan_paths", lambda *_: {"status": "PASS", "covered_source_sha256": "a" * 64}
+    )
+    monkeypatch.setattr(
+        subprocess,
+        "check_output",
+        lambda argv, **_: "b" * 40 if "rev-parse" in argv else b"",
+    )
+    monkeypatch.setattr(ci_run, "postgres", lambda _: "/generated/postgres")
+    calls: list[list[str]] = []
+
+    def simulated_command(argv: list[str], *_: Any, **__: Any) -> dict[str, Any]:
+        calls.append(argv)
+        return {
+            "command": argv,
+            "status": "PASS",
+            "exit_code": 0,
+            "command_evidence": {
+                "kind": "local_integration" if argv[-1] == local else "simulated"
+            },
+        }
+
+    monkeypatch.setattr(ci_run, "run_one", simulated_command)
+    result = ci_run.run_check(job, tmp_path)
+    assert result["status"] == "PASS"
+    if job == "python-unit":
+        assert ["just", "test-python", unit] in calls
+        assert ["just", "test-python", local] not in calls
+        assert result["registered_local_integration_targets"] == [local]
+    elif job == "local-integration":
+        assert ["just", "test-python", local] in calls
+        assert ["just", "test-python", unit] not in calls
+        assert result["registered_local_integration_targets"] == [local]
+
+        def wrong_kind(argv: list[str], *args: Any, **kwargs: Any) -> dict[str, Any]:
+            record = simulated_command(argv, *args, **kwargs)
+            record["command_evidence"]["kind"] = "simulated"
+            return record
+
+        monkeypatch.setattr(ci_run, "run_one", wrong_kind)
+        refused = ci_run.run_check(job, tmp_path)
+        assert refused["status"] == "FAIL"
+        assert refused["steps"][-1]["status"] == "FAIL"
+    else:
+        assert ["just", "test-web", web] in calls
+        assert ["just", "test-python", local] not in calls
 
 
 def test_real_planted_log_credential_is_withheld(tmp_path: Path) -> None:
