@@ -3,6 +3,7 @@
 import copy
 import io
 import json
+import subprocess
 import sys
 import tarfile
 from pathlib import Path
@@ -276,7 +277,7 @@ def test_required_jobs_dispatch_every_partition_in_its_own_evidence_class(
         ci_run, "scan_paths", lambda *_: {"status": "PASS", "covered_source_sha256": "a" * 64}
     )
     monkeypatch.setattr(
-        ci_run.subprocess,
+        subprocess,
         "check_output",
         lambda argv, **_: "b" * 40 if "rev-parse" in argv else b"",
     )
