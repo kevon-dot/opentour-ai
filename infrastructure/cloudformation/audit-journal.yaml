@@ -1,0 +1,1065 @@
+{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Description": "OPE-217 independent audit stores and roles. No deployment or provider qualification claimed.",
+  "Metadata": {
+    "OpenTour": {
+      "issue": "OPE-217",
+      "product_acceptance": "NOT_RUN",
+      "activation": "Service validates approved backup/replay/tombstone retention bounds before use. Deployment requires independent account/role/Region approval and real qualification. No automatic retention cleanup.",
+      "role_boundary": "Service identity/ingress composition is OPE-145/213; the control role receives no direct storage rights. Independent security administrator owns approved lifecycle operations.",
+      "costs": [
+        "DynamoDB reads, transaction double writes, PITR",
+        "S3 locked orphan and content versions",
+        "KMS signing and encryption",
+        "service ingress/compute and operational telemetry"
+      ]
+    }
+  },
+  "Parameters": {
+    "ExpectedAuditAccountId": {
+      "Type": "String",
+      "AllowedPattern": "[0-9]{12}"
+    },
+    "ControlAccountId": {
+      "Type": "String",
+      "AllowedPattern": "[0-9]{12}"
+    },
+    "NonproductionAccountId": {
+      "Type": "String",
+      "AllowedPattern": "[0-9]{12}"
+    },
+    "ApprovedRegion": {
+      "Type": "String",
+      "AllowedPattern": "[a-z]{2}(-[a-z]+)+-[0-9]+"
+    },
+    "DeploymentMode": {
+      "Type": "String",
+      "AllowedValues": [
+        "customer_controlled",
+        "opentour_managed"
+      ]
+    },
+    "SecurityAdminRoleName": {
+      "Type": "String",
+      "AllowedPattern": "[A-Za-z0-9_+=,.@/-]{1,512}"
+    },
+    "RecoveryPrincipalRoleName": {
+      "Type": "String",
+      "AllowedPattern": "[A-Za-z0-9_+=,.@/-]{1,512}"
+    },
+    "ApprovedRetentionDays": {
+      "Type": "Number",
+      "MinValue": 1,
+      "MaxValue": 36500
+    },
+    "RetentionDays": {
+      "Type": "Number",
+      "MinValue": 1,
+      "MaxValue": 36500
+    },
+    "RetentionMode": {
+      "Type": "String",
+      "AllowedValues": [
+        "COMPLIANCE",
+        "GOVERNANCE"
+      ]
+    },
+    "ApprovedConfigurationDigest": {
+      "Type": "String",
+      "AllowedPattern": "[a-f0-9]{64}"
+    }
+  },
+  "Rules": {
+    "ApprovedIndependentDestination": {
+      "Assertions": [
+        {
+          "Assert": {
+            "Fn::Equals": [
+              {
+                "Ref": "ExpectedAuditAccountId"
+              },
+              {
+                "Ref": "AWS::AccountId"
+              }
+            ]
+          },
+          "AssertDescription": "Deploy in the independently approved audit account."
+        },
+        {
+          "Assert": {
+            "Fn::Equals": [
+              {
+                "Ref": "ApprovedRegion"
+              },
+              {
+                "Ref": "AWS::Region"
+              }
+            ]
+          },
+          "AssertDescription": "Residency must match the approved region."
+        },
+        {
+          "Assert": {
+            "Fn::Equals": [
+              {
+                "Ref": "RetentionDays"
+              },
+              {
+                "Ref": "ApprovedRetentionDays"
+              }
+            ]
+          },
+          "AssertDescription": "Use the exact approved retention policy; the service additionally checks backup/replay/tombstone bounds."
+        },
+        {
+          "Assert": {
+            "Fn::Not": [
+              {
+                "Fn::Equals": [
+                  {
+                    "Ref": "ExpectedAuditAccountId"
+                  },
+                  {
+                    "Ref": "ControlAccountId"
+                  }
+                ]
+              }
+            ]
+          },
+          "AssertDescription": "Independent account and administrator boundaries must remain distinct."
+        },
+        {
+          "Assert": {
+            "Fn::Not": [
+              {
+                "Fn::Equals": [
+                  {
+                    "Ref": "ExpectedAuditAccountId"
+                  },
+                  {
+                    "Ref": "NonproductionAccountId"
+                  }
+                ]
+              }
+            ]
+          },
+          "AssertDescription": "Independent account and administrator boundaries must remain distinct."
+        },
+        {
+          "Assert": {
+            "Fn::Not": [
+              {
+                "Fn::Equals": [
+                  {
+                    "Ref": "ControlAccountId"
+                  },
+                  {
+                    "Ref": "NonproductionAccountId"
+                  }
+                ]
+              }
+            ]
+          },
+          "AssertDescription": "Independent account and administrator boundaries must remain distinct."
+        },
+        {
+          "Assert": {
+            "Fn::Not": [
+              {
+                "Fn::Equals": [
+                  {
+                    "Ref": "SecurityAdminRoleName"
+                  },
+                  {
+                    "Ref": "RecoveryPrincipalRoleName"
+                  }
+                ]
+              }
+            ]
+          },
+          "AssertDescription": "Independent account and administrator boundaries must remain distinct."
+        }
+      ]
+    }
+  },
+  "Resources": {
+    "AppendRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "ecs-tasks.amazonaws.com"
+              },
+              "Action": "sts:AssumeRole",
+              "Condition": {
+                "StringEquals": {
+                  "aws:SourceAccount": {
+                    "Ref": "AWS::AccountId"
+                  }
+                },
+                "ArnLike": {
+                  "aws:SourceArn": {
+                    "Fn::Sub": "arn:${AWS::Partition}:ecs:${AWS::Region}:${AWS::AccountId}:*"
+                  }
+                }
+              }
+            }
+          ]
+        },
+        "Description": "Independent journal service; never the control API task role."
+      }
+    },
+    "RecoveryReadRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "AWS": {
+                  "Fn::Sub": "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${RecoveryPrincipalRoleName}"
+                }
+              },
+              "Action": "sts:AssumeRole"
+            }
+          ]
+        },
+        "Description": "Approved independent recovery reader; cannot append or sign."
+      }
+    },
+    "SigningKey": {
+      "Type": "AWS::KMS::Key",
+      "Properties": {
+        "Description": "Independent P256 journal signer, separate from encryption.",
+        "KeySpec": "ECC_NIST_P256",
+        "KeyUsage": "SIGN_VERIFY",
+        "MultiRegion": false,
+        "PendingWindowInDays": 30,
+        "KeyPolicy": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Sid": "IndependentSecurityAdministration",
+              "Effect": "Allow",
+              "Action": [
+                "kms:DescribeKey",
+                "kms:GetKeyPolicy",
+                "kms:PutKeyPolicy",
+                "kms:EnableKey",
+                "kms:DisableKey",
+                "kms:ScheduleKeyDeletion",
+                "kms:CancelKeyDeletion",
+                "kms:TagResource",
+                "kms:UntagResource",
+                "kms:EnableKeyRotation",
+                "kms:DisableKeyRotation",
+                "kms:GetKeyRotationStatus",
+                "kms:CreateGrant",
+                "kms:ListGrants",
+                "kms:RevokeGrant"
+              ],
+              "Resource": "*",
+              "Principal": {
+                "AWS": {
+                  "Fn::Sub": "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${SecurityAdminRoleName}"
+                }
+              }
+            },
+            {
+              "Sid": "JournalSignOnly",
+              "Effect": "Allow",
+              "Action": [
+                "kms:Sign"
+              ],
+              "Resource": "*",
+              "Principal": {
+                "AWS": {
+                  "Fn::GetAtt": [
+                    "AppendRole",
+                    "Arn"
+                  ]
+                }
+              },
+              "Condition": {
+                "StringEquals": {
+                  "kms:SigningAlgorithm": "ECDSA_SHA_256"
+                }
+              }
+            },
+            {
+              "Sid": "RecoveryPublicKeyOnly",
+              "Effect": "Allow",
+              "Action": [
+                "kms:GetPublicKey",
+                "kms:DescribeKey"
+              ],
+              "Resource": "*",
+              "Principal": {
+                "AWS": {
+                  "Fn::GetAtt": [
+                    "RecoveryReadRole",
+                    "Arn"
+                  ]
+                }
+              }
+            },
+            {
+              "Sid": "JournalPublicKey",
+              "Effect": "Allow",
+              "Principal": {
+                "AWS": {
+                  "Fn::GetAtt": [
+                    "AppendRole",
+                    "Arn"
+                  ]
+                }
+              },
+              "Action": [
+                "kms:GetPublicKey",
+                "kms:DescribeKey"
+              ],
+              "Resource": "*"
+            }
+          ]
+        }
+      },
+      "DeletionPolicy": "Retain",
+      "UpdateReplacePolicy": "Retain"
+    },
+    "EncryptionKey": {
+      "Type": "AWS::KMS::Key",
+      "Properties": {
+        "Description": "Audit metadata encryption; never used for signing.",
+        "KeySpec": "SYMMETRIC_DEFAULT",
+        "KeyUsage": "ENCRYPT_DECRYPT",
+        "EnableKeyRotation": true,
+        "MultiRegion": false,
+        "PendingWindowInDays": 30,
+        "KeyPolicy": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Sid": "IndependentSecurityAdministration",
+              "Effect": "Allow",
+              "Action": [
+                "kms:DescribeKey",
+                "kms:GetKeyPolicy",
+                "kms:PutKeyPolicy",
+                "kms:EnableKey",
+                "kms:DisableKey",
+                "kms:ScheduleKeyDeletion",
+                "kms:CancelKeyDeletion",
+                "kms:TagResource",
+                "kms:UntagResource",
+                "kms:EnableKeyRotation",
+                "kms:DisableKeyRotation",
+                "kms:GetKeyRotationStatus",
+                "kms:CreateGrant",
+                "kms:ListGrants",
+                "kms:RevokeGrant"
+              ],
+              "Resource": "*",
+              "Principal": {
+                "AWS": {
+                  "Fn::Sub": "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${SecurityAdminRoleName}"
+                }
+              }
+            },
+            {
+              "Sid": "S3AppendEncryption",
+              "Effect": "Allow",
+              "Action": [
+                "kms:GenerateDataKey",
+                "kms:Decrypt"
+              ],
+              "Resource": "*",
+              "Principal": {
+                "AWS": {
+                  "Fn::GetAtt": [
+                    "AppendRole",
+                    "Arn"
+                  ]
+                }
+              },
+              "Condition": {
+                "StringEquals": {
+                  "kms:ViaService": {
+                    "Fn::Sub": "s3.${AWS::Region}.${AWS::URLSuffix}"
+                  }
+                }
+              }
+            },
+            {
+              "Sid": "S3RecoveryDecryption",
+              "Effect": "Allow",
+              "Action": [
+                "kms:Decrypt"
+              ],
+              "Resource": "*",
+              "Principal": {
+                "AWS": {
+                  "Fn::GetAtt": [
+                    "RecoveryReadRole",
+                    "Arn"
+                  ]
+                }
+              },
+              "Condition": {
+                "StringEquals": {
+                  "kms:ViaService": {
+                    "Fn::Sub": "s3.${AWS::Region}.${AWS::URLSuffix}"
+                  }
+                }
+              }
+            },
+            {
+              "Sid": "DynamoServiceEncryption",
+              "Effect": "Allow",
+              "Action": [
+                "kms:Encrypt",
+                "kms:Decrypt",
+                "kms:GenerateDataKey",
+                "kms:DescribeKey",
+                "kms:CreateGrant"
+              ],
+              "Resource": "*",
+              "Principal": {
+                "AWS": {
+                  "Fn::Sub": "arn:${AWS::Partition}:iam::${AWS::AccountId}:root"
+                }
+              },
+              "Condition": {
+                "StringEquals": {
+                  "kms:ViaService": {
+                    "Fn::Sub": "dynamodb.${AWS::Region}.${AWS::URLSuffix}"
+                  },
+                  "kms:CallerAccount": {
+                    "Ref": "AWS::AccountId"
+                  }
+                }
+              }
+            }
+          ]
+        }
+      },
+      "DeletionPolicy": "Retain",
+      "UpdateReplacePolicy": "Retain"
+    },
+    "ContentBucket": {
+      "Type": "AWS::S3::Bucket",
+      "Properties": {
+        "PublicAccessBlockConfiguration": {
+          "BlockPublicAcls": true,
+          "BlockPublicPolicy": true,
+          "IgnorePublicAcls": true,
+          "RestrictPublicBuckets": true
+        },
+        "OwnershipControls": {
+          "Rules": [
+            {
+              "ObjectOwnership": "BucketOwnerEnforced"
+            }
+          ]
+        },
+        "VersioningConfiguration": {
+          "Status": "Enabled"
+        },
+        "ObjectLockEnabled": true,
+        "ObjectLockConfiguration": {
+          "ObjectLockEnabled": "Enabled",
+          "Rule": {
+            "DefaultRetention": {
+              "Mode": {
+                "Ref": "RetentionMode"
+              },
+              "Days": {
+                "Ref": "RetentionDays"
+              }
+            }
+          }
+        },
+        "BucketEncryption": {
+          "ServerSideEncryptionConfiguration": [
+            {
+              "ServerSideEncryptionByDefault": {
+                "SSEAlgorithm": "aws:kms",
+                "KMSMasterKeyID": {
+                  "Fn::GetAtt": [
+                    "EncryptionKey",
+                    "Arn"
+                  ]
+                }
+              }
+            }
+          ]
+        },
+        "Tags": [
+          {
+            "Key": "OpenTourDeploymentMode",
+            "Value": {
+              "Ref": "DeploymentMode"
+            }
+          },
+          {
+            "Key": "ConfigurationDigest",
+            "Value": {
+              "Ref": "ApprovedConfigurationDigest"
+            }
+          }
+        ]
+      },
+      "DeletionPolicy": "Retain",
+      "UpdateReplacePolicy": "Retain"
+    },
+    "ContentBucketPolicy": {
+      "Type": "AWS::S3::BucketPolicy",
+      "Properties": {
+        "Bucket": {
+          "Ref": "ContentBucket"
+        },
+        "PolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Sid": "RequireTLS",
+              "Effect": "Deny",
+              "Action": "s3:*",
+              "Resource": [
+                {
+                  "Fn::GetAtt": [
+                    "ContentBucket",
+                    "Arn"
+                  ]
+                },
+                {
+                  "Fn::Sub": "${ContentBucket.Arn}/*"
+                }
+              ],
+              "Principal": "*",
+              "Condition": {
+                "Bool": {
+                  "aws:SecureTransport": "false"
+                }
+              }
+            },
+            {
+              "Sid": "OnlyJournalAppends",
+              "Effect": "Deny",
+              "Action": [
+                "s3:PutObject"
+              ],
+              "Resource": {
+                "Fn::Sub": "${ContentBucket.Arn}/journal/*"
+              },
+              "Principal": "*",
+              "Condition": {
+                "ArnNotEquals": {
+                  "aws:PrincipalArn": {
+                    "Fn::GetAtt": [
+                      "AppendRole",
+                      "Arn"
+                    ]
+                  }
+                }
+              }
+            },
+            {
+              "Sid": "ForbidOrdinaryDestruction",
+              "Effect": "Deny",
+              "Action": [
+                "s3:DeleteObject",
+                "s3:DeleteObjectVersion",
+                "s3:BypassGovernanceRetention",
+                "s3:PutObjectRetention",
+                "s3:PutObjectLegalHold",
+                "s3:PutBucketVersioning",
+                "s3:PutBucketObjectLockConfiguration",
+                "s3:DeleteBucketPolicy",
+                "s3:PutBucketPolicy"
+              ],
+              "Resource": [
+                {
+                  "Fn::GetAtt": [
+                    "ContentBucket",
+                    "Arn"
+                  ]
+                },
+                {
+                  "Fn::Sub": "${ContentBucket.Arn}/*"
+                }
+              ],
+              "Principal": "*",
+              "Condition": {
+                "ArnNotEquals": {
+                  "aws:PrincipalArn": {
+                    "Fn::Sub": "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${SecurityAdminRoleName}"
+                  }
+                }
+              }
+            },
+            {
+              "Sid": "RequiredEncryption",
+              "Effect": "Deny",
+              "Action": [
+                "s3:PutObject"
+              ],
+              "Resource": {
+                "Fn::Sub": "${ContentBucket.Arn}/journal/*"
+              },
+              "Principal": "*",
+              "Condition": {
+                "StringNotEquals": {
+                  "s3:x-amz-server-side-encryption": "aws:kms"
+                }
+              }
+            },
+            {
+              "Sid": "RequiredExactKey",
+              "Effect": "Deny",
+              "Action": [
+                "s3:PutObject"
+              ],
+              "Resource": {
+                "Fn::Sub": "${ContentBucket.Arn}/journal/*"
+              },
+              "Principal": "*",
+              "Condition": {
+                "StringNotEquals": {
+                  "s3:x-amz-server-side-encryption-aws-kms-key-id": {
+                    "Fn::GetAtt": [
+                      "EncryptionKey",
+                      "Arn"
+                    ]
+                  }
+                }
+              }
+            },
+            {
+              "Sid": "ForbidPerObjectRetentionOverride",
+              "Effect": "Deny",
+              "Principal": "*",
+              "Action": [
+                "s3:PutObject"
+              ],
+              "Resource": {
+                "Fn::Sub": "${ContentBucket.Arn}/journal/*"
+              },
+              "Condition": {
+                "Null": {
+                  "s3:object-lock-retain-until-date": "false"
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "JournalTable": {
+      "Type": "AWS::DynamoDB::Table",
+      "Properties": {
+        "BillingMode": "PAY_PER_REQUEST",
+        "DeletionProtectionEnabled": true,
+        "AttributeDefinitions": [
+          {
+            "AttributeName": "PK",
+            "AttributeType": "S"
+          },
+          {
+            "AttributeName": "SK",
+            "AttributeType": "S"
+          }
+        ],
+        "KeySchema": [
+          {
+            "AttributeName": "PK",
+            "KeyType": "HASH"
+          },
+          {
+            "AttributeName": "SK",
+            "KeyType": "RANGE"
+          }
+        ],
+        "PointInTimeRecoverySpecification": {
+          "PointInTimeRecoveryEnabled": true
+        },
+        "SSESpecification": {
+          "SSEEnabled": true,
+          "SSEType": "KMS",
+          "KMSMasterKeyId": {
+            "Fn::GetAtt": [
+              "EncryptionKey",
+              "Arn"
+            ]
+          }
+        },
+        "ResourcePolicy": {
+          "PolicyDocument": {
+            "Version": "2012-10-17",
+            "Statement": [
+              {
+                "Sid": "OnlyJournalMutates",
+                "Effect": "Deny",
+                "Action": [
+                  "dynamodb:PutItem",
+                  "dynamodb:UpdateItem",
+                  "dynamodb:BatchWriteItem",
+                  "dynamodb:PartiQLInsert",
+                  "dynamodb:PartiQLUpdate"
+                ],
+                "Resource": "*",
+                "Principal": "*",
+                "Condition": {
+                  "ArnNotEquals": {
+                    "aws:PrincipalArn": [
+                      {
+                        "Fn::GetAtt": [
+                          "AppendRole",
+                          "Arn"
+                        ]
+                      },
+                      {
+                        "Fn::Sub": "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${SecurityAdminRoleName}"
+                      }
+                    ]
+                  }
+                }
+              },
+              {
+                "Sid": "SecurityAdministrationOnly",
+                "Effect": "Deny",
+                "Action": [
+                  "dynamodb:DeleteItem",
+                  "dynamodb:PartiQLDelete",
+                  "dynamodb:DeleteTable",
+                  "dynamodb:UpdateTable",
+                  "dynamodb:UpdateTimeToLive",
+                  "dynamodb:UpdateContinuousBackups",
+                  "dynamodb:PutResourcePolicy",
+                  "dynamodb:DeleteResourcePolicy"
+                ],
+                "Resource": "*",
+                "Principal": "*",
+                "Condition": {
+                  "ArnNotEquals": {
+                    "aws:PrincipalArn": {
+                      "Fn::Sub": "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${SecurityAdminRoleName}"
+                    }
+                  }
+                }
+              }
+            ]
+          }
+        },
+        "Tags": [
+          {
+            "Key": "ConfigurationDigest",
+            "Value": {
+              "Ref": "ApprovedConfigurationDigest"
+            }
+          }
+        ]
+      },
+      "DeletionPolicy": "Retain",
+      "UpdateReplacePolicy": "Retain"
+    },
+    "AppendPolicy": {
+      "Type": "AWS::IAM::Policy",
+      "Properties": {
+        "PolicyName": "JournalAppendOnly",
+        "Roles": [
+          {
+            "Ref": "AppendRole"
+          }
+        ],
+        "PolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Sid": "ReadExactJournal",
+              "Effect": "Allow",
+              "Action": [
+                "dynamodb:GetItem"
+              ],
+              "Resource": {
+                "Fn::GetAtt": [
+                  "JournalTable",
+                  "Arn"
+                ]
+              }
+            },
+            {
+              "Sid": "JournalCAS",
+              "Effect": "Allow",
+              "Action": [
+                "dynamodb:PutItem",
+                "dynamodb:UpdateItem"
+              ],
+              "Resource": {
+                "Fn::GetAtt": [
+                  "JournalTable",
+                  "Arn"
+                ]
+              }
+            },
+            {
+              "Sid": "VersionedContent",
+              "Effect": "Allow",
+              "Action": [
+                "s3:PutObject",
+                "s3:GetObjectVersion"
+              ],
+              "Resource": {
+                "Fn::Sub": "${ContentBucket.Arn}/journal/*"
+              }
+            },
+            {
+              "Sid": "EncryptContent",
+              "Effect": "Allow",
+              "Action": [
+                "kms:GenerateDataKey",
+                "kms:Decrypt"
+              ],
+              "Resource": {
+                "Fn::GetAtt": [
+                  "EncryptionKey",
+                  "Arn"
+                ]
+              },
+              "Condition": {
+                "StringEquals": {
+                  "kms:ViaService": {
+                    "Fn::Sub": "s3.${AWS::Region}.${AWS::URLSuffix}"
+                  }
+                }
+              }
+            },
+            {
+              "Sid": "JournalSignature",
+              "Effect": "Allow",
+              "Action": [
+                "kms:Sign",
+                "kms:GetPublicKey"
+              ],
+              "Resource": {
+                "Fn::GetAtt": [
+                  "SigningKey",
+                  "Arn"
+                ]
+              }
+            },
+            {
+              "Sid": "NeverDeleteOrReconfigure",
+              "Effect": "Deny",
+              "Action": [
+                "dynamodb:DeleteItem",
+                "dynamodb:DeleteTable",
+                "dynamodb:UpdateTable",
+                "dynamodb:PutResourcePolicy",
+                "dynamodb:DeleteResourcePolicy",
+                "s3:DeleteObject",
+                "s3:DeleteObjectVersion",
+                "s3:BypassGovernanceRetention",
+                "s3:DeleteBucket",
+                "s3:PutBucketPolicy",
+                "s3:DeleteBucketPolicy",
+                "kms:DisableKey",
+                "kms:ScheduleKeyDeletion",
+                "kms:PutKeyPolicy",
+                "iam:PassRole",
+                "s3:PutObjectRetention"
+              ],
+              "Resource": "*"
+            },
+            {
+              "Sid": "ReadRequiredBucketSettings",
+              "Effect": "Allow",
+              "Action": [
+                "s3:GetBucketObjectLockConfiguration",
+                "s3:GetBucketVersioning",
+                "s3:GetEncryptionConfiguration"
+              ],
+              "Resource": {
+                "Fn::GetAtt": [
+                  "ContentBucket",
+                  "Arn"
+                ]
+              }
+            },
+            {
+              "Sid": "ReadRequiredTableSettings",
+              "Effect": "Allow",
+              "Action": [
+                "dynamodb:DescribeTable",
+                "dynamodb:DescribeContinuousBackups",
+                "dynamodb:DescribeTimeToLive"
+              ],
+              "Resource": {
+                "Fn::GetAtt": [
+                  "JournalTable",
+                  "Arn"
+                ]
+              }
+            }
+          ]
+        }
+      }
+    },
+    "RecoveryPolicy": {
+      "Type": "AWS::IAM::Policy",
+      "Properties": {
+        "PolicyName": "JournalRecoveryReadOnly",
+        "Roles": [
+          {
+            "Ref": "RecoveryReadRole"
+          }
+        ],
+        "PolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Sid": "ReadExactJournal",
+              "Effect": "Allow",
+              "Action": [
+                "dynamodb:GetItem"
+              ],
+              "Resource": {
+                "Fn::GetAtt": [
+                  "JournalTable",
+                  "Arn"
+                ]
+              }
+            },
+            {
+              "Sid": "ReadExactVersions",
+              "Effect": "Allow",
+              "Action": [
+                "s3:GetObjectVersion",
+                "s3:GetObjectRetention"
+              ],
+              "Resource": {
+                "Fn::Sub": "${ContentBucket.Arn}/journal/*"
+              }
+            },
+            {
+              "Sid": "DecryptContent",
+              "Effect": "Allow",
+              "Action": [
+                "kms:Decrypt"
+              ],
+              "Resource": {
+                "Fn::GetAtt": [
+                  "EncryptionKey",
+                  "Arn"
+                ]
+              },
+              "Condition": {
+                "StringEquals": {
+                  "kms:ViaService": {
+                    "Fn::Sub": "s3.${AWS::Region}.${AWS::URLSuffix}"
+                  }
+                }
+              }
+            },
+            {
+              "Sid": "ReadSigner",
+              "Effect": "Allow",
+              "Action": [
+                "kms:GetPublicKey",
+                "kms:DescribeKey"
+              ],
+              "Resource": {
+                "Fn::GetAtt": [
+                  "SigningKey",
+                  "Arn"
+                ]
+              }
+            },
+            {
+              "Sid": "NeverWriteOrSign",
+              "Effect": "Deny",
+              "Action": [
+                "dynamodb:PutItem",
+                "dynamodb:UpdateItem",
+                "dynamodb:DeleteItem",
+                "dynamodb:BatchWriteItem",
+                "dynamodb:DeleteTable",
+                "dynamodb:UpdateTable",
+                "s3:PutObject",
+                "s3:DeleteObject",
+                "s3:DeleteObjectVersion",
+                "s3:PutObjectRetention",
+                "s3:BypassGovernanceRetention",
+                "kms:Sign",
+                "kms:PutKeyPolicy",
+                "iam:PassRole"
+              ],
+              "Resource": "*"
+            }
+          ]
+        }
+      }
+    }
+  },
+  "Outputs": {
+    "JournalTableName": {
+      "Description": "Exact audit table; never restored control state.",
+      "Value": {
+        "Ref": "JournalTable"
+      }
+    },
+    "ContentBucketName": {
+      "Description": "Version-specific immutable journal content.",
+      "Value": {
+        "Ref": "ContentBucket"
+      }
+    },
+    "SigningKeyArn": {
+      "Description": "Independent signer key registry input; public key digest still requires approval.",
+      "Value": {
+        "Fn::GetAtt": [
+          "SigningKey",
+          "Arn"
+        ]
+      }
+    },
+    "EncryptionKeyArn": {
+      "Description": "Distinct content encryption key.",
+      "Value": {
+        "Fn::GetAtt": [
+          "EncryptionKey",
+          "Arn"
+        ]
+      }
+    },
+    "AppendRoleArn": {
+      "Description": "Audit service task role.",
+      "Value": {
+        "Fn::GetAtt": [
+          "AppendRole",
+          "Arn"
+        ]
+      }
+    },
+    "RecoveryReadRoleArn": {
+      "Description": "Independent read-only recovery role.",
+      "Value": {
+        "Fn::GetAtt": [
+          "RecoveryReadRole",
+          "Arn"
+        ]
+      }
+    },
+    "ConfigurationDigest": {
+      "Description": "Approved destination/profile configuration binding.",
+      "Value": {
+        "Ref": "ApprovedConfigurationDigest"
+      }
+    }
+  }
+}
