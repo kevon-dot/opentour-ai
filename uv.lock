@@ -512,6 +512,7 @@ source = { editable = "services/control-api" }
 dependencies = [
     { name = "cryptography" },
     { name = "fastapi" },
+    { name = "httpx2" },
     { name = "opentour-journal" },
     { name = "psycopg", extra = ["binary"] },
     { name = "pydantic" },
@@ -524,6 +525,7 @@ dependencies = [
 requires-dist = [
     { name = "cryptography", specifier = "==50.0.2" },
     { name = "fastapi", specifier = "==0.163.0" },
+    { name = "httpx2", specifier = "==2.16.0" },
     { name = "opentour-journal", editable = "packages/authority-journal" },
     { name = "psycopg", extras = ["binary"], specifier = "==3.3.9" },
     { name = "pydantic", specifier = "==2.14.3" },
