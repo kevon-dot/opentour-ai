@@ -18890,9 +18890,9 @@
         "native_uuid": "b215de00-fc9e-497b-915f-3dc835614bfa",
         "logical_key": "OT-P23-C12-OVERLAY",
         "url": "https://linear.app/opentourai/issue/OPE-300/implement-controlled-dialog-and-drawer-primitives-with-browser",
-        "updated_at": "2026-11-16T04:18:26.323Z",
-        "publication_spec_sha256": "e07867670f03122986b7c48c6d7f636209cf5716990cb154ba09542cd9c89776",
-        "technical_capture_sha256": "6de8b348e2fa50e89820ee4301859123aa5a4c9684fa701c45c93efa61b7ad2f",
+        "updated_at": "2026-11-16T04:28:36.979Z",
+        "publication_spec_sha256": "8ff8e1c004bc6f6e8fa33f00181337ea82bb6d58b537280b996bd40312a36142",
+        "technical_capture_sha256": "429990397f6a755551664d50ad0c80116abf65be8ac8e64e35002cbc18923fdf",
         "projection": {
           "requirement_ids": [
             "OT-P23-C12-OVERLAY::acceptance:1",
@@ -31592,7 +31592,7 @@
       }
     ]
   },
-  "source_projection_sha256": "6035f23051509f9a3217ed016978740b7905f3a25a57b3806f84bb7953c2163e",
+  "source_projection_sha256": "caf0e344dc1febdd259b6fda271c2684e5f3b95f42754282b5152e6e29e5ae95",
   "source_bindings": {
     "feature_register_sha256": "f6d1061a103a028b6309928a1c6d96b1c58cb969793a2b9e8a4e36dd50b4602f",
     "figma_snapshot_sha256": "38c3537dd10719a1978873137d34086fa51e284456ed7c5d46d36e77815367a7",
