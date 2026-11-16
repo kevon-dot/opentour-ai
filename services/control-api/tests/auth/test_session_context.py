@@ -255,3 +255,41 @@ def test_actual_sdk_fault_body_never_reaches_api_or_logs(identity, caplog):
         assert result.status_code == 200 and result.json()["state"] == "reconciliation_required"
         assert sentinel not in result.text and sentinel not in caplog.text
         assert len(calls) == 1
+
+
+@pytest.mark.parametrize("change", ["provider_denial", "expiry", "freshness"])
+def test_final_state_read_cannot_hide_denial_or_time_passage(identity, change):
+    from datetime import timedelta
+
+    load = identity.repository.load_session
+    reads = 0
+
+    def changed(*args, **kwargs):
+        nonlocal reads
+        reads += 1
+        result = load(*args, **kwargs)
+        if reads == 2:
+            if change == "provider_denial":
+                observed = identity.repository.observation(identity.issuer, "provider_a")
+                identity.repository.record_observation(
+                    replace(observed, status="removed", locally_denied=True)
+                )
+            else:
+                elapsed = 601 if change == "expiry" else 31
+                identity.service.clock = lambda: identity.now + timedelta(seconds=elapsed)
+        return result
+
+    identity.repository.load_session = changed
+    with pytest.raises(AuthError):
+        identity.service.authorization_context(identity.token(), identity.handle, sensitive=True)
+
+
+def test_admission_logs_only_safe_freshness_metadata(identity, caplog):
+    import logging
+
+    with caplog.at_level(logging.INFO, logger="opentour_control.auth.session"):
+        identity.service.authorization_context(identity.token(), identity.handle, sensitive=True)
+    record = next(r for r in caplog.records if r.message == "identity_admission_checked")
+    assert record.identity_freshness_policy_seconds == 30
+    assert record.identity_checked_at == record.identity_observed_at
+    assert "user_a" not in caplog.text and identity.handle not in caplog.text

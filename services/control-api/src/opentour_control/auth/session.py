@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import secrets
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -269,8 +270,9 @@ class SessionService:
         ):
             raise AuthError("CONTEXT_RECONCILIATION_REQUIRED", 409)
         member = self._membership(session)
-        observed = self._fresh(session, member, now, sensitive)
-        self._after_wait(verified, session, binding, member)
+        self._fresh(session, member, now, sensitive)
+        observed = self._after_wait(verified, session, binding, member, sensitive=sensitive)
+        assert observed is not None
         # No capability is granted here. Each domain action consumes the current143 resolver.
         return AuthContext(
             self._context(verified, session, observed.checked_at),
@@ -286,7 +288,9 @@ class SessionService:
         session: Session,
         binding: str,
         member: LocalMembership | None = None,
-    ) -> None:
+        *,
+        sensitive: bool = False,
+    ) -> Observation | None:
         """Fence asynchronous provider work against current durable and local authority state.
 
         This is a point-in-time context, not an authority lease. Domain mutations
@@ -316,6 +320,35 @@ class SessionService:
             raise AuthError("STALE_SESSION_CONTEXT", 409)
         if member is not None and self._membership(current) != member:
             raise AuthError("STALE_SESSION_CONTEXT", 409)
+        observed = None
+        if member is not None:
+            observed = self.repository.observation(session.issuer, member.provider_membership_id)
+            if observed is None:
+                raise AuthError("IDENTITY_FRESHNESS_UNAVAILABLE", 503, True)
+            self._same_membership(current, member, observed)
+            if observed.locally_denied or observed.status != "active":
+                raise AuthError("MEMBERSHIP_INACTIVE", 403)
+        finished = self._admission_time(token, now)
+        if observed is not None:
+            maximum = (
+                self.config.sensitive_freshness_seconds
+                if sensitive
+                else self.config.metadata_freshness_seconds
+            )
+            if (
+                finished < observed.checked_at
+                or (finished - observed.checked_at).total_seconds() > maximum
+            ):
+                raise AuthError("IDENTITY_FRESHNESS_UNAVAILABLE", 503, True)
+            logging.getLogger(__name__).info(
+                "identity_admission_checked",
+                extra={
+                    "identity_observed_at": timestamp(observed.observed_at),
+                    "identity_checked_at": timestamp(observed.checked_at),
+                    "identity_freshness_policy_seconds": maximum,
+                },
+            )
+        return observed
 
     def current_context(self, token: str, binding: str, request_id: str) -> dict[str, object]:
         verified, session, now = self._authenticate(token, binding)
@@ -337,6 +370,7 @@ class SessionService:
                 # Never clear a newer selection or recover an ended session.
                 self._after_wait(verified, session, binding)
                 session = self.repository.clear_selection(session, digest(binding))
+                self._admission_time(verified, now)
                 result["session_generation"] = session.generation
                 return result
             if error.status == 503:
