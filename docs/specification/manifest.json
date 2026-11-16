@@ -10269,9 +10269,9 @@
         "native_uuid": "0f7489f2-801d-4613-b8bd-6a738f80fb2f",
         "logical_key": "OT-P25-C01",
         "url": "https://linear.app/opentourai/issue/OPE-171/create-organizations-with-recoverable-owner-membership",
-        "updated_at": "2026-11-16T01:41:30.772Z",
+        "updated_at": "2026-11-16T03:28:55.581Z",
         "publication_spec_sha256": "239d6a335389108197ada24a7bde98c0507227a50084cc50a9f21e1530d0ec00",
-        "technical_capture_sha256": "515fc25712262831cc847b99e43b1afdb93e49d587d27af56cc94c4ab48a5f13",
+        "technical_capture_sha256": "ac3a2df31d76e4f45d079bf09a40aed98053cfcad4449ecc2031b4701c8d87b7",
         "projection": {
           "requirement_ids": [
             "OT-P25-C01-AC01",
@@ -31077,15 +31077,463 @@
         "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1",
         "issue_key": "OPE-253"
+      },
+      {
+        "issue_key": "OPE-171",
+        "requirement_ids": [
+          "OT-P25-C01-AC01"
+        ],
+        "test_id": "services/control-api/tests/organizations/test_creation_saga.py::test_default_policy_admits_five_and_refuses_sixth_before_durable_effect[customer_controlled]",
+        "kind": "local_integration",
+        "mode": "customer_controlled",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-171",
+        "requirement_ids": [
+          "OT-P25-C01-AC01"
+        ],
+        "test_id": "services/control-api/tests/organizations/test_creation_saga.py::test_default_policy_admits_five_and_refuses_sixth_before_durable_effect[opentour_managed]",
+        "kind": "local_integration",
+        "mode": "opentour_managed",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-171",
+        "requirement_ids": [
+          "OT-P25-C01-AC01",
+          "OT-P25-C01-AC02"
+        ],
+        "test_id": "services/control-api/tests/organizations/test_creation_saga.py::test_exact_replay_at_limit_is_free_and_changed_body_stays_conflict[customer_controlled]",
+        "kind": "local_integration",
+        "mode": "customer_controlled",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-171",
+        "requirement_ids": [
+          "OT-P25-C01-AC01",
+          "OT-P25-C01-AC02"
+        ],
+        "test_id": "services/control-api/tests/organizations/test_creation_saga.py::test_exact_replay_at_limit_is_free_and_changed_body_stays_conflict[opentour_managed]",
+        "kind": "local_integration",
+        "mode": "opentour_managed",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-171",
+        "requirement_ids": [
+          "OT-P25-C01-AC01",
+          "OT-P25-C01-AC02"
+        ],
+        "test_id": "services/control-api/tests/organizations/test_creation_saga.py::test_completed_cancelled_failed_and_unknown_attempts_keep_their_slots[customer_controlled-active]",
+        "kind": "local_integration",
+        "mode": "customer_controlled",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-171",
+        "requirement_ids": [
+          "OT-P25-C01-AC01",
+          "OT-P25-C01-AC02"
+        ],
+        "test_id": "services/control-api/tests/organizations/test_creation_saga.py::test_completed_cancelled_failed_and_unknown_attempts_keep_their_slots[customer_controlled-cancelled]",
+        "kind": "local_integration",
+        "mode": "customer_controlled",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-171",
+        "requirement_ids": [
+          "OT-P25-C01-AC01",
+          "OT-P25-C01-AC02"
+        ],
+        "test_id": "services/control-api/tests/organizations/test_creation_saga.py::test_completed_cancelled_failed_and_unknown_attempts_keep_their_slots[customer_controlled-action_required]",
+        "kind": "local_integration",
+        "mode": "customer_controlled",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-171",
+        "requirement_ids": [
+          "OT-P25-C01-AC01",
+          "OT-P25-C01-AC02"
+        ],
+        "test_id": "services/control-api/tests/organizations/test_creation_saga.py::test_completed_cancelled_failed_and_unknown_attempts_keep_their_slots[customer_controlled-provider_outcome_unknown]",
+        "kind": "local_integration",
+        "mode": "customer_controlled",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-171",
+        "requirement_ids": [
+          "OT-P25-C01-AC01",
+          "OT-P25-C01-AC02"
+        ],
+        "test_id": "services/control-api/tests/organizations/test_creation_saga.py::test_completed_cancelled_failed_and_unknown_attempts_keep_their_slots[opentour_managed-active]",
+        "kind": "local_integration",
+        "mode": "opentour_managed",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-171",
+        "requirement_ids": [
+          "OT-P25-C01-AC01",
+          "OT-P25-C01-AC02"
+        ],
+        "test_id": "services/control-api/tests/organizations/test_creation_saga.py::test_completed_cancelled_failed_and_unknown_attempts_keep_their_slots[opentour_managed-cancelled]",
+        "kind": "local_integration",
+        "mode": "opentour_managed",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-171",
+        "requirement_ids": [
+          "OT-P25-C01-AC01",
+          "OT-P25-C01-AC02"
+        ],
+        "test_id": "services/control-api/tests/organizations/test_creation_saga.py::test_completed_cancelled_failed_and_unknown_attempts_keep_their_slots[opentour_managed-action_required]",
+        "kind": "local_integration",
+        "mode": "opentour_managed",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-171",
+        "requirement_ids": [
+          "OT-P25-C01-AC01",
+          "OT-P25-C01-AC02"
+        ],
+        "test_id": "services/control-api/tests/organizations/test_creation_saga.py::test_completed_cancelled_failed_and_unknown_attempts_keep_their_slots[opentour_managed-provider_outcome_unknown]",
+        "kind": "local_integration",
+        "mode": "opentour_managed",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-171",
+        "requirement_ids": [
+          "OT-P25-C01-AC01",
+          "OT-P25-C01-AC02"
+        ],
+        "test_id": "services/control-api/tests/organizations/test_creation_saga.py::test_retry_reconciliation_and_cancellation_do_not_create_another_attempt[customer_controlled]",
+        "kind": "local_integration",
+        "mode": "customer_controlled",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-171",
+        "requirement_ids": [
+          "OT-P25-C01-AC01",
+          "OT-P25-C01-AC02"
+        ],
+        "test_id": "services/control-api/tests/organizations/test_creation_saga.py::test_retry_reconciliation_and_cancellation_do_not_create_another_attempt[opentour_managed]",
+        "kind": "local_integration",
+        "mode": "opentour_managed",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-171",
+        "requirement_ids": [
+          "OT-P25-C01-AC01"
+        ],
+        "test_id": "services/control-api/tests/organizations/test_creation_saga.py::test_rolling_window_excludes_exact_24_hours_but_counts_one_microsecond_inside[customer_controlled]",
+        "kind": "local_integration",
+        "mode": "customer_controlled",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-171",
+        "requirement_ids": [
+          "OT-P25-C01-AC01"
+        ],
+        "test_id": "services/control-api/tests/organizations/test_creation_saga.py::test_rolling_window_excludes_exact_24_hours_but_counts_one_microsecond_inside[opentour_managed]",
+        "kind": "local_integration",
+        "mode": "opentour_managed",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-171",
+        "requirement_ids": [
+          "OT-P25-C01-AC01"
+        ],
+        "test_id": "services/control-api/tests/organizations/test_creation_saga.py::test_existing_over_limit_history_waits_for_fifth_newest_admission[customer_controlled]",
+        "kind": "local_integration",
+        "mode": "customer_controlled",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-171",
+        "requirement_ids": [
+          "OT-P25-C01-AC01"
+        ],
+        "test_id": "services/control-api/tests/organizations/test_creation_saga.py::test_existing_over_limit_history_waits_for_fifth_newest_admission[opentour_managed]",
+        "kind": "local_integration",
+        "mode": "opentour_managed",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-171",
+        "requirement_ids": [
+          "OT-P25-C01-AC01",
+          "OT-P25-C01-AC03"
+        ],
+        "test_id": "services/control-api/tests/organizations/test_creation_saga.py::test_limit_binds_verified_issuer_subject_not_session_or_display_name[customer_controlled-another_subject]",
+        "kind": "local_integration",
+        "mode": "customer_controlled",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-171",
+        "requirement_ids": [
+          "OT-P25-C01-AC01",
+          "OT-P25-C01-AC03"
+        ],
+        "test_id": "services/control-api/tests/organizations/test_creation_saga.py::test_limit_binds_verified_issuer_subject_not_session_or_display_name[customer_controlled-another_issuer]",
+        "kind": "local_integration",
+        "mode": "customer_controlled",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-171",
+        "requirement_ids": [
+          "OT-P25-C01-AC01",
+          "OT-P25-C01-AC03"
+        ],
+        "test_id": "services/control-api/tests/organizations/test_creation_saga.py::test_limit_binds_verified_issuer_subject_not_session_or_display_name[customer_controlled-same_person]",
+        "kind": "local_integration",
+        "mode": "customer_controlled",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-171",
+        "requirement_ids": [
+          "OT-P25-C01-AC01",
+          "OT-P25-C01-AC03"
+        ],
+        "test_id": "services/control-api/tests/organizations/test_creation_saga.py::test_limit_binds_verified_issuer_subject_not_session_or_display_name[opentour_managed-another_subject]",
+        "kind": "local_integration",
+        "mode": "opentour_managed",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-171",
+        "requirement_ids": [
+          "OT-P25-C01-AC01",
+          "OT-P25-C01-AC03"
+        ],
+        "test_id": "services/control-api/tests/organizations/test_creation_saga.py::test_limit_binds_verified_issuer_subject_not_session_or_display_name[opentour_managed-another_issuer]",
+        "kind": "local_integration",
+        "mode": "opentour_managed",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-171",
+        "requirement_ids": [
+          "OT-P25-C01-AC01",
+          "OT-P25-C01-AC03"
+        ],
+        "test_id": "services/control-api/tests/organizations/test_creation_saga.py::test_limit_binds_verified_issuer_subject_not_session_or_display_name[opentour_managed-same_person]",
+        "kind": "local_integration",
+        "mode": "opentour_managed",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-171",
+        "requirement_ids": [
+          "OT-P25-C01-AC01"
+        ],
+        "test_id": "services/control-api/tests/organizations/test_creation_saga.py::test_twenty_distinct_concurrent_arrivals_across_sessions_admit_exactly_five[customer_controlled]",
+        "kind": "local_integration",
+        "mode": "customer_controlled",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-171",
+        "requirement_ids": [
+          "OT-P25-C01-AC01"
+        ],
+        "test_id": "services/control-api/tests/organizations/test_creation_saga.py::test_twenty_distinct_concurrent_arrivals_across_sessions_admit_exactly_five[opentour_managed]",
+        "kind": "local_integration",
+        "mode": "opentour_managed",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-171",
+        "requirement_ids": [
+          "OT-P25-C01-AC01",
+          "OT-P25-C01-AC03"
+        ],
+        "test_id": "services/control-api/tests/organizations/test_creation_saga.py::test_pre_admission_terms_identity_and_configuration_refusals_consume_no_slots[customer_controlled]",
+        "kind": "local_integration",
+        "mode": "customer_controlled",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-171",
+        "requirement_ids": [
+          "OT-P25-C01-AC01",
+          "OT-P25-C01-AC03"
+        ],
+        "test_id": "services/control-api/tests/organizations/test_creation_saga.py::test_pre_admission_terms_identity_and_configuration_refusals_consume_no_slots[opentour_managed]",
+        "kind": "local_integration",
+        "mode": "opentour_managed",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-171",
+        "requirement_ids": [
+          "OT-P25-C01-AC01",
+          "OT-P25-C01-AC02"
+        ],
+        "test_id": "services/control-api/tests/organizations/test_creation_saga.py::test_rolling_window_is_sampled_after_actual_terms_lock_wait[customer_controlled]",
+        "kind": "local_integration",
+        "mode": "customer_controlled",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-171",
+        "requirement_ids": [
+          "OT-P25-C01-AC01",
+          "OT-P25-C01-AC02"
+        ],
+        "test_id": "services/control-api/tests/organizations/test_creation_saga.py::test_rolling_window_is_sampled_after_actual_terms_lock_wait[opentour_managed]",
+        "kind": "local_integration",
+        "mode": "opentour_managed",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-171",
+        "requirement_ids": [
+          "OT-P25-C01-AC01",
+          "OT-P25-C01-AC02"
+        ],
+        "test_id": "services/control-api/tests/organizations/test_creation_saga.py::test_clock_rollback_after_terms_wait_cannot_hide_the_fifth_admission[customer_controlled]",
+        "kind": "local_integration",
+        "mode": "customer_controlled",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-171",
+        "requirement_ids": [
+          "OT-P25-C01-AC01",
+          "OT-P25-C01-AC02"
+        ],
+        "test_id": "services/control-api/tests/organizations/test_creation_saga.py::test_clock_rollback_after_terms_wait_cannot_hide_the_fifth_admission[opentour_managed]",
+        "kind": "local_integration",
+        "mode": "opentour_managed",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-171",
+        "requirement_ids": [
+          "OT-P25-C01-AC01",
+          "OT-P25-C01-AC02"
+        ],
+        "test_id": "services/control-api/tests/organizations/test_creation_saga.py::test_backward_clock_cannot_reopen_rolling_capacity[customer_controlled]",
+        "kind": "local_integration",
+        "mode": "customer_controlled",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-171",
+        "requirement_ids": [
+          "OT-P25-C01-AC01",
+          "OT-P25-C01-AC02"
+        ],
+        "test_id": "services/control-api/tests/organizations/test_creation_saga.py::test_backward_clock_cannot_reopen_rolling_capacity[opentour_managed]",
+        "kind": "local_integration",
+        "mode": "opentour_managed",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-171",
+        "requirement_ids": [
+          "OT-P25-C01-AC01",
+          "OT-P25-C01-AC03"
+        ],
+        "test_id": "services/control-api/tests/organizations/test_creation_saga.py::test_request_role_cannot_rewrite_original_admission_time[customer_controlled-organizations]",
+        "kind": "local_integration",
+        "mode": "customer_controlled",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-171",
+        "requirement_ids": [
+          "OT-P25-C01-AC01",
+          "OT-P25-C01-AC03"
+        ],
+        "test_id": "services/control-api/tests/organizations/test_creation_saga.py::test_request_role_cannot_rewrite_original_admission_time[customer_controlled-provisioning_operations]",
+        "kind": "local_integration",
+        "mode": "customer_controlled",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-171",
+        "requirement_ids": [
+          "OT-P25-C01-AC01",
+          "OT-P25-C01-AC03"
+        ],
+        "test_id": "services/control-api/tests/organizations/test_creation_saga.py::test_request_role_cannot_rewrite_original_admission_time[opentour_managed-organizations]",
+        "kind": "local_integration",
+        "mode": "opentour_managed",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-171",
+        "requirement_ids": [
+          "OT-P25-C01-AC01",
+          "OT-P25-C01-AC03"
+        ],
+        "test_id": "services/control-api/tests/organizations/test_creation_saga.py::test_request_role_cannot_rewrite_original_admission_time[opentour_managed-provisioning_operations]",
+        "kind": "local_integration",
+        "mode": "opentour_managed",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
       }
     ]
   },
-  "source_projection_sha256": "8bd119eb3e7befe1df4c866f4d6113964aa2032ded3f75f8fb8ffe24de6b5e48",
+  "source_projection_sha256": "6e63baa5e4adcb17480c52c13096fafc608f9a64ab72c620fb86561fd3d8e45d",
   "source_bindings": {
     "feature_register_sha256": "f6d1061a103a028b6309928a1c6d96b1c58cb969793a2b9e8a4e36dd50b4602f",
     "figma_snapshot_sha256": "38c3537dd10719a1978873137d34086fa51e284456ed7c5d46d36e77815367a7",
     "figma_revision": "approved-ui-design-index.v4",
-    "native_projection": "Current native technical IDs, relationships and acceptance-text digests, with reviewed C05 implementation path/test refinements. Excludes full bodies and attachment transport. Original source hashes are provenance, not a claim that omitted source bytes are locally present. OPE-213 native admission and reviewed implementation refresh adds its12 owned paths,3 named native test paths and94 exact positive/adverse cases; the updated technical-capture digest binds current native UTF-8 description with terminal newlines excluded. Full native bodies remain outside this public projection. Provider/customer evidence stays NOT_RUN. OPE-142 current native admission and reviewed implementation refresh adds22 owned paths,6 actual named test paths and158 exact positive/adverse cases (140 simulated,18 local PostgreSQL); the technical-capture digest binds current native UTF-8 description with terminal newlines excluded. Provider/ISO and future consumer integration acceptance stays NOT_RUN. OPE-127 current reviewed browser comparison policy and implementation add 49 exact observed-case declarations (39 browser, 10 visual-policy units), all simulated, with complete file/project/native case IDs and the actual outer bootstrap-command-contract/v1 fixture identity. Inner simulated-browser-harness metadata and raw PNG/numeric comparison evidence remain retained. Native UTF-8 capture excludes terminal newlines. Provider/customer/product acceptance stays NOT_RUN. OPE-142 current organization-namespace mapping and shared observation/activation-lock clarification refreshes the exact inventory to194 cases (160 simulated,34 actual local PostgreSQL) and uses the observed public bootstrap-command-contract/v1 fixture identity; earlier case IDs and historical source-bound receipts remain preserved. Imported owner receipts establish mapping only; eligible records require new supervised execution. Real provider/ISO/171/172 consumer gates are not upgraded. OPE-217 binds153 exact component cases (141 simulated,12 actual local PostgreSQL using a test SQL consumer); AC07 has no qualifying provider binding and all full acceptance remains NOT_RUN. Its technical_capture_sha256 uses canonical JSON (sorted keys,compact separators,ensure_ascii=true) over {issue_description,implementation_profile:{id,content}}, with each UTF-8 native text excluding terminal newlines. Profile document d07264ac-d46a-4892-b05a-6ff73cc7a2bd updated2026-11-16T01:37:13.818Z has content SHA256 d456b0264d792a98eb00fba04c3392363e7772ceef6b20185ce03a881b431017. This binds the current closed receipt/replay profile; no143 production SQL,216 generation/cell-effect or undefinedDEL05 gate is promoted. OPE-171 current native issue and mandatory organization setup profile add13 owned paths,4 actual named test paths and206 exact case declarations (142 simulated,64 actual local PostgreSQL,32 per mode), bound to the outer bootstrap-command-contract/v1 fixture identity. Technical capture is SHA256 of canonical JSON (sorted keys, compact separators, ensure_ascii=true) over {issue_description,implementation_profile:{id,content}}, with terminal newlines excluded from both native texts. Mandatory profile4553dd80-66de-48a5-8c4a-5c3979bb9a1d revision 2026-11-16T01:51:19.425Z, UTF-8 content SHA256 ef770be09125c191d648574a995da64ab8cb578c83c532442943c41a564233ae. Fixtures25.1-25.4 retain component scope; the fifth/sixth admission-count policy remains NOT_RUN. Generated WorkOS observations and injected429 transport never establish real provider or rate-policy acceptance. Actual published terms,143/172/173/297 consumers,G1/ISO01/AC25-01 and full product acceptance remain NOT_RUN. Imported receipts establish mapping only; eligible records require supervised current-source execution. OPE-253 current native issue revision2026-11-16T03:00:30.406Z and mandatory presentation profilec4865bd5-0fce-4468-b6ea-05003ebfa5a2 revision2026-11-16T02:23:29.803Z admit35 owned presentation paths and60 exact case declarations (24 Vitest component/metadata cases and36 actual browser cases,18 per mode), all simulated and bound to outer bootstrap-command-contract/v1. The inner browser presentation-foundation-v1 metadata retains current native968ff7c59d40afa568e5dfd0ea2488a8906531b38bb3daa00b66c58d8a7f8264, fonts, Figma focus revision, exact-rem tokens,16 approved darwin baselines and zero tolerance; it does not replace the outer fixture identity. Technical capture is SHA256 of canonical JSON (sorted keys, compact separators, ensure_ascii=true) over {issue_description,implementation_profile:{id,content}}, excluding terminal newlines from both texts; issue content SHA2566a0b7ab8300e2e4d84a40d4a417f4b27cf6160bb37595604a31489977f6ba079, profile content SHA256b6c396ed2f3a038c6229b597769ebce03877c7a2ef7ecf22a479eaee6bb390f3. All10 full native acceptance criteria remain NOT_RUN: bindings cover only tokens,Button,labelled Badge,controlled Tabs and isolated gallery components. AC03 is local activation suppression only; AC04 has no direct assertion and remains unmapped. AC05 is escaped text/isolated no-egress only, not cell/BFF failure proof; AC06 excludes manual supported screen-reader and later primitives; AC09 is generated mode presentation, not delegated operator trust. Typed API/current authority/revision/recovery consumers202/143/146/151,unimplemented named primitives and provider/customer gates remain open. Three private adverse lifecycle probes are separate harness qualification and add no public case. Imported receipts prove mapping only; eligible records require supervised current-source execution. Existing C06 browser runner/config remain with their coordinated owner and current bounded delegation; no shared ownership is reassigned by this metadata."
+    "native_projection": "Current native technical IDs, relationships and acceptance-text digests, with reviewed C05 implementation path/test refinements. Excludes full bodies and attachment transport. Original source hashes are provenance, not a claim that omitted source bytes are locally present. OPE-213 native admission and reviewed implementation refresh adds its12 owned paths,3 named native test paths and94 exact positive/adverse cases; the updated technical-capture digest binds current native UTF-8 description with terminal newlines excluded. Full native bodies remain outside this public projection. Provider/customer evidence stays NOT_RUN. OPE-142 current native admission and reviewed implementation refresh adds22 owned paths,6 actual named test paths and158 exact positive/adverse cases (140 simulated,18 local PostgreSQL); the technical-capture digest binds current native UTF-8 description with terminal newlines excluded. Provider/ISO and future consumer integration acceptance stays NOT_RUN. OPE-127 current reviewed browser comparison policy and implementation add 49 exact observed-case declarations (39 browser, 10 visual-policy units), all simulated, with complete file/project/native case IDs and the actual outer bootstrap-command-contract/v1 fixture identity. Inner simulated-browser-harness metadata and raw PNG/numeric comparison evidence remain retained. Native UTF-8 capture excludes terminal newlines. Provider/customer/product acceptance stays NOT_RUN. OPE-142 current organization-namespace mapping and shared observation/activation-lock clarification refreshes the exact inventory to194 cases (160 simulated,34 actual local PostgreSQL) and uses the observed public bootstrap-command-contract/v1 fixture identity; earlier case IDs and historical source-bound receipts remain preserved. Imported owner receipts establish mapping only; eligible records require new supervised execution. Real provider/ISO/171/172 consumer gates are not upgraded. OPE-217 binds153 exact component cases (141 simulated,12 actual local PostgreSQL using a test SQL consumer); AC07 has no qualifying provider binding and all full acceptance remains NOT_RUN. Its technical_capture_sha256 uses canonical JSON (sorted keys,compact separators,ensure_ascii=true) over {issue_description,implementation_profile:{id,content}}, with each UTF-8 native text excluding terminal newlines. Profile document d07264ac-d46a-4892-b05a-6ff73cc7a2bd updated2026-11-16T01:37:13.818Z has content SHA256 d456b0264d792a98eb00fba04c3392363e7772ceef6b20185ce03a881b431017. This binds the current closed receipt/replay profile; no143 production SQL,216 generation/cell-effect or undefinedDEL05 gate is promoted. OPE-171 current native issue and mandatory organization setup profile add13 owned paths,4 actual named test paths and206 exact case declarations (142 simulated,64 actual local PostgreSQL,32 per mode), bound to the outer bootstrap-command-contract/v1 fixture identity. Technical capture is SHA256 of canonical JSON (sorted keys, compact separators, ensure_ascii=true) over {issue_description,implementation_profile:{id,content}}, with terminal newlines excluded from both native texts. Mandatory profile4553dd80-66de-48a5-8c4a-5c3979bb9a1d revision 2026-11-16T01:51:19.425Z, UTF-8 content SHA256 ef770be09125c191d648574a995da64ab8cb578c83c532442943c41a564233ae. Historical206-case capture: fixtures25.1-25.4 retained component scope and the then-unresolved fifth/sixth admission-count policy was NOT_RUN; the source-bound current38-case expansion below supersedes that missing-policy statement only. Generated WorkOS observations and injected429 transport never establish real provider or rate-policy acceptance. Actual published terms,143/172/173/297 consumers,G1/ISO01/AC25-01 and full product acceptance remain NOT_RUN. Imported receipts establish mapping only; eligible records require supervised current-source execution. OPE-253 current native issue revision2026-11-16T03:00:30.406Z and mandatory presentation profilec4865bd5-0fce-4468-b6ea-05003ebfa5a2 revision2026-11-16T02:23:29.803Z admit35 owned presentation paths and60 exact case declarations (24 Vitest component/metadata cases and36 actual browser cases,18 per mode), all simulated and bound to outer bootstrap-command-contract/v1. The inner browser presentation-foundation-v1 metadata retains current native968ff7c59d40afa568e5dfd0ea2488a8906531b38bb3daa00b66c58d8a7f8264, fonts, Figma focus revision, exact-rem tokens,16 approved darwin baselines and zero tolerance; it does not replace the outer fixture identity. Technical capture is SHA256 of canonical JSON (sorted keys, compact separators, ensure_ascii=true) over {issue_description,implementation_profile:{id,content}}, excluding terminal newlines from both texts; issue content SHA2566a0b7ab8300e2e4d84a40d4a417f4b27cf6160bb37595604a31489977f6ba079, profile content SHA256b6c396ed2f3a038c6229b597769ebce03877c7a2ef7ecf22a479eaee6bb390f3. All10 full native acceptance criteria remain NOT_RUN: bindings cover only tokens,Button,labelled Badge,controlled Tabs and isolated gallery components. AC03 is local activation suppression only; AC04 has no direct assertion and remains unmapped. AC05 is escaped text/isolated no-egress only, not cell/BFF failure proof; AC06 excludes manual supported screen-reader and later primitives; AC09 is generated mode presentation, not delegated operator trust. Typed API/current authority/revision/recovery consumers202/143/146/151,unimplemented named primitives and provider/customer gates remain open. Three private adverse lifecycle probes are separate harness qualification and add no public case. Imported receipts prove mapping only; eligible records require supervised current-source execution. Existing C06 browser runner/config remain with their coordinated owner and current bounded delegation; no shared ownership is reassigned by this metadata. OPE-171 current native issue revision2026-11-16T03:28:55.581Z and mandatory organization profile4553dd80-66de-48a5-8c4a-5c3979bb9a1d revision2026-11-16T03:07:49.174Z bind the approved five NEW durably admitted attempts per rolling24hours regardless of outcome; exact idempotent replay and actions on existing operations consume no slot. The two reviewed production/test blobs at e76366b721a3cfb3977aeef14516d651606cfdd2 add38 exact actual-PostgreSQL case declarations (19 per mode), preserving the original206 IDs and all historical source-bound receipts. Current171inventory is244:142 simulated units plus102 local PostgreSQL cases (51 per mode), with outer bootstrap-command-contract/v1. Fixture25.3 policy now has actual scoped local fifth/sixth,replay,outcome,rolling-boundary,per-person/concurrent and post-lock clock evidence; it does not prove actualWorkOS,production terms,grants or downstream143/172/173/297/G1/ISO integration. Current native143 creator-policy link supplies an installer contract,not active grants from171 owner membership. Technical capture uses the same canonical JSON recipe over current issue_description and implementation_profile id/content with terminal newlines excluded; current digest ac3a2df31d76e4f45d079bf09a40aed98053cfcad4449ecc2031b4701c8d87b7. All three full native171ACs remain NOT_RUN. Prior206 historical evidence is unchanged and cannot be relabelled current; imported102-case authoredreceipt/independentcollection establish mapping/source proof only,while current eligible EvidenceStore records require supervised final-source execution."
   },
   "mappings": [
     {
@@ -43069,12 +43517,50 @@
         "services/control-api/tests/organizations/test_creation_saga.py::test_waited_terms_admission_uses_post_lock_time_for_policy_and_acceptance[customer_controlled]",
         "services/control-api/tests/organizations/test_creation_saga.py::test_waited_terms_admission_uses_post_lock_time_for_policy_and_acceptance[opentour_managed]",
         "services/control-api/tests/organizations/test_creation_saga.py::test_two_verified_buyers_with_same_display_name_get_independent_owned_organizations[customer_controlled]",
-        "services/control-api/tests/organizations/test_creation_saga.py::test_two_verified_buyers_with_same_display_name_get_independent_owned_organizations[opentour_managed]"
+        "services/control-api/tests/organizations/test_creation_saga.py::test_two_verified_buyers_with_same_display_name_get_independent_owned_organizations[opentour_managed]",
+        "services/control-api/tests/organizations/test_creation_saga.py::test_default_policy_admits_five_and_refuses_sixth_before_durable_effect[customer_controlled]",
+        "services/control-api/tests/organizations/test_creation_saga.py::test_default_policy_admits_five_and_refuses_sixth_before_durable_effect[opentour_managed]",
+        "services/control-api/tests/organizations/test_creation_saga.py::test_exact_replay_at_limit_is_free_and_changed_body_stays_conflict[customer_controlled]",
+        "services/control-api/tests/organizations/test_creation_saga.py::test_exact_replay_at_limit_is_free_and_changed_body_stays_conflict[opentour_managed]",
+        "services/control-api/tests/organizations/test_creation_saga.py::test_completed_cancelled_failed_and_unknown_attempts_keep_their_slots[customer_controlled-active]",
+        "services/control-api/tests/organizations/test_creation_saga.py::test_completed_cancelled_failed_and_unknown_attempts_keep_their_slots[customer_controlled-cancelled]",
+        "services/control-api/tests/organizations/test_creation_saga.py::test_completed_cancelled_failed_and_unknown_attempts_keep_their_slots[customer_controlled-action_required]",
+        "services/control-api/tests/organizations/test_creation_saga.py::test_completed_cancelled_failed_and_unknown_attempts_keep_their_slots[customer_controlled-provider_outcome_unknown]",
+        "services/control-api/tests/organizations/test_creation_saga.py::test_completed_cancelled_failed_and_unknown_attempts_keep_their_slots[opentour_managed-active]",
+        "services/control-api/tests/organizations/test_creation_saga.py::test_completed_cancelled_failed_and_unknown_attempts_keep_their_slots[opentour_managed-cancelled]",
+        "services/control-api/tests/organizations/test_creation_saga.py::test_completed_cancelled_failed_and_unknown_attempts_keep_their_slots[opentour_managed-action_required]",
+        "services/control-api/tests/organizations/test_creation_saga.py::test_completed_cancelled_failed_and_unknown_attempts_keep_their_slots[opentour_managed-provider_outcome_unknown]",
+        "services/control-api/tests/organizations/test_creation_saga.py::test_retry_reconciliation_and_cancellation_do_not_create_another_attempt[customer_controlled]",
+        "services/control-api/tests/organizations/test_creation_saga.py::test_retry_reconciliation_and_cancellation_do_not_create_another_attempt[opentour_managed]",
+        "services/control-api/tests/organizations/test_creation_saga.py::test_rolling_window_excludes_exact_24_hours_but_counts_one_microsecond_inside[customer_controlled]",
+        "services/control-api/tests/organizations/test_creation_saga.py::test_rolling_window_excludes_exact_24_hours_but_counts_one_microsecond_inside[opentour_managed]",
+        "services/control-api/tests/organizations/test_creation_saga.py::test_existing_over_limit_history_waits_for_fifth_newest_admission[customer_controlled]",
+        "services/control-api/tests/organizations/test_creation_saga.py::test_existing_over_limit_history_waits_for_fifth_newest_admission[opentour_managed]",
+        "services/control-api/tests/organizations/test_creation_saga.py::test_limit_binds_verified_issuer_subject_not_session_or_display_name[customer_controlled-another_subject]",
+        "services/control-api/tests/organizations/test_creation_saga.py::test_limit_binds_verified_issuer_subject_not_session_or_display_name[customer_controlled-another_issuer]",
+        "services/control-api/tests/organizations/test_creation_saga.py::test_limit_binds_verified_issuer_subject_not_session_or_display_name[customer_controlled-same_person]",
+        "services/control-api/tests/organizations/test_creation_saga.py::test_limit_binds_verified_issuer_subject_not_session_or_display_name[opentour_managed-another_subject]",
+        "services/control-api/tests/organizations/test_creation_saga.py::test_limit_binds_verified_issuer_subject_not_session_or_display_name[opentour_managed-another_issuer]",
+        "services/control-api/tests/organizations/test_creation_saga.py::test_limit_binds_verified_issuer_subject_not_session_or_display_name[opentour_managed-same_person]",
+        "services/control-api/tests/organizations/test_creation_saga.py::test_twenty_distinct_concurrent_arrivals_across_sessions_admit_exactly_five[customer_controlled]",
+        "services/control-api/tests/organizations/test_creation_saga.py::test_twenty_distinct_concurrent_arrivals_across_sessions_admit_exactly_five[opentour_managed]",
+        "services/control-api/tests/organizations/test_creation_saga.py::test_pre_admission_terms_identity_and_configuration_refusals_consume_no_slots[customer_controlled]",
+        "services/control-api/tests/organizations/test_creation_saga.py::test_pre_admission_terms_identity_and_configuration_refusals_consume_no_slots[opentour_managed]",
+        "services/control-api/tests/organizations/test_creation_saga.py::test_rolling_window_is_sampled_after_actual_terms_lock_wait[customer_controlled]",
+        "services/control-api/tests/organizations/test_creation_saga.py::test_rolling_window_is_sampled_after_actual_terms_lock_wait[opentour_managed]",
+        "services/control-api/tests/organizations/test_creation_saga.py::test_clock_rollback_after_terms_wait_cannot_hide_the_fifth_admission[customer_controlled]",
+        "services/control-api/tests/organizations/test_creation_saga.py::test_clock_rollback_after_terms_wait_cannot_hide_the_fifth_admission[opentour_managed]",
+        "services/control-api/tests/organizations/test_creation_saga.py::test_backward_clock_cannot_reopen_rolling_capacity[customer_controlled]",
+        "services/control-api/tests/organizations/test_creation_saga.py::test_backward_clock_cannot_reopen_rolling_capacity[opentour_managed]",
+        "services/control-api/tests/organizations/test_creation_saga.py::test_request_role_cannot_rewrite_original_admission_time[customer_controlled-organizations]",
+        "services/control-api/tests/organizations/test_creation_saga.py::test_request_role_cannot_rewrite_original_admission_time[customer_controlled-provisioning_operations]",
+        "services/control-api/tests/organizations/test_creation_saga.py::test_request_role_cannot_rewrite_original_admission_time[opentour_managed-organizations]",
+        "services/control-api/tests/organizations/test_creation_saga.py::test_request_role_cannot_rewrite_original_admission_time[opentour_managed-provisioning_operations]"
       ],
       "real_evidence_requirements": [
         {
           "requirement_id": "OT-P25-C01-AC01",
-          "name": "Complete native organization creation: observed component cases plus required unbound fixture25.3 fifth/sixth rolling24h admission-count policy, actual WorkOS and G1/ISO01 consumer qualification; overall NOT_RUN.",
+          "name": "Complete native organization creation: observed component cases including fixture25.3 five new durable admissions per rolling24h and replay-free policy; actual WorkOS and G1/ISO01 consumer qualification remain NOT_RUN.",
           "status": "NOT_RUN"
         },
         {
@@ -66126,6 +66612,454 @@
       "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1",
       "issue_key": "OPE-253"
+    },
+    {
+      "issue_key": "OPE-171",
+      "requirement_ids": [
+        "OT-P25-C01-AC01"
+      ],
+      "test_id": "services/control-api/tests/organizations/test_creation_saga.py::test_default_policy_admits_five_and_refuses_sixth_before_durable_effect[customer_controlled]",
+      "kind": "local_integration",
+      "mode": "customer_controlled",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-171",
+      "requirement_ids": [
+        "OT-P25-C01-AC01"
+      ],
+      "test_id": "services/control-api/tests/organizations/test_creation_saga.py::test_default_policy_admits_five_and_refuses_sixth_before_durable_effect[opentour_managed]",
+      "kind": "local_integration",
+      "mode": "opentour_managed",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-171",
+      "requirement_ids": [
+        "OT-P25-C01-AC01",
+        "OT-P25-C01-AC02"
+      ],
+      "test_id": "services/control-api/tests/organizations/test_creation_saga.py::test_exact_replay_at_limit_is_free_and_changed_body_stays_conflict[customer_controlled]",
+      "kind": "local_integration",
+      "mode": "customer_controlled",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-171",
+      "requirement_ids": [
+        "OT-P25-C01-AC01",
+        "OT-P25-C01-AC02"
+      ],
+      "test_id": "services/control-api/tests/organizations/test_creation_saga.py::test_exact_replay_at_limit_is_free_and_changed_body_stays_conflict[opentour_managed]",
+      "kind": "local_integration",
+      "mode": "opentour_managed",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-171",
+      "requirement_ids": [
+        "OT-P25-C01-AC01",
+        "OT-P25-C01-AC02"
+      ],
+      "test_id": "services/control-api/tests/organizations/test_creation_saga.py::test_completed_cancelled_failed_and_unknown_attempts_keep_their_slots[customer_controlled-active]",
+      "kind": "local_integration",
+      "mode": "customer_controlled",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-171",
+      "requirement_ids": [
+        "OT-P25-C01-AC01",
+        "OT-P25-C01-AC02"
+      ],
+      "test_id": "services/control-api/tests/organizations/test_creation_saga.py::test_completed_cancelled_failed_and_unknown_attempts_keep_their_slots[customer_controlled-cancelled]",
+      "kind": "local_integration",
+      "mode": "customer_controlled",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-171",
+      "requirement_ids": [
+        "OT-P25-C01-AC01",
+        "OT-P25-C01-AC02"
+      ],
+      "test_id": "services/control-api/tests/organizations/test_creation_saga.py::test_completed_cancelled_failed_and_unknown_attempts_keep_their_slots[customer_controlled-action_required]",
+      "kind": "local_integration",
+      "mode": "customer_controlled",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-171",
+      "requirement_ids": [
+        "OT-P25-C01-AC01",
+        "OT-P25-C01-AC02"
+      ],
+      "test_id": "services/control-api/tests/organizations/test_creation_saga.py::test_completed_cancelled_failed_and_unknown_attempts_keep_their_slots[customer_controlled-provider_outcome_unknown]",
+      "kind": "local_integration",
+      "mode": "customer_controlled",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-171",
+      "requirement_ids": [
+        "OT-P25-C01-AC01",
+        "OT-P25-C01-AC02"
+      ],
+      "test_id": "services/control-api/tests/organizations/test_creation_saga.py::test_completed_cancelled_failed_and_unknown_attempts_keep_their_slots[opentour_managed-active]",
+      "kind": "local_integration",
+      "mode": "opentour_managed",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-171",
+      "requirement_ids": [
+        "OT-P25-C01-AC01",
+        "OT-P25-C01-AC02"
+      ],
+      "test_id": "services/control-api/tests/organizations/test_creation_saga.py::test_completed_cancelled_failed_and_unknown_attempts_keep_their_slots[opentour_managed-cancelled]",
+      "kind": "local_integration",
+      "mode": "opentour_managed",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-171",
+      "requirement_ids": [
+        "OT-P25-C01-AC01",
+        "OT-P25-C01-AC02"
+      ],
+      "test_id": "services/control-api/tests/organizations/test_creation_saga.py::test_completed_cancelled_failed_and_unknown_attempts_keep_their_slots[opentour_managed-action_required]",
+      "kind": "local_integration",
+      "mode": "opentour_managed",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-171",
+      "requirement_ids": [
+        "OT-P25-C01-AC01",
+        "OT-P25-C01-AC02"
+      ],
+      "test_id": "services/control-api/tests/organizations/test_creation_saga.py::test_completed_cancelled_failed_and_unknown_attempts_keep_their_slots[opentour_managed-provider_outcome_unknown]",
+      "kind": "local_integration",
+      "mode": "opentour_managed",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-171",
+      "requirement_ids": [
+        "OT-P25-C01-AC01",
+        "OT-P25-C01-AC02"
+      ],
+      "test_id": "services/control-api/tests/organizations/test_creation_saga.py::test_retry_reconciliation_and_cancellation_do_not_create_another_attempt[customer_controlled]",
+      "kind": "local_integration",
+      "mode": "customer_controlled",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-171",
+      "requirement_ids": [
+        "OT-P25-C01-AC01",
+        "OT-P25-C01-AC02"
+      ],
+      "test_id": "services/control-api/tests/organizations/test_creation_saga.py::test_retry_reconciliation_and_cancellation_do_not_create_another_attempt[opentour_managed]",
+      "kind": "local_integration",
+      "mode": "opentour_managed",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-171",
+      "requirement_ids": [
+        "OT-P25-C01-AC01"
+      ],
+      "test_id": "services/control-api/tests/organizations/test_creation_saga.py::test_rolling_window_excludes_exact_24_hours_but_counts_one_microsecond_inside[customer_controlled]",
+      "kind": "local_integration",
+      "mode": "customer_controlled",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-171",
+      "requirement_ids": [
+        "OT-P25-C01-AC01"
+      ],
+      "test_id": "services/control-api/tests/organizations/test_creation_saga.py::test_rolling_window_excludes_exact_24_hours_but_counts_one_microsecond_inside[opentour_managed]",
+      "kind": "local_integration",
+      "mode": "opentour_managed",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-171",
+      "requirement_ids": [
+        "OT-P25-C01-AC01"
+      ],
+      "test_id": "services/control-api/tests/organizations/test_creation_saga.py::test_existing_over_limit_history_waits_for_fifth_newest_admission[customer_controlled]",
+      "kind": "local_integration",
+      "mode": "customer_controlled",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-171",
+      "requirement_ids": [
+        "OT-P25-C01-AC01"
+      ],
+      "test_id": "services/control-api/tests/organizations/test_creation_saga.py::test_existing_over_limit_history_waits_for_fifth_newest_admission[opentour_managed]",
+      "kind": "local_integration",
+      "mode": "opentour_managed",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-171",
+      "requirement_ids": [
+        "OT-P25-C01-AC01",
+        "OT-P25-C01-AC03"
+      ],
+      "test_id": "services/control-api/tests/organizations/test_creation_saga.py::test_limit_binds_verified_issuer_subject_not_session_or_display_name[customer_controlled-another_subject]",
+      "kind": "local_integration",
+      "mode": "customer_controlled",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-171",
+      "requirement_ids": [
+        "OT-P25-C01-AC01",
+        "OT-P25-C01-AC03"
+      ],
+      "test_id": "services/control-api/tests/organizations/test_creation_saga.py::test_limit_binds_verified_issuer_subject_not_session_or_display_name[customer_controlled-another_issuer]",
+      "kind": "local_integration",
+      "mode": "customer_controlled",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-171",
+      "requirement_ids": [
+        "OT-P25-C01-AC01",
+        "OT-P25-C01-AC03"
+      ],
+      "test_id": "services/control-api/tests/organizations/test_creation_saga.py::test_limit_binds_verified_issuer_subject_not_session_or_display_name[customer_controlled-same_person]",
+      "kind": "local_integration",
+      "mode": "customer_controlled",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-171",
+      "requirement_ids": [
+        "OT-P25-C01-AC01",
+        "OT-P25-C01-AC03"
+      ],
+      "test_id": "services/control-api/tests/organizations/test_creation_saga.py::test_limit_binds_verified_issuer_subject_not_session_or_display_name[opentour_managed-another_subject]",
+      "kind": "local_integration",
+      "mode": "opentour_managed",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-171",
+      "requirement_ids": [
+        "OT-P25-C01-AC01",
+        "OT-P25-C01-AC03"
+      ],
+      "test_id": "services/control-api/tests/organizations/test_creation_saga.py::test_limit_binds_verified_issuer_subject_not_session_or_display_name[opentour_managed-another_issuer]",
+      "kind": "local_integration",
+      "mode": "opentour_managed",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-171",
+      "requirement_ids": [
+        "OT-P25-C01-AC01",
+        "OT-P25-C01-AC03"
+      ],
+      "test_id": "services/control-api/tests/organizations/test_creation_saga.py::test_limit_binds_verified_issuer_subject_not_session_or_display_name[opentour_managed-same_person]",
+      "kind": "local_integration",
+      "mode": "opentour_managed",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-171",
+      "requirement_ids": [
+        "OT-P25-C01-AC01"
+      ],
+      "test_id": "services/control-api/tests/organizations/test_creation_saga.py::test_twenty_distinct_concurrent_arrivals_across_sessions_admit_exactly_five[customer_controlled]",
+      "kind": "local_integration",
+      "mode": "customer_controlled",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-171",
+      "requirement_ids": [
+        "OT-P25-C01-AC01"
+      ],
+      "test_id": "services/control-api/tests/organizations/test_creation_saga.py::test_twenty_distinct_concurrent_arrivals_across_sessions_admit_exactly_five[opentour_managed]",
+      "kind": "local_integration",
+      "mode": "opentour_managed",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-171",
+      "requirement_ids": [
+        "OT-P25-C01-AC01",
+        "OT-P25-C01-AC03"
+      ],
+      "test_id": "services/control-api/tests/organizations/test_creation_saga.py::test_pre_admission_terms_identity_and_configuration_refusals_consume_no_slots[customer_controlled]",
+      "kind": "local_integration",
+      "mode": "customer_controlled",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-171",
+      "requirement_ids": [
+        "OT-P25-C01-AC01",
+        "OT-P25-C01-AC03"
+      ],
+      "test_id": "services/control-api/tests/organizations/test_creation_saga.py::test_pre_admission_terms_identity_and_configuration_refusals_consume_no_slots[opentour_managed]",
+      "kind": "local_integration",
+      "mode": "opentour_managed",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-171",
+      "requirement_ids": [
+        "OT-P25-C01-AC01",
+        "OT-P25-C01-AC02"
+      ],
+      "test_id": "services/control-api/tests/organizations/test_creation_saga.py::test_rolling_window_is_sampled_after_actual_terms_lock_wait[customer_controlled]",
+      "kind": "local_integration",
+      "mode": "customer_controlled",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-171",
+      "requirement_ids": [
+        "OT-P25-C01-AC01",
+        "OT-P25-C01-AC02"
+      ],
+      "test_id": "services/control-api/tests/organizations/test_creation_saga.py::test_rolling_window_is_sampled_after_actual_terms_lock_wait[opentour_managed]",
+      "kind": "local_integration",
+      "mode": "opentour_managed",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-171",
+      "requirement_ids": [
+        "OT-P25-C01-AC01",
+        "OT-P25-C01-AC02"
+      ],
+      "test_id": "services/control-api/tests/organizations/test_creation_saga.py::test_clock_rollback_after_terms_wait_cannot_hide_the_fifth_admission[customer_controlled]",
+      "kind": "local_integration",
+      "mode": "customer_controlled",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-171",
+      "requirement_ids": [
+        "OT-P25-C01-AC01",
+        "OT-P25-C01-AC02"
+      ],
+      "test_id": "services/control-api/tests/organizations/test_creation_saga.py::test_clock_rollback_after_terms_wait_cannot_hide_the_fifth_admission[opentour_managed]",
+      "kind": "local_integration",
+      "mode": "opentour_managed",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-171",
+      "requirement_ids": [
+        "OT-P25-C01-AC01",
+        "OT-P25-C01-AC02"
+      ],
+      "test_id": "services/control-api/tests/organizations/test_creation_saga.py::test_backward_clock_cannot_reopen_rolling_capacity[customer_controlled]",
+      "kind": "local_integration",
+      "mode": "customer_controlled",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-171",
+      "requirement_ids": [
+        "OT-P25-C01-AC01",
+        "OT-P25-C01-AC02"
+      ],
+      "test_id": "services/control-api/tests/organizations/test_creation_saga.py::test_backward_clock_cannot_reopen_rolling_capacity[opentour_managed]",
+      "kind": "local_integration",
+      "mode": "opentour_managed",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-171",
+      "requirement_ids": [
+        "OT-P25-C01-AC01",
+        "OT-P25-C01-AC03"
+      ],
+      "test_id": "services/control-api/tests/organizations/test_creation_saga.py::test_request_role_cannot_rewrite_original_admission_time[customer_controlled-organizations]",
+      "kind": "local_integration",
+      "mode": "customer_controlled",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-171",
+      "requirement_ids": [
+        "OT-P25-C01-AC01",
+        "OT-P25-C01-AC03"
+      ],
+      "test_id": "services/control-api/tests/organizations/test_creation_saga.py::test_request_role_cannot_rewrite_original_admission_time[customer_controlled-provisioning_operations]",
+      "kind": "local_integration",
+      "mode": "customer_controlled",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-171",
+      "requirement_ids": [
+        "OT-P25-C01-AC01",
+        "OT-P25-C01-AC03"
+      ],
+      "test_id": "services/control-api/tests/organizations/test_creation_saga.py::test_request_role_cannot_rewrite_original_admission_time[opentour_managed-organizations]",
+      "kind": "local_integration",
+      "mode": "opentour_managed",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-171",
+      "requirement_ids": [
+        "OT-P25-C01-AC01",
+        "OT-P25-C01-AC03"
+      ],
+      "test_id": "services/control-api/tests/organizations/test_creation_saga.py::test_request_role_cannot_rewrite_original_admission_time[opentour_managed-provisioning_operations]",
+      "kind": "local_integration",
+      "mode": "opentour_managed",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
     }
   ]
 }
