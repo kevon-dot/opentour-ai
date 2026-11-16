@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
-from datetime import UTC, datetime
-from typing import Any, Literal, Protocol
+from datetime import UTC, datetime, timedelta
+from typing import Any, Final, Literal, Protocol
 from uuid import uuid4
 
 import psycopg
@@ -31,13 +32,37 @@ ConnectionFactory = Callable[[], Connection]
 
 
 class AdmissionPolicy(Protocol):
-    """Configured policy under the per-person lock; absence refuses new admissions.
-
-    Terminal-attempt counting is a pending product-policy decision. This interface
-    cannot default to an unlimited, partial, or caller-selected admission policy.
-    """
+    """Server-owned policy checked while holding the per-person transaction lock."""
 
     def check(self, connection: Connection, creator: Creator, now: datetime) -> None: ...
+
+
+class RollingOrganizationAdmissionPolicy:
+    """Five durable admissions per person in (now - 24 hours, now], in every state.
+
+    The original organization and provisioning operation are admitted atomically.
+    Use the existing creator/time index; never count mutable status, dedup actions,
+    display names, browser sessions, or provider calls as new attempts.
+    """
+
+    def check(self, connection: Connection, creator: Creator, now: datetime) -> None:
+        now = server_time(now)
+        window = timedelta(hours=24)
+        rows = connection.execute(
+            "SELECT created_at FROM opentour_tenants.organizations "
+            "WHERE creator_issuer=%s AND creator_subject=%s "
+            "AND created_at>%s AND created_at<=%s ORDER BY created_at DESC LIMIT 5",
+            (creator.issuer, creator.subject, now - window, now),
+        ).fetchall()
+        if len(rows) < 5:
+            return
+        # The fifth newest must leave the window before another attempt fits.
+        # This also safely handles history admitted before this policy existed.
+        retry_after = max(1, math.ceil((rows[-1]["created_at"] + window - now).total_seconds()))
+        raise SetupError("ADMISSION_LIMIT", 429, retryable=True, retry_after=retry_after)
+
+
+_DEFAULT_ADMISSION_POLICY: Final = RollingOrganizationAdmissionPolicy()
 
 
 class OrganizationRepository(Protocol):
@@ -88,7 +113,7 @@ class PostgresOrganizationRepository:
     def __init__(
         self,
         connect: ConnectionFactory,
-        policy: AdmissionPolicy | None,
+        policy: AdmissionPolicy | None = _DEFAULT_ADMISSION_POLICY,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
         self.connect, self.policy = connect, policy

@@ -25,6 +25,7 @@ from opentour_control.tenants.models import CreateRequest, Creator, SetupError, 
 from opentour_control.tenants.provider import (
     MembershipObservation,
     OrganizationObservation,
+    ProviderRejected,
     ProviderUnknown,
 )
 from opentour_control.tenants.repository import PostgresOrganizationRepository
@@ -80,7 +81,7 @@ def mode(request):
 
 
 class GeneratedAdmission:
-    """No rate-policy claim. Its unresolved production policy is separately blocked."""
+    """Test-only policy port for focused lock/transport cases, never the default."""
 
     def check(self, connection, creator, now):
         assert connection.execute("SELECT 1 AS ok").fetchone()["ok"] == 1
@@ -159,7 +160,7 @@ def durable(postgres, mode):
     def clock():
         return datetime.now(UTC)
 
-    repository = PostgresOrganizationRepository(connection, GeneratedAdmission(), clock)
+    repository = PostgresOrganizationRepository(connection, clock=clock)
     store = PostgresProvisioningStore(lambda: connection("c03_worker"), clock)
     provider = GeneratedProvider(clock)
     body = CreateRequest(
@@ -848,7 +849,7 @@ def test_committed_admission_acknowledgement_loss_replays_one_original_intent(du
         raise psycopg.OperationalError("Generated commit acknowledgement loss")
 
     repository = PostgresOrganizationRepository(
-        lose_commit_acknowledgement, GeneratedAdmission(), durable.clock
+        lose_commit_acknowledgement, clock=durable.clock
     )
     with pytest.raises(psycopg.OperationalError, match="Generated commit acknowledgement loss"):
         repository.create(
@@ -1040,3 +1041,333 @@ def test_two_verified_buyers_with_same_display_name_get_independent_owned_organi
     for creator, foreign in ((other, first), (durable.creator, second)):
         with pytest.raises(SetupError, match="RESOURCE_NOT_FOUND"):
             durable.repository.get(creator, foreign.operation_id)
+
+
+def admit_new(durable, *, creator=None, key=None, body=None):
+    return durable.repository.create(
+        creator or durable.creator,
+        body or durable.body,
+        key or key_digest(uuid4().hex),
+        "generated_rolling_admission",
+        durable.provider.environment,
+        durable.repository.clock(),
+    )
+
+
+def admission_counts(durable):
+    with durable.connection("c03_owner") as connection:
+        return tuple(
+            connection.execute(query, (durable.creator.issuer, durable.creator.subject)).fetchone()[
+                "n"
+            ]
+            for query in (
+                "SELECT count(*) AS n FROM opentour_tenants.organizations "
+                "WHERE creator_issuer=%s AND creator_subject=%s",
+                "SELECT count(*) AS n FROM opentour_tenants.provisioning_operations "
+                "WHERE creator_issuer=%s AND creator_subject=%s",
+                "SELECT count(*) AS n FROM opentour_tenants.request_dedup "
+                "WHERE issuer=%s AND subject=%s AND operation='organization.create'",
+                "SELECT count(*) AS n FROM opentour_tenants.outbox e "
+                "JOIN opentour_tenants.organizations o ON o.id=e.organization_id "
+                "WHERE o.creator_issuer=%s AND o.creator_subject=%s",
+            )
+        )
+
+
+def another_verified_session(durable, *, issuer=None, subject=None):
+    creator = Creator(
+        issuer or durable.creator.issuer,
+        subject or durable.creator.subject,
+        "session_" + uuid4().hex,
+        0,
+    )
+    now = durable.repository.clock()
+    with durable.connection("c03_owner") as connection:
+        connection.execute(
+            "INSERT INTO opentour_identity.sessions "
+            "(issuer,session_id,subject,created_at,expires_at,deny_until) "
+            "VALUES(%s,%s,%s,%s,%s,%s)",
+            (
+                creator.issuer,
+                creator.session_id,
+                creator.subject,
+                now - timedelta(seconds=1),
+                now + timedelta(hours=48),
+                now + timedelta(hours=48),
+            ),
+        )
+    return creator
+
+
+def controlled_admission_time(durable):
+    clock = [durable.clock()]
+    durable.repository.clock = lambda: clock[0]
+    with durable.connection("c03_owner") as connection:
+        connection.execute(
+            "UPDATE opentour_identity.sessions SET expires_at=%s,deny_until=%s "
+            "WHERE issuer=%s AND session_id=%s",
+            (
+                clock[0] + timedelta(hours=48),
+                clock[0] + timedelta(hours=48),
+                durable.creator.issuer,
+                durable.creator.session_id,
+            ),
+        )
+    return clock
+
+
+def test_default_policy_admits_five_and_refuses_sixth_before_durable_effect(durable):
+    receipts = [admit_new(durable) for _ in range(5)]
+    assert len({receipt.organization_id for receipt in receipts}) == 5
+    assert admission_counts(durable) == (5, 5, 5, 5)
+    with pytest.raises(SetupError, match="ADMISSION_LIMIT") as error:
+        admit_new(durable)
+    assert error.value.status == 429 and error.value.retryable
+    assert 1 <= error.value.retry_after <= 86_400
+    assert admission_counts(durable) == (5, 5, 5, 5)
+    assert durable.provider.creates == durable.provider.member_creates == 0
+
+
+def test_exact_replay_at_limit_is_free_and_changed_body_stays_conflict(durable):
+    first = admit_new(durable, key=durable.key)
+    for _ in range(4):
+        admit_new(durable)
+    assert admit_new(durable, key=durable.key) == first
+    changed = replace_body(durable.body, "Generated changed input")
+    with pytest.raises(SetupError, match="IDEMPOTENCY_CONFLICT") as error:
+        admit_new(durable, key=durable.key, body=changed)
+    assert error.value.status == 409
+    with pytest.raises(SetupError, match="ADMISSION_LIMIT"):
+        admit_new(durable)
+    assert admission_counts(durable) == (5, 5, 5, 5)
+
+
+@pytest.mark.parametrize(
+    "outcome", ["active", "cancelled", "action_required", "provider_outcome_unknown"]
+)
+def test_completed_cancelled_failed_and_unknown_attempts_keep_their_slots(durable, outcome):
+    first = admit_new(durable)
+    for _ in range(4):
+        admit_new(durable)
+    if outcome == "active":
+        durable.worker.step(first.operation_id)
+        assert durable.worker.step(first.operation_id).state == outcome
+    elif outcome == "cancelled":
+        value = durable.repository.change(
+            durable.creator,
+            first.operation_id,
+            "cancel",
+            "1",
+            key_digest(uuid4().hex),
+            "generated_cancel",
+            durable.clock(),
+        )
+        assert value.state == outcome
+    elif outcome == "action_required":
+
+        def rejected(operation):
+            raise ProviderRejected()
+
+        durable.provider.create_organization = rejected
+        assert durable.worker.step(first.operation_id).state == outcome
+    else:
+        durable.provider.lose_organization_response = True
+        assert durable.worker.step(first.operation_id).state == outcome
+    before = admission_counts(durable)
+    with pytest.raises(SetupError, match="ADMISSION_LIMIT"):
+        admit_new(durable)
+    assert admission_counts(durable) == before
+
+
+def test_retry_reconciliation_and_cancellation_do_not_create_another_attempt(durable):
+    first = admit_new(durable)
+    durable.provider.lose_organization_response = True
+    unknown = durable.worker.step(first.operation_id)
+    retried = durable.repository.change(
+        durable.creator,
+        first.operation_id,
+        "retry",
+        str(unknown.revision),
+        key_digest(uuid4().hex),
+        "generated_retry",
+        durable.clock(),
+    )
+    durable.repository.change(
+        durable.creator,
+        first.operation_id,
+        "cancel",
+        retried.revision,
+        key_digest(uuid4().hex),
+        "generated_cancel",
+        durable.clock(),
+    )
+    durable.worker.step(first.operation_id)
+    for _ in range(4):
+        admit_new(durable)
+    assert admission_counts(durable)[:3] == (5, 5, 5)
+    with pytest.raises(SetupError, match="ADMISSION_LIMIT"):
+        admit_new(durable)
+
+
+def test_rolling_window_excludes_exact_24_hours_but_counts_one_microsecond_inside(durable):
+    clock = controlled_admission_time(durable)
+    start = clock[0]
+    admit_new(durable)
+    clock[0] = start + timedelta(hours=1)
+    for _ in range(4):
+        admit_new(durable)
+    clock[0] = start + timedelta(hours=24) - timedelta(microseconds=1)
+    with pytest.raises(SetupError, match="ADMISSION_LIMIT") as error:
+        admit_new(durable)
+    assert error.value.retry_after == 1
+    clock[0] = start + timedelta(hours=24)
+    admit_new(durable)
+    with pytest.raises(SetupError, match="ADMISSION_LIMIT") as error:
+        admit_new(durable)
+    assert error.value.retry_after == 3600
+    assert admission_counts(durable) == (6, 6, 6, 6)
+
+
+def test_existing_over_limit_history_waits_for_fifth_newest_admission(durable):
+    clock = controlled_admission_time(durable)
+    start = clock[0]
+    # Generated legacy history is explicit fixture setup, not a product policy option.
+    durable.repository.policy = GeneratedAdmission()
+    for index in range(7):
+        clock[0] = start + timedelta(seconds=index)
+        admit_new(durable)
+    durable.repository = PostgresOrganizationRepository(durable.connection, clock=lambda: clock[0])
+    clock[0] = start + timedelta(hours=12)
+    with pytest.raises(SetupError, match="ADMISSION_LIMIT") as error:
+        admit_new(durable)
+    assert error.value.retry_after == 43_202
+    assert admission_counts(durable) == (7, 7, 7, 7)
+
+
+@pytest.mark.parametrize("other_identity", ["another_subject", "another_issuer", "same_person"])
+def test_limit_binds_verified_issuer_subject_not_session_or_display_name(durable, other_identity):
+    for _ in range(5):
+        admit_new(durable)
+    other = another_verified_session(
+        durable,
+        issuer="https://other-identity.example.invalid"
+        if other_identity == "another_issuer"
+        else None,
+        subject="user_" + uuid4().hex if other_identity == "another_subject" else None,
+    )
+    if other_identity == "same_person":
+        with pytest.raises(SetupError, match="ADMISSION_LIMIT"):
+            admit_new(durable, creator=other)
+    else:
+        assert admit_new(durable, creator=other).operation_id
+    assert admission_counts(durable) == (5, 5, 5, 5)
+
+
+def test_twenty_distinct_concurrent_arrivals_across_sessions_admit_exactly_five(durable):
+    other = another_verified_session(durable)
+    barrier = threading.Barrier(20)
+    pool_limit = threading.BoundedSemaphore(5)
+
+    def submit(index):
+        barrier.wait(timeout=5)
+        with pool_limit:
+            try:
+                return admit_new(durable, creator=other if index % 2 else durable.creator)
+            except SetupError as error:
+                assert error.status == 429 and error.code == "ADMISSION_LIMIT"
+                return None
+
+    with ThreadPoolExecutor(max_workers=20) as pool:
+        receipts = list(pool.map(submit, range(20)))
+    accepted = [receipt for receipt in receipts if receipt is not None]
+    assert len(accepted) == len({receipt.operation_id for receipt in accepted}) == 5
+    assert receipts.count(None) == 15
+    assert admission_counts(durable) == (5, 5, 5, 5)
+    assert durable.provider.creates == 0
+
+
+def test_pre_admission_terms_identity_and_configuration_refusals_consume_no_slots(durable):
+    wrong = CreateRequest(display_name="Generated buyer", accepted_terms_revision="unpublished")
+    with pytest.raises(SetupError, match="TERMS_REVISION_STALE"):
+        admit_new(durable, body=wrong)
+    foreign = replace(durable.creator, session_id="missing_generated_session")
+    with pytest.raises(SetupError, match="SESSION_INVALID"):
+        admit_new(durable, creator=foreign)
+    durable.repository.policy = None
+    with pytest.raises(SetupError, match="ADMISSION_POLICY_UNAVAILABLE"):
+        admit_new(durable)
+    assert admission_counts(durable) == (0, 0, 0, 0)
+    durable.repository = PostgresOrganizationRepository(durable.connection, clock=durable.clock)
+    for _ in range(5):
+        admit_new(durable)
+    assert admission_counts(durable) == (5, 5, 5, 5)
+
+
+def test_rolling_window_is_sampled_after_actual_terms_lock_wait(durable):
+    clock = controlled_admission_time(durable)
+    start = clock[0]
+    for _ in range(5):
+        admit_new(durable)
+    clock[0] = start + timedelta(hours=24) - timedelta(microseconds=1)
+    connecting = threading.Event()
+    pids = {}
+
+    @contextmanager
+    def admission_connection():
+        with durable.connection() as connection:
+            connection.execute("SET LOCAL statement_timeout='5s'")
+            pids["admission"] = connection.info.backend_pid
+            connecting.set()
+            yield connection
+
+    repository = PostgresOrganizationRepository(admission_connection, clock=lambda: clock[0])
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        with durable.connection("c03_owner") as holder:
+            holder.execute(
+                "SELECT revision FROM opentour_tenants.terms_versions "
+                "WHERE revision=%s FOR UPDATE",
+                (durable.body.accepted_terms_revision,),
+            )
+            admission = pool.submit(
+                repository.create,
+                durable.creator,
+                durable.body,
+                key_digest(uuid4().hex),
+                "generated_window_after_terms_lock",
+                durable.provider.environment,
+                clock[0],
+            )
+            assert connecting.wait(2)
+            wait_for_database_block(durable, pids["admission"], holder.info.backend_pid)
+            assert not admission.done()
+            clock[0] = start + timedelta(hours=24)
+        receipt = admission.result(timeout=6)
+    assert admission_counts(durable) == (6, 6, 6, 6)
+    assert durable.repository.get(durable.creator, receipt.operation_id).created_at == clock[0]
+
+
+def test_backward_clock_cannot_reopen_rolling_capacity(durable):
+    clock = controlled_admission_time(durable)
+    for _ in range(5):
+        admit_new(durable)
+    clock[0] -= timedelta(microseconds=1)
+    with pytest.raises(SetupError, match="CLOCK_UNAVAILABLE"):
+        admit_new(durable)
+    assert admission_counts(durable) == (5, 5, 5, 5)
+
+
+@pytest.mark.parametrize("table", ["organizations", "provisioning_operations"])
+def test_request_role_cannot_rewrite_original_admission_time(durable, table):
+    receipt = admit_new(durable)
+    identity = receipt.organization_id if table == "organizations" else receipt.operation_id
+    with pytest.raises(psycopg.errors.InsufficientPrivilege):
+        with durable.repository._connection(durable.creator) as connection:
+            connection.execute(
+                f"UPDATE opentour_tenants.{table} SET created_at=created_at-interval '1 day' "
+                "WHERE id=%s",
+                (identity,),
+            )
+    for _ in range(4):
+        admit_new(durable)
+    with pytest.raises(SetupError, match="ADMISSION_LIMIT"):
+        admit_new(durable)
