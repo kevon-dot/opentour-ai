@@ -78,12 +78,26 @@
     },
     "local": {
       "kind": "local_integration",
-      "path": "tests/integration/test_failure_harness.py",
-      "prerequisites": [
-        "owned-local-harness",
-        "postgresql-18.4-local-fixture"
-      ],
-      "owner": "OPE-124"
+      "filters": {
+        "harness-smoke": {
+          "kind": "local_integration",
+          "path": "tests/integration/test_failure_harness.py",
+          "prerequisites": [
+            "owned-local-harness",
+            "postgresql-18.4-local-fixture"
+          ],
+          "owner": "OPE-124"
+        },
+        "authority_journal_recovery": {
+          "kind": "local_integration",
+          "path": "tests/integration/authority_journal_recovery.py",
+          "prerequisites": [
+            "owned-journal-recovery-fixture",
+            "postgresql-18.4-local-fixture"
+          ],
+          "owner": "OPE-217"
+        }
+      }
     }
   },
   "isolation_suites": {

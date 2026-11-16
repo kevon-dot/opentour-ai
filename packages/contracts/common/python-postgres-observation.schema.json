@@ -24,13 +24,15 @@
     "target": {
       "enum": [
         "services/control-api/tests/migrations/test_expand_contract.py",
-        "services/control-api/tests/auth/test_identity_postgres.py"
+        "services/control-api/tests/auth/test_identity_postgres.py",
+        "tests/integration/authority_journal_recovery.py"
       ]
     },
     "owner": {
       "enum": [
         "OPE-213",
-        "OPE-142"
+        "OPE-142",
+        "OPE-217"
       ]
     },
     "binding_nonce": {
