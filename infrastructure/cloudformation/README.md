@@ -134,3 +134,19 @@ remain BLOCKED/NOT_RUN until their concrete authority and resources exist.
 Provider semantics: [Fn::Cidr](https://docs.aws.amazon.com/AWSCloudFormation/latest/TemplateReference/intrinsic-function-reference-cidr.html),
 [OIDC condition keys](https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_policies_iam-condition-keys.html),
 [CloudFormation change sets](https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/using-cfn-updating-stacks-changesets.html).
+
+## Verified repository OIDC subject
+
+The repository OIDC configuration read on15 November2026 reports `use_default=true`,
+`use_immutable_subject=true` and prefix
+`repo:kevon-dot@276088488/opentour-ai@1455972360`. Both deployment and migration
+trust therefore require that exact immutable prefix followed by
+`:environment:${Environment}`. The legacy name-only subject is intentionally
+refused. This read did not change repository settings or issue a token.
+`ApprovedDeployWorkflow` and `ApprovedMigrationWorkflow` must identify approved
+**reusable** workflows pinned to full commit SHAs: `job_workflow_ref` is present
+for reusable-workflow jobs. Repository ID, main branch, environment and STS
+audience checks remain mandatory. The predecessor bootstrap CI still grants no
+production OIDC profile; this template does not activate one.
+
+Source: [GitHub immutable subjects and reusable workflow claims](https://docs.github.com/en/actions/reference/security/oidc).

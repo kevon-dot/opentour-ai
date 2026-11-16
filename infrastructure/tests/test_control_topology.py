@@ -194,7 +194,7 @@ def test_oidc_trust_requires_every_exact_identity_claim() -> None:
         assert conditions["StringEquals"] == {
             "token.actions.githubusercontent.com:aud": "sts.amazonaws.com",
             "token.actions.githubusercontent.com:sub": {
-                "Fn::Sub": "repo:kevon-dot/opentour-ai:environment:${Environment}"
+                "Fn::Sub": "repo:kevon-dot@276088488/opentour-ai@1455972360:environment:${Environment}"
             },
             "token.actions.githubusercontent.com:repository_id": "1455972360",
             "token.actions.githubusercontent.com:job_workflow_ref": {"Ref": workflow},
@@ -203,6 +203,19 @@ def test_oidc_trust_requires_every_exact_identity_claim() -> None:
         }
         assert conditions["NumericLessThanEquals"] == {"sts:DurationSeconds": 900}
         assert "StringLike" not in conditions
+        subject = conditions["StringEquals"]["token.actions.githubusercontent.com:sub"]["Fn::Sub"]
+        for environment in ("dev", "test", "prod"):
+            expected = subject.replace("${Environment}", environment)
+            assert expected == (
+                "repo:kevon-dot@276088488/opentour-ai@1455972360:environment:" + environment
+            )
+            for rejected in (
+                "repo:kevon-dot/opentour-ai:environment:" + environment,
+                expected.replace("@276088488", "@000000000"),
+                expected.replace("@1455972360", "@0000000000"),
+                expected.replace("repo:kevon-dot@", "repo:generated-fork@"),
+            ):
+                assert expected != rejected
 
 
 @pytest.mark.parametrize("maximum", [1, 2, 3, 4])
