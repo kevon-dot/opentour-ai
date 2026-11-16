@@ -31,6 +31,12 @@
       "file": "packages/contracts/platform/auth-context.schema.json",
       "sha256": "a5b74fae3eb49ad159e677dd463fb975336c7d2bef2cefb2c01215cc8a5d2668",
       "source_path": "packages/contracts/platform/auth-context.schema.json"
+    },
+    {
+      "id": "urn:opentour:authority-journal:1.0",
+      "file": "packages/contracts/authority-journal.schema.json",
+      "sha256": "d6ccdb993d6e7caadd5ebf29ec7d4ebbeaaba48ee759cc0a9bce689a37befabb",
+      "source_path": "packages/contracts/authority-journal.schema.json"
     }
   ]
 }
