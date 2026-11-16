@@ -405,6 +405,8 @@ for (const kind of ['dialog', 'drawer'] as const) {
   test(`overlay ${kind} B14 B21 StrictMode replacement and unmount never restore an obsolete origin`, async ({ page }, info) => {
     await openOverlay(page, info, kind, { probe: '1', strict: '1' }); await history(page, true);
     await page.getByRole('button', { name: 'Replace open instance' }).click();
+    await expect(page.getByText('Generated instance 1', { exact: true })).toHaveCount(1);
+    await expect(page.getByText('Generated instance 0', { exact: true })).toHaveCount(0);
     await expect(page.getByRole('button', { name: closeName, exact: true })).toBeFocused();
     await insideModal(page); expect((await history(page)).focus).not.toContain('Open generated overlay');
     expect((await history(page)).focus).not.toContain('Current context target');
@@ -412,6 +414,8 @@ for (const kind of ['dialog', 'drawer'] as const) {
     await expect(page.locator('dialog')).toHaveCount(0);
     await expect(page.getByRole('button', { name: 'Current context target' })).toBeFocused();
     await page.getByRole('button', { name: 'Reopen generated overlay' }).click();
+    await expect(page.getByText('Generated instance 1', { exact: true })).toHaveCount(1);
+    await expect(page.getByText('Generated instance 0', { exact: true })).toHaveCount(0);
     await expect(page.getByRole('button', { name: closeName, exact: true })).toBeFocused();
     await page.keyboard.press('Escape'); await expect(page.locator('dialog')).toHaveCount(0);
     await expect(page.getByRole('button', { name: 'Current context target' })).toBeFocused();

@@ -118,6 +118,7 @@ function OverlayGallery() {
           <Button label="Unmount overlay" onPress={() => setMounted(false)} />
           <Button label="Replace open instance" onPress={() => { setContext('b'); setGeneration(value => value + 1); }} />
           <p>Generated render {renders}</p>
+          <p>Generated instance {generation}</p>
         </div>}
       </Component>}
     </form>
