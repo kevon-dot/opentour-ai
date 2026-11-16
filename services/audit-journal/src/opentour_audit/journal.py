@@ -11,6 +11,7 @@ import base64
 import hashlib
 import re
 import threading
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -52,10 +53,12 @@ from opentour_journal.models import (
     ImmutableMetadataRef,
     JournalEntry,
     JournalError,
+    JournalTelemetry,
     LiveHeadEnvelope,
     LiveHeadPayload,
     MutationKind,
     Phase,
+    emit_metric,
 )
 from pydantic import ValidationError
 
@@ -334,7 +337,7 @@ class AWSJournalStore:
     def entry(self, organization_id: str, sequence: int) -> JournalEntry:
         row = self.read_item(organization_id, f"SEQ#{sequence:020d}")
         if row is None:
-            raise JournalError("RECOVERY_HOLD")
+            raise JournalError("JOURNAL_SEQUENCE_MISSING")
         return JournalEntry.parse(row["entry"].encode())
 
     def content(self, entry: JournalEntry) -> bytes:
@@ -466,9 +469,12 @@ class JournalService:
         self,
         store: AWSJournalStore,
         authority: AuthorityResolver,
+        telemetry: JournalTelemetry,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+        monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
         self.store, self.authority, self.clock = store, authority, clock
+        self.telemetry, self.monotonic = telemetry, monotonic
         self.verifier = JournalVerifier(store.config.trust)
         self.capacity = threading.BoundedSemaphore(8)
 
@@ -589,6 +595,20 @@ class JournalService:
         principal: ServicePrincipal,
         body: AppendIntent | AppendOutcome,
     ) -> tuple[int, AppendResponse]:
+        started = self.monotonic()
+        try:
+            return self._append(principal, body)
+        finally:
+            # A delivery failure after commit is an unknown response, resolved by exact OP.
+            emit_metric(
+                self.telemetry, "journal_append_latency_seconds", self.monotonic() - started
+            )
+
+    def _append(
+        self,
+        principal: ServicePrincipal,
+        body: AppendIntent | AppendOutcome,
+    ) -> tuple[int, AppendResponse]:
         self._scope(principal, body.organization_id, "append")
         phase: Phase = "intent" if isinstance(body, AppendIntent) else "outcome"
         prior = self.store.operation(body.organization_id, body.operation_id, phase)
@@ -674,15 +694,19 @@ class JournalService:
             head_revision=str(int(head.revision) + 1),
         )
         payload = payload.model_copy(update={"chain_sha256": chain_digest(payload)})
-        signed = AppendReceiptEnvelope(
-            payload=payload,
-            signature=create_signature(
-                payload,
-                APPEND_PURPOSE,
-                self.store.config.signing_key,
-                self.store.sign,
-            ),
-        )
+        try:
+            signed = AppendReceiptEnvelope(
+                payload=payload,
+                signature=create_signature(
+                    payload,
+                    APPEND_PURPOSE,
+                    self.store.config.signing_key,
+                    self.store.sign,
+                ),
+            )
+        except Exception:
+            emit_metric(self.telemetry, "orphan_bytes", len(canonical(body.wire())))
+            raise
         response = AppendResponse(
             **{
                 name: getattr(payload, name)
@@ -711,6 +735,8 @@ class JournalService:
         try:
             self.store.commit(head, after, entry, response)
         except self.store.ddb.exceptions.TransactionCanceledException:
+            # Transaction cancellation proves this candidate version was not committed.
+            emit_metric(self.telemetry, "orphan_bytes", len(canonical(body.wire())))
             committed = self.store.operation(body.organization_id, body.operation_id, phase)
             if committed is not None:
                 return 200, self._identical(committed, body)
@@ -727,6 +753,34 @@ class JournalService:
                 return 200, self._identical(committed, body)
             raise JournalError("JOURNAL_UNAVAILABLE", 503) from None
         return 201, response
+
+    def observe_unresolved(
+        self, principal: ServicePrincipal, organizations: tuple[str, ...]
+    ) -> None:
+        """Poll a bounded authorized batch; the runtime schedules complete coverage.
+
+        Aggregate age using max across batches. Alert routing is a required sink concern.
+        Service-created entry time is used; caller-supplied intent time is not trusted.
+        This method never resolves an operation or changes any authority state.
+        """
+        if not 1 <= len(organizations) <= 64 or len(set(organizations)) != len(organizations):
+            raise JournalError("SCHEMA_INVALID", 422)
+        oldest = 0.0
+        for organization in organizations:
+            self._scope(principal, organization, "read")
+            head = self.store.head(organization)
+            if head.unresolved_operation_id is None:
+                continue
+            entry = self.read_entry(principal, organization, head.sequence).entry
+            if entry.operation_id != head.unresolved_operation_id or entry.phase != "intent":
+                raise JournalError("JOURNAL_STATE_INVALID", 503)
+            age = (self._now() - datetime.fromisoformat(entry.created_at)).total_seconds()
+            if age < 0:
+                raise JournalError("JOURNAL_TIME_UNAVAILABLE", 503)
+            oldest = max(oldest, age)
+        emit_metric(self.telemetry, "oldest_unresolved_operation_seconds", oldest)
+        if oldest >= 600:
+            emit_metric(self.telemetry, "unresolved_intent_over_10_minutes", oldest)
 
     def _identical(
         self, response: AppendResponse, body: AppendIntent | AppendOutcome

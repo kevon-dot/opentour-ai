@@ -9,7 +9,7 @@ import json
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -32,7 +32,11 @@ from opentour_audit.journal import (
     ServicePrincipal,
     create_router,
 )
-from opentour_control.authority.journal_client import JournalClient, TransportResponse
+from opentour_control.authority.journal_client import (
+    JournalClient,
+    RetryClaim,
+    TransportResponse,
+)
 from opentour_journal.crypto import (
     P256_ORDER,
     JournalVerifier,
@@ -57,9 +61,11 @@ from opentour_journal.models import (
     ImmutableMetadataRef,
     JournalError,
     JournalIdentity,
+    JournalMetric,
     MetadataRef,
     ReplayCheckpoint,
     ReplayManifest,
+    emit_metric,
     strict_json,
 )
 from opentour_journal.replay import FrontierVerifier, VerifiedAuthorityFrontier
@@ -269,6 +275,17 @@ class GeneratedEvidence:
         return artifact(kind, data)
 
 
+class GeneratedTelemetry:
+    def __init__(self):
+        self.events = []
+        self.failure = False
+
+    def record(self, metric):
+        if self.failure:
+            raise OSError("generated sink diagnostic")
+        self.events.append(metric)
+
+
 class GeneratedTransport:
     def __init__(self, service, principal):
         self.service, self.principal = service, principal
@@ -338,12 +355,13 @@ def build_system():
     )
     store = AWSJournalStore(config, ddb, s3, kms)
     authority = SimulatedAuthority()
-    service = JournalService(store, authority, lambda: NOW)
+    telemetry = GeneratedTelemetry()
+    service = JournalService(store, authority, telemetry, lambda: NOW)
     principal = ServicePrincipal("generated-control", metadata("authentication"))
     heads = [service.register(principal, org) for org in ["org-a", "org-b"]]
     checkpoints = GeneratedCheckpoints(journal, heads)
     client = JournalClient(
-        GeneratedTransport(service, principal), JournalVerifier(trust), checkpoints
+        GeneratedTransport(service, principal), JournalVerifier(trust), checkpoints, telemetry
     )
     return SimpleNamespace(
         store=store,
@@ -356,6 +374,7 @@ def build_system():
         authority=authority,
         evidence=GeneratedEvidence(),
         checkpoints=checkpoints,
+        telemetry=telemetry,
     )
 
 
@@ -897,12 +916,15 @@ def test_twenty_two_entry_manifest_roundtrip_and_exact_evidence_budget(system):
     parsed = ReplayManifest.parse(data)
     assert len(parsed.observations) == 22 and canonical(parsed.wire()) == data
     verifier = FrontierVerifier(
-        system.client.verifier, system.checkpoints, max_manifest_bytes=len(data)
+        system.client.verifier, system.checkpoints, system.telemetry, max_manifest_bytes=len(data)
     )
     assert verifier.verify("org-a", system.client, GeneratedEvidence()).head == frontier.head
     writer = GeneratedEvidence()
     verifier = FrontierVerifier(
-        system.client.verifier, system.checkpoints, max_manifest_bytes=len(data) - 1
+        system.client.verifier,
+        system.checkpoints,
+        system.telemetry,
+        max_manifest_bytes=len(data) - 1,
     )
     with pytest.raises(JournalError, match="RECOVERY_HOLD"):
         verifier.verify("org-a", system.client, writer)
@@ -933,7 +955,9 @@ def test_manifest_budget_stops_entry_accumulation_before_evidence(system):
         return original(org, sequence)
 
     system.client.read_entry = read
-    verifier = FrontierVerifier(system.client.verifier, system.checkpoints, max_manifest_bytes=100)
+    verifier = FrontierVerifier(
+        system.client.verifier, system.checkpoints, system.telemetry, max_manifest_bytes=100
+    )
     with pytest.raises(JournalError, match="RECOVERY_HOLD"):
         verifier.verify("org-a", system.client, system.evidence)
     assert reads == [1] and system.evidence.bytes == []
@@ -1006,3 +1030,228 @@ def test_signed_genesis_head_revision_must_be_one(system):
     )
     with pytest.raises(JournalError, match="JOURNAL_BINDING_INVALID"):
         system.client.verifier.live_head(envelope, "org-a", nonce)
+
+
+class SimulatedDurableRetry:
+    """Generated port double; actual143 SQL claim/CAS remains a separate required gate."""
+
+    def __init__(self):
+        self.row = None
+        self.events = []
+        self.lose_complete_ack = False
+
+    def claim(self, binding, body, now):
+        previous = self.row
+        if previous:
+            if previous.binding != binding or previous.original_body != body:
+                raise JournalError("JOURNAL_OPERATION_CONFLICT")
+            if self.state == "claimed":
+                raise JournalError("AUTHORITY_OPERATION_PENDING")
+            if now < self.due:
+                raise JournalError("JOURNAL_RETRY_NOT_DUE")
+        claim = RetryClaim(
+            binding, body, "generated-claim", str(previous.attempt + 1 if previous else 1),
+            previous.attempt + 1 if previous else 1,
+            previous.first_attempt_at if previous else now,
+            self.due if previous else now,
+        )
+        self.row, self.state = claim, "claimed"
+        self.events.append(("claim", claim))
+        return claim
+
+    def schedule(self, claim, not_before, code):
+        assert claim is self.row and self.state == "claimed"
+        self.state, self.due = "scheduled", not_before
+        self.events.append(("schedule", not_before, code))
+
+    def complete(self, claim, response):
+        assert claim is self.row and self.state == "claimed"
+        self.state, self.due = "acknowledged", claim.not_before
+        self.events.append(("complete", response))
+        if self.lose_complete_ack:
+            raise OSError("generated commit acknowledgement loss")
+
+    def hold(self, claim, code):
+        assert claim is self.row and self.state == "claimed"
+        self.state, self.due = "held", claim.not_before
+        self.events.append(("hold", code))
+
+
+@pytest.mark.parametrize("lost_after_commit", [False, True])
+def test_durable_retry_reconciles_exact_operation_before_one_stable_attempt(
+    system, lost_after_commit
+):
+    durable = SimulatedDurableRetry()
+    body = intent(system)
+    original = system.client.transport.post
+    writes = []
+
+    def fault(path, data):
+        if path.endswith("/intents"):
+            writes.append(data)
+            if lost_after_commit:
+                original(path, data)
+            raise OSError("generated transport loss")
+        return original(path, data)
+
+    system.client.transport.post = fault
+    first = system.client.retry_append(body, durable, clock=lambda: NOW)
+    assert first.state == "retry_scheduled" and first.response is None
+    assert first.not_before == NOW + timedelta(seconds=1)
+    assert durable.row.original_body == canonical(body.wire())
+    system.client.transport.post = original
+    second = system.client.retry_append(body, durable, clock=lambda: first.not_before)
+    assert second.state == "acknowledged" and second.response.sequence == 1
+    assert len(system.s3.objects) == 1 and system.store.head("org-a").sequence == 1
+    assert writes == [canonical(body.wire())]
+    assert [e[0] for e in durable.events] == ["claim", "schedule", "claim", "complete"]
+
+
+@pytest.mark.parametrize("attempt,sample,delay", [(1, 1, 1), (2, 1, 2), (6, 1, 30), (90, 0, 1)])
+def test_retry_jitter_is_durable_one_to_thirty_seconds(system, attempt, sample, delay):
+    durable = SimulatedDurableRetry()
+    original_claim = durable.claim
+
+    def claim(*args):
+        durable.row = replace(original_claim(*args), attempt=attempt)
+        return durable.row
+
+    durable.claim = claim
+    system.client.transport.post = lambda *args: (_ for _ in ()).throw(OSError("generated loss"))
+    result = system.client.retry_append(
+        intent(system), durable, clock=lambda: NOW, jitter=lambda: sample
+    )
+    assert result.not_before == NOW + timedelta(seconds=delay)
+    assert durable.events[-1][0] == "schedule"
+    assert not system.s3.objects
+
+
+def test_retry_never_changes_body_or_rewrites_stale_head(system):
+    durable = SimulatedDurableRetry()
+    body = intent(system)
+    original = system.client.transport.post
+    system.client.transport.post = lambda *args: (_ for _ in ()).throw(OSError("generated loss"))
+    result = system.client.retry_append(body, durable, clock=lambda: NOW)
+    changed = body.model_copy(update={"canonical_intent_digest": "d" * 64})
+    with pytest.raises(JournalError, match="JOURNAL_OPERATION_CONFLICT"):
+        system.client.retry_append(changed, durable, clock=lambda: result.not_before)
+    with pytest.raises(JournalError, match="JOURNAL_RETRY_NOT_DUE"):
+        system.client.retry_append(body, durable, clock=lambda: NOW)
+    system.client.transport.post = original
+    system.client.append_intent(intent(system, "different-operation"))
+    with pytest.raises(JournalError, match="AUTHORITY_OPERATION_PENDING"):
+        system.client.retry_append(body, durable, clock=lambda: result.not_before)
+    assert durable.state == "held" and durable.row.original_body == canonical(body.wire())
+    assert system.store.head("org-a").sequence == 1
+
+
+def test_retry_complete_ack_loss_cannot_return_success_or_repeat_append(system):
+    durable = SimulatedDurableRetry()
+    durable.lose_complete_ack = True
+    body = intent(system)
+    with pytest.raises(JournalError, match="JOURNAL_RETRY_STATE_UNAVAILABLE"):
+        system.client.retry_append(body, durable, clock=lambda: NOW)
+    assert system.store.head("org-a").sequence == 1
+    durable.lose_complete_ack = False
+    recovered = system.client.retry_append(body, durable, clock=lambda: NOW)
+    assert recovered.state == "acknowledged" and len(system.s3.objects) == 1
+
+
+@pytest.mark.parametrize("fault", ["backwards", "jitter_nan", "schedule_ack_loss"])
+def test_retry_unknown_clock_or_persistence_never_claims_scheduled_success(system, fault):
+    durable = SimulatedDurableRetry()
+    system.client.transport.post = lambda *args: (_ for _ in ()).throw(OSError("generated loss"))
+    times = iter([NOW, NOW - timedelta(seconds=1) if fault == "backwards" else NOW])
+    if fault == "schedule_ack_loss":
+        durable.schedule = lambda *args: (_ for _ in ()).throw(OSError("generated sink body"))
+    with pytest.raises(JournalError):
+        system.client.retry_append(
+            intent(system), durable, clock=lambda: next(times),
+            jitter=lambda: float("nan") if fault == "jitter_nan" else 0,
+        )
+    assert durable.state == "claimed" and not system.s3.objects
+
+
+def test_retry_durable_binding_fence_precedes_all_network(system):
+    durable = SimulatedDurableRetry()
+    original = durable.claim
+
+    def wrong_claim(*args):
+        return replace(original(*args), original_body=b"{}")
+
+    durable.claim = wrong_claim
+    system.client.transport.post = lambda *args: pytest.fail("invalid claim reached network")
+    with pytest.raises(JournalError, match="JOURNAL_RETRY_STATE_INVALID"):
+        system.client.retry_append(intent(system), durable, clock=lambda: NOW)
+
+
+def test_unresolved_age_uses_service_time_and_alert_never_resolves(system):
+    body = intent(system).model_copy(update={"created_at": "2000-01-01T00:00:00.000Z"})
+    system.client.append_intent(body)
+    for seconds in [599, 600, 3600]:
+        system.service.clock = lambda seconds=seconds: NOW + timedelta(seconds=seconds)
+        system.service.observe_unresolved(system.principal, ("org-a", "org-b"))
+    alerts = [
+        e.value for e in system.telemetry.events if e.name == "unresolved_intent_over_10_minutes"
+    ]
+    assert alerts == [600, 3600]
+    assert system.store.head("org-a").unresolved_operation_id == body.operation_id
+    assert system.store.head("org-a").latest_epoch == 6
+    assert all(set(vars(event)) == {"name", "value"} for event in system.telemetry.events)
+
+
+def test_monitor_clock_regression_is_not_negative_age_or_resolution(system):
+    body = intent(system)
+    system.client.append_intent(body)
+    system.service.clock = lambda: NOW - timedelta(seconds=1)
+    with pytest.raises(JournalError, match="JOURNAL_TIME_UNAVAILABLE"):
+        system.service.observe_unresolved(system.principal, ("org-a",))
+    assert system.store.head("org-a").unresolved_operation_id == body.operation_id
+
+
+def test_required_telemetry_failure_after_append_is_unknown_until_exact_reconciliation(system):
+    body = intent(system)
+    system.telemetry.failure = True
+    with pytest.raises(JournalError, match="JOURNAL_OBSERVABILITY_UNAVAILABLE") as caught:
+        system.client.append_intent(body)
+    assert caught.value.__suppress_context__
+    assert "generated sink diagnostic" not in str(caught.value)
+    assert system.store.head("org-a").sequence == 1
+    system.telemetry.failure = False
+    replay = system.client.append_intent(body)
+    assert replay.sequence == 1 and len(system.s3.objects) == 1
+
+
+def test_known_orphan_bytes_and_unknown_transaction_are_not_conflated(system):
+    system.kms.failure = True
+    with pytest.raises(JournalError):
+        system.client.append_intent(intent(system))
+    orphan = [e.value for e in system.telemetry.events if e.name == "orphan_bytes"]
+    assert orphan == [len(canonical(intent(system).wire()))]
+    system.kms.failure = False
+    system.ddb.crash_before = True
+    with pytest.raises(JournalError):
+        system.client.append_intent(intent(system))
+    # A transport timeout alone does not prove the second candidate is an orphan.
+    assert [e.value for e in system.telemetry.events if e.name == "orphan_bytes"] == orphan
+
+
+def test_missing_sequence_and_explicit_issuance_denial_are_counted(system):
+    body = intent(system)
+    system.client.append_intent(body)
+    with pytest.raises(JournalError, match="AUTHORITY_OPERATION_PENDING"):
+        system.client.require_issuance_frontier("org-a", system.evidence)
+    del system.ddb.rows["ORG#org-a", "SEQ#00000000000000000001"]
+    with pytest.raises(JournalError, match="RECOVERY_HOLD"):
+        system.client.require_issuance_frontier("org-a", system.evidence)
+    assert sum(e.value for e in system.telemetry.events if e.name == "denied_issuance_count") == 2
+    assert JournalMetric("missing_sequence_count", 1) in system.telemetry.events
+
+
+@pytest.mark.parametrize(
+    "name,value", [("private-label", 1), ("orphan_bytes", -1), ("orphan_bytes", float("nan"))]
+)
+def test_telemetry_rejects_unknown_names_and_invalid_values_before_sink(system, name, value):
+    with pytest.raises(JournalError, match="JOURNAL_OBSERVABILITY_UNAVAILABLE"):
+        emit_metric(system.telemetry, name, value)
+    assert system.telemetry.events == []

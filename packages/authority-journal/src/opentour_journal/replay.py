@@ -26,6 +26,7 @@ from opentour_journal.models import (
     ExactEntryResponse,
     HeadState,
     JournalError,
+    JournalTelemetry,
     LiveHeadEnvelope,
     MetadataRef,
     MutationKind,
@@ -33,6 +34,7 @@ from opentour_journal.models import (
     ReplayManifest,
     ReplayObservation,
     VerifiedFrontierProof,
+    emit_metric,
 )
 
 
@@ -154,6 +156,7 @@ class FrontierVerifier:
         self,
         verifier: JournalVerifier,
         checkpoints: CheckpointAuthority,
+        telemetry: JournalTelemetry,
         *,
         max_entries: int = MAX_REPLAY_ENTRIES,
         max_manifest_bytes: int = MAX_MANIFEST_BYTES,
@@ -174,6 +177,7 @@ class FrontierVerifier:
             raise JournalError("JOURNAL_CONFIGURATION_INVALID", 503)
         self.verifier = verifier
         self.checkpoints = checkpoints
+        self.telemetry = telemetry
         self.max_entries = max_entries
         self.max_manifest_bytes = max_manifest_bytes
         self.max_passes = max_passes
@@ -306,7 +310,12 @@ class FrontierVerifier:
         observation_bytes = 0
         for sequence in range(checkpoint.sequence + 1, head.sequence + 1):
             budget()
-            response = reader.read_entry(checkpoint.organization_id, sequence)
+            try:
+                response = reader.read_entry(checkpoint.organization_id, sequence)
+            except JournalError as error:
+                if error.code == "JOURNAL_SEQUENCE_MISSING":
+                    emit_metric(self.telemetry, "missing_sequence_count", 1)
+                raise
             budget()
             entry, body = response.entry, response.body
             self.verifier.entry(entry, checkpoint.organization_id, sequence)

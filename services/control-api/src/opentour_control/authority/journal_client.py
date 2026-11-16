@@ -11,10 +11,13 @@ import urllib.parse
 import urllib.request
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from typing import Literal, Protocol
 
-from opentour_journal.crypto import JournalVerifier, canonical
+from opentour_journal.crypto import JournalVerifier, canonical, sha256
 from opentour_journal.models import (
+    MAX_COUNTER,
+    MAX_REVISION,
     MAX_WIRE_BYTES,
     AppendIntent,
     AppendOutcome,
@@ -24,9 +27,11 @@ from opentour_journal.models import (
     ExactOperationRequest,
     ExactOperationResponse,
     JournalError,
+    JournalTelemetry,
     LiveHeadEnvelope,
     LiveHeadRequest,
     Phase,
+    emit_metric,
     strict_json,
 )
 from opentour_journal.replay import (
@@ -171,18 +176,79 @@ class ExactOperationObservation:
     response: AppendResponse | None
 
 
+@dataclass(frozen=True)
+class RetryBinding:
+    organization_id: str
+    operation_id: str
+    phase: Phase
+    body_sha256: str
+
+
+@dataclass(frozen=True)
+class RetryClaim:
+    binding: RetryBinding
+    original_body: bytes
+    token: str
+    revision: str
+    attempt: int
+    first_attempt_at: datetime
+    not_before: datetime
+
+
+class DurableRetryPort(Protocol):
+    """Required OPE-143 SQL coordinator port, never an in-memory production fallback.
+
+    claim atomically binds immutable original bytes, refuses changed intent/not-due/
+    concurrent execution, increments attempt and durably marks outcome unknown BEFORE
+    returning an exclusive claim. Every completion/schedule/hold compares its token
+    and revision in the same SQL transaction. A lost commit acknowledgement must raise;
+    it never authorizes a second claim until the coordinator reconciles its own SQL.
+    Runtime recovery invokes the original body again; no method rewrites expected head.
+    """
+
+    def claim(self, binding: RetryBinding, original_body: bytes, now: datetime) -> RetryClaim: ...
+
+    def schedule(self, claim: RetryClaim, not_before: datetime, code: str) -> None: ...
+
+    def complete(self, claim: RetryClaim, response: AppendResponse) -> None: ...
+
+    def hold(self, claim: RetryClaim, code: str) -> None: ...
+
+
+@dataclass(frozen=True)
+class AppendAttempt:
+    state: Literal["acknowledged", "retry_scheduled"]
+    response: AppendResponse | None
+    not_before: datetime | None
+
+
+def _utc(value: datetime) -> bool:
+    return (
+        isinstance(value, datetime)
+        and value.tzinfo is not None
+        and value.utcoffset() == timedelta(0)
+    )
+
+
 class JournalClient:
     def __init__(
         self,
         transport: AuthenticatedJournalTransport,
         verifier: JournalVerifier,
         checkpoints: CheckpointAuthority,
+        telemetry: JournalTelemetry,
     ) -> None:
         self.transport, self.verifier = transport, verifier
-        self.frontier_verifier = FrontierVerifier(verifier, checkpoints)
+        self.telemetry = telemetry
+        self.frontier_verifier = FrontierVerifier(verifier, checkpoints, telemetry)
 
     def _post(self, path: str, body: bytes, statuses: tuple[int, ...]) -> bytes:
-        response = self.transport.post(path, body)
+        try:
+            response = self.transport.post(path, body)
+        except JournalError:
+            raise
+        except Exception:
+            raise JournalError("JOURNAL_UNAVAILABLE", 503) from None
         if len(response.body) > MAX_WIRE_BYTES:
             raise JournalError("JOURNAL_UNAVAILABLE", 503)
         if response.status not in statuses:
@@ -197,6 +263,9 @@ class JournalClient:
                 "REVISION_EXHAUSTED",
                 "JOURNAL_RECONCILIATION_REQUIRED",
                 "JOURNAL_UNAVAILABLE",
+                "JOURNAL_OBSERVABILITY_UNAVAILABLE",
+                "JOURNAL_STATE_INVALID",
+                "JOURNAL_SEQUENCE_MISSING",
                 "RECOVERY_HOLD",
                 "JOURNAL_AUTHORITY_CONFLICT",
             }
@@ -219,6 +288,91 @@ class JournalClient:
 
     def append_outcome(self, body: AppendOutcome) -> AppendResponse:
         return self._append("outcomes", body)
+
+    def retry_append(
+        self,
+        body: AppendIntent | AppendOutcome,
+        durable: DurableRetryPort,
+        *,
+        clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+        jitter: Callable[[], float] = lambda: secrets.randbelow(1 << 53) / ((1 << 53) - 1),
+    ) -> AppendAttempt:
+        """One bounded attempt, no sleep. Only the durable scheduler admits later attempts.
+
+        Strong OP absence is not proof of abort. Retrying identical append bytes is safe
+        only because the independent service atomically deduplicates that exact operation.
+        A stale head, changed body, trust failure or unproven SQL outcome is held, never
+        rewritten. This API records append acceptance, not granted authority or SQL success.
+        """
+        original = canonical(body.wire())
+        if len(original) > MAX_WIRE_BYTES:
+            raise JournalError("SCHEMA_INVALID", 422)
+        phase: Phase = "intent" if isinstance(body, AppendIntent) else "outcome"
+        binding = RetryBinding(body.organization_id, body.operation_id, phase, sha256(original))
+        now = clock()
+        if not _utc(now):
+            raise JournalError("JOURNAL_TIME_UNAVAILABLE", 503)
+        try:
+            claim = durable.claim(binding, original, now)
+        except JournalError:
+            raise
+        except Exception:
+            raise JournalError("JOURNAL_RETRY_STATE_UNAVAILABLE", 503) from None
+        if (
+            not isinstance(claim, RetryClaim)
+            or claim.binding != binding
+            or claim.original_body != original
+            or not isinstance(claim.token, str)
+            or not 1 <= len(claim.token) <= 256
+            or not isinstance(claim.revision, str)
+            or not claim.revision.isascii()
+            or not claim.revision.isdecimal()
+            or claim.revision.startswith("0")
+            or not 1 <= len(claim.revision) <= 19
+            or int(claim.revision) > MAX_REVISION
+            or type(claim.attempt) is not int
+            or not 1 <= claim.attempt <= MAX_COUNTER
+            or not _utc(claim.first_attempt_at)
+            or not _utc(claim.not_before)
+            or not claim.first_attempt_at <= claim.not_before <= now
+        ):
+            raise JournalError("JOURNAL_RETRY_STATE_INVALID", 503)
+        try:
+            observation = self.read_exact_operation(body.organization_id, body.operation_id, phase)
+            if observation.response is not None:
+                response = observation.response
+                self.verifier.response(response, body)
+            else:
+                response = self._append("intents" if phase == "intent" else "outcomes", body)
+        except JournalError as error:
+            if error.code not in {"JOURNAL_UNAVAILABLE", "JOURNAL_OBSERVABILITY_UNAVAILABLE"}:
+                try:
+                    durable.hold(claim, error.code)
+                except Exception:
+                    raise JournalError("JOURNAL_RETRY_STATE_UNAVAILABLE", 503) from None
+                raise
+            next_time = clock()
+            sample = jitter()
+            if (
+                not _utc(next_time)
+                or next_time < now
+                or type(sample) not in {int, float}
+                or not math.isfinite(sample)
+                or not 0 <= sample <= 1
+            ):
+                raise JournalError("JOURNAL_TIME_UNAVAILABLE", 503) from None
+            cap = min(30, 2 ** min(claim.attempt - 1, 5))
+            not_before = next_time + timedelta(seconds=1 + sample * (cap - 1))
+            try:
+                durable.schedule(claim, not_before, error.code)
+            except Exception:
+                raise JournalError("JOURNAL_RETRY_STATE_UNAVAILABLE", 503) from None
+            return AppendAttempt("retry_scheduled", None, not_before)
+        try:
+            durable.complete(claim, response)
+        except Exception:
+            raise JournalError("JOURNAL_RETRY_STATE_UNAVAILABLE", 503) from None
+        return AppendAttempt("acknowledged", response, None)
 
     def _append(self, suffix: str, body: AppendIntent | AppendOutcome) -> AppendResponse:
         response = AppendResponse.parse(
@@ -299,3 +453,15 @@ class JournalClient:
             return self.frontier_verifier.verify(organization_id, self, writer)
         except JournalError:
             raise JournalError("RECOVERY_HOLD") from None
+
+    def require_issuance_frontier(
+        self, organization_id: str, writer: EvidenceWriter
+    ) -> VerifiedAuthorityFrontier:
+        """143 issuance precondition only; this does not issue a lease or authorize an effect."""
+        try:
+            frontier = self.verify_frontier(organization_id, writer)
+            frontier.require_resolved()
+            return frontier
+        except JournalError:
+            emit_metric(self.telemetry, "denied_issuance_count", 1)
+            raise

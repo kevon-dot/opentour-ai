@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import json
+import math
 import re
+from dataclasses import dataclass
 from datetime import datetime
-from typing import Annotated, ClassVar, Final, Literal, Self
+from typing import Annotated, ClassVar, Final, Literal, Protocol, Self
 
 from pydantic import (
     AfterValidator,
@@ -32,6 +34,57 @@ class JournalError(Exception):
         self.code = code
         self.status = status
         super().__init__(code)
+
+
+MetricName = Literal[
+    "oldest_unresolved_operation_seconds",
+    "journal_append_latency_seconds",
+    "missing_sequence_count",
+    "denied_issuance_count",
+    "orphan_bytes",
+    "unresolved_intent_over_10_minutes",
+]
+METRIC_NAMES = frozenset(
+    {
+        "oldest_unresolved_operation_seconds",
+        "journal_append_latency_seconds",
+        "missing_sequence_count",
+        "denied_issuance_count",
+        "orphan_bytes",
+        "unresolved_intent_over_10_minutes",
+    }
+)
+
+
+@dataclass(frozen=True)
+class JournalMetric:
+    name: MetricName
+    value: float | int
+
+
+class JournalTelemetry(Protocol):
+    """Required delivery port. No IDs, refs, labels, content or credential fields.
+
+    The runtime owns aggregation/alert routing and must report delivery failures.
+    A returned call means accepted by that configured sink, never provider delivery.
+    """
+
+    def record(self, metric: JournalMetric) -> None: ...
+
+
+def emit_metric(sink: JournalTelemetry, name: MetricName, value: float | int) -> None:
+    if (
+        name not in METRIC_NAMES
+        or type(value) not in {int, float}
+        or not math.isfinite(value)
+        or not 0 <= value <= MAX_COUNTER
+    ):
+        raise JournalError("JOURNAL_OBSERVABILITY_UNAVAILABLE", 503)
+    try:
+        sink.record(JournalMetric(name, value))
+    except Exception:
+        # In particular, never surface a sink's diagnostic credentials or raw values.
+        raise JournalError("JOURNAL_OBSERVABILITY_UNAVAILABLE", 503) from None
 
 
 def _revision(value: str) -> str:
