@@ -365,7 +365,6 @@ def test_exact_canonical_browser_inventory_preserved(checkout):
         "apps/web/tests/accessibility.spec.ts",
         "apps/web/tests/autonomy-status.spec.ts",
         "apps/web/features/support-case-private/privacy.spec.ts",
-        "apps/web/components/foundation/tokens/visual.spec.ts",
         "apps/web/tests/coverage/ot-p22-c01.spec.ts",
     ],
 )

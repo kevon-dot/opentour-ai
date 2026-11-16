@@ -13,7 +13,11 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from tools.ci.browser_evidence import retain_browser_evidence
+from tools.ci.browser_evidence import (
+    BROWSER_PROFILES,
+    DEFAULT_BROWSER_TARGET,
+    retain_browser_evidence,
+)
 from tools.ci.dependency_evidence import (
     SCANNER_VERSION,
     DependencyEvidenceError,
@@ -157,15 +161,31 @@ def stage_report(root: Path, name: str, report: dict[str, Any]) -> Path:
     return file
 
 
-def run_browser(root: Path, env: dict[str, str]) -> dict[str, Any]:
-    result = run_one(
-        ["just", "test-browser", "apps/web/tests/browser-harness.browser.spec.ts"], root, env=env
-    )
+def browser_selection(root: Path) -> list[str]:
+    """Every present, explicitly admitted browser application runs in the required job."""
+    targets = [DEFAULT_BROWSER_TARGET]
+    for target in BROWSER_PROFILES:
+        if target == DEFAULT_BROWSER_TARGET:
+            continue
+        if (root / target).exists() or (root / target).is_symlink():
+            path_target(root, target)
+            if not (root / target).is_file():
+                raise CommandError("Browser target must be a regular file.")
+            targets.append(target)
+    return targets
+
+
+def run_browser(
+    root: Path, env: dict[str, str], target: str = DEFAULT_BROWSER_TARGET
+) -> dict[str, Any]:
+    if target not in BROWSER_PROFILES:
+        raise CommandError("Browser target has no finite hosted profile.")
+    result = run_one(["just", "test-browser", target], root, env=env)
     # A failed actual test may still have valuable, nonce-bound failure evidence.
     # Retain it before propagating failure; an absent/invalid manifest cannot pass.
     try:
         result["browser_artifacts"] = retain_browser_evidence(
-            root, result.get("command_evidence", {})
+            root, result.get("command_evidence", {}), target
         )
     except (KeyError, TypeError, ValueError, OSError):
         result["browser_artifacts"] = {
@@ -272,10 +292,11 @@ def run_check(name: str, root: Path) -> dict[str, Any]:
         elif name == "browser-fixtures":
             env["PLAYWRIGHT_BROWSERS_PATH"] = str(root / ".toolchain/playwright")
             run(["pnpm", "exec", "playwright", "install", "--only-shell", "chromium"])
-            browser = run_browser(root, env)
-            steps.append(browser)
-            if browser["status"] != "PASS":
-                raise CommandError("Browser check failed", 1)
+            for target in browser_selection(root):
+                browser = run_browser(root, env, target)
+                steps.append(browser)
+                if browser["status"] != "PASS":
+                    raise CommandError("Browser check failed", 1)
         elif name == "contract":
             run(["just", "test-contract"])
         elif name == "local-integration":

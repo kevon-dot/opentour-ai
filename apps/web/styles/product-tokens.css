@@ -1,0 +1,101 @@
+/* OPE-253 presentation primitives. Import explicitly; no global element resets. */
+:root {
+  --ot-action-primary: #245bee;
+  --ot-action-hover: #1944ba;
+  --ot-action-subtle: #edf3ff;
+  --ot-surface-canvas: #fafbfd;
+  --ot-surface-base: #ffffff;
+  --ot-surface-nav: #f5f7fb;
+  --ot-text-primary: #182237;
+  --ot-text-secondary: #516078;
+  --ot-text-muted: #626f84;
+  --ot-text-inverse: #ffffff;
+  --ot-text-link: #245bee;
+  --ot-border-default: #e3e8f0;
+  --ot-success-background: #dff5eb;
+  --ot-success-text: #216849;
+  --ot-learning-background: #eee8ff;
+  --ot-learning-text: #6544a4;
+  --ot-hold-background: #fff2d5;
+  --ot-hold-text: #8c5b0a;
+  --ot-failure-background: #ffe8e3;
+  --ot-failure-text: #aa453a;
+  --ot-unknown-background: #edf0f5;
+  --ot-unknown-text: #5a6880;
+  --ot-space-0: 0px;
+  --ot-space-2: 2px;
+  --ot-space-4: 4px;
+  --ot-space-6: 6px;
+  --ot-space-8: 8px;
+  --ot-space-12: 12px;
+  --ot-space-16: 16px;
+  --ot-space-20: 20px;
+  --ot-space-24: 24px;
+  --ot-space-32: 32px;
+  --ot-space-40: 40px;
+  --ot-space-48: 48px;
+  --ot-space-64: 64px;
+  --ot-radius-4: 4px;
+  --ot-radius-6: 6px;
+  --ot-radius-8: 8px;
+  --ot-radius-12: 12px;
+  --ot-radius-16: 16px;
+  --ot-type-display-size: 2rem;
+  --ot-type-display-line: 2.5rem;
+  --ot-type-display-weight: 600;
+  --ot-type-heading-size: 1.5rem;
+  --ot-type-heading-line: 2rem;
+  --ot-type-heading-weight: 600;
+  --ot-type-section-size: 1.125rem;
+  --ot-type-section-line: 1.625rem;
+  --ot-type-section-weight: 600;
+  --ot-type-body-size: 0.875rem;
+  --ot-type-body-line: 1.375rem;
+  --ot-type-body-weight: 400;
+  --ot-type-label-size: 0.875rem;
+  --ot-type-label-line: 1.25rem;
+  --ot-type-label-weight: 500;
+  --ot-type-small-size: 0.75rem;
+  --ot-type-small-line: 1.125rem;
+  --ot-type-small-weight: 400;
+  --ot-type-mono-size: 0.75rem;
+  --ot-type-mono-line: 1.125rem;
+  --ot-type-mono-weight: 400;
+}
+
+@font-face { font-family: Geist; src: url('./fonts/Geist.woff2') format('woff2'); font-style: normal; font-weight: 100 900; font-display: swap; }
+@font-face { font-family: 'Geist Mono'; src: url('./fonts/GeistMono.woff2') format('woff2'); font-style: normal; font-weight: 100 900; font-display: swap; }
+.ot-foundation, .ot-button-group, .ot-badge, .ot-tabs { font-family: Geist, sans-serif; color: var(--ot-text-primary); }
+.ot-button-group { display: inline-flex; flex-direction: column; align-items: flex-start; gap: var(--ot-space-8); max-inline-size: 100%; vertical-align: top; }
+.ot-button, .ot-tab { font: var(--ot-type-label-weight) var(--ot-type-label-size)/var(--ot-type-label-line) Geist, sans-serif; border-radius: var(--ot-radius-6); cursor: pointer; overflow-wrap: anywhere; text-align: center; box-sizing: border-box; max-inline-size: 100%; }
+.ot-button { display: inline-flex; align-items: center; justify-content: center; gap: var(--ot-space-6); padding: var(--ot-space-8) var(--ot-space-16); border: 0; min-block-size: 36px; }
+.ot-button > span { min-inline-size: 0; }
+.ot-button--primary { background: var(--ot-action-primary); color: var(--ot-text-inverse); }
+.ot-button--primary:hover:not(:disabled):not([aria-busy]) , .ot-button--primary:active:not(:disabled):not([aria-busy]) { background: var(--ot-action-hover); }
+.ot-button--secondary { background: var(--ot-surface-base); color: var(--ot-text-primary); border: 1px solid var(--ot-border-default); }
+.ot-button--quiet { background: var(--ot-surface-base); color: var(--ot-text-primary); }
+.ot-button:disabled { background: var(--ot-unknown-background); color: var(--ot-text-muted); cursor: not-allowed; }
+.ot-button[aria-busy] { cursor: wait; }
+.ot-button:focus-visible, .ot-tab:focus-visible, .ot-tabpanel:focus-visible { outline: 2px solid var(--ot-action-primary); outline-offset: 2px; }
+.ot-button-indicator { display: block; flex: none; }
+.ot-button-reason { font-size: var(--ot-type-small-size); line-height: var(--ot-type-small-line); color: var(--ot-text-secondary); overflow-wrap: anywhere; }
+.ot-badge { display: inline-flex; align-items: center; box-sizing: border-box; max-inline-size: 100%; padding: var(--ot-space-4) var(--ot-space-8); border-radius: var(--ot-radius-6); font-size: var(--ot-type-small-size); font-weight: 500; line-height: var(--ot-type-small-line); overflow-wrap: anywhere; }
+.ot-badge--success { background: var(--ot-success-background); color: var(--ot-success-text); }
+.ot-badge--learning { background: var(--ot-learning-background); color: var(--ot-learning-text); }
+.ot-badge--hold { background: var(--ot-hold-background); color: var(--ot-hold-text); }
+.ot-badge--failure { background: var(--ot-failure-background); color: var(--ot-failure-text); }
+.ot-badge--unknown { background: var(--ot-unknown-background); color: var(--ot-unknown-text); }
+.ot-badge--info { background: var(--ot-action-subtle); color: var(--ot-text-link); }
+.ot-tabs { min-inline-size: 0; }
+.ot-tablist { display: flex; flex-wrap: wrap; gap: var(--ot-space-8); padding: var(--ot-space-4); }
+.ot-tab { padding: var(--ot-space-12) var(--ot-space-16); border: 0; min-block-size: 44px; background: var(--ot-surface-base); color: var(--ot-text-secondary); }
+.ot-tab[aria-selected='true'] { background: var(--ot-action-subtle); color: var(--ot-text-link); }
+.ot-tab:disabled { color: var(--ot-text-muted); cursor: not-allowed; }
+.ot-tabpanel { padding: var(--ot-space-16) var(--ot-space-4); overflow-wrap: anywhere; }
+@media (pointer: coarse) { .ot-button { min-block-size: 44px; } }
+@media (forced-colors: active) {
+  .ot-button, .ot-tab, .ot-badge { border: 1px solid ButtonText; }
+  .ot-button:focus-visible, .ot-tab:focus-visible, .ot-tabpanel:focus-visible { outline-color: Highlight; }
+  .ot-tab[aria-selected='true'] { border-block-end: 3px solid Highlight; }
+  .ot-button:disabled, .ot-tab:disabled { color: GrayText; border-color: GrayText; }
+}

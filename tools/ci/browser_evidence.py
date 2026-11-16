@@ -11,6 +11,12 @@ from typing import Any
 
 from tools.public_content_check import MAX_FILE_BYTES, digest, inspect_bytes, load_policy
 
+BROWSER_PROFILES = {
+    "apps/web/tests/browser-harness.browser.spec.ts": ("OPE-127", "OT-BOOT-C06"),
+    "apps/web/components/foundation/tokens/visual.spec.ts": ("OPE-253", "OT-P23-C12"),
+}
+DEFAULT_BROWSER_TARGET = "apps/web/tests/browser-harness.browser.spec.ts"
+
 
 def local_file(root: Path, relative: str) -> Path:
     candidate = root / relative
@@ -28,7 +34,12 @@ def local_file(root: Path, relative: str) -> Path:
     return candidate
 
 
-def retain_browser_evidence(root: Path, command: dict[str, Any]) -> dict[str, Any]:
+def retain_browser_evidence(
+    root: Path, command: dict[str, Any], target: str = DEFAULT_BROWSER_TARGET
+) -> dict[str, Any]:
+    if target not in BROWSER_PROFILES:
+        raise ValueError("Unknown browser evidence profile")
+    issue, evidence_root = BROWSER_PROFILES[target]
     steps = command.get("steps", [])
     if len(steps) != 1 or steps[0].get("runner") != "playwright":
         raise ValueError("Unexpected browser command inventory")
@@ -36,7 +47,7 @@ def retain_browser_evidence(root: Path, command: dict[str, Any]) -> dict[str, An
     nonce = report.get("binding_nonce")
     if not isinstance(nonce, str) or not re.fullmatch(r"[a-f0-9]{32}", nonce):
         raise ValueError("Browser report nonce is invalid")
-    prefix = "evidence/OT-BOOT-C06/runs/" + nonce + "/"
+    prefix = "evidence/" + evidence_root + "/runs/" + nonce + "/"
     path = local_file(root, prefix + "evidence.json")
     if path.stat().st_size > MAX_FILE_BYTES:
         raise ValueError("Browser manifest exceeds bound")
@@ -53,13 +64,13 @@ def retain_browser_evidence(root: Path, command: dict[str, Any]) -> dict[str, An
         test["id"] = "sha256:" + digest(test["id"].encode())
     if (
         value.get("schema_version") != "opentour.browser-artifacts.v1"
-        or value.get("issue_key") != "OPE-127"
+        or value.get("issue_key") != issue
         or value.get("kind") != "simulated"
         or value.get("product_acceptance") != "NOT_RUN"
         or value.get("git_worktree_dirty") is not False
         or value.get("commit_sha") != command.get("commit_sha")
         or normalized_report != report
-        or value.get("target") != "apps/web/tests/browser-harness.browser.spec.ts"
+        or value.get("target") != target
         or value.get("baseline_review_request") is not None
     ):
         raise ValueError("Browser manifest source/report binding failed")
@@ -95,6 +106,10 @@ def retain_browser_evidence(root: Path, command: dict[str, Any]) -> dict[str, An
             raise ValueError("Browser artifact digest mismatch")
     if inspect_bytes("browser-manifest.json", raw, load_policy(root), binary_content=True):
         raise ValueError("Browser manifest disclosure refused")
+    if issue == "OPE-253":
+        from tools.ci.foundation_evidence import verify_foundation_evidence
+
+        verify_foundation_evidence(root, value)
     return {
         "manifest_sha256": digest(raw),
         "manifest": value,
