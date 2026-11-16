@@ -7503,9 +7503,9 @@
         "native_uuid": "1389756b-6a52-4822-a8c4-5a7a6d28db1b",
         "logical_key": "OT-BOOT-C06",
         "url": "https://linear.app/opentourai/issue/OPE-127/create-deterministic-browser-and-visual-test-harness",
-        "updated_at": "2026-11-15T21:58:11.376Z",
+        "updated_at": "2026-11-16T01:04:20.166Z",
         "publication_spec_sha256": "96c405228e6e925e3c11ea4d44c0d5cb5b984541bab1a017735e7629ffa72292",
-        "technical_capture_sha256": "1635b07b7d403daba72a0674baf012a4eaa2060b4985ba1f47bf480d772344cb",
+        "technical_capture_sha256": "f0f168210a953259ff27023a28f8106529361adfefaafe09188cf2929a80775c",
         "projection": {
           "requirement_ids": [
             "OT-BOOT-C06-AC01",
@@ -7522,13 +7522,20 @@
           ],
           "subfeature_ids": [],
           "owned_paths": [
-            "playwright.config.ts",
-            "apps/web/tests/fixtures/harness/",
             "apps/web/tests/browser-harness.browser.spec.ts",
+            "apps/web/tests/fixtures/harness/",
+            "apps/web/tests/fixtures/harness/README.md",
+            "apps/web/tests/fixtures/harness/baseline-review.json",
+            "apps/web/tests/fixtures/harness/reporter.ts",
+            "apps/web/tests/fixtures/harness/visual-comparison-policy.json",
+            "apps/web/tests/fixtures/harness/visual-comparison.test.ts",
+            "apps/web/tests/fixtures/harness/visual-comparison.ts",
+            "playwright.config.ts",
             "tools/browser-test-runner.ts"
           ],
           "declared_test_paths": [
             "apps/web/tests/browser-harness.browser.spec.ts",
+            "apps/web/tests/fixtures/harness/visual-comparison.test.ts",
             "tools/browser-test-runner.ts"
           ],
           "parent": "OPE-5",
@@ -7550,7 +7557,7 @@
             "OPE-5"
           ]
         },
-        "projection_sha256": "8ca22ac31be9fa3ec02713bd5f623a58cafde8bcb270d20d3c3b3fd39ebd560b"
+        "projection_sha256": "dd79fc2e4228398d002428f5e02435a67fb98c0d85e9366c66ff6453ed185748"
       },
       {
         "issue_key": "OPE-128",
@@ -8539,9 +8546,9 @@
         "native_uuid": "90540510-dec1-489e-a2af-4a89125d07d4",
         "logical_key": "OT-P01-C01",
         "url": "https://linear.app/opentourai/issue/OPE-142/verify-human-sessions-and-derive-tenant-authorization-context",
-        "updated_at": "2026-11-16T00:18:55.635Z",
+        "updated_at": "2026-11-16T01:29:12.452Z",
         "publication_spec_sha256": "4053b99a814369d5094086d8179f51abc146d47b0b906ac5716c586e8cc6db80",
-        "technical_capture_sha256": "52310b739fe2f4170f39ec9edb6bce32b723411b7fd86d6fc19be645c6288976",
+        "technical_capture_sha256": "3437828f3682ea84156627c3522ccb2a919be2f791cd5ebdd9b2ef8a4f5f1f7c",
         "projection": {
           "requirement_ids": [
             "OT-P01-C01-AC01",
@@ -23433,7 +23440,7 @@
         "test_id": "services/control-api/tests/auth/test_auth_context.py::test_invalid_claims_deny_before_local_lookup[iss-https://foreign.invalid/]",
         "kind": "simulated",
         "mode": null,
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -23444,7 +23451,7 @@
         "test_id": "services/control-api/tests/auth/test_auth_context.py::test_invalid_claims_deny_before_local_lookup[aud-foreign]",
         "kind": "simulated",
         "mode": null,
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -23455,7 +23462,7 @@
         "test_id": "services/control-api/tests/auth/test_auth_context.py::test_invalid_claims_deny_before_local_lookup[aud-None]",
         "kind": "simulated",
         "mode": null,
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -23466,7 +23473,7 @@
         "test_id": "services/control-api/tests/auth/test_auth_context.py::test_invalid_claims_deny_before_local_lookup[aud-value3]",
         "kind": "simulated",
         "mode": null,
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -23477,7 +23484,7 @@
         "test_id": "services/control-api/tests/auth/test_auth_context.py::test_invalid_claims_deny_before_local_lookup[sub-value4]",
         "kind": "simulated",
         "mode": null,
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -23488,7 +23495,7 @@
         "test_id": "services/control-api/tests/auth/test_auth_context.py::test_invalid_claims_deny_before_local_lookup[sid-]",
         "kind": "simulated",
         "mode": null,
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -23499,7 +23506,7 @@
         "test_id": "services/control-api/tests/auth/test_auth_context.py::test_invalid_claims_deny_before_local_lookup[auth_time-None]",
         "kind": "simulated",
         "mode": null,
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -23510,7 +23517,7 @@
         "test_id": "services/control-api/tests/auth/test_auth_context.py::test_invalid_claims_deny_before_local_lookup[auth_time-True]",
         "kind": "simulated",
         "mode": null,
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -23521,7 +23528,7 @@
         "test_id": "services/control-api/tests/auth/test_auth_context.py::test_invalid_claims_deny_before_local_lookup[exp-0]",
         "kind": "simulated",
         "mode": null,
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -23532,7 +23539,7 @@
         "test_id": "services/control-api/tests/auth/test_auth_context.py::test_invalid_claims_deny_before_local_lookup[sub_profile-ai_agent]",
         "kind": "simulated",
         "mode": null,
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -23543,7 +23550,7 @@
         "test_id": "services/control-api/tests/auth/test_auth_context.py::test_invalid_claims_deny_before_local_lookup[sub_type-widget]",
         "kind": "simulated",
         "mode": null,
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -23554,7 +23561,7 @@
         "test_id": "services/control-api/tests/auth/test_auth_context.py::test_exact_expiry_and_client_clock_cannot_extend",
         "kind": "simulated",
         "mode": null,
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -23565,7 +23572,7 @@
         "test_id": "services/control-api/tests/auth/test_auth_context.py::test_algorithm_substitution[none]",
         "kind": "simulated",
         "mode": null,
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -23576,7 +23583,7 @@
         "test_id": "services/control-api/tests/auth/test_auth_context.py::test_algorithm_substitution[HS256]",
         "kind": "simulated",
         "mode": null,
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -23587,7 +23594,7 @@
         "test_id": "services/control-api/tests/auth/test_auth_context.py::test_signature_tamper",
         "kind": "simulated",
         "mode": null,
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -23598,7 +23605,7 @@
         "test_id": "services/control-api/tests/auth/test_auth_context.py::test_unknown_key_refresh_is_bounded",
         "kind": "simulated",
         "mode": null,
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -23609,7 +23616,7 @@
         "test_id": "services/control-api/tests/auth/test_auth_context.py::test_token_cannot_choose_key_endpoint[jku]",
         "kind": "simulated",
         "mode": null,
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -23620,7 +23627,7 @@
         "test_id": "services/control-api/tests/auth/test_auth_context.py::test_token_cannot_choose_key_endpoint[jwk]",
         "kind": "simulated",
         "mode": null,
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -23631,7 +23638,7 @@
         "test_id": "services/control-api/tests/auth/test_auth_context.py::test_token_cannot_choose_key_endpoint[x5u]",
         "kind": "simulated",
         "mode": null,
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -23642,7 +23649,7 @@
         "test_id": "services/control-api/tests/auth/test_auth_context.py::test_duplicate_jwks_key_id_is_not_ambiguous_allow",
         "kind": "simulated",
         "mode": null,
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -23653,7 +23660,7 @@
         "test_id": "services/control-api/tests/auth/test_auth_context.py::test_slow_key_refresh_never_queues_or_admits_late_result",
         "kind": "simulated",
         "mode": null,
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -23665,7 +23672,7 @@
         "test_id": "services/control-api/tests/auth/test_auth_context.py::test_scoped_context_schema_and_unknown_assurance",
         "kind": "simulated",
         "mode": null,
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -23676,7 +23683,7 @@
         "test_id": "services/control-api/tests/auth/test_auth_context.py::test_unknown_refresh_cannot_deny_current_cached_key",
         "kind": "simulated",
         "mode": null,
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -23688,7 +23695,7 @@
         "test_id": "services/control-api/tests/auth/test_auth_context.py::test_membership_freshness_boundary[True-30-True]",
         "kind": "simulated",
         "mode": null,
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -23700,7 +23707,7 @@
         "test_id": "services/control-api/tests/auth/test_auth_context.py::test_membership_freshness_boundary[True-31-False]",
         "kind": "simulated",
         "mode": null,
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -23712,7 +23719,7 @@
         "test_id": "services/control-api/tests/auth/test_auth_context.py::test_membership_freshness_boundary[False-300-True]",
         "kind": "simulated",
         "mode": null,
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -23724,7 +23731,7 @@
         "test_id": "services/control-api/tests/auth/test_auth_context.py::test_membership_freshness_boundary[False-301-False]",
         "kind": "simulated",
         "mode": null,
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -23736,7 +23743,7 @@
         "test_id": "services/control-api/tests/auth/test_auth_context.py::test_provider_role_and_email_do_not_grant",
         "kind": "simulated",
         "mode": null,
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -23747,7 +23754,7 @@
         "test_id": "services/control-api/tests/auth/test_auth_context.py::test_sdk_fault_is_sanitized_in_formatted_traceback",
         "kind": "simulated",
         "mode": null,
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -23758,7 +23765,7 @@
         "test_id": "services/control-api/tests/auth/test_auth_context.py::test_key_lookup_expiry_and_backward_clock_fail_closed[2]",
         "kind": "simulated",
         "mode": null,
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -23769,7 +23776,7 @@
         "test_id": "services/control-api/tests/auth/test_auth_context.py::test_key_lookup_expiry_and_backward_clock_fail_closed[-2]",
         "kind": "simulated",
         "mode": null,
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -23781,7 +23788,7 @@
         "test_id": "services/control-api/tests/auth/test_auth_context.py::test_closed_context_rejects_malformed_wire_fields[unexpected-True]",
         "kind": "simulated",
         "mode": null,
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -23793,7 +23800,7 @@
         "test_id": "services/control-api/tests/auth/test_auth_context.py::test_closed_context_rejects_malformed_wire_fields[session_generation-True]",
         "kind": "simulated",
         "mode": null,
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -23805,7 +23812,7 @@
         "test_id": "services/control-api/tests/auth/test_auth_context.py::test_closed_context_rejects_malformed_wire_fields[session_generation-9007199254740992]",
         "kind": "simulated",
         "mode": null,
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -23817,7 +23824,7 @@
         "test_id": "services/control-api/tests/auth/test_auth_context.py::test_closed_context_rejects_malformed_wire_fields[session_id-]",
         "kind": "simulated",
         "mode": null,
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -23829,7 +23836,7 @@
         "test_id": "services/control-api/tests/auth/test_auth_context.py::test_closed_context_rejects_malformed_wire_fields[identity_checked_at-2026-11-15T12:00:00-03:00]",
         "kind": "simulated",
         "mode": null,
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -23841,7 +23848,7 @@
         "test_id": "services/control-api/tests/auth/test_auth_context.py::test_closed_context_rejects_malformed_wire_fields[delegated_grant_id-forged-grant]",
         "kind": "simulated",
         "mode": null,
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -23852,7 +23859,7 @@
         "test_id": "services/control-api/tests/auth/test_auth_context.py::test_missing_or_zero_credential_policy_fails_closed",
         "kind": "simulated",
         "mode": null,
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -23863,7 +23870,7 @@
         "test_id": "services/control-api/tests/auth/test_auth_context.py::test_bounded_sdk_backend_rejects_redirect_and_oversize[302-0]",
         "kind": "simulated",
         "mode": null,
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -23874,7 +23881,7 @@
         "test_id": "services/control-api/tests/auth/test_auth_context.py::test_bounded_sdk_backend_rejects_redirect_and_oversize[200-1048577]",
         "kind": "simulated",
         "mode": null,
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -23885,7 +23892,7 @@
         "test_id": "services/control-api/tests/auth/test_auth_context.py::test_bounded_sdk_backend_rejects_redirect_and_oversize[500-50]",
         "kind": "simulated",
         "mode": null,
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -23896,7 +23903,7 @@
         "test_id": "services/control-api/tests/auth/test_auth_context.py::test_sdk_backend_caller_deadline_and_worker_cleanup_are_distinct",
         "kind": "simulated",
         "mode": null,
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -23909,7 +23916,7 @@
         "test_id": "services/control-api/tests/auth/test_session_context.py::test_valid_session_has_exact_scope",
         "kind": "simulated",
         "mode": null,
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -23920,7 +23927,7 @@
         "test_id": "services/control-api/tests/auth/test_session_context.py::test_member_of_b_cannot_reuse_a_context",
         "kind": "simulated",
         "mode": null,
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -23932,7 +23939,7 @@
         "test_id": "services/control-api/tests/auth/test_session_context.py::test_zero_org_identity_has_finite_allowlist",
         "kind": "simulated",
         "mode": null,
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -23945,7 +23952,7 @@
         "test_id": "services/control-api/tests/auth/test_session_context.py::test_current_context_never_fabricates_selection[unselected]",
         "kind": "simulated",
         "mode": null,
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -23958,7 +23965,7 @@
         "test_id": "services/control-api/tests/auth/test_session_context.py::test_current_context_never_fabricates_selection[mismatch]",
         "kind": "simulated",
         "mode": null,
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -23971,7 +23978,7 @@
         "test_id": "services/control-api/tests/auth/test_session_context.py::test_current_context_never_fabricates_selection[pending]",
         "kind": "simulated",
         "mode": null,
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -23984,7 +23991,7 @@
         "test_id": "services/control-api/tests/auth/test_session_context.py::test_current_context_never_fabricates_selection[removed]",
         "kind": "simulated",
         "mode": null,
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -23995,7 +24002,7 @@
         "test_id": "services/control-api/tests/auth/test_session_context.py::test_session_ending_is_idempotent_and_other_sessions_untouched",
         "kind": "simulated",
         "mode": null,
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -24006,7 +24013,7 @@
         "test_id": "services/control-api/tests/auth/test_session_context.py::test_denial_commit_unknown_is_not_success",
         "kind": "simulated",
         "mode": null,
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -24018,7 +24025,7 @@
         "test_id": "services/control-api/tests/auth/test_session_context.py::test_forged_or_foreign_binding_cannot_select_session",
         "kind": "simulated",
         "mode": null,
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -24030,7 +24037,7 @@
         "test_id": "services/control-api/tests/auth/test_session_context.py::test_old_generation_cannot_admit_delayed_request",
         "kind": "simulated",
         "mode": null,
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -24043,7 +24050,7 @@
         "test_id": "services/control-api/tests/auth/test_session_context.py::test_actual_context_route_ignores_forwarded_context",
         "kind": "simulated",
         "mode": null,
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -24054,7 +24061,7 @@
         "test_id": "services/control-api/tests/auth/test_session_context.py::test_invalid_route_identity_has_safe_closed_error",
         "kind": "simulated",
         "mode": null,
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -24066,7 +24073,7 @@
         "test_id": "services/control-api/tests/auth/test_session_context.py::test_provider_wait_cannot_return_old_selected_context[ended-authorization]",
         "kind": "simulated",
         "mode": null,
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -24078,7 +24085,7 @@
         "test_id": "services/control-api/tests/auth/test_session_context.py::test_provider_wait_cannot_return_old_selected_context[ended-current]",
         "kind": "simulated",
         "mode": null,
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -24090,7 +24097,7 @@
         "test_id": "services/control-api/tests/auth/test_session_context.py::test_provider_wait_cannot_return_old_selected_context[generation-authorization]",
         "kind": "simulated",
         "mode": null,
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -24102,7 +24109,7 @@
         "test_id": "services/control-api/tests/auth/test_session_context.py::test_provider_wait_cannot_return_old_selected_context[generation-current]",
         "kind": "simulated",
         "mode": null,
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -24114,7 +24121,7 @@
         "test_id": "services/control-api/tests/auth/test_session_context.py::test_provider_wait_cannot_return_old_selected_context[selection-authorization]",
         "kind": "simulated",
         "mode": null,
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -24126,7 +24133,7 @@
         "test_id": "services/control-api/tests/auth/test_session_context.py::test_provider_wait_cannot_return_old_selected_context[selection-current]",
         "kind": "simulated",
         "mode": null,
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -24138,7 +24145,7 @@
         "test_id": "services/control-api/tests/auth/test_session_context.py::test_provider_wait_cannot_return_old_selected_context[reconciliation-authorization]",
         "kind": "simulated",
         "mode": null,
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -24150,7 +24157,7 @@
         "test_id": "services/control-api/tests/auth/test_session_context.py::test_provider_wait_cannot_return_old_selected_context[reconciliation-current]",
         "kind": "simulated",
         "mode": null,
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -24162,7 +24169,7 @@
         "test_id": "services/control-api/tests/auth/test_session_context.py::test_provider_wait_cannot_return_old_selected_context[removed-authorization]",
         "kind": "simulated",
         "mode": null,
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -24174,7 +24181,7 @@
         "test_id": "services/control-api/tests/auth/test_session_context.py::test_provider_wait_cannot_return_old_selected_context[removed-current]",
         "kind": "simulated",
         "mode": null,
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -24185,7 +24192,7 @@
         "test_id": "services/control-api/tests/auth/test_session_context.py::test_removed_selection_preserves_only_authenticated_recovery_binding",
         "kind": "simulated",
         "mode": null,
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -24196,7 +24203,7 @@
         "test_id": "services/control-api/tests/auth/test_session_context.py::test_provider_wait_cannot_extend_expiry_or_freshness[2]",
         "kind": "simulated",
         "mode": null,
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -24207,7 +24214,7 @@
         "test_id": "services/control-api/tests/auth/test_session_context.py::test_provider_wait_cannot_extend_expiry_or_freshness[-2]",
         "kind": "simulated",
         "mode": null,
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -24218,7 +24225,7 @@
         "test_id": "services/control-api/tests/auth/test_session_context.py::test_provider_wait_cannot_extend_expiry_or_freshness[31]",
         "kind": "simulated",
         "mode": null,
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -24229,7 +24236,7 @@
         "test_id": "services/control-api/tests/auth/test_session_context.py::test_actual_sdk_fault_body_never_reaches_api_or_logs",
         "kind": "simulated",
         "mode": null,
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -24240,7 +24247,7 @@
         "test_id": "services/control-api/tests/auth/test_session_context.py::test_final_state_read_cannot_hide_denial_or_time_passage[provider_denial]",
         "kind": "simulated",
         "mode": null,
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -24251,7 +24258,7 @@
         "test_id": "services/control-api/tests/auth/test_session_context.py::test_final_state_read_cannot_hide_denial_or_time_passage[expiry]",
         "kind": "simulated",
         "mode": null,
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -24262,7 +24269,7 @@
         "test_id": "services/control-api/tests/auth/test_session_context.py::test_final_state_read_cannot_hide_denial_or_time_passage[freshness]",
         "kind": "simulated",
         "mode": null,
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -24274,7 +24281,7 @@
         "test_id": "services/control-api/tests/auth/test_session_context.py::test_admission_logs_only_safe_freshness_metadata",
         "kind": "simulated",
         "mode": null,
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -24286,7 +24293,7 @@
         "test_id": "services/control-api/tests/auth/test_session_context.py::test_pending_provider_context_never_fabricates_removal[pending_identity]",
         "kind": "simulated",
         "mode": null,
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -24298,7 +24305,7 @@
         "test_id": "services/control-api/tests/auth/test_session_context.py::test_pending_provider_context_never_fabricates_removal[reconciliation_unknown]",
         "kind": "simulated",
         "mode": null,
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -24309,7 +24316,7 @@
         "test_id": "services/control-api/tests/auth/test_identity_sync.py::test_remove_then_late_active_stays_denied",
         "kind": "simulated",
         "mode": null,
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -24321,7 +24328,7 @@
         "test_id": "services/control-api/tests/auth/test_identity_sync.py::test_duplicate_and_conflicting_event_digest",
         "kind": "simulated",
         "mode": null,
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -24333,7 +24340,7 @@
         "test_id": "services/control-api/tests/auth/test_identity_sync.py::test_crash_before_cursor_commit_replays_once",
         "kind": "simulated",
         "mode": null,
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -24344,7 +24351,7 @@
         "test_id": "services/control-api/tests/auth/test_identity_sync.py::test_current_fetch_unknown_does_not_advance_cursor",
         "kind": "simulated",
         "mode": null,
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -24356,7 +24363,7 @@
         "test_id": "services/control-api/tests/auth/test_identity_sync.py::test_unconfirmed_identity_never_grants[pending_identity]",
         "kind": "simulated",
         "mode": null,
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -24368,7 +24375,7 @@
         "test_id": "services/control-api/tests/auth/test_identity_sync.py::test_unconfirmed_identity_never_grants[reconciliation_unknown]",
         "kind": "simulated",
         "mode": null,
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -24380,7 +24387,7 @@
         "test_id": "services/control-api/tests/auth/test_identity_sync.py::test_unconfirmed_identity_never_grants[removed]",
         "kind": "simulated",
         "mode": null,
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -24391,7 +24398,7 @@
         "test_id": "services/control-api/tests/auth/test_identity_sync.py::test_conflicting_scope_fails_batch",
         "kind": "simulated",
         "mode": null,
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -24402,7 +24409,7 @@
         "test_id": "services/control-api/tests/auth/test_identity_sync.py::test_revoked_session_cannot_be_recreated",
         "kind": "simulated",
         "mode": null,
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -24413,7 +24420,7 @@
         "test_id": "services/control-api/tests/auth/test_identity_sync.py::test_webhook_wakeup_never_applies_payload",
         "kind": "simulated",
         "mode": null,
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -24425,7 +24432,7 @@
         "test_id": "services/control-api/tests/auth/test_sealing.py::test_sealed_payload_scope_expiry_rotation_and_tampering",
         "kind": "simulated",
         "mode": null,
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -24436,7 +24443,7 @@
         "test_id": "services/control-api/tests/auth/test_sealing.py::test_no_implicit_sealing_key_or_lifetime_extension",
         "kind": "simulated",
         "mode": null,
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -24448,7 +24455,7 @@
         "test_id": "services/control-api/tests/auth/test_identity_postgres.py::test_runtime_role_and_migration_are_real[customer_controlled]",
         "kind": "local_integration",
         "mode": "customer_controlled",
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -24460,7 +24467,7 @@
         "test_id": "services/control-api/tests/auth/test_identity_postgres.py::test_runtime_role_and_migration_are_real[opentour_managed]",
         "kind": "local_integration",
         "mode": "opentour_managed",
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -24472,7 +24479,7 @@
         "test_id": "services/control-api/tests/auth/test_identity_postgres.py::test_router_uses_committed_state_and_durable_end[customer_controlled]",
         "kind": "local_integration",
         "mode": "customer_controlled",
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -24484,7 +24491,7 @@
         "test_id": "services/control-api/tests/auth/test_identity_postgres.py::test_router_uses_committed_state_and_durable_end[opentour_managed]",
         "kind": "local_integration",
         "mode": "opentour_managed",
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -24496,7 +24503,7 @@
         "test_id": "services/control-api/tests/auth/test_identity_postgres.py::test_atomic_admission_credentials_and_late_refresh_denial[customer_controlled]",
         "kind": "local_integration",
         "mode": "customer_controlled",
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -24508,7 +24515,7 @@
         "test_id": "services/control-api/tests/auth/test_identity_postgres.py::test_atomic_admission_credentials_and_late_refresh_denial[opentour_managed]",
         "kind": "local_integration",
         "mode": "opentour_managed",
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -24520,7 +24527,7 @@
         "test_id": "services/control-api/tests/auth/test_identity_postgres.py::test_failed_admission_rolls_back_binding_and_session[customer_controlled]",
         "kind": "local_integration",
         "mode": "customer_controlled",
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -24532,7 +24539,7 @@
         "test_id": "services/control-api/tests/auth/test_identity_postgres.py::test_failed_admission_rolls_back_binding_and_session[opentour_managed]",
         "kind": "local_integration",
         "mode": "opentour_managed",
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -24544,7 +24551,7 @@
         "test_id": "services/control-api/tests/auth/test_identity_postgres.py::test_duplicate_callback_claim_has_one_durable_winner[customer_controlled]",
         "kind": "local_integration",
         "mode": "customer_controlled",
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -24556,7 +24563,7 @@
         "test_id": "services/control-api/tests/auth/test_identity_postgres.py::test_duplicate_callback_claim_has_one_durable_winner[opentour_managed]",
         "kind": "local_integration",
         "mode": "opentour_managed",
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -24568,7 +24575,7 @@
         "test_id": "services/control-api/tests/auth/test_identity_postgres.py::test_cursor_batch_rollback_replay_and_sticky_denial[customer_controlled]",
         "kind": "local_integration",
         "mode": "customer_controlled",
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -24580,7 +24587,7 @@
         "test_id": "services/control-api/tests/auth/test_identity_postgres.py::test_cursor_batch_rollback_replay_and_sticky_denial[opentour_managed]",
         "kind": "local_integration",
         "mode": "opentour_managed",
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -24591,7 +24598,7 @@
         "test_id": "services/control-api/tests/auth/test_identity_postgres.py::test_unknown_session_revocation_prevents_future_admission[customer_controlled]",
         "kind": "local_integration",
         "mode": "customer_controlled",
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -24602,7 +24609,7 @@
         "test_id": "services/control-api/tests/auth/test_identity_postgres.py::test_unknown_session_revocation_prevents_future_admission[opentour_managed]",
         "kind": "local_integration",
         "mode": "opentour_managed",
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -24613,7 +24620,7 @@
         "test_id": "services/control-api/tests/auth/test_identity_postgres.py::test_stale_subject_generation_and_expired_credentials_refuse[customer_controlled]",
         "kind": "local_integration",
         "mode": "customer_controlled",
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -24624,7 +24631,7 @@
         "test_id": "services/control-api/tests/auth/test_identity_postgres.py::test_stale_subject_generation_and_expired_credentials_refuse[opentour_managed]",
         "kind": "local_integration",
         "mode": "opentour_managed",
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -24636,7 +24643,7 @@
         "test_id": "services/control-api/tests/auth/test_identity_postgres.py::test_configured_typescript_factories_with_actual_durable_ports[customer_controlled]",
         "kind": "local_integration",
         "mode": "customer_controlled",
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -24648,7 +24655,7 @@
         "test_id": "services/control-api/tests/auth/test_identity_postgres.py::test_configured_typescript_factories_with_actual_durable_ports[opentour_managed]",
         "kind": "local_integration",
         "mode": "opentour_managed",
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -24659,7 +24666,7 @@
         "test_id": "apps/web/lib/server/authkit-adapter.test.ts::0",
         "kind": "simulated",
         "mode": null,
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -24670,7 +24677,7 @@
         "test_id": "apps/web/lib/server/authkit-adapter.test.ts::1",
         "kind": "simulated",
         "mode": null,
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -24681,7 +24688,7 @@
         "test_id": "apps/web/lib/server/authkit-adapter.test.ts::2",
         "kind": "simulated",
         "mode": null,
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -24692,7 +24699,7 @@
         "test_id": "apps/web/lib/server/authkit-adapter.test.ts::3",
         "kind": "simulated",
         "mode": null,
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -24703,7 +24710,7 @@
         "test_id": "apps/web/lib/server/authkit-adapter.test.ts::4",
         "kind": "simulated",
         "mode": null,
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -24714,7 +24721,7 @@
         "test_id": "apps/web/lib/server/authkit-adapter.test.ts::5",
         "kind": "simulated",
         "mode": null,
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -24725,7 +24732,7 @@
         "test_id": "apps/web/lib/server/authkit-adapter.test.ts::6",
         "kind": "simulated",
         "mode": null,
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -24737,7 +24744,7 @@
         "test_id": "apps/web/lib/server/authkit-adapter.test.ts::7",
         "kind": "simulated",
         "mode": null,
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -24748,7 +24755,7 @@
         "test_id": "apps/web/lib/server/authkit-adapter.test.ts::8",
         "kind": "simulated",
         "mode": null,
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -24759,7 +24766,7 @@
         "test_id": "apps/web/lib/server/authkit-adapter.test.ts::9",
         "kind": "simulated",
         "mode": null,
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -24770,7 +24777,7 @@
         "test_id": "apps/web/lib/server/authkit-adapter.test.ts::10",
         "kind": "simulated",
         "mode": null,
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -24781,7 +24788,7 @@
         "test_id": "apps/web/lib/server/authkit-adapter.test.ts::11",
         "kind": "simulated",
         "mode": null,
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -24792,7 +24799,7 @@
         "test_id": "apps/web/lib/server/authkit-adapter.test.ts::12",
         "kind": "simulated",
         "mode": null,
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -24803,7 +24810,7 @@
         "test_id": "apps/web/lib/server/authkit-adapter.test.ts::13",
         "kind": "simulated",
         "mode": null,
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -24814,7 +24821,7 @@
         "test_id": "apps/web/lib/server/authkit-adapter.test.ts::14",
         "kind": "simulated",
         "mode": null,
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -24825,7 +24832,7 @@
         "test_id": "apps/web/lib/server/authkit-adapter.test.ts::15",
         "kind": "simulated",
         "mode": null,
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -24836,7 +24843,7 @@
         "test_id": "apps/web/lib/server/authkit-adapter.test.ts::16",
         "kind": "simulated",
         "mode": null,
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -24847,7 +24854,7 @@
         "test_id": "apps/web/lib/server/authkit-adapter.test.ts::17",
         "kind": "simulated",
         "mode": null,
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -24858,7 +24865,7 @@
         "test_id": "apps/web/lib/server/authkit-adapter.test.ts::18",
         "kind": "simulated",
         "mode": null,
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -24869,7 +24876,7 @@
         "test_id": "apps/web/lib/server/authkit-adapter.test.ts::19",
         "kind": "simulated",
         "mode": null,
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -24881,7 +24888,7 @@
         "test_id": "apps/web/lib/server/authkit-adapter.test.ts::20",
         "kind": "simulated",
         "mode": null,
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -24893,7 +24900,7 @@
         "test_id": "apps/web/lib/server/authkit-adapter.test.ts::21",
         "kind": "simulated",
         "mode": null,
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -24904,7 +24911,7 @@
         "test_id": "apps/web/lib/server/authkit-adapter.test.ts::22",
         "kind": "simulated",
         "mode": null,
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -24915,7 +24922,7 @@
         "test_id": "apps/web/lib/server/authkit-adapter.test.ts::23",
         "kind": "simulated",
         "mode": null,
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -24926,7 +24933,7 @@
         "test_id": "apps/web/lib/server/authkit-adapter.test.ts::24",
         "kind": "simulated",
         "mode": null,
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -24937,7 +24944,7 @@
         "test_id": "apps/web/lib/server/authkit-adapter.test.ts::25",
         "kind": "simulated",
         "mode": null,
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -24949,7 +24956,7 @@
         "test_id": "apps/web/lib/server/authkit-adapter.test.ts::26",
         "kind": "simulated",
         "mode": null,
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -24961,7 +24968,7 @@
         "test_id": "apps/web/lib/server/authkit-adapter.test.ts::27",
         "kind": "simulated",
         "mode": null,
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -24973,7 +24980,7 @@
         "test_id": "apps/web/lib/server/authkit-adapter.test.ts::28",
         "kind": "simulated",
         "mode": null,
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -24984,7 +24991,7 @@
         "test_id": "apps/web/lib/server/authkit-adapter.test.ts::29",
         "kind": "simulated",
         "mode": null,
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -24995,7 +25002,7 @@
         "test_id": "apps/web/lib/server/authkit-adapter.test.ts::30",
         "kind": "simulated",
         "mode": null,
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -25006,7 +25013,7 @@
         "test_id": "apps/web/lib/server/authkit-adapter.test.ts::31",
         "kind": "simulated",
         "mode": null,
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -25017,7 +25024,7 @@
         "test_id": "apps/web/lib/server/authkit-adapter.test.ts::32",
         "kind": "simulated",
         "mode": null,
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -25028,7 +25035,7 @@
         "test_id": "apps/web/lib/server/authkit-adapter.test.ts::33",
         "kind": "simulated",
         "mode": null,
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -25040,7 +25047,7 @@
         "test_id": "apps/web/lib/server/authkit-adapter.test.ts::34",
         "kind": "simulated",
         "mode": null,
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -25052,7 +25059,7 @@
         "test_id": "apps/web/lib/server/authkit-adapter.test.ts::35",
         "kind": "simulated",
         "mode": null,
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -25064,7 +25071,7 @@
         "test_id": "apps/web/lib/server/authkit-adapter.test.ts::36",
         "kind": "simulated",
         "mode": null,
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -25075,7 +25082,7 @@
         "test_id": "apps/web/lib/server/authkit-adapter.test.ts::37",
         "kind": "simulated",
         "mode": null,
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -25086,7 +25093,7 @@
         "test_id": "apps/web/lib/server/authkit-adapter.test.ts::38",
         "kind": "simulated",
         "mode": null,
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -25097,7 +25104,7 @@
         "test_id": "apps/web/lib/server/authkit-adapter.test.ts::39",
         "kind": "simulated",
         "mode": null,
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -25109,7 +25116,7 @@
         "test_id": "apps/web/lib/server/authkit-adapter.test.ts::40",
         "kind": "simulated",
         "mode": null,
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -25120,7 +25127,7 @@
         "test_id": "apps/web/lib/server/authkit-adapter.test.ts::41",
         "kind": "simulated",
         "mode": null,
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -25131,7 +25138,7 @@
         "test_id": "apps/web/lib/server/authkit-adapter.test.ts::42",
         "kind": "simulated",
         "mode": null,
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -25142,7 +25149,7 @@
         "test_id": "apps/web/lib/server/authkit-adapter.test.ts::43",
         "kind": "simulated",
         "mode": null,
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -25153,7 +25160,7 @@
         "test_id": "apps/web/lib/server/authkit-adapter.test.ts::44",
         "kind": "simulated",
         "mode": null,
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -25164,7 +25171,7 @@
         "test_id": "apps/web/lib/server/authkit-adapter.test.ts::45",
         "kind": "simulated",
         "mode": null,
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -25175,7 +25182,7 @@
         "test_id": "apps/web/lib/server/authkit-adapter.test.ts::46",
         "kind": "simulated",
         "mode": null,
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -25186,7 +25193,7 @@
         "test_id": "apps/web/lib/server/authkit-adapter.test.ts::47",
         "kind": "simulated",
         "mode": null,
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -25197,7 +25204,7 @@
         "test_id": "apps/web/lib/server/authkit-adapter.test.ts::48",
         "kind": "simulated",
         "mode": null,
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -25208,7 +25215,7 @@
         "test_id": "apps/web/lib/server/authkit-adapter.test.ts::49",
         "kind": "simulated",
         "mode": null,
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -25219,7 +25226,7 @@
         "test_id": "apps/web/lib/server/authkit-adapter.test.ts::50",
         "kind": "simulated",
         "mode": null,
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       },
       {
@@ -25230,17 +25237,988 @@
         "test_id": "apps/web/lib/server/authkit-adapter.test.ts::51",
         "kind": "simulated",
         "mode": null,
-        "fixture_id": "identity-session-context",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC02"
+        ],
+        "test_id": "services/control-api/tests/auth/test_session_context.py::test_missing_provider_organization_mapping_never_falls_back_to_local_id[None]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC02"
+        ],
+        "test_id": "services/control-api/tests/auth/test_session_context.py::test_missing_provider_organization_mapping_never_falls_back_to_local_id[]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC02",
+          "OT-P01-C01-AC03"
+        ],
+        "test_id": "services/control-api/tests/auth/test_session_context.py::test_provider_mapping_disagreement_keeps_local_selection_for_reconciliation[mapping]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC02",
+          "OT-P01-C01-AC03"
+        ],
+        "test_id": "services/control-api/tests/auth/test_session_context.py::test_provider_mapping_disagreement_keeps_local_selection_for_reconciliation[jwt_local_id]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC02",
+          "OT-P01-C01-AC03"
+        ],
+        "test_id": "services/control-api/tests/auth/test_session_context.py::test_provider_mapping_disagreement_keeps_local_selection_for_reconciliation[observation]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC02",
+          "OT-P01-C01-AC03"
+        ],
+        "test_id": "services/control-api/tests/auth/test_session_context.py::test_provider_mapping_disagreement_keeps_local_selection_for_reconciliation[removed_foreign]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC02"
+        ],
+        "test_id": "services/control-api/tests/auth/test_session_context.py::test_provider_mapping_changed_during_fetch_cannot_return_old_context[authorization]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC02"
+        ],
+        "test_id": "services/control-api/tests/auth/test_session_context.py::test_provider_mapping_changed_during_fetch_cannot_return_old_context[current]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC02"
+        ],
+        "test_id": "services/control-api/tests/auth/test_session_context.py::test_provider_mapping_never_weakens_verified_issuer_binding",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC02"
+        ],
+        "test_id": "services/control-api/tests/auth/test_session_context.py::test_provider_removed_response_uses_explicit_identity_organization_mapping",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC01"
+        ],
+        "test_id": "services/control-api/tests/auth/test_identity_postgres.py::test_distinct_provider_mapping_returns_local_context_with_actual_pg[customer_controlled]",
+        "kind": "local_integration",
+        "mode": "customer_controlled",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC01"
+        ],
+        "test_id": "services/control-api/tests/auth/test_identity_postgres.py::test_distinct_provider_mapping_returns_local_context_with_actual_pg[opentour_managed]",
+        "kind": "local_integration",
+        "mode": "opentour_managed",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC02",
+          "OT-P01-C01-AC03"
+        ],
+        "test_id": "services/control-api/tests/auth/test_identity_postgres.py::test_wrong_provider_mapping_never_clears_committed_local_selection[customer_controlled]",
+        "kind": "local_integration",
+        "mode": "customer_controlled",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC02",
+          "OT-P01-C01-AC03"
+        ],
+        "test_id": "services/control-api/tests/auth/test_identity_postgres.py::test_wrong_provider_mapping_never_clears_committed_local_selection[opentour_managed]",
+        "kind": "local_integration",
+        "mode": "opentour_managed",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC02"
+        ],
+        "test_id": "services/control-api/tests/auth/test_identity_postgres.py::test_mapping_changed_during_provider_wait_denies_actual_pg_context[customer_controlled]",
+        "kind": "local_integration",
+        "mode": "customer_controlled",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC02"
+        ],
+        "test_id": "services/control-api/tests/auth/test_identity_postgres.py::test_mapping_changed_during_provider_wait_denies_actual_pg_context[opentour_managed]",
+        "kind": "local_integration",
+        "mode": "opentour_managed",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC02"
+        ],
+        "test_id": "services/control-api/tests/auth/test_identity_postgres.py::test_wrong_provider_issuer_cannot_enter_actual_pg_observation[customer_controlled]",
+        "kind": "local_integration",
+        "mode": "customer_controlled",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC02"
+        ],
+        "test_id": "services/control-api/tests/auth/test_identity_postgres.py::test_wrong_provider_issuer_cannot_enter_actual_pg_observation[opentour_managed]",
+        "kind": "local_integration",
+        "mode": "opentour_managed",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC02",
+          "OT-P01-C01-AC03"
+        ],
+        "test_id": "apps/web/lib/server/authkit-adapter.test.ts::52",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC02",
+          "OT-P01-C01-AC03"
+        ],
+        "test_id": "apps/web/lib/server/authkit-adapter.test.ts::53",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC02",
+          "OT-P01-C01-AC03"
+        ],
+        "test_id": "apps/web/lib/server/authkit-adapter.test.ts::54",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC02",
+          "OT-P01-C01-AC03"
+        ],
+        "test_id": "apps/web/lib/server/authkit-adapter.test.ts::55",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC02",
+          "OT-P01-C01-AC03"
+        ],
+        "test_id": "apps/web/lib/server/authkit-adapter.test.ts::56",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC02",
+          "OT-P01-C01-AC03"
+        ],
+        "test_id": "apps/web/lib/server/authkit-adapter.test.ts::57",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC02",
+          "OT-P01-C01-AC03"
+        ],
+        "test_id": "apps/web/lib/server/authkit-adapter.test.ts::58",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC01",
+          "OT-P01-C01-AC03"
+        ],
+        "test_id": "apps/web/lib/server/authkit-adapter.test.ts::59",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC02",
+          "OT-P01-C01-AC03"
+        ],
+        "test_id": "apps/web/lib/server/authkit-adapter.test.ts::60",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC02",
+          "OT-P01-C01-AC03"
+        ],
+        "test_id": "apps/web/lib/server/authkit-adapter.test.ts::61",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC02",
+          "OT-P01-C01-AC03"
+        ],
+        "test_id": "services/control-api/tests/auth/test_identity_postgres.py::test_membership_observation_lock_linearizes_activation_and_denial[customer_controlled-absent-denial]",
+        "kind": "local_integration",
+        "mode": "customer_controlled",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC02",
+          "OT-P01-C01-AC03"
+        ],
+        "test_id": "services/control-api/tests/auth/test_identity_postgres.py::test_membership_observation_lock_linearizes_activation_and_denial[customer_controlled-absent-activation]",
+        "kind": "local_integration",
+        "mode": "customer_controlled",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC02",
+          "OT-P01-C01-AC03"
+        ],
+        "test_id": "services/control-api/tests/auth/test_identity_postgres.py::test_membership_observation_lock_linearizes_activation_and_denial[customer_controlled-active-denial]",
+        "kind": "local_integration",
+        "mode": "customer_controlled",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC02",
+          "OT-P01-C01-AC03"
+        ],
+        "test_id": "services/control-api/tests/auth/test_identity_postgres.py::test_membership_observation_lock_linearizes_activation_and_denial[customer_controlled-active-activation]",
+        "kind": "local_integration",
+        "mode": "customer_controlled",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC02",
+          "OT-P01-C01-AC03"
+        ],
+        "test_id": "services/control-api/tests/auth/test_identity_postgres.py::test_membership_observation_lock_linearizes_activation_and_denial[opentour_managed-absent-denial]",
+        "kind": "local_integration",
+        "mode": "opentour_managed",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC02",
+          "OT-P01-C01-AC03"
+        ],
+        "test_id": "services/control-api/tests/auth/test_identity_postgres.py::test_membership_observation_lock_linearizes_activation_and_denial[opentour_managed-absent-activation]",
+        "kind": "local_integration",
+        "mode": "opentour_managed",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC02",
+          "OT-P01-C01-AC03"
+        ],
+        "test_id": "services/control-api/tests/auth/test_identity_postgres.py::test_membership_observation_lock_linearizes_activation_and_denial[opentour_managed-active-denial]",
+        "kind": "local_integration",
+        "mode": "opentour_managed",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC02",
+          "OT-P01-C01-AC03"
+        ],
+        "test_id": "services/control-api/tests/auth/test_identity_postgres.py::test_membership_observation_lock_linearizes_activation_and_denial[opentour_managed-active-activation]",
+        "kind": "local_integration",
+        "mode": "opentour_managed",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-127",
+        "requirement_ids": [
+          "OT-BOOT-C06-AC01"
+        ],
+        "test_id": "apps/web/tests/browser-harness.browser.spec.ts::customer_controlled::ab7feaa78c82b0b2f1cf-2fdc334e22f2c169b929",
+        "kind": "simulated",
+        "mode": "customer_controlled",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-127",
+        "requirement_ids": [
+          "OT-BOOT-C06-AC01",
+          "OT-BOOT-C06-AC02"
+        ],
+        "test_id": "apps/web/tests/browser-harness.browser.spec.ts::customer_controlled::ab7feaa78c82b0b2f1cf-bf049ca9d014adb2069f",
+        "kind": "simulated",
+        "mode": "customer_controlled",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-127",
+        "requirement_ids": [
+          "OT-BOOT-C06-AC01",
+          "OT-BOOT-C06-AC02"
+        ],
+        "test_id": "apps/web/tests/browser-harness.browser.spec.ts::customer_controlled::ab7feaa78c82b0b2f1cf-136a8fa0d6fd0f94c524",
+        "kind": "simulated",
+        "mode": "customer_controlled",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-127",
+        "requirement_ids": [
+          "OT-BOOT-C06-AC01",
+          "OT-BOOT-C06-AC02"
+        ],
+        "test_id": "apps/web/tests/browser-harness.browser.spec.ts::customer_controlled::ab7feaa78c82b0b2f1cf-3f594eb5d25efe70d8c7",
+        "kind": "simulated",
+        "mode": "customer_controlled",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-127",
+        "requirement_ids": [
+          "OT-BOOT-C06-AC01",
+          "OT-BOOT-C06-AC02"
+        ],
+        "test_id": "apps/web/tests/browser-harness.browser.spec.ts::customer_controlled::ab7feaa78c82b0b2f1cf-3bacb845347872bfad76",
+        "kind": "simulated",
+        "mode": "customer_controlled",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-127",
+        "requirement_ids": [
+          "OT-BOOT-C06-AC01",
+          "OT-BOOT-C06-AC02"
+        ],
+        "test_id": "apps/web/tests/browser-harness.browser.spec.ts::customer_controlled::ab7feaa78c82b0b2f1cf-2d1017d8217334363c35",
+        "kind": "simulated",
+        "mode": "customer_controlled",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-127",
+        "requirement_ids": [
+          "OT-BOOT-C06-AC01",
+          "OT-BOOT-C06-AC02"
+        ],
+        "test_id": "apps/web/tests/browser-harness.browser.spec.ts::customer_controlled::ab7feaa78c82b0b2f1cf-f44782a86d065b2f960d",
+        "kind": "simulated",
+        "mode": "customer_controlled",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-127",
+        "requirement_ids": [
+          "OT-BOOT-C06-AC01"
+        ],
+        "test_id": "apps/web/tests/browser-harness.browser.spec.ts::customer_controlled::ab7feaa78c82b0b2f1cf-ed6b198c499fa4912130",
+        "kind": "simulated",
+        "mode": "customer_controlled",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-127",
+        "requirement_ids": [
+          "OT-BOOT-C06-AC01"
+        ],
+        "test_id": "apps/web/tests/browser-harness.browser.spec.ts::customer_controlled::ab7feaa78c82b0b2f1cf-28c1aae002e683d4297c",
+        "kind": "simulated",
+        "mode": "customer_controlled",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-127",
+        "requirement_ids": [
+          "OT-BOOT-C06-AC01"
+        ],
+        "test_id": "apps/web/tests/browser-harness.browser.spec.ts::customer_controlled::ab7feaa78c82b0b2f1cf-b79c6eff8790d0a3e3e3",
+        "kind": "simulated",
+        "mode": "customer_controlled",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-127",
+        "requirement_ids": [
+          "OT-BOOT-C06-AC01"
+        ],
+        "test_id": "apps/web/tests/browser-harness.browser.spec.ts::customer_controlled::ab7feaa78c82b0b2f1cf-58cc888c48abcc9bffdb",
+        "kind": "simulated",
+        "mode": "customer_controlled",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-127",
+        "requirement_ids": [
+          "OT-BOOT-C06-AC01"
+        ],
+        "test_id": "apps/web/tests/browser-harness.browser.spec.ts::opentour_managed::ab7feaa78c82b0b2f1cf-370abe7abdd1617ccb71",
+        "kind": "simulated",
+        "mode": "opentour_managed",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-127",
+        "requirement_ids": [
+          "OT-BOOT-C06-AC01",
+          "OT-BOOT-C06-AC02"
+        ],
+        "test_id": "apps/web/tests/browser-harness.browser.spec.ts::opentour_managed::ab7feaa78c82b0b2f1cf-16bdea451fba480ada0d",
+        "kind": "simulated",
+        "mode": "opentour_managed",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-127",
+        "requirement_ids": [
+          "OT-BOOT-C06-AC01",
+          "OT-BOOT-C06-AC02"
+        ],
+        "test_id": "apps/web/tests/browser-harness.browser.spec.ts::opentour_managed::ab7feaa78c82b0b2f1cf-51a7180a2d43e25c2b78",
+        "kind": "simulated",
+        "mode": "opentour_managed",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-127",
+        "requirement_ids": [
+          "OT-BOOT-C06-AC01",
+          "OT-BOOT-C06-AC02"
+        ],
+        "test_id": "apps/web/tests/browser-harness.browser.spec.ts::opentour_managed::ab7feaa78c82b0b2f1cf-e4c0b50f9cb52077f1c8",
+        "kind": "simulated",
+        "mode": "opentour_managed",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-127",
+        "requirement_ids": [
+          "OT-BOOT-C06-AC01",
+          "OT-BOOT-C06-AC02"
+        ],
+        "test_id": "apps/web/tests/browser-harness.browser.spec.ts::opentour_managed::ab7feaa78c82b0b2f1cf-88d54eb9312a86854002",
+        "kind": "simulated",
+        "mode": "opentour_managed",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-127",
+        "requirement_ids": [
+          "OT-BOOT-C06-AC01",
+          "OT-BOOT-C06-AC02"
+        ],
+        "test_id": "apps/web/tests/browser-harness.browser.spec.ts::opentour_managed::ab7feaa78c82b0b2f1cf-cc8f2506829c8a09ccf0",
+        "kind": "simulated",
+        "mode": "opentour_managed",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-127",
+        "requirement_ids": [
+          "OT-BOOT-C06-AC01",
+          "OT-BOOT-C06-AC02"
+        ],
+        "test_id": "apps/web/tests/browser-harness.browser.spec.ts::opentour_managed::ab7feaa78c82b0b2f1cf-a764068af57e529bb692",
+        "kind": "simulated",
+        "mode": "opentour_managed",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-127",
+        "requirement_ids": [
+          "OT-BOOT-C06-AC01"
+        ],
+        "test_id": "apps/web/tests/browser-harness.browser.spec.ts::opentour_managed::ab7feaa78c82b0b2f1cf-214286f1b7cf0768ee0b",
+        "kind": "simulated",
+        "mode": "opentour_managed",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-127",
+        "requirement_ids": [
+          "OT-BOOT-C06-AC01"
+        ],
+        "test_id": "apps/web/tests/browser-harness.browser.spec.ts::opentour_managed::ab7feaa78c82b0b2f1cf-11a03cc2bbd5c45cee91",
+        "kind": "simulated",
+        "mode": "opentour_managed",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-127",
+        "requirement_ids": [
+          "OT-BOOT-C06-AC01"
+        ],
+        "test_id": "apps/web/tests/browser-harness.browser.spec.ts::opentour_managed::ab7feaa78c82b0b2f1cf-62f28b30bd849e3677df",
+        "kind": "simulated",
+        "mode": "opentour_managed",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-127",
+        "requirement_ids": [
+          "OT-BOOT-C06-AC01"
+        ],
+        "test_id": "apps/web/tests/browser-harness.browser.spec.ts::opentour_managed::ab7feaa78c82b0b2f1cf-19017402d478c1f68983",
+        "kind": "simulated",
+        "mode": "opentour_managed",
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-127",
+        "requirement_ids": [
+          "OT-BOOT-C06-AC01"
+        ],
+        "test_id": "apps/web/tests/browser-harness.browser.spec.ts::runner::ab7feaa78c82b0b2f1cf-4640df337908842bd5d1",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-127",
+        "requirement_ids": [
+          "OT-BOOT-C06-AC01"
+        ],
+        "test_id": "apps/web/tests/browser-harness.browser.spec.ts::runner::ab7feaa78c82b0b2f1cf-adde5d5662a774e6e9b7",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-127",
+        "requirement_ids": [
+          "OT-BOOT-C06-AC01"
+        ],
+        "test_id": "apps/web/tests/browser-harness.browser.spec.ts::runner::ab7feaa78c82b0b2f1cf-260b6805ec17fa3ee045",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-127",
+        "requirement_ids": [
+          "OT-BOOT-C06-AC01"
+        ],
+        "test_id": "apps/web/tests/browser-harness.browser.spec.ts::runner::ab7feaa78c82b0b2f1cf-369f37bea52bb9ec1414",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-127",
+        "requirement_ids": [
+          "OT-BOOT-C06-AC01"
+        ],
+        "test_id": "apps/web/tests/browser-harness.browser.spec.ts::runner::ab7feaa78c82b0b2f1cf-902b6fd68f38d548aedf",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-127",
+        "requirement_ids": [
+          "OT-BOOT-C06-AC01"
+        ],
+        "test_id": "apps/web/tests/browser-harness.browser.spec.ts::runner::ab7feaa78c82b0b2f1cf-d256ec27e2774602ea71",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-127",
+        "requirement_ids": [
+          "OT-BOOT-C06-AC01"
+        ],
+        "test_id": "apps/web/tests/browser-harness.browser.spec.ts::runner::ab7feaa78c82b0b2f1cf-182b3e0e6fec144e8fde",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-127",
+        "requirement_ids": [
+          "OT-BOOT-C06-AC01"
+        ],
+        "test_id": "apps/web/tests/browser-harness.browser.spec.ts::runner::ab7feaa78c82b0b2f1cf-69be243d5bbd5ed283cb",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-127",
+        "requirement_ids": [
+          "OT-BOOT-C06-AC01"
+        ],
+        "test_id": "apps/web/tests/browser-harness.browser.spec.ts::runner::ab7feaa78c82b0b2f1cf-6a2e4ae53016d67db530",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-127",
+        "requirement_ids": [
+          "OT-BOOT-C06-AC01"
+        ],
+        "test_id": "apps/web/tests/browser-harness.browser.spec.ts::runner::ab7feaa78c82b0b2f1cf-d06cde5b5de2c800285f",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-127",
+        "requirement_ids": [
+          "OT-BOOT-C06-AC01"
+        ],
+        "test_id": "apps/web/tests/browser-harness.browser.spec.ts::runner::ab7feaa78c82b0b2f1cf-9e64968c754b0d4d5001",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-127",
+        "requirement_ids": [
+          "OT-BOOT-C06-AC01"
+        ],
+        "test_id": "apps/web/tests/browser-harness.browser.spec.ts::runner::ab7feaa78c82b0b2f1cf-f19d7383431b8b758f03",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-127",
+        "requirement_ids": [
+          "OT-BOOT-C06-AC01"
+        ],
+        "test_id": "apps/web/tests/browser-harness.browser.spec.ts::runner::ab7feaa78c82b0b2f1cf-32398520a0d9bf721ddb",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-127",
+        "requirement_ids": [
+          "OT-BOOT-C06-AC01"
+        ],
+        "test_id": "apps/web/tests/browser-harness.browser.spec.ts::runner::ab7feaa78c82b0b2f1cf-a3a9e077d76338c1b7d8",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-127",
+        "requirement_ids": [
+          "OT-BOOT-C06-AC01"
+        ],
+        "test_id": "apps/web/tests/browser-harness.browser.spec.ts::runner::ab7feaa78c82b0b2f1cf-7d16b3186c61ef62336b",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-127",
+        "requirement_ids": [
+          "OT-BOOT-C06-AC01"
+        ],
+        "test_id": "apps/web/tests/browser-harness.browser.spec.ts::runner::ab7feaa78c82b0b2f1cf-8655f9c839c09a8df6aa",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-127",
+        "requirement_ids": [
+          "OT-BOOT-C06-AC01"
+        ],
+        "test_id": "apps/web/tests/browser-harness.browser.spec.ts::runner::ab7feaa78c82b0b2f1cf-31a3e2e44679e9cd59b1",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-127",
+        "requirement_ids": [
+          "OT-BOOT-C06-AC01"
+        ],
+        "test_id": "apps/web/tests/fixtures/harness/visual-comparison.test.ts::0",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-127",
+        "requirement_ids": [
+          "OT-BOOT-C06-AC01"
+        ],
+        "test_id": "apps/web/tests/fixtures/harness/visual-comparison.test.ts::1",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-127",
+        "requirement_ids": [
+          "OT-BOOT-C06-AC01"
+        ],
+        "test_id": "apps/web/tests/fixtures/harness/visual-comparison.test.ts::2",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-127",
+        "requirement_ids": [
+          "OT-BOOT-C06-AC01"
+        ],
+        "test_id": "apps/web/tests/fixtures/harness/visual-comparison.test.ts::3",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-127",
+        "requirement_ids": [
+          "OT-BOOT-C06-AC01"
+        ],
+        "test_id": "apps/web/tests/fixtures/harness/visual-comparison.test.ts::4",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-127",
+        "requirement_ids": [
+          "OT-BOOT-C06-AC01"
+        ],
+        "test_id": "apps/web/tests/fixtures/harness/visual-comparison.test.ts::5",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-127",
+        "requirement_ids": [
+          "OT-BOOT-C06-AC01"
+        ],
+        "test_id": "apps/web/tests/fixtures/harness/visual-comparison.test.ts::6",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-127",
+        "requirement_ids": [
+          "OT-BOOT-C06-AC01"
+        ],
+        "test_id": "apps/web/tests/fixtures/harness/visual-comparison.test.ts::7",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-127",
+        "requirement_ids": [
+          "OT-BOOT-C06-AC01"
+        ],
+        "test_id": "apps/web/tests/fixtures/harness/visual-comparison.test.ts::8",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-127",
+        "requirement_ids": [
+          "OT-BOOT-C06-AC01"
+        ],
+        "test_id": "apps/web/tests/fixtures/harness/visual-comparison.test.ts::9",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
       }
     ]
   },
-  "source_projection_sha256": "29be7abdd0a39bdd87f75e3be87014be817415a7a18ed8d6e9ccac2087c36ec1",
+  "source_projection_sha256": "90838a12279a8a7ad4230390ecb2e4788332b136dff68130052a3ba062cf2835",
   "source_bindings": {
     "feature_register_sha256": "f6d1061a103a028b6309928a1c6d96b1c58cb969793a2b9e8a4e36dd50b4602f",
     "figma_snapshot_sha256": "38c3537dd10719a1978873137d34086fa51e284456ed7c5d46d36e77815367a7",
     "figma_revision": "approved-ui-design-index.v4",
-    "native_projection": "Current native technical IDs, relationships and acceptance-text digests, with reviewed C05 implementation path/test refinements. Excludes full bodies and attachment transport. Original source hashes are provenance, not a claim that omitted source bytes are locally present. OPE-213 native admission and reviewed implementation refresh adds its12 owned paths,3 named native test paths and94 exact positive/adverse cases; the updated technical-capture digest binds current native UTF-8 description with terminal newlines excluded. Full native bodies remain outside this public projection. Provider/customer evidence stays NOT_RUN. OPE-142 current native admission and reviewed implementation refresh adds22 owned paths,6 actual named test paths and158 exact positive/adverse cases (140 simulated,18 local PostgreSQL); the technical-capture digest binds current native UTF-8 description with terminal newlines excluded. Provider/ISO and future consumer integration acceptance stays NOT_RUN."
+    "native_projection": "Current native technical IDs, relationships and acceptance-text digests, with reviewed C05 implementation path/test refinements. Excludes full bodies and attachment transport. Original source hashes are provenance, not a claim that omitted source bytes are locally present. OPE-213 native admission and reviewed implementation refresh adds its12 owned paths,3 named native test paths and94 exact positive/adverse cases; the updated technical-capture digest binds current native UTF-8 description with terminal newlines excluded. Full native bodies remain outside this public projection. Provider/customer evidence stays NOT_RUN. OPE-142 current native admission and reviewed implementation refresh adds22 owned paths,6 actual named test paths and158 exact positive/adverse cases (140 simulated,18 local PostgreSQL); the technical-capture digest binds current native UTF-8 description with terminal newlines excluded. Provider/ISO and future consumer integration acceptance stays NOT_RUN. OPE-127 current reviewed browser comparison policy and implementation add 49 exact observed-case declarations (39 browser, 10 visual-policy units), all simulated, with complete file/project/native case IDs and the actual outer bootstrap-command-contract/v1 fixture identity. Inner simulated-browser-harness metadata and raw PNG/numeric comparison evidence remain retained. Native UTF-8 capture excludes terminal newlines. Provider/customer/product acceptance stays NOT_RUN. OPE-142 current organization-namespace mapping and shared observation/activation-lock clarification refreshes the exact inventory to194 cases (160 simulated,34 actual local PostgreSQL) and uses the observed public bootstrap-command-contract/v1 fixture identity; earlier case IDs and historical source-bound receipts remain preserved. Imported owner receipts establish mapping only; eligible records require new supervised execution. Real provider/ISO/171/172 consumer gates are not upgraded."
   },
   "mappings": [
     {
@@ -33624,15 +34602,71 @@
       ],
       "subfeature_ids": [],
       "owned_paths": [
-        "playwright.config.ts",
-        "apps/web/tests/fixtures/harness/",
         "apps/web/tests/browser-harness.browser.spec.ts",
+        "apps/web/tests/fixtures/harness/",
+        "apps/web/tests/fixtures/harness/README.md",
+        "apps/web/tests/fixtures/harness/baseline-review.json",
+        "apps/web/tests/fixtures/harness/reporter.ts",
+        "apps/web/tests/fixtures/harness/visual-comparison-policy.json",
+        "apps/web/tests/fixtures/harness/visual-comparison.test.ts",
+        "apps/web/tests/fixtures/harness/visual-comparison.ts",
+        "playwright.config.ts",
         "tools/browser-test-runner.ts"
       ],
       "contract_refs": [
         "urn:opentour:common-contract:1.0"
       ],
-      "test_ids": [],
+      "test_ids": [
+        "apps/web/tests/browser-harness.browser.spec.ts::customer_controlled::ab7feaa78c82b0b2f1cf-2fdc334e22f2c169b929",
+        "apps/web/tests/browser-harness.browser.spec.ts::customer_controlled::ab7feaa78c82b0b2f1cf-bf049ca9d014adb2069f",
+        "apps/web/tests/browser-harness.browser.spec.ts::customer_controlled::ab7feaa78c82b0b2f1cf-136a8fa0d6fd0f94c524",
+        "apps/web/tests/browser-harness.browser.spec.ts::customer_controlled::ab7feaa78c82b0b2f1cf-3f594eb5d25efe70d8c7",
+        "apps/web/tests/browser-harness.browser.spec.ts::customer_controlled::ab7feaa78c82b0b2f1cf-3bacb845347872bfad76",
+        "apps/web/tests/browser-harness.browser.spec.ts::customer_controlled::ab7feaa78c82b0b2f1cf-2d1017d8217334363c35",
+        "apps/web/tests/browser-harness.browser.spec.ts::customer_controlled::ab7feaa78c82b0b2f1cf-f44782a86d065b2f960d",
+        "apps/web/tests/browser-harness.browser.spec.ts::customer_controlled::ab7feaa78c82b0b2f1cf-ed6b198c499fa4912130",
+        "apps/web/tests/browser-harness.browser.spec.ts::customer_controlled::ab7feaa78c82b0b2f1cf-28c1aae002e683d4297c",
+        "apps/web/tests/browser-harness.browser.spec.ts::customer_controlled::ab7feaa78c82b0b2f1cf-b79c6eff8790d0a3e3e3",
+        "apps/web/tests/browser-harness.browser.spec.ts::customer_controlled::ab7feaa78c82b0b2f1cf-58cc888c48abcc9bffdb",
+        "apps/web/tests/browser-harness.browser.spec.ts::opentour_managed::ab7feaa78c82b0b2f1cf-370abe7abdd1617ccb71",
+        "apps/web/tests/browser-harness.browser.spec.ts::opentour_managed::ab7feaa78c82b0b2f1cf-16bdea451fba480ada0d",
+        "apps/web/tests/browser-harness.browser.spec.ts::opentour_managed::ab7feaa78c82b0b2f1cf-51a7180a2d43e25c2b78",
+        "apps/web/tests/browser-harness.browser.spec.ts::opentour_managed::ab7feaa78c82b0b2f1cf-e4c0b50f9cb52077f1c8",
+        "apps/web/tests/browser-harness.browser.spec.ts::opentour_managed::ab7feaa78c82b0b2f1cf-88d54eb9312a86854002",
+        "apps/web/tests/browser-harness.browser.spec.ts::opentour_managed::ab7feaa78c82b0b2f1cf-cc8f2506829c8a09ccf0",
+        "apps/web/tests/browser-harness.browser.spec.ts::opentour_managed::ab7feaa78c82b0b2f1cf-a764068af57e529bb692",
+        "apps/web/tests/browser-harness.browser.spec.ts::opentour_managed::ab7feaa78c82b0b2f1cf-214286f1b7cf0768ee0b",
+        "apps/web/tests/browser-harness.browser.spec.ts::opentour_managed::ab7feaa78c82b0b2f1cf-11a03cc2bbd5c45cee91",
+        "apps/web/tests/browser-harness.browser.spec.ts::opentour_managed::ab7feaa78c82b0b2f1cf-62f28b30bd849e3677df",
+        "apps/web/tests/browser-harness.browser.spec.ts::opentour_managed::ab7feaa78c82b0b2f1cf-19017402d478c1f68983",
+        "apps/web/tests/browser-harness.browser.spec.ts::runner::ab7feaa78c82b0b2f1cf-4640df337908842bd5d1",
+        "apps/web/tests/browser-harness.browser.spec.ts::runner::ab7feaa78c82b0b2f1cf-adde5d5662a774e6e9b7",
+        "apps/web/tests/browser-harness.browser.spec.ts::runner::ab7feaa78c82b0b2f1cf-260b6805ec17fa3ee045",
+        "apps/web/tests/browser-harness.browser.spec.ts::runner::ab7feaa78c82b0b2f1cf-369f37bea52bb9ec1414",
+        "apps/web/tests/browser-harness.browser.spec.ts::runner::ab7feaa78c82b0b2f1cf-902b6fd68f38d548aedf",
+        "apps/web/tests/browser-harness.browser.spec.ts::runner::ab7feaa78c82b0b2f1cf-d256ec27e2774602ea71",
+        "apps/web/tests/browser-harness.browser.spec.ts::runner::ab7feaa78c82b0b2f1cf-182b3e0e6fec144e8fde",
+        "apps/web/tests/browser-harness.browser.spec.ts::runner::ab7feaa78c82b0b2f1cf-69be243d5bbd5ed283cb",
+        "apps/web/tests/browser-harness.browser.spec.ts::runner::ab7feaa78c82b0b2f1cf-6a2e4ae53016d67db530",
+        "apps/web/tests/browser-harness.browser.spec.ts::runner::ab7feaa78c82b0b2f1cf-d06cde5b5de2c800285f",
+        "apps/web/tests/browser-harness.browser.spec.ts::runner::ab7feaa78c82b0b2f1cf-9e64968c754b0d4d5001",
+        "apps/web/tests/browser-harness.browser.spec.ts::runner::ab7feaa78c82b0b2f1cf-f19d7383431b8b758f03",
+        "apps/web/tests/browser-harness.browser.spec.ts::runner::ab7feaa78c82b0b2f1cf-32398520a0d9bf721ddb",
+        "apps/web/tests/browser-harness.browser.spec.ts::runner::ab7feaa78c82b0b2f1cf-a3a9e077d76338c1b7d8",
+        "apps/web/tests/browser-harness.browser.spec.ts::runner::ab7feaa78c82b0b2f1cf-7d16b3186c61ef62336b",
+        "apps/web/tests/browser-harness.browser.spec.ts::runner::ab7feaa78c82b0b2f1cf-8655f9c839c09a8df6aa",
+        "apps/web/tests/browser-harness.browser.spec.ts::runner::ab7feaa78c82b0b2f1cf-31a3e2e44679e9cd59b1",
+        "apps/web/tests/fixtures/harness/visual-comparison.test.ts::0",
+        "apps/web/tests/fixtures/harness/visual-comparison.test.ts::1",
+        "apps/web/tests/fixtures/harness/visual-comparison.test.ts::2",
+        "apps/web/tests/fixtures/harness/visual-comparison.test.ts::3",
+        "apps/web/tests/fixtures/harness/visual-comparison.test.ts::4",
+        "apps/web/tests/fixtures/harness/visual-comparison.test.ts::5",
+        "apps/web/tests/fixtures/harness/visual-comparison.test.ts::6",
+        "apps/web/tests/fixtures/harness/visual-comparison.test.ts::7",
+        "apps/web/tests/fixtures/harness/visual-comparison.test.ts::8",
+        "apps/web/tests/fixtures/harness/visual-comparison.test.ts::9"
+      ],
       "real_evidence_requirements": [
         {
           "requirement_id": "OT-BOOT-C06-AC01",
@@ -35047,7 +36081,43 @@
         "apps/web/lib/server/authkit-adapter.test.ts::48",
         "apps/web/lib/server/authkit-adapter.test.ts::49",
         "apps/web/lib/server/authkit-adapter.test.ts::50",
-        "apps/web/lib/server/authkit-adapter.test.ts::51"
+        "apps/web/lib/server/authkit-adapter.test.ts::51",
+        "services/control-api/tests/auth/test_session_context.py::test_missing_provider_organization_mapping_never_falls_back_to_local_id[None]",
+        "services/control-api/tests/auth/test_session_context.py::test_missing_provider_organization_mapping_never_falls_back_to_local_id[]",
+        "services/control-api/tests/auth/test_session_context.py::test_provider_mapping_disagreement_keeps_local_selection_for_reconciliation[mapping]",
+        "services/control-api/tests/auth/test_session_context.py::test_provider_mapping_disagreement_keeps_local_selection_for_reconciliation[jwt_local_id]",
+        "services/control-api/tests/auth/test_session_context.py::test_provider_mapping_disagreement_keeps_local_selection_for_reconciliation[observation]",
+        "services/control-api/tests/auth/test_session_context.py::test_provider_mapping_disagreement_keeps_local_selection_for_reconciliation[removed_foreign]",
+        "services/control-api/tests/auth/test_session_context.py::test_provider_mapping_changed_during_fetch_cannot_return_old_context[authorization]",
+        "services/control-api/tests/auth/test_session_context.py::test_provider_mapping_changed_during_fetch_cannot_return_old_context[current]",
+        "services/control-api/tests/auth/test_session_context.py::test_provider_mapping_never_weakens_verified_issuer_binding",
+        "services/control-api/tests/auth/test_session_context.py::test_provider_removed_response_uses_explicit_identity_organization_mapping",
+        "services/control-api/tests/auth/test_identity_postgres.py::test_distinct_provider_mapping_returns_local_context_with_actual_pg[customer_controlled]",
+        "services/control-api/tests/auth/test_identity_postgres.py::test_distinct_provider_mapping_returns_local_context_with_actual_pg[opentour_managed]",
+        "services/control-api/tests/auth/test_identity_postgres.py::test_wrong_provider_mapping_never_clears_committed_local_selection[customer_controlled]",
+        "services/control-api/tests/auth/test_identity_postgres.py::test_wrong_provider_mapping_never_clears_committed_local_selection[opentour_managed]",
+        "services/control-api/tests/auth/test_identity_postgres.py::test_mapping_changed_during_provider_wait_denies_actual_pg_context[customer_controlled]",
+        "services/control-api/tests/auth/test_identity_postgres.py::test_mapping_changed_during_provider_wait_denies_actual_pg_context[opentour_managed]",
+        "services/control-api/tests/auth/test_identity_postgres.py::test_wrong_provider_issuer_cannot_enter_actual_pg_observation[customer_controlled]",
+        "services/control-api/tests/auth/test_identity_postgres.py::test_wrong_provider_issuer_cannot_enter_actual_pg_observation[opentour_managed]",
+        "apps/web/lib/server/authkit-adapter.test.ts::52",
+        "apps/web/lib/server/authkit-adapter.test.ts::53",
+        "apps/web/lib/server/authkit-adapter.test.ts::54",
+        "apps/web/lib/server/authkit-adapter.test.ts::55",
+        "apps/web/lib/server/authkit-adapter.test.ts::56",
+        "apps/web/lib/server/authkit-adapter.test.ts::57",
+        "apps/web/lib/server/authkit-adapter.test.ts::58",
+        "apps/web/lib/server/authkit-adapter.test.ts::59",
+        "apps/web/lib/server/authkit-adapter.test.ts::60",
+        "apps/web/lib/server/authkit-adapter.test.ts::61",
+        "services/control-api/tests/auth/test_identity_postgres.py::test_membership_observation_lock_linearizes_activation_and_denial[customer_controlled-absent-denial]",
+        "services/control-api/tests/auth/test_identity_postgres.py::test_membership_observation_lock_linearizes_activation_and_denial[customer_controlled-absent-activation]",
+        "services/control-api/tests/auth/test_identity_postgres.py::test_membership_observation_lock_linearizes_activation_and_denial[customer_controlled-active-denial]",
+        "services/control-api/tests/auth/test_identity_postgres.py::test_membership_observation_lock_linearizes_activation_and_denial[customer_controlled-active-activation]",
+        "services/control-api/tests/auth/test_identity_postgres.py::test_membership_observation_lock_linearizes_activation_and_denial[opentour_managed-absent-denial]",
+        "services/control-api/tests/auth/test_identity_postgres.py::test_membership_observation_lock_linearizes_activation_and_denial[opentour_managed-absent-activation]",
+        "services/control-api/tests/auth/test_identity_postgres.py::test_membership_observation_lock_linearizes_activation_and_denial[opentour_managed-active-denial]",
+        "services/control-api/tests/auth/test_identity_postgres.py::test_membership_observation_lock_linearizes_activation_and_denial[opentour_managed-active-activation]"
       ],
       "real_evidence_requirements": [
         {
@@ -48514,6 +49584,30 @@
     {
       "path": "services/control-api/tests/auth/test_sealing.py",
       "owner": "OPE-142"
+    },
+    {
+      "path": "apps/web/tests/fixtures/harness/README.md",
+      "owner": "OPE-127"
+    },
+    {
+      "path": "apps/web/tests/fixtures/harness/baseline-review.json",
+      "owner": "OPE-127"
+    },
+    {
+      "path": "apps/web/tests/fixtures/harness/reporter.ts",
+      "owner": "OPE-127"
+    },
+    {
+      "path": "apps/web/tests/fixtures/harness/visual-comparison-policy.json",
+      "owner": "OPE-127"
+    },
+    {
+      "path": "apps/web/tests/fixtures/harness/visual-comparison.test.ts",
+      "owner": "OPE-127"
+    },
+    {
+      "path": "apps/web/tests/fixtures/harness/visual-comparison.ts",
+      "owner": "OPE-127"
     }
   ],
   "ownership_handoffs": [
@@ -51914,7 +53008,7 @@
       "test_id": "services/control-api/tests/auth/test_auth_context.py::test_invalid_claims_deny_before_local_lookup[iss-https://foreign.invalid/]",
       "kind": "simulated",
       "mode": null,
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -51925,7 +53019,7 @@
       "test_id": "services/control-api/tests/auth/test_auth_context.py::test_invalid_claims_deny_before_local_lookup[aud-foreign]",
       "kind": "simulated",
       "mode": null,
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -51936,7 +53030,7 @@
       "test_id": "services/control-api/tests/auth/test_auth_context.py::test_invalid_claims_deny_before_local_lookup[aud-None]",
       "kind": "simulated",
       "mode": null,
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -51947,7 +53041,7 @@
       "test_id": "services/control-api/tests/auth/test_auth_context.py::test_invalid_claims_deny_before_local_lookup[aud-value3]",
       "kind": "simulated",
       "mode": null,
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -51958,7 +53052,7 @@
       "test_id": "services/control-api/tests/auth/test_auth_context.py::test_invalid_claims_deny_before_local_lookup[sub-value4]",
       "kind": "simulated",
       "mode": null,
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -51969,7 +53063,7 @@
       "test_id": "services/control-api/tests/auth/test_auth_context.py::test_invalid_claims_deny_before_local_lookup[sid-]",
       "kind": "simulated",
       "mode": null,
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -51980,7 +53074,7 @@
       "test_id": "services/control-api/tests/auth/test_auth_context.py::test_invalid_claims_deny_before_local_lookup[auth_time-None]",
       "kind": "simulated",
       "mode": null,
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -51991,7 +53085,7 @@
       "test_id": "services/control-api/tests/auth/test_auth_context.py::test_invalid_claims_deny_before_local_lookup[auth_time-True]",
       "kind": "simulated",
       "mode": null,
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -52002,7 +53096,7 @@
       "test_id": "services/control-api/tests/auth/test_auth_context.py::test_invalid_claims_deny_before_local_lookup[exp-0]",
       "kind": "simulated",
       "mode": null,
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -52013,7 +53107,7 @@
       "test_id": "services/control-api/tests/auth/test_auth_context.py::test_invalid_claims_deny_before_local_lookup[sub_profile-ai_agent]",
       "kind": "simulated",
       "mode": null,
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -52024,7 +53118,7 @@
       "test_id": "services/control-api/tests/auth/test_auth_context.py::test_invalid_claims_deny_before_local_lookup[sub_type-widget]",
       "kind": "simulated",
       "mode": null,
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -52035,7 +53129,7 @@
       "test_id": "services/control-api/tests/auth/test_auth_context.py::test_exact_expiry_and_client_clock_cannot_extend",
       "kind": "simulated",
       "mode": null,
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -52046,7 +53140,7 @@
       "test_id": "services/control-api/tests/auth/test_auth_context.py::test_algorithm_substitution[none]",
       "kind": "simulated",
       "mode": null,
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -52057,7 +53151,7 @@
       "test_id": "services/control-api/tests/auth/test_auth_context.py::test_algorithm_substitution[HS256]",
       "kind": "simulated",
       "mode": null,
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -52068,7 +53162,7 @@
       "test_id": "services/control-api/tests/auth/test_auth_context.py::test_signature_tamper",
       "kind": "simulated",
       "mode": null,
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -52079,7 +53173,7 @@
       "test_id": "services/control-api/tests/auth/test_auth_context.py::test_unknown_key_refresh_is_bounded",
       "kind": "simulated",
       "mode": null,
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -52090,7 +53184,7 @@
       "test_id": "services/control-api/tests/auth/test_auth_context.py::test_token_cannot_choose_key_endpoint[jku]",
       "kind": "simulated",
       "mode": null,
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -52101,7 +53195,7 @@
       "test_id": "services/control-api/tests/auth/test_auth_context.py::test_token_cannot_choose_key_endpoint[jwk]",
       "kind": "simulated",
       "mode": null,
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -52112,7 +53206,7 @@
       "test_id": "services/control-api/tests/auth/test_auth_context.py::test_token_cannot_choose_key_endpoint[x5u]",
       "kind": "simulated",
       "mode": null,
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -52123,7 +53217,7 @@
       "test_id": "services/control-api/tests/auth/test_auth_context.py::test_duplicate_jwks_key_id_is_not_ambiguous_allow",
       "kind": "simulated",
       "mode": null,
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -52134,7 +53228,7 @@
       "test_id": "services/control-api/tests/auth/test_auth_context.py::test_slow_key_refresh_never_queues_or_admits_late_result",
       "kind": "simulated",
       "mode": null,
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -52146,7 +53240,7 @@
       "test_id": "services/control-api/tests/auth/test_auth_context.py::test_scoped_context_schema_and_unknown_assurance",
       "kind": "simulated",
       "mode": null,
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -52157,7 +53251,7 @@
       "test_id": "services/control-api/tests/auth/test_auth_context.py::test_unknown_refresh_cannot_deny_current_cached_key",
       "kind": "simulated",
       "mode": null,
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -52169,7 +53263,7 @@
       "test_id": "services/control-api/tests/auth/test_auth_context.py::test_membership_freshness_boundary[True-30-True]",
       "kind": "simulated",
       "mode": null,
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -52181,7 +53275,7 @@
       "test_id": "services/control-api/tests/auth/test_auth_context.py::test_membership_freshness_boundary[True-31-False]",
       "kind": "simulated",
       "mode": null,
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -52193,7 +53287,7 @@
       "test_id": "services/control-api/tests/auth/test_auth_context.py::test_membership_freshness_boundary[False-300-True]",
       "kind": "simulated",
       "mode": null,
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -52205,7 +53299,7 @@
       "test_id": "services/control-api/tests/auth/test_auth_context.py::test_membership_freshness_boundary[False-301-False]",
       "kind": "simulated",
       "mode": null,
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -52217,7 +53311,7 @@
       "test_id": "services/control-api/tests/auth/test_auth_context.py::test_provider_role_and_email_do_not_grant",
       "kind": "simulated",
       "mode": null,
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -52228,7 +53322,7 @@
       "test_id": "services/control-api/tests/auth/test_auth_context.py::test_sdk_fault_is_sanitized_in_formatted_traceback",
       "kind": "simulated",
       "mode": null,
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -52239,7 +53333,7 @@
       "test_id": "services/control-api/tests/auth/test_auth_context.py::test_key_lookup_expiry_and_backward_clock_fail_closed[2]",
       "kind": "simulated",
       "mode": null,
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -52250,7 +53344,7 @@
       "test_id": "services/control-api/tests/auth/test_auth_context.py::test_key_lookup_expiry_and_backward_clock_fail_closed[-2]",
       "kind": "simulated",
       "mode": null,
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -52262,7 +53356,7 @@
       "test_id": "services/control-api/tests/auth/test_auth_context.py::test_closed_context_rejects_malformed_wire_fields[unexpected-True]",
       "kind": "simulated",
       "mode": null,
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -52274,7 +53368,7 @@
       "test_id": "services/control-api/tests/auth/test_auth_context.py::test_closed_context_rejects_malformed_wire_fields[session_generation-True]",
       "kind": "simulated",
       "mode": null,
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -52286,7 +53380,7 @@
       "test_id": "services/control-api/tests/auth/test_auth_context.py::test_closed_context_rejects_malformed_wire_fields[session_generation-9007199254740992]",
       "kind": "simulated",
       "mode": null,
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -52298,7 +53392,7 @@
       "test_id": "services/control-api/tests/auth/test_auth_context.py::test_closed_context_rejects_malformed_wire_fields[session_id-]",
       "kind": "simulated",
       "mode": null,
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -52310,7 +53404,7 @@
       "test_id": "services/control-api/tests/auth/test_auth_context.py::test_closed_context_rejects_malformed_wire_fields[identity_checked_at-2026-11-15T12:00:00-03:00]",
       "kind": "simulated",
       "mode": null,
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -52322,7 +53416,7 @@
       "test_id": "services/control-api/tests/auth/test_auth_context.py::test_closed_context_rejects_malformed_wire_fields[delegated_grant_id-forged-grant]",
       "kind": "simulated",
       "mode": null,
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -52333,7 +53427,7 @@
       "test_id": "services/control-api/tests/auth/test_auth_context.py::test_missing_or_zero_credential_policy_fails_closed",
       "kind": "simulated",
       "mode": null,
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -52344,7 +53438,7 @@
       "test_id": "services/control-api/tests/auth/test_auth_context.py::test_bounded_sdk_backend_rejects_redirect_and_oversize[302-0]",
       "kind": "simulated",
       "mode": null,
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -52355,7 +53449,7 @@
       "test_id": "services/control-api/tests/auth/test_auth_context.py::test_bounded_sdk_backend_rejects_redirect_and_oversize[200-1048577]",
       "kind": "simulated",
       "mode": null,
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -52366,7 +53460,7 @@
       "test_id": "services/control-api/tests/auth/test_auth_context.py::test_bounded_sdk_backend_rejects_redirect_and_oversize[500-50]",
       "kind": "simulated",
       "mode": null,
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -52377,7 +53471,7 @@
       "test_id": "services/control-api/tests/auth/test_auth_context.py::test_sdk_backend_caller_deadline_and_worker_cleanup_are_distinct",
       "kind": "simulated",
       "mode": null,
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -52390,7 +53484,7 @@
       "test_id": "services/control-api/tests/auth/test_session_context.py::test_valid_session_has_exact_scope",
       "kind": "simulated",
       "mode": null,
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -52401,7 +53495,7 @@
       "test_id": "services/control-api/tests/auth/test_session_context.py::test_member_of_b_cannot_reuse_a_context",
       "kind": "simulated",
       "mode": null,
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -52413,7 +53507,7 @@
       "test_id": "services/control-api/tests/auth/test_session_context.py::test_zero_org_identity_has_finite_allowlist",
       "kind": "simulated",
       "mode": null,
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -52426,7 +53520,7 @@
       "test_id": "services/control-api/tests/auth/test_session_context.py::test_current_context_never_fabricates_selection[unselected]",
       "kind": "simulated",
       "mode": null,
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -52439,7 +53533,7 @@
       "test_id": "services/control-api/tests/auth/test_session_context.py::test_current_context_never_fabricates_selection[mismatch]",
       "kind": "simulated",
       "mode": null,
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -52452,7 +53546,7 @@
       "test_id": "services/control-api/tests/auth/test_session_context.py::test_current_context_never_fabricates_selection[pending]",
       "kind": "simulated",
       "mode": null,
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -52465,7 +53559,7 @@
       "test_id": "services/control-api/tests/auth/test_session_context.py::test_current_context_never_fabricates_selection[removed]",
       "kind": "simulated",
       "mode": null,
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -52476,7 +53570,7 @@
       "test_id": "services/control-api/tests/auth/test_session_context.py::test_session_ending_is_idempotent_and_other_sessions_untouched",
       "kind": "simulated",
       "mode": null,
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -52487,7 +53581,7 @@
       "test_id": "services/control-api/tests/auth/test_session_context.py::test_denial_commit_unknown_is_not_success",
       "kind": "simulated",
       "mode": null,
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -52499,7 +53593,7 @@
       "test_id": "services/control-api/tests/auth/test_session_context.py::test_forged_or_foreign_binding_cannot_select_session",
       "kind": "simulated",
       "mode": null,
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -52511,7 +53605,7 @@
       "test_id": "services/control-api/tests/auth/test_session_context.py::test_old_generation_cannot_admit_delayed_request",
       "kind": "simulated",
       "mode": null,
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -52524,7 +53618,7 @@
       "test_id": "services/control-api/tests/auth/test_session_context.py::test_actual_context_route_ignores_forwarded_context",
       "kind": "simulated",
       "mode": null,
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -52535,7 +53629,7 @@
       "test_id": "services/control-api/tests/auth/test_session_context.py::test_invalid_route_identity_has_safe_closed_error",
       "kind": "simulated",
       "mode": null,
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -52547,7 +53641,7 @@
       "test_id": "services/control-api/tests/auth/test_session_context.py::test_provider_wait_cannot_return_old_selected_context[ended-authorization]",
       "kind": "simulated",
       "mode": null,
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -52559,7 +53653,7 @@
       "test_id": "services/control-api/tests/auth/test_session_context.py::test_provider_wait_cannot_return_old_selected_context[ended-current]",
       "kind": "simulated",
       "mode": null,
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -52571,7 +53665,7 @@
       "test_id": "services/control-api/tests/auth/test_session_context.py::test_provider_wait_cannot_return_old_selected_context[generation-authorization]",
       "kind": "simulated",
       "mode": null,
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -52583,7 +53677,7 @@
       "test_id": "services/control-api/tests/auth/test_session_context.py::test_provider_wait_cannot_return_old_selected_context[generation-current]",
       "kind": "simulated",
       "mode": null,
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -52595,7 +53689,7 @@
       "test_id": "services/control-api/tests/auth/test_session_context.py::test_provider_wait_cannot_return_old_selected_context[selection-authorization]",
       "kind": "simulated",
       "mode": null,
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -52607,7 +53701,7 @@
       "test_id": "services/control-api/tests/auth/test_session_context.py::test_provider_wait_cannot_return_old_selected_context[selection-current]",
       "kind": "simulated",
       "mode": null,
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -52619,7 +53713,7 @@
       "test_id": "services/control-api/tests/auth/test_session_context.py::test_provider_wait_cannot_return_old_selected_context[reconciliation-authorization]",
       "kind": "simulated",
       "mode": null,
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -52631,7 +53725,7 @@
       "test_id": "services/control-api/tests/auth/test_session_context.py::test_provider_wait_cannot_return_old_selected_context[reconciliation-current]",
       "kind": "simulated",
       "mode": null,
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -52643,7 +53737,7 @@
       "test_id": "services/control-api/tests/auth/test_session_context.py::test_provider_wait_cannot_return_old_selected_context[removed-authorization]",
       "kind": "simulated",
       "mode": null,
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -52655,7 +53749,7 @@
       "test_id": "services/control-api/tests/auth/test_session_context.py::test_provider_wait_cannot_return_old_selected_context[removed-current]",
       "kind": "simulated",
       "mode": null,
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -52666,7 +53760,7 @@
       "test_id": "services/control-api/tests/auth/test_session_context.py::test_removed_selection_preserves_only_authenticated_recovery_binding",
       "kind": "simulated",
       "mode": null,
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -52677,7 +53771,7 @@
       "test_id": "services/control-api/tests/auth/test_session_context.py::test_provider_wait_cannot_extend_expiry_or_freshness[2]",
       "kind": "simulated",
       "mode": null,
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -52688,7 +53782,7 @@
       "test_id": "services/control-api/tests/auth/test_session_context.py::test_provider_wait_cannot_extend_expiry_or_freshness[-2]",
       "kind": "simulated",
       "mode": null,
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -52699,7 +53793,7 @@
       "test_id": "services/control-api/tests/auth/test_session_context.py::test_provider_wait_cannot_extend_expiry_or_freshness[31]",
       "kind": "simulated",
       "mode": null,
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -52710,7 +53804,7 @@
       "test_id": "services/control-api/tests/auth/test_session_context.py::test_actual_sdk_fault_body_never_reaches_api_or_logs",
       "kind": "simulated",
       "mode": null,
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -52721,7 +53815,7 @@
       "test_id": "services/control-api/tests/auth/test_session_context.py::test_final_state_read_cannot_hide_denial_or_time_passage[provider_denial]",
       "kind": "simulated",
       "mode": null,
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -52732,7 +53826,7 @@
       "test_id": "services/control-api/tests/auth/test_session_context.py::test_final_state_read_cannot_hide_denial_or_time_passage[expiry]",
       "kind": "simulated",
       "mode": null,
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -52743,7 +53837,7 @@
       "test_id": "services/control-api/tests/auth/test_session_context.py::test_final_state_read_cannot_hide_denial_or_time_passage[freshness]",
       "kind": "simulated",
       "mode": null,
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -52755,7 +53849,7 @@
       "test_id": "services/control-api/tests/auth/test_session_context.py::test_admission_logs_only_safe_freshness_metadata",
       "kind": "simulated",
       "mode": null,
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -52767,7 +53861,7 @@
       "test_id": "services/control-api/tests/auth/test_session_context.py::test_pending_provider_context_never_fabricates_removal[pending_identity]",
       "kind": "simulated",
       "mode": null,
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -52779,7 +53873,7 @@
       "test_id": "services/control-api/tests/auth/test_session_context.py::test_pending_provider_context_never_fabricates_removal[reconciliation_unknown]",
       "kind": "simulated",
       "mode": null,
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -52790,7 +53884,7 @@
       "test_id": "services/control-api/tests/auth/test_identity_sync.py::test_remove_then_late_active_stays_denied",
       "kind": "simulated",
       "mode": null,
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -52802,7 +53896,7 @@
       "test_id": "services/control-api/tests/auth/test_identity_sync.py::test_duplicate_and_conflicting_event_digest",
       "kind": "simulated",
       "mode": null,
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -52814,7 +53908,7 @@
       "test_id": "services/control-api/tests/auth/test_identity_sync.py::test_crash_before_cursor_commit_replays_once",
       "kind": "simulated",
       "mode": null,
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -52825,7 +53919,7 @@
       "test_id": "services/control-api/tests/auth/test_identity_sync.py::test_current_fetch_unknown_does_not_advance_cursor",
       "kind": "simulated",
       "mode": null,
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -52837,7 +53931,7 @@
       "test_id": "services/control-api/tests/auth/test_identity_sync.py::test_unconfirmed_identity_never_grants[pending_identity]",
       "kind": "simulated",
       "mode": null,
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -52849,7 +53943,7 @@
       "test_id": "services/control-api/tests/auth/test_identity_sync.py::test_unconfirmed_identity_never_grants[reconciliation_unknown]",
       "kind": "simulated",
       "mode": null,
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -52861,7 +53955,7 @@
       "test_id": "services/control-api/tests/auth/test_identity_sync.py::test_unconfirmed_identity_never_grants[removed]",
       "kind": "simulated",
       "mode": null,
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -52872,7 +53966,7 @@
       "test_id": "services/control-api/tests/auth/test_identity_sync.py::test_conflicting_scope_fails_batch",
       "kind": "simulated",
       "mode": null,
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -52883,7 +53977,7 @@
       "test_id": "services/control-api/tests/auth/test_identity_sync.py::test_revoked_session_cannot_be_recreated",
       "kind": "simulated",
       "mode": null,
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -52894,7 +53988,7 @@
       "test_id": "services/control-api/tests/auth/test_identity_sync.py::test_webhook_wakeup_never_applies_payload",
       "kind": "simulated",
       "mode": null,
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -52906,7 +54000,7 @@
       "test_id": "services/control-api/tests/auth/test_sealing.py::test_sealed_payload_scope_expiry_rotation_and_tampering",
       "kind": "simulated",
       "mode": null,
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -52917,7 +54011,7 @@
       "test_id": "services/control-api/tests/auth/test_sealing.py::test_no_implicit_sealing_key_or_lifetime_extension",
       "kind": "simulated",
       "mode": null,
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -52929,7 +54023,7 @@
       "test_id": "services/control-api/tests/auth/test_identity_postgres.py::test_runtime_role_and_migration_are_real[customer_controlled]",
       "kind": "local_integration",
       "mode": "customer_controlled",
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -52941,7 +54035,7 @@
       "test_id": "services/control-api/tests/auth/test_identity_postgres.py::test_runtime_role_and_migration_are_real[opentour_managed]",
       "kind": "local_integration",
       "mode": "opentour_managed",
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -52953,7 +54047,7 @@
       "test_id": "services/control-api/tests/auth/test_identity_postgres.py::test_router_uses_committed_state_and_durable_end[customer_controlled]",
       "kind": "local_integration",
       "mode": "customer_controlled",
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -52965,7 +54059,7 @@
       "test_id": "services/control-api/tests/auth/test_identity_postgres.py::test_router_uses_committed_state_and_durable_end[opentour_managed]",
       "kind": "local_integration",
       "mode": "opentour_managed",
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -52977,7 +54071,7 @@
       "test_id": "services/control-api/tests/auth/test_identity_postgres.py::test_atomic_admission_credentials_and_late_refresh_denial[customer_controlled]",
       "kind": "local_integration",
       "mode": "customer_controlled",
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -52989,7 +54083,7 @@
       "test_id": "services/control-api/tests/auth/test_identity_postgres.py::test_atomic_admission_credentials_and_late_refresh_denial[opentour_managed]",
       "kind": "local_integration",
       "mode": "opentour_managed",
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -53001,7 +54095,7 @@
       "test_id": "services/control-api/tests/auth/test_identity_postgres.py::test_failed_admission_rolls_back_binding_and_session[customer_controlled]",
       "kind": "local_integration",
       "mode": "customer_controlled",
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -53013,7 +54107,7 @@
       "test_id": "services/control-api/tests/auth/test_identity_postgres.py::test_failed_admission_rolls_back_binding_and_session[opentour_managed]",
       "kind": "local_integration",
       "mode": "opentour_managed",
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -53025,7 +54119,7 @@
       "test_id": "services/control-api/tests/auth/test_identity_postgres.py::test_duplicate_callback_claim_has_one_durable_winner[customer_controlled]",
       "kind": "local_integration",
       "mode": "customer_controlled",
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -53037,7 +54131,7 @@
       "test_id": "services/control-api/tests/auth/test_identity_postgres.py::test_duplicate_callback_claim_has_one_durable_winner[opentour_managed]",
       "kind": "local_integration",
       "mode": "opentour_managed",
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -53049,7 +54143,7 @@
       "test_id": "services/control-api/tests/auth/test_identity_postgres.py::test_cursor_batch_rollback_replay_and_sticky_denial[customer_controlled]",
       "kind": "local_integration",
       "mode": "customer_controlled",
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -53061,7 +54155,7 @@
       "test_id": "services/control-api/tests/auth/test_identity_postgres.py::test_cursor_batch_rollback_replay_and_sticky_denial[opentour_managed]",
       "kind": "local_integration",
       "mode": "opentour_managed",
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -53072,7 +54166,7 @@
       "test_id": "services/control-api/tests/auth/test_identity_postgres.py::test_unknown_session_revocation_prevents_future_admission[customer_controlled]",
       "kind": "local_integration",
       "mode": "customer_controlled",
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -53083,7 +54177,7 @@
       "test_id": "services/control-api/tests/auth/test_identity_postgres.py::test_unknown_session_revocation_prevents_future_admission[opentour_managed]",
       "kind": "local_integration",
       "mode": "opentour_managed",
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -53094,7 +54188,7 @@
       "test_id": "services/control-api/tests/auth/test_identity_postgres.py::test_stale_subject_generation_and_expired_credentials_refuse[customer_controlled]",
       "kind": "local_integration",
       "mode": "customer_controlled",
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -53105,7 +54199,7 @@
       "test_id": "services/control-api/tests/auth/test_identity_postgres.py::test_stale_subject_generation_and_expired_credentials_refuse[opentour_managed]",
       "kind": "local_integration",
       "mode": "opentour_managed",
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -53117,7 +54211,7 @@
       "test_id": "services/control-api/tests/auth/test_identity_postgres.py::test_configured_typescript_factories_with_actual_durable_ports[customer_controlled]",
       "kind": "local_integration",
       "mode": "customer_controlled",
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -53129,7 +54223,7 @@
       "test_id": "services/control-api/tests/auth/test_identity_postgres.py::test_configured_typescript_factories_with_actual_durable_ports[opentour_managed]",
       "kind": "local_integration",
       "mode": "opentour_managed",
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -53140,7 +54234,7 @@
       "test_id": "apps/web/lib/server/authkit-adapter.test.ts::0",
       "kind": "simulated",
       "mode": null,
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -53151,7 +54245,7 @@
       "test_id": "apps/web/lib/server/authkit-adapter.test.ts::1",
       "kind": "simulated",
       "mode": null,
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -53162,7 +54256,7 @@
       "test_id": "apps/web/lib/server/authkit-adapter.test.ts::2",
       "kind": "simulated",
       "mode": null,
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -53173,7 +54267,7 @@
       "test_id": "apps/web/lib/server/authkit-adapter.test.ts::3",
       "kind": "simulated",
       "mode": null,
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -53184,7 +54278,7 @@
       "test_id": "apps/web/lib/server/authkit-adapter.test.ts::4",
       "kind": "simulated",
       "mode": null,
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -53195,7 +54289,7 @@
       "test_id": "apps/web/lib/server/authkit-adapter.test.ts::5",
       "kind": "simulated",
       "mode": null,
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -53206,7 +54300,7 @@
       "test_id": "apps/web/lib/server/authkit-adapter.test.ts::6",
       "kind": "simulated",
       "mode": null,
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -53218,7 +54312,7 @@
       "test_id": "apps/web/lib/server/authkit-adapter.test.ts::7",
       "kind": "simulated",
       "mode": null,
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -53229,7 +54323,7 @@
       "test_id": "apps/web/lib/server/authkit-adapter.test.ts::8",
       "kind": "simulated",
       "mode": null,
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -53240,7 +54334,7 @@
       "test_id": "apps/web/lib/server/authkit-adapter.test.ts::9",
       "kind": "simulated",
       "mode": null,
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -53251,7 +54345,7 @@
       "test_id": "apps/web/lib/server/authkit-adapter.test.ts::10",
       "kind": "simulated",
       "mode": null,
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -53262,7 +54356,7 @@
       "test_id": "apps/web/lib/server/authkit-adapter.test.ts::11",
       "kind": "simulated",
       "mode": null,
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -53273,7 +54367,7 @@
       "test_id": "apps/web/lib/server/authkit-adapter.test.ts::12",
       "kind": "simulated",
       "mode": null,
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -53284,7 +54378,7 @@
       "test_id": "apps/web/lib/server/authkit-adapter.test.ts::13",
       "kind": "simulated",
       "mode": null,
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -53295,7 +54389,7 @@
       "test_id": "apps/web/lib/server/authkit-adapter.test.ts::14",
       "kind": "simulated",
       "mode": null,
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -53306,7 +54400,7 @@
       "test_id": "apps/web/lib/server/authkit-adapter.test.ts::15",
       "kind": "simulated",
       "mode": null,
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -53317,7 +54411,7 @@
       "test_id": "apps/web/lib/server/authkit-adapter.test.ts::16",
       "kind": "simulated",
       "mode": null,
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -53328,7 +54422,7 @@
       "test_id": "apps/web/lib/server/authkit-adapter.test.ts::17",
       "kind": "simulated",
       "mode": null,
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -53339,7 +54433,7 @@
       "test_id": "apps/web/lib/server/authkit-adapter.test.ts::18",
       "kind": "simulated",
       "mode": null,
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -53350,7 +54444,7 @@
       "test_id": "apps/web/lib/server/authkit-adapter.test.ts::19",
       "kind": "simulated",
       "mode": null,
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -53362,7 +54456,7 @@
       "test_id": "apps/web/lib/server/authkit-adapter.test.ts::20",
       "kind": "simulated",
       "mode": null,
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -53374,7 +54468,7 @@
       "test_id": "apps/web/lib/server/authkit-adapter.test.ts::21",
       "kind": "simulated",
       "mode": null,
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -53385,7 +54479,7 @@
       "test_id": "apps/web/lib/server/authkit-adapter.test.ts::22",
       "kind": "simulated",
       "mode": null,
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -53396,7 +54490,7 @@
       "test_id": "apps/web/lib/server/authkit-adapter.test.ts::23",
       "kind": "simulated",
       "mode": null,
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -53407,7 +54501,7 @@
       "test_id": "apps/web/lib/server/authkit-adapter.test.ts::24",
       "kind": "simulated",
       "mode": null,
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -53418,7 +54512,7 @@
       "test_id": "apps/web/lib/server/authkit-adapter.test.ts::25",
       "kind": "simulated",
       "mode": null,
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -53430,7 +54524,7 @@
       "test_id": "apps/web/lib/server/authkit-adapter.test.ts::26",
       "kind": "simulated",
       "mode": null,
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -53442,7 +54536,7 @@
       "test_id": "apps/web/lib/server/authkit-adapter.test.ts::27",
       "kind": "simulated",
       "mode": null,
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -53454,7 +54548,7 @@
       "test_id": "apps/web/lib/server/authkit-adapter.test.ts::28",
       "kind": "simulated",
       "mode": null,
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -53465,7 +54559,7 @@
       "test_id": "apps/web/lib/server/authkit-adapter.test.ts::29",
       "kind": "simulated",
       "mode": null,
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -53476,7 +54570,7 @@
       "test_id": "apps/web/lib/server/authkit-adapter.test.ts::30",
       "kind": "simulated",
       "mode": null,
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -53487,7 +54581,7 @@
       "test_id": "apps/web/lib/server/authkit-adapter.test.ts::31",
       "kind": "simulated",
       "mode": null,
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -53498,7 +54592,7 @@
       "test_id": "apps/web/lib/server/authkit-adapter.test.ts::32",
       "kind": "simulated",
       "mode": null,
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -53509,7 +54603,7 @@
       "test_id": "apps/web/lib/server/authkit-adapter.test.ts::33",
       "kind": "simulated",
       "mode": null,
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -53521,7 +54615,7 @@
       "test_id": "apps/web/lib/server/authkit-adapter.test.ts::34",
       "kind": "simulated",
       "mode": null,
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -53533,7 +54627,7 @@
       "test_id": "apps/web/lib/server/authkit-adapter.test.ts::35",
       "kind": "simulated",
       "mode": null,
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -53545,7 +54639,7 @@
       "test_id": "apps/web/lib/server/authkit-adapter.test.ts::36",
       "kind": "simulated",
       "mode": null,
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -53556,7 +54650,7 @@
       "test_id": "apps/web/lib/server/authkit-adapter.test.ts::37",
       "kind": "simulated",
       "mode": null,
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -53567,7 +54661,7 @@
       "test_id": "apps/web/lib/server/authkit-adapter.test.ts::38",
       "kind": "simulated",
       "mode": null,
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -53578,7 +54672,7 @@
       "test_id": "apps/web/lib/server/authkit-adapter.test.ts::39",
       "kind": "simulated",
       "mode": null,
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -53590,7 +54684,7 @@
       "test_id": "apps/web/lib/server/authkit-adapter.test.ts::40",
       "kind": "simulated",
       "mode": null,
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -53601,7 +54695,7 @@
       "test_id": "apps/web/lib/server/authkit-adapter.test.ts::41",
       "kind": "simulated",
       "mode": null,
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -53612,7 +54706,7 @@
       "test_id": "apps/web/lib/server/authkit-adapter.test.ts::42",
       "kind": "simulated",
       "mode": null,
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -53623,7 +54717,7 @@
       "test_id": "apps/web/lib/server/authkit-adapter.test.ts::43",
       "kind": "simulated",
       "mode": null,
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -53634,7 +54728,7 @@
       "test_id": "apps/web/lib/server/authkit-adapter.test.ts::44",
       "kind": "simulated",
       "mode": null,
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -53645,7 +54739,7 @@
       "test_id": "apps/web/lib/server/authkit-adapter.test.ts::45",
       "kind": "simulated",
       "mode": null,
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -53656,7 +54750,7 @@
       "test_id": "apps/web/lib/server/authkit-adapter.test.ts::46",
       "kind": "simulated",
       "mode": null,
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -53667,7 +54761,7 @@
       "test_id": "apps/web/lib/server/authkit-adapter.test.ts::47",
       "kind": "simulated",
       "mode": null,
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -53678,7 +54772,7 @@
       "test_id": "apps/web/lib/server/authkit-adapter.test.ts::48",
       "kind": "simulated",
       "mode": null,
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -53689,7 +54783,7 @@
       "test_id": "apps/web/lib/server/authkit-adapter.test.ts::49",
       "kind": "simulated",
       "mode": null,
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -53700,7 +54794,7 @@
       "test_id": "apps/web/lib/server/authkit-adapter.test.ts::50",
       "kind": "simulated",
       "mode": null,
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     },
     {
@@ -53711,7 +54805,978 @@
       "test_id": "apps/web/lib/server/authkit-adapter.test.ts::51",
       "kind": "simulated",
       "mode": null,
-      "fixture_id": "identity-session-context",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC02"
+      ],
+      "test_id": "services/control-api/tests/auth/test_session_context.py::test_missing_provider_organization_mapping_never_falls_back_to_local_id[None]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC02"
+      ],
+      "test_id": "services/control-api/tests/auth/test_session_context.py::test_missing_provider_organization_mapping_never_falls_back_to_local_id[]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC02",
+        "OT-P01-C01-AC03"
+      ],
+      "test_id": "services/control-api/tests/auth/test_session_context.py::test_provider_mapping_disagreement_keeps_local_selection_for_reconciliation[mapping]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC02",
+        "OT-P01-C01-AC03"
+      ],
+      "test_id": "services/control-api/tests/auth/test_session_context.py::test_provider_mapping_disagreement_keeps_local_selection_for_reconciliation[jwt_local_id]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC02",
+        "OT-P01-C01-AC03"
+      ],
+      "test_id": "services/control-api/tests/auth/test_session_context.py::test_provider_mapping_disagreement_keeps_local_selection_for_reconciliation[observation]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC02",
+        "OT-P01-C01-AC03"
+      ],
+      "test_id": "services/control-api/tests/auth/test_session_context.py::test_provider_mapping_disagreement_keeps_local_selection_for_reconciliation[removed_foreign]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC02"
+      ],
+      "test_id": "services/control-api/tests/auth/test_session_context.py::test_provider_mapping_changed_during_fetch_cannot_return_old_context[authorization]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC02"
+      ],
+      "test_id": "services/control-api/tests/auth/test_session_context.py::test_provider_mapping_changed_during_fetch_cannot_return_old_context[current]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC02"
+      ],
+      "test_id": "services/control-api/tests/auth/test_session_context.py::test_provider_mapping_never_weakens_verified_issuer_binding",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC02"
+      ],
+      "test_id": "services/control-api/tests/auth/test_session_context.py::test_provider_removed_response_uses_explicit_identity_organization_mapping",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC01"
+      ],
+      "test_id": "services/control-api/tests/auth/test_identity_postgres.py::test_distinct_provider_mapping_returns_local_context_with_actual_pg[customer_controlled]",
+      "kind": "local_integration",
+      "mode": "customer_controlled",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC01"
+      ],
+      "test_id": "services/control-api/tests/auth/test_identity_postgres.py::test_distinct_provider_mapping_returns_local_context_with_actual_pg[opentour_managed]",
+      "kind": "local_integration",
+      "mode": "opentour_managed",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC02",
+        "OT-P01-C01-AC03"
+      ],
+      "test_id": "services/control-api/tests/auth/test_identity_postgres.py::test_wrong_provider_mapping_never_clears_committed_local_selection[customer_controlled]",
+      "kind": "local_integration",
+      "mode": "customer_controlled",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC02",
+        "OT-P01-C01-AC03"
+      ],
+      "test_id": "services/control-api/tests/auth/test_identity_postgres.py::test_wrong_provider_mapping_never_clears_committed_local_selection[opentour_managed]",
+      "kind": "local_integration",
+      "mode": "opentour_managed",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC02"
+      ],
+      "test_id": "services/control-api/tests/auth/test_identity_postgres.py::test_mapping_changed_during_provider_wait_denies_actual_pg_context[customer_controlled]",
+      "kind": "local_integration",
+      "mode": "customer_controlled",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC02"
+      ],
+      "test_id": "services/control-api/tests/auth/test_identity_postgres.py::test_mapping_changed_during_provider_wait_denies_actual_pg_context[opentour_managed]",
+      "kind": "local_integration",
+      "mode": "opentour_managed",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC02"
+      ],
+      "test_id": "services/control-api/tests/auth/test_identity_postgres.py::test_wrong_provider_issuer_cannot_enter_actual_pg_observation[customer_controlled]",
+      "kind": "local_integration",
+      "mode": "customer_controlled",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC02"
+      ],
+      "test_id": "services/control-api/tests/auth/test_identity_postgres.py::test_wrong_provider_issuer_cannot_enter_actual_pg_observation[opentour_managed]",
+      "kind": "local_integration",
+      "mode": "opentour_managed",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC02",
+        "OT-P01-C01-AC03"
+      ],
+      "test_id": "apps/web/lib/server/authkit-adapter.test.ts::52",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC02",
+        "OT-P01-C01-AC03"
+      ],
+      "test_id": "apps/web/lib/server/authkit-adapter.test.ts::53",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC02",
+        "OT-P01-C01-AC03"
+      ],
+      "test_id": "apps/web/lib/server/authkit-adapter.test.ts::54",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC02",
+        "OT-P01-C01-AC03"
+      ],
+      "test_id": "apps/web/lib/server/authkit-adapter.test.ts::55",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC02",
+        "OT-P01-C01-AC03"
+      ],
+      "test_id": "apps/web/lib/server/authkit-adapter.test.ts::56",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC02",
+        "OT-P01-C01-AC03"
+      ],
+      "test_id": "apps/web/lib/server/authkit-adapter.test.ts::57",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC02",
+        "OT-P01-C01-AC03"
+      ],
+      "test_id": "apps/web/lib/server/authkit-adapter.test.ts::58",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC01",
+        "OT-P01-C01-AC03"
+      ],
+      "test_id": "apps/web/lib/server/authkit-adapter.test.ts::59",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC02",
+        "OT-P01-C01-AC03"
+      ],
+      "test_id": "apps/web/lib/server/authkit-adapter.test.ts::60",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC02",
+        "OT-P01-C01-AC03"
+      ],
+      "test_id": "apps/web/lib/server/authkit-adapter.test.ts::61",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC02",
+        "OT-P01-C01-AC03"
+      ],
+      "test_id": "services/control-api/tests/auth/test_identity_postgres.py::test_membership_observation_lock_linearizes_activation_and_denial[customer_controlled-absent-denial]",
+      "kind": "local_integration",
+      "mode": "customer_controlled",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC02",
+        "OT-P01-C01-AC03"
+      ],
+      "test_id": "services/control-api/tests/auth/test_identity_postgres.py::test_membership_observation_lock_linearizes_activation_and_denial[customer_controlled-absent-activation]",
+      "kind": "local_integration",
+      "mode": "customer_controlled",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC02",
+        "OT-P01-C01-AC03"
+      ],
+      "test_id": "services/control-api/tests/auth/test_identity_postgres.py::test_membership_observation_lock_linearizes_activation_and_denial[customer_controlled-active-denial]",
+      "kind": "local_integration",
+      "mode": "customer_controlled",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC02",
+        "OT-P01-C01-AC03"
+      ],
+      "test_id": "services/control-api/tests/auth/test_identity_postgres.py::test_membership_observation_lock_linearizes_activation_and_denial[customer_controlled-active-activation]",
+      "kind": "local_integration",
+      "mode": "customer_controlled",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC02",
+        "OT-P01-C01-AC03"
+      ],
+      "test_id": "services/control-api/tests/auth/test_identity_postgres.py::test_membership_observation_lock_linearizes_activation_and_denial[opentour_managed-absent-denial]",
+      "kind": "local_integration",
+      "mode": "opentour_managed",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC02",
+        "OT-P01-C01-AC03"
+      ],
+      "test_id": "services/control-api/tests/auth/test_identity_postgres.py::test_membership_observation_lock_linearizes_activation_and_denial[opentour_managed-absent-activation]",
+      "kind": "local_integration",
+      "mode": "opentour_managed",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC02",
+        "OT-P01-C01-AC03"
+      ],
+      "test_id": "services/control-api/tests/auth/test_identity_postgres.py::test_membership_observation_lock_linearizes_activation_and_denial[opentour_managed-active-denial]",
+      "kind": "local_integration",
+      "mode": "opentour_managed",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC02",
+        "OT-P01-C01-AC03"
+      ],
+      "test_id": "services/control-api/tests/auth/test_identity_postgres.py::test_membership_observation_lock_linearizes_activation_and_denial[opentour_managed-active-activation]",
+      "kind": "local_integration",
+      "mode": "opentour_managed",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-127",
+      "requirement_ids": [
+        "OT-BOOT-C06-AC01"
+      ],
+      "test_id": "apps/web/tests/browser-harness.browser.spec.ts::customer_controlled::ab7feaa78c82b0b2f1cf-2fdc334e22f2c169b929",
+      "kind": "simulated",
+      "mode": "customer_controlled",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-127",
+      "requirement_ids": [
+        "OT-BOOT-C06-AC01",
+        "OT-BOOT-C06-AC02"
+      ],
+      "test_id": "apps/web/tests/browser-harness.browser.spec.ts::customer_controlled::ab7feaa78c82b0b2f1cf-bf049ca9d014adb2069f",
+      "kind": "simulated",
+      "mode": "customer_controlled",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-127",
+      "requirement_ids": [
+        "OT-BOOT-C06-AC01",
+        "OT-BOOT-C06-AC02"
+      ],
+      "test_id": "apps/web/tests/browser-harness.browser.spec.ts::customer_controlled::ab7feaa78c82b0b2f1cf-136a8fa0d6fd0f94c524",
+      "kind": "simulated",
+      "mode": "customer_controlled",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-127",
+      "requirement_ids": [
+        "OT-BOOT-C06-AC01",
+        "OT-BOOT-C06-AC02"
+      ],
+      "test_id": "apps/web/tests/browser-harness.browser.spec.ts::customer_controlled::ab7feaa78c82b0b2f1cf-3f594eb5d25efe70d8c7",
+      "kind": "simulated",
+      "mode": "customer_controlled",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-127",
+      "requirement_ids": [
+        "OT-BOOT-C06-AC01",
+        "OT-BOOT-C06-AC02"
+      ],
+      "test_id": "apps/web/tests/browser-harness.browser.spec.ts::customer_controlled::ab7feaa78c82b0b2f1cf-3bacb845347872bfad76",
+      "kind": "simulated",
+      "mode": "customer_controlled",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-127",
+      "requirement_ids": [
+        "OT-BOOT-C06-AC01",
+        "OT-BOOT-C06-AC02"
+      ],
+      "test_id": "apps/web/tests/browser-harness.browser.spec.ts::customer_controlled::ab7feaa78c82b0b2f1cf-2d1017d8217334363c35",
+      "kind": "simulated",
+      "mode": "customer_controlled",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-127",
+      "requirement_ids": [
+        "OT-BOOT-C06-AC01",
+        "OT-BOOT-C06-AC02"
+      ],
+      "test_id": "apps/web/tests/browser-harness.browser.spec.ts::customer_controlled::ab7feaa78c82b0b2f1cf-f44782a86d065b2f960d",
+      "kind": "simulated",
+      "mode": "customer_controlled",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-127",
+      "requirement_ids": [
+        "OT-BOOT-C06-AC01"
+      ],
+      "test_id": "apps/web/tests/browser-harness.browser.spec.ts::customer_controlled::ab7feaa78c82b0b2f1cf-ed6b198c499fa4912130",
+      "kind": "simulated",
+      "mode": "customer_controlled",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-127",
+      "requirement_ids": [
+        "OT-BOOT-C06-AC01"
+      ],
+      "test_id": "apps/web/tests/browser-harness.browser.spec.ts::customer_controlled::ab7feaa78c82b0b2f1cf-28c1aae002e683d4297c",
+      "kind": "simulated",
+      "mode": "customer_controlled",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-127",
+      "requirement_ids": [
+        "OT-BOOT-C06-AC01"
+      ],
+      "test_id": "apps/web/tests/browser-harness.browser.spec.ts::customer_controlled::ab7feaa78c82b0b2f1cf-b79c6eff8790d0a3e3e3",
+      "kind": "simulated",
+      "mode": "customer_controlled",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-127",
+      "requirement_ids": [
+        "OT-BOOT-C06-AC01"
+      ],
+      "test_id": "apps/web/tests/browser-harness.browser.spec.ts::customer_controlled::ab7feaa78c82b0b2f1cf-58cc888c48abcc9bffdb",
+      "kind": "simulated",
+      "mode": "customer_controlled",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-127",
+      "requirement_ids": [
+        "OT-BOOT-C06-AC01"
+      ],
+      "test_id": "apps/web/tests/browser-harness.browser.spec.ts::opentour_managed::ab7feaa78c82b0b2f1cf-370abe7abdd1617ccb71",
+      "kind": "simulated",
+      "mode": "opentour_managed",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-127",
+      "requirement_ids": [
+        "OT-BOOT-C06-AC01",
+        "OT-BOOT-C06-AC02"
+      ],
+      "test_id": "apps/web/tests/browser-harness.browser.spec.ts::opentour_managed::ab7feaa78c82b0b2f1cf-16bdea451fba480ada0d",
+      "kind": "simulated",
+      "mode": "opentour_managed",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-127",
+      "requirement_ids": [
+        "OT-BOOT-C06-AC01",
+        "OT-BOOT-C06-AC02"
+      ],
+      "test_id": "apps/web/tests/browser-harness.browser.spec.ts::opentour_managed::ab7feaa78c82b0b2f1cf-51a7180a2d43e25c2b78",
+      "kind": "simulated",
+      "mode": "opentour_managed",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-127",
+      "requirement_ids": [
+        "OT-BOOT-C06-AC01",
+        "OT-BOOT-C06-AC02"
+      ],
+      "test_id": "apps/web/tests/browser-harness.browser.spec.ts::opentour_managed::ab7feaa78c82b0b2f1cf-e4c0b50f9cb52077f1c8",
+      "kind": "simulated",
+      "mode": "opentour_managed",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-127",
+      "requirement_ids": [
+        "OT-BOOT-C06-AC01",
+        "OT-BOOT-C06-AC02"
+      ],
+      "test_id": "apps/web/tests/browser-harness.browser.spec.ts::opentour_managed::ab7feaa78c82b0b2f1cf-88d54eb9312a86854002",
+      "kind": "simulated",
+      "mode": "opentour_managed",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-127",
+      "requirement_ids": [
+        "OT-BOOT-C06-AC01",
+        "OT-BOOT-C06-AC02"
+      ],
+      "test_id": "apps/web/tests/browser-harness.browser.spec.ts::opentour_managed::ab7feaa78c82b0b2f1cf-cc8f2506829c8a09ccf0",
+      "kind": "simulated",
+      "mode": "opentour_managed",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-127",
+      "requirement_ids": [
+        "OT-BOOT-C06-AC01",
+        "OT-BOOT-C06-AC02"
+      ],
+      "test_id": "apps/web/tests/browser-harness.browser.spec.ts::opentour_managed::ab7feaa78c82b0b2f1cf-a764068af57e529bb692",
+      "kind": "simulated",
+      "mode": "opentour_managed",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-127",
+      "requirement_ids": [
+        "OT-BOOT-C06-AC01"
+      ],
+      "test_id": "apps/web/tests/browser-harness.browser.spec.ts::opentour_managed::ab7feaa78c82b0b2f1cf-214286f1b7cf0768ee0b",
+      "kind": "simulated",
+      "mode": "opentour_managed",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-127",
+      "requirement_ids": [
+        "OT-BOOT-C06-AC01"
+      ],
+      "test_id": "apps/web/tests/browser-harness.browser.spec.ts::opentour_managed::ab7feaa78c82b0b2f1cf-11a03cc2bbd5c45cee91",
+      "kind": "simulated",
+      "mode": "opentour_managed",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-127",
+      "requirement_ids": [
+        "OT-BOOT-C06-AC01"
+      ],
+      "test_id": "apps/web/tests/browser-harness.browser.spec.ts::opentour_managed::ab7feaa78c82b0b2f1cf-62f28b30bd849e3677df",
+      "kind": "simulated",
+      "mode": "opentour_managed",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-127",
+      "requirement_ids": [
+        "OT-BOOT-C06-AC01"
+      ],
+      "test_id": "apps/web/tests/browser-harness.browser.spec.ts::opentour_managed::ab7feaa78c82b0b2f1cf-19017402d478c1f68983",
+      "kind": "simulated",
+      "mode": "opentour_managed",
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-127",
+      "requirement_ids": [
+        "OT-BOOT-C06-AC01"
+      ],
+      "test_id": "apps/web/tests/browser-harness.browser.spec.ts::runner::ab7feaa78c82b0b2f1cf-4640df337908842bd5d1",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-127",
+      "requirement_ids": [
+        "OT-BOOT-C06-AC01"
+      ],
+      "test_id": "apps/web/tests/browser-harness.browser.spec.ts::runner::ab7feaa78c82b0b2f1cf-adde5d5662a774e6e9b7",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-127",
+      "requirement_ids": [
+        "OT-BOOT-C06-AC01"
+      ],
+      "test_id": "apps/web/tests/browser-harness.browser.spec.ts::runner::ab7feaa78c82b0b2f1cf-260b6805ec17fa3ee045",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-127",
+      "requirement_ids": [
+        "OT-BOOT-C06-AC01"
+      ],
+      "test_id": "apps/web/tests/browser-harness.browser.spec.ts::runner::ab7feaa78c82b0b2f1cf-369f37bea52bb9ec1414",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-127",
+      "requirement_ids": [
+        "OT-BOOT-C06-AC01"
+      ],
+      "test_id": "apps/web/tests/browser-harness.browser.spec.ts::runner::ab7feaa78c82b0b2f1cf-902b6fd68f38d548aedf",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-127",
+      "requirement_ids": [
+        "OT-BOOT-C06-AC01"
+      ],
+      "test_id": "apps/web/tests/browser-harness.browser.spec.ts::runner::ab7feaa78c82b0b2f1cf-d256ec27e2774602ea71",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-127",
+      "requirement_ids": [
+        "OT-BOOT-C06-AC01"
+      ],
+      "test_id": "apps/web/tests/browser-harness.browser.spec.ts::runner::ab7feaa78c82b0b2f1cf-182b3e0e6fec144e8fde",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-127",
+      "requirement_ids": [
+        "OT-BOOT-C06-AC01"
+      ],
+      "test_id": "apps/web/tests/browser-harness.browser.spec.ts::runner::ab7feaa78c82b0b2f1cf-69be243d5bbd5ed283cb",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-127",
+      "requirement_ids": [
+        "OT-BOOT-C06-AC01"
+      ],
+      "test_id": "apps/web/tests/browser-harness.browser.spec.ts::runner::ab7feaa78c82b0b2f1cf-6a2e4ae53016d67db530",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-127",
+      "requirement_ids": [
+        "OT-BOOT-C06-AC01"
+      ],
+      "test_id": "apps/web/tests/browser-harness.browser.spec.ts::runner::ab7feaa78c82b0b2f1cf-d06cde5b5de2c800285f",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-127",
+      "requirement_ids": [
+        "OT-BOOT-C06-AC01"
+      ],
+      "test_id": "apps/web/tests/browser-harness.browser.spec.ts::runner::ab7feaa78c82b0b2f1cf-9e64968c754b0d4d5001",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-127",
+      "requirement_ids": [
+        "OT-BOOT-C06-AC01"
+      ],
+      "test_id": "apps/web/tests/browser-harness.browser.spec.ts::runner::ab7feaa78c82b0b2f1cf-f19d7383431b8b758f03",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-127",
+      "requirement_ids": [
+        "OT-BOOT-C06-AC01"
+      ],
+      "test_id": "apps/web/tests/browser-harness.browser.spec.ts::runner::ab7feaa78c82b0b2f1cf-32398520a0d9bf721ddb",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-127",
+      "requirement_ids": [
+        "OT-BOOT-C06-AC01"
+      ],
+      "test_id": "apps/web/tests/browser-harness.browser.spec.ts::runner::ab7feaa78c82b0b2f1cf-a3a9e077d76338c1b7d8",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-127",
+      "requirement_ids": [
+        "OT-BOOT-C06-AC01"
+      ],
+      "test_id": "apps/web/tests/browser-harness.browser.spec.ts::runner::ab7feaa78c82b0b2f1cf-7d16b3186c61ef62336b",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-127",
+      "requirement_ids": [
+        "OT-BOOT-C06-AC01"
+      ],
+      "test_id": "apps/web/tests/browser-harness.browser.spec.ts::runner::ab7feaa78c82b0b2f1cf-8655f9c839c09a8df6aa",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-127",
+      "requirement_ids": [
+        "OT-BOOT-C06-AC01"
+      ],
+      "test_id": "apps/web/tests/browser-harness.browser.spec.ts::runner::ab7feaa78c82b0b2f1cf-31a3e2e44679e9cd59b1",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-127",
+      "requirement_ids": [
+        "OT-BOOT-C06-AC01"
+      ],
+      "test_id": "apps/web/tests/fixtures/harness/visual-comparison.test.ts::0",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-127",
+      "requirement_ids": [
+        "OT-BOOT-C06-AC01"
+      ],
+      "test_id": "apps/web/tests/fixtures/harness/visual-comparison.test.ts::1",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-127",
+      "requirement_ids": [
+        "OT-BOOT-C06-AC01"
+      ],
+      "test_id": "apps/web/tests/fixtures/harness/visual-comparison.test.ts::2",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-127",
+      "requirement_ids": [
+        "OT-BOOT-C06-AC01"
+      ],
+      "test_id": "apps/web/tests/fixtures/harness/visual-comparison.test.ts::3",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-127",
+      "requirement_ids": [
+        "OT-BOOT-C06-AC01"
+      ],
+      "test_id": "apps/web/tests/fixtures/harness/visual-comparison.test.ts::4",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-127",
+      "requirement_ids": [
+        "OT-BOOT-C06-AC01"
+      ],
+      "test_id": "apps/web/tests/fixtures/harness/visual-comparison.test.ts::5",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-127",
+      "requirement_ids": [
+        "OT-BOOT-C06-AC01"
+      ],
+      "test_id": "apps/web/tests/fixtures/harness/visual-comparison.test.ts::6",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-127",
+      "requirement_ids": [
+        "OT-BOOT-C06-AC01"
+      ],
+      "test_id": "apps/web/tests/fixtures/harness/visual-comparison.test.ts::7",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-127",
+      "requirement_ids": [
+        "OT-BOOT-C06-AC01"
+      ],
+      "test_id": "apps/web/tests/fixtures/harness/visual-comparison.test.ts::8",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-127",
+      "requirement_ids": [
+        "OT-BOOT-C06-AC01"
+      ],
+      "test_id": "apps/web/tests/fixtures/harness/visual-comparison.test.ts::9",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
       "fixture_version": "1"
     }
   ]
