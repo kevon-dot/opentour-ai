@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any, NoReturn
 
 import pytest
 
@@ -13,10 +14,11 @@ from tools.public_content_check import digest
 from tools.test_runner import ProcessResult
 
 ROOT = Path(__file__).resolve().parents[2]
+ScanFixture = tuple[Path, str, str, dict[str, Any], list[tuple[bytes, Path]]]
 
 
 @pytest.fixture
-def scan(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+def scan(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> ScanFixture:
     (tmp_path / ".github").mkdir()
     (tmp_path / ".github/public-content-policy.json").write_bytes(
         (ROOT / ".github/public-content-policy.json").read_bytes()
@@ -26,9 +28,9 @@ def scan(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     raw = json.dumps({"results": [], "generated_contact": contact})
     result = ProcessResult(0, stdout=raw)
     projection = {"status": "PASS", "counts": {"packages": 3}, "results": []}
-    calls = []
+    calls: list[tuple[bytes, Path]] = []
 
-    def project(value: bytes, *, root: Path):
+    def project(value: bytes, *, root: Path) -> dict[str, Any]:
         calls.append((value, root))
         return projection
 
@@ -37,7 +39,9 @@ def scan(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     return tmp_path, raw, contact, projection, calls
 
 
-def test_only_reviewed_projection_is_published_and_original_digest_is_retained(scan):
+def test_only_reviewed_projection_is_published_and_original_digest_is_retained(
+    scan: ScanFixture,
+) -> None:
     root, raw, contact, projection, calls = scan
     report = ci_run.run_one(ci_run.dependency_scan_command(root), root)
     assert report["status"] == "PASS"
@@ -52,7 +56,9 @@ def test_only_reviewed_projection_is_published_and_original_digest_is_retained(s
 
 
 @pytest.mark.parametrize("failure", ["exit", "timeout", "interrupted", "cleanup"])
-def test_clean_projection_cannot_override_process_failure(scan, monkeypatch, failure):
+def test_clean_projection_cannot_override_process_failure(
+    scan: ScanFixture, monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
     root, raw, _, _, _ = scan
     result = ProcessResult(
         1 if failure == "exit" else 0,
@@ -67,7 +73,7 @@ def test_clean_projection_cannot_override_process_failure(scan, monkeypatch, fai
     assert report["command_evidence"]["status"] == "PASS"
 
 
-def test_reported_findings_refuse_even_if_scanner_exits_zero(scan):
+def test_reported_findings_refuse_even_if_scanner_exits_zero(scan: ScanFixture) -> None:
     root, _, _, projection, _ = scan
     projection.update(status="FAIL", findings_present=True)
     report = ci_run.run_one(ci_run.dependency_scan_command(root), root)
@@ -75,10 +81,12 @@ def test_reported_findings_refuse_even_if_scanner_exits_zero(scan):
     assert report["command_evidence"]["findings_present"]
 
 
-def test_malformed_report_is_not_published_as_empty_success(scan, monkeypatch):
+def test_malformed_report_is_not_published_as_empty_success(
+    scan: ScanFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
     root, raw, contact, _, _ = scan
 
-    def malformed(*_, **__):
+    def malformed(*_: Any, **__: Any) -> NoReturn:
         raise DependencyEvidenceError("Generated details must never be published: " + contact)
 
     monkeypatch.setattr(ci_run, "project_osv_report", malformed)
@@ -88,7 +96,7 @@ def test_malformed_report_is_not_published_as_empty_success(scan, monkeypatch):
     assert "command_evidence" not in report and contact not in json.dumps(report)
 
 
-def test_projection_still_uses_unchanged_public_content_screen(scan):
+def test_projection_still_uses_unchanged_public_content_screen(scan: ScanFixture) -> None:
     root, _, contact, projection, _ = scan
     projection["package_name"] = contact
     report = ci_run.run_one(ci_run.dependency_scan_command(root), root)
@@ -97,7 +105,9 @@ def test_projection_still_uses_unchanged_public_content_screen(scan):
 
 
 @pytest.mark.parametrize("changed", ["binary", "argument", "command"])
-def test_other_commands_cannot_select_dependency_projection(scan, changed):
+def test_other_commands_cannot_select_dependency_projection(
+    scan: ScanFixture, changed: str
+) -> None:
     root, _, contact, _, calls = scan
     command = ci_run.dependency_scan_command(root)
     if changed == "binary":
@@ -115,12 +125,12 @@ def test_other_commands_cannot_select_dependency_projection(scan, changed):
 @pytest.mark.parametrize("has_advisory", [False, True])
 def test_real_projection_composes_with_publication_without_losing_findings(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, has_advisory: bool
-):
+) -> None:
     (tmp_path / ".github").mkdir()
     (tmp_path / ".github/public-content-policy.json").write_bytes(
         (ROOT / ".github/public-content-policy.json").read_bytes()
     )
-    data = {
+    data: dict[str, Any] = {
         "results": [
             {
                 "source": {"type": "lockfile", "path": str(tmp_path / lock)},
