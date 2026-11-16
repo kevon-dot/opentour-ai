@@ -22,8 +22,16 @@ ROOT = Path(__file__).resolve().parents[2]
 TARGETS = {
     "services/control-api/tests/migrations/test_expand_contract.py": "OPE-213",
     "services/control-api/tests/auth/test_identity_postgres.py": "OPE-142",
+    "services/control-api/tests/organizations/test_creation_saga.py": "OPE-171",
 }
 SCHEMA_ID = "urn:opentour:python-postgres-observation:1.0"
+
+
+def target_command(target: str) -> tuple[str, ...]:
+    """Return the native command only for a finite registered local target."""
+    if target not in TARGETS:
+        raise ValueError("Unknown registered PostgreSQL target")
+    return ("just", "test-python", target)
 
 
 def present_targets(root: Path) -> tuple[str, ...]:

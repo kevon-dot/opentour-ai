@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:opentour:organization:1.0",
+  "description": "Organization setup only. Active organization is not workspace readiness or a capability grant.",
+  "$defs": {
+    "CreateRequest": {
+      "type": "object", "additionalProperties": false,
+      "required": ["display_name", "accepted_terms_revision"],
+      "properties": {
+        "display_name": {"type": "string", "minLength": 1, "description": "Normalize NFC and trim; normalized length1–120code points. Reject controls and unpaired surrogates before trimming; preserve internal whitespace."},
+        "accepted_terms_revision": {"$ref": "urn:opentour:common-contract:1.0#/$defs/Id"}
+      }
+    },
+    "RevisionRequest": {
+      "type": "object", "additionalProperties": false, "required": ["expected_revision"],
+      "properties": {"expected_revision": {"$ref": "urn:opentour:common-contract:1.0#/$defs/ResourceRevision"}}
+    },
+    "CreateReceipt": {
+      "type": "object", "additionalProperties": false,
+      "required": ["organization_id", "operation_id", "state", "revision", "request_id"],
+      "properties": {
+        "organization_id": {"$ref": "urn:opentour:common-contract:1.0#/$defs/Id"},
+        "operation_id": {"$ref": "urn:opentour:common-contract:1.0#/$defs/Id"},
+        "state": {"const": "identity_provisioning"}, "revision": {"const": "1"},
+        "request_id": {"$ref": "urn:opentour:common-contract:1.0#/$defs/Id"}
+      }
+    },
+    "TermsView": {
+      "type": "object", "additionalProperties": false,
+      "required": ["revision", "document_url", "effective_at"],
+      "properties": {
+        "revision": {"$ref": "urn:opentour:common-contract:1.0#/$defs/Id"},
+        "document_url": {"type": "string", "format": "uri", "pattern": "^https://", "maxLength": 2048},
+        "effective_at": {"$ref": "urn:opentour:common-contract:1.0#/$defs/Timestamp"}
+      }
+    },
+    "SetupState": {"enum": ["requested", "identity_provisioning", "identity_bound", "active", "provider_outcome_unknown", "action_required", "cancelled"]},
+    "RemoteEffectState": {
+      "enum": ["not_dispatched", "known_no_effect", "known_retained", "outcome_unknown"],
+      "description": "Independent of local cancellation. Unknown later mutation takes precedence over an earlier known retained effect; lookup404 or timeout cannot prove no effect."
+    },
+    "SafeReason": {"enum": ["PROVIDER_OUTCOME_UNKNOWN", "PROVIDER_REJECTED", "PROVIDER_IDENTITY_CONFLICT", "PROVIDER_MEMBERSHIP_NOT_ACTIVE", "SETUP_CANCELLED"]},
+    "OperationView": {
+      "type": "object", "additionalProperties": false,
+      "required": ["organization_id", "operation_id", "state", "revision", "request_id", "retry_available", "cancel_available", "reason_code", "updated_at", "remote_effect_state"],
+      "properties": {
+        "organization_id": {"$ref": "urn:opentour:common-contract:1.0#/$defs/Id"},
+        "operation_id": {"$ref": "urn:opentour:common-contract:1.0#/$defs/Id"},
+        "state": {"$ref": "#/$defs/SetupState"},
+        "revision": {"$ref": "urn:opentour:common-contract:1.0#/$defs/ResourceRevision"},
+        "request_id": {"$ref": "urn:opentour:common-contract:1.0#/$defs/Id"},
+        "retry_available": {"type": "boolean"}, "cancel_available": {"type": "boolean"},
+        "reason_code": {"anyOf": [{"$ref": "#/$defs/SafeReason"}, {"type": "null"}]},
+        "updated_at": {"$ref": "urn:opentour:common-contract:1.0#/$defs/Timestamp"},
+        "remote_effect_state": {"$ref": "#/$defs/RemoteEffectState"}
+      }
+    },
+    "Error": {"$ref": "urn:opentour:common-contract:1.0#/$defs/Error"}
+  }
+}

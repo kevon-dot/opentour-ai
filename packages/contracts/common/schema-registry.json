@@ -23,7 +23,7 @@
     {
       "id": "urn:opentour:python-postgres-observation:1.0",
       "file": "python-postgres-observation.schema.json",
-      "sha256": "72a5fc2e7c7ef446cf9000f1bf773e51e8cfc748fce58edf6541dfcaa4f5075d",
+      "sha256": "acab2843d2c33d09c5af0e0d9cf6bb0353956ddd5e3a87e15fc3df9045c398d8",
       "source_path": "packages/contracts/common/python-postgres-observation.schema.json"
     },
     {
@@ -31,6 +31,12 @@
       "file": "packages/contracts/platform/auth-context.schema.json",
       "sha256": "a5b74fae3eb49ad159e677dd463fb975336c7d2bef2cefb2c01215cc8a5d2668",
       "source_path": "packages/contracts/platform/auth-context.schema.json"
+    },
+    {
+      "id": "urn:opentour:organization:1.0",
+      "file": "packages/contracts/platform/organization.schema.json",
+      "sha256": "100b2bbe73b5bbed618d8845760bada3be4f1cbaf79590ee099f9a48f173c311",
+      "source_path": "packages/contracts/platform/organization.schema.json"
     }
   ]
 }
