@@ -12585,9 +12585,9 @@
         "native_uuid": "bd3fac6c-1b3a-4f31-9392-30b1cff33bd3",
         "logical_key": "OT-P32-C02",
         "url": "https://linear.app/opentourai/issue/OPE-213/separate-control-environments-and-infrastructure-authority",
-        "updated_at": "2026-11-15T04:14:16.134Z",
+        "updated_at": "2026-11-15T23:22:08.210Z",
         "publication_spec_sha256": "27c8c5765dd34518cc29eb18acb794b44aec75d0ffe4c143273c0044478c8a2a",
-        "technical_capture_sha256": "c8c21ccbd3e04bbfab11397c353439657d3ac5d4574b96da18df040a051b87eb",
+        "technical_capture_sha256": "4004a7aa7e0ad28b7807e73f9e435161510ff3aa9998f8c191fab073018f529b",
         "projection": {
           "requirement_ids": [
             "OT-P32-C02-AC01",
@@ -12604,12 +12604,23 @@
           ],
           "subfeature_ids": [],
           "owned_paths": [
+            "infrastructure/__init__.py",
+            "infrastructure/cloudformation/README.md",
             "infrastructure/cloudformation/control-plane.yaml",
             "infrastructure/cloudformation/environment-boundaries.yaml",
-            "infrastructure/tests/test_environment_boundaries.py"
+            "infrastructure/environment_contract.py",
+            "infrastructure/tests/__init__.py",
+            "infrastructure/tests/environment_fixtures.py",
+            "infrastructure/tests/test_control_topology.py",
+            "infrastructure/tests/test_environment_boundaries.py",
+            "services/control-api/src/opentour_control/platform/__init__.py",
+            "services/control-api/src/opentour_control/platform/schema_compatibility.py",
+            "services/control-api/tests/migrations/test_expand_contract.py"
           ],
           "declared_test_paths": [
-            "infrastructure/tests/test_environment_boundaries.py"
+            "infrastructure/tests/test_control_topology.py",
+            "infrastructure/tests/test_environment_boundaries.py",
+            "services/control-api/tests/migrations/test_expand_contract.py"
           ],
           "parent": "OPE-16",
           "blocked_by": [
@@ -12629,7 +12640,7 @@
             "OPE-217"
           ]
         },
-        "projection_sha256": "a2896d9c0a062032d24ce5c4d31c3cc996c3ffd15e67289a4e00b7fbf800540c"
+        "projection_sha256": "d3d8baa66d0cbf31c9f13d0ff2f541d13ef369ae2bdf20db13dfc8bfc9bbb0c2"
       },
       {
         "issue_key": "OPE-214",
@@ -22355,15 +22366,1049 @@
         "mode": null,
         "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-213",
+        "requirement_ids": [
+          "OT-P32-C02-AC01"
+        ],
+        "test_id": "infrastructure/tests/test_environment_boundaries.py::test_approved_environment_manifest[dev]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "environment-topology-sentinels",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-213",
+        "requirement_ids": [
+          "OT-P32-C02-AC01"
+        ],
+        "test_id": "infrastructure/tests/test_environment_boundaries.py::test_approved_environment_manifest[test]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "environment-topology-sentinels",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-213",
+        "requirement_ids": [
+          "OT-P32-C02-AC01"
+        ],
+        "test_id": "infrastructure/tests/test_environment_boundaries.py::test_approved_environment_manifest[prod]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "environment-topology-sentinels",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-213",
+        "requirement_ids": [
+          "OT-P32-C02-AC01"
+        ],
+        "test_id": "infrastructure/tests/test_environment_boundaries.py::test_dev_and_test_share_account_without_sharing_authority",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "environment-topology-sentinels",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-213",
+        "requirement_ids": [
+          "OT-P32-C02-AC03"
+        ],
+        "test_id": "infrastructure/tests/test_environment_boundaries.py::test_prod_reference_injected_into_dev_is_rejected[key_refs]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "environment-topology-sentinels",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-213",
+        "requirement_ids": [
+          "OT-P32-C02-AC03"
+        ],
+        "test_id": "infrastructure/tests/test_environment_boundaries.py::test_prod_reference_injected_into_dev_is_rejected[secrets_refs]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "environment-topology-sentinels",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-213",
+        "requirement_ids": [
+          "OT-P32-C02-AC03"
+        ],
+        "test_id": "infrastructure/tests/test_environment_boundaries.py::test_prod_reference_injected_into_dev_is_rejected[database_ref]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "environment-topology-sentinels",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-213",
+        "requirement_ids": [
+          "OT-P32-C02-AC03"
+        ],
+        "test_id": "infrastructure/tests/test_environment_boundaries.py::test_prod_reference_injected_into_dev_is_rejected[network_policy_ref]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "environment-topology-sentinels",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-213",
+        "requirement_ids": [
+          "OT-P32-C02-AC01"
+        ],
+        "test_id": "infrastructure/tests/test_environment_boundaries.py::test_matching_account_and_inventory_do_not_substitute_for_resource_kind[key_refs-alias/dev]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "environment-topology-sentinels",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-213",
+        "requirement_ids": [
+          "OT-P32-C02-AC01"
+        ],
+        "test_id": "infrastructure/tests/test_environment_boundaries.py::test_matching_account_and_inventory_do_not_substitute_for_resource_kind[database_ref-snapshot/dev]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "environment-topology-sentinels",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-213",
+        "requirement_ids": [
+          "OT-P32-C02-AC01"
+        ],
+        "test_id": "infrastructure/tests/test_environment_boundaries.py::test_matching_account_and_inventory_do_not_substitute_for_resource_kind[service_refs-cluster/dev]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "environment-topology-sentinels",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-213",
+        "requirement_ids": [
+          "OT-P32-C02-AC01"
+        ],
+        "test_id": "infrastructure/tests/test_environment_boundaries.py::test_matching_account_and_inventory_do_not_substitute_for_resource_kind[vpc_ref-subnet/dev]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "environment-topology-sentinels",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-213",
+        "requirement_ids": [
+          "OT-P32-C02-AC01"
+        ],
+        "test_id": "infrastructure/tests/test_environment_boundaries.py::test_matching_account_and_inventory_do_not_substitute_for_resource_kind[subnet_refs-vpc/dev]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "environment-topology-sentinels",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-213",
+        "requirement_ids": [
+          "OT-P32-C02-AC01"
+        ],
+        "test_id": "infrastructure/tests/test_environment_boundaries.py::test_matching_account_and_inventory_do_not_substitute_for_resource_kind[network_policy_ref-route-table/dev]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "environment-topology-sentinels",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-213",
+        "requirement_ids": [
+          "OT-P32-C02-AC01"
+        ],
+        "test_id": "infrastructure/tests/test_environment_boundaries.py::test_matching_account_and_inventory_do_not_substitute_for_resource_kind[ingress_ref-targetgroup/dev]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "environment-topology-sentinels",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-213",
+        "requirement_ids": [
+          "OT-P32-C02-AC01"
+        ],
+        "test_id": "infrastructure/tests/test_environment_boundaries.py::test_matching_account_and_inventory_do_not_substitute_for_resource_kind[registry_refs-image/dev]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "environment-topology-sentinels",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-213",
+        "requirement_ids": [
+          "OT-P32-C02-AC01"
+        ],
+        "test_id": "infrastructure/tests/test_environment_boundaries.py::test_closed_manifest_rejects_adverse_inputs[unknown]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "environment-topology-sentinels",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-213",
+        "requirement_ids": [
+          "OT-P32-C02-AC01"
+        ],
+        "test_id": "infrastructure/tests/test_environment_boundaries.py::test_closed_manifest_rejects_adverse_inputs[missing]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "environment-topology-sentinels",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-213",
+        "requirement_ids": [
+          "OT-P32-C02-AC01"
+        ],
+        "test_id": "infrastructure/tests/test_environment_boundaries.py::test_closed_manifest_rejects_adverse_inputs[digest]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "environment-topology-sentinels",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-213",
+        "requirement_ids": [
+          "OT-P32-C02-AC01"
+        ],
+        "test_id": "infrastructure/tests/test_environment_boundaries.py::test_closed_manifest_rejects_adverse_inputs[unapproved]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "environment-topology-sentinels",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-213",
+        "requirement_ids": [
+          "OT-P32-C02-AC01"
+        ],
+        "test_id": "infrastructure/tests/test_environment_boundaries.py::test_closed_manifest_rejects_adverse_inputs[stale]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "environment-topology-sentinels",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-213",
+        "requirement_ids": [
+          "OT-P32-C02-AC01"
+        ],
+        "test_id": "infrastructure/tests/test_environment_boundaries.py::test_closed_manifest_rejects_adverse_inputs[duplicate]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "environment-topology-sentinels",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-213",
+        "requirement_ids": [
+          "OT-P32-C02-AC01"
+        ],
+        "test_id": "infrastructure/tests/test_environment_boundaries.py::test_closed_manifest_rejects_adverse_inputs[account]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "environment-topology-sentinels",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-213",
+        "requirement_ids": [
+          "OT-P32-C02-AC01"
+        ],
+        "test_id": "infrastructure/tests/test_environment_boundaries.py::test_closed_manifest_rejects_adverse_inputs[region]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "environment-topology-sentinels",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-213",
+        "requirement_ids": [
+          "OT-P32-C02-AC01"
+        ],
+        "test_id": "infrastructure/tests/test_environment_boundaries.py::test_closed_manifest_rejects_adverse_inputs[audit]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "environment-topology-sentinels",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-213",
+        "requirement_ids": [
+          "OT-P32-C02-AC01"
+        ],
+        "test_id": "infrastructure/tests/test_environment_boundaries.py::test_closed_manifest_rejects_adverse_inputs[partition]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "environment-topology-sentinels",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-213",
+        "requirement_ids": [
+          "OT-P32-C02-AC01"
+        ],
+        "test_id": "infrastructure/tests/test_environment_boundaries.py::test_closed_manifest_rejects_adverse_inputs[wildcard]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "environment-topology-sentinels",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-213",
+        "requirement_ids": [
+          "OT-P32-C02-AC01"
+        ],
+        "test_id": "infrastructure/tests/test_environment_boundaries.py::test_audit_account_must_be_independent",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "environment-topology-sentinels",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-213",
+        "requirement_ids": [
+          "OT-P32-C02-AC01"
+        ],
+        "test_id": "infrastructure/tests/test_environment_boundaries.py::test_empty_control_stack_preflight_is_bound_to_exact_reviewed_bytes",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "environment-topology-sentinels",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-213",
+        "requirement_ids": [
+          "OT-P32-C02-AC01"
+        ],
+        "test_id": "infrastructure/tests/test_environment_boundaries.py::test_control_parameter_refusal_before_provider[ExpectedAccountId-111111111111]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "environment-topology-sentinels",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-213",
+        "requirement_ids": [
+          "OT-P32-C02-AC01"
+        ],
+        "test_id": "infrastructure/tests/test_environment_boundaries.py::test_control_parameter_refusal_before_provider[Unknown-sentinel]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "environment-topology-sentinels",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-213",
+        "requirement_ids": [
+          "OT-P32-C02-AC01"
+        ],
+        "test_id": "infrastructure/tests/test_environment_boundaries.py::test_control_parameter_refusal_before_provider[ApiMaxInstances-5]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "environment-topology-sentinels",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-213",
+        "requirement_ids": [
+          "OT-P32-C02-AC01"
+        ],
+        "test_id": "infrastructure/tests/test_environment_boundaries.py::test_control_parameter_refusal_before_provider[DatabaseMaxConnections-True]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "environment-topology-sentinels",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-213",
+        "requirement_ids": [
+          "OT-P32-C02-AC01"
+        ],
+        "test_id": "infrastructure/tests/test_environment_boundaries.py::test_control_parameter_refusal_before_provider[DatabaseMaxConnections-100.0]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "environment-topology-sentinels",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-213",
+        "requirement_ids": [
+          "OT-P32-C02-AC01"
+        ],
+        "test_id": "infrastructure/tests/test_environment_boundaries.py::test_control_parameter_refusal_before_provider[DatabaseEngineFamily-postgres17]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "environment-topology-sentinels",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-213",
+        "requirement_ids": [
+          "OT-P32-C02-AC01"
+        ],
+        "test_id": "infrastructure/tests/test_environment_boundaries.py::test_control_parameter_refusal_before_provider[VpcCidr-0.0.0.0/0]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "environment-topology-sentinels",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-213",
+        "requirement_ids": [
+          "OT-P32-C02-AC01"
+        ],
+        "test_id": "infrastructure/tests/test_environment_boundaries.py::test_control_parameter_refusal_before_provider[VpcCidr-10.44.0.1/16]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "environment-topology-sentinels",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-213",
+        "requirement_ids": [
+          "OT-P32-C02-AC01"
+        ],
+        "test_id": "infrastructure/tests/test_environment_boundaries.py::test_control_parameter_refusal_before_provider[ApplicationEnabled-true]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "environment-topology-sentinels",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-213",
+        "requirement_ids": [
+          "OT-P32-C02-AC01"
+        ],
+        "test_id": "infrastructure/tests/test_environment_boundaries.py::test_control_parameter_refusal_before_provider[BffImageDigest-222222222222.dkr.ecr.us-east-1.amazonaws.com/app:latest]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "environment-topology-sentinels",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-213",
+        "requirement_ids": [
+          "OT-P32-C02-AC01"
+        ],
+        "test_id": "infrastructure/tests/test_environment_boundaries.py::test_control_parameter_refusal_before_provider[EcrS3PrefixListId-pl-deadbeef]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "environment-topology-sentinels",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-213",
+        "requirement_ids": [
+          "OT-P32-C02-AC02"
+        ],
+        "test_id": "infrastructure/tests/test_environment_boundaries.py::test_approved_application_inputs_and_foreign_role_refusal",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "environment-topology-sentinels",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-213",
+        "requirement_ids": [
+          "OT-P32-C02-AC01"
+        ],
+        "test_id": "infrastructure/tests/test_environment_boundaries.py::test_boundary_parameters_bind_exact_environment_resources",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "environment-topology-sentinels",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-213",
+        "requirement_ids": [
+          "OT-P32-C02-AC03"
+        ],
+        "test_id": "infrastructure/tests/test_environment_boundaries.py::test_boundary_parameter_cross_environment_injection_is_refused[ApplicationSecretArn]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "environment-topology-sentinels",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-213",
+        "requirement_ids": [
+          "OT-P32-C02-AC03"
+        ],
+        "test_id": "infrastructure/tests/test_environment_boundaries.py::test_boundary_parameter_cross_environment_injection_is_refused[DataKeyArn]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "environment-topology-sentinels",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-213",
+        "requirement_ids": [
+          "OT-P32-C02-AC03"
+        ],
+        "test_id": "infrastructure/tests/test_environment_boundaries.py::test_boundary_parameter_cross_environment_injection_is_refused[BffLogGroupArn]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "environment-topology-sentinels",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-213",
+        "requirement_ids": [
+          "OT-P32-C02-AC03"
+        ],
+        "test_id": "infrastructure/tests/test_environment_boundaries.py::test_boundary_parameter_cross_environment_injection_is_refused[OidcProviderArn]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "environment-topology-sentinels",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-213",
+        "requirement_ids": [
+          "OT-P32-C02-AC01"
+        ],
+        "test_id": "infrastructure/tests/test_environment_boundaries.py::test_boundary_unapproved_database_services_or_workflows_refused[DatabaseResourceId-db-UNAPPROVED]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "environment-topology-sentinels",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-213",
+        "requirement_ids": [
+          "OT-P32-C02-AC01"
+        ],
+        "test_id": "infrastructure/tests/test_environment_boundaries.py::test_boundary_unapproved_database_services_or_workflows_refused[DeclaredServiceArns-value1]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "environment-topology-sentinels",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-213",
+        "requirement_ids": [
+          "OT-P32-C02-AC01"
+        ],
+        "test_id": "infrastructure/tests/test_environment_boundaries.py::test_boundary_unapproved_database_services_or_workflows_refused[ApprovedDeployWorkflow-kevon-dot/opentour-ai/.github/workflows/deploy.yml@main]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "environment-topology-sentinels",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-213",
+        "requirement_ids": [
+          "OT-P32-C02-AC01"
+        ],
+        "test_id": "infrastructure/tests/test_environment_boundaries.py::test_boundary_unapproved_database_services_or_workflows_refused[ApprovedMigrationWorkflow-fork/other/.github/workflows/migrate.yml@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "environment-topology-sentinels",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-213",
+        "requirement_ids": [
+          "OT-P32-C02-AC01"
+        ],
+        "test_id": "infrastructure/tests/test_control_topology.py::test_real_cloudformation_resource_schema_validation",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "environment-topology-sentinels",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-213",
+        "requirement_ids": [
+          "OT-P32-C02-AC01"
+        ],
+        "test_id": "infrastructure/tests/test_control_topology.py::test_two_az_private_database_backup_and_network_topology",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "environment-topology-sentinels",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-213",
+        "requirement_ids": [
+          "OT-P32-C02-AC01"
+        ],
+        "test_id": "infrastructure/tests/test_control_topology.py::test_ingress_and_egress_have_explicit_narrow_paths",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "environment-topology-sentinels",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-213",
+        "requirement_ids": [
+          "OT-P32-C02-AC01"
+        ],
+        "test_id": "infrastructure/tests/test_control_topology.py::test_services_are_separate_inactive_digest_pinned_and_capacity_bounded",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "environment-topology-sentinels",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-213",
+        "requirement_ids": [
+          "OT-P32-C02-AC02"
+        ],
+        "test_id": "infrastructure/tests/test_control_topology.py::test_runtime_roles_are_not_provisioners_schema_owners_or_audit_administrators",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "environment-topology-sentinels",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-213",
+        "requirement_ids": [
+          "OT-P32-C02-AC02"
+        ],
+        "test_id": "infrastructure/tests/test_control_topology.py::test_oidc_trust_requires_every_exact_identity_claim",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "environment-topology-sentinels",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-213",
+        "requirement_ids": [
+          "OT-P32-C02-AC01"
+        ],
+        "test_id": "infrastructure/tests/test_control_topology.py::test_connection_ceiling_exact_fit[1]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "environment-topology-sentinels",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-213",
+        "requirement_ids": [
+          "OT-P32-C02-AC01"
+        ],
+        "test_id": "infrastructure/tests/test_control_topology.py::test_connection_ceiling_exact_fit[2]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "environment-topology-sentinels",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-213",
+        "requirement_ids": [
+          "OT-P32-C02-AC01"
+        ],
+        "test_id": "infrastructure/tests/test_control_topology.py::test_connection_ceiling_exact_fit[3]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "environment-topology-sentinels",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-213",
+        "requirement_ids": [
+          "OT-P32-C02-AC01"
+        ],
+        "test_id": "infrastructure/tests/test_control_topology.py::test_connection_ceiling_exact_fit[4]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "environment-topology-sentinels",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-213",
+        "requirement_ids": [
+          "OT-P32-C02-AC01"
+        ],
+        "test_id": "infrastructure/tests/test_control_topology.py::test_connection_budget_refuses_unsafe_or_coerced_values[kwargs0]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "environment-topology-sentinels",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-213",
+        "requirement_ids": [
+          "OT-P32-C02-AC01"
+        ],
+        "test_id": "infrastructure/tests/test_control_topology.py::test_connection_budget_refuses_unsafe_or_coerced_values[kwargs1]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "environment-topology-sentinels",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-213",
+        "requirement_ids": [
+          "OT-P32-C02-AC01"
+        ],
+        "test_id": "infrastructure/tests/test_control_topology.py::test_connection_budget_refuses_unsafe_or_coerced_values[kwargs2]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "environment-topology-sentinels",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-213",
+        "requirement_ids": [
+          "OT-P32-C02-AC01"
+        ],
+        "test_id": "infrastructure/tests/test_control_topology.py::test_connection_budget_refuses_unsafe_or_coerced_values[kwargs3]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "environment-topology-sentinels",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-213",
+        "requirement_ids": [
+          "OT-P32-C02-AC01"
+        ],
+        "test_id": "infrastructure/tests/test_control_topology.py::test_connection_budget_refuses_unsafe_or_coerced_values[kwargs4]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "environment-topology-sentinels",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-213",
+        "requirement_ids": [
+          "OT-P32-C02-AC01"
+        ],
+        "test_id": "infrastructure/tests/test_control_topology.py::test_connection_budget_refuses_unsafe_or_coerced_values[kwargs5]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "environment-topology-sentinels",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-213",
+        "requirement_ids": [
+          "OT-P32-C02-AC01"
+        ],
+        "test_id": "infrastructure/tests/test_control_topology.py::test_security_diff_surfaces_changed_privilege_and_egress_values[AWS::ECS::TaskDefinition-TaskRoleArn-scoped-administrator]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "environment-topology-sentinels",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-213",
+        "requirement_ids": [
+          "OT-P32-C02-AC01"
+        ],
+        "test_id": "infrastructure/tests/test_control_topology.py::test_security_diff_surfaces_changed_privilege_and_egress_values[AWS::RDS::DBInstance-PubliclyAccessible-False-True]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "environment-topology-sentinels",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-213",
+        "requirement_ids": [
+          "OT-P32-C02-AC01"
+        ],
+        "test_id": "infrastructure/tests/test_control_topology.py::test_security_diff_surfaces_changed_privilege_and_egress_values[AWS::SQS::QueuePolicy-PolicyDocument-before2-after2]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "environment-topology-sentinels",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-213",
+        "requirement_ids": [
+          "OT-P32-C02-AC01"
+        ],
+        "test_id": "infrastructure/tests/test_control_topology.py::test_security_diff_surfaces_changed_privilege_and_egress_values[AWS::S3::BucketPolicy-PolicyDocument-before3-after3]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "environment-topology-sentinels",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-213",
+        "requirement_ids": [
+          "OT-P32-C02-AC01"
+        ],
+        "test_id": "infrastructure/tests/test_control_topology.py::test_security_diff_surfaces_changed_privilege_and_egress_values[AWS::EC2::SecurityGroupEgress-CidrIp-10.0.0.0/24-0.0.0.0/0]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "environment-topology-sentinels",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-213",
+        "requirement_ids": [
+          "OT-P32-C02-AC01"
+        ],
+        "test_id": "infrastructure/tests/test_control_topology.py::test_parameter_diff_requires_review_without_exporting_secret_defaults",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "environment-topology-sentinels",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-213",
+        "requirement_ids": [
+          "OT-P32-C02-AC01"
+        ],
+        "test_id": "infrastructure/tests/test_control_topology.py::test_complete_cost_inventory_includes_fixed_costs_and_explained_zero_nat",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "environment-topology-sentinels",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-213",
+        "requirement_ids": [
+          "OT-P32-C02-AC02"
+        ],
+        "test_id": "services/control-api/tests/migrations/test_expand_contract.py::test_actual_expand_backfill_verify_switch_contract_and_retry",
+        "kind": "local_integration",
+        "mode": null,
+        "fixture_id": "environment-schema-compatibility",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-213",
+        "requirement_ids": [
+          "OT-P32-C02-AC02"
+        ],
+        "test_id": "services/control-api/tests/migrations/test_expand_contract.py::test_runtime_role_can_read_but_cannot_drop_or_own_schema",
+        "kind": "local_integration",
+        "mode": null,
+        "fixture_id": "environment-schema-compatibility",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-213",
+        "requirement_ids": [
+          "OT-P32-C02-AC02"
+        ],
+        "test_id": "services/control-api/tests/migrations/test_expand_contract.py::test_concurrent_migration_has_one_winner",
+        "kind": "local_integration",
+        "mode": null,
+        "fixture_id": "environment-schema-compatibility",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-213",
+        "requirement_ids": [
+          "OT-P32-C02-AC02"
+        ],
+        "test_id": "services/control-api/tests/migrations/test_expand_contract.py::test_old_reader_blocks_contract_then_fails_readiness_after_contract",
+        "kind": "local_integration",
+        "mode": null,
+        "fixture_id": "environment-schema-compatibility",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-213",
+        "requirement_ids": [
+          "OT-P32-C02-AC02"
+        ],
+        "test_id": "services/control-api/tests/migrations/test_expand_contract.py::test_failed_backfill_rolls_back_batch_and_retains_explicit_progress",
+        "kind": "local_integration",
+        "mode": null,
+        "fixture_id": "environment-schema-compatibility",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-213",
+        "requirement_ids": [
+          "OT-P32-C02-AC02"
+        ],
+        "test_id": "services/control-api/tests/migrations/test_expand_contract.py::test_destructive_contract_refuses_missing_phase_proof[stable]",
+        "kind": "local_integration",
+        "mode": null,
+        "fixture_id": "environment-schema-compatibility",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-213",
+        "requirement_ids": [
+          "OT-P32-C02-AC02"
+        ],
+        "test_id": "services/control-api/tests/migrations/test_expand_contract.py::test_destructive_contract_refuses_missing_phase_proof[expanded]",
+        "kind": "local_integration",
+        "mode": null,
+        "fixture_id": "environment-schema-compatibility",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-213",
+        "requirement_ids": [
+          "OT-P32-C02-AC02"
+        ],
+        "test_id": "services/control-api/tests/migrations/test_expand_contract.py::test_destructive_contract_refuses_missing_phase_proof[backfilling]",
+        "kind": "local_integration",
+        "mode": null,
+        "fixture_id": "environment-schema-compatibility",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-213",
+        "requirement_ids": [
+          "OT-P32-C02-AC02"
+        ],
+        "test_id": "services/control-api/tests/migrations/test_expand_contract.py::test_destructive_contract_refuses_missing_phase_proof[verified]",
+        "kind": "local_integration",
+        "mode": null,
+        "fixture_id": "environment-schema-compatibility",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-213",
+        "requirement_ids": [
+          "OT-P32-C02-AC02"
+        ],
+        "test_id": "services/control-api/tests/migrations/test_expand_contract.py::test_checkpoint_digest_requires_independent_verification",
+        "kind": "local_integration",
+        "mode": null,
+        "fixture_id": "environment-schema-compatibility",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-213",
+        "requirement_ids": [
+          "OT-P32-C02-AC02"
+        ],
+        "test_id": "services/control-api/tests/migrations/test_expand_contract.py::test_partial_or_false_verified_backfill_cannot_switch",
+        "kind": "local_integration",
+        "mode": null,
+        "fixture_id": "environment-schema-compatibility",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-213",
+        "requirement_ids": [
+          "OT-P32-C02-AC02"
+        ],
+        "test_id": "services/control-api/tests/migrations/test_expand_contract.py::test_failed_ddl_transaction_has_no_schema_or_revision_effect",
+        "kind": "local_integration",
+        "mode": null,
+        "fixture_id": "environment-schema-compatibility",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-213",
+        "requirement_ids": [
+          "OT-P32-C02-AC02"
+        ],
+        "test_id": "services/control-api/tests/migrations/test_expand_contract.py::test_changed_plan_or_initialization_refused",
+        "kind": "local_integration",
+        "mode": null,
+        "fixture_id": "environment-schema-compatibility",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-213",
+        "requirement_ids": [
+          "OT-P32-C02-AC02"
+        ],
+        "test_id": "services/control-api/tests/migrations/test_expand_contract.py::test_revision_overflow_refuses_effect_before_callback",
+        "kind": "local_integration",
+        "mode": null,
+        "fixture_id": "environment-schema-compatibility",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-213",
+        "requirement_ids": [
+          "OT-P32-C02-AC02"
+        ],
+        "test_id": "services/control-api/tests/migrations/test_expand_contract.py::test_non_autocommit_or_nested_transaction_refused",
+        "kind": "local_integration",
+        "mode": null,
+        "fixture_id": "environment-schema-compatibility",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-213",
+        "requirement_ids": [
+          "OT-P32-C02-AC02"
+        ],
+        "test_id": "services/control-api/tests/migrations/test_expand_contract.py::test_malformed_version_is_not_coerced[0]",
+        "kind": "local_integration",
+        "mode": null,
+        "fixture_id": "environment-schema-compatibility",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-213",
+        "requirement_ids": [
+          "OT-P32-C02-AC02"
+        ],
+        "test_id": "services/control-api/tests/migrations/test_expand_contract.py::test_malformed_version_is_not_coerced[-1]",
+        "kind": "local_integration",
+        "mode": null,
+        "fixture_id": "environment-schema-compatibility",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-213",
+        "requirement_ids": [
+          "OT-P32-C02-AC02"
+        ],
+        "test_id": "services/control-api/tests/migrations/test_expand_contract.py::test_malformed_version_is_not_coerced[True]",
+        "kind": "local_integration",
+        "mode": null,
+        "fixture_id": "environment-schema-compatibility",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-213",
+        "requirement_ids": [
+          "OT-P32-C02-AC02"
+        ],
+        "test_id": "services/control-api/tests/migrations/test_expand_contract.py::test_malformed_version_is_not_coerced[1.0]",
+        "kind": "local_integration",
+        "mode": null,
+        "fixture_id": "environment-schema-compatibility",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-213",
+        "requirement_ids": [
+          "OT-P32-C02-AC02"
+        ],
+        "test_id": "services/control-api/tests/migrations/test_expand_contract.py::test_malformed_version_is_not_coerced[2147483648]",
+        "kind": "local_integration",
+        "mode": null,
+        "fixture_id": "environment-schema-compatibility",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-213",
+        "requirement_ids": [
+          "OT-P32-C02-AC02"
+        ],
+        "test_id": "services/control-api/tests/migrations/test_expand_contract.py::test_failure_record_does_not_overwrite_a_newer_successful_batch",
+        "kind": "local_integration",
+        "mode": null,
+        "fixture_id": "environment-schema-compatibility",
+        "fixture_version": "1"
       }
     ]
   },
-  "source_projection_sha256": "bf4d8ba30123cf55caa4497ad30da2b9574909f5b66e4a01aa0a2c2fabac6d32",
+  "source_projection_sha256": "09f85bf5216172dd5cbf6ca81531b9d8d83bc54162d22cd0e39e76370c71bcd3",
   "source_bindings": {
     "feature_register_sha256": "f6d1061a103a028b6309928a1c6d96b1c58cb969793a2b9e8a4e36dd50b4602f",
     "figma_snapshot_sha256": "38c3537dd10719a1978873137d34086fa51e284456ed7c5d46d36e77815367a7",
     "figma_revision": "approved-ui-design-index.v4",
-    "native_projection": "Current native technical IDs, relationships and acceptance-text digests, with reviewed C05 implementation path/test refinements. Excludes full bodies and attachment transport. Original source hashes are provenance, not a claim that omitted source bytes are locally present."
+    "native_projection": "Current native technical IDs, relationships and acceptance-text digests, with reviewed C05 implementation path/test refinements. Excludes full bodies and attachment transport. Original source hashes are provenance, not a claim that omitted source bytes are locally present. OPE-213 native admission and reviewed implementation refresh adds its12 owned paths,3 named native test paths and94 exact positive/adverse cases; the updated technical-capture digest binds current native UTF-8 description with terminal newlines excluded. Full native bodies remain outside this public projection. Provider/customer evidence stays NOT_RUN."
   },
   "mappings": [
     {
@@ -36246,14 +37291,118 @@
       ],
       "subfeature_ids": [],
       "owned_paths": [
+        "infrastructure/__init__.py",
+        "infrastructure/cloudformation/README.md",
         "infrastructure/cloudformation/control-plane.yaml",
         "infrastructure/cloudformation/environment-boundaries.yaml",
-        "infrastructure/tests/test_environment_boundaries.py"
+        "infrastructure/environment_contract.py",
+        "infrastructure/tests/__init__.py",
+        "infrastructure/tests/environment_fixtures.py",
+        "infrastructure/tests/test_control_topology.py",
+        "infrastructure/tests/test_environment_boundaries.py",
+        "services/control-api/src/opentour_control/platform/__init__.py",
+        "services/control-api/src/opentour_control/platform/schema_compatibility.py",
+        "services/control-api/tests/migrations/test_expand_contract.py"
       ],
       "contract_refs": [
         "urn:opentour:common-contract:1.0"
       ],
-      "test_ids": [],
+      "test_ids": [
+        "infrastructure/tests/test_environment_boundaries.py::test_approved_environment_manifest[dev]",
+        "infrastructure/tests/test_environment_boundaries.py::test_approved_environment_manifest[test]",
+        "infrastructure/tests/test_environment_boundaries.py::test_approved_environment_manifest[prod]",
+        "infrastructure/tests/test_environment_boundaries.py::test_dev_and_test_share_account_without_sharing_authority",
+        "infrastructure/tests/test_environment_boundaries.py::test_prod_reference_injected_into_dev_is_rejected[key_refs]",
+        "infrastructure/tests/test_environment_boundaries.py::test_prod_reference_injected_into_dev_is_rejected[secrets_refs]",
+        "infrastructure/tests/test_environment_boundaries.py::test_prod_reference_injected_into_dev_is_rejected[database_ref]",
+        "infrastructure/tests/test_environment_boundaries.py::test_prod_reference_injected_into_dev_is_rejected[network_policy_ref]",
+        "infrastructure/tests/test_environment_boundaries.py::test_matching_account_and_inventory_do_not_substitute_for_resource_kind[key_refs-alias/dev]",
+        "infrastructure/tests/test_environment_boundaries.py::test_matching_account_and_inventory_do_not_substitute_for_resource_kind[database_ref-snapshot/dev]",
+        "infrastructure/tests/test_environment_boundaries.py::test_matching_account_and_inventory_do_not_substitute_for_resource_kind[service_refs-cluster/dev]",
+        "infrastructure/tests/test_environment_boundaries.py::test_matching_account_and_inventory_do_not_substitute_for_resource_kind[vpc_ref-subnet/dev]",
+        "infrastructure/tests/test_environment_boundaries.py::test_matching_account_and_inventory_do_not_substitute_for_resource_kind[subnet_refs-vpc/dev]",
+        "infrastructure/tests/test_environment_boundaries.py::test_matching_account_and_inventory_do_not_substitute_for_resource_kind[network_policy_ref-route-table/dev]",
+        "infrastructure/tests/test_environment_boundaries.py::test_matching_account_and_inventory_do_not_substitute_for_resource_kind[ingress_ref-targetgroup/dev]",
+        "infrastructure/tests/test_environment_boundaries.py::test_matching_account_and_inventory_do_not_substitute_for_resource_kind[registry_refs-image/dev]",
+        "infrastructure/tests/test_environment_boundaries.py::test_closed_manifest_rejects_adverse_inputs[unknown]",
+        "infrastructure/tests/test_environment_boundaries.py::test_closed_manifest_rejects_adverse_inputs[missing]",
+        "infrastructure/tests/test_environment_boundaries.py::test_closed_manifest_rejects_adverse_inputs[digest]",
+        "infrastructure/tests/test_environment_boundaries.py::test_closed_manifest_rejects_adverse_inputs[unapproved]",
+        "infrastructure/tests/test_environment_boundaries.py::test_closed_manifest_rejects_adverse_inputs[stale]",
+        "infrastructure/tests/test_environment_boundaries.py::test_closed_manifest_rejects_adverse_inputs[duplicate]",
+        "infrastructure/tests/test_environment_boundaries.py::test_closed_manifest_rejects_adverse_inputs[account]",
+        "infrastructure/tests/test_environment_boundaries.py::test_closed_manifest_rejects_adverse_inputs[region]",
+        "infrastructure/tests/test_environment_boundaries.py::test_closed_manifest_rejects_adverse_inputs[audit]",
+        "infrastructure/tests/test_environment_boundaries.py::test_closed_manifest_rejects_adverse_inputs[partition]",
+        "infrastructure/tests/test_environment_boundaries.py::test_closed_manifest_rejects_adverse_inputs[wildcard]",
+        "infrastructure/tests/test_environment_boundaries.py::test_audit_account_must_be_independent",
+        "infrastructure/tests/test_environment_boundaries.py::test_empty_control_stack_preflight_is_bound_to_exact_reviewed_bytes",
+        "infrastructure/tests/test_environment_boundaries.py::test_control_parameter_refusal_before_provider[ExpectedAccountId-111111111111]",
+        "infrastructure/tests/test_environment_boundaries.py::test_control_parameter_refusal_before_provider[Unknown-sentinel]",
+        "infrastructure/tests/test_environment_boundaries.py::test_control_parameter_refusal_before_provider[ApiMaxInstances-5]",
+        "infrastructure/tests/test_environment_boundaries.py::test_control_parameter_refusal_before_provider[DatabaseMaxConnections-True]",
+        "infrastructure/tests/test_environment_boundaries.py::test_control_parameter_refusal_before_provider[DatabaseMaxConnections-100.0]",
+        "infrastructure/tests/test_environment_boundaries.py::test_control_parameter_refusal_before_provider[DatabaseEngineFamily-postgres17]",
+        "infrastructure/tests/test_environment_boundaries.py::test_control_parameter_refusal_before_provider[VpcCidr-0.0.0.0/0]",
+        "infrastructure/tests/test_environment_boundaries.py::test_control_parameter_refusal_before_provider[VpcCidr-10.44.0.1/16]",
+        "infrastructure/tests/test_environment_boundaries.py::test_control_parameter_refusal_before_provider[ApplicationEnabled-true]",
+        "infrastructure/tests/test_environment_boundaries.py::test_control_parameter_refusal_before_provider[BffImageDigest-222222222222.dkr.ecr.us-east-1.amazonaws.com/app:latest]",
+        "infrastructure/tests/test_environment_boundaries.py::test_control_parameter_refusal_before_provider[EcrS3PrefixListId-pl-deadbeef]",
+        "infrastructure/tests/test_environment_boundaries.py::test_approved_application_inputs_and_foreign_role_refusal",
+        "infrastructure/tests/test_environment_boundaries.py::test_boundary_parameters_bind_exact_environment_resources",
+        "infrastructure/tests/test_environment_boundaries.py::test_boundary_parameter_cross_environment_injection_is_refused[ApplicationSecretArn]",
+        "infrastructure/tests/test_environment_boundaries.py::test_boundary_parameter_cross_environment_injection_is_refused[DataKeyArn]",
+        "infrastructure/tests/test_environment_boundaries.py::test_boundary_parameter_cross_environment_injection_is_refused[BffLogGroupArn]",
+        "infrastructure/tests/test_environment_boundaries.py::test_boundary_parameter_cross_environment_injection_is_refused[OidcProviderArn]",
+        "infrastructure/tests/test_environment_boundaries.py::test_boundary_unapproved_database_services_or_workflows_refused[DatabaseResourceId-db-UNAPPROVED]",
+        "infrastructure/tests/test_environment_boundaries.py::test_boundary_unapproved_database_services_or_workflows_refused[DeclaredServiceArns-value1]",
+        "infrastructure/tests/test_environment_boundaries.py::test_boundary_unapproved_database_services_or_workflows_refused[ApprovedDeployWorkflow-kevon-dot/opentour-ai/.github/workflows/deploy.yml@main]",
+        "infrastructure/tests/test_environment_boundaries.py::test_boundary_unapproved_database_services_or_workflows_refused[ApprovedMigrationWorkflow-fork/other/.github/workflows/migrate.yml@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa]",
+        "infrastructure/tests/test_control_topology.py::test_real_cloudformation_resource_schema_validation",
+        "infrastructure/tests/test_control_topology.py::test_two_az_private_database_backup_and_network_topology",
+        "infrastructure/tests/test_control_topology.py::test_ingress_and_egress_have_explicit_narrow_paths",
+        "infrastructure/tests/test_control_topology.py::test_services_are_separate_inactive_digest_pinned_and_capacity_bounded",
+        "infrastructure/tests/test_control_topology.py::test_runtime_roles_are_not_provisioners_schema_owners_or_audit_administrators",
+        "infrastructure/tests/test_control_topology.py::test_oidc_trust_requires_every_exact_identity_claim",
+        "infrastructure/tests/test_control_topology.py::test_connection_ceiling_exact_fit[1]",
+        "infrastructure/tests/test_control_topology.py::test_connection_ceiling_exact_fit[2]",
+        "infrastructure/tests/test_control_topology.py::test_connection_ceiling_exact_fit[3]",
+        "infrastructure/tests/test_control_topology.py::test_connection_ceiling_exact_fit[4]",
+        "infrastructure/tests/test_control_topology.py::test_connection_budget_refuses_unsafe_or_coerced_values[kwargs0]",
+        "infrastructure/tests/test_control_topology.py::test_connection_budget_refuses_unsafe_or_coerced_values[kwargs1]",
+        "infrastructure/tests/test_control_topology.py::test_connection_budget_refuses_unsafe_or_coerced_values[kwargs2]",
+        "infrastructure/tests/test_control_topology.py::test_connection_budget_refuses_unsafe_or_coerced_values[kwargs3]",
+        "infrastructure/tests/test_control_topology.py::test_connection_budget_refuses_unsafe_or_coerced_values[kwargs4]",
+        "infrastructure/tests/test_control_topology.py::test_connection_budget_refuses_unsafe_or_coerced_values[kwargs5]",
+        "infrastructure/tests/test_control_topology.py::test_security_diff_surfaces_changed_privilege_and_egress_values[AWS::ECS::TaskDefinition-TaskRoleArn-scoped-administrator]",
+        "infrastructure/tests/test_control_topology.py::test_security_diff_surfaces_changed_privilege_and_egress_values[AWS::RDS::DBInstance-PubliclyAccessible-False-True]",
+        "infrastructure/tests/test_control_topology.py::test_security_diff_surfaces_changed_privilege_and_egress_values[AWS::SQS::QueuePolicy-PolicyDocument-before2-after2]",
+        "infrastructure/tests/test_control_topology.py::test_security_diff_surfaces_changed_privilege_and_egress_values[AWS::S3::BucketPolicy-PolicyDocument-before3-after3]",
+        "infrastructure/tests/test_control_topology.py::test_security_diff_surfaces_changed_privilege_and_egress_values[AWS::EC2::SecurityGroupEgress-CidrIp-10.0.0.0/24-0.0.0.0/0]",
+        "infrastructure/tests/test_control_topology.py::test_parameter_diff_requires_review_without_exporting_secret_defaults",
+        "infrastructure/tests/test_control_topology.py::test_complete_cost_inventory_includes_fixed_costs_and_explained_zero_nat",
+        "services/control-api/tests/migrations/test_expand_contract.py::test_actual_expand_backfill_verify_switch_contract_and_retry",
+        "services/control-api/tests/migrations/test_expand_contract.py::test_runtime_role_can_read_but_cannot_drop_or_own_schema",
+        "services/control-api/tests/migrations/test_expand_contract.py::test_concurrent_migration_has_one_winner",
+        "services/control-api/tests/migrations/test_expand_contract.py::test_old_reader_blocks_contract_then_fails_readiness_after_contract",
+        "services/control-api/tests/migrations/test_expand_contract.py::test_failed_backfill_rolls_back_batch_and_retains_explicit_progress",
+        "services/control-api/tests/migrations/test_expand_contract.py::test_destructive_contract_refuses_missing_phase_proof[stable]",
+        "services/control-api/tests/migrations/test_expand_contract.py::test_destructive_contract_refuses_missing_phase_proof[expanded]",
+        "services/control-api/tests/migrations/test_expand_contract.py::test_destructive_contract_refuses_missing_phase_proof[backfilling]",
+        "services/control-api/tests/migrations/test_expand_contract.py::test_destructive_contract_refuses_missing_phase_proof[verified]",
+        "services/control-api/tests/migrations/test_expand_contract.py::test_checkpoint_digest_requires_independent_verification",
+        "services/control-api/tests/migrations/test_expand_contract.py::test_partial_or_false_verified_backfill_cannot_switch",
+        "services/control-api/tests/migrations/test_expand_contract.py::test_failed_ddl_transaction_has_no_schema_or_revision_effect",
+        "services/control-api/tests/migrations/test_expand_contract.py::test_changed_plan_or_initialization_refused",
+        "services/control-api/tests/migrations/test_expand_contract.py::test_revision_overflow_refuses_effect_before_callback",
+        "services/control-api/tests/migrations/test_expand_contract.py::test_non_autocommit_or_nested_transaction_refused",
+        "services/control-api/tests/migrations/test_expand_contract.py::test_malformed_version_is_not_coerced[0]",
+        "services/control-api/tests/migrations/test_expand_contract.py::test_malformed_version_is_not_coerced[-1]",
+        "services/control-api/tests/migrations/test_expand_contract.py::test_malformed_version_is_not_coerced[True]",
+        "services/control-api/tests/migrations/test_expand_contract.py::test_malformed_version_is_not_coerced[1.0]",
+        "services/control-api/tests/migrations/test_expand_contract.py::test_malformed_version_is_not_coerced[2147483648]",
+        "services/control-api/tests/migrations/test_expand_contract.py::test_failure_record_does_not_overwrite_a_newer_successful_batch"
+      ],
       "real_evidence_requirements": [
         {
           "requirement_id": "OT-P32-C02-AC01",
@@ -45242,6 +46391,42 @@
     {
       "path": "docs/specification/assets/ARCH-01.png",
       "owner": "OPE-126"
+    },
+    {
+      "path": "infrastructure/__init__.py",
+      "owner": "OPE-213"
+    },
+    {
+      "path": "infrastructure/cloudformation/README.md",
+      "owner": "OPE-213"
+    },
+    {
+      "path": "infrastructure/environment_contract.py",
+      "owner": "OPE-213"
+    },
+    {
+      "path": "infrastructure/tests/__init__.py",
+      "owner": "OPE-213"
+    },
+    {
+      "path": "infrastructure/tests/environment_fixtures.py",
+      "owner": "OPE-213"
+    },
+    {
+      "path": "infrastructure/tests/test_control_topology.py",
+      "owner": "OPE-213"
+    },
+    {
+      "path": "services/control-api/src/opentour_control/platform/__init__.py",
+      "owner": "OPE-213"
+    },
+    {
+      "path": "services/control-api/src/opentour_control/platform/schema_compatibility.py",
+      "owner": "OPE-213"
+    },
+    {
+      "path": "services/control-api/tests/migrations/test_expand_contract.py",
+      "owner": "OPE-213"
     }
   ],
   "ownership_handoffs": [
@@ -47598,6 +48783,1040 @@
       "kind": "simulated",
       "mode": null,
       "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-213",
+      "requirement_ids": [
+        "OT-P32-C02-AC01"
+      ],
+      "test_id": "infrastructure/tests/test_environment_boundaries.py::test_approved_environment_manifest[dev]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "environment-topology-sentinels",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-213",
+      "requirement_ids": [
+        "OT-P32-C02-AC01"
+      ],
+      "test_id": "infrastructure/tests/test_environment_boundaries.py::test_approved_environment_manifest[test]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "environment-topology-sentinels",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-213",
+      "requirement_ids": [
+        "OT-P32-C02-AC01"
+      ],
+      "test_id": "infrastructure/tests/test_environment_boundaries.py::test_approved_environment_manifest[prod]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "environment-topology-sentinels",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-213",
+      "requirement_ids": [
+        "OT-P32-C02-AC01"
+      ],
+      "test_id": "infrastructure/tests/test_environment_boundaries.py::test_dev_and_test_share_account_without_sharing_authority",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "environment-topology-sentinels",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-213",
+      "requirement_ids": [
+        "OT-P32-C02-AC03"
+      ],
+      "test_id": "infrastructure/tests/test_environment_boundaries.py::test_prod_reference_injected_into_dev_is_rejected[key_refs]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "environment-topology-sentinels",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-213",
+      "requirement_ids": [
+        "OT-P32-C02-AC03"
+      ],
+      "test_id": "infrastructure/tests/test_environment_boundaries.py::test_prod_reference_injected_into_dev_is_rejected[secrets_refs]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "environment-topology-sentinels",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-213",
+      "requirement_ids": [
+        "OT-P32-C02-AC03"
+      ],
+      "test_id": "infrastructure/tests/test_environment_boundaries.py::test_prod_reference_injected_into_dev_is_rejected[database_ref]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "environment-topology-sentinels",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-213",
+      "requirement_ids": [
+        "OT-P32-C02-AC03"
+      ],
+      "test_id": "infrastructure/tests/test_environment_boundaries.py::test_prod_reference_injected_into_dev_is_rejected[network_policy_ref]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "environment-topology-sentinels",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-213",
+      "requirement_ids": [
+        "OT-P32-C02-AC01"
+      ],
+      "test_id": "infrastructure/tests/test_environment_boundaries.py::test_matching_account_and_inventory_do_not_substitute_for_resource_kind[key_refs-alias/dev]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "environment-topology-sentinels",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-213",
+      "requirement_ids": [
+        "OT-P32-C02-AC01"
+      ],
+      "test_id": "infrastructure/tests/test_environment_boundaries.py::test_matching_account_and_inventory_do_not_substitute_for_resource_kind[database_ref-snapshot/dev]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "environment-topology-sentinels",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-213",
+      "requirement_ids": [
+        "OT-P32-C02-AC01"
+      ],
+      "test_id": "infrastructure/tests/test_environment_boundaries.py::test_matching_account_and_inventory_do_not_substitute_for_resource_kind[service_refs-cluster/dev]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "environment-topology-sentinels",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-213",
+      "requirement_ids": [
+        "OT-P32-C02-AC01"
+      ],
+      "test_id": "infrastructure/tests/test_environment_boundaries.py::test_matching_account_and_inventory_do_not_substitute_for_resource_kind[vpc_ref-subnet/dev]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "environment-topology-sentinels",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-213",
+      "requirement_ids": [
+        "OT-P32-C02-AC01"
+      ],
+      "test_id": "infrastructure/tests/test_environment_boundaries.py::test_matching_account_and_inventory_do_not_substitute_for_resource_kind[subnet_refs-vpc/dev]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "environment-topology-sentinels",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-213",
+      "requirement_ids": [
+        "OT-P32-C02-AC01"
+      ],
+      "test_id": "infrastructure/tests/test_environment_boundaries.py::test_matching_account_and_inventory_do_not_substitute_for_resource_kind[network_policy_ref-route-table/dev]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "environment-topology-sentinels",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-213",
+      "requirement_ids": [
+        "OT-P32-C02-AC01"
+      ],
+      "test_id": "infrastructure/tests/test_environment_boundaries.py::test_matching_account_and_inventory_do_not_substitute_for_resource_kind[ingress_ref-targetgroup/dev]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "environment-topology-sentinels",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-213",
+      "requirement_ids": [
+        "OT-P32-C02-AC01"
+      ],
+      "test_id": "infrastructure/tests/test_environment_boundaries.py::test_matching_account_and_inventory_do_not_substitute_for_resource_kind[registry_refs-image/dev]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "environment-topology-sentinels",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-213",
+      "requirement_ids": [
+        "OT-P32-C02-AC01"
+      ],
+      "test_id": "infrastructure/tests/test_environment_boundaries.py::test_closed_manifest_rejects_adverse_inputs[unknown]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "environment-topology-sentinels",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-213",
+      "requirement_ids": [
+        "OT-P32-C02-AC01"
+      ],
+      "test_id": "infrastructure/tests/test_environment_boundaries.py::test_closed_manifest_rejects_adverse_inputs[missing]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "environment-topology-sentinels",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-213",
+      "requirement_ids": [
+        "OT-P32-C02-AC01"
+      ],
+      "test_id": "infrastructure/tests/test_environment_boundaries.py::test_closed_manifest_rejects_adverse_inputs[digest]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "environment-topology-sentinels",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-213",
+      "requirement_ids": [
+        "OT-P32-C02-AC01"
+      ],
+      "test_id": "infrastructure/tests/test_environment_boundaries.py::test_closed_manifest_rejects_adverse_inputs[unapproved]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "environment-topology-sentinels",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-213",
+      "requirement_ids": [
+        "OT-P32-C02-AC01"
+      ],
+      "test_id": "infrastructure/tests/test_environment_boundaries.py::test_closed_manifest_rejects_adverse_inputs[stale]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "environment-topology-sentinels",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-213",
+      "requirement_ids": [
+        "OT-P32-C02-AC01"
+      ],
+      "test_id": "infrastructure/tests/test_environment_boundaries.py::test_closed_manifest_rejects_adverse_inputs[duplicate]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "environment-topology-sentinels",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-213",
+      "requirement_ids": [
+        "OT-P32-C02-AC01"
+      ],
+      "test_id": "infrastructure/tests/test_environment_boundaries.py::test_closed_manifest_rejects_adverse_inputs[account]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "environment-topology-sentinels",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-213",
+      "requirement_ids": [
+        "OT-P32-C02-AC01"
+      ],
+      "test_id": "infrastructure/tests/test_environment_boundaries.py::test_closed_manifest_rejects_adverse_inputs[region]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "environment-topology-sentinels",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-213",
+      "requirement_ids": [
+        "OT-P32-C02-AC01"
+      ],
+      "test_id": "infrastructure/tests/test_environment_boundaries.py::test_closed_manifest_rejects_adverse_inputs[audit]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "environment-topology-sentinels",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-213",
+      "requirement_ids": [
+        "OT-P32-C02-AC01"
+      ],
+      "test_id": "infrastructure/tests/test_environment_boundaries.py::test_closed_manifest_rejects_adverse_inputs[partition]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "environment-topology-sentinels",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-213",
+      "requirement_ids": [
+        "OT-P32-C02-AC01"
+      ],
+      "test_id": "infrastructure/tests/test_environment_boundaries.py::test_closed_manifest_rejects_adverse_inputs[wildcard]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "environment-topology-sentinels",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-213",
+      "requirement_ids": [
+        "OT-P32-C02-AC01"
+      ],
+      "test_id": "infrastructure/tests/test_environment_boundaries.py::test_audit_account_must_be_independent",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "environment-topology-sentinels",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-213",
+      "requirement_ids": [
+        "OT-P32-C02-AC01"
+      ],
+      "test_id": "infrastructure/tests/test_environment_boundaries.py::test_empty_control_stack_preflight_is_bound_to_exact_reviewed_bytes",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "environment-topology-sentinels",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-213",
+      "requirement_ids": [
+        "OT-P32-C02-AC01"
+      ],
+      "test_id": "infrastructure/tests/test_environment_boundaries.py::test_control_parameter_refusal_before_provider[ExpectedAccountId-111111111111]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "environment-topology-sentinels",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-213",
+      "requirement_ids": [
+        "OT-P32-C02-AC01"
+      ],
+      "test_id": "infrastructure/tests/test_environment_boundaries.py::test_control_parameter_refusal_before_provider[Unknown-sentinel]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "environment-topology-sentinels",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-213",
+      "requirement_ids": [
+        "OT-P32-C02-AC01"
+      ],
+      "test_id": "infrastructure/tests/test_environment_boundaries.py::test_control_parameter_refusal_before_provider[ApiMaxInstances-5]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "environment-topology-sentinels",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-213",
+      "requirement_ids": [
+        "OT-P32-C02-AC01"
+      ],
+      "test_id": "infrastructure/tests/test_environment_boundaries.py::test_control_parameter_refusal_before_provider[DatabaseMaxConnections-True]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "environment-topology-sentinels",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-213",
+      "requirement_ids": [
+        "OT-P32-C02-AC01"
+      ],
+      "test_id": "infrastructure/tests/test_environment_boundaries.py::test_control_parameter_refusal_before_provider[DatabaseMaxConnections-100.0]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "environment-topology-sentinels",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-213",
+      "requirement_ids": [
+        "OT-P32-C02-AC01"
+      ],
+      "test_id": "infrastructure/tests/test_environment_boundaries.py::test_control_parameter_refusal_before_provider[DatabaseEngineFamily-postgres17]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "environment-topology-sentinels",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-213",
+      "requirement_ids": [
+        "OT-P32-C02-AC01"
+      ],
+      "test_id": "infrastructure/tests/test_environment_boundaries.py::test_control_parameter_refusal_before_provider[VpcCidr-0.0.0.0/0]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "environment-topology-sentinels",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-213",
+      "requirement_ids": [
+        "OT-P32-C02-AC01"
+      ],
+      "test_id": "infrastructure/tests/test_environment_boundaries.py::test_control_parameter_refusal_before_provider[VpcCidr-10.44.0.1/16]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "environment-topology-sentinels",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-213",
+      "requirement_ids": [
+        "OT-P32-C02-AC01"
+      ],
+      "test_id": "infrastructure/tests/test_environment_boundaries.py::test_control_parameter_refusal_before_provider[ApplicationEnabled-true]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "environment-topology-sentinels",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-213",
+      "requirement_ids": [
+        "OT-P32-C02-AC01"
+      ],
+      "test_id": "infrastructure/tests/test_environment_boundaries.py::test_control_parameter_refusal_before_provider[BffImageDigest-222222222222.dkr.ecr.us-east-1.amazonaws.com/app:latest]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "environment-topology-sentinels",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-213",
+      "requirement_ids": [
+        "OT-P32-C02-AC01"
+      ],
+      "test_id": "infrastructure/tests/test_environment_boundaries.py::test_control_parameter_refusal_before_provider[EcrS3PrefixListId-pl-deadbeef]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "environment-topology-sentinels",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-213",
+      "requirement_ids": [
+        "OT-P32-C02-AC02"
+      ],
+      "test_id": "infrastructure/tests/test_environment_boundaries.py::test_approved_application_inputs_and_foreign_role_refusal",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "environment-topology-sentinels",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-213",
+      "requirement_ids": [
+        "OT-P32-C02-AC01"
+      ],
+      "test_id": "infrastructure/tests/test_environment_boundaries.py::test_boundary_parameters_bind_exact_environment_resources",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "environment-topology-sentinels",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-213",
+      "requirement_ids": [
+        "OT-P32-C02-AC03"
+      ],
+      "test_id": "infrastructure/tests/test_environment_boundaries.py::test_boundary_parameter_cross_environment_injection_is_refused[ApplicationSecretArn]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "environment-topology-sentinels",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-213",
+      "requirement_ids": [
+        "OT-P32-C02-AC03"
+      ],
+      "test_id": "infrastructure/tests/test_environment_boundaries.py::test_boundary_parameter_cross_environment_injection_is_refused[DataKeyArn]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "environment-topology-sentinels",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-213",
+      "requirement_ids": [
+        "OT-P32-C02-AC03"
+      ],
+      "test_id": "infrastructure/tests/test_environment_boundaries.py::test_boundary_parameter_cross_environment_injection_is_refused[BffLogGroupArn]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "environment-topology-sentinels",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-213",
+      "requirement_ids": [
+        "OT-P32-C02-AC03"
+      ],
+      "test_id": "infrastructure/tests/test_environment_boundaries.py::test_boundary_parameter_cross_environment_injection_is_refused[OidcProviderArn]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "environment-topology-sentinels",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-213",
+      "requirement_ids": [
+        "OT-P32-C02-AC01"
+      ],
+      "test_id": "infrastructure/tests/test_environment_boundaries.py::test_boundary_unapproved_database_services_or_workflows_refused[DatabaseResourceId-db-UNAPPROVED]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "environment-topology-sentinels",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-213",
+      "requirement_ids": [
+        "OT-P32-C02-AC01"
+      ],
+      "test_id": "infrastructure/tests/test_environment_boundaries.py::test_boundary_unapproved_database_services_or_workflows_refused[DeclaredServiceArns-value1]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "environment-topology-sentinels",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-213",
+      "requirement_ids": [
+        "OT-P32-C02-AC01"
+      ],
+      "test_id": "infrastructure/tests/test_environment_boundaries.py::test_boundary_unapproved_database_services_or_workflows_refused[ApprovedDeployWorkflow-kevon-dot/opentour-ai/.github/workflows/deploy.yml@main]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "environment-topology-sentinels",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-213",
+      "requirement_ids": [
+        "OT-P32-C02-AC01"
+      ],
+      "test_id": "infrastructure/tests/test_environment_boundaries.py::test_boundary_unapproved_database_services_or_workflows_refused[ApprovedMigrationWorkflow-fork/other/.github/workflows/migrate.yml@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "environment-topology-sentinels",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-213",
+      "requirement_ids": [
+        "OT-P32-C02-AC01"
+      ],
+      "test_id": "infrastructure/tests/test_control_topology.py::test_real_cloudformation_resource_schema_validation",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "environment-topology-sentinels",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-213",
+      "requirement_ids": [
+        "OT-P32-C02-AC01"
+      ],
+      "test_id": "infrastructure/tests/test_control_topology.py::test_two_az_private_database_backup_and_network_topology",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "environment-topology-sentinels",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-213",
+      "requirement_ids": [
+        "OT-P32-C02-AC01"
+      ],
+      "test_id": "infrastructure/tests/test_control_topology.py::test_ingress_and_egress_have_explicit_narrow_paths",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "environment-topology-sentinels",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-213",
+      "requirement_ids": [
+        "OT-P32-C02-AC01"
+      ],
+      "test_id": "infrastructure/tests/test_control_topology.py::test_services_are_separate_inactive_digest_pinned_and_capacity_bounded",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "environment-topology-sentinels",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-213",
+      "requirement_ids": [
+        "OT-P32-C02-AC02"
+      ],
+      "test_id": "infrastructure/tests/test_control_topology.py::test_runtime_roles_are_not_provisioners_schema_owners_or_audit_administrators",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "environment-topology-sentinels",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-213",
+      "requirement_ids": [
+        "OT-P32-C02-AC02"
+      ],
+      "test_id": "infrastructure/tests/test_control_topology.py::test_oidc_trust_requires_every_exact_identity_claim",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "environment-topology-sentinels",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-213",
+      "requirement_ids": [
+        "OT-P32-C02-AC01"
+      ],
+      "test_id": "infrastructure/tests/test_control_topology.py::test_connection_ceiling_exact_fit[1]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "environment-topology-sentinels",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-213",
+      "requirement_ids": [
+        "OT-P32-C02-AC01"
+      ],
+      "test_id": "infrastructure/tests/test_control_topology.py::test_connection_ceiling_exact_fit[2]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "environment-topology-sentinels",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-213",
+      "requirement_ids": [
+        "OT-P32-C02-AC01"
+      ],
+      "test_id": "infrastructure/tests/test_control_topology.py::test_connection_ceiling_exact_fit[3]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "environment-topology-sentinels",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-213",
+      "requirement_ids": [
+        "OT-P32-C02-AC01"
+      ],
+      "test_id": "infrastructure/tests/test_control_topology.py::test_connection_ceiling_exact_fit[4]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "environment-topology-sentinels",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-213",
+      "requirement_ids": [
+        "OT-P32-C02-AC01"
+      ],
+      "test_id": "infrastructure/tests/test_control_topology.py::test_connection_budget_refuses_unsafe_or_coerced_values[kwargs0]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "environment-topology-sentinels",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-213",
+      "requirement_ids": [
+        "OT-P32-C02-AC01"
+      ],
+      "test_id": "infrastructure/tests/test_control_topology.py::test_connection_budget_refuses_unsafe_or_coerced_values[kwargs1]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "environment-topology-sentinels",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-213",
+      "requirement_ids": [
+        "OT-P32-C02-AC01"
+      ],
+      "test_id": "infrastructure/tests/test_control_topology.py::test_connection_budget_refuses_unsafe_or_coerced_values[kwargs2]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "environment-topology-sentinels",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-213",
+      "requirement_ids": [
+        "OT-P32-C02-AC01"
+      ],
+      "test_id": "infrastructure/tests/test_control_topology.py::test_connection_budget_refuses_unsafe_or_coerced_values[kwargs3]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "environment-topology-sentinels",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-213",
+      "requirement_ids": [
+        "OT-P32-C02-AC01"
+      ],
+      "test_id": "infrastructure/tests/test_control_topology.py::test_connection_budget_refuses_unsafe_or_coerced_values[kwargs4]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "environment-topology-sentinels",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-213",
+      "requirement_ids": [
+        "OT-P32-C02-AC01"
+      ],
+      "test_id": "infrastructure/tests/test_control_topology.py::test_connection_budget_refuses_unsafe_or_coerced_values[kwargs5]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "environment-topology-sentinels",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-213",
+      "requirement_ids": [
+        "OT-P32-C02-AC01"
+      ],
+      "test_id": "infrastructure/tests/test_control_topology.py::test_security_diff_surfaces_changed_privilege_and_egress_values[AWS::ECS::TaskDefinition-TaskRoleArn-scoped-administrator]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "environment-topology-sentinels",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-213",
+      "requirement_ids": [
+        "OT-P32-C02-AC01"
+      ],
+      "test_id": "infrastructure/tests/test_control_topology.py::test_security_diff_surfaces_changed_privilege_and_egress_values[AWS::RDS::DBInstance-PubliclyAccessible-False-True]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "environment-topology-sentinels",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-213",
+      "requirement_ids": [
+        "OT-P32-C02-AC01"
+      ],
+      "test_id": "infrastructure/tests/test_control_topology.py::test_security_diff_surfaces_changed_privilege_and_egress_values[AWS::SQS::QueuePolicy-PolicyDocument-before2-after2]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "environment-topology-sentinels",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-213",
+      "requirement_ids": [
+        "OT-P32-C02-AC01"
+      ],
+      "test_id": "infrastructure/tests/test_control_topology.py::test_security_diff_surfaces_changed_privilege_and_egress_values[AWS::S3::BucketPolicy-PolicyDocument-before3-after3]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "environment-topology-sentinels",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-213",
+      "requirement_ids": [
+        "OT-P32-C02-AC01"
+      ],
+      "test_id": "infrastructure/tests/test_control_topology.py::test_security_diff_surfaces_changed_privilege_and_egress_values[AWS::EC2::SecurityGroupEgress-CidrIp-10.0.0.0/24-0.0.0.0/0]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "environment-topology-sentinels",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-213",
+      "requirement_ids": [
+        "OT-P32-C02-AC01"
+      ],
+      "test_id": "infrastructure/tests/test_control_topology.py::test_parameter_diff_requires_review_without_exporting_secret_defaults",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "environment-topology-sentinels",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-213",
+      "requirement_ids": [
+        "OT-P32-C02-AC01"
+      ],
+      "test_id": "infrastructure/tests/test_control_topology.py::test_complete_cost_inventory_includes_fixed_costs_and_explained_zero_nat",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "environment-topology-sentinels",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-213",
+      "requirement_ids": [
+        "OT-P32-C02-AC02"
+      ],
+      "test_id": "services/control-api/tests/migrations/test_expand_contract.py::test_actual_expand_backfill_verify_switch_contract_and_retry",
+      "kind": "local_integration",
+      "mode": null,
+      "fixture_id": "environment-schema-compatibility",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-213",
+      "requirement_ids": [
+        "OT-P32-C02-AC02"
+      ],
+      "test_id": "services/control-api/tests/migrations/test_expand_contract.py::test_runtime_role_can_read_but_cannot_drop_or_own_schema",
+      "kind": "local_integration",
+      "mode": null,
+      "fixture_id": "environment-schema-compatibility",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-213",
+      "requirement_ids": [
+        "OT-P32-C02-AC02"
+      ],
+      "test_id": "services/control-api/tests/migrations/test_expand_contract.py::test_concurrent_migration_has_one_winner",
+      "kind": "local_integration",
+      "mode": null,
+      "fixture_id": "environment-schema-compatibility",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-213",
+      "requirement_ids": [
+        "OT-P32-C02-AC02"
+      ],
+      "test_id": "services/control-api/tests/migrations/test_expand_contract.py::test_old_reader_blocks_contract_then_fails_readiness_after_contract",
+      "kind": "local_integration",
+      "mode": null,
+      "fixture_id": "environment-schema-compatibility",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-213",
+      "requirement_ids": [
+        "OT-P32-C02-AC02"
+      ],
+      "test_id": "services/control-api/tests/migrations/test_expand_contract.py::test_failed_backfill_rolls_back_batch_and_retains_explicit_progress",
+      "kind": "local_integration",
+      "mode": null,
+      "fixture_id": "environment-schema-compatibility",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-213",
+      "requirement_ids": [
+        "OT-P32-C02-AC02"
+      ],
+      "test_id": "services/control-api/tests/migrations/test_expand_contract.py::test_destructive_contract_refuses_missing_phase_proof[stable]",
+      "kind": "local_integration",
+      "mode": null,
+      "fixture_id": "environment-schema-compatibility",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-213",
+      "requirement_ids": [
+        "OT-P32-C02-AC02"
+      ],
+      "test_id": "services/control-api/tests/migrations/test_expand_contract.py::test_destructive_contract_refuses_missing_phase_proof[expanded]",
+      "kind": "local_integration",
+      "mode": null,
+      "fixture_id": "environment-schema-compatibility",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-213",
+      "requirement_ids": [
+        "OT-P32-C02-AC02"
+      ],
+      "test_id": "services/control-api/tests/migrations/test_expand_contract.py::test_destructive_contract_refuses_missing_phase_proof[backfilling]",
+      "kind": "local_integration",
+      "mode": null,
+      "fixture_id": "environment-schema-compatibility",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-213",
+      "requirement_ids": [
+        "OT-P32-C02-AC02"
+      ],
+      "test_id": "services/control-api/tests/migrations/test_expand_contract.py::test_destructive_contract_refuses_missing_phase_proof[verified]",
+      "kind": "local_integration",
+      "mode": null,
+      "fixture_id": "environment-schema-compatibility",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-213",
+      "requirement_ids": [
+        "OT-P32-C02-AC02"
+      ],
+      "test_id": "services/control-api/tests/migrations/test_expand_contract.py::test_checkpoint_digest_requires_independent_verification",
+      "kind": "local_integration",
+      "mode": null,
+      "fixture_id": "environment-schema-compatibility",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-213",
+      "requirement_ids": [
+        "OT-P32-C02-AC02"
+      ],
+      "test_id": "services/control-api/tests/migrations/test_expand_contract.py::test_partial_or_false_verified_backfill_cannot_switch",
+      "kind": "local_integration",
+      "mode": null,
+      "fixture_id": "environment-schema-compatibility",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-213",
+      "requirement_ids": [
+        "OT-P32-C02-AC02"
+      ],
+      "test_id": "services/control-api/tests/migrations/test_expand_contract.py::test_failed_ddl_transaction_has_no_schema_or_revision_effect",
+      "kind": "local_integration",
+      "mode": null,
+      "fixture_id": "environment-schema-compatibility",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-213",
+      "requirement_ids": [
+        "OT-P32-C02-AC02"
+      ],
+      "test_id": "services/control-api/tests/migrations/test_expand_contract.py::test_changed_plan_or_initialization_refused",
+      "kind": "local_integration",
+      "mode": null,
+      "fixture_id": "environment-schema-compatibility",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-213",
+      "requirement_ids": [
+        "OT-P32-C02-AC02"
+      ],
+      "test_id": "services/control-api/tests/migrations/test_expand_contract.py::test_revision_overflow_refuses_effect_before_callback",
+      "kind": "local_integration",
+      "mode": null,
+      "fixture_id": "environment-schema-compatibility",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-213",
+      "requirement_ids": [
+        "OT-P32-C02-AC02"
+      ],
+      "test_id": "services/control-api/tests/migrations/test_expand_contract.py::test_non_autocommit_or_nested_transaction_refused",
+      "kind": "local_integration",
+      "mode": null,
+      "fixture_id": "environment-schema-compatibility",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-213",
+      "requirement_ids": [
+        "OT-P32-C02-AC02"
+      ],
+      "test_id": "services/control-api/tests/migrations/test_expand_contract.py::test_malformed_version_is_not_coerced[0]",
+      "kind": "local_integration",
+      "mode": null,
+      "fixture_id": "environment-schema-compatibility",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-213",
+      "requirement_ids": [
+        "OT-P32-C02-AC02"
+      ],
+      "test_id": "services/control-api/tests/migrations/test_expand_contract.py::test_malformed_version_is_not_coerced[-1]",
+      "kind": "local_integration",
+      "mode": null,
+      "fixture_id": "environment-schema-compatibility",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-213",
+      "requirement_ids": [
+        "OT-P32-C02-AC02"
+      ],
+      "test_id": "services/control-api/tests/migrations/test_expand_contract.py::test_malformed_version_is_not_coerced[True]",
+      "kind": "local_integration",
+      "mode": null,
+      "fixture_id": "environment-schema-compatibility",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-213",
+      "requirement_ids": [
+        "OT-P32-C02-AC02"
+      ],
+      "test_id": "services/control-api/tests/migrations/test_expand_contract.py::test_malformed_version_is_not_coerced[1.0]",
+      "kind": "local_integration",
+      "mode": null,
+      "fixture_id": "environment-schema-compatibility",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-213",
+      "requirement_ids": [
+        "OT-P32-C02-AC02"
+      ],
+      "test_id": "services/control-api/tests/migrations/test_expand_contract.py::test_malformed_version_is_not_coerced[2147483648]",
+      "kind": "local_integration",
+      "mode": null,
+      "fixture_id": "environment-schema-compatibility",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-213",
+      "requirement_ids": [
+        "OT-P32-C02-AC02"
+      ],
+      "test_id": "services/control-api/tests/migrations/test_expand_contract.py::test_failure_record_does_not_overwrite_a_newer_successful_batch",
+      "kind": "local_integration",
+      "mode": null,
+      "fixture_id": "environment-schema-compatibility",
       "fixture_version": "1"
     }
   ]
