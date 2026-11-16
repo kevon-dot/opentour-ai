@@ -41,25 +41,25 @@
   --ot-radius-12: 12px;
   --ot-radius-16: 16px;
   --ot-type-display-size: 2rem;
-  --ot-type-display-line: 1.25;
+  --ot-type-display-line: 2.5rem;
   --ot-type-display-weight: 600;
   --ot-type-heading-size: 1.5rem;
-  --ot-type-heading-line: 1.3333333;
+  --ot-type-heading-line: 2rem;
   --ot-type-heading-weight: 600;
   --ot-type-section-size: 1.125rem;
-  --ot-type-section-line: 1.4444444;
+  --ot-type-section-line: 1.625rem;
   --ot-type-section-weight: 600;
   --ot-type-body-size: 0.875rem;
-  --ot-type-body-line: 1.5714286;
+  --ot-type-body-line: 1.375rem;
   --ot-type-body-weight: 400;
   --ot-type-label-size: 0.875rem;
-  --ot-type-label-line: 1.4285714;
+  --ot-type-label-line: 1.25rem;
   --ot-type-label-weight: 500;
   --ot-type-small-size: 0.75rem;
-  --ot-type-small-line: 1.5;
+  --ot-type-small-line: 1.125rem;
   --ot-type-small-weight: 400;
   --ot-type-mono-size: 0.75rem;
-  --ot-type-mono-line: 1.5;
+  --ot-type-mono-line: 1.125rem;
   --ot-type-mono-weight: 400;
 }
 

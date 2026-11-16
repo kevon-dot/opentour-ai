@@ -5,7 +5,7 @@
   "figma_file_key": "f7RVtmAPRdLo4WVWQMrvQC",
   "focus_review_node": "133:8",
   "design_review_status": "APPROVED_NARROW_FOCUS_AMENDMENT",
-  "browser_baseline_status": "APPROVED",
+  "browser_baseline_status": "NOT_RUN",
   "max_diff_pixels": 0,
   "threshold": 0,
   "masks": [],
@@ -50,5 +50,6 @@
     "source_commit": "8a1fd5818c11fc5afae33cacdd52b78a58d8a69e",
     "review_sha256": "718664a6efa4f3edbe8bda8160c5c8c7b6c103ffee1e9e59777ad67dd356e8f5",
     "baseline_authoring_nonce": "2d304facd3564608a0a5cfcfb3e73f57"
-  }
+  },
+  "baseline_invalidation_reason": "Exact Figma line heights replace rounded unitless ratios; prior approved images remain historical until regenerated and independently reviewed."
 }

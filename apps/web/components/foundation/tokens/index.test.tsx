@@ -114,6 +114,9 @@ describe('design token integrity', () => {
     for (const [key, value] of Object.entries(tokens.colors)) expect(css).toContain(`--ot-${key}: ${value};`);
     for (const value of tokens.spacing_px) expect(css).toContain(`--ot-space-${value}: ${value}px;`);
     for (const value of tokens.radius_px) expect(css).toContain(`--ot-radius-${value}: ${value}px;`);
+    for (const [name, value] of Object.entries(tokens.typography)) {
+      expect(css).toContain(`--ot-type-${name}-line: ${value.line_height_px / 16}rem;`);
+    }
   });
   function luminance(hex: string) {
     const channels = hex.slice(1).match(/../g)!.map(channel => parseInt(channel, 16) / 255)
