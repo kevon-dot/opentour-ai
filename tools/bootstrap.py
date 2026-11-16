@@ -48,12 +48,13 @@ MANIFESTS = (
     "services/control-api/pyproject.toml",
     "services/cell-runtime/pyproject.toml",
     "services/audit-journal/pyproject.toml",
+    "packages/authority-journal/pyproject.toml",
     "training/pyproject.toml",
     "apps/web/package.json",
     "packages/client-ts/package.json",
     "tools/toolchain.json",
 )
-CPU_IMPORTS = ("opentour_control", "opentour_cell", "opentour_audit")
+CPU_IMPORTS = ("opentour_control", "opentour_cell", "opentour_audit", "opentour_journal")
 LEARNING_IMPORTS = ("opentour_training.training", "opentour_training.evaluation")
 Runner = Callable[[Sequence[str], Path], str]
 

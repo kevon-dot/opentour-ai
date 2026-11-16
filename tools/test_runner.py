@@ -1149,6 +1149,7 @@ def dispatch(
                 "services/control-api/src",
                 "services/cell-runtime/src",
                 "services/audit-journal/src",
+                "packages/authority-journal/src",
                 "training/src",
             ),
             (
