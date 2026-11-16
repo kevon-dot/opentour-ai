@@ -34,7 +34,9 @@ def test_member_of_b_cannot_reuse_a_context(identity):
     with pytest.raises(AuthError, match="RESOURCE_NOT_FOUND"):
         context.require_organization("org_b")
     with pytest.raises(AuthError, match="CONTEXT_RECONCILIATION_REQUIRED"):
-        identity.service.authorization_context(identity.token(org_id="org_b"), identity.handle)
+        identity.service.authorization_context(
+            identity.token(org_id="identity_org_b"), identity.handle
+        )
 
 
 def test_zero_org_identity_has_finite_allowlist(identity):
@@ -63,7 +65,7 @@ def test_current_context_never_fabricates_selection(identity, state):
         )
         expected = "unselected"
     elif state == "mismatch":
-        token = identity.token(org_id="org_b")
+        token = identity.token(org_id="identity_org_b")
     elif state == "pending":
         identity.repository.sessions["session_a"] = replace(session, reconciliation_required=True)
     else:
@@ -307,3 +309,85 @@ def test_pending_provider_context_never_fabricates_removal(identity, status):
     assert identity.repository.sessions["session_a"] == before
     with pytest.raises(AuthError, match="CONTEXT_RECONCILIATION_REQUIRED"):
         identity.service.authorization_context(identity.token(), identity.handle)
+
+
+@pytest.mark.parametrize("mapping", [None, ""])
+def test_missing_provider_organization_mapping_never_falls_back_to_local_id(identity, mapping):
+    identity.members["org_a"] = replace(
+        identity.members["org_a"], identity_organization_id=mapping
+    )
+    with pytest.raises(AuthError, match="SCHEMA_INVALID"):
+        identity.service.authorization_context(identity.token(org_id="org_a"), identity.handle)
+
+
+@pytest.mark.parametrize(
+    "disagreement", ["mapping", "jwt_local_id", "observation", "removed_foreign"]
+)
+def test_provider_mapping_disagreement_keeps_local_selection_for_reconciliation(
+    identity, disagreement
+):
+    before = identity.repository.sessions["session_a"]
+    token = identity.token()
+    if disagreement == "mapping":
+        identity.members["org_a"] = replace(
+            identity.members["org_a"], identity_organization_id="identity_org_b"
+        )
+    elif disagreement == "jwt_local_id":
+        token = identity.token(org_id="org_a")
+    else:
+        observation = identity.repository.observation(identity.issuer, "provider_a")
+        identity.repository.observations[identity.issuer, "provider_a"] = replace(
+            observation,
+            organization_id="identity_org_b",
+            status="removed" if disagreement == "removed_foreign" else "active",
+            locally_denied=disagreement == "removed_foreign",
+        )
+    with pytest.raises(AuthError):
+        identity.service.authorization_context(token, identity.handle)
+    view = identity.service.current_context(token, identity.handle, "mapping_reconciliation")
+    assert view["state"] == "reconciliation_required"
+    assert view["organization_id"] is view["membership_id"] is None
+    assert identity.repository.sessions["session_a"] == before
+
+
+@pytest.mark.parametrize("method", ["authorization", "current"])
+def test_provider_mapping_changed_during_fetch_cannot_return_old_context(identity, method):
+    identity.repository.observations.clear()
+    observation = identity.provider.current_membership("provider_a", identity.now)
+
+    def changed(*args):
+        identity.members["org_a"] = replace(
+            identity.members["org_a"], identity_organization_id="identity_org_b"
+        )
+        return observation
+
+    identity.provider.current_membership = changed
+    with pytest.raises(AuthError, match="STALE_SESSION_CONTEXT"):
+        if method == "authorization":
+            identity.service.authorization_context(identity.token(), identity.handle)
+        else:
+            identity.service.current_context(identity.token(), identity.handle, "changed_mapping")
+
+
+def test_provider_mapping_never_weakens_verified_issuer_binding(identity):
+    identity.repository.observations.clear()
+    observation = identity.provider.current_membership("provider_a", identity.now)
+    identity.provider.current_membership = lambda *args: replace(
+        observation, issuer="https://other-identity.example.invalid/"
+    )
+    with pytest.raises(AuthError, match="IDENTITY_MEMBERSHIP_CONFLICT"):
+        identity.service.authorization_context(identity.token(), identity.handle)
+    assert not identity.repository.observations
+
+
+def test_provider_removed_response_uses_explicit_identity_organization_mapping(identity):
+    identity.repository.observations.clear()
+
+    def removed(*args):
+        raise AuthError("PROVIDER_MEMBERSHIP_REMOVED", 404)
+
+    identity.provider.current_membership = removed
+    view = identity.service.current_context(identity.token(), identity.handle, "removed_mapping")
+    assert view["state"] == "unselected"
+    observed = identity.repository.observation(identity.issuer, "provider_a")
+    assert observed.organization_id == "identity_org_a" and observed.locally_denied

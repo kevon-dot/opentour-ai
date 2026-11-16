@@ -31,10 +31,17 @@ class IdentityUse(StrEnum):
 
 @dataclass(frozen=True)
 class LocalMembership:
-    """Authoritative current result from171/172 and143, never provider role inference."""
+    """Current171/172 and143 result, including the explicit provider organization binding.
+
+    organization_id is OpenTour's local ID; identity_organization_id comes from171's
+    authenticated provider binding for this configured issuer. They are separate
+    namespaces. The authority port must never derive one from the other or from JWT
+    claims, provider role names, email domains or caller-supplied context.
+    """
 
     subject: str
     organization_id: str
+    identity_organization_id: str
     membership_id: str
     provider_membership_id: str
     active: bool
@@ -43,6 +50,12 @@ class LocalMembership:
 
 
 class MembershipAuthority(Protocol):
+    """Return the current local membership and independently committed provider mapping.
+
+    A mapping change must be visible to the final current() recheck. The provider
+    identity belongs to the configured verified issuer, never a response-chosen issuer.
+    """
+
     def current(self, subject: str, organization_id: str) -> LocalMembership | None: ...
 
 
@@ -193,6 +206,7 @@ class SessionService:
         ):
             raise AuthError("MEMBERSHIP_INACTIVE", 403)
         identifier(member.authority_revision)
+        identifier(member.identity_organization_id)
         counter(member.revocation_epoch)
         return member
 
@@ -200,6 +214,8 @@ class SessionService:
         self, session: Session, member: LocalMembership, now: datetime, sensitive: bool
     ) -> Observation:
         observation = self.repository.observation(session.issuer, member.provider_membership_id)
+        if observation is not None:
+            self._same_membership(session, member, observation)
         if observation and (observation.locally_denied or observation.status == "removed"):
             raise AuthError("MEMBERSHIP_INACTIVE", 403)
         maximum = (
@@ -220,7 +236,7 @@ class SessionService:
                 fetched = Observation(
                     session.issuer,
                     member.provider_membership_id,
-                    member.organization_id,
+                    member.identity_organization_id,
                     session.subject,
                     "removed",
                     now,
@@ -256,7 +272,7 @@ class SessionService:
         ) != (
             session.issuer,
             session.subject,
-            member.organization_id,
+            member.identity_organization_id,
             member.provider_membership_id,
         ):
             raise AuthError("IDENTITY_MEMBERSHIP_CONFLICT", 403)
@@ -265,13 +281,13 @@ class SessionService:
         self, token: str, binding: str, *, sensitive: bool = False
     ) -> AuthContext:
         verified, session, now = self._authenticate(token, binding)
+        member = self._membership(session)
         if (
             session.reconciliation_required
             or verified.organization_id is None
-            or verified.organization_id != session.selected_organization_id
+            or verified.organization_id != member.identity_organization_id
         ):
             raise AuthError("CONTEXT_RECONCILIATION_REQUIRED", 409)
-        member = self._membership(session)
         self._fresh(session, member, now, sensitive)
         observed = self._after_wait(verified, session, binding, member, sensitive=sensitive)
         assert observed is not None
@@ -377,12 +393,17 @@ class SessionService:
                 self._admission_time(verified, now)
                 result["session_generation"] = session.generation
                 return result
-            if error.status == 503 or error.code == "CONTEXT_RECONCILIATION_REQUIRED":
+            if error.status == 503 or error.code in {
+                "CONTEXT_RECONCILIATION_REQUIRED", "IDENTITY_MEMBERSHIP_CONFLICT"
+            }:
                 self._after_wait(verified, session, binding)
                 result["state"] = "reconciliation_required"
                 return result
             raise
-        if session.reconciliation_required or verified.organization_id != member.organization_id:
+        if (
+            session.reconciliation_required
+            or verified.organization_id != member.identity_organization_id
+        ):
             result["state"] = "reconciliation_required"
         else:
             result.update(

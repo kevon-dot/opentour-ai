@@ -19,6 +19,10 @@ export type Claims = {
   authenticationTime: string; expiresAt: number;
 };
 export type Credentials = { accessToken: string; refreshToken: string; userId: string };
+export type SelectionTarget = Readonly<{
+  organizationId: string; identityOrganizationId: string; identityIssuer: string;
+  membershipId: string; authorityRevision: string;
+}>;
 export type ServerSession = {
   handle: string; identity: Identity; credentials: Credentials; csrfToken: string;
   ended: boolean;
@@ -28,7 +32,7 @@ export type AuthTransaction = {
   state: string; nonce: string; browserDigest: string; verifier: string; expiresAt: number;
   returnPath: string; kind: 'signin' | 'switch';
   sessionHandle: string | null; subject: string | null; sessionId: string | null;
-  generation: number | null; targetOrganization: string | null;
+  generation: number | null; selectionTarget: SelectionTarget | null;
 };
 export interface AuthTransactionPort {
   /** Durably store encrypted private state, TTL<=600s; no in-memory fallback. */
@@ -49,10 +53,12 @@ export interface SessionPort {
   requireReconciliation(handle: string, generation: number): Promise<void>;
 }
 export interface SelectionPort {
-  /** Current local active membership/freshness, before provider preparation and at local CAS. */
-  authorize(identity: Identity, targetOrganization: string): Promise<void>;
-  /** CAS advances generation and clears reconciliation only with the exact verified target. */
-  commit(handle: string, observedGeneration: number, targetOrganization: string,
+  /** Current171/172 local membership and committed provider mapping; never infer equal IDs. */
+  authorize(identity: Identity, localOrganizationId: string): Promise<SelectionTarget>;
+  /**172 atomically rechecks the exact mapping/membership/authority plus generation and ended
+   * marker. Commit the LOCAL organization ID, increment generation, clear reconciliation.
+   * Claims must match the mapped provider org/issuer and remain unexpired at commit. */
+  commit(handle: string, observedGeneration: number, target: SelectionTarget,
     claims: Claims): Promise<void>;
 }
 export interface ProviderPort {
@@ -83,6 +89,26 @@ const secret = (): string => randomBytes(32).toString('base64url');
 const validId = (value: unknown): value is string =>
   typeof value === 'string' && value.length > 0 && value.length <= 256;
 const validGeneration = (value: number): boolean => Number.isSafeInteger(value) && value >= 0;
+const targetFields = ['organizationId', 'identityOrganizationId', 'identityIssuer',
+  'membershipId', 'authorityRevision'] as const;
+function checkedTarget(identity: Identity, localOrganizationId: string,
+  value: SelectionTarget): SelectionTarget {
+  if (!value || Object.keys(value).length !== targetFields.length
+      || !targetFields.every((field) => validId(value[field]))
+      || value.organizationId !== localOrganizationId
+      || value.identityIssuer !== identity.actor.issuer) {
+    throw new IdentityFailure('IDENTITY_MEMBERSHIP_CONFLICT', 403);
+  }
+  // Snapshot the trusted port result before any await; mutable references cannot change intent.
+  return Object.freeze({ organizationId: value.organizationId,
+    identityOrganizationId: value.identityOrganizationId, identityIssuer: value.identityIssuer,
+    membershipId: value.membershipId, authorityRevision: value.authorityRevision });
+}
+function sameTarget(expected: SelectionTarget, current: SelectionTarget): void {
+  if (!targetFields.every((field) => expected[field] === current[field])) {
+    throw new IdentityFailure('STALE_SESSION_CONTEXT', 409);
+  }
+}
 function serverClock(clock: () => number): () => number {
   return () => {
     const value = clock();
@@ -339,15 +365,15 @@ export function createAuthkitAdapter(ports: {
   const now = serverClock(ports.now ?? Date.now);
 
   async function start(returnPath: string, browser: string, session?: ServerSession,
-    targetOrganization?: string): Promise<Response> {
+    selectionTarget?: SelectionTarget): Promise<Response> {
     checkedReturn(profile, returnPath);
     const transaction: AuthTransaction = { state: secret(), nonce: secret(), browserDigest: sha(browser),
       verifier: secret(), expiresAt: now() + 600_000, returnPath,
       kind: session ? 'switch' : 'signin', sessionHandle: session?.handle ?? null,
       subject: session?.identity.actor.subject ?? null, sessionId: session?.identity.session_id ?? null,
-      generation: session?.identity.session_generation ?? null, targetOrganization: targetOrganization ?? null };
+      generation: session?.identity.session_generation ?? null, selectionTarget: selectionTarget ?? null };
     const location = providerDestination(profile, await provider.authorizationURL(
-      `${transaction.state}.${transaction.nonce}`, transaction.verifier, targetOrganization));
+      `${transaction.state}.${transaction.nonce}`, transaction.verifier, selectionTarget?.identityOrganizationId));
     await transactions.create(transaction);
     const headers = noStore();
     headers.append('Set-Cookie', setCookie(flowCookie, browser, 600));
@@ -383,8 +409,9 @@ export function createAuthkitAdapter(ports: {
         }
         checkedReturn(profile, transaction.returnPath);
         let previous: ServerSession | undefined;
+        let target: SelectionTarget | undefined;
         if (transaction.kind === 'switch') {
-          if (!transaction.sessionHandle || transaction.generation === null || !transaction.targetOrganization) {
+          if (!transaction.sessionHandle || transaction.generation === null || !transaction.selectionTarget) {
             throw new IdentityFailure('CALLBACK_INVALID');
           }
           previous = await sessions.current(transaction.sessionHandle);
@@ -392,7 +419,10 @@ export function createAuthkitAdapter(ports: {
           active(previous, transaction.generation);
           if (previous.identity.actor.subject !== transaction.subject
               || previous.identity.session_id !== transaction.sessionId) throw new IdentityFailure('CALLBACK_INVALID');
-          await selections.authorize(previous.identity, transaction.targetOrganization);
+          target = checkedTarget(previous.identity, transaction.selectionTarget.organizationId,
+            transaction.selectionTarget);
+          sameTarget(target, checkedTarget(previous.identity, target.organizationId,
+            await selections.authorize(previous.identity, target.organizationId)));
         }
         // Durable claim is already consumed. Lost exchange outcome cannot automatically retry the code.
         const credentials = await provider.exchange(codeValues[0], transaction.verifier);
@@ -400,12 +430,14 @@ export function createAuthkitAdapter(ports: {
         if (transaction.expiresAt <= now() || claims.expiresAt <= now()) throw new IdentityFailure('CALLBACK_INVALID');
         if (claims.subject !== credentials.userId) throw new IdentityFailure('SESSION_INVALID');
         let session: ServerSession;
-        if (previous) {
-          sameSession(previous, claims, transaction.targetOrganization!);
+        if (previous && target) {
+          sameSession(previous, claims, target.identityOrganizationId);
           active(await sessions.current(previous.handle), transaction.generation!);
           await sessions.replaceCredentials(previous.handle, transaction.generation!, credentials, claims);
-          await selections.authorize(previous.identity, transaction.targetOrganization!);
-          await selections.commit(previous.handle, transaction.generation!, transaction.targetOrganization!, claims);
+          sameTarget(target, checkedTarget(previous.identity, target.organizationId,
+            await selections.authorize(previous.identity, target.organizationId)));
+          if (claims.expiresAt <= now()) throw new IdentityFailure('SESSION_INVALID');
+          await selections.commit(previous.handle, transaction.generation!, target, claims);
           session = await sessions.current(previous.handle);
         } else {
           session = await sessions.admit(credentials, claims);
@@ -452,16 +484,19 @@ export function createAuthkitAdapter(ports: {
       active(session, observedGeneration);
       checkedReturn(profile, returnPath);
       if (!validId(targetOrganization)) throw new IdentityFailure('SCHEMA_INVALID', 422);
-      await selections.authorize(session.identity, targetOrganization);
+      const target = checkedTarget(session.identity, targetOrganization,
+        await selections.authorize(session.identity, targetOrganization));
       // Persist fail-closed admission before an external mutation can have an unknown
       // outcome. A later marker-write failure must not leave the old tenant usable.
       await sessions.requireReconciliation(session.handle, observedGeneration);
       let credentials: Credentials;
-      try { credentials = await provider.refresh(session.credentials, targetOrganization); }
+      try { credentials = await provider.refresh(session.credentials, target.identityOrganizationId); }
       catch (error) {
         if (error instanceof ProviderFailure) {
           if (error.outcome === 'authentication_required') {
-            return { outcome: error.outcome, response: await start(returnPath, secret(), session, targetOrganization) };
+            sameTarget(target, checkedTarget(session.identity, targetOrganization,
+              await selections.authorize(session.identity, targetOrganization)));
+            return { outcome: error.outcome, response: await start(returnPath, secret(), session, target) };
           }
           if (error.outcome === 'unknown') await sessions.requireReconciliation(session.handle, observedGeneration);
           return { outcome: error.outcome };
@@ -472,12 +507,14 @@ export function createAuthkitAdapter(ports: {
       try {
         const claims = await provider.verify(credentials.accessToken);
         if (claims.expiresAt <= now()) throw new IdentityFailure('SESSION_INVALID');
-        sameSession(session, claims, targetOrganization);
+        sameSession(session, claims, target.identityOrganizationId);
         if (credentials.userId !== claims.subject) throw new IdentityFailure('SESSION_INVALID');
         active(await sessions.current(session.handle), observedGeneration);
         await sessions.replaceCredentials(session.handle, observedGeneration, credentials, claims);
-        await selections.authorize(session.identity, targetOrganization);
-        await selections.commit(session.handle, observedGeneration, targetOrganization, claims);
+        sameTarget(target, checkedTarget(session.identity, targetOrganization,
+          await selections.authorize(session.identity, targetOrganization)));
+        if (claims.expiresAt <= now()) throw new IdentityFailure('SESSION_INVALID');
+        await selections.commit(session.handle, observedGeneration, target, claims);
         if (claims.expiresAt <= now()) throw new IdentityFailure('SESSION_INVALID');
         return { outcome: 'verified_target' };
       } catch {

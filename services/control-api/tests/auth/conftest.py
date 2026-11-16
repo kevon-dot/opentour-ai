@@ -155,7 +155,7 @@ def identity(signing_key):
             "aud": AUDIENCE,
             "sub": "user_a",
             "sid": "session_a",
-            "org_id": "org_a",
+            "org_id": "identity_org_a",
             "iat": int(NOW.timestamp()) - 60,
             "exp": int(NOW.timestamp()) + 600,
             "auth_time": int(NOW.timestamp()) - 120,
@@ -166,14 +166,14 @@ def identity(signing_key):
     repository = MemoryRepository()
     members = {
         "org_a": LocalMembership(
-            "user_a", "org_a", "member_a", "provider_a", True, "authority_a", 2
+            "user_a", "org_a", "identity_org_a", "member_a", "provider_a", True, "authority_a", 2
         ),
         "org_b": LocalMembership(
-            "user_a", "org_b", "member_b", "provider_b", True, "authority_b", 3
+            "user_a", "org_b", "identity_org_b", "member_b", "provider_b", True, "authority_b", 3
         ),
     }
     authority = SimpleNamespace(current=lambda subject, org: members.get(org))
-    observation = Observation(ISSUER, "provider_a", "org_a", "user_a", "active", NOW, NOW)
+    observation = Observation(ISSUER, "provider_a", "identity_org_a", "user_a", "active", NOW, NOW)
     repository.record_observation(observation)
     provider = SimpleNamespace(current_membership=lambda member, now: observation)
     verifier = WorkOSTokenVerifier(config, fetch=fetch, clock=lambda: NOW)

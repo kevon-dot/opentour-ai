@@ -20,7 +20,7 @@ def synchronizer(identity, events):
 
 
 def event(kind="organization_membership.updated", event_id="event_a", digest="a" * 64):
-    return ProviderEvent(event_id, kind, digest, "provider_a", "user_a", "org_a")
+    return ProviderEvent(event_id, kind, digest, "provider_a", "user_a", "identity_org_a")
 
 
 def test_remove_then_late_active_stays_denied(identity):

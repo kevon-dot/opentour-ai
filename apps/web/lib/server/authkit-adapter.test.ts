@@ -3,7 +3,8 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { exportJWK, generateKeyPair, SignJWT } from 'jose';
 vi.mock('server-only', () => ({}));
 import { createAuthkitAdapter, createWorkOSProvider, IdentityFailure, ProviderFailure,
-  type AuthProfile, type AuthTransaction, type Claims, type Credentials, type ServerSession } from './authkit-adapter.js';
+  type AuthProfile, type AuthTransaction, type Claims, type Credentials, type Identity,
+  type SelectionTarget, type ServerSession } from './authkit-adapter.js';
 
 const NOW = Date.UTC(2026, 10, 15, 12);
 const profile: AuthProfile = { origin: 'https://app.example.invalid',
@@ -12,9 +13,13 @@ const profile: AuthProfile = { origin: 'https://app.example.invalid',
   issuer: 'https://identity.example.invalid/', audience: 'https://api.example.invalid',
   jwksURL: 'https://api.workos.com/sso/jwks/client_fixture', clientId: 'client_fixture' };
 const claims: Claims = { issuer: profile.issuer, subject: 'user_a', sessionId: 'session_a',
-  organizationId: 'org_a', authenticationTime: new Date(NOW - 60_000).toISOString(), expiresAt: NOW + 600_000 };
+  organizationId: 'identity_org_a', authenticationTime: new Date(NOW - 60_000).toISOString(), expiresAt: NOW + 600_000 };
 const credentials: Credentials = { accessToken: 'GENERATED_ACCESS_SENTINEL',
   refreshToken: 'GENERATED_REFRESH_SENTINEL', userId: 'user_a' };
+const targetA: SelectionTarget = { organizationId: 'org_a', identityOrganizationId: 'identity_org_a',
+  identityIssuer: profile.issuer, membershipId: 'member_a', authorityRevision: 'authority_a' };
+const targetB: SelectionTarget = { organizationId: 'org_b', identityOrganizationId: 'identity_org_b',
+  identityIssuer: profile.issuer, membershipId: 'member_b', authorityRevision: 'authority_b' };
 
 function fixture() {
   let currentTime = NOW;
@@ -57,7 +62,11 @@ function fixture() {
     verify: vi.fn(async () => ({ ...claims })),
     logoutURL: vi.fn(() => 'https://api.workos.com/user_management/sessions/logout'),
   };
-  const selections = { authorize: vi.fn(async () => undefined),
+  const selections = { authorize: vi.fn(async (_identity: Identity, local: string): Promise<SelectionTarget> => {
+    if (local === 'org_a') return { ...targetA };
+    if (local === 'org_b') return { ...targetB };
+    throw new IdentityFailure('MEMBERSHIP_INACTIVE', 403);
+  }),
     commit: vi.fn(async () => { session.reconciliationRequired = false; }) };
   const adapter = createAuthkitAdapter({ profile, provider, transactions, sessions, selections, now: () => currentTime });
   const request = (csrf = true) => new Request(`${profile.origin}/auth/operation`, {
@@ -158,7 +167,8 @@ describe('ending and switching', () => {
     const f = fixture();
     expect((await f.adapter.switchOrganization(f.request(), 'org_a', 0, '/setup')).outcome).toBe('verified_target');
     expect(f.selections.authorize).toHaveBeenCalledTimes(2);
-    expect(f.selections.commit).toHaveBeenCalledExactlyOnceWith(f.session.handle, 0, 'org_a', claims);
+    expect(f.provider.refresh).toHaveBeenCalledExactlyOnceWith(credentials, 'identity_org_a');
+    expect(f.selections.commit).toHaveBeenCalledExactlyOnceWith(f.session.handle, 0, targetA, claims);
     expect(f.session.reconciliationRequired).toBe(false);
   });
   it('requires a durable pending marker before any provider context mutation', async () => {
@@ -207,7 +217,7 @@ describe('ending and switching', () => {
     const outcome = await f.adapter.switchOrganization(f.request(), 'org_b', 0, '/setup');
     expect(outcome.outcome).toBe('authentication_required');
     const flow = [...f.flows.values()][0]!;
-    expect([flow.targetOrganization, flow.sessionId, flow.subject, flow.generation]).toEqual(['org_b','session_a','user_a',0]);
+    expect([flow.selectionTarget, flow.sessionId, flow.subject, flow.generation]).toEqual([targetB,'session_a','user_a',0]);
     expect(flow.browserDigest).toHaveLength(64); expect(flow.nonce).toHaveLength(43);
   });
   it('rejects an SSO callback after another selection advances the generation', async () => {
@@ -224,7 +234,7 @@ describe('ending and switching', () => {
   });
   it('rechecks local membership after provider refresh and before selection', async () => {
     const f = fixture();
-    f.selections.authorize.mockResolvedValueOnce(undefined).mockRejectedValueOnce(new IdentityFailure('MEMBERSHIP_INACTIVE', 403));
+    f.selections.authorize.mockResolvedValueOnce(targetA).mockRejectedValueOnce(new IdentityFailure('MEMBERSHIP_INACTIVE', 403));
     expect((await f.adapter.switchOrganization(f.request(), 'org_a', 0, '/setup')).outcome).toBe('unknown');
     expect(f.selections.commit).not.toHaveBeenCalled(); expect(f.session.reconciliationRequired).toBe(true);
   });
@@ -339,5 +349,63 @@ describe('actual maintained SDK and JWT boundary with generated inputs', () => {
     const sdk = createWorkOSProvider(profile, 'generated-api-key', { fetch: transport });
     await expect(sdk.refresh(credentials, 'org_a')).rejects.toMatchObject({ outcome });
     expect(transport).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('distinct local and provider organization mappings', () => {
+  it.each(['organizationId', 'identityIssuer', 'identityOrganizationId'] as const)(
+    'requires an explicit trusted target %s before contacting the provider', async (field) => {
+      const f = fixture();
+      const wrong = { ...targetA, [field]: field === 'identityOrganizationId' ? '' : 'foreign' };
+      f.selections.authorize.mockResolvedValue(wrong);
+      await expect(f.adapter.switchOrganization(f.request(), 'org_a', 0, '/setup')).rejects.toThrow('IDENTITY_MEMBERSHIP_CONFLICT');
+      expect(f.provider.refresh).not.toHaveBeenCalled(); expect(f.selections.commit).not.toHaveBeenCalled();
+    });
+  it('never accepts the local organization ID as a provider JWT organization', async () => {
+    const f = fixture(); f.provider.verify.mockResolvedValue({ ...claims, organizationId: 'org_a' });
+    expect((await f.adapter.switchOrganization(f.request(), 'org_a', 0, '/setup')).outcome).toBe('unknown');
+    expect(f.selections.commit).not.toHaveBeenCalled(); expect(f.session.reconciliationRequired).toBe(true);
+  });
+  it.each(['identityOrganizationId', 'membershipId', 'authorityRevision'] as const)(
+    'fences %s changed during the provider wait', async (field) => {
+      const f = fixture(); const target = { ...targetA };
+      f.selections.authorize.mockImplementation(async () => target);
+      f.provider.refresh.mockImplementation(async () => { target[field] = 'changed'; return credentials; });
+      expect((await f.adapter.switchOrganization(f.request(), 'org_a', 0, '/setup')).outcome).toBe('unknown');
+      expect(f.provider.refresh).toHaveBeenCalledWith(credentials, 'identity_org_a');
+      expect(f.selections.commit).not.toHaveBeenCalled(); expect(f.session.reconciliationRequired).toBe(true);
+    });
+  it('binds an SSO continuation to both namespaces and commits only the local target', async () => {
+    const f = fixture(); f.provider.refresh.mockRejectedValue(new ProviderFailure('authentication_required'));
+    const outcome = await f.adapter.switchOrganization(f.request(), 'org_b', 0, '/setup');
+    if (outcome.outcome !== 'authentication_required') throw new Error('Missing continuation');
+    expect(f.provider.authorizationURL).toHaveBeenCalledWith(expect.any(String), expect.any(String), 'identity_org_b');
+    const flow = [...f.flows.values()][0]!;
+    expect(flow.selectionTarget).toEqual(targetB);
+    f.provider.verify.mockResolvedValue({ ...claims, organizationId: 'identity_org_b' });
+    const state = new URL(outcome.response.headers.get('location')!).searchParams.get('state');
+    const cookie = outcome.response.headers.get('set-cookie')!.split(';')[0]!;
+    const response = await f.adapter.callback(new Request(`${profile.callbackURI}?state=${state}&code=generated`, { headers: { cookie } }));
+    expect(response.status).toBe(303);
+    expect(f.selections.commit).toHaveBeenCalledExactlyOnceWith(f.session.handle, 0, targetB,
+      { ...claims, organizationId: 'identity_org_b' });
+  });
+  it.each(['before_exchange', 'during_exchange'] as const)('refuses changed continuation mapping %s', async (when) => {
+    const f = fixture(); const target = { ...targetB };
+    f.selections.authorize.mockImplementation(async () => target);
+    f.provider.refresh.mockRejectedValue(new ProviderFailure('authentication_required'));
+    const outcome = await f.adapter.switchOrganization(f.request(), 'org_b', 0, '/setup');
+    if (outcome.outcome !== 'authentication_required') throw new Error('Missing continuation');
+    f.provider.verify.mockResolvedValue({ ...claims, organizationId: 'identity_org_b' });
+    if (when === 'before_exchange') target.identityOrganizationId = 'changed';
+    else f.provider.exchange.mockImplementation(async () => { target.identityOrganizationId = 'changed'; return credentials; });
+    const state = new URL(outcome.response.headers.get('location')!).searchParams.get('state');
+    const cookie = outcome.response.headers.get('set-cookie')!.split(';')[0]!;
+    const response = await f.adapter.callback(new Request(`${profile.callbackURI}?state=${state}&code=generated`, { headers: { cookie } }));
+    expect(response.status).toBe(409);
+    if (when === 'before_exchange') expect(f.provider.exchange).not.toHaveBeenCalled();
+    expect(f.selections.commit).not.toHaveBeenCalled();
+    expect(response.headers.getSetCookie().some((v) => v.startsWith('opentour-session='))).toBe(false);
+    expect(f.session.reconciliationRequired).toBe(true);
   });
 });

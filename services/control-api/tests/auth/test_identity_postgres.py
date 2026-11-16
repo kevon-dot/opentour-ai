@@ -320,3 +320,78 @@ def test_configured_typescript_factories_with_actual_durable_ports(durable, iden
         report = json.loads(probe.stdout)
         assert report["configured_factories"] == "PASS" and report["actual_postgresql"]
         assert report["provider_acceptance"] == "NOT_RUN" and report["mode"] == durable.mode
+
+
+@pytest.fixture
+def mapped_selection(durable, identity):
+    """Generated171/172 authority mapping;142 session/observation persistence is actual PG."""
+    provider_member = "provider_" + uuid4().hex
+    identity.members["org_a"] = replace(
+        identity.members["org_a"], provider_membership_id=provider_member
+    )
+    observed = replace(
+        identity.provider.current_membership("provider_a", identity.now),
+        membership_id=provider_member,
+    )
+    durable.service.provider = SimpleNamespace(current_membership=lambda *args: observed)
+    with durable.connect() as connection:
+        connection.execute(
+            "UPDATE opentour_identity.sessions SET selected_organization_id=%s, "
+            "selected_membership_id=%s WHERE issuer=%s AND session_id=%s",
+            ("org_a", "member_a", identity.issuer, durable.sid),
+        )
+    return observed
+
+
+def test_distinct_provider_mapping_returns_local_context_with_actual_pg(
+    durable, identity, mapped_selection
+):
+    context = durable.service.authorization_context(durable.token, durable.binding)
+    assert context.organization_id == "org_a"
+    assert context.organization_id != mapped_selection.organization_id == "identity_org_a"
+    view = durable.service.current_context(durable.token, durable.binding, "mapped_pg")
+    assert view["state"] == "active" and view["organization_id"] == "org_a"
+    observed = durable.repository.observation(identity.issuer, mapped_selection.membership_id)
+    assert observed.organization_id == "identity_org_a"
+
+
+def test_wrong_provider_mapping_never_clears_committed_local_selection(
+    durable, identity, mapped_selection
+):
+    durable.repository.record_observation(mapped_selection)
+    before = durable.repository.load_session(digest(durable.binding), identity.now)
+    identity.members["org_a"] = replace(
+        identity.members["org_a"], identity_organization_id="identity_org_b"
+    )
+    with pytest.raises(AuthError, match="CONTEXT_RECONCILIATION_REQUIRED"):
+        durable.service.authorization_context(durable.token, durable.binding)
+    view = durable.service.current_context(durable.token, durable.binding, "wrong_pg_mapping")
+    assert view["state"] == "reconciliation_required" and view["organization_id"] is None
+    assert durable.repository.load_session(digest(durable.binding), identity.now) == before
+
+
+def test_mapping_changed_during_provider_wait_denies_actual_pg_context(
+    durable, identity, mapped_selection
+):
+    def changed(*args):
+        identity.members["org_a"] = replace(
+            identity.members["org_a"], identity_organization_id="identity_org_b"
+        )
+        return mapped_selection
+
+    durable.service.provider.current_membership = changed
+    with pytest.raises(AuthError, match="STALE_SESSION_CONTEXT"):
+        durable.service.authorization_context(durable.token, durable.binding)
+    session = durable.repository.load_session(digest(durable.binding), identity.now)
+    assert session.selected_organization_id == "org_a" and session.generation == 0
+
+
+def test_wrong_provider_issuer_cannot_enter_actual_pg_observation(
+    durable, identity, mapped_selection
+):
+    durable.service.provider.current_membership = lambda *args: replace(
+        mapped_selection, issuer="https://other-identity.example.invalid/"
+    )
+    with pytest.raises(AuthError, match="IDENTITY_MEMBERSHIP_CONFLICT"):
+        durable.service.authorization_context(durable.token, durable.binding)
+    assert durable.repository.observation(identity.issuer, mapped_selection.membership_id) is None
