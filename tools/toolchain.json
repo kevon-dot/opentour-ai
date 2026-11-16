@@ -326,6 +326,15 @@
         "requires_python": null,
         "engines": null,
         "integrity": "sha512-qepMx2JxAa5jjfzxG79yPPq+8BuFToHd1hm7kI+Z4zAq1ftQiP7HcxMhDDItrbtwVeLg/cY2JnKnrcFkmiswNA=="
+      },
+      "vite": {
+        "version": "8.3.8",
+        "source": "https://registry.npmjs.org/vite/8.3.8",
+        "requires_python": null,
+        "engines": {
+          "node": "^20.19.0 || >=22.12.0"
+        },
+        "integrity": "sha512-LzOn3h9rG/0vhLdXrV4yJ4QFA9eEoqCl+Yx+kGJd7aB9w6nfNgVHKSYwLPZUHrz4ZGa+t+kXjV9itvcHDLQouA=="
       }
     }
   },
