@@ -18,6 +18,14 @@ async function billingGeometry(page: Page) {
 }
 const BILLING_GEOMETRY = { x: 20, y: 627, width: 280, height: 609, viewport: [320,1100], scroll: [0,0], body_height: 1360, radius: Array(4).fill('10px'), border_width: Array(4).fill('1px'), border_color: Array(4).fill('rgb(214, 222, 234)'), border_style: 'solid', background: 'rgb(255, 255, 255)', font: 'FixtureInter, sans-serif', font_size: '14px', font_weight: '400', line_height: '21px', device_scale_factor: 1, fonts_ready: 'loaded', clock: FIXTURE.clock };
 
+async function retainComparison(info: TestInfo, name: string, image: Buffer, result: Record<string, unknown>) {
+  const png = info.outputPath(`${name}.png`); const receipt = info.outputPath(`${name}.json`);
+  writeFileSync(png, image);
+  writeFileSync(receipt, JSON.stringify({ mode: info.project.metadata.mode, ...result }, null, 2));
+  await info.attach(name, { path: png, contentType: 'image/png' });
+  await info.attach(`${name}-result`, { path: receipt, contentType: 'application/json' });
+}
+
 async function reviewedBillingScreenshot(page: Page, info: TestInfo, path: string, baselineKey: string, policy: VisualPolicy, policyHash: string) {
   const expectedBytes = readFileSync(path); const expected = decodePng(expectedBytes);
   const baselineHash = createHash('sha256').update(expectedBytes).digest('hex');
@@ -27,8 +35,7 @@ async function reviewedBillingScreenshot(page: Page, info: TestInfo, path: strin
   expect(await billingGeometry(page)).toEqual(BILLING_GEOMETRY);
   const result = comparePixels(expected, decodePng(actual), policy.vector);
   // Retain the actual image without masking, re-encoding or replacing any pixel.
-  await info.attach('billing320-raw', { body: actual, contentType: 'image/png' });
-  await info.attach('billing320-comparison', { body: Buffer.from(JSON.stringify({ policy_sha256: policyHash, baseline_sha256: baselineHash, actual_sha256: createHash('sha256').update(actual).digest('hex'), ...result })), contentType: 'application/json' });
+  await retainComparison(info, 'billing320-comparison', actual, { policy_sha256: policyHash, baseline_sha256: baselineHash, actual_sha256: createHash('sha256').update(actual).digest('hex'), ...result });
   expect(result.variant, JSON.stringify(result)).not.toBeNull();
 }
 
@@ -46,8 +53,7 @@ async function qualifyBillingAdverse(page: Page, info: TestInfo, path: string, p
       expect(await billingGeometry(page)).not.toEqual(BILLING_GEOMETRY);
       const changed = await page.screenshot({ animations: 'disabled', caret: 'hide' });
       const comparison = comparePixels(expected, decodePng(changed), policy.vector);
-      await info.attach(`billing320-adverse-${name}`, { body: changed, contentType: 'image/png' });
-      await info.attach(`billing320-adverse-${name}-result`, { body: Buffer.from(JSON.stringify({ expected_rejection: true, actual_sha256: createHash('sha256').update(changed).digest('hex'), ...comparison })), contentType: 'application/json' });
+      await retainComparison(info, `billing320-adverse-${name}`, changed, { expected_rejection: true, actual_sha256: createHash('sha256').update(changed).digest('hex'), ...comparison });
       expect(comparison.variant, name).toBeNull();
     } finally { await style.evaluate(element => { element.parentNode?.removeChild(element); }); }
   }
@@ -56,8 +62,7 @@ async function qualifyBillingAdverse(page: Page, info: TestInfo, path: string, p
     await amount.evaluate(element => { element.textContent = 'Simulated amount: $13.50 USD · quantity: 12.50'; });
     const changed = await page.screenshot({ animations: 'disabled', caret: 'hide' });
     const comparison = comparePixels(expected, decodePng(changed), policy.vector);
-    await info.attach('billing320-adverse-text', { body: changed, contentType: 'image/png' });
-    await info.attach('billing320-adverse-text-result', { body: Buffer.from(JSON.stringify({ expected_rejection: true, actual_sha256: createHash('sha256').update(changed).digest('hex'), ...comparison })), contentType: 'application/json' });
+    await retainComparison(info, 'billing320-adverse-text', changed, { expected_rejection: true, actual_sha256: createHash('sha256').update(changed).digest('hex'), ...comparison });
     expect(comparison.variant, 'Changed billing text').toBeNull();
   } finally { await amount.evaluate((element, text) => { element.textContent = text; }, original); }
   expect(await billingGeometry(page)).toEqual(BILLING_GEOMETRY);

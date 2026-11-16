@@ -1,8 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { readFileSync } from 'node:fs';
+import { readFileSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
 import { comparePixels, decodePng, parsePolicy, type Raster } from './visual-comparison.ts';
+import { collectVisualComparisons } from '../../../../../tools/browser-test-runner.ts';
 
 const directory = fileURLToPath(new URL('.', import.meta.url));
 const policyBytes = readFileSync(`${directory}visual-comparison-policy.json`);
@@ -61,5 +64,43 @@ describe('BH-VISUAL-POLICY: exact reviewed rounded-border alternative', () => {
       const value = structuredClone(policy); mutate(value);
       expect(() => parsePolicy(Buffer.from(JSON.stringify(value)))).toThrow();
     }
+  });
+  it('binds retained numeric results to the exact raw PNG and rejects tampering or missing files', () => {
+    const root = mkdtempSync(join(tmpdir(), 'opentour-visual-evidence-'));
+    try {
+      mkdirSync(join(root, 'artifacts'));
+      const png = readFileSync(`${directory}${Object.keys(policy.images)[0]}`);
+      const pngHash = createHash('sha256').update(png).digest('hex');
+      const path = 'artifacts/billing320-adverse-text.json'; const pngPath = path.replace('.json', '.png');
+      const value = { mode: 'customer_controlled', expected_rejection: true, actual_sha256: pngHash, variant: null, changed_pixels: 1, bounds: { min_x: 0, min_y: 0, max_x: 0, max_y: 0 } };
+      const bytes = Buffer.from(JSON.stringify(value)); writeFileSync(join(root, path), bytes); writeFileSync(join(root, pngPath), png);
+      const output = { path, sha256: createHash('sha256').update(bytes).digest('hex') }; const image = { path: pngPath, sha256: pngHash };
+      expect(collectVisualComparisons(root, [output, image])[0].comparison).toEqual(value);
+      expect(() => collectVisualComparisons(root, [output])).toThrow();
+      expect(() => collectVisualComparisons(root, [output, output, image])).toThrow();
+      expect(() => collectVisualComparisons(root, [output, { ...image, sha256: '0'.repeat(64) }])).toThrow();
+      writeFileSync(join(root, path), JSON.stringify({ ...value, changed_pixels: 0 }));
+      expect(() => collectVisualComparisons(root, [output, image])).toThrow();
+      const changed = readFileSync(join(root, path));
+      expect(() => collectVisualComparisons(root, [{ path, sha256: createHash('sha256').update(changed).digest('hex') }, image])).toThrow();
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+  it('binds retained positive variants to the reviewed policy and correct changed-pixel count', () => {
+    const root = mkdtempSync(join(tmpdir(), 'opentour-visual-evidence-'));
+    try {
+      mkdirSync(join(root, 'artifacts')); mkdirSync(join(root, 'apps/web/tests/fixtures/harness'), { recursive: true });
+      writeFileSync(join(root, 'apps/web/tests/fixtures/harness/visual-comparison-policy.json'), policyBytes);
+      const binding = policy.images['baselines/darwin-customer-controlled/billing-320.png'];
+      const path = 'artifacts/billing320-comparison.json'; const pngPath = path.replace('.json', '.png');
+      const png = readFileSync(`${directory}baselines/darwin-customer-controlled/billing-320.png`); writeFileSync(join(root, pngPath), png);
+      const value = { mode: 'customer_controlled', policy_sha256: createHash('sha256').update(policyBytes).digest('hex'), baseline_sha256: binding.baseline_sha256, actual_sha256: binding.baseline_sha256, variant: 'baseline', changed_pixels: 0, bounds: null };
+      function collect(candidate: typeof value) {
+        const bytes = Buffer.from(JSON.stringify(candidate)); writeFileSync(join(root, path), bytes);
+        return collectVisualComparisons(root, [{ path, sha256: createHash('sha256').update(bytes).digest('hex') }, { path: pngPath, sha256: binding.baseline_sha256 }]);
+      }
+      expect(collect(value)[0].comparison.variant).toBe('baseline');
+      expect(() => collect({ ...value, policy_sha256: '0'.repeat(64) })).toThrow();
+      expect(() => collect({ ...value, variant: 'reviewed_corner_vector' })).toThrow();
+    } finally { rmSync(root, { recursive: true, force: true }); }
   });
 });
