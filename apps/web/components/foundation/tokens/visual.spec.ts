@@ -176,6 +176,13 @@ test('forced colors retains a visible keyboard outline without animations', asyn
   expect(await button.evaluate(node => {
     const style=getComputedStyle(node); return [style.outlineWidth, style.outlineOffset, style.outlineStyle];
   })).toEqual(['2px', '2px', 'solid']);
+  const systemColors = await button.evaluate(node => {
+    const sample = document.createElement('span'); sample.style.color = 'Highlight';
+    document.body.append(sample);
+    try { return { outline: getComputedStyle(node).outlineColor, highlight: getComputedStyle(sample).color }; }
+    finally { sample.remove(); }
+  });
+  expect(systemColors.outline).toBe(systemColors.highlight);
   expect(await page.locator('.ot-button-indicator').first().evaluate(node => getComputedStyle(node).animationName)).toBe('none');
   const bounds = await button.boundingBox();
   await capture(page, info, 'focus-forced-colors', { x: bounds!.x - 6, y: bounds!.y - 6, width: bounds!.width + 12, height: bounds!.height + 12 });
