@@ -7,7 +7,10 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from dataclasses import replace
 from datetime import timedelta
 from pathlib import Path
@@ -25,6 +28,7 @@ from opentour_control.auth.repository import (
     PostgresIdentityRepository,
     SessionRevocationEvent,
     connection_factory,
+    lock_membership_observation,
 )
 from opentour_control.auth.session import SessionService, create_session_router
 
@@ -46,6 +50,18 @@ def postgres():
             "CREATE ROLE c03_runtime LOGIN NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE; "
             "GRANT USAGE ON SCHEMA opentour_identity TO c03_runtime; "
             "GRANT SELECT,INSERT,UPDATE ON ALL TABLES IN SCHEMA opentour_identity TO c03_runtime;",
+            role="c03_owner",
+        )
+        fixture.sql(
+            "CREATE ROLE c03_selection LOGIN NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE; "
+            "GRANT USAGE ON SCHEMA opentour_identity TO c03_selection; "
+            "GRANT SELECT ON opentour_identity.membership_observations TO c03_selection; "
+            "CREATE SCHEMA generated_membership_authority; "
+            "CREATE TABLE generated_membership_authority.activation_probe "
+            "(probe_id text PRIMARY KEY, admitted boolean NOT NULL); "
+            "GRANT USAGE ON SCHEMA generated_membership_authority TO c03_selection; "
+            "GRANT SELECT,INSERT ON generated_membership_authority.activation_probe "
+            "TO c03_selection;",
             role="c03_owner",
         )
         fixture.receipt["identity_migration_sha256"] = hashlib.sha256(
@@ -395,3 +411,99 @@ def test_wrong_provider_issuer_cannot_enter_actual_pg_observation(
     with pytest.raises(AuthError, match="IDENTITY_MEMBERSHIP_CONFLICT"):
         durable.service.authorization_context(durable.token, durable.binding)
     assert durable.repository.observation(identity.issuer, mapped_selection.membership_id) is None
+
+
+@pytest.mark.parametrize("first", ["denial", "activation"])
+@pytest.mark.parametrize("initial", ["absent", "active"])
+def test_membership_observation_lock_linearizes_activation_and_denial(
+    durable, identity, first, initial
+):
+    """Real lock/142 writer; generated activation table is not171's production SQL saga."""
+    membership = "lock_" + uuid4().hex
+    probe_id = uuid4().hex
+    observed = replace(
+        identity.provider.current_membership("provider_a", identity.now),
+        membership_id=membership,
+    )
+    if initial == "active":
+        durable.repository.record_observation(observed)
+    selection_connect = connection_factory(
+        f"host={durable.postgres.socket} port=5432 dbname=postgres user=c03_selection"
+    )
+    # The consumer can coordinate its transaction without receiving142 UPDATE authority.
+    with pytest.raises(psycopg.errors.InsufficientPrivilege), selection_connect() as connection:
+        connection.execute("UPDATE opentour_identity.membership_observations SET status='active'")
+    ready, release = threading.Event(), threading.Event()
+    started = {name: threading.Event() for name in ["activation", "denial"]}
+    pids = {}
+
+    @contextmanager
+    def writer_connection():
+        with durable.connect() as connection:
+            connection.execute("SET LOCAL statement_timeout='5s'")
+            pids["denial"] = connection.info.backend_pid
+            started["denial"].set()
+            yield connection
+            if first == "denial":
+                ready.set()
+                assert release.wait(4), "Test did not release denial transaction"
+
+    writer = PostgresIdentityRepository(writer_connection)
+
+    def denial():
+        return writer.record_observation(replace(observed, status="removed", locally_denied=True))
+
+    def activation():
+        with selection_connect() as connection:
+            connection.execute("SET LOCAL statement_timeout='5s'")
+            pids["activation"] = connection.info.backend_pid
+            started["activation"].set()
+            lock_membership_observation(connection, identity.issuer, membership)
+            row = connection.execute(
+                "SELECT status,locally_denied FROM opentour_identity.membership_observations "
+                "WHERE issuer=%s AND membership_id=%s", (identity.issuer, membership)
+            ).fetchone()
+            admitted = row is None or (not row["locally_denied"] and row["status"] == "active")
+            connection.execute(
+                "INSERT INTO generated_membership_authority.activation_probe VALUES (%s,%s)",
+                (probe_id, admitted),
+            )
+            if first == "activation":
+                ready.set()
+                assert release.wait(4), "Test did not release activation transaction"
+        return admitted
+
+    actions = {"activation": activation, "denial": denial}
+    second = "activation" if first == "denial" else "denial"
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        earlier = pool.submit(actions[first])
+        later = None
+        try:
+            assert ready.wait(3), "First transaction did not reach its commit boundary"
+            later = pool.submit(actions[second])
+            assert started[second].wait(2)
+            deadline = time.monotonic() + 2
+            blocked = False
+            while time.monotonic() < deadline:
+                with durable.connect() as connection:
+                    blocked = connection.execute(
+                        "SELECT count(*) AS n FROM pg_locks WHERE pid=%s "
+                        "AND locktype='advisory' AND NOT granted", (pids[second],)
+                    ).fetchone()["n"] == 1
+                if blocked:
+                    break
+                time.sleep(0.01)
+            assert blocked and not later.done(), "Second transaction bypassed the membership lock"
+        finally:
+            release.set()
+        first_result = earlier.result(timeout=6)
+        second_result = later.result(timeout=6)
+    admitted = first_result if first == "activation" else second_result
+    assert admitted is (first == "activation")
+    assert durable.repository.observation(identity.issuer, membership).locally_denied
+    with selection_connect() as connection:
+        assert connection.execute(
+            "SELECT admitted FROM generated_membership_authority.activation_probe "
+            "WHERE probe_id=%s",
+            (probe_id,),
+        ).fetchone()["admitted"] is admitted
