@@ -866,6 +866,51 @@ def test_journal_missing_or_unknown_sql_never_proves_commit(journal_sources, mut
         g.resolver.reconcile_transaction(g.principal, g.outcome, g.intent)
 
 
+@pytest.mark.parametrize("operation_state", ["prepared", "reconciliation_required", "aborted"])
+def test_known_sql_abort_does_not_require_premature_public_abort(journal_sources, operation_state):
+    g = journal_sources
+    g.operation["state"] = operation_state
+    g.grant = None
+    source = TransactionSource(
+        schema_version="opentour.grant-transaction-source.v1",
+        organization_id=ORG,
+        operation_id="operation-a",
+        grant_id="grant-a",
+        intent_content_sha256=sha256(canonical(g.intent.wire())),
+        proposed_grant_sha256=sha256(canonical(g.operation["proposed_grant"])),
+        result="aborted",
+        resulting_epoch=7,
+        resulting_authority_revision="authority-a",
+    )
+    raw = canonical(source.wire())
+    reference = ImmutableMetadataRef(record_id="transaction-a", revision="1", sha256=sha256(raw))
+    g.rows[reference.record_id] = dict(
+        operation_id="operation-a",
+        kind="transaction",
+        revision="1",
+        sha256=reference.sha256,
+        body=raw,
+    )
+    outcome = g.outcome.model_copy(
+        update={
+            "result": "aborted",
+            "control_transaction_ref": reference,
+            "resulting_authority_revision": "authority-a",
+        }
+    )
+    g.operation["outcome_body"] = canonical(outcome.wire())
+    resolved = g.resolver.reconcile_transaction(g.principal, outcome, g.intent)
+    assert resolved.result == "aborted"
+    assert g.operation["state"] == operation_state  # Resolver never advances public state.
+    g.operation["state"] = "succeeded"
+    with pytest.raises(JournalError, match="JOURNAL_RECONCILIATION_REQUIRED"):
+        g.resolver.reconcile_transaction(g.principal, outcome, g.intent)
+    g.operation["state"] = operation_state
+    del g.rows[reference.record_id]
+    with pytest.raises(JournalError, match="JOURNAL_RECONCILIATION_REQUIRED"):
+        g.resolver.reconcile_transaction(g.principal, outcome, g.intent)
+
+
 def test_journal_changed_expected_head_is_not_rebased(journal_sources):
     g = journal_sources
     changed = g.intent.model_copy(update={"expected_head_sequence": 2})

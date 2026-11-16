@@ -9,7 +9,13 @@ from typing import Any
 
 import pytest
 from jsonschema import Draft202012Validator  # type: ignore[import-untyped]
-from opentour_control.auth.grant_models import CreateGrant, GrantOperationView
+from opentour_control.auth.grant_models import (
+    AccessGrant,
+    CreateGrant,
+    GrantOperationView,
+    InputResourceScope,
+    ResourceScope,
+)
 from pydantic import ValidationError
 from referencing import Resource
 
@@ -229,3 +235,107 @@ def test_receipt_semantics_reject_mismatched_grant_ids() -> None:
     value["current_status_unavailable_reason"] = "AUTHORITY_UNAVAILABLE"
     with pytest.raises(ValidationError):
         GrantOperationView.model_validate(value)
+
+
+ARRAY_BOUNDARIES = [
+    (definition, field, maximum)
+    for definition, fields in [
+        (
+            "InputResourceScope",
+            [
+                (name, 100)
+                for name in ("workspace_ids", "project_ids", "environment_ids", "artifact_refs")
+            ],
+        ),
+        (
+            "ResourceScope",
+            [
+                (name, 100)
+                for name in ("workspace_ids", "project_ids", "environment_ids", "artifact_refs")
+            ],
+        ),
+        ("CreateGrant", [("purposes", 100), ("data_classes", 4)]),
+        (
+            "AccessGrant",
+            [
+                ("purposes", 100),
+                ("data_classes", 4),
+                ("parent_grant_ids", 100),
+                ("template_bindings", 50),
+            ],
+        ),
+    ]
+    for field, maximum in fields
+]
+
+
+@pytest.mark.parametrize("definition,field,maximum", ARRAY_BOUNDARIES)
+@pytest.mark.parametrize("overflow", [False, True])
+def test_schema_and_model_array_bounds_match(
+    definition: str,
+    field: str,
+    maximum: int,
+    overflow: bool,
+) -> None:
+    count = maximum + int(overflow)
+    if definition in {"InputResourceScope", "ResourceScope"}:
+        value = copy.deepcopy(BODY["resource_scope"])
+        if definition == "ResourceScope":
+            value["organization_id"] = "generated-org"
+    else:
+        value = copy.deepcopy(BODY)
+        if definition == "AccessGrant":
+            del value["expected_authority_revision"]
+            value["resource_scope"]["organization_id"] = "generated-org"
+            value.update(
+                grant_id="generated-grant",
+                revision="1",
+                state="active",
+                parent_grant_ids=[],
+                template_bindings=[],
+                creation_operation_id="generated-operation",
+                creation_authority_revision="generated-authority",
+            )
+    if field == "artifact_refs":
+        value[field] = [
+            {
+                "artifact_id": f"generated-artifact-{index}",
+                "kind": "generated",
+                "revision": "1",
+                "sha256": "a" * 64,
+                "manifest_id": "generated-manifest",
+                "environment_id": "generated-env",
+                "classification": "control_metadata",
+                "purpose_grant_id": "generated-purpose",
+                "expires_at": None,
+            }
+            for index in range(count)
+        ]
+    elif field == "template_bindings":
+        value[field] = [
+            {"template_id": f"generated-template-{index}", "revision": "1", "sha256": "a" * 64}
+            for index in range(count)
+        ]
+    elif field == "data_classes":
+        value[field] = [
+            "control_metadata",
+            "customer_confidential",
+            "protected_evaluation",
+            "model_artifact",
+        ] + (["control_metadata"] if overflow else [])
+    else:
+        value[field] = [f"generated-{index}" for index in range(count)]
+    shape = SCHEMA["$defs"][definition]["properties"][field]
+    assert shape["maxItems"] == maximum and "maxLength" not in shape
+    assert valid(definition, value) is not overflow
+    model = {
+        "InputResourceScope": InputResourceScope,
+        "ResourceScope": ResourceScope,
+        "CreateGrant": CreateGrant,
+        "AccessGrant": AccessGrant,
+    }[definition]
+    if overflow:
+        with pytest.raises(ValidationError):
+            model.model_validate(value)
+    else:
+        model.model_validate(value)

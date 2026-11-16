@@ -32,33 +32,33 @@
           "items": {
             "$ref": "urn:opentour:common-contract:1.0#/$defs/Id"
           },
-          "maxLength": 100,
           "type": "array",
-          "uniqueItems": true
+          "uniqueItems": true,
+          "maxItems": 100
         },
         "project_ids": {
           "items": {
             "$ref": "urn:opentour:common-contract:1.0#/$defs/Id"
           },
-          "maxLength": 100,
           "type": "array",
-          "uniqueItems": true
+          "uniqueItems": true,
+          "maxItems": 100
         },
         "environment_ids": {
           "items": {
             "$ref": "urn:opentour:common-contract:1.0#/$defs/Id"
           },
-          "maxLength": 100,
           "type": "array",
-          "uniqueItems": true
+          "uniqueItems": true,
+          "maxItems": 100
         },
         "artifact_refs": {
           "items": {
             "$ref": "urn:opentour:common-contract:1.0#/$defs/ArtifactRef"
           },
-          "maxLength": 100,
           "type": "array",
-          "uniqueItems": true
+          "uniqueItems": true,
+          "maxItems": 100
         },
         "support_note_scopes": {
           "type": "array",
@@ -233,9 +233,9 @@
           "items": {
             "$ref": "urn:opentour:common-contract:1.0#/$defs/Id"
           },
-          "maxLength": 100,
           "type": "array",
-          "uniqueItems": true
+          "uniqueItems": true,
+          "maxItems": 100
         },
         "data_classes": {
           "items": {
@@ -247,9 +247,9 @@
             ],
             "type": "string"
           },
-          "maxLength": 4,
           "type": "array",
-          "uniqueItems": true
+          "uniqueItems": true,
+          "maxItems": 4
         },
         "valid_from": {
           "$ref": "urn:opentour:common-contract:1.0#/$defs/Timestamp"
@@ -279,17 +279,17 @@
           "items": {
             "$ref": "urn:opentour:common-contract:1.0#/$defs/Id"
           },
-          "maxLength": 100,
           "type": "array",
-          "uniqueItems": true
+          "uniqueItems": true,
+          "maxItems": 100
         },
         "template_bindings": {
           "items": {
             "$ref": "#/$defs/TemplateBinding"
           },
-          "maxLength": 50,
           "type": "array",
-          "uniqueItems": true
+          "uniqueItems": true,
+          "maxItems": 50
         },
         "creation_operation_id": {
           "$ref": "urn:opentour:common-contract:1.0#/$defs/Id"
@@ -349,33 +349,33 @@
           "items": {
             "$ref": "urn:opentour:common-contract:1.0#/$defs/Id"
           },
-          "maxLength": 100,
           "type": "array",
-          "uniqueItems": true
+          "uniqueItems": true,
+          "maxItems": 100
         },
         "project_ids": {
           "items": {
             "$ref": "urn:opentour:common-contract:1.0#/$defs/Id"
           },
-          "maxLength": 100,
           "type": "array",
-          "uniqueItems": true
+          "uniqueItems": true,
+          "maxItems": 100
         },
         "environment_ids": {
           "items": {
             "$ref": "urn:opentour:common-contract:1.0#/$defs/Id"
           },
-          "maxLength": 100,
           "type": "array",
-          "uniqueItems": true
+          "uniqueItems": true,
+          "maxItems": 100
         },
         "artifact_refs": {
           "items": {
             "$ref": "urn:opentour:common-contract:1.0#/$defs/ArtifactRef"
           },
-          "maxLength": 100,
           "type": "array",
-          "uniqueItems": true
+          "uniqueItems": true,
+          "maxItems": 100
         },
         "support_note_scopes": {
           "type": "array",
@@ -520,9 +520,9 @@
           "items": {
             "$ref": "urn:opentour:common-contract:1.0#/$defs/Id"
           },
-          "maxLength": 100,
           "type": "array",
-          "uniqueItems": true
+          "uniqueItems": true,
+          "maxItems": 100
         },
         "data_classes": {
           "items": {
@@ -534,9 +534,9 @@
             ],
             "type": "string"
           },
-          "maxLength": 4,
           "type": "array",
-          "uniqueItems": true
+          "uniqueItems": true,
+          "maxItems": 4
         },
         "valid_from": {
           "$ref": "urn:opentour:common-contract:1.0#/$defs/Timestamp"

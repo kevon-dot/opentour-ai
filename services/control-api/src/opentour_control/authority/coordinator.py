@@ -318,7 +318,10 @@ class PostgresAuthorityResolver:
                         != (intent.proposed_epoch, intent.proposed_authority_revision)
                     ):
                         raise JournalError("JOURNAL_RECONCILIATION_REQUIRED", 503)
-                elif grant is not None or operation["state"] != "aborted":
+                # The immutable SQL-aborted source exists before the independent
+                # journal outcome. Public operation state must remain pending
+                # until that outcome is verified; absence alone proves nothing.
+                elif grant is not None or operation["state"] == "succeeded":
                     raise JournalError("JOURNAL_RECONCILIATION_REQUIRED", 503)
                 return ReconciledTransaction(
                     body.organization_id,
