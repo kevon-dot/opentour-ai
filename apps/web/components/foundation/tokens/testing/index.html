@@ -1,0 +1,14 @@
+<!doctype html>
+<html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Presentation foundations</title>
+<style>
+body { margin: 0; background: var(--ot-surface-canvas, #fafbfd); }
+.gallery { padding: 16px; max-width: 1280px; margin-inline: auto; font-size: var(--ot-type-body-size); line-height: var(--ot-type-body-line); }
+.gallery h1 { font-size: var(--ot-type-heading-size); line-height: var(--ot-type-heading-line); font-weight: 600; }
+.gallery h2 { font-size: var(--ot-type-section-size); line-height: var(--ot-type-section-line); font-weight: 600; }
+.gallery h3 { font-size: var(--ot-type-label-size); line-height: var(--ot-type-label-line); font-weight: 500; }
+.gallery header, .gallery section { margin-block-end: 32px; overflow-wrap: anywhere; }
+.gallery .examples { display: flex; flex-wrap: wrap; gap: 24px; align-items: flex-start; }
+.gallery .example { display: flex; flex-direction: column; align-items: flex-start; gap: 16px; min-width: 0; max-width: 100%; margin-block-end: 24px; }
+@media (min-width: 768px) { .gallery { padding: 24px; } }
+@media (min-width: 1280px) { .gallery { padding: 40px; } }
+</style></head><body><div id="root"></div><script type="module" src="./gallery.tsx"></script></body></html>

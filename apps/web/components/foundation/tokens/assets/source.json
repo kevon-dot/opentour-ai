@@ -1,0 +1,34 @@
+{
+  "source_file": "f7RVtmAPRdLo4WVWQMrvQC",
+  "component": "4:32",
+  "assets": [
+    {
+      "file": "loading-light.svg",
+      "sha256": "baa0ee34e3d8ad836553731a1e2ab6928aeac3a6cc788e44e85a77f5507bff53",
+      "figma_nodes": [
+        "58:5"
+      ],
+      "width": "12",
+      "height": "12",
+      "tags": [
+        "svg",
+        "path"
+      ]
+    },
+    {
+      "file": "loading-dark.svg",
+      "sha256": "e1b20a5fd42a739aa4f481faba0e36554dd1acdb1008a39a43a009e9104ba72b",
+      "figma_nodes": [
+        "58:6",
+        "58:7"
+      ],
+      "width": "12",
+      "height": "12",
+      "tags": [
+        "svg",
+        "path"
+      ]
+    }
+  ],
+  "inspection": "XML tags and attributes screened; no scripts, remote references or handlers; exact downloaded bytes retained"
+}
