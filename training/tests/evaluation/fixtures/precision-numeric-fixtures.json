@@ -1,0 +1,30 @@
+{
+  "evidence_status": "SIMULATED_REFERENCE_ARITHMETIC_NOT_PRODUCT_TEST",
+  "paired_exact_marginal_200": {
+    "delta": 0.15,
+    "lower": 0.0439879883615974,
+    "upper": 0.24962234988040366,
+    "tail_allocation": 0.0125
+  },
+  "retention_exact_marginal_400": {
+    "delta": -0.005,
+    "lower": -0.039765095317398746,
+    "upper": null,
+    "tail_allocation": 0.025
+  },
+  "critical_zero_240": 0.012404638050409034,
+  "critical_zero_300": 0.00993608194445772,
+  "critical_one_300": 0.0157145548915833,
+  "critical_zero_required_n_single_1pct": 299,
+  "critical_zero_required_n_three_slices_1pct": 408,
+  "family_hoeffding_200": {
+    "delta": 0.15,
+    "one_sided95_lower": -0.023081838260228527
+  },
+  "family_hoeffding_1000": {
+    "delta": 0.15,
+    "one_sided95_lower": 0.072595448795901
+  },
+  "family_hoeffding_observed_gap_n": 600,
+  "family_hoeffding_power80_n": 1800
+}
