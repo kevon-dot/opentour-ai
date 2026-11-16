@@ -110,3 +110,50 @@ def test_other_commands_cannot_select_dependency_projection(scan, changed):
     assert not calls
     assert report["status"] == "FAIL" and report["disclosure_findings"]
     assert "command_evidence" not in report and contact not in json.dumps(report)
+
+
+@pytest.mark.parametrize("has_advisory", [False, True])
+def test_real_projection_composes_with_publication_without_losing_findings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, has_advisory: bool
+):
+    (tmp_path / ".github").mkdir()
+    (tmp_path / ".github/public-content-policy.json").write_bytes(
+        (ROOT / ".github/public-content-policy.json").read_bytes()
+    )
+    data = {
+        "results": [
+            {
+                "source": {"type": "lockfile", "path": str(tmp_path / lock)},
+                "packages": [
+                    {"package": {"name": "generated-package", "version": "1", "ecosystem": "PyPI"}}
+                ],
+            }
+            for lock in ("uv.lock", "training/uv.lock", "pnpm-lock.yaml")
+        ],
+        "experimental_config": {"licenses": {"summary": False, "allowlist": None}},
+    }
+    contact = "generated-maintainer" + "@" + "vendor.example.com"
+    if has_advisory:
+        data["results"][0]["packages"][0].update(
+            vulnerabilities=[
+                {
+                    "id": "GHSA-aaaa-bbbb-cccc",
+                    "credits": [{"name": "Generated maintainer", "contact": [contact]}],
+                }
+            ],
+            groups=[{"ids": ["GHSA-aaaa-bbbb-cccc"], "max_severity": "7.5"}],
+        )
+    raw = json.dumps(data)
+    monkeypatch.setattr(ci_run, "execute", lambda _: ProcessResult(0, stdout=raw))
+    report = ci_run.run_one(ci_run.dependency_scan_command(tmp_path), tmp_path)
+    assert report["status"] == ("FAIL" if has_advisory else "PASS")
+    assert report["exit_code"] == 0 and not report["disclosure_findings"]
+    assert contact not in json.dumps(report)
+    evidence = report["command_evidence"]
+    assert evidence["counts"]["packages"] == evidence["counts"]["sources"] == 3
+    assert evidence["counts"]["vulnerability_occurrences"] == int(has_advisory)
+    assert evidence["original_output_sha256"] == report["output_sha256"] == digest(raw.encode())
+    if has_advisory:
+        assert evidence["results"][0]["packages"][0]["vulnerabilities"][0]["id"] == (
+            "GHSA-aaaa-bbbb-cccc"
+        )
