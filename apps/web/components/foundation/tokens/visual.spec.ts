@@ -336,6 +336,7 @@ for (const kind of ['dialog', 'drawer'] as const) {
     await page.mouse.click(background!.x + 2, background!.y + 2);
     await expect(page.locator('dialog:modal')).toHaveCount(1);
     await expect(page.getByRole('status', { name: 'Dismissal requests', includeHidden: true })).toHaveText('');
+    await expect(page.getByRole('status', { name: 'Generated opening events', includeHidden: true })).toHaveText('1');
   });
   test(`overlay ${kind} B05 B20 repeated ignored real Escape cannot trigger native close`, async ({ page }, info) => {
     await openOverlay(page, info, kind, { ignore: '1' });

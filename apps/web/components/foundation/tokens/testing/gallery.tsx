@@ -70,6 +70,7 @@ function OverlayGallery() {
   const [open, setOpen] = useState(false);
   const [mounted, setMounted] = useState(true);
   const [generation, setGeneration] = useState(0);
+  const [openEvents, setOpenEvents] = useState(0);
   const [requests, setRequests] = useState<string[]>([]);
   const [events, setEvents] = useState(0);
   const [renders, setRenders] = useState(0);
@@ -85,7 +86,7 @@ function OverlayGallery() {
     query.get('focus') === 'outside' ? { kind: 'element', ref: originRef } :
     ['element', 'disabled'].includes(query.get('focus') ?? '') ? { kind: 'element', ref: elementRef } :
       long || query.get('focus') === 'heading' ? { kind: 'heading' } : { kind: 'close-button' };
-  function begin() { setMounted(true); setOpen(true); }
+  function begin() { setOpenEvents(value => value + 1); setMounted(true); setOpen(true); }
   return <main className="ot-foundation gallery overlay-gallery">
     <header><h1>Generated overlay examples</h1><p>{overlays.caption}</p><p>{mode}</p></header>
     <div className="examples">
@@ -97,6 +98,7 @@ function OverlayGallery() {
     <output aria-label="Dismissal requests">{requests.join(',')}</output>
     <output aria-label="Overlay action events">{events}</output>
     <output aria-label="Generated render count">{renders}</output>
+    {probe && <output aria-label="Generated opening events">{openEvents}</output>}
     <form onSubmit={event => { event.preventDefault(); setEvents(value => value + 100); }}>
       {mounted && <Component key={generation} open={open} title={kind === 'dialog' ? overlays.dialogTitle : overlays.drawerTitle}
         initialFocus={initialFocus} returnFocus={() => context === 'a' ? originRef.current : context === 'b' ? currentRef.current : null}
