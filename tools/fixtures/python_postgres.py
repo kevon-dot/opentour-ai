@@ -23,6 +23,7 @@ TARGETS = {
     "services/control-api/tests/migrations/test_expand_contract.py": "OPE-213",
     "services/control-api/tests/auth/test_identity_postgres.py": "OPE-142",
     "tests/integration/authority_journal_recovery.py": "OPE-217",
+    "services/control-api/tests/organizations/test_creation_saga.py": "OPE-171",
 }
 SCHEMA_ID = "urn:opentour:python-postgres-observation:1.0"
 

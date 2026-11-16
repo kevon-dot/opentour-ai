@@ -935,6 +935,20 @@ def _invoke(
                     "provider_acceptance": "NOT_RUN",
                     "production_grant_consumer": "NOT_RUN",
                 }
+            if target == "services/control-api/tests/organizations/test_creation_saga.py":
+                if code == 0 and not set(MODES).issubset(
+                    {test["mode"] for test in report["tests"]}
+                ):
+                    raise CommandError("Organization creation must execute both deployment modes.")
+                summary["fixture_scope"] = {
+                    "postgresql": (
+                        "actual_local"
+                        if observations["started_instances"] > 0 and observations["binary_sha256"]
+                        else "NOT_RUN"
+                    ),
+                    "workos_responses": "simulated_only",
+                    "provider_acceptance": "NOT_RUN",
+                }
         summary["output_sha256"] = hashlib.sha256(
             json.dumps(summary, sort_keys=True).encode()
         ).hexdigest()
