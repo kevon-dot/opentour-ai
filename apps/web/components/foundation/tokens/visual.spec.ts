@@ -5,7 +5,7 @@ import { writeFile } from 'node:fs/promises';
 import { presentationFixtures as fixtures } from './fixtures';
 
 const unexpected = new WeakMap<Page, string[]>();
-test.beforeEach(async ({ page, baseURL }) => {
+async function installBoundary(page: Page, baseURL: string | undefined) {
   const denied: string[] = []; unexpected.set(page, denied);
   await page.route('**/*', async route => {
     const request = route.request(); const url = new URL(request.url());
@@ -15,7 +15,8 @@ test.beforeEach(async ({ page, baseURL }) => {
     }
     await route.continue();
   });
-});
+}
+test.beforeEach(async ({ page, baseURL }) => { await installBoundary(page, baseURL); });
 test.afterEach(async ({ page }) => { expect(unexpected.get(page)).toEqual([]); });
 
 async function open(page: Page, info: TestInfo, width = 1440, tenant = 'a') {
@@ -93,6 +94,67 @@ test('busy and native disabled controls suppress activation while the busy name 
     await expect(buttons.nth(2)).toHaveAccessibleDescription(fixtures.busyReason);
   }
   await expect(page.getByRole('status', { name: fixtures.invocationLabel })).toHaveText('1');
+});
+
+test('all button variants preserve default hover pressed disabled and loading styles and actual indicator geometry', async ({ page }, info) => {
+  await open(page, info);
+  const colors = async (button: ReturnType<Page['locator']>) => button.evaluate(node => {
+    const style = getComputedStyle(node); return { background: style.backgroundColor, text: style.color };
+  });
+  let events = 0;
+  for (const variant of fixtures.variants) {
+    const buttons = page.locator(`[data-variant="${variant}"] button`);
+    const active = buttons.nth(0), disabled = buttons.nth(1), loading = buttons.nth(2);
+    const normal = { background: variant === 'primary' ? 'rgb(36, 91, 238)' : 'rgb(255, 255, 255)',
+      text: variant === 'primary' ? 'rgb(255, 255, 255)' : 'rgb(24, 34, 55)' };
+    await active.scrollIntoViewIfNeeded(); await page.mouse.move(0, 0);
+    expect(await colors(active)).toEqual(normal);
+    const bounds = await active.boundingBox(); expect(bounds).not.toBeNull();
+    expect(bounds!.height).toBe(variant === 'secondary' ? 38 : 36);
+    await active.hover();
+    const hovered = { ...normal, background: variant === 'primary' ? 'rgb(25, 68, 186)' : normal.background };
+    expect(await colors(active)).toEqual(hovered); expect(await active.boundingBox()).toEqual(bounds);
+    await page.mouse.down();
+    try {
+      expect(await active.evaluate(node => node.matches(':active'))).toBe(true);
+      expect(await colors(active)).toEqual(hovered); expect(await active.boundingBox()).toEqual(bounds);
+    } finally { await page.mouse.up(); }
+    events++;
+    await expect(page.getByRole('status', { name: fixtures.invocationLabel })).toHaveText(String(events));
+    await expect(disabled).toBeDisabled(); await expect(disabled).toHaveAccessibleName(fixtures.buttonLabel);
+    expect(await colors(disabled)).toEqual({ background: 'rgb(237, 240, 245)', text: 'rgb(98, 111, 132)' });
+    await disabled.scrollIntoViewIfNeeded(); const disabledBounds = await disabled.boundingBox();
+    expect(disabledBounds!.height).toBe(bounds!.height); expect(disabledBounds!.width).toBe(bounds!.width);
+    await page.mouse.click(disabledBounds!.x + disabledBounds!.width / 2, disabledBounds!.y + disabledBounds!.height / 2);
+    await loading.scrollIntoViewIfNeeded();
+    await expect(loading).toHaveAccessibleName(fixtures.buttonLabel); await expect(loading).toHaveAttribute('aria-busy', 'true');
+    expect(await colors(loading)).toEqual(normal);
+    const loadingBounds = await loading.boundingBox(); const indicator = loading.locator('img');
+    const imageBounds = await indicator.boundingBox();
+    expect(imageBounds!.width).toBe(12); expect(imageBounds!.height).toBe(12);
+    expect(loadingBounds!.height).toBe(bounds!.height); expect(loadingBounds!.width - bounds!.width).toBe(18);
+    expect(imageBounds!.y + 6).toBe(loadingBounds!.y + loadingBounds!.height / 2);
+    expect(await indicator.evaluate(node => {
+      const image = node as HTMLImageElement; return [image.complete, image.naturalWidth, image.naturalHeight, image.alt];
+    })).toEqual([true, 12, 12, '']);
+    await page.mouse.click(loadingBounds!.x + loadingBounds!.width / 2, loadingBounds!.y + loadingBounds!.height / 2);
+    await expect(page.getByRole('status', { name: fixtures.invocationLabel })).toHaveText(String(events));
+  }
+});
+
+test('coarse pointer presentation provides at least 44px button targets', async ({ browser, baseURL }, info) => {
+  const context = await browser.newContext({ hasTouch: true, isMobile: true, viewport: { width: 320, height: 800 },
+    baseURL, deviceScaleFactor: 1, locale: 'en-US', timezoneId: 'UTC', colorScheme: 'light', reducedMotion: 'reduce', serviceWorkers: 'block' });
+  const page = await context.newPage();
+  try {
+    await installBoundary(page, baseURL); await open(page, info, 320);
+    expect(await page.evaluate(() => matchMedia('(pointer: coarse)').matches)).toBe(true);
+    for (const button of await page.getByRole('button').all()) {
+      const bounds = await button.boundingBox(); expect(bounds!.height).toBeGreaterThanOrEqual(44);
+      expect(bounds!.width).toBeGreaterThanOrEqual(44);
+    }
+    expect(unexpected.get(page)).toEqual([]);
+  } finally { await context.close(); }
 });
 
 test('manual tabs move focus without activation, skip disabled tabs and associate only the selected panel', async ({ page }, info) => {
