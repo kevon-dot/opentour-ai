@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from urllib.parse import urlsplit
+
+from cryptography.fernet import Fernet, InvalidToken, MultiFernet
 
 MAX_COUNTER = 9_007_199_254_740_991
 
@@ -63,6 +66,69 @@ def https_url(value: str) -> str:
     ):
         raise ValueError("Identity profile requires an explicit trusted HTTPS URL")
     return value
+
+
+class FernetSealingPort:
+    """Maintained authenticated encryption with an explicitly injected server key ring.
+
+    First key writes; remaining keys permit bounded rotation. Scope and absolute
+    expiry are encrypted/authenticated with the payload. Ciphertext is never authority.
+    Clock inputs belong to server construction, never a request parameter.
+    """
+
+    def __init__(self, keys: tuple[bytes, ...], max_lifetime_seconds: int) -> None:
+        if not 1 <= len(keys) <= 4 or not 1 <= max_lifetime_seconds <= 2_147_483_647:
+            raise ValueError("Explicit bounded sealing configuration required")
+        self._fernet = MultiFernet([Fernet(key) for key in keys])
+        self.max_lifetime_seconds = max_lifetime_seconds
+
+    def seal(self, payload: str, scope: str, now: datetime, expires: datetime) -> str:
+        now, expires = utc(now), utc(expires)
+        if (
+            not isinstance(payload, str)
+            or len(payload.encode()) > 32_768
+            or not 1 <= len(scope) <= 2048
+            or not 0 < (expires - now).total_seconds() <= self.max_lifetime_seconds
+        ):
+            raise AuthError("SESSION_SEAL_INVALID", 422)
+        document = json.dumps(
+            {
+                "v": 1,
+                "scope": scope,
+                "created": now.timestamp(),
+                "expires": expires.timestamp(),
+                "payload": payload,
+            },
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode()
+        return self._fernet.encrypt_at_time(document, int(now.timestamp())).decode("ascii")
+
+    def open(self, sealed: str, scope: str, now: datetime) -> str:
+        try:
+            if not isinstance(sealed, str) or len(sealed) > 65_536:
+                raise ValueError()
+            document = json.loads(
+                self._fernet.decrypt_at_time(
+                    sealed,
+                    self.max_lifetime_seconds,
+                    int(utc(now).timestamp()),
+                )
+            )
+            if (
+                set(document) != {"v", "scope", "created", "expires", "payload"}
+                or document["v"] != 1
+                or document["scope"] != scope
+                or not isinstance(document["expires"], (int, float))
+                or not isinstance(document["created"], (int, float))
+                or now.timestamp() < document["created"]
+                or now.timestamp() >= document["expires"]
+                or not isinstance(document["payload"], str)
+            ):
+                raise ValueError()
+            return document["payload"]
+        except (InvalidToken, ValueError, TypeError, UnicodeError):
+            raise AuthError("SESSION_CREDENTIALS_UNAVAILABLE", 503) from None
 
 
 @dataclass(frozen=True)

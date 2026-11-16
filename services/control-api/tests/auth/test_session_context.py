@@ -202,3 +202,56 @@ def test_removed_selection_preserves_only_authenticated_recovery_binding(identit
     assert first["session_generation"] == second["session_generation"] == 1
     with pytest.raises(AuthError, match="STALE_SESSION_CONTEXT"):
         identity.service.current_context(identity.token(), other, "request_other")
+
+
+@pytest.mark.parametrize("shift", [2, -2, 31])
+def test_provider_wait_cannot_extend_expiry_or_freshness(identity, shift):
+    from datetime import timedelta
+
+    identity.repository.observations.clear()
+    observed = identity.provider.current_membership("provider_a", identity.now)
+
+    def crossed(*args):
+        identity.service.clock = lambda: identity.now + timedelta(seconds=shift)
+        return observed
+
+    identity.provider.current_membership = crossed
+    expiry = int(identity.now.timestamp()) + (1 if shift == 2 else 600)
+    with pytest.raises(AuthError):
+        identity.service.authorization_context(
+            identity.token(exp=expiry), identity.handle, sensitive=True
+        )
+
+
+def test_actual_sdk_fault_body_never_reaches_api_or_logs(identity, caplog):
+    import httpx2 as httpx
+    from opentour_control.auth.workos_provider import WorkOSMembershipProvider
+    from workos import WorkOSClient
+
+    sentinel = "GENERATED_PROVIDER_CREDENTIAL_SENTINEL"
+    calls = []
+
+    def response(request):
+        calls.append(request.url.path)
+        return httpx.Response(500, json={"message": sentinel})
+
+    identity.repository.observations.clear()
+    with httpx.Client(transport=httpx.MockTransport(response)) as http:
+        sdk = WorkOSClient(
+            api_key="generated-api-key",
+            client_id="client_fixture",
+            http_client=http,
+            max_retries=0,
+            request_timeout=5,
+        )
+        identity.service.provider = WorkOSMembershipProvider(sdk, identity.config)
+        app = FastAPI()
+        app.include_router(create_session_router(identity.service))
+        with TestClient(app) as client:
+            client.cookies.set("opentour-session", identity.handle)
+            result = client.get(
+                "/v1/session/context", headers={"Authorization": f"Bearer {identity.token()}"}
+            )
+        assert result.status_code == 200 and result.json()["state"] == "reconciliation_required"
+        assert sentinel not in result.text and sentinel not in caplog.text
+        assert len(calls) == 1

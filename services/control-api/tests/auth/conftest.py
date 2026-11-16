@@ -176,7 +176,7 @@ def identity(signing_key):
     observation = Observation(ISSUER, "provider_a", "org_a", "user_a", "active", NOW, NOW)
     repository.record_observation(observation)
     provider = SimpleNamespace(current_membership=lambda member, now: observation)
-    verifier = WorkOSTokenVerifier(config, fetch=fetch)
+    verifier = WorkOSTokenVerifier(config, fetch=fetch, clock=lambda: NOW)
     service = SessionService(config, verifier, repository, authority, provider, clock=lambda: NOW)
     context, handle = service.admit(token())
     repository.sessions["session_a"] = replace(

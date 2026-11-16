@@ -107,6 +107,7 @@ class SessionService:
         """Server-only callback port. Return opaque browser binding only after commit."""
         now = utc(self.clock())
         verified = self.verifier.verify(token, now)
+        now = self._admission_time(verified, now)
         expires = now + timedelta(seconds=self.config.credential_max_lifetime_seconds)
         proposed = Session(
             verified.issuer,
@@ -124,15 +125,25 @@ class SessionService:
         handle = secrets.token_urlsafe(32)
         try:
             session = self.repository.create_session(proposed, digest(handle))
+            session = self.repository.load_session(digest(handle), utc(self.clock()))
         except psycopg.Error:
             raise AuthError("SESSION_ADMISSION_UNCONFIRMED", 503, True) from None
-        return self._context(verified, session, now), handle
+        return self._context(verified, session, self._admission_time(verified, now)), handle
+
+    def _admission_time(self, token: VerifiedToken, started: datetime) -> datetime:
+        now = utc(self.clock())
+        if now < started:
+            raise AuthError("IDENTITY_CLOCK_UNAVAILABLE", 503)
+        if now >= token.expires_at:
+            raise AuthError("SESSION_INVALID")
+        return now
 
     def _authenticate(
         self, token: str, binding: str, *, allow_ended: bool = False
     ) -> tuple[VerifiedToken, Session, datetime]:
         now = utc(self.clock())
         verified = self.verifier.verify(token, now)
+        now = self._admission_time(verified, now)
         if not isinstance(binding, str) or not 32 <= len(binding) <= 128:
             raise AuthError("SESSION_INVALID")
         try:
@@ -146,7 +157,7 @@ class SessionService:
         ):
             raise AuthError("SESSION_INVALID")
         counter(session.generation)
-        return verified, session, now
+        return verified, session, self._admission_time(verified, now)
 
     @staticmethod
     def _context(
@@ -220,7 +231,13 @@ class SessionService:
         self._same_membership(session, member, observation)
         if observation.status != "active" or observation.locally_denied:
             raise AuthError("MEMBERSHIP_INACTIVE", 403)
-        if now < observation.checked_at or (now - observation.checked_at).total_seconds() > maximum:
+        finished = utc(self.clock())
+        if finished < now:
+            raise AuthError("IDENTITY_CLOCK_UNAVAILABLE", 503)
+        if (
+            finished < observation.checked_at
+            or (finished - observation.checked_at).total_seconds() > maximum
+        ):
             raise AuthError("IDENTITY_FRESHNESS_UNAVAILABLE", 503, True)
         return observation
 

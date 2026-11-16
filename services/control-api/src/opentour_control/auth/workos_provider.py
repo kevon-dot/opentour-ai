@@ -11,10 +11,11 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from types import MappingProxyType
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
+from urllib.parse import urlsplit
 
 import jwt
-from workos import NotFoundError, WorkOSClient
+from workos import HTTPResponse, NotFoundError, TransportError, TransportTimeout, WorkOSClient
 
 from .config import AuthError, IdentityConfig, identifier, utc
 from .repository import IdentityStatus, Observation
@@ -43,6 +44,117 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
         self, req: Any, fp: Any, code: int, msg: str, headers: Any, newurl: str
     ) -> None:
         return None
+
+
+class BoundedWorkOSBackend:
+    """SDK HTTPBackend for identity GETs: one worker, bounded body and caller wait.
+
+    A timed-out DNS/socket worker remains owned and excludes replacement workers
+    until it exits. close_complete reports this fact; this is not hard cancellation.
+    """
+
+    def __init__(self, opener: Any | None = None, wait_seconds: float = 5.0) -> None:
+        if not 0 < wait_seconds <= 5:
+            raise ValueError("Bounded identity transport configuration required")
+        self.opener = opener or urllib.request.build_opener(_NoRedirect())
+        self.wait_seconds = wait_seconds
+        self.lock = threading.Lock()
+        self.worker: threading.Thread | None = None
+        self.closed = False
+
+    def request(
+        self,
+        method: str,
+        url: str,
+        *,
+        headers: dict[str, str],
+        content: bytes | None,
+        timeout: float,
+    ) -> HTTPResponse:
+        parsed = urlsplit(url)
+        if (
+            self.closed
+            or method != "GET"
+            or parsed.scheme != "https"
+            or parsed.netloc != "api.workos.com"
+            or parsed.fragment
+            or content
+        ):
+            raise TransportError("Identity transport refused request")
+        if not self.lock.acquire(blocking=False):
+            raise TransportTimeout("Identity transport is already retrieving")
+        done = threading.Event()
+        result: list[HTTPResponse] = []
+        budget = min(self.wait_seconds, timeout)
+        deadline = time.monotonic() + budget
+
+        def retrieve() -> None:
+            try:
+                request = urllib.request.Request(
+                    url, method=method, headers={**headers, "Accept-Encoding": "identity"}
+                )
+                try:
+                    response = self.opener.open(request, timeout=budget)
+                except urllib.error.HTTPError as error:
+                    response = error
+                with response:
+                    status = response.getcode()
+                    if (
+                        300 <= status < 400
+                        or response.headers.get("Content-Encoding", "identity") != "identity"
+                    ):
+                        return
+                    data = response.read(1_048_577)
+                    if len(data) > 1_048_576 or time.monotonic() >= deadline:
+                        return
+                    result.append(
+                        HTTPResponse(
+                            status, cast(Mapping[str, str], response.headers), data, method, url
+                        )
+                    )
+            except Exception:
+                pass  # Raw URL/body/SDK diagnostics never cross the transport error boundary.
+            finally:
+                self.lock.release()
+                done.set()
+
+        self.worker = threading.Thread(target=retrieve, daemon=True, name="opentour-workos-read")
+        self.worker.start()
+        if not done.wait(budget):
+            raise TransportTimeout("Identity transport deadline exceeded")
+        if not result:
+            raise TransportError("Identity transport response unavailable")
+        return result[0]
+
+    def close_complete(self, timeout: float = 0.1) -> bool:
+        self.closed = True
+        if self.worker:
+            self.worker.join(max(0, min(timeout, self.wait_seconds)))
+            return not self.worker.is_alive()
+        return True
+
+    def close(self) -> None:
+        if not self.close_complete():
+            raise TransportTimeout("Identity transport shutdown is incomplete")
+
+
+def create_workos_client(
+    api_key: str, config: IdentityConfig
+) -> tuple[WorkOSClient, BoundedWorkOSBackend]:
+    """Composition owns both client and backend lifecycle; no environment URL override."""
+    if not api_key:
+        raise ValueError("Explicit provider credential required")
+    backend = BoundedWorkOSBackend()
+    client = WorkOSClient(
+        api_key=api_key,
+        client_id=config.client_id,
+        base_url="https://api.workos.com",
+        request_timeout=5,
+        max_retries=0,
+        jwt_issuer=config.issuer,
+        http_client=backend,
+    )
+    return client, backend
 
 
 def fetch_jwks(config: IdentityConfig) -> dict[str, Any]:
@@ -74,10 +186,12 @@ class WorkOSTokenVerifier:
         config: IdentityConfig,
         fetch: Callable[[], dict[str, Any]] | None = None,
         monotonic: Callable[[], float] = time.monotonic,
+        clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
         self.config = config
         self.fetch = fetch or (lambda: fetch_jwks(config))
         self.monotonic = monotonic
+        self.clock = clock
         self.snapshot: tuple[Mapping[str, jwt.PyJWK], float] | None = None
         self.lock = threading.Lock()
         self.last_attempt: float | None = None
@@ -207,7 +321,10 @@ class WorkOSTokenVerifier:
             )
             # A trusted server clock, never forwarded request timestamps, is used
             # so exact boundary/restart tests exercise the same production check.
-            seconds = utc(now).timestamp()
+            finished = utc(self.clock())
+            if finished < utc(now):
+                raise AuthError("IDENTITY_CLOCK_UNAVAILABLE", 503)
+            seconds = finished.timestamp()
             for name in ("iat", "exp", "auth_time"):
                 if type(payload[name]) is not int or not 0 <= payload[name] <= 253_402_300_799:
                     raise AuthError("SESSION_INVALID")

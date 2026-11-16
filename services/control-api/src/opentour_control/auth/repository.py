@@ -139,6 +139,8 @@ class PostgresIdentityRepository:
             ).fetchone()
             session = _session(row)
             assert row is not None
+            if now < session.created_at:
+                raise AuthError("IDENTITY_CLOCK_UNAVAILABLE", 503)
             if now >= session.expires_at or now >= row["binding_expiry"]:
                 raise AuthError("SESSION_INVALID")
             if session.ended_at is not None:
@@ -154,7 +156,9 @@ class PostgresIdentityRepository:
                 raise AuthError("STALE_SESSION_CONTEXT", 409)
             return session
 
-    def create_session(self, session: Session, binding_sha256: str) -> Session:
+    def create_session(
+        self, session: Session, binding_sha256: str, *, sealed_payload: str | None = None
+    ) -> Session:
         with self.connect() as connection:
             self._session_lock(connection, session.issuer, session.session_id)
             if connection.execute(
@@ -193,7 +197,56 @@ class PostgresIdentityRepository:
                     current.expires_at,
                 ),
             )
+            if sealed_payload is not None:
+                self._write_credentials(connection, current, sealed_payload)
             return current
+
+    @staticmethod
+    def _write_credentials(
+        connection: psycopg.Connection[dict[str, Any]],
+        session: Session,
+        sealed_payload: str,
+    ) -> None:
+        connection.execute(
+            "INSERT INTO opentour_identity.session_credentials VALUES (%s,%s,%s,%s,%s) "
+            "ON CONFLICT (issuer,session_id) DO UPDATE SET generation=EXCLUDED.generation, "
+            "sealed_payload=EXCLUDED.sealed_payload,expires_at=EXCLUDED.expires_at",
+            (
+                session.issuer,
+                session.session_id,
+                session.generation,
+                sealed_payload,
+                session.expires_at,
+            ),
+        )
+
+    def read_credentials(self, session: Session, now: datetime) -> str:
+        with self.connect() as connection:
+            current = self._locked(connection, session)
+            self._credential_fence(current, session, now)
+            row = connection.execute(
+                "SELECT sealed_payload FROM opentour_identity.session_credentials "
+                "WHERE issuer=%s AND session_id=%s AND generation=%s AND expires_at>%s",
+                (current.issuer, current.session_id, current.generation, now),
+            ).fetchone()
+            if row is None:
+                raise AuthError("SESSION_CREDENTIALS_UNAVAILABLE", 503)
+            return str(row["sealed_payload"])
+
+    @staticmethod
+    def _credential_fence(current: Session, expected: Session, now: datetime) -> None:
+        if current.subject != expected.subject or current.ended_at is not None:
+            raise AuthError("SESSION_ENDED")
+        if now >= current.expires_at:
+            raise AuthError("SESSION_INVALID")
+        if current.generation != expected.generation:
+            raise AuthError("STALE_SESSION_CONTEXT", 409)
+
+    def replace_credentials(self, session: Session, sealed_payload: str, now: datetime) -> None:
+        with self.connect() as connection:
+            current = self._locked(connection, session)
+            self._credential_fence(current, session, now)
+            self._write_credentials(connection, current, sealed_payload)
 
     def end_session(self, session: Session, now: datetime) -> Session:
         with self.connect() as connection:
@@ -247,6 +300,11 @@ class PostgresIdentityRepository:
             )
             if updated.rowcount != 1:
                 raise AuthError("STALE_SESSION_CONTEXT", 409)
+            connection.execute(
+                "UPDATE opentour_identity.session_credentials SET generation=%s "
+                "WHERE issuer=%s AND session_id=%s AND generation=%s",
+                (cleared.generation, current.issuer, current.session_id, current.generation),
+            )
             return cleared
 
     def require_reconciliation(self, session: Session) -> None:
@@ -360,6 +418,12 @@ class PostgresIdentityRepository:
         )
         if isinstance(event, SessionRevocationEvent):
             PostgresIdentityRepository._session_lock(connection, issuer, event.session_id)
+            known = connection.execute(
+                "SELECT subject FROM opentour_identity.sessions WHERE issuer=%s AND session_id=%s",
+                (issuer, event.session_id),
+            ).fetchone()
+            if known and known["subject"] != event.subject:
+                raise AuthError("IDENTITY_EVENT_SCOPE_CONFLICT", 409)
             connection.execute(
                 "INSERT INTO opentour_identity.session_denials VALUES (%s,%s,%s,%s,%s) "
                 "ON CONFLICT (issuer,session_id) DO UPDATE SET deny_until=GREATEST("
@@ -401,6 +465,8 @@ class PostgresIdentityRepository:
             denied = denied or existing["locally_denied"]
         status = "removed" if denied else observation.status
         if not existing or observation.checked_at >= existing["checked_at"] or denied:
+            if existing and existing["revision"] == 9_223_372_036_854_775_807:
+                raise AuthError("REVISION_EXHAUSTED", 409)
             connection.execute(
                 "INSERT INTO opentour_identity.membership_observations "
                 "(issuer,membership_id,organization_id,subject,status,locally_denied,"
@@ -461,9 +527,9 @@ class PostgresIdentityRepository:
         with self.connect() as connection:
             row = connection.execute(
                 "UPDATE opentour_identity.auth_transactions SET consumed_at=%s "
-                "WHERE state_sha256=%s AND browser_sha256=%s AND expires_at>%s "
+                "WHERE state_sha256=%s AND browser_sha256=%s AND expires_at>%s AND created_at<=%s "
                 "AND consumed_at IS NULL RETURNING sealed_payload",
-                (now, state_sha256, browser_sha256, now),
+                (now, state_sha256, browser_sha256, now, now),
             ).fetchone()
             if row is None:
                 raise AuthError("CALLBACK_INVALID")

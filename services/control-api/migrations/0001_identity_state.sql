@@ -37,6 +37,14 @@ CREATE TABLE opentour_identity.session_bindings (
     expires_at timestamptz NOT NULL,
     FOREIGN KEY (issuer, session_id) REFERENCES opentour_identity.sessions(issuer, session_id)
 );
+CREATE TABLE opentour_identity.session_credentials (
+    issuer text NOT NULL, session_id text NOT NULL,
+    generation bigint NOT NULL CHECK (generation BETWEEN 0 AND 9007199254740991),
+    sealed_payload text NOT NULL CHECK (length(sealed_payload) BETWEEN 1 AND 65536),
+    expires_at timestamptz NOT NULL,
+    PRIMARY KEY (issuer, session_id),
+    FOREIGN KEY (issuer, session_id) REFERENCES opentour_identity.sessions(issuer, session_id)
+);
 -- This is the provider observation/denial projection, NOT a membership grant table.
 CREATE TABLE opentour_identity.membership_observations (
     issuer text NOT NULL, membership_id text NOT NULL, organization_id text NOT NULL,

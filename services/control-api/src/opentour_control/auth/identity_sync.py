@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import threading
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -108,8 +109,12 @@ class IdentitySynchronizer:
         now = utc(self.clock())
         for event in page:
             identifier(event.event_id)
-            if event.kind not in EVENT_TYPES or len(event.body_sha256) != 64:
+            if event.kind not in EVENT_TYPES or not re.fullmatch(
+                r"[0-9a-f]{64}", event.body_sha256
+            ):
                 raise AuthError("IDENTITY_EVENTS_INVALID", 503)
+            identifier(event.resource_id)
+            identifier(event.subject)
             if event.kind == "session.revoked":
                 events.append(
                     SessionRevocationEvent(
@@ -123,7 +128,9 @@ class IdentitySynchronizer:
                     )
                 )
                 continue
-            assert event.organization_id is not None
+            if event.organization_id is None:
+                raise AuthError("IDENTITY_EVENTS_INVALID", 503)
+            identifier(event.organization_id)
             try:
                 observation = self.membership.current_membership(event.resource_id, now)
             except AuthError as error:

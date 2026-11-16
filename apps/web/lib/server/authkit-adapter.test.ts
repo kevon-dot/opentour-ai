@@ -1,6 +1,6 @@
 /** Generated providers and memory ports: simulated logic, not durable/provider acceptance. */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { generateKeyPair, SignJWT } from 'jose';
+import { exportJWK, generateKeyPair, SignJWT } from 'jose';
 vi.mock('server-only', () => ({}));
 import { createAuthkitAdapter, createWorkOSProvider, IdentityFailure, ProviderFailure,
   type AuthProfile, type AuthTransaction, type Claims, type Credentials, type ServerSession } from './authkit-adapter.js';
@@ -57,7 +57,8 @@ function fixture() {
     verify: vi.fn(async () => ({ ...claims })),
     logoutURL: vi.fn(() => 'https://api.workos.com/user_management/sessions/logout'),
   };
-  const selections = { authorize: vi.fn(async () => undefined), commit: vi.fn(async () => undefined) };
+  const selections = { authorize: vi.fn(async () => undefined),
+    commit: vi.fn(async () => { session.reconciliationRequired = false; }) };
   const adapter = createAuthkitAdapter({ profile, provider, transactions, sessions, selections, now: () => currentTime });
   const request = (csrf = true) => new Request(`${profile.origin}/auth/operation`, {
     method: 'POST', headers: { Cookie: `opentour-session=${session.handle}`, Origin: profile.origin,
@@ -153,6 +154,18 @@ describe('server adapter admission', () => {
 });
 
 describe('ending and switching', () => {
+  it('confirms only the exact verified target after current membership and local commit', async () => {
+    const f = fixture();
+    expect((await f.adapter.switchOrganization(f.request(), 'org_a', 0, '/setup')).outcome).toBe('verified_target');
+    expect(f.selections.authorize).toHaveBeenCalledTimes(2);
+    expect(f.selections.commit).toHaveBeenCalledExactlyOnceWith(f.session.handle, 0, 'org_a', claims);
+    expect(f.session.reconciliationRequired).toBe(false);
+  });
+  it('requires a durable pending marker before any provider context mutation', async () => {
+    const f = fixture(); f.sessions.requireReconciliation.mockRejectedValue(new Error('unknown local state'));
+    await expect(f.adapter.switchOrganization(f.request(), 'org_a', 0, '/setup')).rejects.toThrow();
+    expect(f.provider.refresh).not.toHaveBeenCalled(); expect(f.selections.commit).not.toHaveBeenCalled();
+  });
   it('checks CSRF before mutation', async () => {
     const f = fixture(); expect((await f.adapter.signout(f.request(false))).status).toBe(403);
     expect(f.sessions.end).not.toHaveBeenCalled();
@@ -197,9 +210,91 @@ describe('ending and switching', () => {
     expect([flow.targetOrganization, flow.sessionId, flow.subject, flow.generation]).toEqual(['org_b','session_a','user_a',0]);
     expect(flow.browserDigest).toHaveLength(64); expect(flow.nonce).toHaveLength(43);
   });
+  it('rejects an SSO callback after another selection advances the generation', async () => {
+    const f = fixture(); f.provider.refresh.mockRejectedValue(new ProviderFailure('authentication_required'));
+    const outcome = await f.adapter.switchOrganization(f.request(), 'org_b', 0, '/setup');
+    if (outcome.outcome !== 'authentication_required') throw new Error('Missing continuation');
+    const state = new URL(outcome.response.headers.get('location')!).searchParams.get('state');
+    const cookie = outcome.response.headers.get('set-cookie')!.split(';')[0]!;
+    f.session.identity.session_generation++;
+    const response = await f.adapter.callback(new Request(`${profile.callbackURI}?state=${state}&code=generated`,
+      { headers: { cookie } }));
+    expect(response.status).toBe(409); expect(f.provider.exchange).not.toHaveBeenCalled();
+    expect(f.selections.commit).not.toHaveBeenCalled();
+  });
+  it('rechecks local membership after provider refresh and before selection', async () => {
+    const f = fixture();
+    f.selections.authorize.mockResolvedValueOnce(undefined).mockRejectedValueOnce(new IdentityFailure('MEMBERSHIP_INACTIVE', 403));
+    expect((await f.adapter.switchOrganization(f.request(), 'org_a', 0, '/setup')).outcome).toBe('unknown');
+    expect(f.selections.commit).not.toHaveBeenCalled(); expect(f.session.reconciliationRequired).toBe(true);
+  });
 });
 
 describe('actual maintained SDK and JWT boundary with generated inputs', () => {
+  it('bounds received streaming bytes and aborts the provider body', async () => {
+    let observedSignal: AbortSignal | undefined;
+    const cancelled = vi.fn();
+    const sdk = createWorkOSProvider(profile, 'generated-api-key', { fetch: async (_input, init) => {
+      expect(init?.redirect).toBe('error'); observedSignal = init?.signal ?? undefined;
+      return new Response(new ReadableStream({ start(controller) {
+        controller.enqueue(new Uint8Array(40_000)); controller.enqueue(new Uint8Array(40_000));
+      }, cancel: cancelled }));
+    } });
+    await expect(sdk.exchange('generated-code', 'verifier')).rejects.toBeInstanceOf(ProviderFailure);
+    expect(observedSignal?.aborted).toBe(true); expect(cancelled).toHaveBeenCalledOnce();
+  });
+  it('applies its five-second deadline to a body that never finishes', async () => {
+    vi.useFakeTimers();
+    const cancelled = vi.fn();
+    try {
+      const sdk = createWorkOSProvider(profile, 'generated-api-key', { fetch: async () =>
+        new Response(new ReadableStream({ cancel: cancelled })) });
+      const operation = expect(sdk.exchange('generated-code', 'verifier')).rejects.toBeInstanceOf(ProviderFailure);
+      await vi.advanceTimersByTimeAsync(5_001);
+      await operation; expect(cancelled).toHaveBeenCalledOnce();
+    } finally { vi.useRealTimers(); }
+  });
+  it('keeps only unexpired cached keys usable during one unknown-key refresh', async () => {
+    const { publicKey, privateKey } = await generateKeyPair('RS256');
+    const jwk = { ...await exportJWK(publicKey), kid: 'known', alg: 'RS256' };
+    const document = { keys: [jwk] };
+    let monotonic = 0;
+    const clock = vi.spyOn(performance, 'now').mockImplementation(() => monotonic);
+    let release: (response: Response) => void = () => undefined;
+    const transport = vi.fn(async () => new Response(JSON.stringify(document)));
+    const sdk = createWorkOSProvider(profile, 'generated-api-key', { fetch: transport, now: () => NOW });
+    const token = (kid: string) => new SignJWT({ iss: profile.issuer, aud: profile.audience,
+      sub: 'user_a', sid: 'session_a', iat: NOW/1000-60, exp: NOW/1000+600, auth_time: NOW/1000-120 })
+      .setProtectedHeader({ alg: 'RS256', kid }).sign(privateKey);
+    try {
+      const known = await token('known'); await sdk.verify(known);
+      monotonic = 31_000;
+      transport.mockImplementationOnce(async () => new Promise<Response>((resolve) => { release = resolve; }));
+      const pending = expect(sdk.verify(await token('unknown'))).rejects.toBeInstanceOf(IdentityFailure);
+      await Promise.resolve();
+      expect((await sdk.verify(known)).subject).toBe('user_a');
+      monotonic = 300_001;
+      await expect(sdk.verify(known)).rejects.toMatchObject({ status: 503 });
+      release(new Response(JSON.stringify(document))); await pending;
+      expect(transport).toHaveBeenCalledTimes(2);
+    } finally { clock.mockRestore(); }
+  });
+  it('uses SDK PKCE challenge and sends the bound verifier only during exchange', async () => {
+    const verifier = 'generated-private-pkce-verifier';
+    let sentBody = '';
+    const sdk = createWorkOSProvider(profile, 'generated-api-key', { fetch: async (_url, init) => {
+      sentBody = String(init?.body);
+      return new Response(JSON.stringify({ error: 'invalid_grant' }), { status: 400,
+        headers: { 'content-type': 'application/json' } });
+    } });
+    const url = new URL(await sdk.authorizationURL('bound-state-and-nonce', verifier));
+    expect(url.searchParams.get('code_challenge_method')).toBe('S256');
+    expect(url.searchParams.get('code_challenge')).toHaveLength(43);
+    expect(url.searchParams.get('state')).toBe('bound-state-and-nonce');
+    expect(url.href).not.toContain(verifier);
+    await expect(sdk.exchange('generated-code', verifier)).rejects.toMatchObject({ outcome: 'denied' });
+    expect(JSON.parse(sentBody).code_verifier).toBe(verifier);
+  });
   it('does not retry or leak a credential-bearing SDK mutation fault', async () => {
     const transport = vi.fn(async () => new Response(JSON.stringify({ message: 'GENERATED_REFRESH_SENTINEL' }),
       { status: 500, headers: { 'Content-Type': 'application/json' } }));
@@ -219,6 +314,17 @@ describe('actual maintained SDK and JWT boundary with generated inputs', () => {
       if (aud === profile.audience) expect((await sdk.verify(token)).subject).toBe('user_a');
       else await expect(sdk.verify(token)).rejects.toBeInstanceOf(IdentityFailure);
     }
+  });
+  it.each(['expired', 'backward', 'nonfinite'])('rejects %s clock across asynchronous key lookup', async (fault) => {
+    const { privateKey, publicKey } = await generateKeyPair('RS256');
+    let now = NOW;
+    const sdk = createWorkOSProvider(profile, 'generated-api-key', {
+      key: async () => { now = fault === 'expired' ? now + 2_000 : fault === 'backward' ? now - 2_000 : NaN; return publicKey; }, now: () => now,
+    });
+    const token = await new SignJWT({ iss: profile.issuer, aud: profile.audience,
+      sub: 'user_a', sid: 'session_a', iat: NOW/1000-60, exp: NOW/1000+1, auth_time: NOW/1000-120 })
+      .setProtectedHeader({ alg: 'RS256', kid: 'generated' }).sign(privateKey);
+    await expect(sdk.verify(token)).rejects.toBeInstanceOf(IdentityFailure);
   });
   it.each([
     [{ error: 'invalid_grant' }, 'denied'], [{ error: 'access_denied' }, 'denied'],

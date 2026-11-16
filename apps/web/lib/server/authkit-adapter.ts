@@ -1,7 +1,8 @@
 import 'server-only';
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { WorkOS } from '@workos-inc/node';
-import { createRemoteJWKSet, decodeProtectedHeader, jwtVerify, type JWTVerifyGetKey } from 'jose';
+import { createLocalJWKSet, decodeProtectedHeader, jwtVerify, type JWTVerifyGetKey,
+  type JSONWebKeySet } from 'jose';
 
 /** Backend ports only. OPE-297 composes routes; OPE-172 owns selection intent/CAS. */
 export type Identity = {
@@ -50,6 +51,7 @@ export interface SessionPort {
 export interface SelectionPort {
   /** Current local active membership/freshness, before provider preparation and at local CAS. */
   authorize(identity: Identity, targetOrganization: string): Promise<void>;
+  /** CAS advances generation and clears reconciliation only with the exact verified target. */
   commit(handle: string, observedGeneration: number, targetOrganization: string,
     claims: Claims): Promise<void>;
 }
@@ -81,6 +83,15 @@ const secret = (): string => randomBytes(32).toString('base64url');
 const validId = (value: unknown): value is string =>
   typeof value === 'string' && value.length > 0 && value.length <= 256;
 const validGeneration = (value: number): boolean => Number.isSafeInteger(value) && value >= 0;
+function serverClock(clock: () => number): () => number {
+  return () => {
+    const value = clock();
+    if (!Number.isSafeInteger(value) || value < 0 || value > 8_640_000_000_000_000) {
+      throw new IdentityFailure('IDENTITY_CLOCK_UNAVAILABLE', 503);
+    }
+    return value;
+  };
+}
 
 function cookie(request: Request, name: string): string {
   const entries = (request.headers.get('cookie') ?? '').split(';').map((v) => v.trim());
@@ -150,7 +161,8 @@ function mutation(request: Request, profile: AuthProfile, session: ServerSession
   }
 }
 function active(session: ServerSession, generation?: number): void {
-  if (session.ended || !validGeneration(session.identity.session_generation)) {
+  if (session.ended || !validGeneration(session.identity.session_generation)
+      || session.identity.actor.kind !== 'human' || !/^[A-Za-z0-9_-]{32,128}$/.test(session.handle)) {
     throw new IdentityFailure('SESSION_ENDED');
   }
   if (generation !== undefined && (!validGeneration(generation)
@@ -166,15 +178,87 @@ function sameSession(session: ServerSession, claims: Claims, target?: string): v
   }
 }
 
+/** Bound the entire response stream, not just receipt of HTTP headers. */
+async function boundedResponse(fetcher: typeof fetch, input: Parameters<typeof fetch>[0],
+  init: Parameters<typeof fetch>[1] = {}): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 5_000);
+  const signal = init.signal ? AbortSignal.any([init.signal, controller.signal]) : controller.signal;
+  let rejectAbort: () => void = () => undefined;
+  const aborted = new Promise<never>((_resolve, reject) => {
+    rejectAbort = () => reject(new IdentityFailure('PROVIDER_RESPONSE_UNAVAILABLE', 503));
+    signal.addEventListener('abort', rejectAbort, { once: true });
+  });
+  const wait = <T>(work: Promise<T>): Promise<T> => Promise.race([work, aborted]);
+  let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+  try {
+    if (signal.aborted) throw new IdentityFailure('PROVIDER_RESPONSE_UNAVAILABLE', 503);
+    const response = await wait(fetcher(input, { ...init, signal, redirect: 'error' }));
+    if (!response.body) return response;
+    reader = response.body.getReader();
+    const chunks: Uint8Array[] = [];
+    let size = 0;
+    while (true) {
+      const { value, done } = await wait(reader.read());
+      if (done) break;
+      size += value.byteLength;
+      if (size > 65_536 || signal.aborted) throw new IdentityFailure('PROVIDER_RESPONSE_UNAVAILABLE', 503);
+      chunks.push(value);
+    }
+    return new Response(Buffer.concat(chunks), { status: response.status,
+      statusText: response.statusText, headers: response.headers });
+  } finally {
+    clearTimeout(timer);
+    signal.removeEventListener('abort', rejectAbort);
+    controller.abort();
+    if (reader) void reader.cancel().catch(() => undefined);
+  }
+}
+
+function trustedKeys(profile: AuthProfile, fetcher: typeof fetch): JWTVerifyGetKey {
+  let snapshot: { get: JWTVerifyGetKey; ids: ReadonlySet<string>; loaded: number } | undefined;
+  let pending: Promise<void> | undefined;
+  let attempted = -Infinity;
+  return async (header, token) => {
+    const time = performance.now();
+    const fresh = snapshot && time >= snapshot.loaded && time - snapshot.loaded < 300_000;
+    if (fresh && snapshot!.ids.has(header.kid ?? '')) return snapshot!.get(header, token);
+    if (pending) throw new IdentityFailure('IDENTITY_VERIFICATION_UNAVAILABLE', 503);
+    if (time - attempted < 30_000) {
+      throw new IdentityFailure(fresh ? 'SESSION_INVALID' : 'IDENTITY_VERIFICATION_UNAVAILABLE', fresh ? 401 : 503);
+    }
+    attempted = time;
+    pending = (async () => {
+      const response = await boundedResponse(fetcher, profile.jwksURL);
+      if (response.status !== 200) throw new Error();
+      const document = await response.json() as JSONWebKeySet;
+      if (!Array.isArray(document.keys) || document.keys.length < 1 || document.keys.length > 32) throw new Error();
+      const ids = new Set<string>();
+      for (const key of document.keys) {
+        if (!key || key.kty !== 'RSA' || !validId(key.kid) || ids.has(key.kid)
+            || (key.alg !== undefined && key.alg !== 'RS256') || (key.use !== undefined && key.use !== 'sig')
+            || (key.key_ops !== undefined && JSON.stringify(key.key_ops) !== '["verify"]')) throw new Error();
+        ids.add(key.kid);
+      }
+      if (performance.now() - time >= 5_000) throw new Error();
+      snapshot = { get: createLocalJWKSet(document), ids, loaded: performance.now() };
+    })();
+    try { await pending; }
+    catch { throw new IdentityFailure('IDENTITY_VERIFICATION_UNAVAILABLE', 503); }
+    finally { pending = undefined; }
+    if (!snapshot || !snapshot.ids.has(header.kid ?? '')) throw new IdentityFailure('SESSION_INVALID');
+    return snapshot.get(header, token);
+  };
+}
+
 export function createWorkOSProvider(profile: AuthProfile, apiKey: string,
   options: { fetch?: typeof fetch; key?: JWTVerifyGetKey; now?: () => number } = {}): ProviderPort {
   profileCheck(profile);
-  const now = options.now ?? Date.now;
+  const now = serverClock(options.now ?? Date.now);
+  const fetcher = options.fetch ?? globalThis.fetch;
   const sdk = new WorkOS(apiKey, { clientId: profile.clientId, issuer: profile.issuer,
-    timeout: 5_000, maxRetries: 0, fetchFn: options.fetch });
-  const jwks = options.key ?? createRemoteJWKSet(new URL(profile.jwksURL), {
-    timeoutDuration: 5_000, cooldownDuration: 30_000, cacheMaxAge: 300_000,
-  });
+    timeout: 5_000, maxRetries: 0, fetchFn: (input, init) => boundedResponse(fetcher, input, init) });
+  const jwks = options.key ?? trustedKeys(profile, fetcher);
   const classify = (error: unknown): ProviderFailure => {
     const e = error as { code?: unknown; error?: unknown; status?: unknown };
     if (['sso_required', 'mfa_enrollment', 'mfa_challenge', 'mfa_verification'].includes(String(e?.code))) {
@@ -212,23 +296,32 @@ export function createWorkOSProvider(profile: AuthProfile, apiKey: string,
     },
     async verify(token) {
       try {
+        const started = now();
         if (typeof token !== 'string' || token.length > 16_384) throw new Error();
         const header = decodeProtectedHeader(token);
         if (!validId(header.kid) || header.alg !== 'RS256' || header.jku || header.jwk || header.x5u) throw new Error();
         const { payload } = await jwtVerify(token, jwks, { issuer: profile.issuer,
           audience: profile.audience, algorithms: ['RS256'], clockTolerance: 0,
-          currentDate: new Date(now()), requiredClaims: ['iss', 'aud', 'sub', 'sid', 'iat', 'exp', 'auth_time'] });
+          currentDate: new Date(started), requiredClaims: ['iss', 'aud', 'sub', 'sid', 'iat', 'exp', 'auth_time'] });
+        if (now() < started) throw new IdentityFailure('IDENTITY_CLOCK_UNAVAILABLE', 503);
         if (!validId(payload.sub) || !validId(payload.sid) || payload.aud !== profile.audience
             || !Number.isSafeInteger(payload.auth_time) || !Number.isSafeInteger(payload.iat)
             || !Number.isSafeInteger(payload.exp) || (payload.auth_time as number) < 0
             || (payload.auth_time as number) > payload.iat! || payload.iat! > now() / 1000
+            || now() >= payload.exp! * 1000
             || payload.exp! <= payload.iat! || (payload.sub_profile !== undefined && payload.sub_profile !== 'user')
             || payload.sub_type !== undefined || (payload.org_id !== undefined && !validId(payload.org_id))) throw new Error();
         return { issuer: profile.issuer, subject: payload.sub, sessionId: payload.sid,
           organizationId: typeof payload.org_id === 'string' ? payload.org_id : null,
           authenticationTime: new Date((payload.auth_time as number) * 1000).toISOString(),
           expiresAt: payload.exp! * 1000 };
-      } catch { throw new IdentityFailure('SESSION_INVALID'); }
+      } catch (error) {
+        if (error instanceof IdentityFailure) throw error;
+        if ((error as { code?: string })?.code === 'ERR_JWKS_TIMEOUT') {
+          throw new IdentityFailure('IDENTITY_VERIFICATION_UNAVAILABLE', 503);
+        }
+        throw new IdentityFailure('SESSION_INVALID');
+      }
     },
     logoutURL(sessionId) {
       return providerDestination(profile, sdk.userManagement.getLogoutUrl({ sessionId,
@@ -243,7 +336,7 @@ export function createAuthkitAdapter(ports: {
 }) {
   const { profile, provider, transactions, sessions, selections } = ports;
   profileCheck(profile);
-  const now = ports.now ?? Date.now;
+  const now = serverClock(ports.now ?? Date.now);
 
   async function start(returnPath: string, browser: string, session?: ServerSession,
     targetOrganization?: string): Promise<Response> {
@@ -304,7 +397,7 @@ export function createAuthkitAdapter(ports: {
         // Durable claim is already consumed. Lost exchange outcome cannot automatically retry the code.
         const credentials = await provider.exchange(codeValues[0], transaction.verifier);
         const claims = await provider.verify(credentials.accessToken);
-        if (transaction.expiresAt <= now()) throw new IdentityFailure('CALLBACK_INVALID');
+        if (transaction.expiresAt <= now() || claims.expiresAt <= now()) throw new IdentityFailure('CALLBACK_INVALID');
         if (claims.subject !== credentials.userId) throw new IdentityFailure('SESSION_INVALID');
         let session: ServerSession;
         if (previous) {
@@ -319,6 +412,7 @@ export function createAuthkitAdapter(ports: {
         }
         active(session);
         sameSession(session, claims);
+        if (claims.expiresAt <= now()) throw new IdentityFailure('SESSION_INVALID');
         const headers = noStore();
         headers.append('Set-Cookie', setCookie(flowCookie, '', 0));
         headers.append('Set-Cookie', setCookie(sessionCookie, session.handle));
@@ -359,6 +453,9 @@ export function createAuthkitAdapter(ports: {
       checkedReturn(profile, returnPath);
       if (!validId(targetOrganization)) throw new IdentityFailure('SCHEMA_INVALID', 422);
       await selections.authorize(session.identity, targetOrganization);
+      // Persist fail-closed admission before an external mutation can have an unknown
+      // outcome. A later marker-write failure must not leave the old tenant usable.
+      await sessions.requireReconciliation(session.handle, observedGeneration);
       let credentials: Credentials;
       try { credentials = await provider.refresh(session.credentials, targetOrganization); }
       catch (error) {
@@ -374,12 +471,14 @@ export function createAuthkitAdapter(ports: {
       }
       try {
         const claims = await provider.verify(credentials.accessToken);
+        if (claims.expiresAt <= now()) throw new IdentityFailure('SESSION_INVALID');
         sameSession(session, claims, targetOrganization);
         if (credentials.userId !== claims.subject) throw new IdentityFailure('SESSION_INVALID');
         active(await sessions.current(session.handle), observedGeneration);
         await sessions.replaceCredentials(session.handle, observedGeneration, credentials, claims);
         await selections.authorize(session.identity, targetOrganization);
         await selections.commit(session.handle, observedGeneration, targetOrganization, claims);
+        if (claims.expiresAt <= now()) throw new IdentityFailure('SESSION_INVALID');
         return { outcome: 'verified_target' };
       } catch {
         await sessions.requireReconciliation(session.handle, observedGeneration);
@@ -395,6 +494,7 @@ export function createAuthkitAdapter(ports: {
       const current = await sessions.current(session.handle);
       active(current, session.identity.session_generation);
       sameSession(current, claims);
+      if (claims.expiresAt <= now()) throw new IdentityFailure('SESSION_INVALID');
       // Unscoped verified identity is allowed for reconciliation; tenant context is
       // supplied only by the Python current-context/authorization service.
       return { ...current.identity, actor: { ...current.identity.actor },

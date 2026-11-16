@@ -117,7 +117,9 @@ def test_slow_key_refresh_never_queues_or_admits_late_result(identity):
         release.wait(2)
         return identity.keys
 
-    verifier = WorkOSTokenVerifier(replace(identity.config, jwks_timeout_seconds=0.05), fetch=slow)
+    verifier = WorkOSTokenVerifier(
+        replace(identity.config, jwks_timeout_seconds=0.05), fetch=slow, clock=lambda: identity.now
+    )
     first = []
 
     def attempt():
@@ -251,3 +253,108 @@ def test_sdk_fault_is_sanitized_in_formatted_traceback(identity):
         assert sentinel not in json.dumps(error.wire("request_fixture"))
     else:
         pytest.fail("SDK failure was accepted")
+
+
+@pytest.mark.parametrize("shift", [2, -2])
+def test_key_lookup_expiry_and_backward_clock_fail_closed(identity, shift):
+    identity.verifier.snapshot = None
+    identity.verifier.last_attempt = -1
+    identity.verifier.clock = lambda: identity.now + timedelta(seconds=shift)
+    with pytest.raises(AuthError):
+        identity.verifier.verify(
+            identity.token(exp=int(identity.now.timestamp()) + 1), identity.now
+        )
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("unexpected", True),
+        ("session_generation", True),
+        ("session_generation", 9_007_199_254_740_992),
+        ("session_id", ""),
+        ("identity_checked_at", "2026-11-15T12:00:00-03:00"),
+        ("delegated_grant_id", "forged-grant"),
+    ],
+)
+def test_closed_context_rejects_malformed_wire_fields(identity, field, value):
+    root = Path(__file__).resolve().parents[4]
+    common = json.loads(
+        (root / "packages/contracts/common/common-contract.schema.json").read_text()
+    )
+    schema = json.loads((root / "packages/contracts/platform/auth-context.schema.json").read_text())
+    validator = Draft202012Validator(
+        schema, registry=Registry().with_resource(common["$id"], Resource.from_contents(common))
+    )
+    context = identity.service.authorization_context(identity.token(), identity.handle).wire()
+    context[field] = value
+    assert list(validator.iter_errors(context))
+
+
+def test_missing_or_zero_credential_policy_fails_closed(identity):
+    with pytest.raises(ValueError):
+        replace(identity.config, credential_max_lifetime_seconds=0)
+
+
+@pytest.mark.parametrize("status,size", [(302, 0), (200, 1_048_577), (500, 50)])
+def test_bounded_sdk_backend_rejects_redirect_and_oversize(identity, status, size):
+    import io
+    from email.message import Message
+
+    from opentour_control.auth.workos_provider import BoundedWorkOSBackend
+    from workos import WorkOSClient
+
+    class Response(io.BytesIO):
+        headers = Message()
+
+        def getcode(self):
+            return status
+
+    requests = []
+
+    def open_response(request, timeout):
+        requests.append(request)
+        return Response(b"x" * size)
+
+    backend = BoundedWorkOSBackend(SimpleNamespace(open=open_response))
+    sdk = WorkOSClient(
+        api_key="generated",
+        client_id="client_fixture",
+        max_retries=0,
+        base_url="https://api.workos.com",
+        http_client=backend,
+    )
+    provider = WorkOSMembershipProvider(sdk, identity.config)
+    with pytest.raises(AuthError, match="IDENTITY_FRESHNESS_UNAVAILABLE"):
+        provider.current_membership("provider_a", identity.now)
+    assert len(requests) == 1 and requests[0].get_header("Accept-encoding") == "identity"
+    assert backend.close_complete()
+
+
+def test_sdk_backend_caller_deadline_and_worker_cleanup_are_distinct():
+    from opentour_control.auth.workos_provider import BoundedWorkOSBackend
+    from workos import TransportTimeout
+
+    entered, release = threading.Event(), threading.Event()
+
+    def slow(*args, **kwargs):
+        entered.set()
+        release.wait(1)
+        raise OSError("generated private transport sentinel")
+
+    backend = BoundedWorkOSBackend(SimpleNamespace(open=slow), wait_seconds=0.03)
+    try:
+        before = time.monotonic()
+        with pytest.raises(TransportTimeout):
+            backend.request(
+                "GET", "https://api.workos.com/events", headers={}, content=None, timeout=5
+            )
+        assert time.monotonic() - before < 0.3 and entered.is_set()
+        with pytest.raises(TransportTimeout):
+            backend.request(
+                "GET", "https://api.workos.com/events", headers={}, content=None, timeout=5
+            )
+        assert not backend.close_complete(0)
+    finally:
+        release.set()
+        assert backend.close_complete(0.1)
