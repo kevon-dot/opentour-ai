@@ -423,7 +423,11 @@ for (const kind of ['dialog', 'drawer'] as const) {
       const viewport = page.viewportSize()!;
       expect(bounds.width).toBe(Math.min(576, width - (kind === 'dialog' ? 32 : 0)));
       if (kind === 'drawer') { expect(bounds.height).toBe(viewport.height); expect(bounds.x + bounds.width).toBe(width); expect(bounds.y).toBe(0); }
-      else { expect(bounds.y).toBeGreaterThanOrEqual(16); expect(bounds.y + bounds.height).toBeLessThanOrEqual(viewport.height - 16); }
+      else {
+        expect(bounds.y).toBeGreaterThanOrEqual(16); expect(bounds.y + bounds.height).toBeLessThanOrEqual(viewport.height - 16);
+        expect(bounds.x).toBe((viewport.width - bounds.width) / 2);
+        expect(bounds.y).toBe((viewport.height - bounds.height) / 2);
+      }
       expect(await panel.evaluate(node => {
         const style = getComputedStyle(node); return [style.padding, style.gap, style.boxShadow, style.animationName, style.transitionDuration, getComputedStyle(node, '::backdrop').backgroundColor];
       })).toEqual(['24px', '16px', 'none', 'none', '0s', 'rgba(24, 34, 55, 0.32)']);
@@ -441,13 +445,15 @@ for (const kind of ['dialog', 'drawer'] as const) {
     }
   });
   test(`overlay ${kind} B17 doubled text reflows without horizontal clipping or lost Close`, async ({ page }, info) => {
-    await openOverlay(page, info, kind, { content: 'long' }, 320);
-    await page.evaluate(() => { document.documentElement.style.fontSize = '200%'; });
-    expect(await page.locator('dialog').evaluate(node => node.scrollWidth <= node.clientWidth)).toBe(true);
-    expect(await page.locator('.ot-modal-body').evaluate(node => node.scrollWidth <= node.clientWidth)).toBe(true);
-    await expect(page.getByRole('button', { name: closeName, exact: true })).toBeInViewport();
-    await page.locator('.ot-modal-body').evaluate(node => { node.scrollTop = node.scrollHeight; });
-    await expect(page.getByRole('heading', { name: 'End of generated content' })).toBeInViewport();
+    for (const width of [320, 768, 1280, 1440]) {
+      await openOverlay(page, info, kind, { content: 'long' }, width);
+      await page.evaluate(() => { document.documentElement.style.fontSize = '200%'; });
+      expect(await page.locator('dialog').evaluate(node => node.scrollWidth <= node.clientWidth)).toBe(true);
+      expect(await page.locator('.ot-modal-body').evaluate(node => node.scrollWidth <= node.clientWidth)).toBe(true);
+      await expect(page.getByRole('button', { name: closeName, exact: true })).toBeInViewport();
+      await page.locator('.ot-modal-body').evaluate(node => { node.scrollTop = node.scrollHeight; });
+      await expect(page.getByRole('heading', { name: 'End of generated content' })).toBeInViewport();
+    }
   });
   test(`overlay ${kind} B18 forced colors keeps Highlight focus with immediate reduced motion`, async ({ page }, info) => {
     await page.emulateMedia({ forcedColors: 'active', reducedMotion: 'reduce' });
@@ -464,7 +470,10 @@ for (const kind of ['dialog', 'drawer'] as const) {
     try {
       await installBoundary(page, baseURL); await openOverlay(page, info, kind, { probe: '1' }, 320);
       expect(await page.evaluate(() => matchMedia('(pointer: coarse)').matches)).toBe(true);
-      for (const button of await page.locator('dialog button').all()) expect((await button.boundingBox())!.height).toBeGreaterThanOrEqual(44);
+      for (const button of await page.locator('dialog button').all()) {
+        const bounds = (await button.boundingBox())!;
+        expect(bounds.height).toBeGreaterThanOrEqual(44); expect(bounds.width).toBeGreaterThanOrEqual(44);
+      }
       expect(unexpected.get(page)).toEqual([]);
     } finally { await context.close(); }
   });
