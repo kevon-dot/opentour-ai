@@ -5,11 +5,28 @@
   "figma_file_key": "f7RVtmAPRdLo4WVWQMrvQC",
   "focus_review_node": "133:8",
   "design_review_status": "APPROVED_NARROW_FOCUS_AMENDMENT",
-  "browser_baseline_status": "NOT_RUN",
+  "browser_baseline_status": "APPROVED",
   "max_diff_pixels": 0,
   "threshold": 0,
   "masks": [],
-  "images": {},
+  "images": {
+    "testing/baselines/darwin-customer-controlled/focus-forced-colors.png": "f70daed0be3be9875b57533b75830cf912fc146e8829f73a78631a5da2d57669",
+    "testing/baselines/darwin-customer-controlled/focus-primary.png": "b0703feaf709dd641c2008b9f8417da952e743f76ef54f617efd1941066ed9f7",
+    "testing/baselines/darwin-customer-controlled/focus-quiet.png": "65887ed4d6f88d14304f0defc94e5e167ac777833bf3a6354acf0fc0930fc75a",
+    "testing/baselines/darwin-customer-controlled/focus-secondary.png": "cc9d95a95913a8832288e20a5ba812d8332cda9601bbc2e6d86600e06aac6214",
+    "testing/baselines/darwin-customer-controlled/gallery-1280.png": "1a9c5209da007ed3b012a89ad5774e411a044d367768a64fb78db9861f965a6b",
+    "testing/baselines/darwin-customer-controlled/gallery-1440.png": "96ae827597b8af16097a90a61cabe14942ae829f709abd46e7c4abf59e3b89d1",
+    "testing/baselines/darwin-customer-controlled/gallery-320.png": "fc3bc232d83de29327c2b6b14fe0d5c234dbe3edfd1098890213335fd8937245",
+    "testing/baselines/darwin-customer-controlled/gallery-768.png": "f97a0fde748dd2305e920ab4d25a8cbfc99909befc6e30715f15a905b258fc37",
+    "testing/baselines/darwin-opentour-managed/focus-forced-colors.png": "f70daed0be3be9875b57533b75830cf912fc146e8829f73a78631a5da2d57669",
+    "testing/baselines/darwin-opentour-managed/focus-primary.png": "b0703feaf709dd641c2008b9f8417da952e743f76ef54f617efd1941066ed9f7",
+    "testing/baselines/darwin-opentour-managed/focus-quiet.png": "65887ed4d6f88d14304f0defc94e5e167ac777833bf3a6354acf0fc0930fc75a",
+    "testing/baselines/darwin-opentour-managed/focus-secondary.png": "cc9d95a95913a8832288e20a5ba812d8332cda9601bbc2e6d86600e06aac6214",
+    "testing/baselines/darwin-opentour-managed/gallery-1280.png": "ba9c2a306eed273dbb27d87d2abfec1dc36b216f9dd2977946ad0c0a03113211",
+    "testing/baselines/darwin-opentour-managed/gallery-1440.png": "7e322e94d8f34b84974c4fe1586691d3255cc557d4953a75c7fd609b57cfdaea",
+    "testing/baselines/darwin-opentour-managed/gallery-320.png": "05d6d6745eff229ad7a4a71de6e487a5070db9de15d6a19811d097fff87d7302",
+    "testing/baselines/darwin-opentour-managed/gallery-768.png": "6be9d870ea5ef443c3e0d4e04997986c2f583cd8d031af353f1459871147919f"
+  },
   "limitations": [
     "Initial images require real browser generation and independent design review.",
     "OPE-127's corner exception does not apply to this profile.",
@@ -27,5 +44,11 @@
     ],
     "original_snapshot_sha256": "38c3537dd10719a1978873137d34086fa51e284456ed7c5d46d36e77815367a7"
   },
-  "design_revision": "v4+focus-02447df8972e94c75e6d18ab79722b3cc5a08440673517c6b63e47cefdbf42aa"
+  "design_revision": "v4+focus-02447df8972e94c75e6d18ab79722b3cc5a08440673517c6b63e47cefdbf42aa",
+  "independent_browser_baseline_review": {
+    "reviewer": "root-independent-Codex",
+    "source_commit": "8a1fd5818c11fc5afae33cacdd52b78a58d8a69e",
+    "review_sha256": "718664a6efa4f3edbe8bda8160c5c8c7b6c103ffee1e9e59777ad67dd356e8f5",
+    "baseline_authoring_nonce": "2d304facd3564608a0a5cfcfb3e73f57"
+  }
 }

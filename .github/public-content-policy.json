@@ -49,7 +49,23 @@
     "apps/web/tests/fixtures/harness/assets/inter-latin-400-normal.woff2": "8909904ab6c872eb994093482a88a28eca2cd95912d7b6fecd72103b0dc07edc",
     "docs/specification/assets/ARCH-01.png": "df052f8168db3535a065525f85fa9b161a2871e899d68acde8d97b284a9a6180",
     "apps/web/styles/fonts/Geist.woff2": "2ffebe993e969069a9789d15164b7715d42491b5835516c5e3b935d5f81b05f1",
-    "apps/web/styles/fonts/GeistMono.woff2": "afaacc4c5fbba89d2ebf7a02dc4070208540874592a5504d57175782fe893101"
+    "apps/web/styles/fonts/GeistMono.woff2": "afaacc4c5fbba89d2ebf7a02dc4070208540874592a5504d57175782fe893101",
+    "apps/web/components/foundation/tokens/testing/baselines/darwin-customer-controlled/focus-forced-colors.png": "f70daed0be3be9875b57533b75830cf912fc146e8829f73a78631a5da2d57669",
+    "apps/web/components/foundation/tokens/testing/baselines/darwin-customer-controlled/focus-primary.png": "b0703feaf709dd641c2008b9f8417da952e743f76ef54f617efd1941066ed9f7",
+    "apps/web/components/foundation/tokens/testing/baselines/darwin-customer-controlled/focus-quiet.png": "65887ed4d6f88d14304f0defc94e5e167ac777833bf3a6354acf0fc0930fc75a",
+    "apps/web/components/foundation/tokens/testing/baselines/darwin-customer-controlled/focus-secondary.png": "cc9d95a95913a8832288e20a5ba812d8332cda9601bbc2e6d86600e06aac6214",
+    "apps/web/components/foundation/tokens/testing/baselines/darwin-customer-controlled/gallery-1280.png": "1a9c5209da007ed3b012a89ad5774e411a044d367768a64fb78db9861f965a6b",
+    "apps/web/components/foundation/tokens/testing/baselines/darwin-customer-controlled/gallery-1440.png": "96ae827597b8af16097a90a61cabe14942ae829f709abd46e7c4abf59e3b89d1",
+    "apps/web/components/foundation/tokens/testing/baselines/darwin-customer-controlled/gallery-320.png": "fc3bc232d83de29327c2b6b14fe0d5c234dbe3edfd1098890213335fd8937245",
+    "apps/web/components/foundation/tokens/testing/baselines/darwin-customer-controlled/gallery-768.png": "f97a0fde748dd2305e920ab4d25a8cbfc99909befc6e30715f15a905b258fc37",
+    "apps/web/components/foundation/tokens/testing/baselines/darwin-opentour-managed/focus-forced-colors.png": "f70daed0be3be9875b57533b75830cf912fc146e8829f73a78631a5da2d57669",
+    "apps/web/components/foundation/tokens/testing/baselines/darwin-opentour-managed/focus-primary.png": "b0703feaf709dd641c2008b9f8417da952e743f76ef54f617efd1941066ed9f7",
+    "apps/web/components/foundation/tokens/testing/baselines/darwin-opentour-managed/focus-quiet.png": "65887ed4d6f88d14304f0defc94e5e167ac777833bf3a6354acf0fc0930fc75a",
+    "apps/web/components/foundation/tokens/testing/baselines/darwin-opentour-managed/focus-secondary.png": "cc9d95a95913a8832288e20a5ba812d8332cda9601bbc2e6d86600e06aac6214",
+    "apps/web/components/foundation/tokens/testing/baselines/darwin-opentour-managed/gallery-1280.png": "ba9c2a306eed273dbb27d87d2abfec1dc36b216f9dd2977946ad0c0a03113211",
+    "apps/web/components/foundation/tokens/testing/baselines/darwin-opentour-managed/gallery-1440.png": "7e322e94d8f34b84974c4fe1586691d3255cc557d4953a75c7fd609b57cfdaea",
+    "apps/web/components/foundation/tokens/testing/baselines/darwin-opentour-managed/gallery-320.png": "05d6d6745eff229ad7a4a71de6e487a5070db9de15d6a19811d097fff87d7302",
+    "apps/web/components/foundation/tokens/testing/baselines/darwin-opentour-managed/gallery-768.png": "6be9d870ea5ef443c3e0d4e04997986c2f583cd8d031af353f1459871147919f"
   },
   "approved_synthetic_matches": {
     "tests/contract/test_bootstrap.py": [
