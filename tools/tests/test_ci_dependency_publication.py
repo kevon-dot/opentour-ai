@@ -1,0 +1,112 @@
+"""CI publication policy probes; generated outputs are not live vulnerability scans."""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import pytest
+
+from tools.ci import run as ci_run
+from tools.ci.dependency_evidence import DependencyEvidenceError
+from tools.public_content_check import digest
+from tools.test_runner import ProcessResult
+
+ROOT = Path(__file__).resolve().parents[2]
+
+
+@pytest.fixture
+def scan(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    (tmp_path / ".github").mkdir()
+    (tmp_path / ".github/public-content-policy.json").write_bytes(
+        (ROOT / ".github/public-content-policy.json").read_bytes()
+    )
+    # Deliberately unapproved subdomain, but wholly generated reserved-domain data.
+    contact = "generated-maintainer" + "@" + "vendor.example.com"
+    raw = json.dumps({"results": [], "generated_contact": contact})
+    result = ProcessResult(0, stdout=raw)
+    projection = {"status": "PASS", "counts": {"packages": 3}, "results": []}
+    calls = []
+
+    def project(value: bytes, *, root: Path):
+        calls.append((value, root))
+        return projection
+
+    monkeypatch.setattr(ci_run, "project_osv_report", project)
+    monkeypatch.setattr(ci_run, "execute", lambda _: result)
+    return tmp_path, raw, contact, projection, calls
+
+
+def test_only_reviewed_projection_is_published_and_original_digest_is_retained(scan):
+    root, raw, contact, projection, calls = scan
+    report = ci_run.run_one(ci_run.dependency_scan_command(root), root)
+    assert report["status"] == "PASS"
+    assert calls == [(raw.encode(), root)]
+    assert report["output_sha256"] == digest(raw.encode())
+    assert report["command_evidence"] == projection
+    assert report["published_projection_sha256"] == digest(
+        json.dumps(projection, sort_keys=True).encode()
+    )
+    assert report["raw_scanner_output_published"] is False
+    assert contact not in json.dumps(report)
+
+
+@pytest.mark.parametrize("failure", ["exit", "timeout", "interrupted", "cleanup"])
+def test_clean_projection_cannot_override_process_failure(scan, monkeypatch, failure):
+    root, raw, _, _, _ = scan
+    result = ProcessResult(
+        1 if failure == "exit" else 0,
+        stdout=raw,
+        timed_out=failure == "timeout",
+        interrupted=failure == "interrupted",
+        cleanup_complete=failure != "cleanup",
+    )
+    monkeypatch.setattr(ci_run, "execute", lambda _: result)
+    report = ci_run.run_one(ci_run.dependency_scan_command(root), root)
+    assert report["status"] == "FAIL"
+    assert report["command_evidence"]["status"] == "PASS"
+
+
+def test_reported_findings_refuse_even_if_scanner_exits_zero(scan):
+    root, _, _, projection, _ = scan
+    projection.update(status="FAIL", findings_present=True)
+    report = ci_run.run_one(ci_run.dependency_scan_command(root), root)
+    assert report["exit_code"] == 0 and report["status"] == "FAIL"
+    assert report["command_evidence"]["findings_present"]
+
+
+def test_malformed_report_is_not_published_as_empty_success(scan, monkeypatch):
+    root, raw, contact, _, _ = scan
+
+    def malformed(*_, **__):
+        raise DependencyEvidenceError("Generated details must never be published: " + contact)
+
+    monkeypatch.setattr(ci_run, "project_osv_report", malformed)
+    report = ci_run.run_one(ci_run.dependency_scan_command(root), root)
+    assert report["status"] == "FAIL" and report["reason"] == "INVALID_DEPENDENCY_REPORT"
+    assert report["output_sha256"] == digest(raw.encode())
+    assert "command_evidence" not in report and contact not in json.dumps(report)
+
+
+def test_projection_still_uses_unchanged_public_content_screen(scan):
+    root, _, contact, projection, _ = scan
+    projection["package_name"] = contact
+    report = ci_run.run_one(ci_run.dependency_scan_command(root), root)
+    assert report["status"] == "FAIL" and report["disclosure_findings"]
+    assert "command_evidence" not in report and contact not in json.dumps(report)
+
+
+@pytest.mark.parametrize("changed", ["binary", "argument", "command"])
+def test_other_commands_cannot_select_dependency_projection(scan, changed):
+    root, _, contact, _, calls = scan
+    command = ci_run.dependency_scan_command(root)
+    if changed == "binary":
+        command[0] = str(root / "other/osv-scanner")
+    elif changed == "argument":
+        command.append("--generated-extra")
+    else:
+        command = ["python", "generated-output.py"]
+    report = ci_run.run_one(command, root)
+    assert not calls
+    assert report["status"] == "FAIL" and report["disclosure_findings"]
+    assert "command_evidence" not in report and contact not in json.dumps(report)
