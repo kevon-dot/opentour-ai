@@ -8539,9 +8539,9 @@
         "native_uuid": "90540510-dec1-489e-a2af-4a89125d07d4",
         "logical_key": "OT-P01-C01",
         "url": "https://linear.app/opentourai/issue/OPE-142/verify-human-sessions-and-derive-tenant-authorization-context",
-        "updated_at": "2026-11-15T04:09:40.410Z",
+        "updated_at": "2026-11-16T00:18:55.635Z",
         "publication_spec_sha256": "4053b99a814369d5094086d8179f51abc146d47b0b906ac5716c586e8cc6db80",
-        "technical_capture_sha256": "bcd417a631693a6cf5aecc0e86fa61d64af7395c51e4c1bd9934ac1b0e638423",
+        "technical_capture_sha256": "52310b739fe2f4170f39ec9edb6bce32b723411b7fd86d6fc19be645c6288976",
         "projection": {
           "requirement_ids": [
             "OT-P01-C01-AC01",
@@ -8558,11 +8558,35 @@
           ],
           "subfeature_ids": [],
           "owned_paths": [
+            "apps/web/app/auth/callback/route.ts",
+            "apps/web/app/auth/signin/route.ts",
+            "apps/web/lib/server/authkit-adapter.test.ts",
+            "apps/web/lib/server/authkit-adapter.ts",
+            "apps/web/lib/server/tsconfig.json",
+            "packages/contracts/platform/auth-context.schema.json",
+            "services/control-api/migrations/0001_identity_state.sql",
+            "services/control-api/src/opentour_control/auth/README.md",
+            "services/control-api/src/opentour_control/auth/__init__.py",
+            "services/control-api/src/opentour_control/auth/config.py",
+            "services/control-api/src/opentour_control/auth/identity_sync.py",
+            "services/control-api/src/opentour_control/auth/repository.py",
             "services/control-api/src/opentour_control/auth/session.py",
-            "services/control-api/tests/auth/test_session_context.py",
-            "packages/contracts/platform/auth-context.schema.json"
+            "services/control-api/src/opentour_control/auth/workos_provider.py",
+            "services/control-api/tests/auth/auth_postgres_bridge.py",
+            "services/control-api/tests/auth/authkit_postgres_probe.mjs",
+            "services/control-api/tests/auth/conftest.py",
+            "services/control-api/tests/auth/test_auth_context.py",
+            "services/control-api/tests/auth/test_identity_postgres.py",
+            "services/control-api/tests/auth/test_identity_sync.py",
+            "services/control-api/tests/auth/test_sealing.py",
+            "services/control-api/tests/auth/test_session_context.py"
           ],
           "declared_test_paths": [
+            "apps/web/lib/server/authkit-adapter.test.ts",
+            "services/control-api/tests/auth/test_auth_context.py",
+            "services/control-api/tests/auth/test_identity_postgres.py",
+            "services/control-api/tests/auth/test_identity_sync.py",
+            "services/control-api/tests/auth/test_sealing.py",
             "services/control-api/tests/auth/test_session_context.py"
           ],
           "parent": "OPE-6",
@@ -8583,7 +8607,7 @@
             "OPE-6"
           ]
         },
-        "projection_sha256": "efe80e3296f5a4d61df6d007cbd2ef8ca4514d2047c79e6533a8466c563bd2b2"
+        "projection_sha256": "8c2b938bac29dfabe7b82737a761294b437e375b65b66bf386ce30c43bc319cd"
       },
       {
         "issue_key": "OPE-143",
@@ -23400,15 +23424,1823 @@
         "mode": null,
         "fixture_id": "environment-schema-compatibility",
         "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC02"
+        ],
+        "test_id": "services/control-api/tests/auth/test_auth_context.py::test_invalid_claims_deny_before_local_lookup[iss-https://foreign.invalid/]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC02"
+        ],
+        "test_id": "services/control-api/tests/auth/test_auth_context.py::test_invalid_claims_deny_before_local_lookup[aud-foreign]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC02"
+        ],
+        "test_id": "services/control-api/tests/auth/test_auth_context.py::test_invalid_claims_deny_before_local_lookup[aud-None]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC02"
+        ],
+        "test_id": "services/control-api/tests/auth/test_auth_context.py::test_invalid_claims_deny_before_local_lookup[aud-value3]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC02"
+        ],
+        "test_id": "services/control-api/tests/auth/test_auth_context.py::test_invalid_claims_deny_before_local_lookup[sub-value4]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC02"
+        ],
+        "test_id": "services/control-api/tests/auth/test_auth_context.py::test_invalid_claims_deny_before_local_lookup[sid-]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC02"
+        ],
+        "test_id": "services/control-api/tests/auth/test_auth_context.py::test_invalid_claims_deny_before_local_lookup[auth_time-None]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC02"
+        ],
+        "test_id": "services/control-api/tests/auth/test_auth_context.py::test_invalid_claims_deny_before_local_lookup[auth_time-True]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC02"
+        ],
+        "test_id": "services/control-api/tests/auth/test_auth_context.py::test_invalid_claims_deny_before_local_lookup[exp-0]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC02"
+        ],
+        "test_id": "services/control-api/tests/auth/test_auth_context.py::test_invalid_claims_deny_before_local_lookup[sub_profile-ai_agent]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC02"
+        ],
+        "test_id": "services/control-api/tests/auth/test_auth_context.py::test_invalid_claims_deny_before_local_lookup[sub_type-widget]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC02"
+        ],
+        "test_id": "services/control-api/tests/auth/test_auth_context.py::test_exact_expiry_and_client_clock_cannot_extend",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC02"
+        ],
+        "test_id": "services/control-api/tests/auth/test_auth_context.py::test_algorithm_substitution[none]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC02"
+        ],
+        "test_id": "services/control-api/tests/auth/test_auth_context.py::test_algorithm_substitution[HS256]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC02"
+        ],
+        "test_id": "services/control-api/tests/auth/test_auth_context.py::test_signature_tamper",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC02"
+        ],
+        "test_id": "services/control-api/tests/auth/test_auth_context.py::test_unknown_key_refresh_is_bounded",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC02"
+        ],
+        "test_id": "services/control-api/tests/auth/test_auth_context.py::test_token_cannot_choose_key_endpoint[jku]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC02"
+        ],
+        "test_id": "services/control-api/tests/auth/test_auth_context.py::test_token_cannot_choose_key_endpoint[jwk]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC02"
+        ],
+        "test_id": "services/control-api/tests/auth/test_auth_context.py::test_token_cannot_choose_key_endpoint[x5u]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC02"
+        ],
+        "test_id": "services/control-api/tests/auth/test_auth_context.py::test_duplicate_jwks_key_id_is_not_ambiguous_allow",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC02"
+        ],
+        "test_id": "services/control-api/tests/auth/test_auth_context.py::test_slow_key_refresh_never_queues_or_admits_late_result",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC01",
+          "OT-P01-C01-AC02"
+        ],
+        "test_id": "services/control-api/tests/auth/test_auth_context.py::test_scoped_context_schema_and_unknown_assurance",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC02"
+        ],
+        "test_id": "services/control-api/tests/auth/test_auth_context.py::test_unknown_refresh_cannot_deny_current_cached_key",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC01",
+          "OT-P01-C01-AC02"
+        ],
+        "test_id": "services/control-api/tests/auth/test_auth_context.py::test_membership_freshness_boundary[True-30-True]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC01",
+          "OT-P01-C01-AC02"
+        ],
+        "test_id": "services/control-api/tests/auth/test_auth_context.py::test_membership_freshness_boundary[True-31-False]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC01",
+          "OT-P01-C01-AC02"
+        ],
+        "test_id": "services/control-api/tests/auth/test_auth_context.py::test_membership_freshness_boundary[False-300-True]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC01",
+          "OT-P01-C01-AC02"
+        ],
+        "test_id": "services/control-api/tests/auth/test_auth_context.py::test_membership_freshness_boundary[False-301-False]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC01",
+          "OT-P01-C01-AC03"
+        ],
+        "test_id": "services/control-api/tests/auth/test_auth_context.py::test_provider_role_and_email_do_not_grant",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC02"
+        ],
+        "test_id": "services/control-api/tests/auth/test_auth_context.py::test_sdk_fault_is_sanitized_in_formatted_traceback",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC02"
+        ],
+        "test_id": "services/control-api/tests/auth/test_auth_context.py::test_key_lookup_expiry_and_backward_clock_fail_closed[2]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC02"
+        ],
+        "test_id": "services/control-api/tests/auth/test_auth_context.py::test_key_lookup_expiry_and_backward_clock_fail_closed[-2]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC01",
+          "OT-P01-C01-AC02"
+        ],
+        "test_id": "services/control-api/tests/auth/test_auth_context.py::test_closed_context_rejects_malformed_wire_fields[unexpected-True]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC01",
+          "OT-P01-C01-AC02"
+        ],
+        "test_id": "services/control-api/tests/auth/test_auth_context.py::test_closed_context_rejects_malformed_wire_fields[session_generation-True]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC01",
+          "OT-P01-C01-AC02"
+        ],
+        "test_id": "services/control-api/tests/auth/test_auth_context.py::test_closed_context_rejects_malformed_wire_fields[session_generation-9007199254740992]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC01",
+          "OT-P01-C01-AC02"
+        ],
+        "test_id": "services/control-api/tests/auth/test_auth_context.py::test_closed_context_rejects_malformed_wire_fields[session_id-]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC01",
+          "OT-P01-C01-AC02"
+        ],
+        "test_id": "services/control-api/tests/auth/test_auth_context.py::test_closed_context_rejects_malformed_wire_fields[identity_checked_at-2026-11-15T12:00:00-03:00]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC01",
+          "OT-P01-C01-AC02"
+        ],
+        "test_id": "services/control-api/tests/auth/test_auth_context.py::test_closed_context_rejects_malformed_wire_fields[delegated_grant_id-forged-grant]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC02"
+        ],
+        "test_id": "services/control-api/tests/auth/test_auth_context.py::test_missing_or_zero_credential_policy_fails_closed",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC02"
+        ],
+        "test_id": "services/control-api/tests/auth/test_auth_context.py::test_bounded_sdk_backend_rejects_redirect_and_oversize[302-0]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC02"
+        ],
+        "test_id": "services/control-api/tests/auth/test_auth_context.py::test_bounded_sdk_backend_rejects_redirect_and_oversize[200-1048577]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC02"
+        ],
+        "test_id": "services/control-api/tests/auth/test_auth_context.py::test_bounded_sdk_backend_rejects_redirect_and_oversize[500-50]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC02"
+        ],
+        "test_id": "services/control-api/tests/auth/test_auth_context.py::test_sdk_backend_caller_deadline_and_worker_cleanup_are_distinct",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC01",
+          "OT-P01-C01-AC02",
+          "OT-P01-C01-AC03"
+        ],
+        "test_id": "services/control-api/tests/auth/test_session_context.py::test_valid_session_has_exact_scope",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC03"
+        ],
+        "test_id": "services/control-api/tests/auth/test_session_context.py::test_member_of_b_cannot_reuse_a_context",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC01",
+          "OT-P01-C01-AC02"
+        ],
+        "test_id": "services/control-api/tests/auth/test_session_context.py::test_zero_org_identity_has_finite_allowlist",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC01",
+          "OT-P01-C01-AC02",
+          "OT-P01-C01-AC03"
+        ],
+        "test_id": "services/control-api/tests/auth/test_session_context.py::test_current_context_never_fabricates_selection[unselected]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC01",
+          "OT-P01-C01-AC02",
+          "OT-P01-C01-AC03"
+        ],
+        "test_id": "services/control-api/tests/auth/test_session_context.py::test_current_context_never_fabricates_selection[mismatch]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC01",
+          "OT-P01-C01-AC02",
+          "OT-P01-C01-AC03"
+        ],
+        "test_id": "services/control-api/tests/auth/test_session_context.py::test_current_context_never_fabricates_selection[pending]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC01",
+          "OT-P01-C01-AC02",
+          "OT-P01-C01-AC03"
+        ],
+        "test_id": "services/control-api/tests/auth/test_session_context.py::test_current_context_never_fabricates_selection[removed]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC02"
+        ],
+        "test_id": "services/control-api/tests/auth/test_session_context.py::test_session_ending_is_idempotent_and_other_sessions_untouched",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC02"
+        ],
+        "test_id": "services/control-api/tests/auth/test_session_context.py::test_denial_commit_unknown_is_not_success",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC02",
+          "OT-P01-C01-AC03"
+        ],
+        "test_id": "services/control-api/tests/auth/test_session_context.py::test_forged_or_foreign_binding_cannot_select_session",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC02",
+          "OT-P01-C01-AC03"
+        ],
+        "test_id": "services/control-api/tests/auth/test_session_context.py::test_old_generation_cannot_admit_delayed_request",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC01",
+          "OT-P01-C01-AC02",
+          "OT-P01-C01-AC03"
+        ],
+        "test_id": "services/control-api/tests/auth/test_session_context.py::test_actual_context_route_ignores_forwarded_context",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC02"
+        ],
+        "test_id": "services/control-api/tests/auth/test_session_context.py::test_invalid_route_identity_has_safe_closed_error",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC02",
+          "OT-P01-C01-AC03"
+        ],
+        "test_id": "services/control-api/tests/auth/test_session_context.py::test_provider_wait_cannot_return_old_selected_context[ended-authorization]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC02",
+          "OT-P01-C01-AC03"
+        ],
+        "test_id": "services/control-api/tests/auth/test_session_context.py::test_provider_wait_cannot_return_old_selected_context[ended-current]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC02",
+          "OT-P01-C01-AC03"
+        ],
+        "test_id": "services/control-api/tests/auth/test_session_context.py::test_provider_wait_cannot_return_old_selected_context[generation-authorization]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC02",
+          "OT-P01-C01-AC03"
+        ],
+        "test_id": "services/control-api/tests/auth/test_session_context.py::test_provider_wait_cannot_return_old_selected_context[generation-current]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC02",
+          "OT-P01-C01-AC03"
+        ],
+        "test_id": "services/control-api/tests/auth/test_session_context.py::test_provider_wait_cannot_return_old_selected_context[selection-authorization]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC02",
+          "OT-P01-C01-AC03"
+        ],
+        "test_id": "services/control-api/tests/auth/test_session_context.py::test_provider_wait_cannot_return_old_selected_context[selection-current]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC02",
+          "OT-P01-C01-AC03"
+        ],
+        "test_id": "services/control-api/tests/auth/test_session_context.py::test_provider_wait_cannot_return_old_selected_context[reconciliation-authorization]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC02",
+          "OT-P01-C01-AC03"
+        ],
+        "test_id": "services/control-api/tests/auth/test_session_context.py::test_provider_wait_cannot_return_old_selected_context[reconciliation-current]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC02",
+          "OT-P01-C01-AC03"
+        ],
+        "test_id": "services/control-api/tests/auth/test_session_context.py::test_provider_wait_cannot_return_old_selected_context[removed-authorization]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC02",
+          "OT-P01-C01-AC03"
+        ],
+        "test_id": "services/control-api/tests/auth/test_session_context.py::test_provider_wait_cannot_return_old_selected_context[removed-current]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC02"
+        ],
+        "test_id": "services/control-api/tests/auth/test_session_context.py::test_removed_selection_preserves_only_authenticated_recovery_binding",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC02"
+        ],
+        "test_id": "services/control-api/tests/auth/test_session_context.py::test_provider_wait_cannot_extend_expiry_or_freshness[2]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC02"
+        ],
+        "test_id": "services/control-api/tests/auth/test_session_context.py::test_provider_wait_cannot_extend_expiry_or_freshness[-2]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC02"
+        ],
+        "test_id": "services/control-api/tests/auth/test_session_context.py::test_provider_wait_cannot_extend_expiry_or_freshness[31]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC02"
+        ],
+        "test_id": "services/control-api/tests/auth/test_session_context.py::test_actual_sdk_fault_body_never_reaches_api_or_logs",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC02"
+        ],
+        "test_id": "services/control-api/tests/auth/test_session_context.py::test_final_state_read_cannot_hide_denial_or_time_passage[provider_denial]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC02"
+        ],
+        "test_id": "services/control-api/tests/auth/test_session_context.py::test_final_state_read_cannot_hide_denial_or_time_passage[expiry]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC02"
+        ],
+        "test_id": "services/control-api/tests/auth/test_session_context.py::test_final_state_read_cannot_hide_denial_or_time_passage[freshness]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC01",
+          "OT-P01-C01-AC02"
+        ],
+        "test_id": "services/control-api/tests/auth/test_session_context.py::test_admission_logs_only_safe_freshness_metadata",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC01",
+          "OT-P01-C01-AC02"
+        ],
+        "test_id": "services/control-api/tests/auth/test_session_context.py::test_pending_provider_context_never_fabricates_removal[pending_identity]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC01",
+          "OT-P01-C01-AC02"
+        ],
+        "test_id": "services/control-api/tests/auth/test_session_context.py::test_pending_provider_context_never_fabricates_removal[reconciliation_unknown]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC02"
+        ],
+        "test_id": "services/control-api/tests/auth/test_identity_sync.py::test_remove_then_late_active_stays_denied",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC01",
+          "OT-P01-C01-AC02"
+        ],
+        "test_id": "services/control-api/tests/auth/test_identity_sync.py::test_duplicate_and_conflicting_event_digest",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC01",
+          "OT-P01-C01-AC02"
+        ],
+        "test_id": "services/control-api/tests/auth/test_identity_sync.py::test_crash_before_cursor_commit_replays_once",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC02"
+        ],
+        "test_id": "services/control-api/tests/auth/test_identity_sync.py::test_current_fetch_unknown_does_not_advance_cursor",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC01",
+          "OT-P01-C01-AC02"
+        ],
+        "test_id": "services/control-api/tests/auth/test_identity_sync.py::test_unconfirmed_identity_never_grants[pending_identity]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC01",
+          "OT-P01-C01-AC02"
+        ],
+        "test_id": "services/control-api/tests/auth/test_identity_sync.py::test_unconfirmed_identity_never_grants[reconciliation_unknown]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC01",
+          "OT-P01-C01-AC02"
+        ],
+        "test_id": "services/control-api/tests/auth/test_identity_sync.py::test_unconfirmed_identity_never_grants[removed]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC02"
+        ],
+        "test_id": "services/control-api/tests/auth/test_identity_sync.py::test_conflicting_scope_fails_batch",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC02"
+        ],
+        "test_id": "services/control-api/tests/auth/test_identity_sync.py::test_revoked_session_cannot_be_recreated",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC02"
+        ],
+        "test_id": "services/control-api/tests/auth/test_identity_sync.py::test_webhook_wakeup_never_applies_payload",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC02",
+          "OT-P01-C01-AC03"
+        ],
+        "test_id": "services/control-api/tests/auth/test_sealing.py::test_sealed_payload_scope_expiry_rotation_and_tampering",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC02"
+        ],
+        "test_id": "services/control-api/tests/auth/test_sealing.py::test_no_implicit_sealing_key_or_lifetime_extension",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC01",
+          "OT-P01-C01-AC02"
+        ],
+        "test_id": "services/control-api/tests/auth/test_identity_postgres.py::test_runtime_role_and_migration_are_real[customer_controlled]",
+        "kind": "local_integration",
+        "mode": "customer_controlled",
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC01",
+          "OT-P01-C01-AC02"
+        ],
+        "test_id": "services/control-api/tests/auth/test_identity_postgres.py::test_runtime_role_and_migration_are_real[opentour_managed]",
+        "kind": "local_integration",
+        "mode": "opentour_managed",
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC01",
+          "OT-P01-C01-AC02"
+        ],
+        "test_id": "services/control-api/tests/auth/test_identity_postgres.py::test_router_uses_committed_state_and_durable_end[customer_controlled]",
+        "kind": "local_integration",
+        "mode": "customer_controlled",
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC01",
+          "OT-P01-C01-AC02"
+        ],
+        "test_id": "services/control-api/tests/auth/test_identity_postgres.py::test_router_uses_committed_state_and_durable_end[opentour_managed]",
+        "kind": "local_integration",
+        "mode": "opentour_managed",
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC01",
+          "OT-P01-C01-AC02"
+        ],
+        "test_id": "services/control-api/tests/auth/test_identity_postgres.py::test_atomic_admission_credentials_and_late_refresh_denial[customer_controlled]",
+        "kind": "local_integration",
+        "mode": "customer_controlled",
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC01",
+          "OT-P01-C01-AC02"
+        ],
+        "test_id": "services/control-api/tests/auth/test_identity_postgres.py::test_atomic_admission_credentials_and_late_refresh_denial[opentour_managed]",
+        "kind": "local_integration",
+        "mode": "opentour_managed",
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC01",
+          "OT-P01-C01-AC02"
+        ],
+        "test_id": "services/control-api/tests/auth/test_identity_postgres.py::test_failed_admission_rolls_back_binding_and_session[customer_controlled]",
+        "kind": "local_integration",
+        "mode": "customer_controlled",
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC01",
+          "OT-P01-C01-AC02"
+        ],
+        "test_id": "services/control-api/tests/auth/test_identity_postgres.py::test_failed_admission_rolls_back_binding_and_session[opentour_managed]",
+        "kind": "local_integration",
+        "mode": "opentour_managed",
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC01",
+          "OT-P01-C01-AC02"
+        ],
+        "test_id": "services/control-api/tests/auth/test_identity_postgres.py::test_duplicate_callback_claim_has_one_durable_winner[customer_controlled]",
+        "kind": "local_integration",
+        "mode": "customer_controlled",
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC01",
+          "OT-P01-C01-AC02"
+        ],
+        "test_id": "services/control-api/tests/auth/test_identity_postgres.py::test_duplicate_callback_claim_has_one_durable_winner[opentour_managed]",
+        "kind": "local_integration",
+        "mode": "opentour_managed",
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC01",
+          "OT-P01-C01-AC02"
+        ],
+        "test_id": "services/control-api/tests/auth/test_identity_postgres.py::test_cursor_batch_rollback_replay_and_sticky_denial[customer_controlled]",
+        "kind": "local_integration",
+        "mode": "customer_controlled",
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC01",
+          "OT-P01-C01-AC02"
+        ],
+        "test_id": "services/control-api/tests/auth/test_identity_postgres.py::test_cursor_batch_rollback_replay_and_sticky_denial[opentour_managed]",
+        "kind": "local_integration",
+        "mode": "opentour_managed",
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC02"
+        ],
+        "test_id": "services/control-api/tests/auth/test_identity_postgres.py::test_unknown_session_revocation_prevents_future_admission[customer_controlled]",
+        "kind": "local_integration",
+        "mode": "customer_controlled",
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC02"
+        ],
+        "test_id": "services/control-api/tests/auth/test_identity_postgres.py::test_unknown_session_revocation_prevents_future_admission[opentour_managed]",
+        "kind": "local_integration",
+        "mode": "opentour_managed",
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC02"
+        ],
+        "test_id": "services/control-api/tests/auth/test_identity_postgres.py::test_stale_subject_generation_and_expired_credentials_refuse[customer_controlled]",
+        "kind": "local_integration",
+        "mode": "customer_controlled",
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC02"
+        ],
+        "test_id": "services/control-api/tests/auth/test_identity_postgres.py::test_stale_subject_generation_and_expired_credentials_refuse[opentour_managed]",
+        "kind": "local_integration",
+        "mode": "opentour_managed",
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC01",
+          "OT-P01-C01-AC02"
+        ],
+        "test_id": "services/control-api/tests/auth/test_identity_postgres.py::test_configured_typescript_factories_with_actual_durable_ports[customer_controlled]",
+        "kind": "local_integration",
+        "mode": "customer_controlled",
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC01",
+          "OT-P01-C01-AC02"
+        ],
+        "test_id": "services/control-api/tests/auth/test_identity_postgres.py::test_configured_typescript_factories_with_actual_durable_ports[opentour_managed]",
+        "kind": "local_integration",
+        "mode": "opentour_managed",
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC01"
+        ],
+        "test_id": "apps/web/lib/server/authkit-adapter.test.ts::0",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC02"
+        ],
+        "test_id": "apps/web/lib/server/authkit-adapter.test.ts::1",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC02"
+        ],
+        "test_id": "apps/web/lib/server/authkit-adapter.test.ts::2",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC02"
+        ],
+        "test_id": "apps/web/lib/server/authkit-adapter.test.ts::3",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC02"
+        ],
+        "test_id": "apps/web/lib/server/authkit-adapter.test.ts::4",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC02"
+        ],
+        "test_id": "apps/web/lib/server/authkit-adapter.test.ts::5",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC02"
+        ],
+        "test_id": "apps/web/lib/server/authkit-adapter.test.ts::6",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC01",
+          "OT-P01-C01-AC02"
+        ],
+        "test_id": "apps/web/lib/server/authkit-adapter.test.ts::7",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC02"
+        ],
+        "test_id": "apps/web/lib/server/authkit-adapter.test.ts::8",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC02"
+        ],
+        "test_id": "apps/web/lib/server/authkit-adapter.test.ts::9",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC02"
+        ],
+        "test_id": "apps/web/lib/server/authkit-adapter.test.ts::10",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC02"
+        ],
+        "test_id": "apps/web/lib/server/authkit-adapter.test.ts::11",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC02"
+        ],
+        "test_id": "apps/web/lib/server/authkit-adapter.test.ts::12",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC02"
+        ],
+        "test_id": "apps/web/lib/server/authkit-adapter.test.ts::13",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC02"
+        ],
+        "test_id": "apps/web/lib/server/authkit-adapter.test.ts::14",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC02"
+        ],
+        "test_id": "apps/web/lib/server/authkit-adapter.test.ts::15",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC02"
+        ],
+        "test_id": "apps/web/lib/server/authkit-adapter.test.ts::16",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC02"
+        ],
+        "test_id": "apps/web/lib/server/authkit-adapter.test.ts::17",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC02"
+        ],
+        "test_id": "apps/web/lib/server/authkit-adapter.test.ts::18",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC02"
+        ],
+        "test_id": "apps/web/lib/server/authkit-adapter.test.ts::19",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC01",
+          "OT-P01-C01-AC02"
+        ],
+        "test_id": "apps/web/lib/server/authkit-adapter.test.ts::20",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC01",
+          "OT-P01-C01-AC03"
+        ],
+        "test_id": "apps/web/lib/server/authkit-adapter.test.ts::21",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC02"
+        ],
+        "test_id": "apps/web/lib/server/authkit-adapter.test.ts::22",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC02"
+        ],
+        "test_id": "apps/web/lib/server/authkit-adapter.test.ts::23",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC02"
+        ],
+        "test_id": "apps/web/lib/server/authkit-adapter.test.ts::24",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC02"
+        ],
+        "test_id": "apps/web/lib/server/authkit-adapter.test.ts::25",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC02",
+          "OT-P01-C01-AC03"
+        ],
+        "test_id": "apps/web/lib/server/authkit-adapter.test.ts::26",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC02",
+          "OT-P01-C01-AC03"
+        ],
+        "test_id": "apps/web/lib/server/authkit-adapter.test.ts::27",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC02",
+          "OT-P01-C01-AC03"
+        ],
+        "test_id": "apps/web/lib/server/authkit-adapter.test.ts::28",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC02"
+        ],
+        "test_id": "apps/web/lib/server/authkit-adapter.test.ts::29",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC02"
+        ],
+        "test_id": "apps/web/lib/server/authkit-adapter.test.ts::30",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC02"
+        ],
+        "test_id": "apps/web/lib/server/authkit-adapter.test.ts::31",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC02"
+        ],
+        "test_id": "apps/web/lib/server/authkit-adapter.test.ts::32",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC02"
+        ],
+        "test_id": "apps/web/lib/server/authkit-adapter.test.ts::33",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC02",
+          "OT-P01-C01-AC03"
+        ],
+        "test_id": "apps/web/lib/server/authkit-adapter.test.ts::34",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC02",
+          "OT-P01-C01-AC03"
+        ],
+        "test_id": "apps/web/lib/server/authkit-adapter.test.ts::35",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC02",
+          "OT-P01-C01-AC03"
+        ],
+        "test_id": "apps/web/lib/server/authkit-adapter.test.ts::36",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC02"
+        ],
+        "test_id": "apps/web/lib/server/authkit-adapter.test.ts::37",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC02"
+        ],
+        "test_id": "apps/web/lib/server/authkit-adapter.test.ts::38",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC02"
+        ],
+        "test_id": "apps/web/lib/server/authkit-adapter.test.ts::39",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC01",
+          "OT-P01-C01-AC02"
+        ],
+        "test_id": "apps/web/lib/server/authkit-adapter.test.ts::40",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC02"
+        ],
+        "test_id": "apps/web/lib/server/authkit-adapter.test.ts::41",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC02"
+        ],
+        "test_id": "apps/web/lib/server/authkit-adapter.test.ts::42",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC02"
+        ],
+        "test_id": "apps/web/lib/server/authkit-adapter.test.ts::43",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC02"
+        ],
+        "test_id": "apps/web/lib/server/authkit-adapter.test.ts::44",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC02"
+        ],
+        "test_id": "apps/web/lib/server/authkit-adapter.test.ts::45",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC02"
+        ],
+        "test_id": "apps/web/lib/server/authkit-adapter.test.ts::46",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC02"
+        ],
+        "test_id": "apps/web/lib/server/authkit-adapter.test.ts::47",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC02"
+        ],
+        "test_id": "apps/web/lib/server/authkit-adapter.test.ts::48",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC02"
+        ],
+        "test_id": "apps/web/lib/server/authkit-adapter.test.ts::49",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC02"
+        ],
+        "test_id": "apps/web/lib/server/authkit-adapter.test.ts::50",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-142",
+        "requirement_ids": [
+          "OT-P01-C01-AC02"
+        ],
+        "test_id": "apps/web/lib/server/authkit-adapter.test.ts::51",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "identity-session-context",
+        "fixture_version": "1"
       }
     ]
   },
-  "source_projection_sha256": "09f85bf5216172dd5cbf6ca81531b9d8d83bc54162d22cd0e39e76370c71bcd3",
+  "source_projection_sha256": "29be7abdd0a39bdd87f75e3be87014be817415a7a18ed8d6e9ccac2087c36ec1",
   "source_bindings": {
     "feature_register_sha256": "f6d1061a103a028b6309928a1c6d96b1c58cb969793a2b9e8a4e36dd50b4602f",
     "figma_snapshot_sha256": "38c3537dd10719a1978873137d34086fa51e284456ed7c5d46d36e77815367a7",
     "figma_revision": "approved-ui-design-index.v4",
-    "native_projection": "Current native technical IDs, relationships and acceptance-text digests, with reviewed C05 implementation path/test refinements. Excludes full bodies and attachment transport. Original source hashes are provenance, not a claim that omitted source bytes are locally present. OPE-213 native admission and reviewed implementation refresh adds its12 owned paths,3 named native test paths and94 exact positive/adverse cases; the updated technical-capture digest binds current native UTF-8 description with terminal newlines excluded. Full native bodies remain outside this public projection. Provider/customer evidence stays NOT_RUN."
+    "native_projection": "Current native technical IDs, relationships and acceptance-text digests, with reviewed C05 implementation path/test refinements. Excludes full bodies and attachment transport. Original source hashes are provenance, not a claim that omitted source bytes are locally present. OPE-213 native admission and reviewed implementation refresh adds its12 owned paths,3 named native test paths and94 exact positive/adverse cases; the updated technical-capture digest binds current native UTF-8 description with terminal newlines excluded. Full native bodies remain outside this public projection. Provider/customer evidence stays NOT_RUN. OPE-142 current native admission and reviewed implementation refresh adds22 owned paths,6 actual named test paths and158 exact positive/adverse cases (140 simulated,18 local PostgreSQL); the technical-capture digest binds current native UTF-8 description with terminal newlines excluded. Provider/ISO and future consumer integration acceptance stays NOT_RUN."
   },
   "mappings": [
     {
@@ -33030,14 +34862,193 @@
       ],
       "subfeature_ids": [],
       "owned_paths": [
+        "apps/web/app/auth/callback/route.ts",
+        "apps/web/app/auth/signin/route.ts",
+        "apps/web/lib/server/authkit-adapter.test.ts",
+        "apps/web/lib/server/authkit-adapter.ts",
+        "apps/web/lib/server/tsconfig.json",
+        "packages/contracts/platform/auth-context.schema.json",
+        "services/control-api/migrations/0001_identity_state.sql",
+        "services/control-api/src/opentour_control/auth/README.md",
+        "services/control-api/src/opentour_control/auth/__init__.py",
+        "services/control-api/src/opentour_control/auth/config.py",
+        "services/control-api/src/opentour_control/auth/identity_sync.py",
+        "services/control-api/src/opentour_control/auth/repository.py",
         "services/control-api/src/opentour_control/auth/session.py",
-        "services/control-api/tests/auth/test_session_context.py",
-        "packages/contracts/platform/auth-context.schema.json"
+        "services/control-api/src/opentour_control/auth/workos_provider.py",
+        "services/control-api/tests/auth/auth_postgres_bridge.py",
+        "services/control-api/tests/auth/authkit_postgres_probe.mjs",
+        "services/control-api/tests/auth/conftest.py",
+        "services/control-api/tests/auth/test_auth_context.py",
+        "services/control-api/tests/auth/test_identity_postgres.py",
+        "services/control-api/tests/auth/test_identity_sync.py",
+        "services/control-api/tests/auth/test_sealing.py",
+        "services/control-api/tests/auth/test_session_context.py"
       ],
       "contract_refs": [
-        "urn:opentour:common-contract:1.0"
+        "urn:opentour:common-contract:1.0",
+        "urn:opentour:auth-context:1.0"
       ],
-      "test_ids": [],
+      "test_ids": [
+        "services/control-api/tests/auth/test_auth_context.py::test_invalid_claims_deny_before_local_lookup[iss-https://foreign.invalid/]",
+        "services/control-api/tests/auth/test_auth_context.py::test_invalid_claims_deny_before_local_lookup[aud-foreign]",
+        "services/control-api/tests/auth/test_auth_context.py::test_invalid_claims_deny_before_local_lookup[aud-None]",
+        "services/control-api/tests/auth/test_auth_context.py::test_invalid_claims_deny_before_local_lookup[aud-value3]",
+        "services/control-api/tests/auth/test_auth_context.py::test_invalid_claims_deny_before_local_lookup[sub-value4]",
+        "services/control-api/tests/auth/test_auth_context.py::test_invalid_claims_deny_before_local_lookup[sid-]",
+        "services/control-api/tests/auth/test_auth_context.py::test_invalid_claims_deny_before_local_lookup[auth_time-None]",
+        "services/control-api/tests/auth/test_auth_context.py::test_invalid_claims_deny_before_local_lookup[auth_time-True]",
+        "services/control-api/tests/auth/test_auth_context.py::test_invalid_claims_deny_before_local_lookup[exp-0]",
+        "services/control-api/tests/auth/test_auth_context.py::test_invalid_claims_deny_before_local_lookup[sub_profile-ai_agent]",
+        "services/control-api/tests/auth/test_auth_context.py::test_invalid_claims_deny_before_local_lookup[sub_type-widget]",
+        "services/control-api/tests/auth/test_auth_context.py::test_exact_expiry_and_client_clock_cannot_extend",
+        "services/control-api/tests/auth/test_auth_context.py::test_algorithm_substitution[none]",
+        "services/control-api/tests/auth/test_auth_context.py::test_algorithm_substitution[HS256]",
+        "services/control-api/tests/auth/test_auth_context.py::test_signature_tamper",
+        "services/control-api/tests/auth/test_auth_context.py::test_unknown_key_refresh_is_bounded",
+        "services/control-api/tests/auth/test_auth_context.py::test_token_cannot_choose_key_endpoint[jku]",
+        "services/control-api/tests/auth/test_auth_context.py::test_token_cannot_choose_key_endpoint[jwk]",
+        "services/control-api/tests/auth/test_auth_context.py::test_token_cannot_choose_key_endpoint[x5u]",
+        "services/control-api/tests/auth/test_auth_context.py::test_duplicate_jwks_key_id_is_not_ambiguous_allow",
+        "services/control-api/tests/auth/test_auth_context.py::test_slow_key_refresh_never_queues_or_admits_late_result",
+        "services/control-api/tests/auth/test_auth_context.py::test_scoped_context_schema_and_unknown_assurance",
+        "services/control-api/tests/auth/test_auth_context.py::test_unknown_refresh_cannot_deny_current_cached_key",
+        "services/control-api/tests/auth/test_auth_context.py::test_membership_freshness_boundary[True-30-True]",
+        "services/control-api/tests/auth/test_auth_context.py::test_membership_freshness_boundary[True-31-False]",
+        "services/control-api/tests/auth/test_auth_context.py::test_membership_freshness_boundary[False-300-True]",
+        "services/control-api/tests/auth/test_auth_context.py::test_membership_freshness_boundary[False-301-False]",
+        "services/control-api/tests/auth/test_auth_context.py::test_provider_role_and_email_do_not_grant",
+        "services/control-api/tests/auth/test_auth_context.py::test_sdk_fault_is_sanitized_in_formatted_traceback",
+        "services/control-api/tests/auth/test_auth_context.py::test_key_lookup_expiry_and_backward_clock_fail_closed[2]",
+        "services/control-api/tests/auth/test_auth_context.py::test_key_lookup_expiry_and_backward_clock_fail_closed[-2]",
+        "services/control-api/tests/auth/test_auth_context.py::test_closed_context_rejects_malformed_wire_fields[unexpected-True]",
+        "services/control-api/tests/auth/test_auth_context.py::test_closed_context_rejects_malformed_wire_fields[session_generation-True]",
+        "services/control-api/tests/auth/test_auth_context.py::test_closed_context_rejects_malformed_wire_fields[session_generation-9007199254740992]",
+        "services/control-api/tests/auth/test_auth_context.py::test_closed_context_rejects_malformed_wire_fields[session_id-]",
+        "services/control-api/tests/auth/test_auth_context.py::test_closed_context_rejects_malformed_wire_fields[identity_checked_at-2026-11-15T12:00:00-03:00]",
+        "services/control-api/tests/auth/test_auth_context.py::test_closed_context_rejects_malformed_wire_fields[delegated_grant_id-forged-grant]",
+        "services/control-api/tests/auth/test_auth_context.py::test_missing_or_zero_credential_policy_fails_closed",
+        "services/control-api/tests/auth/test_auth_context.py::test_bounded_sdk_backend_rejects_redirect_and_oversize[302-0]",
+        "services/control-api/tests/auth/test_auth_context.py::test_bounded_sdk_backend_rejects_redirect_and_oversize[200-1048577]",
+        "services/control-api/tests/auth/test_auth_context.py::test_bounded_sdk_backend_rejects_redirect_and_oversize[500-50]",
+        "services/control-api/tests/auth/test_auth_context.py::test_sdk_backend_caller_deadline_and_worker_cleanup_are_distinct",
+        "services/control-api/tests/auth/test_session_context.py::test_valid_session_has_exact_scope",
+        "services/control-api/tests/auth/test_session_context.py::test_member_of_b_cannot_reuse_a_context",
+        "services/control-api/tests/auth/test_session_context.py::test_zero_org_identity_has_finite_allowlist",
+        "services/control-api/tests/auth/test_session_context.py::test_current_context_never_fabricates_selection[unselected]",
+        "services/control-api/tests/auth/test_session_context.py::test_current_context_never_fabricates_selection[mismatch]",
+        "services/control-api/tests/auth/test_session_context.py::test_current_context_never_fabricates_selection[pending]",
+        "services/control-api/tests/auth/test_session_context.py::test_current_context_never_fabricates_selection[removed]",
+        "services/control-api/tests/auth/test_session_context.py::test_session_ending_is_idempotent_and_other_sessions_untouched",
+        "services/control-api/tests/auth/test_session_context.py::test_denial_commit_unknown_is_not_success",
+        "services/control-api/tests/auth/test_session_context.py::test_forged_or_foreign_binding_cannot_select_session",
+        "services/control-api/tests/auth/test_session_context.py::test_old_generation_cannot_admit_delayed_request",
+        "services/control-api/tests/auth/test_session_context.py::test_actual_context_route_ignores_forwarded_context",
+        "services/control-api/tests/auth/test_session_context.py::test_invalid_route_identity_has_safe_closed_error",
+        "services/control-api/tests/auth/test_session_context.py::test_provider_wait_cannot_return_old_selected_context[ended-authorization]",
+        "services/control-api/tests/auth/test_session_context.py::test_provider_wait_cannot_return_old_selected_context[ended-current]",
+        "services/control-api/tests/auth/test_session_context.py::test_provider_wait_cannot_return_old_selected_context[generation-authorization]",
+        "services/control-api/tests/auth/test_session_context.py::test_provider_wait_cannot_return_old_selected_context[generation-current]",
+        "services/control-api/tests/auth/test_session_context.py::test_provider_wait_cannot_return_old_selected_context[selection-authorization]",
+        "services/control-api/tests/auth/test_session_context.py::test_provider_wait_cannot_return_old_selected_context[selection-current]",
+        "services/control-api/tests/auth/test_session_context.py::test_provider_wait_cannot_return_old_selected_context[reconciliation-authorization]",
+        "services/control-api/tests/auth/test_session_context.py::test_provider_wait_cannot_return_old_selected_context[reconciliation-current]",
+        "services/control-api/tests/auth/test_session_context.py::test_provider_wait_cannot_return_old_selected_context[removed-authorization]",
+        "services/control-api/tests/auth/test_session_context.py::test_provider_wait_cannot_return_old_selected_context[removed-current]",
+        "services/control-api/tests/auth/test_session_context.py::test_removed_selection_preserves_only_authenticated_recovery_binding",
+        "services/control-api/tests/auth/test_session_context.py::test_provider_wait_cannot_extend_expiry_or_freshness[2]",
+        "services/control-api/tests/auth/test_session_context.py::test_provider_wait_cannot_extend_expiry_or_freshness[-2]",
+        "services/control-api/tests/auth/test_session_context.py::test_provider_wait_cannot_extend_expiry_or_freshness[31]",
+        "services/control-api/tests/auth/test_session_context.py::test_actual_sdk_fault_body_never_reaches_api_or_logs",
+        "services/control-api/tests/auth/test_session_context.py::test_final_state_read_cannot_hide_denial_or_time_passage[provider_denial]",
+        "services/control-api/tests/auth/test_session_context.py::test_final_state_read_cannot_hide_denial_or_time_passage[expiry]",
+        "services/control-api/tests/auth/test_session_context.py::test_final_state_read_cannot_hide_denial_or_time_passage[freshness]",
+        "services/control-api/tests/auth/test_session_context.py::test_admission_logs_only_safe_freshness_metadata",
+        "services/control-api/tests/auth/test_session_context.py::test_pending_provider_context_never_fabricates_removal[pending_identity]",
+        "services/control-api/tests/auth/test_session_context.py::test_pending_provider_context_never_fabricates_removal[reconciliation_unknown]",
+        "services/control-api/tests/auth/test_identity_sync.py::test_remove_then_late_active_stays_denied",
+        "services/control-api/tests/auth/test_identity_sync.py::test_duplicate_and_conflicting_event_digest",
+        "services/control-api/tests/auth/test_identity_sync.py::test_crash_before_cursor_commit_replays_once",
+        "services/control-api/tests/auth/test_identity_sync.py::test_current_fetch_unknown_does_not_advance_cursor",
+        "services/control-api/tests/auth/test_identity_sync.py::test_unconfirmed_identity_never_grants[pending_identity]",
+        "services/control-api/tests/auth/test_identity_sync.py::test_unconfirmed_identity_never_grants[reconciliation_unknown]",
+        "services/control-api/tests/auth/test_identity_sync.py::test_unconfirmed_identity_never_grants[removed]",
+        "services/control-api/tests/auth/test_identity_sync.py::test_conflicting_scope_fails_batch",
+        "services/control-api/tests/auth/test_identity_sync.py::test_revoked_session_cannot_be_recreated",
+        "services/control-api/tests/auth/test_identity_sync.py::test_webhook_wakeup_never_applies_payload",
+        "services/control-api/tests/auth/test_sealing.py::test_sealed_payload_scope_expiry_rotation_and_tampering",
+        "services/control-api/tests/auth/test_sealing.py::test_no_implicit_sealing_key_or_lifetime_extension",
+        "services/control-api/tests/auth/test_identity_postgres.py::test_runtime_role_and_migration_are_real[customer_controlled]",
+        "services/control-api/tests/auth/test_identity_postgres.py::test_runtime_role_and_migration_are_real[opentour_managed]",
+        "services/control-api/tests/auth/test_identity_postgres.py::test_router_uses_committed_state_and_durable_end[customer_controlled]",
+        "services/control-api/tests/auth/test_identity_postgres.py::test_router_uses_committed_state_and_durable_end[opentour_managed]",
+        "services/control-api/tests/auth/test_identity_postgres.py::test_atomic_admission_credentials_and_late_refresh_denial[customer_controlled]",
+        "services/control-api/tests/auth/test_identity_postgres.py::test_atomic_admission_credentials_and_late_refresh_denial[opentour_managed]",
+        "services/control-api/tests/auth/test_identity_postgres.py::test_failed_admission_rolls_back_binding_and_session[customer_controlled]",
+        "services/control-api/tests/auth/test_identity_postgres.py::test_failed_admission_rolls_back_binding_and_session[opentour_managed]",
+        "services/control-api/tests/auth/test_identity_postgres.py::test_duplicate_callback_claim_has_one_durable_winner[customer_controlled]",
+        "services/control-api/tests/auth/test_identity_postgres.py::test_duplicate_callback_claim_has_one_durable_winner[opentour_managed]",
+        "services/control-api/tests/auth/test_identity_postgres.py::test_cursor_batch_rollback_replay_and_sticky_denial[customer_controlled]",
+        "services/control-api/tests/auth/test_identity_postgres.py::test_cursor_batch_rollback_replay_and_sticky_denial[opentour_managed]",
+        "services/control-api/tests/auth/test_identity_postgres.py::test_unknown_session_revocation_prevents_future_admission[customer_controlled]",
+        "services/control-api/tests/auth/test_identity_postgres.py::test_unknown_session_revocation_prevents_future_admission[opentour_managed]",
+        "services/control-api/tests/auth/test_identity_postgres.py::test_stale_subject_generation_and_expired_credentials_refuse[customer_controlled]",
+        "services/control-api/tests/auth/test_identity_postgres.py::test_stale_subject_generation_and_expired_credentials_refuse[opentour_managed]",
+        "services/control-api/tests/auth/test_identity_postgres.py::test_configured_typescript_factories_with_actual_durable_ports[customer_controlled]",
+        "services/control-api/tests/auth/test_identity_postgres.py::test_configured_typescript_factories_with_actual_durable_ports[opentour_managed]",
+        "apps/web/lib/server/authkit-adapter.test.ts::0",
+        "apps/web/lib/server/authkit-adapter.test.ts::1",
+        "apps/web/lib/server/authkit-adapter.test.ts::2",
+        "apps/web/lib/server/authkit-adapter.test.ts::3",
+        "apps/web/lib/server/authkit-adapter.test.ts::4",
+        "apps/web/lib/server/authkit-adapter.test.ts::5",
+        "apps/web/lib/server/authkit-adapter.test.ts::6",
+        "apps/web/lib/server/authkit-adapter.test.ts::7",
+        "apps/web/lib/server/authkit-adapter.test.ts::8",
+        "apps/web/lib/server/authkit-adapter.test.ts::9",
+        "apps/web/lib/server/authkit-adapter.test.ts::10",
+        "apps/web/lib/server/authkit-adapter.test.ts::11",
+        "apps/web/lib/server/authkit-adapter.test.ts::12",
+        "apps/web/lib/server/authkit-adapter.test.ts::13",
+        "apps/web/lib/server/authkit-adapter.test.ts::14",
+        "apps/web/lib/server/authkit-adapter.test.ts::15",
+        "apps/web/lib/server/authkit-adapter.test.ts::16",
+        "apps/web/lib/server/authkit-adapter.test.ts::17",
+        "apps/web/lib/server/authkit-adapter.test.ts::18",
+        "apps/web/lib/server/authkit-adapter.test.ts::19",
+        "apps/web/lib/server/authkit-adapter.test.ts::20",
+        "apps/web/lib/server/authkit-adapter.test.ts::21",
+        "apps/web/lib/server/authkit-adapter.test.ts::22",
+        "apps/web/lib/server/authkit-adapter.test.ts::23",
+        "apps/web/lib/server/authkit-adapter.test.ts::24",
+        "apps/web/lib/server/authkit-adapter.test.ts::25",
+        "apps/web/lib/server/authkit-adapter.test.ts::26",
+        "apps/web/lib/server/authkit-adapter.test.ts::27",
+        "apps/web/lib/server/authkit-adapter.test.ts::28",
+        "apps/web/lib/server/authkit-adapter.test.ts::29",
+        "apps/web/lib/server/authkit-adapter.test.ts::30",
+        "apps/web/lib/server/authkit-adapter.test.ts::31",
+        "apps/web/lib/server/authkit-adapter.test.ts::32",
+        "apps/web/lib/server/authkit-adapter.test.ts::33",
+        "apps/web/lib/server/authkit-adapter.test.ts::34",
+        "apps/web/lib/server/authkit-adapter.test.ts::35",
+        "apps/web/lib/server/authkit-adapter.test.ts::36",
+        "apps/web/lib/server/authkit-adapter.test.ts::37",
+        "apps/web/lib/server/authkit-adapter.test.ts::38",
+        "apps/web/lib/server/authkit-adapter.test.ts::39",
+        "apps/web/lib/server/authkit-adapter.test.ts::40",
+        "apps/web/lib/server/authkit-adapter.test.ts::41",
+        "apps/web/lib/server/authkit-adapter.test.ts::42",
+        "apps/web/lib/server/authkit-adapter.test.ts::43",
+        "apps/web/lib/server/authkit-adapter.test.ts::44",
+        "apps/web/lib/server/authkit-adapter.test.ts::45",
+        "apps/web/lib/server/authkit-adapter.test.ts::46",
+        "apps/web/lib/server/authkit-adapter.test.ts::47",
+        "apps/web/lib/server/authkit-adapter.test.ts::48",
+        "apps/web/lib/server/authkit-adapter.test.ts::49",
+        "apps/web/lib/server/authkit-adapter.test.ts::50",
+        "apps/web/lib/server/authkit-adapter.test.ts::51"
+      ],
       "real_evidence_requirements": [
         {
           "requirement_id": "OT-P01-C01-AC01",
@@ -46427,6 +48438,82 @@
     {
       "path": "services/control-api/tests/migrations/test_expand_contract.py",
       "owner": "OPE-213"
+    },
+    {
+      "path": "apps/web/app/auth/callback/route.ts",
+      "owner": "OPE-142"
+    },
+    {
+      "path": "apps/web/app/auth/signin/route.ts",
+      "owner": "OPE-142"
+    },
+    {
+      "path": "apps/web/lib/server/authkit-adapter.test.ts",
+      "owner": "OPE-142"
+    },
+    {
+      "path": "apps/web/lib/server/authkit-adapter.ts",
+      "owner": "OPE-142"
+    },
+    {
+      "path": "apps/web/lib/server/tsconfig.json",
+      "owner": "OPE-142"
+    },
+    {
+      "path": "services/control-api/migrations/0001_identity_state.sql",
+      "owner": "OPE-142"
+    },
+    {
+      "path": "services/control-api/src/opentour_control/auth/README.md",
+      "owner": "OPE-142"
+    },
+    {
+      "path": "services/control-api/src/opentour_control/auth/__init__.py",
+      "owner": "OPE-142"
+    },
+    {
+      "path": "services/control-api/src/opentour_control/auth/config.py",
+      "owner": "OPE-142"
+    },
+    {
+      "path": "services/control-api/src/opentour_control/auth/identity_sync.py",
+      "owner": "OPE-142"
+    },
+    {
+      "path": "services/control-api/src/opentour_control/auth/repository.py",
+      "owner": "OPE-142"
+    },
+    {
+      "path": "services/control-api/src/opentour_control/auth/workos_provider.py",
+      "owner": "OPE-142"
+    },
+    {
+      "path": "services/control-api/tests/auth/auth_postgres_bridge.py",
+      "owner": "OPE-142"
+    },
+    {
+      "path": "services/control-api/tests/auth/authkit_postgres_probe.mjs",
+      "owner": "OPE-142"
+    },
+    {
+      "path": "services/control-api/tests/auth/conftest.py",
+      "owner": "OPE-142"
+    },
+    {
+      "path": "services/control-api/tests/auth/test_auth_context.py",
+      "owner": "OPE-142"
+    },
+    {
+      "path": "services/control-api/tests/auth/test_identity_postgres.py",
+      "owner": "OPE-142"
+    },
+    {
+      "path": "services/control-api/tests/auth/test_identity_sync.py",
+      "owner": "OPE-142"
+    },
+    {
+      "path": "services/control-api/tests/auth/test_sealing.py",
+      "owner": "OPE-142"
     }
   ],
   "ownership_handoffs": [
@@ -49817,6 +51904,1814 @@
       "kind": "local_integration",
       "mode": null,
       "fixture_id": "environment-schema-compatibility",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC02"
+      ],
+      "test_id": "services/control-api/tests/auth/test_auth_context.py::test_invalid_claims_deny_before_local_lookup[iss-https://foreign.invalid/]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC02"
+      ],
+      "test_id": "services/control-api/tests/auth/test_auth_context.py::test_invalid_claims_deny_before_local_lookup[aud-foreign]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC02"
+      ],
+      "test_id": "services/control-api/tests/auth/test_auth_context.py::test_invalid_claims_deny_before_local_lookup[aud-None]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC02"
+      ],
+      "test_id": "services/control-api/tests/auth/test_auth_context.py::test_invalid_claims_deny_before_local_lookup[aud-value3]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC02"
+      ],
+      "test_id": "services/control-api/tests/auth/test_auth_context.py::test_invalid_claims_deny_before_local_lookup[sub-value4]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC02"
+      ],
+      "test_id": "services/control-api/tests/auth/test_auth_context.py::test_invalid_claims_deny_before_local_lookup[sid-]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC02"
+      ],
+      "test_id": "services/control-api/tests/auth/test_auth_context.py::test_invalid_claims_deny_before_local_lookup[auth_time-None]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC02"
+      ],
+      "test_id": "services/control-api/tests/auth/test_auth_context.py::test_invalid_claims_deny_before_local_lookup[auth_time-True]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC02"
+      ],
+      "test_id": "services/control-api/tests/auth/test_auth_context.py::test_invalid_claims_deny_before_local_lookup[exp-0]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC02"
+      ],
+      "test_id": "services/control-api/tests/auth/test_auth_context.py::test_invalid_claims_deny_before_local_lookup[sub_profile-ai_agent]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC02"
+      ],
+      "test_id": "services/control-api/tests/auth/test_auth_context.py::test_invalid_claims_deny_before_local_lookup[sub_type-widget]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC02"
+      ],
+      "test_id": "services/control-api/tests/auth/test_auth_context.py::test_exact_expiry_and_client_clock_cannot_extend",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC02"
+      ],
+      "test_id": "services/control-api/tests/auth/test_auth_context.py::test_algorithm_substitution[none]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC02"
+      ],
+      "test_id": "services/control-api/tests/auth/test_auth_context.py::test_algorithm_substitution[HS256]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC02"
+      ],
+      "test_id": "services/control-api/tests/auth/test_auth_context.py::test_signature_tamper",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC02"
+      ],
+      "test_id": "services/control-api/tests/auth/test_auth_context.py::test_unknown_key_refresh_is_bounded",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC02"
+      ],
+      "test_id": "services/control-api/tests/auth/test_auth_context.py::test_token_cannot_choose_key_endpoint[jku]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC02"
+      ],
+      "test_id": "services/control-api/tests/auth/test_auth_context.py::test_token_cannot_choose_key_endpoint[jwk]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC02"
+      ],
+      "test_id": "services/control-api/tests/auth/test_auth_context.py::test_token_cannot_choose_key_endpoint[x5u]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC02"
+      ],
+      "test_id": "services/control-api/tests/auth/test_auth_context.py::test_duplicate_jwks_key_id_is_not_ambiguous_allow",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC02"
+      ],
+      "test_id": "services/control-api/tests/auth/test_auth_context.py::test_slow_key_refresh_never_queues_or_admits_late_result",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC01",
+        "OT-P01-C01-AC02"
+      ],
+      "test_id": "services/control-api/tests/auth/test_auth_context.py::test_scoped_context_schema_and_unknown_assurance",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC02"
+      ],
+      "test_id": "services/control-api/tests/auth/test_auth_context.py::test_unknown_refresh_cannot_deny_current_cached_key",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC01",
+        "OT-P01-C01-AC02"
+      ],
+      "test_id": "services/control-api/tests/auth/test_auth_context.py::test_membership_freshness_boundary[True-30-True]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC01",
+        "OT-P01-C01-AC02"
+      ],
+      "test_id": "services/control-api/tests/auth/test_auth_context.py::test_membership_freshness_boundary[True-31-False]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC01",
+        "OT-P01-C01-AC02"
+      ],
+      "test_id": "services/control-api/tests/auth/test_auth_context.py::test_membership_freshness_boundary[False-300-True]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC01",
+        "OT-P01-C01-AC02"
+      ],
+      "test_id": "services/control-api/tests/auth/test_auth_context.py::test_membership_freshness_boundary[False-301-False]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC01",
+        "OT-P01-C01-AC03"
+      ],
+      "test_id": "services/control-api/tests/auth/test_auth_context.py::test_provider_role_and_email_do_not_grant",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC02"
+      ],
+      "test_id": "services/control-api/tests/auth/test_auth_context.py::test_sdk_fault_is_sanitized_in_formatted_traceback",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC02"
+      ],
+      "test_id": "services/control-api/tests/auth/test_auth_context.py::test_key_lookup_expiry_and_backward_clock_fail_closed[2]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC02"
+      ],
+      "test_id": "services/control-api/tests/auth/test_auth_context.py::test_key_lookup_expiry_and_backward_clock_fail_closed[-2]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC01",
+        "OT-P01-C01-AC02"
+      ],
+      "test_id": "services/control-api/tests/auth/test_auth_context.py::test_closed_context_rejects_malformed_wire_fields[unexpected-True]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC01",
+        "OT-P01-C01-AC02"
+      ],
+      "test_id": "services/control-api/tests/auth/test_auth_context.py::test_closed_context_rejects_malformed_wire_fields[session_generation-True]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC01",
+        "OT-P01-C01-AC02"
+      ],
+      "test_id": "services/control-api/tests/auth/test_auth_context.py::test_closed_context_rejects_malformed_wire_fields[session_generation-9007199254740992]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC01",
+        "OT-P01-C01-AC02"
+      ],
+      "test_id": "services/control-api/tests/auth/test_auth_context.py::test_closed_context_rejects_malformed_wire_fields[session_id-]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC01",
+        "OT-P01-C01-AC02"
+      ],
+      "test_id": "services/control-api/tests/auth/test_auth_context.py::test_closed_context_rejects_malformed_wire_fields[identity_checked_at-2026-11-15T12:00:00-03:00]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC01",
+        "OT-P01-C01-AC02"
+      ],
+      "test_id": "services/control-api/tests/auth/test_auth_context.py::test_closed_context_rejects_malformed_wire_fields[delegated_grant_id-forged-grant]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC02"
+      ],
+      "test_id": "services/control-api/tests/auth/test_auth_context.py::test_missing_or_zero_credential_policy_fails_closed",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC02"
+      ],
+      "test_id": "services/control-api/tests/auth/test_auth_context.py::test_bounded_sdk_backend_rejects_redirect_and_oversize[302-0]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC02"
+      ],
+      "test_id": "services/control-api/tests/auth/test_auth_context.py::test_bounded_sdk_backend_rejects_redirect_and_oversize[200-1048577]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC02"
+      ],
+      "test_id": "services/control-api/tests/auth/test_auth_context.py::test_bounded_sdk_backend_rejects_redirect_and_oversize[500-50]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC02"
+      ],
+      "test_id": "services/control-api/tests/auth/test_auth_context.py::test_sdk_backend_caller_deadline_and_worker_cleanup_are_distinct",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC01",
+        "OT-P01-C01-AC02",
+        "OT-P01-C01-AC03"
+      ],
+      "test_id": "services/control-api/tests/auth/test_session_context.py::test_valid_session_has_exact_scope",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC03"
+      ],
+      "test_id": "services/control-api/tests/auth/test_session_context.py::test_member_of_b_cannot_reuse_a_context",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC01",
+        "OT-P01-C01-AC02"
+      ],
+      "test_id": "services/control-api/tests/auth/test_session_context.py::test_zero_org_identity_has_finite_allowlist",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC01",
+        "OT-P01-C01-AC02",
+        "OT-P01-C01-AC03"
+      ],
+      "test_id": "services/control-api/tests/auth/test_session_context.py::test_current_context_never_fabricates_selection[unselected]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC01",
+        "OT-P01-C01-AC02",
+        "OT-P01-C01-AC03"
+      ],
+      "test_id": "services/control-api/tests/auth/test_session_context.py::test_current_context_never_fabricates_selection[mismatch]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC01",
+        "OT-P01-C01-AC02",
+        "OT-P01-C01-AC03"
+      ],
+      "test_id": "services/control-api/tests/auth/test_session_context.py::test_current_context_never_fabricates_selection[pending]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC01",
+        "OT-P01-C01-AC02",
+        "OT-P01-C01-AC03"
+      ],
+      "test_id": "services/control-api/tests/auth/test_session_context.py::test_current_context_never_fabricates_selection[removed]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC02"
+      ],
+      "test_id": "services/control-api/tests/auth/test_session_context.py::test_session_ending_is_idempotent_and_other_sessions_untouched",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC02"
+      ],
+      "test_id": "services/control-api/tests/auth/test_session_context.py::test_denial_commit_unknown_is_not_success",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC02",
+        "OT-P01-C01-AC03"
+      ],
+      "test_id": "services/control-api/tests/auth/test_session_context.py::test_forged_or_foreign_binding_cannot_select_session",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC02",
+        "OT-P01-C01-AC03"
+      ],
+      "test_id": "services/control-api/tests/auth/test_session_context.py::test_old_generation_cannot_admit_delayed_request",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC01",
+        "OT-P01-C01-AC02",
+        "OT-P01-C01-AC03"
+      ],
+      "test_id": "services/control-api/tests/auth/test_session_context.py::test_actual_context_route_ignores_forwarded_context",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC02"
+      ],
+      "test_id": "services/control-api/tests/auth/test_session_context.py::test_invalid_route_identity_has_safe_closed_error",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC02",
+        "OT-P01-C01-AC03"
+      ],
+      "test_id": "services/control-api/tests/auth/test_session_context.py::test_provider_wait_cannot_return_old_selected_context[ended-authorization]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC02",
+        "OT-P01-C01-AC03"
+      ],
+      "test_id": "services/control-api/tests/auth/test_session_context.py::test_provider_wait_cannot_return_old_selected_context[ended-current]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC02",
+        "OT-P01-C01-AC03"
+      ],
+      "test_id": "services/control-api/tests/auth/test_session_context.py::test_provider_wait_cannot_return_old_selected_context[generation-authorization]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC02",
+        "OT-P01-C01-AC03"
+      ],
+      "test_id": "services/control-api/tests/auth/test_session_context.py::test_provider_wait_cannot_return_old_selected_context[generation-current]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC02",
+        "OT-P01-C01-AC03"
+      ],
+      "test_id": "services/control-api/tests/auth/test_session_context.py::test_provider_wait_cannot_return_old_selected_context[selection-authorization]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC02",
+        "OT-P01-C01-AC03"
+      ],
+      "test_id": "services/control-api/tests/auth/test_session_context.py::test_provider_wait_cannot_return_old_selected_context[selection-current]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC02",
+        "OT-P01-C01-AC03"
+      ],
+      "test_id": "services/control-api/tests/auth/test_session_context.py::test_provider_wait_cannot_return_old_selected_context[reconciliation-authorization]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC02",
+        "OT-P01-C01-AC03"
+      ],
+      "test_id": "services/control-api/tests/auth/test_session_context.py::test_provider_wait_cannot_return_old_selected_context[reconciliation-current]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC02",
+        "OT-P01-C01-AC03"
+      ],
+      "test_id": "services/control-api/tests/auth/test_session_context.py::test_provider_wait_cannot_return_old_selected_context[removed-authorization]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC02",
+        "OT-P01-C01-AC03"
+      ],
+      "test_id": "services/control-api/tests/auth/test_session_context.py::test_provider_wait_cannot_return_old_selected_context[removed-current]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC02"
+      ],
+      "test_id": "services/control-api/tests/auth/test_session_context.py::test_removed_selection_preserves_only_authenticated_recovery_binding",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC02"
+      ],
+      "test_id": "services/control-api/tests/auth/test_session_context.py::test_provider_wait_cannot_extend_expiry_or_freshness[2]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC02"
+      ],
+      "test_id": "services/control-api/tests/auth/test_session_context.py::test_provider_wait_cannot_extend_expiry_or_freshness[-2]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC02"
+      ],
+      "test_id": "services/control-api/tests/auth/test_session_context.py::test_provider_wait_cannot_extend_expiry_or_freshness[31]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC02"
+      ],
+      "test_id": "services/control-api/tests/auth/test_session_context.py::test_actual_sdk_fault_body_never_reaches_api_or_logs",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC02"
+      ],
+      "test_id": "services/control-api/tests/auth/test_session_context.py::test_final_state_read_cannot_hide_denial_or_time_passage[provider_denial]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC02"
+      ],
+      "test_id": "services/control-api/tests/auth/test_session_context.py::test_final_state_read_cannot_hide_denial_or_time_passage[expiry]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC02"
+      ],
+      "test_id": "services/control-api/tests/auth/test_session_context.py::test_final_state_read_cannot_hide_denial_or_time_passage[freshness]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC01",
+        "OT-P01-C01-AC02"
+      ],
+      "test_id": "services/control-api/tests/auth/test_session_context.py::test_admission_logs_only_safe_freshness_metadata",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC01",
+        "OT-P01-C01-AC02"
+      ],
+      "test_id": "services/control-api/tests/auth/test_session_context.py::test_pending_provider_context_never_fabricates_removal[pending_identity]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC01",
+        "OT-P01-C01-AC02"
+      ],
+      "test_id": "services/control-api/tests/auth/test_session_context.py::test_pending_provider_context_never_fabricates_removal[reconciliation_unknown]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC02"
+      ],
+      "test_id": "services/control-api/tests/auth/test_identity_sync.py::test_remove_then_late_active_stays_denied",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC01",
+        "OT-P01-C01-AC02"
+      ],
+      "test_id": "services/control-api/tests/auth/test_identity_sync.py::test_duplicate_and_conflicting_event_digest",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC01",
+        "OT-P01-C01-AC02"
+      ],
+      "test_id": "services/control-api/tests/auth/test_identity_sync.py::test_crash_before_cursor_commit_replays_once",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC02"
+      ],
+      "test_id": "services/control-api/tests/auth/test_identity_sync.py::test_current_fetch_unknown_does_not_advance_cursor",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC01",
+        "OT-P01-C01-AC02"
+      ],
+      "test_id": "services/control-api/tests/auth/test_identity_sync.py::test_unconfirmed_identity_never_grants[pending_identity]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC01",
+        "OT-P01-C01-AC02"
+      ],
+      "test_id": "services/control-api/tests/auth/test_identity_sync.py::test_unconfirmed_identity_never_grants[reconciliation_unknown]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC01",
+        "OT-P01-C01-AC02"
+      ],
+      "test_id": "services/control-api/tests/auth/test_identity_sync.py::test_unconfirmed_identity_never_grants[removed]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC02"
+      ],
+      "test_id": "services/control-api/tests/auth/test_identity_sync.py::test_conflicting_scope_fails_batch",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC02"
+      ],
+      "test_id": "services/control-api/tests/auth/test_identity_sync.py::test_revoked_session_cannot_be_recreated",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC02"
+      ],
+      "test_id": "services/control-api/tests/auth/test_identity_sync.py::test_webhook_wakeup_never_applies_payload",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC02",
+        "OT-P01-C01-AC03"
+      ],
+      "test_id": "services/control-api/tests/auth/test_sealing.py::test_sealed_payload_scope_expiry_rotation_and_tampering",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC02"
+      ],
+      "test_id": "services/control-api/tests/auth/test_sealing.py::test_no_implicit_sealing_key_or_lifetime_extension",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC01",
+        "OT-P01-C01-AC02"
+      ],
+      "test_id": "services/control-api/tests/auth/test_identity_postgres.py::test_runtime_role_and_migration_are_real[customer_controlled]",
+      "kind": "local_integration",
+      "mode": "customer_controlled",
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC01",
+        "OT-P01-C01-AC02"
+      ],
+      "test_id": "services/control-api/tests/auth/test_identity_postgres.py::test_runtime_role_and_migration_are_real[opentour_managed]",
+      "kind": "local_integration",
+      "mode": "opentour_managed",
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC01",
+        "OT-P01-C01-AC02"
+      ],
+      "test_id": "services/control-api/tests/auth/test_identity_postgres.py::test_router_uses_committed_state_and_durable_end[customer_controlled]",
+      "kind": "local_integration",
+      "mode": "customer_controlled",
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC01",
+        "OT-P01-C01-AC02"
+      ],
+      "test_id": "services/control-api/tests/auth/test_identity_postgres.py::test_router_uses_committed_state_and_durable_end[opentour_managed]",
+      "kind": "local_integration",
+      "mode": "opentour_managed",
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC01",
+        "OT-P01-C01-AC02"
+      ],
+      "test_id": "services/control-api/tests/auth/test_identity_postgres.py::test_atomic_admission_credentials_and_late_refresh_denial[customer_controlled]",
+      "kind": "local_integration",
+      "mode": "customer_controlled",
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC01",
+        "OT-P01-C01-AC02"
+      ],
+      "test_id": "services/control-api/tests/auth/test_identity_postgres.py::test_atomic_admission_credentials_and_late_refresh_denial[opentour_managed]",
+      "kind": "local_integration",
+      "mode": "opentour_managed",
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC01",
+        "OT-P01-C01-AC02"
+      ],
+      "test_id": "services/control-api/tests/auth/test_identity_postgres.py::test_failed_admission_rolls_back_binding_and_session[customer_controlled]",
+      "kind": "local_integration",
+      "mode": "customer_controlled",
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC01",
+        "OT-P01-C01-AC02"
+      ],
+      "test_id": "services/control-api/tests/auth/test_identity_postgres.py::test_failed_admission_rolls_back_binding_and_session[opentour_managed]",
+      "kind": "local_integration",
+      "mode": "opentour_managed",
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC01",
+        "OT-P01-C01-AC02"
+      ],
+      "test_id": "services/control-api/tests/auth/test_identity_postgres.py::test_duplicate_callback_claim_has_one_durable_winner[customer_controlled]",
+      "kind": "local_integration",
+      "mode": "customer_controlled",
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC01",
+        "OT-P01-C01-AC02"
+      ],
+      "test_id": "services/control-api/tests/auth/test_identity_postgres.py::test_duplicate_callback_claim_has_one_durable_winner[opentour_managed]",
+      "kind": "local_integration",
+      "mode": "opentour_managed",
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC01",
+        "OT-P01-C01-AC02"
+      ],
+      "test_id": "services/control-api/tests/auth/test_identity_postgres.py::test_cursor_batch_rollback_replay_and_sticky_denial[customer_controlled]",
+      "kind": "local_integration",
+      "mode": "customer_controlled",
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC01",
+        "OT-P01-C01-AC02"
+      ],
+      "test_id": "services/control-api/tests/auth/test_identity_postgres.py::test_cursor_batch_rollback_replay_and_sticky_denial[opentour_managed]",
+      "kind": "local_integration",
+      "mode": "opentour_managed",
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC02"
+      ],
+      "test_id": "services/control-api/tests/auth/test_identity_postgres.py::test_unknown_session_revocation_prevents_future_admission[customer_controlled]",
+      "kind": "local_integration",
+      "mode": "customer_controlled",
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC02"
+      ],
+      "test_id": "services/control-api/tests/auth/test_identity_postgres.py::test_unknown_session_revocation_prevents_future_admission[opentour_managed]",
+      "kind": "local_integration",
+      "mode": "opentour_managed",
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC02"
+      ],
+      "test_id": "services/control-api/tests/auth/test_identity_postgres.py::test_stale_subject_generation_and_expired_credentials_refuse[customer_controlled]",
+      "kind": "local_integration",
+      "mode": "customer_controlled",
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC02"
+      ],
+      "test_id": "services/control-api/tests/auth/test_identity_postgres.py::test_stale_subject_generation_and_expired_credentials_refuse[opentour_managed]",
+      "kind": "local_integration",
+      "mode": "opentour_managed",
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC01",
+        "OT-P01-C01-AC02"
+      ],
+      "test_id": "services/control-api/tests/auth/test_identity_postgres.py::test_configured_typescript_factories_with_actual_durable_ports[customer_controlled]",
+      "kind": "local_integration",
+      "mode": "customer_controlled",
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC01",
+        "OT-P01-C01-AC02"
+      ],
+      "test_id": "services/control-api/tests/auth/test_identity_postgres.py::test_configured_typescript_factories_with_actual_durable_ports[opentour_managed]",
+      "kind": "local_integration",
+      "mode": "opentour_managed",
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC01"
+      ],
+      "test_id": "apps/web/lib/server/authkit-adapter.test.ts::0",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC02"
+      ],
+      "test_id": "apps/web/lib/server/authkit-adapter.test.ts::1",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC02"
+      ],
+      "test_id": "apps/web/lib/server/authkit-adapter.test.ts::2",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC02"
+      ],
+      "test_id": "apps/web/lib/server/authkit-adapter.test.ts::3",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC02"
+      ],
+      "test_id": "apps/web/lib/server/authkit-adapter.test.ts::4",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC02"
+      ],
+      "test_id": "apps/web/lib/server/authkit-adapter.test.ts::5",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC02"
+      ],
+      "test_id": "apps/web/lib/server/authkit-adapter.test.ts::6",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC01",
+        "OT-P01-C01-AC02"
+      ],
+      "test_id": "apps/web/lib/server/authkit-adapter.test.ts::7",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC02"
+      ],
+      "test_id": "apps/web/lib/server/authkit-adapter.test.ts::8",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC02"
+      ],
+      "test_id": "apps/web/lib/server/authkit-adapter.test.ts::9",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC02"
+      ],
+      "test_id": "apps/web/lib/server/authkit-adapter.test.ts::10",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC02"
+      ],
+      "test_id": "apps/web/lib/server/authkit-adapter.test.ts::11",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC02"
+      ],
+      "test_id": "apps/web/lib/server/authkit-adapter.test.ts::12",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC02"
+      ],
+      "test_id": "apps/web/lib/server/authkit-adapter.test.ts::13",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC02"
+      ],
+      "test_id": "apps/web/lib/server/authkit-adapter.test.ts::14",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC02"
+      ],
+      "test_id": "apps/web/lib/server/authkit-adapter.test.ts::15",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC02"
+      ],
+      "test_id": "apps/web/lib/server/authkit-adapter.test.ts::16",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC02"
+      ],
+      "test_id": "apps/web/lib/server/authkit-adapter.test.ts::17",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC02"
+      ],
+      "test_id": "apps/web/lib/server/authkit-adapter.test.ts::18",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC02"
+      ],
+      "test_id": "apps/web/lib/server/authkit-adapter.test.ts::19",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC01",
+        "OT-P01-C01-AC02"
+      ],
+      "test_id": "apps/web/lib/server/authkit-adapter.test.ts::20",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC01",
+        "OT-P01-C01-AC03"
+      ],
+      "test_id": "apps/web/lib/server/authkit-adapter.test.ts::21",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC02"
+      ],
+      "test_id": "apps/web/lib/server/authkit-adapter.test.ts::22",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC02"
+      ],
+      "test_id": "apps/web/lib/server/authkit-adapter.test.ts::23",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC02"
+      ],
+      "test_id": "apps/web/lib/server/authkit-adapter.test.ts::24",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC02"
+      ],
+      "test_id": "apps/web/lib/server/authkit-adapter.test.ts::25",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC02",
+        "OT-P01-C01-AC03"
+      ],
+      "test_id": "apps/web/lib/server/authkit-adapter.test.ts::26",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC02",
+        "OT-P01-C01-AC03"
+      ],
+      "test_id": "apps/web/lib/server/authkit-adapter.test.ts::27",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC02",
+        "OT-P01-C01-AC03"
+      ],
+      "test_id": "apps/web/lib/server/authkit-adapter.test.ts::28",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC02"
+      ],
+      "test_id": "apps/web/lib/server/authkit-adapter.test.ts::29",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC02"
+      ],
+      "test_id": "apps/web/lib/server/authkit-adapter.test.ts::30",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC02"
+      ],
+      "test_id": "apps/web/lib/server/authkit-adapter.test.ts::31",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC02"
+      ],
+      "test_id": "apps/web/lib/server/authkit-adapter.test.ts::32",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC02"
+      ],
+      "test_id": "apps/web/lib/server/authkit-adapter.test.ts::33",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC02",
+        "OT-P01-C01-AC03"
+      ],
+      "test_id": "apps/web/lib/server/authkit-adapter.test.ts::34",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC02",
+        "OT-P01-C01-AC03"
+      ],
+      "test_id": "apps/web/lib/server/authkit-adapter.test.ts::35",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC02",
+        "OT-P01-C01-AC03"
+      ],
+      "test_id": "apps/web/lib/server/authkit-adapter.test.ts::36",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC02"
+      ],
+      "test_id": "apps/web/lib/server/authkit-adapter.test.ts::37",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC02"
+      ],
+      "test_id": "apps/web/lib/server/authkit-adapter.test.ts::38",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC02"
+      ],
+      "test_id": "apps/web/lib/server/authkit-adapter.test.ts::39",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC01",
+        "OT-P01-C01-AC02"
+      ],
+      "test_id": "apps/web/lib/server/authkit-adapter.test.ts::40",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC02"
+      ],
+      "test_id": "apps/web/lib/server/authkit-adapter.test.ts::41",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC02"
+      ],
+      "test_id": "apps/web/lib/server/authkit-adapter.test.ts::42",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC02"
+      ],
+      "test_id": "apps/web/lib/server/authkit-adapter.test.ts::43",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC02"
+      ],
+      "test_id": "apps/web/lib/server/authkit-adapter.test.ts::44",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC02"
+      ],
+      "test_id": "apps/web/lib/server/authkit-adapter.test.ts::45",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC02"
+      ],
+      "test_id": "apps/web/lib/server/authkit-adapter.test.ts::46",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC02"
+      ],
+      "test_id": "apps/web/lib/server/authkit-adapter.test.ts::47",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC02"
+      ],
+      "test_id": "apps/web/lib/server/authkit-adapter.test.ts::48",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC02"
+      ],
+      "test_id": "apps/web/lib/server/authkit-adapter.test.ts::49",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC02"
+      ],
+      "test_id": "apps/web/lib/server/authkit-adapter.test.ts::50",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "identity-session-context",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-142",
+      "requirement_ids": [
+        "OT-P01-C01-AC02"
+      ],
+      "test_id": "apps/web/lib/server/authkit-adapter.test.ts::51",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "identity-session-context",
       "fixture_version": "1"
     }
   ]
