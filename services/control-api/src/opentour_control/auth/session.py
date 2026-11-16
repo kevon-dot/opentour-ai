@@ -230,8 +230,10 @@ class SessionService:
             self._same_membership(session, member, fetched)
             observation = self.repository.record_observation(fetched)
         self._same_membership(session, member, observation)
-        if observation.status != "active" or observation.locally_denied:
+        if observation.status == "removed" or observation.locally_denied:
             raise AuthError("MEMBERSHIP_INACTIVE", 403)
+        if observation.status != "active":
+            raise AuthError("CONTEXT_RECONCILIATION_REQUIRED", 409)
         finished = utc(self.clock())
         if finished < now:
             raise AuthError("IDENTITY_CLOCK_UNAVAILABLE", 503)
@@ -326,8 +328,10 @@ class SessionService:
             if observed is None:
                 raise AuthError("IDENTITY_FRESHNESS_UNAVAILABLE", 503, True)
             self._same_membership(current, member, observed)
-            if observed.locally_denied or observed.status != "active":
+            if observed.locally_denied or observed.status == "removed":
                 raise AuthError("MEMBERSHIP_INACTIVE", 403)
+            if observed.status != "active":
+                raise AuthError("CONTEXT_RECONCILIATION_REQUIRED", 409)
         finished = self._admission_time(token, now)
         if observed is not None:
             maximum = (
@@ -373,7 +377,7 @@ class SessionService:
                 self._admission_time(verified, now)
                 result["session_generation"] = session.generation
                 return result
-            if error.status == 503:
+            if error.status == 503 or error.code == "CONTEXT_RECONCILIATION_REQUIRED":
                 self._after_wait(verified, session, binding)
                 result["state"] = "reconciliation_required"
                 return result

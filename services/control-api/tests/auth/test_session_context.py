@@ -293,3 +293,17 @@ def test_admission_logs_only_safe_freshness_metadata(identity, caplog):
     assert record.identity_freshness_policy_seconds == 30
     assert record.identity_checked_at == record.identity_observed_at
     assert "user_a" not in caplog.text and identity.handle not in caplog.text
+
+
+@pytest.mark.parametrize("status", ["pending_identity", "reconciliation_unknown"])
+def test_pending_provider_context_never_fabricates_removal(identity, status):
+    before = identity.repository.sessions["session_a"]
+    observed = identity.repository.observation(identity.issuer, "provider_a")
+    identity.repository.record_observation(replace(observed, status=status))
+    context = identity.service.current_context(identity.token(), identity.handle, "request_pending")
+    assert context["state"] == "reconciliation_required"
+    assert context["organization_id"] is context["membership_id"] is None
+    assert context["session_generation"] == before.generation
+    assert identity.repository.sessions["session_a"] == before
+    with pytest.raises(AuthError, match="CONTEXT_RECONCILIATION_REQUIRED"):
+        identity.service.authorization_context(identity.token(), identity.handle)
