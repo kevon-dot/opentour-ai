@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime
@@ -11,7 +12,24 @@ from uuid import uuid4
 import psycopg
 from psycopg.rows import dict_row
 
-from .config import MAX_COUNTER, AuthError, digest, timestamp
+from .config import MAX_COUNTER, AuthError, digest, identifier, timestamp
+
+
+def lock_membership_observation(
+    connection: psycopg.Connection[dict[str, Any]], issuer: str, provider_membership_id: str
+) -> None:
+    """Serialize142 observation writes with171/172 activation checks, including absent rows.
+
+    The caller must hold this transaction-scoped lock through its observation read and
+    local activation commit. It grants no UPDATE privilege on identity state.142 writers
+    keep their existing cursor-before-membership lock order; consumers using both must
+    use that same order. Issuer and membership are exact provider identity coordinates.
+    """
+    key = json.dumps(
+        ["opentour-identity-membership-v1", identifier(issuer), identifier(provider_membership_id)],
+        separators=(",", ":"),
+    )
+    connection.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s,0))", (key,))
 
 IdentityStatus = Literal["pending_identity", "active", "removed", "reconciliation_unknown"]
 
@@ -450,6 +468,7 @@ class PostgresIdentityRepository:
             )
             return
         observation = event.observation
+        lock_membership_observation(connection, issuer, observation.membership_id)
         existing = connection.execute(
             "SELECT * FROM opentour_identity.membership_observations "
             "WHERE issuer=%s AND membership_id=%s FOR UPDATE",
