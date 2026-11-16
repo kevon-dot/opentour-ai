@@ -126,6 +126,48 @@ test('200 percent text and long labels reflow without clipping or horizontal ove
   }
 });
 
+test('leaving an unselected focused tab restores the active tab as the keyboard re-entry point', async ({ page }, info) => {
+  await open(page, info);
+  const overview = page.getByRole('tab', { name: 'Overview', exact: true });
+  const details = page.getByRole('tab', { name: 'Details', exact: true });
+  await overview.focus(); await page.keyboard.press('ArrowRight'); await expect(details).toBeFocused();
+  await expect(overview).toHaveAttribute('aria-selected', 'true');
+  await page.keyboard.press('Tab'); await expect(page.getByRole('tabpanel')).toBeFocused();
+  await page.keyboard.press('Shift+Tab'); await expect(overview).toBeFocused();
+  await expect(overview).toHaveAttribute('aria-selected', 'true');
+  await expect(details).toHaveAttribute('aria-selected', 'false');
+});
+
+test('an external controlled selection updates keyboard re-entry without stealing outside focus', async ({ page }, info) => {
+  await open(page, info);
+  await page.getByRole('tab', { name: 'Overview', exact: true }).focus();
+  await page.keyboard.press('ArrowRight'); await page.keyboard.press('Tab');
+  const control = page.getByRole('button', { name: fixtures.selectNotesLabel, exact: true });
+  await control.click(); await expect(control).toBeFocused();
+  const notes = page.getByRole('tab', { name: 'Notes', exact: true });
+  await expect(notes).toHaveAttribute('aria-selected', 'true');
+  await expect(notes).toHaveAttribute('tabindex', '0');
+  await page.keyboard.press('Shift+Tab'); await expect(page.getByRole('tabpanel')).toBeFocused();
+  await page.keyboard.press('Shift+Tab'); await expect(notes).toBeFocused();
+});
+
+for (const state of ['disabled', 'removed'] as const) {
+  test(`a ${state} former roving tab cannot remain the keyboard entry point`, async ({ page }, info) => {
+    await open(page, info);
+    const overview = page.getByRole('tab', { name: 'Overview', exact: true });
+    await overview.focus(); await page.keyboard.press('ArrowRight');
+    await expect(page.getByRole('tab', { name: 'Details', exact: true })).toBeFocused();
+    const label = state === 'disabled' ? fixtures.disableDetailsLabel : fixtures.removeDetailsLabel;
+    await page.getByRole('button', { name: label, exact: true }).click();
+    if (state === 'disabled') await expect(page.getByRole('tab', { name: 'Details', exact: true })).toBeDisabled();
+    else await expect(page.getByRole('tab', { name: 'Details', exact: true })).toHaveCount(0);
+    await expect(page.locator('[role="tab"][tabindex="0"]')).toHaveCount(1);
+    await expect(overview).toHaveAttribute('tabindex', '0');
+    await page.getByRole('tabpanel').focus(); await page.keyboard.press('Shift+Tab');
+    await expect(overview).toBeFocused(); await expect(overview).toHaveAttribute('aria-selected', 'true');
+  });
+}
+
 test('forced colors retains a visible keyboard outline without animations', async ({ page }, info) => {
   await page.emulateMedia({ forcedColors: 'active', reducedMotion: 'reduce' });
   await open(page, info, 768);

@@ -7,6 +7,7 @@ function Gallery() {
   const [selected, setSelected] = useState('overview');
   const [busy, setBusy] = useState(false);
   const [events, setEvents] = useState(0);
+  const [detailsState, setDetailsState] = useState<'enabled' | 'disabled' | 'removed'>('enabled');
   const query = new URLSearchParams(location.search);
   const mode = query.get('mode');
   const tenant = query.get('tenant') === 'b' ? fixtures.tenants[1] : fixtures.tenants[0];
@@ -38,8 +39,14 @@ function Gallery() {
       <div className="examples">{fixtures.badges.map(badge => <Badge key={badge.tone} {...badge} />)}</div>
     </section>
     <section aria-labelledby="tabs-heading"><h2 id="tabs-heading">Manual tab activation</h2>
-      <Tabs label="Generated panels" items={fixtures.tabs.map(item => ({ ...item, panel: item.content }))}
+      <Tabs label="Generated panels" items={fixtures.tabs.filter(item => item.key !== 'details' || detailsState !== 'removed')
+        .map(item => ({ ...item, disabled: ('disabled' in item && item.disabled) || (item.key === 'details' && detailsState === 'disabled'), panel: item.content }))}
         selectedKey={selected} onSelectionChange={setSelected} />
+      <div className="examples" data-example="controlled-tabs">
+        <Button label={fixtures.selectNotesLabel} variant="quiet" onPress={() => setSelected('notes')} />
+        <Button label={fixtures.disableDetailsLabel} variant="quiet" onPress={() => { setSelected('overview'); setDetailsState('disabled'); }} />
+        <Button label={fixtures.removeDetailsLabel} variant="quiet" onPress={() => { setSelected('overview'); setDetailsState('removed'); }} />
+      </div>
     </section>
   </main>;
 }

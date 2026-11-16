@@ -46,6 +46,7 @@ export function Tabs({ label, items, selectedKey, onSelectionChange }: TabsProps
   requireLabel(label);
   const prefix = useId();
   const [focusedKey, setFocusedKey] = useState(selectedKey);
+  const [focusWithin, setFocusWithin] = useState(false);
   const refs = useRef(new Map<string, HTMLButtonElement>());
   const enabled = items.filter(item => !item.disabled);
   if (!enabled.some(item => item.key === selectedKey) ||
@@ -54,7 +55,7 @@ export function Tabs({ label, items, selectedKey, onSelectionChange }: TabsProps
     throw new Error('Tabs require unique keys and an enabled selected item.');
   }
   for (const item of items) requireLabel(item.label);
-  const stopKey = enabled.some(item => item.key === focusedKey) ? focusedKey : selectedKey;
+  const stopKey = focusWithin && enabled.some(item => item.key === focusedKey) ? focusedKey : selectedKey;
   const tabId = (key: string) => `${prefix}-tab-${encodeURIComponent(key)}`;
   const panelId = (key: string) => `${prefix}-panel-${encodeURIComponent(key)}`;
 
@@ -74,7 +75,9 @@ export function Tabs({ label, items, selectedKey, onSelectionChange }: TabsProps
   }
 
   return <div className="ot-tabs">
-    <div role="tablist" aria-label={label} aria-orientation="horizontal" className="ot-tablist">
+    <div role="tablist" aria-label={label} aria-orientation="horizontal" className="ot-tablist"
+      onFocus={() => setFocusWithin(true)}
+      onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget)) setFocusWithin(false); }}>
       {items.map(item => <button key={item.key} type="button" role="tab" id={tabId(item.key)}
         ref={node => { if (node) refs.current.set(item.key, node); else refs.current.delete(item.key); }}
         className="ot-tab" disabled={item.disabled} aria-selected={selectedKey === item.key}

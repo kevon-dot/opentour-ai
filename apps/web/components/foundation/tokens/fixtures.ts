@@ -31,4 +31,7 @@ export const presentationFixtures = {
   invocationLabel: 'Local button events',
   busyLabel: 'Begin local example',
   resetLabel: 'Reset local example',
+  selectNotesLabel: 'Select notes externally',
+  disableDetailsLabel: 'Disable details example',
+  removeDetailsLabel: 'Remove details example',
 } as const;
