@@ -25,6 +25,21 @@ _MANAGED_POPEN = getattr(subprocess, "_opentour_managed_popen", subprocess.Popen
 COMMON = "packages/contracts/common"
 TRACEABILITY_TARGET = "docs/specification/manifest.json"
 MODES = ("customer_controlled", "opentour_managed")
+FOUNDATION_ROOT = "apps/web/components/foundation/tokens"
+FOUNDATION_TARGET = f"{FOUNDATION_ROOT}/visual.spec.ts"
+FOUNDATION_BROWSER_FILES = (
+    FOUNDATION_TARGET,
+    f"{FOUNDATION_ROOT}/index.tsx",
+    f"{FOUNDATION_ROOT}/testing/server.ts",
+    f"{FOUNDATION_ROOT}/testing/index.html",
+    f"{FOUNDATION_ROOT}/testing/gallery.tsx",
+    f"{FOUNDATION_ROOT}/testing/baseline-review.json",
+    "apps/web/styles/product-tokens.css",
+    "apps/web/styles/product-tokens.json",
+    "apps/web/styles/fonts/Geist.woff2",
+    "apps/web/styles/fonts/GeistMono.woff2",
+    "apps/web/styles/fonts/source.json",
+)
 COMMAND_ARITY = {
     "setup": 0,
     "lint": 0,
@@ -778,6 +793,11 @@ def _invoke(
             if runner == "vitest":
                 report = vitest_report(report, invocation)
             code, reason = validate_report(report, invocation, process, root)
+            if runner == "playwright" and target == FOUNDATION_TARGET and code == 0:
+                if {test["mode"] for test in report["tests"]} != set(MODES):
+                    raise CommandError(
+                        "Presentation foundation must execute only actual tests in both modes."
+                    )
             # Pytest codes are not the wrapper's public code vocabulary.
             if runner == "pytest" and consumer is None and process.returncode in {2, 3, 4}:
                 code, reason = 2, "INVALID_CONFIGURATION"
@@ -992,6 +1012,23 @@ def identity_quality_commands(root: Path, command: str) -> list[tuple[str, ...]]
     return [("pnpm", "exec", "tsc", "--project", f"{server}/tsconfig.json")]
 
 
+def foundation_quality_commands(root: Path, command: str) -> list[tuple[str, ...]]:
+    """Check the owned presentation sources with their strict TSX configuration."""
+    if not (root / FOUNDATION_ROOT).exists() and not (root / FOUNDATION_ROOT).is_symlink():
+        return []
+    for path in (
+        FOUNDATION_ROOT,
+        f"{FOUNDATION_ROOT}/tsconfig.json",
+        f"{FOUNDATION_ROOT}/index.tsx",
+        f"{FOUNDATION_ROOT}/testing/server.ts",
+        FOUNDATION_TARGET,
+    ):
+        path_target(root, path)
+    if command == "lint":
+        return [("pnpm", "exec", "oxlint", "--deny-warnings", FOUNDATION_ROOT)]
+    return [("pnpm", "exec", "tsc", "--project", f"{FOUNDATION_ROOT}/tsconfig.json")]
+
+
 def dispatch(
     command: str, args: list[str], root: Path, registry: dict[str, Any], run: Executor
 ) -> list[dict[str, Any]]:
@@ -1040,6 +1077,11 @@ def dispatch(
         profile = registry["browser_profiles"].get(target)
         if profile is None:
             raise CommandError("Declared browser suite has no admitted execution profile yet.")
+        if target == FOUNDATION_TARGET:
+            if profile != {"kind": "simulated", "owner": "OPE-253"}:
+                raise CommandError("Presentation profile does not match its admitted owner.")
+            for path in FOUNDATION_BROWSER_FILES:
+                path_target(root, path)
         if profile["kind"] != "simulated":
             raise CommandError(
                 "Browser integration profile requires its owning authorized harness.",
@@ -1173,6 +1215,7 @@ def dispatch(
         commands[0] = (*commands[0], "infrastructure/environment_contract.py")
     commands.extend(browser_quality_commands(root, command))
     commands.extend(identity_quality_commands(root, command))
+    commands.extend(foundation_quality_commands(root, command))
     steps = []
     for argv in commands:
         step = invoke(argv, root, command, command, run)

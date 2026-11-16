@@ -265,6 +265,10 @@
     "apps/web/tests/browser-harness.browser.spec.ts": {
       "kind": "simulated",
       "owner": "OPE-127"
+    },
+    "apps/web/components/foundation/tokens/visual.spec.ts": {
+      "kind": "simulated",
+      "owner": "OPE-253"
     }
   }
 }
