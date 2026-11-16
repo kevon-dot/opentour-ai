@@ -16,8 +16,9 @@ from typing import Any
 from tools.ci.browser_evidence import retain_browser_evidence
 from tools.ci.policy import CHECKS, check
 from tools.ci.prepare import download, postgres
+from tools.fixtures.python_postgres import present_targets
 from tools.public_content_check import digest, inspect_bytes, load_policy, scan_paths, tracked_paths
-from tools.test_runner import CommandError, Invocation, execute
+from tools.test_runner import CommandError, Invocation, execute, path_target
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -135,6 +136,7 @@ def run_browser(root: Path, env: dict[str, str]) -> dict[str, Any]:
 
 
 def python_unit_selection(root: Path) -> tuple[list[str], list[str]]:
+    local_targets = set(present_targets(root))
     targets = [
         "tests/contract/test_bootstrap.py",
         "tests/contract/test_harness_modes.py",
@@ -147,12 +149,43 @@ def python_unit_selection(root: Path) -> tuple[list[str], list[str]]:
         "services/cell-runtime/tests",
         "services/audit-journal/tests",
         "training/tests",
+        "infrastructure/tests",
     ):
         if (root / target).exists() or (root / target).is_symlink():
-            targets.append(target)
+            # Validate the whole tree before partitioning: a symlink must fail, not
+            # disappear from a glob or move into a different evidence class.
+            path_target(root, target)
+            routed_local = {p for p in local_targets if p.startswith(target + "/")}
+            if not routed_local:
+                # Keep empty present directories: the command must refuse zero tests.
+                targets.append(target)
+            else:
+                # Pytest's pinned default discovery names. Each remaining file keeps
+                # the unit guard; only the finite approved paths go to PostgreSQL CI.
+                targets.extend(
+                    sorted(
+                        str(p.relative_to(root))
+                        for p in (root / target).rglob("*.py")
+                        if (p.name.startswith("test_") or p.name.endswith("_test.py"))
+                        and str(p.relative_to(root)) not in routed_local
+                    )
+                )
         else:
             absent.append(target)
     return targets, absent
+
+
+def web_unit_selection(root: Path) -> list[str]:
+    # Tracked source inventory excludes installed node_modules/build output while
+    # including colocated tests outside apps/web/tests. Browser specs use their own job.
+    targets = sorted(p for p in tracked_paths(root) if p.endswith((".test.ts", ".test.tsx")))
+    if not targets:
+        raise CommandError("No tracked web unit tests exist.", 1)
+    for target in targets:
+        path_target(root, target)
+        if not (root / target).is_file():
+            raise CommandError("Web unit target must be a regular file.", 1)
+    return targets
 
 
 def run_check(name: str, root: Path) -> dict[str, Any]:
@@ -171,6 +204,7 @@ def run_check(name: str, root: Path) -> dict[str, Any]:
         }
     steps: list[dict[str, Any]] = []
     not_implemented_test_roots: list[str] = []
+    routed_local_targets: list[str] = []
     env = safe_environment()
 
     def run(argv: list[str]) -> None:
@@ -186,11 +220,13 @@ def run_check(name: str, root: Path) -> dict[str, Any]:
         if name in {"lint", "typecheck"}:
             run(["just", name])
         elif name == "python-unit":
+            routed_local_targets = list(present_targets(root))
             targets, not_implemented_test_roots = python_unit_selection(root)
             for target in targets:
                 run(["just", "test-python", target])
         elif name == "web-unit":
-            run(["just", "test-web", "packages/contracts/examples/web-command-smoke.test.ts"])
+            for target in web_unit_selection(root):
+                run(["just", "test-web", target])
         elif name == "browser-fixtures":
             env["PLAYWRIGHT_BROWSERS_PATH"] = str(root / ".toolchain/playwright")
             run(["pnpm", "exec", "playwright", "install", "--only-shell", "chromium"])
@@ -203,6 +239,12 @@ def run_check(name: str, root: Path) -> dict[str, Any]:
         elif name == "local-integration":
             env["PATH"] = postgres(root) + os.pathsep + env.get("PATH", "")
             run(["just", "test-integration", "local", "harness-smoke"])
+            routed_local_targets = list(present_targets(root))
+            for target in routed_local_targets:
+                run(["just", "test-python", target])
+                if steps[-1].get("command_evidence", {}).get("kind") != "local_integration":
+                    steps[-1]["status"] = "FAIL"
+                    raise CommandError("PostgreSQL target lacked local integration evidence.", 1)
         elif name == "spec-traceability":
             run(["just", "validate-spec"])
         elif name == "secret-scan":
@@ -256,9 +298,10 @@ def run_check(name: str, root: Path) -> dict[str, Any]:
         "fixture_kind": "local_integration" if name == "local-integration" else "simulated",
         "product_acceptance": "NOT_RUN",
         "not_implemented_product_test_roots": not_implemented_test_roots,
+        "registered_local_integration_targets": routed_local_targets,
         "steps": steps,
         "limits": [
-            "Bootstrap CI only; provider, GPU and customer gates are not qualified",
+            "Repository CI only; provider, GPU and customer gates are not qualified",
             "Artifact upload contains screened structured reports, not arbitrary raw logs",
         ],
     }
