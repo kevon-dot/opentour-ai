@@ -40,5 +40,10 @@
   },
   "reviewer": "Independent Codex coordinator",
   "review_receipt_sha256": "d2e753bdd34df69ccc0898d32fef4587ac4e9dd766656e134db0da6b857ab0ce",
-  "review_scope": "All 16 initial fixture images individually viewed; exact image hashes verified. Product UI and provider acceptance excluded."
+  "review_scope": "All 16 initial fixture images individually viewed; exact image hashes verified. Product UI and provider acceptance excluded.",
+  "reviewed_alternate_policy": {
+    "path": "visual-comparison-policy.json",
+    "sha256": "13209518eb7297b8158bf409a4978b0f6a855f4bd37cc6df1624332be62e8997",
+    "scope": "Two billing320 images only: exact baseline or exact reviewed complete14-pixel vector; no ignored pixels."
+  }
 }

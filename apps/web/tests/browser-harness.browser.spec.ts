@@ -7,6 +7,61 @@ import { mkdtempSync, realpathSync, readFileSync, rmSync, symlinkSync, writeFile
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomBytes, createHash } from 'node:crypto';
+import type { Page, TestInfo } from '@playwright/test';
+import { comparePixels, decodePng, parsePolicy, type VisualPolicy } from './fixtures/harness/visual-comparison.ts';
+
+async function billingGeometry(page: Page) {
+  return page.locator('section[aria-labelledby="view-title"]').evaluate(element => {
+    const rect = element.getBoundingClientRect(); const style = getComputedStyle(element);
+    return { x: rect.x, y: rect.y, width: rect.width, height: rect.height, viewport: [innerWidth, innerHeight], scroll: [scrollX, scrollY], body_height: document.body.scrollHeight, radius: [style.borderTopLeftRadius, style.borderTopRightRadius, style.borderBottomRightRadius, style.borderBottomLeftRadius], border_width: [style.borderTopWidth, style.borderRightWidth, style.borderBottomWidth, style.borderLeftWidth], border_color: [style.borderTopColor, style.borderRightColor, style.borderBottomColor, style.borderLeftColor], border_style: style.borderStyle, background: style.backgroundColor, font: style.fontFamily, font_size: style.fontSize, font_weight: style.fontWeight, line_height: style.lineHeight, device_scale_factor: devicePixelRatio, fonts_ready: document.fonts.status, clock: new Date().toISOString() };
+  });
+}
+const BILLING_GEOMETRY = { x: 20, y: 627, width: 280, height: 609, viewport: [320,1100], scroll: [0,0], body_height: 1360, radius: Array(4).fill('10px'), border_width: Array(4).fill('1px'), border_color: Array(4).fill('rgb(214, 222, 234)'), border_style: 'solid', background: 'rgb(255, 255, 255)', font: 'FixtureInter, sans-serif', font_size: '14px', font_weight: '400', line_height: '21px', device_scale_factor: 1, fonts_ready: 'loaded', clock: FIXTURE.clock };
+
+async function reviewedBillingScreenshot(page: Page, info: TestInfo, path: string, baselineKey: string, policy: VisualPolicy, policyHash: string) {
+  const expectedBytes = readFileSync(path); const expected = decodePng(expectedBytes);
+  const baselineHash = createHash('sha256').update(expectedBytes).digest('hex');
+  expect(baselineHash).toBe(policy.images[baselineKey].baseline_sha256);
+  expect(await billingGeometry(page)).toEqual(BILLING_GEOMETRY);
+  const actual = await page.screenshot({ animations: 'disabled', caret: 'hide' });
+  expect(await billingGeometry(page)).toEqual(BILLING_GEOMETRY);
+  const result = comparePixels(expected, decodePng(actual), policy.vector);
+  // Retain the actual image without masking, re-encoding or replacing any pixel.
+  await info.attach('billing320-raw', { body: actual, contentType: 'image/png' });
+  await info.attach('billing320-comparison', { body: Buffer.from(JSON.stringify({ policy_sha256: policyHash, baseline_sha256: baselineHash, actual_sha256: createHash('sha256').update(actual).digest('hex'), ...result })), contentType: 'application/json' });
+  expect(result.variant, JSON.stringify(result)).not.toBeNull();
+}
+
+async function qualifyBillingAdverse(page: Page, info: TestInfo, path: string, policy: VisualPolicy) {
+  const expected = decodePng(readFileSync(path));
+  expect(await billingGeometry(page)).toEqual(BILLING_GEOMETRY);
+  // Real rendered adverse cases prove the exception cannot hide design changes.
+  for (const [name, css] of [
+    ['position', 'transform:translateX(1px)'],
+    ['border-color', 'border-color:rgb(215,222,234)'],
+    ['radius', 'border-radius:9px'],
+  ]) {
+    const style = await page.addStyleTag({ content: `${policy.component}{${css}}` });
+    try {
+      expect(await billingGeometry(page)).not.toEqual(BILLING_GEOMETRY);
+      const changed = await page.screenshot({ animations: 'disabled', caret: 'hide' });
+      const comparison = comparePixels(expected, decodePng(changed), policy.vector);
+      await info.attach(`billing320-adverse-${name}`, { body: changed, contentType: 'image/png' });
+      await info.attach(`billing320-adverse-${name}-result`, { body: Buffer.from(JSON.stringify({ expected_rejection: true, actual_sha256: createHash('sha256').update(changed).digest('hex'), ...comparison })), contentType: 'application/json' });
+      expect(comparison.variant, name).toBeNull();
+    } finally { await style.evaluate(element => { element.parentNode?.removeChild(element); }); }
+  }
+  const amount = page.locator('#billing-data'); const original = await amount.textContent();
+  try {
+    await amount.evaluate(element => { element.textContent = 'Simulated amount: $13.50 USD · quantity: 12.50'; });
+    const changed = await page.screenshot({ animations: 'disabled', caret: 'hide' });
+    const comparison = comparePixels(expected, decodePng(changed), policy.vector);
+    await info.attach('billing320-adverse-text', { body: changed, contentType: 'image/png' });
+    await info.attach('billing320-adverse-text-result', { body: Buffer.from(JSON.stringify({ expected_rejection: true, actual_sha256: createHash('sha256').update(changed).digest('hex'), ...comparison })), contentType: 'application/json' });
+    expect(comparison.variant, 'Changed billing text').toBeNull();
+  } finally { await amount.evaluate((element, text) => { element.textContent = text; }, original); }
+  expect(await billingGeometry(page)).toEqual(BILLING_GEOMETRY);
+}
 
 test('BH-STATES: loading, empty, pending, unknown, denied, success and recovery', async ({ page, harness }) => {
   await harness.open('loading'); await expect(page.getByRole('status')).toHaveText('Loading');
@@ -105,10 +160,14 @@ test('BH-RESET: account and storage state start isolated', async ({ page, harnes
   const isolated = await browser.newContext(); const violations = await guard(isolated);
   try { const next = await isolated.newPage(); await next.goto(`${process.env.OPENTOUR_FIXTURE_ORIGIN}/__harness/ready`); expect(await next.evaluate(() => [localStorage.length, sessionStorage.length])).toEqual([0,0]); expect(violations).toEqual([]); } finally { await isolated.close(); }
 });
-test('BH-DETERMINISM, BH-RESPONSIVE and BH-BILLING: reviewed zero-pixel route baselines', async ({ page, harness }, info) => {
+test('BH-DETERMINISM, BH-RESPONSIVE and BH-BILLING: reviewed route baselines and bounded corner alternative', async ({ page, harness }, info) => {
   const root = process.env.OPENTOUR_REPOSITORY_ROOT!;
   const baseline = JSON.parse(readFileSync(join(root,'apps/web/tests/fixtures/harness/baseline-review.json'),'utf8'));
   const authoring = !!process.env.OPENTOUR_BASELINE_REVIEW_REASON;
+  const policyBytes = readFileSync(join(root, 'apps/web/tests/fixtures/harness/visual-comparison-policy.json'));
+  const policyHash = createHash('sha256').update(policyBytes).digest('hex');
+  const policy = parsePolicy(policyBytes);
+  expect(policyHash).toBe(baseline.reviewed_alternate_policy.sha256);
   if (!authoring) {
     expect(baseline.review_status).toBe('APPROVED');
     expect(baseline.platform).toBe(process.platform);
@@ -129,8 +188,15 @@ test('BH-DETERMINISM, BH-RESPONSIVE and BH-BILLING: reviewed zero-pixel route ba
       const path = info.snapshotPath(name);
       const baselineKey = path.slice(join(root,'apps/web/tests/fixtures/harness').length + 1);
       if (!authoring) expect(createHash('sha256').update(readFileSync(path)).digest('hex')).toBe(baseline.images[baselineKey]);
-      await expect(page).toHaveScreenshot(name);
+      if (!authoring && baselineKey in policy.images) await reviewedBillingScreenshot(page, info, path, baselineKey, policy, policyHash);
+      else await expect(page).toHaveScreenshot(name);
     }
+  }
+  if (!authoring) {
+    // Finish the original resize/scroll/screenshot sequence before adverse renders.
+    await page.setViewportSize({ width: 320, height: 1100 }); await page.evaluate(() => scrollTo(0, 0)); await stable(page);
+    await qualifyBillingAdverse(page, info, info.snapshotPath('billing-320.png'), policy);
+    await page.setViewportSize({ width: 1440, height: 1100 }); await page.evaluate(() => scrollTo(0, 0));
   }
   await harness.configure({ scenario: 'unknown' }); await page.getByRole('button', { name: 'Refresh status' }).click(); await expect(page.locator('#billing-data')).toHaveText('Simulated amount: unknown · quantity: unknown');
 });
