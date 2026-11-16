@@ -83,6 +83,9 @@ describe('BH-VISUAL-POLICY: exact reviewed rounded-border alternative', () => {
       expect(() => collectVisualComparisons(root, [output, image])).toThrow();
       const changed = readFileSync(join(root, path));
       expect(() => collectVisualComparisons(root, [{ path, sha256: createHash('sha256').update(changed).digest('hex') }, image])).toThrow();
+      const coercedMode = Buffer.from(JSON.stringify({ ...value, mode: ['customer_controlled'] }));
+      writeFileSync(join(root, path), coercedMode);
+      expect(() => collectVisualComparisons(root, [{ path, sha256: createHash('sha256').update(coercedMode).digest('hex') }, image])).toThrow();
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
   it('binds retained positive variants to the reviewed policy and correct changed-pixel count', () => {

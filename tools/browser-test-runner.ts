@@ -37,7 +37,7 @@ export function collectVisualComparisons(root: string, outputs: Array<{ path: st
     const expectedKeys = positive ? ['mode','policy_sha256','baseline_sha256','actual_sha256','variant','changed_pixels','bounds'] : ['mode','expected_rejection','actual_sha256','variant','changed_pixels','bounds'];
     const pngPath = output.path.replace(/\.json$/, '.png'); const png = outputs.find(item => item.path === pngPath);
     const identity = `${value.mode}:${match[1]}`;
-    if (Object.keys(value).sort().join() !== expectedKeys.sort().join() || !['customer_controlled','opentour_managed'].includes(String(value.mode)) || seen.has(identity) || !png || png.sha256 !== value.actual_sha256 || !Number.isInteger(value.changed_pixels) || Number(value.changed_pixels) < 0 || Number(value.changed_pixels) > 352000) throw new Error('RUNNER_ERROR');
+    if (Object.keys(value).sort().join() !== expectedKeys.sort().join() || !['customer_controlled','opentour_managed'].includes(value.mode as string) || seen.has(identity) || !png || png.sha256 !== value.actual_sha256 || !Number.isInteger(value.changed_pixels) || Number(value.changed_pixels) < 0 || Number(value.changed_pixels) > 352000) throw new Error('RUNNER_ERROR');
     if (positive) {
       const policyBytes = readFileSync(join(root, harness, 'visual-comparison-policy.json'));
       const policy = JSON.parse(policyBytes.toString('utf8'));
