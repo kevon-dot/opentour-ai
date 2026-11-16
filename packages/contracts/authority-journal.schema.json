@@ -1,0 +1,820 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:opentour:authority-journal:1.0",
+  "title": "Independent authority journal protocol",
+  "description": "Closed wire types. Scope, current account, signature, persistence, contiguous replay and fresh-head verification are executable invariants; structural validity grants no authority.",
+  "$defs": {
+    "Id": {
+      "$ref": "urn:opentour:common-contract:1.0#/$defs/Id"
+    },
+    "Sha256": {
+      "$ref": "urn:opentour:common-contract:1.0#/$defs/Sha256"
+    },
+    "ArtifactRef": {
+      "$ref": "urn:opentour:common-contract:1.0#/$defs/ArtifactRef"
+    },
+    "ResourceRevision": {
+      "$ref": "urn:opentour:common-contract:1.0#/$defs/ResourceRevision"
+    },
+    "Timestamp": {
+      "allOf": [
+        {
+          "$ref": "urn:opentour:common-contract:1.0#/$defs/Timestamp"
+        },
+        {
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+        }
+      ]
+    },
+    "SafeCounter": {
+      "$ref": "urn:opentour:common-contract:1.0#/$defs/SafeNonnegativeInteger"
+    },
+    "PositiveCounter": {
+      "$ref": "urn:opentour:common-contract:1.0#/$defs/SafePositiveInteger"
+    },
+    "MetadataRef": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/ArtifactRef"
+        },
+        {
+          "properties": {
+            "classification": {
+              "const": "control_metadata"
+            }
+          }
+        }
+      ]
+    },
+    "JournalIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "audit_account_id": {
+          "type": "string",
+          "pattern": "^[0-9]{12}$"
+        },
+        "region": {
+          "type": "string",
+          "pattern": "^[a-z]{2}(?:-[a-z]+)+-[0-9]+$"
+        },
+        "journal_instance_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "configuration_digest": {
+          "$ref": "#/$defs/Sha256"
+        }
+      },
+      "required": [
+        "audit_account_id",
+        "region",
+        "journal_instance_id",
+        "configuration_digest"
+      ]
+    },
+    "Phase": {
+      "enum": [
+        "intent",
+        "outcome"
+      ]
+    },
+    "HeadState": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "organization_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "sequence": {
+          "$ref": "#/$defs/SafeCounter"
+        },
+        "chain_sha256": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "latest_epoch": {
+          "$ref": "#/$defs/SafeCounter"
+        },
+        "latest_authority_revision": {
+          "$ref": "#/$defs/Id"
+        },
+        "unresolved_operation_id": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/Id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "revision": {
+          "$ref": "#/$defs/ResourceRevision"
+        }
+      },
+      "required": [
+        "organization_id",
+        "sequence",
+        "chain_sha256",
+        "latest_epoch",
+        "latest_authority_revision",
+        "unresolved_operation_id",
+        "revision"
+      ]
+    },
+    "AppendIntent": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "organization_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "operation_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "expected_head_sequence": {
+          "$ref": "#/$defs/SafeCounter"
+        },
+        "expected_head_digest": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "mutation_kind": {
+          "enum": [
+            "grant",
+            "restrict",
+            "tombstone",
+            "enrollment",
+            "recovery"
+          ]
+        },
+        "proposed_epoch": {
+          "$ref": "#/$defs/SafeCounter"
+        },
+        "proposed_authority_revision": {
+          "$ref": "#/$defs/Id"
+        },
+        "canonical_intent_digest": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "scoped_intent_ref": {
+          "$ref": "#/$defs/ImmutableMetadataRef"
+        },
+        "actor_ref": {
+          "$ref": "#/$defs/ImmutableMetadataRef"
+        },
+        "created_at": {
+          "$ref": "#/$defs/Timestamp"
+        }
+      },
+      "required": [
+        "organization_id",
+        "operation_id",
+        "expected_head_sequence",
+        "expected_head_digest",
+        "mutation_kind",
+        "proposed_epoch",
+        "proposed_authority_revision",
+        "canonical_intent_digest",
+        "scoped_intent_ref",
+        "actor_ref",
+        "created_at"
+      ]
+    },
+    "AppendOutcome": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "organization_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "operation_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "expected_head_sequence": {
+          "$ref": "#/$defs/SafeCounter"
+        },
+        "expected_head_digest": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "intent_sequence": {
+          "$ref": "#/$defs/PositiveCounter"
+        },
+        "result": {
+          "enum": [
+            "committed",
+            "aborted"
+          ]
+        },
+        "control_transaction_ref": {
+          "$ref": "#/$defs/ImmutableMetadataRef"
+        },
+        "resulting_epoch": {
+          "$ref": "#/$defs/SafeCounter"
+        },
+        "resulting_authority_revision": {
+          "$ref": "#/$defs/Id"
+        }
+      },
+      "required": [
+        "organization_id",
+        "operation_id",
+        "expected_head_sequence",
+        "expected_head_digest",
+        "intent_sequence",
+        "result",
+        "control_transaction_ref",
+        "resulting_epoch",
+        "resulting_authority_revision"
+      ]
+    },
+    "AppendReceiptPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "profile_version": {
+          "const": "1.0"
+        },
+        "journal": {
+          "$ref": "#/$defs/JournalIdentity"
+        },
+        "organization_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "operation_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "phase": {
+          "$ref": "#/$defs/Phase"
+        },
+        "sequence": {
+          "$ref": "#/$defs/PositiveCounter"
+        },
+        "previous_chain_sha256": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "chain_sha256": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "content_sha256": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "content_bucket_ref": {
+          "$ref": "#/$defs/Id"
+        },
+        "content_key": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024
+        },
+        "content_version_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "head_revision": {
+          "$ref": "#/$defs/ResourceRevision"
+        }
+      },
+      "required": [
+        "profile_version",
+        "journal",
+        "organization_id",
+        "operation_id",
+        "phase",
+        "sequence",
+        "previous_chain_sha256",
+        "chain_sha256",
+        "content_sha256",
+        "content_bucket_ref",
+        "content_key",
+        "content_version_id",
+        "head_revision"
+      ]
+    },
+    "LiveHeadPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "profile_version": {
+          "const": "1.0"
+        },
+        "journal": {
+          "$ref": "#/$defs/JournalIdentity"
+        },
+        "request_nonce": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "observed_at": {
+          "$ref": "#/$defs/Timestamp"
+        },
+        "head": {
+          "$ref": "#/$defs/HeadState"
+        }
+      },
+      "required": [
+        "profile_version",
+        "journal",
+        "request_nonce",
+        "observed_at",
+        "head"
+      ]
+    },
+    "JournalSignature": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "profile_version": {
+          "const": "1.0"
+        },
+        "algorithm": {
+          "const": "ES256"
+        },
+        "encoding": {
+          "const": "base64url_unpadded_r_s_64"
+        },
+        "purpose": {
+          "enum": [
+            "opentour.authority-journal.append-receipt.v1",
+            "opentour.authority-journal.live-head.v1"
+          ]
+        },
+        "key_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "key_registry_revision": {
+          "$ref": "#/$defs/Id"
+        },
+        "signer_role": {
+          "const": "audit_journal_issuer"
+        },
+        "payload_sha256": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "transcript_sha256": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "signature": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{86}$"
+        }
+      },
+      "required": [
+        "profile_version",
+        "algorithm",
+        "encoding",
+        "purpose",
+        "key_id",
+        "key_registry_revision",
+        "signer_role",
+        "payload_sha256",
+        "transcript_sha256",
+        "signature"
+      ]
+    },
+    "AppendReceiptEnvelope": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "payload": {
+          "$ref": "#/$defs/AppendReceiptPayload"
+        },
+        "signature": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/JournalSignature"
+            },
+            {
+              "properties": {
+                "purpose": {
+                  "const": "opentour.authority-journal.append-receipt.v1"
+                }
+              }
+            }
+          ]
+        }
+      },
+      "required": [
+        "payload",
+        "signature"
+      ]
+    },
+    "LiveHeadEnvelope": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "payload": {
+          "$ref": "#/$defs/LiveHeadPayload"
+        },
+        "signature": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/JournalSignature"
+            },
+            {
+              "properties": {
+                "purpose": {
+                  "const": "opentour.authority-journal.live-head.v1"
+                }
+              }
+            }
+          ]
+        }
+      },
+      "required": [
+        "payload",
+        "signature"
+      ]
+    },
+    "AppendResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "organization_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "operation_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "phase": {
+          "$ref": "#/$defs/Phase"
+        },
+        "sequence": {
+          "$ref": "#/$defs/PositiveCounter"
+        },
+        "chain_sha256": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "content_sha256": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "content_version_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "head_revision": {
+          "$ref": "#/$defs/ResourceRevision"
+        },
+        "signed_receipt": {
+          "$ref": "#/$defs/AppendReceiptEnvelope"
+        }
+      },
+      "required": [
+        "organization_id",
+        "operation_id",
+        "phase",
+        "sequence",
+        "chain_sha256",
+        "content_sha256",
+        "content_version_id",
+        "head_revision",
+        "signed_receipt"
+      ]
+    },
+    "JournalEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "profile_version": {
+          "const": "1.0"
+        },
+        "journal": {
+          "$ref": "#/$defs/JournalIdentity"
+        },
+        "organization_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "operation_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "phase": {
+          "$ref": "#/$defs/Phase"
+        },
+        "sequence": {
+          "$ref": "#/$defs/PositiveCounter"
+        },
+        "previous_chain_sha256": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "chain_sha256": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "content_sha256": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "content_bucket_ref": {
+          "$ref": "#/$defs/Id"
+        },
+        "content_key": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024
+        },
+        "content_version_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "head_revision": {
+          "$ref": "#/$defs/ResourceRevision"
+        },
+        "signed_receipt": {
+          "$ref": "#/$defs/AppendReceiptEnvelope"
+        },
+        "created_at": {
+          "$ref": "#/$defs/Timestamp"
+        },
+        "signer_id": {
+          "$ref": "#/$defs/Id"
+        }
+      },
+      "required": [
+        "profile_version",
+        "journal",
+        "organization_id",
+        "operation_id",
+        "phase",
+        "sequence",
+        "previous_chain_sha256",
+        "chain_sha256",
+        "content_sha256",
+        "content_bucket_ref",
+        "content_key",
+        "content_version_id",
+        "head_revision",
+        "signed_receipt",
+        "created_at",
+        "signer_id"
+      ]
+    },
+    "ReplayCheckpoint": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "journal": {
+          "$ref": "#/$defs/JournalIdentity"
+        },
+        "organization_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "sequence": {
+          "$ref": "#/$defs/SafeCounter"
+        },
+        "chain_sha256": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "latest_epoch": {
+          "$ref": "#/$defs/SafeCounter"
+        },
+        "latest_authority_revision": {
+          "$ref": "#/$defs/Id"
+        },
+        "evidence_ref": {
+          "$ref": "#/$defs/MetadataRef"
+        }
+      },
+      "required": [
+        "journal",
+        "organization_id",
+        "sequence",
+        "chain_sha256",
+        "latest_epoch",
+        "latest_authority_revision",
+        "evidence_ref"
+      ]
+    },
+    "VerifiedFrontierProof": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "profile_version": {
+          "const": "1.0"
+        },
+        "journal": {
+          "$ref": "#/$defs/JournalIdentity"
+        },
+        "organization_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "checkpoint": {
+          "$ref": "#/$defs/ReplayCheckpoint"
+        },
+        "live_head_envelope": {
+          "$ref": "#/$defs/LiveHeadEnvelope"
+        },
+        "replay_manifest_ref": {
+          "$ref": "#/$defs/MetadataRef"
+        },
+        "verified_entry_count": {
+          "$ref": "#/$defs/SafeCounter"
+        },
+        "unresolved_operation_id": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/Id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "latest_committed_epoch": {
+          "$ref": "#/$defs/SafeCounter"
+        },
+        "latest_committed_authority_revision": {
+          "$ref": "#/$defs/Id"
+        }
+      },
+      "required": [
+        "profile_version",
+        "journal",
+        "organization_id",
+        "checkpoint",
+        "live_head_envelope",
+        "replay_manifest_ref",
+        "verified_entry_count",
+        "unresolved_operation_id",
+        "latest_committed_epoch",
+        "latest_committed_authority_revision"
+      ]
+    },
+    "ReplayObservation": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "entry": {
+          "$ref": "#/$defs/JournalEntry"
+        },
+        "body": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/AppendIntent"
+            },
+            {
+              "$ref": "#/$defs/AppendOutcome"
+            }
+          ]
+        }
+      },
+      "required": [
+        "entry",
+        "body"
+      ]
+    },
+    "ReplayManifest": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "profile_version": {
+          "const": "1.0"
+        },
+        "journal": {
+          "$ref": "#/$defs/JournalIdentity"
+        },
+        "organization_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "checkpoint_sequence": {
+          "$ref": "#/$defs/SafeCounter"
+        },
+        "head_sequence": {
+          "$ref": "#/$defs/SafeCounter"
+        },
+        "observations": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ReplayObservation"
+          },
+          "maxItems": 10000
+        }
+      },
+      "required": [
+        "profile_version",
+        "journal",
+        "organization_id",
+        "checkpoint_sequence",
+        "head_sequence",
+        "observations"
+      ]
+    },
+    "LiveHeadRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "organization_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "request_nonce": {
+          "$ref": "#/$defs/Sha256"
+        }
+      },
+      "required": [
+        "organization_id",
+        "request_nonce"
+      ]
+    },
+    "ExactOperationRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "organization_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "operation_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "phase": {
+          "$ref": "#/$defs/Phase"
+        }
+      },
+      "required": [
+        "organization_id",
+        "operation_id",
+        "phase"
+      ]
+    },
+    "ExactEntryRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "organization_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "sequence": {
+          "$ref": "#/$defs/PositiveCounter"
+        }
+      },
+      "required": [
+        "organization_id",
+        "sequence"
+      ]
+    },
+    "ExactOperationResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "organization_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "operation_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "phase": {
+          "$ref": "#/$defs/Phase"
+        },
+        "signed_response": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/AppendResponse"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "organization_id",
+        "operation_id",
+        "phase",
+        "signed_response"
+      ]
+    },
+    "ImmutableMetadataRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "record_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "revision": {
+          "$ref": "#/$defs/Id"
+        },
+        "sha256": {
+          "$ref": "#/$defs/Sha256"
+        }
+      },
+      "required": [
+        "record_id",
+        "revision",
+        "sha256"
+      ]
+    },
+    "ExactEntryResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "entry": {
+          "$ref": "#/$defs/JournalEntry"
+        },
+        "body": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/AppendIntent"
+            },
+            {
+              "$ref": "#/$defs/AppendOutcome"
+            }
+          ]
+        }
+      },
+      "required": [
+        "entry",
+        "body"
+      ]
+    }
+  }
+}
