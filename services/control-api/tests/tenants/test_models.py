@@ -134,6 +134,7 @@ def test_foreign_owner_and_unknown_reason_do_not_expose_current_state(operation)
         "https://terms.example.invalid/#secret",
         "https://terms.example.invalid/\n",
     ],
+    ids=("http", "userinfo", "fragment", "control"),
 )
 def test_terms_reject_unsafe_urls(url):
     with pytest.raises(ValidationError):
