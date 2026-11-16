@@ -1,0 +1,31 @@
+{
+  "schema_version": "opentour.presentation-baseline-review.v1",
+  "issue_key": "OPE-253",
+  "profile_id": "c4865bd5-0fce-4468-b6ea-05003ebfa5a2",
+  "figma_file_key": "f7RVtmAPRdLo4WVWQMrvQC",
+  "focus_review_node": "133:8",
+  "design_review_status": "APPROVED_NARROW_FOCUS_AMENDMENT",
+  "browser_baseline_status": "NOT_RUN",
+  "max_diff_pixels": 0,
+  "threshold": 0,
+  "masks": [],
+  "images": {},
+  "limitations": [
+    "Initial images require real browser generation and independent design review.",
+    "OPE-127's corner exception does not apply to this profile.",
+    "Full product, provider, manual screen-reader and later primitive acceptance remain NOT_RUN."
+  ],
+  "design_amendment": {
+    "reviewer": "root-independent-Codex",
+    "review_sha256": "a5d81904e8f4f1fbcf04309211665e804f7a5b6067641dc35efcaddb26d1bdec",
+    "image_sha256": "70ddfe32a52dd8d596bc03b2334702fcbf3473e832c5f3c247da642cdce05c8f",
+    "ledger_sha256": "02447df8972e94c75e6d18ab79722b3cc5a08440673517c6b63e47cefdbf42aa",
+    "components": [
+      "4:10",
+      "4:20",
+      "4:30"
+    ],
+    "original_snapshot_sha256": "38c3537dd10719a1978873137d34086fa51e284456ed7c5d46d36e77815367a7"
+  },
+  "design_revision": "v4+focus-02447df8972e94c75e6d18ab79722b3cc5a08440673517c6b63e47cefdbf42aa"
+}
