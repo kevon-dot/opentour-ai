@@ -52,11 +52,22 @@ def source_digest(root: Path, target: str) -> str:
     ).hexdigest()
 
 
+def case_mode(item: Any) -> str | None:
+    """An observed execution variant, never a fixture-kind or authority upgrade."""
+    parameters = getattr(getattr(item, "callspec", None), "params", {})
+    if "mode" not in parameters:
+        return None
+    mode = parameters["mode"]
+    if mode not in ("customer_controlled", "opentour_managed"):
+        raise ValueError("Registered PostgreSQL case has an invalid deployment mode")
+    return str(mode)
+
+
 class Lifecycle:
     """Retain exact live handles and paths observed before test code regains control."""
 
     def __init__(self) -> None:
-        self.instances: list[tuple[DisposablePostgres, subprocess.Popen[bytes], Path]] = []
+        self.instances: list[tuple[DisposablePostgres, subprocess.Popen[bytes] | None, Path]] = []
         self.binaries: dict[str, str] | None = None
         self.enter = DisposablePostgres.__enter__
         self.close = DisposablePostgres.close
@@ -72,7 +83,7 @@ class Lifecycle:
             except BaseException:
                 # Startup failure may still have a live postmaster or retained recovery
                 # directory. Observe it before exception handling returns to test code.
-                if instance.process is not None and instance.root is not None:
+                if instance.root is not None:
                     observer.instances.append((instance, instance.process, instance.root))
                 raise
             process, root = instance.process, instance.root
@@ -92,26 +103,35 @@ class Lifecycle:
 
     def finish(self) -> bool:
         # Inspect the original handles, never test-supplied replacement booleans/PIDs.
-        for instance, process, root in self.instances:
-            if process.poll() is None:
-                self.cleanup_complete = False
-                if instance.process is process and instance.root == root:
-                    try:
-                        self.close(instance)
-                    except Exception:
-                        pass
-                else:
-                    # Only the exact owned handle is safe to terminate. Preserve its
-                    # recovery directory when fixture state was tampered with.
-                    process.terminate()
-                    try:
-                        process.wait(timeout=8)
-                    except subprocess.TimeoutExpired:
-                        process.kill()
-                        process.wait(timeout=3)
-            if process.poll() != 0 or root.exists() or instance.cleanup_complete is not True:
-                self.cleanup_complete = False
-        DisposablePostgres.__enter__ = self.enter  # type: ignore[method-assign]
+        try:
+            for instance, process, root in self.instances:
+                try:
+                    running = process is not None and process.poll() is None
+                    if running or (process is None and root.exists()):
+                        self.cleanup_complete = False
+                        if instance.process is process and instance.root == root:
+                            self.close(instance)
+                        elif process is not None:
+                            # Only the retained exact handle is eligible. Signal refusal
+                            # stops further attempts; unknown ownership is never success.
+                            process.terminate()
+                            try:
+                                process.wait(timeout=8)
+                            except subprocess.TimeoutExpired:
+                                process.kill()
+                                process.wait(timeout=3)
+                    if (
+                        (process is not None and process.poll() != 0)
+                        or root.exists()
+                        or instance.cleanup_complete is not True
+                    ):
+                        self.cleanup_complete = False
+                except Exception:
+                    self.cleanup_complete = False
+                    # Keep the exact marked directory for recovery; do not remove a
+                    # possibly live cluster or copy private path/PID data to receipts.
+        finally:
+            DisposablePostgres.__enter__ = self.enter  # type: ignore[method-assign]
         return self.cleanup_complete
 
 

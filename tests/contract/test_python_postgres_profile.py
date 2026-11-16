@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import shutil
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -201,3 +202,120 @@ def test_actual_helper_is_included_in_public_typecheck(checkout: Path) -> None:
     result = runner.run_command("typecheck", [], checkout, run)
     assert result["exit_code"] == 0
     assert "infrastructure/environment_contract.py" in calls[0].argv
+
+
+def test_allocated_root_without_postmaster_is_tracked_and_not_claimed_clean(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    retained = tmp_path / "generated-retained-root"
+    retained.mkdir()
+
+    def failed_enter(instance: DisposablePostgres) -> DisposablePostgres:
+        instance.root = retained
+        instance.cleanup_complete = True  # A test boolean is not cleanup proof.
+        raise RuntimeError("generated initdb failure")
+
+    def refused_close(instance: DisposablePostgres) -> None:
+        raise PermissionError("generated deletion refusal")
+
+    monkeypatch.setattr(DisposablePostgres, "__enter__", failed_enter)
+    monkeypatch.setattr(DisposablePostgres, "close", refused_close)
+    observer = adapter.Lifecycle()
+    observer.install()
+    with pytest.raises(RuntimeError, match="initdb"):
+        DisposablePostgres().__enter__()
+    assert observer.started_instances == 0
+    assert len(observer.instances) == 1 and observer.instances[0][1] is None
+    assert observer.finish() is False
+    assert retained.exists() and DisposablePostgres.__enter__ is failed_enter
+
+
+@pytest.mark.parametrize("refusal", ["terminate", "wait", "kill", "final_wait", "poll"])
+def test_cleanup_refusal_is_bounded_nonpassing_and_restores_class(
+    tmp_path: Path, refusal: str
+) -> None:
+    retained = tmp_path / "generated-live-root"
+    retained.mkdir()
+
+    class Handle:
+        calls: list[str]
+
+        def __init__(self) -> None:
+            self.calls = []
+
+        def poll(self) -> None:
+            if refusal == "poll":
+                raise PermissionError("generated poll refusal")
+            return None
+
+        def terminate(self) -> None:
+            self.calls.append("terminate")
+            if refusal == "terminate":
+                raise PermissionError("generated signal refusal")
+
+        def wait(self, timeout: int) -> int:
+            self.calls.append("wait:" + str(timeout))
+            if refusal == "wait":
+                raise PermissionError("generated wait refusal")
+            raise subprocess.TimeoutExpired("generated", timeout)
+
+        def kill(self) -> None:
+            self.calls.append("kill")
+            if refusal == "kill":
+                raise PermissionError("generated kill refusal")
+
+    handle: Any = Handle()
+    instance = DisposablePostgres()
+    instance.root = retained
+    instance.process = None  # Deliberate replacement forces exact retained-handle branch.
+    instance.cleanup_complete = True
+    observer = adapter.Lifecycle()
+    original = DisposablePostgres.__enter__
+    observer.instances.append((instance, handle, retained))
+    observer.install()
+    assert observer.finish() is False
+    assert retained.exists() and DisposablePostgres.__enter__ is original
+    assert len(handle.calls) <= 4
+    if refusal == "terminate":
+        assert handle.calls == ["terminate"]
+    if refusal == "final_wait":
+        assert handle.calls == ["terminate", "wait:8", "kill", "wait:3"]
+
+
+@pytest.mark.parametrize("mode", ["customer_controlled", "opentour_managed"])
+def test_fixed_postgres_report_preserves_observed_callspec_mode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str
+) -> None:
+    from types import SimpleNamespace
+
+    path = tmp_path / TARGET
+    path.parent.mkdir(parents=True)
+    path.write_text("# generated")
+    item = SimpleNamespace(
+        path=path, nodeid="generated::" + mode, callspec=SimpleNamespace(params={"mode": mode})
+    )
+    monkeypatch.setenv("OPENTOUR_REPOSITORY_ROOT", str(tmp_path))
+    monkeypatch.setenv("OPENTOUR_POSTGRES_TARGET", TARGET)
+    monkeypatch.setenv("OPENTOUR_TEST_TARGET", TARGET)
+    original_items = runner._items
+    runner._items = {}
+    try:
+        runner.pytest_collection_finish(SimpleNamespace(items=[item]))
+        assert runner._items[item.nodeid]["mode"] == mode
+    finally:
+        runner._items = original_items
+
+
+@pytest.mark.parametrize("mode", [None, "both", "provider_integration", 1, True, []])
+def test_invalid_explicit_postgres_mode_is_not_coerced(mode: Any) -> None:
+    from types import SimpleNamespace
+
+    with pytest.raises(ValueError):
+        adapter.case_mode(SimpleNamespace(callspec=SimpleNamespace(params={"mode": mode})))
+
+
+def test_absent_mode_is_null_and_generic_cases_do_not_inherit_local_variants() -> None:
+    from types import SimpleNamespace
+
+    assert adapter.case_mode(SimpleNamespace()) is None
+    assert adapter.case_mode(SimpleNamespace(callspec=SimpleNamespace(params={}))) is None

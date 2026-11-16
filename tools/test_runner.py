@@ -1295,7 +1295,14 @@ def pytest_collection_finish(session: Any) -> None:
             file = Path(item.path).resolve().relative_to(root).as_posix()
         except ValueError:
             file = "OUTSIDE_REPOSITORY"
-        _items[item.nodeid] = {"id": item.nodeid, "file": file, "status": "skipped", "mode": None}
+        mode = None
+        postgres_target = os.environ.get("OPENTOUR_POSTGRES_TARGET")
+        if postgres_target and postgres_target == os.environ.get("OPENTOUR_TEST_TARGET"):
+            from tools.fixtures.python_postgres import TARGETS, case_mode
+
+            if postgres_target in TARGETS:
+                mode = case_mode(item)
+        _items[item.nodeid] = {"id": item.nodeid, "file": file, "status": "skipped", "mode": mode}
 
 
 def pytest_runtest_logreport(report: Any) -> None:
