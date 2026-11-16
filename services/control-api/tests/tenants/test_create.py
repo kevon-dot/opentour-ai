@@ -279,3 +279,27 @@ def test_service_rejects_identity_context_from_different_issuer(setup, monkeypat
     monkeypatch.setattr(setup.identity.service, "verified_identity", lambda *args: foreign)
     with pytest.raises((AuthError, SetupError)):
         setup.service.progress("generated", "generated", "operation_generated", "request_generated")
+
+
+@pytest.mark.parametrize("method", ["GET", "POST"])
+@pytest.mark.parametrize(
+    "bad_url", ["http://terms.example.invalid", "https://terms.example.invalid/#fragment"]
+)
+def test_malformed_published_terms_returns_safe_error_without_admission(
+    setup, monkeypatch, method, bad_url
+):
+    setup.repository.published = replace(setup.repository.published, document_url=bad_url)
+
+    def validate_admission(creator, body, key_hash, request_id, environment, now):
+        # Generated repository boundary invokes the actual publication validator.
+        setup.repository.published.current_view(now)
+        pytest.fail("Malformed terms must not reach intent creation")
+
+    monkeypatch.setattr(setup.repository, "create", validate_admission)
+    response = (
+        setup.client.get("/v1/organization-terms")
+        if method == "GET"
+        else setup.client.post("/v1/organizations", json=BODY)
+    )
+    assert_error(response, 503, "TERMS_UNAVAILABLE")
+    assert not setup.repository.admissions and setup.repository.recorded is None

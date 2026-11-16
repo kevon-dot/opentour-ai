@@ -652,9 +652,7 @@ def test_actual_activation_and_identity_writer_observe_the_same_denial_lock(
                 ready.set()
                 assert release.wait(4), "Test did not release the first commit"
 
-    writer = PostgresIdentityRepository(
-        lambda: guarded_connection("denial", "c03_identity")
-    )
+    writer = PostgresIdentityRepository(lambda: guarded_connection("denial", "c03_identity"))
     store = PostgresProvisioningStore(
         lambda: guarded_connection("activation", "c03_worker"), durable.clock
     )
@@ -698,9 +696,7 @@ def test_actual_activation_and_identity_writer_observe_the_same_denial_lock(
 
 
 @pytest.mark.parametrize("held_lock", ["membership", "observation"])
-def test_provider_observation_expiring_during_actual_lock_wait_cannot_activate(
-    durable, held_lock
-):
+def test_provider_observation_expiring_during_actual_lock_wait_cannot_activate(durable, held_lock):
     receipt, claimed, observed = prepared_membership(durable)
     clock = [observed.checked_at]
     started = threading.Event()
@@ -725,9 +721,7 @@ def test_provider_observation_expiring_during_actual_lock_wait_cannot_activate(
                     (receipt.organization_id,),
                 )
             else:
-                lock_membership_observation(
-                    blocker, durable.creator.issuer, observed.membership_id
-                )
+                lock_membership_observation(blocker, durable.creator.issuer, observed.membership_id)
             activation = pool.submit(store.activate, receipt.operation_id, observed)
             assert started.wait(2)
             wait_for_database_block(durable, pids["activation"], blocker.info.backend_pid)
@@ -739,15 +733,21 @@ def test_provider_observation_expiring_during_actual_lock_wait_cannot_activate(
             activation.result(timeout=6)
     assert durable.store.load(receipt.operation_id) == claimed
     with durable.connection("c03_owner") as connection:
-        assert connection.execute(
-            "SELECT status FROM opentour_tenants.memberships WHERE organization_id=%s",
-            (receipt.organization_id,),
-        ).fetchone()["status"] == "provisional"
-        assert connection.execute(
-            "SELECT count(*) AS n FROM opentour_tenants.outbox "
-            "WHERE operation_id=%s AND kind='organization.active'",
-            (receipt.operation_id,),
-        ).fetchone()["n"] == 0
+        assert (
+            connection.execute(
+                "SELECT status FROM opentour_tenants.memberships WHERE organization_id=%s",
+                (receipt.organization_id,),
+            ).fetchone()["status"]
+            == "provisional"
+        )
+        assert (
+            connection.execute(
+                "SELECT count(*) AS n FROM opentour_tenants.outbox "
+                "WHERE operation_id=%s AND kind='organization.active'",
+                (receipt.operation_id,),
+            ).fetchone()["n"]
+            == 0
+        )
 
 
 def test_terms_publication_waits_for_locked_admission_and_preserves_original_receipt(durable):
@@ -773,8 +773,12 @@ def test_terms_publication_waits_for_locked_admission_and_preserves_original_rec
 
     def admit():
         return repository.create(
-            durable.creator, durable.body, durable.key, "original_terms_receipt",
-            durable.provider.environment, durable.clock(),
+            durable.creator,
+            durable.body,
+            durable.key,
+            "original_terms_receipt",
+            durable.provider.environment,
+            durable.clock(),
         )
 
     def publish():
@@ -808,14 +812,21 @@ def test_terms_publication_waits_for_locked_admission_and_preserves_original_rec
         assert durable.create("later_request_id") == original
         with pytest.raises(SetupError, match="TERMS_REVISION_STALE"):
             durable.repository.create(
-                durable.creator, durable.body, key_digest(uuid4().hex), "stale_new_intent",
-                durable.provider.environment, durable.clock(),
+                durable.creator,
+                durable.body,
+                key_digest(uuid4().hex),
+                "stale_new_intent",
+                durable.provider.environment,
+                durable.clock(),
             )
         with durable.connection("c03_owner") as connection:
-            assert connection.execute(
-                "SELECT terms_revision FROM opentour_tenants.organizations WHERE id=%s",
-                (original.organization_id,),
-            ).fetchone()["terms_revision"] == durable.body.accepted_terms_revision
+            assert (
+                connection.execute(
+                    "SELECT terms_revision FROM opentour_tenants.organizations WHERE id=%s",
+                    (original.organization_id,),
+                ).fetchone()["terms_revision"]
+                == durable.body.accepted_terms_revision
+            )
         assert durable.provider.creates == durable.provider.member_creates == 0
     finally:
         release.set()
@@ -841,8 +852,12 @@ def test_committed_admission_acknowledgement_loss_replays_one_original_intent(du
     )
     with pytest.raises(psycopg.OperationalError, match="Generated commit acknowledgement loss"):
         repository.create(
-            durable.creator, durable.body, durable.key, "original_lost_reply",
-            durable.provider.environment, durable.clock(),
+            durable.creator,
+            durable.body,
+            durable.key,
+            "original_lost_reply",
+            durable.provider.environment,
+            durable.clock(),
         )
     assert committed == [True]
     replayed = durable.create("later_replay_request")
@@ -850,17 +865,178 @@ def test_committed_admission_acknowledgement_loss_replays_one_original_intent(du
     assert durable.create("third_request") == replayed
     with durable.connection("c03_owner") as connection:
         for table in ("organizations", "provisioning_operations"):
-            assert connection.execute(
-                f"SELECT count(*) AS n FROM opentour_tenants.{table} WHERE creator_subject=%s",
-                (durable.creator.subject,),
-            ).fetchone()["n"] == 1
-        assert connection.execute(
-            "SELECT count(*) AS n FROM opentour_tenants.request_dedup "
-            "WHERE issuer=%s AND subject=%s",
-            (durable.creator.issuer, durable.creator.subject),
-        ).fetchone()["n"] == 1
-        assert connection.execute(
-            "SELECT count(*) AS n FROM opentour_tenants.outbox WHERE operation_id=%s",
-            (replayed.operation_id,),
-        ).fetchone()["n"] == 1
+            assert (
+                connection.execute(
+                    f"SELECT count(*) AS n FROM opentour_tenants.{table} WHERE creator_subject=%s",
+                    (durable.creator.subject,),
+                ).fetchone()["n"]
+                == 1
+            )
+        assert (
+            connection.execute(
+                "SELECT count(*) AS n FROM opentour_tenants.request_dedup "
+                "WHERE issuer=%s AND subject=%s",
+                (durable.creator.issuer, durable.creator.subject),
+            ).fetchone()["n"]
+            == 1
+        )
+        assert (
+            connection.execute(
+                "SELECT count(*) AS n FROM opentour_tenants.outbox WHERE operation_id=%s",
+                (replayed.operation_id,),
+            ).fetchone()["n"]
+            == 1
+        )
     assert durable.provider.creates == durable.provider.member_creates == 0
+
+
+def test_malformed_published_terms_roll_back_admission_and_acknowledgement(durable):
+    bad_revision = "generated-bad-terms-" + uuid4().hex
+    with durable.connection("c03_terms") as connection:
+        connection.execute(
+            "INSERT INTO opentour_tenants.terms_versions VALUES(%s,%s,%s)",
+            (bad_revision, "http://terms.example.invalid", durable.clock()),
+        )
+        connection.execute(
+            "UPDATE opentour_tenants.terms_publication SET revision=%s WHERE singleton",
+            (bad_revision,),
+        )
+    try:
+        with pytest.raises(SetupError, match="TERMS_UNAVAILABLE") as error:
+            durable.repository.create(
+                durable.creator,
+                replace_body(durable.body, "Generated invalid publication"),
+                durable.key,
+                "generated_request",
+                durable.provider.environment,
+                durable.clock(),
+            )
+        assert error.value.status == 503
+        with durable.connection("c03_owner") as connection:
+            for table, column in (
+                ("organizations", "creator_subject"),
+                ("provisioning_operations", "creator_subject"),
+                ("request_dedup", "subject"),
+            ):
+                assert (
+                    connection.execute(
+                        f"SELECT count(*) AS n FROM opentour_tenants.{table} WHERE {column}=%s",
+                        (durable.creator.subject,),
+                    ).fetchone()["n"]
+                    == 0
+                )
+        assert durable.provider.creates == durable.provider.member_creates == 0
+    finally:
+        with durable.connection("c03_terms") as connection:
+            connection.execute(
+                "UPDATE opentour_tenants.terms_publication SET revision=%s WHERE singleton",
+                (durable.body.accepted_terms_revision,),
+            )
+
+
+def test_waited_terms_admission_uses_post_lock_time_for_policy_and_acceptance(durable):
+    start = durable.clock()
+    effective = start + timedelta(seconds=10)
+    clock = [start]
+    revision = "generated-future-terms-" + uuid4().hex
+    policy_times, pids = [], {}
+    connecting = threading.Event()
+
+    class RecordedPolicy:
+        def check(self, connection, creator, now):
+            policy_times.append(now)
+
+    @contextmanager
+    def admission_connection():
+        with durable.connection() as connection:
+            connection.execute("SET LOCAL statement_timeout='5s'")
+            pids["admission"] = connection.info.backend_pid
+            connecting.set()
+            yield connection
+
+    with durable.connection("c03_terms") as connection:
+        connection.execute(
+            "INSERT INTO opentour_tenants.terms_versions VALUES(%s,%s,%s)",
+            (revision, "https://terms.example.invalid/generated-future", effective),
+        )
+        connection.execute(
+            "UPDATE opentour_tenants.terms_publication SET revision=%s WHERE singleton",
+            (revision,),
+        )
+    repository = PostgresOrganizationRepository(
+        admission_connection, RecordedPolicy(), lambda: clock[0]
+    )
+    body = CreateRequest(display_name="Generated future terms", accepted_terms_revision=revision)
+    try:
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            with durable.connection("c03_owner") as holder:
+                holder.execute(
+                    "SELECT revision FROM opentour_tenants.terms_versions "
+                    "WHERE revision=%s FOR UPDATE",
+                    (revision,),
+                )
+                admission = pool.submit(
+                    repository.create,
+                    durable.creator,
+                    body,
+                    durable.key,
+                    "generated_after_lock",
+                    durable.provider.environment,
+                    start,
+                )
+                assert connecting.wait(2)
+                wait_for_database_block(durable, pids["admission"], holder.info.backend_pid)
+                assert not admission.done()
+                clock[0] = effective + timedelta(seconds=1)
+            receipt = admission.result(timeout=6)
+        assert policy_times == [clock[0]]
+        with durable.connection("c03_owner") as connection:
+            row = connection.execute(
+                "SELECT terms_accepted_at,created_at "
+                "FROM opentour_tenants.organizations WHERE id=%s",
+                (receipt.organization_id,),
+            ).fetchone()
+            assert row["terms_accepted_at"] == row["created_at"] == clock[0]
+            assert row["terms_accepted_at"] >= effective
+    finally:
+        with durable.connection("c03_terms") as connection:
+            connection.execute(
+                "UPDATE opentour_tenants.terms_publication SET revision=%s WHERE singleton",
+                (durable.body.accepted_terms_revision,),
+            )
+
+
+def test_two_verified_buyers_with_same_display_name_get_independent_owned_organizations(durable):
+    first = durable.create()
+    other = Creator(durable.creator.issuer, "user_" + uuid4().hex, "session_" + uuid4().hex, 0)
+    now = durable.clock()
+    with durable.connection("c03_owner") as connection:
+        connection.execute(
+            "INSERT INTO opentour_identity.sessions(issuer,session_id,subject,"
+            "created_at,expires_at,deny_until) "
+            "VALUES(%s,%s,%s,%s,%s,%s)",
+            (
+                other.issuer,
+                other.session_id,
+                other.subject,
+                now - timedelta(seconds=1),
+                now + timedelta(hours=24),
+                now + timedelta(hours=24),
+            ),
+        )
+    second = durable.repository.create(
+        other,
+        durable.body,
+        durable.key,
+        "generated_distinct_buyer",
+        durable.provider.environment,
+        durable.clock(),
+    )
+    assert first.organization_id != second.organization_id
+    assert first.operation_id != second.operation_id
+    assert durable.repository.get(durable.creator, first.operation_id).display_name == (
+        durable.repository.get(other, second.operation_id).display_name
+    )
+    for creator, foreign in ((other, first), (durable.creator, second)):
+        with pytest.raises(SetupError, match="RESOURCE_NOT_FOUND"):
+            durable.repository.get(creator, foreign.operation_id)

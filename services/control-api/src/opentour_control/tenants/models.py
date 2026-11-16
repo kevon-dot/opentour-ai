@@ -231,11 +231,14 @@ class PublishedTerms:
     def current_view(self, now: datetime) -> TermsView:
         if server_time(now) < server_time(self.effective_at):
             raise SetupError("TERMS_UNAVAILABLE", 503)
-        return TermsView(
-            revision=self.revision,
-            document_url=self.document_url,
-            effective_at=timestamp(self.effective_at),
-        )
+        try:
+            return TermsView(
+                revision=self.revision,
+                document_url=self.document_url,
+                effective_at=timestamp(self.effective_at),
+            )
+        except ValidationError as error:
+            raise SetupError("TERMS_UNAVAILABLE", 503) from error
 
 
 @dataclass(frozen=True)

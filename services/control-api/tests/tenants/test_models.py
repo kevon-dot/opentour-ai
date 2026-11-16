@@ -130,7 +130,7 @@ def test_foreign_owner_and_unknown_reason_do_not_expose_current_state(operation)
     "url",
     [
         "http://terms.example.invalid",
-        "https://" + "user:pass@terms.example.invalid",  # Constructed sentinel credentials,
+        "https://" + "user:pass@terms.example.invalid",  # Constructed sentinel credentials
         "https://terms.example.invalid/#secret",
         "https://terms.example.invalid/\n",
     ],

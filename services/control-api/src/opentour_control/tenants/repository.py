@@ -223,6 +223,9 @@ class PostgresOrganizationRepository:
                 self._identity_guard(conn, creator, now)
                 return CreateReceipt.model_validate(previous)
             terms = self._terms(conn, now, lock=True)
+            # Terms acquisition can wait. The acceptance record and admission
+            # policy must use time after the publication lock was acquired.
+            now = self._now(now)
             if terms.revision != body.accepted_terms_revision:
                 raise SetupError("TERMS_REVISION_STALE", 422, field="accepted_terms_revision")
             if self.policy is None:
