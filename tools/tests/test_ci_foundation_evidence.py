@@ -14,8 +14,6 @@ from tools.ci.foundation_evidence import (
     FOUNDATION,
     MODES,
     NAMES,
-    OVERLAY_APPROVAL,
-    OVERLAY_DESIGN,
     OVERLAY_NAMES,
     OVERLAY_NATIVE,
     OVERLAY_SPEC,
@@ -30,6 +28,8 @@ from tools.test_runner import CommandError
 
 
 def fixture(root: Path) -> tuple[Path, dict[str, Any], dict[str, Any]]:
+    source_root = Path(__file__).resolve().parents[2]
+
     def write(name: str, content: bytes) -> str:
         path = root / name
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -62,8 +62,12 @@ def fixture(root: Path) -> tuple[Path, dict[str, Any], dict[str, Any]]:
     prefix = "evidence/OT-P23-C12/runs/" + nonce + "/"
     for mode in MODES:
         for name in NAMES + OVERLAY_NAMES:
-            image = b"generated-png-fixture-" + (mode + name).encode()
             baseline = f"testing/baselines/darwin-{mode.replace('_', '-')}/{name}.png"
+            image = (
+                (source_root / FOUNDATION / baseline).read_bytes()
+                if name in OVERLAY_NAMES
+                else b"generated-png-fixture-" + (mode + name).encode()
+            )
             sha = write(FOUNDATION + baseline, image)
             (overlay_images if name in OVERLAY_NAMES else images)[baseline] = sha
             policy["reviewed_binary_sha256"][FOUNDATION + baseline] = sha
@@ -99,21 +103,10 @@ def fixture(root: Path) -> tuple[Path, dict[str, Any], dict[str, Any]]:
     }
     review_path = FOUNDATION + "testing/baseline-review.json"
     review_sha = write(review_path, encode(review))
-    overlay_review = {
-        "schema_version": "opentour.overlay-baseline-review.v1",
-        "issue_key": "OPE-300",
-        "logical_key": "OT-P23-C12-OVERLAY",
-        "spec_sha256": OVERLAY_SPEC,
-        "design_image_sha256": OVERLAY_DESIGN,
-        "browser_baseline_status": "APPROVED",
-        "max_diff_pixels": 0,
-        "threshold": 0,
-        "masks": [],
-        "images": overlay_images,
-        "independent_browser_baseline_review": OVERLAY_APPROVAL,
-    }
     overlay_path = FOUNDATION + "testing/overlay-baseline-review.json"
-    overlay_sha = write(overlay_path, encode(overlay_review))
+    overlay_raw = (source_root / overlay_path).read_bytes()
+    assert json.loads(overlay_raw)["images"] == overlay_images
+    overlay_sha = write(overlay_path, overlay_raw)
     write(".github/public-content-policy.json", encode(policy))
     current = json.loads(
         (Path(__file__).resolve().parents[2] / "docs/specification/manifest.json").read_text()
@@ -503,4 +496,43 @@ def test_passing_overlay_run_cannot_omit_one_new_comparison(tmp_path: Path) -> N
     ]
     path.write_text(json.dumps(value))
     with pytest.raises(ValueError, match="every reviewed screenshot"):
+        retain_browser_evidence(tmp_path, command, TARGET)
+
+
+def test_coordinated_overlay_replacement_cannot_reuse_an_old_approval(tmp_path: Path) -> None:
+    path, value, command = fixture(tmp_path)
+    review_relative = FOUNDATION + "testing/overlay-baseline-review.json"
+    review_path = tmp_path / review_relative
+    review = json.loads(review_path.read_bytes())
+    baseline = "testing/baselines/darwin-customer-controlled/overlay-dialog-320.png"
+    altered = b"generated-coordinated-replacement"
+    altered_sha = digest(altered)
+    (tmp_path / FOUNDATION / baseline).write_bytes(altered)
+    review["images"][baseline] = altered_sha
+    # Keep every old independent approval reference while changing all self-reported hashes.
+    review_path.write_text(json.dumps(review))
+    review_sha = digest(review_path.read_bytes())
+    policy_path = tmp_path / ".github/public-content-policy.json"
+    policy = json.loads(policy_path.read_text())
+    policy["reviewed_binary_sha256"][FOUNDATION + baseline] = altered_sha
+    policy_path.write_text(json.dumps(policy))
+    value["component_specifications"][0]["baseline_manifest_sha256"] = review_sha
+    next(row for row in value["presentation_sources"] if row["path"] == review_relative)[
+        "sha256"
+    ] = review_sha
+    capture_row = next(
+        row
+        for row in value["outputs"]
+        if row["path"].endswith("customer_controlled/overlay-dialog-320.json")
+    )
+    capture_path = tmp_path / capture_row["path"]
+    capture = json.loads(capture_path.read_text())
+    capture["raw_png_sha256"] = altered_sha
+    capture_path.write_text(json.dumps(capture))
+    capture_row["sha256"] = digest(capture_path.read_bytes())
+    png = capture_row["path"].removesuffix(".json") + ".png"
+    (tmp_path / png).write_bytes(altered)
+    next(row for row in value["outputs"] if row["path"] == png)["sha256"] = altered_sha
+    path.write_text(json.dumps(value))
+    with pytest.raises(ValueError, match="exact independently reviewed bytes"):
         retain_browser_evidence(tmp_path, command, TARGET)

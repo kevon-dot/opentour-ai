@@ -35,6 +35,7 @@ OVERLAY_NAMES = tuple(
 )
 OVERLAY_SPEC = "429990397f6a755551664d50ad0c80116abf65be8ac8e64e35002cbc18923fdf"
 OVERLAY_DESIGN = "a048ee48055c5a3de9089331e41a9e91aa0d64106dde8f8e065a3bd2e093b79d"
+OVERLAY_REVIEW_SHA = "7fbcd3ce1d2eb362f2d608efe9a9627407d278e9341aae7785fe78b2a63a5d71"
 OVERLAY_NATIVE = {
     "digest_recipe": (
         "SHA256 UTF-8 JSON sorted keys, compact separators, ASCII escaping: "
@@ -136,6 +137,8 @@ def verify_overlay_components(
         ):
             raise ValueError("Overlay observed case source mismatch")
     review_raw, review = read_json(root, FOUNDATION + "testing/overlay-baseline-review.json")
+    if digest(review_raw) != OVERLAY_REVIEW_SHA:
+        raise ValueError("Overlay approval requires the exact independently reviewed bytes")
     expected_metadata = {
         "schema_version": "opentour.overlay-baseline-review.v1",
         "issue_key": "OPE-300",
