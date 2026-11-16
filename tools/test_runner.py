@@ -973,6 +973,25 @@ def browser_quality_commands(root: Path, command: str) -> list[tuple[str, ...]]:
     return [("pnpm", "exec", "tsc", "--project", f"{harness}/tsconfig.json")]
 
 
+def identity_quality_commands(root: Path, command: str) -> list[tuple[str, ...]]:
+    """Run the actual owning identity configs; partial source is not a no-op pass."""
+    server = "apps/web/lib/server"
+    routes = ("apps/web/app/auth/signin/route.ts", "apps/web/app/auth/callback/route.ts")
+    required = (
+        f"{server}/tsconfig.json",
+        f"{server}/authkit-adapter.ts",
+        *routes,
+        "packages/contracts/platform/auth-context.schema.json",
+    )
+    if not any((root / path).exists() or (root / path).is_symlink() for path in required[:-1]):
+        return []
+    for path in required:
+        path_target(root, path)
+    if command == "lint":
+        return [("pnpm", "exec", "oxlint", "--deny-warnings", server, *routes)]
+    return [("pnpm", "exec", "tsc", "--project", f"{server}/tsconfig.json")]
+
+
 def dispatch(
     command: str, args: list[str], root: Path, registry: dict[str, Any], run: Executor
 ) -> list[dict[str, Any]]:
@@ -1153,6 +1172,7 @@ def dispatch(
         path_target(root, "infrastructure/environment_contract.py")
         commands[0] = (*commands[0], "infrastructure/environment_contract.py")
     commands.extend(browser_quality_commands(root, command))
+    commands.extend(identity_quality_commands(root, command))
     steps = []
     for argv in commands:
         step = invoke(argv, root, command, command, run)

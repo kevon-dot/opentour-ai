@@ -25,6 +25,12 @@
       "file": "python-postgres-observation.schema.json",
       "sha256": "72a5fc2e7c7ef446cf9000f1bf773e51e8cfc748fce58edf6541dfcaa4f5075d",
       "source_path": "packages/contracts/common/python-postgres-observation.schema.json"
+    },
+    {
+      "id": "urn:opentour:auth-context:1.0",
+      "file": "packages/contracts/platform/auth-context.schema.json",
+      "sha256": "a5b74fae3eb49ad159e677dd463fb975336c7d2bef2cefb2c01215cc8a5d2668",
+      "source_path": "packages/contracts/platform/auth-context.schema.json"
     }
   ]
 }
