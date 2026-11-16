@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import copy
 import io
@@ -10,6 +11,7 @@ import shutil
 import ssl
 import subprocess
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -17,6 +19,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import boto3
+import httpx2 as httpx
 import pytest
 from botocore.exceptions import ClientError, ReadTimeoutError
 from botocore.stub import Stubber
@@ -1359,17 +1362,6 @@ def test_conflicting_outcome_cannot_rewrite_proven_abort(system):
     assert system.store.head("org-a").latest_epoch == 6
 
 
-class GeneratedHTTPSResponse(io.BytesIO):
-    def __init__(self, data=b"{}", status=200, encoding="identity"):
-        super().__init__(data)
-        self.status, self.headers = status, {"Content-Encoding": encoding}
-        self.read_limit = None
-
-    def read(self, limit):
-        self.read_limit = limit
-        return super().read(limit)
-
-
 def https_transport(**changes):
     values = {
         "origin": "https://journal.example.invalid",
@@ -1394,32 +1386,115 @@ def test_https_transport_cannot_override_approved_configuration(changes):
         https_transport(**changes)
 
 
+class GeneratedAsyncBody(httpx.AsyncByteStream):
+    def __init__(self, chunks, delay=0):
+        self.chunks, self.delay = chunks, delay
+        self.closed, self.seen = False, 0
+
+    async def __aiter__(self):
+        for chunk in self.chunks:
+            if self.delay:
+                await asyncio.sleep(self.delay)
+            self.seen += 1
+            yield chunk
+
+    async def aclose(self):
+        self.closed = True
+
+
 @pytest.mark.parametrize("fault", ["oversized", "encoding", "late", "redirect"])
-def test_https_transport_bounds_response_closes_and_refuses_redirect(fault):
+def test_https_transport_bounds_response_closes_and_refuses_redirect(fault, monkeypatch):
     times = iter([0.0, 11.0 if fault == "late" else 1.0])
     transport = https_transport(monotonic=lambda: next(times))
-    response = GeneratedHTTPSResponse(
-        b"x" * 65537 if fault == "oversized" else b"{}",
-        status=302 if fault == "redirect" else 200,
-        encoding="gzip" if fault == "encoding" else "identity",
-    )
-    handlers = transport.opener.handlers
-    redirect = next(h for h in handlers if h.__class__.__name__ == "_NoRedirect")
-    assert redirect.redirect_request(None, None, 302, "", {}, "https://foreign.invalid") is None
+    stream = GeneratedAsyncBody([b"x" * 65537 if fault == "oversized" else b"{}"])
     calls = []
 
-    def opened(request, **kwargs):
-        calls.append((request.full_url, kwargs))
-        return response
+    async def handler(request):
+        calls.append(str(request.url))
+        return httpx.Response(
+            302 if fault == "redirect" else 200, stream=stream,
+            headers={"Content-Encoding": "gzip" if fault == "encoding" else "identity",
+                     "Location": "https://foreign.invalid"},
+        )
 
-    transport.opener = SimpleNamespace(open=opened)
-    if fault == "redirect":
-        # The transport exposes status to the finite client; it never follows the Location.
-        assert transport.post("/v1/authority-journal/heads/read", b"{}").status == 302
-    else:
+    original = httpx.AsyncClient
+
+    def client(**kwargs):
+        assert kwargs["follow_redirects"] is False and kwargs["trust_env"] is False
+        assert kwargs["verify"].check_hostname and kwargs["verify"].verify_mode == ssl.CERT_REQUIRED
+        return original(**kwargs, transport=httpx.MockTransport(handler))
+
+    monkeypatch.setattr(httpx, "AsyncClient", client)
+    try:
+        if fault == "redirect":
+            assert transport.post("/v1/authority-journal/heads/read", b"{}").status == 302
+        else:
+            with pytest.raises(JournalError, match="JOURNAL_UNAVAILABLE"):
+                transport.post("/v1/authority-journal/heads/read", b"{}")
+    finally:
+        assert transport.close()
+    assert stream.closed
+    assert calls == ["https://journal.example.invalid/v1/authority-journal/heads/read"]
+
+
+@pytest.mark.parametrize("stall", ["headers", "body"])
+def test_total_deadline_cancels_continuing_drip_and_header_wait(stall, monkeypatch):
+    stream = GeneratedAsyncBody([b"x"] * 200, delay=0.02)
+    cancelled = threading.Event()
+
+    async def handler(request):
+        if stall == "headers":
+            try:
+                await asyncio.sleep(5)
+            except asyncio.CancelledError:
+                cancelled.set()
+                raise
+        return httpx.Response(200, stream=stream)
+
+    original = httpx.AsyncClient
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: original(
+        **kw, transport=httpx.MockTransport(handler)
+    ))
+    transport = https_transport(timeout=0.05)
+    began = time.monotonic()
+    try:
         with pytest.raises(JournalError, match="JOURNAL_UNAVAILABLE"):
             transport.post("/v1/authority-journal/heads/read", b"{}")
-    assert response.closed and response.read_limit == 65537
-    assert calls == [
-        ("https://journal.example.invalid/v1/authority-journal/heads/read", {"timeout": 10.0})
-    ]
+        assert time.monotonic() - began < 0.4
+    finally:
+        assert transport.close()
+    if stall == "body":
+        assert stream.closed and stream.seen < 10
+    else:
+        assert cancelled.is_set()
+
+
+def test_timeout_retains_bounded_capacity_until_uncancelable_work_exits(monkeypatch):
+    released = threading.Event()
+    calls = []
+    lock = threading.Lock()
+
+    def headers(*args):
+        with lock:
+            calls.append(args)
+        assert released.wait(5), "Test did not release blocked authorizer"
+        return {"Authorization": "generated"}
+
+    # Models native blocking work. Every expired task must recheck BEFORE starting HTTP.
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: pytest.fail("late HTTP dispatch"))
+    transport = https_transport(timeout=0.03, authorizer=SimpleNamespace(headers=headers))
+    try:
+        for _ in range(4):
+            with pytest.raises(JournalError, match="JOURNAL_UNAVAILABLE"):
+                transport.post("/v1/authority-journal/intents", b"{}")
+        assert len(calls) == 4
+        started = time.monotonic()
+        with pytest.raises(JournalError, match="JOURNAL_UNAVAILABLE"):
+            transport.post("/v1/authority-journal/intents", b"{}")
+        assert time.monotonic() - started < 0.1 and len(calls) == 4
+        assert transport.close(timeout=0.01) is False
+    finally:
+        released.set()
+        assert transport.close(timeout=1) is True
+    with pytest.raises(JournalError, match="JOURNAL_UNAVAILABLE"):
+        transport.post("/v1/authority-journal/intents", b"{}")

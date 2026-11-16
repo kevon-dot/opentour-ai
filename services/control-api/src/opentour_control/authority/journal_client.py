@@ -2,18 +2,21 @@
 
 from __future__ import annotations
 
+import asyncio
 import math
 import secrets
 import ssl
+import threading
 import time
-import urllib.error
 import urllib.parse
-import urllib.request
 from collections.abc import Callable
+from concurrent.futures import Future, ThreadPoolExecutor, wait
+from concurrent.futures import TimeoutError as FutureTimeout
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Literal, Protocol
 
+import httpx2 as httpx
 from opentour_journal.crypto import JournalVerifier, canonical, sha256
 from opentour_journal.models import (
     MAX_COUNTER,
@@ -74,19 +77,14 @@ class WorkloadRequestAuthorizer(Protocol):
     def headers(self, method: str, url: str, body: bytes) -> dict[str, str]: ...
 
 
-class _NoRedirect(urllib.request.HTTPRedirectHandler):
-    def redirect_request(
-        self, req: object, fp: object, code: int, msg: str, headers: object, newurl: str
-    ) -> None:
-        return None
-
-
 class HTTPSJournalTransport:
-    """Bounded HTTPS client with finite socket timeout, no redirect or implicit retry.
+    """One absolute HTTP deadline, cancelable streaming, no redirect/proxy/retry.
 
-    A timeout/late result is unknown. A socket timeout cannot promise cancellation
-    of DNS or a request already accepted by the independent service. Deployment
-    config supplies approved origin/213 digest and workload identity; callers do not.
+    Four private worker slots bound native DNS/cleanup that may resist cancellation.
+    Timed-out work retains its slot until it actually exits; admission never queues
+    more work behind it. The caller returns unavailable at the deadline, with no late
+    result accepted. A timed-out write may already have reached the remote service.
+    Runtime composition must call close() and treat False as incomplete cleanup.
     """
 
     def __init__(
@@ -122,51 +120,118 @@ class HTTPSJournalTransport:
             raise JournalError("JOURNAL_CONFIGURATION_INVALID", 503)
         self.origin = origin.rstrip("/")
         self.authorizer, self.timeout, self.monotonic = authorizer, timeout, monotonic
-        self.opener = urllib.request.build_opener(
-            urllib.request.ProxyHandler({}),
-            _NoRedirect(),
-            urllib.request.HTTPSHandler(context=tls),
-        )
+        self.tls = tls
+        self._capacity = threading.BoundedSemaphore(4)
+        self._lock = threading.RLock()
+        self._closed = False
+        self._pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="journal-http")
+        self._active: dict[Future[TransportResponse], threading.Event] = {}
 
-    def post(self, path: str, body: bytes) -> TransportResponse:
-        if path not in PATHS or len(body) > MAX_WIRE_BYTES:
-            raise JournalError("SCHEMA_INVALID", 422)
-        url = self.origin + path
+    def close(self, timeout: float = 1.0) -> bool:
+        """Stop admission, request cancellation and observe cleanup; never pretend success."""
+        if not math.isfinite(timeout) or not 0 <= timeout <= 30:
+            raise JournalError("JOURNAL_CONFIGURATION_INVALID", 503)
+        with self._lock:
+            self._closed = True
+            active = list(self._active)
+            for abort in self._active.values():
+                abort.set()
+            self._pool.shutdown(wait=False, cancel_futures=True)
+        _, pending = wait(active, timeout=timeout)
+        if not pending:
+            self._pool.shutdown(wait=True)
+        return not pending
+
+    def _completed(self, future: Future[TransportResponse]) -> None:
+        with self._lock:
+            self._active.pop(future, None)
+            self._capacity.release()
+
+    async def _http(
+        self, url: str, body: bytes, deadline: float, abort: threading.Event
+    ) -> TransportResponse:
+        remaining = deadline - time.monotonic()
+        if abort.is_set() or remaining <= 0:
+            raise JournalError("JOURNAL_UNAVAILABLE", 503)
+        started = self.monotonic()
+        # The145 authorizer is trusted composition, but even a blocked implementation
+        # holds a bounded worker slot and cannot dispatch after this request expires.
         headers = self.authorizer.headers("POST", url, body)
         allowed = {"authorization", "x-amz-date", "x-amz-security-token", "x-amz-content-sha256"}
         if (
             not headers
             or len(headers) > len(allowed)
             or any(
-                k.lower() not in allowed or "\r" in v or "\n" in v or len(v) > 16384
+                not isinstance(k, str) or not isinstance(v, str)
+                or k.lower() not in allowed or "\r" in v or "\n" in v or len(v) > 16384
                 for k, v in headers.items()
             )
             or len({k.lower() for k in headers}) != len(headers)
             or "authorization" not in {k.lower() for k in headers}
         ):
             raise JournalError("JOURNAL_FORBIDDEN", 403)
-        headers.update({"Content-Type": "application/json", "Accept-Encoding": "identity"})
-        request = urllib.request.Request(url, data=body, method="POST", headers=headers)
-        started = self.monotonic()
+        headers = {**headers, "Content-Type": "application/json", "Accept-Encoding": "identity"}
+        remaining = deadline - time.monotonic()
+        if abort.is_set() or remaining <= 0:
+            raise JournalError("JOURNAL_UNAVAILABLE", 503)
+        async with asyncio.timeout(remaining):
+            async with httpx.AsyncClient(
+                verify=self.tls, timeout=remaining, follow_redirects=False, trust_env=False,
+                limits=httpx.Limits(max_connections=1, max_keepalive_connections=0),
+            ) as client:
+                if abort.is_set() or time.monotonic() >= deadline:
+                    raise JournalError("JOURNAL_UNAVAILABLE", 503)
+                async with client.stream("POST", url, content=body, headers=headers) as response:
+                    if response.headers.get("Content-Encoding", "identity") != "identity":
+                        raise JournalError("JOURNAL_UNAVAILABLE", 503)
+                    payload = bytearray()
+                    async for chunk in response.aiter_raw():
+                        if abort.is_set() or len(chunk) > MAX_WIRE_BYTES - len(payload):
+                            raise JournalError("JOURNAL_UNAVAILABLE", 503)
+                        payload.extend(chunk)
+                    ended = self.monotonic()
+                    if (
+                        abort.is_set() or time.monotonic() >= deadline
+                        or not math.isfinite(started) or not math.isfinite(ended)
+                        or not 0 <= ended - started < self.timeout
+                    ):
+                        raise JournalError("JOURNAL_UNAVAILABLE", 503)
+                    return TransportResponse(response.status_code, bytes(payload))
+
+    def _run(
+        self, url: str, body: bytes, deadline: float, abort: threading.Event
+    ) -> TransportResponse:
         try:
+            return asyncio.run(self._http(url, body, deadline, abort))
+        except JournalError:
+            raise
+        except Exception:
+            raise JournalError("JOURNAL_UNAVAILABLE", 503) from None
+
+    def post(self, path: str, body: bytes) -> TransportResponse:
+        if path not in PATHS or type(body) is not bytes or len(body) > MAX_WIRE_BYTES:
+            raise JournalError("SCHEMA_INVALID", 422)
+        deadline = time.monotonic() + self.timeout
+        abort = threading.Event()
+        with self._lock:
+            if self._closed or not self._capacity.acquire(blocking=False):
+                raise JournalError("JOURNAL_UNAVAILABLE", 503)
             try:
-                response = self.opener.open(request, timeout=self.timeout)
-            except urllib.error.HTTPError as error:
-                response = error
-            with response:
-                payload = response.read(MAX_WIRE_BYTES + 1)
-                encoding = response.headers.get("Content-Encoding", "identity")
-                if len(payload) > MAX_WIRE_BYTES or encoding != "identity":
-                    raise JournalError("JOURNAL_UNAVAILABLE", 503)
-                ended = self.monotonic()
-                if (
-                    not math.isfinite(started)
-                    or not math.isfinite(ended)
-                    or not 0 <= ended - started < self.timeout
-                ):
-                    raise JournalError("JOURNAL_UNAVAILABLE", 503)
-                return TransportResponse(response.status, bytes(payload))
-        except (urllib.error.URLError, OSError, TimeoutError):
+                future = self._pool.submit(self._run, self.origin + path, body, deadline, abort)
+            except Exception:
+                self._capacity.release()
+                raise JournalError("JOURNAL_UNAVAILABLE", 503) from None
+            self._active[future] = abort
+            future.add_done_callback(self._completed)
+        try:
+            return future.result(timeout=max(0.0, deadline - time.monotonic()))
+        except FutureTimeout:
+            abort.set()
+            future.cancel()
+            raise JournalError("JOURNAL_UNAVAILABLE", 503) from None
+        except JournalError:
+            raise
+        except Exception:
             raise JournalError("JOURNAL_UNAVAILABLE", 503) from None
 
 
