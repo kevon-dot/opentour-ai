@@ -141,9 +141,9 @@ def test_invalid_route_identity_has_safe_closed_error(identity):
     app.include_router(create_session_router(identity.service))
     with TestClient(app) as client:
         response = client.get(
-            "/v1/session/context", headers={"Authorization": "Bearer SECRET_SENTINEL"}
+            "/v1/session/context", headers={"Authorization": "Bearer bad.jwt"}
         )
-    assert response.status_code == 401 and "SECRET_SENTINEL" not in response.text
+    assert response.status_code == 401 and "bad.jwt" not in response.text
     assert set(response.json()) == {
         "code",
         "message",
