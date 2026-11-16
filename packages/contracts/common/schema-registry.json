@@ -49,6 +49,12 @@
       "file": "packages/contracts/learning/benchmarks/statistical-design.schema.json",
       "sha256": "76fa494afea46f7bb9f505838d1269320b4aacaaa010b5545731e223affd2cda",
       "source_path": "packages/contracts/learning/benchmarks/statistical-design.schema.json"
+    },
+    {
+      "id": "urn:opentour:support-case:1.0",
+      "file": "support-case.schema.json",
+      "sha256": "e393eec1cb6eb9592db2bbaef665d544cec0ba4a56b3ff4aa3ab3b94986aad08",
+      "source_path": "specification/2026-11-12/schemas/support-case.schema.json"
     }
   ]
 }
