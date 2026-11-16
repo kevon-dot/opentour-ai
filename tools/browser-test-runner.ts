@@ -87,7 +87,15 @@ export function foundationMetadata(root: string, baselineReview?: { reason: stri
   return {
     issue_key: 'OPE-253', requirement_ids: ['OT-P23-C12-AC01', 'OT-P23-C12-AC02', 'OT-P23-C12-AC06', 'OT-P23-C12-AC07', 'OT-P23-C12-AC08', 'OT-P23-C12-AC09', 'OT-P23-C12-AC10'],
     source_refs: ['OPE-253', 'c4865bd5-0fce-4468-b6ea-05003ebfa5a2'], fixture_id: 'presentation-foundation-v1', seed: 253,
-    spec_sha256: '89ce10cdb43882c5d5314c73698a3654cf392dbd3f34efc8128d49173ad10c69', fonts,
+    spec_sha256: '968ff7c59d40afa568e5dfd0ea2488a8906531b38bb3daa00b66c58d8a7f8264',
+    native_specification: {
+      digest_recipe: 'SHA256 UTF-8 JSON sorted keys, compact separators, ASCII escaping: {issue_description, implementation_profile:{id,content}}',
+      issue_description_sha256: '6a0b7ab8300e2e4d84a40d4a417f4b27cf6160bb37595604a31489977f6ba079',
+      issue_updated_at: '2026-11-16T02:32:43.780Z',
+      implementation_profile_id: 'c4865bd5-0fce-4468-b6ea-05003ebfa5a2',
+      implementation_profile_sha256: 'b6c396ed2f3a038c6229b597769ebce03877c7a2ef7ecf22a479eaee6bb390f3',
+      implementation_profile_updated_at: '2026-11-16T02:23:29.803Z',
+    }, fonts,
     font_manifest_sha256: sha(fontManifest), token_manifest_sha256: sha(tokenManifest), design,
     baseline_manifest_sha256: sha(reviewBytes),
     presentation_sources: inventory(root, join(root, foundationRoot)).filter(item => !item.path.includes('/testing/baselines/')),
