@@ -312,7 +312,15 @@ class PostgresOrganizationRepository:
                 now,
             )
             self._event(conn, op_id, org_id, 1, "organization.requested", now)
-            self._identity_guard(conn, creator, now)
+            now = self._identity_guard(conn, creator, now)
+            # Terms/session waits can advance time after _person_lock's first
+            # observation. Persist the final watermark under that same lock, so
+            # a later clock rollback cannot hide an already admitted attempt.
+            conn.execute(
+                "UPDATE opentour_tenants.admission_locks SET last_checked_at=%s "
+                "WHERE issuer=%s AND subject=%s",
+                (now, creator.issuer, creator.subject),
+            )
             return receipt
 
     @staticmethod

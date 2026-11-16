@@ -1346,6 +1346,59 @@ def test_rolling_window_is_sampled_after_actual_terms_lock_wait(durable):
     assert durable.repository.get(durable.creator, receipt.operation_id).created_at == clock[0]
 
 
+def test_clock_rollback_after_terms_wait_cannot_hide_the_fifth_admission(durable):
+    clock = controlled_admission_time(durable)
+    start = clock[0]
+    for _ in range(4):
+        admit_new(durable)
+    connecting = threading.Event()
+    pids = {}
+
+    @contextmanager
+    def admission_connection():
+        with durable.connection() as connection:
+            connection.execute("SET LOCAL statement_timeout='5s'")
+            pids["admission"] = connection.info.backend_pid
+            connecting.set()
+            yield connection
+
+    repository = PostgresOrganizationRepository(admission_connection, clock=lambda: clock[0])
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        with durable.connection("c03_owner") as holder:
+            holder.execute(
+                "SELECT revision FROM opentour_tenants.terms_versions "
+                "WHERE revision=%s FOR UPDATE",
+                (durable.body.accepted_terms_revision,),
+            )
+            admission = pool.submit(
+                repository.create,
+                durable.creator,
+                durable.body,
+                key_digest(uuid4().hex),
+                "generated_waited_fifth_admission",
+                durable.provider.environment,
+                start,
+            )
+            assert connecting.wait(2)
+            wait_for_database_block(durable, pids["admission"], holder.info.backend_pid)
+            clock[0] = start + timedelta(seconds=10)
+        fifth = admission.result(timeout=6)
+    assert durable.repository.get(durable.creator, fifth.operation_id).created_at == clock[0]
+    with durable.connection("c03_owner") as connection:
+        assert connection.execute(
+            "SELECT last_checked_at FROM opentour_tenants.admission_locks "
+            "WHERE issuer=%s AND subject=%s",
+            (durable.creator.issuer, durable.creator.subject),
+        ).fetchone()["last_checked_at"] == clock[0]
+    clock[0] = start + timedelta(seconds=5)
+    with pytest.raises(SetupError, match="CLOCK_UNAVAILABLE"):
+        admit_new(durable)
+    clock[0] = start + timedelta(seconds=10)
+    with pytest.raises(SetupError, match="ADMISSION_LIMIT"):
+        admit_new(durable)
+    assert admission_counts(durable) == (5, 5, 5, 5)
+
+
 def test_backward_clock_cannot_reopen_rolling_capacity(durable):
     clock = controlled_admission_time(durable)
     for _ in range(5):
