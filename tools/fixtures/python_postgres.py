@@ -22,15 +22,18 @@ ROOT = Path(__file__).resolve().parents[2]
 TARGETS = {
     "services/control-api/tests/migrations/test_expand_contract.py": "OPE-213",
     "services/control-api/tests/auth/test_identity_postgres.py": "OPE-142",
+    "tests/integration/authority_journal_recovery.py": "OPE-217",
     "services/control-api/tests/organizations/test_creation_saga.py": "OPE-171",
 }
 SCHEMA_ID = "urn:opentour:python-postgres-observation:1.0"
 
 
 def target_command(target: str) -> tuple[str, ...]:
-    """Return the native command only for a finite registered local target."""
+    """Exact native command for CI; no arbitrary filter or implicit unit exclusion."""
     if target not in TARGETS:
-        raise ValueError("Unknown registered PostgreSQL target")
+        raise ValueError("PostgreSQL target is not registered")
+    if target == "tests/integration/authority_journal_recovery.py":
+        return ("just", "test-integration", "local", "authority_journal_recovery")
     return ("just", "test-python", target)
 
 

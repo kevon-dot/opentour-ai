@@ -25,6 +25,7 @@
       "enum": [
         "services/control-api/tests/migrations/test_expand_contract.py",
         "services/control-api/tests/auth/test_identity_postgres.py",
+        "tests/integration/authority_journal_recovery.py",
         "services/control-api/tests/organizations/test_creation_saga.py"
       ]
     },
@@ -32,6 +33,7 @@
       "enum": [
         "OPE-213",
         "OPE-142",
+        "OPE-217",
         "OPE-171"
       ]
     },

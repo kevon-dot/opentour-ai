@@ -19,7 +19,10 @@ build-constraint-dependencies = [
 package = false
 
 [tool.uv.workspace]
-members = ["services/control-api", "services/cell-runtime", "services/audit-journal"]
+members = [
+  "services/control-api", "services/cell-runtime", "services/audit-journal",
+  "packages/authority-journal",
+]
 exclude = ["training"]
 
 [dependency-groups]

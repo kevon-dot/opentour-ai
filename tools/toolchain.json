@@ -204,6 +204,27 @@
         "requires_python": "<3.16,>=3.10",
         "engines": null,
         "integrity": null
+      },
+      "boto3": {
+        "version": "1.44.3",
+        "source": "https://pypi.org/pypi/boto3/1.44.3/json",
+        "requires_python": ">=3.10",
+        "engines": null,
+        "integrity": null
+      },
+      "botocore": {
+        "version": "1.44.3",
+        "source": "https://pypi.org/pypi/botocore/1.44.3/json",
+        "requires_python": ">=3.10",
+        "engines": null,
+        "integrity": null
+      },
+      "rfc8785": {
+        "version": "0.1.4",
+        "source": "https://pypi.org/pypi/rfc8785/0.1.4/json",
+        "requires_python": ">=3.8",
+        "engines": null,
+        "integrity": null
       }
     },
     "node": {
@@ -352,7 +373,8 @@
     "cpu_workspace": [
       "opentour-control",
       "opentour-cell",
-      "opentour-audit"
+      "opentour-audit",
+      "opentour-journal"
     ],
     "learning_lock": "training/uv.lock",
     "learning_principals": [

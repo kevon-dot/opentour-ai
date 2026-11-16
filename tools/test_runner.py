@@ -294,25 +294,42 @@ def manifest(root: Path) -> dict[str, Any]:
             raise CommandError("Invalid registered browser execution profile.")
     for key in ("integration_profiles", "isolation_suites", "acceptance_gates"):
         for name, profile in value[key].items():
-            if (
-                not isinstance(name, str)
-                or not isinstance(profile, dict)
-                or set(profile) != {"kind", "path", "prerequisites", "owner"}
-                or not isinstance(profile["kind"], str)
-                or profile["kind"]
-                not in {
-                    "simulated",
-                    "local_integration",
-                    "provider_integration",
-                    "customer_evidence",
-                }
-                or (profile["path"] is not None and not isinstance(profile["path"], str))
-                or not isinstance(profile["prerequisites"], list)
-                or any(not isinstance(item, str) for item in profile["prerequisites"])
-                or not isinstance(profile["owner"], str)
-            ):
-                raise CommandError("Invalid registered profile contract.")
+            if key == "integration_profiles" and name == "local":
+                if (
+                    not isinstance(profile, dict)
+                    or set(profile) != {"kind", "filters"}
+                    or profile["kind"] != "local_integration"
+                    or not isinstance(profile["filters"], dict)
+                    or not profile["filters"]
+                ):
+                    raise CommandError("Invalid registered local filter contract.")
+                profiles = list(profile["filters"].items())
+            else:
+                profiles = [(name, profile)]
+            for profile_name, profile_entry in profiles:
+                validate_profile(profile_name, profile_entry)
     return value
+
+
+def validate_profile(name: Any, profile: Any) -> None:
+    if (
+        not isinstance(name, str)
+        or not isinstance(profile, dict)
+        or set(profile) != {"kind", "path", "prerequisites", "owner"}
+        or not isinstance(profile["kind"], str)
+        or profile["kind"]
+        not in {
+            "simulated",
+            "local_integration",
+            "provider_integration",
+            "customer_evidence",
+        }
+        or (profile["path"] is not None and not isinstance(profile["path"], str))
+        or not isinstance(profile["prerequisites"], list)
+        or any(not isinstance(item, str) for item in profile["prerequisites"])
+        or not isinstance(profile["owner"], str)
+    ):
+        raise CommandError("Invalid registered profile contract.")
 
 
 def environment(root: Path, nonce: str) -> dict[str, str]:
@@ -901,6 +918,23 @@ def _invoke(
                     "content": observations,
                 }
             ]
+            if target == "tests/integration/authority_journal_recovery.py":
+                if code == 0 and not set(MODES).issubset(
+                    {test["mode"] for test in report["tests"]}
+                ):
+                    raise CommandError("Journal recovery must execute both deployment modes.")
+                # This boundary belongs to the registered wrapper, never adapter-supplied text.
+                summary["fixture_scope"] = {
+                    "postgresql": (
+                        "actual_local"
+                        if observations["started_instances"] > 0 and observations["binary_sha256"]
+                        else "NOT_RUN"
+                    ),
+                    "aws_responses": "simulated_only",
+                    "sql_consumer": "test_fixture",
+                    "provider_acceptance": "NOT_RUN",
+                    "production_grant_consumer": "NOT_RUN",
+                }
             if target == "services/control-api/tests/organizations/test_creation_saga.py":
                 if code == 0 and not set(MODES).issubset(
                     {test["mode"] for test in report["tests"]}
@@ -1091,19 +1125,27 @@ def dispatch(
                 raise CommandError("Invalid integration filter.")
         entry = registry[key][selector]
         if command == "test-integration" and selector == "local":
-            if option != "harness-smoke":
-                raise CommandError(
-                    "Local profile accepts only the registered harness-smoke filter."
-                )
-            target = "tests/integration/test_failure_harness.py"
+            admitted = {
+                "harness-smoke": ("OPE-124", "tests/integration/test_failure_harness.py"),
+                "authority_journal_recovery": (
+                    "OPE-217",
+                    "tests/integration/authority_journal_recovery.py",
+                ),
+            }
+            if option not in admitted or option not in entry["filters"]:
+                raise CommandError("Local profile requires an exact registered filter.")
+            owner, target = admitted[option]
+            entry = entry["filters"][option]
             if (
                 entry["kind"] != "local_integration"
                 or entry["path"] != target
-                or entry["owner"] != "OPE-124"
+                or entry["owner"] != owner
             ):
-                raise CommandError("Local profile does not match the admitted OPE-124 consumer.")
-            path_target(root, "tools/fixtures/local_harness.py")
+                raise CommandError("Local profile does not match its admitted consumer.")
             path_target(root, target)
+            if option == "authority_journal_recovery":
+                return [python_test(root, target, run)]
+            path_target(root, "tools/fixtures/local_harness.py")
             return [
                 invoke(
                     (*uv_python(root), "-m", "tools.fixtures.local_harness", "harness-smoke"),
@@ -1163,6 +1205,7 @@ def dispatch(
                 "services/control-api/src",
                 "services/cell-runtime/src",
                 "services/audit-journal/src",
+                "packages/authority-journal/src",
                 "training/src",
             ),
             (

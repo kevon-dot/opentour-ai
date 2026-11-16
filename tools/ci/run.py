@@ -14,9 +14,14 @@ from pathlib import Path
 from typing import Any
 
 from tools.ci.browser_evidence import retain_browser_evidence
+from tools.ci.dependency_evidence import (
+    SCANNER_VERSION,
+    DependencyEvidenceError,
+    project_osv_report,
+)
 from tools.ci.policy import CHECKS, check
 from tools.ci.prepare import download, postgres
-from tools.fixtures.python_postgres import present_targets
+from tools.fixtures.python_postgres import present_targets, target_command
 from tools.public_content_check import digest, inspect_bytes, load_policy, scan_paths, tracked_paths
 from tools.test_runner import CommandError, Invocation, execute, path_target
 
@@ -36,6 +41,20 @@ def safe_environment() -> dict[str, str]:
     return env
 
 
+def dependency_scan_command(root: Path) -> list[str]:
+    return [
+        str(root / ".toolchain/ci/osv-scanner"),
+        "scan",
+        "source",
+        "--format=json",
+        "--all-packages",
+        "--verbosity=error",
+        "--lockfile=uv.lock",
+        "--lockfile=training/uv.lock",
+        "--lockfile=pnpm-lock.yaml",
+    ]
+
+
 def run_one(argv: list[str], root: Path, *, env: dict[str, str] | None = None) -> dict[str, Any]:
     with tempfile.TemporaryDirectory(prefix="opentour-ci-command-") as temporary:
         result = execute(
@@ -51,7 +70,19 @@ def run_one(argv: list[str], root: Path, *, env: dict[str, str] | None = None) -
             )
         )
     raw = result.stdout.encode()
-    findings = inspect_bytes("command-output.txt", raw, load_policy(root))
+    projected_dependency: dict[str, Any] | None = None
+    projection_failed = False
+    published = raw
+    if argv == dependency_scan_command(root):
+        try:
+            projected_dependency = project_osv_report(raw, root=root)
+            published = json.dumps(projected_dependency, sort_keys=True).encode()
+        except DependencyEvidenceError:
+            # The raw scanner output can contain third-party advisory contacts.
+            # Invalid reports never publish raw text or become an empty success.
+            published = b""
+            projection_failed = True
+    findings = inspect_bytes("command-output.txt", published, load_policy(root))
     report: dict[str, Any] = {
         "command": argv,
         "exit_code": result.returncode,
@@ -66,8 +97,19 @@ def run_one(argv: list[str], root: Path, *, env: dict[str, str] | None = None) -
         and not result.timed_out
         and not result.interrupted
         and not findings
+        and not projection_failed
         else "FAIL",
     }
+    if argv == dependency_scan_command(root):
+        report["raw_scanner_output_published"] = False
+        report["published_projection_sha256"] = digest(published)
+        if projection_failed:
+            report["reason"] = "INVALID_DEPENDENCY_REPORT"
+        elif not findings and projected_dependency is not None:
+            report["command_evidence"] = projected_dependency
+            if projected_dependency.get("status") != "PASS":
+                report["status"] = "FAIL"
+        return report
     if not findings:
         parsed = None
         try:
@@ -241,7 +283,7 @@ def run_check(name: str, root: Path) -> dict[str, Any]:
             run(["just", "test-integration", "local", "harness-smoke"])
             routed_local_targets = list(present_targets(root))
             for target in routed_local_targets:
-                run(["just", "test-python", target])
+                run(list(target_command(target)))
                 if steps[-1].get("command_evidence", {}).get("kind") != "local_integration":
                     steps[-1]["status"] = "FAIL"
                     raise CommandError("PostgreSQL target lacked local integration evidence.", 1)
@@ -251,22 +293,12 @@ def run_check(name: str, root: Path) -> dict[str, Any]:
             run(["just", "test-python", "tests/contract/test_public_content_policy.py"])
         elif name == "dependency-scan":
             item = json.loads((root / ".github/ci-policy.json").read_text())["osv_scanner"]
+            if item["version"] != SCANNER_VERSION:
+                raise CommandError("Dependency evidence adapter does not match the scanner.", 1)
             binary = root / ".toolchain/ci/osv-scanner"
             download(item["url"], item["sha256"], binary)
             binary.chmod(0o700)
-            run(
-                [
-                    str(binary),
-                    "scan",
-                    "source",
-                    "--format=json",
-                    "--all-packages",
-                    "--verbosity=error",
-                    "--lockfile=uv.lock",
-                    "--lockfile=training/uv.lock",
-                    "--lockfile=pnpm-lock.yaml",
-                ]
-            )
+            run(dependency_scan_command(root))
         elif name == "iac-policy":
             policy_result = check(root)
             steps.append(policy_result)
