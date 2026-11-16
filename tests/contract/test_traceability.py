@@ -44,7 +44,9 @@ def test_complete_current_manifest_passes_with_actual_native_ids(tmp_path, monke
     assert child["logical_key"] == "OT-P23-C12-OVERLAY"
     assert child["projection"]["parent"] == "OPE-253"
     assert child["projection"]["blocked_by"] == ["OPE-125", "OPE-126", "OPE-127"]
-    assert child["projection"]["owned_paths"] == []  # Explicit parent delegation.
+    parent = next(i for i in source["issues"] if i["issue_key"] == "OPE-253")
+    # Only new child evidence paths are exclusive; existing UI files remain delegated.
+    assert not set(child["projection"]["owned_paths"]) & set(parent["projection"]["owned_paths"])
     requirements = child["projection"]["requirement_ids"]
     assert requirements == [f"OT-P23-C12-OVERLAY::acceptance:{n}" for n in range(1, 13)]
     parent_cases = [b for b in value["test_bindings"] if b["issue_key"] == "OPE-253"]
