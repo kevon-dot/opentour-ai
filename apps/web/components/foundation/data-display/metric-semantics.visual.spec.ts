@@ -1,5 +1,7 @@
 import { test, expect } from '@playwright/test';
 import { join } from 'node:path';
+import { writeFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
 import { build } from 'vite';
 import type { MetricSemanticsProps } from './metric-semantics.types';
 
@@ -64,8 +66,37 @@ for (const width of [320, 768, 1280, 1440]) {
       await page.evaluate(() => document.fonts.ready);
       // Native fixture guide 296:259. Each pair is [Metric height, metadata height].
       const expectedHeights = scale === 1 ? Array.from({ length: 5 }, () => [122, 90]) :
-        width === 320 ? [[196, 252], [308, 252], [384, 252], [308, 216], [232, 216]] :
+        width === 320 ? [[196, 252], [308, 252], [384, 252], [232, 216], [232, 216]] :
           [[196, 180], [196, 216], [272, 180], [232, 216], [196, 180]];
+      const lines = await cards.evaluateAll(items => items.map(card => {
+        const fields = [...card.children, card.nextElementSibling!];
+        return fields.map(field => {
+          const rows = new Map<number, string>();
+          const walker = document.createTreeWalker(field, NodeFilter.SHOW_TEXT);
+          while (walker.nextNode()) {
+            const text = walker.currentNode;
+            for (let index = 0; index < text.textContent!.length; index++) {
+              const range = document.createRange();
+              range.setStart(text, index);
+              range.setEnd(text, index + 1);
+              const rect = range.getBoundingClientRect();
+              if (rect.width > 0) rows.set(rect.y, (rows.get(rect.y) ?? '') + range.toString());
+            }
+          }
+          return [...rows.values()].map(row => row.trim());
+        });
+      }));
+      await writeFile(info.outputPath('lines.json'), JSON.stringify(lines));
+      // SHA-256 of each native SVG text layer's tspan lines in DOM order, with
+      // entities decoded and trailing layout spaces trimmed. lines.json records any mismatch.
+      const nativeLineHashes = {
+        normal: 'c261fcb06929cd550f57868f2c7ea436057fbcf361ef16be5fbdbb93b0ec1136',
+        largeNarrow: 'd0be1862448679d9eeac0436386321861a7307510ddb22e0b9795bfd497e4bdc',
+        largeWide: 'db09252f670fc111eb1a16fe2360788fbbfac25012e7167ec41f3704f586d4b3',
+      };
+      const profile = scale === 1 ? 'normal' : width === 320 ? 'largeNarrow' : 'largeWide';
+      expect(lines[3][1]).toEqual(['Unknown']);
+      expect(createHash('sha256').update(JSON.stringify(lines)).digest('hex')).toBe(nativeLineHashes[profile]);
       const actualHeights = await cards.evaluateAll(items => items.map(item => [
         item.getBoundingClientRect().height, item.nextElementSibling!.getBoundingClientRect().height,
       ]));

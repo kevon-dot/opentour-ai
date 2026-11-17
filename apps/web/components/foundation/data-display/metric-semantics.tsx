@@ -31,7 +31,16 @@ export function MetricSemantics(props: MetricSemanticsProps) {
     value = props.value;
   }
 
-  return <div style={{ WebkitFontSmoothing: 'antialiased' }}>
+  // Preserve the full Unknown label when enlarged text leaves too little inline space.
+  const layout: CSSProperties & { '--ot-space-20'?: string } = {
+    WebkitFontSmoothing: 'antialiased',
+    containerType: 'inline-size',
+  };
+  if (state === 'unknown') {
+    layout['--ot-space-20'] =
+      'clamp(var(--ot-space-8), calc(100cqi - 10rem), calc(var(--ot-space-16) + var(--ot-space-4)))';
+  }
+  return <div style={layout}>
     <Metric tone={tone} title={title} value={value} detail={reason} />
     <div style={metadata}>
       <div>{labels[state]} · {direction}</div>
