@@ -73,6 +73,10 @@ class PrincipalRecord:
 class PrincipalPort(Protocol):
     def current(self, organization_id: str, principal: Principal) -> PrincipalRecord | None: ...
 
+    def current_human(
+        self, organization_id: str, issuer: str, subject: str, membership_id: str
+    ) -> PrincipalRecord | None: ...
+
 
 @dataclass(frozen=True)
 class AuthorityState:
@@ -130,46 +134,75 @@ def _duty(
         raise GrantError("DUTY_CONFLICT", 403)
 
 
-def _valid_chain(
-    grant: AccessGrant,
-    grants: Mapping[str, AccessGrant],
-    now: datetime,
-    organization_id: str,
-    seen: frozenset[str] = frozenset(),
-) -> bool:
-    # Bounded traversal fails closed on missing, cyclic, foreign or inactive ancestry.
-    if (
-        grant.grant_id in seen
-        or len(seen) >= 64
-        or grant.resource_scope.organization_id != organization_id
-        or not grant.current(now)
-    ):
-        return False
-    parents = [grants[p] for p in grant.parent_grant_ids if p in grants]
-    if grant.parent_grant_ids and any(
-        not any(
-            capability in parent.capabilities
-            and grant.resource_scope.within(parent.resource_scope)
-            and set(grant.purposes) <= set(parent.purposes)
-            and set(grant.data_classes) <= set(parent.data_classes)
-            and instant(parent.valid_from) <= instant(grant.valid_from)
-            and (
-                parent.expires_at is None
-                or (
-                    grant.expires_at is not None
-                    and instant(grant.expires_at) <= instant(parent.expires_at)
+class GrantAncestry:
+    """Evaluate a bounded graph at one observation time, sharing ancestor results."""
+
+    def __init__(
+        self,
+        grants: Mapping[str, AccessGrant],
+        now: datetime,
+        organization_id: str,
+    ) -> None:
+        self.grants, self.now, self.organization_id = grants, now, organization_id
+        self._depths: dict[str, int | None] = {}
+
+    def valid(self, grant: AccessGrant) -> bool:
+        # Postorder iterates each reachable row once. An ancestor's depth is
+        # independent of the first path that reached it.
+        pending = [(grant, False)]
+        visiting: set[str] = set()
+        while pending:
+            node, children_done = pending.pop()
+            key = node.grant_id
+            if children_done:
+                visiting.remove(key)
+                if key not in self._depths:
+                    self._depths[key] = self._ancestors(node)
+            elif key not in self._depths:
+                if (
+                    key in visiting
+                    or node.resource_scope.organization_id != self.organization_id
+                    or not node.current(self.now)
+                ):
+                    self._depths[key] = None
+                    continue
+                visiting.add(key)
+                pending.append((node, True))
+                for parent_id in node.parent_grant_ids:
+                    parent = self.grants.get(parent_id)
+                    if parent is not None and parent.grant_id == parent_id:
+                        pending.append((parent, False))
+        return self._depths[grant.grant_id] is not None
+
+    def _ancestors(self, grant: AccessGrant) -> int | None:
+        depth = 1
+        covered: set[str] = set()
+        purposes, classes = set(grant.purposes), set(grant.data_classes)
+        for parent_id in grant.parent_grant_ids:
+            parent = self.grants.get(parent_id)
+            if parent is None or parent.grant_id != parent_id:
+                return None
+            parent_depth = self._depths.get(parent_id)
+            if parent_depth is None or parent_depth >= 64:
+                return None
+            depth = max(depth, parent_depth + 1)
+            if (
+                grant.resource_scope.within(parent.resource_scope)
+                and purposes <= set(parent.purposes)
+                and classes <= set(parent.data_classes)
+                and instant(parent.valid_from) <= instant(grant.valid_from)
+                and (
+                    parent.expires_at is None
+                    or (
+                        grant.expires_at is not None
+                        and instant(grant.expires_at) <= instant(parent.expires_at)
+                    )
                 )
-            )
-            for parent in parents
-        )
-        for capability in grant.capabilities
-    ):
-        return False
-    return all(
-        parent_id in grants
-        and _valid_chain(grants[parent_id], grants, now, organization_id, seen | {grant.grant_id})
-        for parent_id in grant.parent_grant_ids
-    )
+            ):
+                covered.update(parent.capabilities)
+        if grant.parent_grant_ids and not set(grant.capabilities) <= covered:
+            return None
+        return depth
 
 
 def _matches(scope: InputResourceScope, resource: ResourceRecord) -> bool:
@@ -212,6 +245,21 @@ class GrantResolver:
             or record.principal != requested
         ):
             raise GrantError("RESOURCE_NOT_FOUND", 404)
+        return record
+
+    def human_principal(
+        self, organization_id: str, issuer: str, subject: str, membership_id: str
+    ) -> PrincipalRecord:
+        record = self.principals.current_human(organization_id, issuer, subject, membership_id)
+        if (
+            record is None
+            or record.organization_id != organization_id
+            or record.identity_issuer != issuer
+            or record.identity_subject != subject
+            or record.principal.type != "user"
+        ):
+            raise GrantError("PRINCIPAL_UNAVAILABLE", 403)
+        _duty(record, (), ())
         return record
 
     def resource(
@@ -288,6 +336,7 @@ class GrantResolver:
             and now >= instant(resource.artifact_ref.expires_at)
         ):
             raise GrantError("RESOURCE_UNAVAILABLE", 409)
+        ancestry = GrantAncestry(grants, now, context.organization_id)
         matches = tuple(
             sorted(
                 grant.grant_id
@@ -297,7 +346,7 @@ class GrantResolver:
                 and purpose in grant.purposes
                 and data_class in grant.data_classes
                 and _matches(grant.resource_scope, resource)
-                and _valid_chain(grant, grants, now, context.organization_id)
+                and ancestry.valid(grant)
             )
         )
         if not matches:
@@ -373,6 +422,7 @@ class GrantResolver:
         now = self._now(now)
         if body.expires_at is not None and instant(body.expires_at) <= now:
             raise GrantError("GRANT_EXPIRED", 403)
+        ancestry = GrantAncestry(grants, now, context.organization_id)
         parents: set[str] = set()
         for capability in body.capabilities:
             # One parent must support the child's complete scope/purpose/class/validity
@@ -383,7 +433,7 @@ class GrantResolver:
                 if (
                     g.principal == actor.principal
                     and capability in g.capabilities
-                    and _valid_chain(g, grants, now, context.organization_id)
+                    and ancestry.valid(g)
                     and body.resource_scope.within(g.resource_scope)
                     and set(body.purposes) <= set(g.purposes)
                     and set(body.data_classes) <= set(g.data_classes)

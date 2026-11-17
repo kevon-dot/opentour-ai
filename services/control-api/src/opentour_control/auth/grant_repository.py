@@ -14,7 +14,10 @@ from typing import Any, Literal
 
 import psycopg
 from opentour_journal.crypto import canonical, sha256
+from opentour_journal.models import HeadState
+from opentour_journal.replay import VerifiedAuthorityFrontier
 from psycopg.pq import TransactionStatus
+from pydantic import ValidationError
 
 from .config import identifier
 from .grant_models import (
@@ -23,10 +26,11 @@ from .grant_models import (
     GrantCurrentStatus,
     GrantError,
     GrantOperationView,
+    instant,
     server_time,
     timestamp,
 )
-from .grants import AuthorityState
+from .grants import AuthorityState, GrantAncestry
 from .repository import lock_membership_observation
 from .session import AuthContext
 
@@ -181,6 +185,7 @@ class PostgresGrantRepository:
         if observation["status"] != "active" or not (
             now - timedelta(seconds=30) <= observation["checked_at"] <= now
             and observation["observed_at"] <= now
+            and now - timedelta(seconds=30) <= instant(context.identity.identity_checked_at) <= now
         ):
             raise GrantError("IDENTITY_FRESHNESS_UNAVAILABLE", 503)
         return source
@@ -243,41 +248,61 @@ class PostgresGrantRepository:
         body: CreateGrant,
         request_id: str,
     ) -> None:
+        with self.transaction(context) as conn:
+            self.retain_request(
+                conn, context, workspace_id, key_hash, body, request_id, server_time(self.clock())
+            )
+
+    @staticmethod
+    def retain_request(
+        conn: Connection,
+        context: AuthContext,
+        workspace_id: str,
+        key_hash: str,
+        body: CreateGrant,
+        request_id: str,
+        now: datetime,
+    ) -> None:
         raw = canonical(body.wire())
         body_hash = sha256(raw)
-        now = server_time(self.clock())
-        with self.transaction(context) as conn:
-            conn.execute(
-                "INSERT INTO opentour_authority.requests "
-                "(organization_id,issuer,subject,workspace_id,key_sha256,"
-                "request_sha256,body,request_id,created_at) "
-                "VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING",
-                (
-                    context.organization_id,
-                    context.identity.actor["issuer"],
-                    context.identity.actor["subject"],
-                    workspace_id,
-                    key_hash,
-                    body_hash,
-                    raw,
-                    request_id,
-                    now,
-                ),
-            )
-            row = conn.execute(
-                "SELECT request_sha256,body FROM opentour_authority.requests "
-                "WHERE organization_id=%s "
-                "AND issuer=%s AND subject=%s AND workspace_id=%s AND key_sha256=%s",
-                (
-                    context.organization_id,
-                    context.identity.actor["issuer"],
-                    context.identity.actor["subject"],
-                    workspace_id,
-                    key_hash,
-                ),
-            ).fetchone()
-            if row is None or row["request_sha256"] != body_hash or bytes(row["body"]) != raw:
-                raise GrantError("IDEMPOTENCY_CONFLICT", 409)
+        owner = (
+            context.organization_id,
+            context.identity.actor["issuer"],
+            context.identity.actor["subject"],
+            workspace_id,
+            key_hash,
+        )
+        conn.execute(
+            "INSERT INTO opentour_authority.requests "
+            "(organization_id,issuer,subject,workspace_id,key_sha256,"
+            "request_sha256,body,request_id,created_at) "
+            "VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING",
+            (*owner, body_hash, raw, request_id, now),
+        )
+        row = conn.execute(
+            "SELECT request_sha256,body FROM opentour_authority.requests "
+            "WHERE organization_id=%s "
+            "AND issuer=%s AND subject=%s AND workspace_id=%s AND key_sha256=%s",
+            owner,
+        ).fetchone()
+        if row is None or row["request_sha256"] != body_hash or bytes(row["body"]) != raw:
+            raise GrantError("IDEMPOTENCY_CONFLICT", 409)
+
+    @staticmethod
+    def operation_for_key(
+        conn: Connection, context: AuthContext, workspace_id: str, key_hash: str
+    ) -> dict[str, Any] | None:
+        return conn.execute(
+            "SELECT * FROM opentour_authority.operations WHERE organization_id=%s "
+            "AND issuer=%s AND subject=%s AND workspace_id=%s AND key_sha256=%s",
+            (
+                context.organization_id,
+                context.identity.actor["issuer"],
+                context.identity.actor["subject"],
+                workspace_id,
+                key_hash,
+            ),
+        ).fetchone()
 
     @staticmethod
     def retained_operation(
@@ -303,40 +328,39 @@ class PostgresGrantRepository:
         *,
         request_id: str,
         now: datetime,
+        frontier: VerifiedAuthorityFrontier | None = None,
+        target_current: bool = False,
     ) -> GrantOperationView:
         current = None
-        unavailable = None
+        unavailable: Literal["AUTHORITY_UNAVAILABLE", "RECONCILIATION_REQUIRED"] | None = None
         if row["state"] == "succeeded":
-            authority, _ = self.authority(conn, row["organization_id"])
-            grant_row = conn.execute(
-                "SELECT revision,state,body FROM opentour_authority.grants "
-                "WHERE organization_id=%s AND grant_id=%s",
-                (row["organization_id"], row["grant_id"]),
-            ).fetchone()
-            if grant_row is None:
+            authority, source = self.authority(conn, row["organization_id"])
+            grants = self.grants(conn, row["organization_id"])
+            grant = grants.get(row["grant_id"])
+            if grant is None or grant.creation_operation_id != row["operation_id"]:
                 raise GrantError("AUTHORITY_STATE_INVALID", 503)
-            grant = AccessGrant.model_validate(
-                {
-                    **grant_row["body"],
-                    "revision": str(grant_row["revision"]),
-                    "state": grant_row["state"],
-                }
-            )
-            now = self.now(now)
-            state = grant.temporal_state(now)
-            status: Literal["current", "reconciliation_required", "unavailable"] = authority.state
-            if authority.current_operation_id is not None:
-                status = "reconciliation_required"
-            if status == "unavailable":
+            now = self.now(max(now, source["updated_at"], row["updated_at"]))
+            if authority.current_operation_id is not None or (
+                frontier is not None and frontier.head.unresolved_operation_id is not None
+            ):
+                unavailable = "RECONCILIATION_REQUIRED"
+            elif not self.matches_frontier(authority, source, frontier):
                 unavailable = "AUTHORITY_UNAVAILABLE"
             else:
-                current = GrantCurrentStatus(
-                    grant_id=grant.grant_id,
-                    revision=grant.revision,
-                    state=state,
-                    authority_status=status,
-                    observed_at=timestamp(now),
-                )
+                state = grant.temporal_state(now)
+                ancestry = GrantAncestry(grants, now, authority.organization_id)
+                if state == "revoked" or (
+                    target_current and (state != "active" or ancestry.valid(grant))
+                ):
+                    current = GrantCurrentStatus(
+                        grant_id=grant.grant_id,
+                        revision=grant.revision,
+                        state=state,
+                        authority_status="current",
+                        observed_at=timestamp(now),
+                    )
+                else:
+                    unavailable = "AUTHORITY_UNAVAILABLE"
         return GrantOperationView.model_validate(
             {
                 "operation_id": row["operation_id"],
@@ -349,4 +373,24 @@ class PostgresGrantRepository:
                 "current_status_unavailable_reason": unavailable,
                 "request_id": request_id,
             }
+        )
+
+    @staticmethod
+    def matches_frontier(
+        authority: AuthorityState,
+        row: dict[str, Any],
+        frontier: VerifiedAuthorityFrontier | None,
+    ) -> bool:
+        if frontier is None or authority.state != "current" or authority.current_operation_id:
+            return False
+        try:
+            head = HeadState.model_validate(row["journal_head"])
+        except ValidationError:
+            return False
+        return (
+            head == frontier.head
+            and head.unresolved_operation_id is None
+            and head.organization_id == authority.organization_id
+            and head.latest_epoch == authority.revocation_epoch
+            and head.latest_authority_revision == authority.authority_revision
         )

@@ -6,6 +6,8 @@ It never accesses an existing database, service, provider account or customer ro
 
 import hashlib
 import os
+import runpy
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -18,6 +20,16 @@ from opentour_control.auth.grant_models import CreateGrant, GrantError, timestam
 from opentour_control.auth.grant_repository import PostgresGrantRepository, set_context
 from opentour_control.auth.repository import connection_factory
 from opentour_control.auth.session import AuthContext, VerifiedIdentityContext
+from opentour_control.authority.coordinator import (
+    GrantCoordinator,
+    JournalCallerContext,
+    PostgresAuthorityResolver,
+)
+from opentour_control.authority.journal_client import TransportResponse
+from opentour_journal.crypto import canonical
+from opentour_journal.models import AppendIntent, AppendOutcome, ImmutableMetadataRef, JournalError
+from opentour_journal.ports import ApprovedRegistration, AuthorizedScope
+from psycopg.types.json import Jsonb
 
 from tools.fixtures.postgres import DisposablePostgres
 
@@ -293,3 +305,351 @@ def test_helper_ignores_temporary_search_path_substitution(durable):
         conn.execute("SET LOCAL search_path=pg_temp,public")
         row = conn.execute("SELECT * FROM opentour_authority.locked_membership()").fetchone()
         assert row["organization_id"] == durable.context.organization_id
+
+
+@pytest.fixture(scope="module")
+def generated_audit():
+    # Exercise the already qualified signed journal with generated provider doubles.
+    return runpy.run_path(str(ROOT / "services/audit-journal/tests/test_append_protocol.py"))
+
+
+@pytest.fixture
+def generated_grant_facts():
+    return runpy.run_path(str(Path(__file__).with_name("test_grants.py")))
+
+
+class ScopedGeneratedService:
+    def __init__(self, context, principal):
+        from opentour_control.auth.grant_repository import RepositoryScope
+
+        self.scope = RepositoryScope.from_context(context)
+        self.principal = principal
+
+    def current(self, principal, organization_id, capability):
+        if principal != self.principal or organization_id != self.scope.organization_id:
+            raise JournalError("JOURNAL_FORBIDDEN", 403)
+        return JournalCallerContext(
+            principal,
+            AuthorizedScope(principal.service_id, organization_id, capability),
+            self.scope,
+        )
+
+
+class GeneratedApproval:
+    def __init__(self, context):
+        self.registration = ApprovedRegistration(
+            context.organization_id,
+            context.revocation_epoch,
+            context.authority_revision,
+            ImmutableMetadataRef(record_id="generated-enrollment", revision="1", sha256="a" * 64),
+        )
+
+    def current(self, principal, organization_id):
+        assert self.registration.organization_id == organization_id
+        return self.registration
+
+
+class ConfiguredTestTransport:
+    def __init__(self, transport):
+        self.transport = transport
+        self.after = lambda path, body: None
+        self.head_available = True
+
+    def post(self, path, body):
+        if not self.head_available and path.endswith("/heads/read"):
+            raise JournalError("JOURNAL_UNAVAILABLE", 503)
+        try:
+            result = self.transport.post(path, body)
+        except JournalError as error:
+            return TransportResponse(error.status, canonical({"code": error.code}))
+        self.after(path, body)
+        return result
+
+
+@pytest.fixture
+def saga(durable, generated_audit, generated_grant_facts):
+    f, d = generated_grant_facts, durable
+    org = d.context.organization_id
+    system = generated_audit["build_system"]()
+    callers = ScopedGeneratedService(d.context, system.principal)
+    enrollments = GeneratedApproval(d.context)
+    sql_resolver = PostgresAuthorityResolver(d.coordinator, callers, enrollments)
+    # Sign a generated preexisting delegated-administration baseline with the
+    # real 217 service, then require native SQL sources for every tested mutation.
+    generated = system.authority
+    generated.authorize = lambda principal, organization, capability: (
+        callers.current(principal, organization, capability).authorization
+    )
+    generated.registration = enrollments.current
+    system.service.authority = generated
+    genesis = system.service.register(system.principal, org)
+    system.checkpoints.checkpoints.update(
+        generated_audit["GeneratedCheckpoints"](
+            system.client.verifier.trust.journal, [genesis]
+        ).checkpoints
+    )
+    genesis_intent = AppendIntent(
+        organization_id=org,
+        operation_id="generated-delegated-admin",
+        expected_head_sequence=0,
+        expected_head_digest=genesis.chain_sha256,
+        mutation_kind="grant",
+        proposed_epoch=genesis.latest_epoch,
+        proposed_authority_revision="generated-current-authority",
+        canonical_intent_digest="a" * 64,
+        scoped_intent_ref=enrollments.registration.enrollment_ref,
+        actor_ref=enrollments.registration.enrollment_ref,
+        created_at=timestamp(NOW),
+    )
+    intent_receipt = system.client.append_intent(genesis_intent)
+    system.client.append_outcome(
+        AppendOutcome(
+            organization_id=org,
+            operation_id=genesis_intent.operation_id,
+            intent_sequence=1,
+            expected_head_sequence=intent_receipt.sequence,
+            expected_head_digest=intent_receipt.chain_sha256,
+            result="committed",
+            control_transaction_ref=enrollments.registration.enrollment_ref,
+            resulting_epoch=genesis.latest_epoch,
+            resulting_authority_revision=genesis_intent.proposed_authority_revision,
+        )
+    )
+    existing = system.client.require_issuance_frontier(org, system.evidence)
+    system.service.authority = sql_resolver
+    transport = ConfiguredTestTransport(system.client.transport)
+    system.client.transport = transport
+
+    resources, principals = f["GeneratedResources"](), f["GeneratedPrincipals"]()
+    resources.rows = {
+        key: replace(v, organization_id=org) if v.organization_id == f["ORG"] else v
+        for key, v in resources.rows.items()
+    }
+    principals.rows = {key: replace(v, organization_id=org) for key, v in principals.rows.items()}
+    principals.rows["local-user-a"] = replace(
+        principals.rows["local-user-a"],
+        identity_issuer=d.context.identity.actor["issuer"],
+        identity_subject=d.context.identity.actor["subject"],
+    )
+    principals.current_human = lambda organization, issuer, subject, member: (
+        principals.rows["local-user-a"]
+        if (organization, issuer, subject, member)
+        == (
+            org,
+            d.context.identity.actor["issuer"],
+            d.context.identity.actor["subject"],
+            d.context.membership_id,
+        )
+        else None
+    )
+    authorized = f["grant"](
+        "generated-parent",
+        capabilities=["access.manage", "training.run"],
+        purposes=["administration", "development"],
+        data_classes=["control_metadata", "customer_confidential"],
+        resource_scope={
+            **f["scope"](workspace_ids=["workspace-a"], project_ids=["project-a"]),
+            "organization_id": org,
+        },
+        creation_operation_id=genesis_intent.operation_id,
+        creation_authority_revision=existing.head.latest_authority_revision,
+    )
+    context = replace(d.context, authority_revision=existing.head.latest_authority_revision)
+    request = CreateGrant.model_validate(
+        f["request"](expected_authority_revision=context.authority_revision)
+    )
+    scope = callers.scope
+    with psycopg.connect(host=str(d.postgres.socket), dbname="postgres", user="c03_owner") as owner:
+        owner.execute(
+            "INSERT INTO opentour_authority.organizations "
+            "VALUES(%s,%s,%s,null,'current',%s,%s,%s,%s)",
+            (
+                org,
+                context.authority_revision,
+                context.revocation_epoch,
+                Jsonb(existing.head.wire()),
+                Jsonb(existing.proof_ref.wire()),
+                Jsonb(enrollments.registration.enrollment_ref.wire()),
+                NOW,
+            ),
+        )
+    with d.coordinator.transaction(scope) as conn:
+        d.coordinator.retain_request(
+            conn, context, "workspace-a", "c" * 64, request, "fixture", NOW
+        )
+        conn.execute(
+            "INSERT INTO opentour_authority.operations "
+            "(organization_id,operation_id,grant_id,issuer,subject,workspace_id,key_sha256,"
+            "context,request_body,plan,proposed_grant,proposed_authority_revision,proposed_epoch,"
+            "intent_body,state,revision,creation_receipt,created_at,updated_at) "
+            "VALUES(%s,%s,%s,%s,%s,'workspace-a',%s,%s,%s,%s,%s,%s,%s,%s,'succeeded',1,%s,%s,%s)",
+            (
+                org,
+                genesis_intent.operation_id,
+                authorized.grant_id,
+                scope.issuer,
+                scope.subject,
+                "c" * 64,
+                Jsonb({}),
+                Jsonb(request.wire()),
+                Jsonb({}),
+                Jsonb(authorized.wire()),
+                context.authority_revision,
+                context.revocation_epoch,
+                canonical(genesis_intent.wire()),
+                Jsonb({"grant_id": authorized.grant_id}),
+                NOW,
+                NOW,
+            ),
+        )
+        conn.execute(
+            "INSERT INTO opentour_authority.grants VALUES(%s,%s,%s,%s,'active',1,%s)",
+            (org, authorized.grant_id, genesis_intent.operation_id, Jsonb(authorized.wire()), NOW),
+        )
+
+    def identity():
+        with d.coordinator.transaction(scope) as conn:
+            state, _ = d.coordinator.authority(conn, org)
+        return replace(context, authority_revision=state.authority_revision)
+
+    from opentour_control.auth.grant_models import GrantVocabulary
+    from opentour_control.auth.grants import GrantResolver
+
+    resolver = GrantResolver(
+        resources,
+        principals,
+        GrantVocabulary(
+            frozenset({"administration", "development"}),
+            frozenset({"scoped-work"}),
+            lambda principal, templates: False,
+        ),
+        lambda: d.coordinator.clock(),
+    )
+    coordinator = GrantCoordinator(
+        d.coordinator, resolver, system.client, system.evidence, management_purpose="administration"
+    )
+    return SimpleNamespace(
+        create=lambda value=request: coordinator.create(
+            identity, "workspace-a", "new-grant", "request-id", canonical(value.wire())
+        ),
+        service=coordinator,
+        identity=identity,
+        request=request,
+        resources=resources,
+        principals=principals,
+        repository=d.coordinator,
+        scope=scope,
+        transport=transport,
+    )
+
+
+def test_actual_grant_saga_idempotency_and_stable_receipt(saga):
+    created = saga.create()
+    assert created.status == 201
+    view = created.operation
+    assert view.state == "succeeded"
+    assert view.creation_receipt.revision == "1"
+    assert view.current_grant_status.state == "active"
+    assert view.current_grant_status.authority_status == "current"
+    replay = saga.create()
+    assert replay.status == 200
+    assert replay.operation.creation_receipt == view.creation_receipt
+    assert replay.operation.operation_revision == view.operation_revision
+    with pytest.raises(GrantError, match="IDEMPOTENCY_CONFLICT"):
+        saga.create(saga.request.model_copy(update={"reason_code": "different"}))
+    with saga.repository.transaction(saga.scope) as conn:
+        rows = conn.execute(
+            "SELECT state,result_sha FROM (SELECT g.state,t.sha256 AS result_sha "
+            "FROM opentour_authority.grants g JOIN opentour_authority.sources t "
+            "ON g.organization_id=t.organization_id AND g.creation_operation_id=t.operation_id "
+            "WHERE g.grant_id=%s AND t.kind='transaction') validated",
+            (view.grant_id,),
+        ).fetchall()
+        assert len(rows) == 1 and rows[0]["state"] == "active"
+        assert len(rows[0]["result_sha"]) == 64
+
+
+def test_actual_grant_saga_signed_outcome_with_unavailable_live_head(saga):
+    def lose_head_after_outcome(path, body):
+        if path.endswith("/outcomes"):
+            saga.transport.head_available = False
+
+    saga.transport.after = lose_head_after_outcome
+    pending = saga.create()
+    assert pending.status == 202
+    assert pending.operation.state == "reconciliation_required"
+    assert pending.operation.creation_receipt is None
+    assert pending.operation.current_grant_status is None
+    with saga.repository.transaction(saga.scope) as conn:
+        state = conn.execute(
+            "SELECT state FROM opentour_authority.grants WHERE grant_id=%s",
+            (pending.operation.grant_id,),
+        ).fetchone()
+        assert state == {"state": "prepared"}
+    saga.transport.head_available = True
+    saga.transport.after = lambda path, body: None
+    reconciled = saga.create()
+    assert reconciled.status == 200
+    assert reconciled.operation.state == "succeeded"
+    assert reconciled.operation.grant_id == pending.operation.grant_id
+    saga.transport.head_available = False
+    historical = saga.service.progress(saga.identity, reconciled.operation.operation_id, "read-id")
+    assert historical.creation_receipt == reconciled.operation.creation_receipt
+    assert historical.current_grant_status is None
+    assert historical.current_status_unavailable_reason == "AUTHORITY_UNAVAILABLE"
+
+
+def test_actual_grant_saga_known_abort_is_journaled_and_retained(saga):
+    def change_scope_revision_after_intent(path, body):
+        if path.endswith("/intents"):
+            key = ("project", "project-a")
+            saga.resources.rows[key] = replace(saga.resources.rows[key], revision="2")
+
+    saga.transport.after = change_scope_revision_after_intent
+    aborted = saga.create().operation
+    assert aborted.state == "aborted"
+    assert aborted.creation_receipt is None
+    assert aborted.current_grant_status is None
+    with saga.repository.transaction(saga.scope) as conn:
+        row = saga.repository.retained_operation(
+            conn, saga.scope.organization_id, aborted.operation_id
+        )
+        assert AppendOutcome.parse(bytes(row["outcome_body"])).result == "aborted"
+        assert row["outcome_response"]["phase"] == "outcome"
+        assert (
+            conn.execute(
+                "SELECT state FROM opentour_authority.grants WHERE grant_id=%s", (aborted.grant_id,)
+            ).fetchone()
+            is None
+        )
+
+
+def test_actual_grant_saga_twenty_way_exact_replay(saga):
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        results = list(executor.map(lambda number: saga.create(), range(20)))
+    operations = {result.operation.operation_id for result in results}
+    assert len(operations) == 1
+    assert all(result.status in {200, 201, 202} for result in results)
+    assert saga.create().operation.state == "succeeded"
+    with saga.repository.transaction(saga.scope) as conn:
+        assert conn.execute(
+            "SELECT count(*) AS size FROM opentour_authority.operations WHERE operation_id=%s",
+            (operations.pop(),),
+        ).fetchone() == {"size": 1}
+
+
+def test_actual_grant_saga_future_start_and_exact_expiry_preserve_receipt(saga):
+    body = saga.request.model_copy(
+        update={
+            "valid_from": timestamp(NOW + timedelta(seconds=5)),
+            "expires_at": timestamp(NOW + timedelta(seconds=20)),
+        }
+    )
+    created = saga.create(body).operation
+    assert created.state == "succeeded"
+    assert created.current_grant_status.state == "not_yet_valid"
+    for delta, expected in [(5, "active"), (20, "expired")]:
+        saga.repository.clock = lambda offset=delta: NOW + timedelta(seconds=offset)
+        current = saga.service.progress(saga.identity, created.operation_id, "read-id")
+        assert current.current_grant_status.state == expected
+        assert current.creation_receipt == created.creation_receipt
