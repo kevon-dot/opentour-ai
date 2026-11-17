@@ -11,23 +11,35 @@ import hashlib
 import json
 import os
 import platform
+import socket
 import subprocess
 import tarfile
 import tempfile
+import urllib.error
 import urllib.request
+from http.client import IncompleteRead
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 MAX_DOWNLOAD = 134_217_728
+DOWNLOAD_ATTEMPTS = 3
+RETRYABLE_HTTP_STATUS = frozenset({408, 429, 500, 502, 503, 504})
 
 
-def download(url: str, expected: str, destination: Path) -> None:
-    if not url.startswith("https://") or len(expected) != 64:
-        raise ValueError("Unpinned prerequisite")
-    destination.parent.mkdir(parents=True, exist_ok=True)
+def _retryable_network_error(error: Exception) -> bool:
+    if isinstance(error, urllib.error.HTTPError):
+        error.close()
+        return error.code in RETRYABLE_HTTP_STATUS
+    reason = error.reason if isinstance(error, urllib.error.URLError) else error
+    return isinstance(
+        reason, (TimeoutError, ConnectionResetError, ConnectionAbortedError, IncompleteRead)
+    ) or (isinstance(reason, socket.gaierror) and reason.errno == socket.EAI_AGAIN)
+
+
+def _download_attempt(url: str, expected: str, staged: Path) -> None:
     size = 0
     checksum = hashlib.sha256()
-    with urllib.request.urlopen(url, timeout=60) as response, destination.open("xb") as file:
+    with urllib.request.urlopen(url, timeout=60) as response, staged.open("xb") as file:
         if not response.geturl().startswith("https://"):
             raise ValueError("Insecure prerequisite redirect")
         while True:
@@ -41,6 +53,29 @@ def download(url: str, expected: str, destination: Path) -> None:
             file.write(chunk)
     if checksum.hexdigest() != expected:
         raise ValueError("Prerequisite digest mismatch")
+
+
+def download(url: str, expected: str, destination: Path) -> None:
+    if not url.startswith("https://") or len(expected) != 64:
+        raise ValueError("Unpinned prerequisite")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if os.path.lexists(destination):
+        raise FileExistsError("Prerequisite destination already exists")
+    for attempt in range(DOWNLOAD_ATTEMPTS):
+        with tempfile.TemporaryDirectory(
+            prefix="artifact-attempt-", dir=destination.parent
+        ) as directory:
+            staged = Path(directory) / "artifact"
+            try:
+                _download_attempt(url, expected, staged)
+            except (OSError, IncompleteRead) as error:
+                if not _retryable_network_error(error) or attempt + 1 == DOWNLOAD_ATTEMPTS:
+                    raise
+                continue
+            # The staging directory is on the destination filesystem. Only the
+            # verified file becomes visible and a concurrent writer is preserved.
+            os.link(staged, destination)
+            return
 
 
 def extract(archive: Path, destination: Path) -> None:
