@@ -7,7 +7,20 @@ export default class HarnessReporter implements Reporter {
   private collectionErrors: string[] = [];
   private attempts = new Map<string, TestResult[]>();
   onBegin(_config: unknown, suite: Suite) { this.tests = suite.allTests(); }
-  onTestEnd(test: TestCase, result: TestResult) { const list = this.attempts.get(test.id) ?? []; list.push(result); this.attempts.set(test.id, list); }
+  onTestEnd(test: TestCase, result: TestResult) {
+    const list = this.attempts.get(test.id) ?? [];
+    list.push(result);
+    this.attempts.set(test.id, list);
+    if (process.env.OPENTOUR_BROWSER_PROFILE !== 'scoped-presentation-v1') return;
+    // Playwright body attachments otherwise disappear when using only this reporter.
+    for (const attachment of result.attachments) {
+      if (attachment.contentType !== 'image/png' || !attachment.body ||
+          !/^status-(320|768|1280|1440)-(100|200)\.png$/.test(attachment.name)) continue;
+      const directory = join(process.env.OPENTOUR_BROWSER_OUTPUT!, 'status-captures');
+      mkdirSync(directory, { recursive: true });
+      writeFileSync(join(directory, attachment.name), attachment.body, { flag: 'wx' });
+    }
+  }
   onError(error: { message?: string }) { this.errors++; this.collectionErrors.push(error.message ?? 'Runner error'); process.stderr.write(`${error.message ?? 'Runner error'}\n`); }
   onEnd(result: FullResult) {
     const root = process.env.OPENTOUR_REPOSITORY_ROOT!;

@@ -293,3 +293,39 @@ def test_foreign_browser_profile_is_rejected_before_execution(tmp_path: Path) ->
         run_browser(tmp_path, {}, "apps/web/unowned.spec.ts")
     with pytest.raises(ValueError):
         retain_browser_evidence(tmp_path, {}, "apps/web/unowned.spec.ts")
+
+
+def test_scoped_suites_are_selected_and_missing_render_evidence_fails_closed(
+    tmp_path: Path,
+) -> None:
+    from tools.ci.browser_evidence import PRESENTATION_TARGETS, verify_scoped_presentation
+    from tools.public_content_check import digest
+
+    font = tmp_path / "apps/web/styles/fonts/Geist.woff2"
+    font.parent.mkdir(parents=True)
+    font.write_bytes(b"generated font digest fixture")
+    for target in PRESENTATION_TARGETS:
+        spec = tmp_path / target
+        spec.parent.mkdir(parents=True, exist_ok=True)
+        spec.write_text("// generated presentation test")
+    assert browser_selection(tmp_path) == [DEFAULT_BROWSER_TARGET, *PRESENTATION_TARGETS]
+    for issue in PRESENTATION_TARGETS.values():
+        value = {
+            "issue_key": issue,
+            "fixture_id": "scoped-presentation-v1",
+            "platform": "linux",
+            "font_sha256": digest(font.read_bytes()),
+            "report": {"status": "PASS", "tests": [{"mode": None}]},
+            "outputs": [],
+        }
+        if issue == "OPE-306":
+            # Use the same content policy that the normal publication check loads.
+            policy = tmp_path / ".github/public-content-policy.json"
+            policy.parent.mkdir(exist_ok=True)
+            policy.write_bytes(
+                (
+                    Path(__file__).resolve().parents[2] / ".github/public-content-policy.json"
+                ).read_bytes()
+            )
+        with pytest.raises(ValueError, match="capture inventory mismatch"):
+            verify_scoped_presentation(tmp_path, value)
