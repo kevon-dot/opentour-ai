@@ -404,9 +404,11 @@ def offline_command(args, cwd, extra_env=None):
 def test_real_python_manifest_drift_is_refused_offline(checkout, relative):
     directory = checkout / relative
     path = directory / "pyproject.toml"
-    path.write_text(
-        path.read_text().replace('dependencies = []', 'dependencies = ["pytest==0.0.0"]')
-    )
+    original = path.read_text()
+    changed = original.replace("dependencies = [", 'dependencies = ["pytest==0.0.0", ', 1)
+    dependencies = tomllib.loads(original)["project"]["dependencies"]
+    assert tomllib.loads(changed)["project"]["dependencies"] == ["pytest==0.0.0", *dependencies]
+    path.write_text(changed)
     before = bootstrap.fingerprints(directory, ("uv.lock",))
     result = offline_command(
         ["uv", "lock", "--check", "--offline", "--no-python-downloads"], directory
