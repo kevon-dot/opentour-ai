@@ -8,8 +8,7 @@ import sys
 import tarfile
 import urllib.error
 import urllib.request
-from email.message import Message
-from http.client import IncompleteRead
+from http.client import HTTPMessage, IncompleteRead
 from pathlib import Path
 from typing import Any
 
@@ -90,11 +89,17 @@ ARTIFACT = b"generated pinned prerequisite bytes"
 
 class ArtifactResponse(io.BytesIO):
     def __init__(
-        self, data: bytes, url: str = ARTIFACT_URL, *, ending: Exception | None = None
+        self,
+        data: bytes,
+        url: str = ARTIFACT_URL,
+        *,
+        ending: Exception | None = None,
+        declared_size: int | None = None,
     ) -> None:
         super().__init__(data)
         self.url = url
         self.ending = ending
+        self.length = declared_size
 
     def geturl(self) -> str:
         return self.url
@@ -120,23 +125,27 @@ def script_artifact_requests(
             raise item
         return item
 
-    monkeypatch.setattr(urllib.request, "urlopen", urlopen)
+    monkeypatch.setattr(prepare, "_open_artifact", urlopen)
     return calls
 
 
-@pytest.mark.parametrize("failure", ["partial_read", "wrapped_timeout", "incomplete", "http_503"])
+@pytest.mark.parametrize(
+    "failure", ["partial_read", "short_body", "wrapped_timeout", "incomplete", "http_503"]
+)
 def test_pinned_download_recovers_from_a_transient_error(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
 ) -> None:
     response: ArtifactResponse | Exception
     if failure == "partial_read":
         response = ArtifactResponse(b"partial attempt", ending=TimeoutError())
+    elif failure == "short_body":
+        response = ArtifactResponse(b"partial attempt", declared_size=len(ARTIFACT))
     elif failure == "wrapped_timeout":
         response = urllib.error.URLError(TimeoutError())
     elif failure == "incomplete":
         response = IncompleteRead(b"partial attempt")
     else:
-        response = urllib.error.HTTPError(ARTIFACT_URL, 503, "Unavailable", Message(), None)
+        response = urllib.error.HTTPError(ARTIFACT_URL, 503, "Unavailable", HTTPMessage(), None)
     dst = tmp_path / "tool"
     calls = script_artifact_requests(monkeypatch, response, ArtifactResponse(ARTIFACT))
     download(ARTIFACT_URL, digest(ARTIFACT), dst)
@@ -172,13 +181,30 @@ def test_pinned_download_refuses_terminal_errors_without_retry(
         monkeypatch.setattr(prepare, "MAX_DOWNLOAD", len(ARTIFACT) - 1)
         response = ArtifactResponse(ARTIFACT)
     else:
-        response = urllib.error.HTTPError(ARTIFACT_URL, 404, "Missing", Message(), None)
+        response = urllib.error.HTTPError(ARTIFACT_URL, 404, "Missing", HTTPMessage(), None)
     calls = script_artifact_requests(monkeypatch, response)
     error = urllib.error.HTTPError if failure == "http_404" else ValueError
     with pytest.raises(error):
         download(ARTIFACT_URL, digest(ARTIFACT), tmp_path / "tool")
     assert calls == [(ARTIFACT_URL, 60)]
     assert not list(tmp_path.iterdir())
+
+
+def test_pinned_download_redirect_handler_refuses_downgrade_before_dispatch() -> None:
+    request = urllib.request.Request(ARTIFACT_URL)
+    headers = HTTPMessage()
+    headers["Location"] = "http://artifacts.example.invalid/insecure-hop"
+    handler = prepare._HttpsRedirects()
+    redirected_body = io.BytesIO()
+    with pytest.raises(ValueError, match="Insecure prerequisite redirect"):
+        handler.http_error_302(request, redirected_body, 302, "Redirect", headers)
+    assert redirected_body.closed
+
+    destination = "https://artifacts.example.invalid/secure-hop"
+    redirected = handler.redirect_request(
+        request, io.BytesIO(), 302, "Redirect", headers, destination
+    )
+    assert redirected is not None and redirected.full_url == destination
 
 
 def test_pinned_download_cannot_overwrite_existing_destination(

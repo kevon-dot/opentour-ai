@@ -17,8 +17,9 @@ import tarfile
 import tempfile
 import urllib.error
 import urllib.request
-from http.client import IncompleteRead
+from http.client import HTTPMessage, HTTPResponse, IncompleteRead
 from pathlib import Path
+from typing import IO, cast
 
 ROOT = Path(__file__).resolve().parents[2]
 MAX_DOWNLOAD = 134_217_728
@@ -36,12 +37,35 @@ def _retryable_network_error(error: Exception) -> bool:
     ) or (isinstance(reason, socket.gaierror) and reason.errno == socket.EAI_AGAIN)
 
 
+class _HttpsRedirects(urllib.request.HTTPRedirectHandler):
+    def redirect_request(
+        self,
+        req: urllib.request.Request,
+        fp: IO[bytes],
+        code: int,
+        msg: str,
+        headers: HTTPMessage,
+        newurl: str,
+    ) -> urllib.request.Request | None:
+        if not newurl.startswith("https://"):
+            fp.close()
+            raise ValueError("Insecure prerequisite redirect")
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def _open_artifact(url: str, *, timeout: int) -> HTTPResponse:
+    return cast(
+        HTTPResponse, urllib.request.build_opener(_HttpsRedirects).open(url, timeout=timeout)
+    )
+
+
 def _download_attempt(url: str, expected: str, staged: Path) -> None:
     size = 0
     checksum = hashlib.sha256()
-    with urllib.request.urlopen(url, timeout=60) as response, staged.open("xb") as file:
+    with _open_artifact(url, timeout=60) as response, staged.open("xb") as file:
         if not response.geturl().startswith("https://"):
             raise ValueError("Insecure prerequisite redirect")
+        expected_size = response.length
         while True:
             chunk = response.read(65_536)
             if not chunk:
@@ -51,6 +75,9 @@ def _download_attempt(url: str, expected: str, staged: Path) -> None:
                 raise ValueError("Prerequisite exceeds download bound")
             checksum.update(chunk)
             file.write(chunk)
+    if expected_size is not None and size < expected_size:
+        # HTTPResponse.read(size) can return EOF silently on a short fixed-length body.
+        raise IncompleteRead(b"", expected_size - size)
     if checksum.hexdigest() != expected:
         raise ValueError("Prerequisite digest mismatch")
 
