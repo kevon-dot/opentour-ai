@@ -14,7 +14,7 @@ from typing import Any, Literal
 
 import psycopg
 from opentour_journal.crypto import canonical, sha256
-from opentour_journal.models import HeadState
+from opentour_journal.models import HeadState, Id, Revision
 from opentour_journal.replay import VerifiedAuthorityFrontier
 from psycopg.pq import TransactionStatus
 from pydantic import ValidationError
@@ -22,6 +22,7 @@ from pydantic import ValidationError
 from .config import identifier
 from .grant_models import (
     AccessGrant,
+    ClosedModel,
     CreateGrant,
     GrantCurrentStatus,
     GrantError,
@@ -32,7 +33,7 @@ from .grant_models import (
 )
 from .grants import AuthorityState, GrantAncestry
 from .repository import lock_membership_observation
-from .session import AuthContext
+from .session import AuthContext, VerifiedIdentityContext
 
 Connection = psycopg.Connection[dict[str, Any]]
 ConnectionFactory = Callable[[], Connection]
@@ -60,6 +61,31 @@ class RepositoryScope:
             context.identity.actor["subject"],
             context.identity.session_id,
         )
+
+    @classmethod
+    def from_identity(
+        cls, organization_id: str, identity: VerifiedIdentityContext
+    ) -> RepositoryScope:
+        return cls(
+            organization_id,
+            identity.actor["issuer"],
+            identity.actor["subject"],
+            identity.session_id,
+        )
+
+
+class CompletedOrganizationFact(ClosedModel):
+    organization_id: Id
+    organization_revision: Revision
+    provisioning_operation_id: Id
+    creator_issuer: Id
+    creator_subject: Id
+    terms_revision: Id
+    membership_id: Id
+    membership_revision: Revision
+    provider_organization_id: Id
+    provider_membership_id: Id
+    lifecycle: Literal["active"]
 
 
 def set_context(connection: Connection, context: AuthContext | RepositoryScope) -> None:
@@ -133,14 +159,77 @@ class PostgresGrantRepository:
         context: AuthContext,
         started: datetime,
     ) -> dict[str, Any]:
+        return self._canonical_membership(
+            conn,
+            RepositoryScope.from_context(context),
+            context.identity,
+            started,
+            selected_membership=context.membership_id,
+        )
+
+    def canonical_completed_organization(
+        self,
+        conn: Connection,
+        scope: RepositoryScope,
+        identity: VerifiedIdentityContext,
+        started: datetime,
+    ) -> CompletedOrganizationFact:
+        source = self._canonical_membership(
+            conn, scope, identity, started, selected_membership=None
+        )
+        provisioning = conn.execute(
+            "SELECT * FROM opentour_authority.completed_provisioning"
+        ).fetchone()
+        if provisioning is None or (
+            source["creator_issuer"],
+            source["creator_subject"],
+            provisioning["organization_id"],
+            provisioning["creator_issuer"],
+            provisioning["creator_subject"],
+            provisioning["provider_org_id"],
+            provisioning["provider_membership_id"],
+        ) != (
+            scope.issuer,
+            scope.subject,
+            scope.organization_id,
+            scope.issuer,
+            scope.subject,
+            source["identity_organization_id"],
+            source["provider_membership_id"],
+        ):
+            raise GrantError("CREATOR_INSTALLATION_SOURCE_UNAVAILABLE", 503, retryable=True)
+        self.now(started)
+        return CompletedOrganizationFact(
+            organization_id=scope.organization_id,
+            organization_revision=str(source["organization_revision"]),
+            provisioning_operation_id=provisioning["provisioning_operation_id"],
+            creator_issuer=scope.issuer,
+            creator_subject=scope.subject,
+            terms_revision=source["terms_revision"],
+            membership_id=source["membership_id"],
+            membership_revision=str(source["membership_revision"]),
+            provider_organization_id=source["identity_organization_id"],
+            provider_membership_id=source["provider_membership_id"],
+            lifecycle="active",
+        )
+
+    def _canonical_membership(
+        self,
+        conn: Connection,
+        scope: RepositoryScope,
+        identity: VerifiedIdentityContext,
+        started: datetime,
+        *,
+        selected_membership: str | None,
+    ) -> dict[str, Any]:
         if self.role != "coordinator":
             raise GrantError("DATABASE_ROLE_INVALID", 503)
         source = conn.execute("SELECT * FROM opentour_authority.locked_membership()").fetchone()
         if source is None or (
-            source["organization_id"] != context.organization_id
-            or source["membership_id"] != context.membership_id
-            or source["identity_issuer"] != context.identity.actor["issuer"]
-            or source["identity_subject"] != context.identity.actor["subject"]
+            source["organization_id"] != scope.organization_id
+            or (selected_membership is not None and source["membership_id"] != selected_membership)
+            or source["identity_issuer"] != identity.actor["issuer"]
+            or source["identity_subject"] != identity.actor["subject"]
         ):
             raise GrantError("RESOURCE_NOT_FOUND", 404)
         if (
@@ -153,22 +242,24 @@ class PostgresGrantRepository:
         # Same142 transaction-scoped session fence; no token verifier or secret reader.
         conn.execute(
             "SELECT pg_advisory_xact_lock(hashtextextended(%s,0))",
-            (
-                f"opentour-identity:{context.identity.actor['issuer']}:{context.identity.session_id}",
-            ),
+            (f"opentour-identity:{scope.issuer}:{scope.session_id}",),
         )
         session = conn.execute("SELECT * FROM opentour_authority.identity_session").fetchone()
-        lock_membership_observation(
-            conn, context.identity.actor["issuer"], source["provider_membership_id"]
-        )
+        lock_membership_observation(conn, scope.issuer, source["provider_membership_id"])
         observation = conn.execute(
             "SELECT * FROM opentour_authority.identity_membership WHERE membership_id=%s",
             (source["provider_membership_id"],),
         ).fetchone()
         now = self.now(started)
+        allowed_selection: list[tuple[str | None, str | None]] = [
+            (scope.organization_id, source["membership_id"])
+        ]
+        if selected_membership is None:
+            allowed_selection.append((None, None))
         if session is None or (
-            session["generation"] != context.identity.session_generation
-            or session["selected_membership_id"] != context.membership_id
+            session["generation"] != identity.session_generation
+            or (session["selected_organization_id"], session["selected_membership_id"])
+            not in allowed_selection
             or session["ended_at"] is not None
             or session["reconciliation_required"]
             or not session["created_at"] <= now < session["expires_at"]
@@ -185,7 +276,7 @@ class PostgresGrantRepository:
         if observation["status"] != "active" or not (
             now - timedelta(seconds=30) <= observation["checked_at"] <= now
             and observation["observed_at"] <= now
-            and now - timedelta(seconds=30) <= instant(context.identity.identity_checked_at) <= now
+            and now - timedelta(seconds=30) <= instant(identity.identity_checked_at) <= now
         ):
             raise GrantError("IDENTITY_FRESHNESS_UNAVAILABLE", 503)
         return source
@@ -340,7 +431,7 @@ class PostgresGrantRepository:
             if grant is None or grant.creation_operation_id != row["operation_id"]:
                 raise GrantError("AUTHORITY_STATE_INVALID", 503)
             now = self.now(max(now, source["updated_at"], row["updated_at"]))
-            if authority.current_operation_id is not None or (
+            if authority.state == "reconciliation_required" or (
                 frontier is not None and frontier.head.unresolved_operation_id is not None
             ):
                 unavailable = "RECONCILIATION_REQUIRED"
@@ -350,7 +441,12 @@ class PostgresGrantRepository:
                 state = grant.temporal_state(now)
                 ancestry = GrantAncestry(grants, now, authority.organization_id)
                 if state == "revoked" or (
-                    target_current and (state != "active" or ancestry.valid(grant))
+                    target_current
+                    and (
+                        state == "expired"
+                        or (state == "active" and ancestry.valid(grant))
+                        or (state == "not_yet_valid" and ancestry.parents_valid(grant))
+                    )
                 ):
                     current = GrantCurrentStatus(
                         grant_id=grant.grant_id,

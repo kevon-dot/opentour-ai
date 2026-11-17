@@ -10,7 +10,7 @@ import secrets
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
-from typing import Any, Literal, Protocol
+from typing import Annotated, Any, Literal, Protocol, Self
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
@@ -22,24 +22,29 @@ from opentour_control.auth.grant_models import (
     GrantCreationReceipt,
     GrantError,
     GrantOperationView,
+    InitialAuthorityPolicy,
     ResourceScope,
+    instant,
     server_time,
     timestamp,
 )
 from opentour_control.auth.grant_repository import (
+    CompletedOrganizationFact,
     Connection,
     PostgresGrantRepository,
     RepositoryScope,
 )
 from opentour_control.auth.grants import (
     AuthorityState,
+    Decision,
     DelegationPlan,
+    GrantAncestry,
     GrantResolver,
     PrincipalRecord,
 )
-from opentour_control.auth.session import AuthContext, SessionService
+from opentour_control.auth.session import AuthContext, SessionService, VerifiedIdentityContext
 from opentour_control.tenants.models import SetupError, key_digest
-from opentour_journal.crypto import JournalVerifier, canonical, sha256
+from opentour_journal.crypto import JournalVerifier, canonical, genesis_digest, sha256
 from opentour_journal.models import (
     MAX_COUNTER,
     MAX_REVISION,
@@ -51,6 +56,7 @@ from opentour_journal.models import (
     Id,
     ImmutableMetadataRef,
     JournalError,
+    JournalIdentity,
     MutationKind,
     Sha256,
     strict_json,
@@ -64,21 +70,18 @@ from opentour_journal.ports import (
 )
 from opentour_journal.replay import EvidenceWriter, VerifiedAuthorityFrontier
 from psycopg.types.json import Jsonb
-from pydantic import ValidationError
+from pydantic import BeforeValidator, Field, ValidationError, model_validator
 from starlette.concurrency import run_in_threadpool
 
 from .journal_client import JournalClient, RetryBinding, RetryClaim
 
 
-class IntentSource(ClosedModel):
+class BoundIntentSource(ClosedModel):
     """Immutable canonical reservation, authored in the same SQL transaction."""
 
-    schema_version: Literal["opentour.grant-intent-source.v1"]
     organization_id: Id
     operation_id: Id
-    grant_id: Id
     request_sha256: Sha256
-    proposed_grant_sha256: Sha256
     plan_sha256: Sha256
     actor_ref: ImmutableMetadataRef
     mutation_kind: MutationKind
@@ -86,6 +89,17 @@ class IntentSource(ClosedModel):
     proposed_authority_revision: Id
     expected_head_sequence: Counter
     expected_head_digest: Sha256
+
+
+class IntentSource(BoundIntentSource):
+    schema_version: Literal["opentour.grant-intent-source.v1"]
+    grant_id: Id
+    proposed_grant_sha256: Sha256
+
+
+class CreatorIntentSource(BoundIntentSource):
+    schema_version: Literal["opentour.creator-installation-intent.v1"]
+    grant_manifest_sha256: Sha256
 
 
 class ActorSource(ClosedModel):
@@ -99,18 +113,45 @@ class ActorSource(ClosedModel):
     membership_id: Id
 
 
-class TransactionSource(ClosedModel):
+class BoundTransactionSource(ClosedModel):
     """Actual SQL result, never a timeout/absence inference or caller boolean."""
 
-    schema_version: Literal["opentour.grant-transaction-source.v1"]
     organization_id: Id
     operation_id: Id
-    grant_id: Id
     intent_content_sha256: Sha256
-    proposed_grant_sha256: Sha256
     result: Literal["committed", "aborted"]
     resulting_epoch: Counter
     resulting_authority_revision: Id
+
+
+class TransactionSource(BoundTransactionSource):
+    schema_version: Literal["opentour.grant-transaction-source.v1"]
+    grant_id: Id
+    proposed_grant_sha256: Sha256
+
+
+class CreatorTransactionSource(BoundTransactionSource):
+    schema_version: Literal["opentour.creator-installation-transaction.v1"]
+    grant_manifest_sha256: Sha256
+
+
+def _manifest_grants(value: object) -> object:
+    return tuple(value) if isinstance(value, list) else value
+
+
+class CreatorGrantManifest(ClosedModel):
+    grants: Annotated[
+        tuple[AccessGrant, ...],
+        BeforeValidator(_manifest_grants),
+        Field(min_length=1, max_length=50),
+    ]
+
+    @model_validator(mode="after")
+    def unique_prepared(self) -> Self:
+        ids = {g.grant_id for g in self.grants}
+        if len(ids) != len(self.grants) or any(g.state != "prepared" for g in self.grants):
+            raise ValueError("Creator manifest requires unique prepared grants")
+        return self
 
 
 @dataclass(frozen=True)
@@ -233,21 +274,16 @@ class PostgresAuthorityResolver:
         raw = canonical(body.wire())
         if bytes(operation["intent_body"]) != raw:
             raise JournalError("JOURNAL_OPERATION_CONFLICT", 409)
-        source = IntentSource.model_validate(
-            self._source(
-                conn, body.organization_id, body.operation_id, "intent", body.scoped_intent_ref
-            )
+        source_value = self._source(
+            conn, body.organization_id, body.operation_id, "intent", body.scoped_intent_ref
         )
         actor = ActorSource.model_validate(
             self._source(conn, body.organization_id, body.operation_id, "actor", body.actor_ref)
         )
-        expected = IntentSource(
-            schema_version="opentour.grant-intent-source.v1",
+        binding: dict[str, Any] = dict(
             organization_id=body.organization_id,
             operation_id=body.operation_id,
-            grant_id=operation["grant_id"],
             request_sha256=sha256(canonical(operation["request_body"])),
-            proposed_grant_sha256=sha256(canonical(operation["proposed_grant"])),
             plan_sha256=sha256(canonical(operation["plan"])),
             actor_ref=body.actor_ref,
             mutation_kind=body.mutation_kind,
@@ -256,6 +292,26 @@ class PostgresAuthorityResolver:
             expected_head_sequence=body.expected_head_sequence,
             expected_head_digest=body.expected_head_digest,
         )
+        proposed_digest = sha256(canonical(operation["proposed_grant"]))
+        source: BoundIntentSource
+        expected: BoundIntentSource
+        if operation["operation_kind"] == "creator_installation":
+            source = CreatorIntentSource.model_validate(source_value)
+            expected = CreatorIntentSource(
+                schema_version="opentour.creator-installation-intent.v1",
+                grant_manifest_sha256=proposed_digest,
+                **binding,
+            )
+        elif operation["operation_kind"] == "access_grant_create":
+            source = IntentSource.model_validate(source_value)
+            expected = IntentSource(
+                schema_version="opentour.grant-intent-source.v1",
+                grant_id=operation["grant_id"],
+                proposed_grant_sha256=proposed_digest,
+                **binding,
+            )
+        else:
+            raise JournalError("JOURNAL_RECONCILIATION_REQUIRED", 503)
         context = operation["context"]
         if source != expected or sha256(canonical(source.wire())) != body.canonical_intent_digest:
             raise JournalError("JOURNAL_RECONCILIATION_REQUIRED", 503)
@@ -309,45 +365,7 @@ class PostgresAuthorityResolver:
                     raise JournalError("JOURNAL_RECONCILIATION_REQUIRED", 503)
                 if bytes(operation["outcome_body"]) != canonical(body.wire()):
                     raise JournalError("JOURNAL_OPERATION_CONFLICT", 409)
-                source = TransactionSource.model_validate(
-                    self._source(
-                        conn,
-                        body.organization_id,
-                        body.operation_id,
-                        "transaction",
-                        body.control_transaction_ref,
-                    )
-                )
-                if source != TransactionSource(
-                    schema_version="opentour.grant-transaction-source.v1",
-                    organization_id=body.organization_id,
-                    operation_id=body.operation_id,
-                    grant_id=operation["grant_id"],
-                    intent_content_sha256=sha256(canonical(intent.wire())),
-                    proposed_grant_sha256=sha256(canonical(operation["proposed_grant"])),
-                    result=body.result,
-                    resulting_epoch=body.resulting_epoch,
-                    resulting_authority_revision=body.resulting_authority_revision,
-                ):
-                    raise JournalError("JOURNAL_RECONCILIATION_REQUIRED", 503)
-                grant = conn.execute(
-                    "SELECT creation_operation_id,body FROM opentour_authority.grants "
-                    "WHERE organization_id=%s AND grant_id=%s",
-                    (body.organization_id, operation["grant_id"]),
-                ).fetchone()
-                if body.result == "committed":
-                    if grant is None or (
-                        grant["creation_operation_id"] != body.operation_id
-                        or sha256(canonical(grant["body"])) != source.proposed_grant_sha256
-                        or (body.resulting_epoch, body.resulting_authority_revision)
-                        != (intent.proposed_epoch, intent.proposed_authority_revision)
-                    ):
-                        raise JournalError("JOURNAL_RECONCILIATION_REQUIRED", 503)
-                # The immutable SQL-aborted source exists before the independent
-                # journal outcome. Public operation state must remain pending
-                # until that outcome is verified; absence alone proves nothing.
-                elif grant is not None or operation["state"] == "succeeded":
-                    raise JournalError("JOURNAL_RECONCILIATION_REQUIRED", 503)
+                source = self._transaction_source(conn, body, intent, operation)
                 return ReconciledTransaction(
                     body.organization_id,
                     body.operation_id,
@@ -359,6 +377,78 @@ class PostgresAuthorityResolver:
                 )
         except (GrantError, ValidationError, KeyError, TypeError, ValueError):
             raise JournalError("JOURNAL_RECONCILIATION_REQUIRED", 503) from None
+
+    def _transaction_source(
+        self,
+        conn: Connection,
+        body: AppendOutcome,
+        intent: AppendIntent,
+        operation: dict[str, Any],
+    ) -> BoundTransactionSource:
+        value = self._source(
+            conn,
+            body.organization_id,
+            body.operation_id,
+            "transaction",
+            body.control_transaction_ref,
+        )
+        binding: dict[str, Any] = dict(
+            organization_id=body.organization_id,
+            operation_id=body.operation_id,
+            intent_content_sha256=sha256(canonical(intent.wire())),
+            result=body.result,
+            resulting_epoch=body.resulting_epoch,
+            resulting_authority_revision=body.resulting_authority_revision,
+        )
+        digest = sha256(canonical(operation["proposed_grant"]))
+        source: BoundTransactionSource
+        expected: BoundTransactionSource
+        if operation["operation_kind"] == "creator_installation":
+            source = CreatorTransactionSource.model_validate(value)
+            expected = CreatorTransactionSource(
+                schema_version="opentour.creator-installation-transaction.v1",
+                grant_manifest_sha256=digest,
+                **binding,
+            )
+            manifest = CreatorGrantManifest.model_validate(operation["proposed_grant"])
+            expected_grants = {g.grant_id: g.digest() for g in manifest.grants}
+            rows = conn.execute(
+                "SELECT grant_id,body FROM opentour_authority.grants "
+                "WHERE organization_id=%s AND creation_operation_id=%s LIMIT 51",
+                (body.organization_id, body.operation_id),
+            ).fetchall()
+            actual_grants = {row["grant_id"]: sha256(canonical(row["body"])) for row in rows}
+        else:
+            source = TransactionSource.model_validate(value)
+            expected = TransactionSource(
+                schema_version="opentour.grant-transaction-source.v1",
+                grant_id=operation["grant_id"],
+                proposed_grant_sha256=digest,
+                **binding,
+            )
+            expected_grants = {operation["grant_id"]: digest}
+            grant = conn.execute(
+                "SELECT creation_operation_id,body FROM opentour_authority.grants "
+                "WHERE organization_id=%s AND grant_id=%s",
+                (body.organization_id, operation["grant_id"]),
+            ).fetchone()
+            actual_grants = {}
+            if grant is not None:
+                if grant["creation_operation_id"] != body.operation_id:
+                    raise JournalError("JOURNAL_RECONCILIATION_REQUIRED", 503)
+                actual_grants[operation["grant_id"]] = sha256(canonical(grant["body"]))
+        if source != expected:
+            raise JournalError("JOURNAL_RECONCILIATION_REQUIRED", 503)
+        if body.result == "committed":
+            if actual_grants != expected_grants or (
+                body.resulting_epoch,
+                body.resulting_authority_revision,
+            ) != (intent.proposed_epoch, intent.proposed_authority_revision):
+                raise JournalError("JOURNAL_RECONCILIATION_REQUIRED", 503)
+        # A proven abort is preserved in SQL before the independent outcome.
+        elif actual_grants or operation["state"] == "succeeded":
+            raise JournalError("JOURNAL_RECONCILIATION_REQUIRED", 503)
+        return source
 
     def registration(
         self,
@@ -680,6 +770,44 @@ class GrantResult:
     operation: GrantOperationView
 
 
+@dataclass(frozen=True)
+class CreatorEnrollment:
+    """Current authenticated installer and exact independent enrollment attestation."""
+
+    installer: ServicePrincipal
+    registration: ApprovedRegistration
+    journal: JournalIdentity
+    policy: InitialAuthorityPolicy
+
+
+class CreatorEnrollmentAuthority(Protocol):
+    def current(self, organization_id: str) -> CreatorEnrollment: ...
+
+
+@dataclass(frozen=True)
+class CreatorInstallationResult:
+    operation_id: str
+    state: Literal["prepared", "reconciliation_required", "succeeded", "aborted"]
+    grant_ids: tuple[str, ...]
+
+
+_DEFINITE_CURRENT_DENIAL = frozenset(
+    {
+        "CAPABILITY_DENIED",
+        "DELEGATION_CEILING",
+        "DELEGATION_CHANGED",
+        "DUTY_CONFLICT",
+        "GRANT_EXPIRED",
+        "MEMBERSHIP_INACTIVE",
+        "PRINCIPAL_UNAVAILABLE",
+        "RESOURCE_NOT_FOUND",
+        "SESSION_ENDED",
+        "SESSION_INVALID",
+        "STALE_SESSION_CONTEXT",
+    }
+)
+
+
 class GrantCoordinator:
     """Configured workspace create and operations reader using SQL and verified journal.
 
@@ -696,6 +824,7 @@ class GrantCoordinator:
         evidence: EvidenceWriter,
         *,
         management_purpose: str,
+        creator_enrollment: CreatorEnrollmentAuthority | None = None,
     ) -> None:
         if repository.role != "coordinator" or management_purpose not in (
             resolver.vocabulary.purpose_codes
@@ -703,6 +832,7 @@ class GrantCoordinator:
             raise GrantError("GRANT_CONFIGURATION_INVALID", 503)
         self.repository, self.resolver, self.journal = repository, resolver, journal
         self.evidence, self.management_purpose = evidence, management_purpose
+        self.creator_enrollment = creator_enrollment
 
     @staticmethod
     def _identity(
@@ -727,6 +857,391 @@ class GrantCoordinator:
             return self.journal.verify_frontier(organization_id, self.evidence)
         except JournalError:
             return None
+
+    def install_creator(
+        self, current_identity: Callable[[], VerifiedIdentityContext], organization_id: str
+    ) -> CreatorInstallationResult:
+        """Internal organization-birth method. No selectable installer or public bypass."""
+        started = server_time(self.repository.clock())
+        scope, original = self._creator_identity(current_identity, organization_id)
+        enrollment = self._creator_approval(organization_id)
+        frontier = self._frontier(organization_id)
+        if frontier is None:
+            raise GrantError("AUTHORITY_UNAVAILABLE", 503, retryable=True)
+
+        def current() -> VerifiedIdentityContext:
+            # Revalidate the independently configured enrollment after waits.
+            if self._creator_approval(organization_id) != enrollment:
+                raise GrantError("CREATOR_ENROLLMENT_CHANGED", 409)
+            return self._creator_identity(current_identity, organization_id, scope, original)[1]
+
+        operation_id = self._reserve_creator(scope, current(), enrollment, frontier, started)
+        try:
+            self._advance_creator(scope, current, enrollment, operation_id)
+        except (GrantError, JournalError, ValidationError):
+            self._mark_reconciliation(scope, operation_id)
+        with self.repository.transaction(scope) as conn:
+            row = self.repository.retained_operation(conn, organization_id, operation_id)
+            if row["operation_kind"] != "creator_installation":
+                raise GrantError("AUTHORITY_STATE_INVALID", 503)
+            manifest = CreatorGrantManifest.model_validate(row["proposed_grant"])
+            return CreatorInstallationResult(
+                operation_id,
+                row["state"],
+                tuple(g.grant_id for g in manifest.grants) if row["state"] == "succeeded" else (),
+            )
+
+    @staticmethod
+    def _creator_identity(
+        current: Callable[[], VerifiedIdentityContext],
+        organization_id: str,
+        previous_scope: RepositoryScope | None = None,
+        previous: VerifiedIdentityContext | None = None,
+    ) -> tuple[RepositoryScope, VerifiedIdentityContext]:
+        try:
+            verified = current()
+            if (
+                not isinstance(verified, VerifiedIdentityContext)
+                or verified.actor.get("kind") != "human"
+                or set(verified.actor) != {"kind", "issuer", "subject"}
+            ):
+                raise GrantError("SESSION_INVALID", 401)
+            scope = RepositoryScope.from_identity(identifier(organization_id), verified)
+        except AuthError as error:
+            raise GrantError(error.code, error.status, retryable=error.retryable) from None
+        if previous is not None and (
+            scope != previous_scope or previous.session_generation != verified.session_generation
+        ):
+            raise GrantError("STALE_SESSION_CONTEXT", 409)
+        return scope, verified
+
+    def _creator_approval(self, organization_id: str) -> CreatorEnrollment:
+        if self.creator_enrollment is None:
+            raise GrantError("CREATOR_ENROLLMENT_UNAVAILABLE", 503)
+        approval = self.creator_enrollment.current(organization_id)
+        if (
+            not isinstance(approval, CreatorEnrollment)
+            or approval.registration.organization_id != organization_id
+            or approval.journal != self.journal.verifier.trust.journal
+            or approval.policy.enrolled_organization_id != organization_id
+            or approval.registration.enrollment_ref != approval.policy.enrollment_ref
+            or approval.installer.authentication_ref != approval.policy.authenticated_installer
+        ):
+            raise GrantError("CREATOR_ENROLLMENT_INVALID", 503)
+        InitialAuthorityPolicy.model_validate(approval.policy.wire())
+        return approval
+
+    @staticmethod
+    def _birth_binding(
+        fact: CompletedOrganizationFact, principal: PrincipalRecord, approval: CreatorEnrollment
+    ) -> dict[str, object]:
+        return {
+            "completed_organization": fact.wire(),
+            "creator_principal": principal.principal.wire(),
+            "policy": approval.policy.wire(),
+            "installer_id": approval.installer.service_id,
+            "journal": approval.journal.wire(),
+        }
+
+    def _reserve_creator(
+        self,
+        scope: RepositoryScope,
+        identity: VerifiedIdentityContext,
+        approval: CreatorEnrollment,
+        frontier: VerifiedAuthorityFrontier,
+        started: datetime,
+    ) -> str:
+        org = scope.organization_id
+        with self.repository.transaction(scope) as conn:
+            fact = self.repository.canonical_completed_organization(conn, scope, identity, started)
+            actor = self.resolver.human_principal(
+                org, scope.issuer, scope.subject, fact.membership_id
+            )
+            binding = self._birth_binding(fact, actor, approval)
+            key = sha256(canonical(binding))
+            now = self.repository.now(started)
+            source = conn.execute(
+                "SELECT * FROM opentour_authority.organizations "
+                "WHERE organization_id=%s FOR UPDATE",
+                (org,),
+            ).fetchone()
+            if source is not None:
+                row = conn.execute(
+                    "SELECT * FROM opentour_authority.operations WHERE organization_id=%s "
+                    "AND operation_kind='creator_installation'",
+                    (org,),
+                ).fetchone()
+                if (
+                    row is None
+                    or row["key_sha256"] != key
+                    or canonical(row["request_body"]) != canonical(binding)
+                    or source["enrollment_ref"] != approval.registration.enrollment_ref.wire()
+                ):
+                    raise GrantError("CREATOR_INSTALLATION_CONFLICT", 409)
+                return str(row["operation_id"])
+            head, registration = frontier.head, approval.registration
+            if (
+                head.organization_id != org
+                or head.sequence != 0
+                or head.revision != "1"
+                or head.unresolved_operation_id is not None
+                or head.latest_epoch != registration.initial_epoch
+                or head.latest_authority_revision != registration.initial_authority_revision
+                or head.chain_sha256 != genesis_digest(approval.journal, head)
+            ):
+                raise GrantError("CREATOR_GENESIS_UNVERIFIED", 503)
+            self.repository.canonical_completed_organization(conn, scope, identity, now)
+            return self._seed_creator(
+                conn,
+                scope,
+                identity,
+                fact,
+                approval,
+                actor,
+                binding,
+                frontier,
+                key,
+                self.repository.now(now),
+            )
+
+    def _seed_creator(
+        self,
+        conn: Connection,
+        scope: RepositoryScope,
+        identity: VerifiedIdentityContext,
+        fact: CompletedOrganizationFact,
+        approval: CreatorEnrollment,
+        actor: PrincipalRecord,
+        binding: dict[str, object],
+        frontier: VerifiedAuthorityFrontier,
+        key: str,
+        now: datetime,
+    ) -> str:
+        org, head = scope.organization_id, frontier.head
+        operation_id, revision = secrets.token_hex(24), secrets.token_hex(24)
+        manifest = CreatorGrantManifest(
+            grants=approval.policy.birth_grants(
+                org, actor.principal.id, operation_id, revision, now
+            )
+        )
+        plan = {"principal_revision": actor.registration_revision}
+        actor_source = ActorSource(
+            schema_version="opentour.grant-actor-source.v1",
+            organization_id=org,
+            operation_id=operation_id,
+            issuer=scope.issuer,
+            subject=scope.subject,
+            session_id=scope.session_id,
+            session_generation=identity.session_generation,
+            membership_id=fact.membership_id,
+        )
+        conn.execute(
+            "INSERT INTO opentour_authority.organizations VALUES"
+            "(%s,%s,%s,%s,'reconciliation_required',%s,%s,%s,%s)",
+            (
+                org,
+                head.latest_authority_revision,
+                head.latest_epoch,
+                operation_id,
+                Jsonb(head.wire()),
+                Jsonb(frontier.proof_ref.wire()),
+                Jsonb(approval.registration.enrollment_ref.wire()),
+                now,
+            ),
+        )
+        actor_ref = self._source_record(conn, actor_source, "actor", now)
+        source = CreatorIntentSource(
+            schema_version="opentour.creator-installation-intent.v1",
+            organization_id=org,
+            operation_id=operation_id,
+            request_sha256=key,
+            grant_manifest_sha256=manifest.digest(),
+            plan_sha256=sha256(canonical(plan)),
+            actor_ref=actor_ref,
+            mutation_kind="grant",
+            proposed_epoch=head.latest_epoch,
+            proposed_authority_revision=revision,
+            expected_head_sequence=head.sequence,
+            expected_head_digest=head.chain_sha256,
+        )
+        reference = self._source_record(conn, source, "intent", now)
+        intent = AppendIntent(
+            organization_id=org,
+            operation_id=operation_id,
+            expected_head_sequence=head.sequence,
+            expected_head_digest=head.chain_sha256,
+            mutation_kind="grant",
+            proposed_epoch=head.latest_epoch,
+            proposed_authority_revision=revision,
+            canonical_intent_digest=reference.sha256,
+            scoped_intent_ref=reference,
+            actor_ref=actor_ref,
+            created_at=timestamp(now),
+        )
+        conn.execute(
+            "INSERT INTO opentour_authority.operations "
+            "(organization_id,operation_id,operation_kind,issuer,subject,key_sha256,context,"
+            "request_body,plan,proposed_grant,proposed_authority_revision,proposed_epoch,"
+            "intent_body,state,revision,created_at,updated_at) "
+            "VALUES(%s,%s,'creator_installation',%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'prepared',1,%s,%s)",
+            (
+                org,
+                operation_id,
+                scope.issuer,
+                scope.subject,
+                key,
+                Jsonb(identity.wire() | {"membership_id": fact.membership_id}),
+                Jsonb(binding),
+                Jsonb(plan),
+                Jsonb(manifest.wire()),
+                revision,
+                head.latest_epoch,
+                canonical(intent.wire()),
+                now,
+                now,
+            ),
+        )
+        self._outbox(conn, org, operation_id, 1, "grant.prepared", now)
+        return operation_id
+
+    def _advance_creator(
+        self,
+        scope: RepositoryScope,
+        current: Callable[[], VerifiedIdentityContext],
+        approval: CreatorEnrollment,
+        operation_id: str,
+    ) -> None:
+        with self.repository.transaction(scope) as conn:
+            row = self.repository.retained_operation(conn, scope.organization_id, operation_id)
+        if row["state"] in {"succeeded", "aborted"}:
+            return
+        intent = AppendIntent.parse(bytes(row["intent_body"]))
+        receipt = self._ack(scope, intent)
+        if receipt is None:
+            self._mark_reconciliation(scope, operation_id)
+            return
+        if row["outcome_body"] is None:
+            outcome = self._apply_creator(scope, current(), approval, intent, receipt)
+        else:
+            outcome = AppendOutcome.parse(bytes(row["outcome_body"]))
+        response = self._ack(scope, outcome)
+        frontier = self._frontier(scope.organization_id)
+        if (
+            response is None
+            or frontier is None
+            or not self._includes_outcome(frontier, outcome, response)
+        ):
+            self._mark_reconciliation(scope, operation_id)
+            return
+        try:
+            self._finalize_creator(scope, current(), approval, intent, outcome, response, frontier)
+        except GrantError as error:
+            if error.code not in _DEFINITE_CURRENT_DENIAL | {
+                "CREATOR_ENROLLMENT_CHANGED",
+                "CREATOR_INSTALLATION_CONFLICT",
+            }:
+                raise
+            self._retain_denied_commit(scope, outcome, response, frontier)
+
+    def _creator_source(
+        self,
+        conn: Connection,
+        scope: RepositoryScope,
+        identity: VerifiedIdentityContext,
+        approval: CreatorEnrollment,
+        intent: AppendIntent,
+        started: datetime,
+    ) -> tuple[AuthorityState, dict[str, Any], CreatorGrantManifest, datetime]:
+        fact = self.repository.canonical_completed_organization(conn, scope, identity, started)
+        org = scope.organization_id
+        authority, source = self.repository.authority(conn, org, lock=True)
+        row = self.repository.retained_operation(conn, org, intent.operation_id, lock=True)
+        manifest = CreatorGrantManifest.model_validate(row["proposed_grant"])
+        now = self.repository.now(max(started, row["updated_at"], source["updated_at"]))
+        if row["state"] in {"succeeded", "aborted"}:
+            return authority, row, manifest, now
+        self._require_reservation(authority, source, intent)
+        actor = self.resolver.human_principal(org, scope.issuer, scope.subject, fact.membership_id)
+        expected = CreatorGrantManifest(
+            grants=approval.policy.birth_grants(
+                org,
+                actor.principal.id,
+                intent.operation_id,
+                intent.proposed_authority_revision,
+                row["created_at"],
+            )
+        )
+        if (
+            row["operation_kind"] != "creator_installation"
+            or row["context"]["session_id"] != identity.session_id
+            or row["context"]["session_generation"] != identity.session_generation
+            or row["context"]["membership_id"] != fact.membership_id
+            or row["plan"]["principal_revision"] != actor.registration_revision
+            or source["enrollment_ref"] != approval.registration.enrollment_ref.wire()
+            or canonical(row["request_body"])
+            != canonical(self._birth_binding(fact, actor, approval))
+            or canonical(manifest.wire()) != canonical(expected.wire())
+        ):
+            raise GrantError("CREATOR_INSTALLATION_CONFLICT", 409)
+        final_fact = self.repository.canonical_completed_organization(conn, scope, identity, now)
+        if fact != final_fact:
+            raise GrantError("CREATOR_INSTALLATION_CONFLICT", 409)
+        return authority, row, manifest, self.repository.now(now)
+
+    def _apply_creator(
+        self,
+        scope: RepositoryScope,
+        identity: VerifiedIdentityContext,
+        approval: CreatorEnrollment,
+        intent: AppendIntent,
+        receipt: AppendResponse,
+    ) -> AppendOutcome:
+        self.journal.verifier.response(receipt, intent)
+        started = server_time(self.repository.clock())
+        with self.repository.transaction(scope) as conn:
+            authority, row, manifest, now = self._creator_source(
+                conn, scope, identity, approval, intent, started
+            )
+            if row["outcome_body"] is not None:
+                return AppendOutcome.parse(bytes(row["outcome_body"]))
+            for grant in manifest.grants:
+                self._insert_prepared(conn, scope.organization_id, grant, now)
+            return self._write_outcome(conn, authority, row, intent, receipt, "committed", now)
+
+    def _finalize_creator(
+        self,
+        scope: RepositoryScope,
+        identity: VerifiedIdentityContext,
+        approval: CreatorEnrollment,
+        intent: AppendIntent,
+        outcome: AppendOutcome,
+        response: AppendResponse,
+        frontier: VerifiedAuthorityFrontier,
+    ) -> None:
+        self.journal.verifier.response(response, outcome)
+        started = server_time(self.repository.clock())
+        with self.repository.transaction(scope) as conn:
+            _, row, manifest, now = self._creator_source(
+                conn, scope, identity, approval, intent, started
+            )
+            if row["state"] in {"succeeded", "aborted"}:
+                return
+            if (
+                outcome.result != "committed"
+                or row["outcome_body"] is None
+                or bytes(row["outcome_body"]) != canonical(outcome.wire())
+            ):
+                raise GrantError("AUTHORITY_STATE_INVALID", 503)
+            for grant in manifest.grants:
+                self._activate_prepared(
+                    conn,
+                    scope.organization_id,
+                    intent.operation_id,
+                    grant.grant_id,
+                    grant.wire(),
+                    now,
+                )
+            self._publish(conn, row, outcome, response, frontier, now)
 
     def create(
         self,
@@ -788,9 +1303,13 @@ class GrantCoordinator:
             self.repository.canonical_identity(conn, context, started)
             authority, source = self.repository.authority(conn, context.organization_id, lock=True)
             row = self.repository.retained_operation(conn, context.organization_id, operation_id)
+            if row["operation_kind"] != "access_grant_create":
+                raise GrantError("RESOURCE_NOT_FOUND", 404)
             grants = self.repository.grants(conn, context.organization_id, lock=True)
             now = self.repository.now(max(started, row["updated_at"], source["updated_at"]))
-            self._authorize_metadata(conn, context, authority, grants, row["workspace_id"], now)
+            decision = self._authorize_metadata(
+                conn, context, authority, source, frontier, grants, row["workspace_id"], now
+            )
             target_current = False
             if row["state"] == "succeeded":
                 target = grants.get(row["grant_id"])
@@ -803,7 +1322,12 @@ class GrantCoordinator:
                         target_current = record.state == "active"
                     except GrantError:
                         pass
-            self.repository.canonical_identity(conn, context, now)
+            observed = max(now, decision.observed_at)
+            self.repository.canonical_identity(conn, context, observed)
+            now = self.repository.now(observed)
+            self.resolver.require_management_current(
+                grants, decision.grant_ids, organization_id=context.organization_id, now=now
+            )
             return self.repository.view(
                 conn,
                 row,
@@ -818,12 +1342,15 @@ class GrantCoordinator:
         conn: Connection,
         context: AuthContext,
         authority: AuthorityState,
+        source: dict[str, Any],
+        frontier: VerifiedAuthorityFrontier | None,
         grants: Mapping[str, AccessGrant],
         workspace_id: str,
         now: datetime,
-    ) -> None:
+    ) -> Decision:
         # An unresolved additive mutation confers none of the grants used by this
         # metadata-only read. Unknown or restrictive operations cannot use this path.
+        pending = None
         if authority.current_operation_id is not None:
             row = self.repository.retained_operation(
                 conn, context.organization_id, authority.current_operation_id
@@ -831,8 +1358,21 @@ class GrantCoordinator:
             original = AppendIntent.parse(bytes(row["intent_body"]))
             if original.mutation_kind != "grant" or row["state"] in {"succeeded", "aborted"}:
                 raise GrantError("AUTHORITY_UNAVAILABLE", 503, retryable=True)
+            pending = row
             authority = replace(authority, state="current", current_operation_id=None)
-        self.resolver.decide(
+        elif authority.state == "reconciliation_required":
+            held = conn.execute(
+                "SELECT 1 FROM opentour_authority.outbox o JOIN opentour_authority.operations p "
+                "USING (organization_id,operation_id) WHERE o.organization_id=%s AND "
+                "o.kind='grant.restrictive_followup_required' AND p.proposed_authority_revision=%s",
+                (authority.organization_id, authority.authority_revision),
+            ).fetchone()
+            if held is None:
+                raise GrantError("AUTHORITY_UNAVAILABLE", 503, retryable=True)
+            authority = replace(authority, state="current")
+        if frontier is not None:
+            self._require_compatible_metadata_head(source, pending, frontier)
+        return self.resolver.decide(
             context,
             self._actor(context),
             authority,
@@ -844,6 +1384,41 @@ class GrantCoordinator:
             data_class="control_metadata",
             now=now,
         )
+
+    @staticmethod
+    def _require_compatible_metadata_head(
+        source: dict[str, Any],
+        pending: dict[str, Any] | None,
+        frontier: VerifiedAuthorityFrontier,
+    ) -> None:
+        durable = HeadState.model_validate(source["journal_head"])
+        head = frontier.head
+        if head.organization_id != durable.organization_id or frontier.unresolved_kind in {
+            "restrict",
+            "tombstone",
+        }:
+            raise GrantError("AUTHORITY_UNAVAILABLE", 503, retryable=True)
+        # An observation can predate a concurrent successful local commit. The
+        # local SQL deny is consulted even then; it gives no current projection.
+        if head.sequence < durable.sequence or head == durable:
+            return
+        if head.sequence > durable.sequence and pending is not None and frontier.observations:
+            latest = frontier.observations[-1]
+            raw = canonical(latest.body.wire())
+            if isinstance(latest.body, AppendIntent):
+                original = pending["intent_body"]
+            else:
+                original = pending["outcome_body"]
+            if (
+                original is not None
+                and raw == bytes(original)
+                and (
+                    latest.entry.sequence == head.sequence
+                    and latest.entry.chain_sha256 == head.chain_sha256
+                )
+            ):
+                return
+        raise GrantError("AUTHORITY_UNAVAILABLE", 503, retryable=True)
 
     def _actor(self, context: AuthContext) -> PrincipalRecord:
         return self.resolver.human_principal(
@@ -891,7 +1466,9 @@ class GrantCoordinator:
             grants = self.repository.grants(conn, scope.organization_id, lock=True)
             now = self.repository.now(max(started, source["updated_at"]))
             if previous is not None:
-                self._authorize_metadata(conn, context, authority, grants, workspace_id, now)
+                self._authorize_metadata(
+                    conn, context, authority, source, frontier, grants, workspace_id, now
+                )
                 if canonical(previous["request_body"]) != canonical(body.wire()):
                     raise GrantError("IDEMPOTENCY_CONFLICT", 409)
                 return str(previous["operation_id"]), False
@@ -901,8 +1478,8 @@ class GrantCoordinator:
             ):
                 raise GrantError("AUTHORITY_UNAVAILABLE", 503, retryable=True)
             plan = self._plan(context, authority, grants, workspace_id, body, now)
-            self.repository.canonical_identity(conn, context, now)
-            now = self.repository.now(now)
+            now, management = self._fence_delegation(conn, context, grants, body, plan, now)
+            plan = replace(plan, management_grant_ids=management)
             self.repository.retain_request(
                 conn, context, workspace_id, key_hash, body, request_id, now
             )
@@ -914,7 +1491,7 @@ class GrantCoordinator:
     @staticmethod
     def _source_record(
         conn: Connection,
-        source: IntentSource | ActorSource | TransactionSource,
+        source: BoundIntentSource | ActorSource | BoundTransactionSource,
         kind: Literal["intent", "actor", "transaction"],
         now: datetime,
     ) -> ImmutableMetadataRef:
@@ -953,6 +1530,7 @@ class GrantCoordinator:
             "parent_grant_ids": list(plan.parent_grant_ids),
             "resource_revisions": [list(r) for r in plan.resource_revisions],
             "principal_revision": plan.principal_revision,
+            "management_grant_ids": list(plan.management_grant_ids),
         }
 
     def _write_reservation(
@@ -1076,7 +1654,7 @@ class GrantCoordinator:
                 raise GrantError("AUTHORITY_STATE_INVALID", 503)
             self.journal.verifier.response(retained.response, body)
             return retained.response
-        if retained is not None and retained.state in {"unknown", "held"}:
+        if retained is not None:
             # Only an exact signed observation settles a lost acknowledgment.
             # Absence never proves abort or admits a new operation.
             observation = self.journal.read_exact_operation(
@@ -1084,7 +1662,18 @@ class GrantCoordinator:
             )
             if observation.response is not None:
                 self.journal.verifier.response(observation.response, body)
-            return observation.response
+                return observation.response
+            elif retained.state == "unknown":
+                current = self._frontier(body.organization_id)
+                unresolved = body.operation_id if isinstance(body, AppendOutcome) else None
+                if current is not None and (
+                    current.head.sequence,
+                    current.head.chain_sha256,
+                    current.head.unresolved_operation_id,
+                ) == (body.expected_head_sequence, body.expected_head_digest, unresolved):
+                    durable.fence_for_reconciliation(binding, retained.token, retained.revision)
+            if retained.state != "scheduled":
+                return None
         return self.journal.retry_append(body, durable, clock=self.repository.clock).response
 
     def _advance(
@@ -1104,18 +1693,7 @@ class GrantCoordinator:
             try:
                 outcome = self._apply(context, scope, intent, intent_response)
             except GrantError as error:
-                if error.code not in {
-                    "CAPABILITY_DENIED",
-                    "DELEGATION_CEILING",
-                    "DELEGATION_CHANGED",
-                    "DUTY_CONFLICT",
-                    "GRANT_EXPIRED",
-                    "MEMBERSHIP_INACTIVE",
-                    "PRINCIPAL_UNAVAILABLE",
-                    "RESOURCE_NOT_FOUND",
-                    "RESOURCE_UNAVAILABLE",
-                    "SESSION_INVALID",
-                }:
+                if error.code not in _DEFINITE_CURRENT_DENIAL - {"STALE_SESSION_CONTEXT"}:
                     raise
                 outcome = self._abort(scope, intent, intent_response)
         else:
@@ -1127,8 +1705,13 @@ class GrantCoordinator:
         frontier = self._frontier(scope.organization_id)
         if frontier is None or not self._includes_outcome(frontier, outcome, response):
             raise GrantError("RECONCILIATION_REQUIRED", 503, retryable=True)
-        current = current_identity() if outcome.result == "committed" else None
-        self._finalize(scope, current, outcome, response, frontier)
+        try:
+            current = current_identity() if outcome.result == "committed" else None
+            self._finalize(scope, current, outcome, response, frontier)
+        except GrantError as error:
+            if outcome.result != "committed" or error.code not in _DEFINITE_CURRENT_DENIAL:
+                raise
+            self._retain_denied_commit(scope, outcome, response, frontier)
 
     @staticmethod
     def _includes_outcome(
@@ -1183,13 +1766,41 @@ class GrantCoordinator:
         authority: AuthorityState,
         row: dict[str, Any],
         now: datetime,
-    ) -> None:
+    ) -> datetime:
         grants = self.repository.grants(conn, context.organization_id, lock=True)
         body = CreateGrant.model_validate(row["request_body"])
         base = replace(authority, state="current", current_operation_id=None)
         fresh = self._plan(context, base, grants, row["workspace_id"], body, now)
-        if row["plan"] != self._plan_wire(fresh):
+        original_management = tuple(row["plan"]["management_grant_ids"])
+        original_binding = replace(fresh, management_grant_ids=original_management)
+        if row["plan"] != self._plan_wire(original_binding):
             raise GrantError("DELEGATION_CHANGED", 409)
+        return self._fence_delegation(conn, context, grants, body, original_binding, now)[0]
+
+    def _fence_delegation(
+        self,
+        conn: Connection,
+        context: AuthContext,
+        grants: Mapping[str, AccessGrant],
+        body: CreateGrant,
+        plan: DelegationPlan,
+        started: datetime,
+    ) -> tuple[datetime, tuple[str, ...]]:
+        checked = max(started, plan.observed_at)
+        self.repository.canonical_identity(conn, context, checked)
+        now = self.repository.now(checked)
+        management = self.resolver.require_management_current(
+            grants, plan.management_grant_ids, organization_id=context.organization_id, now=now
+        )
+        ancestry = GrantAncestry(grants, now, context.organization_id)
+        if any(
+            (grant := grants.get(key)) is None or not ancestry.valid(grant)
+            for key in plan.parent_grant_ids
+        ):
+            raise GrantError("DELEGATION_CHANGED", 409)
+        if body.expires_at is not None and instant(body.expires_at) <= now:
+            raise GrantError("GRANT_EXPIRED", 403)
+        return now, management
 
     def _apply(
         self,
@@ -1210,9 +1821,7 @@ class GrantCoordinator:
                 return AppendOutcome.parse(bytes(row["outcome_body"]))
             self._require_reservation(authority, source, intent)
             now = self.repository.now(max(started, row["updated_at"], source["updated_at"]))
-            self._check_plan(conn, context, authority, row, now)
-            self.repository.canonical_identity(conn, context, now)
-            now = self.repository.now(now)
+            now = self._check_plan(conn, context, authority, row, now)
             grant = AccessGrant.model_validate(row["proposed_grant"])
             if (grant.grant_id, grant.creation_operation_id, grant.creation_authority_revision) != (
                 row["grant_id"],
@@ -1287,17 +1896,29 @@ class GrantCoordinator:
             if result == "committed"
             else (authority.revocation_epoch, authority.authority_revision)
         )
-        source = TransactionSource(
-            schema_version="opentour.grant-transaction-source.v1",
+        binding: dict[str, Any] = dict(
             organization_id=intent.organization_id,
             operation_id=intent.operation_id,
-            grant_id=row["grant_id"],
             intent_content_sha256=sha256(canonical(intent.wire())),
-            proposed_grant_sha256=sha256(canonical(row["proposed_grant"])),
             result=result,
             resulting_epoch=epoch,
             resulting_authority_revision=revision,
         )
+        digest = sha256(canonical(row["proposed_grant"]))
+        source: BoundTransactionSource
+        if row["operation_kind"] == "creator_installation":
+            source = CreatorTransactionSource(
+                schema_version="opentour.creator-installation-transaction.v1",
+                grant_manifest_sha256=digest,
+                **binding,
+            )
+        else:
+            source = TransactionSource(
+                schema_version="opentour.grant-transaction-source.v1",
+                grant_id=row["grant_id"],
+                proposed_grant_sha256=digest,
+                **binding,
+            )
         ref = self._source_record(conn, source, "transaction", now)
         outcome = AppendOutcome(
             organization_id=intent.organization_id,
@@ -1364,17 +1985,10 @@ class GrantCoordinator:
                 if context is None:
                     raise GrantError("SESSION_INVALID", 401)
                 self._require_original(scope, context, row)
-                self._check_plan(conn, context, authority, row, now)
-                self.repository.canonical_identity(conn, context, now)
-                now = self.repository.now(now)
-                changed = conn.execute(
-                    "UPDATE opentour_authority.grants SET state='active',updated_at=%s "
-                    "WHERE organization_id=%s AND grant_id=%s AND creation_operation_id=%s "
-                    "AND body=%s AND revision=1 AND state='prepared'",
-                    (now, org, row["grant_id"], operation_id, Jsonb(row["proposed_grant"])),
+                now = self._check_plan(conn, context, authority, row, now)
+                self._activate_prepared(
+                    conn, org, operation_id, row["grant_id"], row["proposed_grant"], now
                 )
-                if changed.rowcount != 1:
-                    raise GrantError("AUTHORITY_STATE_INVALID", 503)
                 creation = GrantCreationReceipt(
                     grant_id=row["grant_id"],
                     revision="1",
@@ -1382,35 +1996,115 @@ class GrantCoordinator:
                     revocation_epoch=outcome.resulting_epoch,
                     committed_at=timestamp(now),
                 )
-            state = "succeeded" if creation is not None else "aborted"
-            operation_revision = _next_revision(row["revision"])
-            conn.execute(
-                "UPDATE opentour_authority.operations SET state=%s,revision=%s,outcome_response=%s,"
-                "creation_receipt=%s,updated_at=%s WHERE organization_id=%s AND operation_id=%s",
-                (
-                    state,
-                    operation_revision,
-                    Jsonb(response.wire()),
-                    Jsonb(creation.wire()) if creation else None,
-                    now,
-                    org,
-                    operation_id,
-                ),
+            self._publish(conn, row, outcome, response, frontier, now, creation)
+
+    @staticmethod
+    def _activate_prepared(
+        conn: Connection,
+        org: str,
+        operation_id: str,
+        grant_id: str,
+        grant: dict[str, object],
+        now: datetime,
+    ) -> None:
+        changed = conn.execute(
+            "UPDATE opentour_authority.grants SET state='active',updated_at=%s "
+            "WHERE organization_id=%s AND grant_id=%s AND creation_operation_id=%s "
+            "AND body=%s AND revision=1 AND state='prepared'",
+            (now, org, grant_id, operation_id, Jsonb(grant)),
+        )
+        if changed.rowcount != 1:
+            raise GrantError("AUTHORITY_STATE_INVALID", 503)
+
+    def _retain_denied_commit(
+        self,
+        scope: RepositoryScope,
+        outcome: AppendOutcome,
+        response: AppendResponse,
+        frontier: VerifiedAuthorityFrontier,
+    ) -> None:
+        self.journal.verifier.response(response, outcome)
+        if outcome.result != "committed" or not self._includes_outcome(frontier, outcome, response):
+            raise GrantError("RECONCILIATION_REQUIRED", 503, retryable=True)
+        org, operation_id = outcome.organization_id, outcome.operation_id
+        started = server_time(self.repository.clock())
+        with self.repository.transaction(scope) as conn:
+            authority, source = self.repository.authority(conn, org, lock=True)
+            row = self.repository.retained_operation(conn, org, operation_id, lock=True)
+            if row["state"] == "succeeded":
+                return
+            intent = AppendIntent.parse(bytes(row["intent_body"]))
+            self._require_reservation(authority, source, intent)
+            if row["outcome_body"] is None or (
+                bytes(row["outcome_body"]) != canonical(outcome.wire())
+            ):
+                raise GrantError("AUTHORITY_STATE_INVALID", 503)
+            now = self.repository.now(max(started, row["updated_at"], source["updated_at"]))
+            creation = None
+            if row["operation_kind"] == "access_grant_create":
+                creation = GrantCreationReceipt(
+                    grant_id=row["grant_id"],
+                    revision="1",
+                    authority_revision=outcome.resulting_authority_revision,
+                    revocation_epoch=outcome.resulting_epoch,
+                    committed_at=timestamp(now),
+                )
+            # A later identity denial does not undo a signed SQL commit. Keep
+            # the grant prepared and require a separately authorized restriction.
+            self._publish(conn, row, outcome, response, frontier, now, creation, hold=True)
+
+    def _publish(
+        self,
+        conn: Connection,
+        row: dict[str, Any],
+        outcome: AppendOutcome,
+        response: AppendResponse,
+        frontier: VerifiedAuthorityFrontier,
+        now: datetime,
+        creation: GrantCreationReceipt | None = None,
+        *,
+        hold: bool = False,
+    ) -> None:
+        org, operation_id = outcome.organization_id, outcome.operation_id
+        state = "succeeded" if outcome.result == "committed" else "aborted"
+        operation_revision = _next_revision(row["revision"])
+        conn.execute(
+            "UPDATE opentour_authority.operations SET state=%s,revision=%s,outcome_response=%s,"
+            "creation_receipt=%s,updated_at=%s WHERE organization_id=%s AND operation_id=%s",
+            (
+                state,
+                operation_revision,
+                Jsonb(response.wire()),
+                Jsonb(creation.wire()) if creation else None,
+                now,
+                org,
+                operation_id,
+            ),
+        )
+        conn.execute(
+            "UPDATE opentour_authority.organizations SET authority_revision=%s,"
+            "revocation_epoch=%s,current_operation_id=NULL,state=%s,journal_head=%s,"
+            "frontier_proof=%s,updated_at=%s WHERE organization_id=%s",
+            (
+                outcome.resulting_authority_revision,
+                outcome.resulting_epoch,
+                "reconciliation_required" if hold else "current",
+                Jsonb(frontier.head.wire()),
+                Jsonb(frontier.proof_ref.wire()),
+                now,
+                org,
+            ),
+        )
+        self._outbox(conn, org, operation_id, operation_revision, "grant." + state, now)
+        if hold:
+            self._outbox(
+                conn,
+                org,
+                operation_id,
+                operation_revision,
+                "grant.restrictive_followup_required",
+                now,
             )
-            conn.execute(
-                "UPDATE opentour_authority.organizations SET authority_revision=%s,"
-                "revocation_epoch=%s,current_operation_id=NULL,state='current',journal_head=%s,"
-                "frontier_proof=%s,updated_at=%s WHERE organization_id=%s",
-                (
-                    outcome.resulting_authority_revision,
-                    outcome.resulting_epoch,
-                    Jsonb(frontier.head.wire()),
-                    Jsonb(frontier.proof_ref.wire()),
-                    now,
-                    org,
-                ),
-            )
-            self._outbox(conn, org, operation_id, operation_revision, "grant." + state, now)
 
     def _mark_reconciliation(self, scope: RepositoryScope, operation_id: str) -> None:
         try:

@@ -29,8 +29,10 @@ CREATE TABLE opentour_authority.requests (
 );
 CREATE TABLE opentour_authority.operations (
     organization_id text NOT NULL REFERENCES opentour_authority.organizations(organization_id),
-    operation_id text NOT NULL, grant_id text NOT NULL,
-    issuer text NOT NULL, subject text NOT NULL, workspace_id text NOT NULL,
+    operation_id text NOT NULL, grant_id text,
+    operation_kind text NOT NULL DEFAULT 'access_grant_create'
+        CHECK(operation_kind IN ('access_grant_create','creator_installation')),
+    issuer text NOT NULL, subject text NOT NULL, workspace_id text,
     key_sha256 text NOT NULL,
     context jsonb NOT NULL, request_body jsonb NOT NULL,
     plan jsonb NOT NULL, proposed_grant jsonb NOT NULL,
@@ -47,9 +49,15 @@ CREATE TABLE opentour_authority.operations (
     UNIQUE(organization_id,issuer,subject,workspace_id,key_sha256),
     FOREIGN KEY(organization_id,issuer,subject,workspace_id,key_sha256)
         REFERENCES opentour_authority.requests(organization_id,issuer,subject,workspace_id,key_sha256),
-    CHECK((state='succeeded')=(creation_receipt IS NOT NULL)),
+    CHECK((operation_kind='access_grant_create')=(grant_id IS NOT NULL)),
+    CHECK((operation_kind='access_grant_create')=(workspace_id IS NOT NULL)),
+    CHECK((state='succeeded' AND operation_kind='access_grant_create')
+        =(creation_receipt IS NOT NULL)),
     CHECK(outcome_body IS NULL OR octet_length(outcome_body) BETWEEN 1 AND 65536)
 );
+-- One original birth installation survives retries, changed policies and tombstones.
+CREATE UNIQUE INDEX one_creator_installation ON opentour_authority.operations(organization_id)
+    WHERE operation_kind='creator_installation';
 ALTER TABLE opentour_authority.organizations ADD FOREIGN KEY(organization_id,current_operation_id)
     REFERENCES opentour_authority.operations(organization_id,operation_id) DEFERRABLE INITIALLY DEFERRED;
 CREATE TABLE opentour_authority.grants (
@@ -105,7 +113,8 @@ CREATE TABLE opentour_authority.retries (
 );
 CREATE TABLE opentour_authority.outbox (
     organization_id text NOT NULL, operation_id text NOT NULL, revision bigint NOT NULL CHECK(revision>=1),
-    kind text NOT NULL CHECK(kind IN ('grant.prepared','grant.sql_committed','grant.succeeded','grant.aborted','grant.reconciliation_required')),
+    kind text NOT NULL CHECK(kind IN ('grant.prepared','grant.sql_committed','grant.succeeded',
+        'grant.aborted','grant.reconciliation_required','grant.restrictive_followup_required')),
     created_at timestamptz NOT NULL,
     PRIMARY KEY(organization_id,operation_id,revision,kind),
     FOREIGN KEY(organization_id,operation_id)
@@ -233,6 +242,7 @@ GRANT INSERT,UPDATE ON opentour_authority.operations,opentour_authority.grants,
     opentour_authority.retries TO opentour_authority_coordinator;
 -- Enrollment is a separate approved policy installation, never ordinary runtime INSERT.
 GRANT UPDATE ON opentour_authority.organizations TO opentour_authority_coordinator;
+GRANT INSERT ON opentour_authority.organizations TO opentour_authority_coordinator;
 GRANT INSERT ON opentour_authority.ancestry,opentour_authority.template_bindings,
     opentour_authority.sources,opentour_authority.outbox TO opentour_authority_coordinator;
 -- Owner-read security-barrier projections avoid broad source-table privileges.
@@ -254,12 +264,29 @@ SELECT s.issuer,s.session_id,s.subject,s.generation,s.selected_organization_id,
        d.deny_until
 FROM opentour_identity.sessions s LEFT JOIN opentour_identity.session_denials d
     ON d.issuer=s.issuer AND d.session_id=s.session_id
-WHERE s.selected_organization_id=current_setting('opentour.organization_id',true)
+WHERE (s.selected_organization_id IS NULL
+       OR s.selected_organization_id=current_setting('opentour.organization_id',true))
   AND s.issuer=current_setting('opentour.identity_issuer',true)
   AND s.subject=current_setting('opentour.identity_subject',true)
   AND s.session_id=current_setting('opentour.session_id',true);
-REVOKE ALL ON opentour_authority.identity_membership,opentour_authority.identity_session FROM PUBLIC;
-GRANT SELECT ON opentour_authority.identity_membership,opentour_authority.identity_session
+-- 171 mutates its provisioning result under the canonical organization lock
+-- already held by locked_membership(). Only the completed exact tuple is visible.
+CREATE POLICY grant_read_provision_owner ON opentour_tenants.provisioning_operations FOR SELECT
+    TO CURRENT_USER USING (organization_id=current_setting('opentour.organization_id',true)
+      AND creator_issuer=current_setting('opentour.identity_issuer',true)
+      AND creator_subject=current_setting('opentour.identity_subject',true));
+CREATE VIEW opentour_authority.completed_provisioning WITH(security_barrier=true) AS
+SELECT p.id AS provisioning_operation_id,p.organization_id,p.creator_issuer,p.creator_subject,
+       p.provider_org_id,p.provider_membership_id
+FROM opentour_tenants.provisioning_operations p
+WHERE p.organization_id=current_setting('opentour.organization_id',true)
+  AND p.creator_issuer=current_setting('opentour.identity_issuer',true)
+  AND p.creator_subject=current_setting('opentour.identity_subject',true)
+  AND p.stage='activation' AND p.stage_outcome='observed' AND p.last_error IS NULL;
+REVOKE ALL ON opentour_authority.identity_membership,opentour_authority.identity_session,
+    opentour_authority.completed_provisioning FROM PUBLIC;
+GRANT SELECT ON opentour_authority.identity_membership,opentour_authority.identity_session,
+    opentour_authority.completed_provisioning
     TO opentour_authority_coordinator;
 ALTER TABLE opentour_authority.organizations ENABLE ROW LEVEL SECURITY;
 ALTER TABLE opentour_authority.organizations FORCE ROW LEVEL SECURITY;
@@ -273,7 +300,7 @@ CREATE POLICY request_submission ON opentour_authority.requests FOR INSERT TO op
 ALTER TABLE opentour_authority.operations ENABLE ROW LEVEL SECURITY;
 ALTER TABLE opentour_authority.operations FORCE ROW LEVEL SECURITY;
 CREATE POLICY coordinator_tenant ON opentour_authority.operations TO opentour_authority_coordinator USING (organization_id=current_setting('opentour.organization_id',true) AND nullif(current_setting('opentour.identity_issuer',true),'') IS NOT NULL AND nullif(current_setting('opentour.identity_subject',true),'') IS NOT NULL) WITH CHECK (organization_id=current_setting('opentour.organization_id',true) AND nullif(current_setting('opentour.identity_issuer',true),'') IS NOT NULL AND nullif(current_setting('opentour.identity_subject',true),'') IS NOT NULL);
-CREATE POLICY request_tenant ON opentour_authority.operations FOR SELECT TO opentour_grant_runtime USING (organization_id=current_setting('opentour.organization_id',true) AND nullif(current_setting('opentour.identity_issuer',true),'') IS NOT NULL AND nullif(current_setting('opentour.identity_subject',true),'') IS NOT NULL AND issuer=current_setting('opentour.identity_issuer',true) AND subject=current_setting('opentour.identity_subject',true));
+CREATE POLICY request_tenant ON opentour_authority.operations FOR SELECT TO opentour_grant_runtime USING (operation_kind='access_grant_create' AND organization_id=current_setting('opentour.organization_id',true) AND nullif(current_setting('opentour.identity_issuer',true),'') IS NOT NULL AND nullif(current_setting('opentour.identity_subject',true),'') IS NOT NULL AND issuer=current_setting('opentour.identity_issuer',true) AND subject=current_setting('opentour.identity_subject',true));
 ALTER TABLE opentour_authority.grants ENABLE ROW LEVEL SECURITY;
 ALTER TABLE opentour_authority.grants FORCE ROW LEVEL SECURITY;
 CREATE POLICY coordinator_tenant ON opentour_authority.grants TO opentour_authority_coordinator USING (organization_id=current_setting('opentour.organization_id',true) AND nullif(current_setting('opentour.identity_issuer',true),'') IS NOT NULL AND nullif(current_setting('opentour.identity_subject',true),'') IS NOT NULL) WITH CHECK (organization_id=current_setting('opentour.organization_id',true) AND nullif(current_setting('opentour.identity_issuer',true),'') IS NOT NULL AND nullif(current_setting('opentour.identity_subject',true),'') IS NOT NULL);
