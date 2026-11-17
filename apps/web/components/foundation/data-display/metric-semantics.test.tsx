@@ -26,6 +26,27 @@ describe('metric semantics', () => {
     }
     expect(html).not.toContain('aria-hidden');
   });
+  it.each([
+    ['revoked', 'Access revoked'],
+    ['switching', 'Switching…'],
+  ] as const)('clears all supplied measurement details when %s', (state, text) => {
+    const props = { ...base, state, value: 'PRIVATE-OLD-VALUE', evidence: 'PRIVATE-OLD-EVIDENCE',
+      numerator: 'PRIVATE-OLD-COUNT', title: 'Private metric', reason: 'Previous data is hidden.' };
+    const html = renderToStaticMarkup(<MetricSemantics {...props as unknown as MetricSemanticsProps} />);
+    expect(html).toContain(text);
+    expect(html).toContain(props.reason);
+    expect(html).not.toMatch(/PRIVATE-OLD|Numerator:|Evidence:/);
+  });
+  it.each([
+    ['invalid', 'Result unavailable'],
+    ['incompatible', 'Comparison unavailable'],
+  ] as const)('suppresses an old result when the new state is %s', (state, text) => {
+    const props = { ...base, state, reason: 'Supplied comparison is undefined.' };
+    const extra = { value: 'PRIVATE-OLD-DELTA' };
+    const html = renderToStaticMarkup(<MetricSemantics {...{ ...props, ...extra } as unknown as MetricSemanticsProps} />);
+    expect(html).toContain(text);
+    expect(html).not.toContain(extra.value);
+  });
   it('refuses blank readings and context', () => {
     const props = { ...base, state: 'observed', value: '1.000%', reason: 'Confirmed reading' } as const;
     for (const key of ['value','reason','unit','numerator','denominator','observationWindow','evidence'] as const) {
