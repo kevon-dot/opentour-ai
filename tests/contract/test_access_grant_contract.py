@@ -3,16 +3,24 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
+from dataclasses import asdict
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 import pytest
 from jsonschema import Draft202012Validator  # type: ignore[import-untyped]
 from opentour_control.auth.grant_models import (
+    APPROVED_CREATOR_ENTITLEMENTS,
+    APPROVED_CREATOR_POLICY_SHA256,
+    CAPABILITIES,
     AccessGrant,
     CreateGrant,
+    GrantError,
     GrantOperationView,
+    InitialAuthorityPolicy,
     InputResourceScope,
     ResourceScope,
 )
@@ -77,8 +85,6 @@ def test_no_organization_field_in_input_scope() -> None:
 
 @pytest.mark.parametrize("count", [0, 51])
 def test_capability_count_bounds(count: int) -> None:
-    from opentour_control.auth.grant_models import CAPABILITIES
-
     changed = copy.deepcopy(BODY)
     changed["capabilities"] = sorted(CAPABILITIES)[:count]
     assert not valid("CreateGrant", changed)
@@ -339,3 +345,156 @@ def test_schema_and_model_array_bounds_match(
             model.model_validate(value)
     else:
         model.model_validate(value)
+
+
+BIRTH_TUPLES = {
+    "owner-administration-v1": (
+        "organization_administration",
+        ("members.manage", "access.manage", "members.invite", "workspace.create"),
+    ),
+    "owner-commercial-v1": (
+        "billing_administration",
+        ("billing.read", "billing.write", "quotas.manage"),
+    ),
+    "owner-customer-support-v1": (
+        "customer_support",
+        ("support.create", "support.read", "support.manage", "support.close", "support.delegate"),
+    ),
+    "owner-customer-approval-v1": (
+        "customer_policy_approval",
+        ("policy.authorize", "source.authorize", "model_rights.authorize", "budget.authorize"),
+    ),
+}
+
+
+@pytest.fixture
+def creator_policy() -> dict[str, Any]:
+    return {
+        "policy_ref": {
+            "record_id": "generated-policy",
+            "revision": "1",
+            "sha256": APPROVED_CREATOR_POLICY_SHA256,
+        },
+        "template_bindings": [
+            {"template_id": template, "revision": "1", "sha256": "ab" * 32}
+            for template in BIRTH_TUPLES
+        ],
+        "authenticated_installer": {
+            "record_id": "generated-installer",
+            "revision": "1",
+            "sha256": "cd" * 32,
+        },
+        "enrolled_organization_id": "generated-org",
+        "enrollment_ref": {
+            "record_id": "generated-enrollment",
+            "revision": "1",
+            "sha256": "ef" * 32,
+        },
+    }
+
+
+def test_explicit_creator_entitlement_matches_approved_materialization_matrix() -> None:
+    rows = []
+    for group in APPROVED_CREATOR_ENTITLEMENTS:
+        materialization = asdict(group)
+        capabilities = materialization.pop("capabilities")
+        rows.extend({"capability": capability, **materialization} for capability in capabilities)
+    names = {row["capability"] for row in rows}
+    assert len(rows) == len(names) == 94
+    assert CAPABILITIES - names == {
+        "evaluations.inspect_protected",
+        "benchmarks.disclose",
+        "incident.severity_review",
+        "operations.read",
+        "operations.execute",
+        "support.emergency_request",
+        "support.emergency_approve",
+        "security.admin",
+    }
+    normalized = json.dumps(
+        sorted(rows, key=lambda row: row["capability"]), sort_keys=True, separators=(",", ":")
+    ).encode()
+    assert hashlib.sha256(normalized).hexdigest() == (
+        "800d21229592a6a4c6b6a39df1f717f6daf798a46e5d10d81f3d6f97b6aeb9cc"
+    )
+
+
+def test_creator_birth_grants_are_prepared_single_capability_tuples(
+    creator_policy: dict[str, Any],
+) -> None:
+    policy = InitialAuthorityPolicy.model_validate(creator_policy)
+    now = datetime(2026, 11, 16, 5, 1, 0, 123456, tzinfo=UTC)
+    birth = policy.birth_grants("generated-org", "local-creator", "original-install", "rev-a", now)
+    assert len(birth) == len({grant.grant_id for grant in birth}) == 16
+    assert birth == policy.birth_grants(
+        "generated-org", "local-creator", "original-install", "rev-a", now
+    )
+    observed = set()
+    for grant in birth:
+        assert grant.principal.wire() == {"type": "user", "id": "local-creator"}
+        assert grant.resource_scope.organization_id == "generated-org"
+        assert grant.resource_scope.organization_only()
+        assert grant.data_classes == ("control_metadata",)
+        assert grant.valid_from == "2026-11-16T05:01:00.123456Z" and grant.expires_at is None
+        assert (
+            grant.state,
+            grant.revision,
+            grant.creation_operation_id,
+            grant.creation_authority_revision,
+        ) == ("prepared", "1", "original-install", "rev-a")
+        assert not grant.parent_grant_ids and not grant.current(now)
+        assert valid("AccessGrant", grant.wire())
+        (capability,) = grant.capabilities
+        (template,) = grant.template_bindings
+        (purpose,) = grant.purposes
+        observed.add((template.template_id, purpose, capability))
+    assert observed == {
+        (template, purpose, c)
+        for template, (purpose, capabilities) in BIRTH_TUPLES.items()
+        for c in capabilities
+    }
+
+
+@pytest.mark.parametrize("invalid_policy", ["wrong_digest", "excess", "duplicate", "missing"])
+def test_creator_policy_refuses_unapproved_configuration(
+    creator_policy: dict[str, Any], invalid_policy: str
+) -> None:
+    bindings = creator_policy["template_bindings"]
+    if invalid_policy == "wrong_digest":
+        creator_policy["policy_ref"]["sha256"] = "00" * 32
+    elif invalid_policy == "excess":
+        bindings.append({**bindings[0], "template_id": "unapproved-template"})
+    elif invalid_policy == "duplicate":
+        bindings.append(bindings[0].copy())
+    else:
+        bindings.pop()
+    with pytest.raises(ValidationError, match="Unapproved creator policy binding"):
+        InitialAuthorityPolicy.model_validate(creator_policy)
+
+
+def test_creator_birth_refuses_foreign_enrollment_and_binds_operation_identity(
+    creator_policy: dict[str, Any],
+) -> None:
+    policy = InitialAuthorityPolicy.model_validate(creator_policy)
+    now = datetime(2026, 11, 16, 5, 1, tzinfo=UTC)
+    with pytest.raises(GrantError, match="CREATOR_POLICY_UNAVAILABLE"):
+        policy.birth_grants("different-org", "local-creator", "install-a", "rev-a", now)
+    birth = policy.birth_grants("generated-org", "local-creator", "install-a", "rev-a", now)
+    renamed = policy.birth_grants("generated-org", "local-creator", "install-b", "rev-a", now)
+    changed_principal = policy.birth_grants(
+        "generated-org", "other-person", "install-a", "rev-a", now
+    )
+    other_enrollment = InitialAuthorityPolicy.model_validate(
+        {
+            **creator_policy,
+            "enrollment_ref": {**creator_policy["enrollment_ref"], "record_id": "other-enrollment"},
+        }
+    )
+    reenrolled = other_enrollment.birth_grants(
+        "generated-org", "local-creator", "install-a", "rev-a", now
+    )
+    original_ids = {grant.grant_id for grant in birth}
+    assert all(
+        original_ids.isdisjoint(grant.grant_id for grant in other)
+        for other in (renamed, changed_principal, reenrolled)
+    )

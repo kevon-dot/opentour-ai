@@ -409,36 +409,480 @@ class GrantOperationView(ClosedModel):
         return self
 
 
-class GrantTuple(ClosedModel):
-    """One reviewed capability/scope/purpose/class tuple; never union dimensions."""
+APPROVED_CREATOR_POLICY_SHA256 = "0d293389f5e569c69e248368a92e08e445db8cc1d43c015304dc95bdf297769b"
+INITIAL_CREATOR_REASON = "initial_owner_policy_installation"
 
-    capability: Capability
-    resource_scope: ResourceScope
-    purpose: Id
-    data_class: DataClass
-    valid_from: Timestamp
-    expires_at: Timestamp | None
+
+@dataclass(frozen=True)
+class CreatorActivation:
+    event: str
+    resource_kind: str
+    expires_after_seconds: int | None = None
+
+
+@dataclass(frozen=True)
+class CreatorEntitlement:
+    """One group of capability ceilings with identical installation restrictions."""
+
+    capabilities: tuple[str, ...]
+    template_id: str
+    activations: tuple[CreatorActivation, ...]
+    operation_purpose: str
+    data_classes: tuple[DataClass, ...]
+    requires_data_use_policy: bool
+
+
+_ORGANIZATION_ACTIVATED = CreatorActivation("organization_activated", "organization")
+_WORKSPACE_COMMITTED = CreatorActivation("workspace_committed", "workspace")
+_PROJECT_COMMITTED = CreatorActivation("project_committed", "project")
+_ENVIRONMENT_COMMITTED = CreatorActivation("environment_committed", "environment")
+_ARTIFACT_COMMITTED = CreatorActivation("artifact_committed", "artifact")
+_NOTE_WRITE_ADMITTED = CreatorActivation("note_write_intent_admitted", "support_note_write", 120)
+_NOTE_READ_ADMITTED = CreatorActivation("note_read_intent_admitted", "support_note_read", 120)
+
+
+# Lossless projection of the materialization fields of the 28 reviewed groups.
+# The complete approved policy and domain contracts supply the current guards.
+APPROVED_CREATOR_ENTITLEMENTS = (
+    CreatorEntitlement(
+        capabilities=(
+            "members.manage",
+            "access.manage",
+            "members.invite",
+            "workspace.create",
+        ),
+        template_id="owner-administration-v1",
+        activations=(_ORGANIZATION_ACTIVATED,),
+        operation_purpose="organization_administration",
+        data_classes=("control_metadata",),
+        requires_data_use_policy=False,
+    ),
+    CreatorEntitlement(
+        capabilities=(
+            "workspace.read",
+            "workspace.manage",
+            "project.create",
+        ),
+        template_id="workspace-creator-v1",
+        activations=(_WORKSPACE_COMMITTED,),
+        operation_purpose="workspace_administration",
+        data_classes=("control_metadata",),
+        requires_data_use_policy=False,
+    ),
+    CreatorEntitlement(
+        capabilities=(
+            "project.read",
+            "project.manage",
+        ),
+        template_id="project-creator-v1",
+        activations=(_PROJECT_COMMITTED,),
+        operation_purpose="project_administration",
+        data_classes=("control_metadata",),
+        requires_data_use_policy=False,
+    ),
+    CreatorEntitlement(
+        capabilities=(
+            "billing.read",
+            "billing.write",
+            "quotas.manage",
+        ),
+        template_id="owner-commercial-v1",
+        activations=(_ORGANIZATION_ACTIVATED,),
+        operation_purpose="billing_administration",
+        data_classes=("control_metadata",),
+        requires_data_use_policy=False,
+    ),
+    CreatorEntitlement(
+        capabilities=(
+            "connections.manage",
+            "credentials.manage",
+            "integrations.manage",
+            "readiness.manage",
+            "environments.manage",
+            "environment.health.read",
+        ),
+        template_id="owner-setup-v1",
+        activations=(_ENVIRONMENT_COMMITTED, _WORKSPACE_COMMITTED),
+        operation_purpose="environment_configuration",
+        data_classes=("control_metadata",),
+        requires_data_use_policy=False,
+    ),
+    CreatorEntitlement(
+        capabilities=(
+            "workflow.read",
+            "workflow.write",
+            "workflow.activate",
+        ),
+        template_id="owner-workflow-v1",
+        activations=(_PROJECT_COMMITTED,),
+        operation_purpose="workflow_development",
+        data_classes=("control_metadata", "customer_confidential", "model_artifact"),
+        requires_data_use_policy=True,
+    ),
+    CreatorEntitlement(
+        capabilities=(
+            "evidence.read",
+            "evidence.reconstruct",
+            "lineage.read",
+            "lineage.write",
+            "lineage.repair",
+        ),
+        template_id="owner-workflow-v1",
+        activations=(_ARTIFACT_COMMITTED, _PROJECT_COMMITTED),
+        operation_purpose="evidence_review",
+        data_classes=("control_metadata", "customer_confidential", "model_artifact"),
+        requires_data_use_policy=True,
+    ),
+    CreatorEntitlement(
+        capabilities=(
+            "labels.run",
+            "labels.read",
+            "labels.correct",
+            "labels.qualify",
+        ),
+        template_id="owner-workflow-v1",
+        activations=(_PROJECT_COMMITTED,),
+        operation_purpose="data_labeling",
+        data_classes=("control_metadata", "customer_confidential"),
+        requires_data_use_policy=True,
+    ),
+    CreatorEntitlement(
+        capabilities=(
+            "scopes.discover",
+            "scopes.read",
+            "scopes.confirm",
+        ),
+        template_id="owner-experiment-v1",
+        activations=(_PROJECT_COMMITTED,),
+        operation_purpose="experiment_development",
+        data_classes=("control_metadata", "customer_confidential"),
+        requires_data_use_policy=True,
+    ),
+    CreatorEntitlement(
+        capabilities=(
+            "experiments.plan",
+            "experiments.run",
+            "experiments.freeze",
+            "experiments.read",
+        ),
+        template_id="owner-experiment-v1",
+        activations=(_PROJECT_COMMITTED,),
+        operation_purpose="experiment_development",
+        data_classes=("control_metadata", "customer_confidential"),
+        requires_data_use_policy=True,
+    ),
+    CreatorEntitlement(
+        capabilities=(
+            "datasets.write",
+            "datasets.validate",
+            "datasets.seal",
+            "datasets.read",
+            "data.manage",
+        ),
+        template_id="owner-data-v1",
+        activations=(_ARTIFACT_COMMITTED, _PROJECT_COMMITTED),
+        operation_purpose="data_development",
+        data_classes=("control_metadata", "customer_confidential"),
+        requires_data_use_policy=True,
+    ),
+    CreatorEntitlement(
+        capabilities=(
+            "datasets.export",
+            "data.export",
+        ),
+        template_id="owner-data-v1",
+        activations=(_ARTIFACT_COMMITTED, _PROJECT_COMMITTED),
+        operation_purpose="authorized_data_export",
+        data_classes=("customer_confidential",),
+        requires_data_use_policy=True,
+    ),
+    CreatorEntitlement(
+        capabilities=(
+            "synthetic.plan",
+            "synthetic.run",
+            "synthetic.read",
+        ),
+        template_id="owner-data-v1",
+        activations=(_ARTIFACT_COMMITTED, _PROJECT_COMMITTED),
+        operation_purpose="data_development",
+        data_classes=("control_metadata", "customer_confidential"),
+        requires_data_use_policy=True,
+    ),
+    CreatorEntitlement(
+        capabilities=(
+            "training.plan",
+            "training.validate",
+            "training.run",
+            "training.read",
+            "training.cancel",
+        ),
+        template_id="owner-training-v1",
+        activations=(_ARTIFACT_COMMITTED, _PROJECT_COMMITTED),
+        operation_purpose="model_training",
+        data_classes=("control_metadata", "customer_confidential", "model_artifact"),
+        requires_data_use_policy=True,
+    ),
+    CreatorEntitlement(
+        capabilities=(
+            "jobs.cancel",
+            "jobs.diagnostics.read",
+        ),
+        template_id="owner-training-v1",
+        activations=(_PROJECT_COMMITTED,),
+        operation_purpose="job_management",
+        data_classes=("control_metadata",),
+        requires_data_use_policy=False,
+    ),
+    CreatorEntitlement(
+        capabilities=("jobs.retry",),
+        template_id="owner-training-v1",
+        activations=(_PROJECT_COMMITTED,),
+        operation_purpose="job_retry",
+        data_classes=("control_metadata",),
+        requires_data_use_policy=False,
+    ),
+    CreatorEntitlement(
+        capabilities=(
+            "benchmarks.plan",
+            "benchmarks.validate",
+            "benchmarks.lock",
+            "benchmarks.read",
+            "benchmarks.audit",
+            "evaluations.plan",
+            "evaluations.run",
+            "evaluations.read",
+            "evaluations.replay",
+        ),
+        template_id="owner-evaluation-request-v1",
+        activations=(_PROJECT_COMMITTED,),
+        operation_purpose="evaluation_request",
+        data_classes=("control_metadata",),
+        requires_data_use_policy=False,
+    ),
+    CreatorEntitlement(
+        capabilities=(
+            "changes.write",
+            "changes.plan",
+            "changes.read",
+            "artifacts.write",
+            "artifacts.qualify",
+            "deployments.authorize",
+            "deployments.promote",
+            "deployments.rollback",
+        ),
+        template_id="owner-release-v1",
+        activations=(_ARTIFACT_COMMITTED, _ENVIRONMENT_COMMITTED, _PROJECT_COMMITTED),
+        operation_purpose="model_release",
+        data_classes=("control_metadata", "model_artifact"),
+        requires_data_use_policy=True,
+    ),
+    CreatorEntitlement(
+        capabilities=("changes.execute",),
+        template_id="owner-release-v1",
+        activations=(_ARTIFACT_COMMITTED, _ENVIRONMENT_COMMITTED, _PROJECT_COMMITTED),
+        operation_purpose="model_release",
+        data_classes=("control_metadata", "model_artifact"),
+        requires_data_use_policy=True,
+    ),
+    CreatorEntitlement(
+        capabilities=(
+            "monitoring.manage",
+            "releases.read",
+        ),
+        template_id="owner-release-v1",
+        activations=(_ARTIFACT_COMMITTED, _ENVIRONMENT_COMMITTED, _PROJECT_COMMITTED),
+        operation_purpose="model_release",
+        data_classes=("control_metadata", "model_artifact"),
+        requires_data_use_policy=True,
+    ),
+    CreatorEntitlement(
+        capabilities=(
+            "value.read",
+            "value.write",
+        ),
+        template_id="owner-delivery-v1",
+        activations=(_ARTIFACT_COMMITTED, _PROJECT_COMMITTED),
+        operation_purpose="customer_delivery",
+        data_classes=("control_metadata",),
+        requires_data_use_policy=False,
+    ),
+    CreatorEntitlement(
+        capabilities=(
+            "packages.create",
+            "packages.read",
+            "packages.export",
+        ),
+        template_id="owner-delivery-v1",
+        activations=(_ARTIFACT_COMMITTED, _PROJECT_COMMITTED),
+        operation_purpose="customer_delivery",
+        data_classes=("control_metadata", "customer_confidential", "model_artifact"),
+        requires_data_use_policy=True,
+    ),
+    CreatorEntitlement(
+        capabilities=(
+            "incident.read",
+            "incident.manage",
+        ),
+        template_id="owner-incident-v1",
+        activations=(_PROJECT_COMMITTED,),
+        operation_purpose="incident_management",
+        data_classes=("control_metadata",),
+        requires_data_use_policy=False,
+    ),
+    CreatorEntitlement(
+        capabilities=("incident.resolve",),
+        template_id="owner-incident-v1",
+        activations=(_PROJECT_COMMITTED,),
+        operation_purpose="incident_management",
+        data_classes=("control_metadata",),
+        requires_data_use_policy=False,
+    ),
+    CreatorEntitlement(
+        capabilities=(
+            "support.create",
+            "support.read",
+            "support.manage",
+            "support.close",
+            "support.delegate",
+        ),
+        template_id="owner-customer-support-v1",
+        activations=(_ORGANIZATION_ACTIVATED, _WORKSPACE_COMMITTED),
+        operation_purpose="customer_support",
+        data_classes=("control_metadata",),
+        requires_data_use_policy=False,
+    ),
+    CreatorEntitlement(
+        capabilities=("support.note.create",),
+        template_id="owner-customer-support-v1",
+        activations=(_NOTE_WRITE_ADMITTED,),
+        operation_purpose="support_case_note",
+        data_classes=("customer_confidential",),
+        requires_data_use_policy=True,
+    ),
+    CreatorEntitlement(
+        capabilities=("support.note.read",),
+        template_id="owner-customer-support-v1",
+        activations=(_NOTE_READ_ADMITTED,),
+        operation_purpose="support_case_note",
+        data_classes=("customer_confidential",),
+        requires_data_use_policy=True,
+    ),
+    CreatorEntitlement(
+        capabilities=(
+            "policy.authorize",
+            "source.authorize",
+            "model_rights.authorize",
+            "budget.authorize",
+        ),
+        template_id="owner-customer-approval-v1",
+        activations=(
+            _ORGANIZATION_ACTIVATED,
+            _WORKSPACE_COMMITTED,
+            _PROJECT_COMMITTED,
+            _ENVIRONMENT_COMMITTED,
+        ),
+        operation_purpose="customer_policy_approval",
+        data_classes=("control_metadata",),
+        requires_data_use_policy=False,
+    ),
+)
+_BIRTH_ENTITLEMENTS = tuple(
+    entitlement
+    for entitlement in APPROVED_CREATOR_ENTITLEMENTS
+    if _ORGANIZATION_ACTIVATED in entitlement.activations
+)
+_BIRTH_TEMPLATE_IDS = frozenset(entitlement.template_id for entitlement in _BIRTH_ENTITLEMENTS)
+_CREATOR_TEMPLATE_IDS = frozenset(
+    entitlement.template_id for entitlement in APPROVED_CREATOR_ENTITLEMENTS
+)
 
 
 class InitialAuthorityPolicy(ClosedModel):
-    """Required trusted installation input. No default launch policy is supplied."""
+    """The configured immutable policy binding used by the trusted installer."""
 
     policy_ref: ImmutableMetadataRef
-    template: TemplateBinding
+    template_bindings: Annotated[
+        tuple[TemplateBinding, ...], BeforeValidator(_array), Field(min_length=1, max_length=15)
+    ]
     authenticated_installer: ImmutableMetadataRef
     enrolled_organization_id: Id
-    tuples: Annotated[
-        tuple[GrantTuple, ...], BeforeValidator(_array), Field(min_length=1, max_length=100)
-    ]
-    allow_durable_human_expiry: bool
+    enrollment_ref: ImmutableMetadataRef
 
     @model_validator(mode="after")
-    def same_organization(self) -> Self:
-        if any(
-            t.resource_scope.organization_id != self.enrolled_organization_id for t in self.tuples
+    def approved_binding(self) -> Self:
+        template_ids = {binding.template_id for binding in self.template_bindings}
+        if (
+            self.policy_ref.sha256 != APPROVED_CREATOR_POLICY_SHA256
+            or len(template_ids) != len(self.template_bindings)
+            or not _BIRTH_TEMPLATE_IDS <= template_ids <= _CREATOR_TEMPLATE_IDS
         ):
-            raise ValueError("Policy organization mismatch")
+            raise ValueError("Unapproved creator policy binding")
         return self
+
+    def birth_grants(
+        self,
+        organization_id: str,
+        subject: str,
+        operation_id: str,
+        authority_revision: str,
+        now: datetime,
+    ) -> tuple[AccessGrant, ...]:
+        """Compile prepared organization grants for a verified local creator."""
+
+        if organization_id != self.enrolled_organization_id:
+            raise GrantError("CREATOR_POLICY_UNAVAILABLE", 503)
+        scope = ResourceScope(
+            organization_id=organization_id,
+            workspace_ids=(),
+            project_ids=(),
+            environment_ids=(),
+            artifact_refs=(),
+            support_note_scopes=(),
+        )
+        principal = Principal(type="user", id=subject)
+        valid_from = server_time(now).isoformat().replace("+00:00", "Z")
+        bindings = {binding.template_id: binding for binding in self.template_bindings}
+        grants = []
+        for entitlement in _BIRTH_ENTITLEMENTS:
+            if entitlement.requires_data_use_policy or entitlement.data_classes != (
+                "control_metadata",
+            ):
+                raise GrantError("CREATOR_POLICY_UNAVAILABLE", 503)
+            binding = bindings[entitlement.template_id]
+            for capability in entitlement.capabilities:
+                grant_id = sha256(
+                    canonical(
+                        {
+                            "policy_ref": self.policy_ref.wire(),
+                            "enrollment_ref": self.enrollment_ref.wire(),
+                            "organization_id": organization_id,
+                            "principal": principal.wire(),
+                            "operation_id": operation_id,
+                            "capability": capability,
+                            "template": binding.wire(),
+                        }
+                    )
+                )
+                grants.append(
+                    AccessGrant(
+                        grant_id=f"grant-{grant_id}",
+                        revision="1",
+                        principal=principal,
+                        capabilities=(capability,),
+                        resource_scope=scope,
+                        purposes=(entitlement.operation_purpose,),
+                        data_classes=entitlement.data_classes,
+                        valid_from=valid_from,
+                        expires_at=None,
+                        reason_code=INITIAL_CREATOR_REASON,
+                        state="prepared",
+                        parent_grant_ids=(),
+                        template_bindings=(binding,),
+                        creation_operation_id=operation_id,
+                        creation_authority_revision=authority_revision,
+                    )
+                )
+        return tuple(grants)
 
 
 @dataclass(frozen=True)
