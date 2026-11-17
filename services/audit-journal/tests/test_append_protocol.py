@@ -10,6 +10,7 @@ import json
 import shutil
 import ssl
 import subprocess
+import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -80,6 +81,44 @@ from opentour_journal.replay import FrontierVerifier, VerifiedAuthorityFrontier
 
 NOW = datetime(2026, 11, 16, tzinfo=UTC)
 ROOT = Path(__file__).resolve().parents[3]
+
+
+def test_authority_ports_are_reexported_without_duplicate_types() -> None:
+    from opentour_audit import journal
+    from opentour_journal import ports
+
+    for name in (
+        "ServicePrincipal",
+        "AuthorizedScope",
+        "ResolvedIntent",
+        "ReconciledTransaction",
+        "ApprovedRegistration",
+        "AuthorityResolver",
+    ):
+        assert getattr(journal, name) is getattr(ports, name)
+
+
+def test_authority_ports_import_without_service_or_provider_modules() -> None:
+    probe = """
+import importlib.abc
+import sys
+
+class RefuseServiceImports(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname.split('.')[0] in {
+            'opentour_audit', 'opentour_control', 'boto3', 'botocore', 'fastapi',
+        }:
+            raise ImportError('service import forbidden in pure authority ports')
+
+sys.meta_path.insert(0, RefuseServiceImports())
+from opentour_journal.ports import AuthorityResolver, ServicePrincipal
+assert AuthorityResolver.__module__ == 'opentour_journal.ports'
+assert ServicePrincipal.__module__ == 'opentour_journal.ports'
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", probe], capture_output=True, text=True, timeout=10, check=False
+    )
+    assert result.returncode == 0, result.stderr
 
 
 class ConditionalFailure(ClientError):

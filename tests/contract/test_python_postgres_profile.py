@@ -16,6 +16,7 @@ from tools.fixtures import python_postgres as adapter
 from tools.fixtures.postgres import DisposablePostgres, PrerequisiteMissing
 
 TARGET = "services/control-api/tests/migrations/test_expand_contract.py"
+GRANTS_TARGET = "services/control-api/tests/auth/test_grants_postgres.py"
 
 
 @pytest.fixture
@@ -102,6 +103,25 @@ def test_exact_target_uses_fixed_local_profile(checkout: Path) -> None:
     assert calls[0].environment["OPENTOUR_UNIT_GUARD"] == "1"
     assert "tools.fixtures.python_postgres" in calls[0].argv
     assert result["steps"][0]["artifacts"][0]["content"]["product_acceptance"] == "NOT_RUN"
+
+
+def test_grants_target_requires_its_own_observed_postgres_binding(checkout: Path) -> None:
+    target = checkout / GRANTS_TARGET
+    target.parent.mkdir(parents=True)
+    target.write_text("def test_generated():\n    assert True\n")
+    result = runner.run_command("test-python", [GRANTS_TARGET], checkout, controlled_result)
+
+    assert result["exit_code"] == 0 and result["kind"] == "local_integration"
+    assert adapter.target_command(GRANTS_TARGET) == ("just", "test-python", GRANTS_TARGET)
+    assert result["steps"][0]["artifacts"][0]["content"]["owner"] == "OPE-143"
+    assert result["product_acceptance"] == "NOT_RUN"
+    mismatched = runner.run_command(
+        "test-python",
+        [GRANTS_TARGET],
+        checkout,
+        lambda invocation: controlled_result(invocation, "owner"),
+    )
+    assert mismatched["exit_code"] == 2
 
 
 @pytest.mark.parametrize(
