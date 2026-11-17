@@ -1,0 +1,812 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:opentour:access-grant:1.0",
+  "description": "Closed grant request and metadata receipts. Definition library: consumers must select a definition. Shape validation is not current identity, ownership, policy or verified journal authority. Semantic validators enforce timestamp ordering and matching receipt grant IDs.",
+  "type": "object",
+  "$defs": {
+    "Principal": {
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "enum": [
+            "user",
+            "workload",
+            "support"
+          ],
+          "type": "string"
+        },
+        "id": {
+          "$ref": "urn:opentour:common-contract:1.0#/$defs/Id"
+        }
+      },
+      "required": [
+        "type",
+        "id"
+      ],
+      "type": "object"
+    },
+    "ResourceScope": {
+      "additionalProperties": false,
+      "properties": {
+        "workspace_ids": {
+          "items": {
+            "$ref": "urn:opentour:common-contract:1.0#/$defs/Id"
+          },
+          "type": "array",
+          "uniqueItems": true,
+          "maxItems": 100
+        },
+        "project_ids": {
+          "items": {
+            "$ref": "urn:opentour:common-contract:1.0#/$defs/Id"
+          },
+          "type": "array",
+          "uniqueItems": true,
+          "maxItems": 100
+        },
+        "environment_ids": {
+          "items": {
+            "$ref": "urn:opentour:common-contract:1.0#/$defs/Id"
+          },
+          "type": "array",
+          "uniqueItems": true,
+          "maxItems": 100
+        },
+        "artifact_refs": {
+          "items": {
+            "$ref": "urn:opentour:common-contract:1.0#/$defs/ArtifactRef"
+          },
+          "type": "array",
+          "uniqueItems": true,
+          "maxItems": 100
+        },
+        "support_note_scopes": {
+          "type": "array",
+          "items": {
+            "$ref": "urn:opentour:support-case:1.0#/$defs/SupportNoteGrantScope"
+          },
+          "uniqueItems": true,
+          "maxItems": 100
+        },
+        "organization_id": {
+          "$ref": "urn:opentour:common-contract:1.0#/$defs/Id"
+        }
+      },
+      "required": [
+        "workspace_ids",
+        "project_ids",
+        "environment_ids",
+        "artifact_refs",
+        "support_note_scopes",
+        "organization_id"
+      ],
+      "type": "object"
+    },
+    "TemplateBinding": {
+      "additionalProperties": false,
+      "properties": {
+        "template_id": {
+          "$ref": "urn:opentour:common-contract:1.0#/$defs/Id"
+        },
+        "revision": {
+          "$ref": "urn:opentour:common-contract:1.0#/$defs/ResourceRevision"
+        },
+        "sha256": {
+          "$ref": "urn:opentour:common-contract:1.0#/$defs/Sha256"
+        }
+      },
+      "required": [
+        "template_id",
+        "revision",
+        "sha256"
+      ],
+      "type": "object"
+    },
+    "AccessGrant": {
+      "additionalProperties": false,
+      "properties": {
+        "grant_id": {
+          "$ref": "urn:opentour:common-contract:1.0#/$defs/Id"
+        },
+        "revision": {
+          "$ref": "urn:opentour:common-contract:1.0#/$defs/ResourceRevision"
+        },
+        "principal": {
+          "$ref": "#/$defs/Principal"
+        },
+        "capabilities": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 50,
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "access.manage",
+              "artifacts.qualify",
+              "artifacts.write",
+              "benchmarks.audit",
+              "benchmarks.disclose",
+              "benchmarks.lock",
+              "benchmarks.plan",
+              "benchmarks.read",
+              "benchmarks.validate",
+              "billing.read",
+              "billing.write",
+              "budget.authorize",
+              "changes.execute",
+              "changes.plan",
+              "changes.read",
+              "changes.write",
+              "connections.manage",
+              "credentials.manage",
+              "data.export",
+              "data.manage",
+              "datasets.export",
+              "datasets.read",
+              "datasets.seal",
+              "datasets.validate",
+              "datasets.write",
+              "deployments.authorize",
+              "deployments.promote",
+              "deployments.rollback",
+              "environment.health.read",
+              "environments.manage",
+              "evaluations.inspect_protected",
+              "evaluations.plan",
+              "evaluations.read",
+              "evaluations.replay",
+              "evaluations.run",
+              "evidence.read",
+              "evidence.reconstruct",
+              "experiments.freeze",
+              "experiments.plan",
+              "experiments.read",
+              "experiments.run",
+              "incident.manage",
+              "incident.read",
+              "incident.resolve",
+              "incident.severity_review",
+              "integrations.manage",
+              "jobs.cancel",
+              "jobs.diagnostics.read",
+              "jobs.retry",
+              "labels.correct",
+              "labels.qualify",
+              "labels.read",
+              "labels.run",
+              "lineage.read",
+              "lineage.repair",
+              "lineage.write",
+              "members.invite",
+              "members.manage",
+              "model_rights.authorize",
+              "monitoring.manage",
+              "operations.execute",
+              "operations.read",
+              "packages.create",
+              "packages.export",
+              "packages.read",
+              "policy.authorize",
+              "project.create",
+              "project.manage",
+              "project.read",
+              "quotas.manage",
+              "readiness.manage",
+              "releases.read",
+              "scopes.confirm",
+              "scopes.discover",
+              "scopes.read",
+              "security.admin",
+              "source.authorize",
+              "support.close",
+              "support.create",
+              "support.delegate",
+              "support.emergency_approve",
+              "support.emergency_request",
+              "support.manage",
+              "support.note.create",
+              "support.note.read",
+              "support.read",
+              "synthetic.plan",
+              "synthetic.read",
+              "synthetic.run",
+              "training.cancel",
+              "training.plan",
+              "training.read",
+              "training.run",
+              "training.validate",
+              "value.read",
+              "value.write",
+              "workflow.activate",
+              "workflow.read",
+              "workflow.write",
+              "workspace.create",
+              "workspace.manage",
+              "workspace.read"
+            ]
+          }
+        },
+        "resource_scope": {
+          "$ref": "#/$defs/ResourceScope"
+        },
+        "purposes": {
+          "items": {
+            "$ref": "urn:opentour:common-contract:1.0#/$defs/Id"
+          },
+          "type": "array",
+          "uniqueItems": true,
+          "maxItems": 100
+        },
+        "data_classes": {
+          "items": {
+            "enum": [
+              "control_metadata",
+              "customer_confidential",
+              "protected_evaluation",
+              "model_artifact"
+            ],
+            "type": "string"
+          },
+          "type": "array",
+          "uniqueItems": true,
+          "maxItems": 4
+        },
+        "valid_from": {
+          "$ref": "urn:opentour:common-contract:1.0#/$defs/Timestamp"
+        },
+        "expires_at": {
+          "anyOf": [
+            {
+              "$ref": "urn:opentour:common-contract:1.0#/$defs/Timestamp"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "reason_code": {
+          "$ref": "urn:opentour:common-contract:1.0#/$defs/Id"
+        },
+        "state": {
+          "enum": [
+            "prepared",
+            "active",
+            "revoked"
+          ],
+          "type": "string"
+        },
+        "parent_grant_ids": {
+          "items": {
+            "$ref": "urn:opentour:common-contract:1.0#/$defs/Id"
+          },
+          "type": "array",
+          "uniqueItems": true,
+          "maxItems": 100
+        },
+        "template_bindings": {
+          "items": {
+            "$ref": "#/$defs/TemplateBinding"
+          },
+          "type": "array",
+          "uniqueItems": true,
+          "maxItems": 50
+        },
+        "creation_operation_id": {
+          "$ref": "urn:opentour:common-contract:1.0#/$defs/Id"
+        },
+        "creation_authority_revision": {
+          "$ref": "urn:opentour:common-contract:1.0#/$defs/Id"
+        }
+      },
+      "required": [
+        "grant_id",
+        "revision",
+        "principal",
+        "capabilities",
+        "resource_scope",
+        "purposes",
+        "data_classes",
+        "valid_from",
+        "expires_at",
+        "reason_code",
+        "state",
+        "parent_grant_ids",
+        "template_bindings",
+        "creation_operation_id",
+        "creation_authority_revision"
+      ],
+      "type": "object",
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "principal": {
+                "properties": {
+                  "type": {
+                    "enum": [
+                      "workload",
+                      "support"
+                    ]
+                  }
+                }
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "expires_at": {
+                "$ref": "urn:opentour:common-contract:1.0#/$defs/Timestamp"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "InputResourceScope": {
+      "additionalProperties": false,
+      "properties": {
+        "workspace_ids": {
+          "items": {
+            "$ref": "urn:opentour:common-contract:1.0#/$defs/Id"
+          },
+          "type": "array",
+          "uniqueItems": true,
+          "maxItems": 100
+        },
+        "project_ids": {
+          "items": {
+            "$ref": "urn:opentour:common-contract:1.0#/$defs/Id"
+          },
+          "type": "array",
+          "uniqueItems": true,
+          "maxItems": 100
+        },
+        "environment_ids": {
+          "items": {
+            "$ref": "urn:opentour:common-contract:1.0#/$defs/Id"
+          },
+          "type": "array",
+          "uniqueItems": true,
+          "maxItems": 100
+        },
+        "artifact_refs": {
+          "items": {
+            "$ref": "urn:opentour:common-contract:1.0#/$defs/ArtifactRef"
+          },
+          "type": "array",
+          "uniqueItems": true,
+          "maxItems": 100
+        },
+        "support_note_scopes": {
+          "type": "array",
+          "items": {
+            "$ref": "urn:opentour:support-case:1.0#/$defs/SupportNoteGrantScope"
+          },
+          "uniqueItems": true,
+          "maxItems": 100
+        }
+      },
+      "required": [
+        "workspace_ids",
+        "project_ids",
+        "environment_ids",
+        "artifact_refs",
+        "support_note_scopes"
+      ],
+      "type": "object"
+    },
+    "CreateGrant": {
+      "additionalProperties": false,
+      "properties": {
+        "principal": {
+          "$ref": "#/$defs/Principal"
+        },
+        "capabilities": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 50,
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "access.manage",
+              "artifacts.qualify",
+              "artifacts.write",
+              "benchmarks.audit",
+              "benchmarks.disclose",
+              "benchmarks.lock",
+              "benchmarks.plan",
+              "benchmarks.read",
+              "benchmarks.validate",
+              "billing.read",
+              "billing.write",
+              "budget.authorize",
+              "changes.execute",
+              "changes.plan",
+              "changes.read",
+              "changes.write",
+              "connections.manage",
+              "credentials.manage",
+              "data.export",
+              "data.manage",
+              "datasets.export",
+              "datasets.read",
+              "datasets.seal",
+              "datasets.validate",
+              "datasets.write",
+              "deployments.authorize",
+              "deployments.promote",
+              "deployments.rollback",
+              "environment.health.read",
+              "environments.manage",
+              "evaluations.inspect_protected",
+              "evaluations.plan",
+              "evaluations.read",
+              "evaluations.replay",
+              "evaluations.run",
+              "evidence.read",
+              "evidence.reconstruct",
+              "experiments.freeze",
+              "experiments.plan",
+              "experiments.read",
+              "experiments.run",
+              "incident.manage",
+              "incident.read",
+              "incident.resolve",
+              "incident.severity_review",
+              "integrations.manage",
+              "jobs.cancel",
+              "jobs.diagnostics.read",
+              "jobs.retry",
+              "labels.correct",
+              "labels.qualify",
+              "labels.read",
+              "labels.run",
+              "lineage.read",
+              "lineage.repair",
+              "lineage.write",
+              "members.invite",
+              "members.manage",
+              "model_rights.authorize",
+              "monitoring.manage",
+              "operations.execute",
+              "operations.read",
+              "packages.create",
+              "packages.export",
+              "packages.read",
+              "policy.authorize",
+              "project.create",
+              "project.manage",
+              "project.read",
+              "quotas.manage",
+              "readiness.manage",
+              "releases.read",
+              "scopes.confirm",
+              "scopes.discover",
+              "scopes.read",
+              "security.admin",
+              "source.authorize",
+              "support.close",
+              "support.create",
+              "support.delegate",
+              "support.emergency_approve",
+              "support.emergency_request",
+              "support.manage",
+              "support.note.create",
+              "support.note.read",
+              "support.read",
+              "synthetic.plan",
+              "synthetic.read",
+              "synthetic.run",
+              "training.cancel",
+              "training.plan",
+              "training.read",
+              "training.run",
+              "training.validate",
+              "value.read",
+              "value.write",
+              "workflow.activate",
+              "workflow.read",
+              "workflow.write",
+              "workspace.create",
+              "workspace.manage",
+              "workspace.read"
+            ]
+          }
+        },
+        "resource_scope": {
+          "$ref": "#/$defs/InputResourceScope"
+        },
+        "purposes": {
+          "items": {
+            "$ref": "urn:opentour:common-contract:1.0#/$defs/Id"
+          },
+          "type": "array",
+          "uniqueItems": true,
+          "maxItems": 100
+        },
+        "data_classes": {
+          "items": {
+            "enum": [
+              "control_metadata",
+              "customer_confidential",
+              "protected_evaluation",
+              "model_artifact"
+            ],
+            "type": "string"
+          },
+          "type": "array",
+          "uniqueItems": true,
+          "maxItems": 4
+        },
+        "valid_from": {
+          "$ref": "urn:opentour:common-contract:1.0#/$defs/Timestamp"
+        },
+        "expires_at": {
+          "anyOf": [
+            {
+              "$ref": "urn:opentour:common-contract:1.0#/$defs/Timestamp"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "reason_code": {
+          "$ref": "urn:opentour:common-contract:1.0#/$defs/Id"
+        },
+        "expected_authority_revision": {
+          "$ref": "urn:opentour:common-contract:1.0#/$defs/Id"
+        }
+      },
+      "required": [
+        "principal",
+        "capabilities",
+        "resource_scope",
+        "purposes",
+        "data_classes",
+        "valid_from",
+        "expires_at",
+        "reason_code",
+        "expected_authority_revision"
+      ],
+      "type": "object",
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "principal": {
+                "properties": {
+                  "type": {
+                    "enum": [
+                      "workload",
+                      "support"
+                    ]
+                  }
+                }
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "expires_at": {
+                "$ref": "urn:opentour:common-contract:1.0#/$defs/Timestamp"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "GrantCreationReceipt": {
+      "additionalProperties": false,
+      "properties": {
+        "grant_id": {
+          "$ref": "urn:opentour:common-contract:1.0#/$defs/Id"
+        },
+        "revision": {
+          "$ref": "urn:opentour:common-contract:1.0#/$defs/ResourceRevision"
+        },
+        "authority_revision": {
+          "$ref": "urn:opentour:common-contract:1.0#/$defs/Id"
+        },
+        "revocation_epoch": {
+          "$ref": "urn:opentour:common-contract:1.0#/$defs/SafeNonnegativeInteger"
+        },
+        "committed_at": {
+          "$ref": "urn:opentour:common-contract:1.0#/$defs/Timestamp"
+        }
+      },
+      "required": [
+        "grant_id",
+        "revision",
+        "authority_revision",
+        "revocation_epoch",
+        "committed_at"
+      ],
+      "type": "object"
+    },
+    "GrantCurrentStatus": {
+      "additionalProperties": false,
+      "properties": {
+        "grant_id": {
+          "$ref": "urn:opentour:common-contract:1.0#/$defs/Id"
+        },
+        "revision": {
+          "$ref": "urn:opentour:common-contract:1.0#/$defs/ResourceRevision"
+        },
+        "state": {
+          "enum": [
+            "not_yet_valid",
+            "active",
+            "expired",
+            "revoked"
+          ],
+          "type": "string"
+        },
+        "authority_status": {
+          "enum": [
+            "current",
+            "reconciliation_required",
+            "unavailable"
+          ],
+          "type": "string"
+        },
+        "observed_at": {
+          "$ref": "urn:opentour:common-contract:1.0#/$defs/Timestamp"
+        }
+      },
+      "required": [
+        "grant_id",
+        "revision",
+        "state",
+        "authority_status",
+        "observed_at"
+      ],
+      "type": "object"
+    },
+    "GrantOperationView": {
+      "additionalProperties": false,
+      "properties": {
+        "operation_id": {
+          "$ref": "urn:opentour:common-contract:1.0#/$defs/Id"
+        },
+        "operation_kind": {
+          "const": "access_grant_create",
+          "type": "string"
+        },
+        "operation_revision": {
+          "$ref": "urn:opentour:common-contract:1.0#/$defs/ResourceRevision"
+        },
+        "grant_id": {
+          "$ref": "urn:opentour:common-contract:1.0#/$defs/Id"
+        },
+        "state": {
+          "enum": [
+            "prepared",
+            "reconciliation_required",
+            "succeeded",
+            "aborted"
+          ],
+          "type": "string"
+        },
+        "creation_receipt": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GrantCreationReceipt"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "current_grant_status": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GrantCurrentStatus"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "current_status_unavailable_reason": {
+          "anyOf": [
+            {
+              "enum": [
+                "AUTHORITY_UNAVAILABLE",
+                "RECONCILIATION_REQUIRED"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "request_id": {
+          "$ref": "urn:opentour:common-contract:1.0#/$defs/Id"
+        }
+      },
+      "required": [
+        "operation_id",
+        "operation_kind",
+        "operation_revision",
+        "grant_id",
+        "state",
+        "creation_receipt",
+        "current_grant_status",
+        "current_status_unavailable_reason",
+        "request_id"
+      ],
+      "type": "object",
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "enum": [
+                  "prepared",
+                  "reconciliation_required",
+                  "aborted"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "creation_receipt": {
+                "type": "null"
+              },
+              "current_grant_status": {
+                "type": "null"
+              },
+              "current_status_unavailable_reason": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "const": "succeeded"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "creation_receipt": {
+                "$ref": "#/$defs/GrantCreationReceipt"
+              }
+            },
+            "oneOf": [
+              {
+                "properties": {
+                  "current_grant_status": {
+                    "type": "null"
+                  },
+                  "current_status_unavailable_reason": {
+                    "enum": [
+                      "AUTHORITY_UNAVAILABLE",
+                      "RECONCILIATION_REQUIRED"
+                    ]
+                  }
+                }
+              },
+              {
+                "properties": {
+                  "current_grant_status": {
+                    "$ref": "#/$defs/GrantCurrentStatus"
+                  },
+                  "current_status_unavailable_reason": {
+                    "type": "null"
+                  }
+                }
+              }
+            ]
+          }
+        }
+      ]
+    }
+  }
+}

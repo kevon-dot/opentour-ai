@@ -1,0 +1,1532 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:opentour:support-case:1.0",
+  "title": "Support case intake and direct-cell private notes",
+  "$defs": {
+    "SupportCaseScope": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "organization"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "workspace"
+            },
+            "workspace_id": {
+              "$ref": "urn:opentour:common-contract:1.0#/$defs/Id"
+            }
+          },
+          "required": [
+            "kind",
+            "workspace_id"
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "environment"
+            },
+            "environment_id": {
+              "$ref": "urn:opentour:common-contract:1.0#/$defs/Id"
+            }
+          },
+          "required": [
+            "kind",
+            "environment_id"
+          ]
+        }
+      ]
+    },
+    "SupportNoteRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "environment_id": {
+          "$ref": "urn:opentour:common-contract:1.0#/$defs/Id"
+        },
+        "note_id": {
+          "$ref": "urn:opentour:common-contract:1.0#/$defs/Id"
+        },
+        "revision": {
+          "$ref": "urn:opentour:common-contract:1.0#/$defs/ResourceRevision"
+        }
+      },
+      "required": [
+        "environment_id",
+        "note_id",
+        "revision"
+      ]
+    },
+    "SupportCaseCreate": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "scope": {
+          "$ref": "#/$defs/SupportCaseScope"
+        },
+        "category": {
+          "enum": [
+            "installation",
+            "data",
+            "training",
+            "release",
+            "billing",
+            "security",
+            "other"
+          ]
+        },
+        "reason_code": {
+          "enum": [
+            "installation_blocked",
+            "network_access_help",
+            "enrollment_help",
+            "source_connection_help",
+            "evidence_mapping_help",
+            "data_access_question",
+            "training_failed",
+            "training_cost_question",
+            "model_compatibility_question",
+            "platform_release_review",
+            "model_release_question",
+            "rollback_review",
+            "invoice_question",
+            "usage_reconciliation",
+            "entitlement_question",
+            "suspected_disclosure",
+            "authority_question",
+            "access_revocation_help",
+            "product_question",
+            "service_coordination"
+          ]
+        },
+        "impact": {
+          "enum": [
+            "none_reported",
+            "nonproduction_blocked",
+            "production_degraded",
+            "suspected_security_issue",
+            "unknown"
+          ]
+        },
+        "requested_urgency": {
+          "enum": [
+            "normal",
+            "urgent"
+          ]
+        },
+        "related_resource_refs": {
+          "type": "array",
+          "items": {
+            "$ref": "urn:opentour:common-contract:1.0#/$defs/VersionedResourceRef"
+          },
+          "minItems": 0,
+          "maxItems": 20,
+          "uniqueItems": true
+        }
+      },
+      "required": [
+        "scope",
+        "category",
+        "reason_code",
+        "impact",
+        "requested_urgency",
+        "related_resource_refs"
+      ],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "category": {
+                "const": "installation"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "reason_code": {
+                "enum": [
+                  "installation_blocked",
+                  "network_access_help",
+                  "enrollment_help"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "category": {
+                "const": "data"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "reason_code": {
+                "enum": [
+                  "source_connection_help",
+                  "evidence_mapping_help",
+                  "data_access_question"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "category": {
+                "const": "training"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "reason_code": {
+                "enum": [
+                  "training_failed",
+                  "training_cost_question",
+                  "model_compatibility_question"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "category": {
+                "const": "release"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "reason_code": {
+                "enum": [
+                  "platform_release_review",
+                  "model_release_question",
+                  "rollback_review"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "category": {
+                "const": "billing"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "reason_code": {
+                "enum": [
+                  "invoice_question",
+                  "usage_reconciliation",
+                  "entitlement_question"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "category": {
+                "const": "security"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "reason_code": {
+                "enum": [
+                  "suspected_disclosure",
+                  "authority_question",
+                  "access_revocation_help"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "category": {
+                "const": "other"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "reason_code": {
+                "enum": [
+                  "product_question",
+                  "service_coordination"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "category": {
+                "const": "release"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "scope": {
+                "properties": {
+                  "kind": {
+                    "const": "environment"
+                  }
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "SupportCaseView": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "$ref": "urn:opentour:common-contract:1.0#/$defs/Id"
+        },
+        "revision": {
+          "$ref": "urn:opentour:common-contract:1.0#/$defs/ResourceRevision"
+        },
+        "organization_id": {
+          "$ref": "urn:opentour:common-contract:1.0#/$defs/Id"
+        },
+        "scope": {
+          "$ref": "#/$defs/SupportCaseScope"
+        },
+        "category": {
+          "enum": [
+            "installation",
+            "data",
+            "training",
+            "release",
+            "billing",
+            "security",
+            "other"
+          ]
+        },
+        "reason_code": {
+          "enum": [
+            "installation_blocked",
+            "network_access_help",
+            "enrollment_help",
+            "source_connection_help",
+            "evidence_mapping_help",
+            "data_access_question",
+            "training_failed",
+            "training_cost_question",
+            "model_compatibility_question",
+            "platform_release_review",
+            "model_release_question",
+            "rollback_review",
+            "invoice_question",
+            "usage_reconciliation",
+            "entitlement_question",
+            "suspected_disclosure",
+            "authority_question",
+            "access_revocation_help",
+            "product_question",
+            "service_coordination"
+          ]
+        },
+        "impact": {
+          "enum": [
+            "none_reported",
+            "nonproduction_blocked",
+            "production_degraded",
+            "suspected_security_issue",
+            "unknown"
+          ]
+        },
+        "requested_urgency": {
+          "enum": [
+            "normal",
+            "urgent"
+          ]
+        },
+        "state": {
+          "enum": [
+            "open",
+            "triaging",
+            "waiting_for_customer",
+            "waiting_for_support",
+            "ready_to_close",
+            "closed"
+          ]
+        },
+        "created_by_subject": {
+          "$ref": "urn:opentour:common-contract:1.0#/$defs/Id"
+        },
+        "delegating_subject": {
+          "anyOf": [
+            {
+              "$ref": "urn:opentour:common-contract:1.0#/$defs/Id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "assigned_operator_subject": {
+          "anyOf": [
+            {
+              "$ref": "urn:opentour:common-contract:1.0#/$defs/Id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "created_at": {
+          "$ref": "urn:opentour:common-contract:1.0#/$defs/Timestamp"
+        },
+        "updated_at": {
+          "$ref": "urn:opentour:common-contract:1.0#/$defs/Timestamp"
+        },
+        "next_action_code": {
+          "anyOf": [
+            {
+              "enum": [
+                "assign_owner",
+                "customer_information_needed",
+                "support_review",
+                "coordinate_service",
+                "review_release_request",
+                "review_billing",
+                "review_security",
+                "confirm_closure"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "next_update_at": {
+          "anyOf": [
+            {
+              "$ref": "urn:opentour:common-contract:1.0#/$defs/Timestamp"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "related_resource_refs": {
+          "type": "array",
+          "items": {
+            "$ref": "urn:opentour:common-contract:1.0#/$defs/VersionedResourceRef"
+          },
+          "minItems": 0,
+          "maxItems": 20,
+          "uniqueItems": true
+        },
+        "linked_incident_refs": {
+          "type": "array",
+          "items": {
+            "$ref": "urn:opentour:common-contract:1.0#/$defs/VersionedResourceRef"
+          },
+          "minItems": 0,
+          "maxItems": 20,
+          "uniqueItems": true
+        },
+        "note_refs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SupportNoteRef"
+          },
+          "minItems": 0,
+          "maxItems": 100,
+          "uniqueItems": true
+        },
+        "private_notes_status": {
+          "enum": [
+            "none",
+            "cell_local",
+            "unavailable_no_cell",
+            "restricted"
+          ]
+        },
+        "closure_ref": {
+          "anyOf": [
+            {
+              "$ref": "urn:opentour:common-contract:1.0#/$defs/VersionedResourceRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "note_write_statuses": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SupportNoteWriteStatus"
+          },
+          "maxItems": 100
+        }
+      },
+      "required": [
+        "id",
+        "revision",
+        "organization_id",
+        "scope",
+        "category",
+        "reason_code",
+        "impact",
+        "requested_urgency",
+        "state",
+        "created_by_subject",
+        "delegating_subject",
+        "assigned_operator_subject",
+        "created_at",
+        "updated_at",
+        "next_action_code",
+        "next_update_at",
+        "related_resource_refs",
+        "linked_incident_refs",
+        "note_refs",
+        "private_notes_status",
+        "closure_ref",
+        "note_write_statuses"
+      ]
+    },
+    "SupportCasePatch": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "expected_revision": {
+          "$ref": "urn:opentour:common-contract:1.0#/$defs/ResourceRevision"
+        },
+        "target_state": {
+          "enum": [
+            "triaging",
+            "waiting_for_customer",
+            "waiting_for_support",
+            "ready_to_close"
+          ]
+        },
+        "assigned_operator_subject": {
+          "anyOf": [
+            {
+              "$ref": "urn:opentour:common-contract:1.0#/$defs/Id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "next_action_code": {
+          "enum": [
+            "assign_owner",
+            "customer_information_needed",
+            "support_review",
+            "coordinate_service",
+            "review_release_request",
+            "review_billing",
+            "review_security",
+            "confirm_closure"
+          ]
+        },
+        "next_update_at": {
+          "$ref": "urn:opentour:common-contract:1.0#/$defs/Timestamp"
+        },
+        "related_resource_refs": {
+          "type": "array",
+          "items": {
+            "$ref": "urn:opentour:common-contract:1.0#/$defs/VersionedResourceRef"
+          },
+          "minItems": 0,
+          "maxItems": 20,
+          "uniqueItems": true
+        },
+        "linked_incident_refs": {
+          "type": "array",
+          "items": {
+            "$ref": "urn:opentour:common-contract:1.0#/$defs/VersionedResourceRef"
+          },
+          "minItems": 0,
+          "maxItems": 20,
+          "uniqueItems": true
+        }
+      },
+      "required": [
+        "expected_revision",
+        "target_state",
+        "assigned_operator_subject",
+        "next_action_code",
+        "next_update_at",
+        "related_resource_refs",
+        "linked_incident_refs"
+      ]
+    },
+    "SupportCaseCloseRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "expected_revision": {
+          "$ref": "urn:opentour:common-contract:1.0#/$defs/ResourceRevision"
+        },
+        "outcome": {
+          "enum": [
+            "answered",
+            "withdrawn",
+            "duplicate"
+          ]
+        },
+        "reason_code": {
+          "enum": [
+            "request_answered",
+            "customer_withdrawn",
+            "duplicate_request"
+          ]
+        },
+        "answer_note_ref": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SupportNoteRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "duplicate_case_id": {
+          "anyOf": [
+            {
+              "$ref": "urn:opentour:common-contract:1.0#/$defs/Id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "acknowledged_incident_refs": {
+          "type": "array",
+          "items": {
+            "$ref": "urn:opentour:common-contract:1.0#/$defs/VersionedResourceRef"
+          },
+          "minItems": 0,
+          "maxItems": 20,
+          "uniqueItems": true
+        }
+      },
+      "required": [
+        "expected_revision",
+        "outcome",
+        "reason_code",
+        "answer_note_ref",
+        "duplicate_case_id",
+        "acknowledged_incident_refs"
+      ],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "outcome": {
+                "const": "duplicate"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "duplicate_case_id": {
+                "$ref": "urn:opentour:common-contract:1.0#/$defs/Id"
+              },
+              "reason_code": {
+                "const": "duplicate_request"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "duplicate_case_id": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "outcome": {
+                "const": "withdrawn"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "reason_code": {
+                "const": "customer_withdrawn"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "outcome": {
+                "const": "answered"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "reason_code": {
+                "const": "request_answered"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "SupportCaseClosureView": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "$ref": "urn:opentour:common-contract:1.0#/$defs/Id"
+        },
+        "revision": {
+          "$ref": "urn:opentour:common-contract:1.0#/$defs/ResourceRevision"
+        },
+        "case_ref": {
+          "$ref": "urn:opentour:common-contract:1.0#/$defs/VersionedResourceRef"
+        },
+        "outcome": {
+          "enum": [
+            "answered",
+            "withdrawn",
+            "duplicate"
+          ]
+        },
+        "closed_by_subject": {
+          "$ref": "urn:opentour:common-contract:1.0#/$defs/Id"
+        },
+        "closed_at": {
+          "$ref": "urn:opentour:common-contract:1.0#/$defs/Timestamp"
+        },
+        "answer_note_ref": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SupportNoteRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "duplicate_case_id": {
+          "anyOf": [
+            {
+              "$ref": "urn:opentour:common-contract:1.0#/$defs/Id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "acknowledged_incident_refs": {
+          "type": "array",
+          "items": {
+            "$ref": "urn:opentour:common-contract:1.0#/$defs/VersionedResourceRef"
+          },
+          "minItems": 0,
+          "maxItems": 20,
+          "uniqueItems": true
+        },
+        "authority_revocation_operation_id": {
+          "$ref": "urn:opentour:common-contract:1.0#/$defs/Id"
+        },
+        "access_revocation_state": {
+          "enum": [
+            "pending",
+            "enforced",
+            "effects_unresolved"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "revision",
+        "case_ref",
+        "outcome",
+        "closed_by_subject",
+        "closed_at",
+        "answer_note_ref",
+        "duplicate_case_id",
+        "acknowledged_incident_refs",
+        "authority_revocation_operation_id",
+        "access_revocation_state"
+      ]
+    },
+    "SupportCaseList": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SupportCaseView"
+          },
+          "minItems": 0,
+          "maxItems": 100,
+          "uniqueItems": true
+        },
+        "next_cursor": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 8192
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "items",
+        "next_cursor"
+      ]
+    },
+    "SupportNoteWriteRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "expected_case_revision": {
+          "$ref": "urn:opentour:common-contract:1.0#/$defs/ResourceRevision"
+        },
+        "environment_id": {
+          "$ref": "urn:opentour:common-contract:1.0#/$defs/Id"
+        },
+        "purpose_code": {
+          "const": "support_case_note"
+        }
+      },
+      "required": [
+        "expected_case_revision",
+        "environment_id",
+        "purpose_code"
+      ]
+    },
+    "SupportNoteWriteSession": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "write_intent_id": {
+          "$ref": "urn:opentour:common-contract:1.0#/$defs/Id"
+        },
+        "case_ref": {
+          "$ref": "urn:opentour:common-contract:1.0#/$defs/VersionedResourceRef"
+        },
+        "environment_id": {
+          "$ref": "urn:opentour:common-contract:1.0#/$defs/Id"
+        },
+        "cell_id": {
+          "$ref": "urn:opentour:common-contract:1.0#/$defs/Id"
+        },
+        "gateway_origin": {
+          "type": "string",
+          "format": "uri"
+        },
+        "route": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024
+        },
+        "access_token": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 5,
+              "maxLength": 8192
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "secret_unavailable": {
+          "type": "boolean"
+        },
+        "token_type": {
+          "const": "Bearer"
+        },
+        "expires_at": {
+          "$ref": "urn:opentour:common-contract:1.0#/$defs/Timestamp"
+        }
+      },
+      "required": [
+        "write_intent_id",
+        "case_ref",
+        "environment_id",
+        "cell_id",
+        "gateway_origin",
+        "route",
+        "access_token",
+        "secret_unavailable",
+        "token_type",
+        "expires_at"
+      ],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "secret_unavailable": {
+                "const": true
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "access_token": {
+                "type": "null"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "access_token": {
+                "type": "string",
+                "minLength": 5,
+                "maxLength": 8192
+              }
+            }
+          }
+        }
+      ]
+    },
+    "SupportNotePayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "text": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4000
+        }
+      },
+      "required": [
+        "text"
+      ]
+    },
+    "SupportNoteReceipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "note_ref": {
+          "$ref": "#/$defs/SupportNoteRef"
+        },
+        "case_id": {
+          "$ref": "urn:opentour:common-contract:1.0#/$defs/Id"
+        },
+        "write_intent_id": {
+          "$ref": "urn:opentour:common-contract:1.0#/$defs/Id"
+        },
+        "content_sha256": {
+          "$ref": "urn:opentour:common-contract:1.0#/$defs/Sha256"
+        },
+        "utf8_bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 16384
+        },
+        "created_at": {
+          "$ref": "urn:opentour:common-contract:1.0#/$defs/Timestamp"
+        },
+        "author_subject": {
+          "$ref": "urn:opentour:common-contract:1.0#/$defs/Id"
+        },
+        "classification": {
+          "const": "customer_confidential"
+        },
+        "projection_state": {
+          "enum": [
+            "pending",
+            "acknowledged"
+          ]
+        }
+      },
+      "required": [
+        "note_ref",
+        "case_id",
+        "write_intent_id",
+        "content_sha256",
+        "utf8_bytes",
+        "created_at",
+        "author_subject",
+        "classification",
+        "projection_state"
+      ]
+    },
+    "SupportNoteWriteClaims": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "iss": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024
+        },
+        "aud": {
+          "$ref": "urn:opentour:common-contract:1.0#/$defs/Id"
+        },
+        "sub": {
+          "$ref": "urn:opentour:common-contract:1.0#/$defs/Id"
+        },
+        "organization_id": {
+          "$ref": "urn:opentour:common-contract:1.0#/$defs/Id"
+        },
+        "environment_id": {
+          "$ref": "urn:opentour:common-contract:1.0#/$defs/Id"
+        },
+        "cell_id": {
+          "$ref": "urn:opentour:common-contract:1.0#/$defs/Id"
+        },
+        "case_id": {
+          "$ref": "urn:opentour:common-contract:1.0#/$defs/Id"
+        },
+        "case_revision": {
+          "$ref": "urn:opentour:common-contract:1.0#/$defs/ResourceRevision"
+        },
+        "write_intent_id": {
+          "$ref": "urn:opentour:common-contract:1.0#/$defs/Id"
+        },
+        "action": {
+          "const": "support.note.create"
+        },
+        "purpose_code": {
+          "const": "support_case_note"
+        },
+        "jti": {
+          "$ref": "urn:opentour:common-contract:1.0#/$defs/Id"
+        },
+        "iat": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "nbf": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "exp": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "authority_revision": {
+          "$ref": "urn:opentour:common-contract:1.0#/$defs/Id"
+        },
+        "revocation_epoch": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "session_generation": {
+          "$ref": "urn:opentour:common-contract:1.0#/$defs/Id"
+        },
+        "origin": {
+          "type": "string",
+          "format": "uri"
+        },
+        "support_grant_id": {
+          "anyOf": [
+            {
+              "$ref": "urn:opentour:common-contract:1.0#/$defs/Id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "max_utf8_bytes": {
+          "const": 16384
+        },
+        "purpose_grant_id": {
+          "$ref": "urn:opentour:common-contract:1.0#/$defs/Id"
+        }
+      },
+      "required": [
+        "iss",
+        "aud",
+        "sub",
+        "organization_id",
+        "environment_id",
+        "cell_id",
+        "case_id",
+        "case_revision",
+        "write_intent_id",
+        "action",
+        "purpose_code",
+        "jti",
+        "iat",
+        "nbf",
+        "exp",
+        "authority_revision",
+        "revocation_epoch",
+        "session_generation",
+        "origin",
+        "support_grant_id",
+        "max_utf8_bytes",
+        "purpose_grant_id"
+      ]
+    },
+    "SupportNoteReadRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "note_ref": {
+          "$ref": "#/$defs/SupportNoteRef"
+        },
+        "purpose_code": {
+          "const": "support_case_note"
+        }
+      },
+      "required": [
+        "note_ref",
+        "purpose_code"
+      ]
+    },
+    "SupportNoteReadSession": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "case_ref": {
+          "$ref": "urn:opentour:common-contract:1.0#/$defs/VersionedResourceRef"
+        },
+        "environment_id": {
+          "$ref": "urn:opentour:common-contract:1.0#/$defs/Id"
+        },
+        "cell_id": {
+          "$ref": "urn:opentour:common-contract:1.0#/$defs/Id"
+        },
+        "gateway_origin": {
+          "type": "string",
+          "format": "uri"
+        },
+        "route": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024
+        },
+        "access_token": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 5,
+              "maxLength": 8192
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "secret_unavailable": {
+          "type": "boolean"
+        },
+        "token_type": {
+          "const": "Bearer"
+        },
+        "expires_at": {
+          "$ref": "urn:opentour:common-contract:1.0#/$defs/Timestamp"
+        },
+        "note_ref": {
+          "$ref": "#/$defs/SupportNoteRef"
+        },
+        "read_intent_id": {
+          "$ref": "urn:opentour:common-contract:1.0#/$defs/Id"
+        }
+      },
+      "required": [
+        "read_intent_id",
+        "case_ref",
+        "environment_id",
+        "cell_id",
+        "gateway_origin",
+        "route",
+        "access_token",
+        "secret_unavailable",
+        "token_type",
+        "expires_at",
+        "note_ref"
+      ],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "secret_unavailable": {
+                "const": true
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "access_token": {
+                "type": "null"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "access_token": {
+                "type": "string",
+                "minLength": 5,
+                "maxLength": 8192
+              }
+            }
+          }
+        }
+      ]
+    },
+    "SupportNoteReadClaims": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "iss": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024
+        },
+        "aud": {
+          "$ref": "urn:opentour:common-contract:1.0#/$defs/Id"
+        },
+        "sub": {
+          "$ref": "urn:opentour:common-contract:1.0#/$defs/Id"
+        },
+        "organization_id": {
+          "$ref": "urn:opentour:common-contract:1.0#/$defs/Id"
+        },
+        "environment_id": {
+          "$ref": "urn:opentour:common-contract:1.0#/$defs/Id"
+        },
+        "cell_id": {
+          "$ref": "urn:opentour:common-contract:1.0#/$defs/Id"
+        },
+        "case_id": {
+          "$ref": "urn:opentour:common-contract:1.0#/$defs/Id"
+        },
+        "case_revision": {
+          "$ref": "urn:opentour:common-contract:1.0#/$defs/ResourceRevision"
+        },
+        "action": {
+          "const": "support.note.read"
+        },
+        "purpose_code": {
+          "const": "support_case_note"
+        },
+        "jti": {
+          "$ref": "urn:opentour:common-contract:1.0#/$defs/Id"
+        },
+        "iat": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "nbf": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "exp": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "authority_revision": {
+          "$ref": "urn:opentour:common-contract:1.0#/$defs/Id"
+        },
+        "revocation_epoch": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "session_generation": {
+          "$ref": "urn:opentour:common-contract:1.0#/$defs/Id"
+        },
+        "origin": {
+          "type": "string",
+          "format": "uri"
+        },
+        "support_grant_id": {
+          "anyOf": [
+            {
+              "$ref": "urn:opentour:common-contract:1.0#/$defs/Id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "note_id": {
+          "$ref": "urn:opentour:common-contract:1.0#/$defs/Id"
+        },
+        "note_revision": {
+          "$ref": "urn:opentour:common-contract:1.0#/$defs/ResourceRevision"
+        },
+        "read_intent_id": {
+          "$ref": "urn:opentour:common-contract:1.0#/$defs/Id"
+        },
+        "purpose_grant_id": {
+          "$ref": "urn:opentour:common-contract:1.0#/$defs/Id"
+        }
+      },
+      "required": [
+        "iss",
+        "aud",
+        "sub",
+        "organization_id",
+        "environment_id",
+        "cell_id",
+        "case_id",
+        "case_revision",
+        "read_intent_id",
+        "action",
+        "purpose_code",
+        "jti",
+        "iat",
+        "nbf",
+        "exp",
+        "authority_revision",
+        "revocation_epoch",
+        "session_generation",
+        "origin",
+        "support_grant_id",
+        "note_id",
+        "note_revision",
+        "purpose_grant_id"
+      ]
+    },
+    "SupportNoteView": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "note_ref": {
+          "$ref": "#/$defs/SupportNoteRef"
+        },
+        "case_id": {
+          "$ref": "urn:opentour:common-contract:1.0#/$defs/Id"
+        },
+        "text": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4000
+        },
+        "author_subject": {
+          "$ref": "urn:opentour:common-contract:1.0#/$defs/Id"
+        },
+        "created_at": {
+          "$ref": "urn:opentour:common-contract:1.0#/$defs/Timestamp"
+        },
+        "classification": {
+          "const": "customer_confidential"
+        }
+      },
+      "required": [
+        "note_ref",
+        "case_id",
+        "text",
+        "author_subject",
+        "created_at",
+        "classification"
+      ]
+    },
+    "SupportNoteGrantScope": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "resource_type": {
+              "const": "support_note_write"
+            },
+            "case_id": {
+              "$ref": "urn:opentour:common-contract:1.0#/$defs/Id"
+            },
+            "environment_id": {
+              "$ref": "urn:opentour:common-contract:1.0#/$defs/Id"
+            },
+            "write_intent_id": {
+              "$ref": "urn:opentour:common-contract:1.0#/$defs/Id"
+            },
+            "max_utf8_bytes": {
+              "const": 16384
+            }
+          },
+          "required": [
+            "resource_type",
+            "case_id",
+            "environment_id",
+            "write_intent_id",
+            "max_utf8_bytes"
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "resource_type": {
+              "const": "support_note_read"
+            },
+            "case_id": {
+              "$ref": "urn:opentour:common-contract:1.0#/$defs/Id"
+            },
+            "note_ref": {
+              "$ref": "#/$defs/SupportNoteRef"
+            }
+          },
+          "required": [
+            "resource_type",
+            "case_id",
+            "note_ref"
+          ]
+        }
+      ]
+    },
+    "SupportNoteWriteStatus": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "write_intent_id": {
+          "$ref": "urn:opentour:common-contract:1.0#/$defs/Id"
+        },
+        "state": {
+          "enum": [
+            "issued_unused",
+            "receiving",
+            "staged",
+            "committed",
+            "unpublished",
+            "outcome_unknown"
+          ]
+        },
+        "observed_at": {
+          "anyOf": [
+            {
+              "$ref": "urn:opentour:common-contract:1.0#/$defs/Timestamp"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "observation_source": {
+          "enum": [
+            "control_intent",
+            "verified_cell_receipt",
+            "unknown"
+          ]
+        },
+        "note_ref": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SupportNoteRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "status_evidence_ref": {
+          "anyOf": [
+            {
+              "$ref": "urn:opentour:common-contract:1.0#/$defs/VersionedResourceRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "reissue_allowed": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "write_intent_id",
+        "state",
+        "observed_at",
+        "observation_source",
+        "note_ref",
+        "status_evidence_ref",
+        "reissue_allowed"
+      ],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "enum": [
+                  "receiving",
+                  "staged",
+                  "committed",
+                  "outcome_unknown"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "reissue_allowed": {
+                "const": false
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "const": "committed"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "note_ref": {
+                "$ref": "#/$defs/SupportNoteRef"
+              },
+              "status_evidence_ref": {
+                "$ref": "urn:opentour:common-contract:1.0#/$defs/VersionedResourceRef"
+              },
+              "observation_source": {
+                "const": "verified_cell_receipt"
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}
