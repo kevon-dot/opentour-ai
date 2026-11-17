@@ -403,7 +403,7 @@ def test_only_exact_traceability_command_uses_measured_larger_capture(
         ["just", "validate-spec", "extra"],
     ):
         run_one(command, root)
-    assert seen == [2_097_152, 1_048_576, 1_048_576]
+    assert seen == [8_388_608, 1_048_576, 1_048_576]
 
 
 def test_exact_screened_report_and_fresh_publication_only(tmp_path: Path) -> None:

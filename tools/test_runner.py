@@ -105,9 +105,9 @@ def execute(invocation: Invocation) -> ProcessResult:
     """Bound child lifetime and output without shell interpolation or unbounded log files."""
     if (
         type(invocation.output_limit_bytes) is not int
-        or not 1 <= invocation.output_limit_bytes <= 2_097_152
+        or not 1 <= invocation.output_limit_bytes <= 8_388_608
     ):
-        raise CommandError("Runner output limit must be an integer from one byte through two MiB.")
+        raise CommandError("Runner output limit must be an integer from one byte through eight MiB.")
     try:
         process = _MANAGED_POPEN(
             invocation.argv,
