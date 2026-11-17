@@ -15,12 +15,16 @@ from opentour_control.auth.grant_models import (
     GrantVocabulary,
     Principal,
     ResourceScope,
+    SupportNoteRead,
+    SupportNoteRef,
+    SupportNoteWrite,
     TemplateBinding,
     timestamp,
 )
 from opentour_control.auth.grant_repository import RepositoryScope
 from opentour_control.auth.grants import (
     AuthorityState,
+    GrantAncestry,
     GrantResolver,
     PrincipalRecord,
     ResourceRecord,
@@ -502,6 +506,69 @@ def test_delegation_cannot_drop_child_ids_to_gain_organization_scope(grants):
         delegate(grants, request(resource_scope=scope()))
 
 
+def test_management_expiry_during_target_lookup_denies_delegation(grants):
+    grants.rows["manage"] = grants.rows["manage"].model_copy(
+        update={"expires_at": timestamp(NOW + timedelta(seconds=1))}
+    )
+    lookup = grants.resources.current
+
+    def delayed(org, kind, resource_id):
+        if kind == "project":
+            grants.now = NOW + timedelta(seconds=1)
+        return lookup(org, kind, resource_id)
+
+    grants.resources.current = delayed
+    with pytest.raises(GrantError, match="CAPABILITY_DENIED"):
+        delegate(grants)
+    assert decide(grants).grant_ids == ("parent",)
+
+
+def test_delegation_retains_only_management_support_current_after_lookup(grants):
+    original = grants.rows["manage"]
+    grants.rows["manage"] = original.model_copy(
+        update={"expires_at": timestamp(NOW + timedelta(seconds=1))}
+    )
+    grants.rows["manage-backup"] = original.model_copy(update={"grant_id": "manage-backup"})
+    lookup = grants.resources.current
+
+    def delayed(org, kind, resource_id):
+        if kind == "project":
+            grants.now = NOW + timedelta(seconds=1)
+        return lookup(org, kind, resource_id)
+
+    grants.resources.current = delayed
+    plan = delegate(grants)
+    assert plan.parent_grant_ids == ("parent",)
+    assert plan.management_grant_ids == ("manage-backup",)
+    assert plan.observed_at == grants.now
+
+
+def test_delegation_denies_clock_rollback_after_management_lookup(grants):
+    lookup = grants.resources.current
+
+    def time_changes(org, kind, resource_id):
+        if kind == "workspace" and grants.now == NOW:
+            grants.now = NOW + timedelta(seconds=2)
+        elif kind == "project":
+            grants.now = NOW + timedelta(seconds=1)
+        return lookup(org, kind, resource_id)
+
+    grants.resources.current = time_changes
+    with pytest.raises(GrantError, match="CLOCK_UNAVAILABLE"):
+        delegate(grants)
+
+
+def test_final_management_fence_rejects_missing_retained_support(grants):
+    plan = delegate(grants)
+    grants.rows["another-manager"] = grants.rows.pop("manage").model_copy(
+        update={"grant_id": "another-manager"}
+    )
+    with pytest.raises(GrantError, match="CAPABILITY_DENIED"):
+        grants.resolver.require_management_current(
+            grants.rows, plan.management_grant_ids, organization_id=ORG, now=NOW
+        )
+
+
 def test_ancestry_missing_or_revoked_adverse(grants):
     grants.rows["parent"] = grant(parent_grant_ids=["root"])
     with pytest.raises(GrantError, match="CAPABILITY_DENIED"):
@@ -525,6 +592,178 @@ def test_ancestry_cycle_denied(grants):
     grants.rows["root"] = grant("root", parent_grant_ids=["parent"])
     with pytest.raises(GrantError, match="CAPABILITY_DENIED"):
         decide(grants)
+
+
+def test_scheduled_grant_checks_parents_without_authorizing_current_use():
+    parent = grant("root")
+    child = grant(
+        "scheduled", parent_grant_ids=["root"], valid_from=timestamp(NOW + timedelta(seconds=1))
+    )
+    ancestry = GrantAncestry({"scheduled": child, "root": parent}, NOW, ORG)
+    assert child.temporal_state(NOW) == "not_yet_valid"
+    assert not ancestry.valid(child)
+    assert ancestry.parents_valid(child)
+
+
+@pytest.mark.parametrize(
+    "fault",
+    ["missing", "revoked", "prepared", "future", "foreign", "cycle", "weakened", "mismatched-id"],
+)
+def test_scheduled_ancestry_fails_closed(fault):
+    child = grant(
+        "scheduled", parent_grant_ids=["root"], valid_from=timestamp(NOW + timedelta(seconds=2))
+    )
+    root = grant("root")
+    if fault in {"revoked", "prepared"}:
+        root = root.model_copy(update={"state": fault})
+    elif fault == "future":
+        root = root.model_copy(update={"valid_from": timestamp(NOW + timedelta(seconds=1))})
+    elif fault == "foreign":
+        root = root.model_copy(
+            update={
+                "resource_scope": root.resource_scope.model_copy(
+                    update={"organization_id": "local-org-b"}
+                )
+            }
+        )
+    elif fault == "cycle":
+        root = root.model_copy(update={"parent_grant_ids": ("scheduled",)})
+    elif fault == "weakened":
+        root = root.model_copy(update={"capabilities": ("evidence.read",)})
+    elif fault == "mismatched-id":
+        root = root.model_copy(update={"grant_id": "different-root"})
+    rows = {"scheduled": child}
+    if fault != "missing":
+        rows["root"] = root
+    assert not GrantAncestry(rows, NOW, ORG).parents_valid(child)
+
+
+@pytest.fixture
+def scoped_support_notes(grants):
+    write = SupportNoteWrite(
+        resource_type="support_note_write",
+        case_id="case-a",
+        environment_id="environment-a",
+        write_intent_id="note-intent-a",
+        max_utf8_bytes=16384,
+    )
+    read = SupportNoteRead(
+        resource_type="support_note_read",
+        case_id="case-a",
+        note_ref=SupportNoteRef(environment_id="environment-a", note_id="note-a", revision="1"),
+    )
+    records = grants.resources.rows
+    records[("environment", "environment-a")] = ResourceRecord(
+        "environment", "environment-a", ORG, "1", "active", "workspace-a", "project-a", None
+    )
+    for resource_id, note_scope in (("note-intent-a", write), ("note-a", read)):
+        records[("note", resource_id)] = ResourceRecord(
+            "note",
+            resource_id,
+            ORG,
+            "1",
+            "active",
+            "workspace-a",
+            "project-a",
+            "environment-a",
+            note_scope=note_scope,
+        )
+    grants.rows["support-notes"] = grant(
+        "support-notes",
+        capabilities=["support.note.create", "support.note.read", "evidence.read"],
+        resource_scope=ResourceScope(
+            organization_id=ORG,
+            **scope(workspace_ids=["workspace-a"], support_note_scopes=[write, read]),
+        ),
+        purposes=["support_case_note", "development"],
+        data_classes=["customer_confidential", "control_metadata"],
+    )
+    return grants
+
+
+@pytest.mark.parametrize(
+    "action,resource_id",
+    [("support.note.create", "note-intent-a"), ("support.note.read", "note-a")],
+)
+def test_note_capability_binds_typed_operation(scoped_support_notes, action, resource_id):
+    g = scoped_support_notes
+    result = g.resolver.decide(
+        g.context,
+        g.actor,
+        g.authority,
+        g.rows,
+        action=action,
+        resource_kind="note",
+        resource_id=resource_id,
+        purpose="support_case_note",
+        data_class="customer_confidential",
+        now=NOW,
+    )
+    assert result.grant_ids == ("support-notes",)
+
+
+@pytest.mark.parametrize(
+    "action,kind,resource_id,purpose,data_class",
+    [
+        (
+            "support.note.read",
+            "note",
+            "note-intent-a",
+            "support_case_note",
+            "customer_confidential",
+        ),
+        ("support.note.create", "note", "note-a", "support_case_note", "customer_confidential"),
+        (
+            "support.note.read",
+            "workspace",
+            "workspace-a",
+            "support_case_note",
+            "customer_confidential",
+        ),
+        ("evidence.read", "note", "note-a", "support_case_note", "customer_confidential"),
+        ("support.note.read", "note", "note-a", "development", "customer_confidential"),
+        ("support.note.read", "note", "note-a", "support_case_note", "control_metadata"),
+    ],
+)
+def test_note_capability_cannot_substitute_operation_scope_purpose_or_class(
+    scoped_support_notes, action, kind, resource_id, purpose, data_class
+):
+    g = scoped_support_notes
+    with pytest.raises(GrantError, match="CAPABILITY_DENIED"):
+        g.resolver.decide(
+            g.context,
+            g.actor,
+            g.authority,
+            g.rows,
+            action=action,
+            resource_kind=kind,
+            resource_id=resource_id,
+            purpose=purpose,
+            data_class=data_class,
+            now=NOW,
+        )
+
+
+@pytest.mark.parametrize("fault", ["wrong-environment", "wrong-note-id"])
+def test_typed_note_coordinates_must_match_canonical_resource(scoped_support_notes, fault):
+    g = scoped_support_notes
+    resource = g.resources.rows[("note", "note-a")]
+    if fault == "wrong-environment":
+        resource = replace(resource, environment_id="environment-b")
+    else:
+        resource = replace(
+            resource,
+            note_scope=SupportNoteRead(
+                resource_type="support_note_read",
+                case_id="case-a",
+                note_ref=SupportNoteRef(
+                    environment_id="environment-a", note_id="different-note-id", revision="1"
+                ),
+            ),
+        )
+    g.resources.rows[("note", "note-a")] = resource
+    with pytest.raises(GrantError, match="RESOURCE_NOT_FOUND"):
+        g.resolver.resource(ORG, "note", "note-a")
 
 
 def operation(**changes):
@@ -662,6 +901,7 @@ def journal_sources():
     rows = {}
     context = {"session_id": "session-a", "session_generation": 2, "membership_id": "membership-a"}
     operation = dict(
+        operation_kind="access_grant_create",
         organization_id=ORG,
         operation_id="operation-a",
         grant_id="grant-a",

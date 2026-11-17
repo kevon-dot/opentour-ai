@@ -29,6 +29,10 @@ from .grant_models import (
 from .session import AuthContext
 
 ResourceKind = Literal["organization", "workspace", "project", "environment", "artifact", "note"]
+NOTE_CAPABILITIES = {
+    "support.note.create": "support_note_write",
+    "support.note.read": "support_note_read",
+}
 
 
 @dataclass(frozen=True)
@@ -105,6 +109,7 @@ class Decision:
     grant_ids: tuple[str, ...]
     authority_revision: str
     revocation_epoch: int
+    observed_at: datetime
 
 
 @dataclass(frozen=True)
@@ -112,6 +117,8 @@ class DelegationPlan:
     parent_grant_ids: tuple[str, ...]
     resource_revisions: tuple[tuple[str, str, str], ...]
     principal_revision: str
+    management_grant_ids: tuple[str, ...]
+    observed_at: datetime
 
 
 def _duty(
@@ -174,6 +181,16 @@ class GrantAncestry:
                         pending.append((parent, False))
         return self._depths[grant.grant_id] is not None
 
+    def parents_valid(self, grant: AccessGrant) -> bool:
+        """Check a grant's ancestry separately from its own scheduled interval."""
+        if grant.resource_scope.organization_id != self.organization_id:
+            return False
+        for parent_id in grant.parent_grant_ids:
+            parent = self.grants.get(parent_id)
+            if parent is None or parent.grant_id != parent_id or not self.valid(parent):
+                return False
+        return self._ancestors(grant) is not None
+
     def _ancestors(self, grant: AccessGrant) -> int | None:
         depth = 1
         covered: set[str] = set()
@@ -218,6 +235,12 @@ def _matches(scope: InputResourceScope, resource: ResourceRecord) -> bool:
     if resource.kind == "artifact":
         return resource.artifact_ref is not None and resource.artifact_ref in scope.artifact_refs
     return resource.note_scope is not None and resource.note_scope in scope.support_note_scopes
+
+
+def _note_coordinates(scope: NoteScope) -> tuple[str, str]:
+    if scope.resource_type == "support_note_write":
+        return scope.write_intent_id, scope.environment_id
+    return scope.note_ref.note_id, scope.note_ref.environment_id
 
 
 class GrantResolver:
@@ -274,6 +297,11 @@ class GrantResolver:
             raise GrantError("RESOURCE_NOT_FOUND", 404)
         if value.state != "active":
             raise GrantError("RESOURCE_UNAVAILABLE", 409)
+        if kind == "note" and (
+            value.note_scope is None
+            or (value.resource_id, value.environment_id) != _note_coordinates(value.note_scope)
+        ):
+            raise GrantError("RESOURCE_NOT_FOUND", 404)
         # Re-read parent lifecycle. A project cannot outlive a suspended workspace.
         parents: list[tuple[ResourceKind, str]] = []
         if value.workspace_id is not None and kind != "workspace":
@@ -331,6 +359,16 @@ class GrantResolver:
         _duty(principal, (capability,), (data_class,))
         resource = self.resource(context.organization_id, resource_kind, resource_id)
         now = self._now(now)
+        note_type = NOTE_CAPABILITIES.get(capability)
+        if (resource.kind == "note" or note_type is not None) and (
+            note_type is None
+            or resource.kind != "note"
+            or resource.note_scope is None
+            or resource.note_scope.resource_type != note_type
+            or purpose != "support_case_note"
+            or data_class != "customer_confidential"
+        ):
+            raise GrantError("CAPABILITY_DENIED", 403)
         if resource.artifact_ref is not None and (
             resource.artifact_ref.expires_at is not None
             and now >= instant(resource.artifact_ref.expires_at)
@@ -351,7 +389,29 @@ class GrantResolver:
         )
         if not matches:
             raise GrantError("CAPABILITY_DENIED", 403)
-        return Decision(matches, authority.authority_revision, authority.revocation_epoch)
+        return Decision(matches, authority.authority_revision, authority.revocation_epoch, now)
+
+    @staticmethod
+    def require_management_current(
+        grants: Mapping[str, AccessGrant],
+        management_grant_ids: tuple[str, ...],
+        *,
+        organization_id: str,
+        now: datetime,
+    ) -> tuple[str, ...]:
+        """Fence the support of an authenticated, scoped management decision."""
+        ancestry = GrantAncestry(grants, server_time(now), organization_id)
+        current = tuple(
+            grant_id
+            for grant_id in management_grant_ids
+            if (grant := grants.get(grant_id)) is not None
+            and grant.grant_id == grant_id
+            and "access.manage" in grant.capabilities
+            and ancestry.valid(grant)
+        )
+        if not current:
+            raise GrantError("CAPABILITY_DENIED", 403)
+        return current
 
     def scope(
         self, organization_id: str, workspace_id: str, body: InputResourceScope
@@ -404,7 +464,7 @@ class GrantResolver:
         if body.expected_authority_revision != authority.authority_revision:
             raise GrantError("STALE_AUTHORITY", 409)
         self.vocabulary.validate(body, templates)
-        self.decide(
+        management = self.decide(
             context,
             actor,
             authority,
@@ -419,7 +479,10 @@ class GrantResolver:
         subject = self.principal(context.organization_id, body.principal)
         _duty(subject, body.capabilities, body.data_classes)
         revisions = self.scope(context.organization_id, workspace_id, body.resource_scope)
-        now = self._now(now)
+        now = self._now(management.observed_at)
+        management_grant_ids = self.require_management_current(
+            grants, management.grant_ids, organization_id=context.organization_id, now=now
+        )
         if body.expires_at is not None and instant(body.expires_at) <= now:
             raise GrantError("GRANT_EXPIRED", 403)
         ancestry = GrantAncestry(grants, now, context.organization_id)
@@ -450,4 +513,10 @@ class GrantResolver:
             if not candidates:
                 raise GrantError("DELEGATION_CEILING", 403)
             parents.add(min(candidates, key=lambda g: g.grant_id).grant_id)
-        return DelegationPlan(tuple(sorted(parents)), revisions, subject.registration_revision)
+        return DelegationPlan(
+            tuple(sorted(parents)),
+            revisions,
+            subject.registration_revision,
+            management_grant_ids,
+            now,
+        )
