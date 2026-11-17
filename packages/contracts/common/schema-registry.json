@@ -55,6 +55,12 @@
       "file": "support-case.schema.json",
       "sha256": "e393eec1cb6eb9592db2bbaef665d544cec0ba4a56b3ff4aa3ab3b94986aad08",
       "source_path": "specification/2026-11-12/schemas/support-case.schema.json"
+    },
+    {
+      "id": "urn:opentour:access-grant:1.0",
+      "file": "packages/contracts/platform/access-grant.schema.json",
+      "sha256": "de175212f55cf7ca110b5a44cf5a45386a37575768d126f66b8899d5a8991dc3",
+      "source_path": "packages/contracts/platform/access-grant.schema.json"
     }
   ]
 }
