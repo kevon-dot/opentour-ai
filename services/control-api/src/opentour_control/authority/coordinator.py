@@ -73,7 +73,7 @@ from psycopg.types.json import Jsonb
 from pydantic import BeforeValidator, Field, ValidationError, model_validator
 from starlette.concurrency import run_in_threadpool
 
-from .journal_client import JournalClient, RetryBinding, RetryClaim
+from .journal_client import HTTPSJournalTransport, JournalClient, RetryBinding, RetryClaim
 
 
 class BoundIntentSource(ClosedModel):
@@ -480,6 +480,7 @@ class RetryState:
     token: str
     revision: str
     response: AppendResponse | None
+    not_before: datetime
 
 
 class PostgresJournalRetryPort:
@@ -721,12 +722,24 @@ class PostgresJournalRetryPort:
                 if response is not None:
                     self.verifier.response(response, parsed)
                 return RetryState(
-                    binding, row["state"], row["token"], str(row["revision"]), response
+                    binding,
+                    row["state"],
+                    row["token"],
+                    str(row["revision"]),
+                    response,
+                    row["not_before"],
                 )
         except GrantError:
             raise JournalError("JOURNAL_RETRY_STATE_UNAVAILABLE", 503) from None
 
-    def fence_for_reconciliation(self, binding: RetryBinding, token: str, revision: str) -> None:
+    def fence_for_reconciliation(
+        self,
+        binding: RetryBinding,
+        token: str,
+        revision: str,
+        *,
+        minimum_age: timedelta,
+    ) -> None:
         """Trusted worker recovery: retire old SQL claim; never declare provider absence.
 
         The durable SQL row itself is reread under lock, resolving whether that
@@ -747,6 +760,8 @@ class PostgresJournalRetryPort:
                     raise JournalError("JOURNAL_RETRY_CLAIM_STALE", 409)
                 self._binding(binding, bytes(row["original_body"]))
                 now = self.repository.now(row["not_before"])
+                if now < row["not_before"] + minimum_age:
+                    raise JournalError("JOURNAL_RETRY_NOT_ADMITTED", 409)
                 conn.execute(
                     "UPDATE opentour_authority.retries SET state='scheduled',token=%s,revision=%s,"
                     "not_before=%s,reason_code='EXACT_OPERATION_RECONCILIATION_REQUIRED' "
@@ -825,6 +840,7 @@ class GrantCoordinator:
         *,
         management_purpose: str,
         creator_enrollment: CreatorEnrollmentAuthority | None = None,
+        retry_claim_lease: timedelta | None = None,
     ) -> None:
         if repository.role != "coordinator" or management_purpose not in (
             resolver.vocabulary.purpose_codes
@@ -833,6 +849,16 @@ class GrantCoordinator:
         self.repository, self.resolver, self.journal = repository, resolver, journal
         self.evidence, self.management_purpose = evidence, management_purpose
         self.creator_enrollment = creator_enrollment
+        # One exact-read plus one append can still be in flight. Leave five
+        # seconds for the existing control SQL statement deadline.
+        transport = journal.transport
+        deadline = 2 * transport.timeout + 5 if isinstance(transport, HTTPSJournalTransport) else 65
+        self.retry_claim_lease = retry_claim_lease or timedelta(seconds=deadline)
+        if self.retry_claim_lease <= timedelta(0) or (
+            isinstance(transport, HTTPSJournalTransport)
+            and self.retry_claim_lease < timedelta(seconds=deadline)
+        ):
+            raise GrantError("GRANT_CONFIGURATION_INVALID", 503)
 
     @staticmethod
     def _identity(
@@ -1264,12 +1290,18 @@ class GrantCoordinator:
         body = CreateGrant.parse(raw)
         started = server_time(self.repository.clock())
         original = self._identity(current_identity)
-        frontier = self._frontier(original.organization_id)
-        context = self._identity(current_identity, original)
-        operation_id, new = self._reserve(
-            context, workspace_id, key_hash, body, request_id, started, frontier
-        )
-        scope = RepositoryScope.from_context(context)
+
+        def reserve() -> tuple[str, bool]:
+            frontier = self._frontier(original.organization_id)
+            context = self._identity(current_identity, original)
+            return self._reserve(
+                context, workspace_id, key_hash, body, request_id, started, frontier
+            )
+
+        # A racing completion may make the read authorization stale. Refresh
+        # the caller snapshot once without changing the submitted expected ID.
+        operation_id, new = self._refresh_metadata(reserve)
+        scope = RepositoryScope.from_context(original)
         try:
             self._advance(lambda: self._identity(current_identity, original), scope, operation_id)
         except (GrantError, JournalError, ValidationError):
@@ -1297,6 +1329,26 @@ class GrantCoordinator:
             identifier(request_id)
         except AuthError:
             raise GrantError("SCHEMA_INVALID", 422) from None
+        return self._refresh_metadata(
+            lambda: self._project_progress(current_identity, operation_id, request_id, original)
+        )
+
+    @staticmethod
+    def _refresh_metadata[T](attempt: Callable[[], T]) -> T:
+        try:
+            return attempt()
+        except GrantError as error:
+            if error.code != "STALE_AUTHORITY":
+                raise
+        return attempt()
+
+    def _project_progress(
+        self,
+        current_identity: Callable[[], AuthContext],
+        operation_id: str,
+        request_id: str,
+        original: AuthContext | None,
+    ) -> GrantOperationView:
         started = server_time(self.repository.clock())
         initial = self._identity(current_identity, original)
         frontier = self._frontier(initial.organization_id)
@@ -1324,20 +1376,33 @@ class GrantCoordinator:
                         target_current = record.state == "active"
                     except GrantError:
                         pass
-            observed = max(now, decision.observed_at)
-            self.repository.canonical_identity(conn, context, observed)
-            now = self.repository.now(observed)
-            self.resolver.require_management_current(
-                grants, decision.grant_ids, organization_id=context.organization_id, now=now
-            )
+            now = self._fence_metadata(conn, context, grants, decision, now)
             return self.repository.view(
-                conn,
                 row,
+                authority=authority,
+                source=source,
+                grants=grants,
                 request_id=request_id,
                 now=now,
                 frontier=frontier,
                 target_current=target_current,
             )
+
+    def _fence_metadata(
+        self,
+        conn: Connection,
+        context: AuthContext,
+        grants: Mapping[str, AccessGrant],
+        decision: Decision,
+        started: datetime,
+    ) -> datetime:
+        observed = max(started, decision.observed_at)
+        self.repository.canonical_identity(conn, context, observed)
+        now = self.repository.now(observed)
+        self.resolver.require_management_current(
+            grants, decision.grant_ids, organization_id=context.organization_id, now=now
+        )
+        return now
 
     def _authorize_metadata(
         self,
@@ -1468,9 +1533,10 @@ class GrantCoordinator:
             grants = self.repository.grants(conn, scope.organization_id, lock=True)
             now = self.repository.now(max(started, source["updated_at"]))
             if previous is not None:
-                self._authorize_metadata(
+                decision = self._authorize_metadata(
                     conn, context, authority, source, frontier, grants, workspace_id, now
                 )
+                self._fence_metadata(conn, context, grants, decision, now)
                 if canonical(previous["request_body"]) != canonical(body.wire()):
                     raise GrantError("IDEMPOTENCY_CONFLICT", 409)
                 return str(previous["operation_id"]), False
@@ -1665,7 +1731,11 @@ class GrantCoordinator:
             if observation.response is not None:
                 self.journal.verifier.response(observation.response, body)
                 return observation.response
-            elif retained.state == "unknown":
+            elif (
+                retained.state == "unknown"
+                and self.repository.now(retained.not_before)
+                >= retained.not_before + self.retry_claim_lease
+            ):
                 current = self._frontier(body.organization_id)
                 unresolved = body.operation_id if isinstance(body, AppendOutcome) else None
                 if current is not None and (
@@ -1673,7 +1743,12 @@ class GrantCoordinator:
                     current.head.chain_sha256,
                     current.head.unresolved_operation_id,
                 ) == (body.expected_head_sequence, body.expected_head_digest, unresolved):
-                    durable.fence_for_reconciliation(binding, retained.token, retained.revision)
+                    durable.fence_for_reconciliation(
+                        binding,
+                        retained.token,
+                        retained.revision,
+                        minimum_age=self.retry_claim_lease,
+                    )
             if retained.state != "scheduled":
                 return None
         return self.journal.retry_append(body, durable, clock=self.repository.clock).response

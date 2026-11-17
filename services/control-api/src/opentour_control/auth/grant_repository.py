@@ -6,7 +6,7 @@ role, organization context or SQL expression. Provider/journal I/O runs elsewher
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -414,9 +414,11 @@ class PostgresGrantRepository:
 
     def view(
         self,
-        conn: Connection,
         row: dict[str, Any],
         *,
+        authority: AuthorityState,
+        source: dict[str, Any],
+        grants: Mapping[str, AccessGrant],
         request_id: str,
         now: datetime,
         frontier: VerifiedAuthorityFrontier | None = None,
@@ -425,12 +427,9 @@ class PostgresGrantRepository:
         current = None
         unavailable: Literal["AUTHORITY_UNAVAILABLE", "RECONCILIATION_REQUIRED"] | None = None
         if row["state"] == "succeeded":
-            authority, source = self.authority(conn, row["organization_id"])
-            grants = self.grants(conn, row["organization_id"])
             grant = grants.get(row["grant_id"])
             if grant is None or grant.creation_operation_id != row["operation_id"]:
                 raise GrantError("AUTHORITY_STATE_INVALID", 503)
-            now = self.now(max(now, source["updated_at"], row["updated_at"]))
             if authority.state == "reconciliation_required" or (
                 frontier is not None and frontier.head.unresolved_operation_id is not None
             ):

@@ -534,7 +534,12 @@ def saga(durable, generated_audit, generated_grant_facts):
         lambda: d.coordinator.clock(),
     )
     coordinator = GrantCoordinator(
-        d.coordinator, resolver, system.client, system.evidence, management_purpose="administration"
+        d.coordinator,
+        resolver,
+        system.client,
+        system.evidence,
+        management_purpose="administration",
+        retry_claim_lease=timedelta(seconds=1),
     )
     return SimpleNamespace(
         create=lambda value=request: coordinator.create(
@@ -912,6 +917,14 @@ def test_actual_grant_crash_before_dispatch_recovers_the_exact_intent(saga, monk
         assert before["state"] == "unknown"
     assert saga.create().operation.operation_id == pending.operation_id
     with saga.repository.transaction(saga.scope) as conn:
+        assert conn.execute(
+            "SELECT state,token FROM opentour_authority.retries "
+            "WHERE operation_id=%s AND phase='intent'",
+            (pending.operation_id,),
+        ).fetchone() == {"state": "unknown", "token": before["token"]}
+    saga.repository.clock = lambda: NOW + timedelta(seconds=2)
+    assert saga.create().operation.operation_id == pending.operation_id
+    with saga.repository.transaction(saga.scope) as conn:
         fenced = conn.execute(
             "SELECT state,original_body,token FROM opentour_authority.retries "
             "WHERE operation_id=%s AND phase='intent'",
@@ -920,7 +933,7 @@ def test_actual_grant_crash_before_dispatch_recovers_the_exact_intent(saga, monk
         assert fenced["state"] == "scheduled"
         assert fenced["token"] != before["token"]
         assert fenced["original_body"] == before["original_body"]
-    saga.repository.clock = lambda: NOW + timedelta(seconds=2)
+    saga.repository.clock = lambda: NOW + timedelta(seconds=4)
     completed = saga.create().operation
     assert completed.state == "succeeded"
     assert completed.operation_id == pending.operation_id
