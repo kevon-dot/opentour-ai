@@ -190,7 +190,8 @@ function ModalContent({ title, children, actions, initialFocus, onDismiss, kind,
       measure();
     });
     observe(); measure();
-    mutation.observe(body, { childList: true, subtree: true, characterData: true });
+    // Nested style changes can alter the scroll extent without resizing the body or its direct children.
+    mutation.observe(body, { attributes: true, childList: true, subtree: true, characterData: true });
     return () => { resize.disconnect(); mutation.disconnect(); };
   }, []);
 
@@ -206,8 +207,10 @@ function ModalContent({ title, children, actions, initialFocus, onDismiss, kind,
     }
     if (event.key !== 'Tab') return;
     const dialog = event.currentTarget;
-    const stops = [...dialog.querySelectorAll<HTMLElement>('button, a[href], input, select, textarea, [tabindex], [contenteditable="true"]')]
-      .filter(node => node.tabIndex >= 0 && availableFocusTarget(node));
+    const stops = [...dialog.querySelectorAll<HTMLElement>('button, a[href], input, select, textarea, summary, [tabindex], [contenteditable]')]
+      .filter(node => availableFocusTarget(node) && (node.tabIndex >= 0 ||
+        // A standalone editing host is a native Tab stop even when its tabIndex getter returns -1.
+        (!node.hasAttribute('tabindex') && node.isContentEditable && !node.parentElement?.isContentEditable)));
     const index = stops.indexOf(dialog.ownerDocument.activeElement as HTMLElement);
     if (!stops.length) { event.preventDefault(); focusTarget(headingRef.current); }
     else if (event.shiftKey && index <= 0) { event.preventDefault(); focusTarget(stops[stops.length - 1]); }

@@ -363,6 +363,31 @@ for (const kind of ['dialog', 'drawer'] as const) {
     await expect(page.locator('dialog:modal')).toHaveCount(1);
     await expect(page.getByRole('status', { name: 'Dismissal requests', includeHidden: true })).toHaveText('');
     await expect(page.getByRole('status', { name: 'Generated opening events', includeHidden: true })).toHaveText('1');
+    await page.locator('.ot-modal-body').evaluate(node => {
+      const controls = document.createElement('div');
+      controls.innerHTML = '<button type="button">Before native controls</button>' +
+        '<details><summary>Generated summary</summary></details>' +
+        '<div role="textbox" aria-label="Implicit editor" contenteditable=""></div>' +
+        '<div role="textbox" aria-label="Explicit editor" contenteditable="true"></div>' +
+        '<button type="button">After native controls</button>';
+      node.append(controls);
+    });
+    const before = page.getByRole('button', { name: 'Before native controls' });
+    const after = page.getByRole('button', { name: 'After native controls' });
+    const nativeControls = [
+      page.locator('dialog summary'),
+      page.getByRole('textbox', { name: 'Implicit editor' }),
+      page.getByRole('textbox', { name: 'Explicit editor' }),
+    ];
+    await before.focus();
+    for (const control of [...nativeControls, after]) {
+      await page.keyboard.press('Tab');
+      await expect(control).toBeFocused();
+    }
+    for (const control of [...nativeControls].reverse().concat(before)) {
+      await page.keyboard.press('Shift+Tab');
+      await expect(control).toBeFocused();
+    }
   });
   test(`overlay ${kind} B05 B20 repeated ignored real Escape cannot trigger native close`, async ({ page }, info) => {
     await openOverlay(page, info, kind, { ignore: '1' });
@@ -558,6 +583,24 @@ for (const kind of ['dialog', 'drawer'] as const) {
       .toEqual([false, null, null, null]);
     await page.keyboard.press('Tab'); await expect(close).toBeFocused();
     await page.keyboard.press('Tab'); await expect(close).toBeFocused();
+    const boxWidth = await body.evaluate(node => node.clientWidth);
+    await body.evaluate(node => {
+      const fixed = document.createElement('div');
+      fixed.style.cssText = 'width:100%;height:44px;flex:none';
+      const nested = document.createElement('div');
+      nested.id = 'generated-overflow-probe';
+      nested.style.cssText = 'width:20px;height:20px';
+      fixed.append(nested);
+      node.append(fixed);
+    });
+    const nested = page.locator('#generated-overflow-probe');
+    await nested.evaluate(node => { node.style.width = '1600px'; });
+    await expect.poll(() => body.evaluate(node => [node.clientWidth, node.scrollWidth > node.clientWidth, node.getAttribute('tabindex'), node.getAttribute('role')]))
+      .toEqual([boxWidth, true, '0', 'group']);
+    await nested.evaluate(node => { node.style.width = '20px'; });
+    await expect.poll(() => body.evaluate(node => [node.scrollWidth > node.clientWidth, node.getAttribute('tabindex'), node.getAttribute('role')]))
+      .toEqual([false, null, null]);
+    await nested.evaluate(node => node.parentElement!.remove());
     await page.setViewportSize({ width: 320, height: 800 });
     await expect.poll(() => body.evaluate(node => [node.scrollHeight > node.clientHeight, node.getAttribute('tabindex'), node.getAttribute('role')])).toEqual([true, '0', 'group']);
     await page.keyboard.press('Tab'); await expect(body).toBeFocused();
