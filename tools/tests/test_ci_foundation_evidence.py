@@ -55,8 +55,8 @@ def fixture(root: Path) -> tuple[Path, dict[str, Any], dict[str, Any]]:
     design = {"fixture": "generated-design", "focus_profile": PROFILE}
     token_sha = write("apps/web/styles/product-tokens.json", encode({"design": design}))
     target_sha = write(TARGET, b"// Generated presentation specification")
-    images = {}
-    overlay_images = {}
+    images: dict[str, str] = {}
+    overlay_images: dict[str, str] = {}
     outputs = []
     nonce = "a" * 32
     prefix = "evidence/OT-P23-C12/runs/" + nonce + "/"
