@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from numeric_oracle import (  # type: ignore[import-not-found]
+from numeric_oracle import (
     binomial_probability,
     cdf,
     family_lower,
@@ -23,7 +23,6 @@ from numeric_oracle import (  # type: ignore[import-not-found]
     multinomial_probability,
     upper,
 )
-from opentour_training.evaluation import statistics_kernel as kernel
 from opentour_training.evaluation.inference_plan import (
     ContractValidator,
     InvalidKernelInput,
@@ -39,6 +38,7 @@ from opentour_training.evaluation.statistics_kernel import (
     independent_family_interval,
     paired_binary_interval,
 )
+from scipy import special  # type: ignore[import-untyped]
 
 ROOT = Path(__file__).resolve().parents[3]
 FIXTURES = json.loads(
@@ -131,6 +131,7 @@ def test_paired_endpoints_and_symmetry(
     opposite = paired_binary_interval(c, b, correct, wrong, 0.05, 2)
     assert result.lower is not None and -1 <= result.lower <= 1
     if sides == 2:
+        assert opposite.lower is not None
         assert result.upper == pytest.approx(-opposite.lower, abs=1e-13)
     else:
         assert result.upper is None
@@ -298,7 +299,7 @@ def test_family_size_profile_boundary() -> None:
 
 @pytest.mark.parametrize("value", [math.nan, math.inf, -1, 2, 0])
 def test_backend_failure_is_numeric_failure(monkeypatch: pytest.MonkeyPatch, value: float) -> None:
-    monkeypatch.setattr(kernel.special, "betaincinv", lambda *_: value)
+    monkeypatch.setattr(special, "betaincinv", lambda *_: value)
     with pytest.raises(NumericalComputationError):
         binomial_lower_bound(4, 20, 0.05)
 
@@ -311,7 +312,7 @@ def test_backend_exception_is_private(
     def fail(*_: Any) -> float:
         raise RuntimeError(marker)
 
-    monkeypatch.setattr(kernel.special, "betainccinv", fail)
+    monkeypatch.setattr(special, "betainccinv", fail)
     with pytest.raises(NumericalComputationError) as observed:
         binomial_upper_bound(4, 20, 0.05)
     assert marker not in str(observed.value)
@@ -320,14 +321,14 @@ def test_backend_exception_is_private(
 
 
 def test_internal_tail_floor(monkeypatch: pytest.MonkeyPatch) -> None:
-    original = kernel.special.betaincinv
+    original = special.betaincinv
     tails: list[float] = []
 
     def observe(a: float, b: float, tail: float) -> Any:
         tails.append(tail)
         return original(a, b, tail)
 
-    monkeypatch.setattr(kernel.special, "betaincinv", observe)
+    monkeypatch.setattr(special, "betaincinv", observe)
     result = paired_binary_interval(40, 10, 130, 20, 1e-12, 2)
     assert result.lower is not None
     assert tails and set(tails) == {2.5e-13}
@@ -376,7 +377,7 @@ def test_large_n_analytic_oracle(alpha: str) -> None:
     assert Decimal.from_float(hi) >= expected_hi
 
 
-@pytest.mark.parametrize("n", [2, 1_000_000])
+@pytest.mark.parametrize("n", [2, 19, 1_000_000])
 @pytest.mark.parametrize("alpha", ["1e-12", ".999999999999"])
 def test_extreme_interior_tail_has_conservative_representable_root(n: int, alpha: str) -> None:
     with localcontext(Context(prec=80)):

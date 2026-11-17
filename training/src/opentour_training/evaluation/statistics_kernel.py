@@ -125,8 +125,8 @@ def _checked_bound(k: int, n: int, alpha: Fraction, *, upper: bool) -> float:
         guard = 8 * math.ulp(target)
         tolerance = 1e-7 * target
         previous_steps = 0
-        for exponent in range(21):
-            steps = 2**exponent
+        steps = 0
+        for _ in range(22):
             value = math.nextafter(root, direction, steps=steps)
             difference = residual(value)
             if difference >= guard:
@@ -146,6 +146,7 @@ def _checked_bound(k: int, n: int, alpha: Fraction, *, upper: bool) -> float:
             if value == direction:
                 break
             previous_steps = steps
+            steps = max(1, 2 * steps)
     except Exception:
         raise NumericalComputationError() from None
     raise NumericalComputationError()
