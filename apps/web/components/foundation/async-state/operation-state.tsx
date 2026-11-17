@@ -15,7 +15,10 @@ function Status({ display }: { display: Display }) {
     case 'data':
       return <DataState state={display.state} title={display.status} body={display.detail} announce="off" />;
     case 'badge':
-      return <><div style={{ display: 'flex' }}><Badge tone={display.tone} label={display.status} /></div>
+      return <><div style={{ display: 'grid', alignSelf: 'flex-start', maxInlineSize: '100%',
+        minInlineSize: 'min(100%, calc(10 * var(--ot-type-small-size)))' }}>
+        <Badge tone={display.tone} label={display.status} />
+      </div>
         {display.detail !== undefined && <p className="ot-notice-body">{display.detail}</p>}</>;
   }
 }

@@ -72,6 +72,16 @@ for (const name of Object.keys(fixtures) as (keyof typeof fixtures)[]) {
           expect(box).toEqual({ x: bounds!.x, y: bounds!.y + y, width, height: expected[i] });
           y += expected[i] + 16;
         }
+        const badges = root.locator('.ot-badge');
+        if (fixture.runtime.kind === 'badge') {
+          const runtime = root.getByRole('region', { name: 'Runtime', exact: true });
+          const runtimeBounds = (await runtime.boundingBox())!;
+          const box = await badges.boundingBox();
+          expect(box).toEqual({ x: runtimeBounds.x + 17, y: runtimeBounds.y + 33 + 38 * scale,
+            width: 120 * scale, height: 8 + 18 * scale });
+        } else {
+          await expect(badges).toHaveCount(0);
+        }
         await expect(root.getByRole('button')).toHaveCount(0);
         expect(await root.evaluate(el => el.scrollWidth <= el.clientWidth)).toBe(true);
         const capture = `${name}-${width}-${scale}x.png`;
