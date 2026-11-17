@@ -204,11 +204,11 @@ describe('finite overlay evidence attribution', () => {
       check(root, observed);
     } finally { rmSync(root, { recursive: true, force: true }); }
   }
-  it('binds exactly84 child browser cases while preserving the disjoint36 parent observations', () => {
+  it('binds exactly122 child browser cases while preserving the disjoint36 parent observations', () => {
     fixture((root, observed) => {
       const value = overlayMetadata(root, observed, baselinePlatform);
-      expect(value.issue_key).toBe('OPE-300'); expect(value.test_ids).toHaveLength(84);
-      expect(observed).toHaveLength(120); expect(value.baseline_manifest_sha256).toMatch(/^[a-f0-9]{64}$/);
+      expect(value.issue_key).toBe('OPE-300'); expect(value.test_ids).toHaveLength(122);
+      expect(observed).toHaveLength(158); expect(value.baseline_manifest_sha256).toMatch(/^[a-f0-9]{64}$/);
       expect(observed.filter(item => !value.test_ids.includes(item.id))).toHaveLength(36);
     });
   });

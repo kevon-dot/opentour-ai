@@ -145,7 +145,7 @@ export function overlayMetadata(root: string, observed?: ReadonlyArray<Pick<Case
   const groups = new Map<string, string[]>();
   for (const [owner, count, digest] of [
     ['OPE-253', 36, '146c046a366f26c6ad053dec8959798f8dc26aad1867f59c983df82ba359f0dd'],
-    ['OPE-300', 84, 'fb36fd09a37bcde0fc8461cf476d06579701152c87890bb029f40856e2700580'],
+    ['OPE-300', 122, '3db50f715db241a9cf1f926bd4064cb8003cfde54c4b56420aa0289b350fd37d'],
   ] as const) {
     const bindings = manifest.test_bindings.filter((value: Record<string, unknown>) => value.issue_key === owner &&
       typeof value.test_id === 'string' && value.test_id.startsWith(`${foundationTarget}::`));
@@ -159,9 +159,9 @@ export function overlayMetadata(root: string, observed?: ReadonlyArray<Pick<Case
     groups.set(owner, ids);
   }
   const allIds = [...groups.get('OPE-253')!, ...groups.get('OPE-300')!].sort();
-  configuration(new Set(allIds).size === 120);
+  configuration(new Set(allIds).size === 158);
   if (observed) {
-    configuration(observed.length === 120 && new Set(observed.map(value => value.id)).size === 120 &&
+    configuration(observed.length === 158 && new Set(observed.map(value => value.id)).size === 158 &&
       JSON.stringify(observed.map(value => value.id).sort()) === JSON.stringify(allIds));
     for (const value of observed) configuration(value.file === foundationTarget &&
       ['customer_controlled', 'opentour_managed'].includes(value.mode ?? '') &&

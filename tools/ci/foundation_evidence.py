@@ -57,7 +57,7 @@ OVERLAY_APPROVAL = {
 }
 CASE_GROUPS = {
     "OPE-253": (36, "146c046a366f26c6ad053dec8959798f8dc26aad1867f59c983df82ba359f0dd"),
-    "OPE-300": (84, "fb36fd09a37bcde0fc8461cf476d06579701152c87890bb029f40856e2700580"),
+    "OPE-300": (122, "3db50f715db241a9cf1f926bd4064cb8003cfde54c4b56420aa0289b350fd37d"),
 }
 
 
@@ -123,7 +123,7 @@ def verify_overlay_components(
     observed = value["report"]["tests"]
     observed_ids = [row["id"] for row in observed]
     if (
-        len(all_ids) != 120
+        len(all_ids) != 158
         or len(set(observed_ids)) != len(observed_ids)
         or not set(observed_ids) <= all_ids
         or (value["report"]["status"] == "PASS" and set(observed_ids) != all_ids)
