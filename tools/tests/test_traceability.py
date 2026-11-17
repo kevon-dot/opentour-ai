@@ -160,12 +160,13 @@ def test_actual_diagram_asset_hash_and_missing_asset(tmp_path: Path) -> None:
     asset.write_text("graph TD\n A-->B\n")
     # Include registered owning schemas outside common in this synthetic checkout.
     shutil.copytree(ROOT / "packages/contracts", tmp_path / "packages/contracts")
-    # The synthetic complete manifest needs every registered file present. Copying
-    # metadata inputs does not collect/import later consumers or weaken C05 parity.
-    for test_path in {binding["test_id"].split("::", 1)[0] for binding in value["test_bindings"]}:
-        destination = tmp_path / test_path
+    # Copy the exact registered tests and local assets needed by the manifest.
+    inputs = {binding["test_id"].split("::", 1)[0] for binding in value["test_bindings"]}
+    inputs.update(asset["path"] for asset in value["local_sources"])
+    for relative in inputs:
+        destination = tmp_path / relative
         destination.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(schema_validate.local_file(ROOT, test_path), destination)
+        shutil.copyfile(schema_validate.local_file(ROOT, relative), destination)
     entry = {
         "path": "diagram.mmd",
         "sha256": hashlib.sha256(asset.read_bytes()).hexdigest(),
