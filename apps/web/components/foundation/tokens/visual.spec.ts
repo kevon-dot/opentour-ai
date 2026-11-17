@@ -260,3 +260,236 @@ test('fresh generated tenant presentation resets local state and makes no backen
   await expect(page.getByRole('status', { name: fixtures.invocationLabel })).toHaveText('0');
   expect(await page.evaluate(() => ({ local: localStorage.length, session: sessionStorage.length, cookies: document.cookie }))).toEqual({ local: 0, session: 0, cookies: '' });
 });
+
+type OverlayHistory = { focus: string[]; checkpoint: number; closes: number; cancels: number };
+const overlayHistories = new WeakMap<Page, OverlayHistory[]>();
+test.afterEach(async ({ page }, info) => {
+  if (page.isClosed()) return;
+  const observed = await page.evaluate(() => (window as unknown as { overlayHistory?: OverlayHistory }).overlayHistory);
+  if (observed) await writeFile(info.outputPath('overlay-focus-history.json'), JSON.stringify({
+    test: info.title, mode: info.project.name, status: info.status,
+    observations: [...(overlayHistories.get(page) ?? []), observed],
+    consumer_focus_return: info.title.includes('B19') ? 'UNAVAILABLE_TARGETS_CONSUMER_NOT_ACCEPTED' : 'SEE_TEST_ASSERTIONS',
+    provider_qualification: 'NOT_RUN',
+  }));
+});
+async function openOverlay(page: Page, info: TestInfo, kind: 'dialog' | 'drawer', options: Record<string, string> = {}, width = 1280) {
+  const height = new Map([[320, 800], [768, 1024], [1280, 900], [1440, 1024]]).get(width)!;
+  await page.setViewportSize({ width, height });
+  const previous = await page.evaluate(() => (window as unknown as { overlayHistory?: OverlayHistory }).overlayHistory);
+  if (previous) overlayHistories.set(page, [...(overlayHistories.get(page) ?? []), previous]);
+  await page.addInitScript(() => {
+    if ('overlayHistory' in window) return;
+    const history: OverlayHistory = { focus: [], checkpoint: 0, closes: 0, cancels: 0 };
+    Object.assign(window, { overlayHistory: history });
+    document.addEventListener('focusin', event => history.focus.push((event.target as HTMLElement).textContent ?? ''), true);
+    document.addEventListener('close', () => history.closes++, true);
+    document.addEventListener('cancel', () => history.cancels++, true);
+  });
+  await page.goto(`/?${new URLSearchParams({ mode: info.project.name, overlay: kind, ...options })}`);
+  await expect(page.getByRole('heading', { name: 'Generated overlay examples' })).toBeVisible();
+  await page.evaluate(async () => {
+    await Promise.all([document.fonts.load('400 14px Geist'), document.fonts.load('500 14px Geist'), document.fonts.load('600 18px Geist')]);
+    await document.fonts.ready;
+  });
+  await page.getByRole('button', { name: 'Open generated overlay', exact: true }).click();
+  await expect(page.locator('dialog:modal')).toHaveCount(1);
+}
+async function history(page: Page, clear = false) {
+  return page.evaluate(reset => {
+    const value = (window as unknown as { overlayHistory: OverlayHistory }).overlayHistory;
+    const copy = { ...value, focus: value.focus.slice(value.checkpoint) };
+    if (reset) value.checkpoint = value.focus.length; return copy;
+  }, clear);
+}
+async function insideModal(page: Page) {
+  expect(await page.evaluate(() => !!document.querySelector('dialog:modal')?.contains(document.activeElement))).toBe(true);
+}
+
+for (const kind of ['dialog', 'drawer'] as const) {
+  const closeName = kind === 'dialog' ? 'Close dialog' : 'Close details';
+  test(`overlay ${kind} B01 B02 owned safer Close receives focus and returns after caller dismissal`, async ({ page }, info) => {
+    await openOverlay(page, info, kind);
+    await expect(page.getByRole('button', { name: closeName, exact: true })).toBeFocused();
+    expect(await page.getByRole('button', { name: closeName, exact: true }).evaluate(node => {
+      const style = getComputedStyle(node); return [style.outlineWidth, style.outlineOffset, style.outlineColor];
+    })).toEqual(['2px', '2px', 'rgb(36, 91, 238)']);
+    await page.keyboard.press('Escape');
+    await expect(page.locator('dialog')).toHaveCount(0);
+    await expect(page.getByRole('button', { name: 'Open generated overlay', exact: true })).toBeFocused();
+    await expect(page.getByRole('status', { name: 'Dismissal requests' })).toHaveText('escape');
+    expect((await history(page)).closes).toBe(0);
+  });
+  test(`overlay ${kind} B03 long structured content starts at its focused heading`, async ({ page }, info) => {
+    await openOverlay(page, info, kind, { content: 'long' }, 320);
+    await expect(page.locator('.ot-modal-title')).toBeFocused();
+    expect(await page.locator('.ot-modal-body').evaluate(node => node.scrollTop)).toBe(0);
+    await expect(page.getByRole('heading', { name: 'About this example' })).toBeInViewport();
+  });
+  test(`overlay ${kind} B04 keyboard cycles within modal and native inertness blocks background focus`, async ({ page }, info) => {
+    await openOverlay(page, info, kind, { probe: '1', ignore: '1' });
+    for (let index = 0; index < 18; index++) { await page.keyboard.press('Tab'); await insideModal(page); }
+    for (let index = 0; index < 18; index++) { await page.keyboard.press('Shift+Tab'); await insideModal(page); }
+    await page.getByRole('button', { name: 'Safe current fallback', includeHidden: true }).evaluate(node => node.focus());
+    await insideModal(page);
+    const background = await page.getByRole('button', { name: 'Open generated overlay', includeHidden: true, exact: true }).boundingBox();
+    await page.mouse.click(background!.x + 2, background!.y + 2);
+    await expect(page.locator('dialog:modal')).toHaveCount(1);
+    await expect(page.getByRole('status', { name: 'Dismissal requests', includeHidden: true })).toHaveText('');
+    await expect(page.getByRole('status', { name: 'Generated opening events', includeHidden: true })).toHaveText('1');
+  });
+  test(`overlay ${kind} B05 B20 repeated ignored real Escape cannot trigger native close`, async ({ page }, info) => {
+    await openOverlay(page, info, kind, { ignore: '1' });
+    for (let index = 1; index <= 6; index++) {
+      await page.keyboard.press('Escape');
+      await expect(page.locator('dialog:modal')).toHaveCount(1); await insideModal(page);
+      await expect(page.getByRole('status', { name: 'Dismissal requests', includeHidden: true })).toHaveText(Array(index).fill('escape').join(','));
+    }
+    expect((await history(page)).closes).toBe(0);
+  });
+  test(`overlay ${kind} B06 ignored explicit Close remains request-only`, async ({ page }, info) => {
+    await openOverlay(page, info, kind, { ignore: '1' });
+    await page.getByRole('button', { name: closeName, exact: true }).click();
+    await expect(page.locator('dialog:modal')).toHaveCount(1); await insideModal(page);
+    await expect(page.getByRole('status', { name: 'Dismissal requests', includeHidden: true })).toHaveText('close-button');
+  });
+  test(`overlay ${kind} B07 B08 backdrop does nothing and Enter closes without form submission`, async ({ page }, info) => {
+    await openOverlay(page, info, kind);
+    await page.mouse.click(2, 2);
+    await expect(page.locator('dialog:modal')).toHaveCount(1);
+    await expect(page.getByRole('status', { name: 'Dismissal requests', includeHidden: true })).toHaveText('');
+    await page.getByRole('button', { name: closeName, exact: true }).focus(); await page.keyboard.press('Enter');
+    await expect(page.locator('dialog')).toHaveCount(0);
+    await expect(page.getByRole('status', { name: 'Overlay action events' })).toHaveText('0');
+    await page.getByRole('button', { name: 'Safe current fallback' }).focus();
+    await expect(page.getByRole('button', { name: 'Safe current fallback' })).toBeFocused();
+  });
+  test(`overlay ${kind} B09 supplied action invokes only its explicit callback`, async ({ page }, info) => {
+    await openOverlay(page, info, kind, { probe: '1', focus: 'element' });
+    const action = page.getByRole('button', { name: 'Example action', exact: true });
+    await expect(action).toBeFocused(); await page.keyboard.press('Enter');
+    await expect(page.getByRole('status', { name: 'Overlay action events', includeHidden: true })).toHaveText('1');
+    await expect(page.getByRole('status', { name: 'Dismissal requests', includeHidden: true })).toHaveText('');
+    await expect(page.locator('dialog:modal')).toHaveCount(1);
+  });
+  test(`overlay ${kind} B10 rerender preserves current focus and scroll`, async ({ page }, info) => {
+    await openOverlay(page, info, kind, { probe: '1', content: 'long' }, 320);
+    const control = page.getByRole('button', { name: 'Rerender generated content' });
+    await control.click(); const position = await page.locator('.ot-modal-body').evaluate(node => node.scrollTop);
+    await page.keyboard.press('Enter'); await expect(control).toBeFocused();
+    expect(await page.locator('.ot-modal-body').evaluate(node => node.scrollTop)).toBe(position);
+    await expect(page.getByRole('status', { name: 'Generated render count', includeHidden: true })).toHaveText('2');
+  });
+  test(`overlay ${kind} B11 removed or disabled origins use the explicit fallback without transient unsafe focus`, async ({ page }, info) => {
+    for (const label of ['Remove origin', 'Disable origin']) {
+      await openOverlay(page, info, kind, { probe: '1' });
+      await page.getByRole('button', { name: label, exact: true }).click(); await history(page, true);
+      await page.getByRole('button', { name: closeName, exact: true }).click();
+      await expect(page.getByRole('button', { name: 'Safe current fallback' })).toBeFocused();
+      expect((await history(page)).focus).not.toContain('Open generated overlay');
+    }
+  });
+  test(`overlay ${kind} B12 close-time local context resolver excludes the still-connected old origin`, async ({ page }, info) => {
+    await openOverlay(page, info, kind, { probe: '1' });
+    await page.getByRole('button', { name: 'Change local context' }).click(); await history(page, true);
+    await page.getByRole('button', { name: closeName, exact: true }).click();
+    await expect(page.getByRole('button', { name: 'Current context target' })).toBeFocused();
+    expect((await history(page)).focus).not.toContain('Open generated overlay');
+  });
+  test(`overlay ${kind} B13 invalid initial element falls back to the visible heading`, async ({ page }, info) => {
+    for (const focus of ['invalid', 'outside', 'disabled']) {
+      await openOverlay(page, info, kind, { focus, probe: '1' }); await expect(page.locator('.ot-modal-title')).toBeFocused();
+      await expect(page.getByRole('status', { name: 'Overlay action events', includeHidden: true })).toHaveText('0');
+    }
+  });
+  test(`overlay ${kind} B14 B21 StrictMode replacement and unmount never restore an obsolete origin`, async ({ page }, info) => {
+    await openOverlay(page, info, kind, { probe: '1', strict: '1' }); await history(page, true);
+    await page.getByRole('button', { name: 'Replace open instance' }).click();
+    await expect(page.getByText('Generated instance 1', { exact: true })).toHaveCount(1);
+    await expect(page.getByText('Generated instance 0', { exact: true })).toHaveCount(0);
+    await expect(page.getByRole('button', { name: closeName, exact: true })).toBeFocused();
+    await insideModal(page); expect((await history(page)).focus).not.toContain('Open generated overlay');
+    expect((await history(page)).focus).not.toContain('Current context target');
+    await page.getByRole('button', { name: 'Unmount overlay' }).click();
+    await expect(page.locator('dialog')).toHaveCount(0);
+    await expect(page.getByRole('button', { name: 'Current context target' })).toBeFocused();
+    await page.getByRole('button', { name: 'Reopen generated overlay' }).click();
+    await expect(page.getByText('Generated instance 1', { exact: true })).toHaveCount(1);
+    await expect(page.getByText('Generated instance 0', { exact: true })).toHaveCount(0);
+    await expect(page.getByRole('button', { name: closeName, exact: true })).toBeFocused();
+    await page.keyboard.press('Escape'); await expect(page.locator('dialog')).toHaveCount(0);
+    await expect(page.getByRole('button', { name: 'Current context target' })).toBeFocused();
+  });
+  for (const width of [320, 768, 1280, 1440]) {
+    test(`overlay ${kind} B15 geometry and zero-tolerance design at ${width}px`, async ({ page }, info) => {
+      await openOverlay(page, info, kind, width === 320 ? { content: 'long' } : {}, width);
+      const panel = page.locator('dialog'); const bounds = (await panel.boundingBox())!;
+      const viewport = page.viewportSize()!;
+      expect(bounds.width).toBe(Math.min(576, width - (kind === 'dialog' ? 32 : 0)));
+      if (kind === 'drawer') { expect(bounds.height).toBe(viewport.height); expect(bounds.x + bounds.width).toBe(width); expect(bounds.y).toBe(0); }
+      else {
+        expect(bounds.y).toBeGreaterThanOrEqual(16); expect(bounds.y + bounds.height).toBeLessThanOrEqual(viewport.height - 16);
+        expect(bounds.x).toBe((viewport.width - bounds.width) / 2);
+        expect(bounds.y).toBe((viewport.height - bounds.height) / 2);
+      }
+      expect(await panel.evaluate(node => {
+        const style = getComputedStyle(node); return [style.padding, style.gap, style.boxShadow, style.animationName, style.transitionDuration, getComputedStyle(node, '::backdrop').backgroundColor];
+      })).toEqual(['24px', '16px', 'none', 'none', '0s', 'rgba(24, 34, 55, 0.32)']);
+      expect(await page.locator('.ot-modal-body').evaluate(node => node.getBoundingClientRect().width)).toBe(bounds.width - 48);
+      await capture(page, info, `overlay-${kind}-${width}`);
+    });
+  }
+  test(`overlay ${kind} B16 long content and fixed Close remain reachable at every required viewport`, async ({ page }, info) => {
+    for (const width of [320, 768, 1280, 1440]) {
+      await openOverlay(page, info, kind, { content: 'long' }, width);
+      await expect(page.getByRole('button', { name: closeName, exact: true })).toBeInViewport();
+      await page.locator('.ot-modal-body').evaluate(node => { node.scrollTop = node.scrollHeight; });
+      await expect(page.getByRole('heading', { name: 'End of generated content' })).toBeInViewport();
+      await expect(page.getByRole('button', { name: closeName, exact: true })).toBeInViewport();
+    }
+  });
+  test(`overlay ${kind} B17 doubled text reflows without horizontal clipping or lost Close`, async ({ page }, info) => {
+    for (const width of [320, 768, 1280, 1440]) {
+      await openOverlay(page, info, kind, { content: 'long' }, width);
+      await page.evaluate(() => { document.documentElement.style.fontSize = '200%'; });
+      expect(await page.locator('dialog').evaluate(node => node.scrollWidth <= node.clientWidth)).toBe(true);
+      expect(await page.locator('.ot-modal-body').evaluate(node => node.scrollWidth <= node.clientWidth)).toBe(true);
+      await expect(page.getByRole('button', { name: closeName, exact: true })).toBeInViewport();
+      await page.locator('.ot-modal-body').evaluate(node => { node.scrollTop = node.scrollHeight; });
+      await expect(page.getByRole('heading', { name: 'End of generated content' })).toBeInViewport();
+    }
+  });
+  test(`overlay ${kind} B18 forced colors keeps Highlight focus with immediate reduced motion`, async ({ page }, info) => {
+    await page.emulateMedia({ forcedColors: 'active', reducedMotion: 'reduce' });
+    await openOverlay(page, info, kind, { focus: 'heading' }, 320);
+    expect(await page.locator('.ot-modal-title').evaluate(node => {
+      const sample = document.createElement('span'); sample.style.color = 'Highlight'; document.body.append(sample);
+      try { const style = getComputedStyle(node); return style.outlineColor === getComputedStyle(sample).color && style.outlineWidth === '2px' && style.outlineOffset === '2px'; }
+      finally { sample.remove(); }
+    })).toBe(true);
+    expect(await page.locator('dialog').evaluate(node => getComputedStyle(node).animationName)).toBe('none');
+  });
+  test(`overlay ${kind} B18 coarse-pointer close and caller action retain at least 44px targets`, async ({ browser, baseURL }, info) => {
+    const context = await browser.newContext({ hasTouch: true, baseURL }); const page = await context.newPage();
+    try {
+      await installBoundary(page, baseURL); await openOverlay(page, info, kind, { probe: '1' }, 320);
+      expect(await page.evaluate(() => matchMedia('(pointer: coarse)').matches)).toBe(true);
+      for (const button of await page.locator('dialog button').all()) {
+        const bounds = (await button.boundingBox())!;
+        expect(bounds.height).toBeGreaterThanOrEqual(44); expect(bounds.width).toBeGreaterThanOrEqual(44);
+      }
+      expect(unexpected.get(page)).toEqual([]);
+    } finally { await context.close(); }
+  });
+  test(`overlay ${kind} B19 missing both safe return targets still cleans up without claiming focus-return success`, async ({ page }, info) => {
+    await openOverlay(page, info, kind, { probe: '1' });
+    await page.getByRole('button', { name: 'Remove both return targets' }).click(); await history(page, true);
+    await page.getByRole('button', { name: closeName, exact: true }).click();
+    await expect(page.locator('dialog')).toHaveCount(0);
+    expect((await history(page)).focus).not.toContain('Open generated overlay');
+    expect(await page.evaluate(() => document.activeElement === document.body)).toBe(true);
+    await page.getByRole('button', { name: 'Current context target' }).focus();
+    await expect(page.getByRole('button', { name: 'Current context target' })).toBeFocused();
+    await expect(page.getByRole('status', { name: 'Overlay action events' })).toHaveText('0');
+  });
+}

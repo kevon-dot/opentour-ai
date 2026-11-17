@@ -1,7 +1,8 @@
-import React, { useState } from 'react';
+import React, { StrictMode, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
-import { Badge, Button, Tabs } from '../index';
-import { presentationFixtures as fixtures } from '../fixtures';
+import { Badge, Button, Dialog, Drawer, Tabs } from '../index';
+import type { InitialFocus } from '../contracts';
+import { overlayFixtures as overlays, presentationFixtures as fixtures } from '../fixtures';
 
 function Gallery() {
   const [selected, setSelected] = useState('overview');
@@ -55,4 +56,71 @@ function Gallery() {
 
 const root = document.getElementById('root');
 if (!root) throw new Error('Gallery root missing.');
-createRoot(root).render(<Gallery />);
+const query = new URLSearchParams(location.search);
+const gallery = query.has('overlay') ? <OverlayGallery /> : <Gallery />;
+createRoot(root).render(query.get('strict') === '1' ? <StrictMode>{gallery}</StrictMode> : gallery);
+
+function OverlayGallery() {
+  const kind = query.get('overlay') === 'drawer' ? 'drawer' : 'dialog';
+  const Component = kind === 'drawer' ? Drawer : Dialog;
+  const long = query.get('content') === 'long';
+  const probe = query.get('probe') === '1';
+  const mode = query.get('mode');
+  if (!fixtures.modes.some(value => value === mode)) throw new Error('Select a declared presentation mode.');
+  const [open, setOpen] = useState(false);
+  const [mounted, setMounted] = useState(true);
+  const [generation, setGeneration] = useState(0);
+  const [openEvents, setOpenEvents] = useState(0);
+  const [requests, setRequests] = useState<string[]>([]);
+  const [events, setEvents] = useState(0);
+  const [renders, setRenders] = useState(0);
+  const [context, setContext] = useState('a');
+  const [origin, setOrigin] = useState<'available' | 'disabled' | 'removed'>('available');
+  const [fallback, setFallback] = useState(true);
+  const originRef = useRef<HTMLButtonElement>(null);
+  const fallbackRef = useRef<HTMLButtonElement>(null);
+  const currentRef = useRef<HTMLButtonElement>(null);
+  const elementRef = useRef<HTMLButtonElement>(null);
+  const absentRef = useRef<HTMLElement>(null);
+  const initialFocus: InitialFocus = query.get('focus') === 'invalid' ? { kind: 'element', ref: absentRef } :
+    query.get('focus') === 'outside' ? { kind: 'element', ref: originRef } :
+    ['element', 'disabled'].includes(query.get('focus') ?? '') ? { kind: 'element', ref: elementRef } :
+      long || query.get('focus') === 'heading' ? { kind: 'heading' } : { kind: 'close-button' };
+  function begin() { setOpenEvents(value => value + 1); setMounted(true); setOpen(true); }
+  return <main className="ot-foundation gallery overlay-gallery">
+    <header><h1>Generated overlay examples</h1><p>{overlays.caption}</p><p>{mode}</p></header>
+    <div className="examples">
+      {origin !== 'removed' && <Button ref={originRef} label="Open generated overlay" disabled={origin === 'disabled'} onPress={begin} />}
+      <Button label="Reopen generated overlay" onPress={begin} />
+      {fallback && <Button ref={fallbackRef} label="Safe current fallback" variant="secondary" />}
+      <Button ref={currentRef} label="Current context target" variant="secondary" />
+    </div>
+    <output aria-label="Dismissal requests">{requests.join(',')}</output>
+    <output aria-label="Overlay action events">{events}</output>
+    <output aria-label="Generated render count">{renders}</output>
+    {probe && <output aria-label="Generated opening events">{openEvents}</output>}
+    <form onSubmit={event => { event.preventDefault(); setEvents(value => value + 100); }}>
+      {mounted && <Component key={generation} open={open} title={kind === 'dialog' ? overlays.dialogTitle : overlays.drawerTitle}
+        initialFocus={initialFocus} returnFocus={() => context === 'a' ? originRef.current : context === 'b' ? currentRef.current : null}
+        fallbackFocus={() => fallbackRef.current}
+        onDismiss={reason => { setRequests(values => [...values, reason]); if (query.get('ignore') !== '1') setOpen(false); }}
+        actions={!long && (kind === 'dialog' || probe) ? <Button ref={elementRef} label="Example action" disabled={query.get('focus') === 'disabled'} onPress={() => setEvents(value => value + 1)} /> : undefined}>
+        {long ? overlays.sections.map(([heading, body]) => <React.Fragment key={heading}>
+          <h3>{heading}</h3><p>{body}</p>
+        </React.Fragment>) : <><p>{kind === 'dialog' ? overlays.dialogBody : overlays.drawerBody}</p><p className="overlay-caption">{overlays.caption}</p></>}
+        {probe && <div className="overlay-probes">
+          <Button label="Rerender generated content" onPress={() => setRenders(value => value + 1)} />
+          <Button label="Disable origin" onPress={() => setOrigin('disabled')} />
+          <Button label="Remove origin" onPress={() => setOrigin('removed')} />
+          <Button label="Change local context" onPress={() => setContext('b')} />
+          <Button label="Remove both return targets" onPress={() => { setContext('none'); setFallback(false); setOrigin('disabled'); }} />
+          <Button label="Caller closes" onPress={() => setOpen(false)} />
+          <Button label="Unmount overlay" onPress={() => setMounted(false)} />
+          <Button label="Replace open instance" onPress={() => { setContext('b'); setGeneration(value => value + 1); }} />
+          <p>Generated render {renders}</p>
+          <p>Generated instance {generation}</p>
+        </div>}
+      </Component>}
+    </form>
+  </main>;
+}
