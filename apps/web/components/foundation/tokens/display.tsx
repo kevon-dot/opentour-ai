@@ -1,4 +1,5 @@
 import type { MetricProps, MetricTone, NavItemProps, TableCellProps, TableCellTone } from './display.contracts';
+import { requireLabel } from './require-label';
 import '../../../styles/product-tokens.css';
 import './display.css';
 
@@ -8,22 +9,15 @@ export type { MetricProps, MetricTone, NavItemProps, TableCellProps, TableCellTo
 export const metricTones: readonly MetricTone[] = ['blue', 'mint', 'lilac', 'amber'];
 export const tableCellTones: readonly TableCellTone[] = ['default', 'blue', 'mint', 'lilac', 'amber', 'coral'];
 
-/** Visible text is a contract: blank or non-string text is refused, never rendered empty or coerced. */
-function requireText(text: string, name: string): void {
-  if (typeof text !== 'string' || text.trim().length === 0) {
-    throw new Error(`A visible foundation component ${name} is required.`);
-  }
-}
-
 /**
  * A metric card. The description list ties the title to its value and detail without ARIA, and is
  * complete on its own, so a card can stand alone or beside others in any container.
  */
 export function Metric({ tone, title, value, detail }: MetricProps) {
   if (!metricTones.includes(tone)) throw new Error('A declared metric tone is required.');
-  requireText(title, 'metric title');
-  requireText(value, 'metric value');
-  requireText(detail, 'metric detail');
+  requireLabel(title, 'metric title');
+  requireLabel(value, 'metric value');
+  requireLabel(detail, 'metric detail');
   return <dl className={`ot-metric ot-metric--${tone}`}>
     <dt className="ot-metric-title">{title}</dt>
     <dd className="ot-metric-value">{value}</dd>
@@ -40,7 +34,7 @@ export function TableCell({ value, tone = 'default', header }: TableCellProps) {
   if (header !== undefined && header !== 'column' && header !== 'row') {
     throw new Error('A table cell header is `column`, `row` or omitted.');
   }
-  requireText(value, 'table cell value');
+  requireLabel(value, 'table cell value');
   const frame = <div className={`ot-table-cell-frame ot-table-cell-frame--${tone}`}>
     <span className="ot-table-cell-value">{value}</span>
   </div>;
@@ -53,7 +47,7 @@ export function TableCell({ value, tone = 'default', header }: TableCellProps) {
  * `aria-current="page"`, and that attribute is also what selects the active appearance.
  */
 export function NavItem({ label, href, current = false }: NavItemProps) {
-  requireText(label, 'navigation label');
+  requireLabel(label, 'navigation label');
   if (typeof href !== 'string' || href.trim().length === 0) {
     throw new Error('A navigation item destination is required.');
   }
