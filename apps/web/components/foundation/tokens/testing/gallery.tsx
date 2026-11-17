@@ -1,5 +1,7 @@
-import React, { StrictMode, useRef, useState } from 'react';
+import React, { Component as ReactComponent, StrictMode, useRef, useState } from 'react';
+import type { ReactNode } from 'react';
 import { createRoot } from 'react-dom/client';
+import { flushSync } from 'react-dom';
 import { Badge, Button, Dialog, Drawer, Tabs } from '../index';
 import type { InitialFocus } from '../contracts';
 import { overlayFixtures as overlays, presentationFixtures as fixtures } from '../fixtures';
@@ -57,14 +59,24 @@ function Gallery() {
 const root = document.getElementById('root');
 if (!root) throw new Error('Gallery root missing.');
 const query = new URLSearchParams(location.search);
+if (query.get('dir') === 'rtl') document.documentElement.dir = 'rtl';
 const gallery = query.has('overlay') ? <OverlayGallery /> : <Gallery />;
 createRoot(root).render(query.get('strict') === '1' ? <StrictMode>{gallery}</StrictMode> : gallery);
+
+/** Test-only: shows a refused presentation instead of emptying the gallery root. */
+class PresentationBoundary extends ReactComponent<{ children: ReactNode }, { message: string | null }> {
+  state = { message: null as string | null };
+  static getDerivedStateFromError(error: unknown) { return { message: error instanceof Error ? error.message : 'Unknown presentation error' }; }
+  render() { return this.state.message === null ? this.props.children : <output aria-label="Presentation error">{this.state.message}</output>; }
+}
 
 function OverlayGallery() {
   const kind = query.get('overlay') === 'drawer' ? 'drawer' : 'dialog';
   const Component = kind === 'drawer' ? Drawer : Dialog;
   const long = query.get('content') === 'long';
   const probe = query.get('probe') === '1';
+  const review = query.get('review') === '1';
+  const edge = query.get('edge') === '1';
   const mode = query.get('mode');
   if (!fixtures.modes.some(value => value === mode)) throw new Error('Select a declared presentation mode.');
   const [open, setOpen] = useState(false);
@@ -77,6 +89,7 @@ function OverlayGallery() {
   const [context, setContext] = useState('a');
   const [origin, setOrigin] = useState<'available' | 'disabled' | 'removed'>('available');
   const [fallback, setFallback] = useState(true);
+  const [nested, setNested] = useState(false);
   const originRef = useRef<HTMLButtonElement>(null);
   const fallbackRef = useRef<HTMLButtonElement>(null);
   const currentRef = useRef<HTMLButtonElement>(null);
@@ -105,9 +118,10 @@ function OverlayGallery() {
         fallbackFocus={() => fallbackRef.current}
         onDismiss={reason => { setRequests(values => [...values, reason]); if (query.get('ignore') !== '1') setOpen(false); }}
         actions={!long && (kind === 'dialog' || probe) ? <Button ref={elementRef} label="Example action" disabled={query.get('focus') === 'disabled'} onPress={() => setEvents(value => value + 1)} /> : undefined}>
-        {long ? overlays.sections.map(([heading, body]) => <React.Fragment key={heading}>
+        {edge ? <a className="overlay-edge" href="#generated-edge" onClick={event => event.preventDefault()}>Generated edge target</a> :
+          long ? overlays.sections.map(([heading, body]) => <React.Fragment key={heading}>
           <h3>{heading}</h3><p>{body}</p>
-        </React.Fragment>) : <><p>{kind === 'dialog' ? overlays.dialogBody : overlays.drawerBody}</p><p className="overlay-caption">{overlays.caption}</p></>}
+        </React.Fragment>) : <><p>{kind === 'dialog' ? overlays.dialogBody : overlays.drawerBody}</p><p className="ot-modal-meta">{overlays.caption}</p></>}
         {probe && <div className="overlay-probes">
           <Button label="Rerender generated content" onPress={() => setRenders(value => value + 1)} />
           <Button label="Disable origin" onPress={() => setOrigin('disabled')} />
@@ -120,7 +134,16 @@ function OverlayGallery() {
           <p>Generated render {renders}</p>
           <p>Generated instance {generation}</p>
         </div>}
+        {review && <div className="overlay-probes">
+          <input aria-label="Field that consumes Escape" onKeyDown={event => { if (event.key === 'Escape') event.preventDefault(); }} />
+          <input aria-label="Plain generated field" />
+          <Button label="Caller closes then focuses its own target" onPress={() => { flushSync(() => setOpen(false)); currentRef.current?.focus(); }} />
+          <Button label="Caller unmounts then focuses its own target" onPress={() => { flushSync(() => setMounted(false)); currentRef.current?.focus(); }} />
+          <Button label="Open nested overlay" onPress={() => setNested(true)} />
+        </div>}
       </Component>}
+      {nested && <PresentationBoundary><Component open title="Nested generated overlay" initialFocus={{ kind: 'heading' }}
+        returnFocus={() => null} fallbackFocus={() => null} onDismiss={() => undefined}><p>{overlays.caption}</p></Component></PresentationBoundary>}
     </form>
   </main>;
 }

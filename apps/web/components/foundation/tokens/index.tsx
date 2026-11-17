@@ -108,6 +108,20 @@ function focusTarget(node: HTMLElement | null): boolean {
   return node.ownerDocument.activeElement === node;
 }
 
+/** A closed dialog is not rendered, so visibility is judged from the target's own chain up to the dialog. */
+function focusableOnceOpen(node: HTMLElement | null, dialog: HTMLDialogElement): node is HTMLElement {
+  if (!node || node === dialog || !dialog.contains(node) ||
+    !node.matches('button, a[href], input, select, textarea, summary, [tabindex], [contenteditable=""], [contenteditable="true"]') ||
+    node.closest('[hidden], [inert], [aria-hidden="true"], [aria-disabled="true"]') ||
+    node.matches(':disabled, input[type="hidden"]')) return false;
+  const view = node.ownerDocument.defaultView;
+  if (!view || view.getComputedStyle(node).visibility !== 'visible') return false;
+  for (let current: HTMLElement | null = node; current && current !== dialog; current = current.parentElement) {
+    if (view.getComputedStyle(current).display === 'none') return false;
+  }
+  return true;
+}
+
 type FocusResolvers = Pick<ModalPresentationProps, 'returnFocus' | 'fallbackFocus'>;
 
 function ModalContent({ title, children, actions, initialFocus, onDismiss, kind, titleId, resolvers }: Omit<ModalPresentationProps, 'open' | 'returnFocus' | 'fallbackFocus'> & {
@@ -116,24 +130,32 @@ function ModalContent({ title, children, actions, initialFocus, onDismiss, kind,
   const dialogRef = useRef<HTMLDialogElement>(null);
   const headingRef = useRef<HTMLHeadingElement>(null);
   const closeRef = useRef<HTMLButtonElement>(null);
+  const bodyRef = useRef<HTMLDivElement>(null);
+  const [overflow, setOverflow] = useState<'none' | 'inline' | 'block'>('none');
   // Initial focus is sampled only for this opening, never on an ordinary rerender.
   const openingFocus = useRef(initialFocus);
   useLayoutEffect(() => {
     const dialog = dialogRef.current!;
     const heading = headingRef.current!;
     const document = dialog.ownerDocument;
-    if (document.querySelector(':modal') && !dialog.matches(':modal')) {
+    // :modal alone also matches a Fullscreen API element, which is not another modal presentation.
+    if (document.querySelector('dialog:modal') && !dialog.matches(':modal')) {
       throw new Error('Nested modal presentation is not supported.');
     }
     const owner = Symbol('foundation-modal');
     modalOwners.set(document, owner);
     dialog.setAttribute('closedby', 'none');
-    heading.setAttribute('autofocus', '');
     if (!dialog.open) {
-      dialog.showModal();
       const requested = openingFocus.current.kind === 'element' ? openingFocus.current.ref.current :
         openingFocus.current.kind === 'close-button' ? closeRef.current : heading;
-      if (!requested || !dialog.contains(requested) || !focusTarget(requested)) focusTarget(heading);
+      const target = focusableOnceOpen(requested, dialog) ? requested : heading;
+      // showModal() runs the platform focusing steps exactly once. Point them at the one
+      // target for this opening instead of focusing the heading and then moving on.
+      const marked = target.hasAttribute('autofocus');
+      target.setAttribute('autofocus', '');
+      try { dialog.showModal(); } finally { if (!marked) target.removeAttribute('autofocus'); }
+      // Only if the platform could not focus that target: one corrective move, heading last.
+      if (document.activeElement !== target && !focusTarget(target)) focusTarget(heading);
     }
     return () => {
       // React removes the dialog after layout cleanup. Native removing steps release the
@@ -141,7 +163,11 @@ function ModalContent({ title, children, actions, initialFocus, onDismiss, kind,
       queueMicrotask(() => {
         if (dialog.isConnected || modalOwners.get(document) !== owner) return;
         modalOwners.delete(document);
-        if (document.querySelector(':modal')) return;
+        if (document.querySelector('dialog:modal')) return;
+        // Restore only focus that is actually lost. A target the caller has already focused
+        // between removal and this microtask is the caller's decision and is left alone.
+        const active = document.activeElement;
+        if (active && active !== document.body && active !== document.documentElement && !dialog.contains(active)) return;
         for (const resolve of [resolvers.current.returnFocus, resolvers.current.fallbackFocus]) {
           try { if (focusTarget(resolve())) return; } catch { /* Invalid consumer targets cannot prevent teardown. */ }
         }
@@ -151,9 +177,32 @@ function ModalContent({ title, children, actions, initialFocus, onDismiss, kind,
     };
   }, [resolvers]);
 
+  // The body is a keyboard stop only while it actually scrolls; declared after the opening
+  // effect so the first measurement sees the rendered dialog.
+  useLayoutEffect(() => {
+    const body = bodyRef.current!;
+    const measure = () => setOverflow(body.scrollHeight > body.clientHeight ? 'block' : body.scrollWidth > body.clientWidth ? 'inline' : 'none');
+    const resize = new ResizeObserver(measure);
+    const observe = () => { resize.disconnect(); resize.observe(body); for (const child of body.children) resize.observe(child); };
+    // Content can change without this component rendering again; follow its direct children.
+    const mutation = new MutationObserver(records => {
+      if (records.some(record => record.type === 'childList' && record.target === body)) observe();
+      measure();
+    });
+    observe(); measure();
+    mutation.observe(body, { childList: true, subtree: true, characterData: true });
+    return () => { resize.disconnect(); mutation.disconnect(); };
+  }, []);
+
   function handleKey(event: KeyboardEvent<HTMLDialogElement>) {
     if (event.key === 'Escape') {
-      event.preventDefault(); event.stopPropagation(); onDismiss('escape'); return;
+      // Native close stays blocked for every Escape. A request is made once per key press:
+      // not for auto-repeat of a held key, not while an input method is composing, and not
+      // when content inside the overlay already handled the key.
+      const consumed = event.defaultPrevented || event.repeat || event.nativeEvent.isComposing;
+      event.preventDefault(); event.stopPropagation();
+      if (!consumed) onDismiss('escape');
+      return;
     }
     if (event.key !== 'Tab') return;
     const dialog = event.currentTarget;
@@ -168,7 +217,8 @@ function ModalContent({ title, children, actions, initialFocus, onDismiss, kind,
   return <dialog ref={dialogRef} className={`ot-modal ot-modal--${kind}`} aria-labelledby={titleId}
     onCancel={event => event.preventDefault()} onKeyDown={handleKey}>
     <h2 ref={headingRef} id={titleId} tabIndex={-1} className="ot-modal-title">{title}</h2>
-    <div className="ot-modal-body">{children}</div>
+    <div ref={bodyRef} className="ot-modal-body" data-overflow={overflow === 'block' ? 'block' : undefined}
+      {...(overflow !== 'none' ? { tabIndex: 0, role: 'group', 'aria-labelledby': titleId } : {})}>{children}</div>
     <div className="ot-modal-actions"><Button ref={closeRef} variant="secondary" label={kind === 'dialog' ? 'Close dialog' : 'Close details'}
       onPress={() => onDismiss('close-button')} />{actions}</div>
   </dialog>;
