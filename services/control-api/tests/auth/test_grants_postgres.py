@@ -548,6 +548,7 @@ def saga(durable, generated_audit, generated_grant_facts):
         repository=d.coordinator,
         scope=scope,
         transport=transport,
+        connector=f"host={d.postgres.socket} dbname=postgres user=c03_owner",
     )
 
 
@@ -924,3 +925,44 @@ def test_actual_grant_crash_before_dispatch_recovers_the_exact_intent(saga, monk
     assert completed.state == "succeeded"
     assert completed.operation_id == pending.operation_id
     assert completed.grant_id == pending.grant_id
+
+
+def test_actual_exact_replay_from_new_session_reads_pending_without_deciding_its_outcome(saga):
+    def lose_head(path, body):
+        if path.endswith("/outcomes"):
+            saga.transport.head_available = False
+
+    saga.transport.after = lose_head
+    pending = saga.create().operation
+    assert pending.state == "reconciliation_required"
+    saga.transport.head_available = True
+    saga.transport.after = lambda path, body: None
+    current = saga.identity()
+    new_session = replace(
+        current.identity, session_id="alternate-session-" + current.organization_id
+    )
+    with psycopg.connect(saga.connector) as owner:
+        owner.execute(
+            "INSERT INTO opentour_identity.sessions VALUES(%s,%s,%s,2,%s,%s,false,%s,%s,null,%s)",
+            (
+                current.identity.actor["issuer"],
+                new_session.session_id,
+                current.identity.actor["subject"],
+                current.organization_id,
+                current.membership_id,
+                NOW,
+                NOW + timedelta(days=1),
+                NOW + timedelta(days=1),
+            ),
+        )
+    replay = saga.service.create(
+        lambda: replace(saga.identity(), identity=new_session),
+        "workspace-a",
+        "new-grant",
+        "request-id",
+        canonical(saga.request.wire()),
+    )
+    assert replay.status == 202
+    assert replay.operation.operation_id == pending.operation_id
+    assert replay.operation.creation_receipt is None
+    assert saga.create().operation.state == "succeeded"

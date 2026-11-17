@@ -1115,6 +1115,8 @@ class GrantCoordinator:
             row = self.repository.retained_operation(conn, scope.organization_id, operation_id)
         if row["state"] in {"succeeded", "aborted"}:
             return
+        if row["context"]["session_id"] != scope.session_id:
+            return
         intent = AppendIntent.parse(bytes(row["intent_body"]))
         receipt = self._ack(scope, intent)
         if receipt is None:
@@ -1682,6 +1684,10 @@ class GrantCoordinator:
         with self.repository.transaction(scope) as conn:
             row = self.repository.retained_operation(conn, scope.organization_id, operation_id)
         if row["state"] in {"succeeded", "aborted"}:
+            return
+        # The authorized progress read may come from another session. It must
+        # not adjudicate a pending mutation reserved by the original session.
+        if row["context"]["session_id"] != scope.session_id:
             return
         intent = AppendIntent.parse(bytes(row["intent_body"]))
         intent_response = self._ack(scope, intent)
