@@ -165,6 +165,30 @@ def test_python_units_run_bootstrap_and_every_present_product_suite(tmp_path: Pa
     assert "services/control-api/tests" not in absent and len(absent) == 4
 
 
+def test_numerical_kernel_routes_both_required_test_files_once(tmp_path: Path) -> None:
+    kernel = "training/src/opentour_training/evaluation/statistics_kernel.py"
+    plan_tests = "training/tests/evaluation/test_inference_plan.py"
+    kernel_tests = "training/tests/evaluation/test_statistics_kernel.py"
+    other_tests = "training/tests/evaluation/test_other.py"
+    for relative in (kernel, plan_tests, kernel_tests, other_tests):
+        path = tmp_path / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("# Generated routing fixture\n")
+
+    selected, absent = python_unit_selection(tmp_path)
+
+    assert [path for path in selected if path.startswith("training/")] == [
+        plan_tests,
+        kernel_tests,
+        other_tests,
+    ]
+    assert "training/tests" not in absent
+
+    (tmp_path / kernel_tests).unlink()
+    with pytest.raises(CommandError, match="does not exist"):
+        python_unit_selection(tmp_path)
+
+
 def test_only_registered_database_files_leave_the_unit_job(tmp_path: Path) -> None:
     from tools.fixtures.python_postgres import present_targets
 

@@ -493,6 +493,43 @@ def test_typecheck_failure_stops_dependent_steps(checkout):
     assert "mypy" in fixture.calls[0].argv
 
 
+def test_training_typecheck_uses_the_separate_installed_package_metadata(checkout):
+    write(checkout, "training/pyproject.toml")
+    write(checkout, "training/.venv/pyvenv.cfg")
+    write(checkout, "training/.venv/bin/python")
+    fixture = FixtureRunner()
+
+    result = runner.run_command("typecheck", [], checkout, fixture)
+
+    assert result["status"] == "PASS"
+    workspace, training, typescript = fixture.calls
+    assert "mypy" in workspace.argv and "training/src" not in workspace.argv
+    assert "mypy" in training.argv
+    assert training.argv[-3:] == (
+        "--python-executable",
+        "training/.venv/bin/python",
+        "training/src",
+    )
+    assert training.environment["UV_OFFLINE"] == "1"
+    assert typescript.argv[:3] == ("pnpm", "exec", "tsc")
+
+
+@pytest.mark.parametrize("prefix", ["missing", "workspace-symlink"])
+def test_training_typecheck_refuses_missing_or_shared_environment(checkout, prefix):
+    write(checkout, "training/pyproject.toml")
+    if prefix == "workspace-symlink":
+        write(checkout, ".venv/pyvenv.cfg")
+        write(checkout, ".venv/bin/python")
+        (checkout / "training/.venv").symlink_to(checkout / ".venv", target_is_directory=True)
+    fixture = FixtureRunner()
+
+    result = runner.run_command("typecheck", [], checkout, fixture)
+
+    assert result["status"] == "BLOCKED"
+    assert result["reason_code"] == "MISSING_EXTERNAL_PREREQUISITE"
+    assert not fixture.calls
+
+
 def quality_harness(root):
     for name in (
         "playwright.config.ts",
@@ -697,10 +734,12 @@ def test_actual_training_route_uses_separate_pytest_only_environment(
     write(
         checkout,
         target,
-        "import importlib.util,sys\nfrom pathlib import Path\nimport pytest\n"
+        "import importlib.metadata,importlib.util,sys\nfrom pathlib import Path\nimport pytest\n"
         "def test_training_route():\n"
         f"    assert Path(sys.prefix).resolve() == Path({str(qualified_environment.resolve())!r})\n"
-        "    assert importlib.util.find_spec('jsonschema') is None\n"
+        "    assert importlib.metadata.version('jsonschema') == '4.26.0'\n"
+        "    assert importlib.util.find_spec('opentour_control') is None\n"
+        "    assert importlib.util.find_spec('mypy') is None\n"
         "    assert 'jsonschema' not in sys.modules\n"
         "    assert pytest.__version__ == '9.2.0'\n"
         "    Path('TRAINING_ENV_CHECKED').touch()\n"

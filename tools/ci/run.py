@@ -30,6 +30,10 @@ from tools.public_content_check import digest, inspect_bytes, load_policy, scan_
 from tools.test_runner import CommandError, Invocation, execute, path_target
 
 ROOT = Path(__file__).resolve().parents[2]
+NUMERICAL_UNIT_TARGETS = (
+    "training/tests/evaluation/test_inference_plan.py",
+    "training/tests/evaluation/test_statistics_kernel.py",
+)
 
 
 def safe_environment() -> dict[str, str]:
@@ -206,6 +210,14 @@ def python_unit_selection(root: Path) -> tuple[list[str], list[str]]:
         "tools/tests",
     ]
     absent = []
+    numerical_targets: set[str] = set()
+    if (root / "training/src/opentour_training/evaluation/statistics_kernel.py").exists():
+        for target in NUMERICAL_UNIT_TARGETS:
+            path_target(root, target)
+            if not (root / target).is_file():
+                raise CommandError("Numerical kernel tests must be regular files.", 1)
+            numerical_targets.add(target)
+        targets.extend(NUMERICAL_UNIT_TARGETS)
     for target in (
         "services/control-api/tests",
         "services/cell-runtime/tests",
@@ -217,19 +229,21 @@ def python_unit_selection(root: Path) -> tuple[list[str], list[str]]:
             # Validate the whole tree before partitioning: a symlink must fail, not
             # disappear from a glob or move into a different evidence class.
             path_target(root, target)
-            routed_local = {p for p in local_targets if p.startswith(target + "/")}
-            if not routed_local:
+            routed_separately = {
+                path for path in local_targets | numerical_targets if path.startswith(target + "/")
+            }
+            if not routed_separately:
                 # Keep empty present directories: the command must refuse zero tests.
                 targets.append(target)
             else:
                 # Pytest's pinned default discovery names. Each remaining file keeps
-                # the unit guard; only the finite approved paths go to PostgreSQL CI.
+                # the unit guard; separately routed sources are not run a second time.
                 targets.extend(
                     sorted(
                         str(p.relative_to(root))
                         for p in (root / target).rglob("*.py")
                         if (p.name.startswith("test_") or p.name.endswith("_test.py"))
-                        and str(p.relative_to(root)) not in routed_local
+                        and str(p.relative_to(root)) not in routed_separately
                     )
                 )
         else:

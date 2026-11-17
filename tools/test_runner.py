@@ -1239,17 +1239,36 @@ def dispatch(
     if command == "lint":
         commands = [(*uv_python(root)[:-1], "ruff", "check", ".")]
     else:
+        mypy = (*uv_python(root)[:-1], "mypy")
+        workspace_sources = [
+            "tools",
+            "services/control-api/src",
+            "services/cell-runtime/src",
+            "services/audit-journal/src",
+            "packages/authority-journal/src",
+        ]
+        training_checks: list[tuple[str, ...]] = []
+        training_project = root / "training"
+        if (training_project / "pyproject.toml").is_file():
+            training_env = training_project / ".venv"
+            training_python = "training/.venv/bin/python"
+            if (
+                training_project.is_symlink()
+                or training_env.is_symlink()
+                or not (training_env / "pyvenv.cfg").is_file()
+                or not (root / training_python).is_file()
+            ):
+                raise CommandError(
+                    "Run qualified separate training setup before typechecking training.",
+                    3,
+                    "MISSING_EXTERNAL_PREREQUISITE",
+                )
+            training_checks.append((*mypy, "--python-executable", training_python, "training/src"))
+        else:
+            workspace_sources.append("training/src")
         commands = [
-            (
-                *uv_python(root)[:-1],
-                "mypy",
-                "tools",
-                "services/control-api/src",
-                "services/cell-runtime/src",
-                "services/audit-journal/src",
-                "packages/authority-journal/src",
-                "training/src",
-            ),
+            (*mypy, *workspace_sources),
+            *training_checks,
             (
                 "pnpm",
                 "exec",
