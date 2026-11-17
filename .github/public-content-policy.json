@@ -65,7 +65,15 @@
     "apps/web/components/foundation/tokens/testing/baselines/darwin-opentour-managed/gallery-1280.png": "7b72cb23d11395b176f7accafbbd982c20ed7327ae2aeabaae8039d579ee01a0",
     "apps/web/components/foundation/tokens/testing/baselines/darwin-opentour-managed/gallery-1440.png": "4320102cc7426a759cd9307a90366b4ef221a423d051c170306b078347de4657",
     "apps/web/components/foundation/tokens/testing/baselines/darwin-opentour-managed/gallery-320.png": "ad96938e48774bce5e484832d0e095e82e620859885d32dce7a8a07f12968794",
-    "apps/web/components/foundation/tokens/testing/baselines/darwin-opentour-managed/gallery-768.png": "0d99d709a657c6372065f29257c89e733591c4d12ec373672884b485f579e4b8"
+    "apps/web/components/foundation/tokens/testing/baselines/darwin-opentour-managed/gallery-768.png": "0d99d709a657c6372065f29257c89e733591c4d12ec373672884b485f579e4b8",
+    "apps/web/tests/fixtures/presentation/baselines/darwin/status-1280-100.png": "709a078f4c38e715343f8d8b20aedc56a78663232babacbb3a751465ef734c4c",
+    "apps/web/tests/fixtures/presentation/baselines/darwin/status-1280-200.png": "c37fb6550b2c438cf60756a1b7b88880b2ad33f390bcf4b64c73816d6ba6fc0a",
+    "apps/web/tests/fixtures/presentation/baselines/darwin/status-1440-100.png": "a7ffe93cb86b00670196a51d7963824a676c4e934c9cafab65320591b036282b",
+    "apps/web/tests/fixtures/presentation/baselines/darwin/status-1440-200.png": "b428ee09387550e881483522c9d5a64d0e5ce0deab60b5edebf998527c873b44",
+    "apps/web/tests/fixtures/presentation/baselines/darwin/status-320-100.png": "ac45f13079ef6679d5248abb5e566c5118ee083c608759ed2d31b2fffa060563",
+    "apps/web/tests/fixtures/presentation/baselines/darwin/status-320-200.png": "98d9a96a0c622d127c4ba608f791f1ec6113f80bccb4f0f59d69852729cf66a8",
+    "apps/web/tests/fixtures/presentation/baselines/darwin/status-768-100.png": "3cb0dfeaa7d3b44670ca8121bd094f8e1c9ad5a48a744049210f5287e81195d9",
+    "apps/web/tests/fixtures/presentation/baselines/darwin/status-768-200.png": "e23c30b51ec9a2c69286ca30d58ffd6e27048d5f111ade7dd628d7e64c97db05"
   },
   "approved_synthetic_matches": {
     "tests/contract/test_bootstrap.py": [

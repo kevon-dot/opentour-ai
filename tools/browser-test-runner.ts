@@ -1,3 +1,4 @@
+import { presentationSuites } from './presentation-browser-profiles.ts';
 import { exactSelector, validateTarget } from '../apps/web/tests/fixtures/harness/selection.ts';
 import { spawn, execFileSync } from 'node:child_process';
 import { existsSync, lstatSync, realpathSync, readFileSync, writeFileSync, mkdirSync, mkdtempSync, rmSync, linkSync, unlinkSync, readdirSync } from 'node:fs';
@@ -113,6 +114,8 @@ export async function executeBrowser(options: { root: string; target: string; de
   const { root, target, destination, nonce, probe } = options;
   validateDestination(destination);
   const foundation = target === foundationTarget;
+  const scoped = presentationSuites.get(target);
+  const operationFixture = scoped?.owner === 'OPE-308';
   if (!/^[a-f0-9]{32}$/.test(nonce)) throw new Error('INVALID_CONFIGURATION');
   const report: Report = { schema_version: 'opentour.test-result.v1', runner: 'playwright', target, binding_nonce: nonce, kind: 'simulated', mode: null, collected: 0, passed: 0, failed: 0, skipped: 0, tests: [], status: 'FAIL', reason_code: 'INVALID_CONFIGURATION', cleanup_complete: true };
   let code = 2;
@@ -132,9 +135,17 @@ export async function executeBrowser(options: { root: string; target: string; de
   process.on('SIGINT', signal); process.on('SIGTERM', signal);
   try {
     const selection = validateTarget(root, target, !!probe);
-    if (foundation && probe || !foundation && !probe && target !== 'apps/web/tests/browser-harness.browser.spec.ts') throw new Error('INVALID_CONFIGURATION');
+    if ((foundation || scoped) && probe || !foundation && !scoped && !probe && target !== 'apps/web/tests/browser-harness.browser.spec.ts') throw new Error('INVALID_CONFIGURATION');
+    if (scoped) {
+      const manifest = JSON.parse(readFileSync(join(root, 'packages/contracts/common/command-manifest.json'), 'utf8'));
+      if (manifest.browser_profiles[target]?.owner !== scoped.owner || options.baselineReview) throw new Error('INVALID_CONFIGURATION');
+    }
     const applicationRoot = join(root, foundation ? `${foundationRoot}/testing` : harness, probe === 'missing_application' ? 'absent-application' : '');
     const applicationFiles = foundation ? ['index.html', 'gallery.tsx', 'server.ts', 'baseline-review.json', '../index.tsx', '../../../../styles/fonts/Geist.woff2', '../../../../styles/fonts/GeistMono.woff2', '../../../../styles/fonts/source.json'] : ['index.html', 'client.ts', 'server.ts', 'contracts.ts', 'assets/inter-latin-400-normal.woff2'];
+    if (operationFixture) {
+      const fixtureRoot = join(root, 'apps/web/tests/fixtures/presentation');
+      if (['index.html', 'operation-state.tsx'].some(name => !existsSync(join(fixtureRoot, name)))) throw new Error('MISSING_APPLICATION');
+    }
     if (applicationFiles.some(file => !existsSync(join(applicationRoot, file)))) throw new Error('MISSING_APPLICATION');
     if (foundation) { try { presentationMetadata = foundationMetadata(root, options.baselineReview); } catch { throw new Error('INVALID_CONFIGURATION'); } }
     const browserDirectory = probe === 'missing_browser' ? join(dirname(destination), 'absent-browser-cache') : join(root, '.toolchain/playwright');
@@ -148,18 +159,18 @@ export async function executeBrowser(options: { root: string; target: string; de
     if (!executable || !existsSync(executable)) throw new Error('MISSING_BROWSER');
     runDirectory = mkdtempSync(join(dirname(destination), 'browser-'));
     mkdirSync(join(runDirectory, 'home'));
-    artifactDirectory = join(root, foundation ? 'evidence/OT-P23-C12/runs' : 'evidence/OT-BOOT-C06/runs', nonce); mkdirSync(artifactDirectory, { recursive: true });
+    artifactDirectory = join(root, scoped ? `evidence/${scoped.owner}/runs` : foundation ? 'evidence/OT-P23-C12/runs' : 'evidence/OT-BOOT-C06/runs', nonce); mkdirSync(artifactDirectory, { recursive: true });
     const raw = join(runDirectory, 'raw.json');
-    if (foundation) {
+    if (foundation || operationFixture) {
       const { startFoundationServer } = await import(pathToFileURL(join(root, foundationRoot, 'testing/server.ts')).href);
-      server = await startFoundationServer(nonce, runDirectory);
+      server = await startFoundationServer(nonce, runDirectory, operationFixture);
     } else {
       const { startFixtureServer } = await import(pathToFileURL(join(root, harness, 'server.ts')).href);
       server = await startFixtureServer(nonce, probe === 'cleanup');
     }
     const ready = await fetch(`${server!.origin}/__harness/ready`, { signal: AbortSignal.timeout(3000) }).then(response => response.json());
     if (ready.run_id !== nonce) throw new Error('MISSING_APPLICATION');
-    const environment: NodeJS.ProcessEnv = { PATH: process.env.PATH, HOME: join(runDirectory, 'home'), TMPDIR: runDirectory, CI: 'true', TZ: 'UTC', LANG: 'C.UTF-8', NEXT_TELEMETRY_DISABLED: '1', PLAYWRIGHT_BROWSERS_PATH: browserDirectory, OPENTOUR_REPOSITORY_ROOT: root, OPENTOUR_BROWSER_TARGET: target, OPENTOUR_BROWSER_PROFILE: foundation ? 'presentation-foundation-v1' : 'simulated-browser-harness', OPENTOUR_FIXTURE_ORIGIN: server!.origin, OPENTOUR_BROWSER_RAW: raw, OPENTOUR_BROWSER_OUTPUT: join(artifactDirectory, 'artifacts'), OPENTOUR_BROWSER_PROBE: probe, OPENTOUR_BASELINE_REVIEW_REASON: options.baselineReview?.reason, OPENTOUR_BROWSER_READY_FILE: `${destination}.ready`, OPENTOUR_RESULT_NONCE: nonce, NODE_OPTIONS: `--require=${JSON.stringify(join(root, harness, 'network-node.cjs'))}` };
+    const environment: NodeJS.ProcessEnv = { PATH: process.env.PATH, HOME: join(runDirectory, 'home'), TMPDIR: runDirectory, CI: 'true', TZ: 'UTC', LANG: 'C.UTF-8', NEXT_TELEMETRY_DISABLED: '1', PLAYWRIGHT_BROWSERS_PATH: browserDirectory, OPENTOUR_REPOSITORY_ROOT: root, OPENTOUR_BROWSER_TARGET: target, OPENTOUR_BROWSER_PROFILE: scoped ? 'scoped-presentation-v1' : foundation ? 'presentation-foundation-v1' : 'simulated-browser-harness', OPENTOUR_FIXTURE_ORIGIN: server!.origin, OPENTOUR_BROWSER_RAW: raw, OPENTOUR_BROWSER_OUTPUT: join(artifactDirectory, 'artifacts'), OPENTOUR_BROWSER_PROBE: probe, OPENTOUR_BASELINE_REVIEW_REASON: options.baselineReview?.reason, OPENTOUR_BROWSER_READY_FILE: `${destination}.ready`, OPENTOUR_RESULT_NONCE: nonce, NODE_OPTIONS: `--require=${JSON.stringify(join(root, harness, 'network-node.cjs'))}` };
     const playwright = join(dirname(createRequire(require.resolve('@playwright/test')).resolve('playwright/package.json')), 'cli.js');
     const argv = [playwright, 'test', '--config', join(root, 'playwright.config.ts'), exactSelector(selection.path, selection.directory)];
     if (options.baselineReview) { if (!options.baselineReview.reason || !options.baselineReview.designRevision || probe) throw new Error('INVALID_CONFIGURATION'); argv.push('--update-snapshots=all'); }
@@ -225,6 +236,7 @@ export async function executeBrowser(options: { root: string; target: string; de
       let visualEvidenceValid = true;
       try { visualComparisons = collectVisualComparisons(root, outputs); } catch { visualEvidenceValid = false; }
       if (!probe && !options.baselineReview && target === 'apps/web/tests/browser-harness.browser.spec.ts' && report.status === 'PASS' && (visualComparisons.length !== 10 || visualComparisons.some(record => record.path.endsWith('/billing320-comparison.json') && record.comparison.variant === null))) visualEvidenceValid = false;
+      if (scoped && report.status === 'PASS' && (report.collected < scoped.minimumTests || report.tests.some(test => test.mode !== null))) visualEvidenceValid = false;
       if (!visualEvidenceValid) { code = 1; report.status = 'FAIL'; report.reason_code ??= 'RUNNER_ERROR'; }
       const evidence: Record<string, unknown> = { schema_version: 'opentour.browser-artifacts.v1', issue_key: 'OPE-127', kind: 'simulated', requirement_ids: ['OT-BOOT-C06-AC01', 'OT-BOOT-C06-AC02'], source_refs: ['G1', 'AC-22-01', 'AC-23-01'], product_acceptance: 'NOT_RUN', commit_sha: commit, git_worktree_dirty: sourceDirty, test_source_sha256: sha(lstatSync(join(root, target)).isDirectory() ? JSON.stringify(inventory(root, join(root, target))) : readFileSync(join(root, target))), target, fixture_id: 'simulated-browser-harness', fixture_version: '1', seed: 127, clock: '2026-11-14T12:00:00.000Z', spec_sha256: '96c405228e6e925e3c11ea4d44c0d5cb5b984541bab1a017735e7629ffa72292', cleanup_observation: { processCleanup, applicationCleanup, cleanupDiagnostic }, baseline_review_request: options.baselineReview ?? null, platform: process.platform, architecture: process.arch, playwright_version: JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')).devDependencies['@playwright/test'], viewport_widths: [320, 768, 1280, 1440], locale: 'en-US', timezone: 'UTC', color_scheme: 'light', ...foundation ? {} : { font_sha256: sha(readFileSync(join(root, harness, 'assets/inter-latin-400-normal.woff2'))) }, outputs, visual_comparisons: visualComparisons, report, limitations: ['Deterministic simulated interaction evidence only.', 'Provider/customer/isolation G1 acceptance NOT_RUN.', 'Canonical Linux visual qualification requires its platform baselines and independent review.'] };
       if (foundation) {
@@ -233,6 +245,16 @@ export async function executeBrowser(options: { root: string; target: string; de
           code = 1; report.status = 'FAIL'; report.reason_code = 'RUNNER_ERROR';
         }
         Object.assign(evidence, current);
+      }
+      if (scoped) {
+        Object.assign(evidence, {
+          issue_key: scoped.owner, source_refs: [scoped.owner, scoped.parent, scoped.guide],
+          requirement_ids: ['AC05'], spec_sha256: scoped.specHash, fixture_id: 'scoped-presentation-v1',
+          font_sha256: sha(readFileSync(join(root, 'apps/web/styles/fonts/Geist.woff2'))),
+          limitations: ['Generated presentation fixtures only. Parent integration, independent review and strict native pixel parity are separate gates.'],
+        });
+        delete evidence.seed;
+        delete evidence.clock;
       }
       writeFileSync(join(artifactDirectory, 'evidence.json'), JSON.stringify(evidence, null, 2));
       } catch { code = 1; report.status = 'FAIL'; report.reason_code = 'RUNNER_ERROR'; }

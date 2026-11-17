@@ -11,7 +11,7 @@ const contentTypes: Record<string, string> = {
 };
 
 /** Test-only static host. It exposes no product API, proxy, credentials, or persistent state. */
-export async function startFoundationServer(runId: string, outputDirectory: string): Promise<{
+export async function startFoundationServer(runId: string, outputDirectory: string, operationFixture = false): Promise<{
   origin: string; close(): Promise<boolean>;
 }> {
   if (!/^[a-f0-9]{32}$/.test(runId) || resolve(outputDirectory) !== outputDirectory ||
@@ -35,7 +35,7 @@ export async function startFoundationServer(runId: string, outputDirectory: stri
   })();
   try {
     const result = await build({
-      root: dirname(fileURLToPath(import.meta.url)), configFile: false, envFile: false,
+      root: operationFixture ? fileURLToPath(new URL('../../../../tests/fixtures/presentation/', import.meta.url)) : dirname(fileURLToPath(import.meta.url)), configFile: false, envFile: false,
       publicDir: false, cacheDir: join(owned, 'cache'), logLevel: 'silent',
       build: { write: false, outDir: join(owned, 'output'), emptyOutDir: false,
         assetsInlineLimit: 0, sourcemap: false, minify: true, target: 'es2023' },
@@ -75,7 +75,7 @@ export async function startFoundationServer(runId: string, outputDirectory: stri
         response.setHeader('Content-Type', 'application/json');
         response.end(request.method === 'HEAD' ? undefined : JSON.stringify({ run_id: runId })); return;
       }
-      const asset = assets.get(path === '/' ? '/index.html' : path ?? '');
+      const asset = assets.get((path === '/' || (operationFixture && path === '/operation-state')) ? '/index.html' : path ?? '');
       if (!asset) { response.writeHead(404).end(); return; }
       response.setHeader('Content-Type', asset.type); response.setHeader('Content-Length', asset.bytes.length);
       response.end(request.method === 'HEAD' ? undefined : asset.bytes);

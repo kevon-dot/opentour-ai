@@ -283,6 +283,18 @@
     "apps/web/components/foundation/tokens/visual.spec.ts": {
       "kind": "simulated",
       "owner": "OPE-253"
+    },
+    "apps/web/components/foundation/data-display/metric-semantics.visual.spec.ts": {
+      "kind": "simulated",
+      "owner": "OPE-304"
+    },
+    "apps/web/components/foundation/async-state/status-copy.visual.spec.ts": {
+      "kind": "simulated",
+      "owner": "OPE-306"
+    },
+    "apps/web/components/foundation/async-state/operation-state.visual.spec.ts": {
+      "kind": "simulated",
+      "owner": "OPE-308"
     }
   }
 }
