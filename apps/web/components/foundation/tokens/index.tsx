@@ -8,6 +8,9 @@ import '../../../styles/product-tokens.css';
 
 export type { BadgeProps, BadgeTone, ButtonProps, ButtonVariant, NoticeProps, NoticeTone, TabItem, TabsProps } from './contracts';
 export { Notice, noticeTones } from './notice';
+export type { DataStateKind, DataStateProps, PersistentAnnouncement, ProgressProps, ProgressState, ToastAnnouncement,
+  ToastProps, ToastState } from './feedback.contracts';
+export { DataState, Progress, Toast, dataStates, progressStates, toastStates } from './feedback';
 
 const lightIndicator = new URL('./assets/loading-light.svg', import.meta.url).href;
 const darkIndicator = new URL('./assets/loading-dark.svg', import.meta.url).href;

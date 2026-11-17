@@ -1,4 +1,5 @@
 import type { DataStateKind, DataStateProps, ProgressProps, ProgressState, ToastProps, ToastState } from './feedback.contracts';
+import { requireLabel } from './require-label';
 import '../../../styles/product-tokens.css';
 import './feedback.css';
 
@@ -11,13 +12,6 @@ export const dataStates: readonly DataStateKind[] = ['loading', 'empty', 'partia
 export const progressStates: readonly ProgressState[] = ['queued', 'running', 'stopping', 'complete', 'failed'];
 /** Declared states in the Figma variant order of component set 12:138. */
 export const toastStates: readonly ToastState[] = ['accepted', 'confirmed', 'failed', 'unknown'];
-
-/** Visible text is a contract: blank or non-string text is refused, never rendered empty. */
-function requireText(text: string, name: string): void {
-  if (typeof text !== 'string' || text.trim().length === 0) {
-    throw new Error(`A visible foundation component ${name} is required.`);
-  }
-}
 
 /** `status` is a polite live region read as a whole; `off` leaves plain text with no live region at all. */
 function persistentRole(announce: string, name: string): 'status' | undefined {
@@ -33,8 +27,8 @@ function persistentRole(announce: string, name: string): 'status' | undefined {
 export function DataState({ state, title, body, announce = 'polite' }: DataStateProps) {
   if (!dataStates.includes(state)) throw new Error('A declared data state is required.');
   const role = persistentRole(announce, 'data state');
-  requireText(title, 'data state title');
-  requireText(body, 'data state body');
+  requireLabel(title, 'data state title');
+  requireLabel(body, 'data state body');
   return <div role={role} className={`ot-data-state ot-data-state--${state}`}>
     <p className="ot-data-state-title">{title}</p>
     <p className="ot-data-state-body">{body}</p>
@@ -48,8 +42,8 @@ export function DataState({ state, title, body, announce = 'polite' }: DataState
 export function Progress({ state, title, body, announce = 'polite' }: ProgressProps) {
   if (!progressStates.includes(state)) throw new Error('A declared progress state is required.');
   const role = persistentRole(announce, 'progress state');
-  requireText(title, 'progress title');
-  requireText(body, 'progress body');
+  requireLabel(title, 'progress title');
+  requireLabel(body, 'progress body');
   return <div role={role} className={`ot-progress ot-progress--${state}`}>
     <p className="ot-progress-title">{title}</p>
     <p className="ot-progress-body">{body}</p>
@@ -64,8 +58,8 @@ export function Toast({ state, title, body, announce = 'polite' }: ToastProps) {
   if (!toastStates.includes(state)) throw new Error('A declared toast state is required.');
   if (announce !== 'polite' && announce !== 'assertive') throw new Error('A toast is announced politely or assertively.');
   if (announce === 'assertive' && state !== 'failed') throw new Error('Only a failed toast may be announced assertively.');
-  requireText(title, 'toast title');
-  requireText(body, 'toast body');
+  requireLabel(title, 'toast title');
+  requireLabel(body, 'toast body');
   return <div role={announce === 'assertive' ? 'alert' : 'status'} className={`ot-toast ot-toast--${state}`}>
     <p className="ot-toast-title">{title}</p>
     <p className="ot-toast-body">{body}</p>
