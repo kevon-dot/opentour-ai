@@ -29,7 +29,11 @@ def test_complete_current_manifest_passes_with_actual_native_ids():
     checks = validate_manifest(value)
     assert len(checks) > 1000 and not failures(value)
     source = value["source_projection"]
-    assert len(source["issues"]) == 294
+    assert len(source["issues"]) == 295
+    kernel = next(issue for issue in source["issues"] if issue["issue_key"] == "OPE-301")
+    assert kernel["native_uuid"] == "a5fbbcec-6c11-4b0f-be1e-ab20a5c7e03e"
+    assert kernel["logical_key"] == "OT-P16-C04-NUMERIC"
+    assert kernel["projection"]["parent"] == "OPE-118"
     assert len(source["features"]) == 32
     assert len({s for f in source["features"] for s in f["implementation_subfeature_ids"]}) == 173
     assert len(source["actions"]) == 175
