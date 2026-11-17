@@ -6,7 +6,8 @@ import type { BadgeProps, ButtonProps, TabsProps } from './contracts';
 import { requireLabel } from './require-label';
 import '../../../styles/product-tokens.css';
 
-export type { BadgeProps, BadgeTone, ButtonProps, ButtonVariant, TabItem, TabsProps } from './contracts';
+export type { BadgeProps, BadgeTone, ButtonProps, ButtonVariant, NoticeProps, NoticeTone, TabItem, TabsProps } from './contracts';
+export { Notice, noticeTones } from './notice';
 
 const lightIndicator = new URL('./assets/loading-light.svg', import.meta.url).href;
 const darkIndicator = new URL('./assets/loading-dark.svg', import.meta.url).href;

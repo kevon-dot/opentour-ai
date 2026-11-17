@@ -20,6 +20,16 @@ export interface BadgeProps {
   tone: BadgeTone;
 }
 
+/** Colour only. The caller's title states the condition in words; tone never stands in for it. */
+export type NoticeTone = 'info' | 'success' | 'hold' | 'failure' | 'unknown';
+
+/** Persistent status text. Both strings are visible and required; neither is markup. */
+export interface NoticeProps {
+  tone: NoticeTone;
+  title: string;
+  body: string;
+}
+
 export interface TabItem {
   key: string;
   label: string;

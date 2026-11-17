@@ -104,6 +104,16 @@
 .ot-tab[aria-selected='true'] { background: var(--ot-action-subtle); color: var(--ot-text-link); }
 .ot-tab:disabled { color: var(--ot-text-muted); cursor: not-allowed; }
 .ot-tabpanel { padding: var(--ot-space-16) var(--ot-space-4); overflow-wrap: anywhere; }
+.ot-notice { display: flex; flex-direction: column; gap: var(--ot-space-8); box-sizing: border-box; inline-size: 100%; min-inline-size: 0; padding: var(--ot-space-16); border: 1px solid var(--ot-border-default); border-radius: var(--ot-radius-8); font-family: Geist, sans-serif; overflow-wrap: anywhere; }
+.ot-notice-title, .ot-notice-body { margin: 0; }
+.ot-notice-title { font-size: var(--ot-type-label-size); font-weight: var(--ot-type-label-weight); line-height: var(--ot-type-label-line); }
+.ot-notice-body { font-size: var(--ot-type-small-size); font-weight: var(--ot-type-small-weight); line-height: var(--ot-type-small-line); }
+.ot-notice--info { background: var(--ot-surface-base); color: var(--ot-text-primary); }
+.ot-notice--info > .ot-notice-body { color: var(--ot-text-secondary); }
+.ot-notice--success { background: var(--ot-success-background); color: var(--ot-success-text); }
+.ot-notice--hold { background: var(--ot-hold-background); color: var(--ot-hold-text); }
+.ot-notice--failure { background: var(--ot-failure-background); color: var(--ot-failure-text); }
+.ot-notice--unknown { background: var(--ot-unknown-background); color: var(--ot-unknown-text); }
 @media (pointer: coarse) { .ot-button { min-block-size: 44px; } }
 @media (forced-colors: active) {
   .ot-button, .ot-tab, .ot-badge { border: 1px solid ButtonText; }

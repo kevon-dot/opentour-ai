@@ -1,4 +1,4 @@
-import type { BadgeTone, ButtonVariant } from './contracts';
+import type { BadgeTone, ButtonVariant, NoticeProps } from './contracts';
 
 /** Generated presentation examples only. No API response, grant, or receipt is simulated. */
 export const presentationFixtures = {
@@ -22,6 +22,15 @@ export const presentationFixtures = {
     { tone: 'hold', label: 'Hold example' }, { tone: 'failure', label: 'Failed example' },
     { tone: 'unknown', label: 'Unknown example' }, { tone: 'info', label: 'Information example' },
   ] as readonly { tone: BadgeTone; label: string }[],
+  notices: [
+    { tone: 'info', title: 'Information example', body: 'Generated notice text. No operation receipt is implied.' },
+    { tone: 'success', title: 'Confirmed example', body: 'Generated notice text for a confirmed presentation example.' },
+    { tone: 'hold', title: 'Hold example', body: 'Generated notice text for a held presentation example.' },
+    { tone: 'failure', title: 'Failed example', body: 'Generated notice text for a failed presentation example.' },
+    { tone: 'unknown', title: 'Unknown example', body: 'Generated notice text. Unknown values remain unknown.' },
+  ] as readonly NoticeProps[],
+  noticeLongTitle: 'Generated notice title with a long descriptive state name that wraps instead of clipping',
+  noticeLongBody: 'Generated notice body with an unbroken token GENERATED-0123456789-0123456789-0123456789-0123456789 and enough words to span several lines at a narrow width.',
   tabs: [
     { key: 'overview', label: 'Overview', content: 'First generated panel. Arrow keys only move focus.' },
     { key: 'unavailable', label: 'Unavailable', content: 'Unavailable panel.', disabled: true },
