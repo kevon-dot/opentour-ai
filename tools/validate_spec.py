@@ -21,7 +21,7 @@ from tools import schema_validate
 
 ROOT = Path(__file__).resolve().parents[1]
 TARGET = "docs/specification/manifest.json"
-APPROVED_PROJECTION = "6e63baa5e4adcb17480c52c13096fafc608f9a64ab72c620fb86561fd3d8e45d"
+APPROVED_PROJECTION = "15e3cf39a9a9dc078cbb9ec9b0b9088bb6e86343ecfe4b3fe7ec35e61ede9103"
 REPORT_SCHEMA = "docs/specification/traceability-report.schema.json"
 
 
