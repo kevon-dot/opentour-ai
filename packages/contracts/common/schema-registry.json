@@ -23,7 +23,7 @@
     {
       "id": "urn:opentour:python-postgres-observation:1.0",
       "file": "python-postgres-observation.schema.json",
-      "sha256": "6ee81d9a726b534b7c5cbf7b3182513c04a469bd43c16040a0a91d9fe570cd73",
+      "sha256": "f1f92505de26d354b8214425427865602e406bcd74d320074b994171619dfa4f",
       "source_path": "packages/contracts/common/python-postgres-observation.schema.json"
     },
     {
