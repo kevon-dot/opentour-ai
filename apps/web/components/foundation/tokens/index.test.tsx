@@ -1,13 +1,15 @@
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { readFileSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { readFileSync, mkdtempSync, mkdirSync, writeFileSync, rmSync, realpathSync, symlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
-import { Badge, Button, Tabs } from './index';
+import { Badge, Button, Dialog, Drawer, Tabs } from './index';
+import type { ModalPresentationProps } from './contracts';
 import { presentationFixtures as fixtures } from './fixtures';
 import tokens from '../../../styles/product-tokens.json';
-import { foundationMetadata } from '../../../../../tools/browser-test-runner';
+import { foundationMetadata, overlayMetadata } from '../../../../../tools/browser-test-runner';
 
 describe('production presentation contracts', () => {
   it.each(fixtures.variants)('renders native labelled %s button with safe default type', variant => {
@@ -136,5 +138,135 @@ describe('design token integrity', () => {
       const values = [luminance(foreground), luminance(background)].sort((a, b) => b - a);
       expect((values[0] + 0.05) / (values[1] + 0.05)).toBeGreaterThanOrEqual(4.5);
     }
+  });
+});
+
+// Append-only: historical Vitest transport IDs use the collected index.
+describe.each([{ name: 'Dialog', Component: Dialog }, { name: 'Drawer', Component: Drawer }])('$name modal presentation contract', ({ Component, name }) => {
+  const props: ModalPresentationProps = { open: true, title: 'Generated details', children: 'Generated body',
+    initialFocus: { kind: 'heading' }, returnFocus: () => null, fallbackFocus: () => null,
+    onDismiss: () => { throw new Error('Rendering must never request dismissal'); } };
+  it('U01 requires a visible title, associates its heading and removes closed content', () => {
+    expect(renderToStaticMarkup(<Component {...props} open={false} />)).toBe('');
+    expect(() => renderToStaticMarkup(<Component {...props} title=" " />)).toThrow('visible');
+    const html = renderToStaticMarkup(<Component {...props} />);
+    const labelledBy = /aria-labelledby="([^"]+)"/.exec(html)?.[1];
+    expect(labelledBy).toBeTruthy(); expect(html).toContain(`id="${labelledBy}" tabindex="-1"`);
+    expect(html).toContain('Generated details');
+    expect(html).not.toContain('aria-label=');
+  });
+  it('U02 renders only an explicit non-submit close control, without implicit confirmation', () => {
+    const html = renderToStaticMarkup(<Component {...props} />);
+    expect(html).toContain('<button type="button"');
+    expect(html).toContain(name === 'Dialog' ? 'Close dialog' : 'Close details');
+    expect(html).not.toContain('<form'); expect(html).not.toContain('method="dialog"');
+    expect(html).not.toContain('Confirm');
+    const withAction = renderToStaticMarkup(<Component {...props} actions={<Button label="Explicit action" />} />);
+    expect(withAction.indexOf(name === 'Dialog' ? 'Close dialog' : 'Close details')).toBeLessThan(withAction.indexOf('Explicit action'));
+    expect(withAction.match(/<button /g)).toHaveLength(2);
+  });
+  it('U03 requires an explicit initial focus policy and permits an initially empty element ref', () => {
+    expect(() => renderToStaticMarkup(<Component {...props} initialFocus={undefined as never} />)).toThrow('explicit initial focus');
+    expect(() => renderToStaticMarkup(<Component {...props} initialFocus={{ kind: 'unknown' } as never} />)).toThrow('explicit initial focus');
+    expect(renderToStaticMarkup(<Component {...props} initialFocus={{ kind: 'element', ref: { current: null } }} />)).toContain('<dialog');
+    expect(renderToStaticMarkup(<Component {...props} initialFocus={{ kind: 'close-button' }} />)).toContain('<dialog');
+  });
+  it('U04 preserves React content escaping without invoking caller actions', () => {
+    const html = renderToStaticMarkup(<Component {...props} title={'<script>generated</script>'}>
+      {'<img src=x onerror=generated>'}<Button label="Generated action" onPress={() => { throw new Error('No implicit action'); }} />
+    </Component>);
+    expect(html).toContain('&lt;script&gt;generated&lt;/script&gt;');
+    expect(html).toContain('&lt;img src=x onerror=generated&gt;');
+    expect(html).not.toContain('<script>');
+  });
+});
+
+describe('finite overlay evidence attribution', () => {
+  const reviewPath = 'apps/web/components/foundation/tokens/testing/overlay-baseline-review.json';
+  const manifestPath = 'docs/specification/manifest.json';
+  const target = 'apps/web/components/foundation/tokens/visual.spec.ts';
+  // Overlay baselines are reviewed for the macOS browser job only. Name that platform explicitly so the
+  // admission checks below verify the same committed bytes on every unit host (CI runs them on Linux).
+  const baselinePlatform = 'darwin';
+  function fixture(check: (root: string, observed: Array<{ id: string; file: string; mode: 'customer_controlled' | 'opentour_managed' }>) => void) {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), 'opentour-overlay-metadata-')));
+    try {
+      const review = JSON.parse(readFileSync(new URL(`../../../../../${reviewPath}`, import.meta.url), 'utf8'));
+      const paths = [reviewPath, manifestPath, ...Object.keys(review.images).map(path => `apps/web/components/foundation/tokens/${path}`)];
+      for (const path of paths) {
+        mkdirSync(join(root, path, '..'), { recursive: true });
+        writeFileSync(join(root, path), readFileSync(new URL(`../../../../../${path}`, import.meta.url)));
+      }
+      const manifest = JSON.parse(readFileSync(join(root, manifestPath), 'utf8'));
+      const observed = manifest.test_bindings.filter((binding: { issue_key: string; test_id: string }) =>
+        ['OPE-253', 'OPE-300'].includes(binding.issue_key) && binding.test_id.startsWith(`${target}::`))
+        .map((binding: { test_id: string; mode: 'customer_controlled' | 'opentour_managed' }) => ({ id: binding.test_id, file: target, mode: binding.mode }));
+      check(root, observed);
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  }
+  it('binds exactly122 child browser cases while preserving the disjoint36 parent observations', () => {
+    fixture((root, observed) => {
+      const value = overlayMetadata(root, observed, baselinePlatform);
+      expect(value.issue_key).toBe('OPE-300'); expect(value.test_ids).toHaveLength(122);
+      expect(observed).toHaveLength(158); expect(value.baseline_manifest_sha256).toMatch(/^[a-f0-9]{64}$/);
+      expect(observed.filter(item => !value.test_ids.includes(item.id))).toHaveLength(36);
+    });
+  });
+  it('rejects missing, unapproved, stale-specification or foreign-design/source baseline metadata', () => {
+    for (const mutation of [null, { browser_baseline_status: 'PENDING' }, { spec_sha256: '0'.repeat(64) },
+      { design_image_sha256: '0'.repeat(64) }, { max_diff_pixels: 1 }, { extra: true },
+      { independent_browser_baseline_review: { reviewer: 'foreign', source_commit: '0'.repeat(40) } }, 'foreign-review']) {
+      fixture((root, observed) => {
+        const path = join(root, reviewPath);
+        if (mutation === null) rmSync(path);
+        else {
+          const original = JSON.parse(readFileSync(path, 'utf8'));
+          const change = typeof mutation === 'string' ? { independent_browser_baseline_review: { ...original.independent_browser_baseline_review, review_sha256: '0'.repeat(64) } } : mutation;
+          writeFileSync(path, JSON.stringify({ ...original, ...change }));
+        }
+        expect(() => overlayMetadata(root, observed, baselinePlatform)).toThrow();
+      });
+    }
+  });
+  it('rejects changed, missing or symlinked candidate image bytes without normalizing them', () => {
+    for (const mutation of ['changed', 'missing', 'symlink', 'coordinated-map-replacement']) fixture((root, observed) => {
+      const review = JSON.parse(readFileSync(join(root, reviewPath), 'utf8'));
+      const path = join(root, 'apps/web/components/foundation/tokens', Object.keys(review.images)[0]);
+      if (mutation === 'coordinated-map-replacement') {
+        const replacement = Buffer.concat([readFileSync(path), Buffer.from([0])]);
+        writeFileSync(path, replacement);
+        review.images[Object.keys(review.images)[0]] = createHash('sha256').update(replacement).digest('hex');
+        writeFileSync(join(root, reviewPath), JSON.stringify(review, null, 2) + '\n');
+      } else if (mutation === 'changed') writeFileSync(path, 'generated invalid image bytes');
+      else { rmSync(path); if (mutation === 'symlink') symlinkSync(join(root, reviewPath), path); }
+      expect(() => overlayMetadata(root, observed, baselinePlatform)).toThrow();
+    });
+    // The reviewed bytes are never admitted as another platform's baselines.
+    fixture((root, observed) => expect(() => overlayMetadata(root, observed, 'linux')).toThrow());
+  });
+  it('rejects renamed or relabelled manifest cases and an incorrect current native capture', () => {
+    for (const mutation of ['relabel', 'rename', 'capture', 'identity', 'revision', 'publication']) fixture((root, observed) => {
+      const path = join(root, manifestPath); const manifest = JSON.parse(readFileSync(path, 'utf8'));
+      const binding = manifest.test_bindings.find((item: { issue_key: string; test_id: string }) => item.issue_key === 'OPE-300' && item.test_id.startsWith(`${target}::`));
+      if (mutation === 'relabel') binding.issue_key = 'OPE-253';
+      else if (mutation === 'rename') binding.test_id += '-foreign';
+      else {
+        const child = manifest.source_projection.issues.find((item: { issue_key: string }) => item.issue_key === 'OPE-300');
+        if (mutation === 'identity') child.native_uuid = 'foreign';
+        else if (mutation === 'revision') child.updated_at = '2000-01-01T00:00:00.000Z';
+        else if (mutation === 'publication') child.publication_spec_sha256 = '0'.repeat(64);
+        else child.technical_capture_sha256 = '0'.repeat(64);
+      }
+      writeFileSync(path, JSON.stringify(manifest)); expect(() => overlayMetadata(root, observed, baselinePlatform)).toThrow();
+    });
+  });
+  it('refuses zero, incomplete, duplicate, foreign-file or mismatched-mode observations', () => {
+    fixture((root, observed) => {
+      for (const values of [[], observed.slice(1), [...observed.slice(1), observed[1]],
+        observed.map((value, index) => index ? value : { ...value, file: 'foreign.ts' }),
+        observed.map((value, index) => index ? value : { ...value, mode: value.mode === 'customer_controlled' ? 'opentour_managed' as const : 'customer_controlled' as const })]) {
+        expect(() => overlayMetadata(root, values, baselinePlatform)).toThrow();
+      }
+    });
   });
 });

@@ -99,3 +99,29 @@
   .ot-tab[aria-selected='true'] { border-block-end: 3px solid Highlight; }
   .ot-button:disabled, .ot-tab:disabled { color: GrayText; border-color: GrayText; }
 }
+
+/* Controlled modal presentation. Decorative inset strokes do not consume the 24px padding. */
+.ot-modal { box-sizing: border-box; border: 0; padding: var(--ot-space-24); color: var(--ot-text-primary); background: var(--ot-surface-base); font: var(--ot-type-body-weight) var(--ot-type-body-size)/var(--ot-type-body-line) Geist, sans-serif; box-shadow: none; animation: none; transition: none; overflow: hidden; }
+.ot-modal[open] { display: flex; flex-direction: column; gap: var(--ot-space-16); }
+.ot-modal::after { content: ''; position: absolute; inset: 0; border: 1px solid var(--ot-border-default); border-radius: inherit; pointer-events: none; }
+.ot-modal::backdrop { background: color-mix(in srgb, var(--ot-text-primary) 32%, transparent); animation: none; transition: none; }
+.ot-modal--dialog { inline-size: min(576px, calc(100vw - 32px)); max-inline-size: calc(100vw - 32px); max-block-size: calc(100dvh - 32px); border-radius: var(--ot-radius-12); margin: auto; }
+.ot-modal--drawer { inline-size: min(576px, 100vw); max-inline-size: 100vw; block-size: 100dvh; max-block-size: 100dvh; inset-block: 0; inset-inline: auto 0; margin: 0; border-radius: 0; }
+.ot-modal--drawer::after { border: 0; border-inline-start: 1px solid var(--ot-border-default); }
+.ot-modal-title { flex: none; margin: 0; font: var(--ot-type-section-weight) var(--ot-type-section-size)/var(--ot-type-section-line) Geist, sans-serif; overflow-wrap: anywhere; }
+.ot-modal-title:focus, .ot-modal .ot-button:focus { outline: 2px solid var(--ot-action-primary); outline-offset: 2px; }
+/* The scroller extends 4px beyond the approved content box, so a 2px focus ring at 2px offset on caller content is never clipped.
+   While content overflows in the block axis the lower edge stays on the approved body region instead: the 4px becomes trailing
+   scroll space and scroll-padding keeps a focused child's ring clear of that edge. */
+.ot-modal-body { min-block-size: 0; min-inline-size: 0; overflow: auto; overscroll-behavior: contain; display: flex; flex-direction: column; gap: var(--ot-space-16); margin: calc(-1 * var(--ot-space-4)); padding: var(--ot-space-4); scroll-padding: var(--ot-space-4); color: var(--ot-text-secondary); overflow-wrap: anywhere; }
+.ot-modal-body[data-overflow='block'] { margin-block-end: 0; }
+.ot-modal-body:focus-visible { outline: 2px solid var(--ot-action-primary); outline-offset: 2px; }
+/* The 16px rhythm is the gap alone: direct children carry no block margins of their own. */
+.ot-modal-body > * { flex-shrink: 0; margin-block: 0; }
+.ot-modal .ot-modal-body > h3 { font: var(--ot-type-section-weight) var(--ot-type-section-size)/var(--ot-type-section-line) Geist, sans-serif; color: var(--ot-text-primary); }
+.ot-modal .ot-modal-meta { font-size: var(--ot-type-small-size); line-height: var(--ot-type-small-line); }
+.ot-modal-actions { flex: none; display: flex; flex-wrap: wrap; gap: var(--ot-space-12); }
+@media (forced-colors: active) {
+  .ot-modal::after { border-color: CanvasText; }
+  .ot-modal-title:focus, .ot-modal .ot-button:focus, .ot-modal-body:focus-visible { outline-color: Highlight; }
+}

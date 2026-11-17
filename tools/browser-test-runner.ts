@@ -102,6 +102,95 @@ export function foundationMetadata(root: string, baselineReview?: { reason: stri
     visual_comparisons: [], limitations: ['Partial reusable presentation foundations only; no complete OPE-253 AC acceptance.', 'No domain API, authority, intent, receipt, provider or application-flow qualification.', 'Manual assistive-technology review and remaining primitives NOT_RUN.'],
   };
 }
+const overlaySpecification = {
+  issue_key: 'OPE-300', logical_key: 'OT-P23-C12-OVERLAY',
+  spec_sha256: '429990397f6a755551664d50ad0c80116abf65be8ac8e64e35002cbc18923fdf',
+  native_specification: {
+    digest_recipe: 'SHA256 UTF-8 JSON sorted keys, compact separators, ASCII escaping: {issue_description, implementation_profile:{id,content}}; exact native strings',
+    issue_description_sha256: '8ff8e1c004bc6f6e8fa33f00181337ea82bb6d58b537280b996bd40312a36142',
+    issue_updated_at: '2026-11-16T04:28:36.979Z',
+    implementation_profile_id: 'c4865bd5-0fce-4468-b6ea-05003ebfa5a2',
+    implementation_profile_sha256: '323f5919a4e396a4d844cf19f30c5fba2a88e8d9cffe3584405b1d86e2ffac9b',
+    implementation_profile_updated_at: '2026-11-16T04:28:36.062Z',
+  },
+};
+
+function configuration(condition: unknown): asserts condition {
+  if (!condition) throw new Error('INVALID_CONFIGURATION');
+}
+function ownedBytes(root: string, path: string, limit: number): Buffer {
+  const absolute = join(root, path);
+  configuration(realpathSync(absolute) === absolute && lstatSync(absolute).isFile() && lstatSync(absolute).size <= limit);
+  return readFileSync(absolute);
+}
+function record(value: unknown): Record<string, unknown> {
+  configuration(value !== null && typeof value === 'object' && !Array.isArray(value));
+  return value as Record<string, unknown>;
+}
+
+/**
+ * Finite child attribution: exact reviewed IDs, not title prefixes or a new outer profile.
+ * `platform` names the baseline directory to verify. The browser runner always uses its own host,
+ * which is also the platform Playwright compares against; only unit fixtures name one explicitly.
+ */
+export function overlayMetadata(root: string, observed?: ReadonlyArray<Pick<Case, 'id' | 'file' | 'mode'>>, platform: NodeJS.Platform = process.platform) {
+  const manifest = JSON.parse(ownedBytes(root, 'docs/specification/manifest.json', 8 * 1024 * 1024).toString('utf8'));
+  configuration(Array.isArray(manifest.test_bindings) && Array.isArray(manifest.source_projection?.issues));
+  const child = manifest.source_projection.issues.filter((value: Record<string, unknown>) => value.issue_key === 'OPE-300');
+  configuration(child.length === 1 && child[0].logical_key === overlaySpecification.logical_key &&
+    child[0].technical_capture_sha256 === overlaySpecification.spec_sha256 &&
+    child[0].native_uuid === 'b215de00-fc9e-497b-915f-3dc835614bfa' &&
+    child[0].updated_at === overlaySpecification.native_specification.issue_updated_at &&
+    child[0].publication_spec_sha256 === overlaySpecification.native_specification.issue_description_sha256);
+  const groups = new Map<string, string[]>();
+  for (const [owner, count, digest] of [
+    ['OPE-253', 36, '146c046a366f26c6ad053dec8959798f8dc26aad1867f59c983df82ba359f0dd'],
+    ['OPE-300', 122, '3db50f715db241a9cf1f926bd4064cb8003cfde54c4b56420aa0289b350fd37d'],
+  ] as const) {
+    const bindings = manifest.test_bindings.filter((value: Record<string, unknown>) => value.issue_key === owner &&
+      typeof value.test_id === 'string' && value.test_id.startsWith(`${foundationTarget}::`));
+    configuration(bindings.length === count);
+    for (const binding of bindings) configuration(binding.kind === 'simulated' &&
+      binding.fixture_id === 'bootstrap-command-contract' && binding.fixture_version === '1' &&
+      ['customer_controlled', 'opentour_managed'].includes(binding.mode) &&
+      binding.test_id.startsWith(`${foundationTarget}::${binding.mode}::`));
+    const ids = bindings.map((binding: Record<string, unknown>) => binding.test_id as string).sort();
+    configuration(new Set(ids).size === count && sha(JSON.stringify(ids)) === digest);
+    groups.set(owner, ids);
+  }
+  const allIds = [...groups.get('OPE-253')!, ...groups.get('OPE-300')!].sort();
+  configuration(new Set(allIds).size === 158);
+  if (observed) {
+    configuration(observed.length === 158 && new Set(observed.map(value => value.id)).size === 158 &&
+      JSON.stringify(observed.map(value => value.id).sort()) === JSON.stringify(allIds));
+    for (const value of observed) configuration(value.file === foundationTarget &&
+      ['customer_controlled', 'opentour_managed'].includes(value.mode ?? '') &&
+      value.id.startsWith(`${foundationTarget}::${value.mode}::`));
+  }
+  const bytes = ownedBytes(root, `${foundationRoot}/testing/overlay-baseline-review.json`, 32768);
+  configuration(sha(bytes) === '7fbcd3ce1d2eb362f2d608efe9a9627407d278e9341aae7785fe78b2a63a5d71');
+  const review = record(JSON.parse(bytes.toString('utf8')));
+  configuration(Object.keys(review).sort().join() === ['schema_version', 'issue_key', 'logical_key', 'spec_sha256',
+    'design_image_sha256', 'browser_baseline_status', 'max_diff_pixels', 'threshold', 'masks', 'images',
+    'independent_browser_baseline_review'].sort().join());
+  configuration(review.schema_version === 'opentour.overlay-baseline-review.v1' && review.issue_key === 'OPE-300' &&
+    review.logical_key === overlaySpecification.logical_key && review.spec_sha256 === overlaySpecification.spec_sha256 &&
+    review.design_image_sha256 === 'a048ee48055c5a3de9089331e41a9e91aa0d64106dde8f8e065a3bd2e093b79d' &&
+    review.browser_baseline_status === 'APPROVED' && review.max_diff_pixels === 0 && review.threshold === 0 &&
+    Array.isArray(review.masks) && review.masks.length === 0);
+  const approval = record(review.independent_browser_baseline_review);
+  configuration(Object.keys(approval).sort().join() === ['reviewer', 'source_commit', 'review_sha256', 'baseline_authoring_nonce'].sort().join() &&
+    approval.reviewer === 'root-independent-Codex' && approval.source_commit === '7c68462c06101d727c2a1f88d3b37f545b16f169' &&
+    approval.review_sha256 === '0370c59eb923acfdfeba0e875fef3f7e7c98a1d1ed2708347798ee8c5f864ad0' && approval.baseline_authoring_nonce === '3d93df6163434bbc9b87841a4f27cfcf');
+  const images = record(review.images); const paths: string[] = [];
+  for (const mode of ['customer-controlled', 'opentour-managed']) for (const kind of ['dialog', 'drawer']) for (const width of [320, 768, 1280, 1440]) {
+    const path = `testing/baselines/${platform}-${mode}/overlay-${kind}-${width}.png`; paths.push(path);
+    configuration(images[path] === sha(ownedBytes(root, `${foundationRoot}/${path}`, 4 * 1024 * 1024)));
+  }
+  configuration(Object.keys(images).sort().join() === paths.sort().join());
+  return { ...overlaySpecification, test_ids: groups.get('OPE-300')!, baseline_manifest_sha256: sha(bytes) };
+}
+
 function descendants(pid: number): Map<number, string> {
   const rows = execFileSync('ps', ['-axo', 'pid=,ppid=,lstart='], { encoding: 'utf8', timeout: 2000 }).trim().split('\n').map(line => { const match = /^\s*(\d+)\s+(\d+)\s+(.+)$/.exec(line); return match ? { pid: Number(match[1]), parent: Number(match[2]), stamp: match[3] } : null; }).filter(row => row !== null);
   const result = new Map<number, string>(); let changed = true;
@@ -117,6 +206,7 @@ export async function executeBrowser(options: { root: string; target: string; de
   const report: Report = { schema_version: 'opentour.test-result.v1', runner: 'playwright', target, binding_nonce: nonce, kind: 'simulated', mode: null, collected: 0, passed: 0, failed: 0, skipped: 0, tests: [], status: 'FAIL', reason_code: 'INVALID_CONFIGURATION', cleanup_complete: true };
   let code = 2;
   let presentationMetadata: Record<string, unknown> | undefined;
+  let componentMetadata: ReturnType<typeof overlayMetadata> | undefined;
   let server: { origin: string; close(): Promise<boolean> } | undefined;
   let runDirectory = '';
   let artifactDirectory = '';
@@ -136,7 +226,10 @@ export async function executeBrowser(options: { root: string; target: string; de
     const applicationRoot = join(root, foundation ? `${foundationRoot}/testing` : harness, probe === 'missing_application' ? 'absent-application' : '');
     const applicationFiles = foundation ? ['index.html', 'gallery.tsx', 'server.ts', 'baseline-review.json', '../index.tsx', '../../../../styles/fonts/Geist.woff2', '../../../../styles/fonts/GeistMono.woff2', '../../../../styles/fonts/source.json'] : ['index.html', 'client.ts', 'server.ts', 'contracts.ts', 'assets/inter-latin-400-normal.woff2'];
     if (applicationFiles.some(file => !existsSync(join(applicationRoot, file)))) throw new Error('MISSING_APPLICATION');
-    if (foundation) { try { presentationMetadata = foundationMetadata(root, options.baselineReview); } catch { throw new Error('INVALID_CONFIGURATION'); } }
+    if (foundation) {
+      try { presentationMetadata = foundationMetadata(root, options.baselineReview); componentMetadata = overlayMetadata(root); }
+      catch { throw new Error('INVALID_CONFIGURATION'); }
+    }
     const browserDirectory = probe === 'missing_browser' ? join(dirname(destination), 'absent-browser-cache') : join(root, '.toolchain/playwright');
     process.env.PLAYWRIGHT_BROWSERS_PATH = browserDirectory;
     const require = createRequire(join(root, 'package.json'));
@@ -233,6 +326,16 @@ export async function executeBrowser(options: { root: string; target: string; de
           code = 1; report.status = 'FAIL'; report.reason_code = 'RUNNER_ERROR';
         }
         Object.assign(evidence, current);
+        evidence.component_specifications = [componentMetadata];
+        try {
+          const component = overlayMetadata(root, report.tests);
+          if (JSON.stringify(component) !== JSON.stringify(componentMetadata)) {
+            code = 1; report.status = 'FAIL'; report.reason_code = 'RUNNER_ERROR';
+          } else evidence.component_specifications = [component];
+        } catch {
+          // Keep the actual failed report/artifacts; invalid attribution cannot produce PASS.
+          code = 1; report.status = 'FAIL'; report.reason_code = 'RUNNER_ERROR';
+        }
       }
       writeFileSync(join(artifactDirectory, 'evidence.json'), JSON.stringify(evidence, null, 2));
       } catch { code = 1; report.status = 'FAIL'; report.reason_code = 'RUNNER_ERROR'; }
