@@ -128,8 +128,12 @@ function record(value: unknown): Record<string, unknown> {
   return value as Record<string, unknown>;
 }
 
-/** Finite child attribution: exact reviewed IDs, not title prefixes or a new outer profile. */
-export function overlayMetadata(root: string, observed?: ReadonlyArray<Pick<Case, 'id' | 'file' | 'mode'>>) {
+/**
+ * Finite child attribution: exact reviewed IDs, not title prefixes or a new outer profile.
+ * `platform` names the baseline directory to verify. The browser runner always uses its own host,
+ * which is also the platform Playwright compares against; only unit fixtures name one explicitly.
+ */
+export function overlayMetadata(root: string, observed?: ReadonlyArray<Pick<Case, 'id' | 'file' | 'mode'>>, platform: NodeJS.Platform = process.platform) {
   const manifest = JSON.parse(ownedBytes(root, 'docs/specification/manifest.json', 8 * 1024 * 1024).toString('utf8'));
   configuration(Array.isArray(manifest.test_bindings) && Array.isArray(manifest.source_projection?.issues));
   const child = manifest.source_projection.issues.filter((value: Record<string, unknown>) => value.issue_key === 'OPE-300');
@@ -180,7 +184,7 @@ export function overlayMetadata(root: string, observed?: ReadonlyArray<Pick<Case
     approval.review_sha256 === '0370c59eb923acfdfeba0e875fef3f7e7c98a1d1ed2708347798ee8c5f864ad0' && approval.baseline_authoring_nonce === '3d93df6163434bbc9b87841a4f27cfcf');
   const images = record(review.images); const paths: string[] = [];
   for (const mode of ['customer-controlled', 'opentour-managed']) for (const kind of ['dialog', 'drawer']) for (const width of [320, 768, 1280, 1440]) {
-    const path = `testing/baselines/${process.platform}-${mode}/overlay-${kind}-${width}.png`; paths.push(path);
+    const path = `testing/baselines/${platform}-${mode}/overlay-${kind}-${width}.png`; paths.push(path);
     configuration(images[path] === sha(ownedBytes(root, `${foundationRoot}/${path}`, 4 * 1024 * 1024)));
   }
   configuration(Object.keys(images).sort().join() === paths.sort().join());
