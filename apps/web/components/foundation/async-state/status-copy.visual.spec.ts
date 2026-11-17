@@ -50,7 +50,9 @@ test.beforeAll(async () => {
   const js = bundle.output.find(asset => asset.type === 'chunk');
   if (!js) throw new Error('Missing fixture bundle.');
   html = '<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">' +
-    '<style>body{margin:0} main{display:grid;gap:16px;padding:16px}.ot-notice{max-width:440px}.ot-toast{max-width:360px}</style>' +
+    // The native frame has an opaque surface. Paint it in the document so rounded
+    // edges blend against that surface during rasterization.
+    '<style>html{background:var(--ot-surface-base)}body{margin:0} main{display:grid;gap:16px;padding:16px}.ot-notice{max-width:440px}.ot-toast{max-width:360px}</style>' +
     '<main></main><script>' + js.code.replaceAll('</script', '<\\/script') + '</script>';
 });
 
