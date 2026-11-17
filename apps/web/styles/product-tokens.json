@@ -31,6 +31,7 @@
     "text-inverse": "#ffffff",
     "text-link": "#245bee",
     "border-default": "#e3e8f0",
+    "border-control": "#626f84",
     "success-background": "#dff5eb",
     "success-text": "#216849",
     "learning-background": "#eee8ff",
@@ -40,7 +41,11 @@
     "failure-background": "#ffe8e3",
     "failure-text": "#aa453a",
     "unknown-background": "#edf0f5",
-    "unknown-text": "#5a6880"
+    "unknown-text": "#5a6880",
+    "series-mint": "#7dcead",
+    "series-lilac": "#b7a1ed",
+    "series-amber": "#edc36a",
+    "series-coral": "#efa495"
   },
   "spacing_px": [
     0,
@@ -62,7 +67,8 @@
     6,
     8,
     12,
-    16
+    16,
+    999
   ],
   "typography": {
     "display": {
@@ -100,6 +106,18 @@
       "weight": 400,
       "size_px": 12,
       "line_height_px": 18
+    },
+    "small-strong": {
+      "family": "Geist",
+      "weight": 500,
+      "size_px": 12,
+      "line_height_px": 18
+    },
+    "metric": {
+      "family": "Geist",
+      "weight": 500,
+      "size_px": 32,
+      "line_height_px": 38
     },
     "mono": {
       "family": "Geist Mono",

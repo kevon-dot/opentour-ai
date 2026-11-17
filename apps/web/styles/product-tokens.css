@@ -12,6 +12,7 @@
   --ot-text-inverse: #ffffff;
   --ot-text-link: #245bee;
   --ot-border-default: #e3e8f0;
+  --ot-border-control: #626f84;
   --ot-success-background: #dff5eb;
   --ot-success-text: #216849;
   --ot-learning-background: #eee8ff;
@@ -22,6 +23,10 @@
   --ot-failure-text: #aa453a;
   --ot-unknown-background: #edf0f5;
   --ot-unknown-text: #5a6880;
+  --ot-series-mint: #7dcead;
+  --ot-series-lilac: #b7a1ed;
+  --ot-series-amber: #edc36a;
+  --ot-series-coral: #efa495;
   --ot-space-0: 0px;
   --ot-space-2: 2px;
   --ot-space-4: 4px;
@@ -40,6 +45,7 @@
   --ot-radius-8: 8px;
   --ot-radius-12: 12px;
   --ot-radius-16: 16px;
+  --ot-radius-999: 999px;
   --ot-type-display-size: 2rem;
   --ot-type-display-line: 2.5rem;
   --ot-type-display-weight: 600;
@@ -58,6 +64,12 @@
   --ot-type-small-size: 0.75rem;
   --ot-type-small-line: 1.125rem;
   --ot-type-small-weight: 400;
+  --ot-type-small-strong-size: 0.75rem;
+  --ot-type-small-strong-line: 1.125rem;
+  --ot-type-small-strong-weight: 500;
+  --ot-type-metric-size: 2rem;
+  --ot-type-metric-line: 2.375rem;
+  --ot-type-metric-weight: 500;
   --ot-type-mono-size: 0.75rem;
   --ot-type-mono-line: 1.125rem;
   --ot-type-mono-weight: 400;
