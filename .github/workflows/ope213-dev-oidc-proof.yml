@@ -1,0 +1,19 @@
+name: OPE-213 dev OIDC proof
+
+'on':
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  deploy-probe:
+    if: github.repository_id == '1455972360' && github.ref == 'refs/heads/main'
+    permissions:
+      id-token: write
+    uses: kevon-dot/opentour-ai/.github/workflows/ope213-dev-oidc-deploy-probe.yml@58d4092cbee5f1f684031768cd908e73a0d95e0a
+
+  migration-probe:
+    if: github.repository_id == '1455972360' && github.ref == 'refs/heads/main'
+    permissions:
+      id-token: write
+    uses: kevon-dot/opentour-ai/.github/workflows/ope213-dev-oidc-migration-probe.yml@58d4092cbee5f1f684031768cd908e73a0d95e0a
