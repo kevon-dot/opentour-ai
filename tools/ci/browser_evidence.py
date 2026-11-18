@@ -12,6 +12,8 @@ from typing import Any
 from tools.public_content_check import MAX_FILE_BYTES, digest, inspect_bytes, load_policy
 
 PRESENTATION_TARGETS = {
+    "apps/web/components/foundation/data-display/chart-evidence.visual.spec.ts": "OPE-303",
+    "apps/web/components/foundation/data-display/table-populations.visual.spec.ts": "OPE-305",
     "apps/web/components/foundation/data-display/metric-semantics.visual.spec.ts": "OPE-304",
     "apps/web/components/foundation/async-state/status-copy.visual.spec.ts": "OPE-306",
     "apps/web/components/foundation/async-state/operation-state.visual.spec.ts": "OPE-308",
@@ -163,6 +165,29 @@ def verify_scoped_presentation(root: Path, value: dict[str, Any]) -> None:
             or {(int(case[1]), int(case[2]), case[3]) for case in cases if case} != expected
         ):
             raise ValueError("Metric presentation capture inventory mismatch")
+    elif value["issue_key"] == "OPE-303":
+        expected_charts = {
+            f"charts-{width}-{scale}.png" for width in widths for scale in (100, 200)
+        }
+        if (
+            len(images) != len(expected_charts)
+            or {Path(name).name for name in images} != expected_charts
+        ):
+            raise ValueError("Chart presentation capture inventory mismatch")
+    elif value["issue_key"] == "OPE-305":
+        states = {"populated", "partial", "empty", "filtered-to-nothing", "navigation", "query"}
+        expected_tables = {
+            (width, scale, state) for width in widths for scale in (100, 200) for state in states
+        }
+        captures = [
+            re.search(
+                r"(320|768|1280|1440)px-and-(100|200)-text-presentation/([a-z-]+)\.png$", name
+            )
+            for name in images
+        ]
+        actual_tables = {(int(case[1]), int(case[2]), case[3]) for case in captures if case}
+        if len(images) != len(expected_tables) or actual_tables != expected_tables:
+            raise ValueError("Table presentation capture inventory mismatch")
     elif value["issue_key"] == "OPE-308":
         expected_names = {
             f"{state}-{width}-{scale}x.png"
