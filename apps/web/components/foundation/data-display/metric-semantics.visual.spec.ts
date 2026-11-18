@@ -2,7 +2,7 @@ import { test, expect, type Page } from '@playwright/test';
 import { join } from 'node:path';
 import { writeFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
-import { build } from 'vite';
+import { buildInlineFixture } from '../../../tests/fixtures/presentation/build.ts';
 import type { MetricSemanticsProps } from './metric-semantics.types';
 
 const context = {
@@ -128,32 +128,16 @@ let styles: string;
 test.beforeAll(async () => {
   // Bundle the real component and its pinned local font without starting a server.
   const rowsForSource = sourceFixtures.map(row => row.props);
-  const root = join(process.cwd(), 'apps/web');
-  const entry = join(root, 'metric-browser-fixture.tsx');
-  const result = await build({
-    root, configFile: false, envFile: false, publicDir: false, logLevel: 'error',
-    oxc: { jsx: { runtime: 'automatic' } },
-    plugins: [{
-      name: 'metric-fixture', resolveId: id => id === entry ? entry : null,
-      load: id => id === entry ? `
-        import { createRoot } from 'react-dom/client';
-        import { MetricSemantics } from './components/foundation/data-display/metric-semantics';
-        const fixtures = document.querySelector('main').dataset.gallery === 'source'
-          ? ${JSON.stringify(rowsForSource)} : ${JSON.stringify(fixtures)};
-        createRoot(document.querySelector('main')).render(
-          <>{fixtures.map((props,i) => <MetricSemantics key={i} {...props} />)}</>
-        );` : null,
-    }],
-    build: { write: false, lib: { entry, name: 'MetricFixture', formats: ['iife'] } },
-    define: { 'process.env.NODE_ENV': JSON.stringify('production') },
-  });
-  const bundle = Array.isArray(result) ? result[0] : result;
-  if (!('output' in bundle)) throw new Error('Missing metric fixture bundle');
-  const js = bundle.output.find(item => item.type === 'chunk');
-  const css = bundle.output.find(item => item.type === 'asset' && item.fileName.endsWith('.css'));
-  if (!js || js.type !== 'chunk' || !css || css.type !== 'asset') throw new Error('Missing metric fixture assets');
-  script = js.code;
-  styles = String(css.source);
+  const output = await buildInlineFixture(join(process.cwd(), 'apps/web/metric-browser-fixture.tsx'), 'iife', `
+    import { createRoot } from 'react-dom/client';
+    import { MetricSemantics } from './components/foundation/data-display/metric-semantics';
+    const fixtures = document.querySelector('main').dataset.gallery === 'source'
+      ? ${JSON.stringify(rowsForSource)} : ${JSON.stringify(fixtures)};
+    createRoot(document.querySelector('main')).render(
+      <>{fixtures.map((props,i) => <MetricSemantics key={i} {...props} />)}</>
+    );
+  `);
+  script = output.script; styles = output.css;
 });
 
 async function openGallery(page: Page, width: number, scale: number, gallery: 'core' | 'source') {

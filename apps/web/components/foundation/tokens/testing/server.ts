@@ -1,14 +1,54 @@
-import { build } from 'vite';
+import { buildHostedFixture } from '../../../../tests/fixtures/presentation/build.ts';
 import { createServer } from 'node:http';
 import type { Socket } from 'node:net';
-import { lstat, realpath, mkdtemp, rm } from 'node:fs/promises';
-import { dirname, extname, join, resolve } from 'node:path';
+import { lstat, realpath, mkdtemp, readFile, rm } from 'node:fs/promises';
+import { dirname, extname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const contentTypes: Record<string, string> = {
   '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8',
   '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml', '.woff2': 'font/woff2',
 };
+
+async function buildGalleryAssets(output: string, operationFixture: boolean) {
+  const testing = dirname(fileURLToPath(import.meta.url));
+  const source = operationFixture ? fileURLToPath(new URL('../../../../tests/fixtures/presentation/', import.meta.url)) : testing;
+  const entryFile = operationFixture ? 'operation-state.tsx' : 'gallery.tsx';
+  const result = await buildHostedFixture(join(source, entryFile), output);
+  const assets = new Map<string, { bytes: Uint8Array; type: string }>();
+  let totalBytes = 0;
+  function addAsset(path: string, bytes: Uint8Array) {
+    const url = `/${path}`;
+    if (path.split('/').some(part => !part || part === '.' || part === '..') ||
+      path.includes('\\') || assets.has(url)) throw new Error('Invalid build asset');
+    const type = contentTypes[extname(path)];
+    totalBytes += bytes.length;
+    if (!type || totalBytes > 4 * 1024 * 1024) throw new Error('Unexpected build asset');
+    assets.set(url, { bytes, type });
+  }
+  let script = '';
+  let stylesheet = '';
+  for (const file of result.outputFiles) {
+    const path = relative(output, file.path);
+    addAsset(path, file.contents);
+    if (extname(path) === '.js') script = path;
+    if (extname(path) === '.css') stylesheet = path;
+  }
+  const html = await readFile(join(source, 'index.html'), 'utf8');
+  const entry = `<script type="module" src="./${entryFile}"></script>`;
+  if (!script || !stylesheet || !html.includes(entry) || !html.includes('</head>')) {
+    throw new Error('Missing compiled gallery');
+  }
+  addAsset('index.html', Buffer.from(html.replace(entry, '').replace('</head>',
+    `<script type="module" crossorigin src="/${script}"></script>` +
+    `<link rel="stylesheet" crossorigin href="/${stylesheet}"></head>`)));
+
+  // The bundle remains in /assets/ so the component's module-relative URLs resolve below it.
+  for (const name of ['loading-light.svg', 'loading-dark.svg']) {
+    addAsset(`assets/assets/${name}`, await readFile(join(testing, '..', 'assets', name)));
+  }
+  return assets;
+}
 
 /** Test-only static host. It exposes no product API, proxy, credentials, or persistent state. */
 export async function startFoundationServer(runId: string, outputDirectory: string, operationFixture = false): Promise<{
@@ -34,30 +74,7 @@ export async function startFoundationServer(runId: string, outputDirectory: stri
     return clean;
   })();
   try {
-    const result = await build({
-      root: operationFixture ? fileURLToPath(new URL('../../../../tests/fixtures/presentation/', import.meta.url)) : dirname(fileURLToPath(import.meta.url)), configFile: false, envFile: false,
-      publicDir: false, cacheDir: join(owned, 'cache'), logLevel: 'silent',
-      build: { write: false, outDir: join(owned, 'output'), emptyOutDir: false,
-        assetsInlineLimit: 0, sourcemap: false, minify: true, target: 'es2023' },
-      // JSX transformation is automatic; no React development server or HMR runtime is used.
-      oxc: { jsx: { runtime: 'automatic' } },
-    });
-    const bundles = Array.isArray(result) ? result : [result];
-    const assets = new Map<string, { bytes: Buffer; type: string }>();
-    let bytes = 0;
-    for (const bundle of bundles) {
-      if (!('output' in bundle)) { await bundle.close(); throw new Error('Unexpected build watcher'); }
-      for (const item of bundle.output) {
-        if (item.fileName.split('/').some(part => !part || part === '.' || part === '..') ||
-          item.fileName.includes('\\') || assets.has(`/${item.fileName}`)) throw new Error('Invalid build asset');
-        const payload = item.type === 'chunk' ? Buffer.from(item.code) : Buffer.from(item.source);
-        bytes += payload.length;
-        const type = contentTypes[extname(item.fileName)];
-        if (!type || bytes > 4 * 1024 * 1024) throw new Error('Unexpected build asset');
-        assets.set(`/${item.fileName}`, { bytes: payload, type });
-      }
-    }
-    if (!assets.has('/index.html')) throw new Error('Missing compiled gallery');
+    const assets = await buildGalleryAssets(join(owned, 'output'), operationFixture);
     let origin = '';
     server.requestTimeout = 5000; server.headersTimeout = 5000; server.keepAliveTimeout = 1000;
     server.on('connection', socket => { sockets.add(socket); socket.once('close', () => sockets.delete(socket)); });

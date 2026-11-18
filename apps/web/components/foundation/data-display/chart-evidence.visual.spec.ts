@@ -1,6 +1,6 @@
 import { test, expect } from '@playwright/test';
 import { join } from 'node:path';
-import { build } from 'vite';
+import { buildInlineFixture } from '../../../tests/fixtures/presentation/build.ts';
 import type { EvidenceCoverageProps, EvidenceStatementTone, RateComparisonProps, SignedBarsProps } from './chart-evidence.types';
 
 const coverage: EvidenceCoverageProps = {
@@ -37,35 +37,18 @@ const notices: [EvidenceStatementTone, string, string][] = [
 let script: string;
 let styles: string;
 test.beforeAll(async () => {
-  // Bundle the real component and its pinned local font without starting a server.
-  const root = join(process.cwd(), 'apps/web');
-  const entry = join(root, 'chart-browser-fixture.tsx');
-  const result = await build({
-    root, configFile: false, envFile: false, publicDir: false, logLevel: 'error',
-    oxc: { jsx: { runtime: 'automatic' } },
-    plugins: [{
-      name: 'chart-fixture', resolveId: id => id === entry ? entry : null,
-      load: id => id === entry ? `
-        import { createRoot } from 'react-dom/client';
-        import { ChartEvidenceNotice, EvidenceCoverage, RateComparison, SignedBars } from './components/foundation/data-display/chart-evidence';
-        const boards = ${JSON.stringify(notices)};
-        createRoot(document.querySelector('main')).render(<>
-          <EvidenceCoverage {...${JSON.stringify(coverage)}} />
-          <RateComparison {...${JSON.stringify(rate)}} />
-          <SignedBars {...${JSON.stringify(signed)}} />
-          {boards.map(([tone, headline, body]) => <ChartEvidenceNotice key={headline} {...{tone,headline,details:[body]}} />)}
-        </>        );` : null,
-    }],
-    build: { write: false, lib: { entry, name: 'ChartFixture', formats: ['iife'] } },
-    define: { 'process.env.NODE_ENV': JSON.stringify('production') },
-  });
-  const bundle = Array.isArray(result) ? result[0] : result;
-  if (!('output' in bundle)) throw new Error('Missing chart fixture bundle');
-  const js = bundle.output.find(item => item.type === 'chunk');
-  const css = bundle.output.find(item => item.type === 'asset' && item.fileName.endsWith('.css'));
-  if (!js || js.type !== 'chunk' || !css || css.type !== 'asset') throw new Error('Missing chart fixture assets');
-  script = js.code;
-  styles = String(css.source);
+  const output = await buildInlineFixture(join(process.cwd(), 'apps/web/chart-browser-fixture.tsx'), 'iife', `
+    import { createRoot } from 'react-dom/client';
+    import { ChartEvidenceNotice, EvidenceCoverage, RateComparison, SignedBars } from './components/foundation/data-display/chart-evidence';
+    const boards = ${JSON.stringify(notices)};
+    createRoot(document.querySelector('main')).render(<>
+      <EvidenceCoverage {...${JSON.stringify(coverage)}} />
+      <RateComparison {...${JSON.stringify(rate)}} />
+      <SignedBars {...${JSON.stringify(signed)}} />
+      {boards.map(([tone, headline, body]) => <ChartEvidenceNotice key={headline} {...{tone,headline,details:[body]}} />)}
+    </>);
+  `);
+  script = output.script; styles = output.css;
 });
 
 for (const width of [320, 768, 1280, 1440]) {
