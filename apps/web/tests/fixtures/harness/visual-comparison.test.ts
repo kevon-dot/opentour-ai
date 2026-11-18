@@ -1,4 +1,5 @@
-import { describe, expect, it } from 'vitest';
+import assert from 'node:assert/strict';
+import { describe, it } from 'node:test';
 import { readFileSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -22,10 +23,10 @@ describe('BH-VISUAL-POLICY: exact reviewed rounded-border alternative', () => {
     const bytes = readFileSync(`${directory}${path}`);
     const baseline = decodePng(bytes);
     it(`${path}: binds the original image and accepts only the complete alternate`, () => {
-      expect(createHash('sha256').update(bytes).digest('hex')).toBe(binding.baseline_sha256);
-      expect(comparePixels(baseline, baseline, policy.vector)).toMatchObject({ variant: 'baseline', changed_pixels: 0 });
-      expect(comparePixels(baseline, alternate(baseline), policy.vector)).toEqual({ variant: 'reviewed_corner_vector', changed_pixels: 14, bounds: { min_x: 290, min_y: 627, max_x: 299, max_y: 636 } });
-      expect(comparePixels(baseline, alternate(baseline)).variant).toBeNull();
+      assert.equal(createHash('sha256').update(bytes).digest('hex'), binding.baseline_sha256);
+      assert.partialDeepStrictEqual(comparePixels(baseline, baseline, policy.vector), { variant: 'baseline', changed_pixels: 0 });
+      assert.deepEqual(comparePixels(baseline, alternate(baseline), policy.vector), { variant: 'reviewed_corner_vector', changed_pixels: 14, bounds: { min_x: 290, min_y: 627, max_x: 299, max_y: 636 } });
+      assert.equal(comparePixels(baseline, alternate(baseline)).variant, null);
     });
     it(`${path}: rejects a subset, unrelated corner change, larger delta and alpha change`, () => {
       const point = policy.vector[0]; const offset = (point.y * baseline.width + point.x) * 4;
@@ -33,24 +34,24 @@ describe('BH-VISUAL-POLICY: exact reviewed rounded-border alternative', () => {
       const unrelated = alternate(baseline); unrelated.data[(630 * baseline.width + 295) * 4]--;
       const larger = alternate(baseline); larger.data[offset + 1]--;
       const alpha = alternate(baseline); alpha.data[offset + 3]--;
-      for (const image of [partial, unrelated, larger, alpha]) expect(comparePixels(baseline, image, policy.vector).variant).toBeNull();
+      for (const image of [partial, unrelated, larger, alpha]) assert.equal(comparePixels(baseline, image, policy.vector).variant, null);
     });
     it(`${path}: rejects any outside change and mismatched image dimensions`, () => {
       const changed = alternate(baseline); changed.data[0]--;
-      expect(comparePixels(baseline, changed, policy.vector).variant).toBeNull();
-      expect(comparePixels(baseline, { ...baseline, width: 321 }, policy.vector).variant).toBeNull();
-      expect(comparePixels(baseline, { ...baseline, data: baseline.data.slice(4) }, policy.vector).variant).toBeNull();
+      assert.equal(comparePixels(baseline, changed, policy.vector).variant, null);
+      assert.equal(comparePixels(baseline, { ...baseline, width: 321 }, policy.vector).variant, null);
+      assert.equal(comparePixels(baseline, { ...baseline, data: baseline.data.slice(4) }, policy.vector).variant, null);
     });
   }
   it('keeps every other approved image exact', () => {
     const review = JSON.parse(readFileSync(`${directory}baseline-review.json`, 'utf8'));
-    expect(createHash('sha256').update(policyBytes).digest('hex')).toBe(review.reviewed_alternate_policy.sha256);
+    assert.equal(createHash('sha256').update(policyBytes).digest('hex'), review.reviewed_alternate_policy.sha256);
     const strictPaths = Object.keys(review.images).filter(path => !(path in policy.images));
-    expect(strictPaths).toHaveLength(14);
+    assert.equal((strictPaths)?.length, 14);
     for (const path of strictPaths) {
       const expected = decodePng(readFileSync(`${directory}${path}`));
       const changed = copy(expected); changed.data[0]--;
-      expect(comparePixels(expected, changed).variant).toBeNull();
+      assert.equal(comparePixels(expected, changed).variant, null);
     }
   });
   it('rejects masks, scope expansion, duplicate points and widened channel tolerances', () => {
@@ -62,7 +63,7 @@ describe('BH-VISUAL-POLICY: exact reviewed rounded-border alternative', () => {
       (value: typeof policy) => { value.vector[0].delta_rgba[3] = -1; },
     ]) {
       const value = structuredClone(policy); mutate(value);
-      expect(() => parsePolicy(Buffer.from(JSON.stringify(value)))).toThrow();
+      assert.throws(() => parsePolicy(Buffer.from(JSON.stringify(value))));
     }
   });
   it('binds retained numeric results to the exact raw PNG and rejects tampering or missing files', () => {
@@ -75,17 +76,17 @@ describe('BH-VISUAL-POLICY: exact reviewed rounded-border alternative', () => {
       const value = { mode: 'customer_controlled', expected_rejection: true, actual_sha256: pngHash, variant: null, changed_pixels: 1, bounds: { min_x: 0, min_y: 0, max_x: 0, max_y: 0 } };
       const bytes = Buffer.from(JSON.stringify(value)); writeFileSync(join(root, path), bytes); writeFileSync(join(root, pngPath), png);
       const output = { path, sha256: createHash('sha256').update(bytes).digest('hex') }; const image = { path: pngPath, sha256: pngHash };
-      expect(collectVisualComparisons(root, [output, image])[0].comparison).toEqual(value);
-      expect(() => collectVisualComparisons(root, [output])).toThrow();
-      expect(() => collectVisualComparisons(root, [output, output, image])).toThrow();
-      expect(() => collectVisualComparisons(root, [output, { ...image, sha256: '0'.repeat(64) }])).toThrow();
+      assert.deepEqual(collectVisualComparisons(root, [output, image])[0].comparison, value);
+      assert.throws(() => collectVisualComparisons(root, [output]));
+      assert.throws(() => collectVisualComparisons(root, [output, output, image]));
+      assert.throws(() => collectVisualComparisons(root, [output, { ...image, sha256: '0'.repeat(64) }]));
       writeFileSync(join(root, path), JSON.stringify({ ...value, changed_pixels: 0 }));
-      expect(() => collectVisualComparisons(root, [output, image])).toThrow();
+      assert.throws(() => collectVisualComparisons(root, [output, image]));
       const changed = readFileSync(join(root, path));
-      expect(() => collectVisualComparisons(root, [{ path, sha256: createHash('sha256').update(changed).digest('hex') }, image])).toThrow();
+      assert.throws(() => collectVisualComparisons(root, [{ path, sha256: createHash('sha256').update(changed).digest('hex') }, image]));
       const coercedMode = Buffer.from(JSON.stringify({ ...value, mode: ['customer_controlled'] }));
       writeFileSync(join(root, path), coercedMode);
-      expect(() => collectVisualComparisons(root, [{ path, sha256: createHash('sha256').update(coercedMode).digest('hex') }, image])).toThrow();
+      assert.throws(() => collectVisualComparisons(root, [{ path, sha256: createHash('sha256').update(coercedMode).digest('hex') }, image]));
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
   it('binds retained positive variants to the reviewed policy and correct changed-pixel count', () => {
@@ -101,9 +102,9 @@ describe('BH-VISUAL-POLICY: exact reviewed rounded-border alternative', () => {
         const bytes = Buffer.from(JSON.stringify(candidate)); writeFileSync(join(root, path), bytes);
         return collectVisualComparisons(root, [{ path, sha256: createHash('sha256').update(bytes).digest('hex') }, { path: pngPath, sha256: binding.baseline_sha256 }]);
       }
-      expect(collect(value)[0].comparison.variant).toBe('baseline');
-      expect(() => collect({ ...value, policy_sha256: '0'.repeat(64) })).toThrow();
-      expect(() => collect({ ...value, variant: 'reviewed_corner_vector' })).toThrow();
+      assert.equal(collect(value)[0].comparison.variant, 'baseline');
+      assert.throws(() => collect({ ...value, policy_sha256: '0'.repeat(64) }));
+      assert.throws(() => collect({ ...value, variant: 'reviewed_corner_vector' }));
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
 });

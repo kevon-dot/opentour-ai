@@ -1,6 +1,6 @@
 import { expect, test, type Locator, type Page } from '@playwright/test';
 import { join } from 'node:path';
-import { build } from 'vite';
+import { buildInlineFixture } from '../../../tests/fixtures/presentation/build.ts';
 
 const widths = [320, 768, 1280, 1440];
 const helper = 'Used for each generated run.';
@@ -21,20 +21,8 @@ const native = {
 let script: string;
 let styles: string;
 test.beforeAll(async () => {
-  const root = join(process.cwd(), 'apps/web');
-  const result = await build({
-    root, configFile: false, envFile: false, publicDir: false, logLevel: 'error',
-    oxc: { jsx: { runtime: 'automatic' } },
-    build: { write: false, lib: { entry: join(root, 'tests/fixtures/presentation/text-field.tsx'), formats: ['es'] } },
-    define: { 'process.env.NODE_ENV': JSON.stringify('production') },
-  });
-  const bundle = Array.isArray(result) ? result[0] : result;
-  if (!('output' in bundle)) throw new Error('Missing text field gallery');
-  const js = bundle.output.find(item => item.type === 'chunk');
-  const css = bundle.output.find(item => item.type === 'asset' && item.fileName.endsWith('.css'));
-  if (!js || js.type !== 'chunk' || !css || css.type !== 'asset') throw new Error('Missing text field gallery assets');
-  script = js.code;
-  styles = String(css.source);
+  const output = await buildInlineFixture(join(process.cwd(), 'apps/web/tests/fixtures/presentation/text-field.tsx'), 'esm');
+  script = output.script; styles = output.css;
 });
 
 async function open(page: Page, width: number, scale: number) {

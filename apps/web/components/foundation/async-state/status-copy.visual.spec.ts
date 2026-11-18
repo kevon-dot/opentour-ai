@@ -1,6 +1,6 @@
 import { test, expect, type Page } from '@playwright/test';
 import { resolve } from 'node:path';
-import { build } from 'vite';
+import { buildInlineFixture } from '../../../tests/fixtures/presentation/build.ts';
 import type { StatusCopyProps } from './status-copy.types';
 
 declare global {
@@ -18,42 +18,25 @@ let html: string;
 
 test.beforeAll(async () => {
   // Bundle the real component and its local font assets into an offline document.
-  const root = process.cwd();
-  const entry = resolve(root, 'apps/web/components/foundation/async-state/fixture-entry.tsx');
-  const bundles = await build({
-    root, configFile: false, publicDir: false, envFile: false, logLevel: 'silent',
-    oxc: { jsx: { runtime: 'automatic' } },
-    plugins: [{ name: 'finite-status-fixture', resolveId(id) { if (id === entry) return entry; },
-      load(id) {
-        if (id !== entry) return;
-        return `
-          import { createRoot } from 'react-dom/client';
-          import { flushSync } from 'react-dom';
-          import { StatusCopy } from './status-copy';
-          import tokens from '../../../styles/product-tokens.css?inline';
-          import feedback from '../tokens/feedback.css?inline';
-          const styles = document.createElement('style');
-          styles.textContent = tokens + feedback; document.head.append(styles);
-          const root = createRoot(document.querySelector('main'));
-          window.showStatus = (notice, toast) => flushSync(() => root.render(<>
-            {notice && <StatusCopy key="persistent" {...notice} />}
-            {toast && <StatusCopy key="supplementary" {...toast} />}
-          </>));
-        `;
-      },
-    }],
-    build: { write: false, assetsInlineLimit: 1024 * 1024,
-      rolldownOptions: { input: entry, output: { format: 'iife' } } },
-  });
-  const bundle = Array.isArray(bundles) ? bundles[0] : bundles;
-  if (!('output' in bundle)) throw new Error('Expected a compiled fixture.');
-  const js = bundle.output.find(asset => asset.type === 'chunk');
-  if (!js) throw new Error('Missing fixture bundle.');
+  const output = await buildInlineFixture(resolve(process.cwd(), 'apps/web/components/foundation/async-state/fixture-entry.tsx'), 'iife', `
+    import { createRoot } from 'react-dom/client';
+    import { flushSync } from 'react-dom';
+    import { StatusCopy } from './status-copy';
+    import tokens from '../../../styles/product-tokens.css?inline';
+    import feedback from '../tokens/feedback.css?inline';
+    const styles = document.createElement('style');
+    styles.textContent = tokens + feedback; document.head.append(styles);
+    const root = createRoot(document.querySelector('main'));
+    window.showStatus = (notice, toast) => flushSync(() => root.render(<>
+      {notice && <StatusCopy key="persistent" {...notice} />}
+      {toast && <StatusCopy key="supplementary" {...toast} />}
+    </>));
+  `, { requireStylesheet: false });
   html = '<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">' +
     // The native frame has an opaque surface. Paint it in the document so rounded
     // edges blend against that surface during rasterization.
     '<style>html{background:var(--ot-surface-base)}body{margin:0} main{display:grid;gap:16px;padding:16px}.ot-notice{max-width:440px}.ot-toast{max-width:360px}</style>' +
-    '<main></main><script>' + js.code.replaceAll('</script', '<\\/script') + '</script>';
+    '<main></main><script>' + output.script.replaceAll('</script', '<\\/script') + '</script>';
 });
 
 async function open(page: Page) {

@@ -25,7 +25,13 @@ def checkout(tmp_path):
     shutil.copytree(runner.ROOT / "packages/contracts", root / "packages/contracts")
     shutil.copyfile(runner.ROOT / "pyproject.toml", root / "pyproject.toml")
     (root / "tools").mkdir()
-    for name in ("__init__.py", "test_runner.py", "schema_validate.py"):
+    for name in (
+        "__init__.py",
+        "test_runner.py",
+        "schema_validate.py",
+        "web-unit-runner.mjs",
+        "web-unit-loader.mjs",
+    ):
         shutil.copyfile(runner.ROOT / "tools" / name, root / "tools" / name)
     for member in ("control-api", "cell-runtime", "audit-journal"):
         directory = root / "services" / member
@@ -74,7 +80,7 @@ class FixtureRunner:
                     }
                 ),
             )
-        if invocation.runner in {"pytest", "playwright", "vitest"}:
+        if invocation.runner in {"pytest", "playwright", "node_test"}:
             target = invocation.cwd / invocation.target
             file = (
                 invocation.target
@@ -128,25 +134,6 @@ class FixtureRunner:
                             }
                         )
                     )
-            if invocation.runner == "vitest":
-                report = {
-                    "numTotalTests": len(tests),
-                    "numPassedTests": int(self.status == "passed"),
-                    "numFailedTests": int(self.status == "failed"),
-                    "numPendingTests": int(self.status == "skipped"),
-                    "numTodoTests": 0,
-                    "success": self.status == "passed",
-                    "testResults": [
-                        {
-                            "name": str(target),
-                            "assertionResults": [
-                                {"status": self.status, "fullName": "sentinel-one"}
-                            ]
-                            if tests
-                            else [],
-                        }
-                    ],
-                }
             if self.mutate:
                 self.mutate(report, invocation)
             invocation.report.write_text(json.dumps(report))
@@ -1102,34 +1089,66 @@ def test_actual_node_network_preload_denies_tcp_dns_and_udp(checkout, operation)
     assert result.returncode != 0 and "OPENTOUR_NETWORK_DENIED" in result.stderr
 
 
-def local_vitest(invocation):
+def local_node_test(invocation):
     node = shutil.which("node")
     assert node, "Pinned Node is required; run qualified setup and use its PATH"
-    entry = runner.ROOT / "node_modules/vitest/vitest.mjs"
-    assert entry.is_file(), "Frozen Vitest installation is required; no skip/pass fallback"
+    assert (runner.ROOT / "node_modules/esbuild").is_dir(), "Frozen esbuild is required"
     (invocation.cwd / "node_modules").symlink_to(
         runner.ROOT / "node_modules", target_is_directory=True
     )
-    return runner.execute(
-        replace(invocation, argv=(node, str(entry), *invocation.argv[3:]), timeout=30)
-    )
+    return runner.execute(replace(invocation, argv=(node, *invocation.argv[1:]), timeout=30))
 
 
 @pytest.mark.parametrize(
-    "body,expected",
+    "body,expected,reason,collected",
     [
-        ("import {test,expect} from 'vitest'; test('one',()=>expect(2+2).toBe(4));", 0),
         (
-            "import {test} from 'vitest'; import net from 'node:net'; import fs from 'node:fs'; "
+            "import {test} from 'node:test'; import assert from 'node:assert/strict'; "
+            "test('one',()=>{const value: number = 2+2; assert.equal(value,4)});",
+            0,
+            None,
+            1,
+        ),
+        (
+            "import {test} from 'node:test'; import net from 'node:net'; import fs from 'node:fs'; "
             "test('network',()=>{try{net.connect(9,'127.0.0.1')}catch(error){"
             "if(error.code==='OPENTOUR_NETWORK_DENIED')fs.writeFileSync('NETWORK_DENIED','yes');"
             "throw error}});",
             1,
+            "ASSERTION_FAILED",
+            1,
         ),
-        ("import {test} from 'vitest'; test.skip('required',()=>{});", 1),
+        (
+            "import {test} from 'node:test'; test.skip('required',()=>{});",
+            1,
+            "REQUIRED_TEST_SKIPPED",
+            1,
+        ),
+        (
+            "import {test} from 'node:test'; test.todo('required',()=>{});",
+            1,
+            "REQUIRED_TEST_SKIPPED",
+            1,
+        ),
+        (
+            "import {describe} from 'node:test'; describe.skip('suite',()=>{});",
+            1,
+            "REQUIRED_TEST_SKIPPED",
+            0,
+        ),
+        (
+            "import {test} from 'node:test'; test.only('focus',()=>{});",
+            2,
+            "INVALID_CONFIGURATION",
+            1,
+        ),
+        ("export {};", 2, "NO_TESTS", 0),
+        ("throw new Error('load failed');", 2, "INVALID_CONFIGURATION", 0),
     ],
 )
-def test_actual_vitest_exact_file_network_and_required_skip(checkout, body, expected):
+def test_actual_node_test_exact_file_network_and_required_inventory(
+    checkout, body, expected, reason, collected
+):
     target = "apps/web/tests/test with spaces.test.ts"
     write(checkout, target, body)
     write(
@@ -1138,10 +1157,10 @@ def test_actual_vitest_exact_file_network_and_required_skip(checkout, body, expe
         "import fs from 'node:fs'; fs.writeFileSync('UNREQUESTED_EXECUTED','bad'); "
         "throw new Error('Unrequested test executed');",
     )
-    result = runner.run_command("test-web", [target], checkout, local_vitest)
+    result = runner.run_command("test-web", [target], checkout, local_node_test)
     assert not (checkout / "UNREQUESTED_EXECUTED").exists()
-    assert result["exit_code"] == expected, result
-    assert result["steps"][0]["tests"]["collected"] == 1
+    assert result["exit_code"] == expected and result["reason_code"] == reason, result
+    assert result["steps"][0]["tests"]["collected"] == collected
     if "net.connect" in body:
         assert (checkout / "NETWORK_DENIED").read_text() == "yes"
 
