@@ -136,7 +136,10 @@ async function record(page: Page, info: TestInfo, name: string) {
     };
   });
   const aria = await page.locator('#root').ariaSnapshot();
-  await info.attach(`geometry-${name}.json`, { body: JSON.stringify({ ...geometry, aria }, null, 2), contentType: 'application/json' });
+  const measurement = JSON.stringify({ ...geometry, aria }, null, 2);
+  // The owned reporter retains output files; JSON body attachments alone are not retained.
+  await writeFile(info.outputPath(`geometry-${name}.json`), measurement);
+  await info.attach(`geometry-${name}.json`, { body: measurement, contentType: 'application/json' });
   return { ...geometry, aria };
 }
 
@@ -263,7 +266,11 @@ for (const width of [320, 768, 1280, 1440]) for (const scale of [100, 200]) {
           for (const line of geometry.native.stackLines) expect(line!.width).toBe(outer - 32);
         } else {
           const text = geometry.headerTextWidths;
-          expect(Math.max(...text) - Math.min(...text)).toBeLessThan(0.05);
+          // Equal fractional table columns accumulate at most one 1/64px layout unit per column.
+          // At five columns, Chromium assigns the final remainder to one cell (0.0625px spread).
+          const roundingBound = columns.length / 64;
+          expect(Math.max(...text) - Math.min(...text)).toBeLessThanOrEqual(roundingBound);
+          for (const measured of text) expect(Math.abs(measured - textColumn)).toBeLessThan(roundingBound);
           expect(text[0]).toBeCloseTo(textColumn, 1);
           const header = geometry.native.gridHeaderText!;
           expect(header.start).toBeCloseTo(17, 1);

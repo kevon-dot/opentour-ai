@@ -69,7 +69,7 @@
   border: 1px solid var(--ot-border-default);
   border-radius: var(--ot-radius-12);
   background: var(--ot-surface-base);
-  overflow: clip;
+  /* Native row fills remain square and are not clipped by the rounded outer frame. */
 }
 .ot-relationship-table {
   box-sizing: border-box;
