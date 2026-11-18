@@ -12,6 +12,7 @@ from typing import Any
 from tools.public_content_check import MAX_FILE_BYTES, digest, inspect_bytes, load_policy
 
 PRESENTATION_TARGETS = {
+    "apps/web/components/foundation/forms/form-error-summary.visual.spec.ts": "OPE-321",
     "apps/web/components/foundation/forms/derived-value.visual.spec.ts": "OPE-320",
     "apps/web/components/foundation/data-display/relationship-context.visual.spec.ts": "OPE-319",
     "apps/web/components/foundation/tokens/selection-controls.visual.spec.ts": "OPE-318",
@@ -365,6 +366,18 @@ def verify_scoped_presentation(root: Path, value: dict[str, Any]) -> None:
             Path(name).name for name in images
         } != derived_expected:
             raise ValueError("Derived-value capture inventory mismatch")
+    elif value["issue_key"] == "OPE-321":
+        expected_summaries = {
+            f"form-errors-{width}-{scale}-{state}.png"
+            for width in widths
+            for scale in (100, 200)
+            for state in ("mapped", "unmapped", "form")
+        } | {"form-errors-forced-colors.png"}
+        if (
+            len(images) != len(expected_summaries)
+            or {Path(name).name for name in images} != expected_summaries
+        ):
+            raise ValueError("Form error summary capture inventory mismatch")
     elif value["issue_key"] == "OPE-303":
         expected_charts = {
             f"charts-{width}-{scale}.png" for width in widths for scale in (100, 200)

@@ -355,8 +355,9 @@ def test_exact_canonical_browser_inventory_preserved(checkout):
     manifest = runner.manifest(checkout)
     source = json.loads((checkout / runner.COMMON / "browser-suite-inventory.json").read_text())
     assert set(manifest["browser_suites"]) == set(source["paths"])
-    assert len(manifest["browser_suites"]) == source["distinct_paths"] == 75
+    assert len(manifest["browser_suites"]) == source["distinct_paths"] == 76
     sprint_profiles = {
+        "apps/web/components/foundation/forms/form-error-summary.visual.spec.ts": "OPE-321",
         "apps/web/components/foundation/forms/derived-value.visual.spec.ts": "OPE-320",
         "apps/web/components/foundation/data-display/relationship-context.visual.spec.ts": "OPE-319",
         "apps/web/components/foundation/tokens/selection-controls.visual.spec.ts": "OPE-318",

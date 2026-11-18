@@ -43,6 +43,9 @@
     "../../../tests/fixtures/presentation/relationship-context.tsx",
     "../forms/derived-value*.ts",
     "../forms/derived-value*.tsx",
-    "../../../tests/fixtures/presentation/derived-value.tsx"
+    "../../../tests/fixtures/presentation/derived-value.tsx",
+    "../forms/form-error-summary*.ts",
+    "../forms/form-error-summary*.tsx",
+    "../../../tests/fixtures/presentation/form-error-summary.tsx"
   ]
 }

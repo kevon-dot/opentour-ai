@@ -226,10 +226,13 @@
     ],
     "apps/web/components/foundation/forms/derived-value.visual.spec.ts": [
       "OPE-320"
+    ],
+    "apps/web/components/foundation/forms/form-error-summary.visual.spec.ts": [
+      "OPE-321"
     ]
   },
-  "distinct_paths": 75,
-  "issue_count": 71,
+  "distinct_paths": 76,
+  "issue_count": 72,
   "affected_old_wrapper_paths": {
     "apps/web/tests/coverage/ot-p22-c01.spec.ts": [
       "OPE-232"

@@ -21,6 +21,7 @@
     "apps/web/components/foundation/forms/dialogs-focus.visual.spec.ts",
     "apps/web/components/foundation/forms/difference-review.visual.spec.ts",
     "apps/web/components/foundation/forms/field-semantics.visual.spec.ts",
+    "apps/web/components/foundation/forms/form-error-summary.visual.spec.ts",
     "apps/web/components/foundation/forms/mutation-intent.visual.spec.ts",
     "apps/web/components/foundation/forms/permission-controls.visual.spec.ts",
     "apps/web/components/foundation/forms/single-choice-select.visual.spec.ts",
@@ -363,6 +364,10 @@
     "apps/web/components/foundation/forms/derived-value.visual.spec.ts": {
       "kind": "simulated",
       "owner": "OPE-320"
+    },
+    "apps/web/components/foundation/forms/form-error-summary.visual.spec.ts": {
+      "kind": "simulated",
+      "owner": "OPE-321"
     }
   }
 }

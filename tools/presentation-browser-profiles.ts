@@ -1,5 +1,10 @@
 /** Generated local presentation fixtures. Each executable target has exactly one child owner. */
 export const presentationSuites = new Map([
+  ['apps/web/components/foundation/forms/form-error-summary.visual.spec.ts', {
+    owner: 'OPE-321', parent: 'OPE-279', guide: '153:386', minimumTests: 13,
+    requirementIds: ['OPE-321:count-and-copy', 'OPE-321:mapped-and-unmapped', 'OPE-321:submission-focus', 'OPE-321:draft-preservation', 'OPE-321:responsive-renders'],
+    specHash: '37807ec0e39ed952fa324e2b41f0369cb8425bf944b0628784334078564a9c65',
+  }],
   ['apps/web/components/foundation/forms/derived-value.visual.spec.ts', {
     owner: 'OPE-320', parent: 'OPE-279', guide: '170:146', minimumTests: 26,
     requirementIds: ['OPE-320:implementation-scope:exact-copy', 'OPE-320:implementation-scope:clipboard-outcomes', 'OPE-320:verification-and-handoff:browser-evidence'],
