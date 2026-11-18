@@ -5,17 +5,24 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import ssl
+import threading
+from collections.abc import Callable
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from io import BytesIO
 from typing import Any
 from urllib.parse import urlencode
 
 import pytest
-from cryptography.hazmat.primitives import hashes
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec, utils
+from cryptography.x509.oid import NameOID
 from opentour_control.runners.enrollment import (
     MAX_STS_RESPONSE_BYTES,
     EnrollmentVerificationUnavailable,
+    HTTPSSTSIdentityExchange,
     InstalledCell,
     InvalidEnrollmentProof,
     IssuedChallenge,
@@ -433,7 +440,8 @@ def test_refuses_unavailable_malformed_or_redirected_sts_without_retry(
 ):
     exchange = FixtureSTSExchange(**({"body": aws_sts_xml()} | change))
     with pytest.raises(
-        EnrollmentVerificationUnavailable, match="^ENROLLMENT_VERIFICATION_UNAVAILABLE$"
+        EnrollmentVerificationUnavailable,
+        match="^ENROLLMENT_VERIFICATION_UNAVAILABLE$",
     ):
         verify_enrollment_identity(
             fixture_json(proof_for(installed, challenge)),
@@ -450,7 +458,8 @@ def test_provider_result_expires_while_waiting_for_response(installed, challenge
     times = iter((NOW, NOW + timedelta(seconds=seconds)))
     exchange = FixtureSTSExchange(aws_sts_xml())
     with pytest.raises(
-        EnrollmentVerificationUnavailable, match="^ENROLLMENT_VERIFICATION_UNAVAILABLE$"
+        EnrollmentVerificationUnavailable,
+        match="^ENROLLMENT_VERIFICATION_UNAVAILABLE$",
     ):
         verify_enrollment_identity(
             fixture_json(proof_for(installed, challenge)),
@@ -460,3 +469,283 @@ def test_provider_result_expires_while_waiting_for_response(installed, challenge
             clock=lambda: next(times),
         )
     assert len(exchange.calls) == 1
+
+
+@pytest.fixture
+def approved_wire_request(installed, challenge):
+    exchange = FixtureSTSExchange(aws_sts_xml())
+    verify_enrollment_identity(
+        fixture_json(proof_for(installed, challenge)),
+        installed=installed,
+        challenge=challenge,
+        exchange=exchange,
+        clock=lambda: NOW,
+    )
+    return exchange.calls[0]
+
+
+@pytest.fixture
+def server_trust_pem() -> bytes:
+    key = ec.derive_private_key(19, ec.SECP256R1())
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "fixture-root")])
+    return (
+        x509.CertificateBuilder()
+        .issuer_name(name)
+        .subject_name(name)
+        .public_key(key.public_key())
+        .serial_number(1)
+        .not_valid_before(NOW - timedelta(days=1))
+        .not_valid_after(NOW + timedelta(days=1))
+        .add_extension(x509.BasicConstraints(ca=True, path_length=0), critical=True)
+        .sign(key, hashes.SHA256())
+        .public_bytes(serialization.Encoding.PEM)
+    )
+
+
+class WireResponse:
+    def __init__(self, *, status: int = 200, payload: bytes = b"", headers=None) -> None:
+        self.status = status
+        self.stream = BytesIO(payload)
+        self.headers = headers or {}
+        self.read_sizes: list[int] = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        self.stream.close()
+
+    def getheader(self, name: str, default=None):
+        return self.headers.get(name, default)
+
+    def read1(self, size: int) -> bytes:
+        self.read_sizes.append(size)
+        return self.stream.read(size)
+
+
+class WireConnection:
+    def __init__(self, response: WireResponse, on_connect: Callable[[], None] = lambda: None):
+        self.response = response
+        self.on_connect = on_connect
+        self.events: list[object] = []
+        self.sock = None
+        self.closed = threading.Event()
+
+    def set_debuglevel(self, level):
+        self.events.append(("debug", level))
+
+    def settimeout(self, seconds: float) -> None:
+        assert 0 < seconds <= 60
+
+    def connect(self):
+        self.events.append("tls")
+        self.on_connect()
+        self.sock = self
+
+    def request(self, method, target, *, headers):
+        assert self.sock is not None
+        self.events.append((method, target, headers))
+
+    def getresponse(self):
+        self.events.append("response")
+        return self.response
+
+    def close(self):
+        self.closed.set()
+
+
+def use_local_tls_fixture(monkeypatch, connection: WireConnection):
+    initialized = []
+
+    def only_local_test_evidence(host, *, port, timeout, context):
+        initialized.append((host, port, timeout, context))
+        return connection
+
+    monkeypatch.setattr("http.client.HTTPSConnection", only_local_test_evidence)
+    return initialized
+
+
+def test_real_transport_requests_only_exact_presigned_sts_target(
+    installed,
+    challenge,
+    server_trust_pem,
+    monkeypatch,
+    capsys,
+    caplog,
+):
+    proof = proof_for(installed, challenge)
+    wire = WireConnection(WireResponse(payload=aws_sts_xml()))
+    calls = use_local_tls_fixture(monkeypatch, wire)
+    monkeypatch.setenv("AWS_PROFILE", "unapproved-profile")
+    monkeypatch.setenv("HTTPS_PROXY", "https://unapproved-proxy.example")
+    monkeypatch.setenv("SSL_CERT_FILE", "/unapproved/ca.pem")
+    monkeypatch.setenv("SSLKEYLOGFILE", "/unapproved/keylog")
+    transport = HTTPSSTSIdentityExchange(
+        region="us-east-1",
+        trusted_ca_pem=server_trust_pem,
+        timeout_seconds=5,
+        clock=lambda: NOW,
+    )
+    try:
+        result = verify_enrollment_identity(
+            fixture_json(proof),
+            installed=installed,
+            challenge=challenge,
+            exchange=transport,
+            clock=lambda: NOW,
+        )
+    finally:
+        transport.close()
+    assert result.iam_role_id == AWS_ROLE_ID
+    [(host, port, timeout, tls)] = calls
+    assert (host, port) == ("sts.us-east-1.amazonaws.com", 443) and 0 < timeout <= 5
+    assert tls.check_hostname and tls.verify_mode == ssl.CERT_REQUIRED
+    assert tls.minimum_version == ssl.TLSVersion.TLSv1_2 and tls.keylog_filename is None
+    assert tls.cert_store_stats()["x509_ca"] == 1
+    request = proof["signed_sts_request"]
+    expected_target = request["url"].removeprefix("https://sts.us-east-1.amazonaws.com")
+    assert wire.events == [
+        ("debug", 0),
+        "tls",
+        (
+            "GET",
+            expected_target,
+            {
+                "x-opentour-enrollment": request["binding_header"],
+                "Accept-Encoding": "identity",
+                "Connection": "close",
+            },
+        ),
+        "response",
+    ]
+    assert wire.closed.is_set()
+    assert "sentinel-token" not in caplog.text and "sentinel-token" not in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("kind", ["forged", "host-swap", "header-swap", "expiry-swap", "expired"])
+def test_transport_denies_unsealed_or_changed_wire_request_without_tls(
+    approved_wire_request,
+    server_trust_pem,
+    monkeypatch,
+    kind,
+):
+    approved = approved_wire_request
+    choices = {
+        "forged": STSIdentityRequest(approved.url, approved.binding_header, approved.expires_at),
+        "host-swap": replace(approved, url=approved.url.replace("us-east-1", "us-east-2")),
+        "header-swap": replace(approved, binding_header=b64(bytes(32))),
+        "expiry-swap": replace(approved, expires_at=approved.expires_at + timedelta(seconds=10)),
+        "expired": approved,
+    }
+    calls = use_local_tls_fixture(monkeypatch, WireConnection(WireResponse()))
+    now = approved.expires_at if kind == "expired" else NOW
+    transport = HTTPSSTSIdentityExchange(
+        region="us-east-1",
+        trusted_ca_pem=server_trust_pem,
+        timeout_seconds=5,
+        clock=lambda: now,
+    )
+    try:
+        with pytest.raises(
+            EnrollmentVerificationUnavailable, match="^ENROLLMENT_VERIFICATION_UNAVAILABLE$"
+        ):
+            transport.get_caller_identity(choices[kind], max_response_bytes=MAX_STS_RESPONSE_BYTES)
+    finally:
+        transport.close()
+    assert calls == []
+
+
+@pytest.mark.parametrize(
+    "status,headers,body,reads",
+    [
+        (302, {"Location": "https://unapproved.example"}, b"not read", 0),
+        (503, {}, b"not read", 0),
+        (200, {"Content-Encoding": "gzip"}, b"not read", 0),
+        (200, {"Content-Length": "99"}, b"not read", 0),
+        (200, {"Content-Length": "12, 12"}, b"not read", 0),
+        (200, {"Content-Length": "12", "Transfer-Encoding": "chunked"}, b"not read", 0),
+        (200, {"Transfer-Encoding": "identity"}, b"not read", 0),
+        (200, {"Content-Length": "12"}, b"partial", 2),
+        (200, {}, b"x" * 33, 1),
+    ],
+)
+def test_transport_refuses_unbounded_or_unexpected_response_without_retry(
+    approved_wire_request,
+    server_trust_pem,
+    monkeypatch,
+    status,
+    headers,
+    body,
+    reads,
+):
+    response = WireResponse(status=status, headers=headers, payload=body)
+    wire = WireConnection(response)
+    calls = use_local_tls_fixture(monkeypatch, wire)
+    transport = HTTPSSTSIdentityExchange(
+        region="us-east-1",
+        trusted_ca_pem=server_trust_pem,
+        timeout_seconds=5,
+        clock=lambda: NOW,
+    )
+    try:
+        with pytest.raises(
+            EnrollmentVerificationUnavailable, match="^ENROLLMENT_VERIFICATION_UNAVAILABLE$"
+        ):
+            transport.get_caller_identity(approved_wire_request, max_response_bytes=32)
+    finally:
+        transport.close()
+    assert len(calls) == 1 and wire.closed.is_set()
+    assert len(response.read_sizes) == reads
+    assert all(requested <= 33 for requested in response.read_sizes)
+
+
+def test_transport_timeout_never_sends_query_after_slow_tls(
+    approved_wire_request,
+    server_trust_pem,
+    monkeypatch,
+):
+    connect_started = threading.Event()
+    release = threading.Event()
+
+    def delayed_tls():
+        connect_started.set()
+        assert release.wait(3)
+
+    wire = WireConnection(WireResponse(payload=aws_sts_xml()), on_connect=delayed_tls)
+    calls = use_local_tls_fixture(monkeypatch, wire)
+    transport = HTTPSSTSIdentityExchange(
+        region="us-east-1",
+        trusted_ca_pem=server_trust_pem,
+        timeout_seconds=0.15,
+        clock=lambda: NOW,
+    )
+    try:
+        with pytest.raises(
+            EnrollmentVerificationUnavailable, match="^ENROLLMENT_VERIFICATION_UNAVAILABLE$"
+        ):
+            transport.get_caller_identity(
+                approved_wire_request, max_response_bytes=MAX_STS_RESPONSE_BYTES
+            )
+        assert connect_started.is_set()
+    finally:
+        release.set()
+        transport.close()
+    assert wire.closed.wait(3)
+    assert len(calls) == 1 and wire.events == [("debug", 0), "tls"]
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"region": "us-east-2"},
+        {"trusted_ca_pem": b"unapproved-ca"},
+        {"timeout_seconds": 61},
+        {"timeout_seconds": float("nan")},
+    ],
+)
+def test_unapproved_transport_configuration_fails_closed(server_trust_pem, change):
+    options = {"region": "us-east-1", "trusted_ca_pem": server_trust_pem, "timeout_seconds": 5}
+    with pytest.raises(
+        EnrollmentVerificationUnavailable, match="^ENROLLMENT_VERIFICATION_UNAVAILABLE$"
+    ):
+        HTTPSSTSIdentityExchange(**(options | change))

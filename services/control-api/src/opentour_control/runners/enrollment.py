@@ -5,10 +5,16 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import http.client
 import json
+import math
 import re
+import ssl
+import threading
+import time
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal, Protocol
 from urllib.parse import parse_qsl, urlsplit
@@ -21,6 +27,7 @@ from opentour_journal.crypto import canonical, raw_to_der
 from opentour_journal.models import JournalError
 
 MAX_STS_RESPONSE_BYTES = 16 * 1024
+_PROOF_ADMITTED = object()
 STS_NAMESPACE = "{https://sts.amazonaws.com/doc/2011-06-15/}"
 IAM_ROLE_NAME = r"[A-Za-z0-9_+=,.@-]{1,64}"
 STS_ROLE_SESSION_NAME = r"[A-Za-z0-9_+=,.@-]{2,64}"
@@ -54,6 +61,9 @@ class STSIdentityRequest:
     url: str = field(repr=False)
     binding_header: str = field(repr=False)
     expires_at: datetime
+    _preflight: tuple[object, str, str, datetime] | None = field(
+        default=None, repr=False, compare=False
+    )
 
 
 @dataclass(frozen=True)
@@ -265,7 +275,10 @@ def _validate_enrollment_proof(
         if not isinstance(signature, str):
             raise _deny()
         public_key.verify(raw_to_der(signature), transcript, ec.ECDSA(hashes.SHA256()))
-        return request, thumbprint
+        return replace(
+            request,
+            _preflight=(_PROOF_ADMITTED, request.url, request.binding_header, request.expires_at),
+        ), thumbprint
     except (InvalidSignature, JournalError, OverflowError, RecursionError, ValueError):
         raise _deny() from None
 
@@ -362,3 +375,165 @@ def _xml_text(element: ElementTree.Element, names: set[str]) -> dict[str, str]:
             raise ValueError
         text[name] = value.text
     return text
+
+
+class HTTPSSTSIdentityExchange:
+    """One direct TLS request per admitted proof, with a bounded local wait and response."""
+
+    def __init__(
+        self,
+        *,
+        region: str,
+        trusted_ca_pem: bytes,
+        timeout_seconds: float,
+        clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+    ) -> None:
+        try:
+            if (
+                region not in QUALIFIED_STS_HOSTS
+                or type(timeout_seconds) not in (float, int)
+                or not math.isfinite(timeout_seconds)
+                or not 0 < timeout_seconds <= 60
+            ):
+                raise ValueError
+            # Only explicitly approved server roots. No environment trust replacement,
+            # TLS key log, client certificates, credential resolver or proxy discovery.
+            tls = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+            tls.minimum_version = ssl.TLSVersion.TLSv1_2
+            tls.load_verify_locations(cadata=trusted_ca_pem.decode("ascii"))
+            if (
+                tls.verify_mode != ssl.CERT_REQUIRED
+                or not tls.check_hostname
+                or tls.cert_store_stats()["x509_ca"] == 0
+            ):
+                raise ValueError
+        except (OSError, ValueError):
+            raise EnrollmentVerificationUnavailable("ENROLLMENT_VERIFICATION_UNAVAILABLE") from None
+        self._tls, self._region, self._clock = tls, region, clock
+        self._timeout = timeout_seconds
+        self._close_lock = threading.Lock()
+        self._closed = threading.Event()
+        # Native DNS can outlive an I/O timeout. A timed-out worker keeps its slot until
+        # disconnect and rechecks the deadline before sending the proof.
+        self._slots = threading.BoundedSemaphore(4)
+        self._workers = ThreadPoolExecutor(max_workers=4, thread_name_prefix="enrollment-sts")
+
+    def close(self) -> None:
+        """Refuse new requests and close workers as their I/O returns."""
+        with self._close_lock:
+            self._closed.set()
+            self._workers.shutdown(wait=False, cancel_futures=True)
+
+    def get_caller_identity(
+        self, validated: STSIdentityRequest, *, max_response_bytes: int
+    ) -> STSIdentityResponse:
+        aborted = threading.Event()
+        try:
+            if (
+                type(validated) is not STSIdentityRequest
+                or type(max_response_bytes) is not int
+                or not 0 < max_response_bytes <= MAX_STS_RESPONSE_BYTES
+                or validated._preflight
+                != (_PROOF_ADMITTED, validated.url, validated.binding_header, validated.expires_at)
+            ):
+                raise ValueError
+            now = self._clock()
+            _validate_sts_request(
+                {"method": "GET", "url": validated.url, "binding_header": validated.binding_header},
+                validated.binding_header,
+                self._region,
+                now,
+                validated.expires_at,
+            )
+            deadline = time.monotonic() + min(
+                self._timeout, (validated.expires_at - now).total_seconds()
+            )
+            with self._close_lock:
+                if self._closed.is_set() or not self._slots.acquire(blocking=False):
+                    raise ValueError
+                try:
+                    future = self._workers.submit(
+                        self._exchange, validated, max_response_bytes, deadline, aborted
+                    )
+                except Exception:
+                    self._slots.release()
+                    raise
+                future.add_done_callback(lambda _future: self._slots.release())
+            response = future.result(timeout=self._remaining(validated, deadline, aborted))
+            self._remaining(validated, deadline, aborted)
+            return response
+        except Exception:
+            aborted.set()
+            raise EnrollmentVerificationUnavailable("ENROLLMENT_VERIFICATION_UNAVAILABLE") from None
+
+    def _remaining(
+        self, request: STSIdentityRequest, deadline: float, aborted: threading.Event
+    ) -> float:
+        remaining = min(
+            deadline - time.monotonic(), (request.expires_at - self._clock()).total_seconds()
+        )
+        if aborted.is_set() or self._closed.is_set() or remaining <= 0:
+            raise TimeoutError
+        return remaining
+
+    def _exchange(
+        self,
+        request: STSIdentityRequest,
+        limit: int,
+        deadline: float,
+        aborted: threading.Event,
+    ) -> STSIdentityResponse:
+        parts = urlsplit(request.url)
+        connection = http.client.HTTPSConnection(
+            QUALIFIED_STS_HOSTS[self._region],
+            port=443,
+            context=self._tls,
+            timeout=self._remaining(request, deadline, aborted),
+        )
+        try:
+            connection.set_debuglevel(0)
+            # TLS and SNI validation finish before the credential-bearing query is sent.
+            connection.connect()
+            if connection.sock is None:
+                raise ValueError
+            connection.sock.settimeout(self._remaining(request, deadline, aborted))
+            connection.request(
+                "GET",
+                f"{parts.path}?{parts.query}",
+                headers={
+                    "x-opentour-enrollment": request.binding_header,
+                    "Accept-Encoding": "identity",
+                    "Connection": "close",
+                },
+            )
+            with connection.getresponse() as response:
+                declared = response.getheader("Content-Length")
+                transfer = response.getheader("Transfer-Encoding")
+                if (
+                    response.status != 200
+                    or response.getheader("Content-Encoding", "identity") != "identity"
+                    or transfer not in (None, "chunked")
+                    or (
+                        declared is not None
+                        and (
+                            transfer is not None
+                            or re.fullmatch(r"[0-9]{1,8}", declared) is None
+                            or int(declared) > limit
+                        )
+                    )
+                ):
+                    raise ValueError
+                body = bytearray()
+                while True:
+                    self._remaining(request, deadline, aborted)
+                    chunk = response.read1(min(4096, limit - len(body) + 1))
+                    if not chunk:
+                        break
+                    body.extend(chunk)
+                    if len(body) > limit:
+                        raise ValueError
+                if declared is not None and len(body) != int(declared):
+                    raise ValueError
+                return STSIdentityResponse(response.status, request.url, bytes(body))
+        finally:
+            connection.close()
