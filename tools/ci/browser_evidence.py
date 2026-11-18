@@ -15,6 +15,7 @@ PRESENTATION_TARGETS = {
     "apps/web/components/foundation/tokens/skeleton.visual.spec.ts": "OPE-310",
     "apps/web/components/foundation/tokens/icon-button.visual.spec.ts": "OPE-311",
     "apps/web/components/foundation/tokens/status-icon.visual.spec.ts": "OPE-312",
+    "apps/web/components/foundation/tokens/tooltip.visual.spec.ts": "OPE-313",
     "apps/web/components/foundation/forms/difference-review.visual.spec.ts": "OPE-314",
     "apps/web/features/operations/cancellation-impact.visual.spec.ts": "OPE-315",
     "apps/web/features/workspace/customer-shell.visual.spec.ts": "OPE-307",
@@ -226,6 +227,14 @@ def verify_scoped_presentation(root: Path, value: dict[str, Any]) -> None:
             or {Path(name).name for name in images} != expected_icons
         ):
             raise ValueError("Status-icon presentation capture inventory mismatch")
+    elif value["issue_key"] == "OPE-313":
+        expected = {
+            f"tooltip-{kind}-{width}-{scale}.png"
+            for kind in ("evidence", "help", "long")
+            for width in widths for scale in (100, 200)
+        } | {"tooltip-forced-colors.png"}
+        if len(images) != len(expected) or {Path(name).name for name in images} != expected:
+            raise ValueError("Tooltip presentation capture inventory mismatch")
     elif value["issue_key"] == "OPE-314":
         expected_cards = {
             f"difference-{width}-{scale}-{case}.png"

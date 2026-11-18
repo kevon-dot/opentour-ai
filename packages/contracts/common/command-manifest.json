@@ -25,6 +25,7 @@
     "apps/web/components/foundation/tokens/icon-button.visual.spec.ts",
     "apps/web/components/foundation/tokens/skeleton.visual.spec.ts",
     "apps/web/components/foundation/tokens/status-icon.visual.spec.ts",
+    "apps/web/components/foundation/tokens/tooltip.visual.spec.ts",
     "apps/web/components/foundation/tokens/visual.spec.ts",
     "apps/web/features/autonomy/control-actions.visual.spec.ts",
     "apps/web/features/autonomy/status-panel.visual.spec.ts",
@@ -325,6 +326,10 @@
     "apps/web/components/foundation/tokens/status-icon.visual.spec.ts": {
       "kind": "simulated",
       "owner": "OPE-312"
+    },
+    "apps/web/components/foundation/tokens/tooltip.visual.spec.ts": {
+      "kind": "simulated",
+      "owner": "OPE-313"
     },
     "apps/web/components/foundation/forms/difference-review.visual.spec.ts": {
       "kind": "simulated",
