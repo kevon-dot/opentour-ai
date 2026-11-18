@@ -28,7 +28,7 @@ test.beforeAll(async () => {
         function Fixture() {
           const [selectedKey,onSelectionChange]=useState('Overview');
           return <CustomerShell brand="OpenTour" workspace={{customer:identity.name,scope:identity.scope}}
-            navigation={links} activeHref={links[0].href}
+            navigation={links} activeHref={document.body.dataset.active || links[0].href}
             utilities={['Environment','Usage','Settings'].map(label=>({label,href:'#'+label}))}
             delivery={{title:'Your delivery team',detail:'White-glove support is included.'}}
             profile="JD  Jordan Davis"
@@ -185,3 +185,20 @@ for (const [i, identity] of identities.entries()) {
     }
   }
 }
+
+test('resizing an open utility-active drawer restores desktop utility focus', async ({ page }) => {
+  await page.setViewportSize({ width: 320, height: 800 });
+  await page.route('http://shell.test/', route => route.fulfill({
+    contentType: 'text/html', body: '<body data-fixture="0" data-active="#Settings"><div id="root"></div></body>',
+  }));
+  await page.route('http://shell.test/fixture.js', route => route.fulfill({ contentType: 'text/javascript', body: script }));
+  await page.goto('http://shell.test/');
+  await page.addStyleTag({ content: css });
+  await page.addScriptTag({ url: 'http://shell.test/fixture.js', type: 'module' });
+  await page.getByRole('button', { name: 'Open navigation' }).click();
+  const dialog = page.getByRole('dialog');
+  await expect(dialog.getByRole('link', { name: 'Settings' })).toHaveAttribute('aria-current', 'page');
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await expect(dialog).toBeHidden();
+  await expect(page.getByRole('link', { name: 'Settings' })).toBeFocused();
+});

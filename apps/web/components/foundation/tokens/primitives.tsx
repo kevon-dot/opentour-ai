@@ -52,11 +52,11 @@ function requireDestination(href: string, name: string): void {
  * Text link exactly as drawn at rest: link colour, no underline and no hover or visited change,
  * because the design shows none. Keyboard focus uses the approved button outline.
  */
-export function Link({ label, href, size, trailingArrow = false, onPress, ref }: LinkProps) {
+export function Link({ label, href, size, current, trailingArrow = false, onPress, ref }: LinkProps) {
   requireLabel(label, 'link label');
   requireDestination(href, 'link');
   if (!linkSizes.includes(size)) throw new Error('A declared link size is required.');
-  return <a ref={ref} href={href} className={`ot-link ot-link--${size}`} onClick={onPress}>
+  return <a ref={ref} href={href} aria-current={current ? 'page' : undefined} className={`ot-link ot-link--${size}`} onClick={onPress}>
     {label}{trailingArrow && <span aria-hidden="true">{linkArrow}</span>}
   </a>;
 }

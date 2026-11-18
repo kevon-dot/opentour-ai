@@ -18,7 +18,7 @@ function Rail({ shell }: { shell: CustomerShellProps }) {
     <div className="ot-shell-spacer" aria-hidden="true" />
     <nav aria-label="Workspace utilities" className="ot-shell-utilities">
       {shell.utilities.map((link, i) => <span key={link.href}>
-        {i > 0 && <span aria-hidden="true"> · </span>}<Link size="small" {...link} />
+        {i > 0 && <span aria-hidden="true"> · </span>}<Link size="small" {...link} current={link.href === shell.activeHref} />
       </span>)}
     </nav>
     <div className="ot-shell-delivery"><strong>{shell.delivery.title}</strong><span>{shell.delivery.detail}</span></div>

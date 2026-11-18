@@ -25,6 +25,11 @@ describe('customer shell presentation', () => {
       ...links.map(item => item.label), props.delivery.detail, props.page.primaryAction.label]) expect(html).toContain(content);
     expect(html).toContain('href="#view-0" aria-current="page"');
   });
+  it.each(props.utilities)('marks the active utility $label as the current page', ({ href }) => {
+    const html = renderToStaticMarkup(<CustomerShell {...props} activeHref={href} />);
+    expect(html).toContain('href="' + href + '" aria-current="page"');
+    expect(html).not.toContain('href="#view-0" aria-current="page"');
+  });
   it('prints a full long workspace identity as text', () => {
     const customer = 'Northstar Research and Development & Customer Operations';
     const html = renderToStaticMarkup(<CustomerShell {...props} workspace={{ customer, scope: 'Production workspace' }} />);

@@ -14,6 +14,7 @@ export interface LinkProps {
   /** A path, query, fragment, or an http, https or mailto address. Other schemes are refused. */
   href: string;
   size: LinkSize;
+  current?: boolean;
   /** Draws the designed " →" after the label. Decoration only; it is not part of the name. */
   trailingArrow?: boolean;
   /** Observes the native click, for example to route in the client. Navigation stays native unless prevented. */
