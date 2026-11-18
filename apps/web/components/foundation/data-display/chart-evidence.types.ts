@@ -104,6 +104,8 @@ export interface SignedBarUnit {
 
 /** Bars drawn left (negative) and right (positive) of a zero line, with a zero-aligned axis. */
 export interface SignedBarsProps {
+  /** Visible signed observations printed above the plotted marks. */
+  summary: EvidenceStatement;
   /** Accessible name of the value list. The design shows no visible title for this form. */
   label: string;
   unit: SignedBarUnit;

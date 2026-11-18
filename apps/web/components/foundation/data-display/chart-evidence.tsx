@@ -196,7 +196,7 @@ export function RateComparison({ title, headingLevel = 2, subtitle, rateFraction
  * hidden from it. An absent value draws no bar and no track and prints its reason. A value outside the
  * axis is refused, never clipped.
  */
-export function SignedBars({ label, unit, domain, rows }: SignedBarsProps) {
+export function SignedBars({ label, unit, domain, rows, summary }: SignedBarsProps) {
   requireText(label, 'label');
   if (unit?.currency !== 'USD') refuse('Signed bars are drawn in US dollars, the only unit the design shows.');
   requireFractionDigits(unit.fractionDigits);
@@ -213,6 +213,7 @@ export function SignedBars({ label, unit, domain, rows }: SignedBarsProps) {
   const amount = (value: number) => chartFormat.usd(value, unit.fractionDigits);
   return <div className="ot-chart ot-chart-signed"
     style={chartNumbers({ '--ot-chart-min': domain.min, '--ot-chart-max': domain.max })}>
+    <ChartEvidenceNotice {...summary} />
     <ol className="ot-chart-signed-rows" aria-label={label}>
       {rows.map(({ key, value }) => value.status === 'observed'
         ? <li key={key} className="ot-chart-signed-item" data-status="observed">
