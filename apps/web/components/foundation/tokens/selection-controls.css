@@ -1,0 +1,38 @@
+/* Native 12:68 and 12:81. The card is 360x80 with its 1px border inside the occupied box; the native
+   control covers that whole box, so the card is the hit target and carries the focus ring. */
+.ot-selection { position: relative; box-sizing: border-box; display: flex; flex-direction: column; gap: var(--ot-space-8); inline-size: 360px; max-inline-size: 100%; min-inline-size: 0; min-block-size: 44px; padding: var(--ot-space-16); border: 1px solid var(--ot-border-control); border-radius: var(--ot-radius-8); background: var(--ot-surface-base); font-family: Geist, sans-serif; text-align: start; }
+.ot-selection-control { position: absolute; inset-block-start: -1px; inset-inline-start: -1px; box-sizing: border-box; inline-size: calc(100% + 2px); block-size: calc(100% + 2px); margin: 0; padding: 0; border: 0; border-radius: inherit; background: transparent; appearance: none; cursor: pointer; }
+/* An outline occupies no layout: the ring is 2px, offset 2px, around the unchanged 360x80 card. */
+.ot-selection-control:focus-visible { outline: 2px solid var(--ot-action-primary); outline-offset: 2px; }
+.ot-selection--enabled:hover { background: var(--ot-action-subtle); }
+.ot-selection--error { background: var(--ot-failure-background); }
+.ot-selection--disabled { opacity: 0.55; }
+.ot-selection--disabled > .ot-selection-control { cursor: not-allowed; }
+.ot-selection--pending > .ot-selection-control { cursor: progress; }
+.ot-selection-row { display: flex; align-items: flex-start; gap: var(--ot-space-12); min-inline-size: 0; }
+/* Artwork keeps its native pixel size. It is centred on the first label line, which is 20px at default text size. */
+.ot-selection-art { display: block; flex: none; box-sizing: border-box; block-size: 20px; margin-block-start: max(0px, calc((var(--ot-type-label-line) - 20px) / 2)); }
+/* The mapped SDS glyph keeps its default icon colour from the native render; it is not an OpenTour token. */
+.ot-checkbox-indicator { display: grid; place-items: center; inline-size: 20px; border: 1px solid var(--ot-border-control); border-radius: var(--ot-radius-4); background: var(--ot-surface-base); overflow: clip; --svg-stroke-color: #1e1e1e; }
+.ot-checkbox-indicator--checked { background: var(--ot-action-primary); }
+.ot-checkbox-glyph { display: block; flex: none; }
+.ot-switch-art { inline-size: 38px; }
+.ot-switch-art > img { display: block; inline-size: 38px; block-size: 20px; }
+.ot-switch-art > img[hidden] { display: none; }
+.ot-selection-label { flex: 0 1 270px; min-inline-size: 0; font: var(--ot-type-label-weight) var(--ot-type-label-size)/var(--ot-type-label-line) Geist, sans-serif; color: var(--ot-text-primary); overflow-wrap: anywhere; }
+/* The native helper text box is 328px in the 326px content box: it reaches 2px into the end padding. */
+.ot-selection-helper { display: block; margin-inline-end: -2px; font: var(--ot-type-small-weight) var(--ot-type-small-size)/var(--ot-type-small-line) Geist, sans-serif; color: var(--ot-text-secondary); overflow-wrap: anywhere; }
+.ot-selection--error .ot-selection-label, .ot-selection--error .ot-selection-helper { color: var(--ot-failure-text); }
+@media (forced-colors: active) {
+  .ot-selection, .ot-selection--enabled:hover, .ot-selection--error { background: Canvas; border-color: CanvasText; }
+  .ot-selection-label, .ot-selection-helper, .ot-selection--error .ot-selection-label, .ot-selection--error .ot-selection-helper { color: CanvasText; }
+  .ot-selection-control:focus-visible { outline-color: Highlight; }
+  .ot-checkbox-indicator { forced-color-adjust: none; background: Canvas; border-color: CanvasText; --svg-stroke-color: HighlightText; }
+  .ot-checkbox-indicator--checked { background: Highlight; }
+  /* System grey replaces group opacity. Switch artwork is an unedited image, so only it keeps the native dimming. */
+  .ot-selection--disabled { opacity: 1; border-color: GrayText; }
+  .ot-selection--disabled .ot-selection-label, .ot-selection--disabled .ot-selection-helper { color: GrayText; }
+  .ot-selection--disabled .ot-checkbox-indicator { border-color: GrayText; --svg-stroke-color: Canvas; }
+  .ot-selection--disabled .ot-checkbox-indicator--checked { background: GrayText; }
+  .ot-selection--disabled .ot-switch-art { opacity: 0.55; }
+}

@@ -54,6 +54,16 @@ export const presentationSuites = new Map([
     ],
     specHash: '0206bcba5399c925223a10064f4818fda928231626544490ee7757db165dd8cf',
   }],
+  ['apps/web/components/foundation/tokens/selection-controls.visual.spec.ts', {
+    owner: 'OPE-318', parent: 'OPE-253', guide: '170:4', minimumTests: 32,
+    requirementIds: [
+      'OPE-318:implementation-scope:sentence-1',
+      'OPE-318:implementation-scope:sentence-2',
+      'OPE-318:implementation-scope:sentence-3',
+      'OPE-318:verification-and-handoff:sentence-4:browser-evidence',
+    ],
+    specHash: '329aa9716e01707bd78f9040854d6cac4dde3eb953b9614a036f951d4f88b2c5',
+  }],
   ['apps/web/components/foundation/data-display/chart-evidence.visual.spec.ts', {
     owner: 'OPE-303', parent: 'OPE-285', guide: '328:285', minimumTests: 8,
     specHash: 'e62f0ec3573923b56edb40e418f0d352d3e1ba69c4058edc1f6c9074b0a6bfd4',
