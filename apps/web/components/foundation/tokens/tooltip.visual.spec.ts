@@ -1,6 +1,7 @@
 import { test, expect, type Page } from '@playwright/test';
 import { build } from 'vite';
 import { resolve } from 'node:path';
+import { writeFile } from 'node:fs/promises';
 import type { TooltipFixtureKind } from './tooltip.fixtures';
 
 declare global { interface Window { showTooltipFixture(kind: TooltipFixtureKind): void; } }
@@ -117,6 +118,7 @@ for (const [width, height] of [[320, 800], [768, 1024], [1280, 900], [1440, 1024
           return [...context.getImageData(Math.floor(x), Math.floor(y), 1, 1).data];
         }, { data: shot.toString('base64'), x: geometry.x + geometry.width / 2, y: geometry.y + geometry.height - 4 });
         expect(surface).toEqual(kind === 'evidence' ? [255, 255, 255, 255] : [24, 34, 55, 255]);
+        await writeFile(info.outputPath(name), shot);
         await info.attach(name, { body: shot, contentType: 'image/png' });
         expect(shot).toMatchSnapshot(name, { maxDiffPixels: 0, threshold: 0 });
       }
@@ -206,6 +208,7 @@ test('forced colors retain the boundary, readable text and focus indication', as
   await expect(page.getByRole('tooltip')).toHaveCSS('color', 'rgb(0, 0, 0)');
   await expect(page.getByTestId('first-trigger')).toHaveCSS('outline-width', '2px');
   const shot = await page.screenshot({ animations: 'disabled' });
+  await writeFile(info.outputPath('tooltip-forced-colors.png'), shot);
   await info.attach('tooltip-forced-colors.png', { body: shot, contentType: 'image/png' });
   expect(shot).toMatchSnapshot('tooltip-forced-colors.png', { maxDiffPixels: 0, threshold: 0 });
 });
