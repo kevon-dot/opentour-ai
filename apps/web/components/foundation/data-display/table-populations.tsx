@@ -14,6 +14,8 @@ const styles = `
 .ot-population .field { font:var(--ot-type-label-weight) var(--ot-type-label-size)/var(--ot-type-label-line) Geist,sans-serif; display:grid; gap:var(--ot-space-8); background:var(--ot-surface-base); border:1px solid var(--ot-border-control); border-radius:var(--ot-radius-8); padding:var(--ot-space-16) }
 .ot-population .field :is(select,input) { min-width:0; max-width:100%; background:transparent; padding:0; font:inherit; color:inherit; border:0 }
 .ot-population small { font:var(--ot-type-small-size)/var(--ot-type-small-line) Geist,sans-serif; color:var(--ot-text-secondary) }
+.ot-population > h2 + p {color:var(--ot-text-secondary)}
+.ot-population .records {display:grid; min-width:0; gap:var(--ot-space-8)}
 .ot-population .scroll { min-width:0; overflow-x:auto }
 .ot-population table { font:inherit; table-layout:fixed; border-collapse:collapse; width:100%; min-width:640px }
 .ot-population tr {height:44px}
@@ -84,7 +86,7 @@ export function TablePopulations(p: TablePopulationsProps) {
       ? [`0 matching of ${p.total ?? 'unknown'} total`, ...p.filters].join(' · ')
       : p.total === null ? `${p.rows.length} shown · Total not available` : `${p.rows.length} shown · ${p.matching ?? 'Unknown'} matching of ${p.total} total`}</p>
     {p.state === 'partial' && <p className="counts">{p.rows.length} received · {p.expected ?? 'Unknown'} expected</p>}
-    <div className="scroll" role="region" aria-label="Records — scroll horizontally" tabIndex={0}>
+    <div className="records"><div className="scroll" role="region" aria-label="Records — scroll horizontally" tabIndex={0}>
       <table><caption>Records<span className="scroll-hint"> — scroll horizontally</span></caption><thead><tr>
         {p.state === 'populated' && <th scope="col" className="check"><input type="checkbox" aria-label="Select all records on this page" checked={p.rows.length > 0 && p.rows.every(r => selected.has(r.id))} disabled={!p.rows.length} onChange={() => p.onIntent({type:'select-page'})}/></th>}
         <TableCell header="column" tone="blue" value="Record"/><TableCell header="column" tone="blue" value="Origin / lifecycle"/>
@@ -97,6 +99,7 @@ export function TablePopulations(p: TablePopulationsProps) {
     </div>
     {p.state === 'empty' && <><Notice title="No records yet" body="Connect a source to import your first records." tone="info"/><div className="controls recovery"><Button variant="secondary" label="Connect a source" onPress={() => p.onIntent({type:'connect'})}/></div></>}
     {p.state === 'filtered-to-nothing' && <><Notice title="No matches" body="No records match these filters." tone="info"/><div className="controls recovery"><Button variant="secondary" label="Clear filters" onPress={() => p.onIntent({type:'clear'})}/></div></>}
+    </div>
     <label className="field">Rows per page<select value={p.pageSize} aria-describedby={helperId} onChange={e => p.onIntent({type:'page-size',value:Number(e.target.value)})}>
       {p.pageSizes.map(size => <option key={size} value={size}>{size}</option>)}</select><small id={helperId}>Whole number 1–100; default 25.</small></label>
     <p className="sr" role="status">{p.position} · {p.rows.length} shown · Observed time {p.direction}</p>
@@ -113,12 +116,13 @@ export function PageSelectionNavigation(p: import('./table-populations.types').P
       .ot-page-selection h2 { font:600 var(--ot-type-section-size)/var(--ot-type-section-line) Geist,sans-serif }
       .ot-page-selection p { color:var(--ot-text-secondary) }
       .ot-page-selection input { box-sizing:border-box; width:100%; padding:var(--ot-space-12); border:2px solid var(--ot-action-primary); border-radius:var(--ot-radius-6); font:inherit }
+      .ot-page-selection input::placeholder {color:var(--ot-text-muted);opacity:1}
       .ot-page-selection .controls { flex-direction:row }
       .ot-page-selection .controls .ot-button-group { width:auto }
       .ot-page-selection .ot-button { min-height:36px; width:auto }
       .ot-page-selection > .ot-button-group .ot-button { min-width:min(112px,100%) }
-      .ot-page-selection nav .ot-button-group:first-child .ot-button { min-width:min(89px,100%) }
-      .ot-page-selection nav .ot-button-group:last-child .ot-button { min-width:min(64px,100%) }
+      .ot-page-selection nav .ot-button-group:first-child .ot-button { min-width:89px }
+      .ot-page-selection nav .ot-button-group:last-child .ot-button { min-width:64px }
     `}</style>
     <h2>{p.selectedIds.length} records selected</h2>
     <p>Page selection: {p.selectedIds.length} / query result: {p.queryCount}. Bulk action binds the frozen selected IDs and revision.</p>
