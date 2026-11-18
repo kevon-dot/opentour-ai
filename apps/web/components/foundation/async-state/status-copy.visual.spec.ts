@@ -31,7 +31,7 @@ test.beforeAll(async () => {
       {notice && <StatusCopy key="persistent" {...notice} />}
       {toast && <StatusCopy key="supplementary" {...toast} />}
     </>));
-  `);
+  `, { requireStylesheet: false });
   html = '<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">' +
     // The native frame has an opaque surface. Paint it in the document so rounded
     // edges blend against that surface during rasterization.

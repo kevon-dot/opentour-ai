@@ -16,7 +16,7 @@ test.beforeAll(async () => {
     const style = document.createElement('style'); style.textContent = tokens + select + fixtures; document.head.append(style);
     const root = createRoot(document.querySelector('#root'));
     flushSync(() => root.render(<SingleChoiceSelectFixture />));
-  `);
+  `, { requireStylesheet: false });
   html = '<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">' +
     '<style>html{background:#fafbfd}body{margin:0}' + output.css + '</style></head><body><div id="root"></div><script>' +
     output.script.replaceAll('</script', '<\\/script') + '</script></body></html>';

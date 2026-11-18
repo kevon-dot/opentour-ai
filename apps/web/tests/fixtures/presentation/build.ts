@@ -58,7 +58,12 @@ const inlineIndicators: Plugin = {
   },
 };
 
-export async function buildInlineFixture(entry: string, format: 'esm' | 'iife', source?: string) {
+export async function buildInlineFixture(
+  entry: string,
+  format: 'esm' | 'iife',
+  source?: string,
+  { requireStylesheet = true }: { requireStylesheet?: boolean } = {},
+) {
   const directory = dirname(entry);
   const result = await build({
     ...browserBuild,
@@ -74,6 +79,7 @@ export async function buildInlineFixture(entry: string, format: 'esm' | 'iife', 
   const script = result.outputFiles.find(file => extname(file.path) === '.js');
   const stylesheet = result.outputFiles.find(file => extname(file.path) === '.css');
   if (!script) throw new Error(`Missing fixture script for ${entry}`);
+  if (requireStylesheet && !stylesheet) throw new Error(`Missing fixture stylesheet for ${entry}`);
   return { script: script.text, css: stylesheet?.text ?? '' };
 }
 
