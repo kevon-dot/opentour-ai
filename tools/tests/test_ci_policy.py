@@ -3,6 +3,7 @@
 import copy
 import io
 import json
+import platform
 import subprocess
 import sys
 import tarfile
@@ -154,18 +155,60 @@ def test_pinned_download_recovers_from_a_transient_error(
     assert list(tmp_path.iterdir()) == [dst]
 
 
+@pytest.mark.parametrize(
+    ("failure", "error"),
+    [("timeout", TimeoutError), ("incomplete", OSError), ("short_body", OSError)],
+)
 def test_pinned_download_exhausts_attempts_without_publishing(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    failure: str,
+    error: type[OSError],
 ) -> None:
-    calls = script_artifact_requests(
-        monkeypatch,
-        *(ArtifactResponse(b"partial attempt", ending=TimeoutError()) for _ in range(3)),
-    )
-    with pytest.raises(TimeoutError):
+    def response() -> ArtifactResponse:
+        partial = b"partial attempt"
+        if failure == "timeout":
+            return ArtifactResponse(partial, ending=TimeoutError())
+        if failure == "incomplete":
+            return ArtifactResponse(partial, ending=IncompleteRead(b"remaining partial bytes"))
+        return ArtifactResponse(partial, declared_size=len(ARTIFACT))
+
+    calls = script_artifact_requests(monkeypatch, *(response() for _ in range(3)))
+    with pytest.raises(error) as caught:
         download(ARTIFACT_URL, digest(ARTIFACT), tmp_path / "tool")
+    if failure != "timeout":
+        assert isinstance(caught.value.__cause__, IncompleteRead)
     assert calls == [(ARTIFACT_URL, 60)] * 3
     assert not list(tmp_path.iterdir())
+
+
+def test_prepare_reports_safe_failure_after_incomplete_download(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    target = platform.system() + "-" + platform.machine()
+    artifact = {"url": ARTIFACT_URL, "sha256": digest(ARTIFACT)}
+    manifest = {
+        "supported_platforms": [target],
+        "tools": {"python": {"artifacts": {target: artifact}}},
+    }
+    (tmp_path / "tools").mkdir()
+    (tmp_path / "tools/toolchain.json").write_text(json.dumps(manifest))
+    github_path = tmp_path / "github_path"
+    monkeypatch.setattr(prepare, "ROOT", tmp_path)
+    monkeypatch.setattr(sys, "argv", ["prepare.py"])
+    monkeypatch.setenv("GITHUB_PATH", str(github_path))
+    calls = script_artifact_requests(
+        monkeypatch,
+        *(ArtifactResponse(b"partial attempt", declared_size=len(ARTIFACT)) for _ in range(3)),
+    )
+
+    assert prepare.main() == 3
+    output = capsys.readouterr()
+    assert json.loads(output.out) == {"status": "BLOCKED", "reason": "CI_PREREQUISITE_UNAVAILABLE"}
+    assert output.err == ""
+    assert calls == [(ARTIFACT_URL, 60)] * 3
+    assert not github_path.exists()
+    assert not list((tmp_path / ".toolchain/ci").iterdir())
 
 
 @pytest.mark.parametrize("failure", ["digest", "redirect", "size", "http_404"])

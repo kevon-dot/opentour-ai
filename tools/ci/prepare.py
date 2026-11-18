@@ -97,6 +97,8 @@ def download(url: str, expected: str, destination: Path) -> None:
                 _download_attempt(url, expected, staged)
             except (OSError, IncompleteRead) as error:
                 if not _retryable_network_error(error) or attempt + 1 == DOWNLOAD_ATTEMPTS:
+                    if isinstance(error, IncompleteRead):
+                        raise OSError("Incomplete prerequisite download") from error
                     raise
                 continue
             # The staging directory is on the destination filesystem. Only the
