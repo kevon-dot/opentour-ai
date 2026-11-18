@@ -15,9 +15,13 @@ const spendRow = 'Maximum spend: enter a nonnegative amount';
 const generalRow = 'These limits could not be saved together.';
 /** The amount exactly as a person typed it, with a true minus sign (U+2212). It is never parsed or rewritten. */
 const rawSpend = 'USD −10.00';
-/** Every piece of text on the workflow settings screen after the failed submission, in markup order (Figma 159:121). */
-const workflowCopy = [
+/**
+ * Every piece of text drawn on the workflow settings screen after the failed submission, in markup order
+ * (Figma 159:121, 159:151, 159:181, 159:213). The navigation button is the third header row below 1280px only.
+ */
+const workflowCopy = (width: number) => [
   'OpenTour  /  Customer workspace', 'Acme Labs / Production',
+  ...(width < 1280 ? ['Open navigation'] : []),
   'Workflow settings', 'Receipt-status workflow · Current revision 8',
   'Check 2 fields before continuing', mappedBody,
   'Workflow name · Required', 'Name used in your workspace.',
@@ -26,6 +30,43 @@ const workflowCopy = [
   attemptsRow, spendRow,
   'Save changes', 'Discard draft',
 ];
+
+/**
+ * The native frames of that screen at 100% text, one per width: the artboard height, the header height, the
+ * canvas inset and the form's [left, top, width, height] on the page. The form's height is what is left of the
+ * artboard under the form's top once the canvas inset below it is taken off. The viewport is set to the artboard
+ * and nothing in the page is given a height, so these numbers are met by the content or the checks fail.
+ */
+const nativeFrames: Record<number, { height: number; header: number; inset: number; form: number[] }> = {
+  320: { height: 1008, header: 132, inset: 16, form: [16, 234, 288, 758] },
+  768: { height: 888, header: 132, inset: 24, form: [24, 242, 720, 622] },
+  1280: { height: 852, header: 80, inset: 32, form: [32, 198, 720, 622] },
+  1440: { height: 852, header: 80, inset: 32, form: [32, 198, 720, 622] },
+};
+/**
+ * The native rows inside the form, as [left, top, width, height] from the form's own origin. Rows start 17px in
+ * and are 16px apart. From 768px up every row is one line; in the 320 frame the notice body, the first error
+ * text and both links take two lines and the two actions stack.
+ */
+const nativeRows = {
+  wide: {
+    notice: [17, 17, 688, 80],
+    fields: [[17, 113, 688, 108], [17, 237, 688, 108], [17, 361, 688, 108]],
+    links: [[17, 485, 688, 22], [17, 523, 688, 22]],
+    actions: [17, 561, 688, 44], save: [17, 561, 280, 44], discard: [309, 561, 280, 44],
+  },
+  narrow: {
+    notice: [17, 17, 256, 98],
+    fields: [[17, 131, 256, 108], [17, 255, 256, 126], [17, 397, 256, 108]],
+    links: [[17, 521, 256, 44], [17, 581, 256, 44]],
+    actions: [17, 641, 256, 100], save: [17, 641, 256, 44], discard: [17, 697, 256, 44],
+  },
+};
+/** Paint of the production field and the shell, as computed colours. */
+const paint = {
+  text: 'rgb(24, 34, 55)', secondary: 'rgb(81, 96, 120)', surface: 'rgb(255, 255, 255)', border: 'rgb(227, 232, 240)',
+  failureSurface: 'rgb(255, 232, 227)', failureText: 'rgb(170, 69, 58)',
+};
 
 let script: string;
 let styles: string;
@@ -97,16 +138,29 @@ async function expectProductionField(input: Locator, id: string) {
   expect(await input.evaluate(node => node.localName === 'input' && node.parentElement?.className === 'ot-text-field')).toBe(true);
 }
 
-/** Every non-blank text node under the scope, in markup order and exactly as written. */
+/** Every non-blank text node that is rendered under the scope, in markup order and exactly as written. */
 const textIn = (scope: Locator) => scope.evaluate(node => {
   const walker = document.createTreeWalker(node, NodeFilter.SHOW_TEXT);
   const texts: string[] = [];
   while (walker.nextNode()) {
     const text = walker.currentNode.nodeValue ?? '';
-    if (text.trim().length > 0) texts.push(text);
+    // Text inside a part that is not rendered at this width is not on the screen.
+    if (text.trim().length > 0 && walker.currentNode.parentElement?.checkVisibility()) texts.push(text);
   }
   return texts;
 });
+
+/** Each line of a production field frame in markup order: its class, type and colour as the browser computes them. */
+const fieldLines = (frame: Locator) => frame.evaluate(node => [...node.children].map(child => {
+  const style = getComputedStyle(child);
+  return [child.className, style.fontFamily, style.fontSize, style.lineHeight, style.fontWeight, style.color];
+}));
+/** What `fieldLines` reports for a field's label, raw value and one small line, each in the given colour. */
+const fieldType = (small: 'helper' | 'error', scale: number, colors: [string, string, string]) => [
+  ['ot-text-field-label', 'Geist, sans-serif', `${14 * scale / 100}px`, `${20 * scale / 100}px`, '500', colors[0]],
+  ['ot-text-field-control', 'Geist, sans-serif', `${14 * scale / 100}px`, `${20 * scale / 100}px`, '500', colors[1]],
+  [`ot-text-field-${small}`, 'Geist, sans-serif', `${12 * scale / 100}px`, `${18 * scale / 100}px`, '400', colors[2]],
+];
 
 /** Ids carried by more than one element. A regular view has none; only the adverse decoy repeats one. */
 const repeatedIds = (page: Page) => page.evaluate(() => {
@@ -139,14 +193,66 @@ async function expectType(text: Locator, size: number, line: number, weight: str
   await expect(text).toHaveCSS('font-weight', weight);
 }
 
-const systemColors = (page: Page, names: string[]) => page.evaluate(names => {
-  const swatch = document.createElement('span');
-  swatch.style.forcedColorAdjust = 'none';
-  document.body.append(swatch);
-  const colors = names.map(name => { swatch.style.color = name; return getComputedStyle(swatch).color; });
-  swatch.remove();
-  return colors;
-}, names);
+/**
+ * The keyboard focus indication of the product element that holds focus, read with the system Highlight the
+ * browser gives an element in that same state.
+ *
+ * Chromium does not hold one value for `Highlight` through a page's life. A run of this file recorded
+ * rgba(5, 0, 73, 0.8) while the summary held focus and rgba(128, 188, 254, 0.6) on the focused link later, so a
+ * swatch read once up front is not a reference for an element that is focused afterwards. The reference is
+ * therefore taken here, in the same task as the product reading: a temporary element of the target's own kind
+ * is placed straight after the target, takes focus as the target has it, and is styled by nothing but its own
+ * inline `outline: 2px solid Highlight`. It has no class, so no rule of the component or of the fixture reaches
+ * it, and the colour it reports is the browser's own. Focus then goes back to the target and the reference is
+ * removed before the task ends, so it is never painted.
+ *
+ * `shown` is the target's outline as it held focus on arrival and `after` is the same reading once focus is
+ * back. `surface` is the nearest background painted behind the outline.
+ */
+const focusIndication = (target: Locator) => target.evaluate((node: HTMLElement) => {
+  const holdsFocus = (element: Element) => document.activeElement === element && element.matches(':focus-visible');
+  const outlineOf = (element: Element) => {
+    const style = getComputedStyle(element);
+    return { style: style.outlineStyle, width: style.outlineWidth, offset: style.outlineOffset, color: style.outlineColor };
+  };
+  // A forced background keeps the alpha of the authored one, so an unpainted ancestor still reports alpha 0.
+  const unpainted = (color: string) => /^rgba\(.*,\s*0\)$/.test(color);
+  let surface = 'rgba(0, 0, 0, 0)';
+  for (let ancestor = node.parentElement; ancestor && unpainted(surface); ancestor = ancestor.parentElement) {
+    surface = getComputedStyle(ancestor).backgroundColor;
+  }
+  const held = holdsFocus(node);
+  const shown = outlineOf(node);
+  const reference = document.createElement(node.localName);
+  for (const name of ['href', 'tabindex']) {
+    const value = node.getAttribute(name);
+    if (value !== null) reference.setAttribute(name, value);
+  }
+  reference.textContent = 'System reference';
+  reference.style.outline = '2px solid Highlight';
+  node.after(reference);
+  reference.focus({ preventScroll: true });
+  const referenceHeld = holdsFocus(reference);
+  const systemHighlight = getComputedStyle(reference).outlineColor;
+  node.focus({ preventScroll: true });
+  reference.remove();
+  return { held, referenceHeld, restored: holdsFocus(node), shown, after: outlineOf(node), systemHighlight, surface };
+});
+
+/** The indication is the component's own 2px solid outline, 2px off the element, in the system Highlight. */
+function expectSystemFocus(focus: Awaited<ReturnType<typeof focusIndication>>) {
+  // The product element held keyboard focus, the reference then held it the same way, and focus went back.
+  expect([focus.held, focus.referenceHeld, focus.restored]).toEqual([true, true, true]);
+  expect(focus.systemHighlight).toMatch(/^rgba?\(/);
+  const indication = { style: 'solid', width: '2px', offset: '2px', color: focus.systemHighlight };
+  expect(focus.shown).toEqual(indication);
+  expect(focus.after).toEqual(indication);
+  // Visible: the outline is painted and its colour is not the colour of the surface it is drawn over.
+  expect(focus.surface).toMatch(/^rgba?\(/);
+  expect(focus.surface).not.toMatch(/^rgba\(.*,\s*0\)$/);
+  expect(focus.systemHighlight).not.toMatch(/^rgba\(.*,\s*0\)$/);
+  expect(focus.systemHighlight).not.toBe(focus.surface);
+}
 
 for (const width of [320, 768, 1280, 1440]) for (const scale of [100, 200]) {
   test(`form error summary at ${width}px and ${scale}% text`, async ({ page }, info) => {
@@ -229,9 +335,12 @@ for (const width of [320, 768, 1280, 1440]) for (const scale of [100, 200]) {
     expect(await noSidewaysScroll(page)).toBe(true);
     await unmapped.screenshot({ path: info.outputPath(`form-errors-${width}-${scale}-unmapped.png`) });
 
-    // The workflow settings screen (Figma 159:121, native frame 1440 x 852) after an actual failed keyboard
+    // The workflow settings screen (Figma 159:121, 159:151, 159:181, 159:213) after an actual failed keyboard
     // submission: one notice above the shared fields, its rows after them, and the notice region holding focus.
-    await page.setViewportSize({ width, height: 852 });
+    // The viewport is the native artboard for this width. The page itself is as tall as its content.
+    const frame = nativeFrames[width];
+    expect(frame.inset).toBe(pad);
+    await page.setViewportSize({ width, height: frame.height });
     await open(page, 'form', scale);
     expect(await repeatedIds(page)).toEqual([]);
     const header = page.locator('.workflow-settings-header');
@@ -243,6 +352,50 @@ for (const width of [320, 768, 1280, 1440]) for (const scale of [100, 200]) {
     const spend = spendIn(form);
     const save = form.getByRole('button', { name: 'Save changes', exact: true });
     const discard = form.getByRole('button', { name: 'Discard draft', exact: true });
+    const actions = page.locator('.workflow-settings-actions');
+    const openNavigation = header.getByRole('button', { name: 'Open navigation', exact: true });
+    if (width < 1280) {
+      // The 768 and 320 frames have a third header row: the shared secondary button, 220px wide, white with
+      // the default border, its label at the leading edge.
+      await expect(openNavigation).toBeVisible();
+      await expect(openNavigation).toHaveClass('ot-button ot-button--secondary');
+      await expect(openNavigation).toHaveCSS('background-color', paint.surface);
+      await expect(openNavigation).toHaveCSS('border-top-width', '1px');
+      await expect(openNavigation).toHaveCSS('border-top-style', 'solid');
+      await expect(openNavigation).toHaveCSS('border-top-color', paint.border);
+      await expectType(openNavigation, 14, 20, '500', scale);
+      const button = (await openNavigation.boundingBox())!;
+      const label = (await openNavigation.locator('span').boundingBox())!;
+      expect(button.width).toBe(220);
+      // Leading edge: the label starts after the button's 1px border and 16px padding, not centred.
+      expect(label.x).toBe(button.x + 17);
+      if (scale === 100) expect([button.x, button.y, button.height]).toEqual([17, 71, 44]);
+      // It is the first keyboard stop on the screen and it works from the keyboard: Enter opens the local
+      // list, the button's name says so, and Space closes it again. Focus stays on the button throughout.
+      const closeNavigation = header.getByRole('button', { name: 'Close navigation', exact: true });
+      const navigation = header.getByRole('navigation', { name: 'Workspace navigation', exact: true });
+      await expect(navigation).toHaveCount(0);
+      await page.keyboard.press('Tab');
+      await expect(openNavigation).toBeFocused();
+      await expect(openNavigation).toHaveCSS('outline-style', 'solid');
+      await expect(openNavigation).toHaveCSS('outline-width', '2px');
+      await page.keyboard.press('Enter');
+      await expect(closeNavigation).toBeFocused();
+      await expect(navigation).toBeVisible();
+      await expect(navigation.getByRole('listitem')).toHaveText(['Workflow settings']);
+      await expect(openNavigation).toHaveCount(0);
+      await page.keyboard.press('Space');
+      await expect(navigation).toHaveCount(0);
+      await expect(closeNavigation).toHaveCount(0);
+      await expect(openNavigation).toBeFocused();
+    } else {
+      // The 1280 and 1440 frames have the two-line header: the row is not rendered, so the button is not
+      // visible, not exposed and not a keyboard stop.
+      await expect(page.locator('.workflow-settings-navigation')).toBeHidden();
+      await expect(page.getByRole('button', { name: /navigation/i })).toHaveCount(0);
+      await page.keyboard.press('Tab');
+      await expect(name).toBeFocused();
+    }
     await submitInvalid(attempts, spend, rawSpend);
     const summary = summaryNamed(form, mappedTitle(2));
     const rowList = detachedRows(form, mappedTitle(2));
@@ -265,7 +418,8 @@ for (const width of [320, 768, 1280, 1440]) for (const scale of [100, 200]) {
       await expect(link).toHaveCSS('color', 'rgb(36, 91, 238)');
       await expect(link).toHaveCSS('text-decoration-line', 'underline');
     }
-    await expect(rowList).toHaveCSS('row-gap', '12px');
+    // Detached rows are 16px apart, the form's own rhythm. Attached rows keep 12px, as the mapped view showed.
+    await expect(rowList).toHaveCSS('row-gap', '16px');
     // The three controls are the production fields, and they are the form's only native controls.
     await expectProductionField(name, 'workflow-name');
     await expectProductionField(attempts, 'maximum-attempts');
@@ -274,8 +428,19 @@ for (const width of [320, 768, 1280, 1440]) for (const scale of [100, 200]) {
     await expect(name).toHaveValue('Receipt status');
     await expect(attempts).toHaveValue('2.5');
     expect(await spend.inputValue()).toBe(rawSpend);
+    // The fields are painted by the production TextField alone. A valid field keeps the base surface with a
+    // 14/20 medium label and value and a 12/18 regular helper. An invalid field takes the failure surface and
+    // draws its label and raw value 14/20 medium and its error 12/18 regular, all in the failure text colour.
+    const fieldFrames = [name, attempts, spend].map(input => input.locator('xpath=..'));
+    await expect(fieldFrames[0]).toHaveCSS('background-color', paint.surface);
+    expect(await fieldLines(fieldFrames[0])).toEqual(fieldType('helper', scale, [paint.text, paint.text, paint.secondary]));
+    for (const invalid of fieldFrames.slice(1)) {
+      await expect(invalid).toHaveCSS('background-color', paint.failureSurface);
+      expect(await fieldLines(invalid)).toEqual(
+        fieldType('error', scale, [paint.failureText, paint.failureText, paint.failureText]));
+    }
     // The screen carries the approved copy and nothing else: no harness title, note or control.
-    expect(await textIn(page.locator('body'))).toEqual(workflowCopy);
+    expect(await textIn(page.locator('body'))).toEqual(workflowCopy(width));
     // Markup order is the visual order: notice, fields, rows, then the actions.
     const tops: number[] = [];
     for (const part of [summary, name, attempts, spend, formLinks.nth(0), formLinks.nth(1), save]) {
@@ -295,19 +460,31 @@ for (const width of [320, 768, 1280, 1440]) for (const scale of [100, 200]) {
     await expect(form).toHaveCSS('border-top-color', 'rgb(227, 232, 240)');
     await expect(form).toHaveCSS('border-top-left-radius', '12px');
     await expect(form).toHaveCSS('row-gap', '16px');
-    // The form is 720px at most with a 16px inset, so the notice and each field are 688px at most.
+    // The form is 720px at most. Every row starts 17px in, after the 1px stroke and the 16px padding, and keeps
+    // the form's width less 32px: 688px in the 720px frame and 256px in the 288px one.
     const formWidth = Math.min(720, width - 2 * pad);
     const formBox = (await form.boundingBox())!;
     expect([formBox.x, formBox.width]).toEqual([pad, formWidth]);
-    expect((await summary.boundingBox())!.width).toBe(formWidth - 32);
-    expect((await rowList.boundingBox())!.width).toBe(formWidth - 32);
-    for (const input of [name, attempts, spend]) {
-      expect((await input.locator('xpath=..').boundingBox())!.width).toBe(formWidth - 32);
+    for (const row of [summary, ...fieldFrames, rowList, actions]) {
+      const box = (await row.boundingBox())!;
+      expect([box.x - formBox.x, box.width]).toEqual([17, formWidth - 32]);
     }
+    // Save is the primary action. Discard draft is the shared quiet variant: at rest it has no border, no
+    // outline and no shadow on the form's surface.
+    await expect(save).toHaveClass('ot-button ot-button--primary');
+    await expect(discard).toHaveClass('ot-button ot-button--quiet');
+    await expect(discard).not.toBeFocused();
+    expect(await discard.evaluate(node => {
+      const style = getComputedStyle(node);
+      return [style.borderTopWidth, style.borderRightWidth, style.borderBottomWidth, style.borderLeftWidth,
+        style.outlineStyle, style.boxShadow, style.backgroundColor];
+    })).toEqual(['0px', '0px', '0px', '0px', 'none', 'none', paint.surface]);
     const saveBox = (await save.boundingBox())!;
     const discardBox = (await discard.boundingBox())!;
+    // An action is never shorter than the 44px of the native frames, at any text size.
+    expect(Math.min(saveBox.height, discardBox.height)).toBeGreaterThanOrEqual(44);
     if (width === 320) {
-      // Too narrow for two actions side by side: they stack at the form's measure.
+      // Too narrow for two actions side by side: they stack at the form's full inner width.
       expect([saveBox.width, discardBox.width]).toEqual([formWidth - 32, formWidth - 32]);
       expect(discardBox.x).toBe(saveBox.x);
       expect(discardBox.y).toBeGreaterThan(saveBox.y);
@@ -317,28 +494,37 @@ for (const width of [320, 768, 1280, 1440]) for (const scale of [100, 200]) {
       expect(discardBox.x).toBeGreaterThan(saveBox.x + saveBox.width);
     }
     if (scale === 100) {
-      // The header spans the viewport at 80px and its text starts 16px in.
-      expect(await pageBox(header)).toEqual([0, 0, width, 80]);
+      // The native frame for this width, measured on the rendered page. The header spans the viewport, 80px
+      // tall with two lines and 132px with the button row, and its text starts 17px in. Under it come the
+      // canvas inset, the 32px heading, 16px, the 22px revision line and 16px, and then the form.
+      expect(await pageBox(header)).toEqual([0, 0, width, frame.header]);
       const product = (await page.locator('.workflow-settings-product').boundingBox())!;
-      expect([product.x, product.y]).toEqual([16, 16]);
-    }
-    if (scale === 100 && width >= 1280) {
-      // Native positions: 80 header, 32 inset, 32 heading, 16, 22 line, 16, then the form on a 16px rhythm
-      // with an 80px notice, three 106px fields (1 + 15 + 20 + 8 + 20 + 8 + 18 + 15 + 1) and two 22px rows 12 apart.
-      expect(await pageBox(heading)).toEqual([32, 112, width - 64, 32]);
-      expect(await pageBox(revision)).toEqual([32, 160, width - 64, 22]);
-      expect(formBox.y).toBe(198);
-      expect(await pageBox(summary)).toEqual([48, 214, 688, 80]);
-      expect(await pageBox(name.locator('xpath=..'))).toEqual([48, 310, 688, 106]);
-      expect(await pageBox(attempts.locator('xpath=..'))).toEqual([48, 432, 688, 106]);
-      expect(await pageBox(spend.locator('xpath=..'))).toEqual([48, 554, 688, 106]);
-      expect(await pageBox(rowList.getByRole('listitem').nth(0))).toEqual([48, 676, 688, 22]);
-      expect(await pageBox(rowList.getByRole('listitem').nth(1))).toEqual([48, 710, 688, 22]);
-      expect([saveBox.x, saveBox.y]).toEqual([48, 748]);
-    }
-    if (scale === 100 && width === 1440) {
-      // The whole screen fits the native frame, so the capture below is exactly 1440 x 852.
-      expect(await page.evaluate(() => [document.documentElement.scrollWidth, document.documentElement.scrollHeight])).toEqual([1440, 852]);
+      expect([product.x, product.y]).toEqual([17, 17]);
+      expect(await pageBox(heading)).toEqual([pad, frame.header + pad, width - 2 * pad, 32]);
+      expect(await pageBox(revision)).toEqual([pad, frame.header + pad + 48, width - 2 * pad, 22]);
+      expect(await pageBox(form)).toEqual(frame.form);
+      // Every row of the form at its native place and size, from the form's own origin. The fields are the
+      // production frames: 108px with one small line and 126px where the error takes two lines at 320.
+      const rows = width === 320 ? nativeRows.narrow : nativeRows.wide;
+      const inForm = async (part: Locator) => {
+        const [x, y, boxWidth, boxHeight] = await pageBox(part);
+        return [x - frame.form[0], y - frame.form[1], boxWidth, boxHeight];
+      };
+      expect(await inForm(summary)).toEqual(rows.notice);
+      expect(await inForm(summary.getByRole('status'))).toEqual(rows.notice);
+      for (const [index, field] of fieldFrames.entries()) expect(await inForm(field)).toEqual(rows.fields[index]);
+      for (const [index, row] of rows.links.entries()) {
+        expect(await inForm(rowList.getByRole('listitem').nth(index))).toEqual(row);
+      }
+      expect(await inForm(actions)).toEqual(rows.actions);
+      expect(await inForm(save)).toEqual(rows.save);
+      expect(await inForm(discard)).toEqual(rows.discard);
+      // The content alone reaches the bottom of the artboard: the main region ends there by its own height,
+      // with the canvas inset under the form. So the page is exactly the native frame, nothing is cut off and
+      // nothing scrolls, and the capture below is the native size without any height having been set.
+      expect(await pageBox(page.getByRole('main'))).toEqual([0, frame.header, width, frame.height - frame.header]);
+      expect(await page.evaluate(() => [document.documentElement.scrollWidth, document.documentElement.scrollHeight]))
+        .toEqual([width, frame.height]);
     }
     expect(await fits(summary)).toBe(true);
     expect(await fits(rowList)).toBe(true);
@@ -623,7 +809,8 @@ test('links move focus inside the active form when an earlier form repeats the f
 });
 
 test('forced colors keep the notice boundary, readable text, links and focus indication', async ({ page }, info) => {
-  await page.setViewportSize({ width: 320, height: 852 });
+  // The 320 artboard, the narrowest native frame.
+  await page.setViewportSize({ width: 320, height: nativeFrames[320].height });
   await page.emulateMedia({ forcedColors: 'active' });
   await open(page, 'form');
   const form = settingsForm(page);
@@ -633,11 +820,17 @@ test('forced colors keep the notice boundary, readable text, links and focus ind
   const notice = summary.getByRole('status');
   const rowList = detachedRows(form, mappedTitle(2));
   const link = rowList.getByRole('link').first();
-  const [highlight] = await systemColors(page, ['Highlight']);
+  // The failed submission moved focus to the summary. Its indication is the component's 2px solid outline in
+  // the system Highlight, compared with a reference that is read in the same state and at the same moment.
+  await expect(summary).toBeFocused();
+  const summaryFocus = await focusIndication(summary);
+  expectSystemFocus(summaryFocus);
+  // The reference is gone and the summary holds focus again, with the same effective outline, for the capture.
   await expect(summary).toBeFocused();
   await expect(summary).toHaveCSS('outline-style', 'solid');
   await expect(summary).toHaveCSS('outline-width', '2px');
-  await expect(summary).toHaveCSS('outline-color', highlight);
+  await expect(summary).toHaveCSS('outline-offset', '2px');
+  await expect(summary).toHaveCSS('outline-color', summaryFocus.systemHighlight);
   await expect(notice).toHaveCSS('border-top-style', 'solid');
   await expect(notice).toHaveCSS('border-top-width', '1px');
   // The boundary and the notice text differ from the notice surface, and the link text from the form surface.
@@ -664,7 +857,24 @@ test('forced colors keep the notice boundary, readable text, links and focus ind
     await expect(input).toBeFocused();
   }
   await page.keyboard.press('Tab');
+  // The first row itself is the element the keyboard reached, and the summary no longer shows an outline.
   await expect(link).toBeFocused();
+  await expect(link).toHaveAttribute('href', '#maximum-attempts');
+  await expect(summary).toHaveCSS('outline-style', 'none');
+  // Its indication is read now, with the link focused, against a reference that is focused the same way.
+  // The Highlight read while the summary held focus is not reused: the browser may report another by now.
+  const linkFocus = await focusIndication(link);
+  expectSystemFocus(linkFocus);
+  // The reference is gone and the product link holds focus again with the same effective outline.
+  await expect(link).toBeFocused();
+  await expect(link).toHaveCSS('outline-style', 'solid');
   await expect(link).toHaveCSS('outline-width', '2px');
-  await expect(link).toHaveCSS('outline-color', highlight);
+  await expect(link).toHaveCSS('outline-offset', '2px');
+  await expect(link).toHaveCSS('outline-color', linkFocus.systemHighlight);
+  expect(await fits(rowList)).toBe(true);
+  // From there the row still leads to the production input it names.
+  await page.keyboard.press('Enter');
+  await expect(fields[1]).toBeFocused();
+  await expectProductionField(fields[1], 'maximum-attempts');
+  expect(await fields[1].inputValue()).toBe('2.5');
 });

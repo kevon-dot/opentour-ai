@@ -15,8 +15,9 @@ import './form-error-summary.css';
  * runs in the page. There is no request, no provider and no persistence anywhere in this file.
  *
  * The page's <div data-view> selects one view:
- *   form       the workflow settings screen (Figma 159:121): the genuine consumer, with the notice
- *              above its fields and the rows after them. This is the acceptance render.
+ *   form       the workflow settings screen (Figma 159:121, 159:151, 159:181, 159:213): the genuine
+ *              consumer, with the notice above its fields and the rows after them. This is the
+ *              acceptance render. Below 1280px its header has a third row, the navigation button.
  *   mapped     the standalone mapped summary (Figma 153:386), outside the form that owns its two fields
  *   unmapped   the standalone summary for a problem with no field and no public detail
  *   stress     an interactive form for the general, mixed, repeated and re-rendered cases
@@ -33,7 +34,7 @@ function problem(fieldId: string, fieldLabel: string, message: string, text: str
 const rowsOf = (problems: readonly Problem[]) => problems.map(item => item.row);
 const textFor = (problems: readonly Problem[], fieldId: string) => problems.find(item => item.fieldId === fieldId)?.text;
 
-/* ---- Workflow settings: the consumer in Figma 159:121 ---- */
+/* ---- Workflow settings: the consumer in Figma 159:121, 159:151, 159:181 and 159:213 ---- */
 
 interface SettingsDraft { name: string; attempts: string; spend: string }
 
@@ -63,6 +64,7 @@ function WorkflowSettings() {
   const [problems, setProblems] = useState<Problem[]>([]);
   const [submitted, setSubmitted] = useState(false);
   const [failedSubmission, setFailedSubmission] = useState<number | null>(null);
+  const [navigationOpen, setNavigationOpen] = useState(false);
   const errors = rowsOf(problems);
   const edit = (entry: Partial<SettingsDraft>) => setDraft(current => ({ ...current, ...entry }));
   // Before the first submission a blur reports nothing. After it, a blur re-checks the fields.
@@ -72,6 +74,16 @@ function WorkflowSettings() {
     <header className="workflow-settings-header">
       <p className="workflow-settings-product">{'OpenTour  /  Customer workspace'}</p>
       <p className="workflow-settings-workspace">Acme Labs / Production</p>
+      {/* Third header row of the 768 and 320 frames; the stylesheet leaves it out from 1280px up. The button
+          is the shared secondary Button and it works: it opens and closes a local list, and its name says
+          which. That list is generated fixture content with no routing, request or provider behind it. */}
+      <div className="workflow-settings-navigation">
+        <Button variant="secondary" label={navigationOpen ? 'Close navigation' : 'Open navigation'}
+          onPress={() => setNavigationOpen(open => !open)} />
+        {navigationOpen && <nav className="workflow-settings-navigation-list" aria-label="Workspace navigation">
+          <ul role="list"><li aria-current="page">Workflow settings</li></ul>
+        </nav>}
+      </div>
     </header>
     <main className="workflow-settings-main">
       <h1 id={headingId}>Workflow settings</h1>
@@ -97,7 +109,8 @@ function WorkflowSettings() {
         <FormErrorSummaryRows errors={errors} />
         <div className="workflow-settings-actions">
           <Button type="submit" label="Save changes" />
-          <Button variant="secondary" label="Discard draft" onPress={() => {
+          {/* The shared quiet variant: no border and no outline at rest, as the native frames draw it. */}
+          <Button variant="quiet" label="Discard draft" onPress={() => {
             setDraft(currentSettings);
             setProblems([]);
             setSubmitted(false);

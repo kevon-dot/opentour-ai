@@ -190,10 +190,15 @@ describe('form error summary design binding', () => {
     expect(css).not.toMatch(/overflow(?:-[xy]|-inline|-block)?:|text-overflow|white-space|line-clamp|max-inline-size|(?<!-)block-size|(?<![\w-])(?:height|width)/);
   });
 
-  it('gives detached rows the fill, colour, face and wrapping the summary would have given them', () => {
-    expect(css).toContain('.ot-form-error-list--detached { box-sizing: border-box; inline-size: 100%; min-inline-size: 0; ' +
-      'color: var(--ot-text-primary); font-family: Geist, sans-serif; overflow-wrap: anywhere; }');
-    // The shared list rule is still the only one that sets the row rhythm.
-    expect(css).toContain('.ot-form-error-list { display: flex; flex-direction: column; gap: var(--ot-space-12); margin: 0; padding: 0; list-style: none; }');
+  it('gives detached rows the fill, colour, face and wrapping the summary would have given them, on the 16px rhythm of their form', () => {
+    expect(css).toContain('.ot-form-error-list--detached { box-sizing: border-box; gap: var(--ot-space-16); inline-size: 100%; ' +
+      'min-inline-size: 0; color: var(--ot-text-primary); font-family: Geist, sans-serif; overflow-wrap: anywhere; }');
+    expect(tokens).toContain('--ot-space-16: 16px;');
+    // Attached rows keep the 12px rhythm of the shared list rule. Only the detached list widens it, in a later
+    // rule of the same weight, and nothing else sets a row gap.
+    const shared = '.ot-form-error-list { display: flex; flex-direction: column; gap: var(--ot-space-12); margin: 0; padding: 0; list-style: none; }';
+    expect(css).toContain(shared);
+    expect(css.indexOf('.ot-form-error-list--detached {')).toBeGreaterThan(css.indexOf(shared));
+    expect(css.match(/(?<![\w-])gap:/g)).toHaveLength(3);
   });
 });
