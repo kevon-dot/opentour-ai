@@ -85,7 +85,7 @@
 @media (forced-colors: active) {
   .ot-text-field,
   .ot-text-field:has(> .ot-text-field-control[aria-invalid='true']),
-  .ot-input { background: Canvas; color: CanvasText; border-color: CanvasText; }
+  .ot-input:where(:not(:focus-visible)) { background: Canvas; color: CanvasText; border-color: CanvasText; }
   .ot-text-field-helper,
   .ot-text-field-error { color: CanvasText; }
   /* The 2px focus border takes the system highlight; it is the only indicator, so nothing is doubled. */
