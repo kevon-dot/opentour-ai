@@ -23,6 +23,11 @@ import pytest
 from cryptography.fernet import Fernet
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from opentour_control.auth.browser_private import (
+    MAX_REQUEST_BYTES,
+    AuthenticatedBrowserCaller,
+    PrivateBrowserDispatch,
+)
 from opentour_control.auth.browser_state import (
     BrowserAuthState,
     BrowserAuthTransaction,
@@ -204,6 +209,166 @@ def test_browser_switch_flow_binds_exact_intent(browser_state, durable, identity
             browser_state.consume_flow(combined, flow.browser_digest)
     else:
         assert browser_state.consume_flow(combined, flow.browser_digest) == flow
+
+
+def test_private_browser_dispatch_enforces_caller_and_durable_signin(
+    browser_state, durable, identity, monkeypatch, caplog
+):
+    principal = "generated-bff"
+    audience = "generated-dev-listener"
+    dispatcher = PrivateBrowserDispatch(
+        browser_state, principal=principal, audience=audience, clock=lambda: identity.now
+    )
+    expires = identity.now + timedelta(seconds=120)
+
+    def send(method, payload, **caller_changes):
+        caller = AuthenticatedBrowserCaller(principal, audience, method, expires)
+        body = payload if isinstance(payload, bytes) else json.dumps(payload).encode()
+        response = dispatcher.dispatch(
+            method,
+            body,
+            caller=replace(caller, **caller_changes),
+        )
+        assert response.headers["Cache-Control"] == "no-store"
+        assert response.headers["Content-Type"] == "application/json"
+        return response.status, json.loads(response.body)
+
+    flow = {
+        "state": secrets.token_urlsafe(32),
+        "nonce": secrets.token_urlsafe(32),
+        "browserDigest": digest(secrets.token_urlsafe(32)),
+        "verifier": secrets.token_urlsafe(32),
+        "expiresAt": int(expires.timestamp() * 1000),
+        "returnPath": "/signed-out",
+        "kind": "signin",
+        "sessionHandle": None,
+        "subject": None,
+        "sessionId": None,
+        "generation": None,
+        "selectionTarget": None,
+        "selectionIntent": None,
+    }
+    status, error = send("create_flow", {"flow": {**flow, "authority": "generated-extra"}})
+    assert (status, error["code"]) == (422, "SCHEMA_INVALID")
+    status, error = send("create_flow", b" " * (MAX_REQUEST_BYTES + 1))
+    assert (status, error["code"]) == (413, "PRIVATE_BODY_TOO_LARGE")
+    status, error = send("replace", {})
+    assert (status, error["code"]) == (404, "PRIVATE_OPERATION_NOT_FOUND")
+    assert send("create_flow", {"flow": flow}) == (200, None)
+    claim = {"state": f"{flow['state']}.{flow['nonce']}", "browser": flow["browserDigest"]}
+    duplicate = json.dumps(claim).replace(
+        '"browser":', f'"state": {json.dumps(claim["state"])}, "browser":', 1
+    )
+    status, error = send("consume_flow", duplicate.encode())
+    assert (status, error["code"]) == (422, "SCHEMA_INVALID")
+    missing_caller = dispatcher.dispatch("consume_flow", json.dumps(claim).encode(), caller=None)
+    assert (missing_caller.status, json.loads(missing_caller.body)["code"]) == (
+        403,
+        "PRIVATE_CALLER_DENIED",
+    )
+    for invalid in (
+        {"principal": "generated-other"},
+        {"audience": "generated-other-listener"},
+        {"operation": "create_flow"},
+        {"expires_at": identity.now},
+    ):
+        status, error = send("consume_flow", claim, **invalid)
+        assert (status, error["code"]) == (403, "PRIVATE_CALLER_DENIED")
+    assert send("consume_flow", claim) == (200, flow)
+    status, error = send("consume_flow", claim)
+    assert (status, error["code"]) == (401, "CALLBACK_INVALID")
+
+    switch = BrowserAuthTransaction(
+        state=secrets.token_urlsafe(32),
+        nonce=secrets.token_urlsafe(32),
+        browser_digest=flow["browserDigest"],
+        verifier=secrets.token_urlsafe(32),
+        expires_at=expires,
+        return_path="/",
+        kind="switch",
+        session_handle=durable.binding,
+        subject=durable.context.actor["subject"],
+        session_id=durable.sid,
+        generation=0,
+        selection_target=BrowserSelectionTarget(
+            organization_id="org_a",
+            identity_organization_id="identity_org_a",
+            identity_issuer=identity.issuer,
+            membership_id="member_a",
+            authority_revision="authority_a",
+        ),
+        selection_intent=BrowserSelectionIntent(
+            organization_id="org_a", expected_generation=0, idempotency_key="generated-old-switch"
+        ),
+    )
+    browser_state.create_flow(switch)
+    switch_state = f"{switch.state}.{switch.nonce}"
+
+    def autocommit_connection():
+        connection = durable.connect()
+        connection.autocommit = True
+        return connection
+
+    with monkeypatch.context() as patch:
+        patch.setattr(browser_state.repository, "connect", autocommit_connection)
+        status, error = send(
+            "consume_flow", {"state": switch_state, "browser": switch.browser_digest}
+        )
+    assert (status, error["code"]) == (401, "CALLBACK_INVALID")
+    assert browser_state.consume_flow(switch_state, switch.browser_digest) == switch
+
+    sid = f"generated-private-{uuid4().hex}"
+    credentials = {
+        "accessToken": identity.token(sid=sid),
+        "refreshToken": "GENERATED_PRIVATE_REFRESH",
+        "userId": durable.context.actor["subject"],
+    }
+    expired_token = identity.token(sid=sid, exp=int(identity.now.timestamp()))
+    status, error = send("admit", {"credentials": {**credentials, "accessToken": expired_token}})
+    assert (status, error["code"]) == (401, "SESSION_INVALID")
+    with durable.connect() as connection:
+        assert (
+            connection.execute(
+                "SELECT 1 FROM opentour_identity.sessions WHERE issuer=%s AND session_id=%s",
+                (identity.issuer, sid),
+            ).fetchone()
+            is None
+        )
+
+    status, admitted = send("admit", {"credentials": credentials})
+    assert status == 200 and admitted["ended"] is False
+    handle = admitted["handle"]
+    assert admitted["identity"]["session_id"] == sid
+    assert admitted["credentials"] == credentials
+    status, denied = send("current", {"handle": handle}, principal="generated-other")
+    assert (status, denied["code"]) == (403, "PRIVATE_CALLER_DENIED")
+    assert credentials["accessToken"] not in json.dumps(denied)
+    status, current = send("current", {"handle": handle})
+    assert status == 200 and current["credentials"] == credentials
+    assert current["csrfToken"] == admitted["csrfToken"]
+
+    raw_failure = "GENERATED_PRIVATE_END_FAILURE"
+    original_end = browser_state.end
+    end_calls = []
+
+    def end_then_lose_acknowledgment(handle, generation):
+        end_calls.append((handle, generation))
+        original_end(handle, generation)
+        raise RuntimeError(raw_failure)
+
+    end_request = {"handle": handle, "generation": 0}
+    with caplog.at_level("DEBUG"), monkeypatch.context() as patch:
+        patch.setattr(browser_state, "end", end_then_lose_acknowledgment)
+        status, error = send("end", end_request)
+    assert (status, error["code"]) == (503, "SESSION_END_UNCONFIRMED")
+    assert end_calls == [(handle, 0)]
+    assert raw_failure not in json.dumps(error)
+    assert raw_failure not in caplog.text
+    assert send("current", {"handle": handle}) == (
+        200,
+        {"handle": handle, "csrfToken": admitted["csrfToken"], "ended": True, "generation": 1},
+    )
+    assert send("end", end_request) == (200, {"sessionId": sid, "generation": 1})
 
 
 @pytest.mark.parametrize("selected", [False, True])

@@ -191,13 +191,33 @@ class BrowserAuthState:
         except psycopg.Error:
             raise AuthError("IDENTITY_STATE_UNAVAILABLE", 503, True) from None
 
-    def consume_flow(self, state_and_nonce: str, browser_digest: str) -> BrowserAuthTransaction:
+    def consume_flow(
+        self, state_and_nonce: str, browser_digest: str, *, signin_only: bool = False
+    ) -> BrowserAuthTransaction:
         state_digest, scope = _flow_coordinates(state_and_nonce, browser_digest)
         started = utc(self.sessions.clock())
+        checked_flow: BrowserAuthTransaction | None = None
+
+        def check_signin(sealed: str) -> None:
+            nonlocal checked_flow
+            flow = self._open_flow(sealed, scope, state_and_nonce, browser_digest, started)
+            if flow.kind != "signin":
+                raise AuthError("CALLBACK_INVALID")
+            checked_flow = flow
+
         try:
-            sealed = self.repository.consume_auth_transaction(state_digest, browser_digest, started)
+            sealed = self.repository.consume_auth_transaction(
+                state_digest, browser_digest, started, check=check_signin if signin_only else None
+            )
         except psycopg.Error:
             raise AuthError("IDENTITY_STATE_UNAVAILABLE", 503, True) from None
+        if checked_flow is not None:
+            return checked_flow
+        return self._open_flow(sealed, scope, state_and_nonce, browser_digest, started)
+
+    def _open_flow(
+        self, sealed: str, scope: str, state_and_nonce: str, browser_digest: str, started: datetime
+    ) -> BrowserAuthTransaction:
         now = self._time_since(started)
         try:
             flow = BrowserAuthTransaction.model_validate_json(self.sealer.open(sealed, scope, now))

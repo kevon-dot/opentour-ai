@@ -562,9 +562,15 @@ class PostgresIdentityRepository:
             )
 
     def consume_auth_transaction(
-        self, state_sha256: str, browser_sha256: str, now: datetime
+        self,
+        state_sha256: str,
+        browser_sha256: str,
+        now: datetime,
+        *,
+        check: Callable[[str], None] | None = None,
     ) -> str:
-        with self.connect() as connection:
+        """Claim once. A rejected trusted payload check rolls back the claim."""
+        with self.connect() as connection, connection.transaction():
             row = connection.execute(
                 "UPDATE opentour_identity.auth_transactions SET consumed_at=%s "
                 "WHERE state_sha256=%s AND browser_sha256=%s AND expires_at>%s AND created_at<=%s "
@@ -573,7 +579,10 @@ class PostgresIdentityRepository:
             ).fetchone()
             if row is None:
                 raise AuthError("CALLBACK_INVALID")
-            return str(row["sealed_payload"])
+            sealed = str(row["sealed_payload"])
+            if check is not None:
+                check(sealed)
+            return sealed
 
 
 def connection_factory(dsn: str) -> Callable[[], psycopg.Connection[dict[str, Any]]]:
