@@ -6,6 +6,7 @@ from http import HTTPStatus
 from typing import Any
 
 from fastapi import FastAPI
+from fastapi.routing import iter_route_contexts
 from opentour_control.auth.runtime import ControlAuthRuntime
 
 _COMMON = "urn:opentour:common-contract:1.0#/$defs/"
@@ -105,6 +106,15 @@ def create_control_api(runtime: ControlAuthRuntime) -> FastAPI:
         redoc_url=None,
     )
     app.include_router(runtime.router)
+    expected_routes = {
+        (_CONTEXT_PATH, frozenset({"GET"})),
+        (_SELECTION_PATH, frozenset({"POST"})),
+    }
+    routes = [
+        (route.path, frozenset(route.methods or ())) for route in iter_route_contexts(app.routes)
+    ]
+    if len(routes) != len(expected_routes) or set(routes) != expected_routes:
+        raise ValueError("Control session routes do not match their registration")
     # FastAPI caches this document. Register before returning the configured app.
     _register_session_operations(app.openapi())
     return app

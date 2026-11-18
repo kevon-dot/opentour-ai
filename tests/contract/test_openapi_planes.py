@@ -137,10 +137,22 @@ def test_mounted_handlers_still_deny_missing_credentials_with_canonical_error(
         assert client.get("/openapi.json").status_code == 404
 
 
-def test_unregistered_runtime_path_refuses_control_app_composition(
+@pytest.mark.parametrize(
+    ("path", "include_in_schema"),
+    [
+        ("/unexpected-generated-path", True),
+        ("/unexpected-generated-path", False),
+        (_CONTEXT, True),
+        (_CONTEXT, False),
+    ],
+    ids=["extra", "hidden-extra", "duplicate", "hidden-duplicate"],
+)
+def test_unregistered_runtime_route_refuses_control_app_composition(
     runtime: ControlAuthRuntime,
+    path: str,
+    include_in_schema: bool,
 ) -> None:
-    @runtime.router.get("/unexpected-generated-path")
+    @runtime.router.get(path, include_in_schema=include_in_schema)
     def unexpected() -> None:
         pass
 
