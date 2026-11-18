@@ -1,6 +1,7 @@
 """Actual disposable PostgreSQL, generated identities and provider claims."""
 
 import json
+import secrets
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import replace
@@ -19,7 +20,12 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from opentour_control.auth import workos_provider
-from opentour_control.auth.browser_state import BrowserCredentials, BrowserSelectionIntent
+from opentour_control.auth.browser_state import (
+    BrowserAuthTransaction,
+    BrowserCredentials,
+    BrowserSelectionIntent,
+    BrowserSelectionTarget,
+)
 from opentour_control.auth.config import MAX_COUNTER, AuthError, IdentityConfig, digest, timestamp
 from opentour_control.auth.repository import PostgresIdentityRepository, connection_factory
 from opentour_control.auth.runtime import create_control_auth_runtime
@@ -177,12 +183,12 @@ def durable(postgres, mode):
     )
 
 
-def counts(durable):
+def counts(durable, session_id=None):
     with durable.owner() as conn:
         return tuple(
             conn.execute(
                 f"SELECT count(*) AS n FROM opentour_selection.{table} WHERE session_id=%s",
-                (durable.identity.session_id,),
+                (session_id or durable.identity.session_id,),
             ).fetchone()["n"]
             for table in ("receipts", "outbox")
         )
@@ -349,13 +355,17 @@ def generated_browser_auth(durable, monkeypatch):
         "iat": now - 30,
         "exp": now + 300,
     }
-    token = jwt.encode(claims, key, algorithm="RS256", headers={"kid": "generated"})
-    other = jwt.encode(
-        {**claims, "org_id": durable.orgs["b"].remote_org},
-        key,
-        algorithm="RS256",
-        headers={"kid": "generated"},
-    )
+
+    def issue_token(organization_id, **changes):
+        return jwt.encode(
+            {**claims, "org_id": organization_id, **changes},
+            key,
+            algorithm="RS256",
+            headers={"kid": "generated"},
+        )
+
+    token = issue_token(org.remote_org)
+    other = issue_token(durable.orgs["b"].remote_org)
     runtime = create_control_auth_runtime(
         config=config,
         workos_api_key="generated-no-provider-access",
@@ -367,7 +377,12 @@ def generated_browser_auth(durable, monkeypatch):
     assert fetched == []
     try:
         yield SimpleNamespace(
-            runtime=runtime, token=token, other=other, expires_at=claims["exp"], fetched=fetched
+            runtime=runtime,
+            token=token,
+            other=other,
+            expires_at=claims["exp"],
+            fetched=fetched,
+            issue_token=issue_token,
         )
     finally:
         assert runtime.close()
@@ -622,6 +637,114 @@ def test_private_selection_binding_refuses_an_expired_current_bearer(
                 assert isinstance(observed[0], SelectionTarget)
             else:
                 assert observed == [first]
+
+
+@pytest.mark.parametrize("prior_token", ["live", "expired"])
+def test_sealed_continuation_obeys_current_bearer_boundary(durable, monkeypatch, prior_token):
+    subject = durable.identity.actor["subject"]
+    org = durable.orgs["b"]
+    with generated_browser_auth(durable, monkeypatch) as auth:
+        sessions = auth.runtime.browser_state
+        binding = auth.runtime.selection_binding
+        initial = sessions.admit(
+            BrowserCredentials(
+                access_token=auth.token, refresh_token="generated-before-switch", user_id=subject
+            )
+        )
+        handle, identity = initial.handle, initial.identity
+        assert identity is not None
+        intent = BrowserSelectionIntent(
+            organization_id=org.local,
+            expected_generation=0,
+            idempotency_key="generated-continuation",
+        )
+        target = binding.authorize_current(handle, identity, intent)
+        assert (
+            isinstance(target, SelectionTarget)
+            and target.identity_organization_id == org.remote_org
+        )
+        sessions.require_reconciliation(handle, 0)
+        prior_digest = sessions.current(handle).credential_digest
+        assert prior_digest is not None
+        expires = datetime.fromtimestamp(auth.expires_at, UTC)
+        flow = BrowserAuthTransaction(
+            state=secrets.token_urlsafe(32),
+            nonce=secrets.token_urlsafe(32),
+            browser_digest=digest("generated-switch-browser"),
+            verifier=secrets.token_urlsafe(32),
+            expires_at=expires + timedelta(seconds=60),
+            return_path="/",
+            kind="switch",
+            session_handle=handle,
+            subject=subject,
+            session_id=identity.session_id,
+            generation=identity.session_generation,
+            selection_target=BrowserSelectionTarget(
+                organization_id=target.organization_id,
+                identity_organization_id=target.identity_organization_id,
+                identity_issuer=target.identity_issuer,
+                membership_id=target.membership_id,
+                authority_revision=target.authority_revision,
+            ),
+            selection_intent=intent,
+        )
+        sessions.create_flow(flow)
+        if prior_token == "expired":
+            monkeypatch.setattr(auth.runtime.session_service, "clock", lambda: expires)
+            monkeypatch.setattr(auth.runtime.session_service.verifier, "clock", lambda: expires)
+
+        combined = f"{flow.state}.{flow.nonce}"
+        expect(
+            "CALLBACK_INVALID",
+            lambda: sessions.consume_flow(combined, digest("generated-wrong-browser")),
+        )
+        claimed = sessions.consume_flow(combined, flow.browser_digest)
+        assert claimed == flow and claimed.selection_intent is not None
+        expect("CALLBACK_INVALID", lambda: sessions.consume_flow(combined, flow.browser_digest))
+        assert counts(durable, identity.session_id) == (0, 0)
+
+        if prior_token == "expired":
+            admit = Mock(wraps=auth.runtime.selection.admit)
+            monkeypatch.setattr(auth.runtime.selection, "admit", admit)
+            expect(
+                "SESSION_INVALID",
+                lambda: binding.authorize_current(handle, identity, claimed.selection_intent),
+            )
+            admit.assert_not_called()
+            blocked = sessions.current(handle)
+            assert blocked.reconciliation_required and blocked.generation == 0
+            assert blocked.credential_digest == prior_digest
+            assert counts(durable, identity.session_id) == (0, 0)
+            return
+
+        assert binding.authorize_current(handle, identity, claimed.selection_intent) == target
+        now = int(datetime.now(UTC).timestamp())
+        returned = auth.issue_token(
+            org.remote_org, iat=now, exp=now + 600, jti="generated-continuation-exchange"
+        )
+        staged = sessions.replace_credentials(
+            handle,
+            identity.session_generation,
+            BrowserCredentials(
+                access_token=returned, refresh_token="generated-after-switch", user_id=subject
+            ),
+        )
+        assert staged != prior_digest
+        assert binding.authorize_current(handle, identity, claimed.selection_intent) == target
+        receipt = binding.commit(handle, identity, claimed.selection_intent, target, staged)
+        assert (receipt.organization_id, receipt.membership_id, receipt.session_generation) == (
+            org.local,
+            org.membership,
+            1,
+        )
+        completed = sessions.current(handle)
+        assert completed.identity is not None and not completed.reconciliation_required
+        assert completed.credential_digest == staged and completed.generation == 1
+        assert (
+            binding.authorize_current(handle, completed.identity, claimed.selection_intent)
+            == receipt
+        )
+        assert counts(durable, identity.session_id) == (1, 1)
 
 
 def test_exact_historical_receipt_after_later_switch(durable):

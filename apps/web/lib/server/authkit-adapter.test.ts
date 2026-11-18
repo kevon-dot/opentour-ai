@@ -462,6 +462,55 @@ describe('ending and switching', () => {
       assert.equal(f.provider.exchange.mock.callCount(), 0);
       assert.equal(f.selections.commit.mock.callCount(), 0);
     });
+  testCases(['prior expired', 'returned expired', 'returned fresh'] as const)(
+    'applies the current-token continuation boundary when %s', async (scenario) => {
+      const f = fixture();
+      const prior = { ...claims, expiresAt: NOW + 100 };
+      f.provider.verify.mock.mockImplementationOnce(async () => prior, 0);
+      f.provider.refresh.mock.mockImplementation(async () => { throw new ProviderFailure('authentication_required'); });
+      const outcome = await f.adapter.switchOrganization(f.request(), 'org_b', 0, '/setup');
+      if (outcome.outcome !== 'authentication_required') throw new Error('Missing continuation');
+
+      const callbackTime = NOW + (scenario === 'prior expired' ? 100 : 99);
+      f.advance(callbackTime - NOW);
+      const flow = [...f.flows.values()][0]!;
+      assert.ok(flow.expiresAt > callbackTime);
+      if (scenario === 'prior expired') {
+        // Model the configured Python authorize_current port, which requires a fresh stored token.
+        assert.equal(prior.expiresAt, callbackTime);
+        f.selections.authorize.mock.mockImplementationOnce(async () => {
+          throw new IdentityFailure('SESSION_INVALID');
+        }, 2);
+      }
+      const fresh = { ...claims, organizationId: targetB.identityOrganizationId,
+        expiresAt: scenario === 'returned expired' ? callbackTime : callbackTime + 100_000 };
+      f.provider.verify.mock.mockImplementation(async () => fresh);
+      const returned = { ...credentials, accessToken: 'GENERATED_CONTINUATION_ACCESS' };
+      f.provider.exchange.mock.mockImplementation(async () => returned);
+
+      const state = new URL(outcome.response.headers.get('location')!).searchParams.get('state');
+      const cookie = outcome.response.headers.get('set-cookie')!.split(';')[0]!;
+      const request = new Request(`${profile.callbackURI}?state=${state}&code=generated`, { headers: { cookie } });
+      const response = await f.adapter.callback(request);
+      const accepted = scenario === 'returned fresh';
+      assert.equal(response.status, accepted ? 303 : 401);
+      if (!accepted) {
+        assert.equal((await response.json()).code, scenario === 'prior expired' ? 'SESSION_INVALID' : 'CALLBACK_INVALID');
+        assert.equal(response.headers.getSetCookie().some(value => value.startsWith('opentour-session=')), false);
+      }
+      assert.equal(f.provider.exchange.mock.callCount(), scenario === 'prior expired' ? 0 : 1);
+      assert.equal(f.sessions.replaceCredentials.mock.callCount(), accepted ? 1 : 0);
+      assert.equal(f.selections.commit.mock.callCount(), accepted ? 1 : 0);
+      assert.equal(f.session.identity.session_generation, accepted ? 1 : 0);
+      assert.equal(f.session.reconciliationRequired, !accepted);
+      assert.deepEqual(f.session.credentials, accepted ? returned : credentials);
+      assert.equal(f.flows.size, 0);
+
+      const replay = await f.adapter.callback(request);
+      assert.equal(replay.status, 401);
+      assert.equal((await replay.json()).code, 'CALLBACK_INVALID');
+      assert.equal(f.provider.exchange.mock.callCount(), scenario === 'prior expired' ? 0 : 1);
+    });
   it('rechecks local membership after provider refresh and before selection', async () => {
     const f = fixture();
     f.selections.authorize.mock.mockImplementationOnce(async () => ({ target: targetA }), 0);
