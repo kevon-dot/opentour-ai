@@ -1,0 +1,13 @@
+/* Local synthetic gallery only. No product route, request, navigation or shared state. */
+.ot-single-choice-fixture { box-sizing: border-box; min-block-size: 100dvh; display: flex; flex-direction: column; align-items: flex-start; gap: var(--ot-space-24); padding: var(--ot-space-16); font-family: Geist, sans-serif; color: var(--ot-text-primary); background: var(--ot-surface-canvas); }
+.ot-single-choice-fixture h1 { margin: 0; max-inline-size: 100%; overflow-wrap: anywhere; font: var(--ot-type-heading-weight) var(--ot-type-heading-size)/var(--ot-type-heading-line) Geist, sans-serif; }
+.ot-single-choice-fixture h2 { margin: 0; overflow-wrap: anywhere; font: var(--ot-type-label-weight) var(--ot-type-label-size)/var(--ot-type-label-line) Geist, sans-serif; }
+/* Each state keeps the native 360px frame; cells start at the top so an open list never moves a neighbour. */
+.ot-single-choice-fixture .fixture-row { display: flex; flex-wrap: wrap; align-items: flex-start; gap: var(--ot-space-24); inline-size: 100%; }
+.ot-single-choice-fixture .fixture-cell { inline-size: min(360px, 100%); }
+/* Native 31:36: a base surface with 16px padding and a 12px rhythm around a 544px control. */
+.ot-single-choice-fixture .fixture-reference { box-sizing: border-box; display: flex; flex-direction: column; gap: var(--ot-space-12); inline-size: min(576px, 100%); padding: var(--ot-space-16); background: var(--ot-surface-base); }
+.ot-single-choice-fixture .ot-button { min-block-size: 44px; }
+.ot-single-choice-fixture output { display: block; max-inline-size: 100%; min-block-size: var(--ot-type-small-line); overflow-wrap: anywhere; color: var(--ot-text-secondary); font: var(--ot-type-small-weight) var(--ot-type-small-size)/var(--ot-type-small-line) Geist, sans-serif; }
+@media (min-width: 768px) { .ot-single-choice-fixture { padding: var(--ot-space-24); } }
+@media (min-width: 1280px) { .ot-single-choice-fixture { padding: var(--ot-space-32); } }

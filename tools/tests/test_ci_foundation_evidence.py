@@ -389,6 +389,47 @@ def test_scoped_suites_are_selected_and_missing_render_evidence_fails_closed(
             verify_scoped_presentation(tmp_path, value)
 
 
+def test_single_choice_capture_contract_is_exact(tmp_path: Path) -> None:
+    from tools.ci.browser_evidence import SINGLE_CHOICE_CAPTURES, verify_scoped_presentation
+
+    font = tmp_path / "apps/web/styles/fonts/Geist.woff2"
+    font.parent.mkdir(parents=True)
+    font.write_bytes(b"generated font digest fixture")
+    prefix = "evidence/OPE-317/runs/generated/artifacts/"
+
+    def evidence(names: list[str]) -> dict[str, Any]:
+        return {
+            "issue_key": "OPE-317",
+            "fixture_id": "scoped-presentation-v1",
+            "platform": "darwin",
+            "font_sha256": digest(font.read_bytes()),
+            "report": {"status": "PASS", "tests": [{"mode": None}]},
+            "outputs": [{"path": prefix + name, "sha256": "0" * 64} for name in names],
+        }
+
+    complete = sorted(SINGLE_CHOICE_CAPTURES)
+    assert len(complete) == 60
+    for state in ("closed", "hover", "focus", "open", "error", "disabled", "menu"):
+        for width in (320, 768, 1280, 1440):
+            for scale in (100, 200):
+                assert f"single-choice-{width}-{scale}-{state}.png" in SINGLE_CHOICE_CAPTURES
+    verify_scoped_presentation(tmp_path, evidence(complete))
+    # Traces and reporter attachments are not retained captures and leave the inventory alone.
+    extras = ["states/trace.zip", "attachments/single-choice-selected.png"]
+    verify_scoped_presentation(tmp_path, evidence([*complete, *extras]))
+    incomplete = (
+        complete[1:],
+        [name for name in complete if "-200-" not in name],
+        [name for name in complete if not name.endswith("-focus.png")],
+        [*complete, "single-choice-320-100-pressed.png"],
+        # A second copy of one render cannot stand in for a missing one.
+        [*complete[1:], "retry/" + complete[1]],
+    )
+    for names in incomplete:
+        with pytest.raises(ValueError, match="Single-choice select capture inventory mismatch"):
+            verify_scoped_presentation(tmp_path, evidence(names))
+
+
 @pytest.mark.parametrize(
     "change",
     [

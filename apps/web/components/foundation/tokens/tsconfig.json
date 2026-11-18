@@ -34,6 +34,9 @@
     "../../../tests/fixtures/presentation/operation-state.tsx",
     "../forms/text-field*.tsx",
     "../forms/text-field*.ts",
-    "../../../tests/fixtures/presentation/text-field.tsx"
+    "../../../tests/fixtures/presentation/text-field.tsx",
+    "../forms/index.ts",
+    "../forms/single-choice-select*.ts",
+    "../forms/single-choice-select*.tsx"
   ]
 }

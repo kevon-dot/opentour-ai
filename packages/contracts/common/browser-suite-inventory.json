@@ -214,10 +214,13 @@
     ],
     "apps/web/components/foundation/forms/text-field.visual.spec.ts": [
       "OPE-316"
+    ],
+    "apps/web/components/foundation/forms/single-choice-select.visual.spec.ts": [
+      "OPE-317"
     ]
   },
-  "distinct_paths": 71,
-  "issue_count": 67,
+  "distinct_paths": 72,
+  "issue_count": 68,
   "affected_old_wrapper_paths": {
     "apps/web/tests/coverage/ot-p22-c01.spec.ts": [
       "OPE-232"

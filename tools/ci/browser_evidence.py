@@ -12,12 +12,13 @@ from typing import Any
 from tools.public_content_check import MAX_FILE_BYTES, digest, inspect_bytes, load_policy
 
 PRESENTATION_TARGETS = {
+    "apps/web/components/foundation/forms/single-choice-select.visual.spec.ts": "OPE-317",
+    "apps/web/components/foundation/forms/text-field.visual.spec.ts": "OPE-316",
     "apps/web/components/foundation/tokens/skeleton.visual.spec.ts": "OPE-310",
     "apps/web/components/foundation/tokens/icon-button.visual.spec.ts": "OPE-311",
     "apps/web/components/foundation/tokens/status-icon.visual.spec.ts": "OPE-312",
     "apps/web/components/foundation/tokens/tooltip.visual.spec.ts": "OPE-313",
     "apps/web/components/foundation/forms/difference-review.visual.spec.ts": "OPE-314",
-    "apps/web/components/foundation/forms/text-field.visual.spec.ts": "OPE-316",
     "apps/web/features/operations/cancellation-impact.visual.spec.ts": "OPE-315",
     "apps/web/features/workspace/customer-shell.visual.spec.ts": "OPE-307",
     "apps/web/components/foundation/data-display/chart-evidence.visual.spec.ts": "OPE-303",
@@ -249,6 +250,13 @@ def verify_scoped_presentation(root: Path, value: dict[str, Any]) -> None:
         actual_cards = {Path(path).name for path in images}
         if len(images) != len(expected_cards) or actual_cards != expected_cards:
             raise ValueError("Difference review capture inventory mismatch")
+    elif value["issue_key"] == "OPE-315":
+        expected_impact = {
+            f"impact-{width}-{scale}.png" for width in widths for scale in (100, 200)
+        }
+        actual_impact = {Path(name).name for name in images}
+        if len(images) != len(expected_impact) or actual_impact != expected_impact:
+            raise ValueError("Cancellation impact capture inventory mismatch")
     elif value["issue_key"] == "OPE-316":
         expected_fields = {
             f"field-{width}-{scale}-{state}.png"
@@ -259,13 +267,11 @@ def verify_scoped_presentation(root: Path, value: dict[str, Any]) -> None:
         actual_fields = {Path(name).name for name in images}
         if len(images) != len(expected_fields) or actual_fields != expected_fields:
             raise ValueError("Text field capture inventory mismatch")
-    elif value["issue_key"] == "OPE-315":
-        expected_impact = {
-            f"impact-{width}-{scale}.png" for width in widths for scale in (100, 200)
-        }
-        actual_impact = {Path(name).name for name in images}
-        if len(images) != len(expected_impact) or actual_impact != expected_impact:
-            raise ValueError("Cancellation impact capture inventory mismatch")
+    elif value["issue_key"] == "OPE-317":
+        if len(images) != len(SINGLE_CHOICE_CAPTURES) or {
+            Path(name).name for name in images
+        } != SINGLE_CHOICE_CAPTURES:
+            raise ValueError("Single-choice select capture inventory mismatch")
     elif value["issue_key"] == "OPE-303":
         expected_charts = {
             f"charts-{width}-{scale}.png" for width in widths for scale in (100, 200)
