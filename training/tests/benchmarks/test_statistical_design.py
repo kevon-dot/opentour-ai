@@ -39,7 +39,9 @@ def reference(name: str) -> dict[str, Any]:
     }
 
 
-def gate(identifier: str, operator: str, threshold: float | None, alpha: float | None) -> Any:
+def gate(
+    identifier: str, operator: str, threshold: int | float | None, alpha: float | None
+) -> dict[str, Any]:
     return {
         "gate_id": identifier,
         "metric_ref": reference(identifier),
@@ -62,6 +64,7 @@ def policy() -> dict[str, Any]:
             gate("retention", "lower_bound_ge", -0.01, 0.015),
             gate("risk", "upper_bound_le", 0.01, 0.01),
             gate("coverage", "all_checks_pass", None, None),
+            dict(gate("latency", "point_le", 500, None), unit="milliseconds"),
         ],
         "fatal_gate_ids": ["risk"],
         "effect_requirement": {
@@ -120,8 +123,17 @@ def test_predeclared_claims_and_fatal_set(
     plan: dict[str, Any], policy: dict[str, Any], contracts: ContractValidator
 ) -> None:
     before = copy.deepcopy((plan, policy))
-    validate_statistical_design(plan, policy, contracts)
+    assert validate_statistical_design(plan, policy, contracts) is None
     assert (plan, policy) == before
+
+
+def test_registered_policy_validation_returns_independent_document(
+    policy: dict[str, Any], contracts: ContractValidator
+) -> None:
+    validated = contracts.validate_gate_policy(policy)
+    assert validated == policy
+    validated["effect_requirement"]["metric_ref"]["artifact_id"] = "different-fixture"
+    assert policy["effect_requirement"]["metric_ref"]["artifact_id"] == "gain"
 
 
 def test_fixed_final_family_and_unused_optional_gate(
@@ -181,11 +193,14 @@ def test_reject_incompatible_policy(
     for key in path[:-1]:
         target = target[key]
     target[path[-1]] = value
+    before = copy.deepcopy((plan, policy))
     with pytest.raises(InvalidKernelInput, match="^Invalid numerical input$"):
         validate_statistical_design(plan, policy, contracts)
+    # Compare the document's representation so the NaN adverse case also checks for mutation.
+    assert repr((plan, policy)) == repr(before)
 
 
-@pytest.mark.parametrize("identifier", ["risk", "coverage", "unknown"])
+@pytest.mark.parametrize("identifier", ["risk", "coverage", "latency", "unknown"])
 def test_missing_or_ineligible_claim(
     plan: dict[str, Any], policy: dict[str, Any], contracts: ContractValidator, identifier: str
 ) -> None:
@@ -193,6 +208,28 @@ def test_missing_or_ineligible_claim(
     del final["risk"]
     if identifier != "risk":
         final[identifier] = 0.01
+    with pytest.raises(InvalidKernelInput):
+        validate_statistical_design(plan, policy, contracts)
+
+
+def test_familywise_budget_applies_even_when_each_claim_is_within_its_cap(
+    plan: dict[str, Any], policy: dict[str, Any], contracts: ContractValidator
+) -> None:
+    final = plan["look_plan"][-1]["claim_alpha"]
+    final["risk"] = 0.010000000000000002
+    policy["required_gates"][2]["alpha_allocation"] = final["risk"]
+    with pytest.raises(InvalidKernelInput):
+        validate_statistical_design(plan, policy, contracts)
+
+
+def test_optional_scheduled_gate_still_has_a_cap(
+    plan: dict[str, Any], policy: dict[str, Any], contracts: ContractValidator
+) -> None:
+    optional = dict(gate("optional", "upper_bound_le", 0.03, 0.001), required=False)
+    policy["required_gates"].append(optional)
+    final = plan["look_plan"][-1]["claim_alpha"]
+    final["risk"] = 0.005
+    final["optional"] = 0.002
     with pytest.raises(InvalidKernelInput):
         validate_statistical_design(plan, policy, contracts)
 

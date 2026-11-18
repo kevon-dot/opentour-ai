@@ -15,7 +15,7 @@ from opentour_training.evaluation.inference_plan import (
 _INTERVAL_OPERATORS = {"lower_bound_ge", "upper_bound_le"}
 
 
-def _gate_requirements(policy: dict[str, Any]) -> dict[str, dict[str, Any]]:
+def _validate_gate_requirements(policy: dict[str, Any]) -> dict[str, dict[str, Any]]:
     gates: dict[str, dict[str, Any]] = {}
     required_fatal = set()
     for gate in policy["required_gates"]:
@@ -37,17 +37,18 @@ def _gate_requirements(policy: dict[str, Any]) -> dict[str, dict[str, Any]]:
 def validate_statistical_design(
     inference_plan: object, gate_policy: object, contracts: ContractValidator
 ) -> None:
-    """Validate the proposed design before reading outcomes; no lock or receipt is issued.
+    """Check the schema, unit declaration, fatal gates and scheduled alpha before outcomes.
 
-    The caller supplies the two pre-outcome documents and the pinned local registry.
-    Current authority, population eligibility and exposure reservations are checked at lock.
+    Accept decoded, ingress-bounded documents and the pinned local registry. Locking
+    requires authoritative gate-role and slice bindings, metric unit/range and threshold
+    agreement, population eligibility, current authority, and exposure and query reservations.
     """
     plan = validate_inference_plan(inference_plan, contracts)
     policy = contracts.validate_gate_policy(gate_policy)
     if policy["effect_requirement"]["independent_unit"] != plan.independent_unit:
         raise InvalidKernelInput()
 
-    gates = _gate_requirements(policy)
+    gates = _validate_gate_requirements(policy)
     allocated: dict[str, Fraction] = {}
     for look in plan.look_plan:
         for gate_id, alpha in look.claim_alpha:
