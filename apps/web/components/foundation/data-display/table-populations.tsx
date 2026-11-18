@@ -37,6 +37,7 @@ const styles = `
 .ot-population caption { text-align:start; padding-bottom:var(--ot-space-8) }
 .ot-population .ot-button { min-height:44px; width:100% }
 .ot-population .controls .ot-button-group { width:min(280px,100%) }
+.ot-population .controls.recovery .ot-button-group {width:min(240px,100%)}
 .ot-population > .field { width:min(360px,100%); box-sizing:border-box }
 .ot-population tr[data-selected=true]:first-child :is(.record-cell,.ot-table-cell) { border-color:var(--ot-action-primary) }
 .ot-population .time,.ot-population tr td:last-child { text-align:end }
@@ -94,8 +95,8 @@ export function TablePopulations(p: TablePopulationsProps) {
         <TableCell value={row.lifecycle} tone={selected.has(row.id) ? 'blue' : 'default'}/><TableCell value={row.observed} tone={selected.has(row.id) ? 'blue' : 'default'}/>
       </tr>)}</tbody></table>
     </div>
-    {p.state === 'empty' && <><Notice title="No records yet" body="Connect a source to import your first records." tone="info"/><div className="controls"><Button variant="secondary" label="Connect a source" onPress={() => p.onIntent({type:'connect'})}/></div></>}
-    {p.state === 'filtered-to-nothing' && <><Notice title="No matches" body="No records match these filters." tone="info"/><div className="controls"><Button variant="secondary" label="Clear filters" onPress={() => p.onIntent({type:'clear'})}/></div></>}
+    {p.state === 'empty' && <><Notice title="No records yet" body="Connect a source to import your first records." tone="info"/><div className="controls recovery"><Button variant="secondary" label="Connect a source" onPress={() => p.onIntent({type:'connect'})}/></div></>}
+    {p.state === 'filtered-to-nothing' && <><Notice title="No matches" body="No records match these filters." tone="info"/><div className="controls recovery"><Button variant="secondary" label="Clear filters" onPress={() => p.onIntent({type:'clear'})}/></div></>}
     <label className="field">Rows per page<select value={p.pageSize} aria-describedby={helperId} onChange={e => p.onIntent({type:'page-size',value:Number(e.target.value)})}>
       {p.pageSizes.map(size => <option key={size} value={size}>{size}</option>)}</select><small id={helperId}>Whole number 1–100; default 25.</small></label>
     <p className="sr" role="status">{p.position} · {p.rows.length} shown · Observed time {p.direction}</p>
@@ -115,6 +116,9 @@ export function PageSelectionNavigation(p: import('./table-populations.types').P
       .ot-page-selection .controls { flex-direction:row }
       .ot-page-selection .controls .ot-button-group { width:auto }
       .ot-page-selection .ot-button { min-height:36px; width:auto }
+      .ot-page-selection > .ot-button-group .ot-button { min-width:min(112px,100%) }
+      .ot-page-selection nav .ot-button-group:first-child .ot-button { min-width:min(89px,100%) }
+      .ot-page-selection nav .ot-button-group:last-child .ot-button { min-width:min(64px,100%) }
     `}</style>
     <h2>{p.selectedIds.length} records selected</h2>
     <p>Page selection: {p.selectedIds.length} / query result: {p.queryCount}. Bulk action binds the frozen selected IDs and revision.</p>
