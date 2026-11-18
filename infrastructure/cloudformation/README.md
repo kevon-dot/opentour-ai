@@ -149,4 +149,11 @@ for reusable-workflow jobs. Repository ID, main branch, environment and STS
 audience checks remain mandatory. The predecessor bootstrap CI still grants no
 production OIDC profile; this template does not activate one.
 
+Approved deployment and migration workflows must request a 900-second STS session
+and verify the returned expiration before using the credentials. Both roles have
+an IAM maximum session duration of 3,600 seconds, the lowest AWS permits. AWS
+reserves the `sts:DurationSeconds` condition key for bearer and outbound web
+identity token requests. [IAM and STS condition context keys](https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_policies_iam-condition-keys.html)
+· [STS web identity session duration](https://docs.aws.amazon.com/STS/latest/APIReference/API_AssumeRoleWithWebIdentity.html)
+
 Source: [GitHub immutable subjects and reusable workflow claims](https://docs.github.com/en/actions/reference/security/oidc).

@@ -775,9 +775,6 @@
                   "token.actions.githubusercontent.com:environment": {
                     "Ref": "Environment"
                   }
-                },
-                "NumericLessThanEquals": {
-                  "sts:DurationSeconds": 900
                 }
               }
             }
@@ -879,9 +876,6 @@
                   "token.actions.githubusercontent.com:environment": {
                     "Ref": "Environment"
                   }
-                },
-                "NumericLessThanEquals": {
-                  "sts:DurationSeconds": 900
                 }
               }
             }
