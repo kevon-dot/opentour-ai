@@ -412,7 +412,7 @@ test('long unbroken and markup-like caller text wraps verbatim without page over
     if (width === 320) {
       const region = page.getByRole('region', { name: 'Details — scroll horizontally', exact: true });
       await page.keyboard.press('Tab');
-      await expect(scrollRegion).toBeFocused();
+      await expect(region).toBeFocused();
     }
     await capture(page, info, name);
   }
@@ -433,9 +433,10 @@ test('forced colors keep boundaries, readable text and visible focus', async ({ 
         await expect(page.getByRole('cell', { name: 'Sealed' })).toHaveCSS('color', 'rgb(0, 0, 0)');
         if (width === 320) {
           await page.keyboard.press('Tab');
-          await expect(scrollRegion).toBeFocused();
-          await expect(scrollRegion).toHaveCSS('outline-style', 'solid');
-          await expect(scrollRegion).toHaveCSS('outline-width', '2px');
+          const region = page.getByRole('region', { name: 'Details — scroll horizontally', exact: true });
+          await expect(region).toBeFocused();
+          await expect(region).toHaveCSS('outline-style', 'solid');
+          await expect(region).toHaveCSS('outline-width', '2px');
         }
       } else {
         const grid = page.locator('.ot-relationship-grid');
