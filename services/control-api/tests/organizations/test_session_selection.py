@@ -715,6 +715,60 @@ def test_sealed_continuation_obeys_current_bearer_boundary(durable, monkeypatch,
             assert blocked.reconciliation_required and blocked.generation == 0
             assert blocked.credential_digest == prior_digest
             assert counts(durable, identity.session_id) == (0, 0)
+
+            signin = BrowserAuthTransaction(
+                state=secrets.token_urlsafe(32),
+                nonce=secrets.token_urlsafe(32),
+                browser_digest=digest("generated-fresh-signin-browser"),
+                verifier=secrets.token_urlsafe(32),
+                expires_at=expires + timedelta(minutes=10),
+                return_path="/",
+                kind="signin",
+                session_handle=None,
+                subject=None,
+                session_id=None,
+                generation=None,
+                selection_target=None,
+            )
+            sessions.create_flow(signin)
+            signin_state = f"{signin.state}.{signin.nonce}"
+            assert sessions.consume_flow(signin_state, signin.browser_digest) == signin
+            recovery_sid = f"generated-recovery-{uuid4().hex}"
+            recovered_token = auth.issue_token(
+                org.remote_org,
+                sid=recovery_sid,
+                iat=auth.expires_at,
+                auth_time=auth.expires_at,
+                exp=auth.expires_at + 300,
+            )
+            recovered = sessions.admit(
+                BrowserCredentials(
+                    access_token=recovered_token,
+                    refresh_token="generated-fresh-signin",
+                    user_id=subject,
+                )
+            )
+            assert recovery_sid != identity.session_id and recovered.handle != handle
+            assert recovered.session_id == recovery_sid and recovered.generation == 0
+            context = auth.runtime.session_service.current_context
+            assert context(recovered_token, recovered.handle, "generated-recovery") == {
+                "state": "unselected",
+                "organization_id": None,
+                "membership_id": None,
+                "session_generation": 0,
+                "request_id": "generated-recovery",
+            }
+            expect("SESSION_INVALID", lambda: context(recovered_token, handle, "generated-old"))
+            expect("SESSION_INVALID", lambda: context(auth.token, handle, "generated-expired"))
+            expect(
+                "CALLBACK_INVALID",
+                lambda: sessions.consume_flow(signin_state, signin.browser_digest),
+            )
+            expect("CALLBACK_INVALID", lambda: sessions.consume_flow(combined, flow.browser_digest))
+            previous = sessions.current(handle)
+            assert previous == blocked and previous.credential_digest == prior_digest
+            assert counts(durable, identity.session_id) == counts(durable, recovery_sid) == (0, 0)
+            admit.assert_not_called()
             return
 
         assert binding.authorize_current(handle, identity, claimed.selection_intent) == target

@@ -1,20 +1,25 @@
-// Test-only configured factories, real local PostgreSQL ports and generated SDK responses.
+// Test-only exported account handlers, real PostgreSQL ports and generated SDK responses.
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
-const [adapterPath, python, bridgePath, configPath] = process.argv.slice(2);
-const require = createRequire(pathToFileURL(adapterPath));
+const [compiled, python, bridgePath, configPath] = process.argv.slice(2);
+const moduleURL = (path) => pathToFileURL(join(compiled, path)).href;
+const require = createRequire(moduleURL('package.json'));
 const { exportJWK, generateKeyPair, SignJWT } = await import(pathToFileURL(require.resolve('jose')).href);
-const { createAuthkitAdapter, createWorkOSProvider, IdentityFailure } = await import(pathToFileURL(adapterPath).href);
+const { IdentityFailure } = await import(moduleURL('lib/server/authkit-adapter.js'));
+const { configureAccountEntry } = await import(moduleURL('features/account-entry/server.js'));
+const { GET: signinGET } = await import(moduleURL('app/auth/signin/route.js'));
+const { GET: callbackGET } = await import(moduleURL('app/auth/callback/route.js'));
 const config = JSON.parse(readFileSync(configPath, 'utf8'));
 const profile = { origin: 'https://app.example.invalid', callbackURI: 'https://app.example.invalid/auth/callback',
   signedOutPath: '/signed-out', returnPaths: ['/', '/signed-out'], providerOrigins: ['https://api.workos.com'],
   issuer: config.issuer, audience: 'https://api.example.invalid', jwksURL: 'https://api.workos.com/sso/jwks/client_fixture',
   clientId: 'client_fixture' };
 let exchanges = 0;
+let jwksRequests = 0;
 let admissionUnknown = false;
 let endUnknown = false;
 let nextSid = config.sid;
@@ -93,17 +98,30 @@ function issueToken(sessionId, overrides = {}) {
     iat: config.now/1000-60, exp: config.now/1000+600, auth_time: config.now/1000-120, ...overrides })
     .setProtectedHeader({ alg: 'RS256', kid: jwk.kid }).sign(privateKey);
 }
-const sdk = createWorkOSProvider(profile, 'generated-api-key', { now: () => config.now,
-  key: async () => publicKey,
-  fetch: async () => {
-    exchanges++;
-    const token = await issueToken(nextSid);
-    return new Response(JSON.stringify({ access_token: token, refresh_token: 'GENERATED_REFRESH_SENTINEL',
-      user: { id: 'user_a', email: 'generated@example.invalid', email_verified: true,
-        first_name: null, last_name: null, profile_picture_url: null,
-        created_at: new Date(config.now).toISOString(), updated_at: new Date(config.now).toISOString() } }),
-    { headers: { 'content-type': 'application/json' } });
-  } });
+const workosApiKey = 'generated-api-key';
+async function generatedFetch(input, init) {
+  const request = new Request(input, init);
+  if (request.url === profile.jwksURL) {
+    assert.equal(request.method, 'GET');
+    jwksRequests++;
+    return Response.json({ keys: [jwk] });
+  }
+  assert.equal(request.url, 'https://api.workos.com/user_management/authenticate');
+  assert.equal(request.method, 'POST');
+  const body = await request.json();
+  assert.equal(body.code, 'generated');
+  assert.equal(body.client_id, profile.clientId);
+  assert.equal(body.client_secret, workosApiKey);
+  assert.match(body.code_verifier, /^[A-Za-z0-9_-]{43}$/);
+  exchanges++;
+  return Response.json({
+    access_token: await issueToken(nextSid),
+    refresh_token: 'GENERATED_REFRESH_SENTINEL',
+    user: { id: 'user_a', email: 'generated@example.invalid', email_verified: true,
+      first_name: null, last_name: null, profile_picture_url: null,
+      created_at: new Date(config.now).toISOString(), updated_at: new Date(config.now).toISOString() },
+  });
+}
 const sessions = {
   admit: async (credentials) => port(admissionUnknown ? 'admit_unknown' : 'admit', { credentials }),
   current: async (handle) => port('current', { handle }),
@@ -112,7 +130,7 @@ const sessions = {
   end: async (handle, generation) => port(endUnknown ? 'end_unknown' : 'end', { handle, generation }),
   requireReconciliation: async (handle, generation) => port('reconcile', { handle, generation }),
 };
-const adapter = createAuthkitAdapter({ profile, provider: sdk, sessions, now: () => config.now,
+const startup = { profile, workosApiKey, sessions, now: () => config.now,
   transactions: {
     create: async (flow) => port('create_flow', { flow }),
     consume: async (state, browser) => port('consume_flow', { state, browser }),
@@ -120,21 +138,33 @@ const adapter = createAuthkitAdapter({ profile, provider: sdk, sessions, now: ()
   selections: {
     authorize: async () => { throw new Error('Selection belongs to172 and is not invoked by signin'); },
     commit: async () => { throw new Error('Selection belongs to172 and is not invoked by signin'); },
-  } });
+  } };
+const signinURL = profile.origin + '/auth/signin';
 async function signin() {
-  const response = await adapter.signin(new Request(profile.origin + '/auth/signin'));
+  const response = await signinGET(new Request(signinURL));
   assert.equal(response.status, 303);
   const state = new URL(response.headers.get('location')).searchParams.get('state');
   const cookie = response.headers.get('set-cookie').split(';')[0];
   return new Request(`${profile.callbackURI}?state=${state}&code=generated`, { headers: { cookie } });
 }
 async function runProbe() {
+  for (const response of [
+    await signinGET(new Request(signinURL)),
+    await callbackGET(new Request(profile.callbackURI)),
+  ]) {
+    assert.equal(response.status, 503);
+    assert.equal((await response.json()).code, 'IDENTITY_NOT_CONFIGURED');
+    assert.equal(response.headers.get('cache-control'), 'no-store');
+    assert.equal(response.headers.get('set-cookie'), null);
+  }
+  assert.equal(exchanges + jwksRequests, 0);
+  const adapter = configureAccountEntry(startup);
   const callback = await signin();
-  const success = await adapter.callback(callback);
+  const success = await callbackGET(callback);
   assert.equal(success.status, 303);
   const sessionCookie = success.headers.getSetCookie().find((v) => v.startsWith('opentour-session=')).split(';')[0];
   const handle = sessionCookie.split('=')[1];
-  assert.equal((await adapter.callback(callback)).status, 401);
+  assert.equal((await callbackGET(callback)).status, 401);
   assert.equal(exchanges, 1);
   const request = new Request(profile.origin + '/auth/operation', { method: 'POST', headers: {
     cookie: sessionCookie, origin: profile.origin, 'x-csrf-token': (await sessions.current(handle)).csrfToken,
@@ -172,7 +202,7 @@ async function runProbe() {
   await assert.rejects(adapter.verifiedIdentity(request, 'session_context'), IdentityFailure);
   nextSid = config.sid + '_end_unknown';
   const endFlow = await signin();
-  const endAdmission = await adapter.callback(endFlow);
+  const endAdmission = await callbackGET(endFlow);
   assert.equal(endAdmission.status, 303);
   const endCookie = endAdmission.headers.getSetCookie().find((v) => v.startsWith('opentour-session=')).split(';')[0];
   const endHandle = endCookie.split('=')[1];
@@ -190,20 +220,25 @@ async function runProbe() {
   nextSid = config.sid + '_unknown';
   admissionUnknown = true;
   const uncertainFlow = await signin();
-  const uncertain = await adapter.callback(uncertainFlow);
+  const uncertain = await callbackGET(uncertainFlow);
   assert.equal(uncertain.status, 503);
   assert.equal(uncertain.headers.getSetCookie().some((v) => v.startsWith('opentour-session=')), false);
-  assert.equal((await adapter.callback(uncertainFlow)).status, 401);
+  assert.equal((await callbackGET(uncertainFlow)).status, 401);
   assert.equal(exchanges, 3);
+  assert.equal(jwksRequests, 1);
   assert.equal((await port('inspect')).sealed, true);
 }
 
+const originalFetch = globalThis.fetch;
+globalThis.fetch = generatedFetch;
 try {
   await runProbe();
 } finally {
+  globalThis.fetch = originalFetch;
   await closeBridge();
 }
 console.log(JSON.stringify({ configured_factories: 'PASS', actual_postgresql: true,
+  exported_signin_callback: true, unconfigured_exports_refused: true,
   generated_provider: true, provider_acceptance: 'NOT_RUN', exchanges,
   callback_replay_denied: true, durable_end_denied: true, unknown_commit_no_cookie: true,
   unknown_end_no_cookie_or_redirect: true,

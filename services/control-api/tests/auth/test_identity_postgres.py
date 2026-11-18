@@ -536,28 +536,37 @@ def test_stale_subject_generation_and_expired_credentials_refuse(durable, identi
 
 
 def test_configured_typescript_factories_with_actual_durable_ports(durable, identity):
-    """Node SDK HTTP is generated; callback claims, sessions and denial commit to real PG."""
+    """The exported account handlers use generated WorkOS replies and actual PostgreSQL."""
     pnpm, node = shutil.which("pnpm"), shutil.which("node")
     assert pnpm and node, "Qualified pinned Node/pnpm are required by this finite target"
     with tempfile.TemporaryDirectory(prefix="opentour-auth-port-") as directory:
         private = Path(directory)
         private.chmod(0o700)
         output = private / "compiled"
+        web = ROOT / "apps/web"
+        project = private / "tsconfig.json"
+        project.write_text(
+            json.dumps(
+                {
+                    "extends": str(web / "lib/server/tsconfig.json"),
+                    "compilerOptions": {
+                        "typeRoots": [str(ROOT / "node_modules/@types")],
+                        "rootDir": str(web),
+                        "outDir": str(output),
+                        "noEmit": False,
+                        "noEmitOnError": True,
+                    },
+                    "files": [
+                        str(web / "features/account-entry/server.ts"),
+                        str(web / "app/auth/signin/route.ts"),
+                        str(web / "app/auth/callback/route.ts"),
+                    ],
+                    "include": [],
+                }
+            )
+        )
         subprocess.run(
-            [
-                pnpm,
-                "exec",
-                "tsc",
-                "-p",
-                "apps/web/lib/server/tsconfig.json",
-                "--noEmit",
-                "false",
-                "--noEmitOnError",
-                "--rootDir",
-                "apps/web",
-                "--outDir",
-                str(output),
-            ],
+            [pnpm, "exec", "tsc", "-p", str(project)],
             cwd=ROOT,
             check=True,
             timeout=30,
@@ -565,9 +574,7 @@ def test_configured_typescript_factories_with_actual_durable_ports(durable, iden
             stderr=subprocess.DEVNULL,
         )
         (output / "package.json").write_text('{"type":"module"}')
-        (output / "lib/server/node_modules").symlink_to(
-            ROOT / "apps/web/node_modules", target_is_directory=True
-        )
+        (output / "node_modules").symlink_to(web / "node_modules", target_is_directory=True)
         config = private / "fixture.json"
         config.write_text(
             json.dumps(
@@ -589,7 +596,7 @@ def test_configured_typescript_factories_with_actual_durable_ports(durable, iden
                 node,
                 "--conditions=react-server",
                 str(Path(__file__).with_name("authkit_postgres_probe.mjs")),
-                str(output / "lib/server/authkit-adapter.js"),
+                str(output),
                 sys.executable,
                 str(Path(__file__).with_name("auth_postgres_bridge.py")),
                 str(config),
@@ -603,6 +610,7 @@ def test_configured_typescript_factories_with_actual_durable_ports(durable, iden
         assert len(probe.stdout) < 4096
         report = json.loads(probe.stdout)
         assert report["configured_factories"] == "PASS" and report["actual_postgresql"]
+        assert report["exported_signin_callback"] and report["unconfigured_exports_refused"]
         assert report["provider_acceptance"] == "NOT_RUN" and report["mode"] == durable.mode
 
 

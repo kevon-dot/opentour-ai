@@ -496,7 +496,11 @@ describe('ending and switching', () => {
       assert.equal(response.status, accepted ? 303 : 401);
       if (!accepted) {
         assert.equal((await response.json()).code, scenario === 'prior expired' ? 'SESSION_INVALID' : 'CALLBACK_INVALID');
-        assert.equal(response.headers.getSetCookie().some(value => value.startsWith('opentour-session=')), false);
+        assert.equal(response.headers.get('cache-control'), 'no-store');
+        assert.equal(response.headers.get('location'), null);
+        assert.deepEqual(response.headers.getSetCookie(), [
+          'opentour-auth-flow=; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=0',
+        ]);
       }
       assert.equal(f.provider.exchange.mock.callCount(), scenario === 'prior expired' ? 0 : 1);
       assert.equal(f.sessions.replaceCredentials.mock.callCount(), accepted ? 1 : 0);
@@ -510,6 +514,38 @@ describe('ending and switching', () => {
       assert.equal(replay.status, 401);
       assert.equal((await replay.json()).code, 'CALLBACK_INVALID');
       assert.equal(f.provider.exchange.mock.callCount(), scenario === 'prior expired' ? 0 : 1);
+
+      if (scenario === 'prior expired') {
+        const pending = structuredClone(f.session);
+        const restart = await f.signin();
+        assert.equal(restart.response.status, 303);
+        assert.notEqual(restart.state, state);
+        assert.notEqual(restart.cookie, cookie);
+        assert.equal([...f.flows.values()][0]!.kind, 'signin');
+
+        const recoveryProof = { ...fresh, sessionId: 'session_recovery', organizationId: null };
+        const recoveryCredentials = { ...credentials, accessToken: 'GENERATED_RECOVERY_ACCESS' };
+        const recoverySession = { ...pending, ended: false as const, handle: 'n'.repeat(43),
+          reconciliationRequired: false, credentials: recoveryCredentials,
+          identity: { ...pending.identity, session_id: recoveryProof.sessionId } };
+        f.provider.exchange.mock.mockImplementationOnce(async () => recoveryCredentials);
+        f.provider.verify.mock.mockImplementationOnce(async () => recoveryProof);
+        f.sessions.admit.mock.mockImplementationOnce(async () => recoverySession);
+        const recovered = await f.adapter.callback(restart.callback);
+
+        assert.equal(recovered.status, 303);
+        assert.equal(recovered.headers.get('location'), `${profile.origin}/setup`);
+        assert.ok(recovered.headers.getSetCookie().some(value =>
+          value.startsWith(`opentour-session=${recoverySession.handle};`)));
+        assert.equal(f.provider.exchange.mock.callCount(), 1);
+        assert.deepEqual(f.sessions.admit.mock.calls.map(call => call.arguments), [
+          [recoveryCredentials, recoveryProof],
+        ]);
+        assert.equal(f.sessions.replaceCredentials.mock.callCount(), 0);
+        assert.equal(f.selections.commit.mock.callCount(), 0);
+        assert.deepEqual(f.session, pending);
+        assert.equal(f.flows.size, 0);
+      }
     });
   it('rechecks local membership after provider refresh and before selection', async () => {
     const f = fixture();
