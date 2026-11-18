@@ -1,7 +1,9 @@
 import React from 'react';
 import { createHash } from 'node:crypto';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { describe, expect, it } from 'vitest';
+import assert from 'node:assert/strict';
+import { describe, it } from 'node:test';
+import { testCases } from '../../../tests/web-unit-cases.js';
 import { StatusCopy } from './status-copy';
 import { statusFixtures, toastVariants, type StatusCopyProps } from './status-copy.types';
 
@@ -44,35 +46,35 @@ const approved = {
 } as const;
 describe('finite status copy', () => {
   it('exposes exactly the reviewed fixture set', () => {
-    expect(Object.keys(statusFixtures).sort()).toEqual(Object.keys(approved).sort());
+    assert.deepEqual(Object.keys(statusFixtures).sort(), Object.keys(approved).sort());
   });
   for (const fixture of Object.keys(approved) as (keyof typeof approved)[]) {
     it(fixture, () => {
       const html = renderToStaticMarkup(<StatusCopy presentation="notice" fixture={fixture} />);
       const parts = /^<div role="status" class="ot-notice ot-notice--([a-z]+)"><p class="ot-notice-title">([^<]+)<\/p><p class="ot-notice-body">([^<]+)<\/p><\/div>$/.exec(html);
-      expect(parts).not.toBeNull();
+      assert.notEqual(parts, null);
       const [, tone, title, body] = parts!;
-      expect(createHash('sha256').update([title, body, tone].join('\0')).digest('hex')).toBe(approved[fixture]);
+      assert.equal(createHash('sha256').update([title, body, tone].join('\0')).digest('hex'), approved[fixture]);
     });
   }
   for (const fixture of Object.keys(toastVariants) as (keyof typeof toastVariants)[]) {
     it('renders the supplementary toast for ' + fixture, () => {
       const html = renderToStaticMarkup(<StatusCopy presentation="toast" fixture={fixture} />);
-      expect(html).toContain('role="status"');
-      expect(html).toContain('ot-toast--' + toastVariants[fixture]);
-      expect(html).toContain(statusFixtures[fixture].body);
+      assert.ok((html)?.includes('role="status"'));
+      assert.ok((html)?.includes('ot-toast--' + toastVariants[fixture]));
+      assert.ok((html)?.includes(statusFixtures[fixture].body));
     });
   }
   it('allows the explicit action-required failure alert', () => {
-    expect(renderToStaticMarkup(<StatusCopy presentation="toast" fixture="UI-TX-SAVE/failed" urgent />)).toContain('role="alert"');
+    assert.ok((renderToStaticMarkup(<StatusCopy presentation="toast" fixture="UI-TX-SAVE/failed" urgent />))?.includes('role="alert"'));
   });
-  it.each([
+  testCases([
     { presentation: 'modal', fixture: 'UI-TX-SAVE/saved' },
     { presentation: 'notice', fixture: 'toString' },
     { presentation: 'notice', fixture: 'UI-TX-SAVE/failed', urgent: true },
     { presentation: 'toast', fixture: 'UI-TX-SAVE/saved', urgent: true },
     { presentation: 'toast', fixture: 'UI-TX-PROMOTE/active' },
   ])('rejects an unsupported presentation %#', props => {
-    expect(() => renderToStaticMarkup(<StatusCopy {...props as StatusCopyProps} />)).toThrow();
+    assert.throws(() => renderToStaticMarkup(<StatusCopy {...props as StatusCopyProps} />));
   });
 });

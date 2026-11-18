@@ -1,5 +1,5 @@
 import { test, expect, type Page } from '@playwright/test';
-import { build } from 'vite';
+import { buildInlineFixture } from '../../../tests/fixtures/presentation/build.ts';
 import { resolve } from 'node:path';
 import { writeFile } from 'node:fs/promises';
 import type { TooltipFixtureKind } from './tooltip.fixtures';
@@ -10,32 +10,21 @@ let html = '';
 test.use({ launchOptions: { args: ['--disable-gpu', '--disable-skia-runtime-opts', '--deterministic-mode',
   '--run-all-compositor-stages-before-draw', '--num-raster-threads=1', '--js-flags=--random-seed=42'] } });
 test.beforeAll(async () => {
-  const entry = resolve(import.meta.dirname, '__tooltip_fixture.tsx');
-  const bundles = await build({ configFile: false, root: import.meta.dirname, logLevel: 'error',
-    plugins: [{ name: 'finite-tooltip-fixture', resolveId(id) { if (id === entry) return entry; },
-      load(id) { if (id === entry) return `
-        import { createRoot } from 'react-dom/client';
-        import { flushSync } from 'react-dom';
-        import { TooltipFixture } from './tooltip.fixtures';
-        import tokens from '../../../styles/product-tokens.css?inline';
-        import display from './display.css?inline';
-        import tooltip from './tooltip.css?inline';
-        import fixtures from './tooltip.fixtures.css?inline';
-        const style = document.createElement('style'); style.textContent = tokens + display + tooltip + fixtures; document.head.append(style);
-        const root = createRoot(document.querySelector('#root'));
-        window.showTooltipFixture = kind => flushSync(() => root.render(<TooltipFixture key={kind} kind={kind}/>));
-      `; }, }],
-    build: { write: false, assetsInlineLimit: 1024 * 1024,
-      rolldownOptions: { input: entry, output: { format: 'iife' } } },
-  });
-  const bundle = Array.isArray(bundles) ? bundles[0] : bundles;
-  if (!('output' in bundle)) throw new Error('Expected compiled tooltip fixture.');
-  const js = bundle.output.find(item => item.type === 'chunk');
-  const css = bundle.output.flatMap(item => item.type === 'asset' && item.fileName.endsWith('.css') ? [item.source] : []).join('\n');
-  if (!js) throw new Error('Missing tooltip fixture bundle.');
+  const output = await buildInlineFixture(resolve(import.meta.dirname, '__tooltip_fixture.tsx'), 'iife', `
+    import { createRoot } from 'react-dom/client';
+    import { flushSync } from 'react-dom';
+    import { TooltipFixture } from './tooltip.fixtures';
+    import tokens from '../../../styles/product-tokens.css?inline';
+    import display from './display.css?inline';
+    import tooltip from './tooltip.css?inline';
+    import fixtures from './tooltip.fixtures.css?inline';
+    const style = document.createElement('style'); style.textContent = tokens + display + tooltip + fixtures; document.head.append(style);
+    const root = createRoot(document.querySelector('#root'));
+    window.showTooltipFixture = kind => flushSync(() => root.render(<TooltipFixture key={kind} kind={kind}/>));
+  `);
   html = '<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">' +
-    '<style>html{background:#fafbfd}body{margin:0}' + css + '</style></head><body><div id="root"></div><script>' +
-    js.code.replaceAll('</script', '<\\/script') + '</script></body></html>';
+    '<style>html{background:#fafbfd}body{margin:0}' + output.css + '</style></head><body><div id="root"></div><script>' +
+    output.script.replaceAll('</script', '<\\/script') + '</script></body></html>';
 });
 async function open(page: Page, kind: TooltipFixtureKind = 'evidence') {
   await page.route('**/*', route => route.request().url() === origin + '/' ? route.fulfill({ contentType: 'text/html', body: html }) : route.abort());

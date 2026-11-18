@@ -1,37 +1,39 @@
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { readFileSync } from 'node:fs';
-import { describe, expect, it } from 'vitest';
+import assert from 'node:assert/strict';
+import { describe, it } from 'node:test';
+import { testCases } from '../../../tests/web-unit-cases.js';
 import { Notice, noticeTones } from './index';
 import type { NoticeTone } from './index';
 import { presentationFixtures as fixtures } from './fixtures';
 import tokens from '../../../styles/product-tokens.json';
 
 describe('notice presentation contract', () => {
-  it.each(fixtures.notices)('renders the caller $tone title then body as one polite persistent status', ({ tone, title, body }) => {
+  testCases(fixtures.notices)('renders the caller $tone title then body as one polite persistent status', ({ tone, title, body }) => {
     const html = renderToStaticMarkup(<Notice tone={tone} title={title} body={body} />);
     // Exact markup: no alert, no assertive region, no dismiss control and no state name of its own.
-    expect(html).toBe(`<div role="status" class="ot-notice ot-notice--${tone}">` +
+    assert.equal(html, `<div role="status" class="ot-notice ot-notice--${tone}">` +
       `<p class="ot-notice-title">${title}</p><p class="ot-notice-body">${body}</p></div>`);
   });
   it('declares each design state once and carries a generated example for every one', () => {
-    expect(noticeTones).toEqual(['info', 'success', 'hold', 'failure', 'unknown']);
-    expect(fixtures.notices.map(notice => notice.tone)).toEqual(noticeTones);
+    assert.deepEqual(noticeTones, ['info', 'success', 'hold', 'failure', 'unknown']);
+    assert.deepEqual(fixtures.notices.map(notice => notice.tone), noticeTones);
   });
   it('escapes caller text instead of introducing markup or content-derived actions', () => {
     const html = renderToStaticMarkup(<Notice tone="unknown" title={'<b>generated</b>'} body={'<script>generated</script>'} />);
-    expect(html).toContain('&lt;b&gt;generated&lt;/b&gt;');
-    expect(html).toContain('&lt;script&gt;generated&lt;/script&gt;');
-    expect(html).not.toContain('<script>');
-    expect(html.match(/<[a-z]+/g)).toEqual(['<div', '<p', '<p']);
+    assert.ok((html)?.includes('&lt;b&gt;generated&lt;/b&gt;'));
+    assert.ok((html)?.includes('&lt;script&gt;generated&lt;/script&gt;'));
+    assert.ok((html)?.includes('<script>') === false);
+    assert.deepEqual(html.match(/<[a-z]+/g), ['<div', '<p', '<p']);
   });
-  it.each(['', '   ', '\n'])('rejects a missing visible title or body %j', text => {
-    expect(() => renderToStaticMarkup(<Notice tone="info" title={text} body={fixtures.notices[0].body} />)).toThrow('visible');
-    expect(() => renderToStaticMarkup(<Notice tone="info" title={fixtures.notices[0].title} body={text} />)).toThrow('visible');
+  testCases(['', '   ', '\n'])('rejects a missing visible title or body %j', text => {
+    assert.throws(() => renderToStaticMarkup(<Notice tone="info" title={text} body={fixtures.notices[0].body} />), /visible/);
+    assert.throws(() => renderToStaticMarkup(<Notice tone="info" title={fixtures.notices[0].title} body={text} />), /visible/);
   });
-  it.each(['learning', 'failed', '', undefined])('rejects the undeclared tone %j rather than rendering an undesigned state', tone => {
-    expect(() => renderToStaticMarkup(<Notice tone={tone as NoticeTone} title={fixtures.notices[0].title}
-      body={fixtures.notices[0].body} />)).toThrow('declared notice tone');
+  testCases(['learning', 'failed', '', undefined])('rejects the undeclared tone %j rather than rendering an undesigned state', tone => {
+    assert.throws(() => renderToStaticMarkup(<Notice tone={tone as NoticeTone} title={fixtures.notices[0].title}
+      body={fixtures.notices[0].body} />), /declared notice tone/);
   });
 });
 
@@ -47,30 +49,30 @@ describe('notice design token binding', () => {
   };
   it('binds every tone to the fill and text variables of its design variant', () => {
     for (const tone of noticeTones) {
-      expect(rules).toContain(`.ot-notice--${tone} { background: var(--ot-${pairs[tone].fill}); color: var(--ot-${pairs[tone].text[0]}); }`);
+      assert.ok((rules)?.includes(`.ot-notice--${tone} { background: var(--ot-${pairs[tone].fill}); color: var(--ot-${pairs[tone].text[0]}); }`));
     }
-    expect(rules).toContain('.ot-notice--info > .ot-notice-body { color: var(--ot-text-secondary); }');
-    expect(rules.filter(rule => rule.includes('color:'))).toHaveLength(noticeTones.length + 1);
+    assert.ok((rules)?.includes('.ot-notice--info > .ot-notice-body { color: var(--ot-text-secondary); }'));
+    assert.equal((rules.filter(rule => rule.includes('color:')))?.length, noticeTones.length + 1);
   });
   it('takes colour, spacing, radius and type from recorded tokens with the 1px border as the only literal length', () => {
     const text = rules.join('\n');
-    expect(rules.length).toBeGreaterThanOrEqual(9);
-    expect(text.match(/#[0-9a-f]{3,8}\b/gi)).toBeNull();
-    expect(text.match(/(?<![\w-])\d*\.?\d+(?:px|rem|em)\b/g)).toEqual(['1px']);
-    for (const [, name] of text.matchAll(/var\((--ot-[a-z0-9-]+)\)/g)) expect(css).toContain(`  ${name}: `);
-    expect(text).toContain('gap: var(--ot-space-8); ');
-    expect(text).toContain('padding: var(--ot-space-16); ');
-    expect(text).toContain('border: 1px solid var(--ot-border-default); border-radius: var(--ot-radius-8); ');
+    assert.ok(rules.length >= 9);
+    assert.equal(text.match(/#[0-9a-f]{3,8}\b/gi), null);
+    assert.deepEqual(text.match(/(?<![\w-])\d*\.?\d+(?:px|rem|em)\b/g), ['1px']);
+    for (const [, name] of text.matchAll(/var\((--ot-[a-z0-9-]+)\)/g)) assert.ok((css)?.includes(`  ${name}: `));
+    assert.ok((text)?.includes('gap: var(--ot-space-8); '));
+    assert.ok((text)?.includes('padding: var(--ot-space-16); '));
+    assert.ok((text)?.includes('border: 1px solid var(--ot-border-default); border-radius: var(--ot-radius-8); '));
     for (const [name, style] of [['title', 'label'], ['body', 'small']]) {
-      expect(rules).toContain(`.ot-notice-${name} { font-size: var(--ot-type-${style}-size); ` +
-        `font-weight: var(--ot-type-${style}-weight); line-height: var(--ot-type-${style}-line); }`);
+      assert.ok((rules)?.includes(`.ot-notice-${name} { font-size: var(--ot-type-${style}-size); ` +
+        `font-weight: var(--ot-type-${style}-weight); line-height: var(--ot-type-${style}-line); }`));
     }
   });
   it('fills its container and declares nothing that could clip or stop text wrapping', () => {
     const text = rules.join('\n');
-    expect(text).toContain('inline-size: 100%; ');
-    expect(text).toContain('overflow-wrap: anywhere; ');
-    expect(text).not.toMatch(/overflow(?:-[xy]|-inline|-block)?:|text-overflow|white-space|line-clamp|(?<!-)block-size|(?<![\w-])height/);
+    assert.ok((text)?.includes('inline-size: 100%; '));
+    assert.ok((text)?.includes('overflow-wrap: anywhere; '));
+    assert.doesNotMatch(text, /overflow(?:-[xy]|-inline|-block)?:|text-overflow|white-space|line-clamp|(?<!-)block-size|(?<![\w-])height/);
   });
   function luminance(hex: string) {
     const channels = hex.slice(1).match(/../g)!.map(channel => parseInt(channel, 16) / 255)
@@ -80,7 +82,7 @@ describe('notice design token binding', () => {
   it('measures normal-text contrast for every notice text and fill pair', () => {
     for (const tone of noticeTones) for (const text of pairs[tone].text) {
       const values = [luminance(tokens.colors[text]), luminance(tokens.colors[pairs[tone].fill])].sort((a, b) => b - a);
-      expect((values[0] + 0.05) / (values[1] + 0.05)).toBeGreaterThanOrEqual(4.5);
+      assert.ok((values[0] + 0.05) / (values[1] + 0.05) >= 4.5);
     }
   });
 });

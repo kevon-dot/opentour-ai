@@ -1,5 +1,7 @@
 import { renderToStaticMarkup } from 'react-dom/server';
-import { describe, expect, it } from 'vitest';
+import assert from 'node:assert/strict';
+import { describe, it } from 'node:test';
+import { testCases } from '../../../tests/web-unit-cases.js';
 import { Input, TextField } from './text-field';
 
 const base = { id: 'attempts', label: 'Maximum attempts', value: '3', onChange: () => {} };
@@ -9,7 +11,7 @@ const problem = 'Enter a whole number.';
 /** Every attribute of the one native input, so an unexpected attribute fails as surely as a missing one. */
 function control(html: string): Record<string, string> {
   const tags = html.match(/<input [^>]*>/g) ?? [];
-  expect(tags).toHaveLength(1);
+  assert.equal((tags)?.length, 1);
   if (!tags[0]) throw new Error('Missing native input');
   return Object.fromEntries([...tags[0].matchAll(/ ([a-z-]+)="([^"]*)"/g)].map(match => [match[1], match[2]]));
 }
@@ -17,22 +19,22 @@ function control(html: string): Record<string, string> {
 describe('TextField', () => {
   it('puts the id on one native text input and names it with the visible required label', () => {
     const html = renderToStaticMarkup(<TextField {...base} required />);
-    expect(html).toContain('<label class="ot-text-field-label" for="attempts">Maximum attempts · Required</label>');
-    expect(control(html)).toEqual({ class: 'ot-text-field-control', id: 'attempts', type: 'text', required: '', value: '3' });
-    expect(html).not.toContain('<p');
+    assert.ok((html)?.includes('<label class="ot-text-field-label" for="attempts">Maximum attempts · Required</label>'));
+    assert.deepEqual(control(html), { class: 'ot-text-field-control', id: 'attempts', type: 'text', required: '', value: '3' });
+    assert.ok((html)?.includes('<p') === false);
   });
 
-  it.each([{}, { required: false }])('marks a field that is not required as optional %j', requirement => {
+  testCases([{}, { required: false }])('marks a field that is not required as optional %j', requirement => {
     const html = renderToStaticMarkup(<TextField {...base} {...requirement} />);
-    expect(html).toContain('for="attempts">Maximum attempts · Optional</label>');
-    expect(control(html)).toEqual({ class: 'ot-text-field-control', id: 'attempts', type: 'text', value: '3' });
+    assert.ok((html)?.includes('for="attempts">Maximum attempts · Optional</label>'));
+    assert.deepEqual(control(html), { class: 'ot-text-field-control', id: 'attempts', type: 'text', value: '3' });
   });
 
-  it.each([['2.5', '2.5'], ['', ''], ['  03?  ', '  03?  '], ['0003', '0003'], ['-1e3', '-1e3'], ['<raw>', '&lt;raw&gt;']])(
+  testCases([['2.5', '2.5'], ['', ''], ['  03?  ', '  03?  '], ['0003', '0003'], ['-1e3', '-1e3'], ['<raw>', '&lt;raw&gt;']])(
     'renders the caller value %j without parsing, coercing or trimming it', (value, rendered) => {
-      expect(control(renderToStaticMarkup(<TextField {...base} value={value} />)).value).toBe(rendered);
-      expect(control(renderToStaticMarkup(<TextField {...base} value={value} error={problem} />)).value).toBe(rendered);
-      expect(control(renderToStaticMarkup(<TextField {...base} value={value} disabled />)).value).toBe(rendered);
+      assert.equal(control(renderToStaticMarkup(<TextField {...base} value={value} />)).value, rendered);
+      assert.equal(control(renderToStaticMarkup(<TextField {...base} value={value} error={problem} />)).value, rendered);
+      assert.equal(control(renderToStaticMarkup(<TextField {...base} value={value} disabled />)).value, rendered);
     });
 
   const references: Array<{ text: { helper?: string; error?: string }; describedBy?: string; invalid?: string }> = [
@@ -41,58 +43,58 @@ describe('TextField', () => {
     { text: { error: problem }, describedBy: 'attempts-error', invalid: 'true' },
     { text: { helper, error: problem }, describedBy: 'attempts-helper attempts-error', invalid: 'true' },
   ];
-  it.each(references)('references the helper and the error independently for $text', ({ text, describedBy, invalid }) => {
+  testCases(references)('references the helper and the error independently for $text', ({ text, describedBy, invalid }) => {
     const attributes = control(renderToStaticMarkup(<TextField {...base} {...text} />));
-    expect(attributes['aria-describedby']).toBe(describedBy);
-    expect(attributes['aria-invalid']).toBe(invalid);
+    assert.equal(attributes['aria-describedby'], describedBy);
+    assert.equal(attributes['aria-invalid'], invalid);
   });
 
   it('keeps the helper and shows the error as a separate paragraph after it', () => {
     const html = renderToStaticMarkup(<TextField {...base} value="2.5" helper={helper} error={problem} />);
     const helperText = '<p class="ot-text-field-helper" id="attempts-helper">' + helper + '</p>';
     const errorText = '<p class="ot-text-field-error" id="attempts-error">' + problem + '</p>';
-    expect(html).toContain(helperText + errorText);
-    expect(html.match(/<p /g)).toHaveLength(2);
+    assert.ok((html)?.includes(helperText + errorText));
+    assert.equal((html.match(/<p /g))?.length, 2);
   });
 
   it('keeps the helper reference unchanged when an error is added and removed', () => {
     const withError = renderToStaticMarkup(<TextField {...base} helper={helper} error={problem} />);
     const withoutError = renderToStaticMarkup(<TextField {...base} helper={helper} />);
-    expect(withError).toContain('id="attempts-helper"');
-    expect(withoutError).toContain('id="attempts-helper"');
-    expect(withoutError).not.toContain('attempts-error');
-    expect(withoutError).not.toContain('aria-invalid');
+    assert.ok((withError)?.includes('id="attempts-helper"'));
+    assert.ok((withoutError)?.includes('id="attempts-helper"'));
+    assert.ok((withoutError)?.includes('attempts-error') === false);
+    assert.ok((withoutError)?.includes('aria-invalid') === false);
   });
 
   it('does not treat an empty helper or error as text to reference', () => {
     const html = renderToStaticMarkup(<TextField {...base} helper="" error="" />);
-    expect(control(html)).toEqual({ class: 'ot-text-field-control', id: 'attempts', type: 'text', value: '3' });
-    expect(html).not.toContain('<p');
+    assert.deepEqual(control(html), { class: 'ot-text-field-control', id: 'attempts', type: 'text', value: '3' });
+    assert.ok((html)?.includes('<p') === false);
   });
 
   it('uses the native disabled and required states rather than ARIA substitutes', () => {
     const html = renderToStaticMarkup(<TextField {...base} required disabled helper={helper} />);
-    expect(control(html)).toEqual({ class: 'ot-text-field-control', id: 'attempts', type: 'text', required: '', disabled: '',
+    assert.deepEqual(control(html), { class: 'ot-text-field-control', id: 'attempts', type: 'text', required: '', disabled: '',
       'aria-describedby': 'attempts-helper', value: '3' });
-    expect(html).not.toContain('aria-disabled');
-    expect(html).not.toContain('aria-required');
-    expect(html).not.toContain('readonly');
+    assert.ok((html)?.includes('aria-disabled') === false);
+    assert.ok((html)?.includes('aria-required') === false);
+    assert.ok((html)?.includes('readonly') === false);
   });
 
   it('escapes caller text instead of making markup', () => {
     const html = renderToStaticMarkup(<TextField {...base} label="<b>Attempts</b>" helper="<i>help</i>" error="<u>no</u>" />);
-    expect(html).toContain('&lt;b&gt;Attempts&lt;/b&gt; · Optional');
-    expect(html).toContain('&lt;i&gt;help&lt;/i&gt;');
-    expect(html).toContain('&lt;u&gt;no&lt;/u&gt;');
-    expect(html).not.toMatch(/<(b|i|u)>/);
+    assert.ok((html)?.includes('&lt;b&gt;Attempts&lt;/b&gt; · Optional'));
+    assert.ok((html)?.includes('&lt;i&gt;help&lt;/i&gt;'));
+    assert.ok((html)?.includes('&lt;u&gt;no&lt;/u&gt;'));
+    assert.doesNotMatch(html, /<(b|i|u)>/);
   });
 
-  it.each(['', '   '])('refuses the blank label %j', label => {
-    expect(() => renderToStaticMarkup(<TextField {...base} label={label} />)).toThrow('field label');
+  testCases(['', '   '])('refuses the blank label %j', label => {
+    assert.throws(() => renderToStaticMarkup(<TextField {...base} label={label} />), /field label/);
   });
 
-  it.each(['', ' ', 'maximum attempts', 'attempts\n'])('refuses the identity %j, which cannot be referenced', id => {
-    expect(() => renderToStaticMarkup(<TextField {...base} id={id} />)).toThrow('identity');
+  testCases(['', ' ', 'maximum attempts', 'attempts\n'])('refuses the identity %j, which cannot be referenced', id => {
+    assert.throws(() => renderToStaticMarkup(<TextField {...base} id={id} />), /identity/);
   });
 });
 
@@ -101,38 +103,38 @@ describe('Input', () => {
 
   it('is one native text input with an accessible name and no label element or wrapper', () => {
     const html = renderToStaticMarkup(<Input {...standalone} />);
-    expect(html).toMatch(/^<input [^>]*\/>$/);
-    expect(control(html)).toEqual({ class: 'ot-input', id: 'reference', type: 'text', 'aria-label': 'Generated reference',
+    assert.match(html, /^<input [^>]*\/>$/);
+    assert.deepEqual(control(html), { class: 'ot-input', id: 'reference', type: 'text', 'aria-label': 'Generated reference',
       value: 'Generated value' });
   });
 
   it('conveys an invalid value through its state and the attached explanation', () => {
     const html = renderToStaticMarkup(<Input {...standalone} value="2.5" invalid describedBy="reference-problem" />);
-    expect(control(html)).toEqual({ class: 'ot-input', id: 'reference', type: 'text', 'aria-label': 'Generated reference',
+    assert.deepEqual(control(html), { class: 'ot-input', id: 'reference', type: 'text', 'aria-label': 'Generated reference',
       'aria-invalid': 'true', 'aria-describedby': 'reference-problem', value: '2.5' });
   });
 
   it('omits the invalid state and an empty description when neither applies', () => {
     const attributes = control(renderToStaticMarkup(<Input {...standalone} invalid={false} describedBy="" />));
-    expect(attributes).not.toHaveProperty('aria-invalid');
-    expect(attributes).not.toHaveProperty('aria-describedby');
+    assert.ok(!('aria-invalid' in attributes));
+    assert.ok(!('aria-describedby' in attributes));
   });
 
   it('uses the native disabled and required states', () => {
     const attributes = control(renderToStaticMarkup(<Input {...standalone} disabled required />));
-    expect(attributes.disabled).toBe('');
-    expect(attributes.required).toBe('');
+    assert.equal(attributes.disabled, '');
+    assert.equal(attributes.required, '');
   });
 
-  it.each(['', '2.5', '  spaced  '])('renders the caller value %j unchanged', value => {
-    expect(control(renderToStaticMarkup(<Input {...standalone} value={value} />)).value).toBe(value);
+  testCases(['', '2.5', '  spaced  '])('renders the caller value %j unchanged', value => {
+    assert.equal(control(renderToStaticMarkup(<Input {...standalone} value={value} />)).value, value);
   });
 
-  it.each(['', '  '])('refuses the blank accessible name %j', label => {
-    expect(() => renderToStaticMarkup(<Input {...standalone} label={label} />)).toThrow('accessible name');
+  testCases(['', '  '])('refuses the blank accessible name %j', label => {
+    assert.throws(() => renderToStaticMarkup(<Input {...standalone} label={label} />), /accessible name/);
   });
 
-  it.each(['', 'generated reference'])('refuses the identity %j', id => {
-    expect(() => renderToStaticMarkup(<Input {...standalone} id={id} />)).toThrow('identity');
+  testCases(['', 'generated reference'])('refuses the identity %j', id => {
+    assert.throws(() => renderToStaticMarkup(<Input {...standalone} id={id} />), /identity/);
   });
 });

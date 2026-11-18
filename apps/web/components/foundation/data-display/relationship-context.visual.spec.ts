@@ -1,7 +1,7 @@
 import { expect, test, type Page, type TestInfo } from '@playwright/test';
 import { writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { build } from 'vite';
+import { buildInlineFixture } from '../../../tests/fixtures/presentation/build.ts';
 import type { RelationshipFixture } from '../../../tests/fixtures/presentation/relationship-context';
 
 declare global { interface Window { showRelationshipFixture(name: RelationshipFixture): void } }
@@ -11,23 +11,8 @@ const origin = 'http://relationship.test';
 let script = '';
 let styles = '';
 test.beforeAll(async () => {
-  const root = join(process.cwd(), 'apps/web');
-  const bundle = await build({
-    root, configFile: false, envFile: false, publicDir: false, logLevel: 'error',
-    oxc: { jsx: { runtime: 'automatic' } },
-    build: {
-      write: false, assetsInlineLimit: 1024 * 1024,
-      lib: { entry: join(root, 'tests/fixtures/presentation/relationship-context.tsx'), formats: ['es'] },
-    },
-    define: { 'process.env.NODE_ENV': JSON.stringify('production') },
-  });
-  const output = Array.isArray(bundle) ? bundle[0] : bundle;
-  if (!('output' in output)) throw new Error('Missing relationship gallery output');
-  const js = output.output.find(file => file.type === 'chunk');
-  const css = output.output.find(file => file.type === 'asset' && file.fileName.endsWith('.css'));
-  if (!js || js.type !== 'chunk' || !css || css.type !== 'asset') throw new Error('Missing relationship gallery assets');
-  script = js.code;
-  styles = String(css.source);
+  const output = await buildInlineFixture(join(process.cwd(), 'apps/web/tests/fixtures/presentation/relationship-context.tsx'), 'esm');
+  script = output.script; styles = output.css;
   if (!styles.includes('data:font/woff2') && !styles.includes('data:application/font-woff2')) throw new Error('Geist was not inlined');
 });
 

@@ -1,5 +1,5 @@
 import { test, expect, type Locator, type Page, type TestInfo } from '@playwright/test';
-import { build } from 'vite';
+import { buildInlineFixture } from '../../../tests/fixtures/presentation/build.ts';
 import { join } from 'node:path';
 import { readFile, writeFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
@@ -44,17 +44,8 @@ let script: string, styles: string;
 let artworkFiles: { off: string; on: string };
 const rejected = new WeakMap<Page, string[]>();
 test.beforeAll(async () => {
-  const result = await build({ root: join(process.cwd(), 'apps/web'), configFile: false, envFile: false, publicDir: false,
-    logLevel: 'error', oxc: { jsx: { runtime: 'automatic' } },
-    build: { write: false, lib: { entry: join(directory, 'testing/selection-controls-gallery.tsx'), name: 'SelectionControlsGallery', formats: ['iife'] } },
-    define: { 'process.env.NODE_ENV': JSON.stringify('production') },
-  });
-  const bundle = Array.isArray(result) ? result[0] : result;
-  if (!('output' in bundle)) throw new Error('Missing gallery bundle.');
-  const js = bundle.output.find(value => value.type === 'chunk');
-  const css = bundle.output.find(value => value.type === 'asset' && value.fileName.endsWith('.css'));
-  if (!js || js.type !== 'chunk' || !css || css.type !== 'asset') throw new Error('Missing gallery assets.');
-  script = js.code; styles = String(css.source);
+  const output = await buildInlineFixture(join(directory, 'testing/selection-controls-gallery.tsx'), 'iife');
+  script = output.script; styles = output.css;
   // The rendered images are compared with the tracked exports, whose bytes are bound by the provenance record.
   const source = JSON.parse(await readFile(join(directory, 'selection-controls-assets/source.json'), 'utf8'));
   const [off, on] = await Promise.all(['switch-off', 'switch-on'].map(async name => {

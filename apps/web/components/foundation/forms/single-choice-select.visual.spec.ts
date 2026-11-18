@@ -1,36 +1,25 @@
 import { test, expect, type Locator, type Page, type TestInfo } from '@playwright/test';
-import { build } from 'vite';
+import { buildInlineFixture } from '../../../tests/fixtures/presentation/build.ts';
 import { resolve } from 'node:path';
 import { writeFile } from 'node:fs/promises';
 
 const origin = process.env.OPENTOUR_FIXTURE_ORIGIN ?? 'http://127.0.0.1:4317';
 let html = '';
 test.beforeAll(async () => {
-  const entry = resolve(import.meta.dirname, '__single_choice_select_fixture.tsx');
-  const bundles = await build({ configFile: false, root: import.meta.dirname, logLevel: 'error',
-    plugins: [{ name: 'finite-single-choice-fixture', resolveId(id) { if (id === entry) return entry; },
-      load(id) { if (id === entry) return `
-        import { createRoot } from 'react-dom/client';
-        import { flushSync } from 'react-dom';
-        import { SingleChoiceSelectFixture } from './single-choice-select.fixtures';
-        import tokens from '../../../styles/product-tokens.css?inline';
-        import select from './single-choice-select.css?inline';
-        import fixtures from './single-choice-select.fixtures.css?inline';
-        const style = document.createElement('style'); style.textContent = tokens + select + fixtures; document.head.append(style);
-        const root = createRoot(document.querySelector('#root'));
-        flushSync(() => root.render(<SingleChoiceSelectFixture />));
-      `; }, }],
-    build: { write: false, assetsInlineLimit: 1024 * 1024,
-      rolldownOptions: { input: entry, output: { format: 'iife' } } },
-  });
-  const bundle = Array.isArray(bundles) ? bundles[0] : bundles;
-  if (!('output' in bundle)) throw new Error('Expected compiled single-choice fixture.');
-  const js = bundle.output.find(item => item.type === 'chunk');
-  const css = bundle.output.flatMap(item => item.type === 'asset' && item.fileName.endsWith('.css') ? [item.source] : []).join('\n');
-  if (!js) throw new Error('Missing single-choice fixture bundle.');
+  const output = await buildInlineFixture(resolve(import.meta.dirname, '__single_choice_select_fixture.tsx'), 'iife', `
+    import { createRoot } from 'react-dom/client';
+    import { flushSync } from 'react-dom';
+    import { SingleChoiceSelectFixture } from './single-choice-select.fixtures';
+    import tokens from '../../../styles/product-tokens.css?inline';
+    import select from './single-choice-select.css?inline';
+    import fixtures from './single-choice-select.fixtures.css?inline';
+    const style = document.createElement('style'); style.textContent = tokens + select + fixtures; document.head.append(style);
+    const root = createRoot(document.querySelector('#root'));
+    flushSync(() => root.render(<SingleChoiceSelectFixture />));
+  `);
   html = '<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">' +
-    '<style>html{background:#fafbfd}body{margin:0}' + css + '</style></head><body><div id="root"></div><script>' +
-    js.code.replaceAll('</script', '<\\/script') + '</script></body></html>';
+    '<style>html{background:#fafbfd}body{margin:0}' + output.css + '</style></head><body><div id="root"></div><script>' +
+    output.script.replaceAll('</script', '<\\/script') + '</script></body></html>';
 });
 
 const action = 'rgb(36, 91, 238)';
