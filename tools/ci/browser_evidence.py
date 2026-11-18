@@ -12,6 +12,7 @@ from typing import Any
 from tools.public_content_check import MAX_FILE_BYTES, digest, inspect_bytes, load_policy
 
 PRESENTATION_TARGETS = {
+    "apps/web/features/workspace/customer-shell.visual.spec.ts": "OPE-307",
     "apps/web/components/foundation/data-display/chart-evidence.visual.spec.ts": "OPE-303",
     "apps/web/components/foundation/data-display/table-populations.visual.spec.ts": "OPE-305",
     "apps/web/components/foundation/data-display/metric-semantics.visual.spec.ts": "OPE-304",
@@ -188,6 +189,19 @@ def verify_scoped_presentation(root: Path, value: dict[str, Any]) -> None:
         actual_tables = {(int(case[1]), int(case[2]), case[3]) for case in captures if case}
         if len(images) != len(expected_tables) or actual_tables != expected_tables:
             raise ValueError("Table presentation capture inventory mismatch")
+    elif value["issue_key"] == "OPE-307":
+        expected_shells = {
+            f"{identity}-{width}-{scale}x-{state}.png"
+            for identity in (0, 1)
+            for width in widths
+            for scale in (1, 2)
+            for state in (("closed", "open") if width < 1024 else ("closed",))
+        }
+        if (
+            len(images) != len(expected_shells)
+            or {Path(name).name for name in images} != expected_shells
+        ):
+            raise ValueError("Shell presentation capture inventory mismatch")
     elif value["issue_key"] == "OPE-308":
         expected_names = {
             f"{state}-{width}-{scale}x.png"

@@ -20,4 +20,8 @@ export const presentationSuites = new Map([
     owner: 'OPE-308', parent: 'OPE-288', guide: '296:6', minimumTests: 56,
     specHash: '56c14a4b5278b698ae48942e4bad698404538cf97dd89e2a810272b2a1c180f5',
   }],
+  ['apps/web/features/workspace/customer-shell.visual.spec.ts', {
+    owner: 'OPE-307', parent: 'OPE-239', guide: '339:402', minimumTests: 17,
+    specHash: '8372dfc352bd434d2757299136cdaba059018115f33dbf3f453f91e63b3dd13f',
+  }],
 ]);
