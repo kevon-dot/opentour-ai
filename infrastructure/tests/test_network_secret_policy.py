@@ -116,7 +116,7 @@ def readback() -> dict:
                             "httpMethod": "POST",
                             "connectionType": "VPC_LINK",
                             "connectionId": "link",
-                            "integration-target": TARGET,
+                            "integrationTarget": TARGET,
                             "uri": "https://identity.generated.example:443/generated-target",
                         }
                     }
@@ -126,7 +126,16 @@ def readback() -> dict:
     }
 
 
-def test_exact_dev_binding_passes_source_check(binding, readback):
+@pytest.mark.parametrize(
+    "fields",
+    [("integrationTarget",), ("integration-target",), ("integrationTarget", "integration-target")],
+)
+def test_exact_dev_binding_passes_source_check(binding, readback, fields):
+    integration = readback["stage_export"]["paths"]["/generated-operation"]["post"][
+        EXPORT_INTEGRATION
+    ]
+    target = integration.pop("integrationTarget")
+    integration.update(dict.fromkeys(fields, target))
     check_private_gateway(binding, **readback)
 
 
@@ -208,7 +217,7 @@ def test_refuses_unapproved_method_in_deployment_snapshot(binding, readback):
     ("field", "wrong"),
     [
         ("connectionId", "foreign-link"),
-        ("integration-target", TARGET + "0"),
+        ("integrationTarget", TARGET + "0"),
         ("uri", "https://identity.generated.example:443/foreign"),
         ("uri", "http://identity.generated.example:443/generated-target"),
         ("uri", "https://identity.generated.example:443/generated-target?secret=sentinel"),
@@ -241,6 +250,19 @@ def test_refuses_duplicate_policy_members(binding, readback):
 
 def test_refuses_missing_integration_target(binding, readback):
     operation = readback["stage_export"]["paths"]["/generated-operation"]["post"]
-    del operation[EXPORT_INTEGRATION]["integration-target"]
+    del operation[EXPORT_INTEGRATION]["integrationTarget"]
+    with pytest.raises(PrivateGatewayPolicyError, match="PRIVATE_GATEWAY_TARGET_MISMATCH"):
+        check_private_gateway(binding, **readback)
+
+
+
+@pytest.mark.parametrize("field", ["integrationTarget", "integration-target"])
+@pytest.mark.parametrize("wrong", [TARGET + "0", None])
+def test_refuses_conflicting_integration_target_keys(binding, readback, field, wrong):
+    integration = readback["stage_export"]["paths"]["/generated-operation"]["post"][
+        EXPORT_INTEGRATION
+    ]
+    integration["integration-target"] = TARGET
+    integration[field] = wrong
     with pytest.raises(PrivateGatewayPolicyError, match="PRIVATE_GATEWAY_TARGET_MISMATCH"):
         check_private_gateway(binding, **readback)

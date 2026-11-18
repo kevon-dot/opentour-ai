@@ -9,6 +9,8 @@ from dataclasses import dataclass
 
 _SAFE_PATH = r"/[A-Za-z0-9_-]+(?:/[A-Za-z0-9_-]+)*"
 _INTEGRATION = "x-amazon-apigateway-integration"
+# The AWS extension reference and private integration example use different keys.
+_INTEGRATION_TARGET_FIELDS = {"integrationTarget", "integration-target"}
 
 
 class PrivateGatewayPolicyError(ValueError):
@@ -202,12 +204,14 @@ def check_private_gateway(
         operations = _fields(export_paths[route])
         _require(set(operations) == {"post"}, "PRIVATE_GATEWAY_METHOD_MISMATCH")
         integration = _fields(_fields(operations["post"]).get(_INTEGRATION))
+        target_fields = _INTEGRATION_TARGET_FIELDS & integration.keys()
         _require(
             integration.get("type") == "http_proxy"
             and integration.get("httpMethod") == "POST"
             and integration.get("connectionType") == "VPC_LINK"
             and integration.get("connectionId") == approved.link_id
-            and integration.get("integration-target") == approved.target_arn
+            and target_fields
+            and all(integration[key] == approved.target_arn for key in target_fields)
             and integration.get("uri") == f"https://{approved.backend_host}:443{backend_path}"
             and not any(
                 integration.get(field)
