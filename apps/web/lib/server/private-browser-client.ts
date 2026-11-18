@@ -6,14 +6,14 @@ import {
   type Identity, type SelectionPort, type ServerSession, type SessionPort,
 } from './authkit-adapter.js';
 
-const METHOD_PATHS = {
+export const PRIVATE_BROWSER_METHOD_PATHS = Object.freeze({
   create: '/internal/browser-identity/v1/flows/create',
   consume: '/internal/browser-identity/v1/flows/consume',
   admit: '/internal/browser-identity/v1/sessions/admit',
   current: '/internal/browser-identity/v1/sessions/current',
   end: '/internal/browser-identity/v1/sessions/end',
-} as const;
-type Operation = keyof typeof METHOD_PATHS;
+} as const);
+type Operation = keyof typeof PRIVATE_BROWSER_METHOD_PATHS;
 type PrivateFailure = readonly [status: number, code: string];
 const FLOW_FIELDS = ['state', 'nonce', 'browserDigest', 'verifier', 'expiresAt', 'returnPath', 'kind',
   'sessionHandle', 'subject', 'sessionId', 'generation', 'selectionTarget', 'selectionIntent'] as const;
@@ -21,7 +21,7 @@ const CREDENTIAL_FIELDS = ['accessToken', 'refreshToken', 'userId'] as const;
 const BINDING_FIELDS = ['handle', 'csrfToken', 'ended'] as const;
 const SIGNING_FIELDS = ['authorization', 'x-amz-date', 'x-amz-security-token'] as const;
 const BODY_HEADERS = Object.freeze({ 'content-type': 'application/json' } as const);
-const REQUEST_BYTES = 65_536;
+export const PRIVATE_BROWSER_REQUEST_BYTES = 65_536;
 const RESPONSE_BYTES = 131_072;
 const DEADLINE_MS = 25_000;
 const SEMANTIC_FAILURES: Readonly<Record<Operation, readonly PrivateFailure[]>> = {
@@ -164,9 +164,10 @@ export function createPrivateBrowserPorts(
 
   async function call(operation: Operation, data: object): Promise<unknown> {
     const request = Object.freeze({
-      url: base + METHOD_PATHS[operation], method: 'POST' as const, body: JSON.stringify(data), headers: BODY_HEADERS,
+      url: base + PRIVATE_BROWSER_METHOD_PATHS[operation], method: 'POST' as const,
+      body: JSON.stringify(data), headers: BODY_HEADERS,
     });
-    if (Buffer.byteLength(request.body, 'utf8') > REQUEST_BYTES) throw invalid();
+    if (Buffer.byteLength(request.body, 'utf8') > PRIVATE_BROWSER_REQUEST_BYTES) throw invalid();
     let response: Response;
     let value: unknown;
     try {
