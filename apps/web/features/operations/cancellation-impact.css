@@ -1,0 +1,38 @@
+.ot-cancellation-impact {
+  display: grid;
+  min-inline-size: 0;
+  gap: var(--ot-space-16);
+  container-type: inline-size;
+  color: var(--ot-text-primary);
+  font-family: Geist, sans-serif;
+}
+.ot-impact-block { min-inline-size: 0; }
+.ot-impact-block h3 {
+  margin: 0 0 var(--ot-space-8);
+  font: var(--ot-type-label-weight) var(--ot-type-label-size)/var(--ot-type-label-line) Geist, sans-serif;
+  overflow-wrap: anywhere;
+}
+.ot-impact-scroll-hint { display: none; }
+@container (width < 640px) {
+  .ot-impact-scroll-hint { display: inline; }
+}
+.ot-impact-scroll { overflow-x: auto; }
+.ot-impact-scroll:focus-visible { outline: 2px solid var(--ot-action-primary); outline-offset: 2px; }
+.ot-impact-scroll table { inline-size: 100%; min-inline-size: 640px; table-layout: fixed; border-spacing: 0; }
+.ot-impact-scroll .ot-table-cell {
+  border: 1px solid var(--ot-border-default);
+  background: var(--ot-surface-base);
+  font-weight: var(--ot-type-small-weight);
+}
+.ot-impact-scroll thead .ot-table-cell { background: var(--ot-action-subtle); }
+.ot-impact-scroll .ot-table-cell-value {
+  font: var(--ot-type-small-weight) var(--ot-type-small-size)/var(--ot-type-small-line) Geist, sans-serif;
+}
+.ot-impact-scroll thead .ot-table-cell-value {
+  font: var(--ot-type-label-weight) var(--ot-type-label-size)/var(--ot-type-label-line) Geist, sans-serif;
+}
+.ot-impact-scroll tr > :last-child { text-align: end; }
+@media (forced-colors: active) {
+  .ot-impact-scroll .ot-table-cell { border-color: CanvasText; }
+  .ot-impact-scroll:focus-visible { outline-color: Highlight; }
+}
