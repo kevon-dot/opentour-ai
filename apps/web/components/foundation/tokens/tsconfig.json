@@ -22,6 +22,9 @@
     ]
   },
   "include": [
+    "../forms/difference-review*.ts",
+    "../forms/difference-review*.tsx",
+    "../../../tests/fixtures/presentation/difference-review.tsx",
     "./**/*.ts",
     "./**/*.tsx",
     "../../../tests/fixtures/presentation/operation-state.tsx"

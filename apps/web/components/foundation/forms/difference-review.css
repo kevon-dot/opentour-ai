@@ -1,0 +1,31 @@
+.ot-difference-review {
+  box-sizing: border-box;
+  inline-size: 100%;
+  max-inline-size: 688px;
+  display: grid;
+  gap: var(--ot-space-12);
+  padding: var(--ot-space-12);
+  /* The native inside border offsets the content origin while its width remains card width minus 24px. */
+  padding-inline-end: calc(var(--ot-space-12) - 2px);
+  border: 1px solid var(--ot-border-default);
+  border-radius: var(--ot-radius-12);
+  background: var(--ot-hold-background);
+  color: var(--ot-text-primary);
+  font: var(--ot-type-body-weight) var(--ot-type-body-size)/var(--ot-type-body-line) Geist, sans-serif;
+  overflow-wrap: anywhere;
+  container-type: inline-size;
+}
+.ot-difference-review h3 {
+  margin: 0;
+  font: var(--ot-type-label-weight) var(--ot-type-label-size)/var(--ot-type-label-line) Geist, sans-serif;
+}
+.ot-difference-values { white-space: pre-wrap; }
+.ot-difference-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 280px)); gap: var(--ot-space-12); }
+.ot-difference-actions .ot-button { box-sizing: border-box; inline-size: 100%; min-block-size: 44px; }
+@container (max-width: 35rem) {
+  .ot-difference-actions { grid-template-columns: 1fr; }
+}
+@media (forced-colors: active) {
+  .ot-difference-review { background: Canvas; color: CanvasText; border-color: CanvasText; }
+  .ot-difference-actions .ot-button { border-color: ButtonText; }
+}

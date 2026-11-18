@@ -15,6 +15,7 @@ PRESENTATION_TARGETS = {
     "apps/web/components/foundation/tokens/skeleton.visual.spec.ts": "OPE-310",
     "apps/web/components/foundation/tokens/icon-button.visual.spec.ts": "OPE-311",
     "apps/web/components/foundation/tokens/status-icon.visual.spec.ts": "OPE-312",
+    "apps/web/components/foundation/forms/difference-review.visual.spec.ts": "OPE-314",
     "apps/web/features/workspace/customer-shell.visual.spec.ts": "OPE-307",
     "apps/web/components/foundation/data-display/chart-evidence.visual.spec.ts": "OPE-303",
     "apps/web/components/foundation/data-display/table-populations.visual.spec.ts": "OPE-305",
@@ -224,6 +225,16 @@ def verify_scoped_presentation(root: Path, value: dict[str, Any]) -> None:
             or {Path(name).name for name in images} != expected_icons
         ):
             raise ValueError("Status-icon presentation capture inventory mismatch")
+    elif value["issue_key"] == "OPE-314":
+        expected_cards = {
+            f"difference-{width}-{scale}-{case}.png"
+            for width in widths
+            for scale in (100, 200)
+            for case in ("reference", "raw")
+        }
+        actual_cards = {Path(path).name for path in images}
+        if len(images) != len(expected_cards) or actual_cards != expected_cards:
+            raise ValueError("Difference review capture inventory mismatch")
     elif value["issue_key"] == "OPE-303":
         expected_charts = {
             f"charts-{width}-{scale}.png" for width in widths for scale in (100, 200)

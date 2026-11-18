@@ -17,6 +17,7 @@
     "apps/web/components/foundation/data-display/table-populations.visual.spec.ts",
     "apps/web/components/foundation/data-display/visual.spec.ts",
     "apps/web/components/foundation/forms/dialogs-focus.visual.spec.ts",
+    "apps/web/components/foundation/forms/difference-review.visual.spec.ts",
     "apps/web/components/foundation/forms/field-semantics.visual.spec.ts",
     "apps/web/components/foundation/forms/mutation-intent.visual.spec.ts",
     "apps/web/components/foundation/forms/permission-controls.visual.spec.ts",
@@ -323,6 +324,10 @@
     "apps/web/components/foundation/tokens/status-icon.visual.spec.ts": {
       "kind": "simulated",
       "owner": "OPE-312"
+    },
+    "apps/web/components/foundation/forms/difference-review.visual.spec.ts": {
+      "kind": "simulated",
+      "owner": "OPE-314"
     }
   }
 }
