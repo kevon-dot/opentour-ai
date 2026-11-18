@@ -2,6 +2,7 @@
 
 import json
 import secrets
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import replace
@@ -18,7 +19,9 @@ import pytest
 from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives.asymmetric import rsa
 from fastapi import FastAPI
+from fastapi.routing import iter_route_contexts
 from fastapi.testclient import TestClient
+from opentour_control.api.schema import create_control_api
 from opentour_control.auth import workos_provider
 from opentour_control.auth.browser_state import (
     BrowserAuthTransaction,
@@ -401,8 +404,7 @@ def test_composed_control_auth_routes_share_the_durable_session(durable, monkeyp
                 access_token=auth.token, refresh_token="generated-refresh", user_id=subject
             )
         )
-        app = FastAPI()
-        app.include_router(runtime.router)
+        app = create_control_api(runtime)
         headers = {
             "Authorization": f"Bearer {auth.token}",
             "Cookie": f"opentour-session={browser.handle}",
@@ -410,6 +412,11 @@ def test_composed_control_auth_routes_share_the_durable_session(durable, monkeyp
         }
         context_path = "/v1/session/context"
         selection_path = "/v1/session:select-organization"
+        assert Counter(
+            (route.path, method)
+            for route in iter_route_contexts(app.routes)
+            for method in route.methods or ()
+        ) == {(context_path, "GET"): 1, (selection_path, "POST"): 1}
         body = {"organization_id": org.local, "expected_session_generation": 0}
         with TestClient(app) as client:
             malformed = client.post(
