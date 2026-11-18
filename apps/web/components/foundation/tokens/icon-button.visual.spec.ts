@@ -1,26 +1,14 @@
 import { expect, test } from '@playwright/test';
 import { join } from 'node:path';
-import { build } from 'vite';
+import { buildInlineFixture } from '../../../tests/fixtures/presentation/build.ts';
 
 test.use({ hasTouch: true });
 
 let script: string;
 let styles: string;
 test.beforeAll(async () => {
-  const root = join(process.cwd(), 'apps/web');
-  const result = await build({
-    root, configFile: false, envFile: false, publicDir: false, logLevel: 'error',
-    oxc: { jsx: { runtime: 'automatic' } },
-    build: { write: false, lib: { entry: join(root, 'tests/fixtures/presentation/icon-button.tsx'), formats: ['es'] } },
-    define: { 'process.env.NODE_ENV': JSON.stringify('production') },
-  });
-  const bundle = Array.isArray(result) ? result[0] : result;
-  if (!('output' in bundle)) throw new Error('Missing icon gallery');
-  const js = bundle.output.find(item => item.type === 'chunk');
-  const css = bundle.output.find(item => item.type === 'asset' && item.fileName.endsWith('.css'));
-  if (!js || js.type !== 'chunk' || !css || css.type !== 'asset') throw new Error('Missing icon gallery assets');
-  script = js.code;
-  styles = String(css.source);
+  const output = await buildInlineFixture(join(process.cwd(), 'apps/web/tests/fixtures/presentation/icon-button.tsx'), 'esm');
+  script = output.script; styles = output.css;
 });
 
 for (const width of [320, 768, 1280, 1440]) for (const scale of [100, 200]) {

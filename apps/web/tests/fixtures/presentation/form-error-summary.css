@@ -1,0 +1,200 @@
+/* Generated views for the OPE-321 form error summary. Fixture layout only: none of this is the component.
+   The shared TextField, Notice and Button keep their own look. No rule here selects a part of the TextField
+   or the Notice: the form gives its fields their measure through the custom property the field reads.
+   Where a native frame sizes or aligns a Button, the rule is scoped to that place on this screen. */
+
+/* ---- Workflow settings screen after a failed submission (Figma 159:121, 159:151, 159:181, 159:213) ----
+   Native frames at 100% text: 1440 x 852 and 1280 x 852 with an 80px header, 768 x 888 and 320 x 1008 with a
+   132px header whose third row is the navigation button. The canvas inset is 32px, 24px at 768 and 16px at 320,
+   on a 16px rhythm. The header and the form count their 1px stroke in the layout, so their content starts 17px
+   in: the stroke and then the full 16px padding. No height is fixed anywhere: every block is as tall as its
+   content, and the screen is only never shorter than the viewport. */
+.workflow-settings-screen {
+  box-sizing: border-box;
+  min-block-size: 100dvh;
+  background: var(--ot-surface-canvas);
+  overflow-wrap: anywhere;
+}
+.workflow-settings-header {
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  gap: var(--ot-space-8);
+  /* Two lines: 1 + 16 + 20 + 8 + 18 + 16 + 1 = 80. With the button row, 8 + 44 more: 132. */
+  padding: var(--ot-space-16);
+  border: 1px solid var(--ot-border-default);
+  background: var(--ot-surface-base);
+}
+.workflow-settings-header p { margin: 0; }
+/* Third header row of the 768 and 320 frames: a 220 x 44 secondary button with its label at the leading edge.
+   The row is not rendered from 1280px up, so the button is neither visible nor a keyboard stop there. */
+.workflow-settings-navigation {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--ot-space-8);
+}
+.workflow-settings-navigation .ot-button-group { inline-size: 220px; }
+.workflow-settings-navigation .ot-button {
+  inline-size: 100%;
+  min-block-size: 44px;
+  justify-content: flex-start;
+  text-align: start;
+}
+/* The local navigation the button opens. It is generated fixture content and is in no native frame. */
+.workflow-settings-navigation-list {
+  color: var(--ot-text-secondary);
+  font: var(--ot-type-small-weight) var(--ot-type-small-size)/var(--ot-type-small-line) Geist, sans-serif;
+}
+.workflow-settings-navigation-list ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+@media (min-width: 1280px) {
+  .workflow-settings-navigation { display: none; }
+}
+.workflow-settings-product {
+  /* The product path is written with two spaces on each side of the slash. */
+  white-space: pre-wrap;
+  font: var(--ot-type-label-weight) var(--ot-type-label-size)/var(--ot-type-label-line) Geist, sans-serif;
+}
+.workflow-settings-workspace {
+  color: var(--ot-text-secondary);
+  font: var(--ot-type-small-weight) var(--ot-type-small-size)/var(--ot-type-small-line) Geist, sans-serif;
+}
+.workflow-settings-main {
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  gap: var(--ot-space-16);
+  padding: var(--ot-space-32);
+}
+.workflow-settings-main h1 {
+  margin: 0;
+  font: var(--ot-type-heading-weight) var(--ot-type-heading-size)/var(--ot-type-heading-line) Geist, sans-serif;
+}
+.workflow-settings-revision {
+  margin: 0;
+  color: var(--ot-text-secondary);
+  font: var(--ot-type-body-weight) var(--ot-type-body-size)/var(--ot-type-body-line) Geist, sans-serif;
+}
+.workflow-settings-form {
+  /* The form owns the measure of its shared fields: the frame's width less 32px, so 688px in the 720px frame. */
+  --ot-text-field-inline-size: 688px;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  gap: var(--ot-space-16);
+  inline-size: 100%;
+  max-inline-size: 720px;
+  margin: 0;
+  /* Rows start 17px in, after the stroke and the full 16px padding, and keep the frame's width less 32px:
+     688px in the 720px frame and 256px in the 288px one. That leaves 15px after them, so the trailing padding
+     is 14px: 1 + 16 + 688 + 14 + 1 = 720. The block padding is the full 16px on both edges. */
+  padding: var(--ot-space-16);
+  padding-inline-end: calc(var(--ot-space-16) - 2px);
+  border: 1px solid var(--ot-border-default);
+  border-radius: var(--ot-radius-12);
+  background: var(--ot-surface-base);
+}
+/* Two 280px actions side by side while they fit; each wraps to its own line at the form's measure when they do
+   not, as in the 320 frame. Each action is 44px tall in every frame. */
+.workflow-settings-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--ot-space-12);
+}
+.workflow-settings-actions .ot-button-group {
+  flex: 0 1 280px;
+  min-inline-size: 0;
+}
+.workflow-settings-actions .ot-button {
+  inline-size: 100%;
+  min-block-size: 44px;
+}
+@media (max-width: 767px) {
+  .workflow-settings-main { padding: var(--ot-space-16); }
+}
+@media (min-width: 768px) and (max-width: 1279px) {
+  .workflow-settings-main { padding: var(--ot-space-24); }
+}
+
+/* ---- Standalone specimens and the interactive stress form ---- */
+.form-errors-gallery {
+  box-sizing: border-box;
+  display: grid;
+  /* One track that may shrink below its content, so long text wraps instead of widening the page. */
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--ot-space-24);
+  justify-items: start;
+  padding: var(--ot-space-32);
+}
+.form-errors-gallery h1 {
+  margin: 0;
+  font: var(--ot-type-section-weight) var(--ot-type-section-size)/var(--ot-type-section-line) Geist, sans-serif;
+  overflow-wrap: anywhere;
+}
+/* The design width of the standalone summary. The summary itself is fluid and fills this box. */
+.form-errors-specimen {
+  inline-size: 100%;
+  max-inline-size: 360px;
+}
+.form-errors-form {
+  /* The shared fields take the form's measure. */
+  --ot-text-field-inline-size: 688px;
+  box-sizing: border-box;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--ot-space-16);
+  inline-size: 100%;
+  max-inline-size: 688px;
+  margin: 0;
+}
+/* The fixture's own native controls: the save outcome and the adverse decoy. Never a summary target's field. */
+.form-errors-field {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--ot-space-6);
+  font: var(--ot-type-label-weight) var(--ot-type-label-size)/var(--ot-type-label-line) Geist, sans-serif;
+  overflow-wrap: anywhere;
+}
+.form-errors-field input,
+.form-errors-field select {
+  box-sizing: border-box;
+  inline-size: 100%;
+  min-block-size: 44px;
+  padding: var(--ot-space-8) var(--ot-space-12);
+  border: 1px solid var(--ot-border-control);
+  border-radius: var(--ot-radius-6);
+  background: var(--ot-surface-base);
+  color: var(--ot-text-primary);
+  font: var(--ot-type-body-weight) var(--ot-type-body-size)/var(--ot-type-body-line) Geist, sans-serif;
+}
+.form-errors-field input:focus-visible,
+.form-errors-field select:focus-visible {
+  outline: 2px solid var(--ot-action-primary);
+  outline-offset: 2px;
+}
+.form-errors-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--ot-space-12);
+}
+.form-errors-note,
+.form-errors-gallery output {
+  margin: 0;
+  color: var(--ot-text-secondary);
+  font: var(--ot-type-small-weight) var(--ot-type-small-size)/var(--ot-type-small-line) Geist, sans-serif;
+  overflow-wrap: anywhere;
+}
+@media (max-width: 767px) {
+  .form-errors-gallery { padding: var(--ot-space-16); }
+}
+@media (min-width: 768px) and (max-width: 1279px) {
+  .form-errors-gallery { padding: var(--ot-space-24); }
+}
+@media (forced-colors: active) {
+  .form-errors-field input:focus-visible,
+  .form-errors-field select:focus-visible { outline-color: Highlight; }
+}

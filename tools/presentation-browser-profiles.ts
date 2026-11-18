@@ -1,5 +1,50 @@
 /** Generated local presentation fixtures. Each executable target has exactly one child owner. */
 export const presentationSuites = new Map([
+  ['apps/web/components/foundation/forms/form-error-summary.visual.spec.ts', {
+    owner: 'OPE-321', parent: 'OPE-279', guide: '153:386', minimumTests: 13,
+    requirementIds: ['OPE-321:count-and-copy', 'OPE-321:mapped-and-unmapped', 'OPE-321:submission-focus', 'OPE-321:draft-preservation', 'OPE-321:responsive-renders'],
+    specHash: '37807ec0e39ed952fa324e2b41f0369cb8425bf944b0628784334078564a9c65',
+  }],
+  ['apps/web/components/foundation/forms/derived-value.visual.spec.ts', {
+    owner: 'OPE-320', parent: 'OPE-279', guide: '170:146', minimumTests: 26,
+    requirementIds: ['OPE-320:implementation-scope:exact-copy', 'OPE-320:implementation-scope:clipboard-outcomes', 'OPE-320:verification-and-handoff:browser-evidence'],
+    specHash: 'c4f765ab2b07087d0422257e54102117009f8086efb83728e23f9c86bec09a3a',
+  }],
+  ['apps/web/components/foundation/data-display/relationship-context.visual.spec.ts', {
+    owner: 'OPE-319', parent: 'OPE-286', guide: '165:11224', minimumTests: 11,
+    requirementIds: [
+      'OPE-319:read-only-relationship-records',
+      'OPE-319:selected-relationship-table',
+      'OPE-319:selected-node-context',
+      'OPE-319:empty-redacted-semantics',
+      'OPE-319:browser-evidence',
+    ],
+    specHash: '3e06bf05713dc8de15cfc6c58fe60e9679a2d2915dc56288d727192ffb143bb2',
+  }],
+  ['apps/web/components/foundation/tokens/selection-controls.visual.spec.ts', {
+    owner: 'OPE-318', parent: 'OPE-253', guide: '170:4', minimumTests: 32,
+    requirementIds: [
+      'OPE-318:implementation-scope:sentence-1',
+      'OPE-318:implementation-scope:sentence-2',
+      'OPE-318:implementation-scope:sentence-3',
+      'OPE-318:verification-and-handoff:sentence-4:browser-evidence',
+    ],
+    specHash: '329aa9716e01707bd78f9040854d6cac4dde3eb953b9614a036f951d4f88b2c5',
+  }],
+  ['apps/web/components/foundation/forms/single-choice-select.visual.spec.ts', {
+    owner: 'OPE-317', parent: 'OPE-279', guide: '12:55', minimumTests: 18,
+    requirementIds: [
+      'OPE-317:controlled-select',
+      'OPE-317:keyboard-pointer',
+      'OPE-317:visual-evidence',
+    ],
+    specHash: '75ed552e005b58df042f422e4cc30c2c06eb72d3fdf5a52b4d5ecf317822f6fd',
+  }],
+  ['apps/web/components/foundation/forms/text-field.visual.spec.ts', {
+    owner: 'OPE-316', parent: 'OPE-279', guide: '170:146', minimumTests: 8,
+    requirementIds: ['OPE-316:raw-draft', 'OPE-316:accessible-field', 'OPE-316:browser-evidence'],
+    specHash: 'ab12497e6a79f799dd8d6afed6cce80bc5474bf260b77bc770d3722988c1eb25',
+  }],
   ['apps/web/components/foundation/tokens/skeleton.visual.spec.ts', {
     owner: 'OPE-310', parent: 'OPE-253', guide: '153:489', minimumTests: 44,
     requirementIds: [

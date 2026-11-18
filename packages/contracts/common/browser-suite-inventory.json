@@ -211,10 +211,28 @@
     ],
     "apps/web/features/operations/cancellation-impact.visual.spec.ts": [
       "OPE-315"
+    ],
+    "apps/web/components/foundation/forms/text-field.visual.spec.ts": [
+      "OPE-316"
+    ],
+    "apps/web/components/foundation/forms/single-choice-select.visual.spec.ts": [
+      "OPE-317"
+    ],
+    "apps/web/components/foundation/tokens/selection-controls.visual.spec.ts": [
+      "OPE-318"
+    ],
+    "apps/web/components/foundation/data-display/relationship-context.visual.spec.ts": [
+      "OPE-319"
+    ],
+    "apps/web/components/foundation/forms/derived-value.visual.spec.ts": [
+      "OPE-320"
+    ],
+    "apps/web/components/foundation/forms/form-error-summary.visual.spec.ts": [
+      "OPE-321"
     ]
   },
-  "distinct_paths": 70,
-  "issue_count": 66,
+  "distinct_paths": 76,
+  "issue_count": 72,
   "affected_old_wrapper_paths": {
     "apps/web/tests/coverage/ot-p22-c01.spec.ts": [
       "OPE-232"

@@ -13,16 +13,22 @@
     "apps/web/components/foundation/data-display/chart-evidence.visual.spec.ts",
     "apps/web/components/foundation/data-display/graph-projections.visual.spec.ts",
     "apps/web/components/foundation/data-display/metric-semantics.visual.spec.ts",
+    "apps/web/components/foundation/data-display/relationship-context.visual.spec.ts",
     "apps/web/components/foundation/data-display/scenario-conformance.visual.spec.ts",
     "apps/web/components/foundation/data-display/table-populations.visual.spec.ts",
     "apps/web/components/foundation/data-display/visual.spec.ts",
+    "apps/web/components/foundation/forms/derived-value.visual.spec.ts",
     "apps/web/components/foundation/forms/dialogs-focus.visual.spec.ts",
     "apps/web/components/foundation/forms/difference-review.visual.spec.ts",
     "apps/web/components/foundation/forms/field-semantics.visual.spec.ts",
+    "apps/web/components/foundation/forms/form-error-summary.visual.spec.ts",
     "apps/web/components/foundation/forms/mutation-intent.visual.spec.ts",
     "apps/web/components/foundation/forms/permission-controls.visual.spec.ts",
+    "apps/web/components/foundation/forms/single-choice-select.visual.spec.ts",
+    "apps/web/components/foundation/forms/text-field.visual.spec.ts",
     "apps/web/components/foundation/forms/visual.spec.ts",
     "apps/web/components/foundation/tokens/icon-button.visual.spec.ts",
+    "apps/web/components/foundation/tokens/selection-controls.visual.spec.ts",
     "apps/web/components/foundation/tokens/skeleton.visual.spec.ts",
     "apps/web/components/foundation/tokens/status-icon.visual.spec.ts",
     "apps/web/components/foundation/tokens/tooltip.visual.spec.ts",
@@ -338,6 +344,30 @@
     "apps/web/features/operations/cancellation-impact.visual.spec.ts": {
       "kind": "simulated",
       "owner": "OPE-315"
+    },
+    "apps/web/components/foundation/forms/text-field.visual.spec.ts": {
+      "kind": "simulated",
+      "owner": "OPE-316"
+    },
+    "apps/web/components/foundation/forms/single-choice-select.visual.spec.ts": {
+      "kind": "simulated",
+      "owner": "OPE-317"
+    },
+    "apps/web/components/foundation/tokens/selection-controls.visual.spec.ts": {
+      "kind": "simulated",
+      "owner": "OPE-318"
+    },
+    "apps/web/components/foundation/data-display/relationship-context.visual.spec.ts": {
+      "kind": "simulated",
+      "owner": "OPE-319"
+    },
+    "apps/web/components/foundation/forms/derived-value.visual.spec.ts": {
+      "kind": "simulated",
+      "owner": "OPE-320"
+    },
+    "apps/web/components/foundation/forms/form-error-summary.visual.spec.ts": {
+      "kind": "simulated",
+      "owner": "OPE-321"
     }
   }
 }

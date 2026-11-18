@@ -17,7 +17,7 @@
     {
       "id": "urn:opentour:test-result:1.0",
       "file": "test-result.schema.json",
-      "sha256": "efaa4b57c71651c7879f36423049b8db8052d7952365e5160388de2291b8d137",
+      "sha256": "8204559019b22d3292e97d8d133835bbcf5f015485f0031c005274f4e4c73847",
       "source_path": "packages/contracts/common/test-result.schema.json"
     },
     {

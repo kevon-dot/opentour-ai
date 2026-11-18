@@ -28,6 +28,7 @@
       "enum": [
         "pytest",
         "vitest",
+        "node_test",
         "playwright"
       ]
     },

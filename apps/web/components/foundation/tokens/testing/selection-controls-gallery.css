@@ -1,0 +1,27 @@
+/* Local generated gallery only. No product route, request, storage or shared state. */
+body { margin: 0; background: var(--ot-surface-base); }
+.selection-gallery { display: flex; flex-direction: column; gap: var(--ot-space-24); padding: var(--ot-space-16); font-size: var(--ot-type-body-size); line-height: var(--ot-type-body-line); overflow-wrap: anywhere; }
+.selection-gallery h1, .selection-gallery h2, .selection-gallery p { margin: 0; }
+.selection-gallery h1 { font: var(--ot-type-heading-weight) var(--ot-type-heading-size)/var(--ot-type-heading-line) Geist, sans-serif; }
+.selection-family { display: flex; flex-direction: column; align-items: flex-start; gap: var(--ot-space-16); }
+.selection-family > h2 { color: var(--ot-text-secondary); font: var(--ot-type-label-weight) var(--ot-type-label-size)/var(--ot-type-label-line) Geist, sans-serif; }
+.selection-specimens { display: flex; flex-wrap: wrap; align-items: flex-start; gap: var(--ot-space-8); max-inline-size: 100%; }
+/* 8px of clear space on every side keeps the whole 4px focus ring inside each specimen capture. */
+.selection-specimen { box-sizing: border-box; min-inline-size: 0; max-inline-size: 100%; padding: var(--ot-space-8); }
+.selection-contexts { display: flex; flex-direction: column; align-items: flex-start; gap: var(--ot-space-24); }
+/* Native product frames: 596px card, 1px border inside the occupied box, 24px padding, 16px gap. */
+.selection-context { box-sizing: border-box; display: flex; flex-direction: column; align-items: flex-start; gap: var(--ot-space-16); inline-size: 596px; max-inline-size: 100%; padding: var(--ot-space-24); border: 1px solid var(--ot-border-default); border-radius: var(--ot-radius-12); background: var(--ot-surface-canvas); }
+.selection-context > h2 { font: var(--ot-type-section-weight) var(--ot-type-section-size)/var(--ot-type-section-line) Geist, sans-serif; color: var(--ot-text-primary); }
+.selection-context > p { font: var(--ot-type-body-weight) var(--ot-type-body-size)/var(--ot-type-body-line) Geist, sans-serif; color: var(--ot-text-secondary); }
+.selection-context-control { min-inline-size: 0; max-inline-size: 100%; }
+.selection-gallery button:not(.ot-selection-control) { box-sizing: border-box; min-block-size: 44px; max-inline-size: 100%; padding: var(--ot-space-8); font: inherit; color: var(--ot-text-primary); background: var(--ot-surface-base); border: 1px solid var(--ot-border-control); border-radius: var(--ot-radius-6); overflow-wrap: anywhere; }
+.selection-gallery button:not(.ot-selection-control):focus-visible { outline: 2px solid var(--ot-action-primary); outline-offset: 2px; }
+@media (min-width: 768px) { .selection-gallery { padding: var(--ot-space-24); } }
+@media (min-width: 1280px) { .selection-gallery { padding: var(--ot-space-32); } }
+@media (forced-colors: active) {
+  body, .selection-context { background: Canvas; }
+  .selection-gallery, .selection-family > h2, .selection-context > h2, .selection-context > p { color: CanvasText; }
+  .selection-context { border-color: CanvasText; }
+  .selection-gallery button:not(.ot-selection-control) { background: ButtonFace; color: ButtonText; border-color: ButtonText; }
+  .selection-gallery button:not(.ot-selection-control):focus-visible { outline-color: Highlight; }
+}

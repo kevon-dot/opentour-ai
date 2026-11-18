@@ -1,0 +1,14 @@
+/* OPE-321 linked form error summary (Figma 153:386). Imported by form-error-summary.tsx after product-tokens.css.
+   The failure notice is the foundation Notice, unchanged. This file spaces it from the rows and styles the rows.
+   The summary fills its container; the 360px of the design is the container's width. No element resets.
+   Detached rows (Figma 159:121) sit outside the summary, so they carry the text properties it would have given them.
+   Attached rows keep the summary's 12px rhythm. Detached rows are spaced 16px apart, the rhythm of the form they sit in. */
+.ot-form-error-summary { display: flex; flex-direction: column; gap: var(--ot-space-12); box-sizing: border-box; inline-size: 100%; min-inline-size: 0; color: var(--ot-text-primary); font-family: Geist, sans-serif; overflow-wrap: anywhere; }
+.ot-form-error-list { display: flex; flex-direction: column; gap: var(--ot-space-12); margin: 0; padding: 0; list-style: none; }
+.ot-form-error-list--detached { box-sizing: border-box; gap: var(--ot-space-16); inline-size: 100%; min-inline-size: 0; color: var(--ot-text-primary); font-family: Geist, sans-serif; overflow-wrap: anywhere; }
+.ot-form-error-item { font-size: var(--ot-type-body-size); font-weight: var(--ot-type-body-weight); line-height: var(--ot-type-body-line); }
+.ot-form-error-link { color: var(--ot-text-link); text-decoration: underline; }
+.ot-form-error-summary:focus-visible, .ot-form-error-link:focus-visible { outline: 2px solid var(--ot-action-primary); outline-offset: 2px; }
+@media (forced-colors: active) {
+  .ot-form-error-summary:focus-visible, .ot-form-error-link:focus-visible { outline-color: Highlight; }
+}
