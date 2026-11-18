@@ -1,0 +1,67 @@
+/* OPE-303 chart evidence. Geometry of the Figma frames 5:176 (coverage), 5:280 (rate comparison) and
+   24:148-24:156 with 56:129 (signed bars). Uses the custom properties and Geist faces of
+   styles/product-tokens.css; import that first. The design has no shadow, gradient, motion, hover or
+   focus state for charts, so none is declared here.
+
+   Bar lengths are computed here, in CSS, from the numbers the component writes unchanged into
+   --ot-chart-* properties. Bars always run left to right, whatever the text direction. */
+.ot-chart { display: flex; flex-direction: column; align-items: flex-start; gap: var(--ot-space-16); box-sizing: border-box; inline-size: 100%; min-inline-size: 0; margin: 0; font-family: Geist, sans-serif; overflow-wrap: anywhere; }
+.ot-chart--card { padding: var(--ot-space-20); padding-inline-end: calc(var(--ot-space-20) - 2px); background: var(--ot-surface-base); border: 1px solid var(--ot-border-default); border-radius: var(--ot-radius-12); }
+.ot-chart-title, .ot-chart-subtitle, .ot-chart-method, .ot-chart-note { margin: 0; max-inline-size: 100%; }
+.ot-chart-title { color: var(--ot-text-primary); font-size: var(--ot-type-section-size); font-weight: var(--ot-type-section-weight); line-height: var(--ot-type-section-line); }
+.ot-chart-subtitle, .ot-chart-method, .ot-chart-note { font-size: var(--ot-type-small-size); font-weight: var(--ot-type-small-weight); line-height: var(--ot-type-small-line); }
+.ot-chart-subtitle, .ot-chart-method { color: var(--ot-text-secondary); }
+.ot-chart-note { color: var(--ot-text-muted); }
+.ot-chart-method, .ot-chart-note { align-self: stretch; }
+.ot-chart-series--mint { background: var(--ot-series-mint); }
+.ot-chart-series--lilac { background: var(--ot-series-lilac); }
+.ot-chart-series--amber { background: var(--ot-series-amber); }
+.ot-chart-series--coral { background: var(--ot-series-coral); }
+
+/* Coverage (5:176): segments share the bar length that remains after the gaps, in proportion to count / total. */
+.ot-chart-coverage-bar { display: flex; align-self: stretch; gap: var(--ot-space-2); block-size: 18px; direction: ltr; }
+.ot-chart-coverage-segment { box-sizing: border-box; flex: 0 1 auto; inline-size: calc((100% - var(--ot-space-2) * var(--ot-chart-gaps)) * var(--ot-chart-count) / var(--ot-chart-total)); border: 1px solid var(--ot-border-control); border-radius: var(--ot-radius-4); }
+.ot-chart-coverage-key { display: flex; flex-direction: column; align-self: stretch; gap: var(--ot-space-16); margin: 0; }
+.ot-chart-coverage-item { display: flex; align-items: flex-start; gap: var(--ot-space-12); box-sizing: border-box; inline-size: calc(95% + var(--ot-space-12)); max-inline-size: 100%; }
+.ot-chart-coverage-label, .ot-chart-coverage-value { min-inline-size: 0; margin: 0; color: var(--ot-text-secondary); font-size: var(--ot-type-small-size); line-height: var(--ot-type-small-line); }
+.ot-chart-coverage-label { flex: 55 1 0; font-weight: var(--ot-type-small-weight); }
+.ot-chart-coverage-value { flex: 40 1 0; font-size: var(--ot-type-small-strong-size); font-weight: var(--ot-type-small-strong-weight); line-height: var(--ot-type-small-strong-line); }
+
+/* Rate comparison (5:280): one row per series on a fixed 0-100% track. An absent row has no track. */
+.ot-chart-rate-rows { display: flex; flex-direction: column; align-self: stretch; gap: var(--ot-space-16); margin: 0; padding: 0; list-style: none; }
+.ot-chart-rate-row { display: flex; flex-direction: column; align-items: flex-start; gap: var(--ot-space-8); min-inline-size: 0; }
+.ot-chart-rate-head { display: flex; align-self: stretch; flex-wrap: wrap; align-items: flex-start; column-gap: var(--ot-space-16); max-inline-size: 100%; }
+.ot-chart-rate-label { flex: 0 1 440px; min-inline-size: 0; color: var(--ot-text-primary); font-size: var(--ot-type-label-size); font-weight: var(--ot-type-label-weight); line-height: var(--ot-type-label-line); }
+.ot-chart-rate-value { flex: 0 1 auto; min-inline-size: 0; color: var(--ot-text-secondary); font-family: 'Geist Mono', monospace; font-size: var(--ot-type-mono-size); font-weight: var(--ot-type-mono-weight); line-height: var(--ot-type-mono-line); }
+.ot-chart-rate-track { display: flex; align-self: stretch; block-size: 28px; background: var(--ot-surface-nav); border-radius: var(--ot-radius-6); direction: ltr; }
+.ot-chart-rate-fill { box-sizing: border-box; flex: none; inline-size: calc(var(--ot-chart-rate) * 100%); border: 1px solid var(--ot-border-control); border-radius: var(--ot-radius-6); }
+/* The scale labels use the same available width as the data track. */
+.ot-chart-rate-axis { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); align-self: stretch; direction: ltr; color: var(--ot-text-muted); font-size: var(--ot-type-small-size); font-weight: var(--ot-type-small-weight); line-height: var(--ot-type-small-line); }
+.ot-chart-rate-tick { white-space: nowrap; }
+.ot-chart-rate-tick--max { justify-self: end; }
+
+/* Signed bars (24:148-24:156, axis 56:129): the zero line sits at -min / (max - min) of the row. */
+.ot-chart-signed-rows { display: flex; flex-direction: column; align-self: stretch; gap: var(--ot-space-16); margin: 0; padding: 0; list-style: none; }
+.ot-chart-signed-item { position: relative; min-inline-size: 0; }
+.ot-chart-signed-row { position: relative; display: flex; block-size: 22px; direction: ltr; }
+.ot-chart-signed-half { display: flex; min-inline-size: 0; background: var(--ot-surface-nav); }
+.ot-chart-signed-half--negative { flex: 0 0 calc(-1 * var(--ot-chart-min) / (var(--ot-chart-max) - var(--ot-chart-min)) * 100%); justify-content: flex-end; }
+.ot-chart-signed-half--positive { flex: 1 1 0; }
+.ot-chart-signed-bar { box-sizing: border-box; flex: none; border: 1px solid var(--ot-border-control); }
+.ot-chart-signed-bar--negative { inline-size: calc(var(--ot-chart-value) / var(--ot-chart-min) * 100%); background: var(--ot-series-coral); }
+.ot-chart-signed-bar--positive { inline-size: calc(var(--ot-chart-value) / var(--ot-chart-max) * 100%); background: var(--ot-series-mint); }
+.ot-chart-signed-zero { position: absolute; inset-block: 0; left: calc(-1 * var(--ot-chart-min) / (var(--ot-chart-max) - var(--ot-chart-min)) * 100%); inline-size: 1px; background: var(--ot-border-control); }
+.ot-chart-signed-reason, .ot-chart-signed-axis { color: var(--ot-text-secondary); font-size: var(--ot-type-small-size); font-weight: var(--ot-type-small-weight); line-height: var(--ot-type-small-line); }
+.ot-chart-signed-reason { display: block; }
+.ot-chart-signed-axis { display: flex; align-self: stretch; direction: ltr; }
+.ot-chart-signed-tick { min-inline-size: 0; }
+.ot-chart-signed-tick--min { flex: 0 0 calc(-1 * var(--ot-chart-min) / (var(--ot-chart-max) - var(--ot-chart-min)) * 100% - 20px); text-align: left; }
+.ot-chart-signed-tick--zero { flex: 0 0 40px; text-align: center; }
+.ot-chart-signed-tick--max { flex: 1 1 0; text-align: right; }
+
+/* Text for assistive technology where the design draws a bar without printing its value. */
+.ot-chart-visually-hidden { position: absolute; inline-size: 1px; block-size: 1px; margin: -1px; padding: 0; border: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+
+@media (forced-colors: active) {
+  .ot-chart-signed-zero { forced-color-adjust: none; background: CanvasText; }
+}
