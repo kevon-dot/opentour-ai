@@ -31,6 +31,9 @@
     "../../../tests/fixtures/presentation/difference-review.tsx",
     "./**/*.ts",
     "./**/*.tsx",
-    "../../../tests/fixtures/presentation/operation-state.tsx"
+    "../../../tests/fixtures/presentation/operation-state.tsx",
+    "../forms/text-field*.tsx",
+    "../forms/text-field*.ts",
+    "../../../tests/fixtures/presentation/text-field.tsx"
   ]
 }

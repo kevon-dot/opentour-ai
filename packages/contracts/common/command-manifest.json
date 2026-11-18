@@ -21,6 +21,7 @@
     "apps/web/components/foundation/forms/field-semantics.visual.spec.ts",
     "apps/web/components/foundation/forms/mutation-intent.visual.spec.ts",
     "apps/web/components/foundation/forms/permission-controls.visual.spec.ts",
+    "apps/web/components/foundation/forms/text-field.visual.spec.ts",
     "apps/web/components/foundation/forms/visual.spec.ts",
     "apps/web/components/foundation/tokens/icon-button.visual.spec.ts",
     "apps/web/components/foundation/tokens/skeleton.visual.spec.ts",
@@ -338,6 +339,10 @@
     "apps/web/features/operations/cancellation-impact.visual.spec.ts": {
       "kind": "simulated",
       "owner": "OPE-315"
+    },
+    "apps/web/components/foundation/forms/text-field.visual.spec.ts": {
+      "kind": "simulated",
+      "owner": "OPE-316"
     }
   }
 }

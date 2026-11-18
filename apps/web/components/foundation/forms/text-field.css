@@ -9,8 +9,9 @@
   inline-size: 100%;
   /* The containing form owns the measure: it sets --ot-text-field-inline-size (688px in the settings form). */
   max-inline-size: var(--ot-text-field-inline-size, 360px);
-  /* The design strokes inside the frame, so border plus padding keeps content 16px from the outer edge. */
-  padding: calc(var(--ot-space-16) - 1px);
+  /* Full 16px padding inside a real border, never reduced for it: content starts 17px in at rest (360×108)
+     and 18px in under the 2px focus border (360×110). The 1px shift on focus is the native geometry. */
+  padding: var(--ot-space-16);
   border: 1px solid var(--ot-border-control);
   border-radius: var(--ot-radius-8);
   background: var(--ot-surface-base);
@@ -44,41 +45,52 @@
 .ot-text-field-error { color: var(--ot-failure-text); }
 
 /* Frame states follow the native control's own state, so they cannot drift from it. */
-.ot-text-field:has(> .ot-text-field-control[aria-invalid='true']) { background: var(--ot-failure-background); }
+/* Invalid: every line (label, value, helper, error) takes the failure text colour; helper and error stay separate. */
+.ot-text-field:has(> .ot-text-field-control[aria-invalid='true']) {
+  background: var(--ot-failure-background);
+  color: var(--ot-failure-text);
+}
+.ot-text-field:has(> .ot-text-field-control[aria-invalid='true']) > .ot-text-field-helper { color: inherit; }
 .ot-text-field:has(> .ot-text-field-control:disabled) { opacity: 0.55; }
-/* The frame carries the keyboard focus indicator, inside its own edge and in every state including invalid.
-   The control's native indicator is removed only by a rule that also draws the frame's. */
-.ot-text-field:has(> .ot-text-field-control:focus-visible) { outline: 2px solid var(--ot-action-primary); outline-offset: -2px; }
+/* The frame's real border is the keyboard focus indicator: 2px action blue in every state, including invalid.
+   No outline is added, and the control's native indicator is removed only by a rule that also thickens the border. */
+.ot-text-field:has(> .ot-text-field-control:focus-visible) { border-width: 2px; border-color: var(--ot-action-primary); }
 .ot-text-field:has(> .ot-text-field-control:focus-visible) > .ot-text-field-control { outline: none; }
 
 .ot-input {
+  /* Private to this rule set: the border width that the block size has to include. */
+  --ot-input-border-width: 1px;
   appearance: none;
   box-sizing: border-box;
   vertical-align: middle;
   inline-size: 280px;
   max-inline-size: 100%;
-  /* One line of body type between 12px insets; the inside border is taken out of the padding. */
-  block-size: calc(var(--ot-type-body-line) + 2 * var(--ot-space-12));
+  /* One line of body type inside the full 12px padding and the real border: 280×48 at rest with a 13px content
+     inset, 280×50 focused with 14px; 70px and 72px tall at 200% text. */
+  block-size: calc(var(--ot-type-body-line) + 2 * var(--ot-space-12) + 2 * var(--ot-input-border-width));
   margin: 0;
-  padding: calc(var(--ot-space-12) - 1px);
-  border: 1px solid var(--ot-border-control);
+  padding: var(--ot-space-12);
+  border: var(--ot-input-border-width) solid var(--ot-border-control);
   border-radius: var(--ot-radius-6);
   background: var(--ot-surface-base);
   color: var(--ot-text-muted);
   font: var(--ot-type-body-weight) var(--ot-type-body-size)/var(--ot-type-body-line) Geist, sans-serif;
 }
 .ot-input:disabled { background: var(--ot-unknown-background); }
-.ot-input:focus-visible { outline: 2px solid var(--ot-action-primary); outline-offset: -2px; }
+/* The 2px action border replaces the native outline in the same rule. */
+.ot-input:focus-visible { --ot-input-border-width: 2px; border-color: var(--ot-action-primary); outline: none; }
 .ot-text-field-control:disabled,
 .ot-input:disabled { cursor: not-allowed; }
 
 @media (forced-colors: active) {
   .ot-text-field,
+  .ot-text-field:has(> .ot-text-field-control[aria-invalid='true']),
   .ot-input { background: Canvas; color: CanvasText; border-color: CanvasText; }
   .ot-text-field-helper,
   .ot-text-field-error { color: CanvasText; }
-  .ot-text-field:has(> .ot-text-field-control:focus-visible) { outline-color: Highlight; }
-  .ot-input:focus-visible { outline-color: Highlight; }
+  /* The 2px focus border takes the system highlight; it is the only indicator, so nothing is doubled. */
+  .ot-text-field:has(> .ot-text-field-control:focus-visible),
+  .ot-input:focus-visible { border-color: Highlight; }
   .ot-text-field:has(> .ot-text-field-control:disabled) { opacity: 1; color: GrayText; border-color: GrayText; }
   .ot-text-field:has(> .ot-text-field-control:disabled) > .ot-text-field-helper,
   .ot-text-field:has(> .ot-text-field-control:disabled) > .ot-text-field-error,
