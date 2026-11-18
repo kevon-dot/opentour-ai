@@ -7,14 +7,21 @@ from collections import Counter
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field
+from datetime import datetime
 from itertools import permutations
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal, TypedDict
+
+from referencing import Registry
+
+from tools.schema_validate import schema_registry, valid_instance
 
 DeploymentMode = Literal["customer_controlled", "opentour_managed"]
 ActorKind = Literal["human", "workload"]
 FixtureStatus = Literal["PASS", "FAIL", "INCOMPLETE"]
 Metric = bool | int
+ReceiptStatus = Literal["NOT_RUN", "COMPLETE", "FAIL", "INCOMPLETE"]
+_COMMON = "urn:opentour:common-contract:1.0#/$defs/"
 _ROOT = Path(__file__).resolve().parents[2]
 FIXTURE_PATH = _ROOT / "packages/contracts/fixtures/acceptance/ot-g2-c01.json"
 
@@ -339,6 +346,155 @@ def assess_generated(
         tuple(sorted(failed)),
         tuple(sorted(incomplete)),
         tuple(sorted(unexpected)),
+    )
+
+
+class CaseObservationReceipt(TypedDict):
+    case_id: str
+    mode: DeploymentMode
+    initiating_cell_id: str
+    target_cell_id: str | None
+    actor_ref: str
+    provider_contract_ref: str
+    input_digest: str
+    expected: dict[str, Metric]
+    observed: dict[str, Metric] | None
+    assertion_status: FixtureStatus | Literal["NOT_RUN"]
+    evidence_refs: list[dict[str, object]]
+    started_at: str | None
+    finished_at: str | None
+    actual_usage_ref: dict[str, object] | None
+
+
+@dataclass(frozen=True)
+class ReceiptAssessment:
+    receipt_status: ReceiptStatus
+    expected_count: int
+    classified_count: int
+    failed_cases: tuple[str, ...]
+    incomplete_cases: tuple[str, ...]
+    rejected_receipt_count: int
+    missing_cell_bindings: tuple[str, ...]
+    product_acceptance: Literal["NOT_RUN"] = dataclass_field(default="NOT_RUN", init=False)
+
+
+def _missing_cell_bindings(cell_ids: Mapping[str, str]) -> tuple[str, ...]:
+    invalid = {
+        alias
+        for alias in _CELL_MODES
+        if not isinstance(value := cell_ids.get(alias), str)
+        or not value
+        or len(value) > 256
+        or value in _CELL_MODES
+    }
+    counts = Counter(cell_ids[alias] for alias in _CELL_MODES.keys() - invalid)
+    invalid.update(alias for alias in _CELL_MODES.keys() - invalid if counts[cell_ids[alias]] > 1)
+    return tuple(sorted(invalid))
+
+
+def _complete_receipt(
+    receipt: Mapping[str, object], case: IsolationCase, registry: Registry[Any]
+) -> bool:
+    if set(receipt) != CaseObservationReceipt.__required_keys__:
+        return False
+    for field_name, definition in (
+        ("actor_ref", "Id"),
+        ("provider_contract_ref", "Id"),
+        ("input_digest", "Sha256"),
+        ("started_at", "Timestamp"),
+        ("finished_at", "Timestamp"),
+        ("actual_usage_ref", "ArtifactRef"),
+    ):
+        if not valid_instance(_COMMON + definition, receipt[field_name], registry):
+            return False
+    started, finished = receipt["started_at"], receipt["finished_at"]
+    if not isinstance(started, str) or not isinstance(finished, str):
+        return False
+    if datetime.fromisoformat(finished) < datetime.fromisoformat(started):
+        return False
+    artifacts = receipt["evidence_refs"]
+    metrics = receipt["observed"]
+    expectation = receipt["expected"]
+    return (
+        isinstance(artifacts, list)
+        and bool(artifacts)
+        and all(valid_instance(_COMMON + "ArtifactRef", item, registry) for item in artifacts)
+        and _matches_shape(expectation, case.expected)
+        and expectation == dict(case.expected)
+        and _matches_shape(metrics, case.expected)
+        and receipt["assertion_status"] == ("PASS" if metrics == expectation else "FAIL")
+    )
+
+
+def assess_receipts(
+    fixture: IsolationFixture,
+    expected_mode: DeploymentMode,
+    cell_ids: Mapping[str, str],
+    receipts: Iterable[object],
+) -> ReceiptAssessment:
+    """Check ISO-01 receipt completeness against caller-approved cell IDs.
+
+    Callers still authenticate provenance, resolve artifacts and record provider evidence.
+    A complete result describes receipt ingestion only, including for generated input.
+    """
+    expected = {case.case_id: case for case in fixture.cases(expected_mode)}
+    cell_ids = dict(cell_ids)
+    if set(cell_ids) - _CELL_MODES.keys():
+        raise InvalidIsolationFixture("Unexpected approved cell binding alias")
+    missing_cells = _missing_cell_bindings(cell_ids)
+    if missing_cells:
+        return ReceiptAssessment(
+            "NOT_RUN", len(expected), 0, (), tuple(sorted(expected)), 0, missing_cells
+        )
+
+    registry = schema_registry()
+    observations: list[GeneratedObservation] = []
+    incomplete: set[str] = set()
+    rejected = 0
+    for receipt in receipts:
+        if not isinstance(receipt, Mapping):
+            rejected += 1
+            continue
+        case_id = receipt.get("case_id")
+        case = expected.get(case_id) if isinstance(case_id, str) else None
+        if case is None:
+            rejected += 1
+            continue
+        if (
+            receipt.get("mode") != expected_mode
+            or receipt.get("initiating_cell_id") != cell_ids[case.initiating_cell]
+            or receipt.get("target_cell_id") != cell_ids[case.target_cell]
+        ):
+            incomplete.add(case.case_id)
+            rejected += 1
+            continue
+        metrics = receipt.get("observed")
+        observations.append(
+            GeneratedObservation(
+                case.case_id, dict(metrics) if isinstance(metrics, Mapping) else {}
+            )
+        )
+        if not _complete_receipt(receipt, case, registry):
+            incomplete.add(case.case_id)
+            rejected += 1
+
+    result = assess_generated(fixture, expected_mode, observations)
+    incomplete.update(result.incomplete_cases)
+    status: ReceiptStatus = "COMPLETE"
+    if result.failed_cases:
+        status = "FAIL"
+    elif not observations and not rejected:
+        status = "NOT_RUN"
+    elif incomplete or rejected:
+        status = "INCOMPLETE"
+    return ReceiptAssessment(
+        status,
+        len(expected),
+        len(expected) - len(incomplete),
+        result.failed_cases,
+        tuple(sorted(incomplete)),
+        rejected,
+        (),
     )
 
 
