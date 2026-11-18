@@ -461,45 +461,6 @@ def validate_report(
     return 0, None
 
 
-def vitest_report(raw: Any, invocation: Invocation) -> dict[str, Any]:
-    """Normalize the pinned JSON reporter, retaining every selected file and pending case."""
-    if not isinstance(raw, dict) or not isinstance(raw.get("testResults"), list):
-        raise CommandError("Missing or malformed Vitest JSON report.")
-    tests = []
-    for suite in raw["testResults"]:
-        try:
-            file = Path(suite["name"]).resolve().relative_to(invocation.cwd.resolve()).as_posix()
-            for index, case in enumerate(suite["assertionResults"]):
-                state = case["status"]
-                status = (
-                    "passed" if state == "passed" else "failed" if state == "failed" else "skipped"
-                )
-                tests.append(
-                    {"id": f"{file}::{index}", "file": file, "status": status, "mode": None}
-                )
-        except (KeyError, ValueError, TypeError) as exc:
-            raise CommandError("Invalid Vitest test inventory.") from exc
-    result = report_envelope(invocation.runner, invocation.target, invocation.environment, tests)
-    expected = {
-        "numTotalTests": "collected",
-        "numPassedTests": "passed",
-        "numFailedTests": "failed",
-    }
-    if any(type(raw.get(k)) is not int or raw[k] != result[v] for k, v in expected.items()):
-        raise CommandError("Vitest summary and actual inventory disagree.")
-    if (
-        type(raw.get("numPendingTests")) is not int
-        or type(raw.get("numTodoTests")) is not int
-        or raw["numPendingTests"] < 0
-        or raw["numTodoTests"] < 0
-        or raw["numPendingTests"] + raw["numTodoTests"] != result["skipped"]
-    ):
-        raise CommandError("Vitest pending/todo counts do not match the inventory.")
-    if raw.get("success") is not True:
-        result.update(status="FAIL", reason_code="RUNNER_ERROR")
-    return result
-
-
 def report_envelope(
     runner: str,
     target: str,
@@ -726,32 +687,9 @@ def _invoke(
             env["OPENTOUR_UNIT_GUARD"] = "1"
         elif runner == "playwright":
             args.extend(["--result-file", str(report_path)])
-        elif runner == "vitest":
-            args[args.index("REPORT")] = str(report_path)
-            # Positional Vitest filters are substrings. An exact include is applied before
-            # collection, so colliding filenames cannot execute and merely be rejected later.
-            configuration = private_dir / "vitest.config.mjs"
-            configuration.write_text(
-                "export default "
-                + json.dumps(
-                    {
-                        "root": str(root),
-                        "test": {
-                            "include": [target],
-                            "exclude": [],
-                            "passWithNoTests": False,
-                            "allowOnly": False,
-                            "retry": 0,
-                            "watch": False,
-                            "fileParallelism": False,
-                            "maxWorkers": 1,
-                        },
-                    }
-                )
-                + ";\n",
-                encoding="utf-8",
-            )
-            args.extend(["--config", str(configuration)])
+        elif runner == "node_test":
+            for source in ("tools/web-unit-runner.mjs", "tools/web-unit-loader.mjs"):
+                path_target(root, source)
             guard = schema_validate.local_file(root, f"{COMMON}/unit-network-guard.cjs")
             env["NODE_OPTIONS"] = f"--require={json.dumps(str(guard))}"
         elif runner == "setup":
@@ -785,7 +723,7 @@ def _invoke(
                 invocation, process, expected_commit, expected_spec
             )
             code, reason = validation["exit_code"], validation["reason_code"]
-        elif runner in {"pytest", "vitest", "playwright"}:
+        elif runner in {"pytest", "node_test", "playwright"}:
             if process.returncode < 0 and not report_path.is_file():
                 return {
                     "runner": runner,
@@ -807,14 +745,17 @@ def _invoke(
                 report = schema_validate.read_json(report_path)
             except schema_validate.SchemaError as exc:
                 raise CommandError("Runner produced invalid JSON.") from exc
-            if runner == "vitest":
-                report = vitest_report(report, invocation)
             code, reason = validate_report(report, invocation, process, root)
             if runner == "playwright" and target == FOUNDATION_TARGET and code == 0:
                 if {test["mode"] for test in report["tests"]} != set(MODES):
                     raise CommandError(
                         "Presentation foundation must execute only actual tests in both modes."
                     )
+            if runner == "node_test" and report["reason_code"] in {
+                "NO_TESTS",
+                "INVALID_CONFIGURATION",
+            }:
+                code, reason = 2, report["reason_code"]
             # Pytest codes are not the wrapper's public code vocabulary.
             if runner == "pytest" and consumer is None and process.returncode in {2, 3, 4}:
                 code, reason = 2, "INVALID_CONFIGURATION"
@@ -1097,26 +1038,16 @@ def dispatch(
                 )
             return [
                 invoke(
-                    (
-                        "pnpm",
-                        "exec",
-                        "vitest",
-                        "run",
-                        "--reporter=json",
-                        "--outputFile",
-                        "REPORT",
-                        "--no-file-parallelism",
-                        "--maxWorkers=1",
-                    ),
+                    ("node", "tools/web-unit-runner.mjs"),
                     root,
                     target,
-                    "vitest",
+                    "node_test",
                     run,
                 )
             ]
         if (root / target).is_file() and not target.endswith(".spec.ts"):
             raise CommandError(
-                "test-browser accepts declared .spec.ts suites; use test-web for Vitest tests."
+                "test-browser accepts declared .spec.ts suites; use test-web for web unit tests."
             )
         if target not in registry["browser_suites"]:
             raise CommandError(

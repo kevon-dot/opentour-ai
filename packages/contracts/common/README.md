@@ -16,7 +16,7 @@ the public exit code. The accepted setup entry emits its OPE-122 receipt directl
 | `just lint` | Pinned Ruff; when C06 source is present, actual owned Oxlint configuration over the harness/runner and contract web smoke |
 | `just typecheck` | Pinned mypy, TypeScript client/contract-smoke boundary, and actual C06 tsconfig when harness source is present |
 | `just test-python PATH` | Exact existing Python file/directory; declared uv workspace package, separate training project, or root contract scope |
-| `just test-web PATH` | Existing `.test.ts`/`.test.tsx` file; private exact-include Vitest configuration, no retries/only/zero-test pass |
+| `just test-web PATH` | Existing `.test.ts`/`.test.tsx` file; exact file in an isolated Node test worker with no retries. Focused, skipped and empty runs fail. |
 | `just test-browser PATH` | Declared `.spec.ts` file/suite with an admitted profile and actual OPE-127 adapter |
 | `just test-contract` | Hash-verified local schema examples, then actual contract tests |
 | `just validate-spec` | Fixed OPE-126 offline semantic validator; missing owned validator/manifest is configuration failure |
@@ -33,18 +33,17 @@ The fixture kind in command receipts is bound to the admitted execution profile;
 local-cell checks are `local_integration`; its separately retained scripted provider
 observations remain `simulated`.
 
-The initial Vitest configuration is a bounded Node unit profile with exact file
-selection and no automatic project/config discovery. Application-specific Vite
-plugins, DOM setup or future test projects require an explicit reviewed profile
-integration. They cannot silently broaden file selection or disable the boundary.
-Python unit/contract calls deny TCP, UDP and DNS through a test-process guard.
-Vitest receives only the wrapper-owned Node network preload. These are test
-discipline boundaries, not protection against hostile code. Browser local fixture
-networking belongs to OPE-127; actual provider integration belongs to its owner.
+The web unit profile runs the pinned Node test runner in a fresh process for the
+exact requested file. esbuild transpiles local TypeScript and JSX. Markup tests
+read data fixtures and leave stylesheet evaluation to the browser profile. Node
+receives the wrapper-owned network preload before importing test code. Python
+unit and contract calls also deny TCP, UDP and DNS through a test-process guard.
+Browser local fixture networking belongs to OPE-127. Actual provider integration
+belongs to its owner.
 The committed bootstrap web-unit smoke is
-`just test-web packages/contracts/examples/web-command-smoke.test.ts`: one actual
-Vitest case consumes the canonical revision-string example and exercises its JSON
-wire preservation. It is available to CI without a future application test. The
+`just test-web packages/contracts/examples/web-command-smoke.test.ts`. One native
+Node test consumes the canonical revision-string example and verifies its JSON
+wire representation. It is available to CI without a future application test. The
 TypeScript check also covers this source. When any C06 harness entry/config exists,
 lint/typecheck require the complete owned configuration set and execute its real
 Oxlint/TypeScript commands; missing configuration or a failed check cannot silently
