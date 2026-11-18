@@ -29,6 +29,9 @@
     "../forms/difference-review*.ts",
     "../forms/difference-review*.tsx",
     "../../../tests/fixtures/presentation/difference-review.tsx",
+    "../data-display/relationship-context*.ts",
+    "../data-display/relationship-context*.tsx",
+    "../../../tests/fixtures/presentation/relationship-context.tsx",
     "./**/*.ts",
     "./**/*.tsx",
     "../../../tests/fixtures/presentation/operation-state.tsx"
