@@ -7,7 +7,7 @@
     "strict": true,
     "noEmit": true,
     "skipLibCheck": true,
-    "types": ["node", "vitest/globals"]
+    "types": ["node"]
   },
   "include": ["./*.ts", "../../app/auth/signin/route.ts", "../../app/auth/callback/route.ts"]
 }
