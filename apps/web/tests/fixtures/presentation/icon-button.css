@@ -1,0 +1,34 @@
+.icon-button-gallery {
+  box-sizing: border-box;
+  max-inline-size: 1160px;
+  margin-inline: auto;
+  padding: var(--ot-space-32);
+}
+.icon-button-gallery h1 {
+  margin: 0 0 var(--ot-space-16);
+  font: var(--ot-type-section-weight) var(--ot-type-section-size)/var(--ot-type-section-line) Geist, sans-serif;
+}
+.icon-button-gallery .icon-examples {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 11rem), 1fr));
+  gap: var(--ot-space-16);
+}
+.icon-button-gallery .icon-example {
+  display: grid;
+  justify-items: start;
+  align-content: start;
+  gap: var(--ot-space-12);
+  padding: var(--ot-space-16);
+  background: var(--ot-surface-canvas);
+  border-radius: var(--ot-radius-8);
+}
+.icon-button-gallery .icon-example span:first-child:not([aria-hidden]) {
+  color: var(--ot-text-secondary);
+  font: var(--ot-type-small-weight) var(--ot-type-small-size)/var(--ot-type-small-line) Geist, sans-serif;
+}
+@media (max-width: 767px) {
+  .icon-button-gallery { padding: var(--ot-space-16); }
+}
+@media (min-width: 768px) and (max-width: 1279px) {
+  .icon-button-gallery { padding: var(--ot-space-24); }
+}

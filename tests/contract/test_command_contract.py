@@ -355,13 +355,17 @@ def test_exact_canonical_browser_inventory_preserved(checkout):
     manifest = runner.manifest(checkout)
     source = json.loads((checkout / runner.COMMON / "browser-suite-inventory.json").read_text())
     assert set(manifest["browser_suites"]) == set(source["paths"])
-    assert len(manifest["browser_suites"]) == source["distinct_paths"] == 65
+    assert len(manifest["browser_suites"]) == source["distinct_paths"] == 66
+    sprint_profiles = {
+        "apps/web/components/foundation/tokens/skeleton.visual.spec.ts": "OPE-310",
+        "apps/web/components/foundation/tokens/icon-button.visual.spec.ts": "OPE-311",
+    }
+    for path, owner in sprint_profiles.items():
+        assert source["paths"][path] == [owner]
+        assert manifest["browser_profiles"][path] == {"kind": "simulated", "owner": owner}
     shell = "apps/web/features/workspace/customer-shell.visual.spec.ts"
     assert source["paths"][shell] == ["OPE-239"]
     assert manifest["browser_profiles"][shell] == {"kind": "simulated", "owner": "OPE-307"}
-    skeleton = "apps/web/components/foundation/tokens/skeleton.visual.spec.ts"
-    assert source["paths"][skeleton] == ["OPE-310"]
-    assert manifest["browser_profiles"][skeleton] == {"kind": "simulated", "owner": "OPE-310"}
 
 
 @pytest.mark.parametrize(
