@@ -13,6 +13,10 @@ export type { DataStateKind, DataStateProps, PersistentAnnouncement, ProgressPro
 export { DataState, Progress, Toast, dataStates, progressStates, toastStates } from './feedback';
 export type { MetricProps, MetricTone, NavItemProps, TableCellProps, TableCellTone } from './display.contracts';
 export { Metric, NavItem, TableCell, metricTones, tableCellTones } from './display';
+export { Skeleton } from './skeleton';
+export type { SkeletonProps, SkeletonVariant } from './skeleton.contracts';
+export { StatusIcon, statusIconTones } from './status-icon';
+export type { StatusIconProps, StatusIconTone } from './status-icon.contracts';
 
 const lightIndicator = new URL('./assets/loading-light.svg', import.meta.url).href;
 const darkIndicator = new URL('./assets/loading-dark.svg', import.meta.url).href;

@@ -352,7 +352,7 @@ export async function executeBrowser(options: { root: string; target: string; de
       if (scoped) {
         Object.assign(evidence, {
           issue_key: scoped.owner, source_refs: [scoped.owner, scoped.parent, scoped.guide],
-          requirement_ids: ['AC05'], spec_sha256: scoped.specHash, fixture_id: 'scoped-presentation-v1',
+          requirement_ids: scoped.requirementIds ?? ['AC05'], spec_sha256: scoped.specHash, fixture_id: 'scoped-presentation-v1',
           font_sha256: sha(readFileSync(join(root, 'apps/web/styles/fonts/Geist.woff2'))),
           limitations: ['Generated presentation fixtures only. Parent integration, independent review and strict native pixel parity are separate gates.'],
         });

@@ -12,6 +12,12 @@ from typing import Any
 from tools.public_content_check import MAX_FILE_BYTES, digest, inspect_bytes, load_policy
 
 PRESENTATION_TARGETS = {
+    "apps/web/components/foundation/tokens/skeleton.visual.spec.ts": "OPE-310",
+    "apps/web/components/foundation/tokens/icon-button.visual.spec.ts": "OPE-311",
+    "apps/web/components/foundation/tokens/status-icon.visual.spec.ts": "OPE-312",
+    "apps/web/components/foundation/tokens/tooltip.visual.spec.ts": "OPE-313",
+    "apps/web/components/foundation/forms/difference-review.visual.spec.ts": "OPE-314",
+    "apps/web/features/operations/cancellation-impact.visual.spec.ts": "OPE-315",
     "apps/web/features/workspace/customer-shell.visual.spec.ts": "OPE-307",
     "apps/web/components/foundation/data-display/chart-evidence.visual.spec.ts": "OPE-303",
     "apps/web/components/foundation/data-display/table-populations.visual.spec.ts": "OPE-305",
@@ -166,6 +172,89 @@ def verify_scoped_presentation(root: Path, value: dict[str, Any]) -> None:
             or {(int(case[1]), int(case[2]), case[3]) for case in cases if case} != expected
         ):
             raise ValueError("Metric presentation capture inventory mismatch")
+    elif value["issue_key"] == "OPE-310":
+        expected_skeletons = {
+            f"skeleton-{mode}-{variant}-{width}-{scale}-{state}.png"
+            for mode in ("customer-controlled", "opentour-managed")
+            for variant in ("rows", "card")
+            for width in widths
+            for scale in (100, 200)
+            for state in ("loading", "ready", "specimen")
+        } | {
+            f"skeleton-{mode}-{variant}-{treatment}.png"
+            for mode in ("customer-controlled", "opentour-managed")
+            for variant in ("rows", "card")
+            for treatment in ("reduced-motion", "forced-colors")
+        }
+        if (
+            len(images) != len(expected_skeletons)
+            or {Path(name).name for name in images} != expected_skeletons
+        ):
+            raise ValueError("Skeleton presentation capture inventory mismatch")
+    elif value["issue_key"] == "OPE-311":
+        expected_icons = {
+            f"icon-button-{width}-{scale}-{state}.png"
+            for width in widths
+            for scale in (100, 200)
+            for state in ("default", "hover", "focus", "disabled", "loading")
+        }
+        actual_icons = {Path(path).name for path in images}
+        if len(images) != len(expected_icons) or actual_icons != expected_icons:
+            raise ValueError("Icon button capture inventory mismatch")
+    elif value["issue_key"] == "OPE-312":
+        modes = ("customer-controlled", "opentour-managed")
+        expected_icons = (
+            {
+                f"status-icons-{mode}-{width}-{scale}.png"
+                for mode in modes
+                for width in widths
+                for scale in (100, 200)
+            }
+            | {
+                f"status-icon-native-{mode}-{tone}.png"
+                for mode in modes
+                for tone in ("success", "hold", "failed", "unknown", "info")
+            }
+            | {f"status-icon-composition-{mode}.png" for mode in modes}
+            | {
+                f"status-icons-{mode}-{treatment}.png"
+                for mode in modes
+                for treatment in ("forced-colors", "reduced-motion")
+            }
+        )
+        if (
+            len(images) != len(expected_icons)
+            or {Path(name).name for name in images} != expected_icons
+        ):
+            raise ValueError("Status-icon presentation capture inventory mismatch")
+    elif value["issue_key"] == "OPE-313":
+        expected_tooltips = {
+            f"tooltip-{kind}-{width}-{scale}.png"
+            for kind in ("evidence", "help", "long")
+            for width in widths for scale in (100, 200)
+        } | {"tooltip-forced-colors.png"}
+        if (
+            len(images) != len(expected_tooltips)
+            or {Path(name).name for name in images} != expected_tooltips
+        ):
+            raise ValueError("Tooltip presentation capture inventory mismatch")
+    elif value["issue_key"] == "OPE-314":
+        expected_cards = {
+            f"difference-{width}-{scale}-{case}.png"
+            for width in widths
+            for scale in (100, 200)
+            for case in ("reference", "raw")
+        }
+        actual_cards = {Path(path).name for path in images}
+        if len(images) != len(expected_cards) or actual_cards != expected_cards:
+            raise ValueError("Difference review capture inventory mismatch")
+    elif value["issue_key"] == "OPE-315":
+        expected_impact = {
+            f"impact-{width}-{scale}.png" for width in widths for scale in (100, 200)
+        }
+        actual_impact = {Path(name).name for name in images}
+        if len(images) != len(expected_impact) or actual_impact != expected_impact:
+            raise ValueError("Cancellation impact capture inventory mismatch")
     elif value["issue_key"] == "OPE-303":
         expected_charts = {
             f"charts-{width}-{scale}.png" for width in widths for scale in (100, 200)

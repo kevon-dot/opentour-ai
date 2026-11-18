@@ -21,6 +21,13 @@
     ]
   },
   "include": [
+    "../../../tests/fixtures/presentation/icon-button.tsx",
+    "../../../tests/fixtures/presentation/cancellation-impact.tsx",
+    "../../../features/operations/cancellation-impact*.tsx",
+    "../../../features/operations/cancellation-impact*.ts",
+    "../forms/difference-review*.ts",
+    "../forms/difference-review*.tsx",
+    "../../../tests/fixtures/presentation/difference-review.tsx",
     "./**/*.ts",
     "./**/*.tsx",
     "../../../tests/fixtures/presentation/operation-state.tsx"

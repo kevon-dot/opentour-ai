@@ -17,13 +17,19 @@
     "apps/web/components/foundation/data-display/table-populations.visual.spec.ts",
     "apps/web/components/foundation/data-display/visual.spec.ts",
     "apps/web/components/foundation/forms/dialogs-focus.visual.spec.ts",
+    "apps/web/components/foundation/forms/difference-review.visual.spec.ts",
     "apps/web/components/foundation/forms/field-semantics.visual.spec.ts",
     "apps/web/components/foundation/forms/mutation-intent.visual.spec.ts",
     "apps/web/components/foundation/forms/permission-controls.visual.spec.ts",
     "apps/web/components/foundation/forms/visual.spec.ts",
+    "apps/web/components/foundation/tokens/icon-button.visual.spec.ts",
+    "apps/web/components/foundation/tokens/skeleton.visual.spec.ts",
+    "apps/web/components/foundation/tokens/status-icon.visual.spec.ts",
+    "apps/web/components/foundation/tokens/tooltip.visual.spec.ts",
     "apps/web/components/foundation/tokens/visual.spec.ts",
     "apps/web/features/autonomy/control-actions.visual.spec.ts",
     "apps/web/features/autonomy/status-panel.visual.spec.ts",
+    "apps/web/features/operations/cancellation-impact.visual.spec.ts",
     "apps/web/features/product-surfaces/artifact-registry/visual.spec.ts",
     "apps/web/features/product-surfaces/benchmark-builder/visual.spec.ts",
     "apps/web/features/product-surfaces/billing-detail/visual.spec.ts",
@@ -308,6 +314,30 @@
     "apps/web/features/workspace/customer-shell.visual.spec.ts": {
       "kind": "simulated",
       "owner": "OPE-307"
+    },
+    "apps/web/components/foundation/tokens/skeleton.visual.spec.ts": {
+      "kind": "simulated",
+      "owner": "OPE-310"
+    },
+    "apps/web/components/foundation/tokens/icon-button.visual.spec.ts": {
+      "kind": "simulated",
+      "owner": "OPE-311"
+    },
+    "apps/web/components/foundation/tokens/status-icon.visual.spec.ts": {
+      "kind": "simulated",
+      "owner": "OPE-312"
+    },
+    "apps/web/components/foundation/tokens/tooltip.visual.spec.ts": {
+      "kind": "simulated",
+      "owner": "OPE-313"
+    },
+    "apps/web/components/foundation/forms/difference-review.visual.spec.ts": {
+      "kind": "simulated",
+      "owner": "OPE-314"
+    },
+    "apps/web/features/operations/cancellation-impact.visual.spec.ts": {
+      "kind": "simulated",
+      "owner": "OPE-315"
     }
   }
 }

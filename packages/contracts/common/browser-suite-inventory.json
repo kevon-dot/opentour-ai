@@ -193,10 +193,28 @@
     ],
     "apps/web/features/workspace/customer-shell.visual.spec.ts": [
       "OPE-239"
+    ],
+    "apps/web/components/foundation/tokens/skeleton.visual.spec.ts": [
+      "OPE-310"
+    ],
+    "apps/web/components/foundation/tokens/icon-button.visual.spec.ts": [
+      "OPE-311"
+    ],
+    "apps/web/components/foundation/tokens/status-icon.visual.spec.ts": [
+      "OPE-312"
+    ],
+    "apps/web/components/foundation/tokens/tooltip.visual.spec.ts": [
+      "OPE-313"
+    ],
+    "apps/web/components/foundation/forms/difference-review.visual.spec.ts": [
+      "OPE-314"
+    ],
+    "apps/web/features/operations/cancellation-impact.visual.spec.ts": [
+      "OPE-315"
     ]
   },
-  "distinct_paths": 64,
-  "issue_count": 60,
+  "distinct_paths": 70,
+  "issue_count": 66,
   "affected_old_wrapper_paths": {
     "apps/web/tests/coverage/ot-p22-c01.spec.ts": [
       "OPE-232"
