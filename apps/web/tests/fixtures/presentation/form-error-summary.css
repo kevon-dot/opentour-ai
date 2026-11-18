@@ -1,4 +1,85 @@
-/* Generated gallery for the OPE-321 form error summary. Fixture layout only: none of this is the component. */
+/* Generated views for the OPE-321 form error summary. Fixture layout only: none of this is the component,
+   and nothing here restates the shared TextField, Notice or Button. */
+
+/* ---- Workflow settings screen (Figma 159:121, native frame 1440 x 852) ----
+   An 80px header at full width, then the canvas with a 32px inset and a 16px rhythm, and a 720px form with a
+   16px inset and a 16px rhythm. Strokes are inside, so each border is taken out of the padding beside it. */
+.workflow-settings-screen {
+  box-sizing: border-box;
+  min-block-size: 100dvh;
+  background: var(--ot-surface-canvas);
+  overflow-wrap: anywhere;
+}
+.workflow-settings-header {
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  gap: var(--ot-space-8);
+  min-block-size: 80px;
+  padding: calc(var(--ot-space-16) - 1px);
+  border: 1px solid var(--ot-border-default);
+  background: var(--ot-surface-base);
+}
+.workflow-settings-header p { margin: 0; }
+.workflow-settings-product {
+  /* The product path is written with two spaces on each side of the slash. */
+  white-space: pre-wrap;
+  font: var(--ot-type-label-weight) var(--ot-type-label-size)/var(--ot-type-label-line) Geist, sans-serif;
+}
+.workflow-settings-workspace {
+  color: var(--ot-text-secondary);
+  font: var(--ot-type-small-weight) var(--ot-type-small-size)/var(--ot-type-small-line) Geist, sans-serif;
+}
+.workflow-settings-main {
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  gap: var(--ot-space-16);
+  padding: var(--ot-space-32);
+}
+.workflow-settings-main h1 {
+  margin: 0;
+  font: var(--ot-type-heading-weight) var(--ot-type-heading-size)/var(--ot-type-heading-line) Geist, sans-serif;
+}
+.workflow-settings-revision {
+  margin: 0;
+  color: var(--ot-text-secondary);
+  font: var(--ot-type-body-weight) var(--ot-type-body-size)/var(--ot-type-body-line) Geist, sans-serif;
+}
+.workflow-settings-form {
+  /* The form owns the measure of its shared fields: 720 less the 16px inset on each side. */
+  --ot-text-field-inline-size: 688px;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  gap: var(--ot-space-16);
+  inline-size: 100%;
+  max-inline-size: 720px;
+  margin: 0;
+  padding: calc(var(--ot-space-16) - 1px);
+  border: 1px solid var(--ot-border-default);
+  border-radius: var(--ot-radius-12);
+  background: var(--ot-surface-base);
+}
+/* Two 280px actions side by side while they fit; each wraps to its own line and narrows when they do not. */
+.workflow-settings-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--ot-space-12);
+}
+.workflow-settings-actions .ot-button-group {
+  flex: 0 1 280px;
+  min-inline-size: 0;
+}
+.workflow-settings-actions .ot-button { inline-size: 100%; }
+@media (max-width: 767px) {
+  .workflow-settings-main { padding: var(--ot-space-16); }
+}
+@media (min-width: 768px) and (max-width: 1279px) {
+  .workflow-settings-main { padding: var(--ot-space-24); }
+}
+
+/* ---- Standalone specimens and the interactive stress form ---- */
 .form-errors-gallery {
   box-sizing: border-box;
   display: grid;
@@ -19,6 +100,8 @@
   max-inline-size: 360px;
 }
 .form-errors-form {
+  /* The shared fields take the form's measure. */
+  --ot-text-field-inline-size: 688px;
   box-sizing: border-box;
   display: grid;
   grid-template-columns: minmax(0, 1fr);
@@ -27,6 +110,7 @@
   max-inline-size: 688px;
   margin: 0;
 }
+/* The fixture's own native controls: the save outcome and the adverse decoy. Never a summary target's field. */
 .form-errors-field {
   display: grid;
   grid-template-columns: minmax(0, 1fr);

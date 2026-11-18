@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
-import { FormErrorSummary } from './form-error-summary';
+import { FormErrorSummary, FormErrorSummaryRows } from './form-error-summary';
 import type { FormErrorSummaryItem, FormErrorSummaryProps } from './form-error-summary';
 
 // Generated copy only. Focus movement needs a document and is qualified in form-error-summary.visual.spec.ts.
@@ -115,6 +115,48 @@ describe('linked form error summary', () => {
   });
 });
 
+describe('detached rows for a form that places its fields between the notice and the rows', () => {
+  const detached = (errors: readonly FormErrorSummaryItem[]) =>
+    renderToStaticMarkup(<FormErrorSummary errors={errors} submissionId={null} rows="detached" />);
+  const rowsOnly = (errors: readonly FormErrorSummaryItem[], formId?: string) =>
+    renderToStaticMarkup(<FormErrorSummaryRows errors={errors} formId={formId} />);
+  const mixed = [attempts, general, spend, attempts];
+
+  it('keeps the named focusable region and the one notice, and leaves the rows out of a detached summary', () => {
+    expect(detached(mixed)).toBe('<section class="ot-form-error-summary" aria-label="Check 2 fields before continuing" tabindex="-1">' +
+      notice('Check 2 fields before continuing', mappedBody) + '</section>');
+    expect(detached([])).toBe('');
+  });
+
+  it('draws the same rows once in a list named by the heading, with no second status, region or focus target', () => {
+    const html = rowsOnly(mixed, 'generated-limits');
+    const items = link('maximum-attempts', 'Maximum attempts: enter a whole number') +
+      plain('These limits could not be saved together.') +
+      link('maximum-spend', 'Maximum spend: enter a nonnegative amount');
+    expect(html).toBe('<ul class="ot-form-error-list ot-form-error-list--detached" role="list" ' +
+      'aria-label="Check 2 fields before continuing">' + items + '</ul>');
+    // The attached arrangement lists exactly these rows: one source for both.
+    expect(render(mixed)).toContain('<ul class="ot-form-error-list" role="list">' + items + '</ul>');
+    expect(html).not.toMatch(/role="status"|<section|tabindex|generated-limits/);
+    expect((detached(mixed) + html).match(/role="status"/g)).toHaveLength(1);
+  });
+
+  it('names the detached rows by the general heading when no problem maps to a field', () => {
+    expect(rowsOnly([general])).toBe('<ul class="ot-form-error-list ot-form-error-list--detached" role="list" ' +
+      'aria-label="We could not save these changes">' + plain('These limits could not be saved together.') + '</ul>');
+  });
+
+  it('renders no detached rows when there is no row to show', () => {
+    expect(rowsOnly([])).toBe('');
+    expect(rowsOnly([{}])).toBe('');
+  });
+
+  it('refuses a broken problem in the detached rows as the summary does', () => {
+    expect(() => rowsOnly([{ ...attempts, fieldId: 'maximum attempts' } as FormErrorSummaryItem])).toThrow('native id without spaces');
+    expect(() => rowsOnly([{ message: ' ' }])).toThrow('error message');
+  });
+});
+
 describe('form error summary design binding', () => {
   const source = readFileSync(new URL('./form-error-summary.css', import.meta.url), 'utf8');
   const css = source.replace(/\/\*[\s\S]*?\*\//g, '');
@@ -146,5 +188,12 @@ describe('form error summary design binding', () => {
     expect(css).toContain(' inline-size: 100%; min-inline-size: 0; ');
     expect(css).toContain(' overflow-wrap: anywhere; ');
     expect(css).not.toMatch(/overflow(?:-[xy]|-inline|-block)?:|text-overflow|white-space|line-clamp|max-inline-size|(?<!-)block-size|(?<![\w-])(?:height|width)/);
+  });
+
+  it('gives detached rows the fill, colour, face and wrapping the summary would have given them', () => {
+    expect(css).toContain('.ot-form-error-list--detached { box-sizing: border-box; inline-size: 100%; min-inline-size: 0; ' +
+      'color: var(--ot-text-primary); font-family: Geist, sans-serif; overflow-wrap: anywhere; }');
+    // The shared list rule is still the only one that sets the row rhythm.
+    expect(css).toContain('.ot-form-error-list { display: flex; flex-direction: column; gap: var(--ot-space-12); margin: 0; padding: 0; list-style: none; }');
   });
 });

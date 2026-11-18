@@ -33,14 +33,30 @@ export interface FormErrorSummaryProps {
    * that arrives with errors, including a repeat of the same errors. Nothing else moves focus.
    */
   submissionId: string | number | null;
-  /** `id` of the form that owns the inputs. Needed only when the summary is rendered outside that form. */
+  /** `id` of the form that owns the inputs. Needed only when the rows are rendered outside that form. */
+  formId?: string;
+  /**
+   * Where the rows are drawn. `attached`, the default, keeps them directly under the notice (Figma 153:386).
+   * `detached` leaves them out, so the owning form can place its fields between this notice and one
+   * `FormErrorSummaryRows` that is given the same `errors` (Figma 159:121).
+   */
+  rows?: 'attached' | 'detached';
+}
+
+/** The rows of a detached summary. Pass the same `errors` as the summary so both describe one state. */
+export interface FormErrorSummaryRowsProps {
+  errors: readonly FormErrorSummaryItem[];
+  /** `id` of the form that owns the inputs. Needed only when the rows are rendered outside that form. */
   formId?: string;
 }
 
 interface Row { key: string; text: string; fieldId?: string }
 
-/** Rows in the order given, identical rows once, and the number of distinct fields that have a problem. */
-function summarize(errors: readonly FormErrorSummaryItem[]): { rows: Row[]; fieldCount: number } {
+/**
+ * Everything either part shows, from the errors alone: the rows in the order given with identical rows
+ * once, and the heading and body that follow the number of distinct fields that have a problem.
+ */
+function summarize(errors: readonly FormErrorSummaryItem[]): { rows: Row[]; title: string; body: string } {
   const rows = new Map<string, Row>();
   const fields = new Set<string>();
   for (const error of errors) {
@@ -59,7 +75,16 @@ function summarize(errors: readonly FormErrorSummaryItem[]): { rows: Row[]; fiel
       if (!rows.has(key)) rows.set(key, { key, text: error.message });
     }
   }
-  return { rows: [...rows.values()], fieldCount: fields.size };
+  const fieldCount = fields.size;
+  return {
+    rows: [...rows.values()],
+    title: fieldCount > 0
+      ? `Check ${fieldCount} ${fieldCount === 1 ? 'field' : 'fields'} before continuing`
+      : 'We could not save these changes',
+    body: fieldCount > 0
+      ? 'Your entries are still here. Correct the fields below.'
+      : 'Review the form and try again. Contact support if the problem continues.',
+  };
 }
 
 /** Checked by shape, not by constructor: the form may live in another document, such as a frame. */
@@ -67,42 +92,77 @@ function isForm(node: Element | null): node is HTMLFormElement {
   return node !== null && node.localName === 'form' && 'elements' in node;
 }
 
-/**
- * The input for a link, looked up from the link's own tree at the moment of activation. The owning
- * form is searched first, including controls it owns from elsewhere through the `form` attribute, so
- * a repeated id in another form or region is not chosen. The whole tree is only the last resort.
- */
-function resolveField(link: HTMLAnchorElement, fieldId: string, formId: string | undefined): HTMLElement | null {
-  const root = link.getRootNode() as Node & { getElementById?: (id: string) => HTMLElement | null };
-  const named = formId === undefined ? null : root.getElementById?.(formId) ?? null;
-  const form = isForm(named) ? named : link.closest('form');
-  if (form) {
-    for (const control of form.elements) if (control.id === fieldId) return control as HTMLElement;
-    for (const node of form.querySelectorAll<HTMLElement>('[id]')) if (node.id === fieldId) return node;
+/** The element with this id that the form owns: a control it lists, or other content inside it. */
+function findOwned(form: HTMLFormElement, fieldId: string): HTMLElement | null {
+  // Listed controls include those the form owns from elsewhere through the `form` attribute.
+  for (const control of form.elements) if (control.id === fieldId) return control as HTMLElement;
+  for (const node of form.querySelectorAll<HTMLElement>('[id]')) {
+    if (node.id !== fieldId) continue;
+    // A control inside this form's markup can be owned by another form through its own `form` attribute.
+    const owner = (node as HTMLElement & { form?: HTMLFormElement | null }).form;
+    if (owner == null || owner === form) return node;
   }
-  return root.getElementById?.(fieldId) ?? null;
+  return null;
+}
+
+/**
+ * The input for a link, looked up from the link's own tree at the moment of activation.
+ *
+ * A link has a known owner when a `formId` was given or when the link sits inside a form. The named
+ * form wins and the enclosing form is not a substitute for it. A known owner is the only place that
+ * is searched: when it no longer holds the input, or the named form itself is gone, there is no
+ * target. Another form or the rest of the document is never searched instead, so a repeated id
+ * elsewhere cannot be chosen. Only a link with no owner at all is resolved from its whole tree.
+ */
+function resolveField(link: HTMLAnchorElement, fieldId: string, formId: string | undefined):
+  { owned: boolean; target: HTMLElement | null } {
+  const root = link.getRootNode() as Node & { getElementById?: (id: string) => HTMLElement | null };
+  if (formId !== undefined) {
+    const named = root.getElementById?.(formId) ?? null;
+    return { owned: true, target: isForm(named) ? findOwned(named, fieldId) : null };
+  }
+  const enclosing = link.closest('form');
+  if (enclosing) return { owned: true, target: findOwned(enclosing, fieldId) };
+  return { owned: false, target: root.getElementById?.(fieldId) ?? null };
 }
 
 function moveToField(event: MouseEvent<HTMLAnchorElement>, fieldId: string, formId: string | undefined): void {
   // A modified or non-primary activation keeps its native meaning, for example opening a new tab.
   if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
-  const target = resolveField(event.currentTarget, fieldId, formId);
+  const { owned, target } = resolveField(event.currentTarget, fieldId, formId);
+  // Native fragment navigation picks the first matching id in the whole document, which can sit in
+  // another form. For an owned link it therefore never runs, whether the input is found, missing or
+  // unable to take focus. When there is no target, focus stays on the link.
+  if (owned) event.preventDefault();
   if (!target) return;
   target.focus();
-  // Native fragment navigation would pick the first matching id in the document, so it is replaced
-  // only once the intended input holds focus. Otherwise the plain link behaviour is left in place.
-  if (target.matches(':focus')) event.preventDefault();
+  // Without an owner the native target is the same element, so native behaviour is replaced only
+  // once that element holds focus and is otherwise left in place.
+  if (!owned && target.matches(':focus')) event.preventDefault();
+}
+
+/** The one implementation of the rows, shared by the attached and the detached arrangement. */
+function RowList({ rows, formId, label }: { rows: readonly Row[]; formId: string | undefined; label?: string }) {
+  if (rows.length === 0) return null;
+  return <ul className={label === undefined ? 'ot-form-error-list' : 'ot-form-error-list ot-form-error-list--detached'}
+    role="list" aria-label={label}>
+    {rows.map(({ key, text, fieldId }) => <li key={key} className="ot-form-error-item">
+      {fieldId === undefined ? text : <a className="ot-form-error-link" href={'#' + encodeURIComponent(fieldId)}
+        onClick={event => moveToField(event, fieldId, formId)}>{text}</a>}
+    </li>)}
+  </ul>;
 }
 
 /**
  * Linked summary of the problems that stopped a form from continuing (Figma 153:386): the failure
  * notice, then one row per problem. It is a named region that can take focus but is not a Tab stop.
  * The notice is a polite status, so a later change of the count is announced without moving focus.
+ * With `rows="detached"` the region holds the notice alone and `FormErrorSummaryRows` draws the rows.
  */
-export function FormErrorSummary({ errors, submissionId, formId }: FormErrorSummaryProps) {
+export function FormErrorSummary({ errors, submissionId, formId, rows: placement = 'attached' }: FormErrorSummaryProps) {
   const summary = useRef<HTMLElement>(null);
   const handled = useRef<string | number | null>(null);
-  const { rows, fieldCount } = summarize(errors);
+  const { rows, title, body } = summarize(errors);
   const present = errors.length > 0;
 
   useEffect(() => {
@@ -114,20 +174,18 @@ export function FormErrorSummary({ errors, submissionId, formId }: FormErrorSumm
   }, [submissionId, present]);
 
   if (!present) return null;
-  const title = fieldCount > 0
-    ? `Check ${fieldCount} ${fieldCount === 1 ? 'field' : 'fields'} before continuing`
-    : 'We could not save these changes';
-  const body = fieldCount > 0
-    ? 'Your entries are still here. Correct the fields below.'
-    : 'Review the form and try again. Contact support if the problem continues.';
-
   return <section ref={summary} className="ot-form-error-summary" aria-label={title} tabIndex={-1}>
     <Notice tone="failure" title={title} body={body} />
-    {rows.length > 0 && <ul className="ot-form-error-list" role="list">
-      {rows.map(({ key, text, fieldId }) => <li key={key} className="ot-form-error-item">
-        {fieldId === undefined ? text : <a className="ot-form-error-link" href={'#' + encodeURIComponent(fieldId)}
-          onClick={event => moveToField(event, fieldId, formId)}>{text}</a>}
-      </li>)}
-    </ul>}
+    {placement === 'attached' && <RowList rows={rows} formId={formId} />}
   </section>;
+}
+
+/**
+ * The rows of a detached summary, placed after the fields they point to (Figma 159:121). The list is
+ * named by the summary's heading because it no longer sits under it. It adds no notice, no status,
+ * no region and no focus movement of its own, and renders nothing when there is no row to show.
+ */
+export function FormErrorSummaryRows({ errors, formId }: FormErrorSummaryRowsProps) {
+  const { rows, title } = summarize(errors);
+  return <RowList rows={rows} formId={formId} label={title} />;
 }
