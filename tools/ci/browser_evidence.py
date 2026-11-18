@@ -174,7 +174,8 @@ def verify_scoped_presentation(root: Path, value: dict[str, Any]) -> None:
             for scale in (100, 200)
             for state in ("default", "hover", "focus", "disabled", "loading")
         }
-        if len(images) != len(expected_icons) or {Path(path).name for path in images} != expected_icons:
+        actual_icons = {Path(path).name for path in images}
+        if len(images) != len(expected_icons) or actual_icons != expected_icons:
             raise ValueError("Icon button capture inventory mismatch")
     elif value["issue_key"] == "OPE-303":
         expected_charts = {
