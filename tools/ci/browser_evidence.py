@@ -12,6 +12,7 @@ from typing import Any
 from tools.public_content_check import MAX_FILE_BYTES, digest, inspect_bytes, load_policy
 
 PRESENTATION_TARGETS = {
+    "apps/web/components/foundation/data-display/relationship-context.visual.spec.ts": "OPE-319",
     "apps/web/components/foundation/tokens/selection-controls.visual.spec.ts": "OPE-318",
     "apps/web/components/foundation/forms/single-choice-select.visual.spec.ts": "OPE-317",
     "apps/web/components/foundation/forms/text-field.visual.spec.ts": "OPE-316",
@@ -320,6 +321,32 @@ def verify_scoped_presentation(root: Path, value: dict[str, Any]) -> None:
             or {Path(name).name for name in images} != expected_controls
         ):
             raise ValueError("Selection control presentation capture inventory mismatch")
+    elif value["issue_key"] == "OPE-319":
+        relationship_states = ("populated", "selected", "empty", "redacted")
+        expected_relationships = (
+            {
+                f"relationship-{state}-{width}-{scale}.png"
+                for state in relationship_states
+                for width in widths
+                for scale in (100, 200)
+            }
+            | {"relationship-selected-cleared.png"}
+            | {
+                f"relationship-long-{width}-{scale}.png"
+                for width in (320, 1440)
+                for scale in (100, 200)
+            }
+            | {
+                f"relationship-forced-colors-{state}-{width}.png"
+                for state in relationship_states
+                for width in (320, 1280)
+            }
+        )
+        if (
+            len(images) != len(expected_relationships)
+            or {Path(name).name for name in images} != expected_relationships
+        ):
+            raise ValueError("Relationship context capture inventory mismatch")
     elif value["issue_key"] == "OPE-303":
         expected_charts = {
             f"charts-{width}-{scale}.png" for width in widths for scale in (100, 200)

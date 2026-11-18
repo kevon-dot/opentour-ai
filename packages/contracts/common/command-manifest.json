@@ -13,6 +13,7 @@
     "apps/web/components/foundation/data-display/chart-evidence.visual.spec.ts",
     "apps/web/components/foundation/data-display/graph-projections.visual.spec.ts",
     "apps/web/components/foundation/data-display/metric-semantics.visual.spec.ts",
+    "apps/web/components/foundation/data-display/relationship-context.visual.spec.ts",
     "apps/web/components/foundation/data-display/scenario-conformance.visual.spec.ts",
     "apps/web/components/foundation/data-display/table-populations.visual.spec.ts",
     "apps/web/components/foundation/data-display/visual.spec.ts",
@@ -353,6 +354,10 @@
     "apps/web/components/foundation/tokens/selection-controls.visual.spec.ts": {
       "kind": "simulated",
       "owner": "OPE-318"
+    },
+    "apps/web/components/foundation/data-display/relationship-context.visual.spec.ts": {
+      "kind": "simulated",
+      "owner": "OPE-319"
     }
   }
 }

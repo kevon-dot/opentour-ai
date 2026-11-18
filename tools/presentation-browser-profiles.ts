@@ -1,5 +1,16 @@
 /** Generated local presentation fixtures. Each executable target has exactly one child owner. */
 export const presentationSuites = new Map([
+  ['apps/web/components/foundation/data-display/relationship-context.visual.spec.ts', {
+    owner: 'OPE-319', parent: 'OPE-286', guide: '165:11224', minimumTests: 11,
+    requirementIds: [
+      'OPE-319:read-only-relationship-records',
+      'OPE-319:selected-relationship-table',
+      'OPE-319:selected-node-context',
+      'OPE-319:empty-redacted-semantics',
+      'OPE-319:browser-evidence',
+    ],
+    specHash: '3e06bf05713dc8de15cfc6c58fe60e9679a2d2915dc56288d727192ffb143bb2',
+  }],
   ['apps/web/components/foundation/tokens/selection-controls.visual.spec.ts', {
     owner: 'OPE-318', parent: 'OPE-253', guide: '170:4', minimumTests: 32,
     requirementIds: [

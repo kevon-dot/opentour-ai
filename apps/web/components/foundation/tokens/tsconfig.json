@@ -37,6 +37,9 @@
     "../../../tests/fixtures/presentation/text-field.tsx",
     "../forms/index.ts",
     "../forms/single-choice-select*.ts",
-    "../forms/single-choice-select*.tsx"
+    "../forms/single-choice-select*.tsx",
+    "../data-display/relationship-context*.ts",
+    "../data-display/relationship-context*.tsx",
+    "../../../tests/fixtures/presentation/relationship-context.tsx"
   ]
 }
