@@ -5,7 +5,7 @@ body { margin: 0; background: var(--ot-surface-base); }
 .skeleton-controls button { box-sizing: border-box; min-block-size: 44px; max-inline-size: 100%; padding: var(--ot-space-8); font: inherit; color: var(--ot-text-primary); background: var(--ot-surface-base); border: 1px solid var(--ot-border-control); border-radius: var(--ot-radius-6); overflow-wrap: anywhere; }
 .skeleton-controls button:focus-visible { outline: 2px solid var(--ot-action-primary); outline-offset: 2px; }
 /* Both layers size the slot. Hidden generated text reserves its enlarged-text footprint. */
-.skeleton-slot { display: grid; inline-size: 360px; max-inline-size: 100%; }
+.skeleton-slot { display: grid; grid-template-columns: minmax(0, 1fr); inline-size: 360px; max-inline-size: 100%; }
 .skeleton-slot > * { grid-area: 1 / 1; align-self: start; }
 .skeleton-ready { display: flex; flex-direction: column; align-items: flex-start; gap: var(--ot-space-12); inline-size: 360px; max-inline-size: 100%; min-inline-size: 0; visibility: hidden; color: var(--ot-text-secondary); font-size: var(--ot-type-small-size); font-weight: var(--ot-type-small-weight); }
 .skeleton-slot[data-phase='ready'] > .skeleton-ready { visibility: visible; }
