@@ -563,9 +563,19 @@ for (const kind of ['dialog', 'drawer'] as const) {
     expect(await body.evaluate(node => { const style = getComputedStyle(node); return [style.outlineStyle, style.outlineWidth, style.outlineOffset, style.outlineColor]; }))
       .toEqual(['solid', '2px', '2px', 'rgb(36, 91, 238)']);
     expect(await renderedRing(page, '.ot-modal-body')).toEqual(fullRing);
-    await page.keyboard.press('ArrowDown'); await expect.poll(position).toBeGreaterThan(0);
+    // Chromium can coalesce a subsequent key into an unfinished native scroll.
+    const scrollWithKey = async (key: 'ArrowDown' | 'PageDown', start: number) => {
+      const completion = await body.evaluateHandle(node => ({
+        finished: new Promise<void>(resolve => node.addEventListener('scrollend', () => resolve(), { once: true })),
+      }));
+      await page.keyboard.press(key);
+      await expect.poll(position).toBeGreaterThan(start);
+      await completion.evaluate(scroll => scroll.finished);
+      await completion.dispose();
+    };
+    await scrollWithKey('ArrowDown', 0);
     const afterArrow = await position();
-    await page.keyboard.press('PageDown'); await expect.poll(position).toBeGreaterThan(afterArrow);
+    await scrollWithKey('PageDown', afterArrow);
     await page.keyboard.press('End');
     await expect.poll(() => body.evaluate(node => Math.abs(node.scrollHeight - node.clientHeight - node.scrollTop) < 1)).toBe(true);
     await expect(page.getByRole('heading', { name: 'End of generated content' })).toBeInViewport();
