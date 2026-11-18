@@ -373,6 +373,9 @@ describe('ending and switching', () => {
     const result = await f.adapter.signout(f.request());
     assert.equal(result.status, 503); assert.equal(result.headers.get('location'), null);
     assert.equal(result.headers.get('set-cookie'), null); assert.equal(f.provider.logoutURL.mock.callCount(), 0);
+    const error = await result.json();
+    assert.equal(error.code, 'SESSION_END_UNCONFIRMED');
+    assert.equal(error.retryable, false);
   });
   testCases([
     ['empty session ID', true, { sessionId: '', generation: 2 }],

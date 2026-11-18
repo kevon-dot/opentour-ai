@@ -3,6 +3,7 @@ import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { WorkOS } from '@workos-inc/node';
 import { createLocalJWKSet, decodeProtectedHeader, jwtVerify, type JWTVerifyGetKey,
   type JSONWebKeySet } from 'jose';
+import { boundedServerResponse } from './bounded-server-response.js';
 
 /** Backend ports only. OPE-297 composes routes; OPE-172 owns selection intent/CAS. */
 export type Identity = {
@@ -86,7 +87,7 @@ export type AuthProfile = {
 };
 
 export class IdentityFailure extends Error {
-  constructor(readonly code: string, readonly status = 401) { super(code); }
+  constructor(readonly code: string, readonly status = 401, readonly retryable = status === 503) { super(code); }
 }
 export class ProviderFailure extends Error {
   constructor(readonly outcome: 'authentication_required' | 'denied' | 'transient' | 'unknown') {
@@ -176,7 +177,7 @@ function safeError(error: unknown, clearFlow = false): Response {
   if (clearFlow) headers.append('Set-Cookie', setCookie(flowCookie, '', 0));
   return new Response(JSON.stringify({ code: failure.code,
     message: 'The identity operation could not be completed.', request_id: secret(),
-    retryable: failure.status === 503, field_errors: [], current_revision: null }),
+    retryable: failure.retryable, field_errors: [], current_revision: null }),
   { status: failure.status, headers });
 }
 function redirect(url: string, headers = noStore()): Response {
@@ -254,38 +255,10 @@ function projectedIdentity(claims: Claims, session: ActiveServerSession, checked
 /** Bound the entire response stream, not just receipt of HTTP headers. */
 async function boundedResponse(fetcher: typeof fetch, input: Parameters<typeof fetch>[0],
   init: Parameters<typeof fetch>[1] = {}): Promise<Response> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 5_000);
-  const signal = init.signal ? AbortSignal.any([init.signal, controller.signal]) : controller.signal;
-  let rejectAbort: () => void = () => undefined;
-  const aborted = new Promise<never>((_resolve, reject) => {
-    rejectAbort = () => reject(new IdentityFailure('PROVIDER_RESPONSE_UNAVAILABLE', 503));
-    signal.addEventListener('abort', rejectAbort, { once: true });
+  return boundedServerResponse(signal => fetcher(input, { ...init, signal, redirect: 'error' }), {
+    timeoutMs: 5_000, maxBytes: 65_536, signal: init.signal ?? undefined,
+    failure: () => new IdentityFailure('PROVIDER_RESPONSE_UNAVAILABLE', 503),
   });
-  const wait = <T>(work: Promise<T>): Promise<T> => Promise.race([work, aborted]);
-  let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
-  try {
-    if (signal.aborted) throw new IdentityFailure('PROVIDER_RESPONSE_UNAVAILABLE', 503);
-    const response = await wait(fetcher(input, { ...init, signal, redirect: 'error' }));
-    if (!response.body) return response;
-    reader = response.body.getReader();
-    const chunks: Uint8Array[] = [];
-    let size = 0;
-    while (true) {
-      const { value, done } = await wait(reader.read());
-      if (done) break;
-      size += value.byteLength;
-      if (size > 65_536 || signal.aborted) throw new IdentityFailure('PROVIDER_RESPONSE_UNAVAILABLE', 503);
-      chunks.push(value);
-    }
-    return new Response(Buffer.concat(chunks), { status: response.status,
-      statusText: response.statusText, headers: response.headers });
-  } finally {
-    clearTimeout(timer);
-    signal.removeEventListener('abort', rejectAbort);
-    controller.abort();
-    if (reader) void reader.cancel().catch(() => undefined);
-  }
 }
 
 function trustedKeys(profile: AuthProfile, fetcher: typeof fetch): JWTVerifyGetKey {
@@ -559,9 +532,9 @@ export function createAuthkitAdapter(ports: {
               || !validGeneration(ended.generation)
               || (session.ended ? ended.generation !== generation
                 : ended.generation <= generation || ended.sessionId !== session.identity.session_id)) {
-            throw new IdentityFailure('SESSION_END_UNCONFIRMED', 503);
+            throw new IdentityFailure('SESSION_END_UNCONFIRMED', 503, false);
           }
-        } catch { throw new IdentityFailure('SESSION_END_UNCONFIRMED', 503); }
+        } catch { throw new IdentityFailure('SESSION_END_UNCONFIRMED', 503, false); }
         const headers = noStore();
         headers.append('Set-Cookie', setCookie(sessionCookie, '', 0));
         try { return redirect(providerDestination(profile, provider.logoutURL(ended.sessionId)), headers); }

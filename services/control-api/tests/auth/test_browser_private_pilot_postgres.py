@@ -2,12 +2,16 @@
 
 import asyncio
 import json
+import os
 import secrets
+import shutil
 import socket
 import ssl
+import subprocess
 from dataclasses import replace
 from datetime import timedelta
 from http.client import HTTPResponse
+from pathlib import Path
 from uuid import uuid4
 
 import pytest
@@ -20,9 +24,9 @@ from opentour_control.auth.browser_private_pilot_listener import (
 from opentour_control.auth.config import digest
 from test_browser_private_listener import HOST
 from test_browser_private_listener import tls_fixture as tls_fixture
+from test_identity_postgres import ROOT, identity_postgres_fixture
 from test_identity_postgres import browser_state as browser_state
 from test_identity_postgres import durable as durable
-from test_identity_postgres import identity_postgres_fixture
 from test_identity_postgres import mode as mode
 
 pytestmark = pytest.mark.local_integration
@@ -175,3 +179,117 @@ def test_private_pilot_listener_uses_mutual_tls_and_durable_identity(
                 await asyncio.wait_for(task, timeout=5)
 
     asyncio.run(exercise())
+
+
+@pytest.fixture(scope="module")
+def compiled_private_account_entry(tmp_path_factory):
+    node, pnpm = shutil.which("node"), shutil.which("pnpm")
+    assert node and pnpm, "Qualified pinned Node/pnpm are required by this local integration"
+    directory = tmp_path_factory.mktemp("private-browser-node")
+    directory.chmod(0o700)
+    web = ROOT / "apps/web"
+    output = directory / "compiled"
+    project = directory / "tsconfig.json"
+    project.write_text(
+        json.dumps(
+            {
+                "extends": str(web / "lib/server/tsconfig.json"),
+                "compilerOptions": {
+                    "typeRoots": [str(ROOT / "node_modules/@types")],
+                    "rootDir": str(web),
+                    "outDir": str(output),
+                    "noEmit": False,
+                    "noEmitOnError": True,
+                },
+                "files": [
+                    str(web / "features/account-entry/server.ts"),
+                    str(web / "app/auth/signin/route.ts"),
+                    str(web / "app/auth/callback/route.ts"),
+                ],
+                "include": [],
+            }
+        )
+    )
+    subprocess.run([pnpm, "exec", "tsc", "-p", str(project)], cwd=ROOT, check=True, timeout=30)
+    (output / "package.json").write_text('{"type":"module"}')
+    (output / "node_modules").symlink_to(web / "node_modules", target_is_directory=True)
+    return node, output
+
+
+def test_typescript_private_account_entry_uses_the_dev_tls_postgres_listener(
+    browser_state, durable, identity, tls_fixture, compiled_private_account_entry
+):
+    _, options, authority, stage, *_ = tls_fixture
+    approved = options["approved"]
+    assert approved.stage_arn.endswith("/fixture-stage")
+    approved = replace(
+        approved, stage_arn=approved.stage_arn.removesuffix("/fixture-stage") + "/dev"
+    )
+    options = {
+        **options,
+        "approved": approved,
+        "readback": replace(options["readback"], binding=approved),
+    }
+    node, output = compiled_private_account_entry
+    probe = Path(__file__).with_name("private_browser_client_postgres_probe.mjs")
+    sid = f"generated-node-mtls-{uuid4().hex}"
+
+    async def exercise():
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            port = sock.getsockname()[1]
+            config = build_private_browser_pilot_listener(
+                browser_state,
+                path_profile=PrivateBrowserPilotPathProfile.DEV,
+                **(options | {"port": port}),
+            )
+            server = uvicorn.Server(config)
+            task = asyncio.create_task(server.serve(sockets=[sock]))
+            try:
+                async with asyncio.timeout(4):
+                    while not server.started:
+                        await asyncio.sleep(0.01)
+                request = {
+                    "endpoint": f"https://{HOST}:{port}/dev",
+                    "certificate_authority": str(authority),
+                    "stage_certificate": str(stage[0]),
+                    "stage_private_key": str(stage[1]),
+                    "now": int(identity.now.timestamp() * 1000),
+                    "issuer": identity.config.issuer,
+                    "audience": identity.config.audience,
+                    "jwks_url": identity.config.jwks_url,
+                    "client_id": identity.config.client_id,
+                    "jwks": identity.keys,
+                    "access_token": identity.token(sid=sid),
+                    "subject": durable.context.actor["subject"],
+                    "session_id": sid,
+                    "mode": durable.mode,
+                }
+                result = await asyncio.to_thread(
+                    subprocess.run,
+                    [node, "--conditions=react-server", str(probe), str(output)],
+                    cwd=ROOT,
+                    input=json.dumps(request).encode(),
+                    env={"PATH": os.environ["PATH"], "LANG": "C", "TZ": "UTC"},
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                    check=True,
+                    timeout=25,
+                )
+                assert len(result.stdout) < 1024
+                assert json.loads(result.stdout) == {
+                    "account_entry_over_private_mtls": "PASS",
+                    "provider_acceptance": "NOT_RUN",
+                    "mode": durable.mode,
+                }
+            finally:
+                server.should_exit = True
+                await asyncio.wait_for(task, timeout=5)
+
+    asyncio.run(exercise())
+    with durable.connect() as connection:
+        assert connection.execute(
+            "SELECT generation, ended_at FROM opentour_identity.sessions "
+            "WHERE issuer=%s AND session_id=%s",
+            (identity.config.issuer, sid),
+        ).fetchone() == {"generation": 1, "ended_at": identity.now}
