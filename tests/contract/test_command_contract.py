@@ -355,7 +355,7 @@ def test_exact_canonical_browser_inventory_preserved(checkout):
     manifest = runner.manifest(checkout)
     source = json.loads((checkout / runner.COMMON / "browser-suite-inventory.json").read_text())
     assert set(manifest["browser_suites"]) == set(source["paths"])
-    assert len(manifest["browser_suites"]) == source["distinct_paths"] == 70
+    assert len(manifest["browser_suites"]) == source["distinct_paths"] == 71
     sprint_profiles = {
         "apps/web/components/foundation/tokens/skeleton.visual.spec.ts": "OPE-310",
         "apps/web/components/foundation/tokens/icon-button.visual.spec.ts": "OPE-311",
@@ -363,6 +363,7 @@ def test_exact_canonical_browser_inventory_preserved(checkout):
         "apps/web/components/foundation/tokens/tooltip.visual.spec.ts": "OPE-313",
         "apps/web/components/foundation/forms/difference-review.visual.spec.ts": "OPE-314",
         "apps/web/features/operations/cancellation-impact.visual.spec.ts": "OPE-315",
+        "apps/web/components/foundation/forms/single-choice-select.visual.spec.ts": "OPE-317",
     }
     for path, owner in sprint_profiles.items():
         assert source["paths"][path] == [owner]
