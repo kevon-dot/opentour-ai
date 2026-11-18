@@ -6,7 +6,7 @@
    Bar lengths are computed here, in CSS, from the numbers the component writes unchanged into
    --ot-chart-* properties. Bars always run left to right, whatever the text direction. */
 .ot-chart { display: flex; flex-direction: column; align-items: flex-start; gap: var(--ot-space-16); box-sizing: border-box; inline-size: 100%; min-inline-size: 0; margin: 0; font-family: Geist, sans-serif; overflow-wrap: anywhere; }
-.ot-chart--card { padding: var(--ot-space-20); background: var(--ot-surface-base); border: 1px solid var(--ot-border-default); border-radius: var(--ot-radius-12); }
+.ot-chart--card { padding: var(--ot-space-20); padding-inline-end: calc(var(--ot-space-20) - 2px); background: var(--ot-surface-base); border: 1px solid var(--ot-border-default); border-radius: var(--ot-radius-12); }
 .ot-chart-title, .ot-chart-subtitle, .ot-chart-method, .ot-chart-note { margin: 0; max-inline-size: 100%; }
 .ot-chart-title { color: var(--ot-text-primary); font-size: var(--ot-type-section-size); font-weight: var(--ot-type-section-weight); line-height: var(--ot-type-section-line); }
 .ot-chart-subtitle, .ot-chart-method, .ot-chart-note { font-size: var(--ot-type-small-size); font-weight: var(--ot-type-small-weight); line-height: var(--ot-type-small-line); }
@@ -30,16 +30,15 @@
 /* Rate comparison (5:280): one row per series on a fixed 0-100% track. An absent row has no track. */
 .ot-chart-rate-rows { display: flex; flex-direction: column; align-self: stretch; gap: var(--ot-space-16); margin: 0; padding: 0; list-style: none; }
 .ot-chart-rate-row { display: flex; flex-direction: column; align-items: flex-start; gap: var(--ot-space-8); min-inline-size: 0; }
-.ot-chart-rate-head { display: flex; flex-wrap: wrap; align-items: flex-start; column-gap: var(--ot-space-16); max-inline-size: 100%; }
+.ot-chart-rate-head { display: flex; align-self: stretch; flex-wrap: wrap; align-items: flex-start; column-gap: var(--ot-space-16); max-inline-size: 100%; }
 .ot-chart-rate-label { flex: 0 1 440px; min-inline-size: 0; color: var(--ot-text-primary); font-size: var(--ot-type-label-size); font-weight: var(--ot-type-label-weight); line-height: var(--ot-type-label-line); }
 .ot-chart-rate-value { flex: 0 1 auto; min-inline-size: 0; color: var(--ot-text-secondary); font-family: 'Geist Mono', monospace; font-size: var(--ot-type-mono-size); font-weight: var(--ot-type-mono-weight); line-height: var(--ot-type-mono-line); }
 .ot-chart-rate-track { display: flex; align-self: stretch; block-size: 28px; background: var(--ot-surface-nav); border-radius: var(--ot-radius-6); direction: ltr; }
 .ot-chart-rate-fill { box-sizing: border-box; flex: none; inline-size: calc(var(--ot-chart-rate) * 100%); border: 1px solid var(--ot-border-control); border-radius: var(--ot-radius-6); }
-.ot-chart-rate-axis { display: flex; max-inline-size: 100%; direction: ltr; color: var(--ot-text-muted); font-size: var(--ot-type-small-size); font-weight: var(--ot-type-small-weight); line-height: var(--ot-type-small-line); }
-.ot-chart-rate-tick { min-inline-size: 0; }
-.ot-chart-rate-tick--zero { flex: 0 1 340px; }
-.ot-chart-rate-tick--middle { flex: 0 1 338px; }
-.ot-chart-rate-tick--max { flex: none; }
+/* The scale labels use the same available width as the data track. */
+.ot-chart-rate-axis { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); align-self: stretch; direction: ltr; color: var(--ot-text-muted); font-size: var(--ot-type-small-size); font-weight: var(--ot-type-small-weight); line-height: var(--ot-type-small-line); }
+.ot-chart-rate-tick { white-space: nowrap; }
+.ot-chart-rate-tick--max { justify-self: end; }
 
 /* Signed bars (24:148-24:156, axis 56:129): the zero line sits at -min / (max - min) of the row. */
 .ot-chart-signed-rows { display: flex; flex-direction: column; align-self: stretch; gap: var(--ot-space-16); margin: 0; padding: 0; list-style: none; }

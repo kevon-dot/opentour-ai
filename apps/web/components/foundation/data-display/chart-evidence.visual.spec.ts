@@ -51,7 +51,7 @@ test.beforeAll(async () => {
         createRoot(document.querySelector('main')).render(<>
           <EvidenceCoverage {...${JSON.stringify(coverage)}} />
           <RateComparison {...${JSON.stringify(rate)}} />
-          <SignedBars {...${JSON.stringify(signed)}} />
+          <div><ChartEvidenceNotice tone="info" headline="−$900" details={['$300 · $1,800']} /><SignedBars {...${JSON.stringify(signed)}} /></div>
           {boards.map(([tone, headline, body]) => <ChartEvidenceNotice key={headline} {...{tone,headline,details:[body]}} />)}
         </>        );` : null,
     }],
@@ -75,7 +75,7 @@ for (const width of [320, 768, 1280, 1440]) {
       await page.addStyleTag({ content: styles + `
         html { font-size: ${scale}% } body { margin: 0 }
         main { display: grid; gap: 16px; grid-template-columns: minmax(0, 1fr) }
-        .ot-chart-coverage { max-width: 390px } .ot-chart-rate { max-width: 758px }
+        .ot-chart-coverage { max-width: 388px } .ot-chart-rate { max-width: 756px }
         .ot-chart-signed, .ot-notice { max-width: 512px }
       ` });
       await page.addScriptTag({ content: script });
@@ -93,9 +93,18 @@ for (const width of [320, 768, 1280, 1440]) {
           rates: box('.ot-chart-rate-fill'), rateTracks: box('.ot-chart-rate-track'),
           negative: box('.ot-chart-signed-bar--negative'), positive: box('.ot-chart-signed-bar--positive'),
           row: box('.ot-chart-signed-row')[0],
+          tickOffsets: [...document.querySelectorAll('.ot-chart-rate-tick')].map(tick =>
+            ({ left: tick.getBoundingClientRect().left - tick.parentElement!.getBoundingClientRect().left, width: tick.getBoundingClientRect().width })),
+          rowHeaderY: [...document.querySelector('.ot-chart-rate-head')!.children].map(n => n.getBoundingClientRect().top),
+
         };
       });
       expect(measurements.overflow).toBe(0);
+      const [, midpoint, end] = measurements.tickOffsets;
+      expect(midpoint.left + midpoint.width / 2).toBeCloseTo(measurements.rateTracks[0] / 2, 0);
+      expect(end.left + end.width).toBeCloseTo(measurements.rateTracks[0], 0);
+      await expect(page.getByRole('status').filter({ hasText: '$300 · $1,800' })).toBeVisible();
+      if (width >= 768 && scale === 100) expect(measurements.rowHeaderY[0]).toBe(measurements.rowHeaderY[1]);
       const proportions = [1284, 196, 120].map(n => n / 1600);
       for (const [i, proportion] of proportions.entries()) {
         expect(measurements.segment[i]).toBeCloseTo((measurements.track - 4) * proportion, 0);
