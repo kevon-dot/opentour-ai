@@ -12,6 +12,7 @@ from typing import Any
 from tools.public_content_check import MAX_FILE_BYTES, digest, inspect_bytes, load_policy
 
 PRESENTATION_TARGETS = {
+    "apps/web/components/foundation/forms/derived-value.visual.spec.ts": "OPE-320",
     "apps/web/components/foundation/data-display/relationship-context.visual.spec.ts": "OPE-319",
     "apps/web/components/foundation/tokens/selection-controls.visual.spec.ts": "OPE-318",
     "apps/web/components/foundation/forms/single-choice-select.visual.spec.ts": "OPE-317",
@@ -347,6 +348,23 @@ def verify_scoped_presentation(root: Path, value: dict[str, Any]) -> None:
             or {Path(name).name for name in images} != expected_relationships
         ):
             raise ValueError("Relationship context capture inventory mismatch")
+    elif value["issue_key"] == "OPE-320":
+        modes = ("customer-controlled", "opentour-managed")
+        derived_expected = {
+            f"derived-value-{mode}-{width}-{scale}.png"
+            for mode in modes for width in widths for scale in (100, 200)
+        } | {
+            f"derived-value-{mode}-{state}.png"
+            for mode in modes
+            for state in (
+                "native", "keyboard-copied", "clipboard-failed", "race-current",
+                "forced-colors", "reduced-motion",
+            )
+        }
+        if len(images) != len(derived_expected) or {
+            Path(name).name for name in images
+        } != derived_expected:
+            raise ValueError("Derived-value capture inventory mismatch")
     elif value["issue_key"] == "OPE-303":
         expected_charts = {
             f"charts-{width}-{scale}.png" for width in widths for scale in (100, 200)

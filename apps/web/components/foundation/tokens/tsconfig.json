@@ -40,6 +40,9 @@
     "../forms/single-choice-select*.tsx",
     "../data-display/relationship-context*.ts",
     "../data-display/relationship-context*.tsx",
-    "../../../tests/fixtures/presentation/relationship-context.tsx"
+    "../../../tests/fixtures/presentation/relationship-context.tsx",
+    "../forms/derived-value*.ts",
+    "../forms/derived-value*.tsx",
+    "../../../tests/fixtures/presentation/derived-value.tsx"
   ]
 }

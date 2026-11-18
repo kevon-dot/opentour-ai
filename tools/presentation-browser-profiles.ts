@@ -1,5 +1,10 @@
 /** Generated local presentation fixtures. Each executable target has exactly one child owner. */
 export const presentationSuites = new Map([
+  ['apps/web/components/foundation/forms/derived-value.visual.spec.ts', {
+    owner: 'OPE-320', parent: 'OPE-279', guide: '170:146', minimumTests: 26,
+    requirementIds: ['OPE-320:implementation-scope:exact-copy', 'OPE-320:implementation-scope:clipboard-outcomes', 'OPE-320:verification-and-handoff:browser-evidence'],
+    specHash: 'c4f765ab2b07087d0422257e54102117009f8086efb83728e23f9c86bec09a3a',
+  }],
   ['apps/web/components/foundation/data-display/relationship-context.visual.spec.ts', {
     owner: 'OPE-319', parent: 'OPE-286', guide: '165:11224', minimumTests: 11,
     requirementIds: [

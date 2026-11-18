@@ -1,0 +1,16 @@
+.ot-derived-value { inline-size: 360px; max-inline-size: 100%; min-inline-size: 0; display: flex; flex-direction: column; align-items: flex-start; gap: var(--ot-space-16); font-family: Geist, sans-serif; color: var(--ot-text-primary); }
+.ot-derived-display { box-sizing: border-box; inline-size: 100%; padding: var(--ot-space-16); border: 1px solid var(--ot-border-control); border-radius: var(--ot-radius-8); background: var(--ot-surface-base); display: flex; flex-direction: column; gap: var(--ot-space-8); }
+.ot-derived-label, .ot-derived-text { font: var(--ot-type-label-weight) var(--ot-type-label-size)/var(--ot-type-label-line) Geist, sans-serif; }
+.ot-derived-label, .ot-derived-help, .ot-derived-text { min-inline-size: 0; overflow-wrap: anywhere; }
+.ot-derived-text { white-space: pre-wrap; user-select: text; min-block-size: var(--ot-type-label-line); }
+.ot-derived-help { font: var(--ot-type-small-weight) var(--ot-type-small-size)/var(--ot-type-small-line) Geist, sans-serif; color: var(--ot-text-secondary); }
+.ot-derived-copy { inline-size: 300px; max-inline-size: 100%; }
+.ot-derived-copy > .ot-button-group, .ot-derived-copy .ot-button { inline-size: 100%; }
+.ot-derived-copy .ot-button { min-block-size: 44px; }
+.ot-derived-feedback { margin: 0; max-inline-size: 100%; overflow-wrap: anywhere; font: var(--ot-type-small-weight) var(--ot-type-small-size)/var(--ot-type-small-line) Geist, sans-serif; }
+.ot-derived-feedback:empty { block-size: 0; margin-block-start: calc(-1 * var(--ot-space-16)); }
+@media (forced-colors: active) {
+  .ot-derived-display { background: Canvas; border-color: CanvasText; }
+  .ot-derived-value, .ot-derived-help { color: CanvasText; }
+  .ot-derived-copy .ot-button { border-color: ButtonText; }
+}

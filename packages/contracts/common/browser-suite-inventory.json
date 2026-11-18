@@ -223,10 +223,13 @@
     ],
     "apps/web/components/foundation/data-display/relationship-context.visual.spec.ts": [
       "OPE-319"
+    ],
+    "apps/web/components/foundation/forms/derived-value.visual.spec.ts": [
+      "OPE-320"
     ]
   },
-  "distinct_paths": 74,
-  "issue_count": 70,
+  "distinct_paths": 75,
+  "issue_count": 71,
   "affected_old_wrapper_paths": {
     "apps/web/tests/coverage/ot-p22-c01.spec.ts": [
       "OPE-232"
