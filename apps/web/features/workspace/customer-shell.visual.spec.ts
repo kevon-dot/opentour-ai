@@ -135,6 +135,8 @@ for (const [i, identity] of identities.entries()) {
           const modal = page.getByRole('dialog', { name: 'Workspace navigation' });
           await expect(modal.getByRole('button', { name: 'Close navigation' })).toBeFocused();
           await expect(modal.getByRole('navigation', { name: 'Workspace navigation' }).getByRole('link')).toHaveText(navigation);
+          // The protected 320/768 navigation backdrop binds foreground at 28% (183:31476/183:31582).
+          expect(await modal.evaluate(el => getComputedStyle(el, '::backdrop').backgroundColor)).toBe('color(srgb 0.0941176 0.133333 0.215686 / 0.28)');
           await snapshot('open');
           const close = modal.getByRole('button', { name: 'Close navigation' });
           await close.focus();

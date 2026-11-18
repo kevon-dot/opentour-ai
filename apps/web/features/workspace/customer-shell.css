@@ -27,7 +27,7 @@
 .ot-shell-heading h1 { margin: 0; font-size: var(--ot-type-heading-size); line-height: var(--ot-type-heading-line); font-weight: var(--ot-type-heading-weight); }
 .ot-shell-heading p { margin: var(--ot-space-8) 0 0; color: var(--ot-text-secondary); font-size: var(--ot-type-body-size); line-height: var(--ot-type-body-line); }
 .ot-shell-drawer { margin: 0; border: 0; padding: var(--ot-space-16); inline-size: min(360px, 100%); max-width: 100%; height: 100dvh; max-height: 100dvh; overflow: auto; color: inherit; background: var(--ot-surface-nav); }
-.ot-shell-drawer::backdrop { background: rgb(24 34 55 / 32%); }
+.ot-shell-drawer::backdrop { background: color-mix(in srgb, var(--ot-text-primary) 28%, transparent); }
 .ot-shell-drawer .ot-shell-rail { height: auto; padding: var(--ot-space-16) 0 0; gap: var(--ot-space-16); }
 .ot-shell-drawer .ot-shell-links { gap: var(--ot-space-4); }
 .ot-shell-drawer .ot-shell-spacer { display: none; }
