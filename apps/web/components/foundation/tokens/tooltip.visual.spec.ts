@@ -108,7 +108,15 @@ for (const [width, height] of [[320, 800], [768, 1024], [1280, 900], [1440, 1024
           });
           expect(copied).toBe('Exact upper bound: 0.00993608194445772');
         }
-        const shot = await page.screenshot({ fullPage: true, animations: 'disabled' });
+        // Capture the real viewport: expanding it for fullPage can repaint a top-layer popover mid-capture.
+        const shot = await page.screenshot({ animations: 'disabled' });
+        const surface = await page.evaluate(async ({ data, x, y }) => {
+          const image = new Image(); image.src = `data:image/png;base64,${data}`; await image.decode();
+          const canvas = document.createElement('canvas'); canvas.width = image.width; canvas.height = image.height;
+          const context = canvas.getContext('2d')!; context.drawImage(image, 0, 0);
+          return [...context.getImageData(Math.floor(x), Math.floor(y), 1, 1).data];
+        }, { data: shot.toString('base64'), x: geometry.x + geometry.width / 2, y: geometry.y + geometry.height - 4 });
+        expect(surface).toEqual(kind === 'evidence' ? [255, 255, 255, 255] : [24, 34, 55, 255]);
         await info.attach(name, { body: shot, contentType: 'image/png' });
         expect(shot).toMatchSnapshot(name, { maxDiffPixels: 0, threshold: 0 });
       }
