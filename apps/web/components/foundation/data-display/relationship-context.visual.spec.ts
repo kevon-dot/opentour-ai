@@ -186,6 +186,7 @@ for (const width of [320, 768, 1280, 1440]) for (const scale of [100, 200]) {
       expect(geometry.clipped).toEqual([]);
       await expect(page.locator(noActions)).toHaveCount(0);
       const tables = page.getByRole('table');
+      const scrollRegion = page.getByRole('region', { name: 'Details — scroll horizontally', exact: true });
       if (state === 'populated') {
         const table = page.getByRole('table', { name: 'Details', exact: true });
         await expect(page.getByRole('heading', { level: 2, name: /^Details/ })).toBeVisible();
@@ -202,15 +203,12 @@ for (const width of [320, 768, 1280, 1440]) for (const scale of [100, 200]) {
         const card = geometry.boxes['.ot-relationship-records'][0];
         expect(card.width).toBe(Math.min(792, content));
         if (width === 320) {
-          const region = page.getByRole('region', { name: 'Details — scroll horizontally', exact: true });
-          await expect(region).toBeVisible();
+          await expect(scrollRegion).toBeVisible();
           expect(geometry.recordsScroll!.scrollWidth).toBeGreaterThan(geometry.recordsScroll!.clientWidth);
           await page.keyboard.press('Tab');
-          await expect(region).toBeFocused();
-          await expect(region).toHaveCSS('outline-style', 'solid');
-          await page.keyboard.press('ArrowRight');
-          await expect.poll(() => region.evaluate(node => node.scrollLeft)).toBeGreaterThan(0);
-          await region.evaluate(node => { node.scrollLeft = 0; });
+          await expect(scrollRegion).toBeFocused();
+          await expect(scrollRegion).toHaveCSS('outline-style', 'solid');
+          expect(await scrollRegion.evaluate(node => node.scrollLeft)).toBe(0);
         } else {
           await expect(page.getByRole('region')).toHaveCount(0);
           expect(geometry.recordsScroll!.tabIndex).toBeNull();
@@ -354,6 +352,11 @@ for (const width of [320, 768, 1280, 1440]) for (const scale of [100, 200]) {
         }
       }
       await capture(page, info, name);
+      if (state === 'populated' && width === 320) {
+        // Capture the initial view before Chromium animates keyboard scrolling.
+        await page.keyboard.press('ArrowRight');
+        await expect.poll(() => scrollRegion.evaluate(node => node.scrollLeft)).toBeGreaterThan(0);
+      }
     }
     expect([...new Set(requests)].sort()).toEqual([origin + '/', origin + '/gallery.js']);
     expect(await page.evaluate(() => localStorage.length + sessionStorage.length + document.cookie.length)).toBe(0);
@@ -409,7 +412,7 @@ test('long unbroken and markup-like caller text wraps verbatim without page over
     if (width === 320) {
       const region = page.getByRole('region', { name: 'Details — scroll horizontally', exact: true });
       await page.keyboard.press('Tab');
-      await expect(region).toBeFocused();
+      await expect(scrollRegion).toBeFocused();
     }
     await capture(page, info, name);
   }
@@ -430,10 +433,9 @@ test('forced colors keep boundaries, readable text and visible focus', async ({ 
         await expect(page.getByRole('cell', { name: 'Sealed' })).toHaveCSS('color', 'rgb(0, 0, 0)');
         if (width === 320) {
           await page.keyboard.press('Tab');
-          const region = page.getByRole('region', { name: 'Details — scroll horizontally', exact: true });
-          await expect(region).toBeFocused();
-          await expect(region).toHaveCSS('outline-style', 'solid');
-          await expect(region).toHaveCSS('outline-width', '2px');
+          await expect(scrollRegion).toBeFocused();
+          await expect(scrollRegion).toHaveCSS('outline-style', 'solid');
+          await expect(scrollRegion).toHaveCSS('outline-width', '2px');
         }
       } else {
         const grid = page.locator('.ot-relationship-grid');
