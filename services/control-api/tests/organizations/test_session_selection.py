@@ -8,6 +8,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from threading import Barrier
 from types import SimpleNamespace
+from unittest.mock import Mock
 from uuid import uuid4
 
 import jwt
@@ -18,7 +19,7 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from opentour_control.auth import workos_provider
-from opentour_control.auth.browser_state import BrowserCredentials
+from opentour_control.auth.browser_state import BrowserCredentials, BrowserSelectionIntent
 from opentour_control.auth.config import MAX_COUNTER, AuthError, IdentityConfig, digest, timestamp
 from opentour_control.auth.repository import PostgresIdentityRepository, connection_factory
 from opentour_control.auth.runtime import create_control_auth_runtime
@@ -310,10 +311,8 @@ def test_commit_mounts_active_context_and_fences_other_binding(durable):
     assert counts(durable) == (1, 1)
 
 
-def test_composed_control_auth_routes_share_the_durable_session(durable, monkeypatch):
-    registry = schema_registry()
-    context_contract = "urn:opentour:auth-context:1.0#/$defs/SessionContextView"
-    error_contract = "urn:opentour:common-contract:1.0#/$defs/Error"
+@contextmanager
+def generated_browser_auth(durable, monkeypatch):
     subject = durable.identity.actor["subject"]
     org = durable.orgs["a"]
     key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
@@ -367,15 +366,30 @@ def test_composed_control_auth_routes_share_the_durable_session(durable, monkeyp
     )
     assert fetched == []
     try:
+        yield SimpleNamespace(
+            runtime=runtime, token=token, other=other, expires_at=claims["exp"], fetched=fetched
+        )
+    finally:
+        assert runtime.close()
+
+
+def test_composed_control_auth_routes_share_the_durable_session(durable, monkeypatch):
+    registry = schema_registry()
+    context_contract = "urn:opentour:auth-context:1.0#/$defs/SessionContextView"
+    error_contract = "urn:opentour:common-contract:1.0#/$defs/Error"
+    subject = durable.identity.actor["subject"]
+    org = durable.orgs["a"]
+    with generated_browser_auth(durable, monkeypatch) as auth:
+        runtime = auth.runtime
         browser = runtime.browser_state.admit(
             BrowserCredentials(
-                access_token=token, refresh_token="generated-refresh", user_id=subject
+                access_token=auth.token, refresh_token="generated-refresh", user_id=subject
             )
         )
         app = FastAPI()
         app.include_router(runtime.router)
         headers = {
-            "Authorization": f"Bearer {token}",
+            "Authorization": f"Bearer {auth.token}",
             "Cookie": f"opentour-session={browser.handle}",
             "Idempotency-Key": "generated-runtime-selection",
         }
@@ -395,7 +409,7 @@ def test_composed_control_auth_routes_share_the_durable_session(durable, monkeyp
             denied = client.post(
                 selection_path,
                 json=body,
-                headers={**headers, "Authorization": f"Bearer {other}"},
+                headers={**headers, "Authorization": f"Bearer {auth.other}"},
             )
             assert (denied.status_code, denied.json()["code"]) == (
                 409,
@@ -425,9 +439,189 @@ def test_composed_control_auth_routes_share_the_durable_session(durable, monkeyp
             ended = client.get(context_path, headers=headers)
             assert (ended.status_code, ended.json()["code"]) == (401, "SESSION_ENDED")
             assert valid_instance(error_contract, ended.json(), registry)
-        assert fetched == [ISSUER]
-    finally:
-        assert runtime.close()
+        assert auth.fetched == [ISSUER]
+
+
+def test_private_selection_binding_uses_current_sealed_credentials_and_replays(
+    durable, monkeypatch
+):
+    org_a, org_b = durable.orgs["a"], durable.orgs["b"]
+    subject = durable.identity.actor["subject"]
+    with generated_browser_auth(durable, monkeypatch) as auth:
+        runtime = auth.runtime
+        sessions = runtime.browser_state
+        binding = runtime.selection_binding
+        admitted = sessions.admit(
+            BrowserCredentials(
+                access_token=auth.token, refresh_token="generated-initial", user_id=subject
+            )
+        )
+        handle = admitted.handle
+        identity = admitted.identity
+        assert identity is not None
+        initial = BrowserSelectionIntent(
+            organization_id=org_a.local, expected_generation=0, idempotency_key="binding-initial"
+        )
+        admit = Mock(wraps=runtime.selection.admit)
+        commit = Mock(wraps=runtime.selection.commit)
+        monkeypatch.setattr(runtime.selection, "admit", admit)
+        monkeypatch.setattr(runtime.selection, "commit", commit)
+
+        foreign = replace(identity, actor={**identity.actor, "subject": "generated-foreign"})
+        wrong_sid = replace(identity, session_id="generated-foreign-session")
+        for invalid in (foreign, wrong_sid):
+            assert (
+                expect(
+                    "SESSION_INVALID",
+                    lambda invalid=invalid: binding.authorize_current(handle, invalid, initial),
+                ).status
+                == 401
+            )
+        stale = replace(identity, session_generation=1)
+        assert (
+            expect(
+                "STALE_SESSION_CONTEXT", lambda: binding.authorize_current(handle, stale, initial)
+            ).status
+            == 409
+        )
+        admit.assert_not_called()
+
+        target = binding.authorize_current(handle, identity, initial)
+        assert target == SelectionTarget(
+            org_a.local, org_a.remote_org, ISSUER, org_a.membership, "authority-one"
+        )
+        original_digest = sessions.current(handle).credential_digest
+        assert original_digest is not None
+        for invalid in ("malformed", digest("different-ciphertext")):
+            assert (
+                expect(
+                    "STALE_SESSION_CONTEXT",
+                    lambda invalid=invalid: binding.commit(
+                        handle, identity, initial, target, invalid
+                    ),
+                ).status
+                == 409
+            )
+        commit.assert_not_called()
+
+        first = binding.commit(handle, identity, initial, target, original_digest)
+        assert (first.organization_id, first.membership_id, first.session_generation) == (
+            org_a.local,
+            org_a.membership,
+            1,
+        )
+        current = sessions.current(handle)
+        current_identity = current.identity
+        assert current_identity is not None
+        assert binding.authorize_current(handle, current_identity, initial) == first
+
+        followup = BrowserSelectionIntent(
+            organization_id=org_b.local, expected_generation=1, idempotency_key="binding-followup"
+        )
+        other = binding.authorize_current(handle, current_identity, followup)
+        assert isinstance(other, SelectionTarget) and not other.already_current
+        sessions.require_reconciliation(handle, 1)
+        replacement = BrowserCredentials(
+            access_token=auth.other, refresh_token="generated-refresh-a", user_id=subject
+        )
+        staged = sessions.replace_credentials(handle, 1, replacement)
+        latest = sessions.replace_credentials(
+            handle, 1, replacement.model_copy(update={"refresh_token": "generated-refresh-b"})
+        )
+        assert staged != latest
+        assert binding.authorize_current(handle, current_identity, followup) == other
+        commit.reset_mock()
+        assert (
+            expect(
+                "STALE_SESSION_CONTEXT",
+                lambda: binding.commit(handle, current_identity, followup, other, staged),
+            ).status
+            == 409
+        )
+        commit.assert_not_called()
+        assert sessions.current(handle).reconciliation_required
+
+        second = binding.commit(handle, current_identity, followup, other, latest)
+        assert (second.organization_id, second.membership_id, second.session_generation) == (
+            org_b.local,
+            org_b.membership,
+            2,
+        )
+        active = sessions.current(handle)
+        assert active.identity is not None and not active.reconciliation_required
+        assert binding.authorize_current(handle, active.identity, initial) == first
+        assert binding.authorize_current(handle, active.identity, followup) == second
+        assert sessions.end(handle, 2).generation == 3
+        ended = sessions.current(handle)
+        assert ended.ended and ended.generation == 3
+        assert ended.identity is ended.credentials is ended.credential_digest is None
+        assert ended.csrf_token == admitted.csrf_token
+        expect("SESSION_ENDED", lambda: binding.authorize_current(handle, active.identity, initial))
+        assert auth.fetched == [ISSUER]
+
+
+@pytest.mark.parametrize("expiry_point", ["before_admission", "after_target", "after_replay"])
+def test_private_selection_binding_refuses_an_expired_current_bearer(
+    durable, monkeypatch, expiry_point
+):
+    subject = durable.identity.actor["subject"]
+    with generated_browser_auth(durable, monkeypatch) as auth:
+        runtime = auth.runtime
+        admitted = runtime.browser_state.admit(
+            BrowserCredentials(
+                access_token=auth.token, refresh_token="generated-expiry", user_id=subject
+            )
+        )
+        identity = admitted.identity
+        assert identity is not None
+        binding = runtime.selection_binding
+        handle = admitted.handle
+        intent = BrowserSelectionIntent(
+            organization_id=durable.orgs["a"].local,
+            expected_generation=0,
+            idempotency_key="binding-expiry",
+        )
+        if expiry_point == "after_replay":
+            target = binding.authorize_current(handle, identity, intent)
+            sealed = runtime.browser_state.current(handle).credential_digest
+            assert isinstance(target, SelectionTarget) and sealed is not None
+            first = binding.commit(handle, identity, intent, target, sealed)
+            identity = runtime.browser_state.current(handle).identity
+            assert identity is not None and identity.session_generation == first.session_generation
+
+        expires_at = datetime.fromtimestamp(auth.expires_at, UTC)
+
+        def expire():
+            monkeypatch.setattr(runtime.session_service, "clock", lambda: expires_at)
+            monkeypatch.setattr(runtime.session_service.verifier, "clock", lambda: expires_at)
+
+        admit_real = runtime.selection.admit
+        observed = []
+
+        def admit_then_expire(*args):
+            observed.append(admit_real(*args))
+            expire()
+            return observed[-1]
+
+        if expiry_point == "before_admission":
+            expire()
+        admit = Mock(side_effect=admit_then_expire)
+        monkeypatch.setattr(runtime.selection, "admit", admit)
+
+        assert (
+            expect(
+                "SESSION_INVALID", lambda: binding.authorize_current(handle, identity, intent)
+            ).status
+            == 401
+        )
+        if expiry_point == "before_admission":
+            admit.assert_not_called()
+        else:
+            admit.assert_called_once()
+            if expiry_point == "after_target":
+                assert isinstance(observed[0], SelectionTarget)
+            else:
+                assert observed == [first]
 
 
 def test_exact_historical_receipt_after_later_switch(durable):
