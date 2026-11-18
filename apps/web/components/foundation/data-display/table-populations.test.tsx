@@ -21,7 +21,7 @@ describe('table populations', () => {
     const props: TablePopulationsProps = {...base,...state};
     const html = renderToStaticMarkup(<TablePopulations {...props}/>);
     for(const label of labels) expect(html).toContain(label);
-    expect(html).toContain('<caption>Records<span class="scroll-hint"> — scroll horizontally</span></caption>');
+    expect(html).toContain('<caption class="sr">Records<span class="scroll-hint"> — scroll horizontally</span></caption>');
     expect(html).toContain('aria-sort="descending"');
     expect(html).toContain('Whole number 1–100; default 25.');
     if(state.state === 'partial') expect(html).not.toContain('Select all 128');

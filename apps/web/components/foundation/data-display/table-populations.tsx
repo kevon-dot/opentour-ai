@@ -35,8 +35,8 @@ const styles = `
 .ot-population .record-cell { padding:var(--ot-space-12); border:1px solid var(--ot-border-default); font:var(--ot-type-small-size)/var(--ot-type-small-line) Geist,sans-serif }
 .ot-population tr[data-selected=true] :is(.record-cell,.ot-table-cell) { background:var(--ot-action-subtle) }
 @media(min-width:700px){.ot-population .scroll-hint { display:none }}
-.ot-population .counts,.ot-population caption {font:var(--ot-type-label-weight) var(--ot-type-label-size)/var(--ot-type-label-line) Geist,sans-serif}
-.ot-population caption { text-align:start; padding-bottom:var(--ot-space-8) }
+.ot-population .counts,.ot-population .records-label {font:var(--ot-type-label-weight) var(--ot-type-label-size)/var(--ot-type-label-line) Geist,sans-serif}
+
 .ot-population .ot-button { min-height:44px; width:100% }
 .ot-population .controls .ot-button-group { width:min(280px,100%) }
 .ot-population .controls.recovery .ot-button-group {width:min(240px,100%)}
@@ -86,8 +86,10 @@ export function TablePopulations(p: TablePopulationsProps) {
       ? [`0 matching of ${p.total ?? 'unknown'} total`, ...p.filters].join(' · ')
       : p.total === null ? `${p.rows.length} shown · Total not available` : `${p.rows.length} shown · ${p.matching ?? 'Unknown'} matching of ${p.total} total`}</p>
     {p.state === 'partial' && <p className="counts">{p.rows.length} received · {p.expected ?? 'Unknown'} expected</p>}
-    <div className="records"><div className="scroll" role="region" aria-label="Records — scroll horizontally" tabIndex={0}>
-      <table><caption>Records<span className="scroll-hint"> — scroll horizontally</span></caption><thead><tr>
+    <div className="records">
+      <p className="records-label" aria-hidden="true">Records<span className="scroll-hint"> — scroll horizontally</span></p>
+      <div className="scroll" role="region" aria-label="Records — scroll horizontally" tabIndex={0}>
+      <table><caption className="sr">Records<span className="scroll-hint"> — scroll horizontally</span></caption><thead><tr>
         {p.state === 'populated' && <th scope="col" className="check"><input type="checkbox" aria-label="Select all records on this page" checked={p.rows.length > 0 && p.rows.every(r => selected.has(r.id))} disabled={!p.rows.length} onChange={() => p.onIntent({type:'select-page'})}/></th>}
         <TableCell header="column" tone="blue" value="Record"/><TableCell header="column" tone="blue" value="Origin / lifecycle"/>
         <th scope="col" className="time" aria-sort={p.direction}>Observed time {arrow}</th>
