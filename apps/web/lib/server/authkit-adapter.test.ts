@@ -164,6 +164,28 @@ describe('server adapter admission', () => {
     assert.equal(identity.assurance_level, 'unknown'); assert.equal('organization_id' in identity, false);
     await assert.rejects(f.adapter.verifiedIdentity(f.request(), 'tenant_read' as never), IdentityFailure);
   });
+  it('projects only verified identity fields from an enriched session port', async () => {
+    const f = fixture();
+    Object.assign(f.session.identity, {
+      organization_id: targetA.organizationId,
+      membership_id: targetA.membershipId,
+      delegated_grant_id: 'generated_grant',
+      capabilities: ['generated:capability'],
+      session_generation: 4,
+      authentication_time: new Date(NOW - 120_000).toISOString(),
+    });
+    Object.assign(f.session.identity.actor, { profile_label: 'generated private label' });
+    f.advance(5_000);
+
+    assert.deepEqual(await f.adapter.verifiedIdentity(f.request(), 'session_context'), {
+      actor: { kind: 'human', subject: claims.subject, issuer: claims.issuer },
+      session_id: claims.sessionId,
+      session_generation: 4,
+      identity_checked_at: new Date(NOW + 5_000).toISOString(),
+      authentication_time: claims.authenticationTime,
+      assurance_level: 'unknown',
+    });
+  });
 });
 
 describe('ending and switching', () => {

@@ -48,6 +48,15 @@ class LocalMembership:
     authority_revision: str
     revocation_epoch: int
 
+    def provider_binding(self) -> tuple[str, str, str, str, str]:
+        return (
+            self.subject,
+            self.organization_id,
+            self.membership_id,
+            self.identity_organization_id,
+            self.provider_membership_id,
+        )
+
 
 class MembershipAuthority(Protocol):
     """Return the current local membership and independently committed provider mapping.
@@ -193,6 +202,14 @@ class SessionService:
         verified, session, now = self._authenticate(token, binding)
         return self._context(verified, session, now)
 
+    @staticmethod
+    def _matches_selection(session: Session, member: LocalMembership) -> bool:
+        return (
+            member.subject == session.subject
+            and member.organization_id == session.selected_organization_id
+            and member.membership_id == session.selected_membership_id
+        )
+
     def _membership(self, session: Session) -> LocalMembership:
         if session.selected_organization_id is None:
             raise AuthError("CONTEXT_RECONCILIATION_REQUIRED", 409)
@@ -200,9 +217,7 @@ class SessionService:
         if (
             member is None
             or not member.active
-            or member.subject != session.subject
-            or member.organization_id != session.selected_organization_id
-            or member.membership_id != session.selected_membership_id
+            or not self._matches_selection(session, member)
         ):
             raise AuthError("MEMBERSHIP_INACTIVE", 403)
         identifier(member.authority_revision)
@@ -244,6 +259,14 @@ class SessionService:
                     locally_denied=True,
                 )
             self._same_membership(session, member, fetched)
+            if fetched.status == "removed" or fetched.locally_denied:
+                # A request-time removal may create a sticky denial and revocation intent.
+                # Confirm that the independent local mapping still names this target.
+                current = self.authority.current(session.subject, member.organization_id)
+                if current is None:
+                    raise AuthError("MEMBERSHIP_INACTIVE", 403)
+                if current.provider_binding() != member.provider_binding():
+                    raise AuthError("STALE_SESSION_CONTEXT", 409)
             observation = self.repository.record_observation(fetched)
         self._same_membership(session, member, observation)
         if observation.status == "removed" or observation.locally_denied:
@@ -381,6 +404,7 @@ class SessionService:
         }
         if session.selected_organization_id is None:
             return result
+        member: LocalMembership | None = None
         try:
             member = self._membership(session)
             self._fresh(session, member, now, False)
@@ -389,6 +413,16 @@ class SessionService:
             if error.code == "MEMBERSHIP_INACTIVE":
                 # Never clear a newer selection or recover an ended session.
                 self._after_wait(verified, session, binding)
+                current = self.authority.current(session.subject, session.selected_organization_id)
+                if current is not None and current.active:
+                    mapping_changed = (
+                        self._matches_selection(session, current)
+                        if member is None
+                        else current.provider_binding() != member.provider_binding()
+                    )
+                    if mapping_changed:
+                        raise AuthError("STALE_SESSION_CONTEXT", 409) from None
+                self._admission_time(verified, now)
                 session = self.repository.clear_selection(session, digest(binding))
                 self._admission_time(verified, now)
                 result["session_generation"] = session.generation

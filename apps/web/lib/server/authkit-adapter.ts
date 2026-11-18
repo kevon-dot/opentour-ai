@@ -531,12 +531,17 @@ export function createAuthkitAdapter(ports: {
       const current = await sessions.current(session.handle);
       active(current, session.identity.session_generation);
       sameSession(current, claims);
-      if (claims.expiresAt <= now()) throw new IdentityFailure('SESSION_INVALID');
-      // Unscoped verified identity is allowed for reconciliation; tenant context is
-      // supplied only by the Python current-context/authorization service.
-      return { ...current.identity, actor: { ...current.identity.actor },
-        authentication_time: claims.authenticationTime, identity_checked_at: new Date(now()).toISOString(),
-        assurance_level: 'unknown' };
+      const checkedAt = now();
+      if (claims.expiresAt <= checkedAt) throw new IdentityFailure('SESSION_INVALID');
+      // Return only verified identity; tenant context comes from the control API.
+      return {
+        actor: { kind: 'human', subject: claims.subject, issuer: claims.issuer },
+        session_id: claims.sessionId,
+        session_generation: current.identity.session_generation,
+        identity_checked_at: new Date(checkedAt).toISOString(),
+        authentication_time: claims.authenticationTime,
+        assurance_level: 'unknown',
+      };
     },
   };
 }
