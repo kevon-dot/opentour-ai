@@ -1,0 +1,75 @@
+/* Generated gallery for the OPE-321 form error summary. Fixture layout only: none of this is the component. */
+.form-errors-gallery {
+  box-sizing: border-box;
+  display: grid;
+  /* One track that may shrink below its content, so long text wraps instead of widening the page. */
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--ot-space-24);
+  justify-items: start;
+  padding: var(--ot-space-32);
+}
+.form-errors-gallery h1 {
+  margin: 0;
+  font: var(--ot-type-section-weight) var(--ot-type-section-size)/var(--ot-type-section-line) Geist, sans-serif;
+  overflow-wrap: anywhere;
+}
+/* The design width of the standalone summary. The summary itself is fluid and fills this box. */
+.form-errors-specimen {
+  inline-size: 100%;
+  max-inline-size: 360px;
+}
+.form-errors-form {
+  box-sizing: border-box;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--ot-space-16);
+  inline-size: 100%;
+  max-inline-size: 688px;
+  margin: 0;
+}
+.form-errors-field {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--ot-space-6);
+  font: var(--ot-type-label-weight) var(--ot-type-label-size)/var(--ot-type-label-line) Geist, sans-serif;
+  overflow-wrap: anywhere;
+}
+.form-errors-field input,
+.form-errors-field select {
+  box-sizing: border-box;
+  inline-size: 100%;
+  min-block-size: 44px;
+  padding: var(--ot-space-8) var(--ot-space-12);
+  border: 1px solid var(--ot-border-control);
+  border-radius: var(--ot-radius-6);
+  background: var(--ot-surface-base);
+  color: var(--ot-text-primary);
+  font: var(--ot-type-body-weight) var(--ot-type-body-size)/var(--ot-type-body-line) Geist, sans-serif;
+}
+.form-errors-field input:focus-visible,
+.form-errors-field select:focus-visible {
+  outline: 2px solid var(--ot-action-primary);
+  outline-offset: 2px;
+}
+.form-errors-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--ot-space-12);
+}
+.form-errors-note,
+.form-errors-gallery output {
+  margin: 0;
+  color: var(--ot-text-secondary);
+  font: var(--ot-type-small-weight) var(--ot-type-small-size)/var(--ot-type-small-line) Geist, sans-serif;
+  overflow-wrap: anywhere;
+}
+@media (max-width: 767px) {
+  .form-errors-gallery { padding: var(--ot-space-16); }
+}
+@media (min-width: 768px) and (max-width: 1279px) {
+  .form-errors-gallery { padding: var(--ot-space-24); }
+}
+@media (forced-colors: active) {
+  .form-errors-field input:focus-visible,
+  .form-errors-field select:focus-visible { outline-color: Highlight; }
+}
