@@ -1,5 +1,6 @@
 """Generated ISO-01 planning and conformance checks."""
 
+import hashlib
 import json
 from collections import Counter
 from collections.abc import Callable, Iterator, Mapping
@@ -20,6 +21,7 @@ from tools.acceptance.identity_storage_isolation import (
     load_fixture,
     matches_scoped_absence,
     parse_fixture,
+    parse_referenced_fixture,
 )
 
 _MODES: tuple[DeploymentMode, ...] = ("customer_controlled", "opentour_managed")
@@ -333,6 +335,52 @@ def _artifact_ref(kind: str) -> dict[str, object]:
         "classification": "control_metadata",
         "purpose_grant_id": "test-purpose",
     }
+
+
+@pytest.fixture
+def fixture_artifact_ref() -> dict[str, object]:
+    return {
+        **_artifact_ref("isolation-fixture"),
+        "sha256": "e5ef5d089b2305c342be43bd759e84e03a3ba9ca14d0d67005e993fc9add2670",
+    }
+
+
+def test_referenced_fixture_parses_exact_reviewed_source(
+    topology: IsolationFixture, fixture_artifact_ref: dict[str, object]
+) -> None:
+    assert parse_referenced_fixture(FIXTURE_PATH.read_bytes(), fixture_artifact_ref) == topology
+
+
+def test_referenced_fixture_denies_byte_drift_before_json_parsing(
+    fixture_artifact_ref: dict[str, object],
+) -> None:
+    raw = FIXTURE_PATH.read_bytes() + b" "
+    assert parse_fixture(raw.decode()) == load_fixture()
+    with pytest.raises(InvalidIsolationFixture, match="fixture artifact digest mismatch"):
+        parse_referenced_fixture(raw, fixture_artifact_ref)
+
+
+@pytest.mark.parametrize("bad_ref", [None, {}, {"sha256": "a" * 64}])
+def test_referenced_fixture_requires_the_full_artifact_ref(bad_ref: object) -> None:
+    with pytest.raises(InvalidIsolationFixture, match="fixture artifact reference"):
+        parse_referenced_fixture(FIXTURE_PATH.read_bytes(), bad_ref)
+
+
+def test_referenced_fixture_requires_canonical_digest(
+    fixture_artifact_ref: dict[str, object],
+) -> None:
+    fixture_artifact_ref["sha256"] = str(fixture_artifact_ref["sha256"]) + "\n"
+    with pytest.raises(InvalidIsolationFixture, match="fixture artifact reference"):
+        parse_referenced_fixture(FIXTURE_PATH.read_bytes(), fixture_artifact_ref)
+
+
+def test_referenced_fixture_refuses_matching_non_utf8_artifact(
+    fixture_artifact_ref: dict[str, object],
+) -> None:
+    raw = b"\xff"
+    fixture_artifact_ref["sha256"] = hashlib.sha256(raw).hexdigest()
+    with pytest.raises(InvalidIsolationFixture, match="fixture artifact encoding"):
+        parse_referenced_fixture(raw, fixture_artifact_ref)
 
 
 def _receipts(

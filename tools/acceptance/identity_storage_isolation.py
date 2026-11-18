@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from collections import Counter
@@ -403,6 +404,26 @@ def _valid_artifact_ref(value: object, registry: Registry[Any]) -> bool:
         and _strict_sha256(value.get("sha256"))
         and valid_instance(_COMMON + "ArtifactRef", value, registry)
     )
+
+
+def parse_referenced_fixture(raw: bytes, approved_ref: object) -> IsolationFixture:
+    """Check resolved fixture bytes against an independently supplied ArtifactRef.
+
+    The caller must authenticate the approved reference and authorize artifact access.
+    Matching fixture bytes establish integrity for this preflight only.
+    """
+    if not isinstance(approved_ref, Mapping):
+        raise InvalidIsolationFixture("Invalid ISO-01 fixture artifact reference")
+    reference = dict(approved_ref)
+    if not _valid_artifact_ref(reference, schema_registry()):
+        raise InvalidIsolationFixture("Invalid ISO-01 fixture artifact reference")
+    if hashlib.sha256(raw).hexdigest() != reference["sha256"]:
+        raise InvalidIsolationFixture("ISO-01 fixture artifact digest mismatch")
+    try:
+        fixture_text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        raise InvalidIsolationFixture("Invalid ISO-01 fixture artifact encoding") from None
+    return parse_fixture(fixture_text)
 
 
 def _complete_receipt(
