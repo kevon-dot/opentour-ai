@@ -190,9 +190,12 @@
     ],
     "apps/web/tests/workspace-lifecycle.browser.spec.ts": [
       "OPE-298"
+    ],
+    "apps/web/features/workspace/customer-shell.visual.spec.ts": [
+      "OPE-239"
     ]
   },
-  "distinct_paths": 63,
+  "distinct_paths": 64,
   "issue_count": 60,
   "affected_old_wrapper_paths": {
     "apps/web/tests/coverage/ot-p22-c01.spec.ts": [
