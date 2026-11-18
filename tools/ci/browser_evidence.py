@@ -12,6 +12,7 @@ from typing import Any
 from tools.public_content_check import MAX_FILE_BYTES, digest, inspect_bytes, load_policy
 
 PRESENTATION_TARGETS = {
+    "apps/web/components/foundation/tokens/icon-button.visual.spec.ts": "OPE-311",
     "apps/web/features/workspace/customer-shell.visual.spec.ts": "OPE-307",
     "apps/web/components/foundation/data-display/chart-evidence.visual.spec.ts": "OPE-303",
     "apps/web/components/foundation/data-display/table-populations.visual.spec.ts": "OPE-305",
@@ -166,6 +167,15 @@ def verify_scoped_presentation(root: Path, value: dict[str, Any]) -> None:
             or {(int(case[1]), int(case[2]), case[3]) for case in cases if case} != expected
         ):
             raise ValueError("Metric presentation capture inventory mismatch")
+    elif value["issue_key"] == "OPE-311":
+        expected_icons = {
+            f"icon-button-{width}-{scale}-{state}.png"
+            for width in widths
+            for scale in (100, 200)
+            for state in ("default", "hover", "focus", "disabled", "loading")
+        }
+        if len(images) != len(expected_icons) or {Path(path).name for path in images} != expected_icons:
+            raise ValueError("Icon button capture inventory mismatch")
     elif value["issue_key"] == "OPE-303":
         expected_charts = {
             f"charts-{width}-{scale}.png" for width in widths for scale in (100, 200)

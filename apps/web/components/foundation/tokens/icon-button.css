@@ -1,0 +1,40 @@
+@import '../../../styles/product-tokens.css';
+
+.ot-icon-button {
+  appearance: none;
+  display: inline-grid;
+  place-items: center;
+  box-sizing: border-box;
+  flex: 0 0 auto;
+  vertical-align: middle;
+  inline-size: 44px;
+  block-size: 44px;
+  padding: 0;
+  border: 1px solid var(--ot-border-control);
+  border-radius: var(--ot-radius-8);
+  background: var(--ot-surface-base);
+  color: var(--ot-text-primary);
+  cursor: pointer;
+}
+.ot-icon-button:hover:enabled:not([aria-busy="true"]):not(:focus-visible) { background: var(--ot-action-subtle); }
+.ot-icon-button:focus-visible { outline: 2px solid var(--ot-action-primary); outline-offset: 2px; }
+.ot-icon-button:disabled { color: var(--ot-text-muted); cursor: default; }
+.ot-icon-button[aria-busy="true"] { color: var(--ot-text-secondary); cursor: progress; }
+.ot-icon-button-art {
+  inline-size: var(--ot-space-20);
+  block-size: var(--ot-space-20);
+  background-color: currentColor;
+  mask: var(--ot-icon-art, url('./assets/icon-button-close.svg')) center / contain no-repeat;
+}
+.ot-icon-button-busy {
+  min-inline-size: var(--ot-space-20);
+  text-align: center;
+  font: var(--ot-type-label-weight) var(--ot-type-label-size)/var(--ot-type-label-line) Geist, sans-serif;
+}
+@media (forced-colors: active) {
+  .ot-icon-button { color: ButtonText; background: ButtonFace; border-color: ButtonText; }
+  .ot-icon-button:disabled { color: GrayText; border-color: GrayText; }
+  .ot-icon-button:focus-visible { outline-color: Highlight; }
+  .ot-icon-button-art { forced-color-adjust: none; background-color: ButtonText; }
+  .ot-icon-button:disabled .ot-icon-button-art { background-color: GrayText; }
+}
