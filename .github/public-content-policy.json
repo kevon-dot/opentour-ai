@@ -73,7 +73,23 @@
     "apps/web/tests/fixtures/presentation/baselines/darwin/status-320-100.png": "ac45f13079ef6679d5248abb5e566c5118ee083c608759ed2d31b2fffa060563",
     "apps/web/tests/fixtures/presentation/baselines/darwin/status-320-200.png": "98d9a96a0c622d127c4ba608f791f1ec6113f80bccb4f0f59d69852729cf66a8",
     "apps/web/tests/fixtures/presentation/baselines/darwin/status-768-100.png": "3cb0dfeaa7d3b44670ca8121bd094f8e1c9ad5a48a744049210f5287e81195d9",
-    "apps/web/tests/fixtures/presentation/baselines/darwin/status-768-200.png": "e23c30b51ec9a2c69286ca30d58ffd6e27048d5f111ade7dd628d7e64c97db05"
+    "apps/web/tests/fixtures/presentation/baselines/darwin/status-768-200.png": "e23c30b51ec9a2c69286ca30d58ffd6e27048d5f111ade7dd628d7e64c97db05",
+    "apps/web/components/foundation/tokens/testing/baselines/darwin-customer-controlled/overlay-dialog-1280.png": "54da0313a0c067883273fba4a47c56e3522c4b80759c6783e80394074b40686d",
+    "apps/web/components/foundation/tokens/testing/baselines/darwin-customer-controlled/overlay-dialog-1440.png": "721300fd847db99a51712bc045b5b8001b4f87b299bfa8080ca5ed0ab4489964",
+    "apps/web/components/foundation/tokens/testing/baselines/darwin-customer-controlled/overlay-dialog-320.png": "d2f8970d1693c031bfea73541b319db65e7aed445fa9073383237cf26abc3b47",
+    "apps/web/components/foundation/tokens/testing/baselines/darwin-customer-controlled/overlay-dialog-768.png": "328ec130d589d1dd57df91bcf74d68b756bf782707da8c771c405d314f520538",
+    "apps/web/components/foundation/tokens/testing/baselines/darwin-customer-controlled/overlay-drawer-1280.png": "16ad1f63ef3798c33c92b79572c994f47a51aa8329e61bb24173ba121f547878",
+    "apps/web/components/foundation/tokens/testing/baselines/darwin-customer-controlled/overlay-drawer-1440.png": "5b783d5e50e925cc06775186fd9911def448bdef058c7f434801efa35a173808",
+    "apps/web/components/foundation/tokens/testing/baselines/darwin-customer-controlled/overlay-drawer-320.png": "a862b2caef76af4443ea212e1d208272f6b3062c46674ae9c69cdca8f7e91a6e",
+    "apps/web/components/foundation/tokens/testing/baselines/darwin-customer-controlled/overlay-drawer-768.png": "ca9c9af2cf1b23a6de39bfaee4a488d3e73914402ad45f8cb3c0bf90de9b34fc",
+    "apps/web/components/foundation/tokens/testing/baselines/darwin-opentour-managed/overlay-dialog-1280.png": "b9239a3aea1ae6e3fb195c636ccbc4c8507bd759a2787840f9050b2d217c737b",
+    "apps/web/components/foundation/tokens/testing/baselines/darwin-opentour-managed/overlay-dialog-1440.png": "43a11d2058b04be4e96abeb32b0d48d870a388a403951d5467a96374390e2f85",
+    "apps/web/components/foundation/tokens/testing/baselines/darwin-opentour-managed/overlay-dialog-320.png": "d2f8970d1693c031bfea73541b319db65e7aed445fa9073383237cf26abc3b47",
+    "apps/web/components/foundation/tokens/testing/baselines/darwin-opentour-managed/overlay-dialog-768.png": "6adeaaf6df7eaa4f0039ae62e2a0aab82f3e59fce21755f763286c9bd8dce8dc",
+    "apps/web/components/foundation/tokens/testing/baselines/darwin-opentour-managed/overlay-drawer-1280.png": "0fee9ca5a0bf2b24bc79c68e49a92e644956e4bca44a8cb1f6f86e30b61a0327",
+    "apps/web/components/foundation/tokens/testing/baselines/darwin-opentour-managed/overlay-drawer-1440.png": "acf3378883789be07e1c17d5904dcfdc89e2fe4bbbdbd882a3b3a70bbcf8554e",
+    "apps/web/components/foundation/tokens/testing/baselines/darwin-opentour-managed/overlay-drawer-320.png": "a862b2caef76af4443ea212e1d208272f6b3062c46674ae9c69cdca8f7e91a6e",
+    "apps/web/components/foundation/tokens/testing/baselines/darwin-opentour-managed/overlay-drawer-768.png": "e2b42d6d0b79eed47f8ab6f95ca7a9a784c5217821ae1d3bd3226dcdb94cfd89"
   },
   "approved_synthetic_matches": {
     "tests/contract/test_bootstrap.py": [
