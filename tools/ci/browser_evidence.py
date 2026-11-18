@@ -168,8 +168,11 @@ def verify_scoped_presentation(root: Path, value: dict[str, Any]) -> None:
         ):
             raise ValueError("Metric presentation capture inventory mismatch")
     elif value["issue_key"] == "OPE-315":
-        expected_impact = {f"impact-{width}-{scale}.png" for width in widths for scale in (100, 200)}
-        if len(images) != len(expected_impact) or {Path(name).name for name in images} != expected_impact:
+        expected_impact = {
+            f"impact-{width}-{scale}.png" for width in widths for scale in (100, 200)
+        }
+        actual_impact = {Path(name).name for name in images}
+        if len(images) != len(expected_impact) or actual_impact != expected_impact:
             raise ValueError("Cancellation impact capture inventory mismatch")
     elif value["issue_key"] == "OPE-303":
         expected_charts = {

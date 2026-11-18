@@ -32,6 +32,8 @@
   font: var(--ot-type-label-weight) var(--ot-type-label-size)/var(--ot-type-label-line) Geist, sans-serif;
 }
 .ot-impact-scroll tr > :last-child { text-align: end; }
+/* Native text starts 13px into each cell and spans the cell width minus 24px. */
+.ot-impact-scroll .ot-table-cell-frame { padding-inline-end: calc(var(--ot-space-12) - 2px); }
 @media (forced-colors: active) {
   .ot-impact-scroll .ot-table-cell { border-color: CanvasText; }
   .ot-impact-scroll:focus-visible { outline-color: Highlight; }
