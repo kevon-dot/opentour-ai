@@ -13,11 +13,14 @@ const styles = `
 .ot-population .controls { display:flex; flex-wrap:wrap; gap:var(--ot-space-12) }
 .ot-population .field { font:var(--ot-type-label-weight) var(--ot-type-label-size)/var(--ot-type-label-line) Geist,sans-serif; display:grid; gap:var(--ot-space-8); background:var(--ot-surface-base); border:1px solid var(--ot-border-control); border-radius:var(--ot-radius-8); padding:var(--ot-space-16) }
 .ot-population .field :is(select,input) { min-width:0; max-width:100%; background:transparent; padding:0; font:inherit; color:inherit; border:0 }
+.ot-population .field select { appearance:none; cursor:pointer }
+.ot-population .field select:focus-visible { outline:2px solid var(--ot-action-primary); outline-offset:2px }
+@media(forced-colors:active){.ot-population .field select {appearance:auto}}
 .ot-population small { font:var(--ot-type-small-size)/var(--ot-type-small-line) Geist,sans-serif; color:var(--ot-text-secondary) }
 .ot-population > h2 + p {color:var(--ot-text-secondary)}
 .ot-population .records {display:grid; min-width:0; gap:var(--ot-space-8)}
 .ot-population .scroll { min-width:0; overflow-x:auto }
-.ot-population table { font:inherit; table-layout:fixed; border-collapse:collapse; width:100%; min-width:640px }
+.ot-population table { font:inherit; table-layout:fixed; border-collapse:separate; border-spacing:0; width:100%; min-width:640px }
 .ot-population tr {height:44px}
 .ot-population :is(td,th) { text-align:start; padding:0 }
 .ot-population .ot-table-cell-frame { width:auto; min-width:0; height:100%; box-sizing:border-box }

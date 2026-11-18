@@ -81,6 +81,12 @@ for (const width of [320,768,1280,1440]) for (const scale of [1,2]) {
         if (scale===2) expect(bounds!.height).toBeGreaterThan(40);
       }
       await expect(table.getByRole('columnheader',{name:'Observed time ↓'})).toHaveAttribute('aria-sort','descending');
+      if(scale===1) {
+        const rows=table.getByRole('row');
+        expect((await rows.first().boundingBox())!.height).toBe(46);
+        expect((await table.boundingBox())!.height).toBe(46 + (await rows.count()-1)*44);
+      }
+      await expect(page.getByRole('combobox')).toHaveCSS('appearance','none');
       if(state==='query') {
         await expect(page.getByText('128 selected across this query')).toBeVisible();
         await expect(page.getByRole('checkbox',{name:'Select Receipt 001'})).not.toBeChecked();
