@@ -199,10 +199,13 @@
     ],
     "apps/web/components/foundation/tokens/icon-button.visual.spec.ts": [
       "OPE-311"
+    ],
+    "apps/web/components/foundation/tokens/status-icon.visual.spec.ts": [
+      "OPE-312"
     ]
   },
-  "distinct_paths": 66,
-  "issue_count": 62,
+  "distinct_paths": 67,
+  "issue_count": 63,
   "affected_old_wrapper_paths": {
     "apps/web/tests/coverage/ot-p22-c01.spec.ts": [
       "OPE-232"
