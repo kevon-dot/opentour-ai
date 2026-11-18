@@ -15,6 +15,8 @@ from opentour_control.auth.browser_state import BrowserAuthState
 from opentour_control.auth.session import SessionService
 from opentour_control.tenants.session_selection import PostgresSessionSelection
 
+from tools.schema_validate import schema_registry, valid_instance
+
 CONTEXT = "/v1/session/context"
 SELECTION = "/v1/session:select-organization"
 
@@ -77,6 +79,8 @@ assert callable(create_control_auth_runtime)
 def test_runtime_mounts_canonical_routers_and_refuses_missing_state(
     configured, identity, monkeypatch
 ):
+    registry = schema_registry()
+    error_contract = "urn:opentour:common-contract:1.0#/$defs/Error"
     fetch = Mock(return_value=identity.keys)
     provider_request = Mock(side_effect=AssertionError("Generated runtime must stay offline"))
     monkeypatch.setattr(workos_provider, "fetch_jwks", fetch)
@@ -107,6 +111,7 @@ def test_runtime_mounts_canonical_routers_and_refuses_missing_state(
             )
             for response in (missing, refused):
                 assert (response.status_code, response.json()["code"]) == (401, "SESSION_INVALID")
+                assert valid_instance(error_contract, response.json(), registry)
             fetch.assert_not_called()
             now = int(datetime.now(UTC).timestamp())
             token = identity.token(iat=now - 10, auth_time=now - 20, exp=now + 120)
@@ -121,6 +126,7 @@ def test_runtime_mounts_canonical_routers_and_refuses_missing_state(
                 503,
                 "IDENTITY_STATE_UNAVAILABLE",
             )
+            assert valid_instance(error_contract, unavailable.json(), registry)
             assert unavailable.headers["cache-control"] == "no-store"
             assert "generated-private-identity-detail" not in unavailable.text
             assert token not in unavailable.text

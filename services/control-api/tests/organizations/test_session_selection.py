@@ -38,6 +38,7 @@ from opentour_control.tenants.session_selection import (
 from psycopg.types.json import Jsonb
 
 from tools.fixtures.postgres import DisposablePostgres
+from tools.schema_validate import schema_registry, valid_instance
 
 ROOT = Path(__file__).resolve().parents[4]
 ISSUER = "https://identity.example.invalid"
@@ -310,6 +311,9 @@ def test_commit_mounts_active_context_and_fences_other_binding(durable):
 
 
 def test_composed_control_auth_routes_share_the_durable_session(durable, monkeypatch):
+    registry = schema_registry()
+    context_contract = "urn:opentour:auth-context:1.0#/$defs/SessionContextView"
+    error_contract = "urn:opentour:common-contract:1.0#/$defs/Error"
     subject = durable.identity.actor["subject"]
     org = durable.orgs["a"]
     key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
@@ -379,7 +383,15 @@ def test_composed_control_auth_routes_share_the_durable_session(durable, monkeyp
         selection_path = "/v1/session:select-organization"
         body = {"organization_id": org.local, "expected_session_generation": 0}
         with TestClient(app) as client:
-            assert client.get(context_path, headers=headers).json()["state"] == "unselected"
+            malformed = client.post(
+                selection_path, json={**body, "unexpected": "generated"}, headers=headers
+            )
+            assert (malformed.status_code, malformed.json()["code"]) == (422, "SCHEMA_INVALID")
+            assert valid_instance(error_contract, malformed.json(), registry)
+            unselected = client.get(context_path, headers=headers)
+            assert (unselected.status_code, unselected.json()["state"]) == (200, "unselected")
+            assert unselected.json()["session_generation"] == 0
+            assert valid_instance(context_contract, unselected.json(), registry)
             denied = client.post(
                 selection_path,
                 json=body,
@@ -389,9 +401,11 @@ def test_composed_control_auth_routes_share_the_durable_session(durable, monkeyp
                 409,
                 "CONTEXT_RECONCILIATION_REQUIRED",
             )
+            assert valid_instance(error_contract, denied.json(), registry)
             selected = client.post(selection_path, json=body, headers=headers)
             assert selected.status_code == 200
             receipt = selected.json()
+            assert valid_instance(context_contract, receipt, registry)
             assert receipt == {
                 "state": "active",
                 "organization_id": org.local,
@@ -399,12 +413,18 @@ def test_composed_control_auth_routes_share_the_durable_session(durable, monkeyp
                 "session_generation": 1,
                 "request_id": receipt["request_id"],
             }
-            current = client.get(context_path, headers=headers).json()
-            assert {**current, "request_id": receipt["request_id"]} == receipt
-            assert client.post(selection_path, json=body, headers=headers).json() == receipt
+            current = client.get(context_path, headers=headers)
+            assert current.status_code == 200
+            assert valid_instance(context_contract, current.json(), registry)
+            assert {**current.json(), "request_id": receipt["request_id"]} == receipt
+            replay = client.post(selection_path, json=body, headers=headers)
+            assert replay.status_code == 200
+            assert valid_instance(context_contract, replay.json(), registry)
+            assert replay.json() == receipt
             assert runtime.browser_state.end(browser.handle, 1).generation == 2
             ended = client.get(context_path, headers=headers)
             assert (ended.status_code, ended.json()["code"]) == (401, "SESSION_ENDED")
+            assert valid_instance(error_contract, ended.json(), registry)
         assert fetched == [ISSUER]
     finally:
         assert runtime.close()
