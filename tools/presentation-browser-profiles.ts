@@ -1,5 +1,9 @@
 /** Generated local presentation fixtures. Each executable target has exactly one child owner. */
 export const presentationSuites = new Map([
+  ['apps/web/components/foundation/tokens/status-icon.visual.spec.ts', {
+    owner: 'OPE-312', parent: 'OPE-253', guide: '162:4584', minimumTests: 22,
+    specHash: '74f2f3483740166596a58ed99a683cc67f060ad4bf9abd4bdf14c01436b65273',
+  }],
   ['apps/web/components/foundation/data-display/chart-evidence.visual.spec.ts', {
     owner: 'OPE-303', parent: 'OPE-285', guide: '328:285', minimumTests: 8,
     specHash: 'e62f0ec3573923b56edb40e418f0d352d3e1ba69c4058edc1f6c9074b0a6bfd4',
