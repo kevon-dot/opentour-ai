@@ -263,6 +263,10 @@ async function systemColors(page: Page) {
   });
 }
 const channels = (value: string) => value.match(/\d+/g)!.slice(0, 3).map(Number);
+const composite = (foreground: string, background: string) => {
+  const values = foreground.match(/[\d.]+/g)!.map(Number), alpha = values[3] ?? 1;
+  return channels(background).map((channel, index) => Math.round(values[index] * alpha + channel * (1 - alpha)));
+};
 
 for (const mode of fixtures.modes) {
   for (const viewport of fixtures.viewports) for (const scale of fixtures.scales) {
@@ -435,7 +439,7 @@ for (const mode of fixtures.modes) {
       accessible_name: setting.label, captures: [image] });
   });
 
-  test(`${mode} only a parent rerender changes the value, and unchanged rerenders add no request or mutation`, async ({ page, baseURL }, info) => {
+  test(`${mode} only a parent rerender changes the value, and unchanged rerenders preserve nodes and text without requests`, async ({ page, baseURL }, info) => {
     await open(page, baseURL, mode);
     const { selection, requestOnly } = interaction, held = control(page, requestOnly.key), committed = control(page, selection.key);
     await reveal(card(page, selection.key));
@@ -465,10 +469,16 @@ for (const mode of fixtures.modes) {
     expect(new Set(allIds).size).toBe(allIds.length);
     expect(before.every(item => item.resolved)).toBe(true);
     await page.evaluate(() => {
-      const probe = { mutations: 0 };
+      const nodes = [...document.querySelectorAll('.ot-selection')];
+      const probe = { contentMutations: 0, attributeWrites: 0, nodes, markup: nodes.map(node => node.outerHTML) };
       (window as typeof window & { selectionProbe: typeof probe }).selectionProbe = probe;
-      const observer = new MutationObserver(records => { probe.mutations += records.length; });
-      for (const node of document.querySelectorAll('.ot-selection')) observer.observe(node, { childList: true, attributes: true, characterData: true, subtree: true });
+      // React may write an unchanged native input attribute. Record those writes separately;
+      // node identity, final markup and text mutations prove the rendered value stays unchanged.
+      const observer = new MutationObserver(records => {
+        probe.attributeWrites += records.filter(record => record.type === 'attributes').length;
+        probe.contentMutations += records.filter(record => record.type !== 'attributes').length;
+      });
+      for (const node of nodes) observer.observe(node, { childList: true, attributes: true, characterData: true, subtree: true });
     });
     const states = await measurements(page);
     for (let index = 1; index <= 5; index++) {
@@ -479,11 +489,16 @@ for (const mode of fixtures.modes) {
     await expectRequests(page, log);
     expect(await identifiers()).toEqual(before);
     expect(await measurements(page)).toEqual(states);
-    const result = await page.evaluate(() => ({
-      mutations: (window as typeof window & { selectionProbe: { mutations: number } }).selectionProbe.mutations,
-      announcements: document.querySelectorAll('[role="status"], [role="alert"], [role="log"], [aria-live], output').length,
-      localKeys: Object.keys(localStorage), sessionKeys: Object.keys(sessionStorage) }));
-    expect(result).toEqual({ mutations: 0, announcements: 0, localKeys: [], sessionKeys: [] });
+    const result = await page.evaluate(() => {
+      const probe = (window as typeof window & { selectionProbe: { contentMutations: number; attributeWrites: number; nodes: Element[]; markup: string[] } }).selectionProbe;
+      const nodes = [...document.querySelectorAll('.ot-selection')];
+      return { contentMutations: probe.contentMutations, attributeWrites: probe.attributeWrites,
+        nodesUnchanged: nodes.length === probe.nodes.length && nodes.every((node, index) => node === probe.nodes[index]),
+        markupUnchanged: nodes.every((node, index) => node.outerHTML === probe.markup[index]),
+        announcements: document.querySelectorAll('[role="status"], [role="alert"], [role="log"], [aria-live], output').length,
+        localKeys: Object.keys(localStorage), sessionKeys: Object.keys(sessionStorage) };
+    });
+    expect(result).toMatchObject({ contentMutations: 0, nodesUnchanged: true, markupUnchanged: true, announcements: 0, localKeys: [], sessionKeys: [] });
     const image = await capture(page, info, mode, desktop, 100, 'controlled-rerender', region(page, 'interaction'));
     await record(info, 'selection-controls-controlled-rerender.json', { mode, requests: log, unchanged_rerenders: 5, result,
       identifiers: before, requests_rejected: rejected.get(page), captures: [image] });
@@ -685,14 +700,16 @@ for (const mode of fixtures.modes) {
     const captures = [await capture(page, info, mode, desktop, 100, 'forced-colors')];
     await reveal(card(page, 'switch-focus'));
     await keyboardFocus(page, control(page, 'switch-focus'));
+    // System Highlight can change when keyboard focus activates the page.
+    const focusedSystem = await systemColors(page);
     const focused = (await measurements(page)).find(item => item.specimen === 'switch-focus')!;
-    expect(focused.outline).toEqual(['solid', '2px', system.Highlight, '2px']);
+    expect(focused.outline).toEqual(['solid', '2px', focusedSystem.Highlight, '2px']);
     expect(focused.card).toEqual(before.find(item => item.specimen === 'switch-focus')!.card);
-    const ring = await ringSamples(page, focused.card), canvas = channels(system.Canvas), highlight = channels(system.Highlight);
+    const ring = await ringSamples(page, focused.card), canvas = channels(focusedSystem.Canvas), highlight = composite(focusedSystem.Highlight, focusedSystem.Canvas);
     for (const side of ['top', 'bottom', 'left', 'right'] as const) expect(ring[side]).toEqual([canvas, canvas, highlight, highlight, canvas]);
-    expect(ring.border).toEqual(channels(system.CanvasText));
+    expect(ring.border).toEqual(channels(focusedSystem.CanvasText));
     captures.push(await capture(page, info, mode, desktop, 100, 'forced-colors-focus', page.locator('[data-specimen="switch-focus"]')));
-    await record(info, 'selection-controls-forced-colors.json', { mode, system, before, after, artwork: artAfter, focus: { outline: focused.outline, ring },
+    await record(info, 'selection-controls-forced-colors.json', { mode, system, before, after, artwork: artAfter, focus: { system: focusedSystem, outline: focused.outline, ring },
       switch_artwork: 'Unedited image exports keep authored colours; state shape is the knob position.', captures });
   });
 
