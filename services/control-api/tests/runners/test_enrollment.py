@@ -14,10 +14,15 @@ import pytest
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import ec, utils
 from opentour_control.runners.enrollment import (
+    MAX_STS_RESPONSE_BYTES,
+    EnrollmentVerificationUnavailable,
     InstalledCell,
     InvalidEnrollmentProof,
     IssuedChallenge,
+    STSIdentityRequest,
+    STSIdentityResponse,
     validate_enrollment_proof,
+    verify_enrollment_identity,
 )
 
 NOW = datetime(2026, 11, 18, 10, 0, 0, tzinfo=UTC)
@@ -259,3 +264,199 @@ def test_request_must_not_be_forwarded_at_aws_signature_expiry(installed, challe
             challenge=challenge,
             now=NOW + timedelta(seconds=60),
         )
+
+
+AWS_ROLE_ID = "AROAEXISTINGROLE"
+AWS_STS_SESSION = "fixture-role-session"
+AWS_ASSUMED_ROLE_ARN = f"arn:aws:sts::000000000001:assumed-role/fixture-role/{AWS_STS_SESSION}"
+
+
+def aws_sts_xml(
+    *,
+    account: str = "000000000001",
+    arn: str = AWS_ASSUMED_ROLE_ARN,
+    user_id: str = f"{AWS_ROLE_ID}:{AWS_STS_SESSION}",
+) -> bytes:
+    return f"""<GetCallerIdentityResponse xmlns="https://sts.amazonaws.com/doc/2011-06-15/">
+      <GetCallerIdentityResult>
+        <Arn>{arn}</Arn><UserId>{user_id}</UserId><Account>{account}</Account>
+      </GetCallerIdentityResult>
+      <ResponseMetadata><RequestId>01234567-89ab-cdef-0123-456789abcdef</RequestId></ResponseMetadata>
+    </GetCallerIdentityResponse>""".encode()
+
+
+class FixtureSTSExchange:
+    def __init__(
+        self,
+        body: bytes = b"",
+        *,
+        status: int = 200,
+        final_url: str | None = None,
+        failure: Exception | None = None,
+    ) -> None:
+        self.body = body
+        self.status = status
+        self.final_url = final_url
+        self.failure = failure
+        self.calls: list[STSIdentityRequest] = []
+
+    def get_caller_identity(
+        self, validated: STSIdentityRequest, *, max_response_bytes: int
+    ) -> STSIdentityResponse:
+        assert max_response_bytes == MAX_STS_RESPONSE_BYTES
+        self.calls.append(validated)
+        if self.failure is not None:
+            raise self.failure
+        return STSIdentityResponse(self.status, self.final_url or validated.url, self.body)
+
+
+@pytest.mark.parametrize("pinned_role", [None, AWS_ROLE_ID])
+def test_sts_verification_binds_role_id_separately_from_session(installed, challenge, pinned_role):
+    installed = replace(installed, expected_iam_role_id=pinned_role)
+    challenge = replace(challenge, installed=installed)
+    proof = proof_for(installed, challenge)
+    exchange = FixtureSTSExchange(aws_sts_xml())
+    evidence = verify_enrollment_identity(
+        fixture_json(proof),
+        installed=installed,
+        challenge=challenge,
+        exchange=exchange,
+        clock=lambda: NOW,
+    )
+    assert len(exchange.calls) == 1
+    sent = exchange.calls[0]
+    assert sent.url == proof["signed_sts_request"]["url"]
+    assert sent.binding_header == proof["signed_sts_request"]["binding_header"]
+    assert sent.expires_at == NOW + timedelta(seconds=60)
+    assert "sentinel-token" not in repr(sent) and sent.binding_header not in repr(sent)
+    assert evidence.challenge_id == challenge.id and evidence.installed is installed
+    assert evidence.iam_role_id == AWS_ROLE_ID and AWS_STS_SESSION not in repr(evidence)
+    assert evidence.runner_jwk_thumbprint == proof["transcript"]["runner_jwk_thumbprint"]
+    assert evidence.expires_at == sent.expires_at
+    assert evidence.verified_at == NOW
+
+
+@pytest.mark.parametrize(
+    "observed",
+    [
+        {"account": "000000000002"},
+        {"arn": "arn:aws:iam::000000000001:root"},
+        {"arn": "arn:aws:iam::000000000001:user/fixture-role"},
+        {"arn": "arn:aws:sts::000000000001:federated-user/fixture-role"},
+        {"arn": AWS_ASSUMED_ROLE_ARN.replace("000000000001", "000000000002")},
+        {"arn": AWS_ASSUMED_ROLE_ARN.replace("/fixture-role/", "/Fixture-role/")},
+        {"arn": AWS_ASSUMED_ROLE_ARN.replace("/fixture-role/", "/cell/fixture-role/")},
+        {"user_id": AWS_ROLE_ID},
+        {"user_id": AWS_ROLE_ID + ":unrelated-session"},
+        {"user_id": AWS_ROLE_ID + ":substitution:" + AWS_STS_SESSION},
+        {"user_id": "short:" + AWS_STS_SESSION},
+    ],
+)
+def test_sts_response_must_identify_installed_assumed_role(installed, challenge, observed):
+    exchange = FixtureSTSExchange(aws_sts_xml(**observed))
+    with pytest.raises(InvalidEnrollmentProof, match="^ENROLLMENT_PROOF_INVALID$"):
+        verify_enrollment_identity(
+            fixture_json(proof_for(installed, challenge)),
+            installed=installed,
+            challenge=challenge,
+            exchange=exchange,
+            clock=lambda: NOW,
+        )
+    assert len(exchange.calls) == 1
+
+
+def test_enr01_same_arn_recreated_with_different_role_id_requires_recovery(installed, challenge):
+    installed = replace(installed, expected_iam_role_id=AWS_ROLE_ID)
+    challenge = replace(challenge, installed=installed)
+    exchange = FixtureSTSExchange(aws_sts_xml(user_id=f"AROARECREATEDROLE:{AWS_STS_SESSION}"))
+    with pytest.raises(InvalidEnrollmentProof, match="^ENROLLMENT_PROOF_INVALID$"):
+        verify_enrollment_identity(
+            fixture_json(proof_for(installed, challenge)),
+            installed=installed,
+            challenge=challenge,
+            exchange=exchange,
+            clock=lambda: NOW,
+        )
+    assert len(exchange.calls) == 1
+
+
+@pytest.mark.parametrize(
+    "kind", ["bad-runner-signature", "unqualified-host", "invalid-registered-role"]
+)
+def test_rejects_unverified_evidence_before_invoking_sts(installed, challenge, kind):
+    if kind == "invalid-registered-role":
+        installed = replace(installed, iam_role_arn=installed.iam_role_arn + "!")
+        challenge = replace(challenge, installed=installed)
+    proof = proof_for(installed, challenge)
+    if kind == "bad-runner-signature":
+        proof["runner_signature"] += "\n"
+    if kind == "unqualified-host":
+        proof["signed_sts_request"]["url"] = proof["signed_sts_request"]["url"].replace(
+            "sts.us-east-1.amazonaws.com", "sts.us-east-2.amazonaws.com"
+        )
+    exchange = FixtureSTSExchange(aws_sts_xml())
+    with pytest.raises(InvalidEnrollmentProof, match="^ENROLLMENT_PROOF_INVALID$"):
+        verify_enrollment_identity(
+            fixture_json(proof),
+            installed=installed,
+            challenge=challenge,
+            exchange=exchange,
+            clock=lambda: NOW,
+        )
+    assert not exchange.calls
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"status": 403},
+        {"status": 302},
+        {"final_url": "https://example.test"},
+        {"body": b" " * (MAX_STS_RESPONSE_BYTES + 1)},
+        {"body": b""},
+        {"body": aws_sts_xml().replace(b"https://sts.amazonaws.com", b"https://foreign.example")},
+        {
+            "body": aws_sts_xml().replace(
+                b"</Account>", b"</Account><Account>000000000001</Account>"
+            )
+        },
+        {"body": aws_sts_xml().replace(b"</Arn>", b"<Extra/></Arn>")},
+        {"body": aws_sts_xml().replace(b"</ResponseMetadata>", b"</WrongTag>")},
+        {"body": b"<!DOCTYPE x [<!ENTITY x 'generated'>]>" + aws_sts_xml()},
+        {"body": b"<GetCallerIdentityResponse>\xff</GetCallerIdentityResponse>"},
+        {"failure": TimeoutError("sentinel-token")},
+        {"failure": RuntimeError("sentinel-token")},
+    ],
+)
+def test_refuses_unavailable_malformed_or_redirected_sts_without_retry(
+    installed, challenge, change
+):
+    exchange = FixtureSTSExchange(**({"body": aws_sts_xml()} | change))
+    with pytest.raises(
+        EnrollmentVerificationUnavailable, match="^ENROLLMENT_VERIFICATION_UNAVAILABLE$"
+    ):
+        verify_enrollment_identity(
+            fixture_json(proof_for(installed, challenge)),
+            installed=installed,
+            challenge=challenge,
+            exchange=exchange,
+            clock=lambda: NOW,
+        )
+    assert len(exchange.calls) == 1
+
+
+@pytest.mark.parametrize("seconds", [-1, 60, 75])
+def test_provider_result_expires_while_waiting_for_response(installed, challenge, seconds):
+    times = iter((NOW, NOW + timedelta(seconds=seconds)))
+    exchange = FixtureSTSExchange(aws_sts_xml())
+    with pytest.raises(
+        EnrollmentVerificationUnavailable, match="^ENROLLMENT_VERIFICATION_UNAVAILABLE$"
+    ):
+        verify_enrollment_identity(
+            fixture_json(proof_for(installed, challenge)),
+            installed=installed,
+            challenge=challenge,
+            exchange=exchange,
+            clock=lambda: next(times),
+        )
+    assert len(exchange.calls) == 1

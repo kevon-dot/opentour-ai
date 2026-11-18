@@ -7,10 +7,12 @@ import hashlib
 import hmac
 import json
 import re
-from dataclasses import dataclass
+from collections.abc import Callable
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
-from typing import Any, Literal
+from typing import Any, Literal, Protocol
 from urllib.parse import parse_qsl, urlsplit
+from xml.etree import ElementTree
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import hashes
@@ -18,6 +20,10 @@ from cryptography.hazmat.primitives.asymmetric import ec
 from opentour_journal.crypto import canonical, raw_to_der
 from opentour_journal.models import JournalError
 
+MAX_STS_RESPONSE_BYTES = 16 * 1024
+STS_NAMESPACE = "{https://sts.amazonaws.com/doc/2011-06-15/}"
+IAM_ROLE_NAME = r"[A-Za-z0-9_+=,.@-]{1,64}"
+STS_ROLE_SESSION_NAME = r"[A-Za-z0-9_+=,.@-]{2,64}"
 QUALIFIED_STS_HOSTS = {"us-east-1": "sts.us-east-1.amazonaws.com"}
 PROOF_FIELDS = {"transcript", "public_jwk", "signed_sts_request", "runner_signature"}
 STS_QUERY_FIELDS = {
@@ -35,6 +41,39 @@ STS_QUERY_FIELDS = {
 
 class InvalidEnrollmentProof(ValueError):
     """The submitted proof or its independently supplied binding cannot be admitted."""
+
+
+class EnrollmentVerificationUnavailable(ValueError):
+    """Provider evidence cannot establish a current enrollment identity."""
+
+
+@dataclass(frozen=True)
+class STSIdentityRequest:
+    """Created only by proof preflight and sent unchanged by the trusted exchange."""
+
+    url: str = field(repr=False)
+    binding_header: str = field(repr=False)
+    expires_at: datetime
+
+
+@dataclass(frozen=True)
+class STSIdentityResponse:
+    status: int
+    response_url: str = field(repr=False)
+    body: bytes = field(repr=False)
+
+
+class STSIdentityExchange(Protocol):
+    def get_caller_identity(
+        self, validated: STSIdentityRequest, *, max_response_bytes: int
+    ) -> STSIdentityResponse:
+        """Send one verified HTTPS GET with x-opentour-enrollment and no extra credentials.
+
+        Verify the exact TLS hostname, send the unmodified URL and binding, bound the
+        response while reading, and refuse redirects, proxies and retries. The adapter
+        owns timeout and must honor the request expiration as its latest deadline.
+        """
+        ...
 
 
 @dataclass(frozen=True)
@@ -59,6 +98,18 @@ class IssuedChallenge:
     id: str
     installed: InstalledCell
     nonce_sha256: str
+    expires_at: datetime
+
+
+@dataclass(frozen=True)
+class VerifiedEnrollmentIdentity:
+    """A verified identity candidate. Only an atomic challenge commit can enroll it."""
+
+    challenge_id: str
+    installed: InstalledCell
+    iam_role_id: str
+    runner_jwk_thumbprint: str
+    verified_at: datetime
     expires_at: datetime
 
 
@@ -94,7 +145,7 @@ def _decoded_32(encoded: object) -> bytes:
 
 def _validate_sts_request(
     request: object, binding: str, region: str, now: datetime, challenge_expires_at: datetime
-) -> None:
+) -> STSIdentityRequest:
     request = _object(request, {"method", "url", "binding_header"})
     url = request["url"]
     if (
@@ -137,12 +188,19 @@ def _validate_sts_request(
         or not issued_at <= now < expires_at <= challenge_expires_at
     ):
         raise _deny()
+    return STSIdentityRequest(url, binding, expires_at)
 
 
 def validate_enrollment_proof(
     body: bytes, *, installed: InstalledCell, challenge: IssuedChallenge, now: datetime
 ) -> None:
     """Check local proof conformance. Success grants no identity or challenge state change."""
+    _validate_enrollment_proof(body, installed=installed, challenge=challenge, now=now)
+
+
+def _validate_enrollment_proof(
+    body: bytes, *, installed: InstalledCell, challenge: IssuedChallenge, now: datetime
+) -> tuple[STSIdentityRequest, str]:
     try:
         if (
             not 0 < len(body) <= 16 * 1024
@@ -170,6 +228,7 @@ def validate_enrollment_proof(
         public_key = ec.EllipticCurvePublicNumbers(
             int.from_bytes(x, "big"), int.from_bytes(y, "big"), ec.SECP256R1()
         ).public_key()
+        thumbprint = _encoded(hashlib.sha256(canonical(jwk)).digest())
         expected: dict[str, str | None] = {
             "protocol": "opentour-enrollment-v1",
             "challenge_id": challenge.id,
@@ -183,7 +242,7 @@ def validate_enrollment_proof(
             "region": installed.region,
             "deployment_mode": installed.deployment_mode,
             "installer_sha256": installed.installer_sha256,
-            "runner_jwk_thumbprint": _encoded(hashlib.sha256(canonical(jwk)).digest()),
+            "runner_jwk_thumbprint": thumbprint,
         }
         supplied = _object(proof["transcript"], set(expected))
         nonce = supplied["nonce"]
@@ -195,7 +254,7 @@ def validate_enrollment_proof(
         if supplied != expected:
             raise _deny()
         transcript = canonical(expected)
-        _validate_sts_request(
+        request = _validate_sts_request(
             proof["signed_sts_request"],
             _encoded(hashlib.sha256(transcript).digest()),
             installed.region,
@@ -206,5 +265,100 @@ def validate_enrollment_proof(
         if not isinstance(signature, str):
             raise _deny()
         public_key.verify(raw_to_der(signature), transcript, ec.ECDSA(hashes.SHA256()))
+        return request, thumbprint
     except (InvalidSignature, JournalError, OverflowError, RecursionError, ValueError):
         raise _deny() from None
+
+
+def verify_enrollment_identity(
+    body: bytes,
+    *,
+    installed: InstalledCell,
+    challenge: IssuedChallenge,
+    exchange: STSIdentityExchange,
+    clock: Callable[[], datetime],
+) -> VerifiedEnrollmentIdentity:
+    """Verify the proof and trusted provider response without consuming the challenge."""
+    started_at = clock()
+    request, thumbprint = _validate_enrollment_proof(
+        body, installed=installed, challenge=challenge, now=started_at
+    )
+    registered_role = re.fullmatch(
+        rf"arn:aws:iam::{installed.aws_account_id}:role/(?:[!-~]{{1,510}}/)?"
+        rf"(?P<name>{IAM_ROLE_NAME})",
+        installed.iam_role_arn,
+    )
+    if registered_role is None:
+        raise _deny()
+    try:
+        response = exchange.get_caller_identity(request, max_response_bytes=MAX_STS_RESPONSE_BYTES)
+        verified_at = clock()
+        if verified_at.utcoffset() is None or not started_at <= verified_at < request.expires_at:
+            raise ValueError
+        identity = _read_sts_identity(request, response)
+    except Exception:
+        # A transport exception may contain the credential-bearing URL.
+        raise EnrollmentVerificationUnavailable("ENROLLMENT_VERIFICATION_UNAVAILABLE") from None
+
+    role_name = re.escape(registered_role["name"])
+    arn = re.fullmatch(
+        rf"arn:aws:sts::{installed.aws_account_id}:assumed-role/{role_name}/"
+        rf"(?P<session>{STS_ROLE_SESSION_NAME})",
+        identity["Arn"],
+    )
+    role_id, _, session = identity["UserId"].partition(":")
+    if (
+        identity["Account"] != installed.aws_account_id
+        or arn is None
+        or session != arn["session"]
+        or re.fullmatch(r"[A-Za-z0-9_]{16,128}", role_id) is None
+        or installed.expected_iam_role_id not in (None, role_id)
+    ):
+        raise _deny()
+    return VerifiedEnrollmentIdentity(
+        challenge.id, installed, role_id, thumbprint, verified_at, request.expires_at
+    )
+
+
+def _read_sts_identity(
+    request: STSIdentityRequest, response: STSIdentityResponse
+) -> dict[str, str]:
+    body = response.body
+    if (
+        response.status != 200
+        or response.response_url != request.url
+        or type(body) is not bytes
+        or not 0 < len(body) <= MAX_STS_RESPONSE_BYTES
+        or b"<!" in body
+    ):
+        raise ValueError
+    root = ElementTree.fromstring(body.decode("utf-8"))
+    if root.tag != STS_NAMESPACE + "GetCallerIdentityResponse":
+        raise ValueError
+    result = _xml_fields(root, {"GetCallerIdentityResult", "ResponseMetadata"})
+    metadata = _xml_text(result["ResponseMetadata"], {"RequestId"})
+    if re.fullmatch(r"[A-Za-z0-9-]{1,128}", metadata["RequestId"]) is None:
+        raise ValueError
+    return _xml_text(result["GetCallerIdentityResult"], {"Account", "Arn", "UserId"})
+
+
+def _xml_fields(element: ElementTree.Element, names: set[str]) -> dict[str, ElementTree.Element]:
+    parsed = {child.tag: child for child in element}
+    if (
+        element.attrib
+        or (element.text or "").strip()
+        or len(parsed) != len(element)
+        or set(parsed) != {STS_NAMESPACE + name for name in names}
+        or any((child.tail or "").strip() for child in element)
+    ):
+        raise ValueError
+    return {name: parsed[STS_NAMESPACE + name] for name in names}
+
+
+def _xml_text(element: ElementTree.Element, names: set[str]) -> dict[str, str]:
+    text: dict[str, str] = {}
+    for name, value in _xml_fields(element, names).items():
+        if value.attrib or len(value) or not value.text:
+            raise ValueError
+        text[name] = value.text
+    return text
