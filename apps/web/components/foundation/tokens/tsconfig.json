@@ -22,6 +22,9 @@
     ]
   },
   "include": [
+    "../forms/derived-value*.ts",
+    "../forms/derived-value*.tsx",
+    "../../../tests/fixtures/presentation/derived-value.tsx",
     "../../../tests/fixtures/presentation/icon-button.tsx",
     "../../../tests/fixtures/presentation/cancellation-impact.tsx",
     "../../../features/operations/cancellation-impact*.tsx",

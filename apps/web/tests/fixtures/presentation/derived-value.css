@@ -1,0 +1,9 @@
+body { margin: 0; background: var(--ot-surface-base); color: var(--ot-text-primary); font-family: Geist, sans-serif; }
+main { padding: 32px; box-sizing: border-box; min-inline-size: 0; }
+main > h1 { margin: 0 0 16px; font: var(--ot-type-section-weight) var(--ot-type-section-size)/var(--ot-type-section-line) Geist, sans-serif; overflow-wrap: anywhere; }
+main > p { margin: 0 0 24px; font: var(--ot-type-body-weight) var(--ot-type-body-size)/var(--ot-type-body-line) Geist, sans-serif; overflow-wrap: anywhere; }
+form { display: flex; flex-direction: column; align-items: flex-start; gap: 24px; min-inline-size: 0; }
+.derived-first, .derived-long { max-inline-size: 100%; min-inline-size: 0; }
+.fixture-sentinel { font: inherit; min-block-size: 44px; max-inline-size: 100%; border: 1px solid var(--ot-border-control); border-radius: 6px; background: var(--ot-surface-base); color: var(--ot-text-primary); padding: 8px 16px; overflow-wrap: anywhere; }
+@media (max-width: 1279px) { main { padding: 24px; } }
+@media (max-width: 767px) { main { padding: 16px; } }
