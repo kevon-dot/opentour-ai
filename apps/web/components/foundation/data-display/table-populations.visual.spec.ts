@@ -72,7 +72,14 @@ for (const width of [320,768,1280,1440]) for (const scale of [1,2]) {
       await page.evaluate(()=>document.fonts.ready);
       expect(await page.evaluate(()=>document.documentElement.scrollWidth)).toBe(width);
       const region=page.getByRole('region',{name:'Records — scroll horizontally'});
-      if(width===320) expect(await region.evaluate(el=>el.scrollWidth > el.clientWidth)).toBe(true);
+      if(width===320) {
+        expect(await region.evaluate(el=>el.scrollWidth > el.clientWidth)).toBe(true);
+        const caption = page.locator('.records-label');
+        await expect(caption).toHaveText('Records — scroll horizontally');
+        const bounds = await caption.boundingBox();
+        expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(width);
+        if (scale===2) expect(bounds!.height).toBeGreaterThan(40);
+      }
       await expect(table.getByRole('columnheader',{name:'Observed time ↓'})).toHaveAttribute('aria-sort','descending');
       if(state==='query') {
         await expect(page.getByText('128 selected across this query')).toBeVisible();
