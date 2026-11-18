@@ -54,12 +54,19 @@ def test_zero_org_identity_has_finite_allowlist(identity):
         identity.service.authorization_context(identity.token(), identity.handle)
 
 
-@pytest.mark.parametrize("state", ["unselected", "mismatch", "pending", "removed"])
+@pytest.mark.parametrize(
+    "state", ["unselected", "first_switch_pending", "mismatch", "pending", "removed"]
+)
 def test_current_context_never_fabricates_selection(identity, state):
     session = identity.repository.sessions["session_a"]
     token = identity.token()
     expected = "reconciliation_required"
-    if state == "unselected":
+    if state == "first_switch_pending":
+        identity.repository.sessions["session_a"] = replace(
+            session, selected_organization_id=None, selected_membership_id=None,
+            reconciliation_required=True,
+        )
+    elif state == "unselected":
         identity.repository.sessions["session_a"] = replace(
             session, selected_organization_id=None, selected_membership_id=None
         )

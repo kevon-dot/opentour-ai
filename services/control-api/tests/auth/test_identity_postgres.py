@@ -3,6 +3,7 @@
 import hashlib
 import json
 import os
+import secrets
 import shutil
 import subprocess
 import sys
@@ -22,7 +23,14 @@ import pytest
 from cryptography.fernet import Fernet
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from opentour_control.auth.config import AuthError, FernetSealingPort, digest
+from opentour_control.auth.browser_state import (
+    BrowserAuthState,
+    BrowserAuthTransaction,
+    BrowserCredentials,
+    BrowserSelectionIntent,
+    BrowserSelectionTarget,
+)
+from opentour_control.auth.config import AuthError, FernetSealingPort, digest, timestamp
 from opentour_control.auth.repository import (
     IdentityEvent,
     PostgresIdentityRepository,
@@ -31,6 +39,7 @@ from opentour_control.auth.repository import (
     lock_membership_observation,
 )
 from opentour_control.auth.session import SessionService, create_session_router
+from pydantic import ValidationError
 
 from tools.fixtures.postgres import DisposablePostgres
 
@@ -104,6 +113,265 @@ def durable(postgres, identity, mode):
         mode=mode,
         postgres=postgres,
     )
+
+
+@pytest.fixture
+def browser_state(durable):
+    return BrowserAuthState(
+        durable.service, FernetSealingPort((Fernet.generate_key(),), 86_400), os.urandom(32)
+    )
+
+
+def test_browser_flow_is_sealed_browser_bound_and_single_use(browser_state, durable, identity):
+    flow = BrowserAuthTransaction(
+        state=secrets.token_urlsafe(32),
+        nonce=secrets.token_urlsafe(32),
+        browser_digest=digest(secrets.token_urlsafe(32)),
+        verifier=secrets.token_urlsafe(32),
+        expires_at=identity.now + timedelta(seconds=600),
+        return_path="/signed-out",
+        kind="signin",
+        session_handle=None,
+        subject=None,
+        session_id=None,
+        generation=None,
+        selection_target=None,
+    )
+    combined = f"{flow.state}.{flow.nonce}"
+    browser_state.create_flow(flow)
+    with durable.connect() as connection:
+        row = connection.execute(
+            "SELECT sealed_payload FROM opentour_identity.auth_transactions WHERE state_sha256=%s",
+            (digest(combined),),
+        ).fetchone()
+        assert row is not None
+        assert all(part not in row["sealed_payload"] for part in (flow.state, flow.verifier))
+
+    with pytest.raises(AuthError, match="CALLBACK_INVALID"):
+        browser_state.consume_flow(combined, "b" * 64)
+
+    def consume():
+        try:
+            return browser_state.consume_flow(combined, flow.browser_digest)
+        except AuthError as error:
+            return error.code
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(lambda _: consume(), range(2)))
+    assert results.count(flow) == 1
+    assert results.count("CALLBACK_INVALID") == 1
+
+
+@pytest.mark.parametrize("expired", [False, True])
+def test_browser_switch_flow_binds_exact_intent(browser_state, durable, identity, expired):
+    intent = BrowserSelectionIntent(
+        organization_id="org_a", expected_generation=0, idempotency_key="generated-selection"
+    )
+    flow = BrowserAuthTransaction(
+        state=secrets.token_urlsafe(32),
+        nonce=secrets.token_urlsafe(32),
+        browser_digest=digest(secrets.token_urlsafe(32)),
+        verifier=secrets.token_urlsafe(32),
+        expires_at=identity.now + timedelta(seconds=1),
+        return_path="/",
+        kind="switch",
+        session_handle=durable.binding,
+        subject="user_a",
+        session_id=durable.sid,
+        generation=0,
+        selection_target=BrowserSelectionTarget(
+            organization_id="org_a",
+            identity_organization_id="identity_org_a",
+            identity_issuer=identity.issuer,
+            membership_id="member_a",
+            authority_revision="authority_a",
+        ),
+        selection_intent=intent,
+    )
+    fields = flow.model_dump()
+    for invalid_intent in (
+        None,
+        intent.model_copy(update={"organization_id": "org_b"}),
+        intent.model_copy(update={"expected_generation": 1}),
+    ):
+        with pytest.raises(ValidationError):
+            BrowserAuthTransaction.model_validate({**fields, "selection_intent": invalid_intent})
+    browser_state.create_flow(flow)
+    combined = f"{flow.state}.{flow.nonce}"
+    if expired:
+        durable.service.clock = lambda: flow.expires_at
+        with pytest.raises(AuthError, match="CALLBACK_INVALID"):
+            browser_state.consume_flow(combined, flow.browser_digest)
+    else:
+        assert browser_state.consume_flow(combined, flow.browser_digest) == flow
+
+
+@pytest.mark.parametrize("selected", [False, True])
+def test_same_sid_callback_cannot_replace_initialized_credentials(
+    browser_state, durable, identity, selected
+):
+    original = BrowserCredentials(
+        access_token=durable.token,
+        refresh_token="generated-original",
+        user_id=durable.context.actor["subject"],
+    )
+    admitted = browser_state.admit(original)
+    if selected:
+        with durable.connect() as conn:
+            conn.execute(
+                "UPDATE opentour_identity.sessions SET generation=1, "
+                "selected_organization_id='local', selected_membership_id='member' "
+                "WHERE issuer=%s AND session_id=%s",
+                (identity.issuer, durable.sid),
+            )
+            for table in ("session_bindings", "session_credentials"):
+                conn.execute(
+                    f"UPDATE opentour_identity.{table} SET generation=1 "
+                    "WHERE issuer=%s AND session_id=%s",
+                    (identity.issuer, durable.sid),
+                )
+    duplicate = BrowserCredentials(
+        access_token=durable.token,
+        refresh_token="generated-duplicate",
+        user_id=durable.context.actor["subject"],
+    )
+    with pytest.raises(AuthError, match="STALE_SESSION_CONTEXT"):
+        browser_state.admit(duplicate)
+    current = browser_state.current(admitted.handle)
+    assert current.generation == int(selected)
+    assert current.credentials == original
+    with durable.connect() as conn:
+        count = conn.execute(
+            "SELECT count(*) AS count FROM opentour_identity.session_bindings "
+            "WHERE issuer=%s AND session_id=%s",
+            (identity.issuer, durable.sid),
+        ).fetchone()
+    assert count["count"] == 2
+
+
+def test_expired_browser_admission_rolls_back_credentials_and_binding(
+    browser_state, durable, identity, monkeypatch
+):
+    sid = "session_" + uuid4().hex
+    credentials = BrowserCredentials(
+        access_token=identity.token(sid=sid),
+        refresh_token="GENERATED_REFRESH",
+        user_id=durable.context.actor["subject"],
+    )
+    write_credentials = durable.repository._write_credentials
+
+    def write_then_expire(connection, session, sealed_payload):
+        write_credentials(connection, session, sealed_payload)
+        durable.service.clock = lambda: identity.now + timedelta(seconds=600)
+
+    monkeypatch.setattr(durable.repository, "_write_credentials", write_then_expire)
+    with pytest.raises(AuthError, match="SESSION_INVALID"):
+        browser_state.admit(credentials)
+    with durable.connect() as conn:
+        for table in ("sessions", "session_credentials", "session_bindings"):
+            assert conn.execute(
+                f"SELECT 1 FROM opentour_identity.{table} WHERE issuer=%s AND session_id=%s",
+                (identity.issuer, sid),
+            ).fetchone() is None
+
+
+def test_browser_session_round_trip_and_exact_refresh_receipt(browser_state, durable, identity):
+    sid = "session_" + uuid4().hex
+    original = BrowserCredentials(
+        access_token=identity.token(sid=sid),
+        refresh_token="GENERATED_INITIAL_REFRESH",
+        user_id="user_a",
+    )
+    admitted = browser_state.admit(original)
+    current = browser_state.current(admitted.handle)
+    assert current == admitted
+    assert admitted.credentials == original and admitted.identity is not None
+    assert admitted.identity.wire() == {
+        "actor": {"kind": "human", "subject": "user_a", "issuer": identity.issuer},
+        "session_id": sid,
+        "session_generation": 0,
+        "identity_checked_at": timestamp(identity.now),
+        "authentication_time": timestamp(identity.now - timedelta(seconds=120)),
+        "assurance_level": "unknown",
+    }
+    assert admitted.csrf_token == current.csrf_token
+    assert admitted.handle not in repr(admitted)
+    context = durable.service.current_context(original.access_token, admitted.handle, "generated")
+    assert context["state"] == "unselected" and context["organization_id"] is None
+
+    replacement = BrowserCredentials(
+        access_token=identity.token(sid=sid, org_id="identity_org_b"),
+        refresh_token="GENERATED_REPLACEMENT_REFRESH",
+        user_id="user_a",
+    )
+    with pytest.raises(AuthError, match="STALE_SESSION_CONTEXT"):
+        browser_state.replace_credentials(admitted.handle, 1, replacement)
+    assert browser_state.current(admitted.handle).credentials == original
+
+    receipt = browser_state.replace_credentials(admitted.handle, 0, replacement)
+    session = durable.repository.load_session(digest(admitted.handle), identity.now)
+    ciphertext = durable.repository.read_credentials(session, identity.now)
+    assert receipt == digest(ciphertext)
+    assert replacement.refresh_token not in ciphertext
+    assert replacement.access_token not in ciphertext
+    assert browser_state.current(admitted.handle).credentials == replacement
+    current_identity, claim, sealed_digest = browser_state.selection_evidence(
+        replacement.access_token, admitted.handle
+    )
+    assert current_identity.session_generation == 0
+    assert claim.organization_id == "identity_org_b"
+    assert sealed_digest == receipt
+    with pytest.raises(AuthError, match="CONTEXT_RECONCILIATION_REQUIRED"):
+        browser_state.selection_evidence(original.access_token, admitted.handle)
+
+    browser_state.require_reconciliation(admitted.handle, 0)
+    assert browser_state.current(admitted.handle).reconciliation_required
+    ended = browser_state.end(admitted.handle, 0)
+    assert (ended.session_id, ended.generation) == (sid, 1)
+    assert browser_state.end(admitted.handle, 0) == ended
+    ended_view = browser_state.current(admitted.handle)
+    assert ended_view.ended and ended_view.credentials is None and ended_view.identity is None
+    assert ended_view.csrf_token == admitted.csrf_token
+    with pytest.raises(AuthError, match="SESSION_ENDED"):
+        browser_state.replace_credentials(admitted.handle, 0, replacement)
+    with pytest.raises(AuthError, match="SESSION_ENDED"):
+        browser_state.require_reconciliation(admitted.handle, 0)
+
+
+def test_browser_admission_validates_signed_subject_and_cannot_confirm_unknown_commit(
+    browser_state, durable, identity, monkeypatch
+):
+    sid = "session_" + uuid4().hex
+    rejected = BrowserCredentials(
+        access_token=identity.token(sid=sid), refresh_token="GENERATED_REFRESH", user_id="other"
+    )
+    with pytest.raises(AuthError, match="SESSION_INVALID"):
+        browser_state.admit(rejected)
+    with durable.connect() as connection:
+        assert connection.execute(
+            "SELECT count(*) AS n FROM opentour_identity.sessions WHERE session_id=%s", (sid,)
+        ).fetchone() == {"n": 0}
+
+    write = durable.repository.create_session
+
+    def lost_ack(*args, **kwargs):
+        write(*args, **kwargs)
+        raise psycopg.OperationalError("GENERATED_DATABASE_SENTINEL")
+
+    monkeypatch.setattr(durable.repository, "create_session", lost_ack)
+    trusted = BrowserCredentials(
+        access_token=identity.token(sid=sid), refresh_token="GENERATED_REFRESH", user_id="user_a"
+    )
+    with pytest.raises(AuthError, match="^SESSION_ADMISSION_UNCONFIRMED$"):
+        browser_state.admit(trusted)
+    with durable.connect() as connection:
+        assert connection.execute(
+            "SELECT s.session_id FROM opentour_identity.sessions s "
+            "JOIN opentour_identity.session_credentials c USING (issuer, session_id) "
+            "JOIN opentour_identity.session_bindings b USING (issuer, session_id) "
+            "WHERE s.session_id=%s",
+            (sid,),
+        ).fetchone() == {"session_id": sid}
 
 
 def test_runtime_role_and_migration_are_real(durable):

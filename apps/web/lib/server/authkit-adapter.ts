@@ -23,16 +23,26 @@ export type SelectionTarget = Readonly<{
   organizationId: string; identityOrganizationId: string; identityIssuer: string;
   membershipId: string; authorityRevision: string;
 }>;
+export type SelectionIntent = Readonly<{
+  organizationId: string; expectedGeneration: number; idempotencyKey: string;
+}>;
+export type SelectionReceipt = Readonly<{
+  state: 'active'; organization_id: string; membership_id: string;
+  session_generation: number; request_id: string;
+}>;
+export type SelectionDecision = { target: SelectionTarget; alreadyCurrent?: boolean } | { receipt: SelectionReceipt };
 export type ServerSession = {
   handle: string; identity: Identity; credentials: Credentials; csrfToken: string;
   ended: boolean;
   reconciliationRequired: boolean;
+  credentialDigest?: string;
 };
 export type AuthTransaction = {
   state: string; nonce: string; browserDigest: string; verifier: string; expiresAt: number;
   returnPath: string; kind: 'signin' | 'switch';
   sessionHandle: string | null; subject: string | null; sessionId: string | null;
   generation: number | null; selectionTarget: SelectionTarget | null;
+  selectionIntent: SelectionIntent | null;
 };
 export interface AuthTransactionPort {
   /** Durably store encrypted private state, TTL<=600s; no in-memory fallback. */
@@ -44,9 +54,9 @@ export interface SessionPort {
   /** Commit strict verified identity + opaque binding + sealed credentials before returning. */
   admit(credentials: Credentials, claims: Claims): Promise<ServerSession>;
   current(handle: string): Promise<ServerSession>;
-  /** Compare session/subject/generation and ended marker in the credential-write transaction. */
+  /** Return the digest of the exact sealed payload committed under the generation fence. */
   replaceCredentials(handle: string, generation: number, credentials: Credentials,
-    claims: Claims): Promise<void>;
+    claims: Claims): Promise<string>;
   /** Durable idempotent ended marker + generation increment; uncertain commit must throw. */
   end(handle: string, generation: number): Promise<{ sessionId: string; generation: number }>;
   /** Mark private-context admission unavailable without ending the valid human identity. */
@@ -54,12 +64,11 @@ export interface SessionPort {
 }
 export interface SelectionPort {
   /** Current171/172 local membership and committed provider mapping; never infer equal IDs. */
-  authorize(identity: Identity, localOrganizationId: string): Promise<SelectionTarget>;
-  /**172 atomically rechecks the exact mapping/membership/authority plus generation and ended
-   * marker. Commit the LOCAL organization ID, increment generation, clear reconciliation.
-   * Claims must match the mapped provider org/issuer and remain unexpired at commit. */
-  commit(handle: string, observedGeneration: number, target: SelectionTarget,
-    claims: Claims): Promise<void>;
+  authorize(handle: string, identity: Identity, intent: SelectionIntent): Promise<SelectionDecision>;
+  /**172 rechecks current mapping, generation, ended state and the staged ciphertext digest.
+   * Persist the local selection and idempotent receipt in one transaction. */
+  commit(handle: string, identity: Identity, intent: SelectionIntent, target: SelectionTarget,
+    claims: Claims, credentialDigest: string): Promise<SelectionReceipt>;
 }
 export interface ProviderPort {
   authorizationURL(state: string, verifier: string, targetOrganization?: string): Promise<string>;
@@ -103,6 +112,31 @@ function checkedTarget(identity: Identity, localOrganizationId: string,
   return Object.freeze({ organizationId: value.organizationId,
     identityOrganizationId: value.identityOrganizationId, identityIssuer: value.identityIssuer,
     membershipId: value.membershipId, authorityRevision: value.authorityRevision });
+}
+function checkedIntent(organizationId: string, expectedGeneration: number,
+  idempotencyKey: string): SelectionIntent {
+  if (!validId(organizationId) || !validGeneration(expectedGeneration)
+      || !validId(idempotencyKey) || /[^!-~]/.test(idempotencyKey)) {
+    throw new IdentityFailure('SCHEMA_INVALID', 422);
+  }
+  return Object.freeze({ organizationId, expectedGeneration, idempotencyKey });
+}
+function checkedDigest(value: unknown): string {
+  if (typeof value !== 'string' || value.length !== 64 || /[^a-f0-9]/.test(value)) {
+    throw new IdentityFailure('SESSION_CREDENTIALS_UNAVAILABLE', 503);
+  }
+  return value;
+}
+function checkedReceipt(receipt: SelectionReceipt, intent: SelectionIntent,
+  target?: SelectionTarget): SelectionReceipt {
+  const { state, organization_id, membership_id, session_generation, request_id } = receipt;
+  if (state !== 'active' || organization_id !== intent.organizationId || !validId(membership_id)
+      || (target && membership_id !== target.membershipId) || !validGeneration(session_generation)
+      || session_generation < intent.expectedGeneration || session_generation - intent.expectedGeneration > 1
+      || !validId(request_id)) {
+    throw new IdentityFailure('SELECTION_RECEIPT_UNCONFIRMED', 503);
+  }
+  return { state, organization_id, membership_id, session_generation, request_id };
 }
 function sameTarget(expected: SelectionTarget, current: SelectionTarget): void {
   if (!targetFields.every((field) => expected[field] === current[field])) {
@@ -202,6 +236,17 @@ function sameSession(session: ServerSession, claims: Claims, target?: string): v
       || (target !== undefined && claims.organizationId !== target)) {
     throw new IdentityFailure('SESSION_INVALID');
   }
+}
+
+function projectedIdentity(claims: Claims, session: ServerSession, checkedAt: number): Identity {
+  return {
+    actor: { kind: 'human', subject: claims.subject, issuer: claims.issuer },
+    session_id: claims.sessionId,
+    session_generation: session.identity.session_generation,
+    identity_checked_at: new Date(checkedAt).toISOString(),
+    authentication_time: claims.authenticationTime,
+    assurance_level: 'unknown',
+  };
 }
 
 /** Bound the entire response stream, not just receipt of HTTP headers. */
@@ -364,14 +409,60 @@ export function createAuthkitAdapter(ports: {
   profileCheck(profile);
   const now = serverClock(ports.now ?? Date.now);
 
+  async function rebound(session: ServerSession): Promise<ServerSession> {
+    const current = await sessions.current(session.handle);
+    active(current, session.identity.session_generation);
+    if (current.handle !== session.handle || current.identity.session_id !== session.identity.session_id
+        || current.identity.actor.subject !== session.identity.actor.subject
+        || current.identity.actor.issuer !== session.identity.actor.issuer) {
+      throw new IdentityFailure('SESSION_INVALID');
+    }
+    return current;
+  }
+
+  async function verifiedSession(session: ServerSession): Promise<{ session: ServerSession; claims: Claims }> {
+    const claims = await provider.verify(session.credentials.accessToken);
+    sameSession(session, claims);
+    const current = await rebound(session);
+    if (current.credentials.accessToken !== session.credentials.accessToken) {
+      throw new IdentityFailure('STALE_SESSION_CONTEXT', 409);
+    }
+    const checkedAt = now();
+    if (claims.expiresAt <= checkedAt) throw new IdentityFailure('SESSION_INVALID');
+    return { session: { ...current, identity: projectedIdentity(claims, current, checkedAt) }, claims };
+  }
+
+  async function authorizedTarget(session: ServerSession, intent: SelectionIntent): Promise<SelectionTarget> {
+    const decision = await selections.authorize(session.handle, session.identity, intent);
+    if ('receipt' in decision) throw new IdentityFailure('STALE_SESSION_CONTEXT', 409);
+    return checkedTarget(session.identity, intent.organizationId, decision.target);
+  }
+
+  async function commitSwitch(session: ServerSession, intent: SelectionIntent, target: SelectionTarget,
+    credentials: Credentials, claims: Claims): Promise<SelectionReceipt> {
+    sameSession(session, claims, target.identityOrganizationId);
+    if (credentials.userId !== claims.subject || claims.expiresAt <= now()) {
+      throw new IdentityFailure('SESSION_INVALID');
+    }
+    const generation = intent.expectedGeneration;
+    await rebound(session);
+    const digest = checkedDigest(await sessions.replaceCredentials(session.handle, generation, credentials, claims));
+    sameTarget(target, await authorizedTarget(session, intent));
+    if (claims.expiresAt <= now()) throw new IdentityFailure('SESSION_INVALID');
+    return checkedReceipt(await selections.commit(
+      session.handle, session.identity, intent, target, claims, digest,
+    ), intent, target);
+  }
+
   async function start(returnPath: string, browser: string, session?: ServerSession,
-    selectionTarget?: SelectionTarget): Promise<Response> {
+    selectionTarget?: SelectionTarget, selectionIntent?: SelectionIntent): Promise<Response> {
     checkedReturn(profile, returnPath);
     const transaction: AuthTransaction = { state: secret(), nonce: secret(), browserDigest: sha(browser),
       verifier: secret(), expiresAt: now() + 600_000, returnPath,
       kind: session ? 'switch' : 'signin', sessionHandle: session?.handle ?? null,
       subject: session?.identity.actor.subject ?? null, sessionId: session?.identity.session_id ?? null,
-      generation: session?.identity.session_generation ?? null, selectionTarget: selectionTarget ?? null };
+      generation: session?.identity.session_generation ?? null, selectionTarget: selectionTarget ?? null,
+      selectionIntent: selectionIntent ?? null };
     const location = providerDestination(profile, await provider.authorizationURL(
       `${transaction.state}.${transaction.nonce}`, transaction.verifier, selectionTarget?.identityOrganizationId));
     await transactions.create(transaction);
@@ -391,7 +482,6 @@ export function createAuthkitAdapter(ports: {
       } catch (error) { return safeError(error); }
     },
     async callback(request: Request): Promise<Response> {
-      let pendingSwitch: { handle: string; generation: number } | undefined;
       try {
         const url = new URL(request.url);
         const stateValues = url.searchParams.getAll('state');
@@ -410,19 +500,23 @@ export function createAuthkitAdapter(ports: {
         checkedReturn(profile, transaction.returnPath);
         let previous: ServerSession | undefined;
         let target: SelectionTarget | undefined;
+        let intent: SelectionIntent | undefined;
         if (transaction.kind === 'switch') {
-          if (!transaction.sessionHandle || transaction.generation === null || !transaction.selectionTarget) {
+          if (!transaction.sessionHandle || transaction.generation === null
+              || !transaction.selectionTarget || !transaction.selectionIntent) {
             throw new IdentityFailure('CALLBACK_INVALID');
           }
+          intent = checkedIntent(transaction.selectionIntent.organizationId,
+            transaction.selectionIntent.expectedGeneration, transaction.selectionIntent.idempotencyKey);
+          if (intent.expectedGeneration !== transaction.generation) throw new IdentityFailure('CALLBACK_INVALID');
           previous = await sessions.current(transaction.sessionHandle);
-          pendingSwitch = { handle: previous.handle, generation: transaction.generation };
           active(previous, transaction.generation);
           if (previous.identity.actor.subject !== transaction.subject
               || previous.identity.session_id !== transaction.sessionId) throw new IdentityFailure('CALLBACK_INVALID');
-          target = checkedTarget(previous.identity, transaction.selectionTarget.organizationId,
-            transaction.selectionTarget);
-          sameTarget(target, checkedTarget(previous.identity, target.organizationId,
-            await selections.authorize(previous.identity, target.organizationId)));
+          target = checkedTarget(previous.identity, intent.organizationId, transaction.selectionTarget);
+          sameTarget(target, await authorizedTarget(previous, intent));
+          await rebound(previous);
+          if (transaction.expiresAt <= now()) throw new IdentityFailure('CALLBACK_INVALID');
         }
         // Durable claim is already consumed. Lost exchange outcome cannot automatically retry the code.
         const credentials = await provider.exchange(codeValues[0], transaction.verifier);
@@ -430,15 +524,10 @@ export function createAuthkitAdapter(ports: {
         if (transaction.expiresAt <= now() || claims.expiresAt <= now()) throw new IdentityFailure('CALLBACK_INVALID');
         if (claims.subject !== credentials.userId) throw new IdentityFailure('SESSION_INVALID');
         let session: ServerSession;
-        if (previous && target) {
-          sameSession(previous, claims, target.identityOrganizationId);
-          active(await sessions.current(previous.handle), transaction.generation!);
-          await sessions.replaceCredentials(previous.handle, transaction.generation!, credentials, claims);
-          sameTarget(target, checkedTarget(previous.identity, target.organizationId,
-            await selections.authorize(previous.identity, target.organizationId)));
-          if (claims.expiresAt <= now()) throw new IdentityFailure('SESSION_INVALID');
-          await selections.commit(previous.handle, transaction.generation!, target, claims);
+        if (previous && target && intent) {
+          const receipt = await commitSwitch(previous, intent, target, credentials, claims);
           session = await sessions.current(previous.handle);
+          active(session, receipt.session_generation);
         } else {
           session = await sessions.admit(credentials, claims);
         }
@@ -450,10 +539,6 @@ export function createAuthkitAdapter(ports: {
         headers.append('Set-Cookie', setCookie(sessionCookie, session.handle));
         return redirect(new URL(transaction.returnPath, profile.origin).href, headers);
       } catch (error) {
-        if (pendingSwitch) {
-          try { await sessions.requireReconciliation(pendingSwitch.handle, pendingSwitch.generation); }
-          catch { /* Unknown local commit is still a failed callback, never authenticated success. */ }
-        }
         return safeError(error, true);
       }
     },
@@ -477,48 +562,59 @@ export function createAuthkitAdapter(ports: {
     },
     async switchOrganization(request: Request, targetOrganization: string,
       observedGeneration: number, returnPath: string): Promise<
-      { outcome: 'verified_target' | 'denied' | 'transient' | 'unknown' } |
+      { outcome: 'verified_target' | 'replayed'; receipt: SelectionReceipt } |
+      { outcome: 'denied' | 'transient' | 'unknown' } |
       { outcome: 'authentication_required'; response: Response }> {
-      const session = await sessions.current(cookie(request, sessionCookie));
-      mutation(request, profile, session);
-      active(session, observedGeneration);
+      const intent = checkedIntent(targetOrganization, observedGeneration, request.headers.get('Idempotency-Key') ?? '');
+      const bound = await sessions.current(cookie(request, sessionCookie));
+      mutation(request, profile, bound);
+      active(bound);
       checkedReturn(profile, returnPath);
-      if (!validId(targetOrganization)) throw new IdentityFailure('SCHEMA_INVALID', 422);
-      const target = checkedTarget(session.identity, targetOrganization,
-        await selections.authorize(session.identity, targetOrganization));
+      const { session, claims: identityClaims } = await verifiedSession(bound);
+      const decision = await selections.authorize(session.handle, session.identity, intent);
+      const current = await rebound(session);
+      if (current.credentials.accessToken !== session.credentials.accessToken) {
+        throw new IdentityFailure('STALE_SESSION_CONTEXT', 409);
+      }
+      if (identityClaims.expiresAt <= now()) throw new IdentityFailure('SESSION_INVALID');
+      if ('receipt' in decision) return { outcome: 'replayed', receipt: checkedReceipt(decision.receipt, intent) };
+      active(current, observedGeneration);
+      const target = checkedTarget(session.identity, intent.organizationId, decision.target);
+      if (decision.alreadyCurrent) {
+        if (current.reconciliationRequired || identityClaims.organizationId !== target.identityOrganizationId) {
+          throw new IdentityFailure('CONTEXT_RECONCILIATION_REQUIRED', 409);
+        }
+        const digest = checkedDigest(current.credentialDigest);
+        const receipt = checkedReceipt(await selections.commit(
+          current.handle, session.identity, intent, target, identityClaims, digest,
+        ), intent, target);
+        await rebound(current);
+        if (identityClaims.expiresAt <= now()) throw new IdentityFailure('SESSION_INVALID');
+        return { outcome: 'verified_target', receipt };
+      }
       // Persist fail-closed admission before an external mutation can have an unknown
       // outcome. A later marker-write failure must not leave the old tenant usable.
       await sessions.requireReconciliation(session.handle, observedGeneration);
       let credentials: Credentials;
-      try { credentials = await provider.refresh(session.credentials, target.identityOrganizationId); }
+      try { credentials = await provider.refresh(current.credentials, target.identityOrganizationId); }
       catch (error) {
         if (error instanceof ProviderFailure) {
           if (error.outcome === 'authentication_required') {
-            sameTarget(target, checkedTarget(session.identity, targetOrganization,
-              await selections.authorize(session.identity, targetOrganization)));
-            return { outcome: error.outcome, response: await start(returnPath, secret(), session, target) };
+            sameTarget(target, await authorizedTarget(session, intent));
+            await rebound(session);
+            return { outcome: error.outcome, response: await start(returnPath, secret(), session, target, intent) };
           }
-          if (error.outcome === 'unknown') await sessions.requireReconciliation(session.handle, observedGeneration);
           return { outcome: error.outcome };
         }
-        await sessions.requireReconciliation(session.handle, observedGeneration);
         return { outcome: 'unknown' };
       }
       try {
         const claims = await provider.verify(credentials.accessToken);
+        const receipt = await commitSwitch(session, intent, target, credentials, claims);
         if (claims.expiresAt <= now()) throw new IdentityFailure('SESSION_INVALID');
-        sameSession(session, claims, target.identityOrganizationId);
-        if (credentials.userId !== claims.subject) throw new IdentityFailure('SESSION_INVALID');
-        active(await sessions.current(session.handle), observedGeneration);
-        await sessions.replaceCredentials(session.handle, observedGeneration, credentials, claims);
-        sameTarget(target, checkedTarget(session.identity, targetOrganization,
-          await selections.authorize(session.identity, targetOrganization)));
-        if (claims.expiresAt <= now()) throw new IdentityFailure('SESSION_INVALID');
-        await selections.commit(session.handle, observedGeneration, target, claims);
-        if (claims.expiresAt <= now()) throw new IdentityFailure('SESSION_INVALID');
-        return { outcome: 'verified_target' };
+        return { outcome: 'verified_target', receipt };
       } catch {
-        await sessions.requireReconciliation(session.handle, observedGeneration);
+        // The marker was committed before refresh; an older attempt cannot overwrite a newer result.
         return { outcome: 'unknown' };
       }
     },
@@ -526,22 +622,8 @@ export function createAuthkitAdapter(ports: {
       if (!identityUses.includes(use)) throw new IdentityFailure('CAPABILITY_DENIED', 403);
       const session = await sessions.current(cookie(request, sessionCookie));
       active(session);
-      const claims = await provider.verify(session.credentials.accessToken);
-      sameSession(session, claims);
-      const current = await sessions.current(session.handle);
-      active(current, session.identity.session_generation);
-      sameSession(current, claims);
-      const checkedAt = now();
-      if (claims.expiresAt <= checkedAt) throw new IdentityFailure('SESSION_INVALID');
-      // Return only verified identity; tenant context comes from the control API.
-      return {
-        actor: { kind: 'human', subject: claims.subject, issuer: claims.issuer },
-        session_id: claims.sessionId,
-        session_generation: current.identity.session_generation,
-        identity_checked_at: new Date(checkedAt).toISOString(),
-        authentication_time: claims.authenticationTime,
-        assurance_level: 'unknown',
-      };
+      const verified = await verifiedSession(session);
+      return verified.session.identity;
     },
   };
 }

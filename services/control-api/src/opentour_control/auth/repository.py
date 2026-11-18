@@ -175,7 +175,12 @@ class PostgresIdentityRepository:
             return session
 
     def create_session(
-        self, session: Session, binding_sha256: str, *, sealed_payload: str | None = None
+        self,
+        session: Session,
+        binding_sha256: str,
+        *,
+        sealed_payload: str | None = None,
+        credential_check: Callable[[], datetime] | None = None,
     ) -> Session:
         with self.connect() as connection:
             self._session_lock(connection, session.issuer, session.session_id)
@@ -205,6 +210,20 @@ class PostgresIdentityRepository:
                 or session.created_at >= current.expires_at
             ):
                 raise AuthError("SESSION_INVALID")
+            if sealed_payload is not None:
+                # Ordinary callback has no selection fence. It may initialize browser
+                # credentials exactly once, including a legacy unselected identity row.
+                if (
+                    current.generation != 0
+                    or current.selected_organization_id is not None
+                    or current.reconciliation_required
+                    or connection.execute(
+                        "SELECT 1 FROM opentour_identity.session_credentials "
+                        "WHERE issuer=%s AND session_id=%s",
+                        (current.issuer, current.session_id),
+                    ).fetchone()
+                ):
+                    raise AuthError("STALE_SESSION_CONTEXT", 409)
             connection.execute(
                 "INSERT INTO opentour_identity.session_bindings VALUES (%s,%s,%s,%s,%s)",
                 (
@@ -217,6 +236,8 @@ class PostgresIdentityRepository:
             )
             if sealed_payload is not None:
                 self._write_credentials(connection, current, sealed_payload)
+            if credential_check is not None and credential_check() >= current.expires_at:
+                raise AuthError("SESSION_INVALID")
             return current
 
     @staticmethod

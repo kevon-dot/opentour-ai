@@ -128,6 +128,16 @@ class SessionService:
 
     def admit(self, token: str) -> tuple[VerifiedIdentityContext, str]:
         """Server-only callback port. Return opaque browser binding only after commit."""
+        verified, session, handle, checked_at = self._admit_session(
+            token, lambda session, binding, _: self.repository.create_session(session, binding)
+        )
+        return self._context(verified, session, checked_at), handle
+
+    def _admit_session(
+        self,
+        token: str,
+        store: Callable[[Session, str, VerifiedToken], Session],
+    ) -> tuple[VerifiedToken, Session, str, datetime]:
         now = utc(self.clock())
         verified = self.verifier.verify(token, now)
         now = self._admission_time(verified, now)
@@ -147,11 +157,11 @@ class SessionService:
         )
         handle = secrets.token_urlsafe(32)
         try:
-            session = self.repository.create_session(proposed, digest(handle))
+            store(proposed, digest(handle), verified)
             session = self.repository.load_session(digest(handle), utc(self.clock()))
         except psycopg.Error:
             raise AuthError("SESSION_ADMISSION_UNCONFIRMED", 503, True) from None
-        return self._context(verified, session, self._admission_time(verified, now)), handle
+        return verified, session, handle, self._admission_time(verified, now)
 
     def _admission_time(self, token: VerifiedToken, started: datetime) -> datetime:
         now = utc(self.clock())
@@ -403,6 +413,8 @@ class SessionService:
             "request_id": identifier(request_id),
         }
         if session.selected_organization_id is None:
+            if session.reconciliation_required:
+                result["state"] = "reconciliation_required"
             return result
         member: LocalMembership | None = None
         try:
