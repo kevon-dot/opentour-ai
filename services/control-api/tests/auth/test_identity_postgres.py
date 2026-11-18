@@ -28,6 +28,7 @@ from opentour_control.auth.browser_private import (
     AuthenticatedBrowserCaller,
     PrivateBrowserDispatch,
 )
+from opentour_control.auth.browser_private_pilot import lookup_private_browser_pilot_route
 from opentour_control.auth.browser_state import (
     BrowserAuthState,
     BrowserAuthTransaction,
@@ -220,18 +221,32 @@ def test_private_browser_dispatch_enforces_caller_and_durable_signin(
         browser_state, principal=principal, audience=audience, clock=lambda: identity.now
     )
     expires = identity.now + timedelta(seconds=120)
+    paths = {
+        "create_flow": "/internal/browser-identity/v1/flows/create",
+        "consume_flow": "/internal/browser-identity/v1/flows/consume",
+        "admit": "/internal/browser-identity/v1/sessions/admit",
+        "current": "/internal/browser-identity/v1/sessions/current",
+        "end": "/internal/browser-identity/v1/sessions/end",
+    }
 
-    def send(method, payload, **caller_changes):
-        caller = AuthenticatedBrowserCaller(principal, audience, method, expires)
+    def dispatch(operation_id, payload, **caller_changes):
+        caller = AuthenticatedBrowserCaller(principal, audience, operation_id, expires)
         body = payload if isinstance(payload, bytes) else json.dumps(payload).encode()
         response = dispatcher.dispatch(
-            method,
+            operation_id,
             body,
             caller=replace(caller, **caller_changes),
         )
         assert response.headers["Cache-Control"] == "no-store"
         assert response.headers["Content-Type"] == "application/json"
         return response.status, json.loads(response.body)
+
+    def send(operation_id, payload, **caller_changes):
+        path = paths[operation_id]
+        route = lookup_private_browser_pilot_route("POST", path)
+        assert route is not None
+        assert (route.method, route.path, route.operation) == ("POST", path, operation_id)
+        return dispatch(route.operation, payload, **caller_changes)
 
     flow = {
         "state": secrets.token_urlsafe(32),
@@ -252,7 +267,7 @@ def test_private_browser_dispatch_enforces_caller_and_durable_signin(
     assert (status, error["code"]) == (422, "SCHEMA_INVALID")
     status, error = send("create_flow", b" " * (MAX_REQUEST_BYTES + 1))
     assert (status, error["code"]) == (413, "PRIVATE_BODY_TOO_LARGE")
-    status, error = send("replace", {})
+    status, error = dispatch("replace", {})
     assert (status, error["code"]) == (404, "PRIVATE_OPERATION_NOT_FOUND")
     assert send("create_flow", {"flow": flow}) == (200, None)
     claim = {"state": f"{flow['state']}.{flow['nonce']}", "browser": flow["browserDigest"]}

@@ -10,7 +10,12 @@ import pytest
 from cryptography.fernet import Fernet
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from opentour_control.api.schema import create_control_api
 from opentour_control.auth import runtime, workos_provider
+from opentour_control.auth.browser_private_pilot import (
+    PRIVATE_BROWSER_PILOT_ROUTES,
+    lookup_private_browser_pilot_route,
+)
 from opentour_control.auth.browser_state import BrowserAuthState
 from opentour_control.auth.session import SessionService
 from opentour_control.tenants.session_selection import PostgresSessionSelection
@@ -19,6 +24,13 @@ from tools.schema_validate import schema_registry, valid_instance
 
 CONTEXT = "/v1/session/context"
 SELECTION = "/v1/session:select-organization"
+PRIVATE_PILOT_PATHS = (
+    ("/internal/browser-identity/v1/flows/create", "create_flow"),
+    ("/internal/browser-identity/v1/flows/consume", "consume_flow"),
+    ("/internal/browser-identity/v1/sessions/admit", "admit"),
+    ("/internal/browser-identity/v1/sessions/current", "current"),
+    ("/internal/browser-identity/v1/sessions/end", "end"),
+)
 
 
 @pytest.fixture
@@ -136,6 +148,67 @@ def test_runtime_mounts_canonical_routers_and_refuses_missing_state(
     finally:
         assert control.close()
     provider_request.assert_not_called()
+
+
+def test_private_browser_pilot_inventory_is_exact_and_bounded():
+    assert isinstance(PRIVATE_BROWSER_PILOT_ROUTES, tuple)
+    route_keys = tuple((route.path, route.operation) for route in PRIVATE_BROWSER_PILOT_ROUTES)
+    assert route_keys == PRIVATE_PILOT_PATHS
+    for route in PRIVATE_BROWSER_PILOT_ROUTES:
+        assert (route.method, route.max_request_bytes, route.max_response_bytes) == (
+            "POST",
+            65_536,
+            131_072,
+        )
+        assert lookup_private_browser_pilot_route("POST", route.path) is route
+
+
+def test_private_browser_pilot_lookup_refuses_aliases_and_unadmitted_features():
+    for path, _ in PRIVATE_PILOT_PATHS:
+        for method, raw_path in (
+            ("GET", path),
+            ("post", path),
+            ("POST", path.upper()),
+            ("POST", path + "/"),
+            ("POST", path + ".extra"),
+            ("POST", path.replace("/internal/", "/%69nternal/", 1)),
+            ("POST", path + "?probe=generated"),
+            ("POST", "/dev" + path),
+        ):
+            assert lookup_private_browser_pilot_route(method, raw_path) is None
+
+    for path in (
+        "/internal/browser-identity/v1/sessions/refresh",
+        "/internal/browser-identity/v1/sessions/replace-credentials",
+        "/internal/browser-identity/v1/sessions/require-reconciliation",
+        "/internal/browser-identity/v1/selection/authorize",
+        "/internal/browser-identity/v1/selection/commit",
+        SELECTION,
+    ):
+        assert lookup_private_browser_pilot_route("POST", path) is None
+
+
+def test_public_control_factory_does_not_expose_private_browser_pilot(
+    configured, provider_dependencies
+):
+    control = runtime.create_control_auth_runtime(**configured)
+    try:
+        app = create_control_api(control)
+        assert {path: set(operations) for path, operations in app.openapi()["paths"].items()} == {
+            CONTEXT: {"get"},
+            SELECTION: {"post"},
+        }
+        with TestClient(app) as client:
+            assert client.get(CONTEXT).status_code == 401
+            assert client.post(SELECTION, json={}).status_code == 401
+            for path, _ in PRIVATE_PILOT_PATHS:
+                assert client.post(path, json={}).status_code == 404
+        for name in ("identity_connect", "selection_connect"):
+            configured[name].assert_not_called()
+        for dependency in provider_dependencies:
+            assert not dependency.mock_calls
+    finally:
+        assert control.close()
 
 
 @pytest.mark.parametrize(
