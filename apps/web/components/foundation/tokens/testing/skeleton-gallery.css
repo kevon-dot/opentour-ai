@@ -1,0 +1,28 @@
+body { margin: 0; background: var(--ot-surface-base); }
+.skeleton-gallery { padding: var(--ot-space-16); font-size: var(--ot-type-body-size); line-height: var(--ot-type-body-line); overflow-wrap: anywhere; }
+.skeleton-gallery h1 { margin: 0; font-size: var(--ot-type-heading-size); line-height: var(--ot-type-heading-line); }
+.skeleton-controls { display: flex; flex-wrap: wrap; gap: var(--ot-space-12); margin-block: var(--ot-space-24); }
+.skeleton-controls button { box-sizing: border-box; min-block-size: 44px; max-inline-size: 100%; padding: var(--ot-space-8); font: inherit; color: var(--ot-text-primary); background: var(--ot-surface-base); border: 1px solid var(--ot-border-control); border-radius: var(--ot-radius-6); overflow-wrap: anywhere; }
+.skeleton-controls button:focus-visible { outline: 2px solid var(--ot-action-primary); outline-offset: 2px; }
+/* Both layers size the slot. Hidden generated text reserves its enlarged-text footprint. */
+.skeleton-slot { display: grid; inline-size: 360px; max-inline-size: 100%; }
+.skeleton-slot > * { grid-area: 1 / 1; align-self: start; }
+.skeleton-ready { display: flex; flex-direction: column; align-items: flex-start; gap: var(--ot-space-12); inline-size: 360px; max-inline-size: 100%; min-inline-size: 0; visibility: hidden; color: var(--ot-text-secondary); font-size: var(--ot-type-small-size); font-weight: var(--ot-type-small-weight); }
+.skeleton-slot[data-phase='ready'] > .skeleton-ready { visibility: visible; }
+.skeleton-ready p { margin: 0; inline-size: 100%; overflow-wrap: anywhere; }
+.skeleton-ready-label { line-height: var(--ot-type-small-line); }
+.skeleton-ready-row { line-height: 1rem; min-block-size: var(--ot-space-16); }
+.skeleton-ready--rows > .skeleton-ready-row { max-inline-size: 328px; }
+.skeleton-ready--rows > .skeleton-ready-row:nth-of-type(3) { max-inline-size: 288px; }
+.skeleton-ready--card > .skeleton-ready-row:nth-of-type(2) { max-inline-size: 220px; }
+.skeleton-ready--card > .skeleton-ready-row:nth-of-type(3) { max-inline-size: 130px; }
+.skeleton-ready--card > .skeleton-ready-row:nth-of-type(4) { max-inline-size: 280px; }
+.skeleton-following { margin-block: var(--ot-space-24) 0; }
+@media (min-width: 768px) { .skeleton-gallery { padding: var(--ot-space-24); } }
+@media (min-width: 1280px) { .skeleton-gallery { padding: var(--ot-space-32); } }
+@media (forced-colors: active) {
+  body { background: Canvas; }
+  .skeleton-gallery, .skeleton-ready { color: CanvasText; }
+  .skeleton-controls button { color: ButtonText; background: ButtonFace; border-color: ButtonText; }
+  .skeleton-controls button:focus-visible { outline-color: Highlight; }
+}

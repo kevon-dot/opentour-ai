@@ -1,0 +1,13 @@
+/* Static native specimens 153:479 / 153:484; narrow containers cap each bar. */
+.ot-skeleton { display: flex; flex-direction: column; align-items: flex-start; gap: var(--ot-space-12); inline-size: 360px; max-inline-size: 100%; min-inline-size: 0; font-family: Geist, sans-serif; }
+.ot-skeleton-label { margin: 0; inline-size: 100%; color: var(--ot-text-secondary); font-size: var(--ot-type-small-size); font-weight: var(--ot-type-small-weight); line-height: var(--ot-type-small-line); overflow-wrap: anywhere; }
+.ot-skeleton-bar { box-sizing: border-box; flex: none; inline-size: 100%; block-size: var(--ot-space-16); border-radius: var(--ot-radius-4); background: var(--ot-unknown-background); }
+.ot-skeleton--rows > .ot-skeleton-bar { max-inline-size: 328px; }
+.ot-skeleton--rows > .ot-skeleton-bar:nth-of-type(2) { max-inline-size: 288px; }
+.ot-skeleton--card > .ot-skeleton-bar:nth-of-type(1) { max-inline-size: 220px; }
+.ot-skeleton--card > .ot-skeleton-bar:nth-of-type(2) { max-inline-size: 130px; }
+.ot-skeleton--card > .ot-skeleton-bar:nth-of-type(3) { max-inline-size: 280px; }
+@media (forced-colors: active) {
+  .ot-skeleton-label { color: CanvasText; }
+  .ot-skeleton-bar { background: Canvas; border: 1px solid CanvasText; }
+}
