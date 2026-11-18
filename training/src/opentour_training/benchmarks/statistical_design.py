@@ -6,10 +6,8 @@ from fractions import Fraction
 from typing import Any
 
 from opentour_training.evaluation.inference_plan import (
-    INFERENCE_URI,
     ContractValidator,
     InvalidKernelInput,
-    _json_copy,
     strict_count,
     validate_inference_plan,
 )
@@ -45,11 +43,7 @@ def validate_statistical_design(
     Current authority, population eligibility and exposure reservations are checked at lock.
     """
     plan = validate_inference_plan(inference_plan, contracts)
-    policy = _json_copy(gate_policy)
-    # Reuse the kernel's digest-checked registry and its closed common references.
-    validator = contracts._validator.evolve(schema={"$ref": INFERENCE_URI + "#/$defs/GatePolicy"})
-    if not validator.is_valid(policy):
-        raise InvalidKernelInput()
+    policy = contracts.validate_gate_policy(gate_policy)
     if policy["effect_requirement"]["independent_unit"] != plan.independent_unit:
         raise InvalidKernelInput()
 

@@ -134,6 +134,16 @@ class ContractValidator:
     _validator: Any = field(repr=False)
     _seal: object = field(repr=False)
 
+    def validate_gate_policy(self, value: object) -> dict[str, Any]:
+        """Return an independent copy validated by the registered GatePolicy definition."""
+        if self._seal is not _SEAL:
+            raise InvalidKernelInput()
+        policy = _json_copy(value)
+        validator = self._validator.evolve(schema={"$ref": INFERENCE_URI + "#/$defs/GatePolicy"})
+        if not isinstance(policy, dict) or not validator.is_valid(policy):
+            raise InvalidKernelInput()
+        return policy
+
 
 def build_contract_validator(
     inference_schema_bytes: bytes, common_schema_bytes: bytes
