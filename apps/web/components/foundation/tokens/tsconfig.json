@@ -22,6 +22,9 @@
     ]
   },
   "include": [
+    "../forms/form-error-summary*.ts",
+    "../forms/form-error-summary*.tsx",
+    "../../../tests/fixtures/presentation/form-error-summary.tsx",
     "../../../tests/fixtures/presentation/icon-button.tsx",
     "../../../tests/fixtures/presentation/cancellation-impact.tsx",
     "../../../features/operations/cancellation-impact*.tsx",
