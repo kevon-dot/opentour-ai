@@ -166,8 +166,13 @@ def verify_scoped_presentation(root: Path, value: dict[str, Any]) -> None:
         ):
             raise ValueError("Metric presentation capture inventory mismatch")
     elif value["issue_key"] == "OPE-303":
-        expected_charts = {f"charts-{width}-{scale}.png" for width in widths for scale in (100, 200)}
-        if len(images) != len(expected_charts) or {Path(name).name for name in images} != expected_charts:
+        expected_charts = {
+            f"charts-{width}-{scale}.png" for width in widths for scale in (100, 200)
+        }
+        if (
+            len(images) != len(expected_charts)
+            or {Path(name).name for name in images} != expected_charts
+        ):
             raise ValueError("Chart presentation capture inventory mismatch")
     elif value["issue_key"] == "OPE-305":
         states = {"populated", "partial", "empty", "filtered-to-nothing", "navigation"}
@@ -175,7 +180,9 @@ def verify_scoped_presentation(root: Path, value: dict[str, Any]) -> None:
             (width, scale, state) for width in widths for scale in (100, 200) for state in states
         }
         captures = [
-            re.search(r"(320|768|1280|1440)px-and-(100|200)-text-presentation/([a-z-]+)\.png$", name)
+            re.search(
+                r"(320|768|1280|1440)px-and-(100|200)-text-presentation/([a-z-]+)\.png$", name
+            )
             for name in images
         ]
         actual_tables = {(int(case[1]), int(case[2]), case[3]) for case in captures if case}
