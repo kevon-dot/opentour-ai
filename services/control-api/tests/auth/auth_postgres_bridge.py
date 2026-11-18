@@ -26,22 +26,22 @@ def run(config, command):
 
     def current(handle):
         session = repository.load_session(digest(handle), now, allow_ended=True)
+        csrf_token = hmac.new(config["key"].encode(), handle.encode(), hashlib.sha256).hexdigest()
         if session.ended_at:
-            private = {
-                "credentials": {"accessToken": "", "refreshToken": "", "userId": session.subject},
-                "claims": {"authenticationTime": timestamp(session.created_at)},
+            return {
+                "handle": handle,
+                "csrfToken": csrf_token,
+                "ended": True,
+                "generation": session.generation,
             }
-        else:
-            private = json.loads(
-                sealer.open(repository.read_credentials(session, now), scope(session), now)
-            )
+        private = json.loads(
+            sealer.open(repository.read_credentials(session, now), scope(session), now)
+        )
         return {
             "handle": handle,
-            "ended": session.ended_at is not None,
+            "ended": False,
             "reconciliationRequired": session.reconciliation_required,
-            "csrfToken": hmac.new(
-                config["key"].encode(), handle.encode(), hashlib.sha256
-            ).hexdigest(),
+            "csrfToken": csrf_token,
             "credentials": private["credentials"],
             "identity": {
                 "actor": {"kind": "human", "subject": session.subject, "issuer": session.issuer},

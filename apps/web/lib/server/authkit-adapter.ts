@@ -31,12 +31,14 @@ export type SelectionReceipt = Readonly<{
   session_generation: number; request_id: string;
 }>;
 export type SelectionDecision = { target: SelectionTarget; alreadyCurrent?: boolean } | { receipt: SelectionReceipt };
-export type ServerSession = {
-  handle: string; identity: Identity; credentials: Credentials; csrfToken: string;
-  ended: boolean;
+type SessionBinding = { handle: string; csrfToken: string };
+export type ActiveServerSession = SessionBinding & {
+  ended: false; identity: Identity; credentials: Credentials;
   reconciliationRequired: boolean;
   credentialDigest?: string;
 };
+export type EndedServerSession = SessionBinding & { ended: true; generation: number };
+export type ServerSession = ActiveServerSession | EndedServerSession;
 export type AuthTransaction = {
   state: string; nonce: string; browserDigest: string; verifier: string; expiresAt: number;
   returnPath: string; kind: 'signin' | 'switch';
@@ -220,7 +222,7 @@ function mutation(request: Request, profile: AuthProfile, session: ServerSession
     throw new IdentityFailure('CSRF_INVALID', 403);
   }
 }
-function active(session: ServerSession, generation?: number): void {
+function active(session: ServerSession, generation?: number): asserts session is ActiveServerSession {
   if (session.ended || !validGeneration(session.identity.session_generation)
       || session.identity.actor.kind !== 'human' || !/^[A-Za-z0-9_-]{32,128}$/.test(session.handle)) {
     throw new IdentityFailure('SESSION_ENDED');
@@ -230,7 +232,7 @@ function active(session: ServerSession, generation?: number): void {
     throw new IdentityFailure('STALE_SESSION_CONTEXT', 409);
   }
 }
-function sameSession(session: ServerSession, claims: Claims, target?: string): void {
+function sameSession(session: ActiveServerSession, claims: Claims, target?: string): void {
   if (claims.subject !== session.identity.actor.subject || claims.sessionId !== session.identity.session_id
       || claims.issuer !== session.identity.actor.issuer
       || (target !== undefined && claims.organizationId !== target)) {
@@ -238,7 +240,7 @@ function sameSession(session: ServerSession, claims: Claims, target?: string): v
   }
 }
 
-function projectedIdentity(claims: Claims, session: ServerSession, checkedAt: number): Identity {
+function projectedIdentity(claims: Claims, session: ActiveServerSession, checkedAt: number): Identity {
   return {
     actor: { kind: 'human', subject: claims.subject, issuer: claims.issuer },
     session_id: claims.sessionId,
@@ -409,7 +411,7 @@ export function createAuthkitAdapter(ports: {
   profileCheck(profile);
   const now = serverClock(ports.now ?? Date.now);
 
-  async function rebound(session: ServerSession): Promise<ServerSession> {
+  async function rebound(session: ActiveServerSession): Promise<ActiveServerSession> {
     const current = await sessions.current(session.handle);
     active(current, session.identity.session_generation);
     if (current.handle !== session.handle || current.identity.session_id !== session.identity.session_id
@@ -420,7 +422,7 @@ export function createAuthkitAdapter(ports: {
     return current;
   }
 
-  async function verifiedSession(session: ServerSession): Promise<{ session: ServerSession; claims: Claims }> {
+  async function verifiedSession(session: ActiveServerSession): Promise<{ session: ActiveServerSession; claims: Claims }> {
     const claims = await provider.verify(session.credentials.accessToken);
     sameSession(session, claims);
     const current = await rebound(session);
@@ -432,13 +434,13 @@ export function createAuthkitAdapter(ports: {
     return { session: { ...current, identity: projectedIdentity(claims, current, checkedAt) }, claims };
   }
 
-  async function authorizedTarget(session: ServerSession, intent: SelectionIntent): Promise<SelectionTarget> {
+  async function authorizedTarget(session: ActiveServerSession, intent: SelectionIntent): Promise<SelectionTarget> {
     const decision = await selections.authorize(session.handle, session.identity, intent);
     if ('receipt' in decision) throw new IdentityFailure('STALE_SESSION_CONTEXT', 409);
     return checkedTarget(session.identity, intent.organizationId, decision.target);
   }
 
-  async function commitSwitch(session: ServerSession, intent: SelectionIntent, target: SelectionTarget,
+  async function commitSwitch(session: ActiveServerSession, intent: SelectionIntent, target: SelectionTarget,
     credentials: Credentials, claims: Claims): Promise<SelectionReceipt> {
     sameSession(session, claims, target.identityOrganizationId);
     if (credentials.userId !== claims.subject || claims.expiresAt <= now()) {
@@ -454,7 +456,7 @@ export function createAuthkitAdapter(ports: {
     ), intent, target);
   }
 
-  async function start(returnPath: string, browser: string, session?: ServerSession,
+  async function start(returnPath: string, browser: string, session?: ActiveServerSession,
     selectionTarget?: SelectionTarget, selectionIntent?: SelectionIntent): Promise<Response> {
     checkedReturn(profile, returnPath);
     const transaction: AuthTransaction = { state: secret(), nonce: secret(), browserDigest: sha(browser),
@@ -498,7 +500,7 @@ export function createAuthkitAdapter(ports: {
           throw new IdentityFailure('CALLBACK_INVALID');
         }
         checkedReturn(profile, transaction.returnPath);
-        let previous: ServerSession | undefined;
+        let previous: ActiveServerSession | undefined;
         let target: SelectionTarget | undefined;
         let intent: SelectionIntent | undefined;
         if (transaction.kind === 'switch') {
@@ -509,8 +511,9 @@ export function createAuthkitAdapter(ports: {
           intent = checkedIntent(transaction.selectionIntent.organizationId,
             transaction.selectionIntent.expectedGeneration, transaction.selectionIntent.idempotencyKey);
           if (intent.expectedGeneration !== transaction.generation) throw new IdentityFailure('CALLBACK_INVALID');
-          previous = await sessions.current(transaction.sessionHandle);
-          active(previous, transaction.generation);
+          const current = await sessions.current(transaction.sessionHandle);
+          active(current, transaction.generation);
+          previous = current;
           if (previous.identity.actor.subject !== transaction.subject
               || previous.identity.session_id !== transaction.sessionId) throw new IdentityFailure('CALLBACK_INVALID');
           target = checkedTarget(previous.identity, intent.organizationId, transaction.selectionTarget);
@@ -544,11 +547,21 @@ export function createAuthkitAdapter(ports: {
     },
     async signout(request: Request): Promise<Response> {
       try {
-        const session = await sessions.current(cookie(request, sessionCookie));
+        const handle = cookie(request, sessionCookie);
+        const session = await sessions.current(handle);
+        const generation = session.ended ? session.generation : session.identity.session_generation;
+        if (session.handle !== handle || !validGeneration(generation)) throw new IdentityFailure('SESSION_INVALID');
         mutation(request, profile, session);
         let ended: { sessionId: string; generation: number };
-        try { ended = await sessions.end(session.handle, session.identity.session_generation); }
-        catch { throw new IdentityFailure('SESSION_END_UNCONFIRMED', 503); }
+        try {
+          ended = await sessions.end(handle, generation);
+          if (!ended || !validId(ended.sessionId) || ended.sessionId.trim().length === 0
+              || !validGeneration(ended.generation)
+              || (session.ended ? ended.generation !== generation
+                : ended.generation <= generation || ended.sessionId !== session.identity.session_id)) {
+            throw new IdentityFailure('SESSION_END_UNCONFIRMED', 503);
+          }
+        } catch { throw new IdentityFailure('SESSION_END_UNCONFIRMED', 503); }
         const headers = noStore();
         headers.append('Set-Cookie', setCookie(sessionCookie, '', 0));
         try { return redirect(providerDestination(profile, provider.logoutURL(ended.sessionId)), headers); }

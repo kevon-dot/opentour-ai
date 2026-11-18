@@ -1,5 +1,6 @@
 """Actual disposable PostgreSQL, generated identities and provider claims."""
 
+import json
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import replace
@@ -9,12 +10,18 @@ from threading import Barrier
 from types import SimpleNamespace
 from uuid import uuid4
 
+import jwt
 import psycopg
 import pytest
+from cryptography.fernet import Fernet
+from cryptography.hazmat.primitives.asymmetric import rsa
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from opentour_control.auth import workos_provider
+from opentour_control.auth.browser_state import BrowserCredentials
 from opentour_control.auth.config import MAX_COUNTER, AuthError, IdentityConfig, digest, timestamp
 from opentour_control.auth.repository import PostgresIdentityRepository, connection_factory
+from opentour_control.auth.runtime import create_control_auth_runtime
 from opentour_control.auth.session import (
     SessionService,
     VerifiedIdentityContext,
@@ -300,6 +307,107 @@ def test_commit_mounts_active_context_and_fences_other_binding(durable):
         lambda: durable.identity_repository.load_session(digest(durable.other), datetime.now(UTC)),
     )
     assert counts(durable) == (1, 1)
+
+
+def test_composed_control_auth_routes_share_the_durable_session(durable, monkeypatch):
+    subject = durable.identity.actor["subject"]
+    org = durable.orgs["a"]
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    public = json.loads(jwt.algorithms.RSAAlgorithm.to_jwk(key.public_key()))
+    public.update(kid="generated", alg="RS256", use="sig")
+    fetched = []
+
+    def fetch(config):
+        fetched.append(config.issuer)
+        return {"keys": [public]}
+
+    def unexpected_provider_request(*args, **kwargs):
+        pytest.fail("Generated composition test must not use provider networking")
+
+    monkeypatch.setattr(workos_provider, "fetch_jwks", fetch)
+    monkeypatch.setattr(
+        workos_provider.BoundedWorkOSBackend, "request", unexpected_provider_request
+    )
+    config = IdentityConfig(
+        ISSUER,
+        "https://api.example.invalid",
+        "https://api.workos.com/jwks/test",
+        "client_test",
+        3600,
+    )
+    now = int(durable.now.timestamp())
+    claims = {
+        "iss": ISSUER,
+        "aud": config.audience,
+        "sub": subject,
+        "sid": "generated-runtime-" + uuid4().hex,
+        "org_id": org.remote_org,
+        "auth_time": now - 60,
+        "iat": now - 30,
+        "exp": now + 300,
+    }
+    token = jwt.encode(claims, key, algorithm="RS256", headers={"kid": "generated"})
+    other = jwt.encode(
+        {**claims, "org_id": durable.orgs["b"].remote_org},
+        key,
+        algorithm="RS256",
+        headers={"kid": "generated"},
+    )
+    runtime = create_control_auth_runtime(
+        config=config,
+        workos_api_key="generated-no-provider-access",
+        sealing_keys=(Fernet.generate_key(),),
+        csrf_key=b"g" * 32,
+        identity_connect=durable.identity_repository.connect,
+        selection_connect=durable.selector.connect,
+    )
+    assert fetched == []
+    try:
+        browser = runtime.browser_state.admit(
+            BrowserCredentials(
+                access_token=token, refresh_token="generated-refresh", user_id=subject
+            )
+        )
+        app = FastAPI()
+        app.include_router(runtime.router)
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Cookie": f"opentour-session={browser.handle}",
+            "Idempotency-Key": "generated-runtime-selection",
+        }
+        context_path = "/v1/session/context"
+        selection_path = "/v1/session:select-organization"
+        body = {"organization_id": org.local, "expected_session_generation": 0}
+        with TestClient(app) as client:
+            assert client.get(context_path, headers=headers).json()["state"] == "unselected"
+            denied = client.post(
+                selection_path,
+                json=body,
+                headers={**headers, "Authorization": f"Bearer {other}"},
+            )
+            assert (denied.status_code, denied.json()["code"]) == (
+                409,
+                "CONTEXT_RECONCILIATION_REQUIRED",
+            )
+            selected = client.post(selection_path, json=body, headers=headers)
+            assert selected.status_code == 200
+            receipt = selected.json()
+            assert receipt == {
+                "state": "active",
+                "organization_id": org.local,
+                "membership_id": org.membership,
+                "session_generation": 1,
+                "request_id": receipt["request_id"],
+            }
+            current = client.get(context_path, headers=headers).json()
+            assert {**current, "request_id": receipt["request_id"]} == receipt
+            assert client.post(selection_path, json=body, headers=headers).json() == receipt
+            assert runtime.browser_state.end(browser.handle, 1).generation == 2
+            ended = client.get(context_path, headers=headers)
+            assert (ended.status_code, ended.json()["code"]) == (401, "SESSION_ENDED")
+        assert fetched == [ISSUER]
+    finally:
+        assert runtime.close()
 
 
 def test_exact_historical_receipt_after_later_switch(durable):

@@ -4,7 +4,7 @@ import { describe, it, mock } from 'node:test';
 import { isDeepStrictEqual } from 'node:util';
 import { testCases } from '../../tests/web-unit-cases.js';
 import { exportJWK, generateKeyPair, SignJWT } from 'jose';
-import type { AuthProfile, AuthTransaction, Claims, Credentials, Identity,
+import type { ActiveServerSession, AuthProfile, AuthTransaction, Claims, Credentials, Identity,
   SelectionDecision, SelectionIntent, SelectionTarget, ServerSession } from './authkit-adapter.js';
 
 mock.module('server-only', { namedExports: {} });
@@ -32,24 +32,32 @@ const targetB: SelectionTarget = { organizationId: 'org_b', identityOrganization
 function fixture() {
   let currentTime = NOW;
   const flows = new Map<string, AuthTransaction>();
-  const session: ServerSession = { handle: 'h'.repeat(43), ended: false, reconciliationRequired: false,
+  const session: Omit<ActiveServerSession, 'ended'> & { ended: boolean } = {
+    handle: 'h'.repeat(43), ended: false, reconciliationRequired: false,
     csrfToken: 'csrf-fixture', credentials, credentialDigest: stagedDigest,
     identity: { actor: { kind: 'human', subject: claims.subject, issuer: claims.issuer },
       session_id: claims.sessionId, session_generation: 0,
       identity_checked_at: new Date(NOW).toISOString(), authentication_time: claims.authenticationTime,
       assurance_level: 'unknown' } };
+  function readSession(): ServerSession {
+    if (session.ended) {
+      return { handle: session.handle, csrfToken: session.csrfToken, ended: true,
+        generation: session.identity.session_generation };
+    }
+    return { ...structuredClone(session), ended: false };
+  }
   const sessions = {
     admit: mock.fn(async () => {
       if (session.ended) throw new IdentityFailure('SESSION_ENDED');
-      return structuredClone(session);
+      return readSession();
     }),
-    current: mock.fn(async () => structuredClone(session)),
+    current: mock.fn(async () => readSession()),
     replaceCredentials: mock.fn(async (_handle: string, generation: number, next: Credentials) => {
       if (session.ended || generation !== session.identity.session_generation) throw new IdentityFailure('STALE_SESSION_CONTEXT');
       session.credentials = next;
       return stagedDigest;
     }),
-    end: mock.fn(async () => {
+    end: mock.fn(async (_handle: string, _generation: number) => {
       if (!session.ended) session.identity.session_generation++;
       session.ended = true;
       return { sessionId: session.identity.session_id, generation: session.identity.session_generation };
@@ -303,6 +311,57 @@ describe('ending and switching', () => {
     const f = fixture(); assert.equal((await f.adapter.signout(f.request(false))).status, 403);
     assert.equal(f.sessions.end.mock.callCount(), 0);
   });
+  it('checks CSRF before requesting an ended session receipt', async () => {
+    const f = fixture();
+    f.session.ended = true;
+    f.session.identity.session_generation = 1;
+    const request = f.request();
+    request.headers.set('X-CSRF-Token', 'csrf-another');
+
+    const result = await f.adapter.signout(request);
+    assert.equal(result.status, 403);
+    assert.equal((await result.json()).code, 'CSRF_INVALID');
+    assert.equal(result.headers.get('set-cookie'), null);
+    assert.equal(result.headers.get('location'), null);
+    assert.equal(f.sessions.end.mock.callCount(), 0);
+    assert.equal(f.provider.logoutURL.mock.callCount(), 0);
+  });
+  it('clears the same cookie on signout replay with a minimal ended record', async () => {
+    const f = fixture();
+    const first = await f.adapter.signout(f.request());
+    const clearingCookie = first.headers.get('set-cookie');
+    assert.equal(first.status, 303);
+    assert.equal(first.headers.get('location'), 'https://api.workos.com/user_management/sessions/logout');
+    assert.match(clearingCookie ?? '', /^opentour-session=; .*Max-Age=0/);
+    assert.deepEqual(await f.sessions.current(), {
+      handle: f.session.handle, csrfToken: f.session.csrfToken, ended: true, generation: 1,
+    });
+
+    const repeat = await f.adapter.signout(f.request());
+    assert.equal(repeat.status, 303);
+    assert.equal(repeat.headers.get('location'), first.headers.get('location'));
+    assert.equal(repeat.headers.get('set-cookie'), clearingCookie);
+    assert.equal(repeat.headers.get('cache-control'), 'no-store');
+    assert.deepEqual(f.sessions.end.mock.calls.map(call => call.arguments), [
+      [f.session.handle, 0], [f.session.handle, 1],
+    ]);
+    assert.equal(f.session.identity.session_generation, 1);
+    assert.equal(f.provider.logoutURL.mock.callCount(), 2);
+  });
+  testCases(['active', 'ended'] as const)('refuses signout with a mismatched %s session handle', async (state) => {
+    const f = fixture();
+    const request = f.request();
+    f.session.handle = 'x'.repeat(43);
+    f.session.ended = state === 'ended';
+
+    const result = await f.adapter.signout(request);
+    assert.equal(result.status, 401);
+    assert.equal((await result.json()).code, 'SESSION_INVALID');
+    assert.equal(result.headers.get('location'), null);
+    assert.equal(result.headers.get('set-cookie'), null);
+    assert.equal(f.sessions.end.mock.callCount(), 0);
+    assert.equal(f.provider.logoutURL.mock.callCount(), 0);
+  });
   it('provider logout failure cannot undo committed local denial', async () => {
     const f = fixture(); f.provider.logoutURL.mock.mockImplementation(() => { throw new Error('SECRET'); });
     const result = await f.adapter.signout(f.request());
@@ -314,6 +373,28 @@ describe('ending and switching', () => {
     const result = await f.adapter.signout(f.request());
     assert.equal(result.status, 503); assert.equal(result.headers.get('location'), null);
     assert.equal(result.headers.get('set-cookie'), null); assert.equal(f.provider.logoutURL.mock.callCount(), 0);
+  });
+  testCases([
+    ['empty session ID', true, { sessionId: '', generation: 2 }],
+    ['blank session ID', true, { sessionId: '  ', generation: 2 }],
+    ['missing session ID', true, { generation: 2 }],
+    ['wrong active session ID', false, { sessionId: 'foreign_session', generation: 3 }],
+    ['non-advancing active generation', false, { sessionId: claims.sessionId, generation: 2 }],
+    ['mismatched ended replay generation', true, { sessionId: claims.sessionId, generation: 3 }],
+  ] as const)('refuses signout receipt with %s', async (_label, alreadyEnded, receipt) => {
+    const f = fixture();
+    f.session.ended = alreadyEnded;
+    f.session.identity.session_generation = 2;
+    f.sessions.end.mock.mockImplementation(async () =>
+      receipt as Awaited<ReturnType<typeof f.sessions.end>>);
+
+    const result = await f.adapter.signout(f.request());
+    assert.equal(result.status, 503);
+    assert.equal((await result.json()).code, 'SESSION_END_UNCONFIRMED');
+    assert.equal(result.headers.get('set-cookie'), null);
+    assert.equal(result.headers.get('location'), null);
+    assert.deepEqual(f.sessions.end.mock.calls.map(call => call.arguments), [[f.session.handle, 2]]);
+    assert.equal(f.provider.logoutURL.mock.callCount(), 0);
   });
   testCases(['subject', 'sessionId', 'organizationId'])('rejects changed refresh %s', async (field) => {
     const f = fixture();
