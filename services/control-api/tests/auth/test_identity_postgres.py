@@ -53,10 +53,8 @@ TARGET = "services/control-api/tests/auth/test_identity_postgres.py"
 ROOT = Path(__file__).resolve().parents[4]
 
 
-@pytest.fixture(scope="module")
-def postgres():
-    if os.environ.get("OPENTOUR_POSTGRES_TARGET") != TARGET:
-        raise RuntimeError("Real PostgreSQL requires its registered local-integration target")
+@contextmanager
+def identity_postgres_fixture():
     fixture = DisposablePostgres()
     with fixture:
         migration = ROOT / "services/control-api/migrations/0001_identity_state.sql"
@@ -84,6 +82,14 @@ def postgres():
         ).hexdigest()
         yield fixture
     assert fixture.cleanup_complete
+
+
+@pytest.fixture(scope="module")
+def postgres():
+    if os.environ.get("OPENTOUR_POSTGRES_TARGET") != TARGET:
+        raise RuntimeError("Real PostgreSQL requires its registered local-integration target")
+    with identity_postgres_fixture() as fixture:
+        yield fixture
 
 
 @pytest.fixture(params=["customer_controlled", "opentour_managed"])
