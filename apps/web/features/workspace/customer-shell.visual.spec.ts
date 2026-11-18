@@ -1,7 +1,7 @@
 import { expect, test } from '@playwright/test';
 import { join } from 'node:path';
 import { writeFile } from 'node:fs/promises';
-import { build } from 'vite';
+import { buildInlineFixture } from '../../tests/fixtures/presentation/build.ts';
 
 const navigation = ['Overview', 'Workflows', 'Sources', 'Learning assets', 'Experiments', 'Benchmarks', 'Releases', 'Delivery'];
 const tabLabels = ['Overview', 'Mind web', 'Datasets', 'Experiments', 'Benchmarks', 'Releases'];
@@ -12,42 +12,29 @@ const identities = [
 let script: string;
 let css: string;
 test.beforeAll(async () => {
-  const root = join(process.cwd(), 'apps/web');
-  const input = join(root, 'shell-fixture.tsx');
-  const bundle = await build({
-    root, configFile: false, publicDir: false, envFile: false, logLevel: 'error',
-    oxc: { jsx: { runtime: 'automatic' } }, define: { 'process.env.NODE_ENV': '"production"' },
-    plugins: [{ name: 'local-shell-fixtures', resolveId: id => id === input ? input : null,
-      load: id => id === input ? `
-        import { useState } from 'react';
-        import { createRoot } from 'react-dom/client';
-        import { CustomerShell } from './features/workspace/customer-shell';
-        const index = Number(document.body.dataset.fixture);
-        const identity = ${JSON.stringify(identities)}[index];
-        const links = ${JSON.stringify(navigation)}.map((label,i)=>({label,href:'#nav-'+i}));
-        function Fixture() {
-          const [selectedKey,onSelectionChange]=useState('Overview');
-          return <CustomerShell brand="OpenTour" workspace={{customer:identity.name,scope:identity.scope}}
-            navigation={links} activeHref={document.body.dataset.active || links[0].href}
-            utilities={['Environment','Usage','Settings'].map(label=>({label,href:'#'+label}))}
-            delivery={{title:'Your delivery team',detail:'White-glove support is included.'}}
-            profile="JD  Jordan Davis"
-            breadcrumb={{label:'Breadcrumb',items:[{label:identity.name,href:'#workspaces'},{label:'Production'}]}}
-            context={{origin:'Demo data',mode:identity.mode,cloud:'AWS',region:'us-east-1'}}
-            page={{title:'Refund status',subtitle:'Refund status · receipt-backed answers · policy v2',primaryAction:{label:'View benchmark',onPress(){document.body.dataset.action='benchmark'}}}}
-            tabs={{label:'Page tabs',selectedKey,onSelectionChange,items:${JSON.stringify(tabLabels)}.map(label=>({key:label,label,panel:null}))}}
-          />;
-        }
-        createRoot(document.querySelector('#root')).render(<Fixture/>);
-      ` : null }],
-    build: { write: false, lib: { entry: input, name: 'ShellFixture', formats: ['es'] } },
-  });
-  const result = Array.isArray(bundle) ? bundle[0] : bundle;
-  if (!('output' in result)) throw Error('Browser bundle missing');
-  const js = result.output.find(asset => asset.type === 'chunk');
-  const styles = result.output.find(asset => asset.type === 'asset' && asset.fileName.endsWith('.css'));
-  if (!js || js.type !== 'chunk' || !styles || styles.type !== 'asset') throw Error('Shell assets missing');
-  script = js.code; css = String(styles.source);
+  const output = await buildInlineFixture(join(process.cwd(), 'apps/web/shell-fixture.tsx'), 'esm', `
+    import { useState } from 'react';
+    import { createRoot } from 'react-dom/client';
+    import { CustomerShell } from './features/workspace/customer-shell';
+    const index = Number(document.body.dataset.fixture);
+    const identity = ${JSON.stringify(identities)}[index];
+    const links = ${JSON.stringify(navigation)}.map((label,i)=>({label,href:'#nav-'+i}));
+    function Fixture() {
+      const [selectedKey,onSelectionChange]=useState('Overview');
+      return <CustomerShell brand="OpenTour" workspace={{customer:identity.name,scope:identity.scope}}
+        navigation={links} activeHref={document.body.dataset.active || links[0].href}
+        utilities={['Environment','Usage','Settings'].map(label=>({label,href:'#'+label}))}
+        delivery={{title:'Your delivery team',detail:'White-glove support is included.'}}
+        profile="JD  Jordan Davis"
+        breadcrumb={{label:'Breadcrumb',items:[{label:identity.name,href:'#workspaces'},{label:'Production'}]}}
+        context={{origin:'Demo data',mode:identity.mode,cloud:'AWS',region:'us-east-1'}}
+        page={{title:'Refund status',subtitle:'Refund status · receipt-backed answers · policy v2',primaryAction:{label:'View benchmark',onPress(){document.body.dataset.action='benchmark'}}}}
+        tabs={{label:'Page tabs',selectedKey,onSelectionChange,items:${JSON.stringify(tabLabels)}.map(label=>({key:label,label,panel:null}))}}
+      />;
+    }
+    createRoot(document.querySelector('#root')).render(<Fixture/>);
+  `);
+  script = output.script; css = output.css;
 });
 
 for (const [i, identity] of identities.entries()) {
