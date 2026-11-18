@@ -2,7 +2,7 @@
 import assert from 'node:assert/strict';
 import { describe, it, mock } from 'node:test';
 import { isDeepStrictEqual } from 'node:util';
-import { testCases } from '../../../../tools/web-unit-cases.js';
+import { testCases } from '../../tests/web-unit-cases.js';
 import { exportJWK, generateKeyPair, SignJWT } from 'jose';
 import type { AuthProfile, AuthTransaction, Claims, Credentials, Identity,
   SelectionTarget, ServerSession } from './authkit-adapter.js';

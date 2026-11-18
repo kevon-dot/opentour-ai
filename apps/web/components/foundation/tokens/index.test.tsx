@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { testCases } from '../../../../../tools/web-unit-cases.js';
+import { testCases } from '../../../tests/web-unit-cases.js';
 import { Badge, Button, Tabs } from './index';
 import { presentationFixtures as fixtures } from './fixtures';
 import tokens from '../../../styles/product-tokens.json';
