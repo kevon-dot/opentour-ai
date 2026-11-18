@@ -16,6 +16,7 @@
     "apps/web/components/foundation/data-display/scenario-conformance.visual.spec.ts",
     "apps/web/components/foundation/data-display/table-populations.visual.spec.ts",
     "apps/web/components/foundation/data-display/visual.spec.ts",
+    "apps/web/components/foundation/forms/derived-value.visual.spec.ts",
     "apps/web/components/foundation/forms/dialogs-focus.visual.spec.ts",
     "apps/web/components/foundation/forms/difference-review.visual.spec.ts",
     "apps/web/components/foundation/forms/field-semantics.visual.spec.ts",
@@ -338,6 +339,10 @@
     "apps/web/features/operations/cancellation-impact.visual.spec.ts": {
       "kind": "simulated",
       "owner": "OPE-315"
+    },
+    "apps/web/components/foundation/forms/derived-value.visual.spec.ts": {
+      "kind": "simulated",
+      "owner": "OPE-320"
     }
   }
 }
