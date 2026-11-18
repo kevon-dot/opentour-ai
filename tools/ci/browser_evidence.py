@@ -175,7 +175,7 @@ def verify_scoped_presentation(root: Path, value: dict[str, Any]) -> None:
         ):
             raise ValueError("Chart presentation capture inventory mismatch")
     elif value["issue_key"] == "OPE-305":
-        states = {"populated", "partial", "empty", "filtered-to-nothing", "navigation"}
+        states = {"populated", "partial", "empty", "filtered-to-nothing", "navigation", "query"}
         expected_tables = {
             (width, scale, state) for width in widths for scale in (100, 200) for state in states
         }
