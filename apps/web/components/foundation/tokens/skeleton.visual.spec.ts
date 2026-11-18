@@ -60,7 +60,8 @@ async function geometry(page: Page) {
   return page.evaluate(() => {
     const box = (element: Element) => {
       const rect = element.getBoundingClientRect();
-      return { x: rect.x, y: rect.y, width: rect.width, height: rect.height };
+      // Pointer interaction may scroll enlarged content into view; compare layout in document space.
+      return { x: rect.x + scrollX, y: rect.y + scrollY, width: rect.width, height: rect.height };
     };
     const skeleton = document.querySelector('.ot-skeleton');
     const label = document.querySelector('.ot-skeleton-label');
