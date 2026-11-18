@@ -1,0 +1,87 @@
+@import '../../../styles/product-tokens.css';
+
+/* OPE-316 labelled text field and standalone input. Class-scoped; no element resets. */
+.ot-text-field {
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  gap: var(--ot-space-8);
+  inline-size: 100%;
+  /* The containing form owns the measure: it sets --ot-text-field-inline-size (688px in the settings form). */
+  max-inline-size: var(--ot-text-field-inline-size, 360px);
+  /* The design strokes inside the frame, so border plus padding keeps content 16px from the outer edge. */
+  padding: calc(var(--ot-space-16) - 1px);
+  border: 1px solid var(--ot-border-control);
+  border-radius: var(--ot-radius-8);
+  background: var(--ot-surface-base);
+  color: var(--ot-text-primary);
+  overflow-wrap: anywhere;
+}
+.ot-text-field-label,
+.ot-text-field-control {
+  font: var(--ot-type-label-weight) var(--ot-type-label-size)/var(--ot-type-label-line) Geist, sans-serif;
+}
+.ot-text-field-control {
+  appearance: none;
+  box-sizing: border-box;
+  inline-size: 100%;
+  min-inline-size: 0;
+  /* One line of label type. The height follows rem text scaling; long raw text scrolls inside the control. */
+  block-size: var(--ot-type-label-line);
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: inherit;
+}
+.ot-text-field-helper,
+.ot-text-field-error {
+  margin: 0;
+  font: var(--ot-type-small-weight) var(--ot-type-small-size)/var(--ot-type-small-line) Geist, sans-serif;
+}
+.ot-text-field-helper { color: var(--ot-text-secondary); }
+.ot-text-field-error { color: var(--ot-failure-text); }
+
+/* Frame states follow the native control's own state, so they cannot drift from it. */
+.ot-text-field:has(> .ot-text-field-control[aria-invalid='true']) { background: var(--ot-failure-background); }
+.ot-text-field:has(> .ot-text-field-control:disabled) { opacity: 0.55; }
+/* The frame carries the keyboard focus indicator, inside its own edge and in every state including invalid.
+   The control's native indicator is removed only by a rule that also draws the frame's. */
+.ot-text-field:has(> .ot-text-field-control:focus-visible) { outline: 2px solid var(--ot-action-primary); outline-offset: -2px; }
+.ot-text-field:has(> .ot-text-field-control:focus-visible) > .ot-text-field-control { outline: none; }
+
+.ot-input {
+  appearance: none;
+  box-sizing: border-box;
+  vertical-align: middle;
+  inline-size: 280px;
+  max-inline-size: 100%;
+  /* One line of body type between 12px insets; the inside border is taken out of the padding. */
+  block-size: calc(var(--ot-type-body-line) + 2 * var(--ot-space-12));
+  margin: 0;
+  padding: calc(var(--ot-space-12) - 1px);
+  border: 1px solid var(--ot-border-control);
+  border-radius: var(--ot-radius-6);
+  background: var(--ot-surface-base);
+  color: var(--ot-text-muted);
+  font: var(--ot-type-body-weight) var(--ot-type-body-size)/var(--ot-type-body-line) Geist, sans-serif;
+}
+.ot-input:disabled { background: var(--ot-unknown-background); }
+.ot-input:focus-visible { outline: 2px solid var(--ot-action-primary); outline-offset: -2px; }
+.ot-text-field-control:disabled,
+.ot-input:disabled { cursor: not-allowed; }
+
+@media (forced-colors: active) {
+  .ot-text-field,
+  .ot-input { background: Canvas; color: CanvasText; border-color: CanvasText; }
+  .ot-text-field-helper,
+  .ot-text-field-error { color: CanvasText; }
+  .ot-text-field:has(> .ot-text-field-control:focus-visible) { outline-color: Highlight; }
+  .ot-input:focus-visible { outline-color: Highlight; }
+  .ot-text-field:has(> .ot-text-field-control:disabled) { opacity: 1; color: GrayText; border-color: GrayText; }
+  .ot-text-field:has(> .ot-text-field-control:disabled) > .ot-text-field-helper,
+  .ot-text-field:has(> .ot-text-field-control:disabled) > .ot-text-field-error,
+  .ot-input:disabled { color: GrayText; }
+  .ot-input:disabled { border-color: GrayText; }
+}
