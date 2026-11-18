@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from collections import Counter
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
@@ -392,10 +393,24 @@ def _missing_cell_bindings(cell_ids: Mapping[str, str]) -> tuple[str, ...]:
     return tuple(sorted(invalid))
 
 
+def _strict_sha256(value: object) -> bool:
+    return isinstance(value, str) and re.fullmatch(r"[a-f0-9]{64}", value) is not None
+
+
+def _valid_artifact_ref(value: object, registry: Registry[Any]) -> bool:
+    return (
+        isinstance(value, Mapping)
+        and _strict_sha256(value.get("sha256"))
+        and valid_instance(_COMMON + "ArtifactRef", value, registry)
+    )
+
+
 def _complete_receipt(
     receipt: Mapping[str, object], case: IsolationCase, registry: Registry[Any]
 ) -> bool:
     if set(receipt) != CaseObservationReceipt.__required_keys__:
+        return False
+    if not _strict_sha256(receipt["input_digest"]):
         return False
     for field_name, definition in (
         ("actor_ref", "Id"),
@@ -403,7 +418,6 @@ def _complete_receipt(
         ("input_digest", "Sha256"),
         ("started_at", "Timestamp"),
         ("finished_at", "Timestamp"),
-        ("actual_usage_ref", "ArtifactRef"),
     ):
         if not valid_instance(_COMMON + definition, receipt[field_name], registry):
             return False
@@ -418,7 +432,8 @@ def _complete_receipt(
     return (
         isinstance(artifacts, list)
         and bool(artifacts)
-        and all(valid_instance(_COMMON + "ArtifactRef", item, registry) for item in artifacts)
+        and all(_valid_artifact_ref(item, registry) for item in artifacts)
+        and _valid_artifact_ref(receipt["actual_usage_ref"], registry)
         and _matches_shape(expectation, case.expected)
         and expectation == dict(case.expected)
         and _matches_shape(metrics, case.expected)

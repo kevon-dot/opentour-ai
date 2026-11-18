@@ -484,3 +484,28 @@ def test_ingestion_freezes_bindings_and_metrics_at_read(topology: IsolationFixtu
     assert report.receipt_status == "COMPLETE"
     assert report.classified_count == 106
     assert not report.failed_cases
+
+
+@pytest.mark.parametrize("mode", _MODES)
+@pytest.mark.parametrize("suffix", ["\n", "\r\n"], ids=["lf", "crlf"])
+@pytest.mark.parametrize("field", ["input_digest", "evidence_refs", "actual_usage_ref"])
+def test_receipt_digests_reject_trailing_line_terminators(
+    topology: IsolationFixture, mode: DeploymentMode, suffix: str, field: str
+) -> None:
+    first, *rest = _receipts(topology, mode)
+    malformed = "a" * 64 + suffix
+    if field == "input_digest":
+        first["input_digest"] = malformed
+    elif field == "evidence_refs":
+        first["evidence_refs"][0]["sha256"] = malformed
+    else:
+        usage = first["actual_usage_ref"]
+        assert usage is not None
+        usage["sha256"] = malformed
+
+    report = assess_receipts(topology, mode, _CELL_IDS, [first, *rest])
+    assert report.receipt_status == "INCOMPLETE"
+    assert report.classified_count == 105
+    assert report.incomplete_cases == (first["case_id"],)
+    assert report.rejected_receipt_count == 1
+    assert report.product_acceptance == "NOT_RUN"
