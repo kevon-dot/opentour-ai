@@ -20,6 +20,7 @@ const rate: RateComparisonProps = {
   method: 'Paired episodes · frozen two-sided 95% exact-marginal interval with Bonferroni coverage. Retention uses a frozen one-sided bound. No method switch after observing results.',
 };
 const signed: SignedBarsProps = {
+  summary: { tone: 'info', headline: '−$900', details: ['$300 · $1,800'] },
   label: 'Signed amounts', unit: { currency: 'USD', fractionDigits: 0 }, domain: { min: -900, max: 1800 },
   rows: [-900, 300, 1800].map(value => ({ key: String(value), value: { status: 'observed', value } })),
 };
@@ -51,7 +52,7 @@ test.beforeAll(async () => {
         createRoot(document.querySelector('main')).render(<>
           <EvidenceCoverage {...${JSON.stringify(coverage)}} />
           <RateComparison {...${JSON.stringify(rate)}} />
-          <div><ChartEvidenceNotice tone="info" headline="−$900" details={['$300 · $1,800']} /><SignedBars {...${JSON.stringify(signed)}} /></div>
+          <SignedBars {...${JSON.stringify(signed)}} />
           {boards.map(([tone, headline, body]) => <ChartEvidenceNotice key={headline} {...{tone,headline,details:[body]}} />)}
         </>        );` : null,
     }],
