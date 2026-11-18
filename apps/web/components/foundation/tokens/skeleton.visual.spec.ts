@@ -1,5 +1,5 @@
 import { test, expect, type Page, type TestInfo } from '@playwright/test';
-import { build } from 'vite';
+import { buildInlineFixture } from '../../../tests/fixtures/presentation/build.ts';
 import { join } from 'node:path';
 import { writeFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
@@ -11,20 +11,8 @@ let styles: string;
 const unexpected = new WeakMap<Page, string[]>();
 
 test.beforeAll(async () => {
-  const result = await build({
-    root: join(process.cwd(), 'apps/web'), configFile: false, envFile: false, publicDir: false, logLevel: 'error',
-    oxc: { jsx: { runtime: 'automatic' } },
-    build: { write: false, lib: { entry: join(process.cwd(),
-      'apps/web/components/foundation/tokens/testing/skeleton-gallery.tsx'), name: 'SkeletonFixture', formats: ['iife'] } },
-    define: { 'process.env.NODE_ENV': JSON.stringify('production') },
-  });
-  const bundle = Array.isArray(result) ? result[0] : result;
-  if (!('output' in bundle)) throw new Error('Missing skeleton fixture bundle.');
-  const js = bundle.output.find(item => item.type === 'chunk');
-  const css = bundle.output.find(item => item.type === 'asset' && item.fileName.endsWith('.css'));
-  if (!js || js.type !== 'chunk' || !css || css.type !== 'asset') throw new Error('Missing skeleton fixture assets.');
-  script = js.code;
-  styles = String(css.source);
+  const output = await buildInlineFixture(join(process.cwd(), 'apps/web/components/foundation/tokens/testing/skeleton-gallery.tsx'), 'iife');
+  script = output.script; styles = output.css;
 });
 
 test.afterEach(async ({ page }) => { expect(unexpected.get(page)).toEqual([]); });

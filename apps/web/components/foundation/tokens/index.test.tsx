@@ -4,7 +4,9 @@ import { readFileSync, mkdtempSync, mkdirSync, writeFileSync, rmSync, realpathSy
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createHash } from 'node:crypto';
-import { describe, expect, it } from 'vitest';
+import assert from 'node:assert/strict';
+import { describe, it } from 'node:test';
+import { testCases } from '../../../tests/web-unit-cases.js';
 import { Badge, Button, Dialog, Drawer, Tabs } from './index';
 import type { ModalPresentationProps } from './contracts';
 import { presentationFixtures as fixtures } from './fixtures';
@@ -12,60 +14,60 @@ import tokens from '../../../styles/product-tokens.json';
 import { foundationMetadata, overlayMetadata } from '../../../../../tools/browser-test-runner';
 
 describe('production presentation contracts', () => {
-  it.each(fixtures.variants)('renders native labelled %s button with safe default type', variant => {
+  testCases(fixtures.variants)('renders native labelled %s button with safe default type', variant => {
     const html = renderToStaticMarkup(<Button label={fixtures.buttonLabel} variant={variant} />);
-    expect(html).toContain('<button type="button"');
-    expect(html).toContain(fixtures.buttonLabel);
-    expect(html).not.toContain('role="button"');
+    assert.ok((html)?.includes('<button type="button"'));
+    assert.ok((html)?.includes(fixtures.buttonLabel));
+    assert.ok((html)?.includes('role="button"') === false);
   });
   it('preserves a busy button name and identifies the reason without fake completion', () => {
     const html = renderToStaticMarkup(<Button label={fixtures.buttonLabel} busy disabledReason={fixtures.busyReason} />);
-    expect(html).toContain('aria-busy="true"');
-    expect(html).toContain('aria-disabled="true"');
-    expect(html).toContain('aria-describedby=');
-    expect(html).toContain(fixtures.buttonLabel);
-    expect(html).toContain(fixtures.busyReason);
-    expect(html).toContain('width="12" height="12" alt="" aria-hidden="true"');
-    expect(html).not.toContain('disabled=""'); // Busy retains focus; click is guarded in browser tests.
+    assert.ok((html)?.includes('aria-busy="true"'));
+    assert.ok((html)?.includes('aria-disabled="true"'));
+    assert.ok((html)?.includes('aria-describedby='));
+    assert.ok((html)?.includes(fixtures.buttonLabel));
+    assert.ok((html)?.includes(fixtures.busyReason));
+    assert.ok((html)?.includes('width="12" height="12" alt="" aria-hidden="true"'));
+    assert.ok((html)?.includes('disabled=""') === false); // Busy retains focus; click is guarded in browser tests.
   });
   it('uses native disabled semantics and a persistent reason', () => {
     const html = renderToStaticMarkup(<Button label={fixtures.buttonLabel} disabled disabledReason={fixtures.disabledReason} />);
-    expect(html).toContain('disabled=""');
-    expect(html).toContain(fixtures.disabledReason);
+    assert.ok((html)?.includes('disabled=""'));
+    assert.ok((html)?.includes(fixtures.disabledReason));
   });
-  it.each(fixtures.badges)('preserves the explicit $tone label', ({ tone, label }) => {
+  testCases(fixtures.badges)('preserves the explicit $tone label', ({ tone, label }) => {
     const html = renderToStaticMarkup(<Badge tone={tone} label={label} />);
-    expect(html).toContain(label);
-    expect(html).not.toContain('>Active<');
+    assert.ok((html)?.includes(label));
+    assert.ok((html)?.includes('>Active<') === false);
   });
   it('escapes caller text instead of introducing markup or content-derived actions', () => {
     const html = renderToStaticMarkup(<Badge tone="unknown" label={'<script>generated</script>'} />);
-    expect(html).toContain('&lt;script&gt;generated&lt;/script&gt;');
-    expect(html).not.toContain('<script>');
+    assert.ok((html)?.includes('&lt;script&gt;generated&lt;/script&gt;'));
+    assert.ok((html)?.includes('<script>') === false);
   });
-  it.each(['', '   ', '\n'])('rejects a missing visible label %j', label => {
-    expect(() => renderToStaticMarkup(<Button label={label} />)).toThrow('visible');
-    expect(() => renderToStaticMarkup(<Badge tone="unknown" label={label} />)).toThrow('visible');
+  testCases(['', '   ', '\n'])('rejects a missing visible label %j', label => {
+    assert.throws(() => renderToStaticMarkup(<Button label={label} />), /visible/);
+    assert.throws(() => renderToStaticMarkup(<Badge tone="unknown" label={label} />), /visible/);
   });
   it('connects tab and panel IDs, with one tab stop and no inactive panel content', () => {
     const html = renderToStaticMarkup(<Tabs label="Generated panels" selectedKey="overview"
       onSelectionChange={() => { throw new Error('Rendering cannot activate a tab'); }}
       items={fixtures.tabs.map(item => ({ ...item, panel: item.content }))} />);
-    expect(html.match(/role="tab"/g)).toHaveLength(4);
-    expect(html.match(/aria-selected="true"/g)).toHaveLength(1);
-    expect(html.match(/role="tabpanel"/g)).toHaveLength(4);
+    assert.equal((html.match(/role="tab"/g))?.length, 4);
+    assert.equal((html.match(/aria-selected="true"/g))?.length, 1);
+    assert.equal((html.match(/role="tabpanel"/g))?.length, 4);
     const controls = [...html.matchAll(/aria-controls="([^"]+)"/g)].map(match => match[1]);
-    for (const id of controls) expect(html).toContain(`id="${id}"`);
-    expect(html).toContain(fixtures.tabs[0].content);
-    expect(html).not.toContain(fixtures.tabs[2].content);
+    for (const id of controls) assert.ok((html)?.includes(`id="${id}"`));
+    assert.ok((html)?.includes(fixtures.tabs[0].content));
+    assert.ok((html)?.includes(fixtures.tabs[2].content) === false);
   });
   it('rejects duplicate keys and selection that is absent or disabled', () => {
     for (const items of [
       [{ key: 'a', label: 'A', panel: null }, { key: 'a', label: 'B', panel: null }],
       [{ key: 'a', label: 'A', panel: null, disabled: true }],
       [{ key: 'b', label: 'B', panel: null }],
-    ]) expect(() => renderToStaticMarkup(<Tabs label="Generated" items={items} selectedKey="a"
-      onSelectionChange={() => {}} />)).toThrow('unique keys');
+    ]) assert.throws(() => renderToStaticMarkup(<Tabs label="Generated" items={items} selectedKey="a"
+      onSelectionChange={() => {}} />), /unique keys/);
   });
 });
 
@@ -87,37 +89,39 @@ describe('finite presentation evidence admission', () => {
   it('binds qualified Geist sources and the reviewed focus revision without depending on the 127 font', () => {
     fixture(() => {}, (root, review) => {
       const metadata = foundationMetadata(root, review);
-      expect(metadata.issue_key).toBe('OPE-253'); expect(metadata.fixture_id).toBe('presentation-foundation-v1');
-      expect(metadata.fonts).toHaveLength(2); expect(metadata).not.toHaveProperty('font_sha256');
+      assert.equal(metadata.issue_key, 'OPE-253'); assert.equal(metadata.fixture_id, 'presentation-foundation-v1');
+      assert.ok(Array.isArray(metadata.fonts));
+      assert.equal(metadata.fonts.length, 2);
+      assert.ok(!('font_sha256' in metadata));
     });
   });
   it('rejects an unreviewed or missing browser baseline in ordinary execution', () => {
-    fixture(() => {}, root => expect(() => foundationMetadata(root)).toThrow('INVALID_CONFIGURATION'));
+    fixture(() => {}, root => assert.throws(() => foundationMetadata(root), /INVALID_CONFIGURATION/));
   });
   it('rejects baseline authoring bound to a different design revision', () => {
-    fixture(() => {}, (root, review) => expect(() => foundationMetadata(root, { ...review, designRevision: 'foreign' })).toThrow('INVALID_CONFIGURATION'));
+    fixture(() => {}, (root, review) => assert.throws(() => foundationMetadata(root, { ...review, designRevision: 'foreign' }), /INVALID_CONFIGURATION/));
   });
   it('rejects modified font bytes even when the font path is present', () => {
     fixture(root => writeFileSync(join(root, 'apps/web/styles/fonts/Geist.woff2'), 'generated-invalid-font'),
-      (root, review) => expect(() => foundationMetadata(root, review)).toThrow('INVALID_CONFIGURATION'));
+      (root, review) => assert.throws(() => foundationMetadata(root, review), /INVALID_CONFIGURATION/));
   });
   it('rejects an altered focus policy rather than inheriting the 127 exception', () => {
     fixture(root => {
       const path = join(root, 'apps/web/components/foundation/tokens/testing/baseline-review.json');
       const value = JSON.parse(readFileSync(path, 'utf8')); value.max_diff_pixels = 14;
       writeFileSync(path, JSON.stringify(value));
-    }, (root, review) => expect(() => foundationMetadata(root, review)).toThrow('INVALID_CONFIGURATION'));
+    }, (root, review) => assert.throws(() => foundationMetadata(root, review), /INVALID_CONFIGURATION/));
   });
 });
 
 describe('design token integrity', () => {
   const css = readFileSync(new URL('../../../styles/product-tokens.css', import.meta.url), 'utf8');
   it('keeps the CSS colors, spacing and radii equal to the recorded design values', () => {
-    for (const [key, value] of Object.entries(tokens.colors)) expect(css).toContain(`--ot-${key}: ${value};`);
-    for (const value of tokens.spacing_px) expect(css).toContain(`--ot-space-${value}: ${value}px;`);
-    for (const value of tokens.radius_px) expect(css).toContain(`--ot-radius-${value}: ${value}px;`);
+    for (const [key, value] of Object.entries(tokens.colors)) assert.ok((css)?.includes(`--ot-${key}: ${value};`));
+    for (const value of tokens.spacing_px) assert.ok((css)?.includes(`--ot-space-${value}: ${value}px;`));
+    for (const value of tokens.radius_px) assert.ok((css)?.includes(`--ot-radius-${value}: ${value}px;`));
     for (const [name, value] of Object.entries(tokens.typography)) {
-      expect(css).toContain(`--ot-type-${name}-line: ${value.line_height_px / 16}rem;`);
+      assert.ok((css)?.includes(`--ot-type-${name}-line: ${value.line_height_px / 16}rem;`));
     }
   });
   function luminance(hex: string) {
@@ -136,50 +140,52 @@ describe('design token integrity', () => {
     ];
     for (const [foreground, background] of pairs) {
       const values = [luminance(foreground), luminance(background)].sort((a, b) => b - a);
-      expect((values[0] + 0.05) / (values[1] + 0.05)).toBeGreaterThanOrEqual(4.5);
+      assert.ok((values[0] + 0.05) / (values[1] + 0.05) >= 4.5);
     }
   });
 });
 
-// Append-only: historical Vitest transport IDs use the collected index.
-describe.each([{ name: 'Dialog', Component: Dialog }, { name: 'Drawer', Component: Drawer }])('$name modal presentation contract', ({ Component, name }) => {
-  const props: ModalPresentationProps = { open: true, title: 'Generated details', children: 'Generated body',
-    initialFocus: { kind: 'heading' }, returnFocus: () => null, fallbackFocus: () => null,
-    onDismiss: () => { throw new Error('Rendering must never request dismissal'); } };
-  it('U01 requires a visible title, associates its heading and removes closed content', () => {
-    expect(renderToStaticMarkup(<Component {...props} open={false} />)).toBe('');
-    expect(() => renderToStaticMarkup(<Component {...props} title=" " />)).toThrow('visible');
-    const html = renderToStaticMarkup(<Component {...props} />);
-    const labelledBy = /aria-labelledby="([^"]+)"/.exec(html)?.[1];
-    expect(labelledBy).toBeTruthy(); expect(html).toContain(`id="${labelledBy}" tabindex="-1"`);
-    expect(html).toContain('Generated details');
-    expect(html).not.toContain('aria-label=');
+// Keep the existing order because the transport IDs use the collected index.
+for (const [name, Component] of [['Dialog', Dialog], ['Drawer', Drawer]] as const) {
+  describe(`${name} modal presentation contract`, () => {
+    const props: ModalPresentationProps = { open: true, title: 'Generated details', children: 'Generated body',
+      initialFocus: { kind: 'heading' }, returnFocus: () => null, fallbackFocus: () => null,
+      onDismiss: () => { throw new Error('Rendering must never request dismissal'); } };
+    it('U01 requires a visible title, associates its heading and removes closed content', () => {
+      assert.equal(renderToStaticMarkup(<Component {...props} open={false} />), '');
+      assert.throws(() => renderToStaticMarkup(<Component {...props} title=" " />), /visible/);
+      const html = renderToStaticMarkup(<Component {...props} />);
+      const labelledBy = /aria-labelledby="([^"]+)"/.exec(html)?.[1];
+      assert.ok(labelledBy); assert.ok((html)?.includes(`id="${labelledBy}" tabindex="-1"`));
+      assert.ok((html)?.includes('Generated details'));
+      assert.ok((html)?.includes('aria-label=') === false);
+    });
+    it('U02 renders only an explicit non-submit close control, without implicit confirmation', () => {
+      const html = renderToStaticMarkup(<Component {...props} />);
+      assert.ok((html)?.includes('<button type="button"'));
+      assert.ok((html)?.includes(name === 'Dialog' ? 'Close dialog' : 'Close details'));
+      assert.ok((html)?.includes('<form') === false); assert.ok((html)?.includes('method="dialog"') === false);
+      assert.ok((html)?.includes('Confirm') === false);
+      const withAction = renderToStaticMarkup(<Component {...props} actions={<Button label="Explicit action" />} />);
+      assert.ok(withAction.indexOf(name === 'Dialog' ? 'Close dialog' : 'Close details') < withAction.indexOf('Explicit action'));
+      assert.equal((withAction.match(/<button /g))?.length, 2);
+    });
+    it('U03 requires an explicit initial focus policy and permits an initially empty element ref', () => {
+      assert.throws(() => renderToStaticMarkup(<Component {...props} initialFocus={undefined as never} />), /explicit initial focus/);
+      assert.throws(() => renderToStaticMarkup(<Component {...props} initialFocus={{ kind: 'unknown' } as never} />), /explicit initial focus/);
+      assert.ok((renderToStaticMarkup(<Component {...props} initialFocus={{ kind: 'element', ref: { current: null } }} />))?.includes('<dialog'));
+      assert.ok((renderToStaticMarkup(<Component {...props} initialFocus={{ kind: 'close-button' }} />))?.includes('<dialog'));
+    });
+    it('U04 preserves React content escaping without invoking caller actions', () => {
+      const html = renderToStaticMarkup(<Component {...props} title={'<script>generated</script>'}>
+        {'<img src=x onerror=generated>'}<Button label="Generated action" onPress={() => { throw new Error('No implicit action'); }} />
+      </Component>);
+      assert.ok((html)?.includes('&lt;script&gt;generated&lt;/script&gt;'));
+      assert.ok((html)?.includes('&lt;img src=x onerror=generated&gt;'));
+      assert.ok((html)?.includes('<script>') === false);
+    });
   });
-  it('U02 renders only an explicit non-submit close control, without implicit confirmation', () => {
-    const html = renderToStaticMarkup(<Component {...props} />);
-    expect(html).toContain('<button type="button"');
-    expect(html).toContain(name === 'Dialog' ? 'Close dialog' : 'Close details');
-    expect(html).not.toContain('<form'); expect(html).not.toContain('method="dialog"');
-    expect(html).not.toContain('Confirm');
-    const withAction = renderToStaticMarkup(<Component {...props} actions={<Button label="Explicit action" />} />);
-    expect(withAction.indexOf(name === 'Dialog' ? 'Close dialog' : 'Close details')).toBeLessThan(withAction.indexOf('Explicit action'));
-    expect(withAction.match(/<button /g)).toHaveLength(2);
-  });
-  it('U03 requires an explicit initial focus policy and permits an initially empty element ref', () => {
-    expect(() => renderToStaticMarkup(<Component {...props} initialFocus={undefined as never} />)).toThrow('explicit initial focus');
-    expect(() => renderToStaticMarkup(<Component {...props} initialFocus={{ kind: 'unknown' } as never} />)).toThrow('explicit initial focus');
-    expect(renderToStaticMarkup(<Component {...props} initialFocus={{ kind: 'element', ref: { current: null } }} />)).toContain('<dialog');
-    expect(renderToStaticMarkup(<Component {...props} initialFocus={{ kind: 'close-button' }} />)).toContain('<dialog');
-  });
-  it('U04 preserves React content escaping without invoking caller actions', () => {
-    const html = renderToStaticMarkup(<Component {...props} title={'<script>generated</script>'}>
-      {'<img src=x onerror=generated>'}<Button label="Generated action" onPress={() => { throw new Error('No implicit action'); }} />
-    </Component>);
-    expect(html).toContain('&lt;script&gt;generated&lt;/script&gt;');
-    expect(html).toContain('&lt;img src=x onerror=generated&gt;');
-    expect(html).not.toContain('<script>');
-  });
-});
+}
 
 describe('finite overlay evidence attribution', () => {
   const reviewPath = 'apps/web/components/foundation/tokens/testing/overlay-baseline-review.json';
@@ -207,9 +213,9 @@ describe('finite overlay evidence attribution', () => {
   it('binds exactly122 child browser cases while preserving the disjoint36 parent observations', () => {
     fixture((root, observed) => {
       const value = overlayMetadata(root, observed, baselinePlatform);
-      expect(value.issue_key).toBe('OPE-300'); expect(value.test_ids).toHaveLength(122);
-      expect(observed).toHaveLength(158); expect(value.baseline_manifest_sha256).toMatch(/^[a-f0-9]{64}$/);
-      expect(observed.filter(item => !value.test_ids.includes(item.id))).toHaveLength(36);
+      assert.equal(value.issue_key, 'OPE-300'); assert.equal((value.test_ids)?.length, 122);
+      assert.equal((observed)?.length, 158); assert.match(value.baseline_manifest_sha256, /^[a-f0-9]{64}$/);
+      assert.equal((observed.filter(item => !value.test_ids.includes(item.id)))?.length, 36);
     });
   });
   it('rejects missing, unapproved, stale-specification or foreign-design/source baseline metadata', () => {
@@ -224,7 +230,7 @@ describe('finite overlay evidence attribution', () => {
           const change = typeof mutation === 'string' ? { independent_browser_baseline_review: { ...original.independent_browser_baseline_review, review_sha256: '0'.repeat(64) } } : mutation;
           writeFileSync(path, JSON.stringify({ ...original, ...change }));
         }
-        expect(() => overlayMetadata(root, observed, baselinePlatform)).toThrow();
+        assert.throws(() => overlayMetadata(root, observed, baselinePlatform));
       });
     }
   });
@@ -239,10 +245,10 @@ describe('finite overlay evidence attribution', () => {
         writeFileSync(join(root, reviewPath), JSON.stringify(review, null, 2) + '\n');
       } else if (mutation === 'changed') writeFileSync(path, 'generated invalid image bytes');
       else { rmSync(path); if (mutation === 'symlink') symlinkSync(join(root, reviewPath), path); }
-      expect(() => overlayMetadata(root, observed, baselinePlatform)).toThrow();
+      assert.throws(() => overlayMetadata(root, observed, baselinePlatform));
     });
     // The reviewed bytes are never admitted as another platform's baselines.
-    fixture((root, observed) => expect(() => overlayMetadata(root, observed, 'linux')).toThrow());
+    fixture((root, observed) => assert.throws(() => overlayMetadata(root, observed, 'linux')));
   });
   it('rejects renamed or relabelled manifest cases and an incorrect current native capture', () => {
     for (const mutation of ['relabel', 'rename', 'capture', 'identity', 'revision', 'publication']) fixture((root, observed) => {
@@ -257,7 +263,7 @@ describe('finite overlay evidence attribution', () => {
         else if (mutation === 'publication') child.publication_spec_sha256 = '0'.repeat(64);
         else child.technical_capture_sha256 = '0'.repeat(64);
       }
-      writeFileSync(path, JSON.stringify(manifest)); expect(() => overlayMetadata(root, observed, baselinePlatform)).toThrow();
+      writeFileSync(path, JSON.stringify(manifest)); assert.throws(() => overlayMetadata(root, observed, baselinePlatform));
     });
   });
   it('refuses zero, incomplete, duplicate, foreign-file or mismatched-mode observations', () => {
@@ -265,7 +271,7 @@ describe('finite overlay evidence attribution', () => {
       for (const values of [[], observed.slice(1), [...observed.slice(1), observed[1]],
         observed.map((value, index) => index ? value : { ...value, file: 'foreign.ts' }),
         observed.map((value, index) => index ? value : { ...value, mode: value.mode === 'customer_controlled' ? 'opentour_managed' as const : 'customer_controlled' as const })]) {
-        expect(() => overlayMetadata(root, values, baselinePlatform)).toThrow();
+        assert.throws(() => overlayMetadata(root, values, baselinePlatform));
       }
     });
   });

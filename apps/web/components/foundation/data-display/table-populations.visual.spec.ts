@@ -1,46 +1,30 @@
 import { expect, test } from '@playwright/test';
 import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { build } from 'vite';
+import { buildInlineFixture } from '../../../tests/fixtures/presentation/build.ts';
 
 let script: string;
 let styles: string;
 test.beforeAll(async () => {
-  const root = join(process.cwd(), 'apps/web');
-  const entry = join(root, 'table-browser-fixture.tsx');
-  const result = await build({
-    root, configFile: false, envFile: false, publicDir: false, logLevel: 'error',
-    oxc: { jsx: { runtime: 'automatic' } },
-    plugins: [{
-      name: 'table-fixture', resolveId: id => id === entry ? entry : null,
-      load: id => id === entry ? `
-        import { createRoot } from 'react-dom/client';
-        import { TablePopulations, PageSelectionNavigation } from './components/foundation/data-display/table-populations';
-        const rows = Array.from({length:25}, (_,i) => ({
-          id:'record-'+i,label:'Receipt '+String(25-i).padStart(3,'0'),lifecycle:i===0?'Eligible · Observed':i===1?'Protected · Sealed':'Synthetic · Draft',observed:i===0?'Nov 7, 09:42 UTC':i===1?'Nov 7, 09:39 UTC':'Nov 7, 09:30 UTC',
-        }));
-        const state = document.querySelector('main').dataset.state;
-        const shown = ['populated','query'].includes(state) ? rows : state === 'partial' ? rows.slice(0,3).map((row,i)=>({...row,label:'Receipt '+String(24-i).padStart(3,'0')})) : [];
-        window.intents=[];
-        createRoot(document.querySelector('main')).render(state === 'navigation' ? <PageSelectionNavigation
-          selectedIds={['a','b','c','d']} queryCount={128} revision="8" page={1} pages={13} pageSize={10}
-          observed="09:42 UTC" previous={false} next={true} search="" onIntent={intent=>window.intents.push(intent)}/> : <TablePopulations
-          caption="Source records" context="Receipt-status workflow · Locked population receipts-nov-01-07 · Revision 8"
-          search="receipt" filters={state === 'filtered-to-nothing' ? ['Status: eligible'] : []} total={state === 'empty' ? 0 : state === 'partial' ? null : 600}
-          matching={shown.length ? 128 : 0} selection={state==='query' ? {mode:'query',count:128,revision:'8',visibleIds:shown.slice(0,-1).map(row=>row.id)} : {mode:'page',ids:state==='populated'?shown.map(r=>r.id):[]}} direction="descending"
-          pageSize={25} pageSizes={[25,50,100]} position="Page 1" previous={state === 'partial'} next={shown.length > 0}
-          state={state==='query'?'populated':state} rows={shown} reason="3 records shown. More results could not be loaded; this is not the complete population." expected={25} onIntent={intent=>window.intents.push(intent)}/>);` : null,
-    }],
-    build: { write: false, lib: { entry, name: 'TableFixture', formats: ['es'] } },
-    define: { 'process.env.NODE_ENV': JSON.stringify('production') },
-  });
-  const bundle = Array.isArray(result) ? result[0] : result;
-  if (!('output' in bundle)) throw new Error('Missing table fixture bundle');
-  const js = bundle.output.find(item => item.type === 'chunk');
-  const css = bundle.output.find(item => item.type === 'asset' && item.fileName.endsWith('.css'));
-  if (!js || js.type !== 'chunk' || !css || css.type !== 'asset') throw new Error('Missing table fixture assets');
-  script = js.code;
-  styles = String(css.source);
+  const output = await buildInlineFixture(join(process.cwd(), 'apps/web/table-browser-fixture.tsx'), 'esm', `
+    import { createRoot } from 'react-dom/client';
+    import { TablePopulations, PageSelectionNavigation } from './components/foundation/data-display/table-populations';
+    const rows = Array.from({length:25}, (_,i) => ({
+      id:'record-'+i,label:'Receipt '+String(25-i).padStart(3,'0'),lifecycle:i===0?'Eligible · Observed':i===1?'Protected · Sealed':'Synthetic · Draft',observed:i===0?'Nov 7, 09:42 UTC':i===1?'Nov 7, 09:39 UTC':'Nov 7, 09:30 UTC',
+    }));
+    const state = document.querySelector('main').dataset.state;
+    const shown = ['populated','query'].includes(state) ? rows : state === 'partial' ? rows.slice(0,3).map((row,i)=>({...row,label:'Receipt '+String(24-i).padStart(3,'0')})) : [];
+    window.intents=[];
+    createRoot(document.querySelector('main')).render(state === 'navigation' ? <PageSelectionNavigation
+      selectedIds={['a','b','c','d']} queryCount={128} revision="8" page={1} pages={13} pageSize={10}
+      observed="09:42 UTC" previous={false} next={true} search="" onIntent={intent=>window.intents.push(intent)}/> : <TablePopulations
+      caption="Source records" context="Receipt-status workflow · Locked population receipts-nov-01-07 · Revision 8"
+      search="receipt" filters={state === 'filtered-to-nothing' ? ['Status: eligible'] : []} total={state === 'empty' ? 0 : state === 'partial' ? null : 600}
+      matching={shown.length ? 128 : 0} selection={state==='query' ? {mode:'query',count:128,revision:'8',visibleIds:shown.slice(0,-1).map(row=>row.id)} : {mode:'page',ids:state==='populated'?shown.map(r=>r.id):[]}} direction="descending"
+      pageSize={25} pageSizes={[25,50,100]} position="Page 1" previous={state === 'partial'} next={shown.length > 0}
+      state={state==='query'?'populated':state} rows={shown} reason="3 records shown. More results could not be loaded; this is not the complete population." expected={25} onIntent={intent=>window.intents.push(intent)}/>);
+  `);
+  script = output.script; styles = output.css;
 });
 
 

@@ -1,5 +1,7 @@
 import { renderToStaticMarkup } from 'react-dom/server';
-import { describe, it, expect } from 'vitest';
+import assert from 'node:assert/strict';
+import { describe, it } from 'node:test';
+import { testCases } from '../../../tests/web-unit-cases.js';
 import { TablePopulations, PageSelectionNavigation } from './table-populations';
 import type { TablePopulationsProps } from './table-populations.types';
 
@@ -11,7 +13,7 @@ const base = {
 } as const;
 const rows = [{id:'one',label:'Receipt 025',lifecycle:'Eligible · Observed',observed:'09:42 UTC'}];
 describe('table populations', () => {
-  it.each([
+  testCases([
     [{state:'empty',rows:[],matching:0,total:0},['No records yet','Connect a source','0 total records']],
     [{state:'filtered-to-nothing',rows:[],matching:0,filters:['Status: held']},['No matches','Clear filters','0 matching of 600 total','Status: held']],
     [{state:'partial',rows,expected:null,reason:'Source timed out',total:null},['Partial results','1 received · Unknown expected','Source timed out','1 shown · Total not available']],
@@ -20,18 +22,18 @@ describe('table populations', () => {
   ] as const)('exposes the supplied population and scope', (state,labels) => {
     const props: TablePopulationsProps = {...base,...state};
     const html = renderToStaticMarkup(<TablePopulations {...props}/>);
-    for(const label of labels) expect(html).toContain(label);
-    expect(html).toContain('<caption class="sr">Records<span class="scroll-hint"> — scroll horizontally</span></caption>');
-    expect(html).toContain('aria-sort="descending"');
-    expect(html).toContain('Whole number 1–100; default 25.');
-    if(state.state === 'partial') expect(html).not.toContain('Select all 128');
+    for(const label of labels) assert.ok((html)?.includes(label));
+    assert.ok((html)?.includes('<caption class="sr">Records<span class="scroll-hint"> — scroll horizontally</span></caption>'));
+    assert.ok((html)?.includes('aria-sort="descending"'));
+    assert.ok((html)?.includes('Whole number 1–100; default 25.'));
+    if(state.state === 'partial') assert.ok((html)?.includes('Select all 128') === false);
   });
 });
 
 it('renders the bound operation scope and cursor controls without inventing totals', () => {
   const html = renderToStaticMarkup(<PageSelectionNavigation selectedIds={['a','b','c','d']} queryCount={128} revision="r8"
     page={1} pages={13} pageSize={10} observed="09:42 UTC" search="" previous={false} next={true} onIntent={()=>{}}/>);
-  expect(html).toContain('4 records selected');
-  expect(html).toContain('Page selection: 4 / query result: 128. Bulk action binds the frozen selected IDs and revision.');
-  expect(html).toContain('Page 1 of 13 · 10 records per page · observed 09:42 UTC');
+  assert.ok((html)?.includes('4 records selected'));
+  assert.ok((html)?.includes('Page selection: 4 / query result: 128. Bulk action binds the frozen selected IDs and revision.'));
+  assert.ok((html)?.includes('Page 1 of 13 · 10 records per page · observed 09:42 UTC'));
 });

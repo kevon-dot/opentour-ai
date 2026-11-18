@@ -1,24 +1,12 @@
 import { expect, test } from '@playwright/test';
 import { join } from 'node:path';
-import { build } from 'vite';
+import { buildInlineFixture } from '../../tests/fixtures/presentation/build.ts';
 
 let script: string;
 let styles: string;
 test.beforeAll(async () => {
-  const root = join(process.cwd(), 'apps/web');
-  const bundle = await build({
-    root, configFile: false, envFile: false, publicDir: false, logLevel: 'error',
-    oxc: { jsx: { runtime: 'automatic' } },
-    build: { write: false, lib: { entry: join(root, 'tests/fixtures/presentation/cancellation-impact.tsx'), formats: ['es'] } },
-    define: { 'process.env.NODE_ENV': JSON.stringify('production') },
-  });
-  const output = Array.isArray(bundle) ? bundle[0] : bundle;
-  if (!('output' in output)) throw new Error('Missing cancellation gallery output');
-  const js = output.output.find(file => file.type === 'chunk');
-  const css = output.output.find(file => file.type === 'asset' && file.fileName.endsWith('.css'));
-  if (!js || js.type !== 'chunk' || !css || css.type !== 'asset') throw new Error('Missing cancellation gallery assets');
-  script = js.code;
-  styles = String(css.source);
+  const output = await buildInlineFixture(join(process.cwd(), 'apps/web/tests/fixtures/presentation/cancellation-impact.tsx'), 'esm');
+  script = output.script; styles = output.css;
 });
 
 for (const width of [320, 768, 1280, 1440]) for (const scale of [100, 200]) {
