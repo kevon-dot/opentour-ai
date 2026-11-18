@@ -89,8 +89,14 @@
   .ot-text-field-helper,
   .ot-text-field-error { color: CanvasText; }
   /* The 2px focus border takes the system highlight; it is the only indicator, so nothing is doubled. */
-  .ot-text-field:has(> .ot-text-field-control:focus-visible),
-  .ot-input:focus-visible { border-color: Highlight; }
+  .ot-text-field:has(> .ot-text-field-control:focus-visible) { border-color: Highlight; }
+  .ot-input:focus-visible {
+    forced-color-adjust: none;
+    background-color: Canvas;
+    color: CanvasText;
+    border-color: Highlight;
+    outline-color: Highlight;
+  }
   .ot-text-field:has(> .ot-text-field-control:disabled) { opacity: 1; color: GrayText; border-color: GrayText; }
   .ot-text-field:has(> .ot-text-field-control:disabled) > .ot-text-field-helper,
   .ot-text-field:has(> .ot-text-field-control:disabled) > .ot-text-field-error,
