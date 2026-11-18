@@ -1,0 +1,91 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:opentour:cell-installer-parameters:1.0",
+  "title": "OpenTour cell installer input parameters",
+  "description": "Closed input shape shared by both ownership modes. Approved registry binding, resource ownership and deployment authorization are evaluated separately.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "organization_id",
+    "environment_id",
+    "cell_id",
+    "mode",
+    "account_id",
+    "region",
+    "control_endpoint",
+    "controller_digest",
+    "evaluator_digest",
+    "trainer_digest",
+    "kms_policy_profile",
+    "network_profile",
+    "subnet_ids",
+    "security_group_ids",
+    "gateway_hostname",
+    "certificate_arn",
+    "retention_policy_ref"
+  ],
+  "properties": {
+    "organization_id": { "$ref": "urn:opentour:common-contract:1.0#/$defs/Id" },
+    "environment_id": { "$ref": "urn:opentour:common-contract:1.0#/$defs/Id" },
+    "cell_id": { "$ref": "urn:opentour:common-contract:1.0#/$defs/Id" },
+    "mode": { "enum": ["opentour_managed", "customer_controlled"] },
+    "account_id": { "type": "string", "pattern": "^[0-9]{12}$", "minLength": 12, "maxLength": 12 },
+    "region": {
+      "description": "Commercial AWS Region syntax. The approved registry determines supported Regions.",
+      "type": "string",
+      "pattern": "^(?!cn-)[a-z]{2}-[a-z]+-[1-9][0-9]*(?![\\s\\S])"
+    },
+    "control_endpoint": { "$ref": "#/$defs/RegistryKey" },
+    "controller_digest": { "$ref": "#/$defs/ImageDigest" },
+    "evaluator_digest": { "$ref": "#/$defs/ImageDigest" },
+    "trainer_digest": { "$ref": "#/$defs/ImageDigest" },
+    "kms_policy_profile": { "$ref": "#/$defs/RegistryKey" },
+    "network_profile": { "$ref": "#/$defs/RegistryKey" },
+    "subnet_ids": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "type": "string", "pattern": "^subnet-(?:[0-9a-f]{8}|[0-9a-f]{17})(?![\\s\\S])" }
+    },
+    "security_group_ids": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "type": "string", "pattern": "^sg-(?:[0-9a-f]{8}|[0-9a-f]{17})(?![\\s\\S])" }
+    },
+    "gateway_hostname": {
+      "type": ["string", "null"],
+      "format": "hostname",
+      "minLength": 1,
+      "maxLength": 253,
+      "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*(?![\\s\\S])"
+    },
+    "certificate_arn": {
+      "type": ["string", "null"],
+      "pattern": "^arn:aws:acm:[a-z]{2}-[a-z]+-[1-9][0-9]*:[0-9]{12}:certificate/[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}(?![\\s\\S])"
+    },
+    "retention_policy_ref": {
+      "description": "Identifies the exact immutable PRD-24 policy revision.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["policy_id", "revision"],
+      "properties": {
+        "policy_id": { "$ref": "urn:opentour:common-contract:1.0#/$defs/Id" },
+        "revision": { "$ref": "urn:opentour:common-contract:1.0#/$defs/Id" }
+      }
+    }
+  },
+  "$defs": {
+    "RegistryKey": {
+      "description": "Opaque key in the independently approved, typed registry.",
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,255}(?![\\s\\S])"
+    },
+    "ImageDigest": {
+      "description": "Bare SHA-256. The approved release binds the workload and repository to its OCI image.",
+      "$ref": "urn:opentour:common-contract:1.0#/$defs/Sha256",
+      "minLength": 64,
+      "maxLength": 64
+    }
+  }
+}
