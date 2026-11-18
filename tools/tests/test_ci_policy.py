@@ -3,17 +3,22 @@
 import copy
 import io
 import json
+import platform
 import subprocess
 import sys
 import tarfile
+import urllib.error
+import urllib.request
+from http.client import HTTPMessage, IncompleteRead
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+from tools.ci import prepare
 from tools.ci.browser_evidence import retain_browser_evidence
 from tools.ci.policy import CHECKS, check, workflow_errors
-from tools.ci.prepare import extract
+from tools.ci.prepare import download, extract
 from tools.ci.run import (
     python_unit_selection,
     run_browser,
@@ -77,6 +82,207 @@ def test_untrusted_or_incomplete_workflow_fails(mutation: str) -> None:
     elif mutation == "upload":
         job["steps"][-1]["with"]["path"] = "**/*"
     assert workflow_errors(data)
+
+
+ARTIFACT_URL = "https://artifacts.example.invalid/pinned-tool"
+ARTIFACT = b"generated pinned prerequisite bytes"
+
+
+class ArtifactResponse(io.BytesIO):
+    def __init__(
+        self,
+        data: bytes,
+        url: str = ARTIFACT_URL,
+        *,
+        ending: Exception | None = None,
+        declared_size: int | None = None,
+    ) -> None:
+        super().__init__(data)
+        self.url = url
+        self.ending = ending
+        self.length = declared_size
+
+    def geturl(self) -> str:
+        return self.url
+
+    def read(self, size: int | None = -1, /) -> bytes:
+        result = super().read(size)
+        if not result and self.ending is not None:
+            raise self.ending
+        return result
+
+
+def script_artifact_requests(
+    monkeypatch: pytest.MonkeyPatch,
+    *responses: ArtifactResponse | Exception,
+) -> list[tuple[str, int]]:
+    pending = iter(responses)
+    calls: list[tuple[str, int]] = []
+
+    def urlopen(url: str, *, timeout: int) -> ArtifactResponse:
+        calls.append((url, timeout))
+        item = next(pending)
+        if isinstance(item, Exception):
+            raise item
+        return item
+
+    monkeypatch.setattr(prepare, "_open_artifact", urlopen)
+    return calls
+
+
+@pytest.mark.parametrize(
+    "failure", ["partial_read", "short_body", "wrapped_timeout", "incomplete", "http_503"]
+)
+def test_pinned_download_recovers_from_a_transient_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    response: ArtifactResponse | Exception
+    if failure == "partial_read":
+        response = ArtifactResponse(b"partial attempt", ending=TimeoutError())
+    elif failure == "short_body":
+        response = ArtifactResponse(b"partial attempt", declared_size=len(ARTIFACT))
+    elif failure == "wrapped_timeout":
+        response = urllib.error.URLError(TimeoutError())
+    elif failure == "incomplete":
+        response = IncompleteRead(b"partial attempt")
+    else:
+        response = urllib.error.HTTPError(ARTIFACT_URL, 503, "Unavailable", HTTPMessage(), None)
+    dst = tmp_path / "tool"
+    calls = script_artifact_requests(monkeypatch, response, ArtifactResponse(ARTIFACT))
+    download(ARTIFACT_URL, digest(ARTIFACT), dst)
+    assert calls == [(ARTIFACT_URL, 60)] * 2
+    assert dst.read_bytes() == ARTIFACT
+    assert list(tmp_path.iterdir()) == [dst]
+
+
+@pytest.mark.parametrize(
+    ("failure", "error"),
+    [("timeout", TimeoutError), ("incomplete", OSError), ("short_body", OSError)],
+)
+def test_pinned_download_exhausts_attempts_without_publishing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: str,
+    error: type[OSError],
+) -> None:
+    def response() -> ArtifactResponse:
+        partial = b"partial attempt"
+        if failure == "timeout":
+            return ArtifactResponse(partial, ending=TimeoutError())
+        if failure == "incomplete":
+            return ArtifactResponse(partial, ending=IncompleteRead(b"remaining partial bytes"))
+        return ArtifactResponse(partial, declared_size=len(ARTIFACT))
+
+    calls = script_artifact_requests(monkeypatch, *(response() for _ in range(3)))
+    with pytest.raises(error) as caught:
+        download(ARTIFACT_URL, digest(ARTIFACT), tmp_path / "tool")
+    if failure != "timeout":
+        assert isinstance(caught.value.__cause__, IncompleteRead)
+    assert calls == [(ARTIFACT_URL, 60)] * 3
+    assert not list(tmp_path.iterdir())
+
+
+def test_prepare_reports_safe_failure_after_incomplete_download(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    target = platform.system() + "-" + platform.machine()
+    artifact = {"url": ARTIFACT_URL, "sha256": digest(ARTIFACT)}
+    manifest = {
+        "supported_platforms": [target],
+        "tools": {"python": {"artifacts": {target: artifact}}},
+    }
+    (tmp_path / "tools").mkdir()
+    (tmp_path / "tools/toolchain.json").write_text(json.dumps(manifest))
+    github_path = tmp_path / "github_path"
+    monkeypatch.setattr(prepare, "ROOT", tmp_path)
+    monkeypatch.setattr(sys, "argv", ["prepare.py"])
+    monkeypatch.setenv("GITHUB_PATH", str(github_path))
+    calls = script_artifact_requests(
+        monkeypatch,
+        *(ArtifactResponse(b"partial attempt", declared_size=len(ARTIFACT)) for _ in range(3)),
+    )
+
+    assert prepare.main() == 3
+    output = capsys.readouterr()
+    assert json.loads(output.out) == {"status": "BLOCKED", "reason": "CI_PREREQUISITE_UNAVAILABLE"}
+    assert output.err == ""
+    assert calls == [(ARTIFACT_URL, 60)] * 3
+    assert not github_path.exists()
+    assert not list((tmp_path / ".toolchain/ci").iterdir())
+
+
+@pytest.mark.parametrize("failure", ["digest", "redirect", "size", "http_404"])
+def test_pinned_download_refuses_terminal_errors_without_retry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    response: ArtifactResponse | Exception
+    if failure == "digest":
+        response = ArtifactResponse(b"unexpected artifact bytes")
+    elif failure == "redirect":
+        response = ArtifactResponse(ARTIFACT, "http://artifacts.example.invalid/pinned-tool")
+    elif failure == "size":
+        monkeypatch.setattr(prepare, "MAX_DOWNLOAD", len(ARTIFACT) - 1)
+        response = ArtifactResponse(ARTIFACT)
+    else:
+        response = urllib.error.HTTPError(ARTIFACT_URL, 404, "Missing", HTTPMessage(), None)
+    calls = script_artifact_requests(monkeypatch, response)
+    error = urllib.error.HTTPError if failure == "http_404" else ValueError
+    with pytest.raises(error):
+        download(ARTIFACT_URL, digest(ARTIFACT), tmp_path / "tool")
+    assert calls == [(ARTIFACT_URL, 60)]
+    assert not list(tmp_path.iterdir())
+
+
+def test_pinned_download_redirect_handler_refuses_downgrade_before_dispatch() -> None:
+    request = urllib.request.Request(ARTIFACT_URL)
+    headers = HTTPMessage()
+    headers["Location"] = "http://artifacts.example.invalid/insecure-hop"
+    handler = prepare._HttpsRedirects()
+    redirected_body = io.BytesIO()
+    with pytest.raises(ValueError, match="Insecure prerequisite redirect"):
+        handler.http_error_302(request, redirected_body, 302, "Redirect", headers)
+    assert redirected_body.closed
+
+    destination = "https://artifacts.example.invalid/secure-hop"
+    redirected = handler.redirect_request(
+        request, io.BytesIO(), 302, "Redirect", headers, destination
+    )
+    assert redirected is not None and redirected.full_url == destination
+
+
+def test_pinned_download_cannot_overwrite_existing_destination(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dst = tmp_path / "tool"
+    dst.write_bytes(b"existing destination")
+    calls = script_artifact_requests(monkeypatch)
+    with pytest.raises(FileExistsError):
+        download(ARTIFACT_URL, digest(ARTIFACT), dst)
+    assert not calls and dst.read_bytes() == b"existing destination"
+
+
+def test_pinned_download_never_exposes_partial_or_replaces_concurrent_destination(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dst = tmp_path / "tool"
+
+    class ConcurrentResponse(ArtifactResponse):
+        def read(self, size: int | None = -1, /) -> bytes:
+            data = super().read(size)
+            if data:
+                assert not dst.exists()
+            else:
+                dst.write_bytes(b"concurrently installed")
+            return data
+
+    calls = script_artifact_requests(monkeypatch, ConcurrentResponse(ARTIFACT))
+    with pytest.raises(FileExistsError):
+        download(ARTIFACT_URL, digest(ARTIFACT), dst)
+    assert calls == [(ARTIFACT_URL, 60)]
+    assert dst.read_bytes() == b"concurrently installed"
+    assert list(tmp_path.iterdir()) == [dst]
 
 
 def test_archive_traversal_cannot_write_outside_destination(tmp_path: Path) -> None:
