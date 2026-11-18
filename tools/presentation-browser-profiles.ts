@@ -54,6 +54,17 @@ export const presentationSuites = new Map([
     ],
     specHash: '0206bcba5399c925223a10064f4818fda928231626544490ee7757db165dd8cf',
   }],
+  ['apps/web/components/foundation/data-display/relationship-context.visual.spec.ts', {
+    owner: 'OPE-319', parent: 'OPE-286', guide: '165:11224', minimumTests: 11,
+    requirementIds: [
+      'OPE-319:read-only-relationship-records',
+      'OPE-319:selected-relationship-table',
+      'OPE-319:selected-node-context',
+      'OPE-319:empty-redacted-semantics',
+      'OPE-319:browser-evidence',
+    ],
+    specHash: '3e06bf05713dc8de15cfc6c58fe60e9679a2d2915dc56288d727192ffb143bb2',
+  }],
   ['apps/web/components/foundation/data-display/chart-evidence.visual.spec.ts', {
     owner: 'OPE-303', parent: 'OPE-285', guide: '328:285', minimumTests: 8,
     specHash: 'e62f0ec3573923b56edb40e418f0d352d3e1ba69c4058edc1f6c9074b0a6bfd4',

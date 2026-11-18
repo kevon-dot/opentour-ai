@@ -1,0 +1,197 @@
+/* OPE-319 read-only relationship context. Variables are defined in product-tokens.css. */
+.ot-relationship-context {
+  container: relationship / inline-size;
+  display: flex;
+  flex-direction: column;
+  gap: var(--ot-space-16);
+  box-sizing: border-box;
+  inline-size: 100%;
+  min-inline-size: 0;
+  color: var(--ot-text-primary);
+  font-family: Geist, sans-serif;
+  overflow-wrap: anywhere;
+}
+/* Current parent boards: 20px between the selected heading, table and details; 16px elsewhere. */
+.ot-relationship-context--selected { gap: var(--ot-space-20); }
+.ot-relationship-context :is(h2, h3, p, dl, dd, ul) { margin: 0; }
+.ot-relationship-section-title, .ot-relationship-selected-title {
+  font: var(--ot-type-section-weight) var(--ot-type-section-size)/var(--ot-type-section-line) Geist, sans-serif;
+}
+
+/*
+ * Native border convention (verified on the saved 16:81, 165:* and 184:* frames): content starts
+ * after the 1px border plus the full native padding, while child widths equal the frame width minus
+ * twice that padding, as if the border took no space. Each bordered frame keeps the native start
+ * inset and gives up the 2px of border on its end inset only (for example 20/18 on a 792 card
+ * leaves a 752 table starting at 21 with a 19px remainder). Block insets are the native values.
+ */
+/* 16:81 records card: 20px padding, 16px gaps, 752px inner table at the native 792px card. */
+.ot-relationship-records {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ot-space-16);
+  box-sizing: border-box;
+  inline-size: 100%;
+  max-inline-size: 792px;
+  min-inline-size: 0;
+  padding: var(--ot-space-20);
+  padding-inline-end: calc(var(--ot-space-20) - 2px);
+  border: 1px solid var(--ot-border-default);
+  border-radius: var(--ot-radius-12);
+  background: var(--ot-surface-base);
+}
+.ot-relationship-scroll { min-inline-size: 0; overflow-x: auto; }
+.ot-relationship-scroll:focus-visible { outline: 2px solid var(--ot-action-primary); outline-offset: 2px; }
+.ot-relationship-records-table {
+  box-sizing: border-box;
+  inline-size: 100%;
+  min-inline-size: 576px;
+  table-layout: fixed;
+  border-collapse: separate;
+  border-spacing: 0;
+}
+/* Native columns 288/272/188 with 2px gaps: the gap is the leading padding of the next cell. */
+.ot-relationship-col-node { width: calc(100% * 288 / 752); }
+.ot-relationship-col-relationship { width: calc(100% * 274 / 752); }
+.ot-relationship-col-version { width: calc(100% * 190 / 752); }
+.ot-relationship-records-table .ot-table-cell + .ot-table-cell { padding-inline-start: var(--ot-space-2); }
+.ot-relationship-records-table tbody .ot-table-cell { padding-block-start: var(--ot-space-16); }
+.ot-relationship-observation {
+  color: var(--ot-text-muted);
+  font: var(--ot-type-small-weight) var(--ot-type-small-size)/var(--ot-type-small-line) Geist, sans-serif;
+}
+
+/* 165:11224, 184:18 and 184:109 families: 1px framed grid, 16px cell padding, 12px column gaps. */
+.ot-relationship-grid {
+  box-sizing: border-box;
+  inline-size: 100%;
+  min-inline-size: 0;
+  border: 1px solid var(--ot-border-default);
+  border-radius: var(--ot-radius-12);
+  background: var(--ot-surface-base);
+  overflow: clip;
+}
+.ot-relationship-table {
+  box-sizing: border-box;
+  inline-size: 100%;
+  table-layout: fixed;
+  border-collapse: separate;
+  border-spacing: 0;
+  /*
+   * With the 1px frame and 6px cell padding: text starts 17px from the outer edge, columns are
+   * separated by 12px and each equal text column is (outer - 32 - 12 × (n - 1)) / n wide
+   * (128 at 720, 211.2 at 1136, 338 for two columns at 720), as drawn.
+   */
+  padding-inline-start: calc(var(--ot-space-16) - var(--ot-space-6));
+  padding-inline-end: calc(var(--ot-space-16) - var(--ot-space-6) - 2px);
+}
+.ot-relationship-table tr { --ot-relationship-row-fill: var(--ot-surface-base); }
+.ot-relationship-table thead tr, .ot-relationship-table tbody tr:nth-child(even) { --ot-relationship-row-fill: var(--ot-surface-canvas); }
+.ot-relationship-table :is(th, td) {
+  padding: var(--ot-space-16) var(--ot-space-6);
+  background: var(--ot-relationship-row-fill);
+  text-align: start;
+  vertical-align: top;
+  font: var(--ot-type-body-weight) var(--ot-type-body-size)/var(--ot-type-body-line) Geist, sans-serif;
+}
+.ot-relationship-table th {
+  font: var(--ot-type-label-weight) var(--ot-type-label-size)/var(--ot-type-label-line) Geist, sans-serif;
+}
+/* Extend each row fill across the table's edge inset so stripes run the full inner width. */
+.ot-relationship-table tr > :first-child { box-shadow: calc(-1 * (var(--ot-space-16) - var(--ot-space-6))) 0 0 var(--ot-relationship-row-fill); }
+.ot-relationship-table tr > :last-child { box-shadow: calc(var(--ot-space-16) - var(--ot-space-6) - 2px) 0 0 var(--ot-relationship-row-fill); }
+
+/* Narrow containers: labelled stacked records. Exactly one representation is displayed. */
+.ot-relationship-stack { display: none; padding: 0; list-style: none; }
+/*
+ * Native 288px records keep 256px text: the first starts 17px from the frame's outer edge; each
+ * bordered later record keeps its own extra 1px, starting at 18px.
+ */
+.ot-relationship-record {
+  padding: var(--ot-space-16);
+  padding-inline-end: calc(var(--ot-space-16) - 2px);
+  background: var(--ot-surface-base);
+}
+.ot-relationship-record + .ot-relationship-record {
+  padding-inline-end: calc(var(--ot-space-16) - 4px);
+  border: 1px solid var(--ot-border-default);
+}
+.ot-relationship-record dl { display: flex; flex-direction: column; gap: var(--ot-space-8); }
+.ot-relationship-line {
+  font: var(--ot-type-body-weight) var(--ot-type-body-size)/var(--ot-type-body-line) Geist, sans-serif;
+}
+.ot-relationship-line:first-child {
+  font: var(--ot-type-label-weight) var(--ot-type-label-size)/var(--ot-type-label-line) Geist, sans-serif;
+}
+.ot-relationship-line :is(dt, dd) { display: inline; font: inherit; }
+@container relationship (width < 30rem) {
+  .ot-relationship-table { display: none; }
+  .ot-relationship-stack { display: block; }
+}
+
+/* 165:11243 family without its excluded actions: max 576px, 16px padding, 12px gaps. */
+.ot-relationship-selected {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ot-space-12);
+  box-sizing: border-box;
+  inline-size: 100%;
+  max-inline-size: 576px;
+  min-inline-size: 0;
+  padding: var(--ot-space-16);
+  padding-inline-end: calc(var(--ot-space-16) - 2px);
+  border: 1px solid var(--ot-border-default);
+  border-radius: var(--ot-radius-12);
+  background: var(--ot-surface-base);
+}
+.ot-relationship-selected-note, .ot-relationship-reference-detail {
+  color: var(--ot-text-secondary);
+  font: var(--ot-type-small-weight) var(--ot-type-small-size)/var(--ot-type-small-line) Geist, sans-serif;
+}
+.ot-relationship-reference {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ot-space-8);
+  padding: var(--ot-space-16);
+  padding-inline-end: calc(var(--ot-space-16) - 2px);
+  border: 1px solid var(--ot-border-control);
+  border-radius: var(--ot-radius-8);
+  background: var(--ot-surface-base);
+}
+.ot-relationship-reference dt, .ot-relationship-reference-value {
+  font: var(--ot-type-label-weight) var(--ot-type-label-size)/var(--ot-type-label-line) Geist, sans-serif;
+}
+
+/* 184:14 family: 24px padding, 16px gaps. */
+.ot-relationship-empty {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ot-space-16);
+  box-sizing: border-box;
+  inline-size: 100%;
+  min-inline-size: 0;
+  padding: var(--ot-space-24);
+  padding-inline-end: calc(var(--ot-space-24) - 2px);
+  border: 1px solid var(--ot-border-default);
+  border-radius: var(--ot-radius-12);
+  background: var(--ot-surface-base);
+}
+.ot-relationship-empty-title {
+  font: var(--ot-type-heading-weight) var(--ot-type-heading-size)/var(--ot-type-heading-line) Geist, sans-serif;
+}
+.ot-relationship-empty-body {
+  font: var(--ot-type-body-weight) var(--ot-type-body-size)/var(--ot-type-body-line) Geist, sans-serif;
+}
+.ot-relationship-empty-total {
+  font: var(--ot-type-small-weight) var(--ot-type-small-size)/var(--ot-type-small-line) Geist, sans-serif;
+}
+
+/* Fills disappear in forced colors; explicit system-colour rules keep structure and focus visible. */
+@media (forced-colors: active) {
+  .ot-relationship-records, .ot-relationship-grid, .ot-relationship-selected, .ot-relationship-empty,
+  .ot-relationship-reference, .ot-relationship-record + .ot-relationship-record { border-color: CanvasText; }
+  .ot-relationship-records-table .ot-table-cell-frame { outline: 1px solid CanvasText; outline-offset: -1px; }
+  .ot-relationship-table thead :is(th, td) { border-block-end: 1px solid CanvasText; }
+  .ot-relationship-table tbody tr + tr > * { border-block-start: 1px solid CanvasText; }
+  .ot-relationship-scroll:focus-visible { outline-color: Highlight; }
+}
