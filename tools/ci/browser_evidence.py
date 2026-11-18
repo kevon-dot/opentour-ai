@@ -38,6 +38,21 @@ BROWSER_PROFILES = {
 }
 DEFAULT_BROWSER_TARGET = "apps/web/tests/browser-harness.browser.spec.ts"
 
+# OPE-317: each designed control state and the open reference list at every width and text size,
+# plus the keyboard highlight, pointer highlight, completed selection and forced-colors renders.
+SINGLE_CHOICE_CAPTURES = frozenset(
+    {
+        f"single-choice-{width}-{scale}-{state}.png"
+        for width in (320, 768, 1280, 1440)
+        for scale in (100, 200)
+        for state in ("closed", "hover", "focus", "open", "error", "disabled", "menu")
+    }
+    | {
+        f"single-choice-{treatment}.png"
+        for treatment in ("keyboard-highlight", "pointer-highlight", "selected", "forced-colors")
+    }
+)
+
 
 def local_file(root: Path, relative: str) -> Path:
     candidate = root / relative
