@@ -12,6 +12,15 @@ from tools.schema_validate import read_json, schema_registry, valid_instance
 
 ROOT = Path(__file__).resolve().parents[2]
 SCHEMA_ID = "urn:opentour:cell-installer-parameters:1.0"
+ENVIRONMENT_PROFILE_ID = "urn:opentour:environment-profile:1.0"
+IDENTITY_PARAMETER_NAMES = {
+    "environment_id": "environment_id",
+    "organization_id": "organization_id",
+    "mode": "mode",
+    "aws_account_id": "account_id",
+    "region": "region",
+    "cell_id": "cell_id",
+}
 PARAMETER_NAMES = (
     "organization_id",
     "environment_id",
@@ -37,7 +46,8 @@ PARAMETER_NAMES = (
 def registry() -> Registry[Any]:
     document = read_json(ROOT / "infrastructure/cloudformation/parameters.schema.json")
     assert document["$id"] == SCHEMA_ID
-    return schema_registry(ROOT).with_resource(SCHEMA_ID, Resource.from_contents(document))
+    resource: Resource[Any] = Resource.from_contents(document)
+    return schema_registry(ROOT).with_resources([(SCHEMA_ID, resource)])
 
 
 @pytest.fixture
@@ -155,3 +165,76 @@ def test_invalid_parameter_values_are_rejected(
 ) -> None:
     parameters[name] = value
     assert not valid_instance(SCHEMA_ID, parameters, registry)
+
+
+@pytest.fixture(scope="module")
+def profile_registry(registry: Registry[Any]) -> Registry[Any]:
+    path = ROOT / "packages/contracts/platform/environment-profile.schema.json"
+    document = read_json(path)
+    assert document["$id"] == ENVIRONMENT_PROFILE_ID
+    resource: Resource[Any] = Resource.from_contents(document)
+    return registry.with_resources([(ENVIRONMENT_PROFILE_ID, resource)])
+
+
+@pytest.fixture
+def environment_identity(parameters: dict[str, Any]) -> dict[str, Any]:
+    return {
+        profile_field: parameters[parameter]
+        for profile_field, parameter in IDENTITY_PARAMETER_NAMES.items()
+    }
+
+
+def test_environment_identity_uses_the_same_constraints_as_installer_parameters(
+    profile_registry: Registry[Any],
+) -> None:
+    profile = profile_registry.contents(ENVIRONMENT_PROFILE_ID)["$defs"]["EnvironmentIdentity"]
+    parameters = profile_registry.contents(SCHEMA_ID)
+    assert set(profile["required"]) == set(IDENTITY_PARAMETER_NAMES)
+    assert profile["properties"] == {
+        profile_field: parameters["properties"][parameter]
+        for profile_field, parameter in IDENTITY_PARAMETER_NAMES.items()
+    }
+
+
+@pytest.mark.parametrize("mode", ["opentour_managed", "customer_controlled"])
+def test_environment_identity_from_each_installer_mode(
+    profile_registry: Registry[Any],
+    environment_identity: dict[str, Any],
+    parameters: dict[str, Any],
+    mode: str,
+) -> None:
+    parameters.update(mode=mode, network_profile=f"fixture-{mode}-network")
+    environment_identity["mode"] = mode
+    assert valid_instance(SCHEMA_ID, parameters, profile_registry)
+    assert valid_instance(ENVIRONMENT_PROFILE_ID, environment_identity, profile_registry)
+
+
+@pytest.mark.parametrize("name", IDENTITY_PARAMETER_NAMES)
+def test_all_environment_identity_fields_are_required(
+    profile_registry: Registry[Any], environment_identity: dict[str, Any], name: str
+) -> None:
+    del environment_identity[name]
+    assert not valid_instance(ENVIRONMENT_PROFILE_ID, environment_identity, profile_registry)
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        ("organization_id", None),
+        ("environment_id", ""),
+        ("cell_id", ""),
+        ("mode", "managed"),
+        ("aws_account_id", 1),
+        ("aws_account_id", "000000000001\n"),
+        ("region", "us-gov-west-1"),
+        ("region", "cn-north-1"),
+        ("account_id", "000000000001"),
+        ("network_profile", "fixture-network"),
+        ("authority_snapshot_ref", "fixture-assertion"),
+    ],
+)
+def test_environment_identity_rejects_invalid_or_foreign_fields(
+    profile_registry: Registry[Any], environment_identity: dict[str, Any], name: str, value: Any
+) -> None:
+    environment_identity[name] = value
+    assert not valid_instance(ENVIRONMENT_PROFILE_ID, environment_identity, profile_registry)
