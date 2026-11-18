@@ -7,7 +7,7 @@ export type TableRecord = Readonly<{
 
 export type TableSelection =
   | { mode: 'page'; ids: readonly string[] }
-  | { mode: 'query'; revision: string; count: number };
+  | { mode: 'query'; revision: string; count: number; visibleIds: readonly string[] };
 
 export type TableIntent =
   | { type: 'filter' | 'clear' | 'connect' | 'sort' | 'previous' | 'next' | 'review' | 'select-page' | 'select-query' | 'clear-selection' }
