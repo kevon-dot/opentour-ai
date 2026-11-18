@@ -12,6 +12,7 @@ from typing import Any
 from tools.public_content_check import MAX_FILE_BYTES, digest, inspect_bytes, load_policy
 
 PRESENTATION_TARGETS = {
+    "apps/web/components/foundation/tokens/selection-controls.visual.spec.ts": "OPE-318",
     "apps/web/components/foundation/forms/single-choice-select.visual.spec.ts": "OPE-317",
     "apps/web/components/foundation/forms/text-field.visual.spec.ts": "OPE-316",
     "apps/web/components/foundation/tokens/skeleton.visual.spec.ts": "OPE-310",
@@ -272,6 +273,53 @@ def verify_scoped_presentation(root: Path, value: dict[str, Any]) -> None:
             Path(name).name for name in images
         } != SINGLE_CHOICE_CAPTURES:
             raise ValueError("Single-choice select capture inventory mismatch")
+    elif value["issue_key"] == "OPE-318":
+        desktop_states = (
+            *(f"checkbox-{state}" for state in ("unchecked", "checked", "disabled", "error")),
+            *(f"switch-{state}" for state in ("off", "on", "disabled", "pending")),
+            *(
+                f"context-{name}"
+                for name in ("terms-loading", "terms-error", "automation", "hover")
+            ),
+        )
+        matrix_states = {
+            (1280, 100): desktop_states,
+            (320, 200): ("checkbox-family", "switch-family", "contexts"),
+        }
+        behavior_states = (
+            "checkbox-interaction",
+            "switch-interaction",
+            "controlled-rerender",
+            "disabled-error",
+            "pending",
+            "checkbox-focus",
+            "checkbox-hover",
+            "switch-focus",
+            "switch-hover",
+            "context-hover-checkbox",
+            "context-hover-switch",
+            "forced-colors",
+            "forced-colors-focus",
+            "reduced-motion",
+        )
+        expected_controls = {
+            f"selection-controls-{mode}-{width}-{scale}-{state}.png"
+            for mode in ("customer-controlled", "opentour-managed")
+            for width, scale, states in (
+                *(
+                    (width, scale, ("gallery", *matrix_states.get((width, scale), ())))
+                    for width in widths
+                    for scale in (100, 200)
+                ),
+                (1280, 100, behavior_states),
+            )
+            for state in states
+        }
+        if (
+            len(images) != len(expected_controls)
+            or {Path(name).name for name in images} != expected_controls
+        ):
+            raise ValueError("Selection control presentation capture inventory mismatch")
     elif value["issue_key"] == "OPE-303":
         expected_charts = {
             f"charts-{width}-{scale}.png" for width in widths for scale in (100, 200)

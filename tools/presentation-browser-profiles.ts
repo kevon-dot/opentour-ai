@@ -1,5 +1,15 @@
 /** Generated local presentation fixtures. Each executable target has exactly one child owner. */
 export const presentationSuites = new Map([
+  ['apps/web/components/foundation/tokens/selection-controls.visual.spec.ts', {
+    owner: 'OPE-318', parent: 'OPE-253', guide: '170:4', minimumTests: 32,
+    requirementIds: [
+      'OPE-318:implementation-scope:sentence-1',
+      'OPE-318:implementation-scope:sentence-2',
+      'OPE-318:implementation-scope:sentence-3',
+      'OPE-318:verification-and-handoff:sentence-4:browser-evidence',
+    ],
+    specHash: '329aa9716e01707bd78f9040854d6cac4dde3eb953b9614a036f951d4f88b2c5',
+  }],
   ['apps/web/components/foundation/forms/single-choice-select.visual.spec.ts', {
     owner: 'OPE-317', parent: 'OPE-279', guide: '12:55', minimumTests: 18,
     requirementIds: [

@@ -25,6 +25,7 @@
     "apps/web/components/foundation/forms/text-field.visual.spec.ts",
     "apps/web/components/foundation/forms/visual.spec.ts",
     "apps/web/components/foundation/tokens/icon-button.visual.spec.ts",
+    "apps/web/components/foundation/tokens/selection-controls.visual.spec.ts",
     "apps/web/components/foundation/tokens/skeleton.visual.spec.ts",
     "apps/web/components/foundation/tokens/status-icon.visual.spec.ts",
     "apps/web/components/foundation/tokens/tooltip.visual.spec.ts",
@@ -348,6 +349,10 @@
     "apps/web/components/foundation/forms/single-choice-select.visual.spec.ts": {
       "kind": "simulated",
       "owner": "OPE-317"
+    },
+    "apps/web/components/foundation/tokens/selection-controls.visual.spec.ts": {
+      "kind": "simulated",
+      "owner": "OPE-318"
     }
   }
 }
