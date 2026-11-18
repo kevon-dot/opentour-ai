@@ -44,6 +44,15 @@ export const presentationSuites = new Map([
     ],
     specHash: 'f8591e3da62f9264588b6fd11094d9f416038a40f80cdda91b7012be54c3cf3d',
   }],
+  ['apps/web/components/foundation/forms/single-choice-select.visual.spec.ts', {
+    owner: 'OPE-317', parent: 'OPE-279', guide: '12:55', minimumTests: 18,
+    requirementIds: [
+      'OPE-317:controlled-select',
+      'OPE-317:keyboard-pointer',
+      'OPE-317:visual-evidence',
+    ],
+    specHash: '75ed552e005b58df042f422e4cc30c2c06eb72d3fdf5a52b4d5ecf317822f6fd',
+  }],
   ['apps/web/features/operations/cancellation-impact.visual.spec.ts', {
     owner: 'OPE-315', parent: 'OPE-289', guide: '165:9515', minimumTests: 8,
     requirementIds: [

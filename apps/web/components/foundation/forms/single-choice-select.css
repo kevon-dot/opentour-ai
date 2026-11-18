@@ -1,0 +1,42 @@
+/* OPE-317 single-choice select. Control states from native 12:39, 12:43, 12:47, 12:51, 152:14 and 152:18;
+   option rows from 31:36. Imported by single-choice-select.tsx after product-tokens.css; no element resets. */
+.ot-single-choice { box-sizing: border-box; display: flex; flex-direction: column; gap: var(--ot-space-12); inline-size: 100%; min-inline-size: 0; font-family: Geist, sans-serif; color: var(--ot-text-primary); }
+.ot-single-choice-control { position: relative; box-sizing: border-box; display: flex; flex-direction: column; gap: var(--ot-space-8); inline-size: 100%; min-inline-size: 0; padding: var(--ot-space-16); border: 1px solid var(--ot-border-control); border-radius: var(--ot-radius-8); background: var(--ot-surface-base); overflow-wrap: anywhere; }
+.ot-single-choice-label, .ot-single-choice-trigger, .ot-single-choice-option-title { font: var(--ot-type-label-weight) var(--ot-type-label-size)/var(--ot-type-label-line) Geist, sans-serif; }
+.ot-single-choice-support, .ot-single-choice-option-state { font: var(--ot-type-small-weight) var(--ot-type-small-size)/var(--ot-type-small-line) Geist, sans-serif; color: var(--ot-text-secondary); }
+.ot-single-choice-label, .ot-single-choice-support { display: block; }
+/* The value is the native trigger. Its text keeps the two typed spaces before a placeholder's caret. */
+.ot-single-choice-trigger { appearance: none; display: block; box-sizing: border-box; inline-size: 100%; min-inline-size: 0; margin: 0; padding: 0; border: 0; border-radius: 0; background: transparent; color: inherit; text-align: start; white-space: pre-wrap; overflow-wrap: anywhere; cursor: pointer; outline: none; }
+/* The trigger's target is the whole bordered frame, so label, value and supporting text act as one control. */
+.ot-single-choice-trigger::after { content: ''; position: absolute; inset: -1px; box-sizing: border-box; border-radius: var(--ot-radius-8); }
+/* Keyboard focus is the 2px action ring, 2px clear of the whole frame (handoff G07, G08 and D06). It is the
+   outline of the stretched target, and an outline takes no layout space, so nothing moves or resizes. */
+.ot-single-choice-trigger:focus-visible::after { outline: 2px solid var(--ot-action-primary); outline-offset: 2px; }
+.ot-single-choice-trigger:disabled { cursor: not-allowed; }
+.ot-single-choice:not(.ot-single-choice--disabled, .ot-single-choice--invalid) .ot-single-choice-control:hover { background: var(--ot-action-subtle); }
+.ot-single-choice--invalid .ot-single-choice-control { background: var(--ot-failure-background); color: var(--ot-failure-text); }
+.ot-single-choice--invalid .ot-single-choice-support { color: inherit; }
+.ot-single-choice--disabled .ot-single-choice-control { opacity: 0.55; }
+
+/* The list opens in flow under the control on the design's 12px rhythm; nothing is clipped or overlaid. */
+.ot-single-choice-list { display: flex; flex-direction: column; gap: var(--ot-space-12); min-inline-size: 0; }
+.ot-single-choice-list[hidden] { display: none; }
+.ot-single-choice-option { box-sizing: border-box; display: flex; flex-direction: column; gap: var(--ot-space-4); min-block-size: 44px; padding: var(--ot-space-12); background: var(--ot-surface-base); color: var(--ot-text-primary); overflow-wrap: anywhere; cursor: pointer; }
+/* Selection is the fill and the word "Selected". A row reached by the keyboard or under the pointer adds the
+   action ring, so the two never look alike; the row a press merely opens on stays as native 31:36 draws it. */
+.ot-single-choice-option[aria-selected='true'] { background: var(--ot-action-subtle); }
+.ot-single-choice-option[data-highlight-ring] { background: var(--ot-action-subtle); outline: 2px solid var(--ot-action-primary); outline-offset: -2px; }
+.ot-single-choice-option[aria-disabled='true'] { cursor: not-allowed; }
+
+@media (forced-colors: active) {
+  .ot-single-choice-control { border-color: ButtonText; }
+  .ot-single-choice-trigger:focus-visible::after { outline-color: Highlight; }
+  .ot-single-choice--disabled .ot-single-choice-control { opacity: 1; border-color: GrayText; color: GrayText; }
+  .ot-single-choice--disabled .ot-single-choice-trigger, .ot-single-choice--disabled .ot-single-choice-support { color: GrayText; }
+  .ot-single-choice-option { outline: 1px solid CanvasText; outline-offset: -1px; }
+  .ot-single-choice-option[aria-selected='true'] { forced-color-adjust: none; background: SelectedItem; color: SelectedItemText; }
+  .ot-single-choice-option[aria-selected='true'] .ot-single-choice-option-state { color: inherit; }
+  .ot-single-choice-option[data-highlight-ring] { outline: 3px solid Highlight; outline-offset: -3px; }
+  .ot-single-choice-option[aria-selected='true'][data-highlight-ring] { outline-color: SelectedItemText; outline-offset: -6px; }
+  .ot-single-choice-option[aria-disabled='true'] .ot-single-choice-option-title { color: GrayText; }
+}

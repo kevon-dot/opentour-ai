@@ -29,6 +29,9 @@
     "../forms/difference-review*.ts",
     "../forms/difference-review*.tsx",
     "../../../tests/fixtures/presentation/difference-review.tsx",
+    "../forms/index.ts",
+    "../forms/single-choice-select*.ts",
+    "../forms/single-choice-select*.tsx",
     "./**/*.ts",
     "./**/*.tsx",
     "../../../tests/fixtures/presentation/operation-state.tsx"

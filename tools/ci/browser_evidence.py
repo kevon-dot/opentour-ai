@@ -18,6 +18,7 @@ PRESENTATION_TARGETS = {
     "apps/web/components/foundation/tokens/tooltip.visual.spec.ts": "OPE-313",
     "apps/web/components/foundation/forms/difference-review.visual.spec.ts": "OPE-314",
     "apps/web/features/operations/cancellation-impact.visual.spec.ts": "OPE-315",
+    "apps/web/components/foundation/forms/single-choice-select.visual.spec.ts": "OPE-317",
     "apps/web/features/workspace/customer-shell.visual.spec.ts": "OPE-307",
     "apps/web/components/foundation/data-display/chart-evidence.visual.spec.ts": "OPE-303",
     "apps/web/components/foundation/data-display/table-populations.visual.spec.ts": "OPE-305",
@@ -31,6 +32,20 @@ BROWSER_PROFILES = {
     **{target: (issue, issue) for target, issue in PRESENTATION_TARGETS.items()},
 }
 DEFAULT_BROWSER_TARGET = "apps/web/tests/browser-harness.browser.spec.ts"
+# OPE-317: each designed control state and the open reference list at every width and text size,
+# plus the keyboard highlight, pointer highlight, completed selection and forced-colors renders.
+SINGLE_CHOICE_CAPTURES = frozenset(
+    {
+        f"single-choice-{width}-{scale}-{state}.png"
+        for width in (320, 768, 1280, 1440)
+        for scale in (100, 200)
+        for state in ("closed", "hover", "focus", "open", "error", "disabled", "menu")
+    }
+    | {
+        f"single-choice-{treatment}.png"
+        for treatment in ("keyboard-highlight", "pointer-highlight", "selected", "forced-colors")
+    }
+)
 
 
 def local_file(root: Path, relative: str) -> Path:
@@ -255,6 +270,11 @@ def verify_scoped_presentation(root: Path, value: dict[str, Any]) -> None:
         actual_impact = {Path(name).name for name in images}
         if len(images) != len(expected_impact) or actual_impact != expected_impact:
             raise ValueError("Cancellation impact capture inventory mismatch")
+    elif value["issue_key"] == "OPE-317":
+        if len(images) != len(SINGLE_CHOICE_CAPTURES) or {
+            Path(name).name for name in images
+        } != SINGLE_CHOICE_CAPTURES:
+            raise ValueError("Single-choice select capture inventory mismatch")
     elif value["issue_key"] == "OPE-303":
         expected_charts = {
             f"charts-{width}-{scale}.png" for width in widths for scale in (100, 200)
