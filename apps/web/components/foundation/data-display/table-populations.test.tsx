@@ -16,12 +16,12 @@ describe('table populations', () => {
     [{state:'filtered-to-nothing',rows:[],matching:0,filters:['Status: held']},['No matches','Clear filters','0 matching of 600 total','Status: held']],
     [{state:'partial',rows,expected:null,reason:'Source timed out',total:null},['Partial results','1 received · Unknown expected','Source timed out','1 shown · Total not available']],
     [{state:'populated',rows},['1 selected on this page','Only the 1 visible record ID is selected.','Select all 128 matching records']],
-    [{state:'populated',rows,selection:{mode:'query',count:128,revision:'rev-8'}},['128 selected across this query','Frozen selection revision rev-8 · 128 matching records. New arrivals are excluded.']],
+    [{state:'populated',rows,selection:{mode:'query',count:128,revision:'rev-8',visibleIds:['one']}},['128 selected across this query','Frozen selection revision rev-8 · 128 matching records. New arrivals are excluded.']],
   ] as const)('exposes the supplied population and scope', (state,labels) => {
     const props: TablePopulationsProps = {...base,...state};
     const html = renderToStaticMarkup(<TablePopulations {...props}/>);
     for(const label of labels) expect(html).toContain(label);
-    expect(html).toContain('<caption>Records — scroll horizontally</caption>');
+    expect(html).toContain('<caption>Records<span class="scroll-hint"> — scroll horizontally</span></caption>');
     expect(html).toContain('aria-sort="descending"');
     expect(html).toContain('Whole number 1–100; default 25.');
     if(state.state === 'partial') expect(html).not.toContain('Select all 128');

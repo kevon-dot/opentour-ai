@@ -1,4 +1,5 @@
 import { expect, test } from '@playwright/test';
+import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { build } from 'vite';
 
@@ -19,16 +20,16 @@ test.beforeAll(async () => {
           id:'record-'+i,label:'Receipt '+String(25-i).padStart(3,'0'),lifecycle:i===0?'Eligible · Observed':i===1?'Protected · Sealed':'Synthetic · Draft',observed:i===0?'Nov 7, 09:42 UTC':i===1?'Nov 7, 09:39 UTC':'Nov 7, 09:30 UTC',
         }));
         const state = document.querySelector('main').dataset.state;
-        const shown = state === 'populated' ? rows : state === 'partial' ? rows.slice(1,4) : [];
+        const shown = ['populated','query'].includes(state) ? rows : state === 'partial' ? rows.slice(0,3).map((row,i)=>({...row,label:'Receipt '+String(24-i).padStart(3,'0')})) : [];
         window.intents=[];
         createRoot(document.querySelector('main')).render(state === 'navigation' ? <PageSelectionNavigation
           selectedIds={['a','b','c','d']} queryCount={128} revision="8" page={1} pages={13} pageSize={10}
           observed="09:42 UTC" previous={false} next={true} search="" onIntent={intent=>window.intents.push(intent)}/> : <TablePopulations
           caption="Source records" context="Receipt-status workflow · Locked population receipts-nov-01-07 · Revision 8"
-          search={state === 'empty' ? '' : 'receipt'} filters={[]} total={state === 'empty' ? 0 : state === 'partial' ? null : 600}
-          matching={shown.length ? 128 : 0} selection={{mode:'page', ids:state==='populated'?shown.map(r=>r.id):[]}} direction="descending"
-          pageSize={25} pageSizes={[25,50,100]} position="Page 1" previous={false} next={true}
-          state={state} rows={shown} reason="3 records shown. More results could not be loaded; this is not the complete population." expected={25} onIntent={intent=>window.intents.push(intent)}/>);` : null,
+          search="receipt" filters={state === 'filtered-to-nothing' ? ['Status: eligible'] : []} total={state === 'empty' ? 0 : state === 'partial' ? null : 600}
+          matching={shown.length ? 128 : 0} selection={state==='query' ? {mode:'query',count:128,revision:'8',visibleIds:shown.slice(0,-1).map(row=>row.id)} : {mode:'page',ids:state==='populated'?shown.map(r=>r.id):[]}} direction="descending"
+          pageSize={25} pageSizes={[25,50,100]} position="Page 1" previous={state === 'partial'} next={shown.length > 0}
+          state={state==='query'?'populated':state} rows={shown} reason="3 records shown. More results could not be loaded; this is not the complete population." expected={25} onIntent={intent=>window.intents.push(intent)}/>);` : null,
     }],
     build: { write: false, lib: { entry, name: 'TableFixture', formats: ['es'] } },
     define: { 'process.env.NODE_ENV': JSON.stringify('production') },
@@ -49,24 +50,46 @@ for (const width of [320,768,1280,1440]) for (const scale of [1,2]) {
     await page.route('http://table.test/table.js', route => route.fulfill({contentType:'text/javascript',body:script}));
 
     await page.setViewportSize({width,height:900});
-    for(const state of ['populated','partial','empty','filtered-to-nothing','navigation']) {
+    for(const state of ['populated','partial','empty','filtered-to-nothing','query','navigation']) {
       await page.goto('http://table.test/');
-      await page.setContent('<html lang="en"><main data-state="'+state+'"></main></html>');
+      await page.setContent('<!doctype html><html lang="en"><main data-state="'+state+'"></main></html>');
       await page.addStyleTag({content:styles+`html{font-size:${scale*100}%}body{margin:0}`});
       await page.addScriptTag({type:'module',url:'http://table.test/table.js'});
+      await page.locator('.ot-population').waitFor();
+      await page.evaluate(()=>document.fonts.ready);
+      const geometry=await page.locator('.ot-population').evaluate(el=>Array.from(el.children).filter(c=>c.tagName!=='STYLE').map(c=>{
+        const r=c.getBoundingClientRect();return [c.tagName,c.className,r.x,r.y,r.width,r.height];
+      }));
+      writeFileSync(info.outputPath(state+'-geometry.json'), JSON.stringify(geometry));
       if(state==='navigation') {
         await expect(page.getByRole('heading',{name:'4 records selected'})).toBeVisible();
         await expect(page.getByRole('status')).toHaveText('Page 1 of 13 · 10 records per page · observed 09:42 UTC');
         await page.screenshot({path:info.outputPath('navigation.png'),fullPage:true});
         continue;
       }
-      const table=page.getByRole('table',{name:'Records — scroll horizontally'});
+      const table=page.getByRole('table',{name:width===320?'Records — scroll horizontally':'Records',exact:true});
       await expect(table).toBeVisible();
       await page.evaluate(()=>document.fonts.ready);
       expect(await page.evaluate(()=>document.documentElement.scrollWidth)).toBe(width);
       const region=page.getByRole('region',{name:'Records — scroll horizontally'});
       if(width===320) expect(await region.evaluate(el=>el.scrollWidth > el.clientWidth)).toBe(true);
       await expect(table.getByRole('columnheader',{name:'Observed time ↓'})).toHaveAttribute('aria-sort','descending');
+      if(state==='query') {
+        await expect(page.getByText('128 selected across this query')).toBeVisible();
+        await expect(page.getByRole('checkbox',{name:'Select Receipt 001'})).not.toBeChecked();
+        await expect(page.getByRole('checkbox',{name:'Select Receipt 025'})).toBeChecked();
+        await page.getByRole('button',{name:'Clear selection'}).click();
+        expect(await page.evaluate(()=>Reflect.get(window,'intents').splice(0))).toEqual([{type:'clear-selection'}]);
+        await expect(page.getByRole('checkbox',{name:'Select Receipt 025'})).toBeChecked();
+      }
+      if(state==='filtered-to-nothing') {
+        await expect(page.getByText('0 matching of 600 total · Status: eligible')).toBeVisible();
+        await expect(page.getByRole('button',{name:'Next'})).toBeDisabled();
+      }
+      if(state==='partial') {
+        await expect(table.getByRole('row',{name:/Receipt 024/})).toContainText('Eligible · Observed');
+        await expect(table.getByRole('row',{name:/Receipt 023/})).toContainText('Protected · Sealed');
+      }
       await page.screenshot({path:info.outputPath(state+'.png'),fullPage:true});
       if(state==='populated') {
         for(const [name,type] of [['Inspect Receipt 025','inspect'],['Next','next'],['Filter','filter'],['Sort: observed time ↓','sort'],['Select all 128 matching records','select-query'],['Review selected records','review']]) {
