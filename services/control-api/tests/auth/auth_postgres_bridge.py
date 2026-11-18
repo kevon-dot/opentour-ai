@@ -9,6 +9,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import Mock
 
+import psycopg
 from opentour_control.auth.browser_state import (
     BrowserAuthState,
     BrowserAuthTransaction,
@@ -25,6 +26,20 @@ from opentour_control.auth.workos_provider import WorkOSTokenVerifier
 _MAX_REQUESTS = 64
 _MAX_INPUT_FRAME = 65_536
 _MAX_OUTPUT_FRAME = 131_072
+_COMMAND_FIELDS = {
+    "health": set(),
+    "create_flow": {"flow"},
+    "consume_flow": {"state", "browser"},
+    "admit": {"credentials"},
+    "admit_unknown": {"credentials"},
+    "current": {"handle"},
+    "replace": {"handle", "generation", "credentials"},
+    "selection_digest": {"handle", "accessToken"},
+    "end": {"handle", "generation"},
+    "end_unknown": {"handle", "generation"},
+    "reconcile": {"handle", "generation"},
+    "inspect": set(),
+}
 
 
 def _clock_time(epoch_ms):
@@ -153,7 +168,20 @@ def _session_wire(session: BrowserSession):
 
 
 def _dispatch(browser: BrowserAuthState, command):
-    action = command["action"]
+    if not isinstance(command, dict) or not isinstance(action := command.get("action"), str):
+        raise AuthError("TEST_REQUEST_INVALID", 422)
+    fields = _COMMAND_FIELDS.get(action)
+    if fields is None:
+        raise AuthError("TEST_OPERATION_INVALID", 422)
+    if command.keys() - {"action"} != fields:
+        raise AuthError("TEST_REQUEST_INVALID", 422)
+    if action == "health":
+        try:
+            with browser.repository.connect() as connection:
+                connection.execute("SELECT 1 FROM opentour_identity.sessions WHERE FALSE")
+        except psycopg.Error:
+            raise AuthError("TEST_PORT_UNAVAILABLE", 503) from None
+        return {"ready": True}
     if action == "create_flow":
         browser.create_flow(_flow(command["flow"]))
         return None

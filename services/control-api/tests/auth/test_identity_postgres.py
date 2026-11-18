@@ -591,6 +591,7 @@ def test_configured_typescript_factories_with_actual_durable_ports(durable, iden
             )
         )
         config.chmod(0o600)
+        bridge = Path(__file__).with_name("auth_postgres_bridge.py")
         probe = subprocess.run(
             [
                 node,
@@ -598,7 +599,7 @@ def test_configured_typescript_factories_with_actual_durable_ports(durable, iden
                 str(Path(__file__).with_name("authkit_postgres_probe.mjs")),
                 str(output),
                 sys.executable,
-                str(Path(__file__).with_name("auth_postgres_bridge.py")),
+                str(bridge),
                 str(config),
             ],
             cwd=ROOT,
@@ -611,7 +612,36 @@ def test_configured_typescript_factories_with_actual_durable_ports(durable, iden
         report = json.loads(probe.stdout)
         assert report["configured_factories"] == "PASS" and report["actual_postgresql"]
         assert report["exported_signin_callback"] and report["unconfigured_exports_refused"]
+        assert report["pipe_database_readiness"] and report["pipe_invalid_commands_refused"]
+        assert report["pipe_expired_proof_refused"]
         assert report["provider_acceptance"] == "NOT_RUN" and report["mode"] == durable.mode
+
+        with tempfile.TemporaryDirectory(prefix="opentour-c03-", dir="/tmp") as absent:
+            empty = Path(absent).resolve()
+            socket = empty / "socket"
+            socket.mkdir(mode=0o700)
+            (empty / ".owned-c03-fixture").write_text(empty.name)
+            unavailable = private / "unavailable.json"
+            unavailable.touch(mode=0o600)
+            unavailable.write_text(
+                json.dumps(
+                    {
+                        **json.loads(config.read_text()),
+                        "dsn": f"host={socket} port=5432 dbname=postgres user=c03_runtime",
+                    }
+                )
+            )
+            health = subprocess.run(
+                [sys.executable, str(bridge), str(unavailable)],
+                input=b'{"action":"health"}\n',
+                timeout=10,
+                check=True,
+                capture_output=True,
+            )
+            assert not health.stderr
+            assert json.loads(health.stdout) == {
+                "error": {"code": "TEST_PORT_UNAVAILABLE", "status": 503}
+            }
 
 
 @pytest.fixture

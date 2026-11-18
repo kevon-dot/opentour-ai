@@ -158,6 +158,10 @@ async function runProbe() {
     assert.equal(response.headers.get('set-cookie'), null);
   }
   assert.equal(exchanges + jwksRequests, 0);
+  await assert.rejects(port('generated_unregistered'), { code: 'TEST_OPERATION_INVALID', status: 422 });
+  await assert.rejects(port('health', { now: config.now }), { code: 'TEST_REQUEST_INVALID', status: 422 });
+  await assert.rejects(port('current'), { code: 'TEST_REQUEST_INVALID', status: 422 });
+  assert.deepEqual(await port('health'), { ready: true });
   const adapter = configureAccountEntry(startup);
   const callback = await signin();
   const success = await callbackGET(callback);
@@ -175,10 +179,16 @@ async function runProbe() {
 
   const before = await sessions.current(handle);
   const wrongAudience = await issueToken(config.sid, { aud: 'https://foreign.example.invalid' });
+  const expired = await issueToken(config.sid, { exp: config.now / 1000 - 1 });
   await assert.rejects(sessions.replaceCredentials(handle, identity.session_generation, {
     ...before.credentials, accessToken: wrongAudience,
   }), { code: 'SESSION_INVALID', status: 401 });
-  assert.equal((await sessions.current(handle)).credentialDigest, before.credentialDigest);
+  await assert.rejects(sessions.replaceCredentials(handle, identity.session_generation, {
+    ...before.credentials, accessToken: expired,
+  }), { code: 'SESSION_INVALID', status: 401 });
+  await assert.rejects(port('selection_digest', { handle, accessToken: expired }),
+    { code: 'SESSION_INVALID', status: 401 });
+  assert.deepEqual(await sessions.current(handle), before);
   const accessToken = await issueToken(config.sid, { jti: 'generated-replacement' });
   const updatedCredentials = { ...before.credentials, accessToken,
     refreshToken: 'GENERATED_ROTATED_REFRESH_SENTINEL' };
@@ -239,6 +249,7 @@ try {
 }
 console.log(JSON.stringify({ configured_factories: 'PASS', actual_postgresql: true,
   exported_signin_callback: true, unconfigured_exports_refused: true,
+  pipe_database_readiness: true, pipe_invalid_commands_refused: true, pipe_expired_proof_refused: true,
   generated_provider: true, provider_acceptance: 'NOT_RUN', exchanges,
   callback_replay_denied: true, durable_end_denied: true, unknown_commit_no_cookie: true,
   unknown_end_no_cookie_or_redirect: true,
