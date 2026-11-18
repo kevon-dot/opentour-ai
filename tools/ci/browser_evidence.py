@@ -166,7 +166,7 @@ def verify_scoped_presentation(root: Path, value: dict[str, Any]) -> None:
         ):
             raise ValueError("Metric presentation capture inventory mismatch")
     elif value["issue_key"] == "OPE-303":
-        expected_charts = {f"charts-{width}-{scale}.png" for width in widths for scale in (1, 2)}
+        expected_charts = {f"charts-{width}-{scale}.png" for width in widths for scale in (100, 200)}
         if len(images) != len(expected_charts) or {Path(name).name for name in images} != expected_charts:
             raise ValueError("Chart presentation capture inventory mismatch")
     elif value["issue_key"] == "OPE-305":

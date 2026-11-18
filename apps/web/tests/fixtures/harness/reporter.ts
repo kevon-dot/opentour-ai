@@ -15,7 +15,7 @@ export default class HarnessReporter implements Reporter {
     // Playwright body attachments otherwise disappear when using only this reporter.
     for (const attachment of result.attachments) {
       const chart = process.env.OPENTOUR_BROWSER_TARGET?.endsWith('/chart-evidence.visual.spec.ts');
-      const allowed = chart ? /^charts-(320|768|1280|1440)-(1|2)\.png$/ : /^status-(320|768|1280|1440)-(100|200)\.png$/;
+      const allowed = chart ? /^charts-(320|768|1280|1440)-(100|200)\.png$/ : /^status-(320|768|1280|1440)-(100|200)\.png$/;
       if (attachment.contentType !== 'image/png' || !attachment.body ||
           !allowed.test(attachment.name)) continue;
       const directory = join(process.env.OPENTOUR_BROWSER_OUTPUT!, chart ? 'chart-captures' : 'status-captures');
