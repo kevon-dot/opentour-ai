@@ -229,7 +229,10 @@ def verify_scoped_presentation(root: Path, value: dict[str, Any]) -> None:
             for kind in ("evidence", "help", "long")
             for width in widths for scale in (100, 200)
         } | {"tooltip-forced-colors.png"}
-        if len(images) != len(expected_tooltips) or {Path(name).name for name in images} != expected_tooltips:
+        if (
+            len(images) != len(expected_tooltips)
+            or {Path(name).name for name in images} != expected_tooltips
+        ):
             raise ValueError("Tooltip presentation capture inventory mismatch")
     else:
         platform = value.get("platform")
