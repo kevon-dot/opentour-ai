@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
@@ -19,25 +20,37 @@ from .browser_private import (
     _unconfirmed,
 )
 from .browser_private_listener import (
+    PrivateListenerUnavailable,
     ReviewedStageReadback,
     StageClientBinding,
     build_private_browser_listener,
 )
-from .browser_private_pilot import PrivateBrowserPilotRoute, lookup_private_browser_pilot_route
+from .browser_private_pilot import (
+    PrivateBrowserPilotPathProfile,
+    PrivateBrowserPilotRoute,
+    lookup_private_browser_pilot_route,
+)
 from .browser_state import BrowserAuthState
 from .config import AuthError
 
 # These are local pilot bounds. A timed-out call can still commit in the durable writer.
 BODY_READ_SECONDS = 5
 DISPATCH_WAIT_SECONDS = 15
+_DEV_STAGE_ARN = re.compile(
+    r"arn:aws(?:-[a-z0-9-]+)?:apigateway:[a-z0-9-]+::/restapis/[a-z0-9-]+/stages/dev"
+)
 
 
-def _route(scope: HTTPScope) -> PrivateBrowserPilotRoute | None:
+def _route(
+    scope: HTTPScope, path_profile: PrivateBrowserPilotPathProfile
+) -> PrivateBrowserPilotRoute | None:
     raw_path = scope.get("raw_path")
     if not isinstance(raw_path, bytes) or scope.get("query_string") != b"":
         return None
     try:
-        return lookup_private_browser_pilot_route(scope["method"], raw_path.decode("ascii"))
+        return lookup_private_browser_pilot_route(
+            scope["method"], raw_path.decode("ascii"), path_profile=path_profile
+        )
     except UnicodeError:
         return None
 
@@ -88,8 +101,19 @@ def build_private_browser_pilot_listener(
     host: str,
     port: int,
     clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+    path_profile: PrivateBrowserPilotPathProfile = PrivateBrowserPilotPathProfile.LOOPBACK,
 ) -> uvicorn.Config:
     """Return the dedicated TLS configuration. Never register it with the control app."""
+    if (
+        not isinstance(path_profile, PrivateBrowserPilotPathProfile)
+        or not isinstance(approved.stage_arn, str)
+        or (
+            (_DEV_STAGE_ARN.fullmatch(approved.stage_arn) is not None)
+            != (path_profile is PrivateBrowserPilotPathProfile.DEV)
+        )
+        or (path_profile is PrivateBrowserPilotPathProfile.LOOPBACK and host != "127.0.0.1")
+    ):
+        raise PrivateListenerUnavailable("PRIVATE_BROWSER_LISTENER_UNAVAILABLE")
     principal, audience = approved.stage_arn, approved.backend_server_name
     dispatcher = PrivateBrowserDispatch(
         browser_state, principal=principal, audience=audience, clock=clock
@@ -114,7 +138,7 @@ def build_private_browser_pilot_listener(
         nonlocal active, worker
         if scope["type"] != "http":
             return
-        route = _route(scope)
+        route = _route(scope, path_profile)
         if route is None:
             await _send(send, _failure(AuthError("PRIVATE_OPERATION_NOT_FOUND", 404)))
             return

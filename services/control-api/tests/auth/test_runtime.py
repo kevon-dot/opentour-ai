@@ -13,7 +13,9 @@ from fastapi.testclient import TestClient
 from opentour_control.api.schema import create_control_api
 from opentour_control.auth import runtime, workos_provider
 from opentour_control.auth.browser_private_pilot import (
+    PRIVATE_BROWSER_DEV_ROUTES,
     PRIVATE_BROWSER_PILOT_ROUTES,
+    PrivateBrowserPilotPathProfile,
     lookup_private_browser_pilot_route,
 )
 from opentour_control.auth.browser_state import BrowserAuthState
@@ -31,6 +33,7 @@ PRIVATE_PILOT_PATHS = (
     ("/internal/browser-identity/v1/sessions/current", "current"),
     ("/internal/browser-identity/v1/sessions/end", "end"),
 )
+PRIVATE_DEV_PATHS = tuple((f"/dev{path}", operation) for path, operation in PRIVATE_PILOT_PATHS)
 
 
 @pytest.fixture
@@ -188,6 +191,75 @@ def test_private_browser_pilot_lookup_refuses_aliases_and_unadmitted_features():
         assert lookup_private_browser_pilot_route("POST", path) is None
 
 
+def test_private_browser_dev_inventory_is_exact_bounded_and_disjoint():
+    assert isinstance(PRIVATE_BROWSER_DEV_ROUTES, tuple)
+    route_keys = tuple((route.path, route.operation) for route in PRIVATE_BROWSER_DEV_ROUTES)
+    assert route_keys == PRIVATE_DEV_PATHS
+    for stage_route, local_route in zip(
+        PRIVATE_BROWSER_DEV_ROUTES, PRIVATE_BROWSER_PILOT_ROUTES, strict=True
+    ):
+        assert (
+            stage_route.method,
+            stage_route.max_request_bytes,
+            stage_route.max_response_bytes,
+        ) == (
+            "POST",
+            65_536,
+            131_072,
+        )
+        assert lookup_private_browser_pilot_route("POST", stage_route.path) is None
+        dev_match = lookup_private_browser_pilot_route(
+            "POST", stage_route.path, path_profile=PrivateBrowserPilotPathProfile.DEV
+        )
+        assert dev_match is stage_route
+        assert (
+            lookup_private_browser_pilot_route(
+                "POST", local_route.path, path_profile=PrivateBrowserPilotPathProfile.DEV
+            )
+            is None
+        )
+        loopback_match = lookup_private_browser_pilot_route(
+            "POST", local_route.path, path_profile=PrivateBrowserPilotPathProfile.LOOPBACK
+        )
+        assert loopback_match is local_route
+
+
+def test_private_browser_dev_lookup_requires_the_exact_unrewritten_stage_target():
+    for path, _ in PRIVATE_DEV_PATHS:
+        for method, raw_path in (
+            ("GET", path),
+            ("post", path),
+            ("POST", path.upper()),
+            ("POST", path + "/"),
+            ("POST", path + "?probe=generated"),
+            ("POST", path.replace("/dev/", "/test/", 1)),
+            ("POST", path.replace("/dev/", "/prod/", 1)),
+            ("POST", path.replace("/dev/", "/Dev/", 1)),
+            ("POST", path.replace("/dev/", "/%64ev/", 1)),
+            ("POST", path.replace("/internal/", "/%69nternal/", 1)),
+            ("POST", path.replace("/internal/", "//internal/", 1)),
+            ("POST", "/dev" + path),
+        ):
+            assert (
+                lookup_private_browser_pilot_route(
+                    method, raw_path, path_profile=PrivateBrowserPilotPathProfile.DEV
+                )
+                is None
+            )
+
+    for path in (
+        "/dev/internal/browser-identity/v1/sessions/refresh",
+        "/dev/internal/browser-identity/v1/selection/authorize",
+        "/dev" + SELECTION,
+    ):
+        assert (
+            lookup_private_browser_pilot_route(
+                "POST", path, path_profile=PrivateBrowserPilotPathProfile.DEV
+            )
+            is None
+        )
+
+
 def test_public_control_factory_does_not_expose_private_browser_pilot(
     configured, provider_dependencies
 ):
@@ -201,7 +273,7 @@ def test_public_control_factory_does_not_expose_private_browser_pilot(
         with TestClient(app) as client:
             assert client.get(CONTEXT).status_code == 401
             assert client.post(SELECTION, json={}).status_code == 401
-            for path, _ in PRIVATE_PILOT_PATHS:
+            for path, _ in PRIVATE_PILOT_PATHS + PRIVATE_DEV_PATHS:
                 assert client.post(path, json={}).status_code == 404
         for name in ("identity_connect", "selection_connect"):
             configured[name].assert_not_called()

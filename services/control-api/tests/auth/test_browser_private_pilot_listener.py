@@ -8,12 +8,16 @@ import socket
 import ssl
 import threading
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from http.client import HTTPResponse
 from io import BytesIO
 from unittest.mock import Mock
 
+import pytest
 import uvicorn
 from opentour_control.auth import browser_private_pilot_listener as pilot
+from opentour_control.auth.browser_private_listener import PrivateListenerUnavailable
+from opentour_control.auth.browser_private_pilot import PrivateBrowserPilotPathProfile
 from opentour_control.auth.browser_state import BrowserAuthState, BrowserSession, BrowserSessionEnd
 from test_browser_private_listener import HOST
 from test_browser_private_listener import tls_fixture as tls_fixture
@@ -120,6 +124,70 @@ def test_tls_ingress_refuses_raw_aliases_and_disabled_routes(tls_fixture):
             for method, path in invalid:
                 result = await exchange(port, ctx, request(path, b"{}", method=method))
                 assert_refusal(result, 404, "PRIVATE_OPERATION_NOT_FOUND")
+        assert not browser.mock_calls
+
+    asyncio.run(exercise())
+
+
+def test_tls_selects_only_the_path_profile_for_its_bound_stage(tls_fixture):
+    _, options, *_ = tls_fixture
+    original = options["approved"]
+    stage_base = original.stage_arn.removesuffix("/fixture-stage")
+    browser = Mock(spec=BrowserAuthState)
+    for stage_arn, profile, host in (
+        (original.stage_arn, PrivateBrowserPilotPathProfile.DEV, "127.0.0.1"),
+        (f"{stage_base}/dev", PrivateBrowserPilotPathProfile.LOOPBACK, "127.0.0.1"),
+        (f"{stage_base}/dev/", PrivateBrowserPilotPathProfile.DEV, "127.0.0.1"),
+        (f"{stage_base}/another/stages/dev", PrivateBrowserPilotPathProfile.DEV, "127.0.0.1"),
+        (original.stage_arn, PrivateBrowserPilotPathProfile.LOOPBACK, "10.0.0.8"),
+    ):
+        approved = replace(original, stage_arn=stage_arn)
+        readback = replace(options["readback"], binding=approved)
+        with pytest.raises(
+            PrivateListenerUnavailable, match="^PRIVATE_BROWSER_LISTENER_UNAVAILABLE$"
+        ):
+            pilot.build_private_browser_pilot_listener(
+                browser,
+                **(options | {"approved": approved, "readback": readback, "host": host}),
+                path_profile=profile,
+            )
+    assert not browser.mock_calls
+
+
+def test_dev_tls_ingress_rejects_aliases_on_the_landed_request(tls_fixture):
+    now, options, *material = tls_fixture
+    approved = replace(
+        options["approved"],
+        stage_arn=options["approved"].stage_arn.removesuffix("/fixture-stage") + "/dev",
+    )
+    readback = replace(options["readback"], binding=approved)
+    staged = (
+        now,
+        options
+        | {
+            "approved": approved,
+            "readback": readback,
+            "path_profile": PrivateBrowserPilotPathProfile.DEV,
+        },
+        *material,
+    )
+    browser = Mock(spec=BrowserAuthState)
+
+    async def exercise():
+        async with local_pilot(staged, browser) as (port, ctx):
+            for path in (
+                CURRENT,
+                "/prod" + CURRENT,
+                "/%64ev" + CURRENT,
+                "/dev/dev" + CURRENT,
+                "/dev" + CURRENT + "/",
+                "/dev" + CURRENT + "?probe=generated",
+            ):
+                assert_refusal(
+                    await exchange(port, ctx, request(path, b"{}")),
+                    404,
+                    "PRIVATE_OPERATION_NOT_FOUND",
+                )
         assert not browser.mock_calls
 
     asyncio.run(exercise())

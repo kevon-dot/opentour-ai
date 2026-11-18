@@ -5,6 +5,7 @@ import json
 import secrets
 import socket
 import ssl
+from dataclasses import replace
 from datetime import timedelta
 from http.client import HTTPResponse
 from uuid import uuid4
@@ -12,6 +13,7 @@ from uuid import uuid4
 import pytest
 import uvicorn
 from opentour_control.auth.browser_private import MAX_RESPONSE_BYTES
+from opentour_control.auth.browser_private_pilot import PrivateBrowserPilotPathProfile
 from opentour_control.auth.browser_private_pilot_listener import (
     build_private_browser_pilot_listener,
 )
@@ -32,10 +34,31 @@ def postgres():
         yield fixture
 
 
+@pytest.mark.parametrize(
+    "path_profile",
+    [PrivateBrowserPilotPathProfile.LOOPBACK, PrivateBrowserPilotPathProfile.DEV],
+    ids=["loopback-paths", "dev-stage-paths"],
+)
 def test_private_pilot_listener_uses_mutual_tls_and_durable_identity(
-    browser_state, durable, identity, tls_fixture
+    browser_state, durable, identity, tls_fixture, path_profile
 ):
     _, options, authority, stage, wrong, _ = tls_fixture
+    loopback_prefix = "/internal/browser-identity/v1"
+    dev_prefix = "/dev/internal/browser-identity/v1"
+    prefix, opposite = loopback_prefix, dev_prefix
+    if path_profile is PrivateBrowserPilotPathProfile.DEV:
+        approved = options["approved"]
+        assert approved.stage_arn.endswith("/fixture-stage")
+        approved = replace(
+            approved, stage_arn=approved.stage_arn.removesuffix("/fixture-stage") + "/dev"
+        )
+        options = {
+            **options,
+            "approved": approved,
+            "readback": replace(options["readback"], binding=approved),
+        }
+        prefix, opposite = dev_prefix, loopback_prefix
+
     flow = {
         "state": secrets.token_urlsafe(32),
         "nonce": secrets.token_urlsafe(32),
@@ -58,7 +81,6 @@ def test_private_pilot_listener_uses_mutual_tls_and_durable_identity(
         "refreshToken": "GENERATED_MTLS_REFRESH",
         "userId": durable.context.actor["subject"],
     }
-    prefix = "/internal/browser-identity/v1"
 
     def exchange(port, path, body, pair):
         context = ssl.create_default_context(cafile=authority)
@@ -90,7 +112,7 @@ def test_private_pilot_listener_uses_mutual_tls_and_durable_identity(
             sock.bind(("127.0.0.1", 0))
             port = sock.getsockname()[1]
             config = build_private_browser_pilot_listener(
-                browser_state, **(options | {"port": port})
+                browser_state, path_profile=path_profile, **(options | {"port": port})
             )
             server = uvicorn.Server(config)
             task = asyncio.create_task(server.serve(sockets=[sock]))
@@ -99,11 +121,14 @@ def test_private_pilot_listener_uses_mutual_tls_and_durable_identity(
                     while not server.started:
                         await asyncio.sleep(0.01)
 
-                async def post(path, body, pair=stage):
+                async def post(path, body, pair=stage, *, path_prefix=prefix):
                     return await asyncio.wait_for(
-                        asyncio.to_thread(exchange, port, prefix + path, body, pair), timeout=5
+                        asyncio.to_thread(exchange, port, path_prefix + path, body, pair),
+                        timeout=5,
                     )
 
+                status, error = await post("/flows/create", {"flow": flow}, path_prefix=opposite)
+                assert (status, error["code"]) == (404, "PRIVATE_OPERATION_NOT_FOUND")
                 assert await post("/flows/create", {"flow": flow}) == (200, None)
                 assert await post("/flows/consume", claim, None) is None
                 assert await post("/flows/consume", claim, wrong) is None
