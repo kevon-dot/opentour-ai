@@ -222,10 +222,27 @@ def test_approved_application_inputs_and_foreign_role_refusal(application_inputs
         prepare_stack("control-plane", parameters, policy, inventory, **kwargs)
 
 
-@pytest.mark.parametrize("role", ["BffTaskRoleArn", "TaskExecutionRoleArn"])
-def test_application_rejects_reused_role_arn(application_inputs, role: str) -> None:
+@pytest.mark.parametrize(
+    ("role", "alternate_role_path"),
+    [
+        pytest.param("BffTaskRoleArn", None, id="same-task-arn"),
+        pytest.param("TaskExecutionRoleArn", None, id="same-execution-arn"),
+        pytest.param("WorkerTaskRoleArn", "DEV-APITASKROLEARN", id="same-name-different-case"),
+        pytest.param(
+            "TaskExecutionRoleArn", "generated/nested/dev-ApiTaskRoleArn", id="same-name-new-path"
+        ),
+    ],
+)
+def test_application_rejects_reused_role_name(
+    application_inputs, role: str, alternate_role_path: str | None
+) -> None:
     parameters, policy, inventory, kwargs = application_inputs
-    parameters[role] = parameters["ApiTaskRoleArn"]
+    arn = parameters["ApiTaskRoleArn"]
+    if alternate_role_path is not None:
+        alternate_arn = f"arn:aws:iam::{NONPROD}:role/{alternate_role_path}"
+        inventory[alternate_arn] = replace(inventory[arn], arn=alternate_arn)
+        arn = alternate_arn
+    parameters[role] = arn
     with pytest.raises(EnvironmentError, match="^APPLICATION_ROLES_NOT_DISTINCT$"):
         prepare_stack("control-plane", parameters, policy, inventory, **kwargs)
 
