@@ -526,14 +526,19 @@ def prepare_stack(
             != "postgres" + parameters["DatabaseEngineVersion"].split(".")[0]
         ):
             raise EnvironmentError("DATABASE_ENGINE_FAMILY_MISMATCH")
+        role_arns: set[str] = set()
         for role in (
             "BffTaskRoleArn",
             "ApiTaskRoleArn",
             "WorkerTaskRoleArn",
             "TaskExecutionRoleArn",
         ):
-            if parameters[role]:
-                approved_reference(parameters[role], "role", "iam", "role/", global_arn=True)
+            arn = parameters[role]
+            if arn:
+                approved_reference(arn, "role", "iam", "role/", global_arn=True)
+                if arn in role_arns:
+                    raise EnvironmentError("APPLICATION_ROLES_NOT_DISTINCT")
+                role_arns.add(arn)
             elif parameters["ApplicationEnabled"] == "true":
                 raise EnvironmentError("APPLICATION_ROLE_REQUIRED")
         for image in ("BffImageDigest", "ApiImageDigest", "WorkerImageDigest"):
