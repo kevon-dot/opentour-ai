@@ -10,6 +10,11 @@ from typing import Any
 
 import psycopg
 import pytest
+from cryptography.fernet import Fernet
+from fastapi.testclient import TestClient
+from opentour_control.api.server import create_control_service
+from opentour_control.auth.config import IdentityConfig
+from opentour_control.auth.runtime import create_control_auth_runtime
 from opentour_control.platform import schema_compatibility as guard
 from psycopg import Connection
 
@@ -91,6 +96,56 @@ def switched(connection: Connection[Any]) -> None:
     guard.backfill(connection, PLAN, complete_batch)
     guard.verify(connection, PLAN, verify_copy)
     guard.switch(connection, PLAN)
+
+
+def test_control_readiness_tracks_actual_database_state(
+    owner: Connection[Any], cluster: DisposablePostgres
+) -> None:
+    def forbidden_connection() -> Any:
+        raise AssertionError("Readiness must only use its dedicated connection")
+
+    runtime = create_control_auth_runtime(
+        config=IdentityConfig(
+            issuer="https://identity.example/",
+            audience="https://control.example/",
+            jwks_url="https://identity.example/jwks",
+            client_id="generated-client",
+            credential_max_lifetime_seconds=600,
+        ),
+        workos_api_key="test-only",
+        sealing_keys=(Fernet.generate_key(),),
+        csrf_key=b"k" * 32,
+        identity_connect=forbidden_connection,
+        selection_connect=forbidden_connection,
+    )
+    try:
+
+        def app_for_reader(version: int) -> TestClient:
+            app = create_control_service(runtime, lambda: connect(cluster, "c03_runtime"), version)
+            return TestClient(app)
+
+        with app_for_reader(1) as old:
+            assert old.get("/health/ready").status_code == 503
+            owner.execute("GRANT USAGE ON SCHEMA opentour_platform TO c03_runtime")
+            owner.execute("GRANT SELECT ON opentour_platform.schema_state TO c03_runtime")
+            response = old.get("/health/ready")
+            assert (response.status_code, response.json()) == (200, {"status": "ready"})
+
+            with owner.transaction():
+                owner.execute("SELECT pg_advisory_xact_lock(%s)", (guard.LOCK_ID,))
+                assert old.get("/health/ready").status_code == 503
+            assert old.get("/health/ready").status_code == 200
+
+            switched(owner)
+            assert old.get("/health/ready").status_code == 200
+            guard.contract(owner, PLAN, BACKUP, lambda digest: digest == BACKUP, remove_legacy)
+            assert old.get("/health/ready?reader_version=2").status_code == 503
+        with app_for_reader(2) as current:
+            assert current.get("/health/ready").status_code == 200
+            owner.execute("DELETE FROM opentour_platform.schema_state")
+            assert current.get("/health/ready").status_code == 503
+    finally:
+        assert runtime.close()
 
 
 def test_actual_expand_backfill_verify_switch_contract_and_retry(owner: Connection[Any]) -> None:
