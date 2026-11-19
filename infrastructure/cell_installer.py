@@ -263,12 +263,22 @@ class WorkloadStorageBinding:
 
 
 @dataclass(frozen=True)
+class RetainedStorageKeyBinding:
+    """The exact single-Region key and readback for a retained data store."""
+
+    kms_key_arn: str
+    key_policy_sha256: str
+
+
+@dataclass(frozen=True)
 class ApprovedCellStorage:
-    """Exact role/key choices from the independently qualified KMS profile."""
+    """Exact role and purpose-bound key choices from the qualified KMS profile."""
 
     kms_policy_sha256: str
     trainer: WorkloadStorageBinding
     evaluator: WorkloadStorageBinding
+    evidence: RetainedStorageKeyBinding
+    artifact: RetainedStorageKeyBinding
 
 
 def compile_cell_storage(
@@ -285,8 +295,9 @@ def compile_cell_storage(
 
     Deployment authority supplies inventory and the default GetKeyPolicy text encoded
     unchanged as UTF-8, indexed by the exact ARN used in the authenticated request.
-    The profile pins those bytes independently. This fragment is a compiler input.
-    Live authorization and policy freshness need verification at deployment.
+    The profile pins those bytes independently. Bucket policies only deny unwanted access.
+    Approved data access roles, key ownership and policy freshness still need provider
+    verification when deploying the cell.
     """
     prepared = prepare_cell_install(
         requested,
@@ -302,10 +313,17 @@ def compile_cell_storage(
         binding.role_arn.rsplit("/", 1)[-1].casefold()
         for binding in (storage.trainer, storage.evaluator)
     }
+    buckets = (
+        ("TrainerStorage", storage.trainer, storage.evaluator.role_arn),
+        ("EvaluatorStorage", storage.evaluator, storage.trainer.role_arn),
+        ("EvidenceStorage", storage.evidence, storage.trainer.role_arn),
+        ("ArtifactStorage", storage.artifact, None),
+    )
+    keys = {binding.kms_key_arn for _, binding, _ in buckets}
     if (
         storage.kms_policy_sha256 != profiles.kms_policy.sha256
         or len(role_names) != 2
-        or storage.trainer.kms_key_arn == storage.evaluator.kms_key_arn
+        or len(keys) != len(buckets)
     ):
         raise CellInstallRefused("CELL_INSTALL_STORAGE_BINDING_MISMATCH")
 
@@ -313,31 +331,28 @@ def compile_cell_storage(
     region = parameters["region"]
     key_pattern = re.escape(f"arn:aws:kms:{region}:{account}:key/") + _SINGLE_REGION_KEY_ID
     role_pattern = re.escape(f"arn:aws:iam::{account}:role/") + _ROLE_PATH_AND_NAME
-    references: dict[str, str] = {}
-    for binding in (storage.trainer, storage.evaluator):
-        if (
-            re.fullmatch(key_pattern, binding.kms_key_arn) is None
-            or re.fullmatch(role_pattern, binding.role_arn) is None
-        ):
-            raise CellInstallRefused("CELL_INSTALL_STORAGE_SCOPE_MISMATCH")
-        references[binding.kms_key_arn] = "key"
-        references[binding.role_arn] = "role"
+    roles = (storage.trainer.role_arn, storage.evaluator.role_arn)
+    if any(re.fullmatch(key_pattern, key) is None for key in keys) or any(
+        re.fullmatch(role_pattern, role) is None for role in roles
+    ):
+        raise CellInstallRefused("CELL_INSTALL_STORAGE_SCOPE_MISMATCH")
+    references = dict.fromkeys(keys, "key") | dict.fromkeys(roles, "role")
 
     configuration["resource_configuration_sha256"].update(
         _qualified_resources(references, inventory, parameters["environment_id"], account, region)
     )
     configuration["kms_key_policy_sha256"] = {
         binding.kms_key_arn: _qualified_key_policy(
-            binding, opposite.role_arn, key_policies.get(binding.kms_key_arn)
+            binding.key_policy_sha256, key_policies.get(binding.kms_key_arn), denied_role
         )
-        for binding, opposite in (
-            (storage.trainer, storage.evaluator),
-            (storage.evaluator, storage.trainer),
-        )
+        for _, binding, denied_role in buckets
     }
     configuration["cloudformation_resources"] = {
-        **_private_bucket_resources("TrainerStorage", storage.trainer, storage.evaluator),
-        **_private_bucket_resources("EvaluatorStorage", storage.evaluator, storage.trainer),
+        name: resource
+        for logical_id, binding, denied_role in buckets
+        for name, resource in _private_bucket_resources(
+            logical_id, binding.kms_key_arn, denied_role
+        ).items()
     }
     return _prepared_configuration(configuration)
 
@@ -350,12 +365,12 @@ def _unique_policy_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
 
 
 def _qualified_key_policy(
-    binding: WorkloadStorageBinding, opposite_role: str, policy: bytes | None
+    expected_sha256: str, policy: bytes | None, denied_role_arn: str | None
 ) -> str:
     if (
         not isinstance(policy, bytes)
         or not 0 < len(policy) <= 131_072
-        or hashlib.sha256(policy).hexdigest() != binding.key_policy_sha256
+        or hashlib.sha256(policy).hexdigest() != expected_sha256
     ):
         raise CellInstallRefused("CELL_INSTALL_KEY_POLICY_UNQUALIFIED")
     try:
@@ -365,18 +380,23 @@ def _qualified_key_policy(
     if not isinstance(document, dict) or document.get("Version") != "2012-10-17":
         raise CellInstallRefused("CELL_INSTALL_KEY_POLICY_UNQUALIFIED")
     statements = document.get("Statement")
-    if not isinstance(statements, list):
+    if (
+        not isinstance(statements, list)
+        or not statements
+        or any(not isinstance(statement, dict) for statement in statements)
+    ):
         raise CellInstallRefused("CELL_INSTALL_KEY_POLICY_UNQUALIFIED")
+    if denied_role_arn is None:
+        return expected_sha256
 
     matching_actions: set[str] = set()
     for statement in statements:
         if (
-            not isinstance(statement, dict)
-            or set(statement) - {"Sid", "Effect", "Principal", "Action", "Resource", "Condition"}
+            set(statement) - {"Sid", "Effect", "Principal", "Action", "Resource", "Condition"}
             or statement.get("Effect") != "Deny"
             or statement.get("Principal") not in ("*", {"AWS": "*"})
             or statement.get("Resource") != "*"
-            or statement.get("Condition") != {"ArnEquals": {"aws:PrincipalArn": opposite_role}}
+            or statement.get("Condition") != {"ArnEquals": {"aws:PrincipalArn": denied_role_arn}}
         ):
             continue
         actions = statement.get("Action")
@@ -386,16 +406,49 @@ def _qualified_key_policy(
             matching_actions.update(actions)
     if not _KMS_CROSS_ROLE_READ_ACTIONS <= matching_actions:
         raise CellInstallRefused("CELL_INSTALL_CROSS_ROLE_DECRYPT_DENY_MISSING")
-    return binding.key_policy_sha256
+    return expected_sha256
 
 
 def _private_bucket_resources(
-    logical_id: str, binding: WorkloadStorageBinding, opposite: WorkloadStorageBinding
+    logical_id: str, kms_key_arn: str, denied_role_arn: str | None
 ) -> dict[str, object]:
     retain = {"DeletionPolicy": "Retain", "UpdateReplacePolicy": "Retain"}
     bucket_arn = {"Fn::GetAtt": [logical_id, "Arn"]}
     objects_arn = {"Fn::Sub": "${" + logical_id + ".Arn}/*"}
     explicit_deny = {"Effect": "Deny", "Principal": "*"}
+    statements = []
+    if denied_role_arn is not None:
+        statements.append(
+            {
+                "Sid": "DenyOppositeWorkload",
+                **explicit_deny,
+                "Action": "s3:*",
+                "Resource": [bucket_arn, objects_arn],
+                "Condition": {"ArnEquals": {"aws:PrincipalArn": denied_role_arn}},
+            }
+        )
+    statements.extend(
+        [
+            {
+                "Sid": "RequireKmsForObjectWrites",
+                **explicit_deny,
+                "Action": "s3:PutObject",
+                "Resource": objects_arn,
+                "Condition": {"StringNotEquals": {"s3:x-amz-server-side-encryption": "aws:kms"}},
+            },
+            {
+                "Sid": "RequireExactKeyForObjectWrites",
+                **explicit_deny,
+                "Action": "s3:PutObject",
+                "Resource": objects_arn,
+                "Condition": {
+                    "StringNotEquals": {
+                        "s3:x-amz-server-side-encryption-aws-kms-key-id": kms_key_arn
+                    }
+                },
+            },
+        ]
+    )
     return {
         logical_id: {
             "Type": "AWS::S3::Bucket",
@@ -406,7 +459,7 @@ def _private_bucket_resources(
                         {
                             "ServerSideEncryptionByDefault": {
                                 "SSEAlgorithm": "aws:kms",
-                                "KMSMasterKeyID": binding.kms_key_arn,
+                                "KMSMasterKeyID": kms_key_arn,
                             },
                             "BucketKeyEnabled": False,
                         }
@@ -429,37 +482,7 @@ def _private_bucket_resources(
                 "Bucket": {"Ref": logical_id},
                 "PolicyDocument": {
                     "Version": "2012-10-17",
-                    "Statement": [
-                        {
-                            "Sid": "DenyOppositeWorkload",
-                            **explicit_deny,
-                            "Action": "s3:*",
-                            "Resource": [bucket_arn, objects_arn],
-                            "Condition": {"ArnEquals": {"aws:PrincipalArn": opposite.role_arn}},
-                        },
-                        {
-                            "Sid": "RequireKmsForObjectWrites",
-                            **explicit_deny,
-                            "Action": "s3:PutObject",
-                            "Resource": objects_arn,
-                            "Condition": {
-                                "StringNotEquals": {"s3:x-amz-server-side-encryption": "aws:kms"}
-                            },
-                        },
-                        {
-                            "Sid": "RequireExactKeyForObjectWrites",
-                            **explicit_deny,
-                            "Action": "s3:PutObject",
-                            "Resource": objects_arn,
-                            "Condition": {
-                                "StringNotEquals": {
-                                    "s3:x-amz-server-side-encryption-aws-kms-key-id": (
-                                        binding.kms_key_arn
-                                    )
-                                }
-                            },
-                        },
-                    ],
+                    "Statement": statements,
                 },
             },
         },
