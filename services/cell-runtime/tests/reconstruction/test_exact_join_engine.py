@@ -13,6 +13,9 @@ from opentour_cell.reconstruction.exact_join_engine import (
     JoinScope,
     JoinStatus,
     KeyKind,
+    ManyJoinResult,
+    ResolverContract,
+    join_one_to_many,
     join_one_to_one,
 )
 
@@ -127,3 +130,142 @@ def test_empty_strings_match_only_if_explicitly_allowed() -> None:
 def test_invalid_join_plan_refused(fields: tuple[JoinField, ...]) -> None:
     with pytest.raises(JoinInputError, match="nonempty and distinct"):
         join_one_to_one(QUERY, (), scope=SCOPE, fields=fields)
+
+
+RESOLVER = ResolverContract(
+    SCOPE, "resolver-artifact", "revision-1", "retain-all", "descending-reference", "receipt-only"
+)
+
+
+class RecordingResolver:
+    def __init__(
+        self,
+        contract: ResolverContract,
+        output: tuple[str, ...] | None = None,
+    ) -> None:
+        self.contract = contract
+        self.output = output
+        self.calls: list[tuple[str, ...]] = []
+
+    def order_references(self, references: tuple[str, ...]) -> tuple[str, ...]:
+        self.calls.append(references)
+        return references[::-1] if self.output is None else self.output
+
+
+def test_one_to_many_uses_resolver_order_and_keeps_all_exact_references() -> None:
+    records = (
+        JoinRecord(SCOPE, "ref-z", {**QUERY, "detail": "simulated-local-row-detail"}),
+        JoinRecord(replace(SCOPE, snapshot_id="other-snapshot"), "foreign-ref", QUERY),
+        JoinRecord(SCOPE, "ref-a", QUERY),
+        JoinRecord(SCOPE, "lookalike-ref", {"entity": "entity-1", "operation": "42"}),
+    )
+    resolver = RecordingResolver(RESOLVER)
+    for order in (records, records[::-1]):
+        assert join_one_to_many(
+            QUERY, order, scope=SCOPE, fields=FIELDS, required_resolver=RESOLVER, resolver=resolver
+        ) == ManyJoinResult(JoinStatus.MATCHED, ("ref-z", "ref-a"))
+    assert resolver.calls == [("ref-a", "ref-z"), ("ref-a", "ref-z")]
+
+
+@pytest.mark.parametrize(
+    "wrong_binding",
+    [
+        replace(RESOLVER, reference="other-resolver"),
+        replace(RESOLVER, revision="revision-2"),
+        replace(RESOLVER, aggregation_rule="one-record"),
+        replace(RESOLVER, order_rule="ascending-reference"),
+        replace(RESOLVER, authority_rule="other-authority"),
+        replace(RESOLVER, scope=replace(SCOPE, connection_id="other-source")),
+    ],
+)
+def test_one_to_many_refuses_different_pinned_bindings(wrong_binding: ResolverContract) -> None:
+    resolver = RecordingResolver(wrong_binding)
+    with pytest.raises(JoinInputError, match="exact qualified resolver binding"):
+        join_one_to_many(
+            QUERY,
+            (JoinRecord(SCOPE, "ref-a", QUERY),),
+            scope=SCOPE,
+            fields=FIELDS,
+            required_resolver=RESOLVER,
+            resolver=resolver,
+        )
+    assert resolver.calls == []
+
+
+def test_one_to_many_has_no_resolver_default_even_for_zero_or_one_matches() -> None:
+    with pytest.raises(JoinInputError, match="exact qualified resolver binding"):
+        join_one_to_many(
+            QUERY, (), scope=SCOPE, fields=FIELDS, required_resolver=RESOLVER, resolver=None
+        )
+    resolver = RecordingResolver(RESOLVER)
+    with pytest.raises(JoinInputError, match="exact qualified resolver binding"):
+        join_one_to_many(
+            QUERY,
+            (JoinRecord(SCOPE, "ref-a", QUERY),),
+            scope=SCOPE,
+            fields=FIELDS,
+            required_resolver=None,
+            resolver=resolver,
+        )
+    assert resolver.calls == []
+
+
+@pytest.mark.parametrize("output", [("ref-a",), ("ref-a", "ref-a"), ("ref-a", "foreign-ref")])
+def test_one_to_many_refuses_omitted_duplicate_or_foreign_references(
+    output: tuple[str, ...],
+) -> None:
+    resolver = RecordingResolver(RESOLVER, output)
+    records = (JoinRecord(SCOPE, "ref-a", QUERY), JoinRecord(SCOPE, "ref-b", QUERY))
+
+    with pytest.raises(JoinInputError, match="preserve all exact references") as error:
+        join_one_to_many(
+            QUERY,
+            records,
+            scope=SCOPE,
+            fields=FIELDS,
+            required_resolver=RESOLVER,
+            resolver=resolver,
+        )
+    assert "foreign-ref" not in str(error.value)
+
+
+def test_one_to_many_missing_keys_and_no_matches_do_not_call_resolver() -> None:
+    resolver = RecordingResolver(RESOLVER)
+    missing_key: dict[str, JoinScalar] = {"entity": "entity-1"}
+    for query, reason in (
+        (missing_key, JoinReason.MISSING_KEY),
+        (QUERY, JoinReason.NO_EXACT_MATCH),
+    ):
+        assert join_one_to_many(
+            query, (), scope=SCOPE, fields=FIELDS, required_resolver=RESOLVER, resolver=resolver
+        ) == ManyJoinResult(JoinStatus.MISSING, reason=reason)
+    assert resolver.calls == []
+
+
+def test_resolver_binding_read_failure_is_sanitized_before_dispatch() -> None:
+    class UnavailableResolver:
+        called = False
+
+        @property
+        def contract(self) -> ResolverContract:
+            raise ValueError("simulated-resolver-binding-detail")
+
+        def order_references(self, references: tuple[str, ...]) -> tuple[str, ...]:
+            self.called = True
+            return references
+
+    resolver = UnavailableResolver()
+    with pytest.raises(
+        JoinInputError, match="qualified resolver binding could not be read"
+    ) as error:
+        join_one_to_many(
+            QUERY,
+            (JoinRecord(SCOPE, "ref-a", QUERY),),
+            scope=SCOPE,
+            fields=FIELDS,
+            required_resolver=RESOLVER,
+            resolver=resolver,
+        )
+    assert not resolver.called
+    assert error.value.__suppress_context__
+    assert "simulated-resolver-binding-detail" not in str(error.value)
