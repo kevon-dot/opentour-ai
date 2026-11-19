@@ -17,6 +17,7 @@ PRESENTATION_TARGETS = {
     "apps/web/components/foundation/tokens/status-icon.visual.spec.ts": "OPE-312",
     "apps/web/components/foundation/tokens/tooltip.visual.spec.ts": "OPE-313",
     "apps/web/components/foundation/forms/difference-review.visual.spec.ts": "OPE-314",
+    "apps/web/components/foundation/forms/text-field.visual.spec.ts": "OPE-316",
     "apps/web/features/operations/cancellation-impact.visual.spec.ts": "OPE-315",
     "apps/web/features/workspace/customer-shell.visual.spec.ts": "OPE-307",
     "apps/web/components/foundation/data-display/chart-evidence.visual.spec.ts": "OPE-303",
@@ -248,6 +249,16 @@ def verify_scoped_presentation(root: Path, value: dict[str, Any]) -> None:
         actual_cards = {Path(path).name for path in images}
         if len(images) != len(expected_cards) or actual_cards != expected_cards:
             raise ValueError("Difference review capture inventory mismatch")
+    elif value["issue_key"] == "OPE-316":
+        expected_fields = {
+            f"field-{width}-{scale}-{state}.png"
+            for width in widths
+            for scale in (100, 200)
+            for state in ("default", "focus", "error", "disabled", "input")
+        }
+        actual_fields = {Path(name).name for name in images}
+        if len(images) != len(expected_fields) or actual_fields != expected_fields:
+            raise ValueError("Text field capture inventory mismatch")
     elif value["issue_key"] == "OPE-315":
         expected_impact = {
             f"impact-{width}-{scale}.png" for width in widths for scale in (100, 200)

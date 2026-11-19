@@ -35,6 +35,11 @@ export const presentationSuites = new Map([
     requirementIds: ['OPE-313:acceptance-bullet-1', 'OPE-313:acceptance-bullet-2', 'OPE-313:acceptance-bullet-3', 'OPE-313:acceptance-bullet-4:browser-evidence'],
     specHash: '97bd9622301d2d2c806b162f8387ea8c52c28cf4539e2e9bd6c884d6be579473',
   }],
+  ['apps/web/components/foundation/forms/text-field.visual.spec.ts', {
+    owner: 'OPE-316', parent: 'OPE-279', guide: '170:146', minimumTests: 8,
+    requirementIds: ['OPE-316:raw-draft', 'OPE-316:accessible-field', 'OPE-316:browser-evidence'],
+    specHash: 'ab12497e6a79f799dd8d6afed6cce80bc5474bf260b77bc770d3722988c1eb25',
+  }],
   ['apps/web/components/foundation/forms/difference-review.visual.spec.ts', {
     owner: 'OPE-314', parent: 'OPE-280', guide: '159:833', minimumTests: 8,
     requirementIds: [
