@@ -1,5 +1,6 @@
 // Direct fixture-only Node client for the generated private TLS PostgreSQL test.
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { request as requestHttps } from 'node:https';
 import { join } from 'node:path';
@@ -9,12 +10,16 @@ const [compiled] = process.argv.slice(2);
 const config = JSON.parse(readFileSync(0, 'utf8'));
 const moduleURL = path => pathToFileURL(join(compiled, path)).href;
 const { configurePrivateAccountEntry } = await import(moduleURL('features/account-entry/server.js'));
+const { createPrivateGatewaySigner } = await import(moduleURL('lib/server/private-gateway-signer.js'));
 const { GET: signinGET } = await import(moduleURL('app/auth/signin/route.js'));
 const { GET: callbackGET } = await import(moduleURL('app/auth/callback/route.js'));
 
+assert.equal(
+  config.endpoint,
+  'https://fixtureapi-vpce-01234567.execute-api.us-east-2.amazonaws.com/dev',
+);
+assert.ok(Number.isInteger(config.local_port) && config.local_port > 0 && config.local_port <= 65535);
 const endpoint = new URL(config.endpoint);
-assert.equal(endpoint.hostname, 'browser.fixture.test');
-assert.equal(endpoint.pathname, '/dev');
 const tls = {
   ca: readFileSync(config.certificate_authority),
   cert: readFileSync(config.stage_certificate),
@@ -23,14 +28,35 @@ const tls = {
 };
 const base = '/dev/internal/browser-identity/v1';
 const paths = ['/flows/create', '/flows/consume', '/sessions/admit', '/sessions/current', '/sessions/end'];
-const signedHeaders = {
-  authorization: 'AWS4-HMAC-SHA256 generated-fixture-signature',
-  'x-amz-date': '20261118T000000Z',
-  'x-amz-security-token': 'generated-fixture-session-token',
-};
+const accessKeyId = 'ASIAEXAMPLEONLY12345';
+const sessionToken = 'generated-fixture-session-token';
+const signingDate = new Date(config.now).toISOString().replace(/[-:]/g, '').replace(/\.\d{3}Z$/, 'Z');
+const signedHeaderNames = 'content-type;host;x-amz-content-sha256;x-amz-date;x-amz-security-token';
+const credentialScope = `${signingDate.slice(0, 8)}/${config.region}/execute-api/aws4_request`;
+const authorizationPrefix = `AWS4-HMAC-SHA256 Credential=${accessKeyId}/${credentialScope}, `
+  + `SignedHeaders=${signedHeaderNames}, Signature=`;
 const exercised = new Set();
 let pendingProof;
 let latestSession;
+let credentialSnapshots = 0;
+let forwarded = 0;
+const signGatewayRequest = createPrivateGatewaySigner({
+  approvedEndpoint: config.endpoint,
+  region: config.region,
+  restApiId: config.rest_api_id,
+  vpcEndpointId: config.vpc_endpoint_id,
+  now: () => config.now,
+  credentials: async signal => {
+    assert.ok(signal instanceof AbortSignal && !signal.aborted);
+    credentialSnapshots++;
+    return {
+      accessKeyId,
+      secretAccessKey: 'generated-fixture-signing-secret',
+      sessionToken,
+      expiration: new Date(config.now + 600_000),
+    };
+  },
+});
 
 async function sign(request, signal) {
   assert.equal(pendingProof, undefined);
@@ -40,7 +66,10 @@ async function sign(request, signal) {
   assert.deepEqual(request.headers, { 'content-type': 'application/json' });
   assert.equal(typeof request.body, 'string');
   assert.ok(JSON.parse(request.body));
-  pendingProof = request;
+  const before = credentialSnapshots;
+  const signedHeaders = await signGatewayRequest(request, signal);
+  assert.equal(credentialSnapshots, before + 1);
+  pendingProof = { request, signedHeaders };
   return signedHeaders;
 }
 
@@ -52,28 +81,35 @@ async function fetchPrivate(input, init) {
   assert.equal(url.hash, '');
   const path = paths.find(candidate => url.pathname === base + candidate);
   assert.ok(path);
-  const body = await request.text();
-  assert.equal(request.url, pendingProof.url);
-  assert.equal(request.method, pendingProof.method);
-  assert.equal(body, pendingProof.body);
-  assert.equal(request.headers.get('content-type'), 'application/json');
-  for (const [name, value] of Object.entries(signedHeaders)) {
-    assert.equal(request.headers.get(name), value);
-  }
+  const body = Buffer.from(await request.arrayBuffer());
+  assert.ok(pendingProof);
+  assert.equal(request.url, pendingProof.request.url);
+  assert.equal(request.method, pendingProof.request.method);
+  assert.deepEqual(body, Buffer.from(pendingProof.request.body));
+  const headers = Object.fromEntries(request.headers);
+  assert.deepEqual(headers, { ...pendingProof.signedHeaders, 'content-type': 'application/json' });
+  assert.deepEqual(Object.keys(headers).sort(), [
+    'authorization', 'content-type', 'x-amz-content-sha256', 'x-amz-date', 'x-amz-security-token',
+  ]);
+  assert.equal(headers['x-amz-date'], signingDate);
+  assert.equal(headers['x-amz-security-token'], sessionToken);
+  assert.equal(headers['x-amz-content-sha256'], createHash('sha256').update(body).digest('hex'));
+  assert.ok(headers.authorization.startsWith(authorizationPrefix));
+  assert.match(headers.authorization.slice(authorizationPrefix.length), /^[a-f0-9]{64}$/);
   pendingProof = undefined;
 
   const upstream = await new Promise((resolve, reject) => {
     const transport = requestHttps({
       ...tls,
       hostname: '127.0.0.1',
-      port: endpoint.port,
+      port: config.local_port,
       servername: endpoint.hostname,
       method: request.method,
       path: url.pathname,
       headers: {
-        ...Object.fromEntries(request.headers),
+        ...headers,
         host: endpoint.host,
-        'content-length': Buffer.byteLength(body),
+        'content-length': body.length,
       },
       signal: request.signal,
       agent: false,
@@ -81,6 +117,7 @@ async function fetchPrivate(input, init) {
     transport.once('error', reject);
     transport.end(body);
   });
+  forwarded++;
   const chunks = [];
   let size = 0;
   for await (const chunk of upstream) {
@@ -193,6 +230,7 @@ try {
   assert.equal(exchanges, 1);
   assert.equal(jwksRequests, 1);
   assert.equal(pendingProof, undefined);
+  assert.equal(credentialSnapshots, forwarded);
   assert.deepEqual([...exercised].sort(), [...paths].sort());
 } finally {
   globalThis.fetch = originalFetch;
@@ -200,6 +238,7 @@ try {
 
 console.log(JSON.stringify({
   account_entry_over_private_mtls: 'PASS',
+  pinned_signer: 'PASS',
   provider_acceptance: 'NOT_RUN',
   mode: config.mode,
 }));

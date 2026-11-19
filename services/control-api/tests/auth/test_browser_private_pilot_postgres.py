@@ -16,13 +16,14 @@ from uuid import uuid4
 
 import pytest
 import uvicorn
+from cryptography.x509.oid import ExtendedKeyUsageOID
 from opentour_control.auth.browser_private import MAX_RESPONSE_BYTES
 from opentour_control.auth.browser_private_pilot import PrivateBrowserPilotPathProfile
 from opentour_control.auth.browser_private_pilot_listener import (
     build_private_browser_pilot_listener,
 )
 from opentour_control.auth.config import digest
-from test_browser_private_listener import HOST
+from test_browser_private_listener import HOST, cert, write_pair
 from test_browser_private_listener import tls_fixture as tls_fixture
 from test_identity_postgres import ROOT, identity_postgres_fixture
 from test_identity_postgres import browser_state as browser_state
@@ -203,6 +204,7 @@ def compiled_private_account_entry(tmp_path_factory):
                 },
                 "files": [
                     str(web / "features/account-entry/server.ts"),
+                    str(web / "lib/server/private-gateway-signer.ts"),
                     str(web / "app/auth/signin/route.ts"),
                     str(web / "app/auth/callback/route.ts"),
                 ],
@@ -217,18 +219,27 @@ def compiled_private_account_entry(tmp_path_factory):
 
 
 def test_typescript_private_account_entry_uses_the_dev_tls_postgres_listener(
-    browser_state, durable, identity, tls_fixture, compiled_private_account_entry
+    browser_state, durable, identity, tls_fixture, compiled_private_account_entry, tmp_path
 ):
-    _, options, authority, stage, *_ = tls_fixture
-    approved = options["approved"]
-    assert approved.stage_arn.endswith("/fixture-stage")
+    now, options, _, stage, *_ = tls_fixture
+    region, rest_api_id = "us-east-2", "fixtureapi"
+    vpc_endpoint_id = "vpce-01234567"
+    gateway_host = "fixtureapi-vpce-01234567.execute-api.us-east-2.amazonaws.com"
+    issuer = cert("generated-gateway-test-ca", now, ca=True)
+    server = cert(gateway_host, now, purpose=ExtendedKeyUsageOID.SERVER_AUTH, signer=issuer)
+    authority, _ = write_pair(tmp_path, "generated-gateway-test-ca", issuer)
+    server_certificate, server_key = write_pair(tmp_path, "generated-gateway-test", server)
     approved = replace(
-        approved, stage_arn=approved.stage_arn.removesuffix("/fixture-stage") + "/dev"
+        options["approved"],
+        stage_arn=f"arn:aws:apigateway:{region}::/restapis/{rest_api_id}/stages/dev",
+        backend_server_name=gateway_host,
     )
     options = {
         **options,
         "approved": approved,
         "readback": replace(options["readback"], binding=approved),
+        "server_certfile": server_certificate,
+        "server_keyfile": server_key,
     }
     node, output = compiled_private_account_entry
     probe = Path(__file__).with_name("private_browser_client_postgres_probe.mjs")
@@ -250,7 +261,11 @@ def test_typescript_private_account_entry_uses_the_dev_tls_postgres_listener(
                     while not server.started:
                         await asyncio.sleep(0.01)
                 request = {
-                    "endpoint": f"https://{HOST}:{port}/dev",
+                    "endpoint": f"https://{gateway_host}/dev",
+                    "local_port": port,
+                    "region": region,
+                    "rest_api_id": rest_api_id,
+                    "vpc_endpoint_id": vpc_endpoint_id,
                     "certificate_authority": str(authority),
                     "stage_certificate": str(stage[0]),
                     "stage_private_key": str(stage[1]),
@@ -279,6 +294,7 @@ def test_typescript_private_account_entry_uses_the_dev_tls_postgres_listener(
                 assert len(result.stdout) < 1024
                 assert json.loads(result.stdout) == {
                     "account_entry_over_private_mtls": "PASS",
+                    "pinned_signer": "PASS",
                     "provider_acceptance": "NOT_RUN",
                     "mode": durable.mode,
                 }
