@@ -17,6 +17,7 @@ from tools.fixtures.postgres import DisposablePostgres, PrerequisiteMissing
 
 TARGET = "services/control-api/tests/migrations/test_expand_contract.py"
 GRANTS_TARGET = "services/control-api/tests/auth/test_grants_postgres.py"
+LOOPBACK_TARGET = "services/control-api/tests/auth/test_browser_private_listener.py"
 
 
 @pytest.fixture
@@ -125,6 +126,58 @@ def test_grants_target_requires_its_own_observed_postgres_binding(checkout: Path
 
 
 @pytest.mark.parametrize(
+    ("change", "expected"),
+    [(None, 0), ("nonce", 2), ("zero", 1), ("cleanup", 1), ("missing", 2)],
+)
+def test_loopback_needs_bound_observations(
+    checkout: Path, change: str | None, expected: int
+) -> None:
+    target = checkout / LOOPBACK_TARGET
+    target.parent.mkdir(parents=True)
+    target.write_text("def test_generated():\n    assert True\n")
+
+    def run(invocation: runner.Invocation) -> runner.ProcessResult:
+        assert invocation.consumer == "loopback_python"
+        assert invocation.environment["OPENTOUR_UNIT_GUARD"] == "1"
+        assert invocation.environment["OPENTOUR_LOOPBACK_TARGET"] == LOOPBACK_TARGET
+        assert invocation.argv[-4:-2] == ("tools.fixtures.python_postgres", LOOPBACK_TARGET)
+        report = runner.report_envelope(
+            "pytest",
+            LOOPBACK_TARGET,
+            invocation.environment,
+            [{"id": "generated", "file": LOOPBACK_TARGET, "status": "passed", "mode": None}],
+        )
+        report["kind"] = "local_integration"
+        invocation.report.write_text(json.dumps(report))
+        if change != "missing":
+            nonce = invocation.environment["OPENTOUR_RESULT_NONCE"]
+            observations = {
+                "schema_version": "opentour.python-loopback-observation.v1",
+                "target": LOOPBACK_TARGET,
+                "owner": "OPE-142",
+                "binding_nonce": "f" * 32 if change == "nonce" else nonce,
+                "source_sha256": adapter.source_digest(invocation.cwd, LOOPBACK_TARGET),
+                "report_sha256": hashlib.sha256(
+                    json.dumps(report, sort_keys=True).encode()
+                ).hexdigest(),
+                "kind": "local_integration",
+                "product_acceptance": "NOT_RUN",
+                "accepted_connections": 0 if change == "zero" else 1,
+                "cleanup_complete": change != "cleanup",
+            }
+            sidecar = invocation.report.with_name(invocation.report.name + ".loopback.json")
+            sidecar.write_text(json.dumps(observations))
+        return runner.ProcessResult(0)
+
+    result = runner.run_command("test-python", [LOOPBACK_TARGET], checkout, run)
+    assert result["exit_code"] == expected, result["message"]
+    assert result["product_acceptance"] == "NOT_RUN"
+    if expected == 0:
+        assert result["kind"] == "local_integration"
+        assert result["steps"][0]["artifacts"][0]["type"] == "python-loopback-observations"
+
+
+@pytest.mark.parametrize(
     "change", ["nonce", "target", "owner", "source", "report", "shape", "dirty"]
 )
 def test_stale_or_tampered_lifecycle_sidecar_is_refused(checkout: Path, change: str) -> None:
@@ -174,6 +227,7 @@ def test_generic_test_path_does_not_self_upgrade(checkout: Path) -> None:
 
     assert runner.run_command("test-python", [path], checkout, run)["kind"] == "simulated"
     assert calls[0].consumer is None and calls[0].expected_kind == "simulated"
+    assert "OPENTOUR_LOOPBACK_TARGET" not in calls[0].environment
 
 
 def test_adapter_absent_postgres_returns_empty_blocked_report(

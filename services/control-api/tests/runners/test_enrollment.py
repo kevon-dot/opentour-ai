@@ -178,7 +178,7 @@ def test_enr04_newline_suffix_is_denied(installed, challenge, suffix, part):
     [
         ("sts.us-east-1.amazonaws.com", "sts.us-east-2.amazonaws.com"),
         ("sts.us-east-1.amazonaws.com", "sts.us-east-1.amazonaws.com@fixture.example"),
-        ("sts.us-east-1.amazonaws.com", "fixture.example@sts.us-east-1.amazonaws.com"),
+        ("https://", "https://generated%40example.invalid@"),
         ("sts.us-east-1.amazonaws.com", "sts.us-east-1.amazonaws.com:443"),
         ("https://", "http://"),
         ("/?", "/redirect?"),

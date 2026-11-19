@@ -395,15 +395,24 @@ def test_numerical_kernel_routes_both_required_test_files_once(tmp_path: Path) -
         python_unit_selection(tmp_path)
 
 
-def test_only_registered_database_files_leave_the_unit_job(tmp_path: Path) -> None:
-    from tools.fixtures.python_postgres import present_targets
+def test_only_registered_local_python_files_leave_the_unit_job(tmp_path: Path) -> None:
+    from tools.fixtures.python_postgres import present_targets, target_command
 
-    files = {
+    supervised = {
+        "services/control-api/tests/auth/test_browser_private_listener.py",
+        "services/control-api/tests/auth/test_browser_private_pilot_listener.py",
+        "services/control-api/tests/auth/test_browser_private_pilot_postgres.py",
         "services/control-api/tests/auth/test_identity_postgres.py",
         "services/control-api/tests/migrations/test_expand_contract.py",
+        "services/control-api/tests/organizations/test_session_selection.py",
+        "services/control-api/tests/runners/test_enrollment_postgres.py",
+    }
+    files = supervised | {
         "services/control-api/tests/auth/test_session_context.py",
         "services/control-api/tests/auth/refresh_test.py",
         "services/control-api/tests/auth/test_unregistered_database.py",
+        "services/control-api/tests/auth/test_unregistered_loopback.py",
+        "services/control-api/tests/runners/test_enrollment.py",
         "services/control-api/tests/auth/helpers.py",
         "infrastructure/tests/test_environment_boundaries.py",
     }
@@ -413,15 +422,15 @@ def test_only_registered_database_files_leave_the_unit_job(tmp_path: Path) -> No
         path.write_text("# Generated selection fixture\n")
     units, absent = python_unit_selection(tmp_path)
     local = set(present_targets(tmp_path))
-    assert local == {
-        "services/control-api/tests/auth/test_identity_postgres.py",
-        "services/control-api/tests/migrations/test_expand_contract.py",
-    }
+    assert local == supervised
+    assert all(target_command(target) == ("just", "test-python", target) for target in local)
     assert not (set(units) & local)
     assert {
         "services/control-api/tests/auth/test_session_context.py",
         "services/control-api/tests/auth/refresh_test.py",
         "services/control-api/tests/auth/test_unregistered_database.py",
+        "services/control-api/tests/auth/test_unregistered_loopback.py",
+        "services/control-api/tests/runners/test_enrollment.py",
         "infrastructure/tests",
     } <= set(units)
     assert "services/control-api/tests/auth/helpers.py" not in units

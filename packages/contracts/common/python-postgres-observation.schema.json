@@ -26,8 +26,11 @@
         "services/control-api/tests/migrations/test_expand_contract.py",
         "services/control-api/tests/auth/test_identity_postgres.py",
         "services/control-api/tests/auth/test_grants_postgres.py",
+        "services/control-api/tests/auth/test_browser_private_pilot_postgres.py",
         "tests/integration/authority_journal_recovery.py",
-        "services/control-api/tests/organizations/test_creation_saga.py"
+        "services/control-api/tests/organizations/test_creation_saga.py",
+        "services/control-api/tests/organizations/test_session_selection.py",
+        "services/control-api/tests/runners/test_enrollment_postgres.py"
       ]
     },
     "owner": {
@@ -36,7 +39,9 @@
         "OPE-142",
         "OPE-143",
         "OPE-217",
-        "OPE-171"
+        "OPE-171",
+        "OPE-172",
+        "OPE-184"
       ]
     },
     "binding_nonce": {
