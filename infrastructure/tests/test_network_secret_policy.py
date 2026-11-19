@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 from opentour_control.observability.policy import (
@@ -16,6 +17,108 @@ ROLE = "arn:aws:iam::111122223333:role/generated-bff"
 API = "arn:aws:execute-api:us-east-2:111122223333:gateway"
 TARGET = "arn:aws:elasticloadbalancing:us-east-2:111122223333:loadbalancer/net/generated/abcdef"
 EXPORT_INTEGRATION = "x-amazon-apigateway-integration"
+GATEWAY_TEMPLATE = (
+    Path(__file__).resolve().parents[1] / "cloudformation" / "network-secrets-policy.yaml"
+)
+APPROVED_API_PATHS = {
+    "/internal/browser-identity/v1/flows/consume",
+    "/internal/browser-identity/v1/flows/create",
+    "/internal/browser-identity/v1/sessions/admit",
+    "/internal/browser-identity/v1/sessions/current",
+    "/internal/browser-identity/v1/sessions/end",
+}
+
+
+def test_ohio_gateway_template_installs_only_the_approved_private_methods() -> None:
+    template = json.loads(GATEWAY_TEMPLATE.read_text())
+    resources = template["Resources"]
+    api = resources["PrivateApi"]["Properties"]
+    assert api["EndpointConfiguration"] == {
+        "Types": ["PRIVATE"],
+        "IpAddressType": "dualstack",
+        "VpcEndpointIds": [{"Ref": "EndpointId"}],
+    }
+    statements = api["Policy"]["Statement"]
+    assert len(statements) == 2
+    assert all(
+        statement["Effect"] == "Deny"
+        and statement["Action"] == "execute-api:Invoke"
+        and statement["Principal"] == "*"
+        and statement["Resource"] == "execute-api:/*"
+        for statement in statements
+    )
+    assert statements[0]["Condition"] == {
+        "StringNotEquals": {"aws:SourceVpce": {"Ref": "EndpointId"}}
+    }
+    assert statements[1]["Condition"] == {
+        "ArnNotEquals": {
+            "aws:PrincipalArn": {
+                "Fn::Sub": "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${BffRolePath}"
+            }
+        }
+    }
+
+    def api_path(resource_id: str) -> str:
+        properties = resources[resource_id]["Properties"]
+        parent = properties["ParentId"]
+        prefix = api_path(parent["Ref"]) if "Ref" in parent else ""
+        return f"{prefix}/{properties['PathPart']}"
+
+    methods = {
+        name: definition["Properties"]
+        for name, definition in resources.items()
+        if definition["Type"] == "AWS::ApiGateway::Method"
+    }
+    assert len(methods) == len(APPROVED_API_PATHS)
+    assert {
+        api_path(method["ResourceId"]["Ref"]) for method in methods.values()
+    } == APPROVED_API_PATHS
+    for method in methods.values():
+        path = api_path(method["ResourceId"]["Ref"])
+        assert method["HttpMethod"] == "POST"
+        assert method["AuthorizationType"] == "AWS_IAM"
+        assert method["ApiKeyRequired"] is False
+        assert method["Integration"] == {
+            "Type": "HTTP_PROXY",
+            "IntegrationHttpMethod": "POST",
+            "ConnectionType": "VPC_LINK",
+            "ConnectionId": {"Ref": "VpcLinkV2Id"},
+            "IntegrationTarget": {
+                "Fn::Sub": "arn:${AWS::Partition}:elasticloadbalancing:${AWS::Region}:"
+                "${AWS::AccountId}:loadbalancer/net/${NetworkLoadBalancerNameAndId}"
+            },
+            "Uri": {"Fn::Sub": "https://${BackendServerName}:443/dev" + path},
+        }
+    assert set(resources["PrivateDeployment"]["DependsOn"]) == set(methods)
+
+
+def test_ohio_stage_binds_the_deployment_and_has_no_request_logging_or_caching() -> None:
+    template = json.loads(GATEWAY_TEMPLATE.read_text())
+    assertion_conditions = [
+        item["Assert"] for item in template["Rules"]["ApprovedOhioProject"]["Assertions"]
+    ]
+    assert assertion_conditions == [
+        {"Fn::Equals": [{"Ref": "AWS::Region"}, "us-east-2"]},
+        {"Fn::Equals": [{"Ref": "AWS::AccountId"}, {"Ref": "ExpectedProjectId"}]},
+    ]
+    assert template["Resources"]["DevStage"]["Properties"] == {
+        "RestApiId": {"Ref": "PrivateApi"},
+        "DeploymentId": {"Ref": "PrivateDeployment"},
+        "ClientCertificateId": {"Ref": "ClientCertificate"},
+        "StageName": "dev",
+        "CacheClusterEnabled": False,
+        "TracingEnabled": False,
+        "MethodSettings": [
+            {
+                "ResourcePath": "/*",
+                "HttpMethod": "*",
+                "CachingEnabled": False,
+                "DataTraceEnabled": False,
+                "LoggingLevel": "OFF",
+                "MetricsEnabled": False,
+            }
+        ],
+    }
 
 
 @pytest.fixture
@@ -124,6 +227,36 @@ def readback() -> dict:
             }
         },
     }
+
+
+def test_reviewed_gateway_binding_covers_all_five_operations(binding, readback) -> None:
+    routes = {route: "/dev" + route for route in APPROVED_API_PATHS}
+    binding = replace(binding, routes=routes)
+    endpoint_policy = json.loads(readback["endpoint"]["PolicyDocument"])
+    endpoint_policy["Statement"][0]["Resource"] = [f"{API}/dev/POST{route}" for route in routes]
+    readback["endpoint"]["PolicyDocument"] = json.dumps(endpoint_policy)
+    readback["deployment"]["apiSummary"] = {
+        route: {"POST": {"authorizationType": "AWS_IAM", "apiKeyRequired": False}}
+        for route in routes
+    }
+    integration = readback["stage_export"]["paths"]["/generated-operation"]["post"][
+        EXPORT_INTEGRATION
+    ]
+    readback["stage_export"]["paths"] = {
+        route: {
+            "post": {
+                EXPORT_INTEGRATION: {
+                    **integration,
+                    "uri": f"https://identity.generated.example:443{backend_path}",
+                }
+            }
+        }
+        for route, backend_path in routes.items()
+    }
+    check_private_gateway(binding, **readback)
+    readback["stage_export"]["paths"].pop("/internal/browser-identity/v1/sessions/end")
+    with pytest.raises(PrivateGatewayPolicyError, match="PRIVATE_GATEWAY_METHOD_MISMATCH"):
+        check_private_gateway(binding, **readback)
 
 
 @pytest.mark.parametrize(
@@ -238,7 +371,6 @@ def test_refuses_ambiguous_approved_paths(binding, readback, path):
         check_private_gateway(replace(binding, routes={path: "/generated-target"}), **readback)
 
 
-
 def test_refuses_duplicate_policy_members(binding, readback):
     policy = readback["endpoint"]["PolicyDocument"]
     readback["endpoint"]["PolicyDocument"] = policy.replace(
@@ -253,7 +385,6 @@ def test_refuses_missing_integration_target(binding, readback):
     del operation[EXPORT_INTEGRATION]["integrationTarget"]
     with pytest.raises(PrivateGatewayPolicyError, match="PRIVATE_GATEWAY_TARGET_MISMATCH"):
         check_private_gateway(binding, **readback)
-
 
 
 @pytest.mark.parametrize("field", ["integrationTarget", "integration-target"])
