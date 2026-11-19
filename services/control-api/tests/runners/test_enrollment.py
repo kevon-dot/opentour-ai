@@ -69,8 +69,10 @@ def challenge(installed: InstalledCell) -> IssuedChallenge:
     )
 
 
-def proof_for(installed: InstalledCell, challenge: IssuedChallenge) -> dict[str, Any]:
-    key = ec.derive_private_key(7, ec.SECP256R1())
+def proof_for(
+    installed: InstalledCell, challenge: IssuedChallenge, *, key_seed: int = 7
+) -> dict[str, Any]:
+    key = ec.derive_private_key(key_seed, ec.SECP256R1())
     public = key.public_key().public_numbers()
     jwk = {
         "kty": "EC",

@@ -28,6 +28,7 @@ from opentour_journal.models import JournalError
 
 MAX_STS_RESPONSE_BYTES = 16 * 1024
 _PROOF_ADMITTED = object()
+_IDENTITY_VERIFIED = object()
 STS_NAMESPACE = "{https://sts.amazonaws.com/doc/2011-06-15/}"
 IAM_ROLE_NAME = r"[A-Za-z0-9_+=,.@-]{1,64}"
 STS_ROLE_SESSION_NAME = r"[A-Za-z0-9_+=,.@-]{2,64}"
@@ -119,8 +120,19 @@ class VerifiedEnrollmentIdentity:
     installed: InstalledCell
     iam_role_id: str
     runner_jwk_thumbprint: str
+    public_key_x: str
+    public_key_y: str
+    proof_sha256: str
+    challenge_nonce_sha256: str = field(repr=False)
     verified_at: datetime
     expires_at: datetime
+    _verification: tuple[object, VerifiedEnrollmentIdentity] | None = field(
+        default=None, repr=False, compare=False
+    )
+
+    def matches_verifier_result(self) -> bool:
+        """Ensure the in-process result still matches the verifier's exact fields."""
+        return self._verification == (_IDENTITY_VERIFIED, self)
 
 
 def _deny() -> InvalidEnrollmentProof:
@@ -201,6 +213,20 @@ def _validate_sts_request(
     return STSIdentityRequest(url, binding, expires_at)
 
 
+def _proof_document(body: bytes) -> dict[str, Any]:
+    if type(body) is not bytes or not 0 < len(body) <= 16 * 1024:
+        raise _deny()
+    return _object(json.loads(body.decode("utf-8"), object_pairs_hook=_unique_object), PROOF_FIELDS)
+
+
+def enrollment_proof_sha256(body: bytes) -> str:
+    """Return the canonical digest used for replay lookup, without authorizing proof."""
+    try:
+        return hashlib.sha256(canonical(_proof_document(body))).hexdigest()
+    except (JournalError, RecursionError, ValueError):
+        raise _deny() from None
+
+
 def validate_enrollment_proof(
     body: bytes, *, installed: InstalledCell, challenge: IssuedChallenge, now: datetime
 ) -> None:
@@ -210,11 +236,10 @@ def validate_enrollment_proof(
 
 def _validate_enrollment_proof(
     body: bytes, *, installed: InstalledCell, challenge: IssuedChallenge, now: datetime
-) -> tuple[STSIdentityRequest, str]:
+) -> tuple[STSIdentityRequest, str, str, str, str]:
     try:
         if (
-            not 0 < len(body) <= 16 * 1024
-            or challenge.installed != installed
+            challenge.installed != installed
             or installed.region not in QUALIFIED_STS_HOSTS
             or installed.deployment_mode not in {"opentour_managed", "customer_controlled"}
             or re.fullmatch(r"[0-9]{12}", installed.aws_account_id) is None
@@ -228,9 +253,7 @@ def _validate_enrollment_proof(
             or now >= challenge.expires_at
         ):
             raise _deny()
-        proof = _object(
-            json.loads(body.decode("utf-8"), object_pairs_hook=_unique_object), PROOF_FIELDS
-        )
+        proof = _proof_document(body)
         jwk = _object(proof["public_jwk"], {"kty", "crv", "x", "y"})
         if jwk["kty"] != "EC" or jwk["crv"] != "P-256":
             raise _deny()
@@ -275,10 +298,17 @@ def _validate_enrollment_proof(
         if not isinstance(signature, str):
             raise _deny()
         public_key.verify(raw_to_der(signature), transcript, ec.ECDSA(hashes.SHA256()))
-        return replace(
+        admitted = replace(
             request,
             _preflight=(_PROOF_ADMITTED, request.url, request.binding_header, request.expires_at),
-        ), thumbprint
+        )
+        return (
+            admitted,
+            thumbprint,
+            _encoded(x),
+            _encoded(y),
+            hashlib.sha256(canonical(proof)).hexdigest(),
+        )
     except (InvalidSignature, JournalError, OverflowError, RecursionError, ValueError):
         raise _deny() from None
 
@@ -293,7 +323,7 @@ def verify_enrollment_identity(
 ) -> VerifiedEnrollmentIdentity:
     """Verify the proof and trusted provider response without consuming the challenge."""
     started_at = clock()
-    request, thumbprint = _validate_enrollment_proof(
+    request, thumbprint, public_key_x, public_key_y, proof_sha256 = _validate_enrollment_proof(
         body, installed=installed, challenge=challenge, now=started_at
     )
     registered_role = re.fullmatch(
@@ -328,9 +358,19 @@ def verify_enrollment_identity(
         or installed.expected_iam_role_id not in (None, role_id)
     ):
         raise _deny()
-    return VerifiedEnrollmentIdentity(
-        challenge.id, installed, role_id, thumbprint, verified_at, request.expires_at
+    candidate = VerifiedEnrollmentIdentity(
+        challenge.id,
+        installed,
+        role_id,
+        thumbprint,
+        public_key_x,
+        public_key_y,
+        proof_sha256,
+        challenge.nonce_sha256,
+        verified_at,
+        request.expires_at,
     )
+    return replace(candidate, _verification=(_IDENTITY_VERIFIED, candidate))
 
 
 def _read_sts_identity(
