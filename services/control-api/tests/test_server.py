@@ -110,12 +110,16 @@ def test_malformed_deployment_configuration_refuses_start(
     start.assert_not_called()
 
 
-def test_entrypoint_closes_the_auth_runtime_after_serving(
-    deployment: dict[str, str], monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("cleanup_complete", [True, False])
+def test_entrypoint_closes_the_auth_runtime_before_signal_replay(
+    deployment: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    cleanup_complete: bool,
 ) -> None:
     for key, setting in deployment.items():
         monkeypatch.setenv(key, setting)
-    close = Mock(return_value=True)
+    close = Mock(return_value=cleanup_complete)
     monkeypatch.setattr(ControlAuthRuntime, "close", close)
 
     @contextmanager
@@ -139,3 +143,4 @@ def test_entrypoint_closes_the_auth_runtime_after_serving(
         server.main()
     assert terminated.value.code == -signal.SIGTERM
     close.assert_called_once()
+    assert ("Control auth runtime shutdown is incomplete" in caplog.text) is not cleanup_complete
