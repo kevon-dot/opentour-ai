@@ -27,13 +27,11 @@ RUN --mount=type=cache,target=/pnpm/store \
     pnpm install --store-dir=/pnpm/store --frozen-lockfile --ignore-scripts
 COPY apps/web ./apps/web
 WORKDIR /app/apps/web
-RUN test -f instrumentation.ts && test -f app/health/ready/route.ts \
-    && node node_modules/next/dist/bin/next build \
+RUN test -f next.config.mjs && test -f instrumentation.ts && test -f app/health/ready/route.ts \
+    && node node_modules/next/dist/bin/next build --webpack \
     && rm -rf .next/cache
-RUN mkdir /runtime && cp package.json /runtime/ \
-    && for path in next.config.* public; do \
-        if [ -e "$path" ]; then cp -R "$path" /runtime/; fi; \
-    done
+RUN mkdir /runtime && cp package.json next.config.mjs /runtime/ \
+    && if [ -d public ]; then cp -R public /runtime/; fi
 
 FROM workspace AS production-dependencies
 RUN --mount=type=cache,target=/pnpm/store \
