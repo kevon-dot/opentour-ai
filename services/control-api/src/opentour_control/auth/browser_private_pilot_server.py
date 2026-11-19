@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import ipaddress
 import json
@@ -14,6 +15,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
+import httpx2 as httpx
 import psycopg
 import uvicorn
 
@@ -36,6 +38,9 @@ from .runtime_server import serve_auth_runtime
 _PREFIX = "OPENTOUR_PRIVATE_BROWSER_"
 _DOCUMENT_LIMIT = 8192
 _TLS_FILE_LIMIT = 65536
+_METADATA_LIMIT = 32768
+_METADATA_TIMEOUT = 2.0
+_ECS_METADATA_URI = re.compile(r"http://169\.254\.170\.2/v4/[A-Za-z0-9_-]{1,128}")
 _BINDING_FIELDS = {
     "stage_arn",
     "client_certificate_id",
@@ -126,15 +131,97 @@ def _readback_time(value: object) -> datetime:
     return instant
 
 
-def _load_deployment(env: Mapping[str, str]) -> _Deployment:
+def _approved_subnets(raw: str) -> frozenset[ipaddress.IPv4Network]:
+    if len(raw) > 2048:
+        raise ValueError("Invalid approved listener subnets")
+    values: object = json.loads(raw)
+    if not isinstance(values, list) or not 1 <= len(values) <= 32:
+        raise ValueError("Invalid approved listener subnets")
+    networks = []
+    for value in values:
+        network = ipaddress.IPv4Network(_text(value))
+        if str(network) != value or not any(network.subnet_of(block) for block in PRIVATE_NETWORKS):
+            raise ValueError("Expected canonical private listener subnets")
+        networks.append(network)
+    if len(set(networks)) != len(networks):
+        raise ValueError("Duplicate approved listener subnets")
+    return frozenset(networks)
+
+
+async def _ecs_listener_ipv4(
+    uri: str,
+    subnets: frozenset[ipaddress.IPv4Network],
+    *,
+    transport: httpx.AsyncBaseTransport | None = None,
+) -> ipaddress.IPv4Address:
+    if _ECS_METADATA_URI.fullmatch(uri) is None:
+        raise ValueError("Invalid ECS container metadata endpoint")
+    body = bytearray()
+    try:
+        async with (
+            asyncio.timeout(_METADATA_TIMEOUT),
+            httpx.AsyncClient(
+                trust_env=False,
+                follow_redirects=False,
+                timeout=_METADATA_TIMEOUT,
+                transport=transport,
+            ) as client,
+            client.stream(
+                "GET", uri, headers={"Accept": "application/json", "Accept-Encoding": "identity"}
+            ) as response,
+        ):
+            media = response.headers.get("content-type", "").partition(";")[0].strip().lower()
+            encoding = response.headers.get("content-encoding", "identity").strip().lower()
+            if response.status_code != 200 or media != "application/json" or encoding != "identity":
+                raise ValueError("Invalid ECS container metadata response")
+            async for chunk in response.aiter_raw():
+                if len(chunk) > _METADATA_LIMIT - len(body):
+                    raise ValueError("ECS container metadata exceeds its input bound")
+                body.extend(chunk)
+    except (TimeoutError, httpx.HTTPError):
+        raise ValueError("ECS container metadata unavailable") from None
+    document: object = json.loads(body.decode("utf-8"), object_pairs_hook=_unique)
+    networks = document.get("Networks") if isinstance(document, dict) else None
+    if not isinstance(networks, list) or len(networks) != 1:
+        raise ValueError("Expected one ECS container network")
+    network = networks[0]
+    if not isinstance(network, dict) or network.get("NetworkMode") != "awsvpc":
+        raise ValueError("Expected an ECS awsvpc container network")
+    addresses = network.get("IPv4Addresses")
+    if not isinstance(addresses, list) or len(addresses) != 1:
+        raise ValueError("Expected one ECS container IPv4 address")
+    cidr = _text(network.get("IPv4SubnetCIDRBlock"))
+    subnet = ipaddress.IPv4Network(cidr)
+    host = ipaddress.IPv4Address(_text(addresses[0]))
+    if (
+        str(subnet) != cidr
+        or subnet not in subnets
+        or host not in subnet
+        or host in (subnet.network_address, subnet.broadcast_address)
+    ):
+        raise ValueError("ECS container address is outside the approved listener subnet")
+    return host
+
+
+def _listener_host(env: Mapping[str, str], *, allow_metadata: bool) -> ipaddress.IPv4Address:
+    requested = _setting(env, "LISTEN_HOST")
+    if requested != "ecs-task-ipv4":
+        return ipaddress.IPv4Address(requested)
+    if not allow_metadata or env.get("AWS_EXECUTION_ENV") != "AWS_ECS_FARGATE":
+        raise ValueError("ECS listener address requires an explicitly configured Fargate startup")
+    subnets = _approved_subnets(_setting(env, "LISTEN_CIDRS"))
+    return asyncio.run(_ecs_listener_ipv4(env.get("ECS_CONTAINER_METADATA_URI_V4", ""), subnets))
+
+
+def _load_deployment(env: Mapping[str, str], *, allow_metadata: bool) -> _Deployment:
     approved = _binding(_pinned_document(env, "BINDING"))
     observed = _closed(_pinned_document(env, "READBACK"), {"binding", "verified_at", "valid_until"})
-    host = ipaddress.IPv4Address(_setting(env, "LISTEN_HOST"))
+    port = _setting(env, "LISTEN_PORT")
+    if not re.fullmatch(r"[1-9][0-9]{3,4}", port) or not 1024 <= int(port) <= 65535:
+        raise ValueError("Invalid private listener port")
+    host = _listener_host(env, allow_metadata=allow_metadata)
     if not any(host in network for network in PRIVATE_NETWORKS):
         raise ValueError("Expected the task's private IPv4 address")
-    port = _setting(env, "LISTEN_PORT")
-    if not re.fullmatch(r"[1-9][0-9]{3,4}", port):
-        raise ValueError("Invalid private listener port")
     return _Deployment(
         approved=approved,
         readback=ReviewedStageReadback(
@@ -156,7 +243,7 @@ def main(argv: Sequence[str] = ()) -> None:
     if argv and tuple(argv) != ("--check-tls",):
         raise SystemExit("Invalid private browser listener argument")
     try:
-        deployment = _load_deployment(os.environ)
+        deployment = _load_deployment(os.environ, allow_metadata=not argv)
         if argv:
             if not is_private_browser_dev_stage(deployment.approved.stage_arn):
                 raise ValueError("Expected the exact dev stage")
