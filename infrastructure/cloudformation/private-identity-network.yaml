@@ -1,0 +1,302 @@
+{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Description": "OpenTour OPE-214 inactive private browser identity network for Ohio dev",
+  "Metadata": {
+    "OpenTourReadback": {
+      "BeforeCreate": [
+        "Use separately approved Ohio dev inputs and an independently reviewed change set.",
+        "Read back ownership and private routing for the VPC and both subnets. Confirm they span two distinct Ohio AZ IDs supported by API Gateway VPC Link V2.",
+        "Read back the actual shared ApplicationSecurityGroup ID from the control stack.",
+        "Verify both workload groups belong to this VPC and each is dedicated to its named workload. Verify attached groups and effective rules for each workload."
+      ],
+      "AfterCreate": [
+        "Read back the endpoint's explicit deny policy, the groups and their attachments, the internal TCP listener and the empty IP target group.",
+        "The separately approved API Gateway VPC Link V2 uses these two subnets and only VpcLinkSecurityGroupId. Read back AVAILABLE and its exact subnet and group IDs before supplying VpcLinkV2Id to the REST gateway.",
+        "The workload owner must separately approve BFF egress to EndpointSecurityGroupId on TCP 443 and private listener ingress from NetworkLoadBalancerSecurityGroupId on TCP 8443.",
+        "Only a separately approved release may register private listener targets, bind the role and exact invocation ARNs in the endpoint policy, or admit the end-to-end traffic path."
+      ]
+    }
+  },
+  "Parameters": {
+    "ExpectedProjectId": {
+      "Type": "String",
+      "AllowedPattern": "[0-9]{12}",
+      "Description": "Approved Ohio dev AWS project number"
+    },
+    "PrivateVpcId": {
+      "Type": "AWS::EC2::VPC::Id",
+      "Description": "Existing approved Ohio dev VPC"
+    },
+    "PrivateSubnetAId": {
+      "Type": "AWS::EC2::Subnet::Id",
+      "Description": "Existing approved private subnet in the first supported Ohio AZ"
+    },
+    "PrivateSubnetBId": {
+      "Type": "AWS::EC2::Subnet::Id",
+      "Description": "Existing approved private subnet in a second supported Ohio AZ"
+    },
+    "SharedApplicationSecurityGroupId": {
+      "Type": "AWS::EC2::SecurityGroup::Id",
+      "Description": "Actual control stack ApplicationSecurityGroup ID used to exclude the shared group"
+    },
+    "BffSecurityGroupId": {
+      "Type": "AWS::EC2::SecurityGroup::Id",
+      "Description": "Existing dedicated BFF workload group in the approved VPC"
+    },
+    "PrivateListenerSecurityGroupId": {
+      "Type": "AWS::EC2::SecurityGroup::Id",
+      "Description": "Existing dedicated private identity listener workload group in the approved VPC"
+    }
+  },
+  "Rules": {
+    "ApprovedOhioProject": {
+      "Assertions": [
+        {
+          "Assert": {"Fn::Equals": [{"Ref": "AWS::Region"}, "us-east-2"]},
+          "AssertDescription": "This network is limited to Ohio"
+        },
+        {
+          "Assert": {"Fn::Equals": [{"Ref": "AWS::AccountId"}, {"Ref": "ExpectedProjectId"}]},
+          "AssertDescription": "Deploy only in the named dev project"
+        }
+      ]
+    },
+    "PrivateSubnetPlacement": {
+      "Assertions": [
+        {
+          "Assert": {
+            "Fn::EachMemberEquals": [
+              {"Fn::ValueOfAll": ["AWS::EC2::Subnet::Id", "VpcId"]},
+              {"Ref": "PrivateVpcId"}
+            ]
+          },
+          "AssertDescription": "Both subnets must belong to the approved VPC"
+        },
+        {
+          "Assert": {"Fn::Not": [{"Fn::Equals": [{"Ref": "PrivateSubnetAId"}, {"Ref": "PrivateSubnetBId"}]}]},
+          "AssertDescription": "Supply two different subnet IDs"
+        }
+      ]
+    },
+    "DistinctWorkloadGroups": {
+      "Assertions": [
+        {
+          "Assert": {"Fn::Not": [{"Fn::Equals": [{"Ref": "BffSecurityGroupId"}, {"Ref": "PrivateListenerSecurityGroupId"}]}]},
+          "AssertDescription": "The BFF and private listener groups must be distinct"
+        },
+        {
+          "Assert": {"Fn::Not": [{"Fn::Equals": [{"Ref": "BffSecurityGroupId"}, {"Ref": "SharedApplicationSecurityGroupId"}]}]},
+          "AssertDescription": "The BFF group must be distinct from ApplicationSecurityGroup"
+        },
+        {
+          "Assert": {"Fn::Not": [{"Fn::Equals": [{"Ref": "PrivateListenerSecurityGroupId"}, {"Ref": "SharedApplicationSecurityGroupId"}]}]},
+          "AssertDescription": "The private listener group must be distinct from ApplicationSecurityGroup"
+        },
+        {
+          "Assert": {"Fn::Not": [{"Fn::Contains": [
+            {"Fn::ValueOfAll": ["AWS::EC2::VPC::Id", "DefaultSecurityGroup"]},
+            {"Ref": "BffSecurityGroupId"}
+          ]}]},
+          "AssertDescription": "The BFF group must be distinct from the VPC default group"
+        },
+        {
+          "Assert": {"Fn::Not": [{"Fn::Contains": [
+            {"Fn::ValueOfAll": ["AWS::EC2::VPC::Id", "DefaultSecurityGroup"]},
+            {"Ref": "PrivateListenerSecurityGroupId"}
+          ]}]},
+          "AssertDescription": "The private listener group must be distinct from the VPC default group"
+        }
+      ]
+    }
+  },
+  "Resources": {
+    "EndpointSecurityGroup": {
+      "Type": "AWS::EC2::SecurityGroup",
+      "Properties": {
+        "GroupDescription": "Dedicated private identity API endpoint",
+        "VpcId": {"Ref": "PrivateVpcId"},
+        "SecurityGroupIngress": [
+          {
+            "Description": "HTTPS from the dedicated BFF group",
+            "IpProtocol": "tcp",
+            "FromPort": 443,
+            "ToPort": 443,
+            "SourceSecurityGroupId": {"Ref": "BffSecurityGroupId"}
+          }
+        ],
+        "SecurityGroupEgress": [
+          {
+            "Description": "Loopback only to suppress EC2 default allow-all egress",
+            "IpProtocol": "-1",
+            "CidrIp": "127.0.0.1/32"
+          }
+        ]
+      }
+    },
+    "ExecuteApiEndpoint": {
+      "Type": "AWS::EC2::VPCEndpoint",
+      "Properties": {
+        "VpcEndpointType": "Interface",
+        "VpcId": {"Ref": "PrivateVpcId"},
+        "ServiceName": {"Fn::Sub": "com.amazonaws.${AWS::Region}.execute-api"},
+        "SubnetIds": [{"Ref": "PrivateSubnetAId"}, {"Ref": "PrivateSubnetBId"}],
+        "SecurityGroupIds": [{"Fn::GetAtt": ["EndpointSecurityGroup", "GroupId"]}],
+        "IpAddressType": "ipv4",
+        "PrivateDnsEnabled": false,
+        "PolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Sid": "DenyAllUntilApprovedAdmission",
+              "Effect": "Deny",
+              "Principal": "*",
+              "Action": "*",
+              "Resource": "*"
+            }
+          ]
+        }
+      }
+    },
+    "VpcLinkSecurityGroup": {
+      "Type": "AWS::EC2::SecurityGroup",
+      "Properties": {
+        "GroupDescription": "Dedicated private identity API Gateway VPC Link V2",
+        "VpcId": {"Ref": "PrivateVpcId"},
+        "SecurityGroupEgress": [
+          {
+            "Description": "TCP TLS passthrough listener on the internal NLB",
+            "IpProtocol": "tcp",
+            "FromPort": 443,
+            "ToPort": 443,
+            "DestinationSecurityGroupId": {"Fn::GetAtt": ["NetworkLoadBalancerSecurityGroup", "GroupId"]}
+          }
+        ]
+      }
+    },
+    "NetworkLoadBalancerSecurityGroup": {
+      "Type": "AWS::EC2::SecurityGroup",
+      "Properties": {
+        "GroupDescription": "Dedicated private identity internal NLB",
+        "VpcId": {"Ref": "PrivateVpcId"},
+        "SecurityGroupEgress": [
+          {
+            "Description": "TLS passthrough traffic and TCP health checks to the private listener",
+            "IpProtocol": "tcp",
+            "FromPort": 8443,
+            "ToPort": 8443,
+            "DestinationSecurityGroupId": {"Ref": "PrivateListenerSecurityGroupId"}
+          }
+        ]
+      }
+    },
+    "VpcLinkToNlbIngress": {
+      "Type": "AWS::EC2::SecurityGroupIngress",
+      "Properties": {
+        "Description": "TCP TLS passthrough from the dedicated VPC link group",
+        "GroupId": {"Fn::GetAtt": ["NetworkLoadBalancerSecurityGroup", "GroupId"]},
+        "IpProtocol": "tcp",
+        "FromPort": 443,
+        "ToPort": 443,
+        "SourceSecurityGroupId": {"Fn::GetAtt": ["VpcLinkSecurityGroup", "GroupId"]}
+      }
+    },
+    "NetworkLoadBalancer": {
+      "Type": "AWS::ElasticLoadBalancingV2::LoadBalancer",
+      "Properties": {
+        "Scheme": "internal",
+        "Type": "network",
+        "IpAddressType": "ipv4",
+        "Subnets": [{"Ref": "PrivateSubnetAId"}, {"Ref": "PrivateSubnetBId"}],
+        "SecurityGroups": [{"Fn::GetAtt": ["NetworkLoadBalancerSecurityGroup", "GroupId"]}],
+        "EnforceSecurityGroupInboundRulesOnPrivateLinkTraffic": "on"
+      }
+    },
+    "PrivateIdentityTargetGroup": {
+      "Type": "AWS::ElasticLoadBalancingV2::TargetGroup",
+      "Properties": {
+        "VpcId": {"Ref": "PrivateVpcId"},
+        "TargetType": "ip",
+        "IpAddressType": "ipv4",
+        "Protocol": "TCP",
+        "Port": 8443,
+        "HealthCheckEnabled": true,
+        "HealthCheckProtocol": "TCP",
+        "HealthCheckPort": "8443",
+        "TargetGroupAttributes": [
+          {"Key": "preserve_client_ip.enabled", "Value": "false"}
+        ]
+      }
+    },
+    "PrivateTlsPassthroughListener": {
+      "Type": "AWS::ElasticLoadBalancingV2::Listener",
+      "Properties": {
+        "LoadBalancerArn": {"Ref": "NetworkLoadBalancer"},
+        "Protocol": "TCP",
+        "Port": 443,
+        "DefaultActions": [
+          {
+            "Type": "forward",
+            "TargetGroupArn": {"Ref": "PrivateIdentityTargetGroup"}
+          }
+        ]
+      }
+    }
+  },
+  "Outputs": {
+    "PrivateVpcId": {
+      "Description": "Approved VPC for network and gateway readback",
+      "Value": {"Ref": "PrivateVpcId"}
+    },
+    "PrivateSubnetAId": {
+      "Description": "First approved subnet for VPC Link V2",
+      "Value": {"Ref": "PrivateSubnetAId"}
+    },
+    "PrivateSubnetBId": {
+      "Description": "Second approved subnet for VPC Link V2",
+      "Value": {"Ref": "PrivateSubnetBId"}
+    },
+    "BffSecurityGroupId": {
+      "Description": "Workload group for separately approved BFF egress on TCP 443",
+      "Value": {"Ref": "BffSecurityGroupId"}
+    },
+    "PrivateListenerSecurityGroupId": {
+      "Description": "Workload group for separately approved private listener ingress on TCP 8443",
+      "Value": {"Ref": "PrivateListenerSecurityGroupId"}
+    },
+    "EndpointId": {
+      "Description": "Dedicated execute-api endpoint ID for the private REST gateway",
+      "Value": {"Ref": "ExecuteApiEndpoint"}
+    },
+    "EndpointSecurityGroupId": {
+      "Description": "Destination for separately approved BFF egress on TCP 443",
+      "Value": {"Fn::GetAtt": ["EndpointSecurityGroup", "GroupId"]}
+    },
+    "VpcLinkSecurityGroupId": {
+      "Description": "Only security group to attach to the separately approved REST VPC Link V2",
+      "Value": {"Fn::GetAtt": ["VpcLinkSecurityGroup", "GroupId"]}
+    },
+    "NetworkLoadBalancerSecurityGroupId": {
+      "Description": "Source for separately approved private listener ingress on TCP 8443",
+      "Value": {"Fn::GetAtt": ["NetworkLoadBalancerSecurityGroup", "GroupId"]}
+    },
+    "NetworkLoadBalancerArn": {
+      "Description": "Exact internal NLB ARN for REST integration target readback",
+      "Value": {"Ref": "NetworkLoadBalancer"}
+    },
+    "NetworkLoadBalancerNameAndId": {
+      "Description": "Exact NLB name and ID input for the private REST gateway",
+      "Value": {"Fn::Join": ["/", [
+        {"Fn::GetAtt": ["NetworkLoadBalancer", "LoadBalancerName"]},
+        {"Fn::Select": [2, {"Fn::Split": ["/", {"Fn::GetAtt": ["NetworkLoadBalancer", "LoadBalancerFullName"]}]}]}
+      ]]}
+    },
+    "NetworkLoadBalancerListenerArn": {
+      "Description": "Exact TCP 443 listener for readback",
+      "Value": {"Ref": "PrivateTlsPassthroughListener"}
+    },
+    "PrivateIdentityTargetGroupArn": {
+      "Description": "Initially empty target group for separately approved IP registration on TCP 8443",
+      "Value": {"Ref": "PrivateIdentityTargetGroup"}
+    }
+  }
+}
