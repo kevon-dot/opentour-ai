@@ -17,6 +17,8 @@ export { Skeleton } from './skeleton';
 export type { SkeletonProps, SkeletonVariant } from './skeleton.contracts';
 export { StatusIcon, statusIconTones } from './status-icon';
 export type { StatusIconProps, StatusIconTone } from './status-icon.contracts';
+export { Checkbox, Switch } from './selection-controls';
+export type { CheckboxProps, CheckboxState, SwitchProps, SwitchState } from './selection-controls.contracts';
 
 const lightIndicator = new URL('./assets/loading-light.svg', import.meta.url).href;
 const darkIndicator = new URL('./assets/loading-dark.svg', import.meta.url).href;

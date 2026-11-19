@@ -211,10 +211,13 @@
     ],
     "apps/web/features/operations/cancellation-impact.visual.spec.ts": [
       "OPE-315"
+    ],
+    "apps/web/components/foundation/tokens/selection-controls.visual.spec.ts": [
+      "OPE-318"
     ]
   },
-  "distinct_paths": 70,
-  "issue_count": 66,
+  "distinct_paths": 71,
+  "issue_count": 67,
   "affected_old_wrapper_paths": {
     "apps/web/tests/coverage/ot-p22-c01.spec.ts": [
       "OPE-232"

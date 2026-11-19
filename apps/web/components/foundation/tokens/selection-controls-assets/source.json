@@ -1,0 +1,66 @@
+{
+  "schema": "opentour.selection-controls-source.v1",
+  "figma_file": "f7RVtmAPRdLo4WVWQMrvQC",
+  "figma_families": {
+    "checkbox": "12:68",
+    "switch": "12:81"
+  },
+  "sds_commit": "05525f75192a3aa5d5690c5e41277ebd19d2efe1",
+  "sources": {
+    "check_circle": {
+      "indicator": "30:12",
+      "node": "30:20",
+      "indicator_size": [
+        20,
+        20
+      ],
+      "instance_position": [
+        2,
+        2
+      ],
+      "instance_size": [
+        16,
+        16
+      ],
+      "native_stroke_color": "#1e1e1e",
+      "upstream": "https://github.com/figma/sds/blob/05525f75192a3aa5d5690c5e41277ebd19d2efe1/src/ui/icons/IconCheckCircle.tsx",
+      "git_blob": "9805fb3c1e23edee4354e1038bafae5f87d265eb",
+      "license": "selection-controls-glyphs/LICENSE"
+    },
+    "switch_off": {
+      "variant": "12:69",
+      "node": "30:27",
+      "size": [
+        38,
+        20
+      ],
+      "view_box": "0 0 38 20"
+    },
+    "switch_on": {
+      "variant": "12:72",
+      "node": "30:30",
+      "size": [
+        38,
+        20
+      ],
+      "view_box": "0 0 38 20"
+    }
+  },
+  "adaptations": [
+    "SDS CheckCircle path and stroke geometry retained; Icon import localized.",
+    "Local Icon adapter fixes the mapped 16px size, removes clsx, marks the decorative SVG hidden and unfocusable.",
+    "CheckCircle clip IDs use React useId to avoid duplicates; clipping geometry unchanged.",
+    "The glyph keeps the SDS default icon colour #1e1e1e measured in the native checked render; no OpenTour token is added.",
+    "Switch SVG bytes unchanged and loaded as images at their 38x20 root size; nothing is inlined, redrawn or recoloured.",
+    "Disabled, pending, focus and hover switches reuse the off or on export for the supplied value; the native off and pending renders are pixel-identical in the family capture, and the other variant exports were not separately byte-compared.",
+    "Forced colors recolours only the inline glyph and indicator with system colours; switch images keep their authored colours."
+  ],
+  "inspection": "XML tags and attributes screened; no scripts, remote references or handlers; exact downloaded bytes retained",
+  "files": {
+    "selection-controls-assets/switch-off.svg": "bc457ac885d6b71d357451f057d515a463460bd2b57a6ac957ad86279f9cb7b7",
+    "selection-controls-assets/switch-on.svg": "960e63d9a772ca28795b26f2cc72f709e7aa106400b21ffa08a5695d972af3f6",
+    "selection-controls-glyphs/IconCheckCircle.tsx": "e403a8fdd611966a23d8dcda407a7d959a9ae5670ccedf310330814f727fc3e5",
+    "selection-controls-glyphs/Icon.tsx": "7b8716eb1c9c8294689b1cdfa8eb781835970f9d55c95d9838f1542d740e2d33",
+    "selection-controls-glyphs/LICENSE": "570f1f1c07d32e2cdc7da3eea40f9c772e584782db15cbf455a72a19de36b7bc"
+  }
+}
