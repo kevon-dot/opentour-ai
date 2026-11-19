@@ -2,12 +2,23 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
 import pytest
 from referencing import Registry, Resource
 
+from infrastructure.cell_installer import (
+    ApprovedCellProfiles,
+    CellInstallRefused,
+    QualifiedProfile,
+    VerifiedCellRelease,
+    prepare_cell_install,
+)
+from infrastructure.environment_contract import ResourceBinding
 from tools.schema_validate import read_json, schema_registry, valid_instance
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -238,3 +249,210 @@ def test_environment_identity_rejects_invalid_or_foreign_fields(
 ) -> None:
     environment_identity[name] = value
     assert not valid_instance(ENVIRONMENT_PROFILE_ID, environment_identity, profile_registry)
+
+
+@pytest.fixture
+def approved_profiles(parameters: dict[str, Any]) -> ApprovedCellProfiles:
+    return ApprovedCellProfiles(
+        control_endpoint=QualifiedProfile(parameters["control_endpoint"], "d" * 64),
+        kms_policy=QualifiedProfile(parameters["kms_policy_profile"], "e" * 64),
+        network=QualifiedProfile(parameters["network_profile"], "f" * 64),
+        subnet_ids=tuple(parameters["subnet_ids"]),
+        security_group_ids=tuple(parameters["security_group_ids"]),
+        gateway_hostname=parameters["gateway_hostname"],
+        certificate_arn=parameters["certificate_arn"],
+        retention_policy_id=parameters["retention_policy_ref"]["policy_id"],
+        retention_policy_revision=parameters["retention_policy_ref"]["revision"],
+    )
+
+
+@pytest.fixture
+def approved_release(parameters: dict[str, Any]) -> VerifiedCellRelease:
+    host = f"{parameters['account_id']}.dkr.ecr.{parameters['region']}.amazonaws.com"
+    parameter_schema = ROOT / "infrastructure/cloudformation/parameters.schema.json"
+    return VerifiedCellRelease(
+        release_sha256="0" * 64,
+        template_sha256="1" * 64,
+        parameter_schema_sha256=hashlib.sha256(parameter_schema.read_bytes()).hexdigest(),
+        images={
+            workload: f"{host}/fixture/{workload}@sha256:{parameters[f'{workload}_digest']}"
+            for workload in ("controller", "evaluator", "trainer")
+        },
+    )
+
+
+@pytest.fixture
+def inventory(parameters: dict[str, Any]) -> dict[str, ResourceBinding]:
+    scope = f"{parameters['region']}:{parameters['account_id']}"
+    references = {
+        **{f"arn:aws:ec2:{scope}:subnet/{name}": "subnet" for name in parameters["subnet_ids"]},
+        **{
+            f"arn:aws:ec2:{scope}:security-group/{name}": "network_policy"
+            for name in parameters["security_group_ids"]
+        },
+        **{
+            f"arn:aws:ecr:{scope}:repository/fixture/{workload}": "registry"
+            for workload in ("controller", "evaluator", "trainer")
+        },
+        parameters["certificate_arn"]: "certificate",
+    }
+    return {
+        arn: ResourceBinding(
+            arn=arn,
+            kind=kind,
+            environment=parameters["environment_id"],
+            account_id=parameters["account_id"],
+            region=parameters["region"],
+            configuration_digest="2" * 64,
+        )
+        for arn, kind in references.items()
+    }
+
+
+@pytest.fixture
+def prepare(parameters, environment_identity, approved_profiles, approved_release, inventory):
+    def run(**overrides):
+        options = {
+            "requested": parameters,
+            "approved_identity": environment_identity,
+            "profiles": approved_profiles,
+            "release": approved_release,
+            "inventory": inventory,
+        }
+        return prepare_cell_install(**(options | overrides))
+
+    return run
+
+
+@pytest.mark.parametrize("mode", ["opentour_managed", "customer_controlled"])
+def test_prepares_exact_approved_scope_and_immutable_input(
+    prepare, parameters, environment_identity, approved_profiles, mode
+):
+    parameters.update(mode=mode, network_profile=f"fixture-{mode}-network")
+    environment_identity["mode"] = mode
+    profiles = replace(
+        approved_profiles,
+        network=QualifiedProfile(parameters["network_profile"], "3" * 64),
+    )
+    result = prepare(profiles=profiles)
+    assert result == prepare(profiles=profiles, requested=dict(reversed(list(parameters.items()))))
+    assert result.configuration_sha256 == hashlib.sha256(result.configuration).hexdigest()
+    configuration = json.loads(result.configuration)
+    assert configuration["parameters"] == parameters
+    assert configuration["profile_sha256"]["network_profile"] == "3" * 64
+    assert len(configuration["resource_configuration_sha256"]) == 7
+    assert configuration["images"]["trainer"].endswith(f"@sha256:{parameters['trainer_digest']}")
+    parameters["subnet_ids"].clear()
+    assert json.loads(result.configuration) == configuration
+
+
+@pytest.mark.parametrize(
+    ("field", "foreign"),
+    [
+        ("organization_id", "foreign-org"),
+        ("environment_id", "foreign-env"),
+        ("cell_id", "foreign-cell"),
+        ("mode", "customer_controlled"),
+        ("account_id", "000000000002"),
+        ("region", "us-east-2"),
+    ],
+)
+def test_refuses_rebinding_each_permanent_coordinate(prepare, parameters, field, foreign):
+    parameters[field] = foreign
+    with pytest.raises(CellInstallRefused, match="^CELL_INSTALL_IDENTITY_MISMATCH$"):
+        prepare()
+
+
+@pytest.mark.parametrize("field", ["control_endpoint", "kms_policy_profile", "network_profile"])
+def test_refuses_unqualified_registry_keys(prepare, parameters, field):
+    parameters[field] = "forged-qualified"
+    with pytest.raises(CellInstallRefused, match="^CELL_INSTALL_PROFILE_UNQUALIFIED$"):
+        prepare()
+
+
+def test_refuses_profile_without_qualified_digest(prepare, approved_profiles):
+    profiles = replace(
+        approved_profiles, kms_policy=replace(approved_profiles.kms_policy, sha256="")
+    )
+    with pytest.raises(CellInstallRefused, match="^CELL_INSTALL_PROFILE_UNQUALIFIED$"):
+        prepare(profiles=profiles)
+
+
+@pytest.mark.parametrize(
+    ("field", "foreign"),
+    [
+        ("subnet_ids", ["subnet-00000001"]),
+        ("security_group_ids", ["sg-00000001"]),
+        ("certificate_arn", None),
+        ("gateway_hostname", None),
+        ("retention_policy_ref", {"policy_id": "fixture-retention", "revision": "foreign-rev"}),
+    ],
+)
+def test_refuses_owner_unapproved_network_or_retention(prepare, parameters, field, foreign):
+    parameters[field] = foreign
+    with pytest.raises(CellInstallRefused, match="^CELL_INSTALL_PROFILE_MISMATCH$"):
+        prepare()
+
+
+@pytest.mark.parametrize("foreign_scope", ["us-east-1:000000000002", "us-east-2:000000000001"])
+def test_refuses_foreign_certificate_even_if_requested_and_profile_match(
+    prepare, approved_profiles, parameters, foreign_scope
+):
+    _, resource = parameters["certificate_arn"].split(":certificate/", 1)
+    certificate = f"arn:aws:acm:{foreign_scope}:certificate/{resource}"
+    parameters["certificate_arn"] = certificate
+    with pytest.raises(CellInstallRefused, match="^CELL_INSTALL_RESOURCE_SCOPE_MISMATCH$"):
+        prepare(profiles=replace(approved_profiles, certificate_arn=certificate))
+
+
+@pytest.mark.parametrize(
+    ("field", "foreign"),
+    [
+        ("account_id", "000000000002"),
+        ("region", "us-east-2"),
+        ("environment", "foreign-env"),
+        ("kind", "public-ingress"),
+        ("configuration_digest", ""),
+    ],
+)
+def test_refuses_inventory_entry_from_wrong_scope(prepare, inventory, field, foreign):
+    arn = next(iter(inventory))
+    inventory[arn] = replace(inventory[arn], **{field: foreign})
+    with pytest.raises(CellInstallRefused, match="^CELL_INSTALL_RESOURCE_UNQUALIFIED$"):
+        prepare()
+
+
+def test_refuses_missing_inventory_artifact(prepare, inventory):
+    del inventory[next(iter(inventory))]
+    with pytest.raises(CellInstallRefused, match="^CELL_INSTALL_RESOURCE_UNQUALIFIED$"):
+        prepare()
+
+
+@pytest.mark.parametrize("reason", ["same_digest_foreign_ecr", "wrong_workload", "mutable_tag"])
+def test_refuses_unapproved_image_location_or_digest(prepare, approved_release, reason):
+    images = dict(approved_release.images)
+    match reason:
+        case "same_digest_foreign_ecr":
+            images["trainer"] = images["trainer"].replace("000000000001.", "000000000002.")
+        case "wrong_workload":
+            images["trainer"] = images["evaluator"]
+        case "mutable_tag":
+            images["trainer"] = images["trainer"].split("@", 1)[0] + ":latest"
+    with pytest.raises(CellInstallRefused, match="^CELL_INSTALL_IMAGE_MISMATCH$"):
+        prepare(release=replace(approved_release, images=images))
+
+
+@pytest.mark.parametrize("field", ["release_sha256", "template_sha256", "parameter_schema_sha256"])
+def test_refuses_missing_release_binding(prepare, approved_release, field):
+    with pytest.raises(
+        CellInstallRefused, match="^CELL_INSTALL_(RELEASE_INVALID|SCHEMA_MISMATCH)$"
+    ):
+        prepare(release=replace(approved_release, **{field: ""}))
+
+
+def test_refuses_invalid_trusted_identity_or_unknown_parameter(prepare, parameters):
+    with pytest.raises(CellInstallRefused, match="^CELL_INSTALL_IDENTITY_INVALID$"):
+        prepare(approved_identity={"environment_id": "fixture-environment"})
+    parameters["secret"] = "GENERATED_SENTINEL"
+    with pytest.raises(CellInstallRefused, match="^CELL_INSTALL_PARAMETERS_INVALID$"):
+        prepare()
