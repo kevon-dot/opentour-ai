@@ -470,30 +470,56 @@ def test_refuses_invalid_trusted_identity_or_unknown_parameter(prepare, paramete
 
 
 @pytest.fixture
-def approved_storage(parameters, approved_profiles, inventory) -> ApprovedCellStorage:
+def key_policies():
+    return {}
+
+
+@pytest.fixture
+def approved_storage(parameters, approved_profiles, inventory, key_policies) -> ApprovedCellStorage:
     account, region = parameters["account_id"], parameters["region"]
 
-    def workload(name: str, key_id: str) -> WorkloadStorageBinding:
+    def workload(name: str, opposite: str, key_id: str) -> WorkloadStorageBinding:
         role_arn = f"arn:aws:iam::{account}:role/generated/{name}"
+        opposite_role_arn = f"arn:aws:iam::{account}:role/generated/{opposite}"
         key_arn = f"arn:aws:kms:{region}:{account}:key/{key_id}"
+        policy = json.dumps(
+            {
+                "Version": "2012-10-17",
+                "Statement": [
+                    {
+                        "Sid": "DenyOtherRole",
+                        "Effect": "Deny",
+                        "Principal": {"AWS": "*"},
+                        "Action": ["kms:Decrypt", "kms:ReEncryptFrom"],
+                        "Resource": "*",
+                        "Condition": {"ArnEquals": {"aws:PrincipalArn": opposite_role_arn}},
+                    }
+                ],
+            }
+        ).encode()
+        key_policies[key_arn] = policy
         for arn, kind in ((role_arn, "role"), (key_arn, "key")):
             inventory[arn] = ResourceBinding(
                 arn, kind, parameters["environment_id"], account, region, "3" * 64
             )
-        return WorkloadStorageBinding(key_arn, role_arn)
+        return WorkloadStorageBinding(key_arn, role_arn, hashlib.sha256(policy).hexdigest())
 
     return ApprovedCellStorage(
         kms_policy_sha256=approved_profiles.kms_policy.sha256,
-        trainer=workload("trainer", "00000000-0000-0000-0000-000000000001"),
-        evaluator=workload("evaluator", "00000000-0000-0000-0000-000000000002"),
+        trainer=workload("trainer", "evaluator", "00000000-0000-0000-0000-000000000001"),
+        evaluator=workload("evaluator", "trainer", "00000000-0000-0000-0000-000000000002"),
     )
 
 
 @pytest.fixture
-def compile_storage(preparation_inputs, approved_storage):
+def compile_storage(preparation_inputs, approved_storage, key_policies):
     def run(**overrides):
         return compile_cell_storage(
-            **(preparation_inputs | {"storage": approved_storage} | overrides)
+            **(
+                preparation_inputs
+                | {"storage": approved_storage, "key_policies": key_policies}
+                | overrides
+            )
         )
 
     return run
@@ -661,3 +687,68 @@ def test_storage_cannot_bypass_base_installer_admission(compile_storage, paramet
     parameters["cell_id"] = "other-cell"
     with pytest.raises(CellInstallRefused, match="^CELL_INSTALL_IDENTITY_MISMATCH$"):
         compile_storage()
+
+
+def test_storage_binds_both_key_policy_digests(compile_storage, key_policies):
+    compiled = compile_storage()
+    assert json.loads(compiled.configuration)["kms_key_policy_sha256"] == {
+        arn: hashlib.sha256(policy).hexdigest() for arn, policy in key_policies.items()
+    }
+    assert b"DenyOtherRole" not in compiled.configuration
+
+
+@pytest.mark.parametrize("case", ["missing", "swapped", "changed"])
+def test_storage_refuses_missing_or_unapproved_key_policy_readback(
+    compile_storage, approved_storage, key_policies, case
+):
+    trainer, evaluator = approved_storage.trainer, approved_storage.evaluator
+    if case == "missing":
+        del key_policies[trainer.kms_key_arn]
+    elif case == "swapped":
+        key_policies[trainer.kms_key_arn] = key_policies[evaluator.kms_key_arn]
+    else:
+        key_policies[trainer.kms_key_arn] += b" "
+    with pytest.raises(CellInstallRefused, match="^CELL_INSTALL_KEY_POLICY_UNQUALIFIED$"):
+        compile_storage()
+
+
+@pytest.mark.parametrize(
+    "change", ["allow", "only_decrypt", "wrong_role", "conditional", "wrong_resource", "not_action"]
+)
+def test_storage_requires_unqualified_cross_role_deny_on_both_keys(
+    compile_storage, approved_storage, key_policies, change
+):
+    evaluator = approved_storage.evaluator
+    policy = json.loads(key_policies[evaluator.kms_key_arn])
+    statement = policy["Statement"][0]
+    match change:
+        case "allow":
+            statement["Effect"] = "Allow"
+        case "only_decrypt":
+            statement["Action"] = "kms:Decrypt"
+        case "wrong_role":
+            statement["Condition"] = {"ArnEquals": {"aws:PrincipalArn": evaluator.role_arn}}
+        case "conditional":
+            statement["Condition"]["StringEquals"] = {
+                "kms:ViaService": "s3.us-east-1.amazonaws.com"
+            }
+        case "wrong_resource":
+            statement["Resource"] = approved_storage.trainer.kms_key_arn
+        case "not_action":
+            statement["NotAction"] = statement.pop("Action")
+    encoded = json.dumps(policy).encode()
+    key_policies[evaluator.kms_key_arn] = encoded
+    evaluator = replace(evaluator, key_policy_sha256=hashlib.sha256(encoded).hexdigest())
+    with pytest.raises(CellInstallRefused, match="^CELL_INSTALL_CROSS_ROLE_DECRYPT_DENY_MISSING$"):
+        compile_storage(storage=replace(approved_storage, evaluator=evaluator))
+
+
+def test_storage_refuses_ambiguous_key_policy_json(compile_storage, approved_storage, key_policies):
+    trainer = approved_storage.trainer
+    encoded = key_policies[trainer.kms_key_arn].replace(
+        b'"Effect": "Deny"', b'"Effect": "Allow", "Effect": "Deny"'
+    )
+    key_policies[trainer.kms_key_arn] = encoded
+    trainer = replace(trainer, key_policy_sha256=hashlib.sha256(encoded).hexdigest())
+    with pytest.raises(CellInstallRefused, match="^CELL_INSTALL_KEY_POLICY_UNQUALIFIED$"):
+        compile_storage(storage=replace(approved_storage, trainer=trainer))

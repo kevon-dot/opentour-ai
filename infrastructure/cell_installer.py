@@ -31,6 +31,7 @@ _IDENTITY_FIELDS = {
 _WORKLOADS = ("controller", "evaluator", "trainer")
 _SINGLE_REGION_KEY_ID = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
 _ROLE_PATH_AND_NAME = r"(?:[A-Za-z0-9_+=,.@/-]{1,510}/)?[A-Za-z0-9_+=,.@-]{1,64}"
+_KMS_CROSS_ROLE_READ_ACTIONS = frozenset({"kms:Decrypt", "kms:ReEncryptFrom"})
 
 
 class CellInstallRefused(ValueError):
@@ -230,6 +231,7 @@ class WorkloadStorageBinding:
 
     kms_key_arn: str
     role_arn: str
+    key_policy_sha256: str
 
 
 @dataclass(frozen=True)
@@ -249,12 +251,14 @@ def compile_cell_storage(
     release: VerifiedCellRelease,
     inventory: Mapping[str, ResourceBinding],
     storage: ApprovedCellStorage,
+    key_policies: Mapping[str, bytes],
 ) -> PreparedCellInstall:
     """Compile a resource fragment with its immutable input and trusted resource digests.
 
-    The reconciled inventory must come from deployment authority. KMS authorization and
-    effective workload isolation still need the externally qualified key and role policies.
-    This output is an input to the full installer compiler, with no standalone template.
+    Deployment authority supplies inventory and the default GetKeyPolicy text encoded
+    unchanged as UTF-8, indexed by the exact ARN used in the authenticated request.
+    The profile pins those bytes independently. This fragment is a compiler input.
+    Live authorization and policy freshness need verification at deployment.
     """
     prepared = prepare_cell_install(
         requested,
@@ -289,11 +293,67 @@ def compile_cell_storage(
     configuration["resource_configuration_sha256"].update(
         _qualified_resources(references, inventory, parameters["environment_id"], account, region)
     )
+    configuration["kms_key_policy_sha256"] = {
+        binding.kms_key_arn: _qualified_key_policy(
+            binding, opposite.role_arn, key_policies.get(binding.kms_key_arn)
+        )
+        for binding, opposite in (
+            (storage.trainer, storage.evaluator),
+            (storage.evaluator, storage.trainer),
+        )
+    }
     configuration["cloudformation_resources"] = {
         **_private_bucket_resources("TrainerStorage", storage.trainer, storage.evaluator),
         **_private_bucket_resources("EvaluatorStorage", storage.evaluator, storage.trainer),
     }
     return _prepared_configuration(configuration)
+
+
+def _unique_policy_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    value = dict(pairs)
+    if len(value) != len(pairs):
+        raise ValueError("Duplicate key policy property")
+    return value
+
+
+def _qualified_key_policy(
+    binding: WorkloadStorageBinding, opposite_role: str, policy: bytes | None
+) -> str:
+    if (
+        not isinstance(policy, bytes)
+        or not 0 < len(policy) <= 131_072
+        or hashlib.sha256(policy).hexdigest() != binding.key_policy_sha256
+    ):
+        raise CellInstallRefused("CELL_INSTALL_KEY_POLICY_UNQUALIFIED")
+    try:
+        document = json.loads(policy.decode("utf-8"), object_pairs_hook=_unique_policy_object)
+    except (ValueError, RecursionError):
+        raise CellInstallRefused("CELL_INSTALL_KEY_POLICY_UNQUALIFIED") from None
+    if not isinstance(document, dict) or document.get("Version") != "2012-10-17":
+        raise CellInstallRefused("CELL_INSTALL_KEY_POLICY_UNQUALIFIED")
+    statements = document.get("Statement")
+    if not isinstance(statements, list):
+        raise CellInstallRefused("CELL_INSTALL_KEY_POLICY_UNQUALIFIED")
+
+    matching_actions: set[str] = set()
+    for statement in statements:
+        if (
+            not isinstance(statement, dict)
+            or set(statement) - {"Sid", "Effect", "Principal", "Action", "Resource", "Condition"}
+            or statement.get("Effect") != "Deny"
+            or statement.get("Principal") not in ("*", {"AWS": "*"})
+            or statement.get("Resource") != "*"
+            or statement.get("Condition") != {"ArnEquals": {"aws:PrincipalArn": opposite_role}}
+        ):
+            continue
+        actions = statement.get("Action")
+        if isinstance(actions, str):
+            actions = [actions]
+        if isinstance(actions, list) and all(isinstance(action, str) for action in actions):
+            matching_actions.update(actions)
+    if not _KMS_CROSS_ROLE_READ_ACTIONS <= matching_actions:
+        raise CellInstallRefused("CELL_INSTALL_CROSS_ROLE_DECRYPT_DENY_MISSING")
+    return binding.key_policy_sha256
 
 
 def _private_bucket_resources(
