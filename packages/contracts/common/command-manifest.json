@@ -68,7 +68,8 @@
     "apps/web/tests/coverage/ot-p23-c10.spec.ts",
     "apps/web/tests/coverage/ot-p23-c11.spec.ts",
     "apps/web/tests/customer-journeys.spec.ts",
-    "apps/web/tests/workspace-lifecycle.browser.spec.ts"
+    "apps/web/tests/workspace-lifecycle.browser.spec.ts",
+    "apps/web/components/foundation/tokens/status-icon.visual.spec.ts"
   ],
   "integration_profiles": {
     "bootstrap-contract": {
@@ -308,6 +309,10 @@
     "apps/web/features/workspace/customer-shell.visual.spec.ts": {
       "kind": "simulated",
       "owner": "OPE-307"
+    },
+    "apps/web/components/foundation/tokens/status-icon.visual.spec.ts": {
+      "kind": "simulated",
+      "owner": "OPE-312"
     }
   }
 }

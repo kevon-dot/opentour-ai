@@ -1,0 +1,58 @@
+{
+  "schema": "opentour.status-icon-source.v1",
+  "figma_file": "f7RVtmAPRdLo4WVWQMrvQC",
+  "figma_family": "162:4584",
+  "figma_composition": "162:4641",
+  "sds_commit": "05525f75192a3aa5d5690c5e41277ebd19d2efe1",
+  "sources": {
+    "check": {
+      "node": "162:4570",
+      "vector": "I162:4570;7758:11212",
+      "instance_size": [
+        20,
+        20
+      ],
+      "vector_position": [
+        3.3333334922790527,
+        5
+      ],
+      "vector_size": [
+        13.333333015441895,
+        9.166666030883789
+      ],
+      "stroke": 2,
+      "export_size": [
+        15.3333,
+        11.1667
+      ]
+    },
+    "alert": {
+      "nodes": [
+        "162:4573",
+        "162:4579",
+        "162:4582"
+      ],
+      "upstream": "https://github.com/figma/sds/blob/05525f75192a3aa5d5690c5e41277ebd19d2efe1/src/ui/icons/IconAlertCircle.tsx",
+      "git_blob": "48878267dcd0f95fdf41dad6a701be65a95b10c7"
+    },
+    "failed": {
+      "node": "162:4576",
+      "upstream": "https://github.com/figma/sds/blob/05525f75192a3aa5d5690c5e41277ebd19d2efe1/src/ui/icons/IconX.tsx",
+      "git_blob": "cd810914514930fec663b797c388f08d8b1ca76d"
+    }
+  },
+  "adaptations": [
+    "SDS glyph path and stroke geometry retained; Icon import localized.",
+    "Local Icon adapter fixes native 20px size, removes clsx, marks decorative SVG hidden and unfocusable.",
+    "AlertCircle clip IDs use React useId to avoid duplicates; clipping geometry unchanged.",
+    "Native Check SVG bytes unchanged, natural export bounds positioned in native 20px slot including 1px stroke outset.",
+    "Forced colors uses Canvas/CanvasText and the exact Check SVG as a mask without editing its bytes."
+  ],
+  "files": {
+    "status-icon-assets/check.svg": "2a8d4e26a59756f6542412619ec084b63d92be87c769463bc53158f47a509728",
+    "status-icon-glyphs/IconAlertCircle.tsx": "85b078bde064e7b9e584b9ea0bd2b275271bb19b32a34ffea097462399663f92",
+    "status-icon-glyphs/IconX.tsx": "bc7627de5dc2b9121da1d3b23e391e197daf2d0982cb0e64953f83ce8e734e9d",
+    "status-icon-glyphs/Icon.tsx": "be16b709fcb390b8f935a400aa90c0ec8c2bac36e378cb26c65588fe48f15d16",
+    "status-icon-glyphs/LICENSE": "570f1f1c07d32e2cdc7da3eea40f9c772e584782db15cbf455a72a19de36b7bc"
+  }
+}
