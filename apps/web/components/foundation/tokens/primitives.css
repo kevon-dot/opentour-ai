@@ -1,0 +1,16 @@
+/* OPE-253 link, breadcrumb and live region. Imported by primitives.tsx after product-tokens.css; no element resets. */
+.ot-link, .ot-breadcrumb { font-family: Geist, sans-serif; }
+.ot-link { display: inline-block; box-sizing: border-box; max-inline-size: 100%; color: var(--ot-text-link); text-decoration: none; overflow-wrap: anywhere; }
+.ot-link--small { font-size: var(--ot-type-small-size); font-weight: var(--ot-type-small-weight); line-height: var(--ot-type-small-line); }
+.ot-link--small-strong { font-size: var(--ot-type-small-strong-size); font-weight: var(--ot-type-small-strong-weight); line-height: var(--ot-type-small-strong-line); }
+.ot-link--label { font-size: var(--ot-type-label-size); font-weight: var(--ot-type-label-weight); line-height: var(--ot-type-label-line); }
+.ot-breadcrumb { min-inline-size: 0; color: var(--ot-text-secondary); font-size: var(--ot-type-small-size); font-weight: var(--ot-type-small-weight); line-height: var(--ot-type-small-line); overflow-wrap: anywhere; }
+.ot-breadcrumb-list { margin: 0; padding: 0; }
+.ot-breadcrumb-item { display: inline; }
+.ot-breadcrumb-separator { white-space: pre-wrap; }
+.ot-breadcrumb-link { color: inherit; text-decoration: none; }
+.ot-link:focus-visible, .ot-breadcrumb-link:focus-visible { outline: 2px solid var(--ot-action-primary); outline-offset: 2px; }
+.ot-live-region { position: absolute; inline-size: 1px; block-size: 1px; margin: -1px; padding: 0; border: 0; overflow: hidden; clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap; }
+@media (forced-colors: active) {
+  .ot-link:focus-visible, .ot-breadcrumb-link:focus-visible { outline-color: Highlight; }
+}

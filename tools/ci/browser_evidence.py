@@ -11,9 +11,18 @@ from typing import Any
 
 from tools.public_content_check import MAX_FILE_BYTES, digest, inspect_bytes, load_policy
 
+PRESENTATION_TARGETS = {
+    "apps/web/features/workspace/customer-shell.visual.spec.ts": "OPE-307",
+    "apps/web/components/foundation/data-display/chart-evidence.visual.spec.ts": "OPE-303",
+    "apps/web/components/foundation/data-display/table-populations.visual.spec.ts": "OPE-305",
+    "apps/web/components/foundation/data-display/metric-semantics.visual.spec.ts": "OPE-304",
+    "apps/web/components/foundation/async-state/status-copy.visual.spec.ts": "OPE-306",
+    "apps/web/components/foundation/async-state/operation-state.visual.spec.ts": "OPE-308",
+}
 BROWSER_PROFILES = {
     "apps/web/tests/browser-harness.browser.spec.ts": ("OPE-127", "OT-BOOT-C06"),
     "apps/web/components/foundation/tokens/visual.spec.ts": ("OPE-253", "OT-P23-C12"),
+    **{target: (issue, issue) for target, issue in PRESENTATION_TARGETS.items()},
 }
 DEFAULT_BROWSER_TARGET = "apps/web/tests/browser-harness.browser.spec.ts"
 
@@ -106,6 +115,8 @@ def retain_browser_evidence(
             raise ValueError("Browser artifact digest mismatch")
     if inspect_bytes("browser-manifest.json", raw, load_policy(root), binary_content=True):
         raise ValueError("Browser manifest disclosure refused")
+    if target in PRESENTATION_TARGETS:
+        verify_scoped_presentation(root, value)
     if issue == "OPE-253":
         from tools.ci.foundation_evidence import verify_foundation_evidence
 
@@ -117,3 +128,118 @@ def retain_browser_evidence(
         "verified_output_bytes": total,
         "raw_artifacts_uploaded": False,
     }
+
+
+def verify_scoped_presentation(root: Path, value: dict[str, Any]) -> None:
+    report = value["report"]
+    if (
+        value.get("fixture_id") != "scoped-presentation-v1"
+        or value.get("font_sha256")
+        != digest(local_file(root, "apps/web/styles/fonts/Geist.woff2").read_bytes())
+        or any(case["mode"] is not None for case in report["tests"])
+    ):
+        raise ValueError("Scoped presentation fixture identity mismatch")
+    if report["status"] != "PASS":
+        return  # Preserve the verified failure inventory, including incomplete captures.
+    images = {
+        record["path"]: record["sha256"]
+        for record in value["outputs"]
+        if record["path"].endswith(".png") and "/attachments/" not in record["path"]
+    }
+    widths = (320, 768, 1280, 1440)
+    if value["issue_key"] == "OPE-304":
+        expected = {
+            (width, scale, name)
+            for width in widths
+            for scale in (100, 200)
+            for name in ("metrics", "source")
+        }
+        cases = [
+            re.search(
+                r"at-(320|768|1280|1440)px-and-(100|200)-text-presentation/(metrics|source)\.png$",
+                name,
+            )
+            for name in images
+        ]
+        if (
+            len(cases) != len(expected)
+            or {(int(case[1]), int(case[2]), case[3]) for case in cases if case} != expected
+        ):
+            raise ValueError("Metric presentation capture inventory mismatch")
+    elif value["issue_key"] == "OPE-303":
+        expected_charts = {
+            f"charts-{width}-{scale}.png" for width in widths for scale in (100, 200)
+        }
+        if (
+            len(images) != len(expected_charts)
+            or {Path(name).name for name in images} != expected_charts
+        ):
+            raise ValueError("Chart presentation capture inventory mismatch")
+    elif value["issue_key"] == "OPE-305":
+        states = {"populated", "partial", "empty", "filtered-to-nothing", "navigation", "query"}
+        expected_tables = {
+            (width, scale, state) for width in widths for scale in (100, 200) for state in states
+        }
+        captures = [
+            re.search(
+                r"(320|768|1280|1440)px-and-(100|200)-text-presentation/([a-z-]+)\.png$", name
+            )
+            for name in images
+        ]
+        actual_tables = {(int(case[1]), int(case[2]), case[3]) for case in captures if case}
+        if len(images) != len(expected_tables) or actual_tables != expected_tables:
+            raise ValueError("Table presentation capture inventory mismatch")
+    elif value["issue_key"] == "OPE-307":
+        expected_shells = {
+            f"{identity}-{width}-{scale}x-{state}.png"
+            for identity in (0, 1)
+            for width in widths
+            for scale in (1, 2)
+            for state in (("closed", "open") if width < 1024 else ("closed",))
+        }
+        if (
+            len(images) != len(expected_shells)
+            or {Path(name).name for name in images} != expected_shells
+        ):
+            raise ValueError("Shell presentation capture inventory mismatch")
+    elif value["issue_key"] == "OPE-308":
+        expected_names = {
+            f"{state}-{width}-{scale}x.png"
+            for width in widths
+            for scale in (1, 2)
+            for state in (
+                "held",
+                "authorized",
+                "staging",
+                "accepted",
+                "verifying",
+                "active",
+                "unknown",
+            )
+        }
+        if (
+            len(images) != len(expected_names)
+            or {Path(name).name for name in images} != expected_names
+        ):
+            raise ValueError("Operation presentation capture inventory mismatch")
+    else:
+        platform = value.get("platform")
+        if platform not in {"darwin", "linux"}:
+            raise ValueError("Unknown status-copy baseline platform")
+        expected_baselines = {
+            f"status-{width}-{scale}.png" for width in widths for scale in (100, 200)
+        }
+        approved = load_policy(root)["reviewed_binary_sha256"]
+        if (
+            len(images) != len(expected_baselines)
+            or {Path(name).name for name in images} != expected_baselines
+        ):
+            raise ValueError("Status-copy presentation capture inventory mismatch")
+        for name, actual in images.items():
+            baseline = (
+                f"apps/web/tests/fixtures/presentation/baselines/{platform}/{Path(name).name}"
+            )
+            if actual != approved.get(baseline) or actual != digest(
+                local_file(root, baseline).read_bytes()
+            ):
+                raise ValueError("Status-copy capture differs from its reviewed platform baseline")

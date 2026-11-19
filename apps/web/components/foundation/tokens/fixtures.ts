@@ -1,4 +1,4 @@
-import type { BadgeTone, ButtonVariant } from './contracts';
+import type { BadgeTone, ButtonVariant, NoticeProps } from './contracts';
 
 /** Generated presentation examples only. No API response, grant, or receipt is simulated. */
 export const presentationFixtures = {
@@ -22,6 +22,15 @@ export const presentationFixtures = {
     { tone: 'hold', label: 'Hold example' }, { tone: 'failure', label: 'Failed example' },
     { tone: 'unknown', label: 'Unknown example' }, { tone: 'info', label: 'Information example' },
   ] as readonly { tone: BadgeTone; label: string }[],
+  notices: [
+    { tone: 'info', title: 'Information example', body: 'Generated notice text. No operation receipt is implied.' },
+    { tone: 'success', title: 'Confirmed example', body: 'Generated notice text for a confirmed presentation example.' },
+    { tone: 'hold', title: 'Hold example', body: 'Generated notice text for a held presentation example.' },
+    { tone: 'failure', title: 'Failed example', body: 'Generated notice text for a failed presentation example.' },
+    { tone: 'unknown', title: 'Unknown example', body: 'Generated notice text. Unknown values remain unknown.' },
+  ] as readonly NoticeProps[],
+  noticeLongTitle: 'Generated notice title with a long descriptive state name that wraps instead of clipping',
+  noticeLongBody: 'Generated notice body with an unbroken token GENERATED-0123456789-0123456789-0123456789-0123456789 and enough words to span several lines at a narrow width.',
   tabs: [
     { key: 'overview', label: 'Overview', content: 'First generated panel. Arrow keys only move focus.' },
     { key: 'unavailable', label: 'Unavailable', content: 'Unavailable panel.', disabled: true },
@@ -34,4 +43,20 @@ export const presentationFixtures = {
   selectNotesLabel: 'Select notes externally',
   disableDetailsLabel: 'Disable details example',
   removeDetailsLabel: 'Remove details example',
+} as const;
+
+/** Editable Figma140 content; these examples have no provider or protected data. */
+export const overlayFixtures = {
+  dialogTitle: 'Review generated details', drawerTitle: 'Generated record details',
+  dialogBody: 'Review this generated example. Opening or closing it does not confirm an action or change any record.',
+  drawerBody: 'This generated record is presentation content only. The drawer provides a visible title, reading order and explicit close control.',
+  caption: 'Generated example · no provider or protected data',
+  sections: [
+    ['About this example', 'This example demonstrates long content in a controlled modal. It does not read protected information or submit a request.'],
+    ['Review at your own pace', 'The title receives initial focus so the beginning stays visible. Scroll this body to continue. The close control stays reachable outside the scrolling region.'],
+    ['Content remains local', 'These paragraphs are generated solely to demonstrate wrapping and reading order. The surrounding page stays inert while the overlay is open.'],
+    ['Dismissal is a request', 'Escape or the close button asks the caller to dismiss. If the caller keeps open true, the modal and its focus containment remain in place.'],
+    ['Return focus safely', 'After the caller closes the modal, return only to a valid target in the current context. Use the explicit safe fallback if the origin was removed, disabled or became stale.'],
+    ['End of generated content', 'No confirmation, authorization, exposure or cancellation is implied by opening or closing this view.'],
+  ],
 } as const;

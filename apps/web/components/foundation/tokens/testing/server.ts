@@ -1,4 +1,4 @@
-import { build } from 'esbuild';
+import { buildHostedFixture } from '../../../../tests/fixtures/presentation/build.ts';
 import { createServer } from 'node:http';
 import type { Socket } from 'node:net';
 import { lstat, realpath, mkdtemp, readFile, rm } from 'node:fs/promises';
@@ -10,26 +10,11 @@ const contentTypes: Record<string, string> = {
   '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml', '.woff2': 'font/woff2',
 };
 
-async function buildGalleryAssets(output: string) {
-  const source = dirname(fileURLToPath(import.meta.url));
-  const result = await build({
-    absWorkingDir: source,
-    entryPoints: { index: './gallery.tsx' },
-    outdir: output,
-    bundle: true,
-    write: false,
-    platform: 'browser',
-    format: 'esm',
-    target: 'es2023',
-    jsx: 'automatic',
-    minify: true,
-    sourcemap: false,
-    logLevel: 'silent',
-    define: { 'process.env.NODE_ENV': '"production"' },
-    entryNames: 'assets/[name]-[hash]',
-    assetNames: 'assets/[name]-[hash]',
-    loader: { '.woff2': 'file' },
-  });
+async function buildGalleryAssets(output: string, operationFixture: boolean) {
+  const testing = dirname(fileURLToPath(import.meta.url));
+  const source = operationFixture ? fileURLToPath(new URL('../../../../tests/fixtures/presentation/', import.meta.url)) : testing;
+  const entryFile = operationFixture ? 'operation-state.tsx' : 'gallery.tsx';
+  const result = await buildHostedFixture(join(source, entryFile), output);
   const assets = new Map<string, { bytes: Uint8Array; type: string }>();
   let totalBytes = 0;
   function addAsset(path: string, bytes: Uint8Array) {
@@ -50,7 +35,7 @@ async function buildGalleryAssets(output: string) {
     if (extname(path) === '.css') stylesheet = path;
   }
   const html = await readFile(join(source, 'index.html'), 'utf8');
-  const entry = '<script type="module" src="./gallery.tsx"></script>';
+  const entry = `<script type="module" src="./${entryFile}"></script>`;
   if (!script || !stylesheet || !html.includes(entry) || !html.includes('</head>')) {
     throw new Error('Missing compiled gallery');
   }
@@ -60,13 +45,13 @@ async function buildGalleryAssets(output: string) {
 
   // The bundle remains in /assets/ so the component's module-relative URLs resolve below it.
   for (const name of ['loading-light.svg', 'loading-dark.svg']) {
-    addAsset(`assets/assets/${name}`, await readFile(join(source, '..', 'assets', name)));
+    addAsset(`assets/assets/${name}`, await readFile(join(testing, '..', 'assets', name)));
   }
   return assets;
 }
 
 /** Test-only static host. It exposes no product API, proxy, credentials, or persistent state. */
-export async function startFoundationServer(runId: string, outputDirectory: string): Promise<{
+export async function startFoundationServer(runId: string, outputDirectory: string, operationFixture = false): Promise<{
   origin: string; close(): Promise<boolean>;
 }> {
   if (!/^[a-f0-9]{32}$/.test(runId) || resolve(outputDirectory) !== outputDirectory ||
@@ -89,7 +74,7 @@ export async function startFoundationServer(runId: string, outputDirectory: stri
     return clean;
   })();
   try {
-    const assets = await buildGalleryAssets(join(owned, 'output'));
+    const assets = await buildGalleryAssets(join(owned, 'output'), operationFixture);
     let origin = '';
     server.requestTimeout = 5000; server.headersTimeout = 5000; server.keepAliveTimeout = 1000;
     server.on('connection', socket => { sockets.add(socket); socket.once('close', () => sockets.delete(socket)); });
@@ -107,7 +92,7 @@ export async function startFoundationServer(runId: string, outputDirectory: stri
         response.setHeader('Content-Type', 'application/json');
         response.end(request.method === 'HEAD' ? undefined : JSON.stringify({ run_id: runId })); return;
       }
-      const asset = assets.get(path === '/' ? '/index.html' : path ?? '');
+      const asset = assets.get((path === '/' || (operationFixture && path === '/operation-state')) ? '/index.html' : path ?? '');
       if (!asset) { response.writeHead(404).end(); return; }
       response.setHeader('Content-Type', asset.type); response.setHeader('Content-Length', asset.bytes.length);
       response.end(request.method === 'HEAD' ? undefined : asset.bytes);
