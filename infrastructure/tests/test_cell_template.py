@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import subprocess
+import sys
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -13,9 +15,12 @@ from referencing import Registry, Resource
 
 from infrastructure.cell_installer import (
     ApprovedCellProfiles,
+    ApprovedCellStorage,
     CellInstallRefused,
     QualifiedProfile,
     VerifiedCellRelease,
+    WorkloadStorageBinding,
+    compile_cell_storage,
     prepare_cell_install,
 )
 from infrastructure.environment_contract import ResourceBinding
@@ -310,16 +315,22 @@ def inventory(parameters: dict[str, Any]) -> dict[str, ResourceBinding]:
 
 
 @pytest.fixture
-def prepare(parameters, environment_identity, approved_profiles, approved_release, inventory):
+def preparation_inputs(
+    parameters, environment_identity, approved_profiles, approved_release, inventory
+):
+    return {
+        "requested": parameters,
+        "approved_identity": environment_identity,
+        "profiles": approved_profiles,
+        "release": approved_release,
+        "inventory": inventory,
+    }
+
+
+@pytest.fixture
+def prepare(preparation_inputs):
     def run(**overrides):
-        options = {
-            "requested": parameters,
-            "approved_identity": environment_identity,
-            "profiles": approved_profiles,
-            "release": approved_release,
-            "inventory": inventory,
-        }
-        return prepare_cell_install(**(options | overrides))
+        return prepare_cell_install(**(preparation_inputs | overrides))
 
     return run
 
@@ -456,3 +467,197 @@ def test_refuses_invalid_trusted_identity_or_unknown_parameter(prepare, paramete
     parameters["secret"] = "GENERATED_SENTINEL"
     with pytest.raises(CellInstallRefused, match="^CELL_INSTALL_PARAMETERS_INVALID$"):
         prepare()
+
+
+@pytest.fixture
+def approved_storage(parameters, approved_profiles, inventory) -> ApprovedCellStorage:
+    account, region = parameters["account_id"], parameters["region"]
+
+    def workload(name: str, key_id: str) -> WorkloadStorageBinding:
+        role_arn = f"arn:aws:iam::{account}:role/generated/{name}"
+        key_arn = f"arn:aws:kms:{region}:{account}:key/{key_id}"
+        for arn, kind in ((role_arn, "role"), (key_arn, "key")):
+            inventory[arn] = ResourceBinding(
+                arn, kind, parameters["environment_id"], account, region, "3" * 64
+            )
+        return WorkloadStorageBinding(key_arn, role_arn)
+
+    return ApprovedCellStorage(
+        kms_policy_sha256=approved_profiles.kms_policy.sha256,
+        trainer=workload("trainer", "00000000-0000-0000-0000-000000000001"),
+        evaluator=workload("evaluator", "00000000-0000-0000-0000-000000000002"),
+    )
+
+
+@pytest.fixture
+def compile_storage(preparation_inputs, approved_storage):
+    def run(**overrides):
+        return compile_cell_storage(
+            **(preparation_inputs | {"storage": approved_storage} | overrides)
+        )
+
+    return run
+
+
+@pytest.mark.parametrize(
+    ("logical_id", "own", "opposite"),
+    [
+        ("TrainerStorage", "trainer", "evaluator"),
+        ("EvaluatorStorage", "evaluator", "trainer"),
+    ],
+)
+def test_compiled_storage_retains_private_encrypted_buckets_and_policies(
+    compile_storage, approved_storage, logical_id, own, opposite
+):
+    compiled = compile_storage()
+    assert compiled == compile_storage()
+    assert compiled.configuration_sha256 == hashlib.sha256(compiled.configuration).hexdigest()
+    configuration = json.loads(compiled.configuration)
+    resources = configuration["cloudformation_resources"]
+    assert set(resources) == {
+        "TrainerStorage",
+        "TrainerStoragePolicy",
+        "EvaluatorStorage",
+        "EvaluatorStoragePolicy",
+    }
+    assert {item["Type"] for item in resources.values()} == {
+        "AWS::S3::Bucket",
+        "AWS::S3::BucketPolicy",
+    }
+    bucket, policy = resources[logical_id], resources[f"{logical_id}Policy"]
+    for resource in (bucket, policy):
+        assert resource["DeletionPolicy"] == resource["UpdateReplacePolicy"] == "Retain"
+    properties = bucket["Properties"]
+    assert "BucketName" not in properties
+    assert properties["PublicAccessBlockConfiguration"] == dict.fromkeys(
+        ["BlockPublicAcls", "IgnorePublicAcls", "BlockPublicPolicy", "RestrictPublicBuckets"], True
+    )
+    assert properties["VersioningConfiguration"] == {"Status": "Enabled"}
+    assert properties["OwnershipControls"] == {
+        "Rules": [{"ObjectOwnership": "BucketOwnerEnforced"}]
+    }
+    key = getattr(approved_storage, own).kms_key_arn
+    assert properties["BucketEncryption"]["ServerSideEncryptionConfiguration"] == [
+        {
+            "BucketKeyEnabled": False,
+            "ServerSideEncryptionByDefault": {"SSEAlgorithm": "aws:kms", "KMSMasterKeyID": key},
+        }
+    ]
+    other_role = getattr(approved_storage, opposite).role_arn
+    assert policy["Properties"]["Bucket"] == {"Ref": logical_id}
+    statements = policy["Properties"]["PolicyDocument"]["Statement"]
+    assert all(
+        statement["Effect"] == "Deny" and statement["Principal"] == "*" for statement in statements
+    )
+    object_arn = {"Fn::Sub": "${" + logical_id + ".Arn}/*"}
+    assert statements[0] == {
+        "Sid": "DenyOppositeWorkload",
+        "Effect": "Deny",
+        "Principal": "*",
+        "Action": "s3:*",
+        "Resource": [{"Fn::GetAtt": [logical_id, "Arn"]}, object_arn],
+        "Condition": {"ArnEquals": {"aws:PrincipalArn": other_role}},
+    }
+    assert [statement["Action"] for statement in statements[1:]] == ["s3:PutObject"] * 2
+    assert all(statement["Resource"] == object_arn for statement in statements[1:])
+    assert [statement["Condition"] for statement in statements[1:]] == [
+        {"StringNotEquals": {"s3:x-amz-server-side-encryption": "aws:kms"}},
+        {"StringNotEquals": {"s3:x-amz-server-side-encryption-aws-kms-key-id": key}},
+    ]
+    assert set(configuration["resource_configuration_sha256"]) >= {key, other_role}
+
+
+def test_generated_storage_fragment_passes_bundled_cloudformation_schema(compile_storage, tmp_path):
+    configuration = json.loads(compile_storage().configuration)
+    # This local envelope exists only to run the pinned resource-schema checker.
+    template = tmp_path / "generated-storage-fragment.json"
+    template.write_text(
+        json.dumps({"Resources": configuration["cloudformation_resources"]}), encoding="utf-8"
+    )
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(Path(sys.executable).with_name("cfn-lint")),
+            "--format",
+            "json",
+            "--regions",
+            "us-east-1",
+            "--template",
+            str(template),
+        ],
+        timeout=30,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, (result.stdout.decode(), result.stderr.decode())
+    assert json.loads(result.stdout) == []
+
+
+@pytest.mark.parametrize("field", ["kms_policy_sha256", "role_arn", "kms_key_arn"])
+def test_refuses_unqualified_profile_or_shared_workload_authority(
+    compile_storage, approved_storage, field
+):
+    if field == "kms_policy_sha256":
+        binding = replace(approved_storage, kms_policy_sha256="4" * 64)
+    else:
+        binding = replace(
+            approved_storage,
+            evaluator=replace(
+                approved_storage.evaluator, **{field: getattr(approved_storage.trainer, field)}
+            ),
+        )
+    with pytest.raises(CellInstallRefused, match="^CELL_INSTALL_STORAGE_BINDING_MISMATCH$"):
+        compile_storage(storage=binding)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("role_arn", "arn:aws:iam::000000000002:role/generated/trainer"),
+        ("role_arn", "arn:aws:iam::000000000001:user/generated/trainer"),
+        ("role_arn", "arn:aws:sts::000000000001:assumed-role/generated/trainer"),
+        ("role_arn", "arn:aws:iam::000000000001:role/generated/*"),
+        (
+            "kms_key_arn",
+            "arn:aws:kms:us-east-2:000000000001:key/00000000-0000-0000-0000-000000000001",
+        ),
+        (
+            "kms_key_arn",
+            "arn:aws:kms:us-east-1:000000000002:key/00000000-0000-0000-0000-000000000001",
+        ),
+        ("kms_key_arn", "arn:aws:kms:us-east-1:000000000001:alias/generated"),
+        (
+            "kms_key_arn",
+            "arn:aws:kms:us-east-1:000000000001:key/mrk-00000000000000000000000000000000",
+        ),
+    ],
+)
+def test_refuses_foreign_or_noncanonical_storage_scope(
+    compile_storage, approved_storage, field, value
+):
+    storage = replace(approved_storage, trainer=replace(approved_storage.trainer, **{field: value}))
+    with pytest.raises(CellInstallRefused, match="^CELL_INSTALL_STORAGE_SCOPE_MISMATCH$"):
+        compile_storage(storage=storage)
+
+
+@pytest.mark.parametrize("field", ["role_arn", "kms_key_arn"])
+def test_storage_requires_current_scoped_inventory(
+    compile_storage, approved_storage, inventory, field
+):
+    arn = getattr(approved_storage.trainer, field)
+    original = inventory.pop(arn)
+    with pytest.raises(CellInstallRefused, match="^CELL_INSTALL_RESOURCE_UNQUALIFIED$"):
+        compile_storage()
+    inventory[arn] = replace(original, environment="other-cell-environment")
+    with pytest.raises(CellInstallRefused, match="^CELL_INSTALL_RESOURCE_UNQUALIFIED$"):
+        compile_storage()
+    inventory[arn] = replace(original, configuration_digest="7" * 64)
+    changed = compile_storage()
+    inventory[arn] = original
+    assert changed.configuration_sha256 != compile_storage().configuration_sha256
+
+
+def test_storage_cannot_bypass_base_installer_admission(compile_storage, parameters):
+    parameters["cell_id"] = "other-cell"
+    with pytest.raises(CellInstallRefused, match="^CELL_INSTALL_IDENTITY_MISMATCH$"):
+        compile_storage()

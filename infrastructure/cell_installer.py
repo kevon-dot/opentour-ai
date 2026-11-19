@@ -1,4 +1,4 @@
-"""OPE-181 offline binding of tenant-cell installer inputs."""
+"""OPE-181 offline installer binding and cell resource compilation."""
 
 from __future__ import annotations
 
@@ -29,6 +29,8 @@ _IDENTITY_FIELDS = {
     "region": "region",
 }
 _WORKLOADS = ("controller", "evaluator", "trainer")
+_SINGLE_REGION_KEY_ID = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+_ROLE_PATH_AND_NAME = r"(?:[A-Za-z0-9_+=,.@/-]{1,510}/)?[A-Za-z0-9_+=,.@-]{1,64}"
 
 
 class CellInstallRefused(ValueError):
@@ -162,7 +164,8 @@ def prepare_cell_install(
         image = images[workload]
         expected_digest = requested[f"{workload}_digest"]
         location = re.fullmatch(
-            re.escape(image_host) + r"(?P<repo>[a-z0-9]+(?:[._/-][a-z0-9]+)*)@sha256:"
+            re.escape(image_host)
+            + r"(?P<repo>[a-z0-9]+(?:[._/-][a-z0-9]+)*)@sha256:"
             + re.escape(expected_digest),
             image,
         )
@@ -170,22 +173,10 @@ def prepare_cell_install(
             raise CellInstallRefused("CELL_INSTALL_IMAGE_MISMATCH")
         references[f"arn:aws:ecr:{scope}:repository/{location['repo']}"] = "registry"
 
-    resources: dict[str, str] = {}
-    for arn, kind in references.items():
-        binding = inventory.get(arn)
-        if (
-            binding is None
-            or binding.arn != arn
-            or binding.kind != kind
-            or binding.environment != requested["environment_id"]
-            or binding.account_id != account
-            or binding.region != region
-            or SHA256.fullmatch(binding.configuration_digest) is None
-        ):
-            raise CellInstallRefused("CELL_INSTALL_RESOURCE_UNQUALIFIED")
-        resources[arn] = binding.configuration_digest
-
-    configuration = json.dumps(
+    resources = _qualified_resources(
+        references, inventory, requested["environment_id"], account, region
+    )
+    return _prepared_configuration(
         {
             "parameters": requested,
             "release_sha256": release.release_sha256,
@@ -194,10 +185,189 @@ def prepare_cell_install(
             "profile_sha256": {field: profile.sha256 for field, profile in profile_fields.items()},
             "images": images,
             "resource_configuration_sha256": resources,
-        },
+        }
+    )
+
+
+def _qualified_resources(
+    references: Mapping[str, str],
+    inventory: Mapping[str, ResourceBinding],
+    environment_id: str,
+    account: str,
+    region: str,
+) -> dict[str, str]:
+    digests: dict[str, str] = {}
+    for arn, kind in references.items():
+        binding = inventory.get(arn)
+        if (
+            binding is None
+            or binding.arn != arn
+            or binding.kind != kind
+            or binding.environment != environment_id
+            or binding.account_id != account
+            or binding.region != region
+            or SHA256.fullmatch(binding.configuration_digest) is None
+        ):
+            raise CellInstallRefused("CELL_INSTALL_RESOURCE_UNQUALIFIED")
+        digests[arn] = binding.configuration_digest
+    return digests
+
+
+def _prepared_configuration(value: object) -> PreparedCellInstall:
+    configuration = json.dumps(
+        value,
         sort_keys=True,
         separators=(",", ":"),
         ensure_ascii=False,
         allow_nan=False,
     ).encode()
     return PreparedCellInstall(configuration, hashlib.sha256(configuration).hexdigest())
+
+
+@dataclass(frozen=True)
+class WorkloadStorageBinding:
+    """A qualified single-Region encryption key and workload role."""
+
+    kms_key_arn: str
+    role_arn: str
+
+
+@dataclass(frozen=True)
+class ApprovedCellStorage:
+    """Exact role/key choices from the independently qualified KMS profile."""
+
+    kms_policy_sha256: str
+    trainer: WorkloadStorageBinding
+    evaluator: WorkloadStorageBinding
+
+
+def compile_cell_storage(
+    requested: object,
+    *,
+    approved_identity: object,
+    profiles: ApprovedCellProfiles,
+    release: VerifiedCellRelease,
+    inventory: Mapping[str, ResourceBinding],
+    storage: ApprovedCellStorage,
+) -> PreparedCellInstall:
+    """Compile a resource fragment with its immutable input and trusted resource digests.
+
+    The reconciled inventory must come from deployment authority. KMS authorization and
+    effective workload isolation still need the externally qualified key and role policies.
+    This output is an input to the full installer compiler, with no standalone template.
+    """
+    prepared = prepare_cell_install(
+        requested,
+        approved_identity=approved_identity,
+        profiles=profiles,
+        release=release,
+        inventory=inventory,
+    )
+    configuration = json.loads(prepared.configuration)
+    parameters = configuration["parameters"]
+    if (
+        storage.kms_policy_sha256 != profiles.kms_policy.sha256
+        or storage.trainer.role_arn == storage.evaluator.role_arn
+        or storage.trainer.kms_key_arn == storage.evaluator.kms_key_arn
+    ):
+        raise CellInstallRefused("CELL_INSTALL_STORAGE_BINDING_MISMATCH")
+
+    account = parameters["account_id"]
+    region = parameters["region"]
+    key_pattern = re.escape(f"arn:aws:kms:{region}:{account}:key/") + _SINGLE_REGION_KEY_ID
+    role_pattern = re.escape(f"arn:aws:iam::{account}:role/") + _ROLE_PATH_AND_NAME
+    references: dict[str, str] = {}
+    for binding in (storage.trainer, storage.evaluator):
+        if (
+            re.fullmatch(key_pattern, binding.kms_key_arn) is None
+            or re.fullmatch(role_pattern, binding.role_arn) is None
+        ):
+            raise CellInstallRefused("CELL_INSTALL_STORAGE_SCOPE_MISMATCH")
+        references[binding.kms_key_arn] = "key"
+        references[binding.role_arn] = "role"
+
+    configuration["resource_configuration_sha256"].update(
+        _qualified_resources(references, inventory, parameters["environment_id"], account, region)
+    )
+    configuration["cloudformation_resources"] = {
+        **_private_bucket_resources("TrainerStorage", storage.trainer, storage.evaluator),
+        **_private_bucket_resources("EvaluatorStorage", storage.evaluator, storage.trainer),
+    }
+    return _prepared_configuration(configuration)
+
+
+def _private_bucket_resources(
+    logical_id: str, binding: WorkloadStorageBinding, opposite: WorkloadStorageBinding
+) -> dict[str, object]:
+    retain = {"DeletionPolicy": "Retain", "UpdateReplacePolicy": "Retain"}
+    bucket_arn = {"Fn::GetAtt": [logical_id, "Arn"]}
+    objects_arn = {"Fn::Sub": "${" + logical_id + ".Arn}/*"}
+    explicit_deny = {"Effect": "Deny", "Principal": "*"}
+    return {
+        logical_id: {
+            "Type": "AWS::S3::Bucket",
+            **retain,
+            "Properties": {
+                "BucketEncryption": {
+                    "ServerSideEncryptionConfiguration": [
+                        {
+                            "ServerSideEncryptionByDefault": {
+                                "SSEAlgorithm": "aws:kms",
+                                "KMSMasterKeyID": binding.kms_key_arn,
+                            },
+                            "BucketKeyEnabled": False,
+                        }
+                    ]
+                },
+                "OwnershipControls": {"Rules": [{"ObjectOwnership": "BucketOwnerEnforced"}]},
+                "PublicAccessBlockConfiguration": {
+                    "BlockPublicAcls": True,
+                    "BlockPublicPolicy": True,
+                    "IgnorePublicAcls": True,
+                    "RestrictPublicBuckets": True,
+                },
+                "VersioningConfiguration": {"Status": "Enabled"},
+            },
+        },
+        f"{logical_id}Policy": {
+            "Type": "AWS::S3::BucketPolicy",
+            **retain,
+            "Properties": {
+                "Bucket": {"Ref": logical_id},
+                "PolicyDocument": {
+                    "Version": "2012-10-17",
+                    "Statement": [
+                        {
+                            "Sid": "DenyOppositeWorkload",
+                            **explicit_deny,
+                            "Action": "s3:*",
+                            "Resource": [bucket_arn, objects_arn],
+                            "Condition": {"ArnEquals": {"aws:PrincipalArn": opposite.role_arn}},
+                        },
+                        {
+                            "Sid": "RequireKmsForObjectWrites",
+                            **explicit_deny,
+                            "Action": "s3:PutObject",
+                            "Resource": objects_arn,
+                            "Condition": {
+                                "StringNotEquals": {"s3:x-amz-server-side-encryption": "aws:kms"}
+                            },
+                        },
+                        {
+                            "Sid": "RequireExactKeyForObjectWrites",
+                            **explicit_deny,
+                            "Action": "s3:PutObject",
+                            "Resource": objects_arn,
+                            "Condition": {
+                                "StringNotEquals": {
+                                    "s3:x-amz-server-side-encryption-aws-kms-key-id": (
+                                        binding.kms_key_arn
+                                    )
+                                }
+                            },
+                        },
+                    ],
+                },
+            },
+        },
+    }
