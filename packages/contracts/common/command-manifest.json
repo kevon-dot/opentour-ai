@@ -21,6 +21,7 @@
     "apps/web/components/foundation/forms/mutation-intent.visual.spec.ts",
     "apps/web/components/foundation/forms/permission-controls.visual.spec.ts",
     "apps/web/components/foundation/forms/visual.spec.ts",
+    "apps/web/components/foundation/tokens/skeleton.visual.spec.ts",
     "apps/web/components/foundation/tokens/visual.spec.ts",
     "apps/web/features/autonomy/control-actions.visual.spec.ts",
     "apps/web/features/autonomy/status-panel.visual.spec.ts",
@@ -308,6 +309,10 @@
     "apps/web/features/workspace/customer-shell.visual.spec.ts": {
       "kind": "simulated",
       "owner": "OPE-307"
+    },
+    "apps/web/components/foundation/tokens/skeleton.visual.spec.ts": {
+      "kind": "simulated",
+      "owner": "OPE-310"
     }
   }
 }
