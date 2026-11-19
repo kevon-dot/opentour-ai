@@ -8,12 +8,13 @@ import ssl
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
 import uvicorn
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.hazmat.primitives.asymmetric import ec, rsa
 from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 from opentour_control.auth.browser_private_listener import (
     PrivateListenerUnavailable,
@@ -21,12 +22,26 @@ from opentour_control.auth.browser_private_listener import (
     StageClientBinding,
     build_private_browser_listener,
 )
+from uvicorn.server import ServerState
 
 HOST = "browser.fixture.test"
 
 
-def cert(name: str, now: datetime, *, purpose=None, ca=False, signer=None, expire=False):
-    key = ec.generate_private_key(ec.SECP256R1())
+def cert(
+    name: str,
+    now: datetime,
+    *,
+    purpose=None,
+    ca=False,
+    signer=None,
+    expire=False,
+    native_stage=False,
+    key_usage=None,
+):
+    if native_stage:
+        key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    else:
+        key = ec.generate_private_key(ec.SECP256R1())
     subject = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, name)])
     issuer, signing_key = (subject, key) if signer is None else (signer[0].subject, signer[1])
     builder = (
@@ -37,11 +52,15 @@ def cert(name: str, now: datetime, *, purpose=None, ca=False, signer=None, expir
         .serial_number(x509.random_serial_number())
         .not_valid_before(now - timedelta(days=2))
         .not_valid_after(now + timedelta(days=-1 if expire else 2))
-        .add_extension(x509.BasicConstraints(ca=ca, path_length=None), critical=True)
-        .add_extension(x509.SubjectAlternativeName([x509.DNSName(name)]), critical=False)
     )
+    if not native_stage:
+        builder = builder.add_extension(x509.SubjectAlternativeName([x509.DNSName(name)]), False)
+        if ca is not None:
+            builder = builder.add_extension(x509.BasicConstraints(ca=ca, path_length=None), True)
     if purpose is not None:
         builder = builder.add_extension(x509.ExtendedKeyUsage([purpose]), critical=False)
+    if key_usage is not None:
+        builder = builder.add_extension(key_usage, critical=True)
     return builder.sign(signing_key, hashes.SHA256()), key
 
 
@@ -159,7 +178,17 @@ def test_unknown_peer_extra_trust_anchors_and_wrong_server_refused(tls_fixture):
     )
 
 
-@pytest.mark.parametrize("variant", ["server-purpose", "authority", "expired", "not-self-signed"])
+@pytest.mark.parametrize(
+    "variant",
+    [
+        "server-purpose",
+        "bad-key-usage",
+        "no-basic-constraints",
+        "authority",
+        "expired",
+        "not-self-signed",
+    ],
+)
 def test_wrong_client_tls_purpose_or_invalid_client_leaf_refused(tls_fixture, variant):
     now, options, *_ = tls_fixture
     signer = cert("fixture-wrong-signer", now, ca=True) if variant == "not-self-signed" else None
@@ -172,9 +201,24 @@ def test_wrong_client_tls_purpose_or_invalid_client_leaf_refused(tls_fixture, va
         "fixture-stage",
         now,
         purpose=purpose,
-        ca=variant == "authority",
+        ca=None if variant == "no-basic-constraints" else variant == "authority",
         expire=variant == "expired",
         signer=signer,
+        key_usage=(
+            x509.KeyUsage(
+                digital_signature=False,
+                content_commitment=False,
+                key_encipherment=True,
+                data_encipherment=False,
+                key_agreement=False,
+                key_cert_sign=False,
+                crl_sign=False,
+                encipher_only=False,
+                decipher_only=False,
+            )
+            if variant == "bad-key-usage"
+            else None
+        ),
     )
     approved = replace(
         options["approved"], client_certificate_sha256=leaf.fingerprint(hashes.SHA256()).hex()
@@ -191,8 +235,62 @@ def test_wrong_client_tls_purpose_or_invalid_client_leaf_refused(tls_fixture, va
     )
 
 
-def test_real_tls_denies_absent_wrong_descendant_and_plaintext_peers(tls_fixture):
+@pytest.mark.parametrize("peer", ["missing-tls", "missing-cert", "wrong", "descendant"])
+def test_rejected_transport_never_initializes_h11(tls_fixture, monkeypatch, peer):
+    _, options, _, _, wrong, descendant = tls_fixture
+    create_http = Mock()
+    monkeypatch.setattr("opentour_control.auth.browser_private_listener.H11Protocol", create_http)
+    config = build_private_browser_listener(fixture_app, **options)
+    config.load()
+    assert config.http_protocol_class is not None
+    state = ServerState()
+    protocol = config.http_protocol_class(config=config, server_state=state, app_state={})
+    transport = Mock(spec=asyncio.Transport)
+    if peer == "missing-tls":
+        transport.get_extra_info.return_value = None
+    else:
+        tls = Mock(spec=ssl.SSLObject)
+        transport.get_extra_info.return_value = tls
+        tls.getpeercert.return_value = (
+            None
+            if peer == "missing-cert"
+            else x509.load_pem_x509_certificate(
+                (wrong if peer == "wrong" else descendant)[0].read_bytes()
+            ).public_bytes(serialization.Encoding.DER)
+        )
+    protocol.connection_made(transport)
+    protocol.data_received(b"GET /fixture HTTP/1.1\r\n\r\n")
+    protocol.eof_received()
+    protocol.pause_writing()
+    protocol.resume_writing()
+    protocol.connection_lost(None)
+
+    transport.abort.assert_called_once_with()
+    create_http.assert_not_called()
+    assert not state.connections
+    assert not state.tasks
+
+
+@pytest.mark.parametrize("native", [False, True], ids=["explicit-leaf", "aws-native-v3"])
+def test_real_tls_denies_absent_wrong_descendant_and_plaintext_peers(tls_fixture, tmp_path, native):
     now, options, authority, stage, wrong, descendant = tls_fixture
+    if native:
+        native_stage = cert("fixture-native-stage", now, native_stage=True)
+        assert native_stage[0].version == x509.Version.v3
+        assert len(native_stage[0].extensions) == 0
+        stage = write_pair(tmp_path, "native-stage", native_stage)
+        descendant = write_pair(
+            tmp_path, "native-descendant", cert("fixture-descendant", now, signer=native_stage)
+        )
+        approved = replace(
+            options["approved"],
+            client_certificate_sha256=native_stage[0].fingerprint(hashes.SHA256()).hex(),
+        )
+        options = options | {
+            "approved": approved,
+            "readback": replace(options["readback"], binding=approved),
+            "stage_leaf_pem": stage[0].read_bytes(),
+        }
 
     async def exchange(port: int, pair: tuple[Path, Path] | None, *, plaintext=False) -> bytes:
         context = None if plaintext else ssl.create_default_context(cafile=authority)
