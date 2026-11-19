@@ -85,9 +85,8 @@ def _session_keys(env: Mapping[str, str]) -> tuple[tuple[bytes, ...], bytes]:
     return tuple(key.encode("ascii") for key in sealing_keys), decoded
 
 
-def _configure(
-    env: Mapping[str, str],
-) -> tuple[ControlAuthRuntime, Callable[[], psycopg.Connection[Any]], int, int]:
+def configure_auth_runtime(env: Mapping[str, str]) -> tuple[ControlAuthRuntime, str]:
+    """Build the shared auth runtime and return its trusted identity database DSN."""
     identity = _database_profile(_required(env, "OPENTOUR_CONTROL_DATABASE_URL"))
     selection = _database_profile(_required(env, "OPENTOUR_SELECTION_DATABASE_URL"))
     if (
@@ -99,18 +98,6 @@ def _configure(
     identity_dsn = make_conninfo(**identity)
     selection_dsn = make_conninfo(**selection)
 
-    def schema_connect() -> psycopg.Connection[Any]:
-        return psycopg.connect(
-            identity_dsn,
-            autocommit=True,
-            connect_timeout=3,
-            options="-c statement_timeout=2000 -c default_transaction_read_only=on",
-        )
-
-    reader_version = _positive_integer(env, "OPENTOUR_SCHEMA_READER_VERSION")
-    connection_limit = _positive_integer(env, "OPENTOUR_DATABASE_POOL_MAX")
-    if connection_limit > 1000:
-        raise ValueError("Connection limit exceeds the deployment contract")
     sealing_keys, csrf_key = _session_keys(env)
     runtime = create_control_auth_runtime(
         config=IdentityConfig(
@@ -128,6 +115,26 @@ def _configure(
         identity_connect=connection_factory(identity_dsn),
         selection_connect=connection_factory(selection_dsn),
     )
+    return runtime, identity_dsn
+
+
+def _configure(
+    env: Mapping[str, str],
+) -> tuple[ControlAuthRuntime, Callable[[], psycopg.Connection[Any]], int, int]:
+    reader_version = _positive_integer(env, "OPENTOUR_SCHEMA_READER_VERSION")
+    connection_limit = _positive_integer(env, "OPENTOUR_DATABASE_POOL_MAX")
+    if connection_limit > 1000:
+        raise ValueError("Connection limit exceeds the deployment contract")
+    runtime, identity_dsn = configure_auth_runtime(env)
+
+    def schema_connect() -> psycopg.Connection[Any]:
+        return psycopg.connect(
+            identity_dsn,
+            autocommit=True,
+            connect_timeout=3,
+            options="-c statement_timeout=2000 -c default_transaction_read_only=on",
+        )
+
     return runtime, schema_connect, reader_version, connection_limit
 
 
