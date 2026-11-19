@@ -4,14 +4,16 @@ import hashlib
 import json
 from collections import Counter
 from collections.abc import Callable, Iterator, Mapping
+from dataclasses import replace
 from itertools import permutations, product
-from typing import Any, Never
+from typing import Any
 
 import pytest
 
 from tools.acceptance.identity_storage_isolation import (
     FIXTURE_PATH,
     CaseObservationReceipt,
+    CaseReceiptBinding,
     DeploymentMode,
     GeneratedObservation,
     InvalidIsolationFixture,
@@ -434,18 +436,32 @@ def test_referenced_fixture_refuses_matching_non_utf8_artifact(
         parse_referenced_fixture(raw, fixture_artifact_ref)
 
 
+def _case_bindings(
+    topology: IsolationFixture, mode: DeploymentMode = _GENERATED_MODE
+) -> dict[str, CaseReceiptBinding]:
+    return {
+        case.case_id: CaseReceiptBinding(
+            actor_ref=f"test-actor-{case.actor_kind}-{case.initiating_cell}",
+            provider_contract_ref=f"test-contract-{mode}",
+            input_digest=hashlib.sha256(f"{mode}:{case.case_id}".encode()).hexdigest(),
+        )
+        for case in topology.cases(mode)
+    }
+
+
 def _receipts(
     topology: IsolationFixture, mode: DeploymentMode = _GENERATED_MODE
 ) -> list[CaseObservationReceipt]:
+    bindings = _case_bindings(topology, mode)
     return [
         {
             "case_id": case.case_id,
             "mode": mode,
             "initiating_cell_id": _CELL_IDS[case.initiating_cell],
             "target_cell_id": _CELL_IDS[case.target_cell],
-            "actor_ref": f"test-actor-{case.actor_kind}",
-            "provider_contract_ref": "test-api-contract",
-            "input_digest": "b" * 64,
+            "actor_ref": bindings[case.case_id].actor_ref,
+            "provider_contract_ref": bindings[case.case_id].provider_contract_ref,
+            "input_digest": bindings[case.case_id].input_digest,
             "expected": dict(case.expected),
             "observed": dict(case.expected),
             "assertion_status": "PASS",
@@ -459,10 +475,16 @@ def _receipts(
 
 
 @pytest.mark.parametrize("mode", _MODES)
-def test_complete_receipts_bind_exact_cells_and_never_claim_product_acceptance(
+def test_complete_receipts_bind_exact_cells_and_cases_and_never_claim_product_acceptance(
     topology: IsolationFixture, mode: DeploymentMode
 ) -> None:
-    report = assess_receipts(topology, mode, _CELL_IDS, _receipts(topology, mode))
+    report = assess_receipts(
+        topology,
+        mode,
+        _CELL_IDS,
+        _receipts(topology, mode),
+        case_bindings=_case_bindings(topology, mode),
+    )
 
     assert report.receipt_status == "COMPLETE"
     assert report.expected_count == report.classified_count == 106
@@ -472,20 +494,61 @@ def test_complete_receipts_bind_exact_cells_and_never_claim_product_acceptance(
 
 
 def test_no_receipts_and_unbound_cells_are_not_run(topology: IsolationFixture) -> None:
-    report = assess_receipts(topology, _GENERATED_MODE, _CELL_IDS, [])
+    bindings = _case_bindings(topology)
+    report = assess_receipts(topology, _GENERATED_MODE, _CELL_IDS, [], case_bindings=bindings)
     assert report.receipt_status == "NOT_RUN"
     assert report.expected_count == len(report.incomplete_cases) == 106
     assert report.classified_count == 0
     assert not report.missing_cell_bindings
 
-    def must_not_read() -> Never:
-        pytest.fail("receipts were consumed without all cell bindings")
-
     missing = {alias: actual for alias, actual in _CELL_IDS.items() if alias != "managed_a"}
-    report = assess_receipts(topology, _GENERATED_MODE, missing, (must_not_read() for _ in [0]))
+    report = assess_receipts(
+        topology, _GENERATED_MODE, missing, _unread_receipts(), case_bindings=bindings
+    )
     assert report.receipt_status == "NOT_RUN"
     assert report.missing_cell_bindings == ("managed_a",)
     assert report.classified_count == 0
+
+
+def _unread_receipts() -> Iterator[object]:
+    yield pytest.fail("receipts were consumed without all approved bindings")
+
+
+@pytest.mark.parametrize(
+    "invalid",
+    [
+        None,
+        CaseReceiptBinding("", "test-contract", "a" * 64),
+        CaseReceiptBinding("test-actor", "", "a" * 64),
+        CaseReceiptBinding("test-actor", "test-contract", "A" * 64),
+    ],
+)
+def test_missing_or_invalid_case_binding_refuses_intake(
+    topology: IsolationFixture, invalid: CaseReceiptBinding | None
+) -> None:
+    bindings = _case_bindings(topology)
+    case_id = next(iter(bindings))
+    if invalid is None:
+        del bindings[case_id]
+    else:
+        bindings[case_id] = invalid
+
+    report = assess_receipts(
+        topology, _GENERATED_MODE, _CELL_IDS, _unread_receipts(), case_bindings=bindings
+    )
+
+    assert report.receipt_status == report.product_acceptance == "NOT_RUN"
+    assert report.missing_case_bindings == (case_id,)
+    assert report.classified_count == 0
+
+
+def test_unknown_case_binding_refuses_intake(topology: IsolationFixture) -> None:
+    bindings = _case_bindings(topology)
+    bindings["unapproved"] = next(iter(bindings.values()))
+    with pytest.raises(InvalidIsolationFixture, match="Unexpected approved case binding ID"):
+        assess_receipts(
+            topology, _GENERATED_MODE, _CELL_IDS, _unread_receipts(), case_bindings=bindings
+        )
 
 
 @pytest.mark.parametrize("replacement", ["managed_a", _CELL_IDS["managed_b"]])
@@ -493,7 +556,11 @@ def test_fixture_alias_or_reused_cell_id_cannot_bind(
     topology: IsolationFixture, replacement: str
 ) -> None:
     report = assess_receipts(
-        topology, _GENERATED_MODE, {**_CELL_IDS, "managed_a": replacement}, _receipts(topology)
+        topology,
+        _GENERATED_MODE,
+        {**_CELL_IDS, "managed_a": replacement},
+        _receipts(topology),
+        case_bindings=_case_bindings(topology),
     )
     assert report.receipt_status == "NOT_RUN"
     assert "managed_a" in report.missing_cell_bindings
@@ -523,7 +590,11 @@ def test_malformed_or_misattributed_receipt_is_incomplete(
 ) -> None:
     first, *other = _receipts(topology)
     report = assess_receipts(
-        topology, _GENERATED_MODE, _CELL_IDS, [{**first, field: value}, *other]
+        topology,
+        _GENERATED_MODE,
+        _CELL_IDS,
+        [{**first, field: value}, *other],
+        case_bindings=_case_bindings(topology),
     )
 
     assert report.receipt_status == "INCOMPLETE"
@@ -533,12 +604,51 @@ def test_malformed_or_misattributed_receipt_is_incomplete(
     assert report.product_acceptance == "NOT_RUN"
 
 
+@pytest.mark.parametrize("mode", _MODES)
+@pytest.mark.parametrize(
+    ("field", "replacement"),
+    [
+        ("actor_ref", "test-actor-from-another-cell"),
+        ("provider_contract_ref", "test-contract-other-revision"),
+        ("input_digest", "1" * 64),
+    ],
+)
+def test_wrong_case_binding_cannot_be_used_to_attribute_a_failure(
+    topology: IsolationFixture, mode: DeploymentMode, field: str, replacement: str
+) -> None:
+    first, *rest = _receipts(topology, mode)
+    mismatching = {
+        **first,
+        field: replacement,
+        "observed": {**first["expected"], "foreign_bytes": 1},
+        "assertion_status": "FAIL",
+    }
+    report = assess_receipts(
+        topology,
+        mode,
+        _CELL_IDS,
+        [mismatching, *rest],
+        case_bindings=_case_bindings(topology, mode),
+    )
+
+    assert report.receipt_status == "INCOMPLETE"
+    assert report.incomplete_cases == (first["case_id"],)
+    assert report.rejected_receipt_count == 1
+    assert not report.failed_cases
+
+
 def test_duplicate_missing_and_unrecognized_cases_cannot_complete(
     topology: IsolationFixture,
 ) -> None:
     first, second, *rest = _receipts(topology)
     unknown = {**first, "case_id": "unrecognized-private-looking-value"}
-    report = assess_receipts(topology, _GENERATED_MODE, _CELL_IDS, [first, first, unknown, *rest])
+    report = assess_receipts(
+        topology,
+        _GENERATED_MODE,
+        _CELL_IDS,
+        [first, first, unknown, *rest],
+        case_bindings=_case_bindings(topology),
+    )
 
     assert report.receipt_status == "INCOMPLETE"
     assert set(report.incomplete_cases) == {first["case_id"], second["case_id"]}
@@ -553,7 +663,13 @@ def test_oracle_preserves_scoped_failure_with_incomplete_metadata_and_missing_ca
     first = _receipts(topology)[0]
     forged = {**first["expected"], "foreign_bytes": 1}
     mismatching = {**first, "expected": forged, "observed": forged, "evidence_refs": []}
-    report = assess_receipts(topology, _GENERATED_MODE, _CELL_IDS, [mismatching])
+    report = assess_receipts(
+        topology,
+        _GENERATED_MODE,
+        _CELL_IDS,
+        [mismatching],
+        case_bindings=_case_bindings(topology),
+    )
 
     assert report.receipt_status == "FAIL"
     assert report.failed_cases == (first["case_id"],)
@@ -564,11 +680,18 @@ def test_oracle_preserves_scoped_failure_with_incomplete_metadata_and_missing_ca
 
 def test_unknown_cell_binding_alias_refuses_run(topology: IsolationFixture) -> None:
     with pytest.raises(InvalidIsolationFixture, match="Unexpected approved cell binding alias"):
-        assess_receipts(topology, _GENERATED_MODE, {**_CELL_IDS, "unapproved": "test-other"}, [])
+        assess_receipts(
+            topology,
+            _GENERATED_MODE,
+            {**_CELL_IDS, "unapproved": "test-other"},
+            [],
+            case_bindings=_case_bindings(topology),
+        )
 
 
 def test_ingestion_freezes_bindings_and_metrics_at_read(topology: IsolationFixture) -> None:
     cell_ids = dict(_CELL_IDS)
+    bindings = _case_bindings(topology)
     first, *rest = _receipts(topology)
     metrics = first["observed"]
     assert metrics is not None
@@ -576,10 +699,14 @@ def test_ingestion_freezes_bindings_and_metrics_at_read(topology: IsolationFixtu
     def observations() -> Iterator[CaseObservationReceipt]:
         yield first
         cell_ids["byoc_a"] = "test-replacement"
+        other_case = rest[0]["case_id"]
+        bindings[other_case] = replace(bindings[other_case], input_digest="2" * 64)
         metrics["foreign_bytes"] = 1
         yield from rest
 
-    report = assess_receipts(topology, _GENERATED_MODE, cell_ids, observations())
+    report = assess_receipts(
+        topology, _GENERATED_MODE, cell_ids, observations(), case_bindings=bindings
+    )
     assert report.receipt_status == "COMPLETE"
     assert report.classified_count == 106
     assert not report.failed_cases
@@ -602,7 +729,9 @@ def test_receipt_digests_reject_trailing_line_terminators(
         assert usage is not None
         usage["sha256"] = malformed
 
-    report = assess_receipts(topology, mode, _CELL_IDS, [first, *rest])
+    report = assess_receipts(
+        topology, mode, _CELL_IDS, [first, *rest], case_bindings=_case_bindings(topology, mode)
+    )
     assert report.receipt_status == "INCOMPLETE"
     assert report.classified_count == 105
     assert report.incomplete_cases == (first["case_id"],)

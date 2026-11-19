@@ -411,6 +411,13 @@ class CaseObservationReceipt(TypedDict):
 
 
 @dataclass(frozen=True)
+class CaseReceiptBinding:
+    actor_ref: str
+    provider_contract_ref: str
+    input_digest: str
+
+
+@dataclass(frozen=True)
 class ReceiptAssessment:
     receipt_status: ReceiptStatus
     expected_count: int
@@ -419,6 +426,7 @@ class ReceiptAssessment:
     incomplete_cases: tuple[str, ...]
     rejected_receipt_count: int
     missing_cell_bindings: tuple[str, ...]
+    missing_case_bindings: tuple[str, ...]
     product_acceptance: Literal["NOT_RUN"] = dataclass_field(default="NOT_RUN", init=False)
 
 
@@ -473,16 +481,8 @@ def _complete_receipt(
 ) -> bool:
     if set(receipt) != CaseObservationReceipt.__required_keys__:
         return False
-    if not _strict_sha256(receipt["input_digest"]):
-        return False
-    for field_name, definition in (
-        ("actor_ref", "Id"),
-        ("provider_contract_ref", "Id"),
-        ("input_digest", "Sha256"),
-        ("started_at", "Timestamp"),
-        ("finished_at", "Timestamp"),
-    ):
-        if not valid_instance(_COMMON + definition, receipt[field_name], registry):
+    for field_name in ("started_at", "finished_at"):
+        if not valid_instance(_COMMON + "Timestamp", receipt[field_name], registry):
             return False
     started, finished = receipt["started_at"], receipt["finished_at"]
     if not isinstance(started, str) or not isinstance(finished, str):
@@ -509,8 +509,10 @@ def assess_receipts(
     expected_mode: DeploymentMode,
     cell_ids: Mapping[str, str],
     receipts: Iterable[object],
+    *,
+    case_bindings: Mapping[str, CaseReceiptBinding],
 ) -> ReceiptAssessment:
-    """Check ISO-01 receipt completeness against caller-approved cell IDs.
+    """Check ISO-01 receipts against independently approved cell and case bindings.
 
     Callers still authenticate provenance, resolve artifacts and record provider evidence.
     A complete result describes receipt ingestion only, including for generated input.
@@ -520,12 +522,32 @@ def assess_receipts(
     if set(cell_ids) - _CELL_MODES.keys():
         raise InvalidIsolationFixture("Unexpected approved cell binding alias")
     missing_cells = _missing_cell_bindings(cell_ids)
-    if missing_cells:
+    bindings = dict(case_bindings)
+    if bindings.keys() - expected.keys():
+        raise InvalidIsolationFixture("Unexpected approved case binding ID")
+    registry = schema_registry()
+    missing_cases = tuple(
+        sorted(
+            case_id
+            for case_id in expected
+            if not isinstance(binding := bindings.get(case_id), CaseReceiptBinding)
+            or not valid_instance(_COMMON + "Id", binding.actor_ref, registry)
+            or not valid_instance(_COMMON + "Id", binding.provider_contract_ref, registry)
+            or not _strict_sha256(binding.input_digest)
+        )
+    )
+    if missing_cells or missing_cases:
         return ReceiptAssessment(
-            "NOT_RUN", len(expected), 0, (), tuple(sorted(expected)), 0, missing_cells
+            "NOT_RUN",
+            len(expected),
+            0,
+            (),
+            tuple(sorted(expected)),
+            0,
+            missing_cells,
+            missing_cases,
         )
 
-    registry = schema_registry()
     observations: list[GeneratedObservation] = []
     incomplete: set[str] = set()
     rejected = 0
@@ -538,10 +560,14 @@ def assess_receipts(
         if case is None:
             rejected += 1
             continue
+        binding = bindings[case.case_id]
         if (
             receipt.get("mode") != expected_mode
             or receipt.get("initiating_cell_id") != cell_ids[case.initiating_cell]
             or receipt.get("target_cell_id") != cell_ids[case.target_cell]
+            or receipt.get("actor_ref") != binding.actor_ref
+            or receipt.get("provider_contract_ref") != binding.provider_contract_ref
+            or receipt.get("input_digest") != binding.input_digest
         ):
             incomplete.add(case.case_id)
             rejected += 1
@@ -572,6 +598,7 @@ def assess_receipts(
         result.failed_cases,
         tuple(sorted(incomplete)),
         rejected,
+        (),
         (),
     )
 
