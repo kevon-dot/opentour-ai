@@ -4,8 +4,8 @@ import { describe, it, mock } from 'node:test';
 import { isDeepStrictEqual } from 'node:util';
 import { testCases } from '../../tests/web-unit-cases.js';
 import { exportJWK, generateKeyPair, SignJWT } from 'jose';
-import type { AuthProfile, AuthTransaction, Claims, Credentials, Identity,
-  SelectionTarget, ServerSession } from './authkit-adapter.js';
+import type { ActiveServerSession, AuthProfile, AuthTransaction, Claims, Credentials, Identity,
+  SelectionDecision, SelectionIntent, SelectionTarget, ServerSession } from './authkit-adapter.js';
 
 mock.module('server-only', { namedExports: {} });
 const { createAuthkitAdapter, createWorkOSProvider, IdentityFailure, ProviderFailure } =
@@ -23,29 +23,41 @@ const credentials: Credentials = { accessToken: 'GENERATED_ACCESS_SENTINEL',
   refreshToken: 'GENERATED_REFRESH_SENTINEL', userId: 'user_a' };
 const targetA: SelectionTarget = { organizationId: 'org_a', identityOrganizationId: 'identity_org_a',
   identityIssuer: profile.issuer, membershipId: 'member_a', authorityRevision: 'authority_a' };
+const selectionKey = 'generated-selection-intent';
+const stagedDigest = 'a'.repeat(64);
+const intentFor = (organizationId: string) => ({ organizationId, expectedGeneration: 0, idempotencyKey: selectionKey });
 const targetB: SelectionTarget = { organizationId: 'org_b', identityOrganizationId: 'identity_org_b',
   identityIssuer: profile.issuer, membershipId: 'member_b', authorityRevision: 'authority_b' };
 
 function fixture() {
   let currentTime = NOW;
   const flows = new Map<string, AuthTransaction>();
-  const session: ServerSession = { handle: 'h'.repeat(43), ended: false, reconciliationRequired: false,
-    csrfToken: 'csrf-fixture', credentials,
+  const session: Omit<ActiveServerSession, 'ended'> & { ended: boolean } = {
+    handle: 'h'.repeat(43), ended: false, reconciliationRequired: false,
+    csrfToken: 'csrf-fixture', credentials, credentialDigest: stagedDigest,
     identity: { actor: { kind: 'human', subject: claims.subject, issuer: claims.issuer },
       session_id: claims.sessionId, session_generation: 0,
       identity_checked_at: new Date(NOW).toISOString(), authentication_time: claims.authenticationTime,
       assurance_level: 'unknown' } };
+  function readSession(): ServerSession {
+    if (session.ended) {
+      return { handle: session.handle, csrfToken: session.csrfToken, ended: true,
+        generation: session.identity.session_generation };
+    }
+    return { ...structuredClone(session), ended: false };
+  }
   const sessions = {
     admit: mock.fn(async () => {
       if (session.ended) throw new IdentityFailure('SESSION_ENDED');
-      return structuredClone(session);
+      return readSession();
     }),
-    current: mock.fn(async () => structuredClone(session)),
+    current: mock.fn(async () => readSession()),
     replaceCredentials: mock.fn(async (_handle: string, generation: number, next: Credentials) => {
       if (session.ended || generation !== session.identity.session_generation) throw new IdentityFailure('STALE_SESSION_CONTEXT');
       session.credentials = next;
+      return stagedDigest;
     }),
-    end: mock.fn(async () => {
+    end: mock.fn(async (_handle: string, _generation: number) => {
       if (!session.ended) session.identity.session_generation++;
       session.ended = true;
       return { sessionId: session.identity.session_id, generation: session.identity.session_generation };
@@ -67,15 +79,23 @@ function fixture() {
     verify: mock.fn(async () => ({ ...claims })),
     logoutURL: mock.fn(() => 'https://api.workos.com/user_management/sessions/logout'),
   };
-  const selections = { authorize: mock.fn(async (_identity: Identity, local: string): Promise<SelectionTarget> => {
-    if (local === 'org_a') return { ...targetA };
-    if (local === 'org_b') return { ...targetB };
-    throw new IdentityFailure('MEMBERSHIP_INACTIVE', 403);
-  }),
-    commit: mock.fn(async () => { session.reconciliationRequired = false; }) };
+  const selections = {
+    authorize: mock.fn(async (_handle: string, _identity: Identity, intent: SelectionIntent): Promise<SelectionDecision> => {
+      if (intent.organizationId === 'org_a') return { target: { ...targetA } };
+      if (intent.organizationId === 'org_b') return { target: { ...targetB } };
+      throw new IdentityFailure('MEMBERSHIP_INACTIVE', 403);
+    }),
+    commit: mock.fn(async (_handle: string, _identity: Identity, intent: SelectionIntent, target: SelectionTarget) => {
+      session.identity.session_generation = intent.expectedGeneration + 1;
+      session.reconciliationRequired = false;
+      return { state: 'active' as const, organization_id: target.organizationId,
+        membership_id: target.membershipId, session_generation: session.identity.session_generation, request_id: 'generated-request' };
+    }),
+  };
   const adapter = createAuthkitAdapter({ profile, provider, transactions, sessions, selections, now: () => currentTime });
   const request = (csrf = true) => new Request(`${profile.origin}/auth/operation`, {
     method: 'POST', headers: { Cookie: `opentour-session=${session.handle}`, Origin: profile.origin,
+      'Idempotency-Key': selectionKey,
       ...(csrf ? { 'X-CSRF-Token': session.csrfToken } : {}) } });
   async function signin() {
     const response = await adapter.signin(new Request(`${profile.origin}/auth/signin?return_to=/setup`));
@@ -164,16 +184,123 @@ describe('server adapter admission', () => {
     assert.equal(identity.assurance_level, 'unknown'); assert.equal('organization_id' in identity, false);
     await assert.rejects(f.adapter.verifiedIdentity(f.request(), 'tenant_read' as never), IdentityFailure);
   });
+  it('projects only verified identity fields from an enriched session port', async () => {
+    const f = fixture();
+    Object.assign(f.session.identity, {
+      organization_id: targetA.organizationId,
+      membership_id: targetA.membershipId,
+      delegated_grant_id: 'generated_grant',
+      capabilities: ['generated:capability'],
+      session_generation: 4,
+      authentication_time: new Date(NOW - 120_000).toISOString(),
+    });
+    Object.assign(f.session.identity.actor, { profile_label: 'generated private label' });
+    f.advance(5_000);
+
+    assert.deepEqual(await f.adapter.verifiedIdentity(f.request(), 'session_context'), {
+      actor: { kind: 'human', subject: claims.subject, issuer: claims.issuer },
+      session_id: claims.sessionId,
+      session_generation: 4,
+      identity_checked_at: new Date(NOW + 5_000).toISOString(),
+      authentication_time: claims.authenticationTime,
+      assurance_level: 'unknown',
+    });
+  });
 });
 
 describe('ending and switching', () => {
   it('confirms only the exact verified target after current membership and local commit', async () => {
     const f = fixture();
-    assert.equal((await f.adapter.switchOrganization(f.request(), 'org_a', 0, '/setup')).outcome, 'verified_target');
+    const identity = structuredClone(f.session.identity);
+    const outcome = await f.adapter.switchOrganization(f.request(), 'org_a', 0, '/setup');
+    assert.deepEqual(outcome, { outcome: 'verified_target', receipt: {
+      state: 'active', organization_id: 'org_a', membership_id: 'member_a', session_generation: 1, request_id: 'generated-request',
+    } });
     assert.equal(f.selections.authorize.mock.callCount(), 2);
     assert.deepEqual(f.provider.refresh.mock.calls.map(call => call.arguments), [[credentials, 'identity_org_a']]);
-    assert.deepEqual(f.selections.commit.mock.calls.map(call => call.arguments), [[f.session.handle, 0, targetA, claims]]);
+    assert.deepEqual(f.selections.commit.mock.calls.map(call => call.arguments), [
+      [f.session.handle, identity, intentFor('org_a'), targetA, claims, stagedDigest],
+    ]);
     assert.equal(f.session.reconciliationRequired, false);
+  });
+  it('returns a historical receipt for the exact retained intent without refreshing or restoring the old selection', async () => {
+    const f = fixture();
+    f.session.identity.session_generation = 3;
+    const receipt = { state: 'active' as const, organization_id: 'org_a',
+      membership_id: 'member_a', session_generation: 1, request_id: 'original-request' };
+    f.selections.authorize.mock.mockImplementation(async () => ({ receipt }));
+    assert.deepEqual(await f.adapter.switchOrganization(f.request(), 'org_a', 0, '/setup'),
+      { outcome: 'replayed', receipt });
+    assert.equal(f.sessions.requireReconciliation.mock.callCount(), 0);
+    assert.equal(f.provider.refresh.mock.callCount(), 0);
+    assert.equal(f.selections.commit.mock.callCount(), 0);
+    assert.equal(f.session.identity.session_generation, 3);
+  });
+  testCases(['ended', 'expired'] as const)('refuses a historical receipt after the bound identity becomes %s', async (state) => {
+    const f = fixture();
+    f.selections.authorize.mock.mockImplementation(async () => {
+      if (state === 'ended') f.session.ended = true;
+      else f.advance(600_000);
+      return { receipt: { state: 'active', organization_id: 'org_a',
+        membership_id: 'member_a', session_generation: 1, request_id: 'original-request' } };
+    });
+    await assert.rejects(f.adapter.switchOrganization(f.request(), 'org_a', 0, '/setup'),
+      { code: state === 'ended' ? 'SESSION_ENDED' : 'SESSION_INVALID' });
+    assert.equal(f.provider.refresh.mock.callCount(), 0);
+  });
+  it('rechecks the bound session after token verification and before contacting selection authority', async () => {
+    const f = fixture();
+    f.provider.verify.mock.mockImplementation(async () => { f.session.ended = true; return claims; });
+    await assert.rejects(f.adapter.switchOrganization(f.request(), 'org_a', 0, '/setup'), { code: 'SESSION_ENDED' });
+    assert.equal(f.selections.authorize.mock.callCount(), 0);
+  });
+  it('records a verified current organization without another refresh or credential write', async () => {
+    const f = fixture();
+    f.selections.authorize.mock.mockImplementation(async () => ({ target: targetA, alreadyCurrent: true }));
+    f.selections.commit.mock.mockImplementation(async () => ({ state: 'active', organization_id: 'org_a',
+      membership_id: 'member_a', session_generation: 0, request_id: 'no-op' }));
+    const result = await f.adapter.switchOrganization(f.request(), 'org_a', 0, '/setup');
+    assert.equal(result.outcome, 'verified_target');
+    assert.equal(f.provider.refresh.mock.callCount(), 0);
+    assert.equal(f.sessions.requireReconciliation.mock.callCount(), 0);
+    assert.equal(f.sessions.replaceCredentials.mock.callCount(), 0);
+  });
+  it('refuses a current-organization receipt when another selection becomes pending', async () => {
+    const f = fixture();
+    f.selections.authorize.mock.mockImplementation(async () => {
+      f.session.reconciliationRequired = true;
+      return { target: targetA, alreadyCurrent: true };
+    });
+    await assert.rejects(f.adapter.switchOrganization(f.request(), 'org_a', 0, '/setup'),
+      { code: 'CONTEXT_RECONCILIATION_REQUIRED' });
+    assert.equal(f.provider.refresh.mock.callCount(), 0);
+    assert.equal(f.selections.commit.mock.callCount(), 0);
+  });
+  it('refuses selection without a stable intent key', async () => {
+    const f = fixture();
+    const request = f.request();
+    request.headers.delete('Idempotency-Key');
+    await assert.rejects(f.adapter.switchOrganization(request, 'org_a', 0, '/setup'), { code: 'SCHEMA_INVALID' });
+    assert.equal(f.selections.authorize.mock.callCount(), 0);
+    assert.equal(f.provider.refresh.mock.callCount(), 0);
+  });
+  it('refuses selection after an unconfirmed credential write', async () => {
+    const f = fixture();
+    f.sessions.replaceCredentials.mock.mockImplementation(async () => '');
+    assert.equal((await f.adapter.switchOrganization(f.request(), 'org_a', 0, '/setup')).outcome, 'unknown');
+    assert.equal(f.selections.commit.mock.callCount(), 0);
+    assert.equal(f.session.reconciliationRequired, true);
+  });
+  it('refreshes with the latest sealed credentials when the access token is unchanged', async () => {
+    const f = fixture();
+    const rotated = { ...credentials, refreshToken: 'GENERATED_ROTATED_REFRESH' };
+    f.selections.authorize.mock.mockImplementationOnce(async () => {
+      f.session.credentials = rotated;
+      return { target: targetA };
+    }, 0);
+    assert.equal((await f.adapter.switchOrganization(f.request(), 'org_a', 0, '/setup')).outcome, 'verified_target');
+    assert.deepEqual(f.provider.refresh.mock.calls.map(({ arguments: args }) => args),
+      [[rotated, 'identity_org_a']]);
   });
   it('requires a durable pending marker before any provider context mutation', async () => {
     const f = fixture(); f.sessions.requireReconciliation.mock.mockImplementation(async () => { throw new Error('unknown local state'); });
@@ -183,6 +310,57 @@ describe('ending and switching', () => {
   it('checks CSRF before mutation', async () => {
     const f = fixture(); assert.equal((await f.adapter.signout(f.request(false))).status, 403);
     assert.equal(f.sessions.end.mock.callCount(), 0);
+  });
+  it('checks CSRF before requesting an ended session receipt', async () => {
+    const f = fixture();
+    f.session.ended = true;
+    f.session.identity.session_generation = 1;
+    const request = f.request();
+    request.headers.set('X-CSRF-Token', 'csrf-another');
+
+    const result = await f.adapter.signout(request);
+    assert.equal(result.status, 403);
+    assert.equal((await result.json()).code, 'CSRF_INVALID');
+    assert.equal(result.headers.get('set-cookie'), null);
+    assert.equal(result.headers.get('location'), null);
+    assert.equal(f.sessions.end.mock.callCount(), 0);
+    assert.equal(f.provider.logoutURL.mock.callCount(), 0);
+  });
+  it('clears the same cookie on signout replay with a minimal ended record', async () => {
+    const f = fixture();
+    const first = await f.adapter.signout(f.request());
+    const clearingCookie = first.headers.get('set-cookie');
+    assert.equal(first.status, 303);
+    assert.equal(first.headers.get('location'), 'https://api.workos.com/user_management/sessions/logout');
+    assert.match(clearingCookie ?? '', /^opentour-session=; .*Max-Age=0/);
+    assert.deepEqual(await f.sessions.current(), {
+      handle: f.session.handle, csrfToken: f.session.csrfToken, ended: true, generation: 1,
+    });
+
+    const repeat = await f.adapter.signout(f.request());
+    assert.equal(repeat.status, 303);
+    assert.equal(repeat.headers.get('location'), first.headers.get('location'));
+    assert.equal(repeat.headers.get('set-cookie'), clearingCookie);
+    assert.equal(repeat.headers.get('cache-control'), 'no-store');
+    assert.deepEqual(f.sessions.end.mock.calls.map(call => call.arguments), [
+      [f.session.handle, 0], [f.session.handle, 1],
+    ]);
+    assert.equal(f.session.identity.session_generation, 1);
+    assert.equal(f.provider.logoutURL.mock.callCount(), 2);
+  });
+  testCases(['active', 'ended'] as const)('refuses signout with a mismatched %s session handle', async (state) => {
+    const f = fixture();
+    const request = f.request();
+    f.session.handle = 'x'.repeat(43);
+    f.session.ended = state === 'ended';
+
+    const result = await f.adapter.signout(request);
+    assert.equal(result.status, 401);
+    assert.equal((await result.json()).code, 'SESSION_INVALID');
+    assert.equal(result.headers.get('location'), null);
+    assert.equal(result.headers.get('set-cookie'), null);
+    assert.equal(f.sessions.end.mock.callCount(), 0);
+    assert.equal(f.provider.logoutURL.mock.callCount(), 0);
   });
   it('provider logout failure cannot undo committed local denial', async () => {
     const f = fixture(); f.provider.logoutURL.mock.mockImplementation(() => { throw new Error('SECRET'); });
@@ -195,9 +373,36 @@ describe('ending and switching', () => {
     const result = await f.adapter.signout(f.request());
     assert.equal(result.status, 503); assert.equal(result.headers.get('location'), null);
     assert.equal(result.headers.get('set-cookie'), null); assert.equal(f.provider.logoutURL.mock.callCount(), 0);
+    const error = await result.json();
+    assert.equal(error.code, 'SESSION_END_UNCONFIRMED');
+    assert.equal(error.retryable, false);
+  });
+  testCases([
+    ['empty session ID', true, { sessionId: '', generation: 2 }],
+    ['blank session ID', true, { sessionId: '  ', generation: 2 }],
+    ['missing session ID', true, { generation: 2 }],
+    ['wrong active session ID', false, { sessionId: 'foreign_session', generation: 3 }],
+    ['non-advancing active generation', false, { sessionId: claims.sessionId, generation: 2 }],
+    ['mismatched ended replay generation', true, { sessionId: claims.sessionId, generation: 3 }],
+  ] as const)('refuses signout receipt with %s', async (_label, alreadyEnded, receipt) => {
+    const f = fixture();
+    f.session.ended = alreadyEnded;
+    f.session.identity.session_generation = 2;
+    f.sessions.end.mock.mockImplementation(async () =>
+      receipt as Awaited<ReturnType<typeof f.sessions.end>>);
+
+    const result = await f.adapter.signout(f.request());
+    assert.equal(result.status, 503);
+    assert.equal((await result.json()).code, 'SESSION_END_UNCONFIRMED');
+    assert.equal(result.headers.get('set-cookie'), null);
+    assert.equal(result.headers.get('location'), null);
+    assert.deepEqual(f.sessions.end.mock.calls.map(call => call.arguments), [[f.session.handle, 2]]);
+    assert.equal(f.provider.logoutURL.mock.callCount(), 0);
   });
   testCases(['subject', 'sessionId', 'organizationId'])('rejects changed refresh %s', async (field) => {
-    const f = fixture(); f.provider.verify.mock.mockImplementation(async () => ({ ...claims, [field]: 'foreign' }));
+    const f = fixture();
+    f.provider.verify.mock.mockImplementation(async () => ({ ...claims, [field]: 'foreign' }));
+    f.provider.verify.mock.mockImplementationOnce(async () => ({ ...claims }), 0);
     assert.equal((await f.adapter.switchOrganization(f.request(), 'org_a', 0, '/setup')).outcome, 'unknown');
     assert.equal(f.selections.commit.mock.callCount(), 0); assert.equal(f.session.reconciliationRequired, true);
   });
@@ -221,7 +426,8 @@ describe('ending and switching', () => {
     const outcome = await f.adapter.switchOrganization(f.request(), 'org_b', 0, '/setup');
     assert.equal(outcome.outcome, 'authentication_required');
     const flow = [...f.flows.values()][0]!;
-    assert.deepEqual([flow.selectionTarget, flow.sessionId, flow.subject, flow.generation], [targetB,'session_a','user_a',0]);
+    assert.deepEqual([flow.selectionIntent, flow.selectionTarget, flow.sessionId, flow.subject, flow.generation],
+      [intentFor('org_b'), targetB, 'session_a', 'user_a', 0]);
     assert.equal((flow.browserDigest)?.length, 64); assert.equal((flow.nonce)?.length, 43);
   });
   it('rejects an SSO callback after another selection advances the generation', async () => {
@@ -236,9 +442,117 @@ describe('ending and switching', () => {
     assert.equal(response.status, 409); assert.equal(f.provider.exchange.mock.callCount(), 0);
     assert.equal(f.selections.commit.mock.callCount(), 0);
   });
+  testCases(['missing intent key', 'expired flow', 'changed generation'] as const)(
+    'refuses SSO exchange after %s', async (fault) => {
+      const f = fixture();
+      f.provider.refresh.mock.mockImplementation(async () => { throw new ProviderFailure('authentication_required'); });
+      const outcome = await f.adapter.switchOrganization(f.request(), 'org_b', 0, '/setup');
+      if (outcome.outcome !== 'authentication_required') throw new Error('Missing continuation');
+      if (fault === 'missing intent key') {
+        Reflect.deleteProperty([...f.flows.values()][0]!.selectionIntent!, 'idempotencyKey');
+      } else {
+        f.selections.authorize.mock.mockImplementationOnce(async () => {
+          if (fault === 'changed generation') f.session.identity.session_generation++;
+          else f.advance(600_000);
+          return { target: targetB };
+        }, 2);
+      }
+      const state = new URL(outcome.response.headers.get('location')!).searchParams.get('state');
+      const cookie = outcome.response.headers.get('set-cookie')!.split(';')[0]!;
+      const response = await f.adapter.callback(new Request(`${profile.callbackURI}?state=${state}&code=generated`,
+        { headers: { cookie } }));
+      assert.equal(response.status, fault === 'changed generation' ? 409 : fault === 'expired flow' ? 401 : 422);
+      assert.equal(f.provider.exchange.mock.callCount(), 0);
+      assert.equal(f.selections.commit.mock.callCount(), 0);
+    });
+  testCases(['prior expired', 'returned expired', 'returned fresh'] as const)(
+    'applies the current-token continuation boundary when %s', async (scenario) => {
+      const f = fixture();
+      const prior = { ...claims, expiresAt: NOW + 100 };
+      f.provider.verify.mock.mockImplementationOnce(async () => prior, 0);
+      f.provider.refresh.mock.mockImplementation(async () => { throw new ProviderFailure('authentication_required'); });
+      const outcome = await f.adapter.switchOrganization(f.request(), 'org_b', 0, '/setup');
+      if (outcome.outcome !== 'authentication_required') throw new Error('Missing continuation');
+
+      const callbackTime = NOW + (scenario === 'prior expired' ? 100 : 99);
+      f.advance(callbackTime - NOW);
+      const flow = [...f.flows.values()][0]!;
+      assert.ok(flow.expiresAt > callbackTime);
+      if (scenario === 'prior expired') {
+        // Model the configured Python authorize_current port, which requires a fresh stored token.
+        assert.equal(prior.expiresAt, callbackTime);
+        f.selections.authorize.mock.mockImplementationOnce(async () => {
+          throw new IdentityFailure('SESSION_INVALID');
+        }, 2);
+      }
+      const fresh = { ...claims, organizationId: targetB.identityOrganizationId,
+        expiresAt: scenario === 'returned expired' ? callbackTime : callbackTime + 100_000 };
+      f.provider.verify.mock.mockImplementation(async () => fresh);
+      const returned = { ...credentials, accessToken: 'GENERATED_CONTINUATION_ACCESS' };
+      f.provider.exchange.mock.mockImplementation(async () => returned);
+
+      const state = new URL(outcome.response.headers.get('location')!).searchParams.get('state');
+      const cookie = outcome.response.headers.get('set-cookie')!.split(';')[0]!;
+      const request = new Request(`${profile.callbackURI}?state=${state}&code=generated`, { headers: { cookie } });
+      const response = await f.adapter.callback(request);
+      const accepted = scenario === 'returned fresh';
+      assert.equal(response.status, accepted ? 303 : 401);
+      if (!accepted) {
+        assert.equal((await response.json()).code, scenario === 'prior expired' ? 'SESSION_INVALID' : 'CALLBACK_INVALID');
+        assert.equal(response.headers.get('cache-control'), 'no-store');
+        assert.equal(response.headers.get('location'), null);
+        assert.deepEqual(response.headers.getSetCookie(), [
+          'opentour-auth-flow=; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=0',
+        ]);
+      }
+      assert.equal(f.provider.exchange.mock.callCount(), scenario === 'prior expired' ? 0 : 1);
+      assert.equal(f.sessions.replaceCredentials.mock.callCount(), accepted ? 1 : 0);
+      assert.equal(f.selections.commit.mock.callCount(), accepted ? 1 : 0);
+      assert.equal(f.session.identity.session_generation, accepted ? 1 : 0);
+      assert.equal(f.session.reconciliationRequired, !accepted);
+      assert.deepEqual(f.session.credentials, accepted ? returned : credentials);
+      assert.equal(f.flows.size, 0);
+
+      const replay = await f.adapter.callback(request);
+      assert.equal(replay.status, 401);
+      assert.equal((await replay.json()).code, 'CALLBACK_INVALID');
+      assert.equal(f.provider.exchange.mock.callCount(), scenario === 'prior expired' ? 0 : 1);
+
+      if (scenario === 'prior expired') {
+        const pending = structuredClone(f.session);
+        const restart = await f.signin();
+        assert.equal(restart.response.status, 303);
+        assert.notEqual(restart.state, state);
+        assert.notEqual(restart.cookie, cookie);
+        assert.equal([...f.flows.values()][0]!.kind, 'signin');
+
+        const recoveryProof = { ...fresh, sessionId: 'session_recovery', organizationId: null };
+        const recoveryCredentials = { ...credentials, accessToken: 'GENERATED_RECOVERY_ACCESS' };
+        const recoverySession = { ...pending, ended: false as const, handle: 'n'.repeat(43),
+          reconciliationRequired: false, credentials: recoveryCredentials,
+          identity: { ...pending.identity, session_id: recoveryProof.sessionId } };
+        f.provider.exchange.mock.mockImplementationOnce(async () => recoveryCredentials);
+        f.provider.verify.mock.mockImplementationOnce(async () => recoveryProof);
+        f.sessions.admit.mock.mockImplementationOnce(async () => recoverySession);
+        const recovered = await f.adapter.callback(restart.callback);
+
+        assert.equal(recovered.status, 303);
+        assert.equal(recovered.headers.get('location'), `${profile.origin}/setup`);
+        assert.ok(recovered.headers.getSetCookie().some(value =>
+          value.startsWith(`opentour-session=${recoverySession.handle};`)));
+        assert.equal(f.provider.exchange.mock.callCount(), 1);
+        assert.deepEqual(f.sessions.admit.mock.calls.map(call => call.arguments), [
+          [recoveryCredentials, recoveryProof],
+        ]);
+        assert.equal(f.sessions.replaceCredentials.mock.callCount(), 0);
+        assert.equal(f.selections.commit.mock.callCount(), 0);
+        assert.deepEqual(f.session, pending);
+        assert.equal(f.flows.size, 0);
+      }
+    });
   it('rechecks local membership after provider refresh and before selection', async () => {
     const f = fixture();
-    f.selections.authorize.mock.mockImplementationOnce(async () => targetA, 0);
+    f.selections.authorize.mock.mockImplementationOnce(async () => ({ target: targetA }), 0);
     f.selections.authorize.mock.mockImplementationOnce(async () => { throw new IdentityFailure('MEMBERSHIP_INACTIVE', 403); }, 1);
     assert.equal((await f.adapter.switchOrganization(f.request(), 'org_a', 0, '/setup')).outcome, 'unknown');
     assert.equal(f.selections.commit.mock.callCount(), 0); assert.equal(f.session.reconciliationRequired, true);
@@ -362,7 +676,7 @@ describe('distinct local and provider organization mappings', () => {
   testCases(['organizationId', 'identityIssuer', 'identityOrganizationId'] as const)('requires an explicit trusted target %s before contacting the provider', async (field) => {
       const f = fixture();
       const wrong = { ...targetA, [field]: field === 'identityOrganizationId' ? '' : 'foreign' };
-      f.selections.authorize.mock.mockImplementation(async () => wrong);
+      f.selections.authorize.mock.mockImplementation(async () => ({ target: wrong }));
       await assert.rejects(f.adapter.switchOrganization(f.request(), 'org_a', 0, '/setup'), /IDENTITY_MEMBERSHIP_CONFLICT/);
       assert.equal(f.provider.refresh.mock.callCount(), 0); assert.equal(f.selections.commit.mock.callCount(), 0);
     });
@@ -373,7 +687,7 @@ describe('distinct local and provider organization mappings', () => {
   });
   testCases(['identityOrganizationId', 'membershipId', 'authorityRevision'] as const)('fences %s changed during the provider wait', async (field) => {
       const f = fixture(); const target = { ...targetA };
-      f.selections.authorize.mock.mockImplementation(async () => target);
+      f.selections.authorize.mock.mockImplementation(async () => ({ target }));
       f.provider.refresh.mock.mockImplementation(async () => { target[field] = 'changed'; return credentials; });
       assert.equal((await f.adapter.switchOrganization(f.request(), 'org_a', 0, '/setup')).outcome, 'unknown');
       assert.ok(f.provider.refresh.mock.calls.some(call => isDeepStrictEqual(call.arguments, [credentials, 'identity_org_a'])));
@@ -391,12 +705,13 @@ describe('distinct local and provider organization mappings', () => {
     const cookie = outcome.response.headers.get('set-cookie')!.split(';')[0]!;
     const response = await f.adapter.callback(new Request(`${profile.callbackURI}?state=${state}&code=generated`, { headers: { cookie } }));
     assert.equal(response.status, 303);
-    assert.deepEqual(f.selections.commit.mock.calls.map(call => call.arguments), [[f.session.handle, 0, targetB,
-      { ...claims, organizationId: 'identity_org_b' }]]);
+    assert.deepEqual(f.selections.commit.mock.calls.map(({ arguments: args }) => args.slice(2)), [
+      [intentFor('org_b'), targetB, { ...claims, organizationId: 'identity_org_b' }, stagedDigest],
+    ]);
   });
   testCases(['before_exchange', 'during_exchange'] as const)('refuses changed continuation mapping %s', async (when) => {
     const f = fixture(); const target = { ...targetB };
-    f.selections.authorize.mock.mockImplementation(async () => target);
+    f.selections.authorize.mock.mockImplementation(async () => ({ target }));
     f.provider.refresh.mock.mockImplementation(async () => { throw new ProviderFailure('authentication_required'); });
     const outcome = await f.adapter.switchOrganization(f.request(), 'org_b', 0, '/setup');
     if (outcome.outcome !== 'authentication_required') throw new Error('Missing continuation');

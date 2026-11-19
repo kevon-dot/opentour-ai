@@ -647,13 +647,15 @@ def _invoke(
         args = list(argv)
         expected_commit: str | None = None
         expected_spec: str | None = None
-        expected_postgres_source: str | None = None
-        if consumer == "postgres_python":
-            from tools.fixtures.python_postgres import source_digest
+        expected_local_source: str | None = None
+        if consumer in {"postgres_python", "loopback_python"}:
+            from tools.fixtures.python_postgres import TLS_TARGETS, source_digest, source_paths
 
-            for source_file in ("tools/fixtures/postgres.py", "tools/fixtures/python_postgres.py"):
+            for source_file in source_paths(target):
                 schema_validate.local_file(root, source_file)
-            expected_postgres_source = source_digest(root, target)
+            expected_local_source = source_digest(root, target)
+            if target in TLS_TARGETS:
+                env["OPENTOUR_LOOPBACK_TARGET"] = target
             args.extend(["--result-file", str(report_path)])
         if consumer == "local_harness":
             args.extend(["--result-file", str(report_path)])
@@ -779,7 +781,7 @@ def _invoke(
         else:
             code = 0 if process.returncode == 0 else 1
             reason = None if code == 0 else "RUNNER_ERROR"
-        summary = {
+        summary: dict[str, Any] = {
             "runner": runner,
             "target": target,
             "raw_exit_code": process.returncode,
@@ -853,14 +855,14 @@ def _invoke(
                         ("target", target),
                         ("owner", TARGETS[target]),
                         ("binding_nonce", env["OPENTOUR_RESULT_NONCE"]),
-                        ("source_sha256", expected_postgres_source),
+                        ("source_sha256", expected_local_source),
                         (
                             "report_sha256",
                             hashlib.sha256(json.dumps(report, sort_keys=True).encode()).hexdigest(),
                         ),
                     )
                 )
-                or source_digest(root, target) != expected_postgres_source
+                or source_digest(root, target) != expected_local_source
             ):
                 raise CommandError(
                     "PostgreSQL lifecycle observations do not match this invocation."
@@ -910,6 +912,54 @@ def _invoke(
                     "workos_responses": "simulated_only",
                     "provider_acceptance": "NOT_RUN",
                 }
+        if consumer in {"postgres_python", "loopback_python"} and report and code != 3:
+            from tools.fixtures.python_postgres import TLS_TARGETS, source_digest
+
+            if target in TLS_TARGETS:
+                sidecar = report_path.with_name(report_path.name + ".loopback.json")
+                if (
+                    not sidecar.is_file()
+                    or sidecar.is_symlink()
+                    or sidecar.resolve().parent != private_dir
+                    or sidecar.stat().st_size > 16_384
+                ):
+                    raise CommandError("Local loopback observations are missing or unsafe.")
+                observations = schema_validate.read_json(sidecar)
+                expected = {
+                    "schema_version": "opentour.python-loopback-observation.v1",
+                    "target": target,
+                    "owner": TLS_TARGETS[target],
+                    "binding_nonce": env["OPENTOUR_RESULT_NONCE"],
+                    "source_sha256": expected_local_source,
+                    "report_sha256": hashlib.sha256(
+                        json.dumps(report, sort_keys=True).encode()
+                    ).hexdigest(),
+                    "kind": "local_integration",
+                    "product_acceptance": "NOT_RUN",
+                }
+                if (
+                    not isinstance(observations, dict)
+                    or observations.keys()
+                    != expected.keys() | {"accepted_connections", "cleanup_complete"}
+                    or any(observations[key] != value for key, value in expected.items())
+                    or type(observations["accepted_connections"]) is not int
+                    or not 0 <= observations["accepted_connections"] <= 8192
+                    or type(observations["cleanup_complete"]) is not bool
+                    or source_digest(root, target) != expected_local_source
+                ):
+                    raise CommandError("Local loopback observations do not match this invocation.")
+                if not observations["cleanup_complete"]:
+                    code, reason = 1, "CLEANUP_FAILED"
+                elif code == 0 and not observations["accepted_connections"]:
+                    code, reason = 1, "RUNNER_ERROR"
+                summary.update(exit_code=code, reason_code=reason)
+                summary.setdefault("artifacts", []).append(
+                    {
+                        "type": "python-loopback-observations",
+                        "sha256": hashlib.sha256(sidecar.read_bytes()).hexdigest(),
+                        "content": observations,
+                    }
+                )
         summary["output_sha256"] = hashlib.sha256(
             json.dumps(summary, sort_keys=True).encode()
         ).hexdigest()
@@ -919,20 +969,20 @@ def _invoke(
 def python_test(root: Path, target: str, run: Executor) -> dict[str, Any]:
     if (root / target).is_file() and not target.endswith(".py"):
         raise CommandError("test-python expects a Python file or declared package test directory.")
-    from tools.fixtures.python_postgres import TARGETS, present_targets
+    from tools.fixtures.python_postgres import TARGETS, TLS_TARGETS, present_targets
 
     if (root / target).is_dir():
         try:
             local_targets = present_targets(root)
         except (OSError, ValueError) as exc:
-            raise CommandError("Registered PostgreSQL target is unsafe.") from exc
+            raise CommandError("Registered local Python target is unsafe.") from exc
         if any(file.startswith(target + "/") for file in local_targets):
             raise CommandError(
-                "Directory contains a registered PostgreSQL target; select each local target "
+                "Directory contains a registered local Python target; select each local target "
                 "and each remaining unit file explicitly so all fixtures retain their actual kind."
             )
 
-    if target in TARGETS:
+    if target in TARGETS or target in TLS_TARGETS:
         return invoke(
             (*uv_python(root, target), "-m", "tools.fixtures.python_postgres", target),
             root,
@@ -940,7 +990,7 @@ def python_test(root: Path, target: str, run: Executor) -> dict[str, Any]:
             "pytest",
             run,
             expected_kind="local_integration",
-            consumer="postgres_python",
+            consumer="postgres_python" if target in TARGETS else "loopback_python",
         )
     return invoke(
         (*uv_python(root, target), "-m", "pytest", "-p", "tools.test_runner", "-q", "--", target),

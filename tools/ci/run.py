@@ -321,7 +321,7 @@ def run_check(name: str, root: Path) -> dict[str, Any]:
                 run(list(target_command(target)))
                 if steps[-1].get("command_evidence", {}).get("kind") != "local_integration":
                     steps[-1]["status"] = "FAIL"
-                    raise CommandError("PostgreSQL target lacked local integration evidence.", 1)
+                    raise CommandError("Python target lacked local integration evidence.", 1)
         elif name == "spec-traceability":
             run(["just", "validate-spec"])
         elif name == "secret-scan":

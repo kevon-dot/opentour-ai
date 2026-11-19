@@ -175,7 +175,12 @@ class PostgresIdentityRepository:
             return session
 
     def create_session(
-        self, session: Session, binding_sha256: str, *, sealed_payload: str | None = None
+        self,
+        session: Session,
+        binding_sha256: str,
+        *,
+        sealed_payload: str | None = None,
+        credential_check: Callable[[], datetime] | None = None,
     ) -> Session:
         with self.connect() as connection:
             self._session_lock(connection, session.issuer, session.session_id)
@@ -205,6 +210,20 @@ class PostgresIdentityRepository:
                 or session.created_at >= current.expires_at
             ):
                 raise AuthError("SESSION_INVALID")
+            if sealed_payload is not None:
+                # Ordinary callback has no selection fence. It may initialize browser
+                # credentials exactly once, including a legacy unselected identity row.
+                if (
+                    current.generation != 0
+                    or current.selected_organization_id is not None
+                    or current.reconciliation_required
+                    or connection.execute(
+                        "SELECT 1 FROM opentour_identity.session_credentials "
+                        "WHERE issuer=%s AND session_id=%s",
+                        (current.issuer, current.session_id),
+                    ).fetchone()
+                ):
+                    raise AuthError("STALE_SESSION_CONTEXT", 409)
             connection.execute(
                 "INSERT INTO opentour_identity.session_bindings VALUES (%s,%s,%s,%s,%s)",
                 (
@@ -217,6 +236,8 @@ class PostgresIdentityRepository:
             )
             if sealed_payload is not None:
                 self._write_credentials(connection, current, sealed_payload)
+            if credential_check is not None and credential_check() >= current.expires_at:
+                raise AuthError("SESSION_INVALID")
             return current
 
     @staticmethod
@@ -541,9 +562,15 @@ class PostgresIdentityRepository:
             )
 
     def consume_auth_transaction(
-        self, state_sha256: str, browser_sha256: str, now: datetime
+        self,
+        state_sha256: str,
+        browser_sha256: str,
+        now: datetime,
+        *,
+        check: Callable[[str], None] | None = None,
     ) -> str:
-        with self.connect() as connection:
+        """Claim once. A rejected trusted payload check rolls back the claim."""
+        with self.connect() as connection, connection.transaction():
             row = connection.execute(
                 "UPDATE opentour_identity.auth_transactions SET consumed_at=%s "
                 "WHERE state_sha256=%s AND browser_sha256=%s AND expires_at>%s AND created_at<=%s "
@@ -552,7 +579,10 @@ class PostgresIdentityRepository:
             ).fetchone()
             if row is None:
                 raise AuthError("CALLBACK_INVALID")
-            return str(row["sealed_payload"])
+            sealed = str(row["sealed_payload"])
+            if check is not None:
+                check(sealed)
+            return sealed
 
 
 def connection_factory(dsn: str) -> Callable[[], psycopg.Connection[dict[str, Any]]]:

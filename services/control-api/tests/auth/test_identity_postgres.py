@@ -3,6 +3,7 @@
 import hashlib
 import json
 import os
+import secrets
 import shutil
 import subprocess
 import sys
@@ -22,7 +23,20 @@ import pytest
 from cryptography.fernet import Fernet
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from opentour_control.auth.config import AuthError, FernetSealingPort, digest
+from opentour_control.auth.browser_private import (
+    MAX_REQUEST_BYTES,
+    AuthenticatedBrowserCaller,
+    PrivateBrowserDispatch,
+)
+from opentour_control.auth.browser_private_pilot import lookup_private_browser_pilot_route
+from opentour_control.auth.browser_state import (
+    BrowserAuthState,
+    BrowserAuthTransaction,
+    BrowserCredentials,
+    BrowserSelectionIntent,
+    BrowserSelectionTarget,
+)
+from opentour_control.auth.config import AuthError, FernetSealingPort, digest, timestamp
 from opentour_control.auth.repository import (
     IdentityEvent,
     PostgresIdentityRepository,
@@ -31,6 +45,7 @@ from opentour_control.auth.repository import (
     lock_membership_observation,
 )
 from opentour_control.auth.session import SessionService, create_session_router
+from pydantic import ValidationError
 
 from tools.fixtures.postgres import DisposablePostgres
 
@@ -38,10 +53,8 @@ TARGET = "services/control-api/tests/auth/test_identity_postgres.py"
 ROOT = Path(__file__).resolve().parents[4]
 
 
-@pytest.fixture(scope="module")
-def postgres():
-    if os.environ.get("OPENTOUR_POSTGRES_TARGET") != TARGET:
-        raise RuntimeError("Real PostgreSQL requires its registered local-integration target")
+@contextmanager
+def identity_postgres_fixture():
     fixture = DisposablePostgres()
     with fixture:
         migration = ROOT / "services/control-api/migrations/0001_identity_state.sql"
@@ -69,6 +82,14 @@ def postgres():
         ).hexdigest()
         yield fixture
     assert fixture.cleanup_complete
+
+
+@pytest.fixture(scope="module")
+def postgres():
+    if os.environ.get("OPENTOUR_POSTGRES_TARGET") != TARGET:
+        raise RuntimeError("Real PostgreSQL requires its registered local-integration target")
+    with identity_postgres_fixture() as fixture:
+        yield fixture
 
 
 @pytest.fixture(params=["customer_controlled", "opentour_managed"])
@@ -104,6 +125,439 @@ def durable(postgres, identity, mode):
         mode=mode,
         postgres=postgres,
     )
+
+
+@pytest.fixture
+def browser_state(durable):
+    return BrowserAuthState(
+        durable.service, FernetSealingPort((Fernet.generate_key(),), 86_400), os.urandom(32)
+    )
+
+
+def test_browser_flow_is_sealed_browser_bound_and_single_use(browser_state, durable, identity):
+    flow = BrowserAuthTransaction(
+        state=secrets.token_urlsafe(32),
+        nonce=secrets.token_urlsafe(32),
+        browser_digest=digest(secrets.token_urlsafe(32)),
+        verifier=secrets.token_urlsafe(32),
+        expires_at=identity.now + timedelta(seconds=600),
+        return_path="/signed-out",
+        kind="signin",
+        session_handle=None,
+        subject=None,
+        session_id=None,
+        generation=None,
+        selection_target=None,
+    )
+    combined = f"{flow.state}.{flow.nonce}"
+    browser_state.create_flow(flow)
+    with durable.connect() as connection:
+        row = connection.execute(
+            "SELECT sealed_payload FROM opentour_identity.auth_transactions WHERE state_sha256=%s",
+            (digest(combined),),
+        ).fetchone()
+        assert row is not None
+        assert all(part not in row["sealed_payload"] for part in (flow.state, flow.verifier))
+
+    with pytest.raises(AuthError, match="CALLBACK_INVALID"):
+        browser_state.consume_flow(combined, "b" * 64)
+
+    def consume():
+        try:
+            return browser_state.consume_flow(combined, flow.browser_digest)
+        except AuthError as error:
+            return error.code
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(lambda _: consume(), range(2)))
+    assert results.count(flow) == 1
+    assert results.count("CALLBACK_INVALID") == 1
+
+
+@pytest.mark.parametrize("expired", [False, True])
+def test_browser_switch_flow_binds_exact_intent(browser_state, durable, identity, expired):
+    intent = BrowserSelectionIntent(
+        organization_id="org_a", expected_generation=0, idempotency_key="generated-selection"
+    )
+    flow = BrowserAuthTransaction(
+        state=secrets.token_urlsafe(32),
+        nonce=secrets.token_urlsafe(32),
+        browser_digest=digest(secrets.token_urlsafe(32)),
+        verifier=secrets.token_urlsafe(32),
+        expires_at=identity.now + timedelta(seconds=1),
+        return_path="/",
+        kind="switch",
+        session_handle=durable.binding,
+        subject="user_a",
+        session_id=durable.sid,
+        generation=0,
+        selection_target=BrowserSelectionTarget(
+            organization_id="org_a",
+            identity_organization_id="identity_org_a",
+            identity_issuer=identity.issuer,
+            membership_id="member_a",
+            authority_revision="authority_a",
+        ),
+        selection_intent=intent,
+    )
+    fields = flow.model_dump()
+    for invalid_intent in (
+        None,
+        intent.model_copy(update={"organization_id": "org_b"}),
+        intent.model_copy(update={"expected_generation": 1}),
+    ):
+        with pytest.raises(ValidationError):
+            BrowserAuthTransaction.model_validate({**fields, "selection_intent": invalid_intent})
+    browser_state.create_flow(flow)
+    combined = f"{flow.state}.{flow.nonce}"
+    if expired:
+        durable.service.clock = lambda: flow.expires_at
+        with pytest.raises(AuthError, match="CALLBACK_INVALID"):
+            browser_state.consume_flow(combined, flow.browser_digest)
+    else:
+        assert browser_state.consume_flow(combined, flow.browser_digest) == flow
+
+
+def test_private_browser_dispatch_enforces_caller_and_durable_signin(
+    browser_state, durable, identity, monkeypatch, caplog
+):
+    principal = "generated-bff"
+    audience = "generated-dev-listener"
+    dispatcher = PrivateBrowserDispatch(
+        browser_state, principal=principal, audience=audience, clock=lambda: identity.now
+    )
+    expires = identity.now + timedelta(seconds=120)
+    paths = {
+        "create_flow": "/internal/browser-identity/v1/flows/create",
+        "consume_flow": "/internal/browser-identity/v1/flows/consume",
+        "admit": "/internal/browser-identity/v1/sessions/admit",
+        "current": "/internal/browser-identity/v1/sessions/current",
+        "end": "/internal/browser-identity/v1/sessions/end",
+    }
+
+    def dispatch(operation_id, payload, **caller_changes):
+        caller = AuthenticatedBrowserCaller(principal, audience, operation_id, expires)
+        body = payload if isinstance(payload, bytes) else json.dumps(payload).encode()
+        response = dispatcher.dispatch(
+            operation_id,
+            body,
+            caller=replace(caller, **caller_changes),
+        )
+        assert response.headers["Cache-Control"] == "no-store"
+        assert response.headers["Content-Type"] == "application/json"
+        return response.status, json.loads(response.body)
+
+    def send(operation_id, payload, **caller_changes):
+        path = paths[operation_id]
+        route = lookup_private_browser_pilot_route("POST", path)
+        assert route is not None
+        assert (route.method, route.path, route.operation) == ("POST", path, operation_id)
+        return dispatch(route.operation, payload, **caller_changes)
+
+    flow = {
+        "state": secrets.token_urlsafe(32),
+        "nonce": secrets.token_urlsafe(32),
+        "browserDigest": digest(secrets.token_urlsafe(32)),
+        "verifier": secrets.token_urlsafe(32),
+        "expiresAt": int(expires.timestamp() * 1000),
+        "returnPath": "/signed-out",
+        "kind": "signin",
+        "sessionHandle": None,
+        "subject": None,
+        "sessionId": None,
+        "generation": None,
+        "selectionTarget": None,
+        "selectionIntent": None,
+    }
+    status, error = send("create_flow", {"flow": {**flow, "authority": "generated-extra"}})
+    assert (status, error["code"]) == (422, "SCHEMA_INVALID")
+    status, error = send("create_flow", b" " * (MAX_REQUEST_BYTES + 1))
+    assert (status, error["code"]) == (413, "PRIVATE_BODY_TOO_LARGE")
+    status, error = dispatch("replace", {})
+    assert (status, error["code"]) == (404, "PRIVATE_OPERATION_NOT_FOUND")
+    assert send("create_flow", {"flow": flow}) == (200, None)
+    claim = {"state": f"{flow['state']}.{flow['nonce']}", "browser": flow["browserDigest"]}
+    duplicate = json.dumps(claim).replace(
+        '"browser":', f'"state": {json.dumps(claim["state"])}, "browser":', 1
+    )
+    status, error = send("consume_flow", duplicate.encode())
+    assert (status, error["code"]) == (422, "SCHEMA_INVALID")
+    missing_caller = dispatcher.dispatch("consume_flow", json.dumps(claim).encode(), caller=None)
+    assert (missing_caller.status, json.loads(missing_caller.body)["code"]) == (
+        403,
+        "PRIVATE_CALLER_DENIED",
+    )
+    for invalid in (
+        {"principal": "generated-other"},
+        {"audience": "generated-other-listener"},
+        {"operation": "create_flow"},
+        {"expires_at": identity.now},
+    ):
+        status, error = send("consume_flow", claim, **invalid)
+        assert (status, error["code"]) == (403, "PRIVATE_CALLER_DENIED")
+    assert send("consume_flow", claim) == (200, flow)
+    status, error = send("consume_flow", claim)
+    assert (status, error["code"]) == (401, "CALLBACK_INVALID")
+
+    switch = BrowserAuthTransaction(
+        state=secrets.token_urlsafe(32),
+        nonce=secrets.token_urlsafe(32),
+        browser_digest=flow["browserDigest"],
+        verifier=secrets.token_urlsafe(32),
+        expires_at=expires,
+        return_path="/",
+        kind="switch",
+        session_handle=durable.binding,
+        subject=durable.context.actor["subject"],
+        session_id=durable.sid,
+        generation=0,
+        selection_target=BrowserSelectionTarget(
+            organization_id="org_a",
+            identity_organization_id="identity_org_a",
+            identity_issuer=identity.issuer,
+            membership_id="member_a",
+            authority_revision="authority_a",
+        ),
+        selection_intent=BrowserSelectionIntent(
+            organization_id="org_a", expected_generation=0, idempotency_key="generated-old-switch"
+        ),
+    )
+    browser_state.create_flow(switch)
+    switch_state = f"{switch.state}.{switch.nonce}"
+
+    def autocommit_connection():
+        connection = durable.connect()
+        connection.autocommit = True
+        return connection
+
+    with monkeypatch.context() as patch:
+        patch.setattr(browser_state.repository, "connect", autocommit_connection)
+        status, error = send(
+            "consume_flow", {"state": switch_state, "browser": switch.browser_digest}
+        )
+    assert (status, error["code"]) == (401, "CALLBACK_INVALID")
+    assert browser_state.consume_flow(switch_state, switch.browser_digest) == switch
+
+    sid = f"generated-private-{uuid4().hex}"
+    credentials = {
+        "accessToken": identity.token(sid=sid),
+        "refreshToken": "GENERATED_PRIVATE_REFRESH",
+        "userId": durable.context.actor["subject"],
+    }
+    expired_token = identity.token(sid=sid, exp=int(identity.now.timestamp()))
+    status, error = send("admit", {"credentials": {**credentials, "accessToken": expired_token}})
+    assert (status, error["code"]) == (401, "SESSION_INVALID")
+    with durable.connect() as connection:
+        assert (
+            connection.execute(
+                "SELECT 1 FROM opentour_identity.sessions WHERE issuer=%s AND session_id=%s",
+                (identity.issuer, sid),
+            ).fetchone()
+            is None
+        )
+
+    status, admitted = send("admit", {"credentials": credentials})
+    assert status == 200 and admitted["ended"] is False
+    handle = admitted["handle"]
+    assert admitted["identity"]["session_id"] == sid
+    assert admitted["credentials"] == credentials
+    status, denied = send("current", {"handle": handle}, principal="generated-other")
+    assert (status, denied["code"]) == (403, "PRIVATE_CALLER_DENIED")
+    assert credentials["accessToken"] not in json.dumps(denied)
+    status, current = send("current", {"handle": handle})
+    assert status == 200 and current["credentials"] == credentials
+    assert current["csrfToken"] == admitted["csrfToken"]
+
+    raw_failure = "GENERATED_PRIVATE_END_FAILURE"
+    original_end = browser_state.end
+    end_calls = []
+
+    def end_then_lose_acknowledgment(handle, generation):
+        end_calls.append((handle, generation))
+        original_end(handle, generation)
+        raise RuntimeError(raw_failure)
+
+    end_request = {"handle": handle, "generation": 0}
+    with caplog.at_level("DEBUG"), monkeypatch.context() as patch:
+        patch.setattr(browser_state, "end", end_then_lose_acknowledgment)
+        status, error = send("end", end_request)
+    assert (status, error["code"]) == (503, "SESSION_END_UNCONFIRMED")
+    assert end_calls == [(handle, 0)]
+    assert raw_failure not in json.dumps(error)
+    assert raw_failure not in caplog.text
+    assert send("current", {"handle": handle}) == (
+        200,
+        {"handle": handle, "csrfToken": admitted["csrfToken"], "ended": True, "generation": 1},
+    )
+    assert send("end", end_request) == (200, {"sessionId": sid, "generation": 1})
+
+
+@pytest.mark.parametrize("selected", [False, True])
+def test_same_sid_callback_cannot_replace_initialized_credentials(
+    browser_state, durable, identity, selected
+):
+    original = BrowserCredentials(
+        access_token=durable.token,
+        refresh_token="generated-original",
+        user_id=durable.context.actor["subject"],
+    )
+    admitted = browser_state.admit(original)
+    if selected:
+        with durable.connect() as conn:
+            conn.execute(
+                "UPDATE opentour_identity.sessions SET generation=1, "
+                "selected_organization_id='local', selected_membership_id='member' "
+                "WHERE issuer=%s AND session_id=%s",
+                (identity.issuer, durable.sid),
+            )
+            for table in ("session_bindings", "session_credentials"):
+                conn.execute(
+                    f"UPDATE opentour_identity.{table} SET generation=1 "
+                    "WHERE issuer=%s AND session_id=%s",
+                    (identity.issuer, durable.sid),
+                )
+    duplicate = BrowserCredentials(
+        access_token=durable.token,
+        refresh_token="generated-duplicate",
+        user_id=durable.context.actor["subject"],
+    )
+    with pytest.raises(AuthError, match="STALE_SESSION_CONTEXT"):
+        browser_state.admit(duplicate)
+    current = browser_state.current(admitted.handle)
+    assert current.generation == int(selected)
+    assert current.credentials == original
+    with durable.connect() as conn:
+        count = conn.execute(
+            "SELECT count(*) AS count FROM opentour_identity.session_bindings "
+            "WHERE issuer=%s AND session_id=%s",
+            (identity.issuer, durable.sid),
+        ).fetchone()
+    assert count["count"] == 2
+
+
+def test_expired_browser_admission_rolls_back_credentials_and_binding(
+    browser_state, durable, identity, monkeypatch
+):
+    sid = "session_" + uuid4().hex
+    credentials = BrowserCredentials(
+        access_token=identity.token(sid=sid),
+        refresh_token="GENERATED_REFRESH",
+        user_id=durable.context.actor["subject"],
+    )
+    write_credentials = durable.repository._write_credentials
+
+    def write_then_expire(connection, session, sealed_payload):
+        write_credentials(connection, session, sealed_payload)
+        durable.service.clock = lambda: identity.now + timedelta(seconds=600)
+
+    monkeypatch.setattr(durable.repository, "_write_credentials", write_then_expire)
+    with pytest.raises(AuthError, match="SESSION_INVALID"):
+        browser_state.admit(credentials)
+    with durable.connect() as conn:
+        for table in ("sessions", "session_credentials", "session_bindings"):
+            assert conn.execute(
+                f"SELECT 1 FROM opentour_identity.{table} WHERE issuer=%s AND session_id=%s",
+                (identity.issuer, sid),
+            ).fetchone() is None
+
+
+def test_browser_session_round_trip_and_exact_refresh_receipt(browser_state, durable, identity):
+    sid = "session_" + uuid4().hex
+    original = BrowserCredentials(
+        access_token=identity.token(sid=sid),
+        refresh_token="GENERATED_INITIAL_REFRESH",
+        user_id="user_a",
+    )
+    admitted = browser_state.admit(original)
+    current = browser_state.current(admitted.handle)
+    assert current == admitted
+    assert admitted.credentials == original and admitted.identity is not None
+    assert admitted.identity.wire() == {
+        "actor": {"kind": "human", "subject": "user_a", "issuer": identity.issuer},
+        "session_id": sid,
+        "session_generation": 0,
+        "identity_checked_at": timestamp(identity.now),
+        "authentication_time": timestamp(identity.now - timedelta(seconds=120)),
+        "assurance_level": "unknown",
+    }
+    assert admitted.csrf_token == current.csrf_token
+    assert admitted.handle not in repr(admitted)
+    context = durable.service.current_context(original.access_token, admitted.handle, "generated")
+    assert context["state"] == "unselected" and context["organization_id"] is None
+
+    replacement = BrowserCredentials(
+        access_token=identity.token(sid=sid, org_id="identity_org_b"),
+        refresh_token="GENERATED_REPLACEMENT_REFRESH",
+        user_id="user_a",
+    )
+    with pytest.raises(AuthError, match="STALE_SESSION_CONTEXT"):
+        browser_state.replace_credentials(admitted.handle, 1, replacement)
+    assert browser_state.current(admitted.handle).credentials == original
+
+    receipt = browser_state.replace_credentials(admitted.handle, 0, replacement)
+    session = durable.repository.load_session(digest(admitted.handle), identity.now)
+    ciphertext = durable.repository.read_credentials(session, identity.now)
+    assert receipt == digest(ciphertext)
+    assert replacement.refresh_token not in ciphertext
+    assert replacement.access_token not in ciphertext
+    assert browser_state.current(admitted.handle).credentials == replacement
+    current_identity, claim, sealed_digest = browser_state.selection_evidence(
+        replacement.access_token, admitted.handle
+    )
+    assert current_identity.session_generation == 0
+    assert claim.organization_id == "identity_org_b"
+    assert sealed_digest == receipt
+    with pytest.raises(AuthError, match="CONTEXT_RECONCILIATION_REQUIRED"):
+        browser_state.selection_evidence(original.access_token, admitted.handle)
+
+    browser_state.require_reconciliation(admitted.handle, 0)
+    assert browser_state.current(admitted.handle).reconciliation_required
+    ended = browser_state.end(admitted.handle, 0)
+    assert (ended.session_id, ended.generation) == (sid, 1)
+    assert browser_state.end(admitted.handle, 0) == ended
+    ended_view = browser_state.current(admitted.handle)
+    assert ended_view.ended and ended_view.credentials is None and ended_view.identity is None
+    assert ended_view.csrf_token == admitted.csrf_token
+    with pytest.raises(AuthError, match="SESSION_ENDED"):
+        browser_state.replace_credentials(admitted.handle, 0, replacement)
+    with pytest.raises(AuthError, match="SESSION_ENDED"):
+        browser_state.require_reconciliation(admitted.handle, 0)
+
+
+def test_browser_admission_validates_signed_subject_and_cannot_confirm_unknown_commit(
+    browser_state, durable, identity, monkeypatch
+):
+    sid = "session_" + uuid4().hex
+    rejected = BrowserCredentials(
+        access_token=identity.token(sid=sid), refresh_token="GENERATED_REFRESH", user_id="other"
+    )
+    with pytest.raises(AuthError, match="SESSION_INVALID"):
+        browser_state.admit(rejected)
+    with durable.connect() as connection:
+        assert connection.execute(
+            "SELECT count(*) AS n FROM opentour_identity.sessions WHERE session_id=%s", (sid,)
+        ).fetchone() == {"n": 0}
+
+    write = durable.repository.create_session
+
+    def lost_ack(*args, **kwargs):
+        write(*args, **kwargs)
+        raise psycopg.OperationalError("GENERATED_DATABASE_SENTINEL")
+
+    monkeypatch.setattr(durable.repository, "create_session", lost_ack)
+    trusted = BrowserCredentials(
+        access_token=identity.token(sid=sid), refresh_token="GENERATED_REFRESH", user_id="user_a"
+    )
+    with pytest.raises(AuthError, match="^SESSION_ADMISSION_UNCONFIRMED$"):
+        browser_state.admit(trusted)
+    with durable.connect() as connection:
+        assert connection.execute(
+            "SELECT s.session_id FROM opentour_identity.sessions s "
+            "JOIN opentour_identity.session_credentials c USING (issuer, session_id) "
+            "JOIN opentour_identity.session_bindings b USING (issuer, session_id) "
+            "WHERE s.session_id=%s",
+            (sid,),
+        ).fetchone() == {"session_id": sid}
 
 
 def test_runtime_role_and_migration_are_real(durable):
@@ -268,28 +722,37 @@ def test_stale_subject_generation_and_expired_credentials_refuse(durable, identi
 
 
 def test_configured_typescript_factories_with_actual_durable_ports(durable, identity):
-    """Node SDK HTTP is generated; callback claims, sessions and denial commit to real PG."""
+    """The exported account handlers use generated WorkOS replies and actual PostgreSQL."""
     pnpm, node = shutil.which("pnpm"), shutil.which("node")
     assert pnpm and node, "Qualified pinned Node/pnpm are required by this finite target"
     with tempfile.TemporaryDirectory(prefix="opentour-auth-port-") as directory:
         private = Path(directory)
         private.chmod(0o700)
         output = private / "compiled"
+        web = ROOT / "apps/web"
+        project = private / "tsconfig.json"
+        project.write_text(
+            json.dumps(
+                {
+                    "extends": str(web / "lib/server/tsconfig.json"),
+                    "compilerOptions": {
+                        "typeRoots": [str(ROOT / "node_modules/@types")],
+                        "rootDir": str(web),
+                        "outDir": str(output),
+                        "noEmit": False,
+                        "noEmitOnError": True,
+                    },
+                    "files": [
+                        str(web / "features/account-entry/server.ts"),
+                        str(web / "app/auth/signin/route.ts"),
+                        str(web / "app/auth/callback/route.ts"),
+                    ],
+                    "include": [],
+                }
+            )
+        )
         subprocess.run(
-            [
-                pnpm,
-                "exec",
-                "tsc",
-                "-p",
-                "apps/web/lib/server/tsconfig.json",
-                "--noEmit",
-                "false",
-                "--noEmitOnError",
-                "--rootDir",
-                "apps/web",
-                "--outDir",
-                str(output),
-            ],
+            [pnpm, "exec", "tsc", "-p", str(project)],
             cwd=ROOT,
             check=True,
             timeout=30,
@@ -297,9 +760,7 @@ def test_configured_typescript_factories_with_actual_durable_ports(durable, iden
             stderr=subprocess.DEVNULL,
         )
         (output / "package.json").write_text('{"type":"module"}')
-        (output / "lib/server/node_modules").symlink_to(
-            ROOT / "apps/web/node_modules", target_is_directory=True
-        )
+        (output / "node_modules").symlink_to(web / "node_modules", target_is_directory=True)
         config = private / "fixture.json"
         config.write_text(
             json.dumps(
@@ -316,14 +777,15 @@ def test_configured_typescript_factories_with_actual_durable_ports(durable, iden
             )
         )
         config.chmod(0o600)
+        bridge = Path(__file__).with_name("auth_postgres_bridge.py")
         probe = subprocess.run(
             [
                 node,
                 "--conditions=react-server",
                 str(Path(__file__).with_name("authkit_postgres_probe.mjs")),
-                str(output / "lib/server/authkit-adapter.js"),
+                str(output),
                 sys.executable,
-                str(Path(__file__).with_name("auth_postgres_bridge.py")),
+                str(bridge),
                 str(config),
             ],
             cwd=ROOT,
@@ -335,7 +797,37 @@ def test_configured_typescript_factories_with_actual_durable_ports(durable, iden
         assert len(probe.stdout) < 4096
         report = json.loads(probe.stdout)
         assert report["configured_factories"] == "PASS" and report["actual_postgresql"]
+        assert report["exported_signin_callback"] and report["unconfigured_exports_refused"]
+        assert report["pipe_database_readiness"] and report["pipe_invalid_commands_refused"]
+        assert report["pipe_expired_proof_refused"]
         assert report["provider_acceptance"] == "NOT_RUN" and report["mode"] == durable.mode
+
+        with tempfile.TemporaryDirectory(prefix="opentour-c03-", dir="/tmp") as absent:
+            empty = Path(absent).resolve()
+            socket = empty / "socket"
+            socket.mkdir(mode=0o700)
+            (empty / ".owned-c03-fixture").write_text(empty.name)
+            unavailable = private / "unavailable.json"
+            unavailable.touch(mode=0o600)
+            unavailable.write_text(
+                json.dumps(
+                    {
+                        **json.loads(config.read_text()),
+                        "dsn": f"host={socket} port=5432 dbname=postgres user=c03_runtime",
+                    }
+                )
+            )
+            health = subprocess.run(
+                [sys.executable, str(bridge), str(unavailable)],
+                input=b'{"action":"health"}\n',
+                timeout=10,
+                check=True,
+                capture_output=True,
+            )
+            assert not health.stderr
+            assert json.loads(health.stdout) == {
+                "error": {"code": "TEST_PORT_UNAVAILABLE", "status": 503}
+            }
 
 
 @pytest.fixture

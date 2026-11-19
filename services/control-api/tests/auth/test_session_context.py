@@ -54,12 +54,19 @@ def test_zero_org_identity_has_finite_allowlist(identity):
         identity.service.authorization_context(identity.token(), identity.handle)
 
 
-@pytest.mark.parametrize("state", ["unselected", "mismatch", "pending", "removed"])
+@pytest.mark.parametrize(
+    "state", ["unselected", "first_switch_pending", "mismatch", "pending", "removed"]
+)
 def test_current_context_never_fabricates_selection(identity, state):
     session = identity.repository.sessions["session_a"]
     token = identity.token()
     expected = "reconciliation_required"
-    if state == "unselected":
+    if state == "first_switch_pending":
+        identity.repository.sessions["session_a"] = replace(
+            session, selected_organization_id=None, selected_membership_id=None,
+            reconciliation_required=True,
+        )
+    elif state == "unselected":
         identity.repository.sessions["session_a"] = replace(
             session, selected_organization_id=None, selected_membership_id=None
         )
@@ -369,6 +376,71 @@ def test_provider_mapping_changed_during_fetch_cannot_return_old_context(identit
             identity.service.current_context(identity.token(), identity.handle, "changed_mapping")
 
 
+@pytest.mark.parametrize("method", ["authorization", "current"])
+@pytest.mark.parametrize("outcome", ["removed", "not_found"])
+def test_removal_from_old_provider_mapping_cannot_deny_new_selection(identity, method, outcome):
+    before = identity.repository.sessions["session_a"]
+    observation = identity.repository.observations.pop((identity.issuer, "provider_a"))
+
+    def changed(*args):
+        identity.members["org_a"] = replace(
+            identity.members["org_a"], identity_organization_id="identity_org_b"
+        )
+        if outcome == "not_found":
+            raise AuthError("PROVIDER_MEMBERSHIP_REMOVED", 404)
+        return replace(observation, status="removed", locally_denied=True)
+
+    identity.provider.current_membership = changed
+    with pytest.raises(AuthError, match="STALE_SESSION_CONTEXT") as refused:
+        if method == "authorization":
+            identity.service.authorization_context(identity.token(), identity.handle)
+        else:
+            identity.service.current_context(identity.token(), identity.handle, "changed_mapping")
+    assert refused.value.status == 409
+    assert identity.repository.sessions["session_a"] == before
+    assert not identity.repository.observations
+
+
+def test_mapping_changed_while_reading_denial_preserves_current_selection(identity):
+    before = identity.repository.sessions["session_a"]
+    read_observation = identity.repository.observation
+    observation = read_observation(identity.issuer, "provider_a")
+    identity.repository.record_observation(
+        replace(observation, status="removed", locally_denied=True)
+    )
+
+    def changed(*args):
+        identity.members["org_a"] = replace(
+            identity.members["org_a"], provider_membership_id="provider_b"
+        )
+        return read_observation(*args)
+
+    identity.repository.observation = changed
+    with pytest.raises(AuthError, match="STALE_SESSION_CONTEXT") as refused:
+        identity.service.current_context(identity.token(), identity.handle, "changed_mapping")
+    assert refused.value.status == 409
+    assert identity.repository.sessions["session_a"] == before
+
+
+def test_locally_missing_membership_reappears_before_selection_clear(identity):
+    before = identity.repository.sessions["session_a"]
+    membership = identity.members.pop("org_a")
+    repository = identity.repository
+    load_session = repository.load_session
+    first_request_load = repository.load_calls + 1
+
+    def reappeared(*args, **kwargs):
+        if repository.load_calls == first_request_load:
+            identity.members["org_a"] = membership
+        return load_session(*args, **kwargs)
+
+    repository.load_session = reappeared
+    with pytest.raises(AuthError, match="STALE_SESSION_CONTEXT") as refused:
+        identity.service.current_context(identity.token(), identity.handle, "reappeared_membership")
+    assert refused.value.status == 409
+    assert repository.sessions["session_a"] == before
+
+
 def test_provider_mapping_never_weakens_verified_issuer_binding(identity):
     identity.repository.observations.clear()
     observation = identity.provider.current_membership("provider_a", identity.now)
@@ -380,14 +452,25 @@ def test_provider_mapping_never_weakens_verified_issuer_binding(identity):
     assert not identity.repository.observations
 
 
-def test_provider_removed_response_uses_explicit_identity_organization_mapping(identity):
+@pytest.mark.parametrize("local_change", ["unchanged", "inactive", "authority_revision"])
+def test_provider_removed_response_uses_explicit_identity_organization_mapping(
+    identity, local_change
+):
+    before = identity.repository.sessions["session_a"]
     identity.repository.observations.clear()
 
     def removed(*args):
+        if local_change == "inactive":
+            identity.members["org_a"] = replace(identity.members["org_a"], active=False)
+        elif local_change == "authority_revision":
+            identity.members["org_a"] = replace(
+                identity.members["org_a"], authority_revision="authority_b", revocation_epoch=3
+            )
         raise AuthError("PROVIDER_MEMBERSHIP_REMOVED", 404)
 
     identity.provider.current_membership = removed
     view = identity.service.current_context(identity.token(), identity.handle, "removed_mapping")
     assert view["state"] == "unselected"
+    assert view["session_generation"] == before.generation + 1
     observed = identity.repository.observation(identity.issuer, "provider_a")
     assert observed.organization_id == "identity_org_a" and observed.locally_denied

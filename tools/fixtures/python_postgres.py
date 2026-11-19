@@ -1,4 +1,4 @@
-"""Finite native Python targets using observed accepted PostgreSQL fixture lifecycle.
+"""Finite native Python targets using observed PostgreSQL or local TCP/TLS fixtures.
 
 This is test discipline, not a hostile-code sandbox or provider qualification.
 The adapter observes the accepted fixture implementation; test booleans/markers do
@@ -13,26 +13,38 @@ import json
 import os
 import re
 import subprocess
+from contextlib import ExitStack
 from pathlib import Path
 from typing import Any
 
 from tools.fixtures.postgres import VERSION, DisposablePostgres, PrerequisiteMissing
 
 ROOT = Path(__file__).resolve().parents[2]
+PILOT_POSTGRES = "services/control-api/tests/auth/test_browser_private_pilot_postgres.py"
+NODE_PROBE = "services/control-api/tests/auth/private_browser_client_postgres_probe.mjs"
+NODE_GUARD = "packages/contracts/common/unit-network-guard.cjs"
 TARGETS = {
     "services/control-api/tests/migrations/test_expand_contract.py": "OPE-213",
     "services/control-api/tests/auth/test_identity_postgres.py": "OPE-142",
     "services/control-api/tests/auth/test_grants_postgres.py": "OPE-143",
     "tests/integration/authority_journal_recovery.py": "OPE-217",
     "services/control-api/tests/organizations/test_creation_saga.py": "OPE-171",
+    "services/control-api/tests/organizations/test_session_selection.py": "OPE-172",
+    "services/control-api/tests/runners/test_enrollment_postgres.py": "OPE-184",
+    PILOT_POSTGRES: "OPE-142",
+}
+TLS_TARGETS = {
+    "services/control-api/tests/auth/test_browser_private_listener.py": "OPE-142",
+    "services/control-api/tests/auth/test_browser_private_pilot_listener.py": "OPE-142",
+    PILOT_POSTGRES: "OPE-142",
 }
 SCHEMA_ID = "urn:opentour:python-postgres-observation:1.0"
 
 
 def target_command(target: str) -> tuple[str, ...]:
     """Exact native command for CI; no arbitrary filter or implicit unit exclusion."""
-    if target not in TARGETS:
-        raise ValueError("PostgreSQL target is not registered")
+    if target not in TARGETS and target not in TLS_TARGETS:
+        raise ValueError("Local Python target is not registered")
     if target == "tests/integration/authority_journal_recovery.py":
         return ("just", "test-integration", "local", "authority_journal_recovery")
     return ("just", "test-python", target)
@@ -41,24 +53,39 @@ def target_command(target: str) -> tuple[str, ...]:
 def present_targets(root: Path) -> tuple[str, ...]:
     """CI inventory: every existing finite target needs the required local job."""
     result = []
-    for target in TARGETS:
+    for target in TARGETS.keys() | TLS_TARGETS.keys():
         path = root / target
-        if path.exists():
+        if path.exists() or path.is_symlink():
             if (
                 not path.is_file()
                 or path.is_symlink()
                 or not path.resolve().is_relative_to(root.resolve())
             ):
-                raise ValueError("Registered PostgreSQL target is not a safe repository file")
+                raise ValueError("Registered local Python target is not a safe repository file")
             result.append(target)
     return tuple(sorted(result))
 
 
+def source_paths(target: str) -> tuple[str, ...]:
+    paths: tuple[str, ...] = (
+        target,
+        "tools/fixtures/postgres.py",
+        "tools/fixtures/python_postgres.py",
+    )
+    if target in TLS_TARGETS:
+        paths += ("packages/contracts/common/python-unit/sitecustomize.py",)
+    if target == PILOT_POSTGRES:
+        paths += (NODE_PROBE, NODE_GUARD)
+    return paths
+
+
 def source_digest(root: Path, target: str) -> str:
-    paths = (target, "tools/fixtures/postgres.py", "tools/fixtures/python_postgres.py")
     return hashlib.sha256(
         json.dumps(
-            [(path, hashlib.sha256((root / path).read_bytes()).hexdigest()) for path in paths],
+            [
+                (path, hashlib.sha256((root / path).read_bytes()).hexdigest())
+                for path in source_paths(target)
+            ],
             separators=(",", ":"),
         ).encode()
     ).hexdigest()
@@ -73,6 +100,26 @@ def case_mode(item: Any) -> str | None:
     if mode not in ("customer_controlled", "opentour_managed"):
         raise ValueError("Registered PostgreSQL case has an invalid deployment mode")
     return str(mode)
+
+
+def node_probe_environment(probe: Path, port: int) -> dict[str, str]:
+    """Limit the fixed TLS child to the listener currently owned by this fixture."""
+    owns = getattr(subprocess, "_opentour_owns_loopback", None)
+    if (
+        os.environ.get("OPENTOUR_POSTGRES_TARGET") != PILOT_POSTGRES
+        or os.environ.get("OPENTOUR_LOOPBACK_TARGET") != PILOT_POSTGRES
+        or probe != ROOT / NODE_PROBE
+        or not callable(owns)
+        or not owns(("127.0.0.1", port))
+    ):
+        raise RuntimeError("Node TLS probe requires its exact supervised listener")
+    return {
+        "PATH": os.environ["PATH"],
+        "LANG": "C",
+        "TZ": "UTC",
+        "NODE_OPTIONS": f"--require={json.dumps(str(ROOT / NODE_GUARD))}",
+        "OPENTOUR_NODE_TLS_PORT": str(port),
+    }
 
 
 class Lifecycle:
@@ -158,7 +205,7 @@ def main(argv: list[str] | None = None) -> int:
     from tools import test_runner
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("target", choices=sorted(TARGETS))
+    parser.add_argument("target", choices=sorted(TARGETS.keys() | TLS_TARGETS.keys()))
     parser.add_argument("--result-file", required=True)
     args = parser.parse_args(argv)
     target = args.target
@@ -182,31 +229,42 @@ def main(argv: list[str] | None = None) -> int:
     before = source_digest(ROOT, target)
     report = test_runner.report_envelope("pytest", target, dict(os.environ), [])
     report["kind"] = "local_integration"
-    try:
-        DisposablePostgres().qualify_binaries()
-    except PrerequisiteMissing:
-        report.update(status="BLOCKED", reason_code="MISSING_EXTERNAL_PREREQUISITE")
-        write_json(destination, report)
-        return 3
-    observer = Lifecycle()
+    observer = None
+    if target in TARGETS:
+        try:
+            DisposablePostgres().qualify_binaries()
+        except PrerequisiteMissing:
+            report.update(status="BLOCKED", reason_code="MISSING_EXTERNAL_PREREQUISITE")
+            write_json(destination, report)
+            return 3
+        observer = Lifecycle()
+    loopback = None
     inner = destination.with_name(destination.name + ".pytest.json")
     os.environ["OPENTOUR_RESULT_FILE"] = str(inner)
     code = 2
     try:
-        observer.install()
-        os.environ["OPENTOUR_POSTGRES_TARGET"] = target
-        code = int(pytest.main(["-p", "tools.test_runner", "-q", "--", target]))
+        with ExitStack() as stack:
+            if observer is not None:
+                observer.install()
+                os.environ["OPENTOUR_POSTGRES_TARGET"] = target
+            if target in TLS_TARGETS:
+                scope = subprocess._opentour_supervised_loopback  # type: ignore[attr-defined]
+                loopback = stack.enter_context(scope())
+            code = int(pytest.main(["-p", "tools.test_runner", "-q", "--", target]))
     finally:
-        cleanup = observer.finish()
+        postgres_clean = observer.finish() if observer is not None else True
         os.environ["OPENTOUR_RESULT_FILE"] = str(destination)
     if inner.is_file() and not inner.is_symlink() and inner.stat().st_size <= 8_388_608:
         report = json.loads(inner.read_bytes())
         report["kind"] = "local_integration"
-    observed = observer.started_instances
-    if code == 0 and (not observed or source_digest(ROOT, target) != before):
+    if code == 0 and (
+        (observer is not None and not observer.started_instances)
+        or (loopback is not None and not loopback["accepted_connections"])
+        or source_digest(ROOT, target) != before
+    ):
         code = 1
         report.update(status="FAIL", reason_code="RUNNER_ERROR")
-    if not cleanup:
+    if not postgres_clean or (loopback is not None and not loopback["cleanup_complete"]):
         code = 1
         report.update(status="FAIL", reason_code="CLEANUP_FAILED", cleanup_complete=False)
     if code not in (0, 1):
@@ -217,21 +275,37 @@ def main(argv: list[str] | None = None) -> int:
     if not report["collected"]:
         code = 2
         report.update(status="FAIL", reason_code="NO_TESTS")
-    observation = {
-        "schema_version": "opentour.python-postgres-observation.v1",
+    binding = {
         "target": target,
-        "owner": TARGETS[target],
         "binding_nonce": nonce,
         "source_sha256": before,
         "report_sha256": hashlib.sha256(json.dumps(report, sort_keys=True).encode()).hexdigest(),
         "kind": "local_integration",
         "product_acceptance": "NOT_RUN",
-        "postgres_version": VERSION,
-        "started_instances": observed,
-        "cleanup_complete": cleanup,
-        "binary_sha256": observer.binaries,
     }
-    write_json(destination.with_name(destination.name + ".postgres.json"), observation)
+    if observer is not None:
+        write_json(
+            destination.with_name(destination.name + ".postgres.json"),
+            {
+                **binding,
+                "schema_version": "opentour.python-postgres-observation.v1",
+                "owner": TARGETS[target],
+                "postgres_version": VERSION,
+                "started_instances": observer.started_instances,
+                "cleanup_complete": postgres_clean,
+                "binary_sha256": observer.binaries,
+            },
+        )
+    if loopback is not None:
+        write_json(
+            destination.with_name(destination.name + ".loopback.json"),
+            {
+                **binding,
+                **loopback,
+                "schema_version": "opentour.python-loopback-observation.v1",
+                "owner": TLS_TARGETS[target],
+            },
+        )
     write_json(destination, report)
     return code
 
