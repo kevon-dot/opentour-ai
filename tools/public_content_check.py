@@ -114,10 +114,16 @@ def inspect_bytes(
         and content_hash in binary_hashes.values()
     ):
         return issues
+    source_path = Path(path)
+    release_dockerignore = source_path.parent == Path("infrastructure/images") and (
+        source_path.name.endswith(".Dockerfile.dockerignore")
+    )
     if (
         b"\0" in data
-        or Path(path).suffix.lower() not in TEXT_SUFFIXES | {".dockerfile"}
-        and (Path(path).name not in TEXT_NAMES and not Path(path).name.startswith(".env.example"))
+        or source_path.suffix.lower() not in TEXT_SUFFIXES | {".dockerfile"}
+        and source_path.name not in TEXT_NAMES
+        and not source_path.name.startswith(".env.example")
+        and not release_dockerignore
     ):
         return issues + [finding(path, "UNREVIEWED_BINARY_OR_TYPE")]
     try:
