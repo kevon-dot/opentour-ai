@@ -21,6 +21,8 @@ from tools.fixtures.postgres import VERSION, DisposablePostgres, PrerequisiteMis
 
 ROOT = Path(__file__).resolve().parents[2]
 PILOT_POSTGRES = "services/control-api/tests/auth/test_browser_private_pilot_postgres.py"
+NODE_PROBE = "services/control-api/tests/auth/private_browser_client_postgres_probe.mjs"
+NODE_GUARD = "packages/contracts/common/unit-network-guard.cjs"
 TARGETS = {
     "services/control-api/tests/migrations/test_expand_contract.py": "OPE-213",
     "services/control-api/tests/auth/test_identity_postgres.py": "OPE-142",
@@ -73,7 +75,7 @@ def source_paths(target: str) -> tuple[str, ...]:
     if target in TLS_TARGETS:
         paths += ("packages/contracts/common/python-unit/sitecustomize.py",)
     if target == PILOT_POSTGRES:
-        paths += ("services/control-api/tests/auth/private_browser_client_postgres_probe.mjs",)
+        paths += (NODE_PROBE, NODE_GUARD)
     return paths
 
 
@@ -98,6 +100,26 @@ def case_mode(item: Any) -> str | None:
     if mode not in ("customer_controlled", "opentour_managed"):
         raise ValueError("Registered PostgreSQL case has an invalid deployment mode")
     return str(mode)
+
+
+def node_probe_environment(probe: Path, port: int) -> dict[str, str]:
+    """Limit the fixed TLS child to the listener currently owned by this fixture."""
+    owns = getattr(subprocess, "_opentour_owns_loopback", None)
+    if (
+        os.environ.get("OPENTOUR_POSTGRES_TARGET") != PILOT_POSTGRES
+        or os.environ.get("OPENTOUR_LOOPBACK_TARGET") != PILOT_POSTGRES
+        or probe != ROOT / NODE_PROBE
+        or not callable(owns)
+        or not owns(("127.0.0.1", port))
+    ):
+        raise RuntimeError("Node TLS probe requires its exact supervised listener")
+    return {
+        "PATH": os.environ["PATH"],
+        "LANG": "C",
+        "TZ": "UTC",
+        "NODE_OPTIONS": f"--require={json.dumps(str(ROOT / NODE_GUARD))}",
+        "OPENTOUR_NODE_TLS_PORT": str(port),
+    }
 
 
 class Lifecycle:

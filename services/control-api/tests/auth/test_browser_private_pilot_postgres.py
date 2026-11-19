@@ -2,7 +2,6 @@
 
 import asyncio
 import json
-import os
 import secrets
 import shutil
 import socket
@@ -29,6 +28,8 @@ from test_identity_postgres import ROOT, identity_postgres_fixture
 from test_identity_postgres import browser_state as browser_state
 from test_identity_postgres import durable as durable
 from test_identity_postgres import mode as mode
+
+from tools.fixtures.python_postgres import node_probe_environment
 
 pytestmark = pytest.mark.local_integration
 
@@ -285,7 +286,7 @@ def test_typescript_private_account_entry_uses_the_dev_tls_postgres_listener(
                     [node, "--conditions=react-server", str(probe), str(output)],
                     cwd=ROOT,
                     input=json.dumps(request).encode(),
-                    env={"PATH": os.environ["PATH"], "LANG": "C", "TZ": "UTC"},
+                    env=node_probe_environment(probe, port),
                     stdout=subprocess.PIPE,
                     stderr=subprocess.DEVNULL,
                     check=True,

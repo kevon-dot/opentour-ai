@@ -112,9 +112,11 @@ def install() -> None:
         socket.socket.connect = loopback_connect
         socket.socket.accept = loopback_accept
         socket.getaddrinfo = loopback_getaddrinfo
+        subprocess._opentour_owns_loopback = owns  # type: ignore[attr-defined]
         try:
             yield observation
         finally:
+            del subprocess._opentour_owns_loopback  # type: ignore[attr-defined]
             socket.socket.bind = bind
             socket.socket.connect = network_denied
             socket.socket.accept = accept

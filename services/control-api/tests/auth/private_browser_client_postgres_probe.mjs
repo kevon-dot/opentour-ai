@@ -1,9 +1,12 @@
 // Direct fixture-only Node client for the generated private TLS PostgreSQL test.
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
+import { lookup } from 'node:dns';
 import { readFileSync } from 'node:fs';
 import { request as requestHttps } from 'node:https';
+import { Socket } from 'node:net';
 import { join } from 'node:path';
+import { connect as connectTls } from 'node:tls';
 import { pathToFileURL } from 'node:url';
 
 const [compiled] = process.argv.slice(2);
@@ -26,6 +29,14 @@ const tls = {
   key: readFileSync(config.stage_private_key),
   rejectUnauthorized: true,
 };
+const allowedSocket = { ...tls, host: '127.0.0.1', port: config.local_port };
+const denied = { code: 'OPENTOUR_NETWORK_DENIED' };
+assert.throws(() => lookup(endpoint.hostname, () => {}), denied);
+assert.throws(() => new Socket().connect(allowedSocket), denied);
+assert.throws(() => connectTls({ ...allowedSocket, host: endpoint.hostname }), denied);
+assert.throws(() => connectTls({ ...allowedSocket, port: config.local_port % 65535 + 1 }), denied);
+assert.throws(() => connectTls({ ...allowedSocket, rejectUnauthorized: false }), denied);
+await assert.rejects(fetch('https://example.invalid'), denied);
 const base = '/dev/internal/browser-identity/v1';
 const paths = ['/flows/create', '/flows/consume', '/sessions/admit', '/sessions/current', '/sessions/end'];
 const accessKeyId = 'fixture-access-id';
