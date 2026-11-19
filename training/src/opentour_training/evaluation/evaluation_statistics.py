@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from fractions import Fraction
 from typing import Literal
 
 from opentour_training.evaluation.inference_plan import (
     InferencePlan,
     MetricRole,
+    numeric_alpha,
     qualify_numeric_profile,
     validate_denominators,
     validate_pair_cells,
@@ -35,6 +37,7 @@ class ConfidenceInterval:
     confidence_level: float
     sidedness: Literal["one", "two"]
     method_ref: bytes
+    claim_alpha: Fraction
 
 
 @dataclass(frozen=True, slots=True)
@@ -106,6 +109,7 @@ def assemble_paired_metric(
             float(1 - selected.alpha),
             "two" if selected.sides == 2 else "one",
             descriptor.method_ref,
+            selected.alpha,
         ),
         units,
         clusters,
@@ -130,14 +134,42 @@ def assemble_critical_risk_metric(
             None,
             "no_gradeable_units",
         )
+    claim_alpha = numeric_alpha(alpha)
     return MetricResult(
         descriptor.metric_ref,
         errors,
         independent_exposures,
         errors / independent_exposures,
         descriptor.unit,
-        ConfidenceInterval(None, upper, 1 - alpha, "one", descriptor.method_ref),
+        ConfidenceInterval(
+            None, upper, float(1 - claim_alpha), "one", descriptor.method_ref, claim_alpha
+        ),
         independent_exposures,
         None,
         None,
+    )
+
+
+def assemble_planned_critical_risk_metric(
+    descriptor: MetricDescriptor,
+    plan: InferencePlan,
+    selected_look_id: str,
+    selected_gate_id: str,
+    *,
+    errors: int,
+    independent_exposures: int,
+) -> MetricResult:
+    """Use the claim's prespecified alpha and the qualified risk population's denominator.
+
+    Risk exposures are counted independently of paired effect rows by the
+    caller. The look selection supplies only the frozen risk-claim alpha.
+    """
+    selected = qualify_numeric_profile(
+        plan, selected_look_id, selected_gate_id, metric_role="effect"
+    )
+    return assemble_critical_risk_metric(
+        descriptor,
+        errors=errors,
+        independent_exposures=independent_exposures,
+        alpha=float(selected.alpha),
     )

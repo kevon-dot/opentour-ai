@@ -8,6 +8,7 @@ from opentour_training.evaluation.evaluation_statistics import (
     MetricDescriptor,
     assemble_critical_risk_metric,
     assemble_paired_metric,
+    assemble_planned_critical_risk_metric,
 )
 from opentour_training.evaluation.inference_plan import (
     ContractValidator,
@@ -201,3 +202,36 @@ def test_no_eligible_critical_exposures_have_no_measured_rate() -> None:
     assert result.undefined_reason == "no_gradeable_units"
     with pytest.raises(InvalidKernelInput):
         assemble_critical_risk_metric(DESCRIPTOR, errors=True, independent_exposures=0, alpha=0.05)
+
+
+def test_critical_risk_claim_uses_frozen_alpha_and_its_own_exposure_population(
+    contract_validator: ContractValidator,
+) -> None:
+    data = plan_data(n=200)
+    data["look_plan"][0]["claim_alpha"]["claim"] = 0.025
+    plan = validate_inference_plan(data, contract_validator)
+    result = assemble_planned_critical_risk_metric(
+        DESCRIPTOR, plan, "final", "claim", errors=0, independent_exposures=240
+    )
+    assert result.independent_units == 240
+    assert result.value == 0.0
+    assert result.interval is not None
+    assert result.interval.confidence_level == 0.975
+    assert result.interval.upper == pytest.approx(1 - 0.025 ** (1 / 240))
+    with pytest.raises(InvalidKernelInput):
+        assemble_planned_critical_risk_metric(
+            DESCRIPTOR, plan, "final", "not-in-plan", errors=0, independent_exposures=240
+        )
+
+
+def test_nonzero_critical_errors_are_measured_instead_of_using_zero_error_bound() -> None:
+    zero = assemble_critical_risk_metric(
+        DESCRIPTOR, errors=0, independent_exposures=240, alpha=0.05
+    )
+    nonzero = assemble_critical_risk_metric(
+        DESCRIPTOR, errors=1, independent_exposures=240, alpha=0.05
+    )
+    assert (nonzero.numerator, nonzero.denominator, nonzero.value) == (1, 240, 1 / 240)
+    assert zero.interval is not None and zero.interval.upper is not None
+    assert nonzero.interval is not None and nonzero.interval.upper is not None
+    assert nonzero.interval.upper > zero.interval.upper
