@@ -31,6 +31,16 @@ _IDENTITY_FIELDS = {
 _WORKLOADS = ("controller", "evaluator", "trainer")
 _SINGLE_REGION_KEY_ID = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
 _ROLE_PATH_AND_NAME = r"(?:[A-Za-z0-9_+=,.@/-]{1,510}/)?[A-Za-z0-9_+=,.@-]{1,64}"
+_STORAGE_KEY_ARN_PATTERN = (
+    r"arn:aws:kms:(?!cn-)[a-z]{2}-[a-z]+-[1-9][0-9]*:[0-9]{12}:key/" + _SINGLE_REGION_KEY_ID
+)
+_STORAGE_LAYOUT = {
+    "trainer": ("TrainerStorage", "evaluator"),
+    "evaluator": ("EvaluatorStorage", "trainer"),
+    "evidence": ("EvidenceStorage", "trainer"),
+    "artifact": ("ArtifactStorage", None),
+}
+_Arn = str | dict[str, str]
 _KMS_CROSS_ROLE_READ_ACTIONS = frozenset({"kms:Decrypt", "kms:ReEncryptFrom"})
 
 
@@ -308,22 +318,20 @@ def compile_cell_storage(
     )
     configuration = json.loads(prepared.configuration)
     parameters = configuration["parameters"]
-    # IAM role names are account-wide and case-insensitive, independent of path.
-    role_names = {
-        binding.role_arn.rsplit("/", 1)[-1].casefold()
-        for binding in (storage.trainer, storage.evaluator)
+    bindings: dict[str, WorkloadStorageBinding | RetainedStorageKeyBinding] = {
+        "trainer": storage.trainer,
+        "evaluator": storage.evaluator,
+        "evidence": storage.evidence,
+        "artifact": storage.artifact,
     }
-    buckets = (
-        ("TrainerStorage", storage.trainer, storage.evaluator.role_arn),
-        ("EvaluatorStorage", storage.evaluator, storage.trainer.role_arn),
-        ("EvidenceStorage", storage.evidence, storage.trainer.role_arn),
-        ("ArtifactStorage", storage.artifact, None),
-    )
-    keys = {binding.kms_key_arn for _, binding, _ in buckets}
+    roles = {"trainer": storage.trainer.role_arn, "evaluator": storage.evaluator.role_arn}
+    # IAM role names are account-wide and case-insensitive, independent of path.
+    role_names = {role.rsplit("/", 1)[-1].casefold() for role in roles.values()}
+    keys = {name: binding.kms_key_arn for name, binding in bindings.items()}
     if (
         storage.kms_policy_sha256 != profiles.kms_policy.sha256
         or len(role_names) != 2
-        or len(keys) != len(buckets)
+        or len(set(keys.values())) != len(bindings)
     ):
         raise CellInstallRefused("CELL_INSTALL_STORAGE_BINDING_MISMATCH")
 
@@ -331,29 +339,25 @@ def compile_cell_storage(
     region = parameters["region"]
     key_pattern = re.escape(f"arn:aws:kms:{region}:{account}:key/") + _SINGLE_REGION_KEY_ID
     role_pattern = re.escape(f"arn:aws:iam::{account}:role/") + _ROLE_PATH_AND_NAME
-    roles = (storage.trainer.role_arn, storage.evaluator.role_arn)
-    if any(re.fullmatch(key_pattern, key) is None for key in keys) or any(
-        re.fullmatch(role_pattern, role) is None for role in roles
+    if any(re.fullmatch(key_pattern, key) is None for key in keys.values()) or any(
+        re.fullmatch(role_pattern, role) is None for role in roles.values()
     ):
         raise CellInstallRefused("CELL_INSTALL_STORAGE_SCOPE_MISMATCH")
-    references = dict.fromkeys(keys, "key") | dict.fromkeys(roles, "role")
+    references = dict.fromkeys(keys.values(), "key") | dict.fromkeys(roles.values(), "role")
 
     configuration["resource_configuration_sha256"].update(
         _qualified_resources(references, inventory, parameters["environment_id"], account, region)
     )
-    configuration["kms_key_policy_sha256"] = {
-        binding.kms_key_arn: _qualified_key_policy(
-            binding.key_policy_sha256, key_policies.get(binding.kms_key_arn), denied_role
+    key_policy_digests = {}
+    for name, (_, denied) in _STORAGE_LAYOUT.items():
+        binding = bindings[name]
+        key_policy_digests[binding.kms_key_arn] = _qualified_key_policy(
+            binding.key_policy_sha256,
+            key_policies.get(binding.kms_key_arn),
+            None if denied is None else roles[denied],
         )
-        for _, binding, denied_role in buckets
-    }
-    configuration["cloudformation_resources"] = {
-        name: resource
-        for logical_id, binding, denied_role in buckets
-        for name, resource in _private_bucket_resources(
-            logical_id, binding.kms_key_arn, denied_role
-        ).items()
-    }
+    configuration["kms_key_policy_sha256"] = key_policy_digests
+    configuration["cloudformation_resources"] = _storage_resources(keys, roles)
     return _prepared_configuration(configuration)
 
 
@@ -409,8 +413,45 @@ def _qualified_key_policy(
     return expected_sha256
 
 
+def retained_storage_template_section() -> dict[str, dict[str, object]]:
+    """Generate the static template section using deployment-internal ARN parameters."""
+    key_refs = {
+        name: {"Ref": f"{logical_id}KmsKeyArn"} for name, (logical_id, _) in _STORAGE_LAYOUT.items()
+    }
+    role_refs = {"trainer": {"Ref": "TrainerRoleArn"}, "evaluator": {"Ref": "EvaluatorRoleArn"}}
+    return {
+        "Parameters": {
+            **{
+                ref["Ref"]: {
+                    "Type": "String",
+                    "AllowedPattern": _STORAGE_KEY_ARN_PATTERN,
+                }
+                for ref in key_refs.values()
+            },
+            **{
+                ref["Ref"]: {
+                    "Type": "String",
+                    "AllowedPattern": r"arn:aws:iam::[0-9]{12}:role/" + _ROLE_PATH_AND_NAME,
+                }
+                for ref in role_refs.values()
+            },
+        },
+        "Resources": _storage_resources(key_refs, role_refs),
+    }
+
+
+def _storage_resources(keys: Mapping[str, _Arn], roles: Mapping[str, _Arn]) -> dict[str, object]:
+    return {
+        name: resource
+        for store, (logical_id, denied) in _STORAGE_LAYOUT.items()
+        for name, resource in _private_bucket_resources(
+            logical_id, keys[store], None if denied is None else roles[denied]
+        ).items()
+    }
+
+
 def _private_bucket_resources(
-    logical_id: str, kms_key_arn: str, denied_role_arn: str | None
+    logical_id: str, kms_key_arn: _Arn, denied_role_arn: _Arn | None
 ) -> dict[str, object]:
     retain = {"DeletionPolicy": "Retain", "UpdateReplacePolicy": "Retain"}
     bucket_arn = {"Fn::GetAtt": [logical_id, "Arn"]}

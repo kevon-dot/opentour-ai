@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import subprocess
 import sys
 from dataclasses import replace
@@ -23,11 +24,13 @@ from infrastructure.cell_installer import (
     WorkloadStorageBinding,
     compile_cell_storage,
     prepare_cell_install,
+    retained_storage_template_section,
 )
 from infrastructure.environment_contract import ResourceBinding
 from tools.schema_validate import read_json, schema_registry, valid_instance
 
 ROOT = Path(__file__).resolve().parents[2]
+CELL_TEMPLATE = ROOT / "infrastructure/cloudformation/cell.yaml"
 SCHEMA_ID = "urn:opentour:cell-installer-parameters:1.0"
 ENVIRONMENT_PROFILE_ID = "urn:opentour:environment-profile:1.0"
 IDENTITY_PARAMETER_NAMES = {
@@ -674,6 +677,72 @@ def test_storage_resources_use_the_same_compiler_in_both_modes(
     assert managed["cloudformation_resources"] == customer["cloudformation_resources"]
     assert managed["kms_key_policy_sha256"] == customer["kms_key_policy_sha256"]
     assert managed["parameters"]["network_profile"] != customer["parameters"]["network_profile"]
+
+
+def test_checked_in_retained_storage_matches_policy_builder():
+    template = read_json(CELL_TEMPLATE)
+    for section, expected in retained_storage_template_section().items():
+        assert {name: template[section][name] for name in expected} == expected
+
+
+def _resolve_storage_parameters(value, bindings):
+    if isinstance(value, dict):
+        if set(value) == {"Ref"} and value["Ref"] in bindings:
+            return bindings[value["Ref"]]
+        return {key: _resolve_storage_parameters(item, bindings) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_resolve_storage_parameters(item, bindings) for item in value]
+    return value
+
+
+@pytest.mark.parametrize("mode", ["opentour_managed", "customer_controlled"])
+def test_common_template_retained_storage_matches_compiled_configuration(
+    compile_storage,
+    parameters,
+    environment_identity,
+    approved_profiles,
+    approved_release,
+    approved_storage,
+    mode,
+):
+    template_bytes = CELL_TEMPLATE.read_bytes()
+    release = replace(approved_release, template_sha256=hashlib.sha256(template_bytes).hexdigest())
+    profiles = approved_profiles
+    if mode == "customer_controlled":
+        parameters.update(
+            mode=mode,
+            network_profile="fixture-customer-controlled-network",
+            gateway_hostname=None,
+            certificate_arn=None,
+        )
+        environment_identity["mode"] = mode
+        profiles = replace(
+            profiles,
+            network=QualifiedProfile(parameters["network_profile"], "3" * 64),
+            gateway_hostname=None,
+            certificate_arn=None,
+        )
+
+    prepared = compile_storage(release=release, profiles=profiles)
+    template = json.loads(prepared.verified_template(template_bytes))
+    with pytest.raises(CellInstallRefused, match="^CELL_INSTALL_TEMPLATE_MISMATCH$"):
+        prepared.verified_template(template_bytes + b" ")
+    resources = json.loads(prepared.configuration)["cloudformation_resources"]
+    bindings = {
+        "TrainerStorageKmsKeyArn": approved_storage.trainer.kms_key_arn,
+        "EvaluatorStorageKmsKeyArn": approved_storage.evaluator.kms_key_arn,
+        "EvidenceStorageKmsKeyArn": approved_storage.evidence.kms_key_arn,
+        "ArtifactStorageKmsKeyArn": approved_storage.artifact.kms_key_arn,
+        "TrainerRoleArn": approved_storage.trainer.role_arn,
+        "EvaluatorRoleArn": approved_storage.evaluator.role_arn,
+    }
+    assert set(bindings).isdisjoint(parameters)
+    for name, arn in bindings.items():
+        definition = template["Parameters"][name]
+        assert definition["Type"] == "String" and "Default" not in definition
+        assert re.fullmatch(definition["AllowedPattern"], arn)
+    storage = {name: template["Resources"][name] for name in resources}
+    assert _resolve_storage_parameters(storage, bindings) == resources
 
 
 def test_generated_storage_fragment_passes_bundled_cloudformation_schema(compile_storage, tmp_path):
