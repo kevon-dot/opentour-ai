@@ -1,5 +1,5 @@
 import 'server-only';
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { boundedServerResponse } from './bounded-server-response.js';
 import {
   IdentityFailure, type AuthTransaction, type AuthTransactionPort, type Credentials,
@@ -156,13 +156,14 @@ function signedHeaders(value: unknown, body: string): Headers {
 /** Trusted startup supplies the approved endpoint and server-side signing and HTTPS capabilities. */
 export function createPrivateBrowserPorts(
   { approvedEndpoint, sign, fetch: transport }: PrivateBrowserClientOptions,
-): { transactions: AuthTransactionPort; sessions: SessionPort; selections: SelectionPort } {
+): { transactions: AuthTransactionPort; sessions: SessionPort; selections: SelectionPort;
+  checkReadiness: (signal: AbortSignal) => Promise<boolean> } {
   const base = endpoint(approvedEndpoint);
   if (typeof sign !== 'function' || typeof transport !== 'function') {
     throw new IdentityFailure('IDENTITY_CONFIGURATION_INVALID', 503, false);
   }
 
-  async function call(operation: Operation, data: object): Promise<unknown> {
+  async function call(operation: Operation, data: object, externalSignal?: AbortSignal): Promise<unknown> {
     const request = Object.freeze({
       url: base + PRIVATE_BROWSER_METHOD_PATHS[operation], method: 'POST' as const,
       body: JSON.stringify(data), headers: BODY_HEADERS,
@@ -182,7 +183,8 @@ export function createPrivateBrowserPorts(
           throw unavailable(operation);
         }
         return result;
-      }, { timeoutMs: DEADLINE_MS, maxBytes: RESPONSE_BYTES, failure: () => unavailable(operation) });
+      }, { timeoutMs: DEADLINE_MS, maxBytes: RESPONSE_BYTES, failure: () => unavailable(operation),
+        signal: externalSignal });
       if (response.headers.get('content-type') !== 'application/json'
           || response.headers.get('cache-control') !== 'no-store'
           || response.headers.has('content-encoding')) throw unavailable(operation);
@@ -199,6 +201,15 @@ export function createPrivateBrowserPorts(
   }
 
   return {
+    async checkReadiness(signal) {
+      try {
+        await call('current', { handle: randomBytes(32).toString('base64url') }, signal);
+      } catch (error) {
+        return !signal.aborted && error instanceof IdentityFailure && error.code === 'SESSION_INVALID'
+          && error.status === 401 && !error.retryable;
+      }
+      return false;
+    },
     transactions: {
       async create(flow) {
         if (!transaction(flow)) throw invalid();

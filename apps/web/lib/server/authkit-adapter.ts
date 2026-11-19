@@ -615,13 +615,17 @@ export function createAuthkitAdapter(ports: {
 }
 
 export type AuthkitAdapter = ReturnType<typeof createAuthkitAdapter>;
-let configured: AuthkitAdapter | undefined;
+// Production instrumentation and routes can be built into separate server module graphs.
+const adapterKey = Symbol.for('@opentour/web.authkit-adapter');
+const adapters = globalThis as typeof globalThis & { [adapterKey]?: AuthkitAdapter };
 /** Called once by trusted server composition with durable ports; never a request-controlled override. */
 export function configureAuthkitAdapter(adapter: AuthkitAdapter): void {
-  if (configured) throw new IdentityFailure('IDENTITY_ALREADY_CONFIGURED', 503);
-  configured = adapter;
+  if (adapters[adapterKey]) throw new IdentityFailure('IDENTITY_ALREADY_CONFIGURED', 503);
+  adapters[adapterKey] = adapter;
 }
 export function configuredHandler(action: 'signin' | 'callback'): (request: Request) => Promise<Response> {
-  return async (request) => configured ? configured[action](request)
-    : safeError(new IdentityFailure('IDENTITY_NOT_CONFIGURED', 503));
+  return async (request) => {
+    const configured = adapters[adapterKey];
+    return configured ? configured[action](request) : safeError(new IdentityFailure('IDENTITY_NOT_CONFIGURED', 503));
+  };
 }

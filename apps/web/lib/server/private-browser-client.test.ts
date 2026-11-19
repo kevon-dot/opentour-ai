@@ -73,6 +73,19 @@ function safeRefusal(code: string, status: number) {
   };
 }
 
+it('cancels private readiness during signing without sending a late request', async () => {
+  const f = fixture();
+  const controller = new AbortController();
+  f.sign.mock.mockImplementationOnce(async (_request, signal) => {
+    controller.abort();
+    assert.equal(signal.aborted, true);
+    return { ...SIGNED };
+  });
+  assert.equal(await f.ports.checkReadiness(controller.signal), false);
+  assert.equal(f.sign.mock.callCount(), 1);
+  assert.equal(f.fetch.mock.callCount(), 0);
+});
+
 it('signs and sends only the five exact dev requests and closed payloads', async () => {
   const receipt = { sessionId: CLAIMS.sessionId, generation: ENDED.generation };
   const replies = [null, FLOW, ACTIVE, ENDED, receipt];
