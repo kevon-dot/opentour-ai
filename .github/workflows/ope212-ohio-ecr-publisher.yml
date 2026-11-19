@@ -53,8 +53,10 @@ jobs:
              "$APPROVED_COMMIT" == "$REQUESTED_COMMIT" &&
              "$APPROVED_COMMIT" == "$GITHUB_SHA" ]] || exit 1
           [[ "$(uname -m)" == aarch64 ]] || exit 1
-          [[ "$AWS_CLI_VERSION" =~ ^2\.[0-9]+\.[0-9]+$ &&
-             "$(aws --version)" == "aws-cli/$AWS_CLI_VERSION "* ]] || exit 1
+          if [[ "$AWS_CLI_VERSION" != 2.40.0 ]]; then
+            echo 'The protected environment must approve AWS CLI 2.40.0 for this publisher.' >&2
+            exit 1
+          fi
           environment_api=https://api.github.com/repos/kevon-dot/opentour-ai/environments/opentour-ohio-ecr-publishing
           curl --fail --silent --show-error --max-time 15 --proto '=https' "$environment_api" |
             jq -e '
@@ -66,6 +68,28 @@ jobs:
           curl --fail --silent --show-error --max-time 15 --proto '=https' "$environment_api/deployment-branch-policies" |
             jq -e '.total_count == 1 and (.branch_policies | length == 1) and
               .branch_policies[0].name == "main" and .branch_policies[0].type == "branch"' >/dev/null
+
+      - name: Install the verified AWS CLI for this job
+        id: aws-cli
+        shell: bash
+        run: |
+          umask 077
+          cli_dir=$(mktemp -d "$RUNNER_TEMP/opentour-aws-cli.XXXXXXXX")
+          archive="$cli_dir/awscli.zip"
+          curl --fail --silent --show-error --retry 3 --max-time 120 --max-filesize 110000000 \
+            --proto '=https' \
+            https://awscli.amazonaws.com/awscli-exe-linux-aarch64-2.40.0.zip \
+            --output "$archive"
+          # Pin verified against the detached AWS CLI Team signature and the AWS-documented
+          # fingerprint FB5DB77FD5C118B80511ADA8A6310ACC4672475C.
+          # https://docs.aws.amazon.com/cli/latest/userguide/getting-started-version.html
+          printf '%s  %s\n' 'd293743e9e79dc69dc79dcbc23e26d1258193f0dd1253ba0c09ccf56b6123c6e' "$archive" \
+            | sha256sum --check --status
+          unzip -q "$archive" -d "$cli_dir"
+          "$cli_dir/aws/install" --install-dir "$cli_dir/install" --bin-dir "$cli_dir/bin"
+          [[ "$("$cli_dir/bin/aws" --version)" == "aws-cli/2.40.0 "* ]] || exit 1
+          rm -rf -- "$archive" "$cli_dir/aws"
+          printf 'bin=%s\n' "$cli_dir/bin" >> "$GITHUB_OUTPUT"
 
       - name: Bind the separately approved AWS publisher and two repositories
         shell: bash
@@ -145,16 +169,19 @@ jobs:
           ROLE_ID: ${{ secrets.OHIO_ECR_PUBLISH_ROLE_ID }}
           BFF_REPOSITORY: ${{ secrets.OHIO_ECR_BFF_REPOSITORY }}
           API_REPOSITORY: ${{ secrets.OHIO_ECR_API_REPOSITORY }}
+          AWS_CLI_BIN: ${{ steps.aws-cli.outputs.bin }}
           EXPECTED_DIGEST: ${{ steps.build.outputs.digest }}
           WORK: ${{ steps.build.outputs.work }}
         run: |
           trap 'rm -rf -- "$WORK"' EXIT
+          [[ "$AWS_CLI_BIN" == "$RUNNER_TEMP"/opentour-aws-cli.*/bin && -x "$AWS_CLI_BIN/aws" ]] || exit 1
           case "$IMAGE" in
             bff) export REPOSITORY=$BFF_REPOSITORY ;;
             control-api) export REPOSITORY=$API_REPOSITORY ;;
             *) exit 1 ;;
           esac
-          digest=$(bash infrastructure/images/publish-ohio-candidate.sh "$WORK/image" "$EXPECTED_DIGEST" "$WORK")
+          digest=$(PATH="$AWS_CLI_BIN:$PATH" bash infrastructure/images/publish-ohio-candidate.sh \
+            "$WORK/image" "$EXPECTED_DIGEST" "$WORK")
           [[ "$digest" == "$EXPECTED_DIGEST" ]] || exit 1
           printf '%s\n' "$digest" > "$RUNNER_TEMP/opentour-$IMAGE-candidate.sha256"
           printf '### Ohio ECR candidate: %s\n\nVerified OCI manifest digest: \x60%s\x60\n' \
