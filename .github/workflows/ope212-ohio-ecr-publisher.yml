@@ -1,0 +1,169 @@
+name: Publish one verified Ohio ARM64 image candidate
+
+"on":
+  workflow_call:
+    inputs:
+      source_commit:
+        required: true
+        type: string
+      image:
+        required: true
+        type: string
+    secrets:
+      OHIO_ECR_ACCOUNT_ID:
+        required: true
+      OHIO_ECR_PUBLISH_ROLE_ARN:
+        required: true
+      OHIO_ECR_PUBLISH_ROLE_ID:
+        required: true
+      OHIO_ECR_BFF_REPOSITORY:
+        required: true
+      OHIO_ECR_API_REPOSITORY:
+        required: true
+
+permissions: {}
+
+jobs:
+  publish:
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      github.repository == 'kevon-dot/opentour-ai' &&
+      github.repository_id == '1455972360' &&
+      github.ref == 'refs/heads/main' && github.ref_protected &&
+      github.workflow_ref == 'kevon-dot/opentour-ai/.github/workflows/release-images.yml@refs/heads/main'
+    name: Publish the ${{ inputs.image }} to private Ohio ECR
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 45
+    environment: opentour-ohio-ecr-publishing
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      IMAGE: ${{ inputs.image }}
+    steps:
+      - name: Confirm the exact approved source and publishing environment
+        shell: bash
+        env:
+          APPROVED_COMMIT: ${{ vars.OHIO_ECR_PUBLISH_COMMIT }}
+          REQUESTED_COMMIT: ${{ inputs.source_commit }}
+          AWS_CLI_VERSION: ${{ vars.OHIO_ECR_AWS_CLI_VERSION }}
+        run: |
+          [[ "$IMAGE" == bff || "$IMAGE" == control-api ]] || exit 1
+          [[ "$APPROVED_COMMIT" =~ ^[a-f0-9]{40}$ &&
+             "$APPROVED_COMMIT" == "$REQUESTED_COMMIT" &&
+             "$APPROVED_COMMIT" == "$GITHUB_SHA" ]] || exit 1
+          [[ "$(uname -m)" == aarch64 ]] || exit 1
+          [[ "$AWS_CLI_VERSION" =~ ^2\.[0-9]+\.[0-9]+$ &&
+             "$(aws --version)" == "aws-cli/$AWS_CLI_VERSION "* ]] || exit 1
+          environment_api=https://api.github.com/repos/kevon-dot/opentour-ai/environments/opentour-ohio-ecr-publishing
+          curl --fail --silent --show-error --max-time 15 --proto '=https' "$environment_api" |
+            jq -e '
+              .name == "opentour-ohio-ecr-publishing"
+              and .deployment_branch_policy == {protected_branches:false, custom_branch_policies:true}
+              and any(.protection_rules[]; .type == "required_reviewers" and
+                any(.reviewers[]; .type == "User" and .reviewer.id == 276088488))
+            ' >/dev/null
+          curl --fail --silent --show-error --max-time 15 --proto '=https' "$environment_api/deployment-branch-policies" |
+            jq -e '.total_count == 1 and (.branch_policies | length == 1) and
+              .branch_policies[0].name == "main" and .branch_policies[0].type == "branch"' >/dev/null
+
+      - name: Bind the separately approved AWS publisher and two repositories
+        shell: bash
+        id: approval
+        env:
+          ACCOUNT: ${{ secrets.OHIO_ECR_ACCOUNT_ID }}
+          ROLE_ARN: ${{ secrets.OHIO_ECR_PUBLISH_ROLE_ARN }}
+          ROLE_ID: ${{ secrets.OHIO_ECR_PUBLISH_ROLE_ID }}
+          BFF_REPOSITORY: ${{ secrets.OHIO_ECR_BFF_REPOSITORY }}
+          API_REPOSITORY: ${{ secrets.OHIO_ECR_API_REPOSITORY }}
+        run: |
+          [[ "$ACCOUNT" =~ ^[0-9]{8}2146$ && "$ROLE_ID" =~ ^AROA[A-Z0-9]{17}$ &&
+             "$ROLE_ARN" =~ ^arn:aws:iam::$ACCOUNT:role/[A-Za-z0-9+=,.@_/-]{1,128}$ ]] || exit 1
+          [[ "$BFF_REPOSITORY" =~ ^opentour-ohio-identity-canary-baseline-bffrepository-[a-z0-9]+$ &&
+             "$API_REPOSITORY" =~ ^opentour-ohio-identity-canary-baseline-apirepository-[a-z0-9]+$ ]] || exit 1
+          case "$IMAGE" in
+            bff) repository=$BFF_REPOSITORY ;;
+            control-api) repository=$API_REPOSITORY ;;
+            *) exit 1 ;;
+          esac
+          session_name="ope212-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$IMAGE"
+          [[ "$GITHUB_RUN_ID" =~ ^[0-9]+$ && "$GITHUB_RUN_ATTEMPT" =~ ^[0-9]+$ &&
+             "${#session_name}" -le 64 ]] || exit 1
+          printf 'session_name=%s\n' "$session_name" >> "$GITHUB_OUTPUT"
+          jq -cn --arg repository "$repository" '
+            {Version:"2012-10-17", Statement:[
+              {Effect:"Allow",Action:"ecr:GetAuthorizationToken",Resource:"*"},
+              {Effect:"Allow",Action:["ecr:DescribeRepositories","ecr:BatchGetImage",
+                "ecr:BatchCheckLayerAvailability","ecr:InitiateLayerUpload",
+                "ecr:UploadLayerPart","ecr:CompleteLayerUpload","ecr:PutImage"],
+                Resource:("arn:aws:ecr:us-east-2:" + env.ACCOUNT + ":repository/" + $repository)}
+            ]} | "session_policy=" + tojson
+          ' >> "$GITHUB_OUTPUT"
+
+      - name: Check out the exact approved source
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Build and fully verify the temporary OCI content
+        id: build
+        shell: bash
+        run: |
+          work=$(mktemp -d "$RUNNER_TEMP/opentour-candidate.XXXXXXXX")
+          digest=$(bash infrastructure/images/build-arm64-candidate.sh "$IMAGE" "$work")
+          printf 'work=%s\ndigest=%s\n' "$work" "$digest" >> "$GITHUB_OUTPUT"
+
+          # https://github.com/oras-project/oras/releases/expanded_assets/v1.4.0
+          curl --fail --silent --show-error --location --retry 3 --max-time 120 \
+            --proto '=https' --proto-redir '=https' \
+            https://github.com/oras-project/oras/releases/download/v1.4.0/oras_1.4.0_linux_arm64.tar.gz \
+            --output "$work/oras.tar.gz"
+          printf '%s  %s\n' '0791fc200831563e498638d30e8ee8aac20ad1da2610760120fe3f770e12a8a4' "$work/oras.tar.gz" \
+            | sha256sum --check --status
+          tar -xzf "$work/oras.tar.gz" -C "$work" oras
+
+      - name: Assume the scoped Ohio publisher role
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          aws-region: us-east-2
+          audience: sts.amazonaws.com
+          role-to-assume: ${{ secrets.OHIO_ECR_PUBLISH_ROLE_ARN }}
+          allowed-account-ids: ${{ secrets.OHIO_ECR_ACCOUNT_ID }}
+          role-session-name: ${{ steps.approval.outputs.session_name }}
+          role-duration-seconds: 900
+          inline-session-policy: ${{ steps.approval.outputs.session_policy }}
+          mask-aws-account-id: true
+          unset-current-credentials: true
+          disable-retry: true
+
+      - name: Copy exact OCI content and verify Ohio readback
+        shell: bash
+        env:
+          ACCOUNT: ${{ secrets.OHIO_ECR_ACCOUNT_ID }}
+          ROLE_ARN: ${{ secrets.OHIO_ECR_PUBLISH_ROLE_ARN }}
+          ROLE_ID: ${{ secrets.OHIO_ECR_PUBLISH_ROLE_ID }}
+          BFF_REPOSITORY: ${{ secrets.OHIO_ECR_BFF_REPOSITORY }}
+          API_REPOSITORY: ${{ secrets.OHIO_ECR_API_REPOSITORY }}
+          EXPECTED_DIGEST: ${{ steps.build.outputs.digest }}
+          WORK: ${{ steps.build.outputs.work }}
+        run: |
+          trap 'rm -rf -- "$WORK"' EXIT
+          case "$IMAGE" in
+            bff) export REPOSITORY=$BFF_REPOSITORY ;;
+            control-api) export REPOSITORY=$API_REPOSITORY ;;
+            *) exit 1 ;;
+          esac
+          digest=$(bash infrastructure/images/publish-ohio-candidate.sh "$WORK/image" "$EXPECTED_DIGEST" "$WORK")
+          [[ "$digest" == "$EXPECTED_DIGEST" ]] || exit 1
+          printf '%s\n' "$digest" > "$RUNNER_TEMP/opentour-$IMAGE-candidate.sha256"
+          printf '### Ohio ECR candidate: %s\n\nVerified OCI manifest digest: \x60%s\x60\n' \
+            "$IMAGE" "$digest" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Hand off only the verified candidate digest
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: opentour-${{ inputs.image }}-candidate-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/opentour-${{ inputs.image }}-candidate.sha256
+          if-no-files-found: error
+          retention-days: 1

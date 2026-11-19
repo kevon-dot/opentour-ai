@@ -2,20 +2,163 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
+import ipaddress
 import json
 import ssl
 from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Any
-from unittest.mock import Mock
+from unittest.mock import AsyncMock, Mock
 
+import httpx2 as httpx
 import pytest
 import uvicorn
 from opentour_control.auth import browser_private_pilot_server as server
 from test_browser_private_listener import tls_fixture as tls_fixture
 
 PREFIX = "OPENTOUR_PRIVATE_BROWSER_"
+METADATA_URI = "http://169.254.170.2/v4/generated-fixture"
+SUBNET = "10.0.10.0/24"
+LISTEN_ADDRESS = "10.0.10.20"
+
+
+def _network(**overrides: object) -> dict[str, object]:
+    return {
+        "NetworkMode": "awsvpc",
+        "IPv4Addresses": [LISTEN_ADDRESS],
+        "IPv4SubnetCIDRBlock": SUBNET,
+        **overrides,
+    }
+
+
+def _reply(body: bytes, *, status: int = 200, **headers: str) -> httpx.Response:
+    return httpx.Response(
+        status,
+        headers={"content-type": "application/json", **headers},
+        stream=httpx.ByteStream(body),
+    )
+
+
+def test_reads_only_own_container_metadata_and_approved_address() -> None:
+    def respond(request: httpx.Request) -> httpx.Response:
+        assert request.method == "GET"
+        assert str(request.url) == METADATA_URI
+        assert request.headers["Accept-Encoding"] == "identity"
+        assert "authorization" not in request.headers
+        return _reply(json.dumps({"Networks": [_network()], "UnrelatedField": True}).encode())
+
+    approved = server._approved_subnets(json.dumps([SUBNET, "10.0.11.0/24"]))
+    result = asyncio.run(
+        server._ecs_listener_ipv4(METADATA_URI, approved, transport=httpx.MockTransport(respond))
+    )
+    assert str(result) == LISTEN_ADDRESS
+
+
+@pytest.mark.parametrize(
+    "uri",
+    [
+        "http://169.254.169.254/v4/generated-fixture",
+        "http://169.254.170.2:8080/v4/generated-fixture",
+        "http://169.254.170.2/v4/generated-fixture/task",
+        "http://169.254.170.2/v4/generated-fixture?target=foreign",
+        "http://169.254.170.2/v4/%2F",
+    ],
+)
+def test_wrong_metadata_address_is_refused_before_transport(uri: str) -> None:
+    respond = Mock(side_effect=AssertionError("unexpected transport"))
+    approved = server._approved_subnets(json.dumps([SUBNET]))
+    with pytest.raises(ValueError, match="Invalid ECS container metadata endpoint"):
+        asyncio.run(
+            server._ecs_listener_ipv4(uri, approved, transport=httpx.MockTransport(respond))
+        )
+    respond.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "networks",
+    [
+        [_network(), _network()],
+        [_network(NetworkMode="bridge")],
+        [_network(IPv4Addresses=[LISTEN_ADDRESS, "10.0.10.21"])],
+        [_network(IPv4SubnetCIDRBlock="10.0.0.0/16")],
+        [_network(IPv4Addresses=["10.0.11.20"])],
+        [_network(IPv4Addresses=["10.0.10.255"])],
+    ],
+)
+def test_disallows_ambiguous_or_unapproved_eni(networks: list[dict[str, object]]) -> None:
+    approved = server._approved_subnets(json.dumps([SUBNET]))
+    transport = httpx.MockTransport(
+        lambda _request: _reply(json.dumps({"Networks": networks}).encode())
+    )
+    with pytest.raises(ValueError):
+        asyncio.run(server._ecs_listener_ipv4(METADATA_URI, approved, transport=transport))
+
+
+@pytest.mark.parametrize(
+    ("body", "status", "headers"),
+    [
+        (b"", 302, {"location": "http://example.invalid"}),
+        (b" " * 32769, 200, {}),
+        (b"{}", 200, {"content-encoding": "gzip"}),
+        (b'{"Networks":[],"Networks":[]}', 200, {}),
+    ],
+)
+def test_metadata_transport_refuses_redirect_and_unusable_bytes(
+    body: bytes, status: int, headers: dict[str, str]
+) -> None:
+    approved = server._approved_subnets(json.dumps([SUBNET]))
+    respond = Mock(side_effect=lambda _request: _reply(body, status=status, **headers))
+    with pytest.raises(ValueError):
+        asyncio.run(
+            server._ecs_listener_ipv4(
+                METADATA_URI, approved, transport=httpx.MockTransport(respond)
+            )
+        )
+    assert respond.call_count == 1
+
+
+def test_metadata_timeout_is_total(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def wait(_request: httpx.Request) -> httpx.Response:
+        await asyncio.sleep(1)
+        raise AssertionError("deadline was not applied")
+
+    monkeypatch.setattr(server, "_METADATA_TIMEOUT", 0.01)
+    approved = server._approved_subnets(json.dumps([SUBNET]))
+    with pytest.raises(ValueError, match="ECS container metadata unavailable"):
+        asyncio.run(
+            server._ecs_listener_ipv4(METADATA_URI, approved, transport=httpx.MockTransport(wait))
+        )
+
+
+@pytest.mark.parametrize(
+    "value", ["[]", '["10.0.10.2/24"]', '["10.0.10.0/24","10.0.10.0/24"]', '["8.8.8.0/24"]']
+)
+def test_requires_canonical_distinct_private_subnets(value: str) -> None:
+    with pytest.raises(ValueError):
+        server._approved_subnets(value)
+
+
+def test_task_metadata_is_opt_in_fargate_startup_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    resolve = AsyncMock(return_value=ipaddress.IPv4Address(LISTEN_ADDRESS))
+    monkeypatch.setattr(server, "_ecs_listener_ipv4", resolve)
+    env = {
+        PREFIX + "LISTEN_HOST": LISTEN_ADDRESS,
+        PREFIX + "LISTEN_CIDRS": json.dumps([SUBNET]),
+        "AWS_EXECUTION_ENV": "AWS_ECS_FARGATE",
+        "ECS_CONTAINER_METADATA_URI_V4": METADATA_URI,
+    }
+    assert str(server._listener_host(env, allow_metadata=True)) == LISTEN_ADDRESS
+    resolve.assert_not_awaited()
+    env[PREFIX + "LISTEN_HOST"] = "ecs-task-ipv4"
+    with pytest.raises(ValueError):
+        server._listener_host(env, allow_metadata=False)
+    with pytest.raises(ValueError):
+        server._listener_host({**env, "AWS_EXECUTION_ENV": "AWS_ECS_EC2"}, allow_metadata=True)
+    resolve.assert_not_awaited()
+    assert str(server._listener_host(env, allow_metadata=True)) == LISTEN_ADDRESS
+    resolve.assert_awaited_once_with(METADATA_URI, frozenset({ipaddress.IPv4Network(SUBNET)}))
 
 
 @pytest.fixture
@@ -61,11 +204,19 @@ def launch(deployment: dict[str, str], monkeypatch: pytest.MonkeyPatch) -> tuple
     return runtime, configure
 
 
+@pytest.mark.parametrize("bind_source", ["explicit", "fargate"])
 def test_private_launcher_loads_real_reviewed_tls_configuration(
-    launch: tuple[Mock, Mock], monkeypatch: pytest.MonkeyPatch
+    bind_source: str, launch: tuple[Mock, Mock], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     runtime, configure = launch
     loaded: list[uvicorn.Config] = []
+    resolve = AsyncMock(return_value=ipaddress.IPv4Address(LISTEN_ADDRESS))
+    monkeypatch.setattr(server, "_ecs_listener_ipv4", resolve)
+    if bind_source == "fargate":
+        monkeypatch.setenv(PREFIX + "LISTEN_HOST", "ecs-task-ipv4")
+        monkeypatch.setenv(PREFIX + "LISTEN_CIDRS", json.dumps([SUBNET]))
+        monkeypatch.setenv("AWS_EXECUTION_ENV", "AWS_ECS_FARGATE")
+        monkeypatch.setenv("ECS_CONTAINER_METADATA_URI_V4", METADATA_URI)
 
     def inspect(listener: uvicorn.Server) -> None:
         listener.config.load()
@@ -82,6 +233,7 @@ def test_private_launcher_loads_real_reviewed_tls_configuration(
     assert config.timeout_graceful_shutdown == 20
     configure.assert_called_once()
     runtime.close.assert_called_once()
+    assert resolve.await_count == (1 if bind_source == "fargate" else 0)
 
 
 def test_tls_preflight_checks_the_real_mounts_without_starting_runtime(

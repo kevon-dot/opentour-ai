@@ -46,8 +46,12 @@ COPY --from=production-dependencies /app/packages/client-ts /app/packages/client
 WORKDIR /app/apps/web
 COPY --from=build /runtime/ ./
 COPY --from=build /app/apps/web/.next ./.next
+# Use the same empty Fargate volume seed as the control API image.
+RUN install -d -m 0755 -o 0 -g 0 /run/opentour \
+    && install -d -m 0700 -o 10001 -g 10001 /run/opentour/runtime
 ENV NODE_ENV=production NEXT_TELEMETRY_DISABLED=1
 USER 10001:10001
+VOLUME ["/run/opentour"]
 EXPOSE 3000
 HEALTHCHECK --interval=30s --timeout=3s --start-period=20s \
     CMD ["node", "-e", "fetch('http://127.0.0.1:3000/health/ready', {redirect: 'error', signal: AbortSignal.timeout(2000)}).then(response => {process.exitCode = Number(response.status !== 200)}, () => {process.exitCode = 1})"]
