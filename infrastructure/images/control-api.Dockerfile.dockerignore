@@ -1,0 +1,17 @@
+**
+!pyproject.toml
+!uv.lock
+!services/control-api/pyproject.toml
+!services/control-api/src/
+!services/control-api/src/**
+!services/cell-runtime/pyproject.toml
+!services/audit-journal/pyproject.toml
+!packages/authority-journal/pyproject.toml
+!packages/authority-journal/src/
+!packages/authority-journal/src/**
+**/__pycache__
+**/*.pyc
+**/.env*
+**/.aws
+**/evidence
+**/tests
