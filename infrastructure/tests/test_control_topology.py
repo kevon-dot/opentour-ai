@@ -188,9 +188,12 @@ def test_oidc_trust_requires_every_exact_identity_claim() -> None:
         ("Deploy", "ApprovedDeployWorkflow"),
         ("Migration", "ApprovedMigrationWorkflow"),
     ):
-        trust = resources[name + "Role"]["Properties"]["AssumeRolePolicyDocument"]["Statement"][0]
+        role = resources[name + "Role"]["Properties"]
+        assert role["MaxSessionDuration"] == 3600
+        trust = role["AssumeRolePolicyDocument"]["Statement"][0]
         assert trust["Action"] == "sts:AssumeRoleWithWebIdentity"
         conditions = trust["Condition"]
+        assert set(conditions) == {"StringEquals"}
         assert conditions["StringEquals"] == {
             "token.actions.githubusercontent.com:aud": "sts.amazonaws.com",
             "token.actions.githubusercontent.com:sub": {
@@ -203,8 +206,6 @@ def test_oidc_trust_requires_every_exact_identity_claim() -> None:
             "token.actions.githubusercontent.com:ref": "refs/heads/main",
             "token.actions.githubusercontent.com:environment": {"Ref": "Environment"},
         }
-        assert conditions["NumericLessThanEquals"] == {"sts:DurationSeconds": 900}
-        assert "StringLike" not in conditions
         subject = conditions["StringEquals"]["token.actions.githubusercontent.com:sub"]["Fn::Sub"]
         for environment in ("dev", "test", "prod"):
             expected = subject.replace("${Environment}", environment)
