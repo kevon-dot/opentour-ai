@@ -7,6 +7,7 @@ from typing import Any
 
 import pytest
 
+from tools import verify_release_manifest
 from tools.verify_release_manifest import ReleaseVerificationError, verify_oci_layout
 
 _MANIFEST = "application/vnd.oci.image.manifest.v1+json"
@@ -124,3 +125,28 @@ def test_refuses_duplicate_index_keys_even_when_index_bytes_match(
     digest = f"sha256:{hashlib.sha256(ambiguous_index).hexdigest()}"
     with pytest.raises(ReleaseVerificationError, match="Duplicate keys"):
         verify_oci_layout(root, digest)
+
+
+@pytest.mark.parametrize("extra_bytes", [-1, 0], ids=["index", "manifest"])
+def test_bounds_index_and_manifest_metadata_reads(
+    layout: tuple[Path, dict[str, Any], dict[str, Any]],
+    monkeypatch: pytest.MonkeyPatch,
+    extra_bytes: int,
+) -> None:
+    root, manifest, _ = layout
+    index_size = (root / "index.json").stat().st_size
+    assert manifest["size"] > index_size
+    monkeypatch.setattr(verify_release_manifest, "_MAX_METADATA_BYTES", index_size + extra_bytes)
+    with pytest.raises(ReleaseVerificationError, match="local verification limit"):
+        verify_oci_layout(root, manifest["digest"])
+
+
+def test_refuses_symlink_blob_directory(
+    layout: tuple[Path, dict[str, Any], dict[str, Any]],
+) -> None:
+    root, manifest, _ = layout
+    blob_directory = root / "blobs" / "sha256"
+    original = blob_directory.rename(root / "outside-blob-directory")
+    blob_directory.symlink_to(original, target_is_directory=True)
+    with pytest.raises(ReleaseVerificationError, match="Missing or unreadable local OCI directory"):
+        verify_oci_layout(root, manifest["digest"])

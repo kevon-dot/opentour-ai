@@ -8,6 +8,8 @@ import json
 import os
 import re
 import stat
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from io import BufferedReader, FileIO
 from pathlib import Path
@@ -17,6 +19,8 @@ _INDEX = "application/vnd.oci.image.index.v1+json"
 _MANIFEST = "application/vnd.oci.image.manifest.v1+json"
 _IMAGE_TYPES = {_INDEX, _MANIFEST}
 _DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
+_MAX_METADATA_BYTES = 16 * 1024 * 1024
+_READ_CHUNK = 1024 * 1024
 
 
 class ReleaseVerificationError(ValueError):
@@ -47,15 +51,34 @@ def _json_object(data: bytes) -> dict[str, Any]:
     return result
 
 
-def _open_file(path: Path) -> BufferedReader:
+@contextmanager
+def _directory(path: Path | str, parent: int | None = None) -> Iterator[int]:
     try:
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
+    except OSError as error:
+        raise ReleaseVerificationError("Missing or unreadable local OCI directory") from error
+    try:
+        yield fd
+    finally:
+        os.close(fd)
+
+
+def _open_file(directory: int, name: str) -> BufferedReader:
+    try:
+        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
     except OSError as error:
         raise ReleaseVerificationError("Missing or unreadable OCI file") from error
     if not stat.S_ISREG(os.fstat(fd).st_mode):
         os.close(fd)
         raise ReleaseVerificationError("OCI content must be a regular file")
     return BufferedReader(FileIO(fd, mode="rb", closefd=True))
+
+
+def _read_metadata(stream: BufferedReader) -> bytes:
+    data = stream.read(_MAX_METADATA_BYTES + 1)
+    if len(data) > _MAX_METADATA_BYTES:
+        raise ReleaseVerificationError("OCI metadata exceeds the local verification limit")
+    return data
 
 
 def _descriptor(value: object) -> _Descriptor:
@@ -85,20 +108,31 @@ def _document(data: bytes, media_type: str) -> dict[str, Any]:
     return result
 
 
-def _verify_blob(blobs: Path, descriptor: _Descriptor, *, document: bool) -> bytes:
+def _verify_blob(blobs: int, descriptor: _Descriptor, *, document: bool) -> bytes:
     expected = descriptor.digest.removeprefix("sha256:")
-    with _open_file(blobs / expected) as stream:
+    if document and descriptor.size > _MAX_METADATA_BYTES:
+        raise ReleaseVerificationError("OCI metadata exceeds the local verification limit")
+    with _open_file(blobs, expected) as stream:
         if os.fstat(stream.fileno()).st_size != descriptor.size:
             raise ReleaseVerificationError("OCI blob size mismatch")
+        hasher = hashlib.sha256()
         if document:
-            data = stream.read(descriptor.size + 1)
+            data = stream.read(descriptor.size)
             if len(data) != descriptor.size:
                 raise ReleaseVerificationError("OCI blob size changed while reading")
-            digest = hashlib.sha256(data).hexdigest()
+            hasher.update(data)
         else:
             data = b""
-            digest = hashlib.file_digest(stream, "sha256").hexdigest()
-    if digest != expected:
+            remaining = descriptor.size
+            while remaining:
+                chunk = stream.read(min(remaining, _READ_CHUNK))
+                if not chunk:
+                    raise ReleaseVerificationError("OCI blob size changed while reading")
+                hasher.update(chunk)
+                remaining -= len(chunk)
+        if stream.read(1):
+            raise ReleaseVerificationError("OCI blob size changed while reading")
+    if hasher.hexdigest() != expected:
         raise ReleaseVerificationError("OCI blob digest mismatch")
     return data
 
@@ -106,19 +140,24 @@ def _verify_blob(blobs: Path, descriptor: _Descriptor, *, document: bool) -> byt
 def verify_oci_layout(layout: Path, expected_digest: str) -> None:
     """Verify one approved SHA-256 image and its locally available OCI content.
 
-    The caller establishes the digest's authority separately. This reads local files only,
-    and an incomplete export fails even if its descriptors advertise remote blob URLs.
+    The caller establishes the digest's authority separately. An approved digest can name
+    the layout index bytes or a descriptor in its top-level index. This reads local files
+    only, and an incomplete export fails even if its descriptors advertise remote blob URLs.
+    Each JSON metadata document is limited to 16 MiB. Layers are streamed.
     """
     if _DIGEST.fullmatch(expected_digest) is None:
         raise ReleaseVerificationError("Expected a canonical SHA-256 image digest")
-    blobs = layout / "blobs" / "sha256"
-    if blobs.parent.is_symlink() or blobs.is_symlink() or not blobs.is_dir():
-        raise ReleaseVerificationError("Expected a local OCI SHA-256 blob directory")
-    with _open_file(layout / "oci-layout") as stream:
-        if _json_object(stream.read()).get("imageLayoutVersion") != "1.0.0":
-            raise ReleaseVerificationError("Unsupported OCI image layout version")
-    with _open_file(layout / "index.json") as stream:
-        index = stream.read()
+    with _directory(layout) as layout_fd:
+        with _open_file(layout_fd, "oci-layout") as stream:
+            if _json_object(_read_metadata(stream)).get("imageLayoutVersion") != "1.0.0":
+                raise ReleaseVerificationError("Unsupported OCI image layout version")
+        with _open_file(layout_fd, "index.json") as stream:
+            index = _read_metadata(stream)
+        with _directory("blobs", layout_fd) as blobs_fd, _directory("sha256", blobs_fd) as sha_fd:
+            _verify_reachable(sha_fd, index, expected_digest)
+
+
+def _verify_reachable(blobs: int, index: bytes, expected_digest: str) -> None:
     candidates = _descriptors(_document(index, _INDEX).get("manifests"))
     if f"sha256:{hashlib.sha256(index).hexdigest()}" == expected_digest:
         roots = candidates
