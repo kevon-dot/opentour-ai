@@ -24,6 +24,7 @@ _PROFILES = {
         ("STAGE_LEAF", "stage.pem", 65536),
         ("SERVER_CERT", "server.pem", 65536),
         ("SERVER_KEY", "server.key", 65536),
+        ("RDS_CA", "rds-ca.pem", 65536),
     ),
 }
 _DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW

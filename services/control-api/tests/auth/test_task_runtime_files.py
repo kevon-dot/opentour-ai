@@ -21,6 +21,7 @@ LISTENER = (
     ("STAGE_LEAF", "stage.pem", b"generated-stage-leaf\n"),
     ("SERVER_CERT", "server.pem", b"generated-server-certificate\n"),
     ("SERVER_KEY", "server.key", b"generated-server-key\n"),
+    ("RDS_CA", "rds-ca.pem", b"generated-rds-ca-bundle\n"),
 )
 
 
@@ -128,6 +129,16 @@ def test_refuses_oversize_bff_and_incomplete_listener_without_partial_publicatio
         _configure(listener, "private-listener", LISTENER[:-1])
         _refused(capsys)
         assert not list(volume.iterdir())
+
+
+def test_refuses_changed_rds_ca_before_publishing_listener_files(
+    volume: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _configure(monkeypatch, "private-listener", LISTENER)
+    changed = base64.b64encode(b"unapproved-generated-ca-bundle").decode("ascii")
+    monkeypatch.setenv(PREFIX + "RDS_CA_B64", changed)
+    _refused(capsys)
+    assert not list(volume.iterdir())
 
 
 @pytest.mark.parametrize("admission", ["uid", "mount-mode"])
