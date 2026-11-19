@@ -1,0 +1,227 @@
+name: OPE-213 dev migration OIDC probe
+
+'on':
+  workflow_call:
+
+permissions: {}
+
+jobs:
+  prove:
+    if: >-
+      ${{ github.event_name == 'workflow_dispatch'
+      && github.repository == 'kevon-dot/opentour-ai'
+      && github.repository_id == '1455972360'
+      && github.ref == 'refs/heads/main'
+      && github.workflow_ref == 'kevon-dot/opentour-ai/.github/workflows/ope213-dev-oidc-proof.yml@refs/heads/main' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+    environment: dev
+    permissions:
+      id-token: write
+    steps:
+      - name: Verify GitHub federation with the no-policy AWS probe role
+        shell: bash
+        env:
+          OPENTOUR_DEV_ACCOUNT_ID: ${{ vars.OPENTOUR_DEV_ACCOUNT_ID }}
+        run: |
+          python3 -I - <<'PY'
+          import base64
+          import json
+          import os
+          import re
+          import subprocess
+          from contextlib import ExitStack
+          from datetime import datetime, timezone
+          from tempfile import NamedTemporaryFile
+          from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+          from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
+
+
+          class ProofFailed(Exception):
+              pass
+
+
+          class NoRedirect(HTTPRedirectHandler):
+              def redirect_request(self, *args, **kwargs):
+                  return None
+
+
+          REPOSITORY = "kevon-dot/opentour-ai"
+          SUBJECT = "repo:kevon-dot@276088488/opentour-ai@1455972360:environment:dev"
+          AUDIENCE = "sts.amazonaws.com"
+          WORKFLOW = "ope213-dev-oidc-migration-probe.yml"
+          ROLE = "OpenTourDevOidcMigrationProbe"
+          REGION = "us-east-2"
+          SESSION_SECONDS = 900
+
+
+          def require_dev_protection():
+              url = f"https://api.github.com/repos/{REPOSITORY}/environments/dev"
+              opener = build_opener(ProxyHandler({}), NoRedirect())
+
+              def read(path):
+                  request = Request(
+                      url + path,
+                      headers={"Accept": "application/vnd.github+json", "User-Agent": "OpenTour-dev-OIDC-probe"},
+                  )
+                  with opener.open(request, timeout=15) as response:
+                      return json.loads(response.read(65537))
+
+              environment = read("")
+              branch_policy = environment.get("deployment_branch_policy") or {}
+              required_review = any(
+                  rule.get("type") == "required_reviewers"
+                  and rule.get("prevent_self_review", False) is False
+                  and len(rule.get("reviewers", [])) == 1
+                  and rule["reviewers"][0].get("type") == "User"
+                  and rule["reviewers"][0].get("reviewer", {}).get("id") == 276088488
+                  for rule in environment.get("protection_rules", [])
+              )
+              if (
+                  environment.get("name") != "dev"
+                  or branch_policy.get("custom_branch_policies") is not True
+                  or branch_policy.get("protected_branches") is not False
+                  or not required_review
+              ):
+                  raise ProofFailed("The dev environment is missing its required reviewer and branch protections.")
+              branches = read("/deployment-branch-policies")
+              rules = branches.get("branch_policies", [])
+              if (
+                  branches.get("total_count") != 1
+                  or len(rules) != 1
+                  or rules[0].get("name") != "main"
+                  or rules[0].get("type", "branch") != "branch"
+              ):
+                  raise ProofFailed("The dev environment must allow only the main branch.")
+
+
+          def request_token():
+              token_url = urlsplit(os.environ["ACTIONS_ID_TOKEN_REQUEST_URL"])
+              if (
+                  token_url.scheme != "https"
+                  or not token_url.hostname
+                  or not token_url.hostname.endswith(".actions.githubusercontent.com")
+                  or token_url.username is not None
+                  or token_url.password is not None
+                  or token_url.port not in (None, 443)
+                  or token_url.fragment
+              ):
+                  raise ProofFailed("OIDC request endpoint did not match the GitHub runner profile.")
+
+              query = [(key, value) for key, value in parse_qsl(token_url.query) if key != "audience"]
+              query.append(("audience", AUDIENCE))
+              request = Request(
+                  urlunsplit(token_url._replace(query=urlencode(query))),
+                  headers={"Authorization": "Bearer " + os.environ["ACTIONS_ID_TOKEN_REQUEST_TOKEN"]},
+              )
+              with build_opener(ProxyHandler({}), NoRedirect()).open(request, timeout=15) as response:
+                  token = json.loads(response.read(65537))["value"]
+              if not isinstance(token, str) or len(token) > 65536:
+                  raise ProofFailed("GitHub did not return a bounded OIDC token.")
+              return token
+
+
+          def check_claims(token):
+              # This is a local assertion only. AWS STS verifies the token and enforces the trust policy.
+              _, payload, _ = token.split(".")
+              claims = json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
+              reviewed_sha = claims.get("job_workflow_sha", "")
+              if not re.fullmatch(r"[0-9a-f]{40}", reviewed_sha):
+                  raise ProofFailed("The reusable workflow SHA claim was missing or invalid.")
+              expected = {
+                  "iss": "https://token.actions.githubusercontent.com",
+                  "aud": AUDIENCE,
+                  "sub": SUBJECT,
+                  "repository": REPOSITORY,
+                  "repository_id": "1455972360",
+                  "ref": "refs/heads/main",
+                  "environment": "dev",
+                  "event_name": "workflow_dispatch",
+                  "workflow_ref": f"{REPOSITORY}/.github/workflows/ope213-dev-oidc-proof.yml@refs/heads/main",
+                  "job_workflow_ref": f"{REPOSITORY}/.github/workflows/{WORKFLOW}@{reviewed_sha}",
+              }
+              if any(claims.get(name) != value for name, value in expected.items()):
+                  raise ProofFailed("GitHub OIDC claims did not match the approved proof context.")
+
+
+          def call_sts(operation, *, request=None, credentials=None):
+              process_env = {
+                  "PATH": os.environ["PATH"],
+                  "AWS_CONFIG_FILE": "/dev/null",
+                  "AWS_SHARED_CREDENTIALS_FILE": "/dev/null",
+                  "AWS_EC2_METADATA_DISABLED": "true",
+                  "AWS_MAX_ATTEMPTS": "1",
+              }
+              if credentials is not None:
+                  process_env.update(
+                      AWS_ACCESS_KEY_ID=credentials["AccessKeyId"],
+                      AWS_SECRET_ACCESS_KEY=credentials["SecretAccessKey"],
+                      AWS_SESSION_TOKEN=credentials["SessionToken"],
+                  )
+              with ExitStack() as stack:
+                  arguments = ()
+                  if request is not None:
+                      # The JWT stays out of process arguments and is removed on success or failure.
+                      payload = stack.enter_context(NamedTemporaryFile(mode="w", encoding="utf-8"))
+                      json.dump(request, payload)
+                      payload.flush()
+                      arguments = ("--no-sign-request", "--cli-input-json", "file://" + payload.name)
+                  result = subprocess.run(
+                      [
+                          "aws", "sts", operation, "--region", REGION,
+                          "--endpoint-url", f"https://sts.{REGION}.amazonaws.com",
+                          "--output", "json", "--no-cli-pager", *arguments,
+                      ],
+                      stdin=subprocess.DEVNULL,
+                      capture_output=True,
+                      text=True,
+                      env=process_env,
+                      timeout=30,
+                      check=False,
+                  )
+              if result.returncode != 0:
+                  raise ProofFailed(f"AWS STS {operation} failed.")
+              return json.loads(result.stdout)
+
+
+          def prove_identity():
+              # The independent dev environment reviewer must verify this variable against Future Unicorn.
+              account = os.environ.get("OPENTOUR_DEV_ACCOUNT_ID", "")
+              if not re.fullmatch(r"[0-9]{8}2146", account):
+                  raise ProofFailed("The protected dev account binding was missing or invalid.")
+              session = f"ope213-migration-{os.environ['GITHUB_RUN_ID']}-{os.environ['GITHUB_RUN_ATTEMPT']}"
+              if not re.fullmatch(r"ope213-migration-[0-9]+-[0-9]+", session) or len(session) > 64:
+                  raise ProofFailed("The GitHub run identity was missing or invalid.")
+              require_dev_protection()
+              token = request_token()
+              check_claims(token)
+              assumed = call_sts(
+                  "assume-role-with-web-identity",
+                  request={
+                      "RoleArn": f"arn:aws:iam::{account}:role/{ROLE}",
+                      "RoleSessionName": session,
+                      "WebIdentityToken": token,
+                      "DurationSeconds": SESSION_SECONDS,
+                  },
+              )
+              expected_arn = f"arn:aws:sts::{account}:assumed-role/{ROLE}/{session}"
+              if assumed["AssumedRoleUser"]["Arn"] != expected_arn:
+                  raise ProofFailed("STS did not return the expected probe role session.")
+              credentials = assumed["Credentials"]
+              expiry = datetime.fromisoformat(credentials["Expiration"])
+              remaining = (expiry - datetime.now(timezone.utc)).total_seconds()
+              if not SESSION_SECONDS - 60 <= remaining <= SESSION_SECONDS + 5:
+                  raise ProofFailed("STS did not issue the expected 900-second session.")
+              identity = call_sts("get-caller-identity", credentials=credentials)
+              if identity["Account"] != account or identity["Arn"] != expected_arn:
+                  raise ProofFailed("The signed caller identity did not match the approved account and role.")
+              print("Verified the dev migration OIDC probe role, caller identity, and 900-second session.")
+
+
+          try:
+              prove_identity()
+          except ProofFailed as error:
+              raise SystemExit(str(error)) from None
+          except Exception:
+              raise SystemExit("The dev OIDC probe did not complete.") from None
+          PY
