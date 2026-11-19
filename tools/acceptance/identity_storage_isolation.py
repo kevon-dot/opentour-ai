@@ -56,6 +56,21 @@ _EXPECTED: dict[str, tuple[tuple[str, Metric], ...]] = {
     "same_org_wrong_scope": (("scope_bypass", False),),
     "own_scope_control": (("scope_authorized", True),),
 }
+_ISO01_ACCEPTANCE_IDS = ("OT-G2-C01-AC01", "OT-G2-C01-AC07")
+_ISO01_EVIDENCE_FILES = {
+    "cross_cell_every_pair": (
+        "topology.json",
+        "directed-pair-matrix.json",
+        "route-role-matrix.json",
+        "sentinel-search-results.json",
+    ),
+    "same_org_wrong_scope": (
+        "topology.json",
+        "route-role-matrix.json",
+        "sentinel-search-results.json",
+    ),
+    "own_scope_control": ("route-role-matrix.json",),
+}
 
 
 class InvalidIsolationFixture(ValueError):
@@ -218,6 +233,17 @@ def _validate_catalog(document: Mapping[str, object]) -> None:
         raise InvalidIsolationFixture("ISO-01 must include exact denial and positive controls")
     for row in rows:
         key = _identifier(row.get("id"))
+        fields = {"id", "expect", "acceptance_ids", "evidence_files"}
+        if key == "cross_cell_every_pair":
+            fields.update(("substituted_scope_fields", "operations", "worker_handoff"))
+        if row.keys() != fields:
+            raise InvalidIsolationFixture(f"Unexpected declaration fields for {key}")
+        if row.get("acceptance_ids") != list(_ISO01_ACCEPTANCE_IDS) or row.get(
+            "evidence_files"
+        ) != list(_ISO01_EVIDENCE_FILES[key]):
+            raise InvalidIsolationFixture(
+                f"Incorrect acceptance or evidence declarations for {key}"
+            )
         if not _matches_shape(row.get("expect"), _EXPECTED[key]):
             raise InvalidIsolationFixture(f"Incorrect oracle shape for {key}")
         if row["expect"] != dict(_EXPECTED[key]):
@@ -265,7 +291,17 @@ def parse_fixture(raw: str) -> IsolationFixture:
     aliases = [_identifier(cell.get("alias")) for cell in cells]
     if Counter(aliases) != Counter(_CELL_MODES.keys()):
         raise InvalidIsolationFixture("Expected exactly four named cells")
+    cell_fields = {
+        "alias",
+        "organization_id",
+        "deployment_mode",
+        "sentinel",
+        "secondary_scope",
+        *_SCOPE_FIELDS,
+    }
     for cell in cells:
+        if cell.keys() != cell_fields:
+            raise InvalidIsolationFixture("Unexpected fields in a generated cell")
         alias = _identifier(cell.get("alias"))
         if cell.get("deployment_mode") != _CELL_MODES[alias]:
             raise InvalidIsolationFixture("Each cell must retain its declared deployment mode")
@@ -285,17 +321,23 @@ def parse_fixture(raw: str) -> IsolationFixture:
         all_secondary = {secondary[alias, field] for alias in aliases}
         if primary & all_secondary or len(all_secondary) != len(cells):
             raise InvalidIsolationFixture("Secondary scope must use distinct generated identifiers")
+    directed_rows = _records(document.get("directed_pairs"))
+    if any(row.keys() != {"initiator_cell", "target_cell"} for row in directed_rows):
+        raise InvalidIsolationFixture("Unexpected fields in a directed pair")
     pairs = tuple(
         (_identifier(row.get("initiator_cell")), _identifier(row.get("target_cell")))
-        for row in _records(document.get("directed_pairs"))
+        for row in directed_rows
     )
+    intra_rows = _records(document.get("intra_organization_cases"))
+    if any(row.keys() != {"cell_alias", "scope_field", "foreign_id"} for row in intra_rows):
+        raise InvalidIsolationFixture("Unexpected fields in a same-organization case")
     scopes = [
         (
             _identifier(row.get("cell_alias")),
             _identifier(row.get("scope_field")),
             _identifier(row.get("foreign_id")),
         )
-        for row in _records(document.get("intra_organization_cases"))
+        for row in intra_rows
     ]
     if Counter(scopes) != Counter(
         (alias, field, target) for (alias, field), target in secondary.items()

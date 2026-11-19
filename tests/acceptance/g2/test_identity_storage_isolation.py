@@ -321,6 +321,57 @@ def test_fixture_parser_requires_cross_cell_scope_metadata() -> None:
         parse_fixture(json.dumps(fixture))
 
 
+@pytest.mark.parametrize(
+    "mutation",
+    ["duplicate", "self", "unknown"],
+)
+def test_fixture_parser_rejects_wrong_directed_pair_with_the_same_count(mutation: str) -> None:
+    fixture = json.loads(FIXTURE_PATH.read_text(encoding="utf-8"))
+    pairs = fixture["directed_pairs"]
+    match mutation:
+        case "duplicate":
+            pairs[-1] = pairs[0]
+        case "self":
+            pairs[-1]["target_cell"] = pairs[-1]["initiator_cell"]
+        case "unknown":
+            pairs[-1]["target_cell"] = "generated-unknown-cell"
+    assert len(pairs) == 12
+
+    with pytest.raises(InvalidIsolationFixture, match="all twelve directed cross-cell pairs"):
+        parse_fixture(json.dumps(fixture))
+
+
+@pytest.mark.parametrize(
+    "collection",
+    ["cells", "directed_pairs", "intra_organization_cases"],
+)
+def test_fixture_parser_rejects_undeclared_topology_fields(collection: str) -> None:
+    fixture = json.loads(FIXTURE_PATH.read_text(encoding="utf-8"))
+    fixture[collection][0]["undeclared_binding"] = "generated-binding"
+
+    with pytest.raises(InvalidIsolationFixture, match="Unexpected fields"):
+        parse_fixture(json.dumps(fixture))
+
+
+@pytest.mark.parametrize(
+    "case_id", ["cross_cell_every_pair", "same_org_wrong_scope", "own_scope_control"]
+)
+@pytest.mark.parametrize("field", ["acceptance_ids", "evidence_files"])
+def test_fixture_parser_rejects_missing_or_substituted_case_evidence(
+    case_id: str, field: str
+) -> None:
+    fixture = json.loads(FIXTURE_PATH.read_text(encoding="utf-8"))
+    iso = next(suite for suite in fixture["suites"] if suite["suite_id"] == "ISO-01")
+    declaration = next(row for row in iso["cases"] if row["id"] == case_id)
+    declaration[field].pop()
+    with pytest.raises(InvalidIsolationFixture, match="Incorrect acceptance or evidence"):
+        parse_fixture(json.dumps(fixture))
+
+    declaration[field].append("generated-unapproved-association")
+    with pytest.raises(InvalidIsolationFixture, match="Incorrect acceptance or evidence"):
+        parse_fixture(json.dumps(fixture))
+
+
 _CELL_IDS = {alias: f"test-cell-{alias}" for alias in sorted(_CELLS)}
 
 
