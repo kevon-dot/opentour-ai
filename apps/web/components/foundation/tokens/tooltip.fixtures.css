@@ -1,0 +1,30 @@
+/* Local synthetic gallery only. No product route, request, navigation or shared state. */
+.ot-tooltip-fixture, .ot-tooltip-samples { font-family: Geist, sans-serif; color: var(--ot-text-primary); background: var(--ot-surface-canvas); }
+.ot-tooltip-fixture header { display: flex; flex-direction: column; align-items: flex-start; gap: var(--ot-space-8); box-sizing: border-box; padding: var(--ot-space-16); border: 1px solid var(--ot-border-default); background: var(--ot-surface-base); }
+.ot-tooltip-fixture header p { margin: 0; white-space: pre-wrap; font: var(--ot-type-label-weight) var(--ot-type-label-size)/var(--ot-type-label-line) Geist, sans-serif; }
+.ot-tooltip-fixture header small { color: var(--ot-text-secondary); font: var(--ot-type-small-weight) var(--ot-type-small-size)/var(--ot-type-small-line) Geist, sans-serif; }
+.ot-tooltip-fixture .fixture-navigation { min-block-size: 44px; inline-size: 220px; justify-content: flex-start; text-align: start; }
+.ot-tooltip-fixture main { display: flex; flex-direction: column; align-items: stretch; gap: var(--ot-space-16); padding: var(--ot-space-16); }
+.ot-tooltip-fixture h1, .ot-tooltip-samples h1 { margin: 0; max-inline-size: 100%; overflow-wrap: anywhere; font: var(--ot-type-heading-weight) var(--ot-type-heading-size)/var(--ot-type-heading-line) Geist, sans-serif; }
+.ot-tooltip-fixture .fixture-description { margin: 0; color: var(--ot-text-secondary); font: var(--ot-type-body-weight) var(--ot-type-body-size)/var(--ot-type-body-line) Geist, sans-serif; }
+.fixture-evidence-help > .ot-button { inline-size: min(300px, 100%); min-block-size: 44px; vertical-align: top; }
+.fixture-reserved-help { visibility: hidden; box-sizing: border-box; inline-size: min(360px, 100%); padding: var(--ot-space-12); border: 1px solid transparent; margin-block-start: var(--ot-space-16); display: flex; flex-direction: column; gap: var(--ot-space-8); font: var(--ot-type-small-weight) var(--ot-type-small-size)/var(--ot-type-small-line) Geist, sans-serif; overflow-wrap: anywhere; }
+.fixture-reserved-help p { margin: 0; }
+.fixture-exact-values { display: flex; flex-direction: column; gap: var(--ot-space-8); }
+.fixture-exact-values h2 { margin: 0; font: var(--ot-type-label-weight) var(--ot-type-label-size)/var(--ot-type-label-line) Geist, sans-serif; }
+.fixture-exact-region { overflow-x: auto; }
+.fixture-exact-region:focus-visible { outline: 2px solid var(--ot-action-primary); outline-offset: 2px; }
+.fixture-exact-region table { border-collapse: collapse; border-spacing: 0; table-layout: fixed; min-inline-size: 640px; inline-size: 100%; }
+.fixture-exact-region .ot-table-cell-frame { border: 1px solid var(--ot-border-default); }
+.fixture-exact-region th .ot-table-cell-value { font: var(--ot-type-label-weight) var(--ot-type-label-size)/var(--ot-type-label-line) Geist, sans-serif; }
+.fixture-exact-region td .ot-table-cell-value { font: var(--ot-type-small-weight) var(--ot-type-small-size)/var(--ot-type-small-line) Geist, sans-serif; }
+.fixture-exact-region tr > :last-child { text-align: right; }
+.ot-tooltip-samples { box-sizing: border-box; min-block-size: 100dvh; padding: var(--ot-space-16); display: flex; flex-direction: column; align-items: flex-start; gap: var(--ot-space-16); }
+.ot-tooltip-samples > p { margin: 0; font: var(--ot-type-body-weight) var(--ot-type-body-size)/var(--ot-type-body-line) Geist, sans-serif; overflow-wrap: anywhere; }
+.ot-tooltip-samples .ot-button { min-block-size: 44px; }
+.ot-tooltip-samples--edge > button { position: fixed; bottom: 24px; right: 16px; }
+.fixture-scroll-space { block-size: 1600px; }
+@media (min-width: 768px) { .ot-tooltip-fixture main { padding: var(--ot-space-24); } .fixture-scroll-hint { display: none; } }
+@media (min-width: 1024px) { .ot-tooltip-fixture .fixture-navigation { display: none; } }
+@media (min-width: 1280px) { .ot-tooltip-fixture main { padding: var(--ot-space-32); } }
+@media (forced-colors: active) { .fixture-exact-region .ot-table-cell-frame { border-color: CanvasText; } .fixture-exact-region:focus-visible { outline-color: Highlight; } }

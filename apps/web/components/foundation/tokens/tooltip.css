@@ -1,0 +1,16 @@
+/* OPE-313: finite Help and Evidence appearances from native 153:511 and 171:5183–5278. */
+.ot-tooltip-layer { position: fixed; inset: auto; margin: 0; padding: 0; border: 0; overflow: visible; background: transparent; color: var(--ot-text-inverse); inline-size: min(288px, calc(100vw - 32px)); max-inline-size: calc(100vw - 32px); pointer-events: none; }
+.ot-tooltip-layer[hidden] { display: none; }
+.ot-tooltip-layer--evidence { inline-size: min(360px, calc(100vw - 32px)); color: var(--ot-text-primary); }
+.ot-tooltip { display: flex; flex-direction: column; box-sizing: border-box; inline-size: 100%; padding: var(--ot-space-12); gap: var(--ot-space-8); border-radius: var(--ot-radius-6); background: var(--ot-text-primary); font: var(--ot-type-small-weight) var(--ot-type-small-size)/var(--ot-type-small-line) Geist, sans-serif; overflow-wrap: anywhere; overflow-y: auto; pointer-events: auto; }
+.ot-tooltip p { margin: 0; }
+.ot-tooltip-fraction { display: inline-block; vertical-align: top; max-inline-size: 100%; }
+.ot-tooltip-fraction > span { display: inline-block; max-inline-size: 100%; }
+.ot-tooltip-layer--evidence .ot-tooltip { border: 1px solid var(--ot-border-default); border-radius: var(--ot-radius-12); background: var(--ot-surface-base); }
+.ot-tooltip-bridge { position: absolute; block-size: var(--ot-space-16); pointer-events: auto; }
+.ot-tooltip-layer--bottom .ot-tooltip-bridge { inset-block-end: 100%; }
+.ot-tooltip-layer--top .ot-tooltip-bridge { inset-block-start: 100%; }
+@media (forced-colors: active) {
+  .ot-tooltip { color: CanvasText; background: Canvas; border: 1px solid CanvasText; }
+  .ot-tooltip-layer--evidence .ot-tooltip { border-color: CanvasText; background: Canvas; }
+}

@@ -24,4 +24,9 @@ export const presentationSuites = new Map([
     owner: 'OPE-307', parent: 'OPE-239', guide: '339:402', minimumTests: 17,
     specHash: '8372dfc352bd434d2757299136cdaba059018115f33dbf3f453f91e63b3dd13f',
   }],
+  ['apps/web/components/foundation/tokens/tooltip.visual.spec.ts', {
+    owner: 'OPE-313', parent: 'OPE-253', guide: '415:60', minimumTests: 15,
+    requirementIds: ['OPE-313:acceptance-bullet-1', 'OPE-313:acceptance-bullet-2', 'OPE-313:acceptance-bullet-3', 'OPE-313:acceptance-bullet-4:browser-evidence'],
+    specHash: '97bd9622301d2d2c806b162f8387ea8c52c28cf4539e2e9bd6c884d6be579473',
+  }],
 ]);
