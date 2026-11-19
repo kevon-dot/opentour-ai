@@ -17,6 +17,7 @@ from opentour_control.api.schema import create_control_api
 from opentour_control.auth.config import AuthError, IdentityConfig
 from opentour_control.auth.repository import connection_factory
 from opentour_control.auth.runtime import ControlAuthRuntime, create_control_auth_runtime
+from opentour_control.auth.runtime_server import serve_auth_runtime
 from opentour_control.platform import schema_compatibility
 from psycopg.conninfo import conninfo_to_dict, make_conninfo
 
@@ -144,11 +145,11 @@ def main() -> None:
     except (AuthError, ValueError, psycopg.Error):
         raise SystemExit("Control API deployment configuration is missing or invalid") from None
 
-    try:
+    def configure() -> uvicorn.Config:
         app = create_control_service(runtime, schema_connect, reader_version)
         # Each admitted handler holds at most one connection at a time. Uvicorn
         # counts the incoming connection in the concurrency threshold as well.
-        uvicorn.run(
+        return uvicorn.Config(
             app,
             host="0.0.0.0",
             port=8000,
@@ -160,9 +161,8 @@ def main() -> None:
             proxy_headers=False,
             access_log=False,
         )
-    finally:
-        if not runtime.close():
-            raise SystemExit("Control API provider shutdown is incomplete")
+
+    serve_auth_runtime(runtime, configure)
 
 
 if __name__ == "__main__":

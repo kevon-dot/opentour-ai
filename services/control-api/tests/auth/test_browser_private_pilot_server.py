@@ -79,6 +79,7 @@ def test_private_launcher_loads_real_reviewed_tls_configuration(
     assert config.ssl.verify_mode == ssl.CERT_REQUIRED
     assert config.ssl.cert_store_stats()["x509"] == 1
     assert config.proxy_headers is False
+    assert config.timeout_graceful_shutdown == 20
     configure.assert_called_once()
     runtime.close.assert_called_once()
 

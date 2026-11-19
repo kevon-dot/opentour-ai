@@ -22,6 +22,7 @@ from .browser_private_listener import PRIVATE_NETWORKS, ReviewedStageReadback, S
 from .browser_private_pilot import PrivateBrowserPilotPathProfile
 from .browser_private_pilot_listener import build_private_browser_pilot_listener
 from .config import AuthError
+from .runtime_server import serve_auth_runtime
 
 _PREFIX = "OPENTOUR_PRIVATE_BROWSER_"
 _DOCUMENT_LIMIT = 8192
@@ -149,9 +150,9 @@ def main() -> None:
     except (AuthError, OSError, ValueError, RecursionError, psycopg.Error):
         raise SystemExit(_UNAVAILABLE) from None
 
-    try:
+    def configure() -> uvicorn.Config:
         try:
-            config = build_private_browser_pilot_listener(
+            return build_private_browser_pilot_listener(
                 runtime.browser_state,
                 approved=deployment.approved,
                 readback=deployment.readback,
@@ -164,10 +165,8 @@ def main() -> None:
             )
         except ValueError:
             raise SystemExit(_UNAVAILABLE) from None
-        uvicorn.Server(config).run()
-    finally:
-        if not runtime.close():
-            raise SystemExit("Private browser listener provider shutdown is incomplete")
+
+    serve_auth_runtime(runtime, configure)
 
 
 if __name__ == "__main__":

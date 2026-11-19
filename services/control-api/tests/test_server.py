@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import base64
 import json
+import signal
+from collections.abc import Iterator
+from contextlib import contextmanager
 from unittest.mock import Mock
 
 import psycopg
@@ -101,7 +104,7 @@ def test_malformed_deployment_configuration_refuses_start(
     for key, setting in {**deployment, name: value}.items():
         monkeypatch.setenv(key, setting)
     start = Mock()
-    monkeypatch.setattr(uvicorn, "run", start)
+    monkeypatch.setattr(uvicorn.Server, "run", start)
     with pytest.raises(SystemExit, match="^Control API deployment configuration is missing"):
         server.main()
     start.assert_not_called()
@@ -112,14 +115,27 @@ def test_entrypoint_closes_the_auth_runtime_after_serving(
 ) -> None:
     for key, setting in deployment.items():
         monkeypatch.setenv(key, setting)
-    start = Mock()
-    monkeypatch.setattr(uvicorn, "run", start)
     close = Mock(return_value=True)
     monkeypatch.setattr(ControlAuthRuntime, "close", close)
-    server.main()
-    start.assert_called_once()
-    assert start.call_args.kwargs["port"] == 8000
-    assert start.call_args.kwargs["workers"] == 1
-    assert start.call_args.kwargs["limit_concurrency"] == 21
-    assert start.call_args.kwargs["proxy_headers"] is False
+
+    @contextmanager
+    def capture(_: uvicorn.Server) -> Iterator[None]:
+        yield
+        close.assert_called_once()
+        raise SystemExit(-signal.SIGTERM)
+
+    def run(listener: uvicorn.Server) -> None:
+        assert listener.config.port == 8000
+        assert listener.config.workers == 1
+        assert listener.config.limit_concurrency == 21
+        assert listener.config.proxy_headers is False
+        assert listener.config.timeout_graceful_shutdown == 20
+        with listener.capture_signals():
+            close.assert_not_called()
+
+    monkeypatch.setattr(uvicorn.Server, "capture_signals", capture)
+    monkeypatch.setattr(uvicorn.Server, "run", run)
+    with pytest.raises(SystemExit) as terminated:
+        server.main()
+    assert terminated.value.code == -signal.SIGTERM
     close.assert_called_once()
