@@ -193,10 +193,13 @@
     ],
     "apps/web/features/workspace/customer-shell.visual.spec.ts": [
       "OPE-239"
+    ],
+    "apps/web/components/foundation/forms/difference-review.visual.spec.ts": [
+      "OPE-314"
     ]
   },
-  "distinct_paths": 64,
-  "issue_count": 60,
+  "distinct_paths": 65,
+  "issue_count": 61,
   "affected_old_wrapper_paths": {
     "apps/web/tests/coverage/ot-p22-c01.spec.ts": [
       "OPE-232"

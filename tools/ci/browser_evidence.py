@@ -12,6 +12,7 @@ from typing import Any
 from tools.public_content_check import MAX_FILE_BYTES, digest, inspect_bytes, load_policy
 
 PRESENTATION_TARGETS = {
+    "apps/web/components/foundation/forms/difference-review.visual.spec.ts": "OPE-314",
     "apps/web/features/workspace/customer-shell.visual.spec.ts": "OPE-307",
     "apps/web/components/foundation/data-display/chart-evidence.visual.spec.ts": "OPE-303",
     "apps/web/components/foundation/data-display/table-populations.visual.spec.ts": "OPE-305",
@@ -166,6 +167,16 @@ def verify_scoped_presentation(root: Path, value: dict[str, Any]) -> None:
             or {(int(case[1]), int(case[2]), case[3]) for case in cases if case} != expected
         ):
             raise ValueError("Metric presentation capture inventory mismatch")
+    elif value["issue_key"] == "OPE-314":
+        expected_cards = {
+            f"difference-{width}-{scale}-{case}.png"
+            for width in widths
+            for scale in (100, 200)
+            for case in ("reference", "raw")
+        }
+        actual_cards = {Path(path).name for path in images}
+        if len(images) != len(expected_cards) or actual_cards != expected_cards:
+            raise ValueError("Difference review capture inventory mismatch")
     elif value["issue_key"] == "OPE-303":
         expected_charts = {
             f"charts-{width}-{scale}.png" for width in widths for scale in (100, 200)
