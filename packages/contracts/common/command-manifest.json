@@ -24,6 +24,7 @@
     "apps/web/components/foundation/tokens/visual.spec.ts",
     "apps/web/features/autonomy/control-actions.visual.spec.ts",
     "apps/web/features/autonomy/status-panel.visual.spec.ts",
+    "apps/web/features/operations/cancellation-impact.visual.spec.ts",
     "apps/web/features/product-surfaces/artifact-registry/visual.spec.ts",
     "apps/web/features/product-surfaces/benchmark-builder/visual.spec.ts",
     "apps/web/features/product-surfaces/billing-detail/visual.spec.ts",
@@ -308,6 +309,10 @@
     "apps/web/features/workspace/customer-shell.visual.spec.ts": {
       "kind": "simulated",
       "owner": "OPE-307"
+    },
+    "apps/web/features/operations/cancellation-impact.visual.spec.ts": {
+      "kind": "simulated",
+      "owner": "OPE-315"
     }
   }
 }

@@ -1,5 +1,9 @@
 /** Generated local presentation fixtures. Each executable target has exactly one child owner. */
 export const presentationSuites = new Map([
+  ['apps/web/features/operations/cancellation-impact.visual.spec.ts', {
+    owner: 'OPE-315', parent: 'OPE-289', guide: '165:9515', minimumTests: 8,
+    specHash: '0206bcba5399c925223a10064f4818fda928231626544490ee7757db165dd8cf',
+  }],
   ['apps/web/components/foundation/data-display/chart-evidence.visual.spec.ts', {
     owner: 'OPE-303', parent: 'OPE-285', guide: '328:285', minimumTests: 8,
     specHash: 'e62f0ec3573923b56edb40e418f0d352d3e1ba69c4058edc1f6c9074b0a6bfd4',
