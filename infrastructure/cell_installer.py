@@ -78,6 +78,34 @@ class PreparedCellInstall:
     configuration: bytes
     configuration_sha256: str
 
+    def verified_template(self, template: bytes) -> bytes:
+        """Return the unchanged common template pinned by this install's verified release.
+
+        Templates and cell-specific configuration remain separate. This check assumes the
+        caller obtained the install from the trusted compiler with verified release inputs.
+        It does not validate the template's resource coverage or authorize a change set.
+        """
+        try:
+            configuration = json.loads(self.configuration)
+            if (
+                not isinstance(configuration, dict)
+                or _prepared_configuration(configuration) != self
+            ):
+                raise ValueError
+        except (TypeError, ValueError, RecursionError):
+            raise CellInstallRefused("CELL_INSTALL_CONFIGURATION_INVALID") from None
+
+        expected = configuration.get("template_sha256")
+        if (
+            not isinstance(expected, str)
+            or SHA256.fullmatch(expected) is None
+            or not isinstance(template, bytes)
+            or not template
+            or hashlib.sha256(template).hexdigest() != expected
+        ):
+            raise CellInstallRefused("CELL_INSTALL_TEMPLATE_MISMATCH")
+        return template
+
 
 def prepare_cell_install(
     requested: object,
@@ -269,9 +297,14 @@ def compile_cell_storage(
     )
     configuration = json.loads(prepared.configuration)
     parameters = configuration["parameters"]
+    # IAM role names are account-wide and case-insensitive, independent of path.
+    role_names = {
+        binding.role_arn.rsplit("/", 1)[-1].casefold()
+        for binding in (storage.trainer, storage.evaluator)
+    }
     if (
         storage.kms_policy_sha256 != profiles.kms_policy.sha256
-        or storage.trainer.role_arn == storage.evaluator.role_arn
+        or len(role_names) != 2
         or storage.trainer.kms_key_arn == storage.evaluator.kms_key_arn
     ):
         raise CellInstallRefused("CELL_INSTALL_STORAGE_BINDING_MISMATCH")

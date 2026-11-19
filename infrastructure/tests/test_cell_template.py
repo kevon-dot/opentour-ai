@@ -336,6 +336,41 @@ def prepare(preparation_inputs):
 
 
 @pytest.mark.parametrize("mode", ["opentour_managed", "customer_controlled"])
+def test_verified_template_preserves_exact_shared_bytes(
+    prepare, parameters, environment_identity, approved_release, mode
+):
+    template = b'{"AWSTemplateFormatVersion":"2010-09-09","Resources":{}}\n'
+    parameters["mode"] = environment_identity["mode"] = mode
+    release = replace(approved_release, template_sha256=hashlib.sha256(template).hexdigest())
+    prepared = prepare(release=release)
+
+    assert prepared.verified_template(template) == template
+    with pytest.raises(CellInstallRefused, match="^CELL_INSTALL_TEMPLATE_MISMATCH$"):
+        prepared.verified_template(template.rstrip())
+
+
+def test_verified_template_refuses_empty_release_template(prepare, approved_release):
+    release = replace(approved_release, template_sha256=hashlib.sha256(b"").hexdigest())
+    prepared = prepare(release=release)
+
+    with pytest.raises(CellInstallRefused, match="^CELL_INSTALL_TEMPLATE_MISMATCH$"):
+        prepared.verified_template(b"")
+
+
+def test_verified_template_refuses_configuration_substitution(prepare, approved_release):
+    template = b'{"AWSTemplateFormatVersion":"2010-09-09","Resources":{}}'
+    template_sha256 = hashlib.sha256(template).hexdigest()
+    prepared = prepare()
+    replaced_configuration = prepared.configuration.replace(
+        approved_release.template_sha256.encode(), template_sha256.encode()
+    )
+    tampered = replace(prepared, configuration=replaced_configuration)
+
+    with pytest.raises(CellInstallRefused, match="^CELL_INSTALL_CONFIGURATION_INVALID$"):
+        tampered.verified_template(template)
+
+
+@pytest.mark.parametrize("mode", ["opentour_managed", "customer_controlled"])
 def test_prepares_exact_approved_scope_and_immutable_input(
     prepare, parameters, environment_identity, approved_profiles, mode
 ):
@@ -632,6 +667,21 @@ def test_refuses_unqualified_profile_or_shared_workload_authority(
                 approved_storage.evaluator, **{field: getattr(approved_storage.trainer, field)}
             ),
         )
+    with pytest.raises(CellInstallRefused, match="^CELL_INSTALL_STORAGE_BINDING_MISMATCH$"):
+        compile_storage(storage=binding)
+
+
+@pytest.mark.parametrize("evaluator_name", ["generated/TRAINER", "other/trainer"])
+def test_refuses_workload_role_name_reuse_across_case_or_path(
+    compile_storage, approved_storage, evaluator_name
+):
+    role_prefix = approved_storage.trainer.role_arn.split(":role/", 1)[0]
+    evaluator_role = f"{role_prefix}:role/{evaluator_name}"
+    binding = replace(
+        approved_storage,
+        evaluator=replace(approved_storage.evaluator, role_arn=evaluator_role),
+    )
+
     with pytest.raises(CellInstallRefused, match="^CELL_INSTALL_STORAGE_BINDING_MISMATCH$"):
         compile_storage(storage=binding)
 
