@@ -84,6 +84,63 @@ def test_private_launcher_loads_real_reviewed_tls_configuration(
     runtime.close.assert_called_once()
 
 
+def test_tls_preflight_checks_the_real_mounts_without_starting_runtime(
+    launch: tuple[Mock, Mock], monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _, configure = launch
+    run = Mock()
+    monkeypatch.setattr(uvicorn.Server, "run", run)
+    server.main(["--check-tls"])
+    captured = capsys.readouterr()
+    assert captured.out == "Private browser TLS configuration verified\n"
+    assert captured.err == ""
+    configure.assert_not_called()
+    run.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "change", ["wrong-certificate", "wrong-port", "expired-readback", "wrong-stage"]
+)
+def test_tls_preflight_refuses_unqualified_mounts_before_runtime(
+    change: str,
+    deployment: dict[str, str],
+    launch: tuple[Mock, Mock],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, configure = launch
+    if change == "wrong-certificate":
+        monkeypatch.setenv(PREFIX + "STAGE_LEAF_FILE", deployment[PREFIX + "SERVER_CERT_FILE"])
+    elif change == "wrong-port":
+        monkeypatch.setenv(PREFIX + "LISTEN_PORT", "65536")
+    elif change == "expired-readback":
+        path = Path(deployment[PREFIX + "READBACK_FILE"])
+        document = json.loads(path.read_bytes())
+        document["verified_at"] = "2020-01-01T00:00:00Z"
+        document["valid_until"] = "2020-01-02T00:00:00Z"
+        content = json.dumps(document).encode()
+        path.write_bytes(content)
+        monkeypatch.setenv(PREFIX + "READBACK_SHA256", hashlib.sha256(content).hexdigest())
+    else:
+        for name in ("BINDING", "READBACK"):
+            path = Path(deployment[f"{PREFIX}{name}_FILE"])
+            document = json.loads(path.read_bytes())
+            binding = document if name == "BINDING" else document["binding"]
+            binding["stage_arn"] = binding["stage_arn"].replace("/stages/dev", "/stages/test")
+            content = json.dumps(document).encode()
+            path.write_bytes(content)
+            monkeypatch.setenv(f"{PREFIX}{name}_SHA256", hashlib.sha256(content).hexdigest())
+    with pytest.raises(SystemExit, match="^Private browser listener deployment configuration"):
+        server.main(["--check-tls"])
+    configure.assert_not_called()
+
+
+def test_unrecognized_argument_refuses_to_start(launch: tuple[Mock, Mock]) -> None:
+    _, configure = launch
+    with pytest.raises(SystemExit, match="^Invalid private browser listener argument"):
+        server.main(["--unknown"])
+    configure.assert_not_called()
+
+
 @pytest.mark.parametrize(
     "change", ["missing-pin", "changed-bytes", "duplicate", "oversize", "bind"]
 )

@@ -41,6 +41,10 @@ _DEV_STAGE_ARN = re.compile(
 )
 
 
+def is_private_browser_dev_stage(value: str) -> bool:
+    return _DEV_STAGE_ARN.fullmatch(value) is not None
+
+
 def _route(
     scope: HTTPScope, path_profile: PrivateBrowserPilotPathProfile
 ) -> PrivateBrowserPilotRoute | None:
@@ -108,7 +112,7 @@ def build_private_browser_pilot_listener(
         not isinstance(path_profile, PrivateBrowserPilotPathProfile)
         or not isinstance(approved.stage_arn, str)
         or (
-            (_DEV_STAGE_ARN.fullmatch(approved.stage_arn) is not None)
+            is_private_browser_dev_stage(approved.stage_arn)
             != (path_profile is PrivateBrowserPilotPathProfile.DEV)
         )
         or (path_profile is PrivateBrowserPilotPathProfile.LOOPBACK and host != "127.0.0.1")

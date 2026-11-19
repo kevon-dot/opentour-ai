@@ -8,7 +8,8 @@ import json
 import os
 import re
 import stat
-from collections.abc import Mapping
+import sys
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -18,9 +19,17 @@ import uvicorn
 
 from opentour_control.api.server import configure_auth_runtime
 
-from .browser_private_listener import PRIVATE_NETWORKS, ReviewedStageReadback, StageClientBinding
+from .browser_private_listener import (
+    PRIVATE_NETWORKS,
+    ReviewedStageReadback,
+    StageClientBinding,
+    prepare_private_browser_listener_tls,
+)
 from .browser_private_pilot import PrivateBrowserPilotPathProfile
-from .browser_private_pilot_listener import build_private_browser_pilot_listener
+from .browser_private_pilot_listener import (
+    build_private_browser_pilot_listener,
+    is_private_browser_dev_stage,
+)
 from .config import AuthError
 from .runtime_server import serve_auth_runtime
 
@@ -143,9 +152,25 @@ def _load_deployment(env: Mapping[str, str]) -> _Deployment:
     )
 
 
-def main() -> None:
+def main(argv: Sequence[str] = ()) -> None:
+    if argv and tuple(argv) != ("--check-tls",):
+        raise SystemExit("Invalid private browser listener argument")
     try:
         deployment = _load_deployment(os.environ)
+        if argv:
+            if not is_private_browser_dev_stage(deployment.approved.stage_arn):
+                raise ValueError("Expected the exact dev stage")
+            prepare_private_browser_listener_tls(
+                approved=deployment.approved,
+                readback=deployment.readback,
+                stage_leaf_pem=deployment.stage_leaf_pem,
+                server_certfile=deployment.server_certfile,
+                server_keyfile=deployment.server_keyfile,
+                host=deployment.host,
+                port=deployment.port,
+            )
+            print("Private browser TLS configuration verified")
+            return
         runtime, _ = configure_auth_runtime(os.environ)
     except (AuthError, OSError, ValueError, RecursionError, psycopg.Error):
         raise SystemExit(_UNAVAILABLE) from None
@@ -170,4 +195,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    main(sys.argv[1:])

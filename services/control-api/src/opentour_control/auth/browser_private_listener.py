@@ -97,8 +97,7 @@ def _assert_tls_material(
     return leaf
 
 
-def build_private_browser_listener(
-    app: ASGI3Application,
+def prepare_private_browser_listener_tls(
     *,
     approved: StageClientBinding,
     readback: ReviewedStageReadback | None,
@@ -108,8 +107,8 @@ def build_private_browser_listener(
     host: str,
     port: int,
     clock: Callable[[], datetime] = lambda: datetime.now(UTC),
-) -> uvicorn.Config:
-    """Build the isolated TLS listener. No route is chosen or mounted here."""
+) -> tuple[ssl.SSLContext, datetime, datetime]:
+    """Verify the reviewed TLS material without binding a socket."""
     try:
         now = clock()
         bind = ipaddress.IPv4Address(host)
@@ -145,7 +144,32 @@ def build_private_browser_listener(
     ):
         raise _unavailable() from None
 
-    valid_until = min(readback.valid_until, leaf.not_valid_after_utc)
+    return context, readback.verified_at, min(readback.valid_until, leaf.not_valid_after_utc)
+
+
+def build_private_browser_listener(
+    app: ASGI3Application,
+    *,
+    approved: StageClientBinding,
+    readback: ReviewedStageReadback | None,
+    stage_leaf_pem: bytes,
+    server_certfile: Path,
+    server_keyfile: Path,
+    host: str,
+    port: int,
+    clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+) -> uvicorn.Config:
+    """Build the isolated TLS listener. No route is chosen or mounted here."""
+    context, verified_at, valid_until = prepare_private_browser_listener_tls(
+        approved=approved,
+        readback=readback,
+        stage_leaf_pem=stage_leaf_pem,
+        server_certfile=server_certfile,
+        server_keyfile=server_keyfile,
+        host=host,
+        port=port,
+        clock=clock,
+    )
 
     async def private_app(
         scope: Scope, receive: ASGIReceiveCallable, send: ASGISendCallable
@@ -154,7 +178,7 @@ def build_private_browser_listener(
             return
         try:
             now = clock()
-            verified = now.utcoffset() is not None and readback.verified_at <= now < valid_until
+            verified = now.utcoffset() is not None and verified_at <= now < valid_until
         except (TypeError, ValueError):
             verified = False
         if scope["scheme"] != "https" or not verified:
