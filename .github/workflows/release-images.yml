@@ -1,0 +1,97 @@
+name: Build unsigned ARM64 image candidates
+
+"on":
+  workflow_dispatch:
+    inputs:
+      source_commit:
+        description: Full commit SHA expected on main for this run
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  candidate:
+    if: >-
+      github.repository == 'kevon-dot/opentour-ai' &&
+      github.repository_id == '1455972360' &&
+      github.ref == 'refs/heads/main' && github.ref_protected
+    name: Package ${{ matrix.image }} candidate
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        image: [control-api, bff]
+    steps:
+      - name: Confirm the requested commit and runner platform
+        shell: bash
+        env:
+          REQUESTED_COMMIT: ${{ inputs.source_commit }}
+        run: |
+          if [[ ! "$REQUESTED_COMMIT" =~ ^[a-f0-9]{40}$ || "$REQUESTED_COMMIT" != "$GITHUB_SHA" ]]; then
+            echo 'The requested source commit must match the dispatched commit on main.' >&2
+            exit 1
+          fi
+          test "$(uname -m)" = aarch64
+
+      - name: Check out the dispatched commit
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Package OCI content and record its manifest digest
+        shell: bash
+        env:
+          IMAGE: ${{ matrix.image }}
+          BUILDX_METADATA_PROVENANCE: disabled
+        run: |
+          set -u
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          candidate_dir=$(mktemp -d "$RUNNER_TEMP/opentour-candidate.XXXXXXXX")
+          export DOCKER_CONFIG="$candidate_dir/docker"
+          trap 'docker buildx rm opentour-candidate >/dev/null 2>&1 || true; rm -rf -- "$candidate_dir"' EXIT
+          mkdir -p "$DOCKER_CONFIG/cli-plugins" "$candidate_dir/source"
+
+          # https://github.com/docker/buildx/releases/expanded_assets/v0.39.0
+          buildx="$DOCKER_CONFIG/cli-plugins/docker-buildx"
+          curl --fail --silent --show-error --location --retry 3 --max-time 120 \
+            --proto '=https' --proto-redir '=https' \
+            https://github.com/docker/buildx/releases/download/v0.39.0/buildx-v0.39.0.linux-arm64 \
+            --output "$buildx"
+          printf '%s  %s\n' '722cdcdfdd6f3fb943fa1ba75102d057feb18ba72aab93b1b0a8cf2b2b48a25f' "$buildx" \
+            | sha256sum --check --status
+          chmod 0755 "$buildx"
+
+          # BuildKit v0.35.0 Linux ARM64 manifest from the moby/buildkit repository.
+          docker buildx create --bootstrap --name opentour-candidate --driver docker-container \
+            --driver-opt image=docker.io/moby/buildkit@sha256:7dc61a9fab7c7f5a50b1cdbbefa4180829e68c6c0172206eb54ad934de097ddf
+
+          git archive "$GITHUB_SHA" | tar -x -C "$candidate_dir/source"
+          layout="$candidate_dir/image"
+          docker buildx build --builder opentour-candidate --platform linux/arm64 \
+            --file "$candidate_dir/source/infrastructure/images/$IMAGE.Dockerfile" \
+            --provenance=false --sbom=false \
+            --output "type=oci,tar=false,dest=$layout" \
+            "$candidate_dir/source"
+
+          digest=$(jq -er '
+            select(.schemaVersion == 2 and (.manifests | length == 1))
+            | .manifests[0]
+            | select(.mediaType == "application/vnd.oci.image.manifest.v1+json")
+            | .digest | select(test("^sha256:[a-f0-9]{64}$"))
+          ' "$layout/index.json")
+          manifest="$layout/blobs/sha256/${digest#sha256:}"
+          printf '%s  %s\n' "${digest#sha256:}" "$manifest" | sha256sum --check --status
+
+          config_digest=$(jq -er '
+            .config.digest | select(test("^sha256:[a-f0-9]{64}$"))
+          ' "$manifest")
+          config="$layout/blobs/sha256/${config_digest#sha256:}"
+          printf '%s  %s\n' "${config_digest#sha256:}" "$config" | sha256sum --check --status
+          jq -e '.os == "linux" and .architecture == "arm64"' "$config" >/dev/null
+
+          printf '### Unsigned %s image candidate\n\n- Source commit: `%s`\n- Platform: `linux/arm64`\n- OCI manifest digest: `%s`\n' \
+            "$IMAGE" "$GITHUB_SHA" "$digest" >> "$GITHUB_STEP_SUMMARY"
