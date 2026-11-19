@@ -342,7 +342,10 @@ def test_exact_canonical_browser_inventory_preserved(checkout):
     manifest = runner.manifest(checkout)
     source = json.loads((checkout / runner.COMMON / "browser-suite-inventory.json").read_text())
     assert set(manifest["browser_suites"]) == set(source["paths"])
-    assert len(manifest["browser_suites"]) == source["distinct_paths"] == 64
+    assert len(manifest["browser_suites"]) == source["distinct_paths"] == 65
+    icon_button = "apps/web/components/foundation/tokens/icon-button.visual.spec.ts"
+    assert source["paths"][icon_button] == ["OPE-311"]
+    assert manifest["browser_profiles"][icon_button] == {"kind": "simulated", "owner": "OPE-311"}
     shell = "apps/web/features/workspace/customer-shell.visual.spec.ts"
     assert source["paths"][shell] == ["OPE-239"]
     assert manifest["browser_profiles"][shell] == {"kind": "simulated", "owner": "OPE-307"}
