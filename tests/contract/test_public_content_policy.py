@@ -92,6 +92,19 @@ def test_unaccompanied_credential_assignment_is_refused():
     assert inspect_bytes("output.txt", payload, load_policy(ROOT))
 
 
+def test_release_dockerfile_ignore_is_screened_as_text():
+    policy = load_policy(ROOT)
+    path = "infrastructure/images/control-api.Dockerfile.dockerignore"
+    assert not inspect_bytes(path, b"**\n!uv.lock\n", policy)
+    payload = ("AWS_SECRET_" + "ACCESS_KEY=" + "Q" * 40).encode()
+    assert {item["rule"] for item in inspect_bytes(path, payload, policy)} == {"CREDENTIAL_PATTERN"}
+    assert {item["rule"] for item in inspect_bytes(path, b"\0payload", policy)} == {
+        "UNREVIEWED_BINARY_OR_TYPE"
+    }
+    assert inspect_bytes("apps/control-api.Dockerfile.dockerignore", b"**\n", policy)
+    assert inspect_bytes("infrastructure/images/arbitrary.dockerignore", b"**\n", policy)
+
+
 def test_reviewed_fake_match_exception_is_exact_and_never_applies_to_logs():
     policy = load_policy(ROOT)
     sentinel = ("AK" + "IA" + "Y" * 16).encode()

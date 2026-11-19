@@ -34,12 +34,14 @@ export type SignedPrivateAccountEntryStartupOptions = AccountEntrySettings & {
 export function configureSignedPrivateAccountEntry({
   privateIdentity: { fetch, ...binding },
   ...startup
-}: SignedPrivateAccountEntryStartupOptions): AuthkitAdapter {
+}: SignedPrivateAccountEntryStartupOptions): AuthkitAdapter & {
+  checkReadiness: (signal: AbortSignal) => Promise<boolean>;
+} {
   const sign = createPrivateGatewaySigner({ ...binding, now: startup.now });
-  return configurePrivateAccountEntry({
-    ...startup,
-    privateIdentity: { approvedEndpoint: binding.approvedEndpoint, sign, fetch },
-  });
+  const { checkReadiness, ...ports } = createPrivateBrowserPorts({ approvedEndpoint: binding.approvedEndpoint,
+    sign, fetch });
+  const adapter = configureAccountEntry({ ...startup, ...ports });
+  return { ...adapter, checkReadiness };
 }
 
 /** Install the private pilot only after trusted startup supplies its binding and signing transport. */
@@ -47,8 +49,8 @@ export function configurePrivateAccountEntry({
   privateIdentity,
   ...startup
 }: PrivateAccountEntryStartupOptions): AuthkitAdapter {
-  const ports = createPrivateBrowserPorts(privateIdentity);
-  return configureAccountEntry({ ...startup, ...ports });
+  const { transactions, sessions, selections } = createPrivateBrowserPorts(privateIdentity);
+  return configureAccountEntry({ ...startup, transactions, sessions, selections });
 }
 
 /** Trusted server startup supplies the configured profile, secret, and durable ports. */
