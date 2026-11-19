@@ -1,6 +1,6 @@
 // Direct fixture-only Node client for the generated private TLS PostgreSQL test.
 import assert from 'node:assert/strict';
-import { createHash } from 'node:crypto';
+import { createHash, createHmac } from 'node:crypto';
 import { lookup } from 'node:dns';
 import { readFileSync } from 'node:fs';
 import { request as requestHttps } from 'node:https';
@@ -12,8 +12,7 @@ import { pathToFileURL } from 'node:url';
 const [compiled] = process.argv.slice(2);
 const config = JSON.parse(readFileSync(0, 'utf8'));
 const moduleURL = path => pathToFileURL(join(compiled, path)).href;
-const { configurePrivateAccountEntry } = await import(moduleURL('features/account-entry/server.js'));
-const { createPrivateGatewaySigner } = await import(moduleURL('lib/server/private-gateway-signer.js'));
+const { configureSignedPrivateAccountEntry } = await import(moduleURL('features/account-entry/server.js'));
 const { GET: signinGET } = await import(moduleURL('app/auth/signin/route.js'));
 const { GET: callbackGET } = await import(moduleURL('app/auth/callback/route.js'));
 
@@ -40,6 +39,7 @@ await assert.rejects(fetch('https://example.invalid'), denied);
 const base = '/dev/internal/browser-identity/v1';
 const paths = ['/flows/create', '/flows/consume', '/sessions/admit', '/sessions/current', '/sessions/end'];
 const accessKeyId = 'fixture-access-id';
+const signingSecret = 'generated-fixture-signing-secret';
 const sessionToken = 'generated-fixture-session-token';
 const signingDate = new Date(config.now).toISOString().replace(/[-:]/g, '').replace(/\.\d{3}Z$/, 'Z');
 const signedHeaderNames = 'content-type;host;x-amz-content-sha256;x-amz-date;x-amz-security-token';
@@ -47,45 +47,28 @@ const credentialScope = `${signingDate.slice(0, 8)}/${config.region}/execute-api
 const authorizationPrefix = `AWS4-HMAC-SHA256 Credential=${accessKeyId}/${credentialScope}, `
   + `SignedHeaders=${signedHeaderNames}, Signature=`;
 const exercised = new Set();
-let pendingProof;
 let latestSession;
 let credentialSnapshots = 0;
 let forwarded = 0;
-const signGatewayRequest = createPrivateGatewaySigner({
-  approvedEndpoint: config.endpoint,
-  region: config.region,
-  restApiId: config.rest_api_id,
-  vpcEndpointId: config.vpc_endpoint_id,
-  now: () => config.now,
-  credentials: async signal => {
-    assert.ok(signal instanceof AbortSignal && !signal.aborted);
-    credentialSnapshots++;
-    return {
-      accessKeyId,
-      secretAccessKey: 'generated-fixture-signing-secret',
-      sessionToken,
-      expiration: new Date(config.now + 600_000),
-    };
-  },
-});
 
-async function sign(request, signal) {
-  assert.equal(pendingProof, undefined);
-  assert.ok(Object.isFrozen(request));
-  assert.ok(signal instanceof AbortSignal);
-  assert.equal(request.method, 'POST');
-  assert.deepEqual(request.headers, { 'content-type': 'application/json' });
-  assert.equal(typeof request.body, 'string');
-  assert.ok(JSON.parse(request.body));
-  const before = credentialSnapshots;
-  const signedHeaders = await signGatewayRequest(request, signal);
-  assert.equal(credentialSnapshots, before + 1);
-  pendingProof = { request, signedHeaders };
-  return signedHeaders;
+function expectedSignature(pathname, headers, payloadHash) {
+  const signedValues = { ...headers, host: endpoint.host };
+  const canonicalHeaders = signedHeaderNames.split(';')
+    .map(name => `${name}:${signedValues[name]}\n`).join('');
+  const canonical = ['POST', pathname, '', canonicalHeaders, signedHeaderNames, payloadHash].join('\n');
+  const toSign = ['AWS4-HMAC-SHA256', signingDate, credentialScope,
+    createHash('sha256').update(canonical).digest('hex')].join('\n');
+  let key = Buffer.from('AWS4' + signingSecret);
+  for (const component of credentialScope.split('/')) {
+    key = createHmac('sha256', key).update(component).digest();
+  }
+  return createHmac('sha256', key).update(toSign).digest('hex');
 }
 
 async function fetchPrivate(input, init) {
   const request = new Request(input, init);
+  assert.equal(request.method, 'POST');
+  assert.equal(credentialSnapshots, forwarded + 1);
   const url = new URL(request.url);
   assert.equal(url.origin, endpoint.origin);
   assert.equal(url.search, '');
@@ -93,21 +76,16 @@ async function fetchPrivate(input, init) {
   const path = paths.find(candidate => url.pathname === base + candidate);
   assert.ok(path);
   const body = Buffer.from(await request.arrayBuffer());
-  assert.ok(pendingProof);
-  assert.equal(request.url, pendingProof.request.url);
-  assert.equal(request.method, pendingProof.request.method);
-  assert.deepEqual(body, Buffer.from(pendingProof.request.body));
+  const payloadHash = createHash('sha256').update(body).digest('hex');
   const headers = Object.fromEntries(request.headers);
-  assert.deepEqual(headers, { ...pendingProof.signedHeaders, 'content-type': 'application/json' });
   assert.deepEqual(Object.keys(headers).sort(), [
     'authorization', 'content-type', 'x-amz-content-sha256', 'x-amz-date', 'x-amz-security-token',
   ]);
+  assert.equal(headers['content-type'], 'application/json');
   assert.equal(headers['x-amz-date'], signingDate);
   assert.equal(headers['x-amz-security-token'], sessionToken);
-  assert.equal(headers['x-amz-content-sha256'], createHash('sha256').update(body).digest('hex'));
-  assert.ok(headers.authorization.startsWith(authorizationPrefix));
-  assert.match(headers.authorization.slice(authorizationPrefix.length), /^[a-f0-9]{64}$/);
-  pendingProof = undefined;
+  assert.equal(headers['x-amz-content-sha256'], payloadHash);
+  assert.equal(headers.authorization, authorizationPrefix + expectedSignature(url.pathname, headers, payloadHash));
 
   const upstream = await new Promise((resolve, reject) => {
     const transport = requestHttps({
@@ -198,12 +176,43 @@ globalThis.fetch = async (input, init) => {
 };
 
 try {
-  const adapter = configurePrivateAccountEntry({
+  const startup = {
     profile,
     workosApiKey,
     now: () => config.now,
-    privateIdentity: { approvedEndpoint: config.endpoint, sign, fetch: fetchPrivate },
+    privateIdentity: {
+      approvedEndpoint: config.endpoint,
+      region: config.region,
+      restApiId: config.rest_api_id,
+      vpcEndpointId: config.vpc_endpoint_id,
+      fetch: fetchPrivate,
+      async credentials(signal) {
+        assert.ok(signal instanceof AbortSignal && !signal.aborted);
+        credentialSnapshots++;
+        return { accessKeyId, secretAccessKey: signingSecret, sessionToken,
+          expiration: new Date(config.now + 600_000) };
+      },
+    },
+  };
+  assert.throws(() => configureSignedPrivateAccountEntry({
+    ...startup, privateIdentity: { ...startup.privateIdentity, restApiId: 'otherfixture' },
+  }), { code: 'IDENTITY_CONFIGURATION_INVALID', status: 503 });
+  for (const result of [
+    await signinGET(new Request(profile.origin + '/auth/signin')),
+    await callbackGET(new Request(profile.callbackURI)),
+  ]) {
+    assert.equal(result.status, 503);
+    assert.equal((await result.json()).code, 'IDENTITY_NOT_CONFIGURED');
+  }
+  const adapter = configureSignedPrivateAccountEntry(startup);
+  assert.throws(() => configureSignedPrivateAccountEntry(startup), {
+    code: 'IDENTITY_ALREADY_CONFIGURED', status: 503,
   });
+  assert.equal(credentialSnapshots, 0);
+  assert.equal(forwarded, 0);
+  assert.equal(exchanges, 0);
+  assert.equal(jwksRequests, 0);
+
   const signin = await signinGET(new Request(profile.origin + '/auth/signin'));
   assert.equal(signin.status, 303);
   const state = new URL(signin.headers.get('location')).searchParams.get('state');
@@ -240,7 +249,6 @@ try {
   assert.equal('credentials' in latestSession, false);
   assert.equal(exchanges, 1);
   assert.equal(jwksRequests, 1);
-  assert.equal(pendingProof, undefined);
   assert.equal(credentialSnapshots, forwarded);
   assert.deepEqual([...exercised].sort(), [...paths].sort());
 } finally {
