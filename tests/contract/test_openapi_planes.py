@@ -35,7 +35,7 @@ def runtime(monkeypatch: pytest.MonkeyPatch) -> Iterator[ControlAuthRuntime]:
             client_id="generated-client",
             credential_max_lifetime_seconds=600,
         ),
-        workos_api_key="generated-workos-key",
+        workos_api_key="test-only",
         sealing_keys=(Fernet.generate_key(),),
         csrf_key=b"f" * 32,
         identity_connect=forbidden,

@@ -28,7 +28,7 @@ const tls = {
 };
 const base = '/dev/internal/browser-identity/v1';
 const paths = ['/flows/create', '/flows/consume', '/sessions/admit', '/sessions/current', '/sessions/end'];
-const accessKeyId = 'ASIAEXAMPLEONLY12345';
+const accessKeyId = 'fixture-access-id';
 const sessionToken = 'generated-fixture-session-token';
 const signingDate = new Date(config.now).toISOString().replace(/[-:]/g, '').replace(/\.\d{3}Z$/, 'Z');
 const signedHeaderNames = 'content-type;host;x-amz-content-sha256;x-amz-date;x-amz-security-token';
@@ -151,7 +151,7 @@ const profile = {
   jwksURL: config.jwks_url,
   clientId: config.client_id,
 };
-const workosApiKey = 'generated-workos-api-key';
+const workosApiKey = 'loopback-fixture';
 let exchanges = 0;
 let jwksRequests = 0;
 const originalFetch = globalThis.fetch;

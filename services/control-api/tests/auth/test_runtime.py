@@ -40,7 +40,7 @@ PRIVATE_DEV_PATHS = tuple((f"/dev{path}", operation) for path, operation in PRIV
 def configured(identity):
     return {
         "config": identity.config,
-        "workos_api_key": "generated-workos-key",
+        "workos_api_key": "test-only",
         "sealing_keys": (Fernet.generate_key(),),
         "csrf_key": b"g" * 32,
         "identity_connect": Mock(

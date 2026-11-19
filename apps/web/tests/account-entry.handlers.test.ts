@@ -17,7 +17,7 @@ const issuedAt = now / 1000 - 30;
 const subject = 'generated_user';
 const sessionId = 'generated_session';
 const handle = 'a'.repeat(43);
-const workosApiKey = 'generated-account-entry-key';
+const workosApiKey = 'entry-fixture-key';
 const profile: AccountEntryStartupOptions['profile'] = {
   origin: 'https://app.example.invalid',
   callbackURI: 'https://app.example.invalid/auth/callback',

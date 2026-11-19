@@ -238,7 +238,7 @@ it('rejects a JSON acknowledgement over the response byte cap even without Conte
 
 testCases([
   'https://fixture.example.invalid/dev?probe=generated',
-  'https://generated:fixture@fixture.example.invalid/dev',
+  'https://generated-user@fixture.example.invalid/dev',
   'https://fixture.example.invalid/test',
   'https://fixture.example.invalid/dev/',
   'https://fixture.example.invalid/dev/dev',

@@ -371,7 +371,7 @@ def generated_browser_auth(durable, monkeypatch):
     other = issue_token(durable.orgs["b"].remote_org)
     runtime = create_control_auth_runtime(
         config=config,
-        workos_api_key="generated-no-provider-access",
+        workos_api_key="test-only",
         sealing_keys=(Fernet.generate_key(),),
         csrf_key=b"g" * 32,
         identity_connect=durable.identity_repository.connect,
