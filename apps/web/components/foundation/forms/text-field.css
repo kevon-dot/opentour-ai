@@ -46,16 +46,16 @@
 
 /* Frame states follow the native control's own state, so they cannot drift from it. */
 /* Invalid: every line (label, value, helper, error) takes the failure text colour; helper and error stay separate. */
-.ot-text-field:has(> .ot-text-field-control[aria-invalid='true']) {
+.ot-text-field:has(.ot-text-field-control[aria-invalid='true']) {
   background: var(--ot-failure-background);
   color: var(--ot-failure-text);
 }
-.ot-text-field:has(> .ot-text-field-control[aria-invalid='true']) > .ot-text-field-helper { color: inherit; }
-.ot-text-field:has(> .ot-text-field-control:disabled) { opacity: 0.55; }
+.ot-text-field:has(.ot-text-field-control[aria-invalid='true']) > .ot-text-field-helper { color: inherit; }
+.ot-text-field:has(.ot-text-field-control:disabled) { opacity: 0.55; }
 /* The frame's real border is the keyboard focus indicator: 2px action blue in every state, including invalid.
    No outline is added, and the control's native indicator is removed only by a rule that also thickens the border. */
-.ot-text-field:has(> .ot-text-field-control:focus-visible) { border-width: 2px; border-color: var(--ot-action-primary); }
-.ot-text-field:has(> .ot-text-field-control:focus-visible) > .ot-text-field-control { outline: none; }
+.ot-text-field:has(.ot-text-field-control:focus-visible) { border-width: 2px; border-color: var(--ot-action-primary); }
+.ot-text-field:has(.ot-text-field-control:focus-visible) .ot-text-field-control { outline: none; }
 
 .ot-input {
   /* Private to this rule set: the border width that the block size has to include. */
@@ -84,12 +84,12 @@
 
 @media (forced-colors: active) {
   .ot-text-field,
-  .ot-text-field:has(> .ot-text-field-control[aria-invalid='true']),
+  .ot-text-field:has(.ot-text-field-control[aria-invalid='true']),
   .ot-input:where(:not(:focus-visible)) { background: Canvas; color: CanvasText; border-color: CanvasText; }
   .ot-text-field-helper,
   .ot-text-field-error { color: CanvasText; }
   /* The 2px focus border takes the system highlight; it is the only indicator, so nothing is doubled. */
-  .ot-text-field:has(> .ot-text-field-control:focus-visible) { border-color: Highlight; }
+  .ot-text-field:has(.ot-text-field-control:focus-visible) { border-color: Highlight; }
   .ot-input:focus-visible {
     forced-color-adjust: none;
     background-color: Canvas;
@@ -97,9 +97,30 @@
     border-color: Highlight;
     outline-color: Highlight;
   }
-  .ot-text-field:has(> .ot-text-field-control:disabled) { opacity: 1; color: GrayText; border-color: GrayText; }
-  .ot-text-field:has(> .ot-text-field-control:disabled) > .ot-text-field-helper,
-  .ot-text-field:has(> .ot-text-field-control:disabled) > .ot-text-field-error,
+  .ot-text-field:has(.ot-text-field-control:disabled) { opacity: 1; color: GrayText; border-color: GrayText; }
+  .ot-text-field:has(.ot-text-field-control:disabled) > .ot-text-field-helper,
+  .ot-text-field:has(.ot-text-field-control:disabled) > .ot-text-field-error,
   .ot-input:disabled { color: GrayText; }
   .ot-input:disabled { border-color: GrayText; }
+}
+
+.ot-text-field-value {
+  display: flex;
+  align-items: baseline;
+  gap: 0.25em;
+  min-inline-size: 0;
+  font: var(--ot-type-label-weight) var(--ot-type-label-size)/var(--ot-type-label-line) Geist, sans-serif;
+}
+.ot-text-field-unit {
+  flex: none;
+  max-inline-size: 50%;
+  overflow-wrap: anywhere;
+}
+.ot-text-field-value[data-position='prefix'] > input { flex: 1; }
+.ot-text-field-value[data-position='suffix'] > input {
+  field-sizing: content;
+  inline-size: auto;
+  min-inline-size: 1ch;
+  max-inline-size: calc(100% - 1ch);
+  flex: 0 1 auto;
 }

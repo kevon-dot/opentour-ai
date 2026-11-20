@@ -1,0 +1,40 @@
+@import '../../styles/product-tokens.css';
+
+.ot-setup-steps {
+  display: grid;
+  gap: var(--ot-space-16);
+  inline-size: 100%;
+  min-inline-size: 0;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-family: Geist, sans-serif;
+  overflow-wrap: anywhere;
+}
+
+.ot-setup-steps > li {
+  display: grid;
+  gap: var(--ot-space-8);
+  min-inline-size: 0;
+  padding: var(--ot-space-16);
+  border: 1px solid var(--ot-border-default);
+  border-radius: var(--ot-radius-12);
+  background: var(--ot-surface-base);
+}
+
+.ot-setup-step-title {
+  color: var(--ot-text-primary);
+  font-size: var(--ot-type-label-size);
+  font-weight: var(--ot-type-label-weight);
+  line-height: var(--ot-type-label-line);
+}
+
+.ot-setup-step-details {
+  color: var(--ot-text-secondary);
+  font-size: var(--ot-type-body-size);
+  line-height: var(--ot-type-body-line);
+}
+
+@media (forced-colors: active) {
+  .ot-setup-steps > li { border-color: CanvasText; }
+}

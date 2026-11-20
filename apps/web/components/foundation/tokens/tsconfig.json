@@ -54,6 +54,18 @@
     "../../../tests/fixtures/presentation/numeric-field.tsx",
     "../data-display/paired-outcomes*.tsx",
     "../data-display/paired-outcomes*.ts",
-    "../../../tests/fixtures/presentation/paired-outcomes.tsx"
+    "../../../tests/fixtures/presentation/paired-outcomes.tsx",
+    "../../../features/workspace-lifecycle/project-description*.ts",
+    "../../../features/workspace-lifecycle/project-description*.tsx",
+    "../../../tests/fixtures/presentation/project-description.tsx",
+    "../../../features/account-entry/setup-step-indicator*.ts",
+    "../../../features/account-entry/setup-step-indicator*.tsx",
+    "../../../tests/fixtures/presentation/setup-step-indicator.tsx",
+    "../forms/unit-field*.ts",
+    "../forms/unit-field*.tsx",
+    "../../../tests/fixtures/presentation/unit-field.tsx",
+    "../data-display/category-chart*.ts",
+    "../data-display/category-chart*.tsx",
+    "../../../tests/fixtures/presentation/category-chart.tsx"
   ]
 }

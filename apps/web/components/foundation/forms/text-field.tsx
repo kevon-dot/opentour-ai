@@ -22,6 +22,8 @@ export interface TextFieldProps extends ControlProps {
   /** Visible label without a suffix; the requirement suffix is appended here. */
   label: string;
   helper?: string;
+  /** Fixed unit next to the editable raw value. It is part of the input description. */
+  affix?: { text: string; position: 'prefix' | 'suffix' };
   /** Caller's explanation of an invalid value. Shown in addition to the helper, never in place of it. */
   error?: string;
 }
@@ -40,9 +42,9 @@ function requireIdentity(id: string): void {
 }
 
 function NativeInput({ className, name, id, value, onChange, onBlur, required = false, disabled = false, invalid = false,
-  readOnly, inputMode, describedBy }: ControlProps & { className: string; name?: string; invalid?: boolean }) {
+  readOnly, inputMode, describedBy, size }: ControlProps & { className: string; name?: string; invalid?: boolean; size?: number }) {
   return <input className={className} id={id} type="text" aria-label={name} required={required} disabled={disabled}
-    readOnly={readOnly} inputMode={inputMode} aria-invalid={invalid || undefined} aria-describedby={describedBy || undefined} value={value}
+    size={size} readOnly={readOnly} inputMode={inputMode} aria-invalid={invalid || undefined} aria-describedby={describedBy || undefined} value={value}
     onChange={event => onChange(event.currentTarget.value)} onBlur={onBlur ? () => onBlur() : undefined} />;
 }
 
@@ -51,16 +53,25 @@ function NativeInput({ className, name, id, value, onChange, onBlur, required = 
  * the helper and the error are separate paragraphs with ids derived from the field id.
  */
 export function TextField({ id, label, required = false, value, onChange, onBlur, helper, error,
-  disabled = false, readOnly, inputMode, describedBy }: TextFieldProps) {
+  disabled = false, readOnly, inputMode, describedBy, affix }: TextFieldProps) {
   requireIdentity(id);
   requireLabel(label, 'field label');
   const helperId = helper ? id + '-helper' : undefined;
   const errorId = error ? id + '-error' : undefined;
+  const affixId = affix ? id + '-unit' : undefined;
+  const unit = affix && <span id={affixId} className="ot-text-field-unit">{affix.text}</span>;
+  const input = <NativeInput className="ot-text-field-control" id={id} value={value} onChange={onChange} onBlur={onBlur}
+    required={required} disabled={disabled} invalid={!!error} readOnly={readOnly} inputMode={inputMode}
+    size={affix?.position === 'suffix' ? Math.max(1, value.length) : undefined}
+    describedBy={[affixId, helperId, errorId, describedBy].filter(Boolean).join(' ')} />;
+
   return <div className="ot-text-field">
     <label className="ot-text-field-label" htmlFor={id}>{label + (required ? ' · Required' : ' · Optional')}</label>
-    <NativeInput className="ot-text-field-control" id={id} value={value} onChange={onChange} onBlur={onBlur}
-      required={required} disabled={disabled} invalid={!!error}
-      readOnly={readOnly} inputMode={inputMode} describedBy={[helperId, errorId, describedBy].filter(Boolean).join(' ')} />
+    {affix ? <div className="ot-text-field-value" data-position={affix.position}>
+      {affix.position === 'prefix' && unit}
+      {input}
+      {affix.position === 'suffix' && unit}
+    </div> : input}
     {helper && <p className="ot-text-field-helper" id={helperId}>{helper}</p>}
     {error && <p className="ot-text-field-error" id={errorId}>{error}</p>}
   </div>;

@@ -1,0 +1,55 @@
+.ot-category {
+  display: grid;
+  gap: var(--ot-space-16);
+  inline-size: min(100%, 920px);
+  min-inline-size: 0;
+  color: var(--ot-text-primary);
+  font: var(--ot-type-small-size)/var(--ot-type-small-line) Geist, sans-serif;
+  overflow-wrap: anywhere;
+}
+.ot-category figure {
+  box-sizing: border-box;
+  min-block-size: 260px;
+  margin: 0;
+  padding: var(--ot-space-8);
+  background: var(--ot-surface-base);
+}
+.ot-category ul {
+  list-style: none;
+  display: grid;
+  gap: 22px;
+  margin: 14px 0 0;
+  padding: 0;
+}
+.ot-category-track {
+  margin: var(--ot-space-6) var(--ot-space-12) 0 var(--ot-space-40);
+  block-size: var(--ot-space-16);
+}
+.ot-category li:last-child .ot-category-track {
+  background: url('./category-axis.svg') left top / auto 2px repeat-x;
+}
+.ot-category-mark {
+  display: block;
+  height: 100%;
+  background: var(--ot-action-primary);
+  box-shadow: inset 0 0 0 1px var(--ot-border-control);
+}
+.ot-category-data { min-inline-size: 0; container-type: inline-size; }
+.ot-category-data > p {
+  margin: 0 0 var(--ot-space-8);
+  font: var(--ot-type-label-weight) var(--ot-type-label-size)/var(--ot-type-label-line) Geist, sans-serif;
+}
+.ot-category-hint { display: none; }
+@container (width < 640px) { .ot-category-hint { display: inline; } }
+.ot-category-data [role='region'] { overflow-x: auto; }
+.ot-category-data [role='region']:focus-visible { outline: 2px solid var(--ot-action-primary); outline-offset: 2px; }
+.ot-category table { inline-size: 100%; min-inline-size: 640px; table-layout: fixed; border-spacing: 0; }
+.ot-category :is(td, th) { border: 1px solid var(--ot-border-default); background: var(--ot-surface-base); }
+.ot-category th { font-weight: inherit; }
+.ot-category thead th { background: var(--ot-action-subtle); font: var(--ot-type-label-weight) var(--ot-type-label-size)/var(--ot-type-label-line) Geist, sans-serif; }
+.ot-category .ot-table-cell-value { font: inherit; }
+.ot-category td, .ot-category thead th:last-child { text-align: end; }
+.ot-category .ot-button { justify-self: start; inline-size: min(100%, 240px); min-block-size: 44px; }
+@media (forced-colors: active) {
+  .ot-category-mark { background: CanvasText; forced-color-adjust: none; }
+}

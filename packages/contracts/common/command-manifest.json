@@ -10,6 +10,7 @@
     "apps/web/components/foundation/async-state/operation-state.visual.spec.ts",
     "apps/web/components/foundation/async-state/status-copy.visual.spec.ts",
     "apps/web/components/foundation/async-state/visual.spec.ts",
+    "apps/web/components/foundation/data-display/category-chart.visual.spec.ts",
     "apps/web/components/foundation/data-display/chart-evidence.visual.spec.ts",
     "apps/web/components/foundation/data-display/graph-projections.visual.spec.ts",
     "apps/web/components/foundation/data-display/metric-semantics.visual.spec.ts",
@@ -29,6 +30,7 @@
     "apps/web/components/foundation/forms/permission-controls.visual.spec.ts",
     "apps/web/components/foundation/forms/single-choice-select.visual.spec.ts",
     "apps/web/components/foundation/forms/text-field.visual.spec.ts",
+    "apps/web/components/foundation/forms/unit-field.visual.spec.ts",
     "apps/web/components/foundation/forms/visual.spec.ts",
     "apps/web/components/foundation/tokens/icon-button.visual.spec.ts",
     "apps/web/components/foundation/tokens/selection-controls.visual.spec.ts",
@@ -36,6 +38,7 @@
     "apps/web/components/foundation/tokens/status-icon.visual.spec.ts",
     "apps/web/components/foundation/tokens/tooltip.visual.spec.ts",
     "apps/web/components/foundation/tokens/visual.spec.ts",
+    "apps/web/features/account-entry/setup-step-indicator.visual.spec.ts",
     "apps/web/features/autonomy/control-actions.visual.spec.ts",
     "apps/web/features/autonomy/status-panel.visual.spec.ts",
     "apps/web/features/operations/cancellation-impact.visual.spec.ts",
@@ -57,6 +60,7 @@
     "apps/web/features/product-surfaces/workflow-contract/visual.spec.ts",
     "apps/web/features/support-case-private/privacy.spec.ts",
     "apps/web/features/support-case-private/visual.spec.ts",
+    "apps/web/features/workspace-lifecycle/project-description.visual.spec.ts",
     "apps/web/features/workspace/customer-shell.visual.spec.ts",
     "apps/web/tests/accessibility.spec.ts",
     "apps/web/tests/account-entry.browser.spec.ts",
@@ -383,6 +387,22 @@
     "apps/web/components/foundation/data-display/paired-outcomes.visual.spec.ts": {
       "kind": "simulated",
       "owner": "OPE-345"
+    },
+    "apps/web/features/workspace-lifecycle/project-description.visual.spec.ts": {
+      "kind": "simulated",
+      "owner": "OPE-323"
+    },
+    "apps/web/features/account-entry/setup-step-indicator.visual.spec.ts": {
+      "kind": "simulated",
+      "owner": "OPE-324"
+    },
+    "apps/web/components/foundation/forms/unit-field.visual.spec.ts": {
+      "kind": "simulated",
+      "owner": "OPE-334"
+    },
+    "apps/web/components/foundation/data-display/category-chart.visual.spec.ts": {
+      "kind": "simulated",
+      "owner": "OPE-344"
     }
   }
 }
