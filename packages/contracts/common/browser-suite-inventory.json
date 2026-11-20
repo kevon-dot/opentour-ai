@@ -238,10 +238,19 @@
     ],
     "apps/web/components/foundation/data-display/paired-outcomes.visual.spec.ts": [
       "OPE-345"
+    ],
+    "apps/web/features/workspace-lifecycle/project-description.visual.spec.ts": [
+      "OPE-323"
+    ],
+    "apps/web/features/account-entry/setup-step-indicator.visual.spec.ts": [
+      "OPE-324"
+    ],
+    "apps/web/components/foundation/forms/unit-field.visual.spec.ts": [
+      "OPE-334"
     ]
   },
-  "distinct_paths": 79,
-  "issue_count": 75,
+  "distinct_paths": 82,
+  "issue_count": 77,
   "affected_old_wrapper_paths": {
     "apps/web/tests/coverage/ot-p22-c01.spec.ts": [
       "OPE-232"

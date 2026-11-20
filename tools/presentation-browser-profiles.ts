@@ -15,6 +15,21 @@ export const presentationSuites = new Map([
     requirementIds: ['OPE-345:complete-counts', 'OPE-345:partial-counts', 'OPE-345:zero-unknown-missing', 'OPE-345:responsive-accessibility'],
     specHash: '0d2bf39d3c645024baf6f22070f6474d0e0e7e1b25a6cbc1c18a628f79a73f69',
   }],
+  ['apps/web/features/workspace-lifecycle/project-description.visual.spec.ts', {
+    owner: 'OPE-323', parent: 'OPE-298', guide: '153:166', minimumTests: 10,
+    requirementIds: ['OPE-323:raw-count-and-limit', 'OPE-323:summary-focus', 'OPE-323:responsive-renders'],
+    specHash: '674537b23a0c26b1a8671ab7b6de8b65f30cb27b6989aa65a82995e753c8de64',
+  }],
+  ['apps/web/features/account-entry/setup-step-indicator.visual.spec.ts', {
+    owner: 'OPE-324', parent: 'OPE-297', guide: '195:26669,195:26688,195:26707,195:26723', minimumTests: 10,
+    requirementIds: ['OPE-324:ordered-progress', 'OPE-324:responsive-and-forced-colors', 'OPE-324:caller-controlled'],
+    specHash: '8a9544f30cab93da774648b759b8c439a96f92eac76e3fd7de45b9aeb9846666',
+  }],
+  ['apps/web/components/foundation/forms/unit-field.visual.spec.ts', {
+    owner: 'OPE-334', parent: 'OPE-279', guide: '153:85,153:69,153:112,153:96', minimumTests: 10,
+    requirementIds: ['OPE-334:field-states', 'OPE-334:raw-value-and-unit', 'OPE-334:accessible-responsive'],
+    specHash: '42cca5d0f759422c7bdd67abd9d87f7d071f86c22629d7edab02192e05e7f064',
+  }],
   ['apps/web/components/foundation/forms/form-error-summary.visual.spec.ts', {
     owner: 'OPE-321', parent: 'OPE-279', guide: '153:386', minimumTests: 13,
     requirementIds: ['OPE-321:count-and-copy', 'OPE-321:mapped-and-unmapped', 'OPE-321:submission-focus', 'OPE-321:draft-preservation', 'OPE-321:responsive-renders'],

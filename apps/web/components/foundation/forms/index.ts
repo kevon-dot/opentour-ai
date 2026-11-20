@@ -5,3 +5,5 @@ export { NullableField } from './nullable-field';
 export type { NullableDraft, NullableFieldProps, NullableChoices } from './nullable-field';
 export { NumericField } from './numeric-field';
 export type { NumericFieldProps } from './numeric-field';
+export { UnitField } from './unit-field';
+export type { UnitFieldProps } from './unit-field';

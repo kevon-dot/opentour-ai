@@ -1,0 +1,26 @@
+.ot-project-description {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--ot-space-12);
+  overflow-wrap: anywhere;
+}
+.ot-project-description .ot-project-description-frame {
+  min-block-size: var(--ot-project-description-min-height, 154px);
+  max-inline-size: none;
+}
+.ot-project-description-frame > textarea {
+  block-size: auto;
+  min-block-size: var(--ot-type-label-line);
+  field-sizing: content;
+  overflow: auto;
+  overflow-wrap: anywhere;
+  resize: vertical;
+}
+/* A single line starts with the native specimen height. The controlling field grows on edits. */
+@supports (field-sizing: content) {
+  .ot-project-description-frame > textarea { resize: none; }
+}
+.ot-project-description-frame:has(> .ot-text-field-control:disabled) { opacity: 0.6; }
+@media (forced-colors: active) {
+  .ot-project-description-frame:has(> .ot-text-field-control:disabled) { opacity: 1; }
+}

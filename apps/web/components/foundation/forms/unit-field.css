@@ -1,0 +1,16 @@
+.ot-unit-field {
+  display: grid;
+  gap: var(--ot-space-12);
+  inline-size: 100%;
+  max-inline-size: var(--ot-text-field-inline-size, 360px);
+  min-inline-size: 0;
+  overflow-wrap: anywhere;
+}
+.ot-unit-field > p {
+  margin: 0;
+  color: var(--ot-text-secondary);
+  font: var(--ot-type-small-weight) var(--ot-type-small-size)/var(--ot-type-small-line) Geist, sans-serif;
+}
+@media (forced-colors: none) {
+  .ot-unit-field > .ot-text-field:has(input:disabled) { opacity: 0.6; }
+}

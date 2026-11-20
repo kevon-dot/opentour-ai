@@ -15,6 +15,9 @@ PRESENTATION_TARGETS = {
     "apps/web/components/foundation/data-display/paired-outcomes.visual.spec.ts": "OPE-345",
     "apps/web/components/foundation/forms/nullable-field.visual.spec.ts": "OPE-322",
     "apps/web/components/foundation/forms/numeric-field.visual.spec.ts": "OPE-328",
+    "apps/web/features/workspace-lifecycle/project-description.visual.spec.ts": "OPE-323",
+    "apps/web/features/account-entry/setup-step-indicator.visual.spec.ts": "OPE-324",
+    "apps/web/components/foundation/forms/unit-field.visual.spec.ts": "OPE-334",
     "apps/web/components/foundation/forms/form-error-summary.visual.spec.ts": "OPE-321",
     "apps/web/components/foundation/forms/derived-value.visual.spec.ts": "OPE-320",
     "apps/web/components/foundation/data-display/relationship-context.visual.spec.ts": "OPE-319",
@@ -313,6 +316,36 @@ def verify_scoped_presentation(root: Path, value: dict[str, Any]) -> None:
         actual_numeric = {Path(p).name for p in images}
         if len(images) != len(expected_numeric) or actual_numeric != expected_numeric:
             raise ValueError("Numeric field capture inventory mismatch")
+    elif value["issue_key"] == "OPE-323":
+        expected_descriptions = {
+            f"description-{width}-{scale}-{state}.png"
+            for width in widths
+            for scale in (100, 200)
+            for state in ("settings", "default", "focus", "disabled", "readonly", "error")
+        }
+        if (
+            len(images) != len(expected_descriptions)
+            or {Path(name).name for name in images} != expected_descriptions
+        ):
+            raise ValueError("Project description capture inventory mismatch")
+    elif value["issue_key"] == "OPE-324":
+        expected_steps = {
+            f"setup-{step}-{width}-{scale}.png"
+            for step in ("organization", "workspace", "project")
+            for width in widths
+            for scale in (100, 200)
+        } | {"setup-forced-colors.png"}
+        if len(images) != len(expected_steps) or {Path(p).name for p in images} != expected_steps:
+            raise ValueError("Setup step indicator capture inventory mismatch")
+    elif value["issue_key"] == "OPE-334":
+        expected_units = {
+            f"unit-{kind}-{width}-{scale}.png"
+            for kind in ("currency", "duration")
+            for width in (320, 768, 1280, 1440)
+            for scale in (100, 200)
+        }
+        if len(images) != len(expected_units) or {Path(p).name for p in images} != expected_units:
+            raise ValueError("Unit field capture inventory mismatch")
     elif value["issue_key"] == "OPE-316":
         expected_fields = {
             f"field-{width}-{scale}-{state}.png"
