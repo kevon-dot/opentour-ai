@@ -28,7 +28,7 @@ export const presentationSuites = new Map([
   ['apps/web/features/autonomy/activity-history.visual.spec.ts', {
     owner: 'OPE-343', parent: 'OPE-294', guide: '169:7432,169:7504,169:7674,169:1028', minimumTests: 9,
     requirementIds: ['OPE-343:permitted-detail', 'OPE-343:append-focus-count', 'OPE-343:generation-replacement'],
-    specHash: '47d23af192dce16e337ca2ba2ba2ffaaa24b47ed20c983ef0bb5c22519d496ce',
+    specHash: '18f9540094105cb92bd35d0880077bde0ac23ea38cf36c848b8071d78fa99819',
   }],
   ['apps/web/features/access/resource-disclosure.visual.spec.ts', {
     owner: 'OPE-329', parent: 'OPE-282', guide: '164:11778,164:14659,164:14664', minimumTests: 8,

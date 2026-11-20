@@ -1,4 +1,5 @@
 .ot-activity-history {
+  container: activity-history / inline-size;
   display: grid;
   grid-template-columns: minmax(0, 1fr);
   gap: var(--ot-space-16);
@@ -27,7 +28,22 @@
   font: inherit; color: var(--ot-text-link); border: 0; background: transparent; text-decoration: underline; cursor: pointer;
 }
 .ot-activity-disclosure:focus-visible, .ot-activity-load:focus-visible { outline: 2px solid var(--ot-action-primary); outline-offset: 2px; }
-.ot-activity-load { inline-size: min(280px, 100%); min-block-size: 44px; }
+.ot-activity-actions {
+  display: flex; flex-wrap: wrap; align-items: flex-start; gap: var(--ot-space-12);
+}
+.ot-activity-actions :is(.ot-link, .ot-activity-load) { inline-size: 280px; min-block-size: 44px; }
+.ot-activity-actions .ot-link {
+  display: flex; align-items: center; justify-content: center;
+  padding: var(--ot-space-8) var(--ot-space-16); border-radius: var(--ot-radius-6);
+  background: var(--ot-action-primary); color: var(--ot-text-inverse); text-align: center;
+}
+@container activity-history (width < 572px) {
+  .ot-activity-actions :is(.ot-link, .ot-activity-load) { inline-size: 100%; }
+}
+@media (forced-colors: active) {
+  .ot-activity-actions .ot-link { color: LinkText; background: Canvas; border: 1px solid LinkText; }
+  .ot-activity-actions .ot-link:focus-visible { outline-color: Highlight; }
+}
 .ot-activity-load[aria-disabled=true] { color: var(--ot-text-muted); background: var(--ot-unknown-background); cursor: default; }
 @container (width < 36rem) {
   .ot-activity-panel :is(table, tbody, tr, td, tbody th) { display: block; }

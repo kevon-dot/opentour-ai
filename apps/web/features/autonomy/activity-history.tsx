@@ -1,6 +1,6 @@
 'use client';
 
-import { useId, useState } from 'react';
+import { useCallback, useId, useRef, useState } from 'react';
 import { Notice } from '../../components/foundation/tokens/notice';
 import { Link } from '../../components/foundation/tokens/primitives';
 import './activity-history.css';
@@ -40,6 +40,12 @@ function uniqueEvents(events: readonly ActivityEvent[]) {
 
 export function ActivityHistory({ snapshot, onLoadOlder }: ActivityHistoryProps) {
   const id = useId();
+  const loadButton = useRef<HTMLButtonElement>(null);
+  const receiptRef = useCallback((link: HTMLAnchorElement | null) => {
+    if (link) return () => {
+      if (link === document.activeElement) loadButton.current?.focus();
+    };
+  }, []);
   const events = uniqueEvents(snapshot.events);
   const [expanded, setExpanded] = useState<string | null>(null);
   const [previous, setPrevious] = useState(snapshot);
@@ -88,12 +94,14 @@ export function ActivityHistory({ snapshot, onLoadOlder }: ActivityHistoryProps)
       {selected.operation && <p>Operation: {selected.operation}</p>}
       {selected.reason && <p>Reason: {selected.reason}</p>}
       {selected.receipt && <p>Source receipt: {selected.receipt}</p>}
-      {selected.detail && <Link size="label" {...selected.detail} />}
     </section>}
-    <button className="ot-button ot-button--secondary ot-activity-load" type="button"
-      aria-disabled={snapshot.exhausted || undefined} onClick={() => { if (!snapshot.exhausted) onLoadOlder(); }}>
-      Load older activity
-    </button>
+    <div className="ot-activity-actions" role="group" aria-label="Activity actions">
+      {selected?.detail && <Link key={selected.detail.href} ref={receiptRef} size="label" {...selected.detail} />}
+      <button ref={loadButton} className="ot-button ot-button--secondary ot-activity-load" type="button"
+        aria-disabled={snapshot.exhausted || undefined} onClick={() => { if (!snapshot.exhausted) onLoadOlder(); }}>
+        Load older activity
+      </button>
+    </div>
     <div role="status" aria-atomic="true">
       {announcement.text && <p key={announcement.sequence}>{announcement.text}</p>}
       {snapshot.exhausted && <p>You have reached the beginning.</p>}
