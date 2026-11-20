@@ -1,6 +1,7 @@
 import 'server-only';
 
 import { configureSignedPrivateAccountEntry } from '../../features/account-entry/server.js';
+import { observeBffStartup, withBffProbeObservation } from './bff-readiness-observation.js';
 import { readBffRuntimeBinding } from './bff-runtime-binding.js';
 import { createEcsTaskCredentialProvider, fetchEcsTaskCredentials } from './ecs-task-role.js';
 
@@ -18,34 +19,41 @@ function cachedReadiness(check: Check): () => Promise<boolean> {
     if (pending) return pending;
     const now = performance.now();
     if (last && now >= last.at && now - last.at < probeIntervalMs) return Promise.resolve(last.ready);
-    pending = check(AbortSignal.timeout(probeTimeoutMs)).catch(() => false).then(ready => {
-      last = { at: performance.now(), ready };
-      pending = undefined;
-      return ready;
-    });
+    pending = withBffProbeObservation(() => check(AbortSignal.timeout(probeTimeoutMs)))
+      .catch(() => false)
+      .then(ready => {
+        last = { at: performance.now(), ready };
+        pending = undefined;
+        return ready;
+      });
     return pending;
   };
 }
 
 async function initialize(runtime: Runtime): Promise<void> {
   try {
+    observeBffStartup('runtime_started');
     const workosApiKey = process.env.OPENTOUR_WORKOS_API_KEY;
     if (!workosApiKey || workosApiKey.length > 4_096 || workosApiKey.trim() !== workosApiKey) return;
+    observeBffStartup('workos_key_shape_validated');
     const { profile, gateway: { taskRoleArn, ...binding } } = await readBffRuntimeBinding(
       process.env.OPENTOUR_BFF_BINDING_FILE,
       process.env.OPENTOUR_BFF_BINDING_SHA256,
     );
+    observeBffStartup('binding_validated');
     const credentials = createEcsTaskCredentialProvider({
       relativeUri: process.env.AWS_CONTAINER_CREDENTIALS_RELATIVE_URI,
       expectedRoleArn: taskRoleArn,
       fetch: fetchEcsTaskCredentials,
     });
+    observeBffStartup('role_provider_configured');
     const { checkReadiness } = configureSignedPrivateAccountEntry({
       profile,
       workosApiKey,
       privateIdentity: { ...binding, credentials, fetch: globalThis.fetch },
     });
     runtime.ready = cachedReadiness(checkReadiness);
+    observeBffStartup('runtime_configured');
   } catch {
     // Keep the routing plane closed when the deployment supplies incomplete or invalid inputs.
   }
