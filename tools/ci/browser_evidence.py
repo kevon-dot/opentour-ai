@@ -343,7 +343,7 @@ def verify_scoped_presentation(root: Path, value: dict[str, Any]) -> None:
     elif value["issue_key"] in {"OPE-327", "OPE-329"}:
         prefix, states = {
             "OPE-327": ("effort-ledger", ("reference", "history", "revoked")),
-            "OPE-329": ("disclosure", ("known", "undisclosed", "after-switch")),
+            "OPE-329": ("disclosure", ("known", "known-focus", "undisclosed", "after-switch")),
         }[value["issue_key"]]
         expected = {
             f"{prefix}-{state}-{width}-{scale}.png"

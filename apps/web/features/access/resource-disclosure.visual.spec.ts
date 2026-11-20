@@ -66,6 +66,7 @@ for (const width of [320, 768, 1280, 1440]) {
       await page.keyboard.press('Tab');
       await expect(action).toBeFocused();
       await expect(action).toHaveCSS('outline-style', 'solid');
+      await capture('known-focus');
       await page.keyboard.press('Enter');
       await page.keyboard.press('Space');
       await action.scrollIntoViewIfNeeded();
