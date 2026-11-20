@@ -12,6 +12,9 @@ from typing import Any
 from tools.public_content_check import MAX_FILE_BYTES, digest, inspect_bytes, load_policy
 
 PRESENTATION_TARGETS = {
+    "apps/web/components/foundation/data-display/paired-outcomes.visual.spec.ts": "OPE-345",
+    "apps/web/components/foundation/forms/nullable-field.visual.spec.ts": "OPE-322",
+    "apps/web/components/foundation/forms/numeric-field.visual.spec.ts": "OPE-328",
     "apps/web/components/foundation/forms/form-error-summary.visual.spec.ts": "OPE-321",
     "apps/web/components/foundation/forms/derived-value.visual.spec.ts": "OPE-320",
     "apps/web/components/foundation/data-display/relationship-context.visual.spec.ts": "OPE-319",
@@ -276,6 +279,40 @@ def verify_scoped_presentation(root: Path, value: dict[str, Any]) -> None:
         actual_impact = {Path(name).name for name in images}
         if len(images) != len(expected_impact) or actual_impact != expected_impact:
             raise ValueError("Cancellation impact capture inventory mismatch")
+    elif value["issue_key"] == "OPE-345":
+        expected_paired = {
+            f"paired-{state}-{width}-{scale}.png"
+            for state in ("complete", "partial", "mixed")
+            for width in widths
+            for scale in (100, 200)
+        }
+        if (
+            len(images) != len(expected_paired)
+            or {Path(name).name for name in images} != expected_paired
+        ):
+            raise ValueError("Paired outcomes capture inventory mismatch")
+    elif value["issue_key"] == "OPE-322":
+        expected_nullable = {
+            f"nullable-{width}-{scale}-{state}.png"
+            for width in widths
+            for scale in (100, 200)
+            for state in ("value", "null", "omitted")
+        } | {"nullable-keyboard-focus.png"}
+        if (
+            len(images) != len(expected_nullable)
+            or {Path(name).name for name in images} != expected_nullable
+        ):
+            raise ValueError("Nullable field capture inventory mismatch")
+    elif value["issue_key"] == "OPE-328":
+        expected_numeric = {
+            f"numeric-{kind}-{width}-{scale}.png"
+            for kind in ("integer", "decimal")
+            for width in (320, 768, 1280, 1440)
+            for scale in (100, 200)
+        }
+        actual_numeric = {Path(p).name for p in images}
+        if len(images) != len(expected_numeric) or actual_numeric != expected_numeric:
+            raise ValueError("Numeric field capture inventory mismatch")
     elif value["issue_key"] == "OPE-316":
         expected_fields = {
             f"field-{width}-{scale}-{state}.png"

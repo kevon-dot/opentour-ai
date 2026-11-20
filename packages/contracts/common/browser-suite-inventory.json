@@ -229,10 +229,19 @@
     ],
     "apps/web/components/foundation/forms/form-error-summary.visual.spec.ts": [
       "OPE-321"
+    ],
+    "apps/web/components/foundation/forms/nullable-field.visual.spec.ts": [
+      "OPE-322"
+    ],
+    "apps/web/components/foundation/forms/numeric-field.visual.spec.ts": [
+      "OPE-328"
+    ],
+    "apps/web/components/foundation/data-display/paired-outcomes.visual.spec.ts": [
+      "OPE-345"
     ]
   },
-  "distinct_paths": 76,
-  "issue_count": 72,
+  "distinct_paths": 79,
+  "issue_count": 75,
   "affected_old_wrapper_paths": {
     "apps/web/tests/coverage/ot-p22-c01.spec.ts": [
       "OPE-232"

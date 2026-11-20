@@ -1,0 +1,20 @@
+.ot-nullable {
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  gap: var(--ot-space-12);
+  inline-size: 360px;
+  max-inline-size: 100%;
+  min-inline-size: 0;
+}
+.ot-nullable > .ot-button-group,
+.ot-nullable .ot-button { inline-size: 100%; }
+.ot-nullable .ot-button { min-block-size: 44px; }
+@media (forced-colors: active) {
+  .ot-nullable .ot-button[aria-pressed='true'] {
+    forced-color-adjust: none;
+    color: HighlightText;
+    background: Highlight;
+    border-color: Highlight;
+  }
+}

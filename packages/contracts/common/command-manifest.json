@@ -13,6 +13,7 @@
     "apps/web/components/foundation/data-display/chart-evidence.visual.spec.ts",
     "apps/web/components/foundation/data-display/graph-projections.visual.spec.ts",
     "apps/web/components/foundation/data-display/metric-semantics.visual.spec.ts",
+    "apps/web/components/foundation/data-display/paired-outcomes.visual.spec.ts",
     "apps/web/components/foundation/data-display/relationship-context.visual.spec.ts",
     "apps/web/components/foundation/data-display/scenario-conformance.visual.spec.ts",
     "apps/web/components/foundation/data-display/table-populations.visual.spec.ts",
@@ -23,6 +24,8 @@
     "apps/web/components/foundation/forms/field-semantics.visual.spec.ts",
     "apps/web/components/foundation/forms/form-error-summary.visual.spec.ts",
     "apps/web/components/foundation/forms/mutation-intent.visual.spec.ts",
+    "apps/web/components/foundation/forms/nullable-field.visual.spec.ts",
+    "apps/web/components/foundation/forms/numeric-field.visual.spec.ts",
     "apps/web/components/foundation/forms/permission-controls.visual.spec.ts",
     "apps/web/components/foundation/forms/single-choice-select.visual.spec.ts",
     "apps/web/components/foundation/forms/text-field.visual.spec.ts",
@@ -368,6 +371,18 @@
     "apps/web/components/foundation/forms/form-error-summary.visual.spec.ts": {
       "kind": "simulated",
       "owner": "OPE-321"
+    },
+    "apps/web/components/foundation/forms/nullable-field.visual.spec.ts": {
+      "kind": "simulated",
+      "owner": "OPE-322"
+    },
+    "apps/web/components/foundation/forms/numeric-field.visual.spec.ts": {
+      "kind": "simulated",
+      "owner": "OPE-328"
+    },
+    "apps/web/components/foundation/data-display/paired-outcomes.visual.spec.ts": {
+      "kind": "simulated",
+      "owner": "OPE-345"
     }
   }
 }

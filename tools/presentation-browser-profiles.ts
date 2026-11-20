@@ -1,5 +1,20 @@
 /** Generated local presentation fixtures. Each executable target has exactly one child owner. */
 export const presentationSuites = new Map([
+  ['apps/web/components/foundation/forms/nullable-field.visual.spec.ts', {
+    owner: 'OPE-322', parent: 'OPE-279', guide: '153:280', minimumTests: 10,
+    requirementIds: ['OPE-322:allowed-alternatives', 'OPE-322:distinct-drafts', 'OPE-322:responsive-renders'],
+    specHash: '1e18997c1415704ac562d14f022c96adeb979455cd98a735b0ee3f090b068873',
+  }],
+  ['apps/web/components/foundation/forms/numeric-field.visual.spec.ts', {
+    owner: 'OPE-328', parent: 'OPE-279', guide: '153:31,153:15,153:58,153:42', minimumTests: 9,
+    requirementIds: ['OPE-328:field-states', 'OPE-328:raw-draft', 'OPE-328:accessible-responsive'],
+    specHash: '2f8862ae2b017934e8f94255cfca62bb3381ad678624ce8dacce4cf8cb2e361b',
+  }],
+  ['apps/web/components/foundation/data-display/paired-outcomes.visual.spec.ts', {
+    owner: 'OPE-345', parent: 'OPE-285', guide: '162:28706', minimumTests: 8,
+    requirementIds: ['OPE-345:complete-counts', 'OPE-345:partial-counts', 'OPE-345:zero-unknown-missing', 'OPE-345:responsive-accessibility'],
+    specHash: '0d2bf39d3c645024baf6f22070f6474d0e0e7e1b25a6cbc1c18a628f79a73f69',
+  }],
   ['apps/web/components/foundation/forms/form-error-summary.visual.spec.ts', {
     owner: 'OPE-321', parent: 'OPE-279', guide: '153:386', minimumTests: 13,
     requirementIds: ['OPE-321:count-and-copy', 'OPE-321:mapped-and-unmapped', 'OPE-321:submission-focus', 'OPE-321:draft-preservation', 'OPE-321:responsive-renders'],

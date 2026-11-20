@@ -342,8 +342,10 @@ def test_exact_canonical_browser_inventory_preserved(checkout):
     manifest = runner.manifest(checkout)
     source = json.loads((checkout / runner.COMMON / "browser-suite-inventory.json").read_text())
     assert set(manifest["browser_suites"]) == set(source["paths"])
-    assert len(manifest["browser_suites"]) == source["distinct_paths"] == 76
+    assert len(manifest["browser_suites"]) == source["distinct_paths"] == 79
     sprint_profiles = {
+        "apps/web/components/foundation/data-display/paired-outcomes.visual.spec.ts": "OPE-345",
+        "apps/web/components/foundation/forms/nullable-field.visual.spec.ts": "OPE-322",
         "apps/web/components/foundation/forms/form-error-summary.visual.spec.ts": "OPE-321",
         "apps/web/components/foundation/forms/derived-value.visual.spec.ts": "OPE-320",
         "apps/web/components/foundation/data-display/relationship-context.visual.spec.ts": (
@@ -351,6 +353,7 @@ def test_exact_canonical_browser_inventory_preserved(checkout):
         ),
         "apps/web/components/foundation/tokens/selection-controls.visual.spec.ts": "OPE-318",
         "apps/web/components/foundation/forms/single-choice-select.visual.spec.ts": "OPE-317",
+        "apps/web/components/foundation/forms/numeric-field.visual.spec.ts": "OPE-328",
         "apps/web/components/foundation/forms/text-field.visual.spec.ts": "OPE-316",
         "apps/web/components/foundation/tokens/skeleton.visual.spec.ts": "OPE-310",
         "apps/web/components/foundation/tokens/icon-button.visual.spec.ts": "OPE-311",

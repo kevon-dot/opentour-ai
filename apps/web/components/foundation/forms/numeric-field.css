@@ -1,0 +1,16 @@
+.ot-numeric-field {
+  display: grid;
+  gap: var(--ot-space-12);
+  inline-size: 100%;
+  max-inline-size: var(--ot-text-field-inline-size, 360px);
+  min-inline-size: 0;
+  overflow-wrap: anywhere;
+}
+.ot-numeric-field > p {
+  margin: 0;
+  color: var(--ot-text-secondary);
+  font: var(--ot-type-small-weight) var(--ot-type-small-size)/var(--ot-type-small-line) Geist, sans-serif;
+}
+@media (forced-colors: none) {
+  .ot-numeric-field > .ot-text-field:has(> .ot-text-field-control:disabled) { opacity: 0.6; }
+}

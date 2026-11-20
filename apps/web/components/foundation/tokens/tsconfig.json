@@ -45,6 +45,15 @@
     "../../../tests/fixtures/presentation/derived-value.tsx",
     "../forms/form-error-summary*.ts",
     "../forms/form-error-summary*.tsx",
-    "../../../tests/fixtures/presentation/form-error-summary.tsx"
+    "../../../tests/fixtures/presentation/form-error-summary.tsx",
+    "../forms/nullable-field*.ts",
+    "../forms/nullable-field*.tsx",
+    "../../../tests/fixtures/presentation/nullable-field.tsx",
+    "../forms/numeric-field*.tsx",
+    "../forms/numeric-field*.ts",
+    "../../../tests/fixtures/presentation/numeric-field.tsx",
+    "../data-display/paired-outcomes*.tsx",
+    "../data-display/paired-outcomes*.ts",
+    "../../../tests/fixtures/presentation/paired-outcomes.tsx"
   ]
 }

@@ -1,0 +1,67 @@
+.ot-paired {
+  display: grid;
+  gap: var(--ot-space-16);
+  inline-size: min(100%, 920px);
+  min-inline-size: 0;
+  color: var(--ot-text-primary);
+  font: var(--ot-type-small-size)/var(--ot-type-small-line) Geist, sans-serif;
+  overflow-wrap: anywhere;
+}
+
+.ot-paired-plot {
+  margin: 0;
+  box-sizing: border-box;
+  min-block-size: 260px;
+  padding: var(--ot-space-8);
+  background: var(--ot-surface-base);
+}
+.ot-paired-plot ul {
+  display: grid;
+  gap: 15px;
+  margin: 10px 0 0;
+  padding: 0;
+  list-style: none;
+}
+.ot-paired [data-series] { --ot-paired-fill: var(--ot-action-primary); }
+.ot-paired [data-series='regressed'] { --ot-paired-fill: var(--ot-hold-text); }
+.ot-paired-track, .ot-paired-axis {
+  margin-inline: var(--ot-space-40) var(--ot-space-12);
+}
+.ot-paired-track { margin-block-start: var(--ot-space-4); }
+.ot-paired-mark {
+  display: block;
+  block-size: var(--ot-space-12);
+  background: var(--ot-paired-fill);
+  box-shadow: inset 0 0 0 1px var(--ot-border-control);
+}
+.ot-paired-axis { margin-block-start: var(--ot-space-12); border-block-start: 2px solid var(--ot-border-control); }
+
+.ot-paired table { inline-size: 100%; table-layout: fixed; border-spacing: 0; }
+.ot-paired caption {
+  padding-block-end: var(--ot-space-8);
+  text-align: start;
+  font: var(--ot-type-label-weight) var(--ot-type-label-size)/var(--ot-type-label-line) Geist, sans-serif;
+}
+.ot-paired :is(td, th) {
+  border: 1px solid var(--ot-border-default);
+  background: var(--ot-surface-base);
+}
+.ot-paired thead th { background: var(--ot-action-subtle); }
+.ot-paired .ot-table-cell-frame { min-inline-size: 0; inline-size: auto; }
+.ot-paired .ot-table-cell-value { font: inherit; }
+.ot-paired th { font-weight: var(--ot-type-small-weight); }
+.ot-paired thead th { font: var(--ot-type-label-weight) var(--ot-type-label-size)/var(--ot-type-label-line) Geist, sans-serif; }
+.ot-paired td, .ot-paired th:last-child { text-align: end; }
+.ot-paired [data-series] th .ot-table-cell-value::before {
+  content: '';
+  display: inline-block;
+  inline-size: var(--ot-space-8);
+  block-size: var(--ot-space-8);
+  margin-inline-end: var(--ot-space-6);
+  background-color: var(--ot-paired-fill);
+  outline: 1px solid var(--ot-border-control);
+}
+.ot-paired tfoot tr:first-child > * { border-block-start-color: var(--ot-border-control); }
+@media (forced-colors: active) {
+  .ot-paired-mark { background: CanvasText; forced-color-adjust: none; }
+}
