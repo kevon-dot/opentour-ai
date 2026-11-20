@@ -95,7 +95,7 @@ jobs:
       max-parallel: 1
       matrix:
         image: [control-api, bff]
-    uses: kevon-dot/opentour-ai/.github/workflows/ope212-ohio-ecr-publisher.yml@c34f9c9a945dd5a3ade7c34493685d2da8c5f491
+    uses: kevon-dot/opentour-ai/.github/workflows/ope212-ohio-ecr-publisher.yml@39b5012e48e98430e2de08ef5c27bf464512d087
     with:
       source_commit: ${{ inputs.source_commit }}
       image: ${{ matrix.image }}

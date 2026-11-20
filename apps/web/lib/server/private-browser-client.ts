@@ -1,5 +1,6 @@
 import 'server-only';
 import { createHash, randomBytes } from 'node:crypto';
+import { observeBffProbe } from './bff-readiness-observation.js';
 import { boundedServerResponse } from './bounded-server-response.js';
 import {
   IdentityFailure, type AuthTransaction, type AuthTransactionPort, type Credentials,
@@ -175,8 +176,10 @@ export function createPrivateBrowserPorts(
       response = await boundedServerResponse(async (signal, assertTime) => {
         const signed = await sign(request, signal);
         assertTime();
+        const headers = signedHeaders(signed, request.body);
+        observeBffProbe('signed_request_prepared');
         const result = await transport(request.url, { method: request.method, body: request.body,
-          headers: signedHeaders(signed, request.body), signal, redirect: 'error',
+          headers, signal, redirect: 'error',
           cache: 'no-store', credentials: 'omit', referrerPolicy: 'no-referrer' });
         if (result.redirected || (result.url && result.url !== request.url)) {
           void result.body?.cancel().catch(() => undefined);
@@ -202,12 +205,16 @@ export function createPrivateBrowserPorts(
 
   return {
     async checkReadiness(signal) {
+      observeBffProbe('probe_started');
       try {
         await call('current', { handle: randomBytes(32).toString('base64url') }, signal);
       } catch (error) {
-        return !signal.aborted && error instanceof IdentityFailure && error.code === 'SESSION_INVALID'
+        const ready = !signal.aborted && error instanceof IdentityFailure && error.code === 'SESSION_INVALID'
           && error.status === 401 && !error.retryable;
+        observeBffProbe(ready ? 'probe_accepted' : 'probe_refused');
+        return ready;
       }
+      observeBffProbe('probe_refused');
       return false;
     },
     transactions: {

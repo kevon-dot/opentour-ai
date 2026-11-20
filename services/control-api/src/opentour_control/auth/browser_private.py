@@ -16,6 +16,7 @@ from .browser_state import (
     BrowserSession,
 )
 from .config import AuthError, counter, utc
+from .repository import _current_readiness_observation
 
 # Local dispatcher bounds. A listener must enforce its reviewed limits while reading the body.
 MAX_REQUEST_BYTES = 65_536
@@ -256,7 +257,15 @@ class PrivateBrowserDispatch:
                 return response
         except AuthError as error:
             if error.code in _DOMAIN_ERRORS.get(error.status, set()):
-                return _failure(error)
+                response = _failure(error)
+                if (
+                    operation == "current"
+                    and error.status == 401
+                    and error.code == "SESSION_INVALID"
+                    and (observation := _current_readiness_observation.get()) is not None
+                ):
+                    observation.session_invalid = True
+                return response
         except Exception:
             # The durable mutation may already have taken effect. Do not infer or retry.
             pass

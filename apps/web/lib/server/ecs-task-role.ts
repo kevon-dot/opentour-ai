@@ -3,6 +3,7 @@ import 'server-only';
 import http from 'node:http';
 import { Readable } from 'node:stream';
 import { IdentityFailure } from './authkit-adapter.js';
+import { observeBffProbe } from './bff-readiness-observation.js';
 import { boundedServerResponse } from './bounded-server-response.js';
 import type { PrivateGatewaySignerOptions } from './private-gateway-signer.js';
 
@@ -112,6 +113,7 @@ export function createEcsTaskCredentialProvider({
           || expiration.toISOString().slice(0, 19) !== data.Expiration.slice(0, 19)) {
         throw unavailable();
       }
+      observeBffProbe('credentials_validated');
       return {
         accessKeyId: data.AccessKeyId, secretAccessKey: data.SecretAccessKey,
         sessionToken: data.Token, expiration,

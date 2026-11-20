@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import hashlib
 import ipaddress
 import re
 import ssl
@@ -14,8 +16,11 @@ import uvicorn
 from cryptography import x509
 from cryptography.exceptions import InvalidSignature, UnsupportedAlgorithm
 from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.x509.oid import ExtendedKeyUsageOID
+from cryptography.hazmat.primitives.asymmetric.rsa import RSAPublicKey
+from cryptography.x509.oid import ExtendedKeyUsageOID, SignatureAlgorithmOID
 from uvicorn._types import ASGI3Application, ASGIReceiveCallable, ASGISendCallable, Scope
+from uvicorn.protocols.http.h11_impl import H11Protocol
+from uvicorn.server import ServerState
 
 UVICORN_VERSION = "0.54.0"
 PRIVATE_NETWORKS = tuple(
@@ -64,8 +69,19 @@ def _assert_tls_material(
     if (
         leaf.fingerprint(hashes.SHA256()).hex() != approved.client_certificate_sha256
         or not leaf.not_valid_before_utc <= now < leaf.not_valid_after_utc
-        or leaf.extensions.get_extension_for_class(x509.BasicConstraints).value.ca
     ):
+        raise _unavailable()
+    if len(leaf.extensions) == 0:
+        # API Gateway's native REST stage certificate omits X.509 extensions.
+        public_key = leaf.public_key()
+        if (
+            leaf.version != x509.Version.v3
+            or not isinstance(public_key, RSAPublicKey)
+            or public_key.key_size != 2048
+            or leaf.signature_algorithm_oid != SignatureAlgorithmOID.RSA_WITH_SHA256
+        ):
+            raise _unavailable()
+    elif leaf.extensions.get_extension_for_class(x509.BasicConstraints).value.ca:
         raise _unavailable()
     leaf.verify_directly_issued_by(leaf)
     try:
@@ -147,6 +163,66 @@ def prepare_private_browser_listener_tls(
     return context, readback.verified_at, min(readback.valid_until, leaf.not_valid_after_utc)
 
 
+def _pin_peer_protocol(client_certificate_sha256: str) -> type[asyncio.Protocol]:
+    peer_digest = bytes.fromhex(client_certificate_sha256)
+
+    class PinnedStageProtocol(asyncio.Protocol):
+        def __init__(
+            self,
+            config: uvicorn.Config,
+            server_state: ServerState,
+            app_state: dict[str, object],
+            _loop: asyncio.AbstractEventLoop | None = None,
+        ) -> None:
+            self._config = config
+            self._server_state = server_state
+            self._app_state = app_state
+            self._loop = _loop
+            self._http: H11Protocol | None = None
+
+        def connection_made(self, transport: asyncio.BaseTransport) -> None:
+            if not isinstance(transport, asyncio.Transport):
+                transport.close()
+                return
+            tls = transport.get_extra_info("ssl_object")
+            try:
+                peer = (
+                    tls.getpeercert(binary_form=True)
+                    if isinstance(tls, (ssl.SSLObject, ssl.SSLSocket))
+                    else None
+                )
+            except (OSError, ValueError):
+                peer = None
+            if not peer or hashlib.sha256(peer).digest() != peer_digest:
+                transport.abort()
+                return
+            self._http = H11Protocol(self._config, self._server_state, self._app_state, self._loop)
+            self._http.connection_made(transport)
+
+        def data_received(self, data: bytes) -> None:
+            if self._http is not None:
+                self._http.data_received(data)
+
+        def eof_received(self) -> None:
+            if self._http is not None:
+                self._http.eof_received()
+
+        def pause_writing(self) -> None:
+            if self._http is not None:
+                self._http.pause_writing()
+
+        def resume_writing(self) -> None:
+            if self._http is not None:
+                self._http.resume_writing()
+
+        def connection_lost(self, exc: Exception | None) -> None:
+            if self._http is not None:
+                self._http.connection_lost(exc)
+                self._http = None
+
+    return PinnedStageProtocol
+
+
 def build_private_browser_listener(
     app: ASGI3Application,
     *,
@@ -193,7 +269,7 @@ def build_private_browser_listener(
         port=port,
         ssl_context_factory=lambda _config, _default: context,
         interface="asgi3",
-        http="h11",
+        http=_pin_peer_protocol(approved.client_certificate_sha256),
         ws="none",
         lifespan="off",
         proxy_headers=False,
