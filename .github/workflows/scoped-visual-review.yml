@@ -12,24 +12,51 @@
   },
   "jobs": {
     "captures": {
-      "name": "Review ${{ matrix.issue }}",
+      "name": "Review ${{ matrix.issue }} images ${{ matrix.start }}-${{ matrix.stop }}",
       "strategy": {
         "fail-fast": false,
         "matrix": {
-          "issue": [
-            "OPE-326",
-            "OPE-337",
-            "OPE-339"
+          "include": [
+            {
+              "issue": "OPE-326",
+              "start": 0,
+              "stop": 8
+            },
+            {
+              "issue": "OPE-326",
+              "start": 8,
+              "stop": 16
+            },
+            {
+              "issue": "OPE-326",
+              "start": 16,
+              "stop": 24
+            },
+            {
+              "issue": "OPE-326",
+              "start": 24,
+              "stop": 32
+            },
+            {
+              "issue": "OPE-337",
+              "start": 0,
+              "stop": 48
+            },
+            {
+              "issue": "OPE-339",
+              "start": 0,
+              "stop": 24
+            }
           ]
         }
       },
       "runs-on": "macos-26",
       "timeout-minutes": 20,
       "env": {
-        "QA_PRODUCT": "86ee1b296ee4c423c014af4dec08e90e76fface3",
+        "QA_PRODUCT": "e349e64f9b61d8b9071a4aada863ec1e8f21feac",
         "QA_ISSUE": "${{ matrix.issue }}",
-        "QA_START": "0",
-        "QA_STOP": "192",
+        "QA_START": "${{ matrix.start }}",
+        "QA_STOP": "${{ matrix.stop }}",
         "QA_INVENTORY": "{\"OPE-326\":[\"comparator-tied-320-100.png\",\"comparator-mismatched-320-100.png\",\"comparator-unknown-320-100.png\",\"comparator-train-320-100.png\",\"comparator-tied-320-200.png\",\"comparator-mismatched-320-200.png\",\"comparator-unknown-320-200.png\",\"comparator-train-320-200.png\",\"comparator-tied-768-100.png\",\"comparator-mismatched-768-100.png\",\"comparator-unknown-768-100.png\",\"comparator-train-768-100.png\",\"comparator-tied-768-200.png\",\"comparator-mismatched-768-200.png\",\"comparator-unknown-768-200.png\",\"comparator-train-768-200.png\",\"comparator-tied-1280-100.png\",\"comparator-mismatched-1280-100.png\",\"comparator-unknown-1280-100.png\",\"comparator-train-1280-100.png\",\"comparator-tied-1280-200.png\",\"comparator-mismatched-1280-200.png\",\"comparator-unknown-1280-200.png\",\"comparator-train-1280-200.png\",\"comparator-tied-1440-100.png\",\"comparator-mismatched-1440-100.png\",\"comparator-unknown-1440-100.png\",\"comparator-train-1440-100.png\",\"comparator-tied-1440-200.png\",\"comparator-mismatched-1440-200.png\",\"comparator-unknown-1440-200.png\",\"comparator-train-1440-200.png\"],\"OPE-337\":[\"blockers-three-320-100.png\",\"blockers-focus-320-100.png\",\"blockers-reduced-320-100.png\",\"blockers-one-320-100.png\",\"blockers-last-320-100.png\",\"blockers-none-320-100.png\",\"blockers-three-320-200.png\",\"blockers-focus-320-200.png\",\"blockers-reduced-320-200.png\",\"blockers-one-320-200.png\",\"blockers-last-320-200.png\",\"blockers-none-320-200.png\",\"blockers-three-768-100.png\",\"blockers-focus-768-100.png\",\"blockers-reduced-768-100.png\",\"blockers-one-768-100.png\",\"blockers-last-768-100.png\",\"blockers-none-768-100.png\",\"blockers-three-768-200.png\",\"blockers-focus-768-200.png\",\"blockers-reduced-768-200.png\",\"blockers-one-768-200.png\",\"blockers-last-768-200.png\",\"blockers-none-768-200.png\",\"blockers-three-1280-100.png\",\"blockers-focus-1280-100.png\",\"blockers-reduced-1280-100.png\",\"blockers-one-1280-100.png\",\"blockers-last-1280-100.png\",\"blockers-none-1280-100.png\",\"blockers-three-1280-200.png\",\"blockers-focus-1280-200.png\",\"blockers-reduced-1280-200.png\",\"blockers-one-1280-200.png\",\"blockers-last-1280-200.png\",\"blockers-none-1280-200.png\",\"blockers-three-1440-100.png\",\"blockers-focus-1440-100.png\",\"blockers-reduced-1440-100.png\",\"blockers-one-1440-100.png\",\"blockers-last-1440-100.png\",\"blockers-none-1440-100.png\",\"blockers-three-1440-200.png\",\"blockers-focus-1440-200.png\",\"blockers-reduced-1440-200.png\",\"blockers-one-1440-200.png\",\"blockers-last-1440-200.png\",\"blockers-none-1440-200.png\"],\"OPE-339\":[\"verifier-exact-320-100.png\",\"verifier-measured-320-100.png\",\"verifier-replacement-320-100.png\",\"verifier-exact-320-200.png\",\"verifier-measured-320-200.png\",\"verifier-replacement-320-200.png\",\"verifier-exact-768-100.png\",\"verifier-measured-768-100.png\",\"verifier-replacement-768-100.png\",\"verifier-exact-768-200.png\",\"verifier-measured-768-200.png\",\"verifier-replacement-768-200.png\",\"verifier-exact-1280-100.png\",\"verifier-measured-1280-100.png\",\"verifier-replacement-1280-100.png\",\"verifier-exact-1280-200.png\",\"verifier-measured-1280-200.png\",\"verifier-replacement-1280-200.png\",\"verifier-exact-1440-100.png\",\"verifier-measured-1440-100.png\",\"verifier-replacement-1440-100.png\",\"verifier-exact-1440-200.png\",\"verifier-measured-1440-200.png\",\"verifier-replacement-1440-200.png\"]}"
       },
       "steps": [
@@ -37,7 +64,7 @@
           "name": "Check out pinned product revision",
           "uses": "actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8",
           "with": {
-            "ref": "86ee1b296ee4c423c014af4dec08e90e76fface3",
+            "ref": "e349e64f9b61d8b9071a4aada863ec1e8f21feac",
             "persist-credentials": false
           }
         },
