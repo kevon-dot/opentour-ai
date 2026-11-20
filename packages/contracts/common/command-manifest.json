@@ -10,6 +10,7 @@
     "apps/web/components/foundation/async-state/operation-state.visual.spec.ts",
     "apps/web/components/foundation/async-state/status-copy.visual.spec.ts",
     "apps/web/components/foundation/async-state/visual.spec.ts",
+    "apps/web/components/foundation/data-display/category-chart.visual.spec.ts",
     "apps/web/components/foundation/data-display/chart-evidence.visual.spec.ts",
     "apps/web/components/foundation/data-display/graph-projections.visual.spec.ts",
     "apps/web/components/foundation/data-display/metric-semantics.visual.spec.ts",
@@ -398,6 +399,10 @@
     "apps/web/components/foundation/forms/unit-field.visual.spec.ts": {
       "kind": "simulated",
       "owner": "OPE-334"
+    },
+    "apps/web/components/foundation/data-display/category-chart.visual.spec.ts": {
+      "kind": "simulated",
+      "owner": "OPE-344"
     }
   }
 }

@@ -30,6 +30,11 @@ export const presentationSuites = new Map([
     requirementIds: ['OPE-334:field-states', 'OPE-334:raw-value-and-unit', 'OPE-334:accessible-responsive'],
     specHash: '42cca5d0f759422c7bdd67abd9d87f7d071f86c22629d7edab02192e05e7f064',
   }],
+  ['apps/web/components/foundation/data-display/category-chart.visual.spec.ts', {
+    owner: 'OPE-344', parent: 'OPE-285', guide: '162:28942', minimumTests: 8,
+    requirementIds: ['OPE-344:category-limit', 'OPE-344:declared-order', 'OPE-344:authorized-breakdown', 'OPE-344:responsive-geometry'],
+    specHash: '7a643b976d97b1bbbbd991312f66abe809ff65479d2a1d768e048375463f5707',
+  }],
   ['apps/web/components/foundation/forms/form-error-summary.visual.spec.ts', {
     owner: 'OPE-321', parent: 'OPE-279', guide: '153:386', minimumTests: 13,
     requirementIds: ['OPE-321:count-and-copy', 'OPE-321:mapped-and-unmapped', 'OPE-321:submission-focus', 'OPE-321:draft-preservation', 'OPE-321:responsive-renders'],

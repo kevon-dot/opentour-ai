@@ -18,6 +18,7 @@ PRESENTATION_TARGETS = {
     "apps/web/features/workspace-lifecycle/project-description.visual.spec.ts": "OPE-323",
     "apps/web/features/account-entry/setup-step-indicator.visual.spec.ts": "OPE-324",
     "apps/web/components/foundation/forms/unit-field.visual.spec.ts": "OPE-334",
+    "apps/web/components/foundation/data-display/category-chart.visual.spec.ts": "OPE-344",
     "apps/web/components/foundation/forms/form-error-summary.visual.spec.ts": "OPE-321",
     "apps/web/components/foundation/forms/derived-value.visual.spec.ts": "OPE-320",
     "apps/web/components/foundation/data-display/relationship-context.visual.spec.ts": "OPE-319",
@@ -337,6 +338,19 @@ def verify_scoped_presentation(root: Path, value: dict[str, Any]) -> None:
         } | {"setup-forced-colors.png"}
         if len(images) != len(expected_steps) or {Path(p).name for p in images} != expected_steps:
             raise ValueError("Setup step indicator capture inventory mismatch")
+    elif value["issue_key"] == "OPE-344":
+        expected_categories = {
+            f"category-{scenario}-{width}-{scale}-{state}.png"
+            for scenario in ("overflow", "incomplete", "tied")
+            for width in widths
+            for scale in (100, 200)
+            for state in (("summary",) if scenario == "tied" else ("summary", "expanded"))
+        }
+        if (
+            len(images) != len(expected_categories)
+            or {Path(name).name for name in images} != expected_categories
+        ):
+            raise ValueError("Category chart capture inventory mismatch")
     elif value["issue_key"] == "OPE-334":
         expected_units = {
             f"unit-{kind}-{width}-{scale}.png"

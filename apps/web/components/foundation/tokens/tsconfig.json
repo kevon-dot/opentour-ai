@@ -63,6 +63,9 @@
     "../../../tests/fixtures/presentation/setup-step-indicator.tsx",
     "../forms/unit-field*.ts",
     "../forms/unit-field*.tsx",
-    "../../../tests/fixtures/presentation/unit-field.tsx"
+    "../../../tests/fixtures/presentation/unit-field.tsx",
+    "../data-display/category-chart*.ts",
+    "../data-display/category-chart*.tsx",
+    "../../../tests/fixtures/presentation/category-chart.tsx"
   ]
 }

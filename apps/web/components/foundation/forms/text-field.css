@@ -111,7 +111,11 @@
   min-inline-size: 0;
   font: var(--ot-type-label-weight) var(--ot-type-label-size)/var(--ot-type-label-line) Geist, sans-serif;
 }
-.ot-text-field-unit { max-inline-size: 50%; overflow-wrap: anywhere; }
+.ot-text-field-unit {
+  flex: none;
+  max-inline-size: 50%;
+  overflow-wrap: anywhere;
+}
 .ot-text-field-value[data-position='prefix'] > input { flex: 1; }
 .ot-text-field-value[data-position='suffix'] > input {
   field-sizing: content;

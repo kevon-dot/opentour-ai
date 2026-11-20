@@ -83,6 +83,28 @@ for (const [kind, spec] of Object.entries(families)) {
       await expect(unit).toHaveText(spec.other);
       await expect(field).toHaveAccessibleDescription(new RegExp('^' + spec.other + ' '));
       await expect(field).toHaveValue(draft);
+      if (kind === 'duration' && draft.startsWith('000.')) {
+        // At 320px with 200% type the fixed unit keeps its natural width, capped at half
+        // the row. The long precise draft scrolls inside the remaining editable space.
+        const metrics = await field.evaluate((input: HTMLInputElement) => {
+          const row = input.parentElement!;
+          const unit = row.querySelector('.ot-text-field-unit')!;
+          const measure = document.createElement('canvas').getContext('2d')!;
+          measure.font = getComputedStyle(unit).font;
+          const rowWidth = row.clientWidth;
+          return { unitWidth: unit.getBoundingClientRect().width, rowWidth, rowScroll: row.scrollWidth,
+            unitNatural: measure.measureText(unit.textContent ?? '').width,
+            inputWidth: input.clientWidth, inputScroll: input.scrollWidth };
+        });
+        expect(Math.abs(metrics.unitWidth - Math.min(metrics.unitNatural, metrics.rowWidth / 2))).toBeLessThan(1);
+        expect(metrics.rowScroll).toBe(metrics.rowWidth);
+        expect(metrics.inputWidth).toBeGreaterThan(0);
+        expect(metrics.inputScroll).toBeGreaterThan(metrics.inputWidth);
+        await field.focus();
+        await field.press('End');
+        await expect.poll(() => field.evaluate((input: HTMLInputElement) => input.scrollLeft)).toBeGreaterThan(0);
+        await expect(field).toHaveValue(draft);
+      }
       await page.getByRole('button', { name: 'Change ' + kind + ' unit' }).click();
       await expect(unit).toHaveText(spec.unit);
       await expect(field).toHaveValue(draft);
