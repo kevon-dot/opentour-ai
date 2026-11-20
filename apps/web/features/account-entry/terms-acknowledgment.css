@@ -1,0 +1,40 @@
+.ot-terms-link {
+  justify-self: start;
+  color: var(--ot-text-primary);
+  font: var(--ot-type-body-weight) var(--ot-type-body-size)/var(--ot-type-body-line) Geist, sans-serif;
+  overflow-wrap: anywhere;
+}
+.ot-terms-link:focus-visible { outline: 2px solid var(--ot-action-primary); outline-offset: 2px; }
+
+.ot-terms-acknowledgment, .ot-terms-revision {
+  display: grid;
+  min-inline-size: 0;
+  gap: var(--ot-space-16);
+  color: var(--ot-text-primary);
+  font-family: Geist, sans-serif;
+  overflow-wrap: anywhere;
+}
+.ot-terms-acknowledgment .ot-selection { inline-size: 100%; }
+.ot-terms-acknowledgment .ot-selection-label { flex: 1; }
+.ot-terms-acknowledgment .ot-button {
+  inline-size: min(100%, 280px);
+  min-block-size: 44px;
+}
+.ot-terms-revision {
+  margin: 0;
+  padding: var(--ot-space-16);
+  gap: var(--ot-space-8);
+  border: 1px solid var(--ot-border-control);
+  border-radius: var(--ot-radius-8);
+  background: var(--ot-surface-base);
+  font: var(--ot-type-label-weight) var(--ot-type-label-size)/var(--ot-type-label-line) Geist, sans-serif;
+}
+.ot-terms-revision dd { margin: 0; }
+.ot-terms-revision dd:last-child {
+  color: var(--ot-text-secondary);
+  font: var(--ot-type-small-weight) var(--ot-type-small-size)/var(--ot-type-small-line) Geist, sans-serif;
+}
+@media (forced-colors: active) {
+  .ot-terms-link:focus-visible { outline-color: Highlight; }
+  .ot-terms-revision { border-color: CanvasText; }
+}

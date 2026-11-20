@@ -10,6 +10,16 @@ export const presentationSuites = new Map([
     requirementIds: ['OPE-327:separate-effort', 'OPE-327:correction-history', 'OPE-327:authority-and-responsive'],
     specHash: '517803081304dfed7c0327f25091d88228f0a368e982cbe1480c5c47ff8e0bbd',
   }],
+  ['apps/web/features/account-entry/terms-acknowledgment.visual.spec.ts', {
+    owner: 'OPE-330', parent: 'OPE-297', guide: '171:6098,171:6228,171:6589,171:6653', minimumTests: 9,
+    requirementIds: ['OPE-330:current-terms', 'OPE-330:revision-change', 'OPE-330:unavailable-recovery', 'OPE-330:responsive-consent'],
+    specHash: '46cea8390bfab690f34f49e5e445b9bf1457f347554d9a0084a23e1c863f7435',
+  }],
+  ['apps/web/features/product-surfaces/support-center/support-next-steps.visual.spec.ts', {
+    owner: 'OPE-325', parent: 'OPE-271', guide: '169:7415,169:7353,162:30554', minimumTests: 9,
+    requirementIds: ['OPE-325:case-41', 'OPE-325:independent-outcomes', 'OPE-325:scope-removal', 'OPE-325:responsive-rows'],
+    specHash: '035db3ca41aaea9f1c750cdf9dce8866c24f62cdf22b7153d42adc50c8eca69e',
+  }],
   ['apps/web/components/foundation/forms/nullable-field.visual.spec.ts', {
     owner: 'OPE-322', parent: 'OPE-279', guide: '153:280', minimumTests: 10,
     requirementIds: ['OPE-322:allowed-alternatives', 'OPE-322:distinct-drafts', 'OPE-322:responsive-renders'],

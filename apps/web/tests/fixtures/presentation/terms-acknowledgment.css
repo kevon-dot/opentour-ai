@@ -1,0 +1,27 @@
+@import './setup-step-indicator.css';
+.fixture-steps, .fixture-organization, .fixture-name {
+  display: grid;
+  min-inline-size: 0;
+  gap: var(--ot-space-16);
+  padding: var(--ot-space-24);
+  border: 1px solid var(--ot-border-default);
+  border-radius: var(--ot-radius-12);
+  background: var(--ot-surface-base);
+}
+.terms-fixture .fixture-steps, .fixture-name { padding: var(--ot-space-16); gap: var(--ot-space-8); }
+.terms-fixture h2, .terms-fixture ol { margin: 0; }
+.fixture-steps h2, .fixture-name {
+  font: var(--ot-type-label-weight) var(--ot-type-label-size)/var(--ot-type-label-line) Geist, sans-serif;
+}
+.fixture-steps ol { padding: 0; list-style: none; color: var(--ot-text-secondary); }
+.fixture-steps li, .fixture-organization > p {
+  font: var(--ot-type-body-weight) var(--ot-type-body-size)/var(--ot-type-body-line) Geist, sans-serif;
+}
+.fixture-organization > h2 { font: var(--ot-type-section-weight) var(--ot-type-section-size)/var(--ot-type-section-line) Geist, sans-serif; }
+.fixture-name { border-color: var(--ot-border-control); border-radius: var(--ot-radius-8); }
+.fixture-name input { min-inline-size: 0; padding: 0; border: none; color: inherit; font: inherit; }
+.fixture-name small, .terms-fixture footer {
+  color: var(--ot-text-secondary);
+  font: var(--ot-type-small-weight) var(--ot-type-small-size)/var(--ot-type-small-line) Geist, sans-serif;
+}
+.fixture-organization .ot-button { inline-size: min(280px, 100%); min-block-size: 44px; }
