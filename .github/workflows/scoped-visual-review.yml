@@ -26,7 +26,7 @@
       "runs-on": "macos-26",
       "timeout-minutes": 20,
       "env": {
-        "QA_PRODUCT": "e7960e37fce6b7e3931af4a4dcc52528370d8f35",
+        "QA_PRODUCT": "61d43bb50052bc10776e1d83813d514b9174216b",
         "QA_ISSUE": "${{ matrix.issue }}",
         "QA_START": "0",
         "QA_STOP": "192",
@@ -37,7 +37,7 @@
           "name": "Check out pinned product revision",
           "uses": "actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8",
           "with": {
-            "ref": "e7960e37fce6b7e3931af4a4dcc52528370d8f35",
+            "ref": "61d43bb50052bc10776e1d83813d514b9174216b",
             "persist-credentials": false
           }
         },
