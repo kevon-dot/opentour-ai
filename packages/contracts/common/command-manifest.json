@@ -41,9 +41,12 @@
     "apps/web/features/access/resource-disclosure.visual.spec.ts",
     "apps/web/features/account-entry/setup-step-indicator.visual.spec.ts",
     "apps/web/features/account-entry/terms-acknowledgment.visual.spec.ts",
+    "apps/web/features/artifacts/artifact-manifest.visual.spec.ts",
+    "apps/web/features/autonomy/activity-history.visual.spec.ts",
     "apps/web/features/autonomy/blocking-reasons.visual.spec.ts",
     "apps/web/features/autonomy/control-actions.visual.spec.ts",
     "apps/web/features/autonomy/status-panel.visual.spec.ts",
+    "apps/web/features/benchmarks/offline-evidence.visual.spec.ts",
     "apps/web/features/operations/cancellation-impact.visual.spec.ts",
     "apps/web/features/operator/effort-ledger.visual.spec.ts",
     "apps/web/features/product-surfaces/artifact-registry/visual.spec.ts",
@@ -438,6 +441,18 @@
     "apps/web/features/product-surfaces/verifier-console/verifier-qualification.visual.spec.ts": {
       "kind": "simulated",
       "owner": "OPE-339"
+    },
+    "apps/web/features/benchmarks/offline-evidence.visual.spec.ts": {
+      "kind": "simulated",
+      "owner": "OPE-331"
+    },
+    "apps/web/features/artifacts/artifact-manifest.visual.spec.ts": {
+      "kind": "simulated",
+      "owner": "OPE-342"
+    },
+    "apps/web/features/autonomy/activity-history.visual.spec.ts": {
+      "kind": "simulated",
+      "owner": "OPE-343"
     }
   }
 }

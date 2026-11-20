@@ -1,0 +1,22 @@
+.ot-offline-evidence {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--ot-space-16);
+  color: var(--ot-text-primary);
+  overflow-wrap: anywhere;
+  font: var(--ot-type-label-weight) var(--ot-type-label-size)/var(--ot-type-label-line) Geist, sans-serif;
+}
+.ot-offline-evidence .ot-metric { max-inline-size: 500px; }
+.ot-benchmark-field {
+  display: grid;
+  gap: var(--ot-space-8);
+  margin: 0;
+  padding: var(--ot-space-20) var(--ot-space-16);
+  border: 1px solid var(--ot-border-control);
+  border-radius: var(--ot-radius-8);
+  background: var(--ot-surface-base);
+}
+.ot-benchmark-field dd { margin: 0; }
+.ot-observation { color: var(--ot-text-secondary); font: var(--ot-type-small-weight) var(--ot-type-small-size)/var(--ot-type-small-line) Geist, sans-serif; }
+.ot-offline-evidence .ot-button-group { inline-size: min(260px, 100%); }
+.ot-offline-evidence .ot-button { inline-size: 100%; }

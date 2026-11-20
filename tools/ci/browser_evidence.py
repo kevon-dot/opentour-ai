@@ -12,6 +12,9 @@ from typing import Any
 from tools.public_content_check import MAX_FILE_BYTES, digest, inspect_bytes, load_policy
 
 PRESENTATION_TARGETS = {
+    "apps/web/features/benchmarks/offline-evidence.visual.spec.ts": "OPE-331",
+    "apps/web/features/artifacts/artifact-manifest.visual.spec.ts": "OPE-342",
+    "apps/web/features/autonomy/activity-history.visual.spec.ts": "OPE-343",
     "apps/web/features/access/resource-disclosure.visual.spec.ts": "OPE-329",
     "apps/web/features/operator/effort-ledger.visual.spec.ts": "OPE-327",
     "apps/web/features/product-surfaces/support-center/support-next-steps.visual.spec.ts": (
@@ -355,6 +358,32 @@ def verify_scoped_presentation(root: Path, value: dict[str, Any]) -> None:
         } | {"setup-forced-colors.png"}
         if len(images) != len(expected_steps) or {Path(p).name for p in images} != expected_steps:
             raise ValueError("Setup step indicator capture inventory mismatch")
+    elif value["issue_key"] in {"OPE-331", "OPE-342", "OPE-343"}:
+        evidence_prefix, evidence_states = {
+            "OPE-331": (
+                "local-evidence",
+                ("available", "offline", "retry-focus", "recovered", "missing", "restricted"),
+            ),
+            "OPE-342": (
+                "artifact", ("model", "copy-focus", "rule", "missing", "error", "restricted")
+            ),
+            "OPE-343": (
+                "activity", ("expanded-focus", "appended", "exhausted", "replacement", "read-only")
+            ),
+        }[value["issue_key"]]
+        evidence_images = {
+            f"{evidence_prefix}-{state}-{width}-{scale}.png"
+            for state in evidence_states
+            for width in widths
+            for scale in (100, 200)
+        } | {f"{evidence_prefix}-forced-focus.png"}
+        output_names = {record["path"] for record in value["outputs"]}
+        if (
+            len(images) != len(evidence_images)
+            or {Path(name).name for name in images} != evidence_images
+            or any(str(Path(image).with_suffix(".json")) not in output_names for image in images)
+        ):
+            raise ValueError(f"{evidence_prefix} capture inventory mismatch")
     elif value["issue_key"] in {"OPE-327", "OPE-329"}:
         prefix, effort_disclosure_states = {
             "OPE-327": ("effort-ledger", ("reference", "history", "revoked")),
@@ -372,14 +401,14 @@ def verify_scoped_presentation(root: Path, value: dict[str, Any]) -> None:
         ):
             raise ValueError(f"{prefix} capture inventory mismatch")
     elif value["issue_key"] in {"OPE-326", "OPE-337", "OPE-339"}:
-        evidence_prefix, evidence_states = {
+        evidence_prefix, comparator_blocker_verifier_states = {
             "OPE-326": ("comparator", ["tied", "mismatched", "unknown", "train"]),
             "OPE-337": ("blockers", ["three", "focus", "reduced", "one", "last", "none"]),
             "OPE-339": ("verifier", ["exact", "measured", "replacement"]),
         }[value["issue_key"]]
         expected_evidence_images = {
             f"{evidence_prefix}-{state}-{width}-{scale}.png"
-            for state in evidence_states
+            for state in comparator_blocker_verifier_states
             for width in widths
             for scale in (100, 200)
         }

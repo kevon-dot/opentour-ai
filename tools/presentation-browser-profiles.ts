@@ -15,6 +15,21 @@ export const presentationSuites = new Map([
     requirementIds: ['OPE-326:tied-quality', 'OPE-326:returned-assessment', 'OPE-326:parity-partial-denominator'],
     specHash: '13fb54e98b9b6867de1adc1f19b5b227f19fc83abc58ac9f8df2a5a75f5100fc',
   }],
+  ['apps/web/features/benchmarks/offline-evidence.visual.spec.ts', {
+    owner: 'OPE-331', parent: 'OPE-290', guide: '164:13175,164:13182,164:13189,164:13193,164:13196', minimumTests: 9,
+    requirementIds: ['OPE-331:independent-projections', 'OPE-331:offline-retry', 'OPE-331:authorized-recovery'],
+    specHash: 'de6a8a961cdc805002e1cd4890c3ca45b026b050442637e6e7b73030db79dfb9',
+  }],
+  ['apps/web/features/artifacts/artifact-manifest.visual.spec.ts', {
+    owner: 'OPE-342', parent: 'OPE-265', guide: '169:6420,169:6462,169:6412,162:20621', minimumTests: 9,
+    requirementIds: ['OPE-342:typed-checkpoint', 'OPE-342:qualification-and-rights', 'OPE-342:exact-authorized-digests'],
+    specHash: '6e57941340f6f93a17d0bc6e0a21bf3c36af0df87fb65062e00ebd61bfbec445',
+  }],
+  ['apps/web/features/autonomy/activity-history.visual.spec.ts', {
+    owner: 'OPE-343', parent: 'OPE-294', guide: '169:7432,169:7504,169:7674,169:1028', minimumTests: 9,
+    requirementIds: ['OPE-343:permitted-detail', 'OPE-343:append-focus-count', 'OPE-343:generation-replacement'],
+    specHash: 'b634d04546cdc0b7b52b40126d0d2864119ead0b632bcac7afe63679f222767e',
+  }],
   ['apps/web/features/access/resource-disclosure.visual.spec.ts', {
     owner: 'OPE-329', parent: 'OPE-282', guide: '164:11778,164:14659,164:14664', minimumTests: 8,
     requirementIds: ['OPE-329:safe-denied-reason', 'OPE-329:undisclosed-resource', 'OPE-329:disclosure-transition'],
