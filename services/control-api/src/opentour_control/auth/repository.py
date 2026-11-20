@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable, Sequence
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Literal, Protocol
@@ -31,7 +32,19 @@ def lock_membership_observation(
     )
     connection.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s,0))", (key,))
 
+
 IdentityStatus = Literal["pending_identity", "active", "removed", "reconciliation_unknown"]
+
+
+@dataclass
+class _CurrentReadinessObservation:
+    empty_lookup: bool = False
+    session_invalid: bool = False
+
+
+_current_readiness_observation: ContextVar[_CurrentReadinessObservation | None] = ContextVar(
+    "current_readiness_observation", default=None
+)
 
 
 @dataclass(frozen=True)
@@ -155,6 +168,8 @@ class PostgresIdentityRepository:
                 "USING (issuer,session_id) WHERE b.binding_sha256=%s",
                 (binding_sha256,),
             ).fetchone()
+            if row is None and (observation := _current_readiness_observation.get()) is not None:
+                observation.empty_lookup = True
             session = _session(row)
             assert row is not None
             if now < session.created_at:
