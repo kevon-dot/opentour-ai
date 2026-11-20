@@ -1,5 +1,15 @@
 /** Generated local presentation fixtures. Each executable target has exactly one child owner. */
 export const presentationSuites = new Map([
+  ['apps/web/features/access/resource-disclosure.visual.spec.ts', {
+    owner: 'OPE-329', parent: 'OPE-282', guide: '164:11778,164:14659,164:14664', minimumTests: 8,
+    requirementIds: ['OPE-329:safe-denied-reason', 'OPE-329:undisclosed-resource', 'OPE-329:disclosure-transition'],
+    specHash: '1d5eb651d2031ee6a184890bc7a903c932b511dfd23fd3f4c415e9144f15f39b',
+  }],
+  ['apps/web/features/operator/effort-ledger.visual.spec.ts', {
+    owner: 'OPE-327', parent: 'OPE-237', guide: '181:15786,165:10556,165:10734,167:6254', minimumTests: 8,
+    requirementIds: ['OPE-327:separate-effort', 'OPE-327:correction-history', 'OPE-327:authority-and-responsive'],
+    specHash: '517803081304dfed7c0327f25091d88228f0a368e982cbe1480c5c47ff8e0bbd',
+  }],
   ['apps/web/components/foundation/forms/nullable-field.visual.spec.ts', {
     owner: 'OPE-322', parent: 'OPE-279', guide: '153:280', minimumTests: 10,
     requirementIds: ['OPE-322:allowed-alternatives', 'OPE-322:distinct-drafts', 'OPE-322:responsive-renders'],

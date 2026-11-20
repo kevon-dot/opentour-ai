@@ -12,6 +12,8 @@ from typing import Any
 from tools.public_content_check import MAX_FILE_BYTES, digest, inspect_bytes, load_policy
 
 PRESENTATION_TARGETS = {
+    "apps/web/features/access/resource-disclosure.visual.spec.ts": "OPE-329",
+    "apps/web/features/operator/effort-ledger.visual.spec.ts": "OPE-327",
     "apps/web/components/foundation/data-display/paired-outcomes.visual.spec.ts": "OPE-345",
     "apps/web/components/foundation/forms/nullable-field.visual.spec.ts": "OPE-322",
     "apps/web/components/foundation/forms/numeric-field.visual.spec.ts": "OPE-328",
@@ -338,6 +340,17 @@ def verify_scoped_presentation(root: Path, value: dict[str, Any]) -> None:
         } | {"setup-forced-colors.png"}
         if len(images) != len(expected_steps) or {Path(p).name for p in images} != expected_steps:
             raise ValueError("Setup step indicator capture inventory mismatch")
+    elif value["issue_key"] in {"OPE-327", "OPE-329"}:
+        prefix, states = {
+            "OPE-327": ("effort-ledger", ("reference", "history", "revoked")),
+            "OPE-329": ("disclosure", ("known", "undisclosed", "after-switch")),
+        }[value["issue_key"]]
+        expected = {
+            f"{prefix}-{state}-{width}-{scale}.png"
+            for state in states for width in widths for scale in (100, 200)
+        }
+        if len(images) != len(expected) or {Path(name).name for name in images} != expected:
+            raise ValueError(f"{prefix} capture inventory mismatch")
     elif value["issue_key"] == "OPE-344":
         expected_categories = {
             f"category-{scenario}-{width}-{scale}-{state}.png"

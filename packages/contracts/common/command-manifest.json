@@ -38,10 +38,12 @@
     "apps/web/components/foundation/tokens/status-icon.visual.spec.ts",
     "apps/web/components/foundation/tokens/tooltip.visual.spec.ts",
     "apps/web/components/foundation/tokens/visual.spec.ts",
+    "apps/web/features/access/resource-disclosure.visual.spec.ts",
     "apps/web/features/account-entry/setup-step-indicator.visual.spec.ts",
     "apps/web/features/autonomy/control-actions.visual.spec.ts",
     "apps/web/features/autonomy/status-panel.visual.spec.ts",
     "apps/web/features/operations/cancellation-impact.visual.spec.ts",
+    "apps/web/features/operator/effort-ledger.visual.spec.ts",
     "apps/web/features/product-surfaces/artifact-registry/visual.spec.ts",
     "apps/web/features/product-surfaces/benchmark-builder/visual.spec.ts",
     "apps/web/features/product-surfaces/billing-detail/visual.spec.ts",
@@ -403,6 +405,14 @@
     "apps/web/components/foundation/data-display/category-chart.visual.spec.ts": {
       "kind": "simulated",
       "owner": "OPE-344"
+    },
+    "apps/web/features/operator/effort-ledger.visual.spec.ts": {
+      "kind": "simulated",
+      "owner": "OPE-327"
+    },
+    "apps/web/features/access/resource-disclosure.visual.spec.ts": {
+      "kind": "simulated",
+      "owner": "OPE-329"
     }
   }
 }

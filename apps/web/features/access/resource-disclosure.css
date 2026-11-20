@@ -1,0 +1,24 @@
+.ot-resource-disclosure {
+  display: grid;
+  gap: var(--ot-space-16);
+  min-inline-size: 0;
+  overflow-wrap: anywhere;
+  color: var(--ot-text-primary);
+  font-family: Geist, sans-serif;
+}
+.ot-resource-disclosure h1 {
+  margin: 0;
+  font: var(--ot-type-heading-weight) var(--ot-type-heading-size)/var(--ot-type-heading-line) Geist, sans-serif;
+}
+.ot-resource-disclosure h1:focus-visible { outline: 2px solid var(--ot-action-primary); outline-offset: 2px; }
+.ot-resource-disclosure > .ot-button-reason { margin: 0; }
+.ot-disclosure-actions { display: flex; flex-wrap: wrap; gap: var(--ot-space-12); align-items: start; }
+.ot-resource-disclosure .ot-button { inline-size: min(280px, 100%); min-block-size: 44px; }
+.ot-resource-disclosure .ot-unavailable-action {
+  color: var(--ot-text-muted);
+  background: var(--ot-unknown-background);
+  cursor: not-allowed;
+}
+@media (forced-colors: active) {
+  .ot-resource-disclosure .ot-unavailable-action { color: GrayText; border: 1px solid GrayText; }
+}
