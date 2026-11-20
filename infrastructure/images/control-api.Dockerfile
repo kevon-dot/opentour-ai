@@ -15,10 +15,14 @@ FROM docker.io/library/python:3.12.16-slim-bookworm@sha256:935c3c5b12357a7e10caa
 
 WORKDIR /app
 COPY --from=build /app/.venv ./.venv
+# Fargate seeds the ephemeral mount from this empty runtime directory.
+RUN install -d -m 0755 -o 0 -g 0 /run/opentour \
+    && install -d -m 0700 -o 10001 -g 10001 /run/opentour/runtime
 ENV PATH="/app/.venv/bin:${PATH}" \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 USER 10001:10001
+VOLUME ["/run/opentour"]
 EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=3s --start-period=20s \
     CMD ["python", "-c", "from http.client import HTTPConnection; c = HTTPConnection('127.0.0.1', 8000, timeout=2); c.request('GET', '/health/ready'); raise SystemExit(c.getresponse().status != 200)"]

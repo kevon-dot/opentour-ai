@@ -32,6 +32,7 @@ from .browser_private_pilot import (
 )
 from .browser_state import BrowserAuthState
 from .config import AuthError
+from .repository import _current_readiness_observation, _CurrentReadinessObservation
 
 # These are local pilot bounds. A timed-out call can still commit in the durable writer.
 BODY_READ_SECONDS = 5
@@ -106,6 +107,7 @@ def build_private_browser_pilot_listener(
     port: int,
     clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     path_profile: PrivateBrowserPilotPathProfile = PrivateBrowserPilotPathProfile.LOOPBACK,
+    readiness_checkpoint: Callable[[bool, bool], None] | None = None,
 ) -> uvicorn.Config:
     """Return the dedicated TLS configuration. Never register it with the control app."""
     if (
@@ -123,23 +125,45 @@ def build_private_browser_pilot_listener(
         browser_state, principal=principal, audience=audience, clock=clock
     )
     active = False
-    worker: asyncio.Task[PrivateBrowserResponse] | None = None
+    checkpoint_claimed = False
+    worker: asyncio.Task[tuple[PrivateBrowserResponse, bool, bool]] | None = None
+
+    def dispatch_current(
+        body: bytes, caller: AuthenticatedBrowserCaller
+    ) -> tuple[PrivateBrowserResponse, bool, bool]:
+        observation = _CurrentReadinessObservation()
+        token = _current_readiness_observation.set(observation)
+        try:
+            response = dispatcher.dispatch("current", body, caller=caller)
+            return response, observation.empty_lookup, observation.session_invalid
+        finally:
+            _current_readiness_observation.reset(token)
 
     async def dispatch(
-        route: PrivateBrowserPilotRoute, body: bytes, caller: AuthenticatedBrowserCaller
-    ) -> PrivateBrowserResponse:
+        route: PrivateBrowserPilotRoute,
+        body: bytes,
+        caller: AuthenticatedBrowserCaller,
+        *,
+        observe: bool,
+    ) -> tuple[PrivateBrowserResponse, bool, bool]:
         try:
-            response = await asyncio.to_thread(
-                dispatcher.dispatch, route.operation, body, caller=caller
-            )
+            if observe:
+                response, empty_lookup, session_invalid = await asyncio.to_thread(
+                    dispatch_current, body, caller
+                )
+            else:
+                response = await asyncio.to_thread(
+                    dispatcher.dispatch, route.operation, body, caller=caller
+                )
+                empty_lookup = session_invalid = False
             if len(response.body) <= route.max_response_bytes:
-                return response
+                return response, empty_lookup, session_invalid
         except Exception:
             pass
-        return _unconfirmed(route.operation)
+        return _unconfirmed(route.operation), False, False
 
     async def app(scope: Scope, receive: ASGIReceiveCallable, send: ASGISendCallable) -> None:
-        nonlocal active, worker
+        nonlocal active, checkpoint_claimed, worker
         if scope["type"] != "http":
             return
         route = _route(scope, path_profile)
@@ -174,13 +198,36 @@ def build_private_browser_pilot_listener(
             # Only the authenticated, still-live stage listener can invoke this closure.
             # BFF role admission belongs to the upstream IAM and endpoint perimeter.
             proof = AuthenticatedBrowserCaller(principal, audience, route.operation, valid_until)
-            worker = asyncio.create_task(dispatch(route, body, proof))
+            checkpoint = (
+                readiness_checkpoint
+                if path_profile is PrivateBrowserPilotPathProfile.DEV
+                and route.operation == "current"
+                and not checkpoint_claimed
+                else None
+            )
+            if checkpoint is not None:
+                checkpoint_claimed = True
+            worker = asyncio.create_task(
+                dispatch(route, body, proof, observe=checkpoint is not None)
+            )
             try:
                 async with asyncio.timeout(DISPATCH_WAIT_SECONDS):
-                    response = await asyncio.shield(worker)
+                    response, empty_lookup, session_invalid = await asyncio.shield(worker)
             except TimeoutError:
                 response = _unconfirmed(route.operation)
+                empty_lookup = session_invalid = False
             await _send(send, response)
+            if checkpoint is not None:
+                # A timed-out worker cannot emit. Only this request can record its ASGI handoff.
+                try:
+                    emitted_at = clock()
+                    if (
+                        emitted_at.utcoffset() is not None
+                        and verified_at <= emitted_at < valid_until
+                    ):
+                        checkpoint(empty_lookup, session_invalid)
+                except Exception:
+                    pass
         finally:
             active = False
 
