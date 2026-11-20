@@ -1,0 +1,53 @@
+.ot-activity-history {
+  container: activity-history / inline-size;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--ot-space-16);
+  overflow-wrap: anywhere;
+  color: var(--ot-text-primary);
+  font: var(--ot-type-body-weight) var(--ot-type-body-size)/var(--ot-type-body-line) Geist, sans-serif;
+}
+.ot-activity-panel {
+  container-type: inline-size;
+  min-inline-size: 0;
+  padding: var(--ot-space-16);
+  border: 1px solid var(--ot-border-default);
+  border-radius: var(--ot-radius-12);
+  background: var(--ot-surface-base);
+}
+.ot-activity-history :is(h2, h3, p) { margin: 0; }
+.ot-activity-history h2 { font: var(--ot-type-section-weight) var(--ot-type-section-size)/var(--ot-type-section-line) Geist, sans-serif; }
+.ot-activity-history h3 { font: var(--ot-type-label-weight) var(--ot-type-label-size)/var(--ot-type-label-line) Geist, sans-serif; }
+.ot-activity-panel h3 + p { margin-block-start: var(--ot-space-8); }
+.ot-activity-panel table { table-layout: fixed; inline-size: 100%; border-collapse: collapse; text-align: start; }
+.ot-activity-panel :is(th, td) { text-align: start; vertical-align: top; font-weight: inherit; padding: var(--ot-space-8) var(--ot-space-8) 0 0; }
+.ot-activity-panel :is(td, p) { color: var(--ot-text-secondary); }
+.ot-activity-prefix { display: none; }
+.ot-activity-disclosure {
+  display: block; max-inline-size: 100%; padding: var(--ot-space-2) 0;
+  font: inherit; color: var(--ot-text-link); border: 0; background: transparent; text-decoration: underline; cursor: pointer;
+}
+.ot-activity-disclosure:focus-visible, .ot-activity-load:focus-visible { outline: 2px solid var(--ot-action-primary); outline-offset: 2px; }
+.ot-activity-actions {
+  display: flex; flex-wrap: wrap; align-items: flex-start; gap: var(--ot-space-12);
+}
+.ot-activity-actions :is(.ot-link, .ot-activity-load) { inline-size: 280px; min-block-size: 44px; }
+.ot-activity-actions .ot-link {
+  display: flex; align-items: center; justify-content: center;
+  padding: var(--ot-space-8) var(--ot-space-16); border-radius: var(--ot-radius-6);
+  background: var(--ot-action-primary); color: var(--ot-text-inverse); text-align: center;
+}
+@container activity-history (width < 572px) {
+  .ot-activity-actions :is(.ot-link, .ot-activity-load) { inline-size: 100%; }
+}
+@media (forced-colors: active) {
+  .ot-activity-actions .ot-link { color: LinkText; background: Canvas; border: 1px solid LinkText; }
+  .ot-activity-actions .ot-link:focus-visible { outline-color: Highlight; }
+}
+.ot-activity-load[aria-disabled=true] { color: var(--ot-text-muted); background: var(--ot-unknown-background); cursor: default; }
+@container (width < 36rem) {
+  .ot-activity-panel :is(table, tbody, tr, td, tbody th) { display: block; }
+  .ot-activity-panel thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+  .ot-activity-panel tbody tr { padding: var(--ot-space-12); margin-block-start: var(--ot-space-12); border: 1px solid var(--ot-border-default); border-radius: var(--ot-radius-8); }
+  .ot-activity-prefix { display: inline; }
+}

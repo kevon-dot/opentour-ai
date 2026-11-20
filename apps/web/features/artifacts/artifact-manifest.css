@@ -1,0 +1,15 @@
+.ot-artifact-manifest {
+  container: relationship / inline-size;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--ot-space-16);
+  color: var(--ot-text-primary);
+  overflow-wrap: anywhere;
+  font-family: Geist, sans-serif;
+}
+.ot-artifact-manifest h2 {
+  margin: 0;
+  font: var(--ot-type-section-weight) var(--ot-type-section-size)/var(--ot-type-section-line) Geist, sans-serif;
+}
+.ot-artifact-manifest :is(ul, dl, dd) { margin: 0; }
+.ot-artifact-manifest .ot-link { justify-self: start; }

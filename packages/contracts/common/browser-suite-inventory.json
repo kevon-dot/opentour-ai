@@ -271,10 +271,19 @@
     ],
     "apps/web/features/product-surfaces/verifier-console/verifier-qualification.visual.spec.ts": [
       "OPE-339"
+    ],
+    "apps/web/features/benchmarks/offline-evidence.visual.spec.ts": [
+      "OPE-331"
+    ],
+    "apps/web/features/artifacts/artifact-manifest.visual.spec.ts": [
+      "OPE-342"
+    ],
+    "apps/web/features/autonomy/activity-history.visual.spec.ts": [
+      "OPE-343"
     ]
   },
-  "distinct_paths": 90,
-  "issue_count": 86,
+  "distinct_paths": 93,
+  "issue_count": 89,
   "affected_old_wrapper_paths": {
     "apps/web/tests/coverage/ot-p22-c01.spec.ts": [
       "OPE-232"
