@@ -24,13 +24,13 @@ const lightIndicator = new URL('./assets/loading-light.svg', import.meta.url).hr
 const darkIndicator = new URL('./assets/loading-dark.svg', import.meta.url).href;
 
 export function Button({ label, variant = 'primary', type = 'button', disabled = false,
-  busy = false, disabledReason, onPress, ref }: ButtonProps) {
+  busy = false, disabledReason, onPress, pressed, ref }: ButtonProps) {
   requireLabel(label);
   const reasonId = useId();
   const blocked = disabled || busy;
   return <span className="ot-button-group">
     <button ref={ref} type={type} className={`ot-button ot-button--${variant}`}
-      disabled={disabled} aria-disabled={blocked || undefined} aria-busy={busy || undefined}
+      disabled={disabled} aria-pressed={pressed} aria-disabled={blocked || undefined} aria-busy={busy || undefined}
       aria-describedby={blocked && disabledReason ? reasonId : undefined}
       onClick={event => {
         if (blocked) { event.preventDefault(); return; }

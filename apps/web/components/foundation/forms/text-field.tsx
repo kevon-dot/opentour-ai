@@ -12,6 +12,10 @@ interface ControlProps {
   onBlur?: () => void;
   required?: boolean;
   disabled?: boolean;
+  readOnly?: boolean;
+  inputMode?: 'numeric' | 'decimal';
+  /** Additional caller-rendered descriptions, appended to the built-in helper and error. */
+  describedBy?: string;
 }
 
 export interface TextFieldProps extends ControlProps {
@@ -26,8 +30,6 @@ export interface InputProps extends ControlProps {
   /** Accessible name. The standalone control draws no visible label of its own. */
   label: string;
   invalid?: boolean;
-  /** Ids of caller-rendered text that explains the control, such as the reason a value is invalid. */
-  describedBy?: string;
 }
 
 /** The id seeds the label, helper and error references, so it has to be a single IDREF token. */
@@ -38,9 +40,9 @@ function requireIdentity(id: string): void {
 }
 
 function NativeInput({ className, name, id, value, onChange, onBlur, required = false, disabled = false, invalid = false,
-  describedBy }: ControlProps & { className: string; name?: string; invalid?: boolean; describedBy?: string }) {
+  readOnly, inputMode, describedBy }: ControlProps & { className: string; name?: string; invalid?: boolean }) {
   return <input className={className} id={id} type="text" aria-label={name} required={required} disabled={disabled}
-    aria-invalid={invalid || undefined} aria-describedby={describedBy || undefined} value={value}
+    readOnly={readOnly} inputMode={inputMode} aria-invalid={invalid || undefined} aria-describedby={describedBy || undefined} value={value}
     onChange={event => onChange(event.currentTarget.value)} onBlur={onBlur ? () => onBlur() : undefined} />;
 }
 
@@ -48,7 +50,8 @@ function NativeInput({ className, name, id, value, onChange, onBlur, required = 
  * Labelled single-line text field. The caller owns the raw value and every validation decision;
  * the helper and the error are separate paragraphs with ids derived from the field id.
  */
-export function TextField({ id, label, required = false, value, onChange, onBlur, helper, error, disabled = false }: TextFieldProps) {
+export function TextField({ id, label, required = false, value, onChange, onBlur, helper, error,
+  disabled = false, readOnly, inputMode, describedBy }: TextFieldProps) {
   requireIdentity(id);
   requireLabel(label, 'field label');
   const helperId = helper ? id + '-helper' : undefined;
@@ -57,7 +60,7 @@ export function TextField({ id, label, required = false, value, onChange, onBlur
     <label className="ot-text-field-label" htmlFor={id}>{label + (required ? ' · Required' : ' · Optional')}</label>
     <NativeInput className="ot-text-field-control" id={id} value={value} onChange={onChange} onBlur={onBlur}
       required={required} disabled={disabled} invalid={!!error}
-      describedBy={[helperId, errorId].filter(Boolean).join(' ')} />
+      readOnly={readOnly} inputMode={inputMode} describedBy={[helperId, errorId, describedBy].filter(Boolean).join(' ')} />
     {helper && <p className="ot-text-field-helper" id={helperId}>{helper}</p>}
     {error && <p className="ot-text-field-error" id={errorId}>{error}</p>}
   </div>;

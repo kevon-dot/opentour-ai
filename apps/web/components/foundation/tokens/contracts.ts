@@ -10,6 +10,8 @@ export interface ButtonProps {
   type?: 'button' | 'submit' | 'reset';
   disabled?: boolean;
   busy?: boolean;
+  /** Controlled toggle state; omit for a regular action. */
+  pressed?: boolean;
   disabledReason?: string;
   onPress?: (event: MouseEvent<HTMLButtonElement>) => void;
   ref?: Ref<HTMLButtonElement>;
