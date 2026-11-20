@@ -1,0 +1,48 @@
+.ot-effort-ledger {
+  container-type: inline-size;
+  box-sizing: border-box;
+  min-inline-size: 0;
+  padding: var(--ot-space-16);
+  background: var(--ot-surface-base);
+  border: 1px solid var(--ot-border-default);
+  border-radius: var(--ot-radius-12);
+  color: var(--ot-text-primary);
+  font: var(--ot-type-body-weight) var(--ot-type-body-size)/var(--ot-type-body-line) Geist, sans-serif;
+  overflow-wrap: anywhere;
+}
+
+.ot-effort-ledger h2 {
+  font: var(--ot-type-section-weight) var(--ot-type-section-size)/var(--ot-type-section-line) Geist, sans-serif;
+  margin: 0 0 var(--ot-space-12);
+}
+
+.ot-effort-ledger table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+.ot-effort-ledger th, .ot-effort-ledger td { text-align: start; vertical-align: top; padding: 0; }
+.ot-effort-ledger :is(th, td):not(:last-child) { padding-inline-end: var(--ot-space-12); }
+.ot-effort-ledger thead th {
+  font: var(--ot-type-label-weight) var(--ot-type-label-size)/var(--ot-type-label-line) Geist, sans-serif;
+}
+.ot-effort-ledger tbody :is(td, th) { padding-block-start: var(--ot-space-12); }
+.ot-effort-ledger tbody th { font-weight: var(--ot-type-body-weight); }
+.ot-effort-ledger td, .ot-effort-detail { color: var(--ot-text-secondary); }
+.ot-effort-detail { display: block; font-weight: var(--ot-type-body-weight); }
+.ot-effort-prefix { display: none; }
+.ot-effort-access:focus-visible { outline: 2px solid var(--ot-action-primary); outline-offset: 2px; }
+
+@container (max-width: 36rem) {
+  .ot-effort-ledger table, .ot-effort-ledger tbody, .ot-effort-ledger tbody :is(th, td) { display: block; }
+  .ot-effort-ledger thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+  .ot-effort-ledger tbody tr {
+    display: block;
+    border: 1px solid var(--ot-border-default);
+    border-radius: var(--ot-radius-12);
+    padding: var(--ot-space-16);
+  }
+  .ot-effort-ledger tbody tr + tr { margin-block-start: var(--ot-space-12); }
+  .ot-effort-ledger tbody :is(th, td), .ot-effort-ledger tbody :is(th, td):not(:last-child) { padding: 0; }
+  .ot-effort-ledger tbody th {
+    margin-block-end: var(--ot-space-8);
+    font: var(--ot-type-label-weight) var(--ot-type-label-size)/var(--ot-type-label-line) Geist, sans-serif;
+  }
+  .ot-effort-prefix { display: inline; }
+}

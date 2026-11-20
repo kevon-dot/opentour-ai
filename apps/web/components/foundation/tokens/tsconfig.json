@@ -66,6 +66,12 @@
     "../../../tests/fixtures/presentation/unit-field.tsx",
     "../data-display/category-chart*.ts",
     "../data-display/category-chart*.tsx",
-    "../../../tests/fixtures/presentation/category-chart.tsx"
+    "../../../tests/fixtures/presentation/category-chart.tsx",
+    "../../../features/operator/effort-ledger*.ts",
+    "../../../features/operator/effort-ledger*.tsx",
+    "../../../tests/fixtures/presentation/effort-ledger.tsx",
+    "../../../features/access/resource-disclosure*.ts",
+    "../../../features/access/resource-disclosure*.tsx",
+    "../../../tests/fixtures/presentation/resource-disclosure.tsx"
   ]
 }

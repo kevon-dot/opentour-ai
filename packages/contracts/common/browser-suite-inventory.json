@@ -250,10 +250,16 @@
     ],
     "apps/web/components/foundation/data-display/category-chart.visual.spec.ts": [
       "OPE-344"
+    ],
+    "apps/web/features/operator/effort-ledger.visual.spec.ts": [
+      "OPE-327"
+    ],
+    "apps/web/features/access/resource-disclosure.visual.spec.ts": [
+      "OPE-329"
     ]
   },
-  "distinct_paths": 83,
-  "issue_count": 78,
+  "distinct_paths": 85,
+  "issue_count": 81,
   "affected_old_wrapper_paths": {
     "apps/web/tests/coverage/ot-p22-c01.spec.ts": [
       "OPE-232"

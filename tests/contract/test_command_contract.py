@@ -342,8 +342,13 @@ def test_exact_canonical_browser_inventory_preserved(checkout):
     manifest = runner.manifest(checkout)
     source = json.loads((checkout / runner.COMMON / "browser-suite-inventory.json").read_text())
     assert set(manifest["browser_suites"]) == set(source["paths"])
-    assert len(manifest["browser_suites"]) == source["distinct_paths"] == 83
+    assert len(manifest["browser_suites"]) == source["distinct_paths"] == 85
+    assert source["issue_count"] == len(
+        {owner for owners in source["paths"].values() for owner in owners}
+    )
     sprint_profiles = {
+        "apps/web/features/access/resource-disclosure.visual.spec.ts": "OPE-329",
+        "apps/web/features/operator/effort-ledger.visual.spec.ts": "OPE-327",
         "apps/web/components/foundation/data-display/paired-outcomes.visual.spec.ts": "OPE-345",
         "apps/web/components/foundation/forms/nullable-field.visual.spec.ts": "OPE-322",
         "apps/web/features/workspace-lifecycle/project-description.visual.spec.ts": "OPE-323",
