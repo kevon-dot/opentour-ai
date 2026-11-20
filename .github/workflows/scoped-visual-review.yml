@@ -1,0 +1,60 @@
+{
+  "name": "Hosted synthetic visual review",
+  "on": {
+    "push": {
+      "branches": [
+        "codex/visual-qa-support-terms-v2"
+      ]
+    }
+  },
+  "permissions": {
+    "contents": "read"
+  },
+  "jobs": {
+    "captures": {
+      "name": "Review ${{ matrix.issue }}",
+      "strategy": {
+        "fail-fast": false,
+        "matrix": {
+          "issue": [
+            "OPE-325",
+            "OPE-330"
+          ]
+        }
+      },
+      "runs-on": "macos-26",
+      "timeout-minutes": 20,
+      "env": {
+        "QA_PRODUCT": "07ff7306c70a7d65ee21ac43b2d8f658f46a3d91",
+        "QA_ISSUE": "${{ matrix.issue }}",
+        "QA_START": "0",
+        "QA_STOP": "192",
+        "QA_INVENTORY": "{\"OPE-325\":[\"support-case41-320-100.png\",\"support-closed-320-100.png\",\"support-long-320-100.png\",\"support-restricted-320-100.png\",\"support-case41-320-200.png\",\"support-closed-320-200.png\",\"support-long-320-200.png\",\"support-restricted-320-200.png\",\"support-case41-768-100.png\",\"support-closed-768-100.png\",\"support-long-768-100.png\",\"support-restricted-768-100.png\",\"support-case41-768-200.png\",\"support-closed-768-200.png\",\"support-long-768-200.png\",\"support-restricted-768-200.png\",\"support-case41-1280-100.png\",\"support-closed-1280-100.png\",\"support-long-1280-100.png\",\"support-restricted-1280-100.png\",\"support-case41-1280-200.png\",\"support-closed-1280-200.png\",\"support-long-1280-200.png\",\"support-restricted-1280-200.png\",\"support-case41-1440-100.png\",\"support-closed-1440-100.png\",\"support-long-1440-100.png\",\"support-restricted-1440-100.png\",\"support-case41-1440-200.png\",\"support-closed-1440-200.png\",\"support-long-1440-200.png\",\"support-restricted-1440-200.png\",\"support-forced-colors.png\"],\"OPE-330\":[\"terms-unchecked-320-100.png\",\"terms-checked-320-100.png\",\"terms-changed-320-100.png\",\"terms-unavailable-320-100.png\",\"terms-unchecked-320-200.png\",\"terms-checked-320-200.png\",\"terms-changed-320-200.png\",\"terms-unavailable-320-200.png\",\"terms-unchecked-768-100.png\",\"terms-checked-768-100.png\",\"terms-changed-768-100.png\",\"terms-unavailable-768-100.png\",\"terms-unchecked-768-200.png\",\"terms-checked-768-200.png\",\"terms-changed-768-200.png\",\"terms-unavailable-768-200.png\",\"terms-unchecked-1280-100.png\",\"terms-checked-1280-100.png\",\"terms-changed-1280-100.png\",\"terms-unavailable-1280-100.png\",\"terms-unchecked-1280-200.png\",\"terms-checked-1280-200.png\",\"terms-changed-1280-200.png\",\"terms-unavailable-1280-200.png\",\"terms-unchecked-1440-100.png\",\"terms-checked-1440-100.png\",\"terms-changed-1440-100.png\",\"terms-unavailable-1440-100.png\",\"terms-unchecked-1440-200.png\",\"terms-checked-1440-200.png\",\"terms-changed-1440-200.png\",\"terms-unavailable-1440-200.png\",\"terms-forced-colors-focus.png\"]}"
+      },
+      "steps": [
+        {
+          "name": "Check out pinned product revision",
+          "uses": "actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8",
+          "with": {
+            "ref": "07ff7306c70a7d65ee21ac43b2d8f658f46a3d91",
+            "persist-credentials": false
+          }
+        },
+        {
+          "name": "Install pinned prerequisites",
+          "run": "python3 tools/ci/prepare.py"
+        },
+        {
+          "name": "Prepare verified browser harness",
+          "shell": "bash",
+          "run": "set -euo pipefail\njust setup\nPLAYWRIGHT_BROWSERS_PATH=\"$PWD/.toolchain/playwright\" pnpm exec playwright install --only-shell chromium"
+        },
+        {
+          "name": "Qualify registered suite and return named synthetic PNGs",
+          "shell": "bash",
+          "run": "python - <<'PY_REVIEW'\nimport base64\nimport hashlib\nimport json\nimport os\nfrom pathlib import Path\nimport struct\nimport subprocess\nimport sys\nfrom tools.ci.browser_evidence import PRESENTATION_TARGETS, local_file\nfrom tools.ci.run import run_browser, safe_environment\n\nroot = Path.cwd().resolve()\nissue = os.environ[\"QA_ISSUE\"]\nexpected = set(json.loads(os.environ[\"QA_INVENTORY\"])[issue])\nproduct = os.environ[\"QA_PRODUCT\"]\ntargets = [name for name, owner in PRESENTATION_TARGETS.items() if owner == issue]\nif len(targets) != 1:\n    sys.exit(\"QA: expected exactly one registered product suite for \" + issue)\nif subprocess.check_output([\"git\", \"rev-parse\", \"HEAD\"], text=True).strip() != product:\n    sys.exit(\"QA: product revision mismatch\")\nenv = safe_environment()\nenv[\"PLAYWRIGHT_BROWSERS_PATH\"] = str(root / \".toolchain/playwright\")\nresult = run_browser(root, env, targets[0])\nif result[\"status\"] != \"PASS\":\n    command = result.get(\"command_evidence\", {})\n    tests = (command.get(\"steps\") or [{}])[0].get(\"tests\", {})\n    reason = tests.get(\"reason_code\", \"COMMAND_OR_MANIFEST_VERIFICATION_FAILED\")\n    if not isinstance(reason, str) or not reason.replace(\"_\", \"\").isalnum():\n        reason = \"COMMAND_OR_MANIFEST_VERIFICATION_FAILED\"\n    # Report only source-derived operation names and numeric locations, never traces or raw errors.\n    import re\n    import zipfile\n    failed = result.get(\"browser_artifacts\", {}).get(\"manifest\", {})\n    if failed.get(\"commit_sha\") == product and failed.get(\"issue_key\") == issue:\n        progress = sorted({Path(rec[\"path\"]).name for rec in failed[\"outputs\"]\n                           if Path(rec[\"path\"]).name in expected and \"/attachments/\" not in rec[\"path\"]})\n        print(\"OTQA-CAPTURED\", issue, \" \".join(progress))\n        for rec in failed[\"outputs\"]:\n            rel = rec[\"path\"]\n            if rel.endswith(\"/failures.json\"):\n                for attempt in json.loads(local_file(root, rel).read_text())[:12]:\n                    for error in attempt.get(\"errors\", [])[:2]:\n                        error = re.sub(r\"\\x1b\\[[0-9;]*m\", \"\", error)\n                        operations = sorted(set(re.findall(r\"\\b(to(?:Have|Be|Contain|Equal|Match)[A-Za-z]{0,30})\\b\", error)))\n                        # Identify selectors and expected string literals only if present verbatim in the committed test source.\n                        source = local_file(root, targets[0]).read_text()\n                        lines = sorted({i for i, line in enumerate(source.splitlines(), 1)\n                                        for literal in re.findall(r\"[\\x22\\x27]([^\\x22\\x27\\n]{3,80})[\\x22\\x27]\", line)\n                                        if literal in error})\n                        print(\"OTQA-ASSERT\", issue, \"matcher\", \",\".join(operations), \"candidate-lines\", \",\".join(map(str, lines)))\n                        for label, token in re.findall(r\"^(Expected|Received):\\s*([^\\n]{1,70})$\", error, re.MULTILINE):\n                            token = token.strip().strip(chr(34)).strip(chr(39))\n                            if re.fullmatch(r\"-?\\d+(?:\\.\\d+)?(?:px|rem|em|%)?|true|false|solid|none|block|inline|flex|grid|table-row|active|inactive|rgb\\([0-9., ]+\\)\", token):\n                                print(\"OTQA-VALUE\", issue, label, token)\n            if not rel.endswith(\"/trace.zip\"):\n                continue\n            with zipfile.ZipFile(local_file(root, rel)) as z:\n                if \"test.trace\" not in z.namelist() or z.getinfo(\"test.trace\").file_size > 4_194_304:\n                    continue\n                before = {}\n                with z.open(\"test.trace\") as trace:\n                    for record in trace:\n                        try:\n                            ev = json.loads(record)\n                        except ValueError:\n                            continue\n                        if ev.get(\"type\") == \"before\":\n                            before[ev.get(\"callId\")] = ev\n                        if not ev.get(\"error\"):\n                            continue\n                        origin = before.get(ev.get(\"callId\"), {})\n                        for frame in origin.get(\"stack\") or []:\n                            if isinstance(frame, dict) and str(frame.get(\"file\", \"\")).endswith(targets[0]) and isinstance(frame.get(\"line\"), int):\n                                print(\"OTQA-FAILED-AT\", issue, targets[0], frame[\"line\"])\n                                break\n    sys.exit(f\"QA: registered browser suite failed ({issue}, {reason[:70]})\")\nverified = result[\"browser_artifacts\"]\nmanifest = verified[\"manifest\"]\nif (manifest[\"commit_sha\"] != product or manifest[\"issue_key\"] != issue\n        or manifest[\"kind\"] != \"simulated\" or manifest[\"git_worktree_dirty\"] is not False\n        or manifest[\"fixture_id\"] != \"scoped-presentation-v1\"):\n    sys.exit(\"QA: product fixture identity mismatch\")\nfiles = {}\nfor record in manifest[\"outputs\"]:\n    rel = record[\"path\"]\n    if not rel.endswith(\".png\") or \"/attachments/\" in rel:\n        continue\n    filename = Path(rel).name\n    if filename not in expected or filename in files:\n        sys.exit(\"QA: unexpected synthetic capture inventory\")\n    files[filename] = record\nif set(files) != expected:\n    sys.exit(\"QA: missing requested screenshots\")\nnames = sorted(files)[int(os.environ[\"QA_START\"]):int(os.environ[\"QA_STOP\"])]\nif not names:\n    sys.exit(\"QA: no screenshots in selected range\")\n# Verify the complete selected set before emitting any of its pixels.\ncaptures = []\nfor name in names:\n    record = files[name]\n    data = local_file(root, record[\"path\"]).read_bytes()\n    sha = hashlib.sha256(data).hexdigest()\n    if sha != record[\"sha256\"] or data[:8] != b\"\\x89PNG\\r\\n\\x1a\\n\" or data[12:16] != b\"IHDR\":\n        sys.exit(\"QA: invalid selected PNG\")\n    width, height = struct.unpack(\">II\", data[16:24])\n    if not (0 < width <= 4096 and 0 < height <= 32768 and len(data) <= 4*1024*1024):\n        sys.exit(\"QA: PNG outside review bounds\")\n    captures.append((name, sha, width, height, data))\nprint(f\"OTQA-BEGIN {issue} {product} {verified['manifest_sha256']} {len(captures)}\", flush=True)\nfor name, sha, width, height, data in captures:\n    size = 3072\n    parts = (len(data) + size - 1) // size\n    print(f\"OTQA-IMAGE {name} {sha} {width} {height} {len(data)} {parts}\")\n    for i in range(parts):\n        chunk = base64.b64encode(data[i*size:(i+1)*size]).decode(\"ascii\")\n        print(f\"OTQA-DATA {name} {i} {chunk}\")\nprint(f\"OTQA-END {issue} {product} {len(captures)}\", flush=True)\nPY_REVIEW"
+        }
+      ]
+    }
+  }
+}
