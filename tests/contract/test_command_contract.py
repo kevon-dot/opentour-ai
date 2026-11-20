@@ -361,9 +361,10 @@ def test_exact_canonical_browser_inventory_preserved(checkout):
         "apps/web/features/autonomy/blocking-reasons.visual.spec.ts": (
             "OPE-337"
         ),
-        "apps/web/features/product-surfaces/verifier-console/verifier-qualification.visual.spec.ts": (
-            "OPE-339"
-        ),
+        (
+            "apps/web/features/product-surfaces/verifier-console/"
+            "verifier-qualification.visual.spec.ts"
+        ): "OPE-339",
         "apps/web/components/foundation/data-display/paired-outcomes.visual.spec.ts": "OPE-345",
         "apps/web/components/foundation/forms/nullable-field.visual.spec.ts": "OPE-322",
         "apps/web/features/workspace-lifecycle/project-description.visual.spec.ts": "OPE-323",
