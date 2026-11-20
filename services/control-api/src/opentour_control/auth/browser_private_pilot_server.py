@@ -239,14 +239,50 @@ def _load_deployment(env: Mapping[str, str], *, allow_metadata: bool) -> _Deploy
     )
 
 
+def _write_readiness_checkpoint(empty_lookup: bool, session_invalid: bool) -> None:
+    # Fixed, short records fit in an atomic nonblocking pipe write.
+    record = json.dumps(
+        {
+            "kind": "control_readiness_checkpoint",
+            "listener": "CURRENT_ADMITTED",
+            "lookup": "EMPTY" if empty_lookup else "UNCONFIRMED",
+            "response": "SESSION_INVALID_ASGI_SENT" if session_invalid else "UNCONFIRMED",
+        },
+        separators=(",", ":"),
+    ).encode("ascii")
+    try:
+        stdout = os.fstat(1)
+        if not stat.S_ISFIFO(stdout.st_mode):
+            return
+        fd = os.open("/proc/self/fd/1", os.O_WRONLY | os.O_NONBLOCK | os.O_CLOEXEC)
+        try:
+            sink = os.fstat(fd)
+            if stat.S_ISFIFO(sink.st_mode) and os.path.samestat(stdout, sink):
+                os.write(fd, record + b"\n")
+        finally:
+            os.close(fd)
+    except OSError:
+        return
+
+
 def main(argv: Sequence[str] = ()) -> None:
-    if argv and tuple(argv) != ("--check-tls",):
+    arguments = tuple(argv)
+    check_tls = arguments == ("--check-tls",)
+    readiness_checkpoint = arguments == ("--readiness-checkpoint",)
+    if arguments and not (check_tls or readiness_checkpoint):
         raise SystemExit("Invalid private browser listener argument")
     try:
-        deployment = _load_deployment(os.environ, allow_metadata=not argv)
-        if argv:
-            if not is_private_browser_dev_stage(deployment.approved.stage_arn):
-                raise ValueError("Expected the exact dev stage")
+        if readiness_checkpoint and (
+            os.environ.get(_PREFIX + "LISTEN_HOST") != "ecs-task-ipv4"
+            or os.environ.get("AWS_EXECUTION_ENV") != "AWS_ECS_FARGATE"
+        ):
+            raise ValueError("Readiness checkpoint requires the private Fargate task")
+        deployment = _load_deployment(os.environ, allow_metadata=not check_tls)
+        if (check_tls or readiness_checkpoint) and not is_private_browser_dev_stage(
+            deployment.approved.stage_arn
+        ):
+            raise ValueError("Expected the exact dev stage")
+        if check_tls:
             prepare_private_browser_listener_tls(
                 approved=deployment.approved,
                 readback=deployment.readback,
@@ -274,6 +310,7 @@ def main(argv: Sequence[str] = ()) -> None:
                 host=deployment.host,
                 port=deployment.port,
                 path_profile=PrivateBrowserPilotPathProfile.DEV,
+                readiness_checkpoint=_write_readiness_checkpoint if readiness_checkpoint else None,
             )
         except ValueError:
             raise SystemExit(_UNAVAILABLE) from None

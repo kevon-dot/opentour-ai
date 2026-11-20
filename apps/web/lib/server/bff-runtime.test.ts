@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
+import { channel } from 'node:diagnostics_channel';
 import { mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -9,9 +10,10 @@ mock.module('server-only', { namedExports: {} });
 const { createEcsTaskCredentialProvider } = await import('./ecs-task-role.js');
 const taskRoleArn = 'arn:aws:iam::000000000000:role/generated-bff';
 const relativeUri = '/v2/credentials/01234567-89ab-cdef-0123-456789abcdef';
+let metadataRole = taskRoleArn;
 const fetchMetadata = mock.fn(async (input: RequestInfo | URL) => {
   assert.equal(String(input), `http://169.254.170.2${relativeUri}`);
-  return Response.json({ RoleArn: taskRoleArn, AccessKeyId: 'fixture-key-id',
+  return Response.json({ RoleArn: metadataRole, AccessKeyId: 'fixture-key-id',
     SecretAccessKey: 'generated-fixture-material', Token: 'generated-fixture-session',
     Expiration: new Date(Date.now() + 60_000).toISOString() });
 });
@@ -42,6 +44,11 @@ const canonicalMissing = { code: 'SESSION_INVALID', message: 'The identity opera
   request_id: '0'.repeat(32), retryable: false, field_errors: [], current_revision: null };
 
 it('registers the Node server and bases readiness on a bounded signed private read', async (t) => {
+  const phases: unknown[] = [];
+  const observations = channel('opentour:bff-readiness:v1');
+  const recordPhase = (phase: unknown) => { phases.push(phase); };
+  observations.subscribe(recordPhase);
+  t.after(() => observations.unsubscribe(recordPhase));
   const dir = await mkdtemp(join(await realpath(tmpdir()), 'opentour-bff-runtime-'));
   t.after(() => rm(dir, { recursive: true, force: true }));
   const file = join(dir, 'binding.json');
@@ -82,10 +89,14 @@ it('registers the Node server and bases readiness on a bounded signed private re
   await register();
   assert.equal((await signin(new Request(profile.origin + '/auth/signin'))).status, 503);
   assert.equal((await callback(new Request(profile.callbackURI))).status, 503);
+  assert.deepEqual(phases, []);
   process.env.NEXT_RUNTIME = 'nodejs';
   await Promise.all([register(), register()]);
   assert.equal(fetchMetadata.mock.callCount(), 0);
   assert.equal(transport.mock.callCount(), 0);
+  const startupPhases = ['runtime_started', 'workos_key_shape_validated', 'binding_validated',
+    'role_provider_configured', 'runtime_configured'];
+  assert.deepEqual(phases, startupPhases);
 
   const failed = await Promise.all([ready(), ready(), ready()]);
   for (const result of failed) {
@@ -95,6 +106,8 @@ it('registers the Node server and bases readiness on a bounded signed private re
   }
   assert.equal(transport.mock.callCount(), 1);
   assert.equal(fetchMetadata.mock.callCount(), 1);
+  const probePhases = ['probe_started', 'credentials_validated', 'signed_request_prepared'];
+  assert.deepEqual(phases, [...startupPhases, ...probePhases, 'probe_refused']);
 
   canonical = true;
   assert.equal((await ready()).status, 503);
@@ -105,6 +118,9 @@ it('registers the Node server and bases readiness on a bounded signed private re
   assert.equal(await copy.bffRuntimeReady(), true);
   assert.equal(transport.mock.callCount(), 2);
   assert.equal(fetchMetadata.mock.callCount(), 2);
+  const expectedPhases = [...startupPhases, ...probePhases, 'probe_refused', ...probePhases,
+    'probe_accepted'];
+  assert.deepEqual(phases, expectedPhases);
 
   const adapterCopy = './authkit-adapter.js?route-bundle';
   const { configuredHandler } = await import(adapterCopy) as typeof import('./authkit-adapter.js');
@@ -113,4 +129,12 @@ it('registers the Node server and bases readiness on a bounded signed private re
   assert.equal(new URL(result.headers.get('location')!).origin, profile.providerOrigins[0]);
   assert.equal(transport.mock.callCount(), 3);
   assert.equal(fetchMetadata.mock.callCount(), 3);
+  assert.deepEqual(phases, expectedPhases);
+
+  metadataRole = 'arn:aws:iam::000000000000:role/generated-foreign';
+  time += 10_000;
+  assert.equal((await ready()).status, 503);
+  assert.equal(fetchMetadata.mock.callCount(), 4);
+  assert.equal(transport.mock.callCount(), 3);
+  assert.deepEqual(phases, [...expectedPhases, 'probe_started', 'probe_refused']);
 });

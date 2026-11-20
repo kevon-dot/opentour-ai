@@ -6,9 +6,12 @@ import asyncio
 import hashlib
 import ipaddress
 import json
+import os
 import ssl
+import stat
 from dataclasses import asdict, replace
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, Mock
 
@@ -204,14 +207,22 @@ def launch(deployment: dict[str, str], monkeypatch: pytest.MonkeyPatch) -> tuple
     return runtime, configure
 
 
-@pytest.mark.parametrize("bind_source", ["explicit", "fargate"])
+@pytest.mark.parametrize(
+    ("bind_source", "arguments"),
+    [("explicit", ()), ("fargate", ()), ("fargate", ("--readiness-checkpoint",))],
+)
 def test_private_launcher_loads_real_reviewed_tls_configuration(
-    bind_source: str, launch: tuple[Mock, Mock], monkeypatch: pytest.MonkeyPatch
+    bind_source: str,
+    arguments: tuple[str, ...],
+    launch: tuple[Mock, Mock],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     runtime, configure = launch
     loaded: list[uvicorn.Config] = []
     resolve = AsyncMock(return_value=ipaddress.IPv4Address(LISTEN_ADDRESS))
     monkeypatch.setattr(server, "_ecs_listener_ipv4", resolve)
+    build = Mock(wraps=server.build_private_browser_pilot_listener)
+    monkeypatch.setattr(server, "build_private_browser_pilot_listener", build)
     if bind_source == "fargate":
         monkeypatch.setenv(PREFIX + "LISTEN_HOST", "ecs-task-ipv4")
         monkeypatch.setenv(PREFIX + "LISTEN_CIDRS", json.dumps([SUBNET]))
@@ -223,7 +234,7 @@ def test_private_launcher_loads_real_reviewed_tls_configuration(
         loaded.append(listener.config)
 
     monkeypatch.setattr(uvicorn.Server, "run", inspect)
-    server.main()
+    server.main(arguments)
     (config,) = loaded
     assert (config.host, config.port, config.workers) == ("10.0.10.20", 8443, 1)
     assert config.ssl is not None
@@ -234,6 +245,121 @@ def test_private_launcher_loads_real_reviewed_tls_configuration(
     configure.assert_called_once()
     runtime.close.assert_called_once()
     assert resolve.await_count == (1 if bind_source == "fargate" else 0)
+    expected_sink = server._write_readiness_checkpoint if arguments else None
+    assert build.call_args.kwargs["readiness_checkpoint"] is expected_sink
+
+
+@pytest.mark.parametrize(
+    ("bind_host", "execution_env"),
+    [(LISTEN_ADDRESS, "AWS_ECS_FARGATE"), ("ecs-task-ipv4", "AWS_ECS_EC2")],
+)
+def test_checkpoint_requires_private_fargate_binding(
+    bind_host: str,
+    execution_env: str,
+    launch: tuple[Mock, Mock],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, configure = launch
+    monkeypatch.setenv(PREFIX + "LISTEN_HOST", bind_host)
+    monkeypatch.setenv("AWS_EXECUTION_ENV", execution_env)
+    load = Mock(wraps=server._load_deployment)
+    monkeypatch.setattr(server, "_load_deployment", load)
+
+    with pytest.raises(SystemExit, match="^Private browser listener deployment configuration"):
+        server.main(["--readiness-checkpoint"])
+
+    load.assert_not_called()
+    configure.assert_not_called()
+
+
+@pytest.fixture
+def checkpoint_process(monkeypatch: pytest.MonkeyPatch) -> Mock:
+    process = Mock(
+        O_WRONLY=os.O_WRONLY,
+        O_NONBLOCK=os.O_NONBLOCK,
+        O_CLOEXEC=os.O_CLOEXEC,
+        path=os.path,
+    )
+    process.open.return_value = 91
+    monkeypatch.setattr(server, "os", process)
+    return process
+
+
+@pytest.mark.parametrize(
+    ("empty", "session_invalid", "lookup", "response"),
+    [
+        (True, True, "EMPTY", "SESSION_INVALID_ASGI_SENT"),
+        (False, False, "UNCONFIRMED", "UNCONFIRMED"),
+        (False, True, "UNCONFIRMED", "SESSION_INVALID_ASGI_SENT"),
+        (True, False, "EMPTY", "UNCONFIRMED"),
+    ],
+)
+def test_checkpoint_writes_one_fixed_record_to_inherited_pipe(
+    empty: bool,
+    session_invalid: bool,
+    lookup: str,
+    response: str,
+    checkpoint_process: Mock,
+) -> None:
+    pipe = SimpleNamespace(st_mode=stat.S_IFIFO, st_dev=12, st_ino=34)
+    process = checkpoint_process
+    process.fstat.side_effect = [pipe, pipe]
+
+    server._write_readiness_checkpoint(empty, session_invalid)
+
+    process.open.assert_called_once_with(
+        "/proc/self/fd/1", os.O_WRONLY | os.O_NONBLOCK | os.O_CLOEXEC
+    )
+    assert [call.args for call in process.fstat.call_args_list] == [(1,), (91,)]
+    process.write.assert_called_once()
+    fd, payload = process.write.call_args.args
+    assert fd == 91
+    assert len(payload) <= 512
+    assert payload.count(b"\n") == 1 and payload.endswith(b"\n")
+    assert json.loads(payload) == {
+        "kind": "control_readiness_checkpoint",
+        "listener": "CURRENT_ADMITTED",
+        "lookup": lookup,
+        "response": response,
+    }
+    process.close.assert_called_once_with(91)
+    process.set_blocking.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("stdout_mode", "sink_inode", "open_error", "write_error"),
+    [
+        (stat.S_IFREG, 34, None, None),
+        (stat.S_IFIFO, 35, None, None),
+        (stat.S_IFIFO, 34, PermissionError, None),
+        (stat.S_IFIFO, 34, None, BlockingIOError),
+        (stat.S_IFIFO, 34, None, BrokenPipeError),
+    ],
+)
+def test_checkpoint_does_not_fall_back_when_pipe_is_unavailable(
+    stdout_mode: int,
+    sink_inode: int,
+    open_error: type[OSError] | None,
+    write_error: type[OSError] | None,
+    checkpoint_process: Mock,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    process = checkpoint_process
+    process.fstat.side_effect = [
+        SimpleNamespace(st_mode=stdout_mode, st_dev=12, st_ino=34),
+        SimpleNamespace(st_mode=stat.S_IFIFO, st_dev=12, st_ino=sink_inode),
+    ]
+    process.open.side_effect = open_error
+    process.write.side_effect = write_error
+
+    server._write_readiness_checkpoint(True, True)
+
+    assert process.open.call_count == int(stdout_mode == stat.S_IFIFO)
+    assert process.write.call_count == int(write_error is not None)
+    assert process.close.call_count == int(stdout_mode == stat.S_IFIFO and open_error is None)
+    if process.close.called:
+        process.close.assert_called_once_with(91)
+    assert capsys.readouterr() == ("", "")
 
 
 def test_tls_preflight_checks_the_real_mounts_without_starting_runtime(
@@ -286,10 +412,20 @@ def test_tls_preflight_refuses_unqualified_mounts_before_runtime(
     configure.assert_not_called()
 
 
-def test_unrecognized_argument_refuses_to_start(launch: tuple[Mock, Mock]) -> None:
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        ["--unknown"],
+        ["--readiness-checkpoint", "--readiness-checkpoint"],
+        ["--check-tls", "--readiness-checkpoint"],
+    ],
+)
+def test_unrecognized_argument_refuses_to_start(
+    arguments: list[str], launch: tuple[Mock, Mock]
+) -> None:
     _, configure = launch
     with pytest.raises(SystemExit, match="^Invalid private browser listener argument"):
-        server.main(["--unknown"])
+        server.main(arguments)
     configure.assert_not_called()
 
 
