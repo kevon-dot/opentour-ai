@@ -20,6 +20,15 @@ PRESENTATION_TARGETS = {
     "apps/web/features/account-entry/terms-acknowledgment.visual.spec.ts": (
         "OPE-330"
     ),
+    "apps/web/features/product-surfaces/repair-comparator/comparator-evidence.visual.spec.ts": (
+        "OPE-326"
+    ),
+    "apps/web/features/autonomy/blocking-reasons.visual.spec.ts": (
+        "OPE-337"
+    ),
+    "apps/web/features/product-surfaces/verifier-console/verifier-qualification.visual.spec.ts": (
+        "OPE-339"
+    ),
     "apps/web/components/foundation/data-display/paired-outcomes.visual.spec.ts": "OPE-345",
     "apps/web/components/foundation/forms/nullable-field.visual.spec.ts": "OPE-322",
     "apps/web/components/foundation/forms/numeric-field.visual.spec.ts": "OPE-328",
@@ -362,6 +371,23 @@ def verify_scoped_presentation(root: Path, value: dict[str, Any]) -> None:
             or {Path(name).name for name in images} != expected_effort_disclosure_images
         ):
             raise ValueError(f"{prefix} capture inventory mismatch")
+    elif value["issue_key"] in {"OPE-326", "OPE-337", "OPE-339"}:
+        evidence_prefix, evidence_states = {
+            "OPE-326": ("comparator", ["tied", "mismatched", "unknown", "train"]),
+            "OPE-337": ("blockers", ["three", "focus", "reduced", "one", "last", "none"]),
+            "OPE-339": ("verifier", ["exact", "measured", "replacement"]),
+        }[value["issue_key"]]
+        expected_evidence_images = {
+            f"{evidence_prefix}-{state}-{width}-{scale}.png"
+            for state in evidence_states
+            for width in widths
+            for scale in (100, 200)
+        }
+        if (
+            len(images) != len(expected_evidence_images)
+            or {Path(name).name for name in images} != expected_evidence_images
+        ):
+            raise ValueError("Comparator, blocker or verifier capture inventory mismatch")
     elif value["issue_key"] in {"OPE-325", "OPE-330"}:
         if value["issue_key"] == "OPE-325":
             capture_prefix = "support"

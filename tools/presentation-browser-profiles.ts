@@ -1,5 +1,20 @@
 /** Generated local presentation fixtures. Each executable target has exactly one child owner. */
 export const presentationSuites = new Map([
+  ['apps/web/features/product-surfaces/verifier-console/verifier-qualification.visual.spec.ts', {
+    owner: 'OPE-339', parent: 'OPE-260', guide: '169:4947,169:4982,169:4939,162:13242', minimumTests: 8,
+    requirementIds: ['OPE-339:qualification-slices', 'OPE-339:requalification-impact', 'OPE-339:scoped-comparisons'],
+    specHash: '5aaf7f1bce9c27e51dc32f1ee67898a121ddf458f6faae6a9c44cc40c028edb1',
+  }],
+  ['apps/web/features/autonomy/blocking-reasons.visual.spec.ts', {
+    owner: 'OPE-337', parent: 'OPE-294', guide: '228:6731,228:6743,228:6765,228:6767,228:6769', minimumTests: 9,
+    requirementIds: ['OPE-337:ordered-reasons', 'OPE-337:responsibility', 'OPE-337:bounded-safe-recovery', 'OPE-337:focus-and-replacement'],
+    specHash: '608cd26d4c35131e4f7dd638a321e13524d33472e5c242566cbe999b9884a91e',
+  }],
+  ['apps/web/features/product-surfaces/repair-comparator/comparator-evidence.visual.spec.ts', {
+    owner: 'OPE-326', parent: 'OPE-262', guide: '169:6212,169:6234,169:6256,162:14085,162:14226', minimumTests: 8,
+    requirementIds: ['OPE-326:tied-quality', 'OPE-326:returned-assessment', 'OPE-326:parity-partial-denominator'],
+    specHash: '13fb54e98b9b6867de1adc1f19b5b227f19fc83abc58ac9f8df2a5a75f5100fc',
+  }],
   ['apps/web/features/access/resource-disclosure.visual.spec.ts', {
     owner: 'OPE-329', parent: 'OPE-282', guide: '164:11778,164:14659,164:14664', minimumTests: 8,
     requirementIds: ['OPE-329:safe-denied-reason', 'OPE-329:undisclosed-resource', 'OPE-329:disclosure-transition'],
