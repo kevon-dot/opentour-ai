@@ -18,7 +18,7 @@ export const presentationSuites = new Map([
   ['apps/web/features/benchmarks/offline-evidence.visual.spec.ts', {
     owner: 'OPE-331', parent: 'OPE-290', guide: '164:13175,164:13182,164:13189,164:13193,164:13196', minimumTests: 9,
     requirementIds: ['OPE-331:independent-projections', 'OPE-331:offline-retry', 'OPE-331:authorized-recovery'],
-    specHash: 'de6a8a961cdc805002e1cd4890c3ca45b026b050442637e6e7b73030db79dfb9',
+    specHash: 'fa1826e7f023482dc4fe2c3b9bb230a6ce338f619abf05dae674a510579969fd',
   }],
   ['apps/web/features/artifacts/artifact-manifest.visual.spec.ts', {
     owner: 'OPE-342', parent: 'OPE-265', guide: '169:6420,169:6462,169:6412,162:20621', minimumTests: 9,
@@ -28,7 +28,7 @@ export const presentationSuites = new Map([
   ['apps/web/features/autonomy/activity-history.visual.spec.ts', {
     owner: 'OPE-343', parent: 'OPE-294', guide: '169:7432,169:7504,169:7674,169:1028', minimumTests: 9,
     requirementIds: ['OPE-343:permitted-detail', 'OPE-343:append-focus-count', 'OPE-343:generation-replacement'],
-    specHash: 'b634d04546cdc0b7b52b40126d0d2864119ead0b632bcac7afe63679f222767e',
+    specHash: '47d23af192dce16e337ca2ba2ba2ffaaa24b47ed20c983ef0bb5c22519d496ce',
   }],
   ['apps/web/features/access/resource-disclosure.visual.spec.ts', {
     owner: 'OPE-329', parent: 'OPE-282', guide: '164:11778,164:14659,164:14664', minimumTests: 8,

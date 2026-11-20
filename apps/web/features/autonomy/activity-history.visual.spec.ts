@@ -16,6 +16,8 @@ for (const width of [320, 768, 1280, 1440]) for (const scale of [100, 200]) {
     const load = main.getByRole('button', { name: 'Load older activity' });
     await show('reference');
     await expect(rows).toHaveCount(5);
+    await expect(load).toHaveCSS('min-block-size', '44px');
+    expect((await load.boundingBox())!.height).toBeGreaterThanOrEqual(44);
     const first = rows.nth(1).getByRole('button');
     await page.keyboard.press('Tab');
     await expect(first).toBeFocused();

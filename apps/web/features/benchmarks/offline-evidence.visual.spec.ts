@@ -26,6 +26,11 @@ for (const width of [320, 768, 1280, 1440]) for (const scale of [100, 200]) {
     await expect(main.getByText('Private evidence unavailable')).toBeVisible();
     await assertHosted();
     for (const surface of [await main.innerHTML(), await main.ariaSnapshot()]) expect(surface).not.toMatch(/Synthetic local receipt|Prior scoped observation/);
+    const hostedField = main.locator('dl').filter({ hasText: 'Hosted benchmark' });
+    await expect(hostedField).toHaveCSS('padding-block-start', '16px');
+    await expect(hostedField).toHaveCSS('padding-block-end', '16px');
+    await expect(retry).toHaveCSS('min-block-size', '44px');
+    expect((await retry.boundingBox())!.height).toBeGreaterThanOrEqual(44);
     await capture('offline');
     const offline = await main.innerHTML();
     await page.keyboard.press('Tab');
