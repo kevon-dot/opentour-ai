@@ -623,7 +623,7 @@ export function configureAuthkitAdapter(adapter: AuthkitAdapter): void {
   if (adapters[adapterKey]) throw new IdentityFailure('IDENTITY_ALREADY_CONFIGURED', 503);
   adapters[adapterKey] = adapter;
 }
-export function configuredHandler(action: 'signin' | 'callback'): (request: Request) => Promise<Response> {
+export function configuredHandler(action: 'signin' | 'callback' | 'signout'): (request: Request) => Promise<Response> {
   return async (request) => {
     const configured = adapters[adapterKey];
     return configured ? configured[action](request) : safeError(new IdentityFailure('IDENTITY_NOT_CONFIGURED', 503));
