@@ -256,10 +256,16 @@
     ],
     "apps/web/features/access/resource-disclosure.visual.spec.ts": [
       "OPE-329"
+    ],
+    "apps/web/features/product-surfaces/support-center/support-next-steps.visual.spec.ts": [
+      "OPE-325"
+    ],
+    "apps/web/features/account-entry/terms-acknowledgment.visual.spec.ts": [
+      "OPE-330"
     ]
   },
-  "distinct_paths": 85,
-  "issue_count": 81,
+  "distinct_paths": 87,
+  "issue_count": 83,
   "affected_old_wrapper_paths": {
     "apps/web/tests/coverage/ot-p22-c01.spec.ts": [
       "OPE-232"

@@ -73,11 +73,11 @@ interface GridRow { key: string; cells: readonly string[] }
  * records on narrow ones. A container query displays exactly one; the other is `display: none`
  * and therefore absent from the accessibility tree.
  */
-function RelationshipGrid({ name, columns, rows, kind }: {
+export function LabelledRecordGrid({ name, columns, rows, kind }: {
   name: { 'aria-labelledby': string } | { 'aria-label': string };
-  columns: readonly string[]; rows: readonly GridRow[]; kind: 'selected' | 'empty' | 'redacted';
+  columns: readonly string[]; rows: readonly GridRow[]; kind?: 'selected' | 'empty' | 'redacted';
 }) {
-  return <div className={`ot-relationship-grid ot-relationship-grid--${kind}`}>
+  return <div className={kind ? `ot-relationship-grid ot-relationship-grid--${kind}` : 'ot-relationship-grid'}>
     <table className="ot-relationship-table" {...name}>
       <thead><tr>{columns.map(column => <th key={column} scope="col">{column}</th>)}</tr></thead>
       <tbody>{rows.map(row => <tr key={row.key}>
@@ -155,7 +155,7 @@ function SelectedView({ rows, selected }: { rows: readonly SelectedRelationshipR
   const copy = relationshipCopy.selected;
   return <>
     <h2 id={headingId} className="ot-relationship-section-title">{copy.heading}</h2>
-    <RelationshipGrid kind="selected" name={{ 'aria-labelledby': headingId }} columns={copy.columns}
+    <LabelledRecordGrid kind="selected" name={{ 'aria-labelledby': headingId }} columns={copy.columns}
       rows={rows.map(row => ({ key: row.key, cells: [row.source, row.relation, row.target, row.version, row.validity] }))} />
     {selected && <SelectedDetails selected={selected} />}
   </>;
@@ -170,7 +170,7 @@ function EmptyView() {
       <p className="ot-relationship-empty-body">{copy.body}</p>
       <p className="ot-relationship-empty-total">{copy.total}</p>
     </div>
-    <RelationshipGrid kind="empty" name={{ 'aria-labelledby': headingId }} columns={copy.columns} rows={[{ key: 'empty', cells: copy.row }]} />
+    <LabelledRecordGrid kind="empty" name={{ 'aria-labelledby': headingId }} columns={copy.columns} rows={[{ key: 'empty', cells: copy.row }]} />
   </>;
 }
 
@@ -178,7 +178,7 @@ function RedactedView() {
   const copy = relationshipCopy.redacted;
   return <>
     <Notice tone="hold" title={copy.title} body={copy.body} />
-    <RelationshipGrid kind="redacted" name={{ 'aria-label': copy.title }} columns={copy.columns} rows={[{ key: 'redacted', cells: copy.row }]} />
+    <LabelledRecordGrid kind="redacted" name={{ 'aria-label': copy.title }} columns={copy.columns} rows={[{ key: 'redacted', cells: copy.row }]} />
   </>;
 }
 

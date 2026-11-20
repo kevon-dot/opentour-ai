@@ -40,6 +40,7 @@
     "apps/web/components/foundation/tokens/visual.spec.ts",
     "apps/web/features/access/resource-disclosure.visual.spec.ts",
     "apps/web/features/account-entry/setup-step-indicator.visual.spec.ts",
+    "apps/web/features/account-entry/terms-acknowledgment.visual.spec.ts",
     "apps/web/features/autonomy/control-actions.visual.spec.ts",
     "apps/web/features/autonomy/status-panel.visual.spec.ts",
     "apps/web/features/operations/cancellation-impact.visual.spec.ts",
@@ -56,6 +57,7 @@
     "apps/web/features/product-surfaces/repair-comparator/visual.spec.ts",
     "apps/web/features/product-surfaces/scope-opportunities/visual.spec.ts",
     "apps/web/features/product-surfaces/source-authority/visual.spec.ts",
+    "apps/web/features/product-surfaces/support-center/support-next-steps.visual.spec.ts",
     "apps/web/features/product-surfaces/support-center/visual.spec.ts",
     "apps/web/features/product-surfaces/synthetic-planner/visual.spec.ts",
     "apps/web/features/product-surfaces/verifier-console/visual.spec.ts",
@@ -413,6 +415,14 @@
     "apps/web/features/access/resource-disclosure.visual.spec.ts": {
       "kind": "simulated",
       "owner": "OPE-329"
+    },
+    "apps/web/features/product-surfaces/support-center/support-next-steps.visual.spec.ts": {
+      "kind": "simulated",
+      "owner": "OPE-325"
+    },
+    "apps/web/features/account-entry/terms-acknowledgment.visual.spec.ts": {
+      "kind": "simulated",
+      "owner": "OPE-330"
     }
   }
 }

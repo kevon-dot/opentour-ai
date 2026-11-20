@@ -1,0 +1,24 @@
+.ot-support-next-steps {
+  container: relationship / inline-size;
+  display: grid;
+  gap: var(--ot-space-16);
+  min-inline-size: 0;
+  color: var(--ot-text-primary);
+  font-family: Geist, sans-serif;
+  overflow-wrap: anywhere;
+}
+.ot-support-next-steps h2 {
+  margin: 0;
+  font: var(--ot-type-section-weight) var(--ot-type-section-size)/var(--ot-type-section-line) Geist, sans-serif;
+}
+.ot-support-details {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--ot-space-16);
+  margin: 0;
+  font: var(--ot-type-body-weight) var(--ot-type-body-size)/var(--ot-type-body-line) Geist, sans-serif;
+}
+.ot-support-details dt { font-weight: var(--ot-type-label-weight); }
+.ot-support-details dd { margin: 0; }
+
+.ot-support-next-steps :is(ul, dl, dd) { margin: 0; }

@@ -72,6 +72,12 @@
     "../../../tests/fixtures/presentation/effort-ledger.tsx",
     "../../../features/access/resource-disclosure*.ts",
     "../../../features/access/resource-disclosure*.tsx",
-    "../../../tests/fixtures/presentation/resource-disclosure.tsx"
+    "../../../tests/fixtures/presentation/resource-disclosure.tsx",
+    "../../../features/product-surfaces/support-center/support-next-steps*.ts",
+    "../../../features/product-surfaces/support-center/support-next-steps*.tsx",
+    "../../../tests/fixtures/presentation/support-next-steps.tsx",
+    "../../../features/account-entry/terms-acknowledgment*.ts",
+    "../../../features/account-entry/terms-acknowledgment*.tsx",
+    "../../../tests/fixtures/presentation/terms-acknowledgment.tsx"
   ]
 }

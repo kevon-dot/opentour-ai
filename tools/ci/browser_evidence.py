@@ -14,6 +14,12 @@ from tools.public_content_check import MAX_FILE_BYTES, digest, inspect_bytes, lo
 PRESENTATION_TARGETS = {
     "apps/web/features/access/resource-disclosure.visual.spec.ts": "OPE-329",
     "apps/web/features/operator/effort-ledger.visual.spec.ts": "OPE-327",
+    "apps/web/features/product-surfaces/support-center/support-next-steps.visual.spec.ts": (
+        "OPE-325"
+    ),
+    "apps/web/features/account-entry/terms-acknowledgment.visual.spec.ts": (
+        "OPE-330"
+    ),
     "apps/web/components/foundation/data-display/paired-outcomes.visual.spec.ts": "OPE-345",
     "apps/web/components/foundation/forms/nullable-field.visual.spec.ts": "OPE-322",
     "apps/web/components/foundation/forms/numeric-field.visual.spec.ts": "OPE-328",
@@ -356,6 +362,26 @@ def verify_scoped_presentation(root: Path, value: dict[str, Any]) -> None:
             or {Path(name).name for name in images} != expected_effort_disclosure_images
         ):
             raise ValueError(f"{prefix} capture inventory mismatch")
+    elif value["issue_key"] in {"OPE-325", "OPE-330"}:
+        if value["issue_key"] == "OPE-325":
+            capture_prefix = "support"
+            support_terms_states = ("case41", "closed", "long", "restricted")
+            forced_colors_image = "support-forced-colors.png"
+        else:
+            capture_prefix = "terms"
+            support_terms_states = ("unchecked", "checked", "changed", "unavailable")
+            forced_colors_image = "terms-forced-colors-focus.png"
+        expected_support_terms_images = {
+            f"{capture_prefix}-{state}-{width}-{scale}.png"
+            for state in support_terms_states
+            for width in widths
+            for scale in (100, 200)
+        } | {forced_colors_image}
+        if (
+            len(images) != len(expected_support_terms_images)
+            or {Path(name).name for name in images} != expected_support_terms_images
+        ):
+            raise ValueError("Support or terms capture inventory mismatch")
     elif value["issue_key"] == "OPE-344":
         expected_categories = {
             f"category-{scenario}-{width}-{scale}-{state}.png"
