@@ -81,11 +81,24 @@ for (const width of [320, 768, 1280, 1440]) {
           expect(mark.color).toBe(mark.tableColor);
           expect(mark.color).toBe(state === 'complete' && i === 2 ? 'rgb(140, 91, 10)' : 'rgb(36, 91, 238)');
         }
-        // Exact values are already visible. Reading this static chart requires no focus or hover.
-        await expect(page.locator('.ot-paired :is(button, a, input, [tabindex])')).toHaveCount(0);
+        // Static marks expose their values directly. The table has one keyboard entry point.
+        const region = page.getByRole('region', { name: width === 320
+          ? 'Accessible data table — scroll horizontally' : 'Accessible data table', exact: true });
+        await expect(region).toHaveCount(1);
+        await expect(figure.locator('[tabindex], button, a')).toHaveCount(0);
         const name = `paired-${state}-${width}-${scale}`;
         await page.screenshot({ path: info.outputPath(name + '.png'), fullPage: true, animations: 'disabled' });
         await writeFile(info.outputPath(name + '.json'), JSON.stringify({ ...geometry, aria: await table.ariaSnapshot() }));
+        if (state === 'complete') {
+          await page.keyboard.press('Tab');
+          await expect(region).toBeFocused();
+          if (width === 320) {
+            await page.keyboard.press('ArrowRight');
+            await expect.poll(() => region.evaluate(el => el.scrollLeft)).toBeGreaterThan(0);
+            await region.evaluate(el => { el.scrollLeft = 0; });
+          }
+          await page.keyboard.press('Tab');
+        }
       }
     });
   }

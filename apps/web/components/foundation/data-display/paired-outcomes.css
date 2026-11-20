@@ -36,8 +36,14 @@
 }
 .ot-paired-axis { margin-block-start: var(--ot-space-12); border-block-start: 2px solid var(--ot-border-control); }
 
-.ot-paired table { inline-size: 100%; table-layout: fixed; border-spacing: 0; }
-.ot-paired caption {
+.ot-paired-table { min-inline-size: 0; container-type: inline-size; }
+.ot-paired-scroll { overflow-x: auto; }
+.ot-paired-scroll:focus-visible { outline: 2px solid var(--ot-action-primary); outline-offset: 2px; }
+.ot-paired-hint { display: none; }
+@container (width < 640px) { .ot-paired-hint { display: inline; } }
+.ot-paired table { inline-size: 100%; min-inline-size: 640px; table-layout: fixed; border-spacing: 0; }
+.ot-paired-caption {
+  margin: 0;
   padding-block-end: var(--ot-space-8);
   text-align: start;
   font: var(--ot-type-label-weight) var(--ot-type-label-size)/var(--ot-type-label-line) Geist, sans-serif;

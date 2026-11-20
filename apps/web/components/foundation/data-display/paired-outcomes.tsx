@@ -63,24 +63,28 @@ export function PairedOutcomes({ completePairs, expectedPairs, missingCandidate,
       </ul>
       <div className="ot-paired-axis" aria-hidden="true" />
     </figure>
-    <table>
-      <caption>Paired outcomes · Exact values</caption>
-      <thead><tr>
-        <TableCell header="column" tone="blue" value="Measure" />
-        <TableCell header="column" tone="blue" value="Exact value" />
-      </tr></thead>
-      <tbody>
-        {rows.map(({ key, label, text }) => <tr key={key} data-series={key}>
-          <TableCell header="row" value={label} /><TableCell value={text} />
-        </tr>)}
-        <tr><TableCell header="row" value="Excluded" /><TableCell value={exactValue(excluded)} /></tr>
-        <tr><TableCell header="row" value="Unknown" /><TableCell value={exactValue(unknown)} /></tr>
-      </tbody>
-      <tfoot>
-        <tr><TableCell header="row" value="Complete pairs" /><TableCell value={complete} /></tr>
-        <tr><TableCell header="row" value="Missing candidate results" /><TableCell value={missing} /></tr>
-        <tr><TableCell header="row" value="Expected pairs" /><TableCell value={expected} /></tr>
-      </tfoot>
-    </table>
+    <div className="ot-paired-table">
+      <p id={id + '-table'} className="ot-paired-caption">Accessible data table<span className="ot-paired-hint"> — scroll horizontally</span></p>
+      <div className="ot-paired-scroll" role="region" tabIndex={0} aria-labelledby={id + '-table'}>
+      <table aria-label="Paired outcomes · Exact values">
+        <thead><tr>
+          <TableCell header="column" tone="blue" value="Measure" />
+          <TableCell header="column" tone="blue" value="Exact value" />
+        </tr></thead>
+        <tbody>
+          {rows.map(({ key, label, text }) => <tr key={key} data-series={key}>
+            <TableCell header="row" value={label} /><TableCell value={text} />
+          </tr>)}
+          <tr><TableCell header="row" value="Excluded" /><TableCell value={exactValue(excluded)} /></tr>
+          <tr><TableCell header="row" value="Unknown" /><TableCell value={exactValue(unknown)} /></tr>
+        </tbody>
+        <tfoot>
+          <tr><TableCell header="row" value="Complete pairs" /><TableCell value={complete} /></tr>
+          <tr><TableCell header="row" value="Missing candidate results" /><TableCell value={missing} /></tr>
+          <tr><TableCell header="row" value="Expected pairs" /><TableCell value={expected} /></tr>
+        </tfoot>
+      </table>
+      </div>
+    </div>
   </section>;
 }
