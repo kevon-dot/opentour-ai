@@ -41,6 +41,7 @@
     "apps/web/features/access/resource-disclosure.visual.spec.ts",
     "apps/web/features/account-entry/setup-step-indicator.visual.spec.ts",
     "apps/web/features/account-entry/terms-acknowledgment.visual.spec.ts",
+    "apps/web/features/autonomy/blocking-reasons.visual.spec.ts",
     "apps/web/features/autonomy/control-actions.visual.spec.ts",
     "apps/web/features/autonomy/status-panel.visual.spec.ts",
     "apps/web/features/operations/cancellation-impact.visual.spec.ts",
@@ -54,12 +55,14 @@
     "apps/web/features/product-surfaces/environment-fleet/visual.spec.ts",
     "apps/web/features/product-surfaces/platform-release-view/visual.spec.ts",
     "apps/web/features/product-surfaces/quota-console/visual.spec.ts",
+    "apps/web/features/product-surfaces/repair-comparator/comparator-evidence.visual.spec.ts",
     "apps/web/features/product-surfaces/repair-comparator/visual.spec.ts",
     "apps/web/features/product-surfaces/scope-opportunities/visual.spec.ts",
     "apps/web/features/product-surfaces/source-authority/visual.spec.ts",
     "apps/web/features/product-surfaces/support-center/support-next-steps.visual.spec.ts",
     "apps/web/features/product-surfaces/support-center/visual.spec.ts",
     "apps/web/features/product-surfaces/synthetic-planner/visual.spec.ts",
+    "apps/web/features/product-surfaces/verifier-console/verifier-qualification.visual.spec.ts",
     "apps/web/features/product-surfaces/verifier-console/visual.spec.ts",
     "apps/web/features/product-surfaces/workflow-contract/visual.spec.ts",
     "apps/web/features/support-case-private/privacy.spec.ts",
@@ -423,6 +426,18 @@
     "apps/web/features/account-entry/terms-acknowledgment.visual.spec.ts": {
       "kind": "simulated",
       "owner": "OPE-330"
+    },
+    "apps/web/features/product-surfaces/repair-comparator/comparator-evidence.visual.spec.ts": {
+      "kind": "simulated",
+      "owner": "OPE-326"
+    },
+    "apps/web/features/autonomy/blocking-reasons.visual.spec.ts": {
+      "kind": "simulated",
+      "owner": "OPE-337"
+    },
+    "apps/web/features/product-surfaces/verifier-console/verifier-qualification.visual.spec.ts": {
+      "kind": "simulated",
+      "owner": "OPE-339"
     }
   }
 }

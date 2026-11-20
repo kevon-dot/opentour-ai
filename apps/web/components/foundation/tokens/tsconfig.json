@@ -78,6 +78,15 @@
     "../../../tests/fixtures/presentation/support-next-steps.tsx",
     "../../../features/account-entry/terms-acknowledgment*.ts",
     "../../../features/account-entry/terms-acknowledgment*.tsx",
-    "../../../tests/fixtures/presentation/terms-acknowledgment.tsx"
+    "../../../tests/fixtures/presentation/terms-acknowledgment.tsx",
+    "../../../features/product-surfaces/repair-comparator/comparator-evidence*.ts",
+    "../../../features/product-surfaces/repair-comparator/comparator-evidence*.tsx",
+    "../../../tests/fixtures/presentation/comparator-evidence.tsx",
+    "../../../features/autonomy/blocking-reasons*.ts",
+    "../../../features/autonomy/blocking-reasons*.tsx",
+    "../../../tests/fixtures/presentation/blocking-reasons.tsx",
+    "../../../features/product-surfaces/verifier-console/verifier-qualification*.ts",
+    "../../../features/product-surfaces/verifier-console/verifier-qualification*.tsx",
+    "../../../tests/fixtures/presentation/verifier-qualification.tsx"
   ]
 }

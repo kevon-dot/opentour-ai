@@ -1,0 +1,14 @@
+.ot-evidence-records {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  container: relationship / inline-size;
+  min-inline-size: 0;
+  gap: var(--ot-space-16);
+  color: var(--ot-text-primary);
+  font-family: Geist, sans-serif;
+  overflow-wrap: anywhere;
+}
+.ot-evidence-records :is(h3, ul, dl, dd) { margin: 0; }
+.ot-evidence-records h3 {
+  font: var(--ot-type-section-weight) var(--ot-type-section-size)/var(--ot-type-section-line) Geist, sans-serif;
+}

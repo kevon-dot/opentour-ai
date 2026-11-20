@@ -1,0 +1,5 @@
+.ot-verifier-qualification { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--ot-space-20); min-inline-size: 0; overflow-wrap: anywhere; }
+.ot-verifier-qualification > h2 {
+  margin: 0; color: var(--ot-text-primary);
+  font: var(--ot-type-heading-weight) var(--ot-type-heading-size)/var(--ot-type-heading-line) Geist, sans-serif;
+}

@@ -342,7 +342,7 @@ def test_exact_canonical_browser_inventory_preserved(checkout):
     manifest = runner.manifest(checkout)
     source = json.loads((checkout / runner.COMMON / "browser-suite-inventory.json").read_text())
     assert set(manifest["browser_suites"]) == set(source["paths"])
-    assert len(manifest["browser_suites"]) == source["distinct_paths"] == 87
+    assert len(manifest["browser_suites"]) == source["distinct_paths"] == 90
     assert source["issue_count"] == len(
         {owner for owners in source["paths"].values() for owner in owners}
     )
@@ -354,6 +354,15 @@ def test_exact_canonical_browser_inventory_preserved(checkout):
         ),
         "apps/web/features/account-entry/terms-acknowledgment.visual.spec.ts": (
             "OPE-330"
+        ),
+        "apps/web/features/product-surfaces/repair-comparator/comparator-evidence.visual.spec.ts": (
+            "OPE-326"
+        ),
+        "apps/web/features/autonomy/blocking-reasons.visual.spec.ts": (
+            "OPE-337"
+        ),
+        "apps/web/features/product-surfaces/verifier-console/verifier-qualification.visual.spec.ts": (
+            "OPE-339"
         ),
         "apps/web/components/foundation/data-display/paired-outcomes.visual.spec.ts": "OPE-345",
         "apps/web/components/foundation/forms/nullable-field.visual.spec.ts": "OPE-322",

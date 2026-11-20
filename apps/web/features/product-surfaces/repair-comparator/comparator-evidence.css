@@ -1,0 +1,19 @@
+.ot-comparison {
+  container: comparator / inline-size;
+  min-inline-size: 0;
+  display: grid;
+  gap: var(--ot-space-20);
+  color: var(--ot-text-primary);
+  font: var(--ot-type-body-weight) var(--ot-type-body-size)/var(--ot-type-body-line) Geist, sans-serif;
+  overflow-wrap: anywhere;
+}
+.ot-comparison-section { min-inline-size: 0; display: grid; gap: var(--ot-space-16); }
+.ot-comparison-section h3 {
+  margin: 0;
+  font: var(--ot-type-section-weight) var(--ot-type-section-size)/var(--ot-type-section-line) Geist, sans-serif;
+}
+.ot-comparison-section p { margin: 0; }
+.ot-comparison-metrics { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--ot-space-12); }
+@container comparator (width < 37.5rem) {
+  .ot-comparison-metrics { grid-template-columns: minmax(0, 1fr); }
+}
