@@ -341,15 +341,20 @@ def verify_scoped_presentation(root: Path, value: dict[str, Any]) -> None:
         if len(images) != len(expected_steps) or {Path(p).name for p in images} != expected_steps:
             raise ValueError("Setup step indicator capture inventory mismatch")
     elif value["issue_key"] in {"OPE-327", "OPE-329"}:
-        prefix, states = {
+        prefix, effort_disclosure_states = {
             "OPE-327": ("effort-ledger", ("reference", "history", "revoked")),
             "OPE-329": ("disclosure", ("known", "known-focus", "undisclosed", "after-switch")),
         }[value["issue_key"]]
-        expected = {
+        expected_effort_disclosure_images = {
             f"{prefix}-{state}-{width}-{scale}.png"
-            for state in states for width in widths for scale in (100, 200)
+            for state in effort_disclosure_states
+            for width in widths
+            for scale in (100, 200)
         }
-        if len(images) != len(expected) or {Path(name).name for name in images} != expected:
+        if (
+            len(images) != len(expected_effort_disclosure_images)
+            or {Path(name).name for name in images} != expected_effort_disclosure_images
+        ):
             raise ValueError(f"{prefix} capture inventory mismatch")
     elif value["issue_key"] == "OPE-344":
         expected_categories = {

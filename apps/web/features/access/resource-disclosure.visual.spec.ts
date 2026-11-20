@@ -23,7 +23,7 @@ for (const width of [320, 768, 1280, 1440]) {
         .fixture-workflow {margin:0;color:var(--ot-text-secondary);font:var(--ot-type-body-size)/var(--ot-type-body-line) Geist,sans-serif}
         .fixture-evidence h2 {margin:0 0 8px;font:var(--ot-type-label-weight) var(--ot-type-label-size)/var(--ot-type-label-line) Geist,sans-serif}
         .fixture-evidence table {inline-size:100%;table-layout:fixed;border-collapse:collapse}
-        main .ot-metric {max-inline-size:100%;inline-size:500px;box-sizing:border-box}
+        main .ot-metric {inline-size:min(500px, 100%)}
       ` });
       await page.evaluate(fixture.script);
       const main = page.getByRole('main');
@@ -55,6 +55,7 @@ for (const width of [320, 768, 1280, 1440]) {
       const help = main.getByRole('button', { name: 'Refresh view' });
       await expect(main.getByText('Receipt-status workflow · Revision 8')).toBeVisible();
       await expect(main.getByText('300', { exact: true })).toHaveCount(2);
+      await expect(main.locator('.ot-metric')).toHaveCSS('width', Math.min(500, width - 2 * inset) + 'px');
       await expect(action).toHaveAccessibleDescription(reason);
       await expect(main.getByText(reason)).toBeVisible();
       await expect(action).toHaveAttribute('aria-disabled', 'true');
