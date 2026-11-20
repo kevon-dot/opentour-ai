@@ -347,32 +347,40 @@ def verify_scoped_presentation(root: Path, value: dict[str, Any]) -> None:
         if len(images) != len(expected_steps) or {Path(p).name for p in images} != expected_steps:
             raise ValueError("Setup step indicator capture inventory mismatch")
     elif value["issue_key"] in {"OPE-327", "OPE-329"}:
-        prefix, states = {
+        prefix, effort_disclosure_states = {
             "OPE-327": ("effort-ledger", ("reference", "history", "revoked")),
             "OPE-329": ("disclosure", ("known", "known-focus", "undisclosed", "after-switch")),
         }[value["issue_key"]]
-        expected = {
+        expected_effort_disclosure_images = {
             f"{prefix}-{state}-{width}-{scale}.png"
-            for state in states for width in widths for scale in (100, 200)
+            for state in effort_disclosure_states
+            for width in widths
+            for scale in (100, 200)
         }
-        if len(images) != len(expected) or {Path(name).name for name in images} != expected:
+        if (
+            len(images) != len(expected_effort_disclosure_images)
+            or {Path(name).name for name in images} != expected_effort_disclosure_images
+        ):
             raise ValueError(f"{prefix} capture inventory mismatch")
     elif value["issue_key"] in {"OPE-325", "OPE-330"}:
         if value["issue_key"] == "OPE-325":
-            prefix = "support"
-            states = ("case41", "closed", "long", "restricted")
-            extra = "support-forced-colors.png"
+            capture_prefix = "support"
+            support_terms_states = ("case41", "closed", "long", "restricted")
+            forced_colors_image = "support-forced-colors.png"
         else:
-            prefix = "terms"
-            states = ("unchecked", "checked", "changed", "unavailable")
-            extra = "terms-forced-colors-focus.png"
-        expected = {
-            f"{prefix}-{state}-{width}-{scale}.png"
-            for state in states
+            capture_prefix = "terms"
+            support_terms_states = ("unchecked", "checked", "changed", "unavailable")
+            forced_colors_image = "terms-forced-colors-focus.png"
+        expected_support_terms_images = {
+            f"{capture_prefix}-{state}-{width}-{scale}.png"
+            for state in support_terms_states
             for width in widths
             for scale in (100, 200)
-        } | {extra}
-        if len(images) != len(expected) or {Path(name).name for name in images} != expected:
+        } | {forced_colors_image}
+        if (
+            len(images) != len(expected_support_terms_images)
+            or {Path(name).name for name in images} != expected_support_terms_images
+        ):
             raise ValueError("Support or terms capture inventory mismatch")
     elif value["issue_key"] == "OPE-344":
         expected_categories = {

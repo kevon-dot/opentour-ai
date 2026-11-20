@@ -3,7 +3,7 @@ export const presentationSuites = new Map([
   ['apps/web/features/access/resource-disclosure.visual.spec.ts', {
     owner: 'OPE-329', parent: 'OPE-282', guide: '164:11778,164:14659,164:14664', minimumTests: 8,
     requirementIds: ['OPE-329:safe-denied-reason', 'OPE-329:undisclosed-resource', 'OPE-329:disclosure-transition'],
-    specHash: '8a38355d696ce61728f952dd6b274c5080f1cfc29ce9270bd0ad914d50911b90',
+    specHash: '03d3aa5bcab1bc87230062b3e3c6164bf61afd9da256048fae79b89a79c91dd0',
   }],
   ['apps/web/features/operator/effort-ledger.visual.spec.ts', {
     owner: 'OPE-327', parent: 'OPE-237', guide: '181:15786,165:10556,165:10734,167:6254', minimumTests: 8,

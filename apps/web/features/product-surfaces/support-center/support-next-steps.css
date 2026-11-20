@@ -1,5 +1,5 @@
 .ot-support-next-steps {
-  container: records / inline-size;
+  container: relationship / inline-size;
   display: grid;
   gap: var(--ot-space-16);
   min-inline-size: 0;

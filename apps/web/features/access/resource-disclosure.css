@@ -1,5 +1,6 @@
 .ot-resource-disclosure {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: var(--ot-space-16);
   min-inline-size: 0;
   overflow-wrap: anywhere;
