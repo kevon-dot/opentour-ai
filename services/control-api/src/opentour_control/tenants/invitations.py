@@ -20,6 +20,16 @@ from .models import ClosedModel, validate_revision
 
 _TOKEN_CONTROLS = re.compile(r"[\x00-\x1f\x7f-\x9f]")
 _ID = Annotated[str, Field(min_length=1, max_length=256)]
+_STORE_DENIALS = frozenset(
+    {
+        ("SESSION_INVALID", 401),
+        ("SESSION_ENDED", 401),
+        ("STALE_SESSION_CONTEXT", 409),
+        ("CAPABILITY_DENIED", 403),
+        ("RESOURCE_NOT_FOUND", 404),
+        ("INVITATION_EXPIRED", 410),
+    }
+)
 
 
 class _AcceptRequest(ClosedModel):
@@ -65,7 +75,7 @@ class InvitationAcceptanceStore(Protocol):
         token_sha256: str,
         request_id: str,
     ) -> InvitationAcceptanceReceipt:
-        """Verify the current session and recipient, then commit or replay the scoped acceptance."""
+        """Verify and commit or replay the scoped acceptance within the storage transaction."""
         ...
 
 
@@ -94,13 +104,21 @@ def create_invitation_acceptance_router(
             raise AuthError("SESSION_INVALID")
         if current.session_generation != initial.session_generation:
             raise AuthError("STALE_SESSION_CONTEXT", 409)
-        return store.accept(
-            current,
-            session_binding=binding,
-            recipient_address=address,
-            token_sha256=token_sha256,
-            request_id=request_id,
-        )
+        try:
+            receipt = store.accept(
+                current,
+                session_binding=binding,
+                recipient_address=address,
+                token_sha256=token_sha256,
+                request_id=request_id,
+            )
+        except AuthError as error:
+            if (error.code, error.status) in _STORE_DENIALS:
+                raise AuthError(error.code, error.status) from None
+            raise AuthError("IDENTITY_STATE_UNAVAILABLE", 503, True) from None
+        if type(receipt) is not InvitationAcceptanceReceipt:
+            raise AuthError("IDENTITY_STATE_UNAVAILABLE", 503, True)
+        return InvitationAcceptanceReceipt.model_validate(receipt.model_dump(warnings=False))
 
     @router.post("/v1/invitations:accept")
     async def accept_invitation(request: Request) -> JSONResponse:
@@ -116,8 +134,6 @@ def create_invitation_acceptance_router(
             receipt = await run_in_threadpool(
                 accept, bearer, binding, digest(body.token), request_id
             )
-            if type(receipt) is not InvitationAcceptanceReceipt:
-                raise AuthError("IDENTITY_STATE_UNAVAILABLE", 503, True)
             return JSONResponse(
                 receipt.model_dump(),
                 status_code=202 if receipt.state == "awaiting_identity" else 200,

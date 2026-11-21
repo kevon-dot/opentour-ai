@@ -244,7 +244,7 @@ def test_acceptance_rejects_envelope_limit_and_url_token(acceptance) -> None:
 def test_acceptance_rejects_invalid_session_before_provider(acceptance, fault) -> None:
     headers = dict(acceptance.headers)
     if fault == "signature":
-        headers["Authorization"] = "Bearer generated_invalid"
+        headers["Authorization"] = "Bearer invalid"
     elif fault == "mismatched_binding":
         headers["Cookie"] = f"opentour-session={acceptance.identity.handle}"
     elif fault == "duplicate_cookie":
@@ -343,14 +343,32 @@ def test_protected_route_reads_the_exact_workos_recipient(acceptance, verified) 
         assert backend.close_complete()
 
 
-@pytest.mark.parametrize("failure", ["database", "invalid_projection"])
+@pytest.mark.parametrize(
+    ("code", "status"), [("CAPABILITY_DENIED", 403), ("INVITATION_EXPIRED", 410)]
+)
+def test_acceptance_returns_scoped_storage_denials(acceptance, code, status) -> None:
+    acceptance.store.accept.side_effect = AuthError(code, status)
+    response = acceptance.client.post(ROUTE, headers=acceptance.headers, json={"token": INVITE})
+    assert response.status_code == status and response.json()["code"] == code
+    assert ADDRESS not in response.text and INVITE not in response.text
+
+
+@pytest.mark.parametrize(
+    "failure", ["database", "invalid_projection", "unvalidated_receipt", "unrecognized_error"]
+)
 def test_acceptance_refuses_an_unconfirmed_write_without_credential_leak(
     acceptance, failure
 ) -> None:
     if failure == "database":
         acceptance.store.accept.side_effect = psycopg.OperationalError(f"{ADDRESS} {INVITE}")
-    else:
+    elif failure == "invalid_projection":
         acceptance.store.accept.return_value = {"email": ADDRESS, "token": INVITE}
+    elif failure == "unvalidated_receipt":
+        acceptance.store.accept.return_value = acceptance.store.accept.return_value.model_copy(
+            update={"state": "unexpected", "revision": "01"}
+        )
+    else:
+        acceptance.store.accept.side_effect = AuthError(f"{ADDRESS} {INVITE}", 409)
     response = acceptance.client.post(ROUTE, headers=acceptance.headers, json={"token": INVITE})
     assert response.status_code == 503 and response.json()["code"] == "IDENTITY_STATE_UNAVAILABLE"
     assert response.headers["Cache-Control"] == "no-store"
