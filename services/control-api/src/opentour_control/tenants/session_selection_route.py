@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import json
-import re
 import secrets
 from typing import Protocol
 
@@ -16,6 +14,7 @@ from opentour_control.auth.config import AuthError
 from opentour_control.auth.session import VerifiedIdentityContext
 from opentour_control.auth.workos_provider import VerifiedToken
 
+from ._request import credentials, json_body
 from .models import SetupError, key_digest
 from .session_selection import PostgresSessionSelection, SelectionReceipt, SessionSelectionRequest
 
@@ -24,45 +23,6 @@ class _SelectionEvidence(Protocol):
     def selection_evidence(
         self, token: str, binding: str
     ) -> tuple[VerifiedIdentityContext, VerifiedToken, str]: ...
-
-
-def _credentials(request: Request) -> tuple[str, str]:
-    authorization = request.headers.getlist("authorization")
-    bindings = [
-        cookie.partition("=")[2].strip()
-        for header in request.headers.getlist("cookie")
-        for cookie in header.split(";")
-        if cookie.partition("=")[0].strip() == "opentour-session"
-    ]
-    if (
-        len(authorization) != 1
-        or not authorization[0].startswith("Bearer ")
-        or not authorization[0][7:]
-        or len(bindings) != 1
-        or not re.fullmatch(r"[A-Za-z0-9_-]{32,128}", bindings[0])
-    ):
-        raise AuthError("SESSION_INVALID")
-    return authorization[0][7:], bindings[0]
-
-
-def _unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
-    value = dict(pairs)
-    if len(value) != len(pairs):
-        raise AuthError("SCHEMA_INVALID", 422)
-    return value
-
-
-async def _body(request: Request) -> SessionSelectionRequest:
-    raw = bytearray()
-    async for chunk in request.stream():
-        if len(raw) + len(chunk) > 16_384:
-            raise AuthError("SCHEMA_INVALID", 422)
-        raw.extend(chunk)
-    try:
-        value = json.loads(raw.decode("utf-8"), object_pairs_hook=_unique_object)
-    except (ValueError, RecursionError):
-        raise AuthError("SCHEMA_INVALID", 422) from None
-    return SessionSelectionRequest.parse(value)
 
 
 def create_session_selection_router(
@@ -92,7 +52,7 @@ def create_session_selection_router(
     async def select_organization(request: Request) -> JSONResponse:
         request_id = secrets.token_hex(16)
         try:
-            token, binding = _credentials(request)
+            token, binding = credentials(request)
             keys = request.headers.getlist("idempotency-key")
             if len(keys) != 1 or request.query_params:
                 raise AuthError("SCHEMA_INVALID", 422)
@@ -100,7 +60,7 @@ def create_session_selection_router(
                 key_digest(keys[0])
             except SetupError:
                 raise AuthError("SCHEMA_INVALID", 422) from None
-            body = await _body(request)
+            body = SessionSelectionRequest.parse(await json_body(request))
             result = await run_in_threadpool(select, token, binding, keys[0], body, request_id)
             return JSONResponse(result.wire(), headers=headers)
         except AuthError as error:
