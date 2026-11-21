@@ -78,6 +78,58 @@ class InvitationAcceptanceStore(Protocol):
         ...
 
 
+class InvitationProgressReader(Protocol):
+    def progress(
+        self,
+        identity: VerifiedIdentityContext,
+        *,
+        session_binding: str,
+        operation_id: str,
+        bearer_expires_at: datetime,
+    ) -> InvitationAcceptanceReceipt: ...
+
+
+class InvitationProgressService:
+    """Authorize reading the recipient's own pending operation before organization selection."""
+
+    def __init__(self, sessions: SessionService, reader: InvitationProgressReader) -> None:
+        self._sessions = sessions
+        self._reader = reader
+
+    def read(
+        self, bearer: str, session_binding: str, operation_id: str
+    ) -> InvitationAcceptanceReceipt:
+        identity, bearer_expires_at = self._sessions.verified_identity_with_expiry(
+            bearer, session_binding, IdentityUse.RECIPIENT_INVITATION
+        )
+        if (
+            not isinstance(operation_id, str)
+            or not 1 <= len(operation_id) <= 256
+            or _TOKEN_CONTROLS.search(operation_id)
+        ):
+            raise AuthError("RESOURCE_NOT_FOUND", 404)
+        try:
+            operation_id.encode("utf-8")
+        except UnicodeEncodeError:
+            raise AuthError("RESOURCE_NOT_FOUND", 404) from None
+        receipt = self._reader.progress(
+            identity,
+            session_binding=session_binding,
+            operation_id=operation_id,
+            bearer_expires_at=bearer_expires_at,
+        )
+        if (
+            type(receipt) is not InvitationAcceptanceReceipt
+            or receipt.operation_id != operation_id
+            or receipt.state != "awaiting_identity"
+        ):
+            raise AuthError("IDENTITY_STATE_UNAVAILABLE", 503, True)
+        try:
+            return InvitationAcceptanceReceipt.model_validate(receipt.model_dump(warnings=False))
+        except ValidationError:
+            raise AuthError("IDENTITY_STATE_UNAVAILABLE", 503, True) from None
+
+
 def create_invitation_acceptance_router(
     sessions: SessionService,
     recipients: VerifiedRecipientProvider,
