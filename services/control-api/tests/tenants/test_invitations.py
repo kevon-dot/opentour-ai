@@ -354,7 +354,8 @@ def test_acceptance_returns_scoped_storage_denials(acceptance, code, status) -> 
 
 
 @pytest.mark.parametrize(
-    "failure", ["database", "invalid_projection", "unvalidated_receipt", "unrecognized_error"]
+    "failure",
+    ["database", "invalid_projection", "unvalidated_receipt", "unrecognized_error", "unexpected"],
 )
 def test_acceptance_refuses_an_unconfirmed_write_without_credential_leak(
     acceptance, failure
@@ -367,8 +368,10 @@ def test_acceptance_refuses_an_unconfirmed_write_without_credential_leak(
         acceptance.store.accept.return_value = acceptance.store.accept.return_value.model_copy(
             update={"state": "unexpected", "revision": "01"}
         )
-    else:
+    elif failure == "unrecognized_error":
         acceptance.store.accept.side_effect = AuthError(f"{ADDRESS} {INVITE}", 409)
+    else:
+        acceptance.store.accept.side_effect = RuntimeError(f"{ADDRESS} {INVITE}")
     response = acceptance.client.post(ROUTE, headers=acceptance.headers, json={"token": INVITE})
     assert response.status_code == 503 and response.json()["code"] == "IDENTITY_STATE_UNAVAILABLE"
     assert response.headers["Cache-Control"] == "no-store"

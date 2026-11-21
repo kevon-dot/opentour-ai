@@ -6,7 +6,6 @@ import re
 import secrets
 from typing import Annotated, Literal, Protocol
 
-import psycopg
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 from pydantic import Field, ValidationError, field_validator, model_validator
@@ -75,7 +74,7 @@ class InvitationAcceptanceStore(Protocol):
         token_sha256: str,
         request_id: str,
     ) -> InvitationAcceptanceReceipt:
-        """Verify and commit or replay the scoped acceptance within the storage transaction."""
+        """Verify and commit, or replay the stored receipt with its original request ID."""
         ...
 
 
@@ -141,7 +140,7 @@ def create_invitation_acceptance_router(
             )
         except AuthError as error:
             return JSONResponse(error.wire(request_id), status_code=error.status, headers=headers)
-        except (psycopg.Error, ValidationError):
+        except Exception:
             unavailable = AuthError("IDENTITY_STATE_UNAVAILABLE", 503, True)
             return JSONResponse(unavailable.wire(request_id), status_code=503, headers=headers)
 
