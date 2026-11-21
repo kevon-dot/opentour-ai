@@ -391,6 +391,7 @@ def test_prepares_exact_approved_scope_and_immutable_input(
     assert configuration["parameters"] == parameters
     assert configuration["profile_sha256"]["network_profile"] == "3" * 64
     assert len(configuration["resource_configuration_sha256"]) == 7
+    assert "cloudformation_parameters" not in configuration
     assert configuration["images"]["trainer"].endswith(f"@sha256:{parameters['trainer_digest']}")
     parameters["subnet_ids"].clear()
     assert json.loads(result.configuration) == configuration
@@ -674,6 +675,7 @@ def test_storage_resources_use_the_same_compiler_in_both_modes(
         certificate_arn=None,
     )
     customer = json.loads(compile_storage(profiles=profiles).configuration)
+    assert managed["cloudformation_parameters"] == customer["cloudformation_parameters"]
     assert managed["cloudformation_resources"] == customer["cloudformation_resources"]
     assert managed["kms_key_policy_sha256"] == customer["kms_key_policy_sha256"]
     assert managed["parameters"]["network_profile"] != customer["parameters"]["network_profile"]
@@ -727,8 +729,10 @@ def test_common_template_retained_storage_matches_compiled_configuration(
     template = json.loads(prepared.verified_template(template_bytes))
     with pytest.raises(CellInstallRefused, match="^CELL_INSTALL_TEMPLATE_MISMATCH$"):
         prepared.verified_template(template_bytes + b" ")
-    resources = json.loads(prepared.configuration)["cloudformation_resources"]
-    bindings = {
+    configuration = json.loads(prepared.configuration)
+    resources = configuration["cloudformation_resources"]
+    bindings = configuration["cloudformation_parameters"]
+    assert bindings == {
         "TrainerStorageKmsKeyArn": approved_storage.trainer.kms_key_arn,
         "EvaluatorStorageKmsKeyArn": approved_storage.evaluator.kms_key_arn,
         "EvidenceStorageKmsKeyArn": approved_storage.evidence.kms_key_arn,

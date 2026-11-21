@@ -40,6 +40,10 @@ _STORAGE_LAYOUT = {
     "evidence": ("EvidenceStorage", "trainer"),
     "artifact": ("ArtifactStorage", None),
 }
+_STORAGE_KEY_PARAMETERS = {
+    name: f"{logical_id}KmsKeyArn" for name, (logical_id, _) in _STORAGE_LAYOUT.items()
+}
+_STORAGE_ROLE_PARAMETERS = {"trainer": "TrainerRoleArn", "evaluator": "EvaluatorRoleArn"}
 _Arn = str | dict[str, str]
 _KMS_CROSS_ROLE_READ_ACTIONS = frozenset({"kms:Decrypt", "kms:ReEncryptFrom"})
 
@@ -301,7 +305,7 @@ def compile_cell_storage(
     storage: ApprovedCellStorage,
     key_policies: Mapping[str, bytes],
 ) -> PreparedCellInstall:
-    """Compile a resource fragment with its immutable input and trusted resource digests.
+    """Compile the validated retained-storage parameters, resources, and input digests.
 
     Deployment authority supplies inventory and the default GetKeyPolicy text encoded
     unchanged as UTF-8, indexed by the exact ARN used in the authenticated request.
@@ -357,6 +361,10 @@ def compile_cell_storage(
             None if denied is None else roles[denied],
         )
     configuration["kms_key_policy_sha256"] = key_policy_digests
+    configuration["cloudformation_parameters"] = {
+        **{parameter: keys[name] for name, parameter in _STORAGE_KEY_PARAMETERS.items()},
+        **{parameter: roles[name] for name, parameter in _STORAGE_ROLE_PARAMETERS.items()},
+    }
     configuration["cloudformation_resources"] = _storage_resources(keys, roles)
     return _prepared_configuration(configuration)
 
@@ -415,10 +423,8 @@ def _qualified_key_policy(
 
 def retained_storage_template_section() -> dict[str, dict[str, object]]:
     """Generate the static template section using deployment-internal ARN parameters."""
-    key_refs = {
-        name: {"Ref": f"{logical_id}KmsKeyArn"} for name, (logical_id, _) in _STORAGE_LAYOUT.items()
-    }
-    role_refs = {"trainer": {"Ref": "TrainerRoleArn"}, "evaluator": {"Ref": "EvaluatorRoleArn"}}
+    key_refs = {name: {"Ref": parameter} for name, parameter in _STORAGE_KEY_PARAMETERS.items()}
+    role_refs = {name: {"Ref": parameter} for name, parameter in _STORAGE_ROLE_PARAMETERS.items()}
     return {
         "Parameters": {
             **{
