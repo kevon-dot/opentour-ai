@@ -1,7 +1,10 @@
 import json
+from email.message import Message
+from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import create_autospec
+from urllib.response import addinfourl
 
 import psycopg
 import pytest
@@ -9,6 +12,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from jsonschema import Draft202012Validator
 from opentour_control.auth.config import AuthError, digest
+from opentour_control.auth.workos_provider import WorkOSMembershipProvider, create_workos_client
 from opentour_control.tenants.invitations import (
     InvitationAcceptanceReceipt,
     InvitationAcceptanceStore,
@@ -286,6 +290,57 @@ def test_acceptance_propagates_safe_provider_refusal_before_any_write(
     )
     validator_common.validate(response.json())
     acceptance.store.accept.assert_not_called()
+
+
+@pytest.mark.parametrize("verified", [True, False])
+def test_protected_route_reads_the_exact_workos_recipient(acceptance, verified) -> None:
+    profile = acceptance.identity.config
+    client, backend = create_workos_client("generated-provider-key", profile)
+    calls = []
+
+    def get_user(request, timeout):
+        calls.append((request.get_method(), request.full_url))
+        assert 0 < timeout <= 5
+        payload = {
+            "object": "user",
+            "id": "user_invitee",
+            "email": ADDRESS,
+            "email_verified": verified,
+            "first_name": None,
+            "last_name": None,
+            "profile_picture_url": None,
+            "external_id": None,
+            "last_sign_in_at": None,
+            "created_at": "2026-01-01T00:00:00Z",
+            "updated_at": "2026-01-01T00:00:00Z",
+        }
+        headers = Message()
+        headers["Content-Type"] = "application/json"
+        return addinfourl(BytesIO(json.dumps(payload).encode()), headers, request.full_url, 200)
+
+    backend.opener = SimpleNamespace(open=get_user)
+    app = FastAPI()
+    app.include_router(
+        create_invitation_acceptance_router(
+            acceptance.identity.service, WorkOSMembershipProvider(client, profile), acceptance.store
+        )
+    )
+    try:
+        with TestClient(app) as protected:
+            response = protected.post(ROUTE, headers=acceptance.headers, json={"token": INVITE})
+        assert calls == [("GET", "https://api.workos.com/user_management/users/user_invitee")]
+        if verified:
+            assert response.status_code == 202
+            assert acceptance.store.accept.call_args.kwargs["recipient_address"] == ADDRESS
+            assert acceptance.store.accept.call_args.kwargs["token_sha256"] == digest(INVITE)
+        else:
+            assert response.status_code == 403
+            assert response.json()["code"] == "EMAIL_VERIFICATION_REQUIRED"
+            acceptance.store.accept.assert_not_called()
+        assert ADDRESS not in response.text and INVITE not in response.text
+    finally:
+        client.close()
+        assert backend.close_complete()
 
 
 @pytest.mark.parametrize("failure", ["database", "invalid_projection"])
