@@ -412,13 +412,16 @@ def test_composed_control_auth_routes_share_the_durable_session(durable, monkeyp
         }
         context_path = "/v1/session/context"
         selection_path = "/v1/session:select-organization"
+        terms_path = "/v1/organization-terms"
         assert Counter(
             (route.path, method)
             for route in iter_route_contexts(app.routes)
             for method in route.methods or ()
-        ) == {(context_path, "GET"): 1, (selection_path, "POST"): 1}
+        ) == {(context_path, "GET"): 1, (selection_path, "POST"): 1, (terms_path, "GET"): 1}
         body = {"organization_id": org.local, "expected_session_generation": 0}
         with TestClient(app) as client:
+            terms = client.get(terms_path)
+            assert (terms.status_code, terms.json()["code"]) == (503, "TERMS_UNAVAILABLE")
             malformed = client.post(
                 selection_path, json={**body, "unexpected": "generated"}, headers=headers
             )

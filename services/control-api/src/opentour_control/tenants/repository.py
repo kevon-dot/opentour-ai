@@ -22,6 +22,7 @@ from .models import (
     OperationView,
     PublishedTerms,
     SetupError,
+    TermsView,
     advance_revision,
     correlation,
     server_time,
@@ -101,6 +102,64 @@ FROM opentour_tenants.provisioning_operations p
 JOIN opentour_tenants.organizations o ON o.id=p.organization_id
 WHERE p.id=%s
 """
+_PUBLISHED_TERMS_SELECT = """
+SELECT v.revision,v.document_url,v.effective_at
+FROM opentour_tenants.terms_publication p JOIN opentour_tenants.terms_versions v
+ON p.revision=v.revision WHERE p.singleton
+"""
+
+
+def read_public_organization_terms(connect: ConnectionFactory) -> TermsView:
+    """Read only the published projection with a separate terms-reader login."""
+    with connect() as conn:
+        role = conn.execute(
+            """
+            SELECT current_setting('transaction_read_only') = 'on'
+                AND NOT (rolsuper OR rolbypassrls OR rolcreaterole OR rolcreatedb OR rolreplication)
+                AND NOT EXISTS (
+                    SELECT FROM pg_roles AS grant_role
+                    WHERE grant_role.rolname IN (
+                        'opentour_tenant_runtime', 'opentour_provisioner',
+                        'opentour_grant_runtime', 'opentour_authority_coordinator',
+                        'opentour_selection_runtime', 'pg_read_all_data', 'pg_write_all_data'
+                    )
+                    AND pg_has_role(current_user, grant_role.oid, 'MEMBER')
+                )
+                AND NOT EXISTS (
+                    SELECT FROM pg_class AS relation
+                    JOIN pg_namespace AS namespace ON namespace.oid = relation.relnamespace
+                    WHERE starts_with(namespace.nspname, 'opentour_')
+                    AND relation.relkind IN ('r', 'p', 'v', 'm', 'f')
+                    AND relation.oid NOT IN (
+                        'opentour_tenants.terms_versions'::regclass,
+                        'opentour_tenants.terms_publication'::regclass
+                    )
+                    AND (
+                        has_any_column_privilege(relation.oid, 'SELECT,INSERT,UPDATE,REFERENCES')
+                        OR has_table_privilege(relation.oid, 'DELETE,TRUNCATE,TRIGGER')
+                    )
+                )
+                AND NOT has_any_column_privilege(
+                    'opentour_tenants.terms_versions', 'INSERT,UPDATE,REFERENCES'
+                )
+                AND NOT has_any_column_privilege(
+                    'opentour_tenants.terms_publication', 'INSERT,UPDATE,REFERENCES'
+                )
+                AND NOT has_table_privilege(
+                    'opentour_tenants.terms_versions', 'DELETE,TRUNCATE,TRIGGER'
+                )
+                AND NOT has_table_privilege(
+                    'opentour_tenants.terms_publication', 'DELETE,TRUNCATE,TRIGGER'
+                ) AS allowed
+            FROM pg_roles WHERE rolname=current_user
+            """
+        ).fetchone()
+        if role is None or not role["allowed"]:
+            raise SetupError("TERMS_UNAVAILABLE", 503)
+        row = conn.execute(_PUBLISHED_TERMS_SELECT).fetchone()
+        if row is None:
+            raise SetupError("TERMS_UNAVAILABLE", 503)
+        return PublishedTerms(**row).current_view(datetime.now(UTC))
 
 
 def operation(row: dict[str, Any] | None) -> Operation:
@@ -192,9 +251,7 @@ class PostgresOrganizationRepository:
         row = conn.execute(
             "SELECT revision,document_url,effective_at FROM opentour_tenants.locked_current_terms()"
             if lock
-            else "SELECT v.revision,v.document_url,v.effective_at "
-            "FROM opentour_tenants.terms_publication p JOIN opentour_tenants.terms_versions v "
-            "ON p.revision=v.revision WHERE p.singleton"
+            else _PUBLISHED_TERMS_SELECT
         ).fetchone()
         if row is None:
             raise SetupError("TERMS_UNAVAILABLE", 503)
