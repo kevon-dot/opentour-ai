@@ -1,4 +1,5 @@
 import json
+from datetime import timedelta
 from email.message import Message
 from io import BytesIO
 from pathlib import Path
@@ -196,6 +197,7 @@ def test_acceptance_uses_preorganization_identity_and_digest_only(
         "session_binding": acceptance.binding,
         "recipient_address": ADDRESS,
         "token_sha256": digest(INVITE),
+        "bearer_expires_at": acceptance.identity.now + timedelta(minutes=10),
     }
     assert ADDRESS not in response.text and INVITE not in response.text
 
