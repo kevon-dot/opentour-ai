@@ -16,7 +16,7 @@ from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
-from typing import Any, Literal, Protocol
+from typing import Any, Literal, Protocol, TypedDict
 from urllib.parse import parse_qsl, urlsplit
 from xml.etree import ElementTree
 
@@ -24,7 +24,7 @@ from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import ec
 from opentour_journal.crypto import canonical, raw_to_der
-from opentour_journal.models import JournalError
+from opentour_journal.models import MAX_REVISION, JournalError
 
 MAX_STS_RESPONSE_BYTES = 16 * 1024
 _PROOF_ADMITTED = object()
@@ -45,6 +45,10 @@ STS_QUERY_FIELDS = {
     "X-Amz-Signature",
     "X-Amz-SignedHeaders",
 }
+
+
+class InvalidEnrollmentChallenge(ValueError):
+    """The challenge request or the projection of an issued challenge is invalid."""
 
 
 class InvalidEnrollmentProof(ValueError):
@@ -113,6 +117,29 @@ class IssuedChallenge:
 
 
 @dataclass(frozen=True)
+class EnrollmentChallengeRequest:
+    expected_environment_revision: int
+    mode: Literal["initial", "rotation", "recovery"]
+
+
+class EnrollmentChallengeResponse(TypedDict):
+    challenge_id: str
+    nonce: str | None
+    secret_unavailable: bool
+    expires_at: str
+    organization_id: str
+    environment_id: str
+    cell_id: str
+    aws_account_id: str
+    iam_role_arn: str
+    expected_iam_role_id: str | None
+    region: Literal["us-east-1"]
+    deployment_mode: Literal["opentour_managed", "customer_controlled"]
+    installer_sha256: str
+    proof_schema_version: Literal["opentour-enrollment-v1"]
+
+
+@dataclass(frozen=True)
 class VerifiedEnrollmentIdentity:
     """A verified identity candidate. Only an atomic challenge commit can enroll it."""
 
@@ -163,6 +190,84 @@ def _decoded_32(encoded: object) -> bytes:
     if _encoded(raw) != encoded:
         raise _deny()
     return raw
+
+
+def parse_enrollment_challenge_request(body: bytes) -> EnrollmentChallengeRequest:
+    """Decode the closed challenge request from bounded Control ingress bytes."""
+    try:
+        request = _object(
+            json.loads(body.decode("utf-8"), object_pairs_hook=_unique_object),
+            {"expected_environment_revision", "mode"},
+        )
+        revision = request["expected_environment_revision"]
+        mode = request["mode"]
+        if (
+            not isinstance(revision, str)
+            or re.fullmatch(r"[1-9][0-9]{0,18}", revision) is None
+            or int(revision) > MAX_REVISION
+            or mode not in ("initial", "rotation", "recovery")
+        ):
+            raise ValueError
+        return EnrollmentChallengeRequest(int(revision), mode)
+    except (ValueError, RecursionError):
+        raise InvalidEnrollmentChallenge("ENROLLMENT_CHALLENGE_INVALID") from None
+
+
+def enrollment_challenge_response(
+    challenge: IssuedChallenge, *, nonce: str | None
+) -> EnrollmentChallengeResponse:
+    """Project the issued metadata. A durable replay supplies its original record and no nonce."""
+    installed = challenge.installed
+    ids = (challenge.id, installed.organization_id, installed.environment_id, installed.cell_id)
+    expires_at = challenge.expires_at
+    role_id = installed.expected_iam_role_id
+    if (
+        any(not isinstance(value, str) or not 1 <= len(value) <= 256 for value in ids)
+        or installed.region != "us-east-1"
+        or installed.deployment_mode not in ("opentour_managed", "customer_controlled")
+        or not isinstance(installed.aws_account_id, str)
+        or re.fullmatch(r"[0-9]{12}", installed.aws_account_id) is None
+        or not isinstance(installed.iam_role_arn, str)
+        or len(installed.iam_role_arn) > 1024
+        or not installed.iam_role_arn.startswith(f"arn:aws:iam::{installed.aws_account_id}:role/")
+        or installed.iam_role_arn.endswith("/")
+        or (role_id is not None and (not isinstance(role_id, str) or not 1 <= len(role_id) <= 1024))
+        or not isinstance(installed.installer_sha256, str)
+        or re.fullmatch(r"[a-f0-9]{64}", installed.installer_sha256) is None
+        or not isinstance(challenge.nonce_sha256, str)
+        or re.fullmatch(r"[a-f0-9]{64}", challenge.nonce_sha256) is None
+        or not isinstance(expires_at, datetime)
+        or expires_at.utcoffset() is None
+    ):
+        raise InvalidEnrollmentChallenge("ENROLLMENT_CHALLENGE_INVALID")
+
+    try:
+        expires_utc = expires_at.astimezone(UTC)
+        if expires_utc.microsecond % 1000:
+            raise ValueError
+        if nonce is not None:
+            nonce_digest = hashlib.sha256(_decoded_32(nonce)).hexdigest()
+            if not hmac.compare_digest(nonce_digest, challenge.nonce_sha256):
+                raise ValueError
+    except (ValueError, OverflowError):
+        raise InvalidEnrollmentChallenge("ENROLLMENT_CHALLENGE_INVALID") from None
+
+    return {
+        "challenge_id": challenge.id,
+        "nonce": nonce,
+        "secret_unavailable": nonce is None,
+        "expires_at": expires_utc.isoformat(timespec="milliseconds").replace("+00:00", "Z"),
+        "organization_id": installed.organization_id,
+        "environment_id": installed.environment_id,
+        "cell_id": installed.cell_id,
+        "aws_account_id": installed.aws_account_id,
+        "iam_role_arn": installed.iam_role_arn,
+        "expected_iam_role_id": role_id,
+        "region": "us-east-1",
+        "deployment_mode": installed.deployment_mode,
+        "installer_sha256": installed.installer_sha256,
+        "proof_schema_version": "opentour-enrollment-v1",
+    }
 
 
 def _validate_sts_request(
