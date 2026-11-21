@@ -245,6 +245,7 @@ def test_connection_budget_refuses_unsafe_or_coerced_values(kwargs: dict[str, An
 @pytest.mark.parametrize(
     ("kind", "property", "before", "after"),
     [
+        ("AWS::ECS::Service", "EnableExecuteCommand", False, True),
         ("AWS::ECS::TaskDefinition", "TaskRoleArn", "scoped", "administrator"),
         ("AWS::RDS::DBInstance", "PubliclyAccessible", False, True),
         (
