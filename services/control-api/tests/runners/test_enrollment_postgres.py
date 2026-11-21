@@ -14,6 +14,7 @@ from uuid import uuid4
 import pytest
 from opentour_control.auth.repository import connection_factory
 from opentour_control.runners.enrollment import (
+    EnrollmentVerificationUnavailable,
     InstalledCell,
     IssuedChallenge,
     enrollment_proof_sha256,
@@ -366,24 +367,69 @@ def test_unavailable_exchange_can_only_retry_exact_claimed_proof(scenario):
     challenge = issue(s)
     op = "lost-reply"
     raw = fixture_json(proof_for(challenge.installed, challenge))
-    pending = s.store.prepare_proof(s.scope, challenge.id, op, raw)
-    assert pending == challenge
     exchange = FixtureSTSExchange(failure=TimeoutError())
-    from opentour_control.runners.enrollment import EnrollmentVerificationUnavailable
 
     with pytest.raises(EnrollmentVerificationUnavailable):
-        verify_enrollment_identity(
-            raw,
-            installed=challenge.installed,
-            challenge=pending,
-            exchange=exchange,
-            clock=lambda: s.time.now,
-        )
+        s.store.accept_proof(s.scope, challenge.id, op, raw, exchange=exchange)
+    assert len(exchange.calls) == 1
+    assert facts(s) == ((0, 0, 0), 1)
+
     restarted = PostgresEnrollmentStore(s.connect, s.authority, clock=lambda: s.time.now)
-    assert restarted.prepare_proof(s.scope, challenge.id, op, raw) == challenge
+    retry = FixtureSTSExchange(aws_sts_xml())
+    with pytest.raises(EnrollmentStoreError, match="^ENROLLMENT_NOT_FOUND$"):
+        restarted.accept_proof(
+            replace(s.scope, organization_id="foreign-org"),
+            challenge.id,
+            op,
+            raw,
+            exchange=retry,
+        )
     changed = fixture_json(proof_for(challenge.installed, challenge, key_seed=8))
     with pytest.raises(EnrollmentStoreError, match="^IDEMPOTENCY_CONFLICT$"):
-        restarted.prepare_proof(s.scope, challenge.id, op, changed)
+        restarted.accept_proof(s.scope, challenge.id, op, changed, exchange=retry)
+    assert retry.calls == []
+    assert facts(s) == ((0, 0, 0), 1)
+
+    receipt = restarted.accept_proof(s.scope, challenge.id, op, raw, exchange=retry)
+    assert receipt.identity_epoch == 1 and receipt.bound_role_id == AWS_ROLE_ID
+    assert len(retry.calls) == 1
+    assert facts(s) == ((1, 1, 1), 2)
+
+
+def test_accept_proof_replays_committed_receipt_after_lost_ack_without_sts(scenario):
+    s = scenario
+    challenge = issue(s)
+    op = "lost-acknowledgment"
+    raw = fixture_json(proof_for(challenge.installed, challenge))
+    exchange = FixtureSTSExchange(aws_sts_xml())
+    committed = s.store.accept_proof(s.scope, challenge.id, op, raw, exchange=exchange)
+    assert committed.identity_epoch == 1 and committed.bound_role_id == AWS_ROLE_ID
+    assert len(exchange.calls) == 1
+    assert facts(s) == ((1, 1, 1), 2)
+
+    s.time.now = NOW + timedelta(minutes=10)
+    restarted = PostgresEnrollmentStore(s.connect, s.authority, clock=lambda: s.time.now)
+    replay = FixtureSTSExchange(failure=AssertionError("receipt replay must bypass STS"))
+    assert restarted.accept_proof(s.scope, challenge.id, op, raw, exchange=replay) == committed
+    assert replay.calls == []
+    assert facts(s) == ((1, 1, 1), 2)
+
+
+def test_accept_proof_rechecks_qualified_installation_after_sts(scenario):
+    s = scenario
+    challenge = issue(s)
+    raw = fixture_json(proof_for(challenge.installed, challenge))
+
+    class ChangedInstallationExchange(FixtureSTSExchange):
+        def get_caller_identity(self, validated, *, max_response_bytes):
+            response = super().get_caller_identity(validated, max_response_bytes=max_response_bytes)
+            owner_update(s, install_digest="c" * 64)
+            return response
+
+    exchange = ChangedInstallationExchange(aws_sts_xml())
+    with pytest.raises(EnrollmentStoreError, match="^STALE_REVISION$"):
+        s.store.accept_proof(s.scope, challenge.id, "changed-install", raw, exchange=exchange)
+    assert len(exchange.calls) == 1
     assert facts(s) == ((0, 0, 0), 1)
 
 
