@@ -123,6 +123,7 @@ DECLARE
     member opentour_tenants.memberships%ROWTYPE;
     receipt opentour_invitation.receipts%ROWTYPE;
     member_exists boolean;
+    membership_checked_at timestamptz;
     deadline timestamptz;
     now_utc timestamptz;
 BEGIN
@@ -207,10 +208,6 @@ BEGIN
     SELECT m.* INTO member FROM opentour_tenants.memberships m
         WHERE m.organization_id = local_org AND m.issuer = p_issuer AND m.subject = p_subject FOR UPDATE;
     member_exists := FOUND;
-    IF member_exists AND member.provider_membership_id IS NOT NULL THEN
-        PERFORM 1 FROM opentour_identity.membership_observations o
-            WHERE o.issuer = p_issuer AND o.membership_id = member.provider_membership_id FOR SHARE;
-    END IF;
     IF (member_exists AND member.status = 'removed') OR EXISTS (
         SELECT 1 FROM opentour_identity.membership_observations o
         WHERE o.issuer = p_issuer AND o.organization_id = organization.identity_org_id
@@ -218,13 +215,18 @@ BEGIN
     ) THEN
         RAISE EXCEPTION 'CAPABILITY_DENIED';
     END IF;
-    IF member_exists AND member.status = 'active' AND EXISTS (
-        SELECT 1 FROM opentour_identity.membership_observations o
-        WHERE o.issuer = p_issuer AND o.membership_id = member.provider_membership_id
-            AND (o.organization_id <> organization.identity_org_id OR o.subject <> p_subject
-                OR o.locally_denied OR o.status <> 'active')
-    ) THEN
-        RAISE EXCEPTION 'CAPABILITY_DENIED';
+    IF member_exists AND member.status = 'active' THEN
+        SELECT o.checked_at INTO membership_checked_at FROM opentour_identity.membership_observations o
+            WHERE o.issuer = p_issuer AND o.membership_id = member.provider_membership_id
+                AND o.organization_id = organization.identity_org_id AND o.subject = p_subject
+                AND o.status = 'active' AND NOT o.locally_denied
+            FOR SHARE OF o;
+        now_utc := clock_timestamp();
+        IF NOT FOUND OR membership_checked_at > now_utc
+            OR membership_checked_at < now_utc - interval '30 seconds'
+        THEN
+            RAISE EXCEPTION 'IDENTITY_STATE_UNAVAILABLE';
+        END IF;
     END IF;
 
     IF invite.status = 'consumed' THEN
@@ -287,9 +289,15 @@ BEGIN
             RAISE EXCEPTION 'INVITATION_EXPIRED';
         END IF;
     END IF;
-    -- A failure here rolls back membership, consumption, receipt and outbox together.
-    IF clock_timestamp() >= deadline THEN
+    -- Recheck after the final writes and any waits they incurred.
+    now_utc := clock_timestamp();
+    IF now_utc >= deadline THEN
         RAISE EXCEPTION 'SESSION_INVALID';
+    END IF;
+    IF membership_checked_at IS NOT NULL AND (
+        membership_checked_at > now_utc OR membership_checked_at < now_utc - interval '30 seconds'
+    ) THEN
+        RAISE EXCEPTION 'IDENTITY_STATE_UNAVAILABLE';
     END IF;
     RETURN QUERY SELECT receipt.invitation_id, receipt.membership_id, receipt.operation_id,
         receipt.state, receipt.revision::text, receipt.request_id;

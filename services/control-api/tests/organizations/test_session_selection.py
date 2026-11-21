@@ -597,7 +597,7 @@ def test_invitation_acceptance_commits_once_and_replays_exact_receipt(durable, a
     assert retained == effects
 
 
-def test_invitation_existing_active_member_does_not_change_role_or_queue_work(durable, acceptance):
+def test_invitation_active_member_requires_provider_observation(durable, acceptance):
     membership_id = uuid4().hex
     provider_membership_id = f"generated-existing-provider-{membership_id}"
     with durable.owner() as conn:
@@ -613,6 +613,15 @@ def test_invitation_existing_active_member_does_not_change_role_or_queue_work(du
                 durable.now,
             ),
         )
+    before = invitation_effects(durable, acceptance)
+    _, membership_before, _ = before
+    missing = expect("^IDENTITY_STATE_UNAVAILABLE$", acceptance.accept)
+    assert missing.status == 503 and missing.retryable
+    assert invitation_effects(durable, acceptance) == before
+    assert_invitation_pending(durable, acceptance, existing="active")
+
+    stale_at = durable.now - timedelta(seconds=31)
+    with durable.owner() as conn:
         conn.execute(
             "INSERT INTO opentour_identity.membership_observations "
             "VALUES (%s,%s,%s,%s,'active',false,%s,%s,1)",
@@ -621,11 +630,20 @@ def test_invitation_existing_active_member_does_not_change_role_or_queue_work(du
                 provider_membership_id,
                 durable.orgs["a"].remote_org,
                 acceptance.subject,
-                durable.now,
-                durable.now,
+                stale_at,
+                stale_at,
             ),
         )
-    _, before, _ = invitation_effects(durable, acceptance)
+    stale = expect("^IDENTITY_STATE_UNAVAILABLE$", acceptance.accept)
+    assert stale.status == 503 and stale.retryable
+    assert invitation_effects(durable, acceptance) == before
+
+    with durable.owner() as conn:
+        conn.execute(
+            "UPDATE opentour_identity.membership_observations SET checked_at=clock_timestamp() "
+            "WHERE issuer=%s AND membership_id=%s",
+            (ISSUER, provider_membership_id),
+        )
     receipt = acceptance.accept()
     assert receipt.state == "already_member"
     assert receipt.membership_id == membership_id
@@ -638,7 +656,7 @@ def test_invitation_existing_active_member_does_not_change_role_or_queue_work(du
         "accepted_issuer": ISSUER,
         "accepted_subject": acceptance.subject,
     }
-    assert membership == before
+    assert membership == membership_before
     assert effects == {"receipts": 1, "events": 0, "grants": 0}
 
 
