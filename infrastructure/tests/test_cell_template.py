@@ -567,11 +567,21 @@ def approved_storage(parameters, approved_profiles, inventory, key_policies) -> 
 
 @pytest.fixture
 def compile_storage(preparation_inputs, approved_storage, key_policies):
-    def run(**overrides):
+    checked_in_template = CELL_TEMPLATE.read_bytes()
+
+    def run(*, template=checked_in_template, **overrides):
+        release = replace(
+            preparation_inputs["release"], template_sha256=hashlib.sha256(template).hexdigest()
+        )
         return compile_cell_storage(
             **(
                 preparation_inputs
-                | {"storage": approved_storage, "key_policies": key_policies}
+                | {
+                    "template": template,
+                    "release": release,
+                    "storage": approved_storage,
+                    "key_policies": key_policies,
+                }
                 | overrides
             )
         )
@@ -725,7 +735,7 @@ def test_common_template_retained_storage_matches_compiled_configuration(
             certificate_arn=None,
         )
 
-    prepared = compile_storage(release=release, profiles=profiles)
+    prepared = compile_storage(template=template_bytes, release=release, profiles=profiles)
     template = json.loads(prepared.verified_template(template_bytes))
     with pytest.raises(CellInstallRefused, match="^CELL_INSTALL_TEMPLATE_MISMATCH$"):
         prepared.verified_template(template_bytes + b" ")
@@ -747,6 +757,116 @@ def test_common_template_retained_storage_matches_compiled_configuration(
         assert re.fullmatch(definition["AllowedPattern"], arn)
     storage = {name: template["Resources"][name] for name in resources}
     assert _resolve_storage_parameters(storage, bindings) == resources
+
+
+@pytest.mark.parametrize(
+    ("path", "replacement"),
+    [
+        pytest.param(
+            ("Resources", "EvaluatorStoragePolicy", "Properties", "PolicyDocument", "Statement", 0),
+            None,
+            id="remove-opposite-workload-deny",
+        ),
+        pytest.param(
+            (
+                "Resources",
+                "EvaluatorStoragePolicy",
+                "Properties",
+                "PolicyDocument",
+                "Statement",
+                0,
+                "Action",
+            ),
+            "s3:GetObject",
+            id="weaken-opposite-workload-deny",
+        ),
+        pytest.param(
+            (
+                "Resources",
+                "TrainerStorage",
+                "Properties",
+                "BucketEncryption",
+                "ServerSideEncryptionConfiguration",
+                0,
+                "ServerSideEncryptionByDefault",
+                "KMSMasterKeyID",
+                "Ref",
+            ),
+            "EvaluatorStorageKmsKeyArn",
+            id="cross-key-ref",
+        ),
+        pytest.param(("Resources", "EvidenceStorage"), None, id="omit-retained-bucket"),
+        pytest.param(("Resources", "ArtifactStoragePolicy"), None, id="omit-retained-policy"),
+        pytest.param(("Parameters", "TrainerRoleArn"), None, id="omit-role-parameter"),
+        pytest.param(
+            ("Parameters", "EvaluatorStorageKmsKeyArn", "Default"),
+            "generated-unapproved-key",
+            id="add-key-parameter-default",
+        ),
+        pytest.param(
+            (
+                "Resources",
+                "ArtifactStorage",
+                "Properties",
+                "PublicAccessBlockConfiguration",
+                "BlockPublicPolicy",
+            ),
+            1,
+            id="replace-boolean-with-number",
+        ),
+    ],
+)
+def test_storage_compile_refuses_digest_pinned_template_drift(compile_storage, path, replacement):
+    document = read_json(CELL_TEMPLATE)
+    target = document
+    for key in path[:-1]:
+        target = target[key]
+    if replacement is None:
+        del target[path[-1]]
+    else:
+        target[path[-1]] = replacement
+
+    with pytest.raises(CellInstallRefused, match="^CELL_INSTALL_STORAGE_TEMPLATE_MISMATCH$"):
+        compile_storage(template=json.dumps(document).encode())
+
+
+@pytest.mark.parametrize(
+    "template",
+    [
+        pytest.param(b"[]", id="non-object"),
+        pytest.param(b'{"Parameters":[],"Resources":{}}', id="non-object-parameters"),
+        pytest.param(b'{"Parameters":{},"Resources":NaN}', id="non-json-number"),
+    ],
+)
+def test_storage_compile_refuses_invalid_digest_pinned_template(compile_storage, template):
+    with pytest.raises(CellInstallRefused, match="^CELL_INSTALL_STORAGE_TEMPLATE_MISMATCH$"):
+        compile_storage(template=template)
+
+
+def test_storage_compile_refuses_duplicate_digest_pinned_template_member(compile_storage):
+    original = CELL_TEMPLATE.read_bytes()
+    duplicate = original.replace(b'"Type": "String",', b'"Type": "String", "Type": "String",', 1)
+    assert duplicate != original
+    with pytest.raises(CellInstallRefused, match="^CELL_INSTALL_STORAGE_TEMPLATE_MISMATCH$"):
+        compile_storage(template=duplicate)
+
+
+def test_storage_compile_refuses_bytes_outside_release_pin(compile_storage, approved_release):
+    template = CELL_TEMPLATE.read_bytes()
+    release = replace(approved_release, template_sha256=hashlib.sha256(template).hexdigest())
+    with pytest.raises(CellInstallRefused, match="^CELL_INSTALL_TEMPLATE_MISMATCH$"):
+        compile_storage(template=template + b" ", release=release)
+
+
+def test_storage_compile_preserves_pinned_template_with_unrelated_resources(compile_storage):
+    document = read_json(CELL_TEMPLATE)
+    document["Resources"]["FutureQueue"] = {"Type": "AWS::SQS::Queue"}
+    template = json.dumps(document).encode()
+
+    prepared = compile_storage(template=template)
+
+    assert prepared.verified_template(template) == template
+    assert "FutureQueue" not in json.loads(prepared.configuration)["cloudformation_resources"]
 
 
 def test_generated_storage_fragment_passes_bundled_cloudformation_schema(compile_storage, tmp_path):

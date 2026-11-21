@@ -301,11 +301,12 @@ def compile_cell_storage(
     approved_identity: object,
     profiles: ApprovedCellProfiles,
     release: VerifiedCellRelease,
+    template: bytes,
     inventory: Mapping[str, ResourceBinding],
     storage: ApprovedCellStorage,
     key_policies: Mapping[str, bytes],
 ) -> PreparedCellInstall:
-    """Compile the validated retained-storage parameters, resources, and input digests.
+    """Compile retained storage against the exact release-pinned template.
 
     Deployment authority supplies inventory and the default GetKeyPolicy text encoded
     unchanged as UTF-8, indexed by the exact ARN used in the authenticated request.
@@ -320,6 +321,7 @@ def compile_cell_storage(
         release=release,
         inventory=inventory,
     )
+    _verify_retained_storage_template(prepared.verified_template(template))
     configuration = json.loads(prepared.configuration)
     parameters = configuration["parameters"]
     bindings: dict[str, WorkloadStorageBinding | RetainedStorageKeyBinding] = {
@@ -369,11 +371,38 @@ def compile_cell_storage(
     return _prepared_configuration(configuration)
 
 
-def _unique_policy_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+def _unique_json_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
     value = dict(pairs)
     if len(value) != len(pairs):
-        raise ValueError("Duplicate key policy property")
+        raise ValueError("Duplicate JSON property")
     return value
+
+
+def _reject_json_constant(_: str) -> None:
+    raise ValueError("Non-finite JSON number")
+
+
+def _verify_retained_storage_template(template: bytes) -> None:
+    """Check only the template sections owned by the retained-storage compiler."""
+    try:
+        document = json.loads(
+            template.decode("utf-8"),
+            object_pairs_hook=_unique_json_object,
+            parse_constant=_reject_json_constant,
+        )
+        if not isinstance(document, dict):
+            raise ValueError
+        for section, expected in retained_storage_template_section().items():
+            actual = document.get(section)
+            if not isinstance(actual, dict):
+                raise ValueError
+            retained = {name: actual.get(name) for name in expected}
+            if json.dumps(retained, sort_keys=True, allow_nan=False) != json.dumps(
+                expected, sort_keys=True
+            ):
+                raise ValueError
+    except (ValueError, RecursionError):
+        raise CellInstallRefused("CELL_INSTALL_STORAGE_TEMPLATE_MISMATCH") from None
 
 
 def _qualified_key_policy(
@@ -386,7 +415,7 @@ def _qualified_key_policy(
     ):
         raise CellInstallRefused("CELL_INSTALL_KEY_POLICY_UNQUALIFIED")
     try:
-        document = json.loads(policy.decode("utf-8"), object_pairs_hook=_unique_policy_object)
+        document = json.loads(policy.decode("utf-8"), object_pairs_hook=_unique_json_object)
     except (ValueError, RecursionError):
         raise CellInstallRefused("CELL_INSTALL_KEY_POLICY_UNQUALIFIED") from None
     if not isinstance(document, dict) or document.get("Version") != "2012-10-17":
