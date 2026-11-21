@@ -77,6 +77,8 @@ def postgres():
                 "0002_organization_creation.sql",
                 "0003_authority_grants.sql",
                 "0004_session_selection.sql",
+                "0005_runner_enrollment.sql",
+                "0006_invitation_ledger.sql",
             ):
                 migration = ROOT / "services/control-api/migrations" / name
                 owner.execute(migration.read_text())
@@ -184,6 +186,173 @@ def durable(postgres, mode):
         other=other,
         orgs=orgs,
     )
+
+
+@pytest.fixture
+def insert_invitation(durable):
+    def insert(conn, **overrides):
+        invitation_id = str(uuid4())
+        row = {
+            "id": invitation_id,
+            "organization_id": durable.orgs["a"].local,
+            "normalized_recipient": "generated@example.invalid",
+            "token_hash": digest(f"generated-invitation-{invitation_id}"),
+            "created_at": durable.now,
+            "expires_at": durable.now + timedelta(hours=72),
+            "role": "member",
+            "workspace_ids": [],
+            "creator_issuer": ISSUER,
+            "creator_subject": durable.identity.actor["subject"],
+        } | overrides
+        conn.execute(
+            "INSERT INTO opentour_tenants.invitations "
+            "(id, organization_id, normalized_recipient, token_hash, created_at, expires_at, "
+            "role, workspace_ids, creator_issuer, creator_subject) "
+            "VALUES (%(id)s, %(organization_id)s, %(normalized_recipient)s, %(token_hash)s, "
+            "%(created_at)s, %(expires_at)s, %(role)s, %(workspace_ids)s, %(creator_issuer)s, "
+            "%(creator_subject)s)",
+            row,
+        )
+        return row["id"]
+
+    return insert
+
+
+def test_invitation_pending_uniqueness_uses_bounded_workspace_set(durable, insert_invitation):
+    scope = ['workspace-"a,b"', "Workspace-Z", "workspace-é", " workspace-edge"]
+    reversed_scope = scope[::-1]
+    expected = digest(json.dumps(sorted(scope, key=lambda item: item.encode()), ensure_ascii=False))
+    maximum_scope = [f"workspace-{number:03d}-" + "x" * 242 for number in range(100)]
+    with durable.owner() as conn:
+        result = conn.execute(
+            "SELECT encode(opentour_tenants.invitation_scope_sha256(%s), 'hex') AS original, "
+            "encode(opentour_tenants.invitation_scope_sha256(%s), 'hex') AS reversed",
+            (scope, reversed_scope),
+        ).fetchone()
+        assert result == {"original": expected, "reversed": expected}
+        assert conn.execute(
+            "SELECT opentour_tenants.invitation_scope_sha256(ARRAY['workspace-a,workspace-b']) "
+            "<> opentour_tenants.invitation_scope_sha256(ARRAY['workspace-a','workspace-b']) "
+            "AS distinct_scopes"
+        ).fetchone()["distinct_scopes"]
+        invitation_id = insert_invitation(conn, workspace_ids=scope)
+        with pytest.raises(psycopg.errors.UniqueViolation) as rejected, conn.transaction():
+            insert_invitation(conn, workspace_ids=reversed_scope, role="viewer")
+        assert rejected.value.diag.constraint_name == "invitations_pending_scope_unique"
+        insert_invitation(conn, workspace_ids=maximum_scope, role="admin")
+        with pytest.raises(psycopg.errors.UniqueViolation), conn.transaction():
+            insert_invitation(conn, workspace_ids=maximum_scope[::-1])
+        insert_invitation(
+            conn,
+            id=invitation_id,
+            workspace_ids=reversed_scope,
+            organization_id=durable.orgs["b"].local,
+        )
+        with pytest.raises(psycopg.errors.UniqueViolation) as rejected, conn.transaction():
+            insert_invitation(conn, id=invitation_id, workspace_ids=["other-workspace"])
+        assert rejected.value.diag.constraint_name == "invitations_pkey"
+        insert_invitation(
+            conn, workspace_ids=reversed_scope, normalized_recipient="other@example.invalid"
+        )
+        with pytest.raises(psycopg.errors.CheckViolation), conn.transaction():
+            conn.execute(
+                "UPDATE opentour_tenants.invitations SET status='revoked' "
+                "WHERE organization_id=%s AND id=%s",
+                (durable.orgs["a"].local, invitation_id),
+            )
+        with pytest.raises(psycopg.errors.UniqueViolation), conn.transaction():
+            insert_invitation(conn, workspace_ids=reversed_scope)
+
+
+def test_invitation_ledger_refuses_invalid_data_and_global_digest_reuse(durable, insert_invitation):
+    generated_hash = digest(f"generated-invitation-hash-fixture-{durable.orgs['a'].local}")
+    with durable.owner() as conn:
+        insert_invitation(conn, token_hash=generated_hash)
+        for seconds in (900, 604800):
+            insert_invitation(
+                conn,
+                workspace_ids=[f"workspace-{seconds}"],
+                expires_at=durable.now + timedelta(seconds=seconds),
+            )
+        with pytest.raises(psycopg.errors.UniqueViolation) as rejected, conn.transaction():
+            insert_invitation(
+                conn, token_hash=generated_hash, organization_id=durable.orgs["b"].local
+            )
+        assert rejected.value.diag.constraint_name == "invitations_token_hash_key"
+        invalid_rows = (
+            {"token_hash": generated_hash.upper()},
+            {"token_hash": generated_hash + "\n"},
+            {"normalized_recipient": "x" * 255},
+            {"normalized_recipient": " generated@example.invalid"},
+            {"role": "owner"},
+            {"expires_at": durable.now + timedelta(seconds=899)},
+            {"expires_at": durable.now + timedelta(seconds=604801)},
+            {"expires_at": "infinity"},
+            {"workspace_ids": ["workspace-a", "workspace-a"]},
+            {"workspace_ids": ["workspace-a", None]},
+            {"workspace_ids": ["x" * 257]},
+            {"workspace_ids": [f"workspace-{number}" for number in range(101)]},
+        )
+        for invalid in invalid_rows:
+            with pytest.raises(psycopg.errors.CheckViolation), conn.transaction():
+                insert_invitation(
+                    conn, **({"normalized_recipient": "invalid@example.invalid"} | invalid)
+                )
+        with pytest.raises(psycopg.errors.ForeignKeyViolation), conn.transaction():
+            insert_invitation(
+                conn,
+                creator_subject="generated-unrelated-subject",
+                normalized_recipient="foreign-creator@example.invalid",
+            )
+        assert conn.execute(
+            "SELECT opentour_tenants.invitation_scope_sha256('[0:0]={workspace-a}'::text[]) "
+            "IS NULL AND opentour_tenants.invitation_scope_sha256(ARRAY[['workspace-a']]) "
+            "IS NULL AS invalid_shape"
+        ).fetchone()["invalid_shape"]
+
+
+def test_invitation_ledger_has_forced_rls_and_no_legacy_runtime_grants(durable, insert_invitation):
+    with durable.owner() as conn:
+        invitation_id = insert_invitation(conn)
+        with pytest.raises(psycopg.errors.CheckViolation), conn.transaction():
+            conn.execute(
+                "UPDATE opentour_tenants.invitations SET accepted_issuer=%s, accepted_subject=%s "
+                "WHERE organization_id=%s AND id=%s",
+                (ISSUER, durable.identity.actor["subject"], durable.orgs["a"].local, invitation_id),
+            )
+        catalog = conn.execute(
+            "SELECT relrowsecurity, relforcerowsecurity FROM pg_class "
+            "WHERE oid='opentour_tenants.invitations'::regclass"
+        ).fetchone()
+        assert catalog == {"relrowsecurity": True, "relforcerowsecurity": True}
+        conn.execute("SET LOCAL ROLE c172_migration")
+        assert (
+            conn.execute(
+                "SELECT id FROM opentour_tenants.invitations WHERE organization_id=%s AND id=%s",
+                (durable.orgs["a"].local, invitation_id),
+            ).fetchone()
+            is None
+        )
+        conn.execute("RESET ROLE")
+        for role in (
+            "opentour_tenant_runtime",
+            "opentour_provisioner",
+            "opentour_selection_runtime",
+            "c172_identity",
+        ):
+            privileges = conn.execute(
+                "SELECT has_table_privilege(%s, 'opentour_tenants.invitations', "
+                "'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER,MAINTAIN') "
+                "AS table_granted, "
+                "has_function_privilege(%s, "
+                "'opentour_tenants.invitation_scope_sha256(text[])', 'EXECUTE') "
+                "AS function_granted",
+                (role, role),
+            ).fetchone()
+            assert privileges == {"table_granted": False, "function_granted": False}
+        with pytest.raises(psycopg.errors.InsufficientPrivilege), conn.transaction():
+            conn.execute("SET LOCAL ROLE opentour_tenant_runtime")
+            conn.execute("SELECT id FROM opentour_tenants.invitations")
 
 
 def counts(durable, session_id=None):
