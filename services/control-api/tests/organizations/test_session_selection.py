@@ -268,6 +268,7 @@ def test_invitation_ledger_refuses_invalid_data_and_global_digest_reuse(durable,
     generated_hash = digest(f"generated-invitation-hash-fixture-{durable.orgs['a'].local}")
     with durable.owner() as conn:
         insert_invitation(conn, token_hash=generated_hash)
+        insert_invitation(conn, normalized_recipient="générée@example.invalid")
         for seconds in (900, 604800):
             insert_invitation(
                 conn,
@@ -284,6 +285,8 @@ def test_invitation_ledger_refuses_invalid_data_and_global_digest_reuse(durable,
             {"token_hash": generated_hash + "\n"},
             {"normalized_recipient": "x" * 255},
             {"normalized_recipient": " generated@example.invalid"},
+            {"normalized_recipient": "Generated@example.invalid"},
+            {"normalized_recipient": "generated@EXAMPLE.invalid"},
             {"role": "owner"},
             {"expires_at": durable.now + timedelta(seconds=899)},
             {"expires_at": durable.now + timedelta(seconds=604801)},
@@ -353,6 +356,48 @@ def test_invitation_ledger_has_forced_rls_and_no_legacy_runtime_grants(durable, 
         with pytest.raises(psycopg.errors.InsufficientPrivilege), conn.transaction():
             conn.execute("SET LOCAL ROLE opentour_tenant_runtime")
             conn.execute("SELECT id FROM opentour_tenants.invitations")
+
+
+def test_invitation_creator_removal_preserves_history_and_denies_selection(
+    durable, insert_invitation
+):
+    organization = durable.orgs["a"]
+    subject = durable.identity.actor["subject"]
+    assert durable.authority.current(subject, organization.local) is not None
+    with durable.owner() as conn:
+        invitation_id = insert_invitation(conn)
+        conn.execute("SET LOCAL ROLE opentour_tenant_runtime")
+        conn.execute(
+            "SELECT set_config('opentour.identity_issuer', %s, true), "
+            "set_config('opentour.identity_subject', %s, true)",
+            (ISSUER, subject),
+        )
+        removed = conn.execute(
+            "UPDATE opentour_tenants.memberships SET status='removed', updated_at=%s "
+            "WHERE organization_id=%s AND issuer=%s AND subject=%s RETURNING membership_id, status",
+            (durable.now, organization.local, ISSUER, subject),
+        ).fetchone()
+        assert removed == {"membership_id": organization.membership, "status": "removed"}
+        conn.execute("RESET ROLE")
+        invitation = conn.execute(
+            "SELECT creator_issuer, creator_subject, status FROM opentour_tenants.invitations "
+            "WHERE organization_id=%s AND id=%s",
+            (organization.local, invitation_id),
+        ).fetchone()
+        assert invitation == {
+            "creator_issuer": ISSUER,
+            "creator_subject": subject,
+            "status": "pending",
+        }
+    assert durable.authority.current(subject, organization.local) is None
+    assert durable.authority.current(subject, durable.orgs["b"].local) is not None
+    expect(
+        "MEMBERSHIP_INACTIVE",
+        lambda: durable.selector.admit(
+            durable.identity, durable.binding, request(durable), "selection-removed"
+        ),
+    )
+    assert counts(durable) == (0, 0)
 
 
 def counts(durable, session_id=None):

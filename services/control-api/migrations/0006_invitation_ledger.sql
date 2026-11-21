@@ -24,10 +24,13 @@ CREATE TABLE opentour_tenants.invitations (
     id text NOT NULL CHECK (length(id) BETWEEN 1 AND 256),
     organization_id text NOT NULL CHECK (length(organization_id) BETWEEN 1 AND 256)
         REFERENCES opentour_tenants.organizations(id),
+    -- The issuer trims and lowercases using the same rules as WorkOS before writing.
+    -- Reject ASCII uppercase independently of database locale.
     normalized_recipient text COLLATE "C" NOT NULL CHECK (
         length(normalized_recipient) BETWEEN 1 AND 254
         AND normalized_recipient = btrim(normalized_recipient)
         AND normalized_recipient !~ '[[:cntrl:]]'
+        AND normalized_recipient !~ '[A-Z]'
     ),
     token_hash text COLLATE "C" NOT NULL UNIQUE CHECK (token_hash ~ '^[a-f0-9]{64}$'),
     status text COLLATE "C" NOT NULL DEFAULT 'pending' CHECK (status = 'pending'),
