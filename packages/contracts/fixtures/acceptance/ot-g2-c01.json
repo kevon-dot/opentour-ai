@@ -1,0 +1,207 @@
+{
+  "fixture_version": 1,
+  "fixture_kind": "synthetic",
+  "gate_id": "G2",
+  "child_key": "OT-G2-C01",
+  "cells": [
+    {
+      "alias": "managed_a",
+      "organization_id": "org_ma",
+      "workspace_id": "ws_ma",
+      "project_id": "pr_ma",
+      "environment_id": "env_ma",
+      "deployment_mode": "opentour_managed",
+      "sentinel": "generated-iso01-managed-a",
+      "secondary_scope": {
+        "workspace_id": "ws_ma_secondary",
+        "project_id": "pr_ma_secondary",
+        "environment_id": "env_ma_secondary"
+      }
+    },
+    {
+      "alias": "managed_b",
+      "organization_id": "org_mb",
+      "workspace_id": "ws_mb",
+      "project_id": "pr_mb",
+      "environment_id": "env_mb",
+      "deployment_mode": "opentour_managed",
+      "sentinel": "generated-iso01-managed-b",
+      "secondary_scope": {
+        "workspace_id": "ws_mb_secondary",
+        "project_id": "pr_mb_secondary",
+        "environment_id": "env_mb_secondary"
+      }
+    },
+    {
+      "alias": "byoc_a",
+      "organization_id": "org_ba",
+      "workspace_id": "ws_ba",
+      "project_id": "pr_ba",
+      "environment_id": "env_ba",
+      "deployment_mode": "customer_controlled",
+      "sentinel": "generated-iso01-byoc-a",
+      "secondary_scope": {
+        "workspace_id": "ws_ba_secondary",
+        "project_id": "pr_ba_secondary",
+        "environment_id": "env_ba_secondary"
+      }
+    },
+    {
+      "alias": "byoc_b",
+      "organization_id": "org_bb",
+      "workspace_id": "ws_bb",
+      "project_id": "pr_bb",
+      "environment_id": "env_bb",
+      "deployment_mode": "customer_controlled",
+      "sentinel": "generated-iso01-byoc-b",
+      "secondary_scope": {
+        "workspace_id": "ws_bb_secondary",
+        "project_id": "pr_bb_secondary",
+        "environment_id": "env_bb_secondary"
+      }
+    }
+  ],
+  "visible_resource_id": "generated-shared-resource",
+  "principal_kinds": ["human", "workload"],
+  "directed_pairs": [
+    {"initiator_cell": "managed_a", "target_cell": "managed_b"},
+    {"initiator_cell": "managed_a", "target_cell": "byoc_a"},
+    {"initiator_cell": "managed_a", "target_cell": "byoc_b"},
+    {"initiator_cell": "managed_b", "target_cell": "managed_a"},
+    {"initiator_cell": "managed_b", "target_cell": "byoc_a"},
+    {"initiator_cell": "managed_b", "target_cell": "byoc_b"},
+    {"initiator_cell": "byoc_a", "target_cell": "managed_a"},
+    {"initiator_cell": "byoc_a", "target_cell": "managed_b"},
+    {"initiator_cell": "byoc_a", "target_cell": "byoc_b"},
+    {"initiator_cell": "byoc_b", "target_cell": "managed_a"},
+    {"initiator_cell": "byoc_b", "target_cell": "managed_b"},
+    {"initiator_cell": "byoc_b", "target_cell": "byoc_a"}
+  ],
+  "intra_organization_cases": [
+    {"cell_alias": "managed_a", "scope_field": "workspace_id", "foreign_id": "ws_ma_secondary"},
+    {"cell_alias": "managed_a", "scope_field": "project_id", "foreign_id": "pr_ma_secondary"},
+    {"cell_alias": "managed_a", "scope_field": "environment_id", "foreign_id": "env_ma_secondary"},
+    {"cell_alias": "managed_b", "scope_field": "workspace_id", "foreign_id": "ws_mb_secondary"},
+    {"cell_alias": "managed_b", "scope_field": "project_id", "foreign_id": "pr_mb_secondary"},
+    {"cell_alias": "managed_b", "scope_field": "environment_id", "foreign_id": "env_mb_secondary"},
+    {"cell_alias": "byoc_a", "scope_field": "workspace_id", "foreign_id": "ws_ba_secondary"},
+    {"cell_alias": "byoc_a", "scope_field": "project_id", "foreign_id": "pr_ba_secondary"},
+    {"cell_alias": "byoc_a", "scope_field": "environment_id", "foreign_id": "env_ba_secondary"},
+    {"cell_alias": "byoc_b", "scope_field": "workspace_id", "foreign_id": "ws_bb_secondary"},
+    {"cell_alias": "byoc_b", "scope_field": "project_id", "foreign_id": "pr_bb_secondary"},
+    {"cell_alias": "byoc_b", "scope_field": "environment_id", "foreign_id": "env_bb_secondary"}
+  ],
+  "actual_binding_requirements": [
+    "cell_id",
+    "account_id",
+    "region",
+    "installed_release_digest",
+    "runtime_identity_ref",
+    "authority_snapshot_ref",
+    "approved_spend_ref"
+  ],
+  "suites": [
+    {
+      "suite_id": "ISO-01",
+      "cases": [
+        {
+          "id": "cross_cell_every_pair",
+          "substituted_scope_fields": ["organization_id", "cell_id", "resource_id"],
+          "operations": ["read", "list", "search", "write", "delete", "export", "subscription"],
+          "worker_handoff": "separate_observation",
+          "expect": {
+            "foreign_bytes": 0,
+            "foreign_mutations": 0,
+            "useful_existence_details": 0
+          },
+          "acceptance_ids": ["OT-G2-C01-AC01", "OT-G2-C01-AC07"],
+          "evidence_files": [
+            "topology.json",
+            "directed-pair-matrix.json",
+            "route-role-matrix.json",
+            "sentinel-search-results.json"
+          ]
+        },
+        {
+          "id": "same_org_wrong_scope",
+          "expect": {"scope_bypass": false},
+          "acceptance_ids": ["OT-G2-C01-AC01", "OT-G2-C01-AC07"],
+          "evidence_files": ["topology.json", "route-role-matrix.json", "sentinel-search-results.json"]
+        },
+        {
+          "id": "own_scope_control",
+          "expect": {"scope_authorized": true},
+          "acceptance_ids": ["OT-G2-C01-AC01", "OT-G2-C01-AC07"],
+          "evidence_files": ["route-role-matrix.json"]
+        }
+      ]
+    },
+    {
+      "suite_id": "ISO-02",
+      "cases": [
+        {
+          "id": "rls_pool_cache",
+          "preconditions": ["non_owner", "no_bypassrls", "shared_pool", "application_filter_omitted"],
+          "runtime_roles": ["application", "reporting", "background", "export"],
+          "context_sequence": ["initiator", "target", "unbound"],
+          "expect": {
+            "A_payload_in_B": 0,
+            "A_payload_without_context": 0,
+            "runtime_bypassrls": false
+          },
+          "acceptance_ids": ["OT-G2-C01-AC02", "OT-G2-C01-AC07"],
+          "evidence_files": ["sql-policy-observations.json", "sentinel-search-results.json"]
+        },
+        {
+          "id": "composite_ownership_constraint",
+          "expect": {
+            "foreign_reference_created": false,
+            "useful_existence_details": 0
+          },
+          "acceptance_ids": ["OT-G2-C01-AC02", "OT-G2-C01-AC07"],
+          "evidence_files": ["sql-policy-observations.json"]
+        }
+      ]
+    },
+    {
+      "suite_id": "ISO-03",
+      "cases": [
+        {
+          "id": "foreign_object_reference",
+          "reference_kinds": ["digest", "path", "link"],
+          "required_observations": ["admission", "worker_fetch"],
+          "expect": {"foreign_bytes": 0, "foreign_mutations": 0},
+          "acceptance_ids": ["OT-G2-C01-AC03", "OT-G2-C01-AC07"],
+          "evidence_files": ["object-export-denials.json", "sentinel-search-results.json"]
+        },
+        {
+          "id": "export_reference_scope",
+          "reference_conditions": ["expired", "wrong_object", "wrong_recipient", "revoked_grant"],
+          "expect": {"unauthorized_export_available": false},
+          "acceptance_ids": ["OT-G2-C01-AC03", "OT-G2-C01-AC07"],
+          "evidence_files": ["object-export-denials.json"]
+        }
+      ]
+    },
+    {
+      "suite_id": "ISO-04",
+      "cases": [
+        {
+          "id": "graph_vector_partition",
+          "checks": ["exact_search", "approximate_search", "graph_traversal", "deduplication", "cache"],
+          "expect": {"foreign_results": 0, "protected_results": 0},
+          "acceptance_ids": ["OT-G2-C01-AC03", "OT-G2-C01-AC04", "OT-G2-C01-AC07"],
+          "evidence_files": ["graph-vector-results.json", "sentinel-search-results.json"]
+        },
+        {
+          "id": "protected_training_boundary",
+          "runtime_roles": ["trainer", "generator"],
+          "checks": ["direct_object_access", "query", "lineage"],
+          "expect": {"protected_data_disclosures": 0, "protected_label_disclosures": 0},
+          "acceptance_ids": ["OT-G2-C01-AC04", "OT-G2-C01-AC07"],
+          "evidence_files": ["object-export-denials.json", "graph-vector-results.json", "sentinel-search-results.json"]
+        }
+      ]
+    }
+  ]
+}
