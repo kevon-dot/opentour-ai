@@ -640,8 +640,19 @@ def test_invitation_active_member_requires_provider_observation(durable, accepta
 
     with durable.owner() as conn:
         conn.execute(
-            "UPDATE opentour_identity.membership_observations SET checked_at=clock_timestamp() "
+            "UPDATE opentour_identity.membership_observations SET checked_at=clock_timestamp(), "
+            "observed_at=clock_timestamp()+interval '1 hour' "
             "WHERE issuer=%s AND membership_id=%s",
+            (ISSUER, provider_membership_id),
+        )
+    future = expect("^IDENTITY_STATE_UNAVAILABLE$", acceptance.accept)
+    assert future.status == 503 and future.retryable
+    assert invitation_effects(durable, acceptance) == before
+
+    with durable.owner() as conn:
+        conn.execute(
+            "UPDATE opentour_identity.membership_observations SET checked_at=clock_timestamp(), "
+            "observed_at=clock_timestamp() WHERE issuer=%s AND membership_id=%s",
             (ISSUER, provider_membership_id),
         )
     receipt = acceptance.accept()
@@ -658,6 +669,27 @@ def test_invitation_active_member_requires_provider_observation(durable, accepta
     }
     assert membership == membership_before
     assert effects == {"receipts": 1, "events": 0, "grants": 0}
+
+    application_name = f"generated-invite-observation-{uuid4().hex}"
+    store = PostgresInvitationAcceptanceStore(
+        connection_factory(f"{acceptance.dsn} application_name={application_name}")
+    )
+    with ThreadPoolExecutor(max_workers=1) as workers:
+        with durable.owner() as lock:
+            lock.execute(
+                "UPDATE opentour_identity.membership_observations "
+                "SET status='removed', locally_denied=true WHERE issuer=%s AND membership_id=%s",
+                (ISSUER, provider_membership_id),
+            )
+            deadline = lock.execute(
+                "SELECT clock_timestamp() + interval '1 second' AS expiry"
+            ).fetchone()["expiry"]
+            attempt = workers.submit(acceptance.accept, via=store)
+            wait_for_acceptance_lock(lock, application_name, attempt, deadline)
+        with pytest.raises(AuthError, match="^CAPABILITY_DENIED$") as failure:
+            attempt.result(timeout=6)
+    assert failure.value.status == 403
+    assert invitation_effects(durable, acceptance) == (invitation, membership, effects)
 
 
 @pytest.mark.parametrize("state", ["removed", "provisional"])
@@ -708,12 +740,28 @@ def test_invitation_acceptance_rejects_mismatched_actor_binding_and_denial(durab
     assert_invitation_pending(durable, acceptance)
 
 
+def wait_for_acceptance_lock(conn, application_name, attempt, deadline):
+    tick = Event()
+    while True:
+        conn.execute("SELECT pg_stat_clear_snapshot()")
+        state = conn.execute(
+            "SELECT clock_timestamp() < %s AS live, EXISTS ("
+            "SELECT 1 FROM pg_stat_activity WHERE application_name=%s "
+            "AND wait_event_type='Lock') AS waiting",
+            (deadline, application_name),
+        ).fetchone()
+        assert state["live"], "Acceptance did not begin its lock wait before the deadline"
+        if state["waiting"]:
+            return
+        assert not attempt.done(), "Acceptance finished before the lock was released"
+        tick.wait(0.01)
+
+
 def test_invitation_acceptance_rechecks_bearer_expiry_after_lock_wait(durable, acceptance):
     application_name = f"invite-expiry-{uuid4().hex}"
     store = PostgresInvitationAcceptanceStore(
         connection_factory(f"{acceptance.dsn} application_name={application_name}")
     )
-    tick = Event()
     with ThreadPoolExecutor(max_workers=1) as workers:
         with durable.owner() as lock:
             lock.execute(
@@ -724,19 +772,7 @@ def test_invitation_acceptance_rechecks_bearer_expiry_after_lock_wait(durable, a
                 "SELECT clock_timestamp() + interval '1 second' AS expiry"
             ).fetchone()["expiry"]
             attempt = workers.submit(acceptance.accept, via=store, bearer_expires_at=deadline)
-            while True:
-                lock.execute("SELECT pg_stat_clear_snapshot()")
-                state = lock.execute(
-                    "SELECT clock_timestamp() < %s AS live, EXISTS ("
-                    "SELECT 1 FROM pg_stat_activity WHERE application_name=%s "
-                    "AND wait_event_type='Lock') AS waiting",
-                    (deadline, application_name),
-                ).fetchone()
-                assert state["live"], "Acceptance did not begin its lock wait before expiry"
-                if state["waiting"]:
-                    break
-                assert not attempt.done(), "Acceptance finished before the lock was released"
-                tick.wait(0.01)
+            wait_for_acceptance_lock(lock, application_name, attempt, deadline)
             lock.execute("SELECT pg_sleep_until(%s)", (deadline,))
         with pytest.raises(AuthError, match="^SESSION_INVALID$") as failure:
             attempt.result(timeout=6)

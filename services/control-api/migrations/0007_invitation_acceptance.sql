@@ -123,7 +123,10 @@ DECLARE
     member opentour_tenants.memberships%ROWTYPE;
     receipt opentour_invitation.receipts%ROWTYPE;
     member_exists boolean;
+    observed_status text;
+    observed_denial boolean;
     membership_checked_at timestamptz;
+    membership_observed_at timestamptz;
     deadline timestamptz;
     now_utc timestamptz;
 BEGIN
@@ -216,13 +219,18 @@ BEGIN
         RAISE EXCEPTION 'CAPABILITY_DENIED';
     END IF;
     IF member_exists AND member.status = 'active' THEN
-        SELECT o.checked_at INTO membership_checked_at FROM opentour_identity.membership_observations o
+        SELECT o.status, o.locally_denied, o.checked_at, o.observed_at
+            INTO observed_status, observed_denial, membership_checked_at, membership_observed_at
+            FROM opentour_identity.membership_observations o
             WHERE o.issuer = p_issuer AND o.membership_id = member.provider_membership_id
                 AND o.organization_id = organization.identity_org_id AND o.subject = p_subject
-                AND o.status = 'active' AND NOT o.locally_denied
             FOR SHARE OF o;
         now_utc := clock_timestamp();
-        IF NOT FOUND OR membership_checked_at > now_utc
+        IF FOUND AND (observed_status = 'removed' OR observed_denial) THEN
+            RAISE EXCEPTION 'CAPABILITY_DENIED';
+        END IF;
+        IF NOT FOUND OR observed_status <> 'active'
+            OR membership_checked_at > now_utc OR membership_observed_at > now_utc
             OR membership_checked_at < now_utc - interval '30 seconds'
         THEN
             RAISE EXCEPTION 'IDENTITY_STATE_UNAVAILABLE';
@@ -295,7 +303,8 @@ BEGIN
         RAISE EXCEPTION 'SESSION_INVALID';
     END IF;
     IF membership_checked_at IS NOT NULL AND (
-        membership_checked_at > now_utc OR membership_checked_at < now_utc - interval '30 seconds'
+        membership_checked_at > now_utc OR membership_observed_at > now_utc
+        OR membership_checked_at < now_utc - interval '30 seconds'
     ) THEN
         RAISE EXCEPTION 'IDENTITY_STATE_UNAVAILABLE';
     END IF;
