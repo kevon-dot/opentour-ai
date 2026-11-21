@@ -7800,7 +7800,9 @@
           "feature_ids": [],
           "subfeature_ids": [],
           "owned_paths": [],
-          "declared_test_paths": [],
+          "declared_test_paths": [
+            "tests/acceptance/g2/test_identity_storage_isolation.py"
+          ],
           "parent": "OPE-57",
           "blocked_by": [
             "OPE-126",
@@ -7834,7 +7836,7 @@
             "OPE-87"
           ]
         },
-        "projection_sha256": "884bbc299d80237782f50b37be63f85a36c0c087f0ebc7f83344d52bebe104fa"
+        "projection_sha256": "43b64ce251d560e7f11a70d6cb63d2b72dab1bc6f1e73e0f70e73419b6c0794b"
       },
       {
         "issue_key": "OPE-132",
@@ -34368,10 +34370,76 @@
         "mode": null,
         "fixture_id": "bootstrap-command-contract",
         "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-131",
+        "requirement_ids": [
+          "OT-G2-C01::acceptance:1"
+        ],
+        "test_id": "tests/acceptance/g2/test_identity_storage_isolation.py::test_topology_has_twelve_directed_pairs_and_both_initiating_modes",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-131",
+        "requirement_ids": [
+          "OT-G2-C01::acceptance:5"
+        ],
+        "test_id": "tests/acceptance/g2/test_identity_storage_isolation.py::test_missing_worker_observation_keeps_conformance_incomplete",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-131",
+        "requirement_ids": [
+          "OT-G2-C01::acceptance:7"
+        ],
+        "test_id": "tests/acceptance/g2/test_identity_storage_isolation.py::test_each_directed_pair_has_all_actor_operations_and_separate_worker_row[customer_controlled]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-131",
+        "requirement_ids": [
+          "OT-G2-C01::acceptance:7"
+        ],
+        "test_id": "tests/acceptance/g2/test_identity_storage_isolation.py::test_each_directed_pair_has_all_actor_operations_and_separate_worker_row[opentour_managed]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-131",
+        "requirement_ids": [
+          "OT-G2-C01::acceptance:8"
+        ],
+        "test_id": "tests/acceptance/g2/test_identity_storage_isolation.py::test_complete_generated_conformance_keeps_product_not_run[customer_controlled]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
+      },
+      {
+        "issue_key": "OPE-131",
+        "requirement_ids": [
+          "OT-G2-C01::acceptance:8"
+        ],
+        "test_id": "tests/acceptance/g2/test_identity_storage_isolation.py::test_complete_generated_conformance_keeps_product_not_run[opentour_managed]",
+        "kind": "simulated",
+        "mode": null,
+        "fixture_id": "bootstrap-command-contract",
+        "fixture_version": "1"
       }
     ]
   },
-  "source_projection_sha256": "15e3cf39a9a9dc078cbb9ec9b0b9088bb6e86343ecfe4b3fe7ec35e61ede9103",
+  "source_projection_sha256": "3b400abe9f567876e1a62b1452d0c1fce2a1038ba77885db3bd43025ec9bab32",
   "source_bindings": {
     "feature_register_sha256": "f6d1061a103a028b6309928a1c6d96b1c58cb969793a2b9e8a4e36dd50b4602f",
     "figma_snapshot_sha256": "38c3537dd10719a1978873137d34086fa51e284456ed7c5d46d36e77815367a7",
@@ -43125,7 +43193,14 @@
       "contract_refs": [
         "urn:opentour:common-contract:1.0"
       ],
-      "test_ids": [],
+      "test_ids": [
+        "tests/acceptance/g2/test_identity_storage_isolation.py::test_topology_has_twelve_directed_pairs_and_both_initiating_modes",
+        "tests/acceptance/g2/test_identity_storage_isolation.py::test_missing_worker_observation_keeps_conformance_incomplete",
+        "tests/acceptance/g2/test_identity_storage_isolation.py::test_each_directed_pair_has_all_actor_operations_and_separate_worker_row[customer_controlled]",
+        "tests/acceptance/g2/test_identity_storage_isolation.py::test_each_directed_pair_has_all_actor_operations_and_separate_worker_row[opentour_managed]",
+        "tests/acceptance/g2/test_identity_storage_isolation.py::test_complete_generated_conformance_keeps_product_not_run[customer_controlled]",
+        "tests/acceptance/g2/test_identity_storage_isolation.py::test_complete_generated_conformance_keeps_product_not_run[opentour_managed]"
+      ],
       "real_evidence_requirements": [
         {
           "requirement_id": "OT-G2-C01::acceptance:1",
@@ -73061,6 +73136,72 @@
         "OT-P16-C04-NUMERIC-AC07"
       ],
       "test_id": "training/tests/evaluation/test_statistics_kernel.py::test_zero_exposure_is_unknown_and_unrelated_rows_not_added",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-131",
+      "requirement_ids": [
+        "OT-G2-C01::acceptance:1"
+      ],
+      "test_id": "tests/acceptance/g2/test_identity_storage_isolation.py::test_topology_has_twelve_directed_pairs_and_both_initiating_modes",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-131",
+      "requirement_ids": [
+        "OT-G2-C01::acceptance:5"
+      ],
+      "test_id": "tests/acceptance/g2/test_identity_storage_isolation.py::test_missing_worker_observation_keeps_conformance_incomplete",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-131",
+      "requirement_ids": [
+        "OT-G2-C01::acceptance:7"
+      ],
+      "test_id": "tests/acceptance/g2/test_identity_storage_isolation.py::test_each_directed_pair_has_all_actor_operations_and_separate_worker_row[customer_controlled]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-131",
+      "requirement_ids": [
+        "OT-G2-C01::acceptance:7"
+      ],
+      "test_id": "tests/acceptance/g2/test_identity_storage_isolation.py::test_each_directed_pair_has_all_actor_operations_and_separate_worker_row[opentour_managed]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-131",
+      "requirement_ids": [
+        "OT-G2-C01::acceptance:8"
+      ],
+      "test_id": "tests/acceptance/g2/test_identity_storage_isolation.py::test_complete_generated_conformance_keeps_product_not_run[customer_controlled]",
+      "kind": "simulated",
+      "mode": null,
+      "fixture_id": "bootstrap-command-contract",
+      "fixture_version": "1"
+    },
+    {
+      "issue_key": "OPE-131",
+      "requirement_ids": [
+        "OT-G2-C01::acceptance:8"
+      ],
+      "test_id": "tests/acceptance/g2/test_identity_storage_isolation.py::test_complete_generated_conformance_keeps_product_not_run[opentour_managed]",
       "kind": "simulated",
       "mode": null,
       "fixture_id": "bootstrap-command-contract",
