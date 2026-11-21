@@ -3,6 +3,7 @@
 import hashlib
 import json
 import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -18,6 +19,7 @@ from tools.verify_release_manifest import (
 
 _MANIFEST = "application/vnd.oci.image.manifest.v1+json"
 _INDEX = "application/vnd.oci.image.index.v1+json"
+_GENERATED_SUBJECT = "generated-installer-subject"
 
 
 def _json(value: object) -> bytes:
@@ -167,13 +169,14 @@ class _AttestationInputs:
     github_cli: Path
     output: dict[str, Any]
 
-    def verify(self) -> str:
+    def verify(self, *, expected_subject: str | None = None) -> str:
         return verify_manifest_attestation(
             self.manifest,
             bundle=self.bundle,
             trusted_root=self.trusted_root,
             approved_policy=self.policy,
             github_cli=self.github_cli,
+            expected_subject=expected_subject,
         )
 
 
@@ -298,6 +301,112 @@ def test_accepts_an_exact_verified_attestation_result(
     calls = _stub_github_cli(attestation, monkeypatch)
     assert attestation.verify() == hashlib.sha256(attestation.manifest.read_bytes()).hexdigest()
     assert len(calls) == 2
+
+
+def test_cli_binds_the_exact_approved_subject_and_digest(
+    attestation: _AttestationInputs,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    digest = hashlib.sha256(attestation.manifest.read_bytes()).hexdigest()
+    statement = attestation.output["verificationResult"]["statement"]
+    statement["subject"] = [
+        {"name": "generated-other-subject", "digest": {"sha256": digest}},
+        {"name": _GENERATED_SUBJECT, "digest": {"sha256": digest}},
+    ]
+    calls = _stub_github_cli(attestation, monkeypatch)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "verify_release_manifest.py",
+            "--manifest",
+            str(attestation.manifest),
+            "--bundle",
+            str(attestation.bundle),
+            "--trusted-root",
+            str(attestation.trusted_root),
+            "--approved-policy",
+            str(attestation.policy),
+            "--github-cli",
+            str(attestation.github_cli),
+            "--expected-subject",
+            _GENERATED_SUBJECT,
+        ],
+    )
+    assert verify_release_manifest.main() == 0
+    assert capsys.readouterr().out == (
+        f"Verified GitHub attestation for local manifest sha256:{digest}\n"
+    )
+    assert len(calls) == 2
+
+
+@pytest.mark.parametrize(
+    ("subjects", "message"),
+    [
+        ([(_GENERATED_SUBJECT.upper(), True)], "exactly one approved attestation subject name"),
+        ([(_GENERATED_SUBJECT, False), ("generated-other-subject", True)], "manifest SHA-256"),
+        (
+            [(_GENERATED_SUBJECT, True), (_GENERATED_SUBJECT, True)],
+            "exactly one approved attestation subject name",
+        ),
+        (
+            [
+                (_GENERATED_SUBJECT, True),
+                (_GENERATED_SUBJECT, False),
+                ("generated-other-subject", True),
+            ],
+            "exactly one approved attestation subject name",
+        ),
+    ],
+    ids=["wrong-name", "wrong-digest", "duplicate-name", "duplicate-name-mixed-digest"],
+)
+def test_rejects_unmatched_or_ambiguous_approved_subject(
+    attestation: _AttestationInputs,
+    monkeypatch: pytest.MonkeyPatch,
+    subjects: list[tuple[str, bool]],
+    message: str,
+) -> None:
+    digest = hashlib.sha256(attestation.manifest.read_bytes()).hexdigest()
+    statement = attestation.output["verificationResult"]["statement"]
+    statement["subject"] = [
+        {"name": name, "digest": {"sha256": digest if matching_digest else "0" * 64}}
+        for name, matching_digest in subjects
+    ]
+    _stub_github_cli(attestation, monkeypatch)
+    with pytest.raises(ReleaseVerificationError, match=message):
+        attestation.verify(expected_subject=_GENERATED_SUBJECT)
+
+
+def test_rejects_empty_approved_subject_before_attestation_verification(
+    attestation: _AttestationInputs, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls = _stub_github_cli(attestation, monkeypatch)
+    with pytest.raises(ReleaseVerificationError, match="nonempty approved attestation subject"):
+        attestation.verify(expected_subject="")
+    assert not calls
+
+
+def test_cli_rejects_expected_subject_with_oci_layout(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "verify_release_manifest.py",
+            "--oci-layout",
+            "generated-layout",
+            "--image-digest",
+            f"sha256:{'1' * 64}",
+            "--expected-subject",
+            _GENERATED_SUBJECT,
+        ],
+    )
+    with pytest.raises(SystemExit) as error:
+        verify_release_manifest.main()
+    assert error.value.code == 2
+    assert "--expected-subject requires --manifest" in capsys.readouterr().err
 
 
 @pytest.mark.parametrize(
