@@ -10,6 +10,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
 from uuid import uuid4
@@ -28,7 +29,10 @@ from opentour_control.tenants.provider import (
     ProviderRejected,
     ProviderUnknown,
 )
-from opentour_control.tenants.repository import PostgresOrganizationRepository
+from opentour_control.tenants.repository import (
+    PostgresOrganizationRepository,
+    read_public_organization_terms,
+)
 from opentour_control.tenants.worker import PostgresProvisioningStore, ProvisioningWorker
 from psycopg.rows import dict_row
 
@@ -65,6 +69,14 @@ def postgres():
             "opentour_tenants.terms_publication TO c03_terms;"
             "GRANT INSERT ON opentour_tenants.terms_versions TO c03_terms;"
             "GRANT UPDATE(revision) ON opentour_tenants.terms_publication TO c03_terms;"
+            "CREATE ROLE c03_terms_reader LOGIN NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE;"
+            "GRANT USAGE ON SCHEMA opentour_tenants TO c03_terms_reader;"
+            "GRANT SELECT ON opentour_tenants.terms_versions,"
+            "opentour_tenants.terms_publication TO c03_terms_reader;"
+            "CREATE ROLE c03_terms_mixed LOGIN NOSUPERUSER IN ROLE c03_terms_reader;"
+            "GRANT USAGE ON SCHEMA opentour_identity TO c03_terms_mixed;"
+            "GRANT SELECT(subject) ON opentour_identity.sessions TO c03_terms_mixed;"
+            "CREATE ROLE c03_terms_all LOGIN NOSUPERUSER IN ROLE pg_read_all_data;"
             "INSERT INTO opentour_tenants.terms_versions VALUES('gen"
             "erated-terms-v1','https://terms.example.invalid/generat"
             "ed','2026-01-01T00:00:00Z');"
@@ -137,9 +149,14 @@ def durable(postgres, mode):
         "https://identity.example.invalid", "user_" + uuid4().hex, "session_" + uuid4().hex, 0
     )
 
-    def connection(role="c03_runtime"):
+    def connection(role="c03_runtime", *, read_only=False):
         return psycopg.connect(
-            host=str(postgres.socket), port=5432, dbname="postgres", user=role, row_factory=dict_row
+            host=str(postgres.socket),
+            port=5432,
+            dbname="postgres",
+            user=role,
+            row_factory=dict_row,
+            options="-c default_transaction_read_only=on" if read_only else "",
         )
 
     with connection("c03_owner") as conn:
@@ -480,6 +497,38 @@ def test_runtime_permissions_refuse_identity_writes_terms_and_deletion(durable):
         PostgresOrganizationRepository(
             lambda: durable.connection("c03_owner"), GeneratedAdmission()
         ).terms(durable.clock())
+
+
+def test_public_terms_reader_only_admits_the_read_only_metadata_login(durable):
+    published = durable.repository.terms(durable.clock()).current_view(durable.clock())
+    assert (
+        read_public_organization_terms(
+            lambda: durable.connection("c03_terms_reader", read_only=True)
+        )
+        == published
+    )
+    for role, read_only in (
+        ("c03_terms_reader", False),
+        ("c03_terms", True),
+        ("c03_runtime", True),
+        ("c03_worker", True),
+        ("c03_terms_mixed", True),
+        ("c03_terms_all", True),
+    ):
+        with pytest.raises(SetupError, match="TERMS_UNAVAILABLE"):
+            read_public_organization_terms(partial(durable.connection, role, read_only=read_only))
+    with durable.connection("c03_terms_mixed", read_only=True) as conn:
+        assert (
+            conn.execute("SELECT subject FROM opentour_identity.sessions LIMIT 0").fetchall() == []
+        )
+    for statement in (
+        "SELECT subject FROM opentour_identity.sessions",
+        "SELECT id FROM opentour_tenants.organizations",
+        "UPDATE opentour_tenants.terms_publication SET revision='other'",
+    ):
+        with pytest.raises(psycopg.errors.InsufficientPrivilege):
+            with durable.connection("c03_terms_reader") as conn:
+                conn.execute(statement)
 
 
 @pytest.mark.parametrize(

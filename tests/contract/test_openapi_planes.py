@@ -13,6 +13,7 @@ from opentour_control.api.schema import create_control_api
 from opentour_control.auth import workos_provider
 from opentour_control.auth.config import IdentityConfig
 from opentour_control.auth.runtime import ControlAuthRuntime, create_control_auth_runtime
+from opentour_control.tenants.models import TermsView
 
 from tools.schema_validate import schema_registry
 
@@ -20,6 +21,8 @@ _CONTEXT = "/v1/session/context"
 _SELECTION = "/v1/session:select-organization"
 _VIEW = "urn:opentour:auth-context:1.0#/$defs/SessionContextView"
 _ERROR = "urn:opentour:common-contract:1.0#/$defs/Error"
+_TERMS = "/v1/organization-terms"
+_TERMS_VIEW = "urn:opentour:organization:1.0#/$defs/TermsView"
 
 
 @pytest.fixture
@@ -62,6 +65,7 @@ def test_session_registration_declares_two_control_routes_with_combined_security
     assert {path: set(operations) for path, operations in paths.items()} == {
         _CONTEXT: {"get"},
         _SELECTION: {"post"},
+        _TERMS: {"get"},
     }
     assert document["components"]["securitySchemes"] == {
         "HTTPBearer": {"type": "http", "scheme": "bearer", "bearerFormat": "JWT"},
@@ -137,6 +141,39 @@ def test_mounted_handlers_still_deny_missing_credentials_with_canonical_error(
         assert client.get("/openapi.json").status_code == 404
 
 
+def test_public_terms_registers_and_serves_only_the_pinned_view(
+    runtime: ControlAuthRuntime,
+) -> None:
+    terms = TermsView(
+        revision="generated-terms",
+        document_url="https://terms.example.invalid/generated",
+        effective_at="2026-11-15T12:00:00.000Z",
+    )
+    app = create_control_api(runtime, read_terms=lambda: terms)
+    operation = app.openapi()["paths"][_TERMS]["get"]
+    assert operation["operationId"] == "getOrganizationTerms"
+    assert operation["x-opentour-plane"] == "control"
+    assert operation["security"] == []
+    assert "requestBody" not in operation and "parameters" not in operation
+    assert set(operation["responses"]) == {"200", "503"}
+    assert _schema(operation["responses"]["200"]) == {"$ref": _TERMS_VIEW}
+    assert _schema(operation["responses"]["503"]) == {"$ref": _ERROR}
+    registry = schema_registry()
+    with TestClient(app) as client:
+        response = client.get(_TERMS)
+        assert response.status_code == 200
+        assert response.json() == terms.model_dump()
+        Draft202012Validator({"$ref": _TERMS_VIEW}, registry=registry).validate(response.json())
+        assert response.headers["Cache-Control"] == "no-store"
+        assert client.post("/v1/organizations").status_code == 404
+        assert client.get("/v1/operations/generated").status_code == 404
+    with TestClient(create_control_api(runtime)) as client:
+        response = client.get(_TERMS)
+        assert (response.status_code, response.json()["code"]) == (503, "TERMS_UNAVAILABLE")
+        Draft202012Validator({"$ref": _ERROR}, registry=registry).validate(response.json())
+        assert response.headers["Cache-Control"] == "no-store"
+
+
 @pytest.mark.parametrize(
     ("path", "include_in_schema"),
     [
@@ -144,8 +181,9 @@ def test_mounted_handlers_still_deny_missing_credentials_with_canonical_error(
         ("/unexpected-generated-path", False),
         (_CONTEXT, True),
         (_CONTEXT, False),
+        (_TERMS, False),
     ],
-    ids=["extra", "hidden-extra", "duplicate", "hidden-duplicate"],
+    ids=["extra", "hidden-extra", "duplicate", "hidden-duplicate", "terms-duplicate"],
 )
 def test_unregistered_runtime_route_refuses_control_app_composition(
     runtime: ControlAuthRuntime,

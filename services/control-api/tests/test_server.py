@@ -7,6 +7,7 @@ import json
 import signal
 from collections.abc import Iterator
 from contextlib import contextmanager
+from datetime import UTC, datetime
 from unittest.mock import Mock
 
 import psycopg
@@ -76,6 +77,57 @@ def test_server_uses_scoped_database_profiles_and_sanitizes_connection_failure(
         assert runtime.close()
 
 
+def test_entrypoint_serves_current_terms_through_the_scoped_reader(
+    deployment: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    deployment["OPENTOUR_TERMS_DATABASE_URL"] = (
+        "postgresql://terms@generated-database.example/control?sslmode=verify-full"
+    )
+    for key, value in deployment.items():
+        monkeypatch.setenv(key, value)
+
+    connection = Mock()
+    connection.__enter__ = Mock(return_value=connection)
+    connection.__exit__ = Mock(return_value=False)
+    connection.execute.side_effect = [
+        Mock(fetchone=Mock(return_value={"allowed": True})),
+        Mock(
+            fetchone=Mock(
+                return_value={
+                    "revision": "generated-terms",
+                    "document_url": "https://terms.example.invalid/generated",
+                    "effective_at": datetime(2026, 1, 1, tzinfo=UTC),
+                }
+            )
+        ),
+    ]
+    connect = Mock(return_value=connection)
+    monkeypatch.setattr(psycopg, "connect", connect)
+
+    def run(listener: uvicorn.Server) -> None:
+        connect.assert_not_called()
+        with TestClient(listener.config.app) as client:
+            response = client.get("/v1/organization-terms")
+            assert response.status_code == 200
+            assert response.json() == {
+                "revision": "generated-terms",
+                "document_url": "https://terms.example.invalid/generated",
+                "effective_at": "2026-01-01T00:00:00.000Z",
+            }
+            assert response.headers["Cache-Control"] == "no-store"
+        connect.assert_called_once()
+        assert conninfo_to_dict(connect.call_args.args[0])["user"] == "terms"
+        assert conninfo_to_dict(connect.call_args.args[0])["sslmode"] == "verify-full"
+        assert "default_transaction_read_only=on" in connect.call_args.kwargs["options"]
+        assert connection.execute.call_count == 2
+        assert "transaction_read_only" in connection.execute.call_args_list[0].args[0]
+        assert "has_any_column_privilege" in connection.execute.call_args_list[0].args[0]
+        assert "opentour_tenants.terms_publication" in connection.execute.call_args_list[1].args[0]
+
+    monkeypatch.setattr(uvicorn.Server, "run", run)
+    server.main()
+
+
 @pytest.mark.parametrize(
     ("name", "value"),
     [
@@ -92,6 +144,19 @@ def test_server_uses_scoped_database_profiles_and_sanitizes_connection_failure(
         (
             "OPENTOUR_SELECTION_DATABASE_URL",
             "postgresql://identity@generated-database.example/control?sslmode=verify-full",
+        ),
+        ("OPENTOUR_TERMS_DATABASE_URL", ""),
+        (
+            "OPENTOUR_TERMS_DATABASE_URL",
+            "postgresql://identity@generated-database.example/control?sslmode=verify-full",
+        ),
+        (
+            "OPENTOUR_TERMS_DATABASE_URL",
+            "postgresql://selection@generated-database.example/control?sslmode=verify-full",
+        ),
+        (
+            "OPENTOUR_TERMS_DATABASE_URL",
+            "postgresql://terms@other.example/control?sslmode=verify-full",
         ),
     ],
 )
