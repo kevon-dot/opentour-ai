@@ -207,10 +207,17 @@ class SessionService:
     def verified_identity(
         self, token: str, binding: str, use: IdentityUse
     ) -> VerifiedIdentityContext:
+        identity, _ = self.verified_identity_with_expiry(token, binding, use)
+        return identity
+
+    def verified_identity_with_expiry(
+        self, token: str, binding: str, use: IdentityUse
+    ) -> tuple[VerifiedIdentityContext, datetime]:
+        """Return verified identity and the private bearer deadline for a transactional fence."""
         if not isinstance(use, IdentityUse):
             raise AuthError("CAPABILITY_DENIED", 403)
         verified, session, now = self._authenticate(token, binding)
-        return self._context(verified, session, now)
+        return self._context(verified, session, now), verified.expires_at
 
     @staticmethod
     def _matches_selection(session: Session, member: LocalMembership) -> bool:

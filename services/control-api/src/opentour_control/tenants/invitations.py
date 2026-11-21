@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import secrets
+from datetime import datetime
 from typing import Annotated, Literal, Protocol
 
 from fastapi import APIRouter, Request
@@ -19,16 +20,14 @@ from .models import ClosedModel, validate_revision
 
 _TOKEN_CONTROLS = re.compile(r"[\x00-\x1f\x7f-\x9f]")
 _ID = Annotated[str, Field(min_length=1, max_length=256)]
-_STORE_DENIALS = frozenset(
-    {
-        ("SESSION_INVALID", 401),
-        ("SESSION_ENDED", 401),
-        ("STALE_SESSION_CONTEXT", 409),
-        ("CAPABILITY_DENIED", 403),
-        ("RESOURCE_NOT_FOUND", 404),
-        ("INVITATION_EXPIRED", 410),
-    }
-)
+_STORE_DENIALS = {
+    "SESSION_INVALID": 401,
+    "SESSION_ENDED": 401,
+    "STALE_SESSION_CONTEXT": 409,
+    "CAPABILITY_DENIED": 403,
+    "RESOURCE_NOT_FOUND": 404,
+    "INVITATION_EXPIRED": 410,
+}
 
 
 class _AcceptRequest(ClosedModel):
@@ -73,6 +72,7 @@ class InvitationAcceptanceStore(Protocol):
         recipient_address: str,
         token_sha256: str,
         request_id: str,
+        bearer_expires_at: datetime,
     ) -> InvitationAcceptanceReceipt:
         """Verify and commit, or replay the stored receipt with its original request ID."""
         ...
@@ -98,7 +98,9 @@ def create_invitation_acceptance_router(
         address = recipients.verified_recipient_address(
             initial.actor["issuer"], initial.actor["subject"]
         )
-        current = sessions.verified_identity(bearer, binding, IdentityUse.RECIPIENT_INVITATION)
+        current, bearer_expires_at = sessions.verified_identity_with_expiry(
+            bearer, binding, IdentityUse.RECIPIENT_INVITATION
+        )
         if current.actor != initial.actor or current.session_id != initial.session_id:
             raise AuthError("SESSION_INVALID")
         if current.session_generation != initial.session_generation:
@@ -110,9 +112,10 @@ def create_invitation_acceptance_router(
                 recipient_address=address,
                 token_sha256=token_sha256,
                 request_id=request_id,
+                bearer_expires_at=bearer_expires_at,
             )
         except AuthError as error:
-            if (error.code, error.status) in _STORE_DENIALS:
+            if _STORE_DENIALS.get(error.code) == error.status:
                 raise AuthError(error.code, error.status) from None
             raise AuthError("IDENTITY_STATE_UNAVAILABLE", 503, True) from None
         if type(receipt) is not InvitationAcceptanceReceipt:
