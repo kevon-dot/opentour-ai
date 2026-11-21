@@ -38,8 +38,14 @@ from opentour_control.auth.session import (
     create_session_router,
 )
 from opentour_control.auth.workos_provider import VerifiedToken
-from opentour_control.tenants.invitation_acceptance_store import PostgresInvitationAcceptanceStore
-from opentour_control.tenants.invitations import create_invitation_acceptance_router
+from opentour_control.tenants.invitation_acceptance_store import (
+    PostgresInvitationAcceptanceStore,
+    PostgresInvitationProgressReader,
+)
+from opentour_control.tenants.invitations import (
+    InvitationProgressService,
+    create_invitation_acceptance_router,
+)
 from opentour_control.tenants.session_selection import (
     PostgresSelectionMembershipAuthority,
     PostgresSessionSelection,
@@ -83,6 +89,7 @@ def postgres():
                 "0005_runner_enrollment.sql",
                 "0006_invitation_ledger.sql",
                 "0007_invitation_acceptance.sql",
+                "0008_invitation_progress.sql",
             ):
                 migration = ROOT / "services/control-api/migrations" / name
                 owner.execute(migration.read_text())
@@ -91,6 +98,8 @@ def postgres():
             "IN ROLE opentour_selection_runtime;"
             "CREATE ROLE c172_invitation LOGIN NOSUPERUSER NOBYPASSRLS "
             "IN ROLE opentour_invitation_runtime;"
+            "CREATE ROLE c172_progress LOGIN NOSUPERUSER NOBYPASSRLS "
+            "IN ROLE opentour_invitation_progress_runtime;"
             "CREATE ROLE c172_identity LOGIN NOSUPERUSER NOBYPASSRLS;"
             "GRANT USAGE ON SCHEMA opentour_identity TO c172_identity;"
             "GRANT SELECT,INSERT,UPDATE ON ALL TABLES IN SCHEMA "
@@ -861,6 +870,170 @@ def test_invitation_legacy_roles_cannot_change_invited_membership(durable, accep
     assert effects == {"receipts": 1, "events": 1, "grants": 0}
 
 
+@pytest.fixture
+def invitation_progress(postgres, durable, acceptance):
+    receipt = acceptance.accept()
+    assert receipt.state == "awaiting_identity" and receipt.operation_id is not None
+    connect = connection_factory(f"host={postgres.socket} dbname=postgres user=c172_progress")
+    reader = PostgresInvitationProgressReader(connect)
+
+    def read(actor=acceptance.identity, **overrides):
+        options = {
+            "session_binding": acceptance.binding,
+            "operation_id": receipt.operation_id,
+            "bearer_expires_at": durable.now + timedelta(minutes=10),
+        }
+        return reader.progress(actor, **(options | overrides))
+
+    return SimpleNamespace(receipt=receipt, reader=reader, read=read, connect=connect)
+
+
+def test_invitation_progress_hides_unknown_and_foreign_operations(durable, invitation_progress):
+    progress = invitation_progress
+    unknown = expect("^RESOURCE_NOT_FOUND$", lambda: progress.read(operation_id=uuid4().hex))
+    foreign = expect(
+        "^RESOURCE_NOT_FOUND$",
+        lambda: progress.read(durable.identity, session_binding=durable.binding),
+    )
+    assert unknown.status == foreign.status == 404
+    assert unknown.wire("generated-progress-denial") == foreign.wire("generated-progress-denial")
+    assert progress.read() == progress.receipt
+
+
+def test_invitation_progress_denies_an_ambiguous_recipient_operation(
+    durable, acceptance, invitation_progress, insert_invitation
+):
+    progress = invitation_progress
+    assert progress.read() == progress.receipt
+    other_org = durable.orgs["b"].local
+    other_membership = uuid4().hex
+    operation_id = progress.receipt.operation_id
+    with durable.owner() as conn:
+        other_invitation = insert_invitation(conn, organization_id=other_org)
+        conn.execute(
+            "INSERT INTO opentour_tenants.memberships "
+            "VALUES (%s,%s,%s,%s,NULL,'provisional','member',1,%s)",
+            (other_org, ISSUER, acceptance.subject, other_membership, durable.now),
+        )
+        conn.execute(
+            "UPDATE opentour_tenants.invitations SET status='consumed', "
+            "accepted_issuer=%s, accepted_subject=%s WHERE organization_id=%s AND id=%s",
+            (ISSUER, acceptance.subject, other_org, other_invitation),
+        )
+        conn.execute(
+            "INSERT INTO opentour_invitation.receipts "
+            "(organization_id,invitation_id,recipient_issuer,recipient_subject,membership_id,"
+            "operation_id,state,revision,request_id,created_at) "
+            "VALUES (%s,%s,%s,%s,%s,%s,'awaiting_identity',1,'generated-collision',%s)",
+            (
+                other_org,
+                other_invitation,
+                ISSUER,
+                acceptance.subject,
+                other_membership,
+                operation_id,
+                durable.now,
+            ),
+        )
+        conn.execute(
+            "INSERT INTO opentour_invitation.outbox VALUES (%s,%s,%s)",
+            (other_org, operation_id, durable.now),
+        )
+    assert expect("^RESOURCE_NOT_FOUND$", progress.read).status == 404
+
+
+@pytest.mark.parametrize("change", ["removed", "provider_denied", "no_longer_pending"])
+def test_invitation_progress_refuses_when_membership_authority_changes(
+    durable, acceptance, invitation_progress, change
+):
+    progress = invitation_progress
+    assert progress.read() == progress.receipt
+    with durable.owner() as conn:
+        if change == "provider_denied":
+            conn.execute(
+                "INSERT INTO opentour_identity.membership_observations "
+                "VALUES (%s,%s,%s,%s,'removed',true,%s,%s,1)",
+                (
+                    ISSUER,
+                    uuid4().hex,
+                    durable.orgs["a"].remote_org,
+                    acceptance.subject,
+                    durable.now,
+                    durable.now,
+                ),
+            )
+        else:
+            status = "removed" if change == "removed" else "active"
+            provider_membership_id = None if status == "removed" else uuid4().hex
+            conn.execute(
+                "UPDATE opentour_tenants.memberships SET status=%s, provider_membership_id=%s "
+                "WHERE organization_id=%s AND issuer=%s AND subject=%s",
+                (
+                    status,
+                    provider_membership_id,
+                    acceptance.organization_id,
+                    ISSUER,
+                    acceptance.subject,
+                ),
+            )
+    before = invitation_effects(durable, acceptance)
+    assert expect("^RESOURCE_NOT_FOUND$", progress.read).status == 404
+    assert invitation_effects(durable, acceptance) == before
+
+
+def test_invitation_progress_rejects_expired_bearer_and_ended_session(
+    durable, acceptance, invitation_progress
+):
+    progress = invitation_progress
+    assert (
+        expect("^SESSION_INVALID$", lambda: progress.read(bearer_expires_at=durable.now)).status
+        == 401
+    )
+    assert (
+        expect("^SESSION_INVALID$", lambda: progress.read(session_binding=durable.binding)).status
+        == 401
+    )
+    before = invitation_effects(durable, acceptance)
+    session = durable.identity_repository.load_session(digest(acceptance.binding), durable.now)
+    ended = durable.identity_repository.end_session(session, datetime.now(UTC))
+    assert ended.ended_at is not None
+    assert expect("^SESSION_ENDED$", progress.read).status == 401
+    assert invitation_effects(durable, acceptance) == before
+
+
+def test_invitation_progress_role_cannot_read_tables_or_execute_the_writer(
+    durable, acceptance, invitation_progress
+):
+    progress = invitation_progress
+    with progress.connect() as conn:
+        privileges = conn.execute(
+            "SELECT rolsuper, rolbypassrls FROM pg_roles WHERE rolname=current_user"
+        ).fetchone()
+    assert privileges == {"rolsuper": False, "rolbypassrls": False}
+    before = invitation_effects(durable, acceptance)
+    for query in (
+        "SELECT recipient_subject FROM opentour_invitation.receipts",
+        "SELECT operation_id FROM opentour_invitation.outbox",
+        "SELECT token_hash FROM opentour_tenants.invitations",
+        "SELECT sealed_payload FROM opentour_identity.session_credentials",
+        "UPDATE opentour_invitation.receipts SET request_id='generated-denied-write'",
+        "SELECT * FROM opentour_invitation.accept("
+        "NULL,NULL,NULL,0,NULL,NULL,NULL,NULL,NULL,NULL,clock_timestamp())",
+    ):
+        with pytest.raises(psycopg.errors.InsufficientPrivilege), progress.connect() as conn:
+            conn.execute(query)
+    with (
+        pytest.raises(psycopg.errors.InsufficientPrivilege),
+        connection_factory(acceptance.dsn)() as conn,
+    ):
+        conn.execute(
+            "SELECT * FROM opentour_invitation.progress("
+            "NULL,NULL,NULL,0,NULL,NULL,clock_timestamp())"
+        )
+    assert progress.read() == progress.receipt
+    assert invitation_effects(durable, acceptance) == before
+
+
 def counts(durable, session_id=None):
     with durable.owner() as conn:
         return tuple(
@@ -1116,6 +1289,37 @@ def test_invitation_acceptance_post_composes_signed_session_recipient_and_postgr
     _, member, effects = invitation_effects(durable, acceptance)
     assert member["membership_id"] == receipt["membership_id"] and member["status"] == "provisional"
     assert effects == {"receipts": 1, "events": 1, "grants": 0}
+
+
+def test_invitation_progress_reads_original_receipt_for_signed_recipient(
+    durable, acceptance, invitation_progress, monkeypatch
+):
+    progress = invitation_progress
+    operation_id = progress.receipt.operation_id
+    before = invitation_effects(durable, acceptance)
+    with generated_browser_auth(durable, monkeypatch, subject=acceptance.subject) as auth:
+        sessions = auth.runtime.session_service
+        service = InvitationProgressService(sessions, progress.reader)
+        bearer = auth.issue_token(None, sid=acceptance.identity.session_id)
+        receipt = service.read(bearer, acceptance.binding, operation_id)
+        assert receipt == progress.receipt
+        assert receipt.request_id == "generated-acceptance-request"
+        new_bearer = auth.issue_token(None)
+        same_recipient, new_binding = sessions.admit(new_bearer)
+        assert same_recipient.actor == acceptance.identity.actor
+        assert same_recipient.session_id != acceptance.identity.session_id
+        assert new_binding != acceptance.binding
+        assert service.read(new_bearer, new_binding, operation_id) == receipt
+        foreign = auth.issue_token(
+            None, sid=durable.identity.session_id, sub=durable.identity.actor["subject"]
+        )
+        assert (
+            expect(
+                "^RESOURCE_NOT_FOUND$", lambda: service.read(foreign, durable.binding, operation_id)
+            ).status
+            == 404
+        )
+    assert invitation_effects(durable, acceptance) == before
 
 
 def test_composed_control_auth_routes_share_the_durable_session(durable, monkeypatch):
