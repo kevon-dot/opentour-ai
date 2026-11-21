@@ -60,7 +60,7 @@ class EnrollmentAuthorityStore(Protocol):
     ) -> EnrollmentAuthority | None:
         """Authorize the operation and lock its current qualified environment in this transaction.
 
-        The owner checks current environment.manage or proof admission, plus mode-specific
+        The owner checks current environments.manage or proof admission, plus mode-specific
         current runner/explicit recovery authority. It uses the supplied connection and
         performs no provider I/O. An unavailable or unauthorized source returns None.
         """
