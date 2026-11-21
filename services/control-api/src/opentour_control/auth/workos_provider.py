@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import threading
 import time
 import urllib.error
@@ -363,6 +364,39 @@ class WorkOSMembershipProvider:
 
     def __init__(self, client: WorkOSClient, config: IdentityConfig) -> None:
         self.client, self.config = client, config
+
+    def verified_recipient_address(self, issuer: str, subject: str) -> str:
+        """Read the current address for an already authenticated invitation recipient."""
+        if (
+            issuer != self.config.issuer
+            or not isinstance(subject, str)
+            or not re.fullmatch(r"[A-Za-z0-9_-]{1,256}", subject)
+        ):
+            raise AuthError("SESSION_INVALID")
+
+        try:
+            user = self.client.user_management.get_user(
+                subject, request_options={"timeout": 5, "max_retries": 0}
+            )
+            if user.id != subject or type(user.email_verified) is not bool:
+                raise ValueError("Invalid provider user")
+            if user.email_verified:
+                address = user.email
+                if (
+                    not isinstance(address, str)
+                    or len(address) > 254
+                    or not address.isprintable()
+                    or address != address.lower()
+                    or not re.fullmatch(r"[^@\s]+@[^@\s]+", address)
+                ):
+                    raise ValueError("Invalid canonical provider address")
+                return address
+        except NotFoundError:
+            pass
+        except Exception:
+            raise AuthError("IDENTITY_VERIFICATION_UNAVAILABLE", 503, True) from None
+
+        raise AuthError("EMAIL_VERIFICATION_REQUIRED", 403)
 
     def current_membership(self, membership_id: str, now: datetime) -> Observation:
         try:
