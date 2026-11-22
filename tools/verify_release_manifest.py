@@ -28,6 +28,10 @@ _GITHUB_CLI_VERSION = "2.91.0"
 _GITHUB_REPOSITORY = "kevon-dot/opentour-ai"
 _GITHUB_REPOSITORY_ID = "1455972360"
 _GITHUB_OIDC_ISSUER = "https://token.actions.githubusercontent.com"
+_GITHUB_INVOCATION = re.compile(
+    rf"https://github\.com/{re.escape(_GITHUB_REPOSITORY)}"
+    r"/actions/runs/[1-9][0-9]*/attempts/[1-9][0-9]*"
+)
 _PROVENANCE_TYPE = "https://slsa.dev/provenance/v1"
 _ATTESTATION_RESULT_TYPE = "application/vnd.dev.sigstore.verificationresult+json;version=0.1"
 
@@ -283,6 +287,7 @@ def _verify_attestation_result(
     policy: _AttestationPolicy,
     manifest_sha256: str,
     expected_subject: str | None,
+    expected_invocation: str | None,
 ) -> None:
     results = _attestation_json(output, "GitHub CLI verification result")
     if not isinstance(results, list) or len(results) != 1 or not isinstance(results[0], dict):
@@ -315,6 +320,16 @@ def _verify_attestation_result(
     statement = result.get("statement")
     if not isinstance(statement, dict) or statement.get("predicateType") != _PROVENANCE_TYPE:
         raise ReleaseVerificationError("Missing verified SLSA provenance statement")
+    if expected_invocation is not None:
+        match statement.get("predicate"):
+            case {"runDetails": {"metadata": {"invocationId": str(invocation)}}} if (
+                invocation == expected_invocation
+            ):
+                pass
+            case _:
+                raise ReleaseVerificationError(
+                    "Verified attestation does not match the approved GitHub run and attempt"
+                )
     subjects = statement.get("subject")
     if not isinstance(subjects, list):
         raise ReleaseVerificationError("Verified attestation does not name the manifest SHA-256")
@@ -343,6 +358,7 @@ def verify_manifest_attestation(
     approved_policy: Path,
     github_cli: Path,
     expected_subject: str | None = None,
+    expected_invocation: str | None = None,
 ) -> str:
     """Return the SHA-256 of exact local manifest bytes with verified SLSA provenance.
 
@@ -351,12 +367,19 @@ def verify_manifest_attestation(
     JSON bundle signed by a direct OpenTour GitHub Actions workflow at the approved
     ref and commit. If supplied, the subject name must come from the same independent
     trust boundary and identify exactly one entry in the authenticated statement.
+    An approved invocation from that boundary pins the GitHub URL including its run
+    ID and attempt in the authenticated SLSA statement.
     OCI content and release eligibility have separate checks.
     """
     if expected_subject is not None and (
         not isinstance(expected_subject, str) or not expected_subject
     ):
         raise ReleaseVerificationError("Expected a nonempty approved attestation subject name")
+    if expected_invocation is not None and (
+        not isinstance(expected_invocation, str)
+        or _GITHUB_INVOCATION.fullmatch(expected_invocation) is None
+    ):
+        raise ReleaseVerificationError("Expected a canonical approved GitHub run and attempt URL")
     if not github_cli.is_absolute():
         raise ReleaseVerificationError("Expected an absolute path to the approved GitHub CLI")
     policy = _load_attestation_policy(approved_policy)
@@ -412,7 +435,9 @@ def verify_manifest_attestation(
             "--format",
             "json",
         )
-    _verify_attestation_result(output, policy, manifest_sha256, expected_subject)
+    _verify_attestation_result(
+        output, policy, manifest_sha256, expected_subject, expected_invocation
+    )
     return manifest_sha256
 
 
@@ -423,6 +448,9 @@ def main() -> int:
     mode.add_argument("--manifest", type=Path, help="Exact local manifest bytes to authenticate")
     parser.add_argument("--image-digest")
     parser.add_argument("--expected-subject", help="Independently approved SLSA subject name")
+    parser.add_argument(
+        "--expected-invocation", help="Independently approved GitHub run and attempt URL"
+    )
     parser.add_argument("--bundle", type=Path, help="Local Sigstore JSON attestation bundle")
     parser.add_argument("--trusted-root", type=Path, help="Local GitHub CLI trusted_root.jsonl")
     parser.add_argument(
@@ -452,11 +480,14 @@ def main() -> int:
                 approved_policy=args.approved_policy,
                 github_cli=args.github_cli,
                 expected_subject=args.expected_subject,
+                expected_invocation=args.expected_invocation,
             )
             print(f"Verified GitHub attestation for local manifest sha256:{digest}")
         else:
             if args.expected_subject is not None:
                 parser.error("--expected-subject requires --manifest")
+            if args.expected_invocation is not None:
+                parser.error("--expected-invocation requires --manifest")
             if args.image_digest is None or any(item is not None for item in attestation_inputs):
                 parser.error("--oci-layout requires --image-digest")
             verify_oci_layout(args.oci_layout, args.image_digest)
