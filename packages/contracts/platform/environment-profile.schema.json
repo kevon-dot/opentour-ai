@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:opentour:environment-profile:1.0",
+  "title": "OpenTour environment identity profile",
+  "description": "Permanent identity of a tenant cell in either ownership mode. The installer must compare this profile with separately authorized inputs before installation. Region syntax alone grants no qualification.",
+  "$ref": "#/$defs/EnvironmentIdentity",
+  "$defs": {
+    "EnvironmentIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "environment_id",
+        "organization_id",
+        "mode",
+        "aws_account_id",
+        "region",
+        "cell_id"
+      ],
+      "properties": {
+        "environment_id": { "$ref": "urn:opentour:common-contract:1.0#/$defs/Id" },
+        "organization_id": { "$ref": "urn:opentour:common-contract:1.0#/$defs/Id" },
+        "mode": { "enum": ["opentour_managed", "customer_controlled"] },
+        "aws_account_id": { "type": "string", "pattern": "^[0-9]{12}$", "minLength": 12, "maxLength": 12 },
+        "region": {
+          "description": "Commercial AWS Region syntax. The approved registry determines supported Regions.",
+          "type": "string",
+          "pattern": "^(?!cn-)[a-z]{2}-[a-z]+-[1-9][0-9]*(?![\\s\\S])"
+        },
+        "cell_id": { "$ref": "urn:opentour:common-contract:1.0#/$defs/Id" }
+      }
+    }
+  }
+}
