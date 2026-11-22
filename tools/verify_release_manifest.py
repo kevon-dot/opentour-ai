@@ -282,6 +282,7 @@ def _verify_attestation_result(
     output: bytes,
     policy: _AttestationPolicy,
     manifest_sha256: str,
+    expected_subject: str | None,
 ) -> None:
     results = _attestation_json(output, "GitHub CLI verification result")
     if not isinstance(results, list) or len(results) != 1 or not isinstance(results[0], dict):
@@ -315,7 +316,17 @@ def _verify_attestation_result(
     if not isinstance(statement, dict) or statement.get("predicateType") != _PROVENANCE_TYPE:
         raise ReleaseVerificationError("Missing verified SLSA provenance statement")
     subjects = statement.get("subject")
-    if not isinstance(subjects, list) or not any(
+    if not isinstance(subjects, list):
+        raise ReleaseVerificationError("Verified attestation does not name the manifest SHA-256")
+    if expected_subject is not None:
+        subjects = [
+            subject
+            for subject in subjects
+            if isinstance(subject, dict) and subject.get("name") == expected_subject
+        ]
+        if len(subjects) != 1:
+            raise ReleaseVerificationError("Expected exactly one approved attestation subject name")
+    if not any(
         isinstance(subject, dict)
         and isinstance(subject.get("digest"), dict)
         and subject["digest"].get("sha256") == manifest_sha256
@@ -331,14 +342,21 @@ def verify_manifest_attestation(
     trusted_root: Path,
     approved_policy: Path,
     github_cli: Path,
+    expected_subject: str | None = None,
 ) -> str:
     """Return the SHA-256 of exact local manifest bytes with verified SLSA provenance.
 
     Supply the policy and pinned-version GitHub CLI executable from a trusted
     source independent of the manifest and bundle. This supports one local Sigstore
     JSON bundle signed by a direct OpenTour GitHub Actions workflow at the approved
-    ref and commit. OCI content and release eligibility have separate checks.
+    ref and commit. If supplied, the subject name must come from the same independent
+    trust boundary and identify exactly one entry in the authenticated statement.
+    OCI content and release eligibility have separate checks.
     """
+    if expected_subject is not None and (
+        not isinstance(expected_subject, str) or not expected_subject
+    ):
+        raise ReleaseVerificationError("Expected a nonempty approved attestation subject name")
     if not github_cli.is_absolute():
         raise ReleaseVerificationError("Expected an absolute path to the approved GitHub CLI")
     policy = _load_attestation_policy(approved_policy)
@@ -394,7 +412,7 @@ def verify_manifest_attestation(
             "--format",
             "json",
         )
-    _verify_attestation_result(output, policy, manifest_sha256)
+    _verify_attestation_result(output, policy, manifest_sha256, expected_subject)
     return manifest_sha256
 
 
@@ -404,6 +422,7 @@ def main() -> int:
     mode.add_argument("--oci-layout", type=Path)
     mode.add_argument("--manifest", type=Path, help="Exact local manifest bytes to authenticate")
     parser.add_argument("--image-digest")
+    parser.add_argument("--expected-subject", help="Independently approved SLSA subject name")
     parser.add_argument("--bundle", type=Path, help="Local Sigstore JSON attestation bundle")
     parser.add_argument("--trusted-root", type=Path, help="Local GitHub CLI trusted_root.jsonl")
     parser.add_argument(
@@ -432,9 +451,12 @@ def main() -> int:
                 trusted_root=args.trusted_root,
                 approved_policy=args.approved_policy,
                 github_cli=args.github_cli,
+                expected_subject=args.expected_subject,
             )
             print(f"Verified GitHub attestation for local manifest sha256:{digest}")
         else:
+            if args.expected_subject is not None:
+                parser.error("--expected-subject requires --manifest")
             if args.image_digest is None or any(item is not None for item in attestation_inputs):
                 parser.error("--oci-layout requires --image-digest")
             verify_oci_layout(args.oci_layout, args.image_digest)
