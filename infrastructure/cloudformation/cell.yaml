@@ -1,0 +1,435 @@
+{
+ "AWSTemplateFormatVersion": "2010-09-09",
+ "Description": "OPE-181 common tenant-cell template draft. Retained storage only.",
+ "Metadata": {
+  "OpenTour": {
+   "scope": "retained-storage",
+   "product_acceptance": "NOT_RUN",
+   "storage_source": "infrastructure.cell_installer.retained_storage_template_section"
+  }
+ },
+ "Parameters": {
+  "TrainerStorageKmsKeyArn": {
+   "Type": "String",
+   "AllowedPattern": "arn:aws:kms:(?!cn-)[a-z]{2}-[a-z]+-[1-9][0-9]*:[0-9]{12}:key/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+  },
+  "EvaluatorStorageKmsKeyArn": {
+   "Type": "String",
+   "AllowedPattern": "arn:aws:kms:(?!cn-)[a-z]{2}-[a-z]+-[1-9][0-9]*:[0-9]{12}:key/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+  },
+  "EvidenceStorageKmsKeyArn": {
+   "Type": "String",
+   "AllowedPattern": "arn:aws:kms:(?!cn-)[a-z]{2}-[a-z]+-[1-9][0-9]*:[0-9]{12}:key/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+  },
+  "ArtifactStorageKmsKeyArn": {
+   "Type": "String",
+   "AllowedPattern": "arn:aws:kms:(?!cn-)[a-z]{2}-[a-z]+-[1-9][0-9]*:[0-9]{12}:key/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+  },
+  "TrainerRoleArn": {
+   "Type": "String",
+   "AllowedPattern": "arn:aws:iam::[0-9]{12}:role/(?:[A-Za-z0-9_+=,.@/-]{1,510}/)?[A-Za-z0-9_+=,.@-]{1,64}"
+  },
+  "EvaluatorRoleArn": {
+   "Type": "String",
+   "AllowedPattern": "arn:aws:iam::[0-9]{12}:role/(?:[A-Za-z0-9_+=,.@/-]{1,510}/)?[A-Za-z0-9_+=,.@-]{1,64}"
+  }
+ },
+ "Resources": {
+  "TrainerStorage": {
+   "Type": "AWS::S3::Bucket",
+   "DeletionPolicy": "Retain",
+   "UpdateReplacePolicy": "Retain",
+   "Properties": {
+    "BucketEncryption": {
+     "ServerSideEncryptionConfiguration": [
+      {
+       "ServerSideEncryptionByDefault": {
+        "SSEAlgorithm": "aws:kms",
+        "KMSMasterKeyID": {
+         "Ref": "TrainerStorageKmsKeyArn"
+        }
+       },
+       "BucketKeyEnabled": false
+      }
+     ]
+    },
+    "OwnershipControls": {
+     "Rules": [
+      {
+       "ObjectOwnership": "BucketOwnerEnforced"
+      }
+     ]
+    },
+    "PublicAccessBlockConfiguration": {
+     "BlockPublicAcls": true,
+     "BlockPublicPolicy": true,
+     "IgnorePublicAcls": true,
+     "RestrictPublicBuckets": true
+    },
+    "VersioningConfiguration": {
+     "Status": "Enabled"
+    }
+   }
+  },
+  "TrainerStoragePolicy": {
+   "Type": "AWS::S3::BucketPolicy",
+   "DeletionPolicy": "Retain",
+   "UpdateReplacePolicy": "Retain",
+   "Properties": {
+    "Bucket": {
+     "Ref": "TrainerStorage"
+    },
+    "PolicyDocument": {
+     "Version": "2012-10-17",
+     "Statement": [
+      {
+       "Sid": "DenyOppositeWorkload",
+       "Effect": "Deny",
+       "Principal": "*",
+       "Action": "s3:*",
+       "Resource": [
+        {
+         "Fn::GetAtt": [
+          "TrainerStorage",
+          "Arn"
+         ]
+        },
+        {
+         "Fn::Sub": "${TrainerStorage.Arn}/*"
+        }
+       ],
+       "Condition": {
+        "ArnEquals": {
+         "aws:PrincipalArn": {
+          "Ref": "EvaluatorRoleArn"
+         }
+        }
+       }
+      },
+      {
+       "Sid": "RequireKmsForObjectWrites",
+       "Effect": "Deny",
+       "Principal": "*",
+       "Action": "s3:PutObject",
+       "Resource": {
+        "Fn::Sub": "${TrainerStorage.Arn}/*"
+       },
+       "Condition": {
+        "StringNotEquals": {
+         "s3:x-amz-server-side-encryption": "aws:kms"
+        }
+       }
+      },
+      {
+       "Sid": "RequireExactKeyForObjectWrites",
+       "Effect": "Deny",
+       "Principal": "*",
+       "Action": "s3:PutObject",
+       "Resource": {
+        "Fn::Sub": "${TrainerStorage.Arn}/*"
+       },
+       "Condition": {
+        "StringNotEquals": {
+         "s3:x-amz-server-side-encryption-aws-kms-key-id": {
+          "Ref": "TrainerStorageKmsKeyArn"
+         }
+        }
+       }
+      }
+     ]
+    }
+   }
+  },
+  "EvaluatorStorage": {
+   "Type": "AWS::S3::Bucket",
+   "DeletionPolicy": "Retain",
+   "UpdateReplacePolicy": "Retain",
+   "Properties": {
+    "BucketEncryption": {
+     "ServerSideEncryptionConfiguration": [
+      {
+       "ServerSideEncryptionByDefault": {
+        "SSEAlgorithm": "aws:kms",
+        "KMSMasterKeyID": {
+         "Ref": "EvaluatorStorageKmsKeyArn"
+        }
+       },
+       "BucketKeyEnabled": false
+      }
+     ]
+    },
+    "OwnershipControls": {
+     "Rules": [
+      {
+       "ObjectOwnership": "BucketOwnerEnforced"
+      }
+     ]
+    },
+    "PublicAccessBlockConfiguration": {
+     "BlockPublicAcls": true,
+     "BlockPublicPolicy": true,
+     "IgnorePublicAcls": true,
+     "RestrictPublicBuckets": true
+    },
+    "VersioningConfiguration": {
+     "Status": "Enabled"
+    }
+   }
+  },
+  "EvaluatorStoragePolicy": {
+   "Type": "AWS::S3::BucketPolicy",
+   "DeletionPolicy": "Retain",
+   "UpdateReplacePolicy": "Retain",
+   "Properties": {
+    "Bucket": {
+     "Ref": "EvaluatorStorage"
+    },
+    "PolicyDocument": {
+     "Version": "2012-10-17",
+     "Statement": [
+      {
+       "Sid": "DenyOppositeWorkload",
+       "Effect": "Deny",
+       "Principal": "*",
+       "Action": "s3:*",
+       "Resource": [
+        {
+         "Fn::GetAtt": [
+          "EvaluatorStorage",
+          "Arn"
+         ]
+        },
+        {
+         "Fn::Sub": "${EvaluatorStorage.Arn}/*"
+        }
+       ],
+       "Condition": {
+        "ArnEquals": {
+         "aws:PrincipalArn": {
+          "Ref": "TrainerRoleArn"
+         }
+        }
+       }
+      },
+      {
+       "Sid": "RequireKmsForObjectWrites",
+       "Effect": "Deny",
+       "Principal": "*",
+       "Action": "s3:PutObject",
+       "Resource": {
+        "Fn::Sub": "${EvaluatorStorage.Arn}/*"
+       },
+       "Condition": {
+        "StringNotEquals": {
+         "s3:x-amz-server-side-encryption": "aws:kms"
+        }
+       }
+      },
+      {
+       "Sid": "RequireExactKeyForObjectWrites",
+       "Effect": "Deny",
+       "Principal": "*",
+       "Action": "s3:PutObject",
+       "Resource": {
+        "Fn::Sub": "${EvaluatorStorage.Arn}/*"
+       },
+       "Condition": {
+        "StringNotEquals": {
+         "s3:x-amz-server-side-encryption-aws-kms-key-id": {
+          "Ref": "EvaluatorStorageKmsKeyArn"
+         }
+        }
+       }
+      }
+     ]
+    }
+   }
+  },
+  "EvidenceStorage": {
+   "Type": "AWS::S3::Bucket",
+   "DeletionPolicy": "Retain",
+   "UpdateReplacePolicy": "Retain",
+   "Properties": {
+    "BucketEncryption": {
+     "ServerSideEncryptionConfiguration": [
+      {
+       "ServerSideEncryptionByDefault": {
+        "SSEAlgorithm": "aws:kms",
+        "KMSMasterKeyID": {
+         "Ref": "EvidenceStorageKmsKeyArn"
+        }
+       },
+       "BucketKeyEnabled": false
+      }
+     ]
+    },
+    "OwnershipControls": {
+     "Rules": [
+      {
+       "ObjectOwnership": "BucketOwnerEnforced"
+      }
+     ]
+    },
+    "PublicAccessBlockConfiguration": {
+     "BlockPublicAcls": true,
+     "BlockPublicPolicy": true,
+     "IgnorePublicAcls": true,
+     "RestrictPublicBuckets": true
+    },
+    "VersioningConfiguration": {
+     "Status": "Enabled"
+    }
+   }
+  },
+  "EvidenceStoragePolicy": {
+   "Type": "AWS::S3::BucketPolicy",
+   "DeletionPolicy": "Retain",
+   "UpdateReplacePolicy": "Retain",
+   "Properties": {
+    "Bucket": {
+     "Ref": "EvidenceStorage"
+    },
+    "PolicyDocument": {
+     "Version": "2012-10-17",
+     "Statement": [
+      {
+       "Sid": "DenyOppositeWorkload",
+       "Effect": "Deny",
+       "Principal": "*",
+       "Action": "s3:*",
+       "Resource": [
+        {
+         "Fn::GetAtt": [
+          "EvidenceStorage",
+          "Arn"
+         ]
+        },
+        {
+         "Fn::Sub": "${EvidenceStorage.Arn}/*"
+        }
+       ],
+       "Condition": {
+        "ArnEquals": {
+         "aws:PrincipalArn": {
+          "Ref": "TrainerRoleArn"
+         }
+        }
+       }
+      },
+      {
+       "Sid": "RequireKmsForObjectWrites",
+       "Effect": "Deny",
+       "Principal": "*",
+       "Action": "s3:PutObject",
+       "Resource": {
+        "Fn::Sub": "${EvidenceStorage.Arn}/*"
+       },
+       "Condition": {
+        "StringNotEquals": {
+         "s3:x-amz-server-side-encryption": "aws:kms"
+        }
+       }
+      },
+      {
+       "Sid": "RequireExactKeyForObjectWrites",
+       "Effect": "Deny",
+       "Principal": "*",
+       "Action": "s3:PutObject",
+       "Resource": {
+        "Fn::Sub": "${EvidenceStorage.Arn}/*"
+       },
+       "Condition": {
+        "StringNotEquals": {
+         "s3:x-amz-server-side-encryption-aws-kms-key-id": {
+          "Ref": "EvidenceStorageKmsKeyArn"
+         }
+        }
+       }
+      }
+     ]
+    }
+   }
+  },
+  "ArtifactStorage": {
+   "Type": "AWS::S3::Bucket",
+   "DeletionPolicy": "Retain",
+   "UpdateReplacePolicy": "Retain",
+   "Properties": {
+    "BucketEncryption": {
+     "ServerSideEncryptionConfiguration": [
+      {
+       "ServerSideEncryptionByDefault": {
+        "SSEAlgorithm": "aws:kms",
+        "KMSMasterKeyID": {
+         "Ref": "ArtifactStorageKmsKeyArn"
+        }
+       },
+       "BucketKeyEnabled": false
+      }
+     ]
+    },
+    "OwnershipControls": {
+     "Rules": [
+      {
+       "ObjectOwnership": "BucketOwnerEnforced"
+      }
+     ]
+    },
+    "PublicAccessBlockConfiguration": {
+     "BlockPublicAcls": true,
+     "BlockPublicPolicy": true,
+     "IgnorePublicAcls": true,
+     "RestrictPublicBuckets": true
+    },
+    "VersioningConfiguration": {
+     "Status": "Enabled"
+    }
+   }
+  },
+  "ArtifactStoragePolicy": {
+   "Type": "AWS::S3::BucketPolicy",
+   "DeletionPolicy": "Retain",
+   "UpdateReplacePolicy": "Retain",
+   "Properties": {
+    "Bucket": {
+     "Ref": "ArtifactStorage"
+    },
+    "PolicyDocument": {
+     "Version": "2012-10-17",
+     "Statement": [
+      {
+       "Sid": "RequireKmsForObjectWrites",
+       "Effect": "Deny",
+       "Principal": "*",
+       "Action": "s3:PutObject",
+       "Resource": {
+        "Fn::Sub": "${ArtifactStorage.Arn}/*"
+       },
+       "Condition": {
+        "StringNotEquals": {
+         "s3:x-amz-server-side-encryption": "aws:kms"
+        }
+       }
+      },
+      {
+       "Sid": "RequireExactKeyForObjectWrites",
+       "Effect": "Deny",
+       "Principal": "*",
+       "Action": "s3:PutObject",
+       "Resource": {
+        "Fn::Sub": "${ArtifactStorage.Arn}/*"
+       },
+       "Condition": {
+        "StringNotEquals": {
+         "s3:x-amz-server-side-encryption-aws-kms-key-id": {
+          "Ref": "ArtifactStorageKmsKeyArn"
+         }
+        }
+       }
+      }
+     ]
+    }
+   }
+  }
+ }
+}
