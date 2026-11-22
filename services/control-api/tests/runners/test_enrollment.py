@@ -7,8 +7,8 @@ import hashlib
 import json
 import ssl
 import threading
-from collections.abc import Callable
-from dataclasses import replace
+from collections.abc import Callable, Mapping
+from dataclasses import asdict, replace
 from datetime import UTC, datetime, timedelta
 from io import BytesIO
 from typing import Any
@@ -19,6 +19,7 @@ from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec, utils
 from cryptography.x509.oid import NameOID
+from opentour_cell.enrollment.client import EnrollmentProofUnavailable, build_enrollment_proof
 from opentour_control.runners.enrollment import (
     MAX_STS_RESPONSE_BYTES,
     EnrollmentVerificationUnavailable,
@@ -31,6 +32,7 @@ from opentour_control.runners.enrollment import (
     validate_enrollment_proof,
     verify_enrollment_identity,
 )
+from opentour_journal.crypto import canonical, der_to_raw
 
 NOW = datetime(2026, 11, 18, 10, 0, 0, tzinfo=UTC)
 NONCE_BYTES = bytes(range(32))
@@ -125,6 +127,277 @@ def proof_for(
 def assert_denied(body: bytes, installed: InstalledCell, challenge: IssuedChallenge) -> None:
     with pytest.raises(InvalidEnrollmentProof, match="^ENROLLMENT_PROOF_INVALID$"):
         validate_enrollment_proof(body, installed=installed, challenge=challenge, now=NOW)
+
+
+class FixtureRunnerSigningKey:
+    def __init__(self) -> None:
+        self.key = ec.derive_private_key(17, ec.SECP256R1())
+        coordinates = self.key.public_key().public_numbers()
+        self.jwk = {
+            "kty": "EC",
+            "crv": "P-256",
+            "x": b64(coordinates.x.to_bytes(32)),
+            "y": b64(coordinates.y.to_bytes(32)),
+        }
+        self.digest: bytes | None = None
+
+    def public_jwk(self) -> Mapping[str, str]:
+        return self.jwk
+
+    def sign_sha256(self, digest: bytes) -> str:
+        self.digest = digest
+        return der_to_raw(self.key.sign(digest, ec.ECDSA(utils.Prehashed(hashes.SHA256()))))
+
+
+class FixtureCallerIdentityPresigner:
+    def __init__(self) -> None:
+        self.binding: str | None = None
+        self.expiry: int | None = None
+        self.changes: dict[str, str] = {}
+        self.return_endpoint: str | None = None
+
+    def presign_get_caller_identity(
+        self, *, endpoint: str, region: str, binding_header: str, expires_in: int
+    ) -> str:
+        assert endpoint == "https://sts.us-east-1.amazonaws.com/" and region == "us-east-1"
+        self.binding, self.expiry = binding_header, expires_in
+        query = {
+            "Action": "GetCallerIdentity",
+            "Version": "2011-06-15",
+            "X-Amz-Algorithm": "AWS4-HMAC-SHA256",
+            "X-Amz-Credential": f"SENTINEL/20261118/{region}/sts/aws4_request",
+            "X-Amz-Date": "20261118T100000Z",
+            "X-Amz-Expires": str(expires_in),
+            "X-Amz-Security-Token": "inert-session-marker",
+            "X-Amz-Signature": "b" * 64,
+            "X-Amz-SignedHeaders": "host;x-opentour-enrollment",
+            **self.changes,
+        }
+        return f"{self.return_endpoint or endpoint}?{urlencode(query)}"
+
+
+def runner_challenge(challenge: IssuedChallenge) -> dict[str, object]:
+    return {
+        **asdict(challenge.installed),
+        "challenge_id": challenge.id,
+        "nonce": b64(NONCE_BYTES),
+        "secret_unavailable": False,
+        "expires_at": challenge.expires_at.isoformat(timespec="milliseconds").replace(
+            "+00:00", "Z"
+        ),
+        "proof_schema_version": "opentour-enrollment-v1",
+    }
+
+
+@pytest.mark.parametrize("mode", ["opentour_managed", "customer_controlled"])
+@pytest.mark.parametrize("role_id", [None, "AROAEXISTINGROLE"])
+def test_runner_built_proof_matches_the_control_verifier(
+    installed, challenge, mode, role_id
+) -> None:
+    installed = replace(
+        installed, organization_id="fixture-é", deployment_mode=mode, expected_iam_role_id=role_id
+    )
+    challenge = replace(challenge, installed=installed, expires_at=NOW + timedelta(seconds=23.5))
+    signer = FixtureRunnerSigningKey()
+    presigner = FixtureCallerIdentityPresigner()
+
+    body = build_enrollment_proof(
+        runner_challenge(challenge),
+        approved_installation=asdict(installed),
+        canonicalize=canonical,
+        signer=signer,
+        presigner=presigner,
+        clock=lambda: NOW,
+    )
+
+    validate_enrollment_proof(body, installed=installed, challenge=challenge, now=NOW)
+    assert presigner.expiry == 23
+    proof = json.loads(body)
+    digest = hashlib.sha256(canonical(proof["transcript"])).digest()
+    assert signer.digest == digest
+    assert presigner.binding == b64(digest)
+    assert proof["signed_sts_request"]["binding_header"] == presigner.binding
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"organization_id": "other-org"},
+        {"environment_id": "other-env"},
+        {"cell_id": "other-cell"},
+        {"aws_account_id": "000000000002"},
+        {"iam_role_arn": "arn:aws:iam::000000000001:role/fixture-other"},
+        {"expected_iam_role_id": "AROAOTHERROLE"},
+        {"region": "us-east-2"},
+        {"deployment_mode": "customer_controlled"},
+        {"installer_sha256": "f" * 64},
+        {"nonce": "A" * 42 + "B"},
+        {"nonce": None, "secret_unavailable": True},
+        {"expires_at": "2026-11-18T10:00:00.000Z"},
+        {"proof_schema_version": "opentour-enrollment-v2"},
+        {"additional": "fixture"},
+    ],
+)
+def test_runner_refuses_invalid_challenge_before_signing(installed, challenge, changes) -> None:
+    signer = FixtureRunnerSigningKey()
+    presigner = FixtureCallerIdentityPresigner()
+    with pytest.raises(EnrollmentProofUnavailable, match="^ENROLLMENT_PROOF_UNAVAILABLE$"):
+        build_enrollment_proof(
+            {**runner_challenge(challenge), **changes},
+            approved_installation=asdict(installed),
+            canonicalize=canonical,
+            signer=signer,
+            presigner=presigner,
+            clock=lambda: NOW,
+        )
+    assert signer.digest is presigner.binding is None
+
+
+def test_runner_rejects_an_unqualified_region_even_when_the_challenge_and_binding_match(
+    installed, challenge
+) -> None:
+    ohio = replace(installed, region="us-east-2")
+    signer = FixtureRunnerSigningKey()
+    presigner = FixtureCallerIdentityPresigner()
+    with pytest.raises(EnrollmentProofUnavailable):
+        build_enrollment_proof(
+            runner_challenge(replace(challenge, installed=ohio)),
+            approved_installation=asdict(ohio),
+            canonicalize=canonical,
+            signer=signer,
+            presigner=presigner,
+            clock=lambda: NOW,
+        )
+    assert signer.digest is presigner.binding is None
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"Action": "AssumeRole"},
+        {"X-Amz-SignedHeaders": "host"},
+        {"X-Amz-Expires": "61"},
+        {"X-Amz-Date": "20261118T100001Z"},
+        {"X-Amz-Credential": "SENTINEL/20261118/us-east-2/sts/aws4_request"},
+        {"unexpected": "inert"},
+    ],
+)
+def test_runner_rejects_presigner_scope_drift(installed, challenge, changes) -> None:
+    presigner = FixtureCallerIdentityPresigner()
+    presigner.changes = changes
+    with pytest.raises(EnrollmentProofUnavailable):
+        build_enrollment_proof(
+            runner_challenge(challenge),
+            approved_installation=asdict(installed),
+            canonicalize=canonical,
+            signer=FixtureRunnerSigningKey(),
+            presigner=presigner,
+            clock=lambda: NOW,
+        )
+
+
+@pytest.mark.parametrize(
+    "endpoint",
+    [
+        "https://fixture.example/",
+        "https://sts.us-east-1.amazonaws.com:443/",
+        "https://sts.us-east-1.amazonaws.com/noncanonical",
+    ],
+)
+def test_runner_rejects_presigner_destination_drift(installed, challenge, endpoint) -> None:
+    presigner = FixtureCallerIdentityPresigner()
+    presigner.return_endpoint = endpoint
+    with pytest.raises(EnrollmentProofUnavailable):
+        build_enrollment_proof(
+            runner_challenge(challenge),
+            approved_installation=asdict(installed),
+            canonicalize=canonical,
+            signer=FixtureRunnerSigningKey(),
+            presigner=presigner,
+            clock=lambda: NOW,
+        )
+
+
+def test_runner_rechecks_expiry_after_signing_before_presigning(installed, challenge) -> None:
+    signer = FixtureRunnerSigningKey()
+    presigner = FixtureCallerIdentityPresigner()
+    progress = iter((NOW, NOW, challenge.expires_at))
+    with pytest.raises(EnrollmentProofUnavailable):
+        build_enrollment_proof(
+            runner_challenge(challenge),
+            approved_installation=asdict(installed),
+            canonicalize=canonical,
+            signer=signer,
+            presigner=presigner,
+            clock=lambda: next(progress),
+        )
+    assert signer.digest is not None and presigner.binding is None
+
+
+def test_runner_caps_long_expiry_at_sixty_seconds(installed, challenge) -> None:
+    presigner = FixtureCallerIdentityPresigner()
+    proof = build_enrollment_proof(
+        runner_challenge(challenge),
+        approved_installation=asdict(installed),
+        canonicalize=canonical,
+        signer=FixtureRunnerSigningKey(),
+        presigner=presigner,
+        clock=lambda: NOW,
+    )
+    assert presigner.expiry == 60
+    validate_enrollment_proof(proof, installed=installed, challenge=challenge, now=NOW)
+
+
+def test_runner_public_jwk_cannot_include_private_fields(installed, challenge) -> None:
+    signer = FixtureRunnerSigningKey()
+    signer.jwk["d"] = "inert-private-marker"
+    with pytest.raises(EnrollmentProofUnavailable, match="^ENROLLMENT_PROOF_UNAVAILABLE$"):
+        build_enrollment_proof(
+            runner_challenge(challenge),
+            approved_installation=asdict(installed),
+            canonicalize=canonical,
+            signer=signer,
+            presigner=FixtureCallerIdentityPresigner(),
+            clock=lambda: NOW,
+        )
+    assert signer.digest is None
+
+
+def test_runner_refuses_serialized_proof_over_wire_limit(installed, challenge) -> None:
+    large_id = "\U0001f4a1" * 256
+    installed = replace(
+        installed, organization_id=large_id, environment_id=large_id, cell_id=large_id
+    )
+    challenge = replace(challenge, installed=installed, id=large_id)
+    presigner = FixtureCallerIdentityPresigner()
+    presigner.changes["X-Amz-Security-Token"] = "x" * 11_850
+    with pytest.raises(EnrollmentProofUnavailable, match="^ENROLLMENT_PROOF_UNAVAILABLE$"):
+        build_enrollment_proof(
+            runner_challenge(challenge),
+            approved_installation=asdict(installed),
+            canonicalize=canonical,
+            signer=FixtureRunnerSigningKey(),
+            presigner=presigner,
+            clock=lambda: NOW,
+        )
+    assert presigner.binding is not None
+
+
+def test_runner_adapter_error_has_no_nonce_or_credential_details(installed, challenge) -> None:
+    class FailedSigner(FixtureRunnerSigningKey):
+        def sign_sha256(self, digest: bytes) -> str:
+            raise RuntimeError("inert-provider-detail")
+
+    with pytest.raises(EnrollmentProofUnavailable, match="^ENROLLMENT_PROOF_UNAVAILABLE$") as error:
+        build_enrollment_proof(
+            runner_challenge(challenge),
+            approved_installation=asdict(installed),
+            canonicalize=canonical,
+            signer=FailedSigner(),
+            presigner=FixtureCallerIdentityPresigner(),
+            clock=lambda: NOW,
+        )
+    assert error.value.__suppress_context__
 
 
 @pytest.mark.parametrize("mode", ["opentour_managed", "customer_controlled"])
