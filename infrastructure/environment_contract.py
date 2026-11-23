@@ -288,6 +288,7 @@ def security_configuration_diff(
             "KeyPolicy",
             "TaskRoleArn",
             "ExecutionRoleArn",
+            "EnableExecuteCommand",
             "PubliclyAccessible",
             "VPCSecurityGroups",
             "SecurityGroupIds",
