@@ -1,8 +1,24 @@
 import json
+from email.message import Message
+from io import BytesIO
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import create_autospec
+from urllib.response import addinfourl
 
+import psycopg
 import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 from jsonschema import Draft202012Validator
+from opentour_control.auth.config import AuthError, digest
+from opentour_control.auth.workos_provider import WorkOSMembershipProvider, create_workos_client
+from opentour_control.tenants.invitations import (
+    InvitationAcceptanceReceipt,
+    InvitationAcceptanceStore,
+    VerifiedRecipientProvider,
+    create_invitation_acceptance_router,
+)
 from referencing import Registry, Resource
 
 ROOT = Path(__file__).resolve().parents[4]
@@ -117,3 +133,246 @@ def test_receipt_requires_all_six_fields(receipt: dict[str, object]) -> None:
 @pytest.mark.parametrize("body", [None, [], "active"])
 def test_receipt_requires_an_object(body: object) -> None:
     assert not validator("AcceptReceipt").is_valid(body)
+
+
+ROUTE = "/v1/invitations:accept"
+INVITE = " generated-invitation "
+ADDRESS = "generated-recipient@example.invalid"
+
+
+@pytest.fixture
+def acceptance(identity, receipt):
+    token = identity.token(sub="user_invitee", sid="session_invitee", org_id=None)
+    context, binding = identity.service.admit(token)
+    assert identity.repository.sessions[context.session_id].selected_organization_id is None
+    recipients = create_autospec(VerifiedRecipientProvider, instance=True)
+    recipients.verified_recipient_address.return_value = ADDRESS
+    store = create_autospec(InvitationAcceptanceStore, instance=True)
+    store.accept.return_value = InvitationAcceptanceReceipt.model_validate(receipt)
+
+    app = FastAPI()
+    app.include_router(create_invitation_acceptance_router(identity.service, recipients, store))
+    with TestClient(app) as client:
+        yield SimpleNamespace(
+            client=client,
+            headers={"Authorization": f"Bearer {token}", "Cookie": f"opentour-session={binding}"},
+            token=token,
+            binding=binding,
+            context=context,
+            recipients=recipients,
+            store=store,
+            identity=identity,
+        )
+
+
+@pytest.mark.parametrize(
+    ("state", "operation", "status", "response_definition"),
+    [
+        ("awaiting_identity", "operation_generated", 202, "AcceptPendingReceipt"),
+        ("active", "operation_generated", 200, "AcceptConfirmedReceipt"),
+        ("already_member", None, 200, "AcceptConfirmedReceipt"),
+    ],
+)
+def test_acceptance_uses_preorganization_identity_and_digest_only(
+    acceptance, receipt, state, operation, status, response_definition
+) -> None:
+    receipt.update(state=state, operation_id=operation)
+    acceptance.store.accept.return_value = InvitationAcceptanceReceipt.model_validate(receipt)
+    response = acceptance.client.post(ROUTE, headers=acceptance.headers, json={"token": INVITE})
+
+    assert response.status_code == status
+    assert response.headers["Cache-Control"] == "no-store"
+    assert response.headers["Vary"] == "Authorization, Cookie"
+    assert response.json() == receipt
+    validator(response_definition).validate(response.json())
+    acceptance.recipients.verified_recipient_address.assert_called_once_with(
+        acceptance.identity.issuer, "user_invitee"
+    )
+    acceptance.store.accept.assert_called_once()
+    args, kwargs = acceptance.store.accept.call_args
+    assert args == (acceptance.context,)
+    assert kwargs.pop("request_id")
+    assert kwargs == {
+        "session_binding": acceptance.binding,
+        "recipient_address": ADDRESS,
+        "token_sha256": digest(INVITE),
+    }
+    assert ADDRESS not in response.text and INVITE not in response.text
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        '{"token":"a","token":"b"}',
+        '{"invitation_token":"a"}',
+        '{"token":"a","recipient_email":"generated@example.invalid"}',
+        '{"token":"a","organization_id":"foreign_org"}',
+        '{"token":"\\u0085"}',
+        '{"token":"\\ud800"}',
+        '{"token":true}',
+        '{"token":',
+    ],
+)
+def test_acceptance_denies_unsafe_bodies_before_recipient_or_storage(acceptance, body) -> None:
+    response = acceptance.client.post(ROUTE, headers=acceptance.headers, content=body)
+    assert response.status_code == 422
+    assert response.json()["code"] == "SCHEMA_INVALID"
+    acceptance.recipients.verified_recipient_address.assert_not_called()
+    acceptance.store.accept.assert_not_called()
+
+
+def test_acceptance_rejects_envelope_limit_and_url_token(acceptance) -> None:
+    oversized = acceptance.client.post(
+        ROUTE,
+        headers=acceptance.headers,
+        content=(" " * 16_384) + '{"token":"bounded-but-envelope-is-not"}',
+    )
+    query = acceptance.client.post(
+        ROUTE, headers=acceptance.headers, params={"token": INVITE}, json={"token": INVITE}
+    )
+    alias = acceptance.client.post(
+        "/v1/invitations/generated:accept", headers=acceptance.headers, json={"token": INVITE}
+    )
+    assert (oversized.status_code, query.status_code, alias.status_code) == (422, 422, 404)
+    acceptance.recipients.verified_recipient_address.assert_not_called()
+    acceptance.store.accept.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "fault", ["signature", "mismatched_binding", "duplicate_cookie", "no_bearer"]
+)
+def test_acceptance_rejects_invalid_session_before_provider(acceptance, fault) -> None:
+    headers = dict(acceptance.headers)
+    if fault == "signature":
+        headers["Authorization"] = "Bearer invalid"
+    elif fault == "mismatched_binding":
+        headers["Cookie"] = f"opentour-session={acceptance.identity.handle}"
+    elif fault == "duplicate_cookie":
+        headers["Cookie"] += f"; opentour-session={acceptance.identity.handle}"
+    else:
+        del headers["Authorization"]
+    response = acceptance.client.post(ROUTE, headers=headers, json={"token": INVITE})
+    assert response.status_code == 401 and response.json()["code"] == "SESSION_INVALID"
+    acceptance.recipients.verified_recipient_address.assert_not_called()
+    acceptance.store.accept.assert_not_called()
+
+
+@pytest.mark.parametrize("fault", ["ended", "generation_changed"])
+def test_acceptance_rechecks_session_after_provider_io(acceptance, fault) -> None:
+    def observe(issuer, subject):
+        if fault == "ended":
+            acceptance.identity.service.end(acceptance.token, acceptance.binding)
+        else:
+            repository = acceptance.identity.repository
+            session = repository.sessions[acceptance.context.session_id]
+            repository.clear_selection(session, digest(acceptance.binding))
+        return ADDRESS
+
+    acceptance.recipients.verified_recipient_address.side_effect = observe
+    response = acceptance.client.post(ROUTE, headers=acceptance.headers, json={"token": INVITE})
+    expected = (401, "SESSION_ENDED") if fault == "ended" else (409, "STALE_SESSION_CONTEXT")
+    assert (response.status_code, response.json()["code"]) == expected
+    acceptance.store.accept.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("code", "status"),
+    [("EMAIL_VERIFICATION_REQUIRED", 403), ("IDENTITY_VERIFICATION_UNAVAILABLE", 503)],
+)
+def test_acceptance_propagates_safe_provider_refusal_before_any_write(
+    acceptance, code, status
+) -> None:
+    acceptance.recipients.verified_recipient_address.side_effect = AuthError(code, status)
+    response = acceptance.client.post(ROUTE, headers=acceptance.headers, json={"token": INVITE})
+    assert response.status_code == status and response.json()["code"] == code
+    validator_common = Draft202012Validator(
+        {"$ref": COMMON["$id"] + "#/$defs/Error"}, registry=REGISTRY
+    )
+    validator_common.validate(response.json())
+    acceptance.store.accept.assert_not_called()
+
+
+@pytest.mark.parametrize("verified", [True, False])
+def test_protected_route_reads_the_exact_workos_recipient(acceptance, verified) -> None:
+    profile = acceptance.identity.config
+    client, backend = create_workos_client("generated-provider-key", profile)
+    calls = []
+
+    def get_user(request, timeout):
+        calls.append((request.get_method(), request.full_url))
+        assert 0 < timeout <= 5
+        payload = {
+            "object": "user",
+            "id": "user_invitee",
+            "email": ADDRESS,
+            "email_verified": verified,
+            "first_name": None,
+            "last_name": None,
+            "profile_picture_url": None,
+            "external_id": None,
+            "last_sign_in_at": None,
+            "created_at": "2026-01-01T00:00:00Z",
+            "updated_at": "2026-01-01T00:00:00Z",
+        }
+        headers = Message()
+        headers["Content-Type"] = "application/json"
+        return addinfourl(BytesIO(json.dumps(payload).encode()), headers, request.full_url, 200)
+
+    backend.opener = SimpleNamespace(open=get_user)
+    app = FastAPI()
+    app.include_router(
+        create_invitation_acceptance_router(
+            acceptance.identity.service, WorkOSMembershipProvider(client, profile), acceptance.store
+        )
+    )
+    try:
+        with TestClient(app) as protected:
+            response = protected.post(ROUTE, headers=acceptance.headers, json={"token": INVITE})
+        assert calls == [("GET", "https://api.workos.com/user_management/users/user_invitee")]
+        if verified:
+            assert response.status_code == 202
+            assert acceptance.store.accept.call_args.kwargs["recipient_address"] == ADDRESS
+            assert acceptance.store.accept.call_args.kwargs["token_sha256"] == digest(INVITE)
+        else:
+            assert response.status_code == 403
+            assert response.json()["code"] == "EMAIL_VERIFICATION_REQUIRED"
+            acceptance.store.accept.assert_not_called()
+        assert ADDRESS not in response.text and INVITE not in response.text
+    finally:
+        client.close()
+        assert backend.close_complete()
+
+
+@pytest.mark.parametrize(
+    ("code", "status"), [("CAPABILITY_DENIED", 403), ("INVITATION_EXPIRED", 410)]
+)
+def test_acceptance_returns_scoped_storage_denials(acceptance, code, status) -> None:
+    acceptance.store.accept.side_effect = AuthError(code, status)
+    response = acceptance.client.post(ROUTE, headers=acceptance.headers, json={"token": INVITE})
+    assert response.status_code == status and response.json()["code"] == code
+    assert ADDRESS not in response.text and INVITE not in response.text
+
+
+@pytest.mark.parametrize(
+    "failure",
+    ["database", "invalid_projection", "unvalidated_receipt", "unrecognized_error", "unexpected"],
+)
+def test_acceptance_refuses_an_unconfirmed_write_without_credential_leak(
+    acceptance, failure
+) -> None:
+    if failure == "database":
+        acceptance.store.accept.side_effect = psycopg.OperationalError(f"{ADDRESS} {INVITE}")
+    elif failure == "invalid_projection":
+        acceptance.store.accept.return_value = {"email": ADDRESS, "token": INVITE}
+    elif failure == "unvalidated_receipt":
+        acceptance.store.accept.return_value = acceptance.store.accept.return_value.model_copy(
+            update={"state": "unexpected", "revision": "01"}
+        )
+    elif failure == "unrecognized_error":
+        acceptance.store.accept.side_effect = AuthError(f"{ADDRESS} {INVITE}", 409)
+    else:
+        acceptance.store.accept.side_effect = RuntimeError(f"{ADDRESS} {INVITE}")
+    response = acceptance.client.post(ROUTE, headers=acceptance.headers, json={"token": INVITE})
+    assert response.status_code == 503 and response.json()["code"] == "IDENTITY_STATE_UNAVAILABLE"
+    assert response.headers["Cache-Control"] == "no-store"
+    assert ADDRESS not in response.text and INVITE not in response.text
