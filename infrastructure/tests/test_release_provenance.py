@@ -3,6 +3,7 @@
 import hashlib
 import json
 import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -18,6 +19,9 @@ from tools.verify_release_manifest import (
 
 _MANIFEST = "application/vnd.oci.image.manifest.v1+json"
 _INDEX = "application/vnd.oci.image.index.v1+json"
+_GENERATED_SUBJECT = "generated-installer-subject"
+_RUNS_URL = "https://github.com/kevon-dot/opentour-ai/actions/runs"
+_GENERATED_INVOCATION = f"{_RUNS_URL}/123456789/attempts/2"
 
 
 def _json(value: object) -> bytes:
@@ -167,13 +171,17 @@ class _AttestationInputs:
     github_cli: Path
     output: dict[str, Any]
 
-    def verify(self) -> str:
+    def verify(
+        self, *, expected_subject: str | None = None, expected_invocation: str | None = None
+    ) -> str:
         return verify_manifest_attestation(
             self.manifest,
             bundle=self.bundle,
             trusted_root=self.trusted_root,
             approved_policy=self.policy,
             github_cli=self.github_cli,
+            expected_subject=expected_subject,
+            expected_invocation=expected_invocation,
         )
 
 
@@ -298,6 +306,182 @@ def test_accepts_an_exact_verified_attestation_result(
     calls = _stub_github_cli(attestation, monkeypatch)
     assert attestation.verify() == hashlib.sha256(attestation.manifest.read_bytes()).hexdigest()
     assert len(calls) == 2
+
+
+@pytest.mark.parametrize("pin_invocation", [False, True], ids=["subject", "subject-and-run"])
+def test_cli_binds_the_approved_subject_digest_and_optional_invocation(
+    attestation: _AttestationInputs,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    pin_invocation: bool,
+) -> None:
+    digest = hashlib.sha256(attestation.manifest.read_bytes()).hexdigest()
+    statement = attestation.output["verificationResult"]["statement"]
+    statement["subject"] = [
+        {"name": "generated-other-subject", "digest": {"sha256": digest}},
+        {"name": _GENERATED_SUBJECT, "digest": {"sha256": digest}},
+    ]
+    invocation_args = []
+    if pin_invocation:
+        statement["predicate"] = {
+            "runDetails": {"metadata": {"invocationId": _GENERATED_INVOCATION}}
+        }
+        invocation_args = ["--expected-invocation", _GENERATED_INVOCATION]
+    calls = _stub_github_cli(attestation, monkeypatch)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "verify_release_manifest.py",
+            "--manifest",
+            str(attestation.manifest),
+            "--bundle",
+            str(attestation.bundle),
+            "--trusted-root",
+            str(attestation.trusted_root),
+            "--approved-policy",
+            str(attestation.policy),
+            "--github-cli",
+            str(attestation.github_cli),
+            "--expected-subject",
+            _GENERATED_SUBJECT,
+            *invocation_args,
+        ],
+    )
+    assert verify_release_manifest.main() == 0
+    assert capsys.readouterr().out == (
+        f"Verified GitHub attestation for local manifest sha256:{digest}\n"
+    )
+    assert len(calls) == 2
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        {"invocationId": f"{_RUNS_URL}/123456790/attempts/2"},
+        {"invocationId": f"{_RUNS_URL}/123456789/attempts/3"},
+        {},
+        {"invocationId": 123456789},
+        [],
+    ],
+    ids=["wrong-run", "wrong-attempt", "missing-id", "numeric-id", "malformed-metadata"],
+)
+def test_rejects_an_unapproved_run_with_the_same_signer_source_and_digest(
+    attestation: _AttestationInputs, monkeypatch: pytest.MonkeyPatch, metadata: object
+) -> None:
+    statement = attestation.output["verificationResult"]["statement"]
+    statement["predicate"] = {"runDetails": {"metadata": metadata}}
+    calls = _stub_github_cli(attestation, monkeypatch)
+    with pytest.raises(ReleaseVerificationError, match="approved GitHub run and attempt"):
+        attestation.verify(expected_invocation=_GENERATED_INVOCATION)
+    assert len(calls) == 2
+
+
+def test_rejects_missing_provenance_invocation_when_pinned(
+    attestation: _AttestationInputs, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _stub_github_cli(attestation, monkeypatch)
+    with pytest.raises(ReleaseVerificationError, match="approved GitHub run and attempt"):
+        attestation.verify(expected_invocation=_GENERATED_INVOCATION)
+
+
+@pytest.mark.parametrize(
+    "invocation",
+    [
+        "",
+        f"{_RUNS_URL}/123456789",
+        f"{_RUNS_URL}/123456789/attempts/0",
+        f"{_RUNS_URL}/0123456789/attempts/2",
+        f"{_GENERATED_INVOCATION}?check=1",
+        "https://github.com/other/repo/actions/runs/123456789/attempts/2",
+    ],
+    ids=["empty", "no-attempt", "zero-attempt", "leading-zero", "query", "foreign-repository"],
+)
+def test_rejects_invalid_invocation_pins_before_attestation_verification(
+    attestation: _AttestationInputs, monkeypatch: pytest.MonkeyPatch, invocation: str
+) -> None:
+    calls = _stub_github_cli(attestation, monkeypatch)
+    with pytest.raises(ReleaseVerificationError, match="canonical approved GitHub run and attempt"):
+        attestation.verify(expected_invocation=invocation)
+    assert not calls
+
+
+@pytest.mark.parametrize(
+    ("subjects", "message"),
+    [
+        ([(_GENERATED_SUBJECT.upper(), True)], "exactly one approved attestation subject name"),
+        ([(_GENERATED_SUBJECT, False), ("generated-other-subject", True)], "manifest SHA-256"),
+        (
+            [(_GENERATED_SUBJECT, True), (_GENERATED_SUBJECT, True)],
+            "exactly one approved attestation subject name",
+        ),
+        (
+            [
+                (_GENERATED_SUBJECT, True),
+                (_GENERATED_SUBJECT, False),
+                ("generated-other-subject", True),
+            ],
+            "exactly one approved attestation subject name",
+        ),
+    ],
+    ids=["wrong-name", "wrong-digest", "duplicate-name", "duplicate-name-mixed-digest"],
+)
+def test_rejects_unmatched_or_ambiguous_approved_subject(
+    attestation: _AttestationInputs,
+    monkeypatch: pytest.MonkeyPatch,
+    subjects: list[tuple[str, bool]],
+    message: str,
+) -> None:
+    digest = hashlib.sha256(attestation.manifest.read_bytes()).hexdigest()
+    statement = attestation.output["verificationResult"]["statement"]
+    statement["subject"] = [
+        {"name": name, "digest": {"sha256": digest if matching_digest else "0" * 64}}
+        for name, matching_digest in subjects
+    ]
+    _stub_github_cli(attestation, monkeypatch)
+    with pytest.raises(ReleaseVerificationError, match=message):
+        attestation.verify(expected_subject=_GENERATED_SUBJECT)
+
+
+def test_rejects_empty_approved_subject_before_attestation_verification(
+    attestation: _AttestationInputs, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls = _stub_github_cli(attestation, monkeypatch)
+    with pytest.raises(ReleaseVerificationError, match="nonempty approved attestation subject"):
+        attestation.verify(expected_subject="")
+    assert not calls
+
+
+@pytest.mark.parametrize(
+    ("option", "value"),
+    [
+        ("--expected-subject", _GENERATED_SUBJECT),
+        ("--expected-invocation", _GENERATED_INVOCATION),
+    ],
+)
+def test_cli_rejects_attestation_pins_with_oci_layout(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    option: str,
+    value: str,
+) -> None:
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "verify_release_manifest.py",
+            "--oci-layout",
+            "generated-layout",
+            "--image-digest",
+            f"sha256:{'1' * 64}",
+            option,
+            value,
+        ],
+    )
+    with pytest.raises(SystemExit) as error:
+        verify_release_manifest.main()
+    assert error.value.code == 2
+    assert f"{option} requires --manifest" in capsys.readouterr().err
 
 
 @pytest.mark.parametrize(

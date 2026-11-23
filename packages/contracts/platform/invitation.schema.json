@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Request and receipt shapes for POST /v1/invitations:accept.",
+  "$defs": {
+    "AcceptRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["token"],
+      "properties": {
+        "token": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512,
+          "not": {"pattern": "[\\u0000-\\u001f\\u007f-\\u009f]"},
+          "description": "Opaque invitation token. Preserve its exact value when matching the stored digest."
+        }
+      }
+    },
+    "AcceptReceipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["invitation_id", "membership_id", "operation_id", "state", "revision", "request_id"],
+      "properties": {
+        "invitation_id": {"$ref": "urn:opentour:common-contract:1.0#/$defs/Id"},
+        "membership_id": {"$ref": "urn:opentour:common-contract:1.0#/$defs/Id"},
+        "operation_id": {
+          "anyOf": [{"$ref": "urn:opentour:common-contract:1.0#/$defs/Id"}, {"type": "null"}]
+        },
+        "state": {"enum": ["awaiting_identity", "active", "already_member"]},
+        "revision": {"$ref": "urn:opentour:common-contract:1.0#/$defs/ResourceRevision"},
+        "request_id": {"$ref": "urn:opentour:common-contract:1.0#/$defs/Id"}
+      },
+      "if": {"properties": {"state": {"const": "already_member"}}},
+      "then": {"properties": {"operation_id": {"type": "null"}}},
+      "else": {
+        "properties": {"operation_id": {"$ref": "urn:opentour:common-contract:1.0#/$defs/Id"}}
+      }
+    },
+    "AcceptPendingReceipt": {
+      "description": "HTTP 202. Membership awaits provider confirmation.",
+      "$ref": "#/$defs/AcceptReceipt",
+      "properties": {"state": {"const": "awaiting_identity"}}
+    },
+    "AcceptConfirmedReceipt": {
+      "description": "HTTP 200. The recipient is an active member. Workspace access still requires a current authorization check.",
+      "$ref": "#/$defs/AcceptReceipt",
+      "properties": {"state": {"enum": ["active", "already_member"]}}
+    }
+  }
+}
