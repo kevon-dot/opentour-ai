@@ -2,13 +2,23 @@
 
 from __future__ import annotations
 
-import hashlib
-import json
 import re
 from dataclasses import dataclass, field
 from datetime import date
 from typing import Any
 
+from opentour_cell.pilot.operating_point import (
+    AgreementError,
+    enrollment_revision,
+    source_digest,
+    validate_agreement,
+)
+from opentour_cell.pilot.operating_point import (
+    canonical as canonical,
+)
+from opentour_cell.pilot.operating_point import (
+    digest as digest,
+)
 from opentour_cell.pilot.readout import INPUT_VERSION, ManifestError, evaluate_manifest
 from opentour_cell.pilot.text_classifier import (
     MAX_HELDOUT_ROWS,
@@ -22,16 +32,6 @@ EVALUATION_VERSION = "opentour.pilot.evaluation-dataset.v1"
 EVALUATION_FIELDS = frozenset({"case_id", "current", "repair", "reference"})
 FIELD_NAMES = frozenset({"case_id", "family_id", "text", "label", "incumbent"})
 PREVIEW_NAMES = frozenset({"case_id", "text", "label"})
-
-
-def canonical(value: object) -> str:
-    return json.dumps(
-        value, ensure_ascii=True, sort_keys=True, separators=(",", ":"), allow_nan=False
-    )
-
-
-def digest(value: object) -> str:
-    return hashlib.sha256(canonical(value).encode()).hexdigest()
 
 
 def identifier(value: Any) -> str:
@@ -88,6 +88,7 @@ class Dataset:
     mode: str = "training"
     destination: str = "owner_local_store"
     retention: dict[str, str] = field(default_factory=lambda: {"disposition": "unrecorded"})
+    agreement: dict[str, Any] | None = None
 
     @property
     def purpose(self) -> str:
@@ -189,6 +190,33 @@ def _prepare_evaluation(data: dict[str, Any], organization: str) -> Dataset:
 
 
 def prepare(data: dict[str, Any], organization: str) -> Dataset:
+    if not isinstance(data, dict) or "operating_agreement" not in data:
+        return _prepare_unbound(data, organization)
+    raw = {key: item for key, item in data.items() if key != "operating_agreement"}
+    profile = raw.get("manifest") if raw.get("schema_version") == EVALUATION_VERSION else raw
+    if not isinstance(profile, dict) or type(profile.get("error_ceiling_bps")) is not int:
+        raise TrainingError("invalid_dataset")
+    try:
+        # Validate the pre-run terms before processing held-out answers. The custodian's
+        # normal MCP grant binds the resulting combined revision to the selected store.
+        agreement = validate_agreement(
+            data["operating_agreement"],
+            organization=organization,
+            source=source_digest(raw),
+            ceiling=profile["error_ceiling_bps"],
+        )
+    except AgreementError as exc:
+        raise TrainingError(str(exc)) from None
+    prepared = _prepare_unbound(raw, organization)
+    prepared.agreement = agreement
+    prepared.revision = enrollment_revision(prepared.revision, digest(agreement))
+    prepared.expires_at = min(
+        prepared.expires_at or agreement["expires_at"], agreement["expires_at"]
+    )
+    return prepared
+
+
+def _prepare_unbound(data: dict[str, Any], organization: str) -> Dataset:
     if isinstance(data, dict) and data.get("schema_version") == EVALUATION_VERSION:
         return _prepare_evaluation(data, organization)
     required = {

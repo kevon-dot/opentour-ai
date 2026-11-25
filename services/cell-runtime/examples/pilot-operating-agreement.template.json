@@ -1,0 +1,15 @@
+{
+  "schema_version": "opentour.pilot.operating-agreement.v1",
+  "organization": "generated-demo",
+  "engagement": "generated-coverage-demo",
+  "source_digest": null,
+  "current_method": "method-incumbent",
+  "repair_method": "method-repair",
+  "owner_attestation": "att-0123456789abcdef",
+  "agreed_at": null,
+  "expires_at": null,
+  "state": "active",
+  "basis": "predeclared",
+  "minimum_coverage_bps": 8000,
+  "error_ceiling_bps": 500
+}

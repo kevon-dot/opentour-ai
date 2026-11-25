@@ -17,7 +17,9 @@ Open `first-readout/brief.md` for the comparison. The same kit includes local MC
 
 - [Operator quickstart and reproducible training example](services/cell-runtime/docs/slack-workspace-kit.md)
 - [Client MCP enrollment and consent](services/cell-runtime/docs/pilot-onboarding-mcp.md)
+- [Agree on minimum coverage and maximum error before a comparison](services/cell-runtime/docs/pilot-operating-point.md)
 - [Install the workspace app and check the approval flow](services/cell-runtime/integrations/slack/README.md)
+- [Find and reconcile an uncertain Zapier delivery](services/cell-runtime/docs/pilot-receipt-recovery.md)
 
 ## Compare two workflows offline
 

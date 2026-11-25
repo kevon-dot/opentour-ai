@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
+import stat
 import sys
 import tempfile
 from dataclasses import dataclass
@@ -12,6 +14,15 @@ from pathlib import Path
 from typing import Any, NoReturn
 
 from opentour_cell.pilot.brief import decision_brief
+from opentour_cell.pilot.operating_point import (
+    AgreementError,
+    canonical,
+    decision_quality,
+    operating_point,
+    quality_brief,
+    source_digest,
+    validate_agreement,
+)
 
 INPUT_VERSION = "opentour.pilot.case-manifest.v1"
 OUTPUT_VERSION = "opentour.pilot.readout.v1"
@@ -222,9 +233,49 @@ class _Parser(argparse.ArgumentParser):
         self.exit(2, "Invalid command arguments. Use --help for usage.\n")
 
 
+def _agreement_file(path: Path) -> dict[str, Any]:
+    if os.name != "posix":
+        raise AgreementError("private_operating_agreement_required")
+    parent = path.parent.lstat()
+    if not stat.S_ISDIR(parent.st_mode) or parent.st_uid != os.getuid() or parent.st_mode & 0o077:
+        raise AgreementError("private_operating_agreement_required")
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(fd, "rb") as src:
+        st = os.fstat(src.fileno())
+        if (
+            not stat.S_ISREG(st.st_mode)
+            or st.st_uid != os.getuid()
+            or st.st_mode & 0o077
+            or st.st_nlink != 1
+            or st.st_size > 8192
+        ):
+            raise AgreementError("private_operating_agreement_required")
+        contents = src.read(8193)
+        if len(contents) > 8192:
+            raise AgreementError("invalid_operating_agreement")
+        return parse_manifest(contents)
+
+
 def main() -> int:
     parser = _Parser(description=__doc__)
     parser.add_argument("manifest", metavar="FILE", help="local case manifest, or - for stdin")
+    parser.add_argument(
+        "--source-digest",
+        action="store_true",
+        help="fingerprint an unbound case manifest or dataset envelope without scoring",
+    )
+    parser.add_argument(
+        "--operating-agreement",
+        type=Path,
+        help="owner-selected 0600 predeclared agreement under an owner-only local directory",
+    )
+    parser.add_argument("--organization", help="expected organization for the operating agreement")
+    parser.add_argument("--engagement", help="expected engagement for the operating agreement")
+    parser.add_argument(
+        "--decision-quality",
+        action="store_true",
+        help="show a descriptive companion when there is no bound agreement",
+    )
     parser.add_argument(
         "--report-dir",
         type=Path,
@@ -232,22 +283,72 @@ def main() -> int:
         help="write brief.md and aggregate.json together to a new local directory",
     )
     args = parser.parse_args()
+    if (
+        (args.operating_agreement is None and (args.organization or args.engagement))
+        or (args.operating_agreement is not None and not (args.organization and args.engagement))
+        or (
+            args.source_digest
+            and (args.operating_agreement or args.report_dir or args.decision_quality)
+        )
+    ):
+        parser.error("incompatible arguments")
+    agreement = None
+
+    def selected_agreement() -> dict[str, Any]:
+        ceiling = manifest.get("error_ceiling_bps")
+        if type(ceiling) is not int:
+            raise ManifestError("Expected an integer error ceiling from 0 to 10000.")
+        return validate_agreement(
+            _agreement_file(args.operating_agreement),
+            organization=args.organization,
+            engagement=args.engagement,
+            source=selected_source,
+            ceiling=ceiling,
+        )
+
     try:
         if args.manifest == "-":
             payload = sys.stdin.buffer.read(MAX_MANIFEST_BYTES + 1)
         else:
             with Path(args.manifest).open("rb") as source:
                 payload = source.read(MAX_MANIFEST_BYTES + 1)
-        report = evaluate_manifest(parse_manifest(payload))
-    except ManifestError as exc:
+        manifest = parse_manifest(payload)
+        if args.source_digest:
+            print(source_digest(manifest))
+            return 0
+        selected_source = (
+            source_digest(manifest) if args.operating_agreement or args.decision_quality else ""
+        )
+        if args.operating_agreement is not None:
+            agreement = selected_agreement()
+        report = evaluate_manifest(manifest)
+    except (AgreementError, ManifestError) as exc:
         print(str(exc), file=sys.stderr)
         return 2
     except OSError:
         print("Unable to read local manifest.", file=sys.stderr)
         return 2
     aggregate = json.dumps(report, sort_keys=True, allow_nan=False)
+    quality = None
+    if agreement is not None or args.decision_quality:
+        point = operating_point(agreement, report) if agreement is not None else None
+        quality = decision_quality(
+            report,
+            point,
+            source=selected_source,
+            aggregate=hashlib.sha256((aggregate + "\n").encode()).hexdigest(),
+            revision=selected_source,
+            cohort=selected_source,
+            artifact=None,
+        )
     if args.report_dir is None:
-        print(aggregate)
+        try:
+            if agreement is not None and selected_agreement() != agreement:
+                raise AgreementError("operating_agreement_changed")
+        except (OSError, AgreementError, ManifestError):
+            print("operating_agreement_no_longer_valid", file=sys.stderr)
+            return 2
+        print(canonical(quality) if quality is not None else aggregate)
         return 0
     try:
         target: Path = args.report_dir
@@ -256,6 +357,15 @@ def main() -> int:
             staged.mkdir(mode=0o700)
             (staged / "aggregate.json").write_bytes((aggregate + "\n").encode("utf-8"))
             (staged / "brief.md").write_bytes(decision_brief(report).encode("utf-8"))
+            if quality is not None:
+                (staged / "decision-quality.json").write_text(
+                    canonical(quality) + "\n", encoding="utf-8"
+                )
+                (staged / "decision-quality.md").write_text(
+                    quality_brief(quality), encoding="utf-8"
+                )
+            if agreement is not None and selected_agreement() != agreement:
+                raise AgreementError("operating_agreement_changed")
             if os.name == "nt":
                 # Windows rename refuses any existing destination.
                 staged.rename(target)
@@ -272,6 +382,9 @@ def main() -> int:
                     except FileNotFoundError:
                         pass
                     raise
+    except (AgreementError, ManifestError):
+        print("operating_agreement_no_longer_valid", file=sys.stderr)
+        return 2
     except OSError:
         print(
             "Unable to publish report. Choose a new directory under a writable parent.",

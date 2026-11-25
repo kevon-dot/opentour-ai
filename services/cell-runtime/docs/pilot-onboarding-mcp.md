@@ -18,6 +18,8 @@ python3.12 -I -S -B /opt/opentour/opentour-slack.pyz data --org generated-demo -
 
 For customer data, the custodian selects the allowed destination and records retention in the manifest before approving its revision. Use `owner_local_store` or an approved opaque `dest-` reference followed by 16–64 lowercase hexadecimal characters. For retention, provide a disposition of `delete`, `return` or `retain` and an ISO date, or an opaque private terms reference. For example, use `{"disposition":"return","date":"2030-12-31"}` or `{"terms_ref":"terms-0123456789abcdef"}`. A legacy training manifest with unrecorded retention can be previewed. A new enrollment requires agreed terms and an authorization for the resulting revision.
 
+For a decision against the customer's limits, the workflow owner declares minimum automatic coverage and maximum wrong-automatic rate against the frozen source before inspecting its answers. Bind the agreement to the enrollment manifest before issuing the custodian grant. The owner can reproduce the original descriptive comparison without an agreement. [Operating agreement, worked example and replacement procedure](pilot-operating-point.md)
+
 ## Connect the client
 
 In the private intake register, the operator records the actual custodian, permission, approved destination and retention. Assign that attestation an opaque reference of the form `att-` followed by 16–64 lowercase hexadecimal characters. Use the reference when launching the MCP server and issuing the separate grant. Only trusted operators may manage consent in this directory. Configure the MCP client with access to the two onboarding tools and reserve the operator shell and grant-file writes for the custodian or their delegate.

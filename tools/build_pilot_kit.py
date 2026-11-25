@@ -15,12 +15,13 @@ from zipfile import ZIP_STORED, ZipFile, ZipInfo
 
 ROOT = Path(__file__).resolve().parents[1]
 CELL = "services/cell-runtime"
-KIT_VERSION = "1.0.0-rc.1"
+KIT_VERSION = "1.0.0-rc.3"
 PYTHON = (3, 12, 16)
 MODULES = (
     "opentour_cell/__init__.py",
     "opentour_cell/pilot/__init__.py",
     "opentour_cell/pilot/brief.py",
+    "opentour_cell/pilot/operating_point.py",
     "opentour_cell/pilot/readout.py",
 )
 

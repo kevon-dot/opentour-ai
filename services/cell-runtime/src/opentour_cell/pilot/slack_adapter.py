@@ -26,6 +26,7 @@ from urllib.parse import urlsplit
 
 Json = dict[str, Any]
 SESSION_SECONDS = 900
+RESULT_PAGE_SIZE = 12
 SLACK_ID = re.compile(r"[A-Z][A-Z0-9]{2,31}\Z")
 LOCAL_ID = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}\Z")
 ROLES = {"inspect", "tune", "review"}
@@ -42,6 +43,16 @@ ACTIONS = {
     "ot_status_refresh",
     "ot_dataset_back",
     "ot_tune_dataset",
+    "ot_readouts",
+    "ot_result_open",
+    "ot_result_prev",
+    "ot_result_next",
+    "ot_help",
+    "ot_question",
+    "ot_question_errors",
+    "ot_question_coverage",
+    "ot_question_changes",
+    "ot_question_audience",
 }
 
 
@@ -376,6 +387,21 @@ class Journal:
                     return str(row["job"])
         return ""
 
+    def review_jobs(
+        self, allowed: set[str], engagement: str, audience: str
+    ) -> list[tuple[str, str]]:
+        with self.db() as db:
+            self.active(db)
+            return [
+                (row["dataset"], row["job"])
+                for row in db.execute(
+                    "SELECT j.dataset,j.job FROM jobs j JOIN proposals p ON p.job=j.job "
+                    "WHERE p.engagement=? AND p.audience=? ORDER BY j.dataset,j.job",
+                    (engagement, audience),
+                )
+                if row["dataset"] in allowed
+            ]
+
     def present(
         self,
         presentation: str,
@@ -565,27 +591,31 @@ class Journal:
             }
 
     def confirm_delivery(self, receipt: str, reference: str) -> None:
-        _check(isinstance(reference, str) and LOCAL_ID.fullmatch(reference))
         with self.db() as db:
             db.execute("BEGIN IMMEDIATE")
-            row = db.execute(
-                "SELECT d.delivery,a.confirmation_ref FROM decisions d JOIN "
-                "authorizations a USING(receipt) WHERE receipt=? AND a.transmitted IS NOT NULL",
-                (receipt,),
-            ).fetchone()
-            _check(
-                row
-                and row[0] in {"sending", "uncertain", "failed", "accepted", "downstream_confirmed"}
-                and (row[1] is None or row[1] == reference)
-            )
-            db.execute(
-                "UPDATE authorizations SET confirmed=COALESCE(confirmed,?),confirmation_ref=? "
-                "WHERE receipt=?",
-                (int(time.time()), reference, receipt),
-            )
-            db.execute(
-                "UPDATE decisions SET delivery='downstream_confirmed' WHERE receipt=?", (receipt,)
-            )
+            self.confirm_delivery_in(db, receipt, reference)
+
+    @staticmethod
+    def confirm_delivery_in(db: sqlite3.Connection, receipt: str, reference: str) -> None:
+        _check(isinstance(reference, str) and LOCAL_ID.fullmatch(reference))
+        row = db.execute(
+            "SELECT d.delivery,a.confirmation_ref FROM decisions d JOIN "
+            "authorizations a USING(receipt) WHERE receipt=? AND a.transmitted IS NOT NULL",
+            (receipt,),
+        ).fetchone()
+        _check(
+            row
+            and row[0] in {"sending", "uncertain", "failed", "accepted", "downstream_confirmed"}
+            and (row[1] is None or row[1] == reference)
+        )
+        db.execute(
+            "UPDATE authorizations SET confirmed=COALESCE(confirmed,?),confirmation_ref=? "
+            "WHERE receipt=?",
+            (int(time.time()), reference, receipt),
+        )
+        db.execute(
+            "UPDATE decisions SET delivery='downstream_confirmed' WHERE receipt=?", (receipt,)
+        )
 
 
 def _hook_path(hook: str) -> str:
@@ -928,16 +958,27 @@ class Workbench:
                 break
         raise Refused()
 
+    def _authorized_job(self, cfg: Settings, actor: str, job: str) -> Json:
+        known = self.journal.job(job)
+        cfg.permission(actor, "inspect", known["dataset"])
+        _check(
+            known["engagement"] == self.store.engagement_id and known["audience"] == cfg.recipient
+        )
+        return known
+
     def _readout(self, cfg: Settings, actor: str, job: str) -> Target | None:
         if not job:
             return None
         evaluation = job.startswith("eval:")
-        dataset = job[5:] if evaluation else self.journal.job(job)["dataset"]
+        dataset = job[5:] if evaluation else self._authorized_job(cfg, actor, job)["dataset"]
         cfg.permission(actor, "inspect", dataset)
         registration = self.store.dataset_summary(dataset)
         if evaluation:
             _check(registration["mode"] == "evaluation_only")
-            result = self.store.frozen_evaluation(dataset)
+            try:
+                result = self.store.frozen_evaluation(dataset)
+            except ValueError:
+                return None
             status = {
                 "dataset_revision": result["dataset_revision"],
                 "revision": result["aggregate_digest"],
@@ -988,6 +1029,13 @@ class Workbench:
             "reviewer": cfg.reviewer,
             "recipient": cfg.recipient,
         }
+        if "operating_point" in result:
+            quality_digest = result.get("decision_quality_digest")
+            _check(
+                isinstance(quality_digest, str) and re.fullmatch(r"[0-9a-f]{64}", quality_digest)
+            )
+            audit["operating_point"] = result["operating_point"]
+            audit["decision_quality_digest"] = quality_digest
         digest = hashlib.sha256(_json({"audit": audit, "readout": report}).encode()).hexdigest()
         revision = self.journal.opaque("rev", digest)
         return Target(
@@ -1006,8 +1054,160 @@ class Workbench:
 
     def _catalog(self, cfg: Settings, actor: str, search: str = "") -> list[Json]:
         entry = cfg.permission(actor, "inspect")
-        _check(isinstance(search, str) and len(search) <= 64)
+        _check(isinstance(search, str) and len(search) <= self.views.SEARCH_LIMIT)
         return list(self.store.catalog(query=search, allowed_ids=entry["datasets"]))
+
+    def _result_sources(self, cfg: Settings, actor: str) -> list[tuple[str, str]]:
+        entry = cfg.permission(actor, "inspect")
+        active = set()
+        sources = []
+        for dataset in sorted(set(entry["datasets"])):
+            try:
+                data = self.store.dataset_summary(dataset)
+            except ValueError as error:
+                if str(error) in {"dataset_unavailable", "operating_agreement_unverified"}:
+                    continue
+                raise
+            active.add(dataset)
+            if data["mode"] == "evaluation_only" and entry["aggregate"]:
+                sources.append((dataset, "eval:" + dataset))
+        sources.extend(self.journal.review_jobs(active, self.store.engagement_id, cfg.recipient))
+        return sorted(sources)
+
+    def _recorded_decision(self, revision: str) -> tuple[str, Json]:
+        receipt = self.journal.decision(revision)
+        if not receipt:
+            return "ready", {}
+        try:
+            if self.journal.receipt(receipt["receipt"])["evidence"] is not None:
+                return str(receipt["disposition"]), receipt
+        except Refused:
+            pass
+        return "uncertain", {}
+
+    def _result_state(self, cfg: Settings, actor: str, source: str) -> tuple[str, str]:
+        if not source.startswith("eval:"):
+            state = self.store.status(source)
+            if state["status"] != "completed":
+                label = {
+                    "awaiting_approval": "Awaiting trainer confirmation",
+                    "running": "Training in progress",
+                    "failed": "Training failed",
+                }.get(state["status"], "Run requires verification")
+                return str(state["revision"]), label
+            if not cfg.permission(actor, "inspect", state["dataset_id"])["aggregate"]:
+                return str(state["revision"]), "Completed · status access"
+        target = self._readout(cfg, actor, source)
+        if target is None:
+            return "", "Evidence unavailable · hold"
+        disposition, _ = self._recorded_decision(target.revision)
+        labels = {
+            "ready": "Ready for evidence review",
+            "uncertain": "Decision requires verification",
+            "approved": "Cleared for readout",
+            "changes_requested": "Changes requested",
+        }
+        return target.revision, labels[disposition]
+
+    def _selected(self, cfg: Settings, actor: str, view: str, source: str, old_hash: str) -> None:
+        if not source.startswith("eval:"):
+            state = self.store.status(source)
+            entry = cfg.permission(actor, "inspect", state["dataset_id"])
+            if state["status"] != "completed" or not entry["aggregate"]:
+                self._status(cfg, actor, view, source, old_hash)
+                return
+        self._home(cfg, actor, view, source, old_hash)
+
+    def _results(
+        self, cfg: Settings, actor: str, view: str, old_hash: str = "", page: int = 0
+    ) -> None:
+        sources = self._result_sources(cfg, actor)
+        if not sources:
+            self._home(cfg, actor, view, "", old_hash)
+            return
+        if len(sources) == 1:
+            self._selected(cfg, actor, view, sources[0][1], old_hash)
+            return
+        page = max(0, min(page, (len(sources) - 1) // RESULT_PAGE_SIZE))
+        start = page * RESULT_PAGE_SIZE
+        rows = []
+        pins = {}
+        for dataset, source in sources[start : start + RESULT_PAGE_SIZE]:
+            revision, state = self._result_state(cfg, actor, source)
+            token = self.journal.opaque("item", [source, revision, state])
+            pins[token] = [source, revision, state]
+            rows.append(
+                {
+                    "dataset": dataset,
+                    "method": "Supplied comparison"
+                    if source.startswith("eval:")
+                    else "CPU training job · " + source,
+                    "state": state,
+                    "reference": revision or source,
+                    "token": token,
+                }
+            )
+        ctx = self.journal.context(
+            actor, cfg.channel, view, "results", revision=_json({"page": page, "items": pins})
+        )
+        self._show(
+            view,
+            self.views.result_chooser(
+                ctx, rows, previous=bool(page), more=start + len(rows) < len(sources)
+            ),
+            old_hash,
+        )
+
+    def _help(
+        self, cfg: Settings, actor: str, view: str, message: str = "", old_hash: str = ""
+    ) -> None:
+        cfg.permission(actor, "inspect")
+        ctx = self.journal.context(actor, cfg.channel, view, "help")
+        self._show(view, self.views.reviewer_help(ctx, message), old_hash)
+
+    def _search(
+        self, cfg: Settings, actor: str, view: str, source: str, query: str, old_hash: str = ""
+    ) -> None:
+        if len(query) > self.views.SEARCH_LIMIT or (query and not query.isprintable()):
+            self._help(
+                cfg,
+                actor,
+                view,
+                "Enter up to 64 printable characters to search the authorized catalog.",
+                old_hash,
+            )
+            return
+        self._browse(cfg, actor, view, source, search=query, old_hash=old_hash)
+
+    def _questions(
+        self,
+        cfg: Settings,
+        actor: str,
+        view: str,
+        source: str,
+        revision: str,
+        topic: str,
+        old_hash: str = "",
+    ) -> None:
+        target = self._readout(cfg, actor, source)
+        _check(target and target.revision == revision)
+        assert target is not None
+        entry = cfg.permission(actor, "inspect", target.dataset)
+        _check(
+            entry["aggregate"] and self.journal.inspected(actor, revision, self._policy(cfg, actor))
+        )
+        _check(not topic or topic in self.views.QUESTION_LABELS)
+        current = self.settings()
+        _check(self._policy(cfg, actor) == self._policy(current, actor))
+        current.permission(actor, "inspect", target.dataset)
+        token = self.journal.context(actor, cfg.channel, view, "questions", source, revision)
+        self._show(
+            view,
+            self.views.question_modal(token, revision, target.report, target.audit, topic),
+            old_hash,
+            dataset=target.dataset,
+            dataset_revision=target.dataset_revision,
+        )
 
     def _show(
         self,
@@ -1045,24 +1245,21 @@ class Workbench:
 
     def _home(self, cfg: Settings, actor: str, view_id: str, job: str, old_hash: str = "") -> None:
         entry = cfg.permission(actor, "inspect")
-        target = self._readout(cfg, actor, job)
+        target = self._readout(cfg, actor, job) if entry["aggregate"] else None
         revision = target.revision if target else ""
         ctx = self.journal.context(actor, cfg.channel, view_id, "home", job, revision)
-        receipt = self.journal.decision(revision)
-        disposition = receipt.get("disposition", "ready" if target else "pending")
-        if receipt and self.journal.receipt(receipt["receipt"])["evidence"] is None:
-            receipt = {}
-            disposition = "uncertain"
+        disposition, receipt = self._recorded_decision(revision) if target else ("pending", {})
         if (
             not target
             and job
-            and not job.startswith("eval:")
-            and self.store.status(job)["status"] == "completed"
+            and (job.startswith("eval:") or self.store.status(job)["status"] == "completed")
         ):
             disposition = "uncertain"
         show = cfg.channel_aggregates and entry["aggregate"]
         inspected = bool(
-            target and self.journal.inspected(actor, revision, self._policy(cfg, actor))
+            target
+            and disposition != "uncertain"
+            and self.journal.inspected(actor, revision, self._policy(cfg, actor))
         )
         modal = self.views.home_modal(
             context=ctx,
@@ -1080,9 +1277,13 @@ class Workbench:
             receipt=receipt.get("receipt"),
             tune_allowed="tune" in entry["roles"]
             and not job.startswith("eval:")
-            and any(row["can_train"] for row in self._catalog(cfg, actor)),
+            and any(
+                row["can_train"] and self.store.can_propose(row["dataset_id"], actor)
+                for row in self._catalog(cfg, actor)
+            ),
             audit=target.audit if target else None,
             decision_allowed=actor == cfg.reviewer and "review" in entry["roles"],
+            reviewer_navigation=True,
         )
         self._show(
             view_id,
@@ -1146,8 +1347,11 @@ class Workbench:
                 datasets=rows,
                 query=search,
                 detail=detail,
-                tune_allowed="tune" in cfg.permission(actor, "inspect")["roles"]
-                and any(r["can_train"] for r in rows),
+                tune_allowed=bool(
+                    selected
+                    and "tune" in cfg.permission(actor, "inspect")["roles"]
+                    and self.store.can_propose(selected, actor)
+                ),
                 evidence_revision=evaluation_target.revision if evaluation_target else None,
             ),
             old_hash,
@@ -1156,7 +1360,7 @@ class Workbench:
         )
 
     def _status(self, cfg: Settings, actor: str, view: str, job: str, old_hash: str = "") -> None:
-        known = self.journal.job(job)
+        known = self._authorized_job(cfg, actor, job)
         entry = cfg.permission(actor, "inspect", known["dataset"])
         info = self.store.status(job)
         _check(info["dataset_id"] == known["dataset"])
@@ -1166,6 +1370,7 @@ class Workbench:
             and known["engagement"] == self.store.engagement_id
             and "tune" in entry["roles"]
             and info["status"] == "awaiting_approval"
+            and self.store.can_propose(known["dataset"], actor)
         )
         mode = "proposal" if can_start else "status"
         target = (
@@ -1212,6 +1417,7 @@ class Workbench:
             recipient=cfg.recipient,
             dataset_revision=target.dataset_revision,
             audit={**target.audit, "viewer": actor},
+            questions=True,
         )
         proof = self._show(
             view, modal, old_hash, dataset=target.dataset, dataset_revision=target.dataset_revision
@@ -1280,7 +1486,30 @@ class Workbench:
         old_hash: str,
     ) -> None:
         job = ctx["job"]
-        if action == "ot_home":
+        if action == "ot_help":
+            self._help(cfg, actor, view, old_hash=old_hash)
+        elif action == "ot_readouts":
+            self._results(cfg, actor, view, old_hash)
+        elif action in {"ot_result_prev", "ot_result_next", "ot_result_open"}:
+            _check(ctx["kind"] == "results")
+            listing = json.loads(ctx["revision"])
+            if action == "ot_result_open":
+                _check(value in listing["items"])
+                source, revision, state = listing["items"][value]
+                _check(source in {s for _, s in self._result_sources(cfg, actor)})
+                if self._result_state(cfg, actor, source) != (revision, state):
+                    self._results(cfg, actor, view, old_hash, listing["page"])
+                    return
+                self._selected(cfg, actor, view, source, old_hash)
+            else:
+                self._results(
+                    cfg,
+                    actor,
+                    view,
+                    old_hash,
+                    listing["page"] + (1 if action == "ot_result_next" else -1),
+                )
+        elif action == "ot_home":
             self._home(cfg, actor, view, job, old_hash)
         elif action in {"ot_browse", "ot_dataset_back"}:
             self._browse(cfg, actor, view, job, old_hash=old_hash)
@@ -1299,13 +1528,21 @@ class Workbench:
             )
         elif action in {"ot_tune", "ot_tune_dataset"}:
             cfg.permission(actor, "tune")
-            rows = [r for r in self._catalog(cfg, actor) if r["can_train"]]
+            rows = [
+                r
+                for r in self._catalog(cfg, actor)
+                if r["can_train"] and self.store.can_propose(r["dataset_id"], actor)
+            ]
             if action == "ot_tune_dataset":
                 _check(ctx["kind"] == "dataset")
                 pins = json.loads(ctx["revision"])
                 cfg.permission(actor, "tune", value)
                 row = self.store.dataset_summary(value)
-                _check(row["can_train"] and pins.get(value) == row["dataset_revision"])
+                _check(
+                    row["can_train"]
+                    and pins.get(value) == row["dataset_revision"]
+                    and self.store.can_propose(value, actor)
+                )
                 rows = [row]
             pins = {r["dataset_id"]: r["dataset_revision"] for r in rows}
             token = self.journal.context(actor, cfg.channel, view, "tune", job, _json(pins))
@@ -1315,10 +1552,14 @@ class Workbench:
             self._status(cfg, actor, view, job, old_hash)
         elif action == "ot_evidence":
             _check(
-                ctx["kind"] in {"home", "evidence", "status", "eval_detail"}
+                ctx["kind"] in {"home", "evidence", "status", "eval_detail", "questions"}
                 and value == ctx["revision"]
             )
             self._evidence(cfg, actor, view, ctx, old_hash)
+        elif action == "ot_question" or action.startswith("ot_question_"):
+            _check(ctx["kind"] in {"evidence", "questions"} and value == ctx["revision"])
+            topic = "" if action == "ot_question" else action.removeprefix("ot_question_")
+            self._questions(cfg, actor, view, job, ctx["revision"], topic, old_hash)
         elif action in {"ot_approve", "ot_changes"}:
             _check(ctx["kind"] in {"home", "evidence"} and value == ctx["revision"])
             self._decide(cfg, actor, view, ctx, action, old_hash)
@@ -1344,7 +1585,9 @@ class Workbench:
     ) -> None:
         if callback == "ot_dataset_search":
             _check(ctx["kind"] == "dataset")
-            self._browse(cfg, actor, view, ctx["job"], search=self._field(values, "query"))
+            query = values.get("query", {}).get("query", {}).get("value")
+            _check(query is None or isinstance(query, str))
+            self._search(cfg, actor, view, ctx["job"], query or "")
         elif callback == "ot_tune_preview":
             _check(ctx["kind"] == "tune")
             dataset = self._field(values, "dataset", select=True)
@@ -1360,6 +1603,7 @@ class Workbench:
                 profile=profile,
                 epochs=int(epoch),
                 request_id=self.journal.opaque("req", [token, actor, callback]),
+                authorized_trainer=actor,
             )
             _check(info["dataset_revision"] == pins[dataset])
             self.journal.bind_job(
@@ -1461,35 +1705,67 @@ class Workbench:
         self.journal.launcher(cfg.channel, posted["ts"], register=True)
 
     def _launch(self, cfg: Settings, actor: str, trigger: str, prompt: str) -> None:
-        entry = cfg.permission(actor, "inspect")
+        cfg.permission(actor, "inspect")
         opened = self.web.views_open(trigger_id=trigger, view=self.views.notice_modal("checking"))
         view = opened["view"]["id"]
         try:
             self.private_channel(cfg, actor)
             words = prompt.strip().split(maxsplit=1)
-            if words and words[0] == "search":
-                self._browse(cfg, actor, view, "", search=words[1] if len(words) > 1 else "")
+            command = words[0].casefold() if words else ""
+            argument = words[1] if len(words) == 2 else ""
+            if command == "search":
+                self._search(cfg, actor, view, "", argument)
                 return
-            if len(words) == 1 and words[0] == "data":
+            if command == "data" and not argument:
                 self._browse(cfg, actor, view, "")
                 return
-            job = self.journal.latest(entry["datasets"])
-            if job and not words:
-                # A withdrawn prior selection must not block access to the remaining catalog.
-                try:
-                    self.store.status(job)
-                except ValueError:
-                    job = ""
-            if words and words != ["status"]:
-                requested = words[1] if len(words) == 2 and words[0] == "status" else words[0]
-                _check(len(words) == 1 or words[0] == "status")
-                _check(LOCAL_ID.fullmatch(requested))
-                cfg.permission(actor, "inspect", self.journal.job(requested)["dataset"])
-                job = requested
-            if words and words[0] == "status" and job:
-                self._status(cfg, actor, view, job)
-            else:
-                self._home(cfg, actor, view, job)
+            if command in {"", "status", "review"} and not argument:
+                self._results(cfg, actor, view)
+                return
+            if command == "ask":
+                aliases = {
+                    "threshold": "coverage",
+                    "limits": "coverage",
+                    "fixes": "changes",
+                    "regressions": "changes",
+                    "who receives it": "audience",
+                    "error rate": "errors",
+                }
+                topic = aliases.get(argument.casefold(), argument.casefold())
+                if topic not in self.views.QUESTION_LABELS:
+                    self._help(
+                        cfg,
+                        actor,
+                        view,
+                        "Ask about errors, coverage, changes or audience from an inspected result.",
+                    )
+                    return
+                sources = self._result_sources(cfg, actor)
+                if len(sources) == 1 and cfg.permission(actor, "inspect")["aggregate"]:
+                    source = sources[0][1]
+                    target = self._readout(cfg, actor, source)
+                    if target and self.journal.inspected(
+                        actor, target.revision, self._policy(cfg, actor)
+                    ):
+                        self._questions(cfg, actor, view, source, target.revision, topic)
+                        return
+                self._help(
+                    cfg,
+                    actor,
+                    view,
+                    "Choose the exact readout and open its evidence before asking.",
+                )
+                return
+            if command == "status" and LOCAL_ID.fullmatch(argument):
+                self._status(cfg, actor, view, argument)
+                return
+            if len(words) == 1 and words[0].startswith("job-") and LOCAL_ID.fullmatch(words[0]):
+                self._authorized_job(cfg, actor, words[0])
+                self._home(cfg, actor, view, words[0])
+                return
+            self._help(
+                cfg, actor, view, "" if command == "help" else "Choose a supported pilot command."
+            )
         except Exception:
             self._safe_notice(view)
 
@@ -1603,8 +1879,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     commands.add_argument("--fingerprint-zapier", action="store_true")
     commands.add_argument("--receipt", metavar="RECEIPT")
+    commands.add_argument("--unresolved-receipts", action="store_true")
     commands.add_argument("--confirm-zapier", metavar="RECEIPT")
     parser.add_argument("--downstream-ref", metavar="OWNER_REFERENCE")
+    parser.add_argument("--limit", type=int)
+    parser.add_argument("--cursor")
     arguments = list(sys.argv[1:] if argv is None else argv)
     for flag in ("--receipt", "--confirm-zapier"):
         if flag in arguments:
@@ -1623,33 +1902,46 @@ def main(argv: list[str] | None = None) -> int:
             return Settings.load(args.config)
 
         cfg = config()
+        _check(args.unresolved_receipts or (args.limit is None and args.cursor is None))
         _check(bool(args.confirm_zapier) == bool(args.downstream_ref))
+        if args.receipt is not None or args.unresolved_receipts:
+            from opentour_cell.pilot.receipt_recovery import inspect_receipt, unresolved_receipts
+
+            record = (
+                inspect_receipt(cfg, args.receipt)
+                if args.receipt is not None
+                else unresolved_receipts(
+                    cfg, limit=25 if args.limit is None else args.limit, cursor=args.cursor
+                )
+            )
+            print(_json(record))
+            return 0
         if args.fingerprint_zapier:
             print(hook_fingerprint(os.environ.get("OPENTOUR_ZAPIER_HOOK_URL", "")))
             return 0
         if args.check_config:
             print("Pilot configuration validated.")
             return 0
+        if args.confirm_zapier:
+            from opentour_cell.pilot.receipt_recovery import confirm_receipt
+
+            confirm_receipt(cfg, args.confirm_zapier, args.downstream_ref)
+            print("Recorded the owner's independent downstream verification.")
+            return 0
         from opentour_cell.pilot.training import LocalTrainingStore
 
-        if args.receipt or args.confirm_zapier or args.flush_zapier:
+        if args.flush_zapier:
             _check((cfg.directory / "slack-pilot.sqlite3").is_file())
             journal = Journal(cfg.directory / "slack-pilot.sqlite3", cfg.binding)
-            if args.receipt:
-                print(_json(journal.receipt(args.receipt)))
-            elif args.confirm_zapier:
-                journal.confirm_delivery(args.confirm_zapier, args.downstream_ref)
-                print("Recorded the owner's independent downstream verification.")
-            else:
-                _check((cfg.directory / "training.sqlite3").is_file())
-                store = LocalTrainingStore(cfg.directory / "training.sqlite3", cfg.organization)
-                count = flush_receipts(
-                    journal,
-                    os.environ.get("OPENTOUR_ZAPIER_HOOK_URL", ""),
-                    config=config,
-                    training=store,
-                )
-                print(f"Accepted receipt deliveries: {count}.")
+            _check((cfg.directory / "training.sqlite3").is_file())
+            store = LocalTrainingStore(cfg.directory / "training.sqlite3", cfg.organization)
+            count = flush_receipts(
+                journal,
+                os.environ.get("OPENTOUR_ZAPIER_HOOK_URL", ""),
+                config=config,
+                training=store,
+            )
+            print(f"Accepted receipt deliveries: {count}.")
             return 0
         # The official Slack SDK is optional and isolated from the offline pilot kit.
         sdk = importlib.import_module("slack_sdk")

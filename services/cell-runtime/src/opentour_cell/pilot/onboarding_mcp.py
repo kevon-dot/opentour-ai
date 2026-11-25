@@ -114,6 +114,12 @@ class Selection:
             "destination": data.destination,
             "retention": data.retention,
         }
+        if data.agreement is not None:
+            self.scope["operating_agreement"] = {
+                "revision": hashlib.sha256(canonical(data.agreement).encode()).hexdigest(),
+                "minimum_coverage_bps": data.agreement["minimum_coverage_bps"],
+                "error_ceiling_bps": data.agreement["error_ceiling_bps"],
+            }
         self.previewed = False
         self.previewed_grant_expiry: int | None = None
 

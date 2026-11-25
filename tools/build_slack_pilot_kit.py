@@ -16,7 +16,7 @@ ROOT = Path(__file__).resolve().parents[1]
 BUILDER = "tools/build_slack_pilot_kit.py"
 ARCHIVE_HELPER = "tools/build_pilot_kit.py"
 CELL = "services/cell-runtime"
-VERSION = "1.0.0-rc.2"
+VERSION = "1.0.0-rc.3"
 PYTHON = (3, 12, 16)
 MODULES = (
     "opentour_cell/__init__.py",
@@ -26,6 +26,8 @@ MODULES = (
     "opentour_cell/pilot/readout.py",
     "opentour_cell/pilot/mcp.py",
     "opentour_cell/pilot/onboarding_mcp.py",
+    "opentour_cell/pilot/operating_point.py",
+    "opentour_cell/pilot/receipt_recovery.py",
     "opentour_cell/pilot/slack_adapter.py",
     "opentour_cell/pilot/slack_views.py",
     "opentour_cell/pilot/text_classifier.py",
@@ -38,7 +40,14 @@ ASSETS = {
     "manifest-guide.md": f"{CELL}/docs/pilot-readout.md",
     "pilot-onboarding-mcp.md": f"{CELL}/docs/pilot-onboarding-mcp.md",
     "pilot-mcp.md": f"{CELL}/docs/pilot-mcp.md",
+    "pilot-operating-point.md": f"{CELL}/docs/pilot-operating-point.md",
+    "pilot-receipt-recovery.md": f"{CELL}/docs/pilot-receipt-recovery.md",
     "generated/readout-input.json": f"{CELL}/examples/pilot-evaluation.json",
+    "generated/coverage-floor.json": f"{CELL}/examples/pilot-coverage-floor.json",
+    "generated/operating-agreement.template.json": (
+        f"{CELL}/examples/pilot-operating-agreement.template.json"
+    ),
+    "templates/pilot-receipt.blank.json": f"{CELL}/examples/pilot-receipt.blank.json",
     "integrations/slack/manifest.json": f"{CELL}/integrations/slack/manifest.json",
     "integrations/slack/requirements.txt": f"{CELL}/integrations/slack/requirements.txt",
     "integrations/slack/README.md": f"{CELL}/integrations/slack/README.md",

@@ -18,6 +18,8 @@ python -I -S -B opentour-slack.pyz data --db generated-state/training.sqlite3 --
 
 Open `generated-state/supplied-report/brief.md` and `aggregate.json` to see a comparison of two sets of supplied decisions. The training rehearsal fits `cpu_text_v1`, a multiclass perceptron, on six generated training examples and scores four held-out examples. Compare the frozen result with `generated/expected-training.json`. The local job ID will vary by installation. The sample reduces verified mistakes from two to one at four automated decisions out of four. Both arms miss the sample's 10% limit.
 
+Use [the coverage and error rehearsal](pilot-operating-point.md) to compare a repair against two owner-set thresholds. The generated repair gets both automated answers right, yet it covers only 2 of 10 cases against an 80% minimum. The guide binds the agreement before scoring and repeats the owner-facing evidence in a fresh process.
+
 ## Repeat from frozen evidence
 
 Read the generated job ID and start a new process to load its saved weights and recompute the predictions and report. The command checks the stored dataset, cohort, model and output identities. Rerunning a finished job shows its cached status. A score-only repeat performs a fresh calculation.
@@ -31,6 +33,8 @@ cmp generated-state/first-repeat/brief.md generated-state/second-repeat/brief.md
 ```
 
 Each new directory also contains `repeat.json` with its source and digest bindings. A permitted recipient reruns or witnesses the comparison, checks the exact result and records that event privately. The workflow owner then records a dated business decision. Use the checklist in `operator-guide.md`.
+
+Copy `templates/pilot-receipt.blank.json` for the witness and business decision. Keep the approved aggregate, brief, and decision-quality files intact so their hashes can be verified later.
 
 ## Onboard the customer through MCP
 
@@ -64,6 +68,8 @@ The workspace administrator and custodian select a private, unshared channel, na
 In the authorized channel, type `/opentour`. Browse or search the dataset and work in private native views. An evaluation-only dataset offers its supplied comparison. A training-enabled dataset can offer the bounded CPU profile, with up to 256 training rows, 128 held-out rows and a three-second CPU limit. The trainer confirms the specific proposal. An expired job lease stays uncertain until the operator reconciles the original job. The designated reviewer opens the evidence before selecting **Approve for readout** or **Request changes**. The local receipt binds the reviewer, audience, revision, model or supplied method, cohort and evidence shown.
 
 The customer worker connects outbound through Socket Mode. A separately approved Zapier Catch Hook may receive only permitted receipt fields. Start the configured Slack worker with `--auto-flush-zapier` for automatic handoff, or run `--flush-zapier` for a single operator-initiated flush. Both use the same current permission and destination checks. Verify a matching downstream delivery in the owner's Zap before recording it as confirmed. The first-ten product provisions zero OpenTour-managed AWS services. The administrator controls the Slack workspace and any approved third-party destinations.
+
+After a restart or uncertain request, use the [owner receipt recovery procedure](pilot-receipt-recovery.md) to discover outstanding receipts, inspect a held item and record independently verified downstream disposition. The listing reads private local state without sending an event.
 
 ## Withdraw and close an engagement
 

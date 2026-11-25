@@ -30,6 +30,8 @@ To obtain only the aggregate JSON on standard output, run `python -I -S -B opent
 
 Keep one receipt for the engagement in the owner's approved record system. The same opaque organization key follows a revised report, an additional workflow and a return engagement. The operating schedule allows one active pilot at a time.
 
+In the Slack workspace kit, copy `templates/pilot-receipt.blank.json` to the engagement's private record system. Set the record class and use opaque references for authorized people and private evidence. An independent recipient reruns or witnesses the frozen computation. The workflow owner records the decision in that separate copy. Preserve the original `brief.md`, `aggregate.json` and operating agreement evidence byte for byte. An editable receipt and a Slack presentation decision have different purposes. Fill the private receipt only after the relevant events occurred.
+
 | When | What the operator records privately |
 | --- | --- |
 | Before opening the held-out answers | Organization and engagement reference, workflow owner, custodian, permitted operator, recipient and support route. Record the recurring decision, who can verify the answer, the decision date, allowed processing location, fields, purpose, recipients, retention and any external destination. Record training permission separately when requested. |

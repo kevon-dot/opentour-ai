@@ -13,6 +13,44 @@ from pathlib import Path
 from zipfile import ZipFile
 
 
+def verify_operating_agreement(executable, target):
+    work = target / "private-agreement"
+    work.mkdir(mode=0o700)
+    sample = target / "generated/coverage-floor.json"
+    score = [*executable, "evaluate"]
+    source = subprocess.check_output([*score, "--source-digest", sample], text=True).strip()
+    agreement = json.loads((target / "generated/operating-agreement.template.json").read_text())
+    now = int(time.time())
+    agreement.update(source_digest=source, agreed_at=now, expires_at=now + 1800)
+    path = work / "agreement.json"
+    path.write_text(json.dumps(agreement))
+    path.chmod(0o600)
+    bound = [
+        *score,
+        "--operating-agreement",
+        path,
+        "--organization",
+        agreement["organization"],
+        "--engagement",
+        agreement["engagement"],
+    ]
+    for directory, command in (("legacy", score), ("first", bound), ("repeat", bound)):
+        subprocess.run([*command, "--report-dir", work / directory, sample], check=True, env={})
+    for name in ("brief.md", "aggregate.json", "decision-quality.md", "decision-quality.json"):
+        assert (work / "first" / name).read_bytes() == (work / "repeat" / name).read_bytes()
+        if name in ("brief.md", "aggregate.json"):
+            assert (work / "first" / name).read_bytes() == (work / "legacy" / name).read_bytes()
+    quality = json.loads((work / "first" / "decision-quality.json").read_text())
+    assert quality["operating_point"]["repair"] == {
+        "coverage": "missed",
+        "error": "met",
+        "combined": "missed",
+    }
+    private_receipt = json.loads((target / "templates/pilot-receipt.blank.json").read_text())
+    assert private_receipt["record_class"] == "unclassified"
+    assert not (work / "legacy" / "decision-quality.json").exists()
+
+
 def test_reproducible_kit_runs_isolated_data_mcp_and_slack_entrypoints(tmp_path):
     root = Path(__file__).resolve().parents[4]
     builder = "tools/build_slack_pilot_kit.py"
@@ -66,7 +104,10 @@ def test_reproducible_kit_runs_isolated_data_mcp_and_slack_entrypoints(tmp_path)
 
     assert revision.encode() in run("--version")
     assert b"usage" in run("slack", "--help").lower()
+    assert b"--unresolved-receipts" in run("slack", "--help")
     assert b"withdraw" in run("custody", "--help").lower()
+    assert (target / "pilot-receipt-recovery.md").is_file()
+    verify_operating_agreement(executable, target)
     supplied = "generated/readout-input.json"
     for directory in ("first-readout", "repeat-readout"):
         run("evaluate", "--report-dir", directory, supplied)

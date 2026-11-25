@@ -21,6 +21,7 @@ def test_kit_rebuild_sample_integrity_and_isolated_replay(tmp_path):
         src / "pilot/__init__.py",
         src / "pilot/readout.py",
         src / "pilot/brief.py",
+        src / "pilot/operating_point.py",
         cell / "examples/pilot-evaluation.json",
         cell / "docs/pilot-kit.md",
         cell / "docs/pilot-readout.md",

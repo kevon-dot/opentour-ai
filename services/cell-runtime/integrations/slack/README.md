@@ -97,6 +97,15 @@ Preview again and call `confirm_dataset_onboarding` with that revision in the sa
 
 Before starting Slack, check the local catalog and give each actor only the IDs they are authorized to use. A reviewer rehearsing both dispositions needs `generated-intake` **and** `generated-supplied` in their actor's `datasets` list; a training-only operator can be limited to `generated-intake`. If the trainer and presentation reviewer differ, add the real trainer as a separate actor with `inspect` and `tune` for the training dataset. Populate grant expiry and separate preview/aggregate permissions for each person.
 
+The administrator records each readiness check privately before the first real callback. The syntax check can succeed even when no people have active grants.
+
+| Check | Evidence needed to proceed | If missing |
+| --- | --- | --- |
+| Named reviewer and recipient | The reviewer is in the private channel, has a current review and aggregate grant for the intended dataset, and agrees who may receive the evidence. | Record the missing person, permission or audience. Keep the live rehearsal waiting. |
+| Authorized dataset | The catalog contains the agreed dataset ID and revision for that organization. Its mode and limits match the custodian's intake. | Repeat the private MCP preview and resolve the scope with the custodian. |
+| Training, when selected | The intended trainer is listed for this exact training dataset and has an unexpired tuning grant. | Correct the private role or obtain a freshly authorized revision. The supplied-output path remains available to eligible reviewers. |
+| Worker and restart | The approved operator starts one worker, checks its connection to the selected workspace, and restarts it against the original working directory and current custody ledger. | Hold live signoff until the operator can reproduce startup and identify the support owner. |
+
 ```sh
 "$pilot_python" -I -S -B "$pilot_bundle" data --db "$pilot_dir/training.sqlite3" --org "$pilot_org" catalog
 "$pilot_python" -I -B "$pilot_bundle" slack "$pilot_dir/worker.json" --check-config
@@ -104,6 +113,8 @@ Before starting Slack, check the local catalog and give each actor only the IDs 
 ```
 
 Run the worker with the locally injected tokens. An optional `--post-launcher` invocation sends a neutral launcher into the approved channel. Use it only after the workspace owner authorizes that post.
+
+Open `/opentour` to find the reviewed, pending or returned evidence available to your actor. Select the relevant readout when several are available. Ask the bounded questions in its private evidence view to understand errors, coverage and limits, paired changes, or the intended audience. Return to the same evidence before choosing its disposition. Open `/opentour search FIELD` to look for authorized data; the search term can contain up to 64 characters.
 
 1. In the approved private channel, enter `/opentour data` or `/opentour search label`. Open a dataset. Verify its approved purpose, revision, visible split sizes and any explicitly permitted training preview. Evaluation-only enrollment displays the frozen supplied comparison. A training-enabled enrollment offers **Tune this dataset** to an authorized trainer.
 2. Review the frozen data revision, CPU profile, epochs, maximum updates, CPU limit and intended audience. **Start training** confirms one fit. Record the job ID privately and open `/opentour status JOB`. A working message reports that a lookup is underway. The durable job record supplies the actual execution state. A prompt such as `approve` grants no authority.

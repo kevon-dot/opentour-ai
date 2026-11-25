@@ -20,6 +20,14 @@ from pathlib import Path
 from typing import Any
 
 from opentour_cell.pilot.brief import decision_brief
+from opentour_cell.pilot.operating_point import (
+    AgreementError,
+    decision_quality,
+    enrollment_revision,
+    operating_point,
+    quality_brief,
+    validate_agreement,
+)
 from opentour_cell.pilot.readout import (
     INPUT_VERSION,
     MAX_MANIFEST_BYTES,
@@ -63,6 +71,7 @@ CREATE TABLE IF NOT EXISTS split_keys (fingerprint TEXT PRIMARY KEY,
  split TEXT NOT NULL, used_by TEXT);
 CREATE TABLE IF NOT EXISTS evaluation_keys (dataset TEXT NOT NULL, fingerprint TEXT NOT NULL,
  PRIMARY KEY(dataset,fingerprint));
+CREATE INDEX IF NOT EXISTS evaluation_fingerprint ON evaluation_keys(fingerprint,dataset);
 CREATE TABLE IF NOT EXISTS jobs (
  id TEXT PRIMARY KEY, request TEXT UNIQUE, dataset TEXT NOT NULL, revision TEXT NOT NULL,
  epochs INTEGER NOT NULL, status TEXT NOT NULL, reviewer TEXT, lease_token TEXT, lease_until REAL,
@@ -75,12 +84,16 @@ CREATE TABLE IF NOT EXISTS engagement (singleton INTEGER PRIMARY KEY CHECK(singl
 CREATE TABLE IF NOT EXISTS dataset_scope (dataset TEXT PRIMARY KEY, mode TEXT NOT NULL,
  destination TEXT NOT NULL, retention TEXT NOT NULL, train_digest TEXT, cohort_digest TEXT NOT NULL,
  baseline_result TEXT);
+CREATE TABLE IF NOT EXISTS operating_agreements (dataset TEXT PRIMARY KEY, engagement TEXT NOT NULL,
+ content TEXT NOT NULL);
 """
 
 
 _DATASET_QUERY = (
     "SELECT d.*,s.mode,s.destination,s.retention,s.train_digest,s.cohort_digest,"
-    "s.baseline_result FROM datasets d LEFT JOIN dataset_scope s ON s.dataset=d.id "
+    "s.baseline_result,a.content AS agreement,a.engagement AS agreement_engagement FROM datasets d "
+    "LEFT JOIN dataset_scope s ON s.dataset=d.id "
+    "LEFT JOIN operating_agreements a ON a.dataset=d.id "
 )
 
 
@@ -103,9 +116,10 @@ def _evidence(
     cohort: str,
     model: str | None,
     readout: dict[str, Any],
+    agreement: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     aggregate, brief = _report_bytes(readout)
-    return {
+    result: dict[str, Any] = {
         "dataset_id": name,
         "dataset_revision": revision,
         "mode": mode,
@@ -115,6 +129,25 @@ def _evidence(
         "brief_digest": hashlib.sha256(brief).hexdigest(),
         "readout": readout,
     }
+    if agreement is not None:
+        result["operating_point"] = operating_point(agreement, readout)
+        quality = _quality(result, agreement)
+        result["decision_quality_digest"] = hashlib.sha256(
+            (canonical(quality) + "\n").encode()
+        ).hexdigest()
+    return result
+
+
+def _quality(result: dict[str, Any], agreement: dict[str, Any] | None) -> dict[str, Any]:
+    return decision_quality(
+        result["readout"],
+        result.get("operating_point"),
+        source=agreement["source_digest"] if agreement else result["dataset_revision"],
+        aggregate=result["aggregate_digest"],
+        revision=result["dataset_revision"],
+        cohort=result["cohort_digest"],
+        artifact=result["artifact_digest"],
+    )
 
 
 def _score(
@@ -249,8 +282,33 @@ def _registration_probe(
         return "unavailable"
 
 
+def _stored_agreement(row: sqlite3.Row, organization: str) -> dict[str, Any] | None:
+    recorded, contents = row["agreement_revision"], row["agreement"]
+    if recorded is None and contents is None:
+        return None
+    try:
+        if not isinstance(recorded, str):
+            raise TrainingError("operating_agreement_unverified")
+        value = json.loads(contents)
+        agreement = validate_agreement(
+            value,
+            organization=organization,
+            source=value["source_digest"],
+            engagement=row["agreement_engagement"],
+            ceiling=row["ceiling"],
+        )
+        if digest(agreement) != recorded or row["revision"] != enrollment_revision(
+            agreement["source_digest"], recorded
+        ):
+            raise TrainingError("operating_agreement_unverified")
+        return agreement
+    except (AgreementError, TypeError, KeyError, json.JSONDecodeError, RecursionError):
+        raise TrainingError("operating_agreement_unverified") from None
+
+
 def _enrollment_snapshot(path: Path, organization: str, selection: tuple[str, str] | None) -> str:
     with closing(sqlite3.connect(path.absolute().as_uri() + "?mode=ro", uri=True, timeout=2)) as db:
+        db.row_factory = sqlite3.Row
         db.execute("PRAGMA query_only=ON")
         db.execute("BEGIN")
         owner = db.execute("SELECT organization FROM owner WHERE singleton=1").fetchone()
@@ -282,7 +340,21 @@ def _enrollment_snapshot(path: Path, organization: str, selection: tuple[str, st
             return "absent"
         if row[1] or (row[2] is not None and row[2] <= time.time()):
             return "unavailable"
-        return "registered" if row[0] == expected_revision else "stale"
+        if row[0] != expected_revision:
+            return "stale"
+        # Older stores were created before agreements. A current store must be able
+        # to verify the bound permission before MCP calls an enrollment registered.
+        if "agreement_revision" in {
+            column[1] for column in db.execute("PRAGMA table_info(datasets)")
+        }:
+            terms = db.execute(
+                "SELECT d.revision,d.ceiling,d.agreement_revision,a.content AS agreement,"
+                "a.engagement AS agreement_engagement FROM datasets d "
+                "LEFT JOIN operating_agreements a ON a.dataset=d.id WHERE d.id=?",
+                (dataset_id,),
+            ).fetchone()
+            _stored_agreement(terms, organization)
+        return "registered"
 
 
 def onboarding_store_available(path: Path | str, organization: str) -> bool:
@@ -365,6 +437,10 @@ class LocalTrainingStore:
             for statement in _SCHEMA.split(";"):
                 if statement.strip():
                     db.execute(statement)
+            if "agreement_revision" not in {
+                r[1] for r in db.execute("PRAGMA table_info(datasets)")
+            }:
+                db.execute("ALTER TABLE datasets ADD COLUMN agreement_revision TEXT")
             db.execute("INSERT OR IGNORE INTO owner VALUES (1,?)", (self.organization,))
             if "engagement" not in existing:
                 db.execute("INSERT INTO engagement(singleton,id) VALUES(1,?)", (uuid.uuid4().hex,))
@@ -491,13 +567,13 @@ class LocalTrainingStore:
                 "evaluation_keys",
                 "split_keys",
                 "dataset_scope",
+                "operating_agreements",
                 "datasets",
             ):
                 db.execute("DELETE FROM " + table)
         return self.custody_inventory()
 
-    @staticmethod
-    def _dataset(db: sqlite3.Connection, dataset_id: str) -> sqlite3.Row:
+    def _dataset(self, db: sqlite3.Connection, dataset_id: str) -> sqlite3.Row:
         row: sqlite3.Row | None = db.execute(
             _DATASET_QUERY
             + "WHERE d.id=? AND d.revoked=0 AND (d.expires_at IS NULL OR d.expires_at>?)",
@@ -505,6 +581,7 @@ class LocalTrainingStore:
         ).fetchone()
         if row is None:
             raise TrainingError("dataset_unavailable")
+        _stored_agreement(row, self.organization)
         return row
 
     @staticmethod
@@ -515,7 +592,7 @@ class LocalTrainingStore:
             actions = [
                 action for action in actions if action not in {"score_frozen", "train_cpu_text"}
             ]
-        return {
+        summary = {
             "dataset_id": row["id"],
             "dataset_revision": row["revision"],
             "mode": mode,
@@ -533,16 +610,58 @@ class LocalTrainingStore:
             if row["retention"]
             else {"disposition": "unrecorded"},
         }
+        if row["agreement_revision"] is not None:
+            summary["agreement_revision"] = row["agreement_revision"]
+        return summary
 
     def _bind(self, db: sqlite3.Connection, data: Dataset) -> None:
         cohort = _cohort_digest(
             self.organization, data.name, data.revision, data.ceiling_bps, data.heldout
         )
         initial = None
+        if data.agreement is not None:
+            previous = db.execute(
+                "SELECT 1 FROM operating_agreements WHERE engagement != ? LIMIT 1",
+                (data.agreement["engagement"],),
+            ).fetchone()
+            if previous is not None:
+                raise TrainingError("operating_engagement_mismatch")
+            exposed = db.execute(
+                "SELECT 1 FROM evaluation_keys selected JOIN evaluation_keys prior "
+                "ON prior.fingerprint=selected.fingerprint AND prior.dataset!=selected.dataset "
+                "JOIN dataset_scope ps ON ps.dataset=prior.dataset "
+                "JOIN split_keys k ON k.fingerprint=selected.fingerprint "
+                "WHERE selected.dataset=? AND "
+                "(ps.baseline_result IS NOT NULL OR k.used_by IS NOT NULL) "
+                "LIMIT 1",
+                (data.name,),
+            ).fetchone()
+            if exposed is not None:
+                raise TrainingError("prospective_agreement_requires_fresh_heldout")
+            if "supersedes" in data.agreement:
+                # A new named dataset and its new owner-authorized revision preserve historical
+                # receipts. Revoke the superseded selection in the same enrollment transaction.
+                old = db.execute(
+                    _DATASET_QUERY + "WHERE d.revoked=0 AND d.agreement_revision=?",
+                    (data.agreement["supersedes"],),
+                ).fetchone()
+                if old is None:
+                    raise TrainingError("superseded_agreement_unavailable")
+                previous_agreement = _stored_agreement(old, self.organization)
+                if previous_agreement is None or any(
+                    previous_agreement[field] != data.agreement[field]
+                    for field in ("engagement", "current_method", "repair_method")
+                ):
+                    raise TrainingError("superseded_agreement_mismatch")
+                db.execute("UPDATE datasets SET revoked=1 WHERE id=?", (old["id"],))
+            db.execute(
+                "INSERT INTO operating_agreements VALUES(?,?,?)",
+                (data.name, data.agreement["engagement"], canonical(data.agreement)),
+            )
         if data.mode == "evaluation_only":
             report = _score(data.heldout, data.ceiling_bps, None)
             initial = canonical(
-                _evidence(data.name, data.revision, data.mode, cohort, None, report)
+                _evidence(data.name, data.revision, data.mode, cohort, None, report, data.agreement)
             )
         db.execute(
             "INSERT INTO dataset_scope VALUES(?,?,?,?,?,?,?)",
@@ -610,7 +729,8 @@ class LocalTrainingStore:
             db.execute(
                 "INSERT INTO"
                 " datasets(id,revision,reviewers,fields,preview_fields,previews,train_count,"
-                "heldout_count,ceiling,expires_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                "heldout_count,ceiling,expires_at,agreement_revision) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     data.name,
                     data.revision,
@@ -622,6 +742,7 @@ class LocalTrainingStore:
                     len(data.heldout),
                     data.ceiling_bps,
                     data.expires_at,
+                    digest(data.agreement) if data.agreement is not None else None,
                 ),
             )
             self._bind(db, data)
@@ -655,6 +776,10 @@ class LocalTrainingStore:
             matches = []
             for row in rows:
                 if allowed is not None and row["id"] not in allowed:
+                    continue
+                try:
+                    _stored_agreement(row, self.organization)
+                except TrainingError:
                     continue
                 summary = self._summary(row)
                 if any(term in s.casefold() for s in [summary["dataset_id"], *summary["fields"]]):
@@ -718,6 +843,7 @@ class LocalTrainingStore:
         epochs: int = 3,
         profile: str = PROFILE,
         request_id: str | None = None,
+        authorized_trainer: str | None = None,
     ) -> dict[str, Any]:
         if profile != PROFILE:
             raise TrainingError("qualified_trainer_required")
@@ -731,6 +857,10 @@ class LocalTrainingStore:
         with self._db(write=True) as db:
             data = self._dataset(db, dataset_id)
             if data["mode"] != "training" or not data["train_digest"]:
+                raise TrainingError("training_not_authorized")
+            if authorized_trainer is not None and identifier(authorized_trainer) not in json.loads(
+                data["reviewers"]
+            ):
                 raise TrainingError("training_not_authorized")
             revision = digest(
                 [
@@ -756,6 +886,16 @@ class LocalTrainingStore:
                 (job_id, request_id, dataset_id, revision, epochs, "awaiting_approval"),
             )
             return self._envelope(*self._job(db, job_id))
+
+    def can_propose(self, dataset_id: str, actor: str) -> bool:
+        """Determine this actor's eligibility without disclosing the other named reviewers."""
+        with self._db() as db:
+            data = self._dataset(db, dataset_id)
+            return bool(
+                data["mode"] == "training"
+                and data["train_digest"]
+                and identifier(actor) in json.loads(data["reviewers"])
+            )
 
     def status(self, job_id: str) -> dict[str, Any]:
         with self._db() as db:
@@ -839,8 +979,12 @@ class LocalTrainingStore:
                 data["cohort_digest"],
                 artifact,
                 report,
+                _stored_agreement(data, self.organization),
             )
-            if expected.get("readout") != report:
+            if any(
+                expected.get(key) != repeat.get(key)
+                for key in ("readout", "operating_point", "decision_quality_digest")
+            ):
                 raise TrainingError("readout_repeat_mismatch")
             # Pre-binding software jobs require independently re-enrolled original inputs.
             # Their legacy result can validate aggregates, but it never attested a brief.
@@ -866,7 +1010,12 @@ class LocalTrainingStore:
             raise TrainingError("readout_repeat_mismatch") from None
 
     def score_only(
-        self, *, output_dir: Path, dataset_id: str | None = None, job_id: str | None = None
+        self,
+        *,
+        output_dir: Path,
+        dataset_id: str | None = None,
+        job_id: str | None = None,
+        include_decision_quality: bool = False,
     ) -> dict[str, Any]:
         if (dataset_id is None) == (job_id is None):
             raise TrainingError("choose_one_frozen_source")
@@ -878,6 +1027,7 @@ class LocalTrainingStore:
                 job = None
                 data = self._dataset(db, dataset_id)
             result = self._recompute(db, data, job)
+            agreement = _stored_agreement(data, self.organization)
         target = Path(output_dir)
         _check_directory(target)
         aggregate, brief = _report_bytes(result["readout"])
@@ -891,6 +1041,14 @@ class LocalTrainingStore:
                 ("repeat.json", (canonical(receipt) + "\n").encode()),
             ):
                 (staged / name).write_bytes(content)
+            if agreement is not None or include_decision_quality:
+                quality = _quality(result, agreement)
+                (staged / "decision-quality.json").write_text(
+                    canonical(quality) + "\n", encoding="utf-8"
+                )
+                (staged / "decision-quality.md").write_text(
+                    quality_brief(quality), encoding="utf-8"
+                )
             with self.engagement_guard(data["id"], data["revision"]):
                 try:
                     target.mkdir(mode=0o700)
@@ -1034,6 +1192,7 @@ class LocalTrainingStore:
                     data["cohort_digest"],
                     artifact_id,
                     readout,
+                    _stored_agreement(current_data, self.organization),
                 ),
                 "changed_weights": sum(
                     bool(weight) for weights in model["weights"] for weight in weights
@@ -1091,6 +1250,11 @@ def main() -> int:
     selection.add_argument("--dataset", dest="dataset_id")
     selection.add_argument("--job", dest="job_id")
     score.add_argument("--output-dir", type=Path, required=True)
+    score.add_argument(
+        "--decision-quality",
+        action="store_true",
+        help="include a descriptive companion if no prospective operating agreement was enrolled",
+    )
     recovery = actions.add_parser("recover", help="resume an already-confirmed interrupted job")
     recovery.add_argument("job_id")
     recovery.add_argument("--reviewer", required=True)
@@ -1131,7 +1295,10 @@ def main() -> int:
                 )
             elif args.command == "score-only":
                 value = store.score_only(
-                    dataset_id=args.dataset_id, job_id=args.job_id, output_dir=args.output_dir
+                    dataset_id=args.dataset_id,
+                    job_id=args.job_id,
+                    output_dir=args.output_dir,
+                    include_decision_quality=args.decision_quality,
                 )
             elif args.command == "recover":
                 value = store.recover(

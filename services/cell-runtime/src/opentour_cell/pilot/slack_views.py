@@ -20,6 +20,13 @@ from opentour_cell.pilot.text_classifier import (
 from opentour_cell.pilot.training_data import EVALUATION_FIELDS, FIELD_NAMES
 
 Block = dict[str, Any]
+SEARCH_LIMIT = 64
+QUESTION_LABELS = {
+    "errors": "Verified errors",
+    "coverage": "Coverage and limits",
+    "changes": "What changed?",
+    "audience": "Who receives it?",
+}
 _REF = re.compile(r"[A-Za-z0-9_.:~-]{1,160}\Z")
 _MODEL = "CPU text classifier · multiclass perceptron (cpu_text_v1)"
 _SAMPLE_FIELDS = ("case_id", "text", "label")
@@ -144,6 +151,7 @@ def _audit_blocks(audit: Mapping[str, Any]) -> list[Block]:
         ("model_revision", "Model or method revision"),
         ("cohort_revision", "Tested cohort"),
         ("evidence_digest", "Evidence digest"),
+        ("decision_quality_digest", "Decision quality digest"),
         ("reviewer", "Named reviewer"),
         ("viewer", "Opened by"),
         ("team", "Workspace"),
@@ -220,6 +228,7 @@ class _Arm:
 class _Evidence:
     summary: str
     details: list[Block]
+    answers: dict[str, str]
 
     @classmethod
     def read(cls, report: Mapping[str, Any] | None) -> _Evidence | None:
@@ -289,14 +298,19 @@ class _Evidence:
         except (KeyError, TypeError, ValueError):
             return None
         same = "Different automatic cases." if old_only or new_only else "Same automatic cases."
-        summary = (
+        errors = (
             f"Incorrect automatic decisions · incumbent {current.error()} "
-            f"→ repair {repair.error()}.\n"
-            f"Coverage {_ratio(current.auto, size)} → {_ratio(repair.auto, size)}. {same}\n"
-            f"Human review {current.review} → {repair.review}. "
-            f"Paired fixes {fixes}, regressions {regressions}. Unknown references {unknown}.\n"
+            f"→ repair {repair.error()}."
+        )
+        coverage = f"Coverage {_ratio(current.auto, size)} → {_ratio(repair.auto, size)}. {same}"
+        changes_text = f"Paired fixes {fixes}, regressions {regressions}."
+        ceiling = (
             f"Error ceiling ≤{bps / 100:g}% · incumbent {current.ceiling(bps)}, "
-            f"repair {repair.ceiling(bps)}. {finding}"
+            f"repair {repair.ceiling(bps)}."
+        )
+        summary = (
+            f"{errors}\n{coverage}\nHuman review {current.review} → {repair.review}. "
+            f"{changes_text} Unknown references {unknown}.\n{ceiling} {finding}"
         )
         details = [
             _section(summary),
@@ -320,12 +334,130 @@ class _Evidence:
                 "routing. Time saved and future performance were not measured."
             ),
         ]
-        return cls(summary, details)
+        return cls(
+            summary,
+            details,
+            {
+                "errors": f"{errors} {ceiling} Automatic decisions with unknown references · "
+                f"incumbent {current.unknown}, repair {repair.unknown}.",
+                "coverage": f"{coverage} {ceiling} Eligible pairs {common}/{size}.",
+                "changes": f"{changes_text} Eligible pairs {common}/{size}. {finding}",
+            },
+        )
 
 
 def evidence_available(report: Mapping[str, Any] | None) -> bool:
     """True when the supplied readout has a renderable, internally consistent aggregate."""
     return _Evidence.read(report) is not None
+
+
+def _operating_terms(audit: Mapping[str, Any]) -> str:
+    terms = audit.get("operating_point")
+    if terms is None:
+        return "Descriptive comparison. A frozen minimum-coverage agreement is unavailable."
+    if (
+        not isinstance(terms, Mapping)
+        or terms.get("schema_version") != "opentour.pilot.operating-point.v1"
+        or not re.fullmatch(r"[0-9a-f]{64}", str(terms.get("agreement_revision", "")))
+    ):
+        raise ValueError("Unverified operating agreement.")
+    minimum = _count(terms.get("minimum_coverage_bps"))
+    ceiling = _count(terms.get("error_ceiling_bps"))
+    if minimum > 10000 or ceiling > 10000 or ceiling != audit.get("error_ceiling_bps"):
+        raise ValueError("Unverified operating limits.")
+    lines = [
+        f"Agreed minimum automated coverage ≥{minimum / 100:g}%. "
+        f"Maximum wrong-automatic rate ≤{ceiling / 100:g}%.",
+    ]
+    for key, label in (("current", "Incumbent"), ("repair", "Repair")):
+        arm = terms.get(key)
+        if not isinstance(arm, Mapping) or any(
+            arm.get(k) not in ("met", "missed", "undetermined")
+            for k in ("coverage", "error", "combined")
+        ):
+            raise ValueError("Unverified operating outcome.")
+        lines.append(
+            f"{label} · coverage {arm['coverage']}, error {arm['error']}, "
+            f"combined {arm['combined']}."
+        )
+    return "\n".join(lines)
+
+
+def reviewer_help(context: str, message: str = "") -> Block:
+    blocks = [_section(message)] if message else []
+    blocks.extend(
+        [
+            _section(
+                "Open /opentour review to choose a readout. Open its evidence to ask about "
+                "errors, coverage, changes or audience. Only the named reviewer's buttons "
+                "record a decision."
+            ),
+            _section(
+                "Use /opentour data to browse datasets, /opentour search FIELD to find one, "
+                "or /opentour status JOB to inspect an authorized job."
+            ),
+            _actions(
+                _button("Review results", "ot_readouts", "home"),
+                _button("Browse data", "ot_browse", "home"),
+            ),
+        ]
+    )
+    return _modal("Pilot help", "ot_help_view", context, blocks)
+
+
+def result_chooser(
+    context: str, rows: Sequence[Mapping[str, Any]], *, previous: bool, more: bool
+) -> Block:
+    blocks = [_section("Choose the result to inspect. Each selection opens its own revision.")]
+    for item in rows:
+        section = _section(
+            f"{_ref(item['dataset'])} · {_display(item['method'])}\n"
+            f"{_display(item['state'])} · {_ref(item['reference'])}"
+        )
+        section["accessory"] = _button("Open result", "ot_result_open", item["token"])
+        blocks.append(section)
+    navigation = []
+    if previous:
+        navigation.append(_button("Previous", "ot_result_prev", "previous"))
+    if more:
+        navigation.append(_button("Next", "ot_result_next", "next"))
+    navigation.extend(
+        [_button("Browse data", "ot_browse", "home"), _button("Help", "ot_help", "home")]
+    )
+    blocks.append(_actions(*navigation))
+    return _modal("Review results", "ot_review_list", context, blocks)
+
+
+def question_modal(
+    context: str,
+    revision: str,
+    report: Mapping[str, Any],
+    audit: Mapping[str, Any],
+    topic: str = "",
+) -> Block:
+    facts = _Evidence.read(report)
+    if facts is None:
+        raise ValueError("Unverified evidence.")
+    answers = {
+        **facts.answers,
+        "coverage": facts.answers["coverage"] + "\n" + _operating_terms(audit),
+        "audience": f"Only {_display(audit.get('recipient'))} is the intended audience. "
+        "Approve for readout permits presenting this revision. The workflow owner separately "
+        "decides whether to use or deploy it.",
+    }
+    blocks = [_section(f"Readout revision {_ref(revision)}")]
+    if topic:
+        blocks.append(_section(answers[topic]))
+    blocks.append(
+        _actions(
+            *[
+                _button(label, "ot_question_" + key, revision)
+                for key, label in QUESTION_LABELS.items()
+            ]
+        )
+    )
+    blocks.append(_actions(_button("View evidence", "ot_evidence", revision), _home()))
+    return _modal("Evidence questions", "ot_questions_view", context, blocks)
 
 
 def _decision(label: str, action: str, revision: str, recipient: str, *, approve: bool) -> Block:
@@ -389,8 +521,11 @@ def workbench_message(
         blocks.extend([_section(scope), _section(state_text)])
         fallback += " " + scope
         if evidence:
-            blocks.append(_section(evidence.summary))
-            fallback += " " + evidence.summary
+            summary = evidence.summary
+            if audit and "operating_point" in audit:
+                summary += "\n" + _operating_terms(audit)
+            blocks.append(_section(summary))
+            fallback += " " + summary
         elif malformed:
             blocks.append(_section("Handoff held. The supplied aggregate could not be verified."))
         elif witnessed:
@@ -466,6 +601,7 @@ def home_modal(
     tune_allowed: bool = True,
     decision_allowed: bool = True,
     audit: Mapping[str, Any] | None = None,
+    reviewer_navigation: bool = False,
 ) -> Block:
     message = workbench_message(
         revision=revision,
@@ -487,6 +623,12 @@ def home_modal(
     blocks = message["blocks"][1:]
     if audit and evidence_reviewed and revision:
         blocks.extend(_audit_blocks(audit))
+    if reviewer_navigation:
+        blocks.append(
+            _actions(
+                _button("Review results", "ot_readouts", "home"), _button("Help", "ot_help", "home")
+            )
+        )
     return _modal("Pilot workspace", "ot_home_view", context, blocks)
 
 
@@ -556,11 +698,11 @@ def dataset_modal(
     search: Block = {
         "type": "plain_text_input",
         "action_id": "query",
-        "max_length": 100,
+        "max_length": SEARCH_LIMIT,
         "placeholder": _text("Search an approved name or field"),
     }
     if query:
-        search["initial_value"] = _display(query, 100)
+        search["initial_value"] = query
     blocks = [
         {
             "type": "input",
@@ -775,6 +917,7 @@ def evidence_modal(
     recipient: str | None = None,
     dataset_revision: str | None = None,
     audit: Mapping[str, Any] | None = None,
+    questions: bool = False,
 ) -> Block:
     ref = _ref(revision)
     evidence = _Evidence.read(report)
@@ -789,6 +932,9 @@ def evidence_modal(
         blocks.extend(evidence.details)
         if audit:
             blocks.extend(_audit_blocks(audit))
+            blocks.append(_section(_operating_terms(audit)))
+        if questions:
+            blocks.append(_actions(_button("Ask about evidence", "ot_question", ref)))
     else:
         blocks.append(
             _section(
