@@ -1688,27 +1688,32 @@ class Workbench:
         target = self._readout(cfg, actor, ctx["job"])
         _check(target and target.revision == ctx["revision"])
         assert target is not None
-        entry = cfg.permission(actor, "inspect", target.dataset)
+        current = self.settings()
+        _check(
+            current.binding == cfg.binding
+            and self._policy(current, actor) == self._policy(cfg, actor)
+        )
+        entry = current.permission(actor, "inspect", target.dataset)
         _check(entry["aggregate"] and self.views.evidence_available(target.report))
         token = self.journal.context(
             actor, cfg.channel, view, "evidence", ctx["job"], target.revision
         )
-        charts = bool(
-            target.audit.get("comparison_cohorts")
-            and cfg.reviewer == actor
-            and "review" in entry["roles"]
-        )
+        named_reviewer = current.reviewer == actor and "review" in entry["roles"]
+        charts = bool(target.audit.get("comparison_cohorts") and named_reviewer)
+        view_audit = {**target.audit, "viewer": actor}
+        if not named_reviewer:
+            view_audit.pop("workflow_benchmark", None)
         modal = self.views.evidence_modal(
             context=token,
             revision=target.revision,
             report=target.report,
             recipient=cfg.recipient,
             dataset_revision=target.dataset_revision,
-            audit={**target.audit, "viewer": actor},
+            audit=view_audit,
             questions=True,
-            release_allowed=actor == target.audit.get("release_reviewer")
-            and "review" in entry["roles"],
+            release_allowed=named_reviewer and actor == target.audit.get("release_reviewer"),
             charts_allowed=charts,
+            benchmark_allowed=named_reviewer,
             workflow=cfg.workflow_label,
         )
         proof = self._show(

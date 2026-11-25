@@ -1115,6 +1115,7 @@ def evidence_modal(
     questions: bool = False,
     release_allowed: bool = False,
     charts_allowed: bool = False,
+    benchmark_allowed: bool = False,
     workflow: str = "",
 ) -> Block:
     ref = _ref(revision)
@@ -1141,11 +1142,11 @@ def evidence_modal(
                 blocks.append(
                     _section("No protected cases were evaluated. No comparable paired cases.")
                 )
-            if "workflow_benchmark" in audit:
+            if benchmark_allowed and "workflow_benchmark" in audit:
                 from opentour_cell.pilot.slack_benchmark import benchmark_summary
 
                 blocks.append(_section(benchmark_summary(audit["workflow_benchmark"])))
-            else:
+            elif benchmark_allowed:
                 blocks.append(
                     _section(
                         "Workflow benchmark unavailable. This revision has no verified figures "

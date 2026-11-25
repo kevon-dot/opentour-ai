@@ -262,6 +262,80 @@ def test_managed_slack_projection_discards_unknown_nested_business_fields() -> N
     assert "confidential" not in json.dumps(slack_views.managed_report(report))
 
 
+@pytest.mark.parametrize(
+    ("actor", "roles", "visible"),
+    [
+        (ACTOR, ["inspect", "review"], True),
+        (ACTOR, ["inspect"], False),
+        (OTHER, ["inspect"], False),
+        (OTHER, ["review", "inspect"], False),
+    ],
+)
+def test_private_benchmark_requires_the_named_current_reviewer_on_this_source(
+    tmp_path: Path, actor: str, roles: list[str], visible: bool
+) -> None:
+    from opentour_cell.pilot.slack_benchmark import benchmark_summary
+
+    h, _, run, _ = setup_workflow(tmp_path, "rule", release=True)
+    h.config["users"][actor].update(datasets=["generated-repair"], roles=roles)
+    h.save()
+    v = h.launch(actor=actor)
+    ref = buttons(screen(h, v))["ot_evidence"]
+    h.action(v, "ot_evidence", ref, actor=actor)
+    assert screen(h, v)["callback_id"] == "ot_evidence_view"
+    normal = repair_workflow.managed_review_evidence(
+        h.path.parent, h.store.organization, run, h.config["recipient"], TEAM, CHANNEL
+    )
+    authorized_benchmark = benchmark_summary(normal["audit"]["workflow_benchmark"])
+    sections = [b["text"]["text"] for b in screen(h, v)["blocks"] if b["type"] == "section"]
+    assert (authorized_benchmark in sections) == visible
+    assert ("95% verified-error interval" in text(h, v)) == visible
+    assert ("ot_release_approve" in buttons(screen(h, v))) == visible
+    assert "Workflow benchmark unavailable" not in text(h, v)
+    assert "Incorrect automatic decisions" in text(h, v) and not h.slack.post
+
+
+@pytest.mark.parametrize("change", ["role", "named_reviewer", "audience", "aggregate", "source"])
+def test_private_benchmark_scope_is_rechecked_after_readout_before_presentation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, change: str
+) -> None:
+    h, _, _, _ = setup_workflow(tmp_path, "rule", release=True)
+    v = h.launch()
+    ref = buttons(screen(h, v))["ot_evidence"]
+    read = h.app._readout
+
+    def change_scope(*args: Any) -> Any:
+        result = read(*args)
+        if change == "role":
+            h.config["users"][ACTOR]["roles"] = ["inspect"]
+        elif change == "named_reviewer":
+            h.config["reviewer"] = OTHER
+        elif change == "audience":
+            h.config["recipient"] = "UOTHER"
+        elif change == "aggregate":
+            h.config["users"][ACTOR]["aggregate"] = False
+        else:
+            h.config["users"][ACTOR]["datasets"] = []
+        h.save()
+        return result
+
+    monkeypatch.setattr(h.app, "_readout", change_scope)
+    update = MagicMock(wraps=h.slack.views_update)
+    monkeypatch.setattr(h.slack, "views_update", update)
+    h.action(v, "ot_evidence", ref)
+    assert all(
+        "95% verified-error interval" not in json.dumps(call.kwargs)
+        for call in update.call_args_list
+    )
+    assert all(
+        call.kwargs["view"].get("callback_id") != "ot_evidence_view"
+        for call in update.call_args_list
+    )
+    with h.app.journal.db() as db:
+        assert not db.execute("SELECT 1 FROM presentations").fetchone()
+    assert not h.slack.post
+
+
 @pytest.mark.parametrize("withdrawn", [False, True])
 def test_managed_receipt_current_grant_dispatches_only_opaque_event(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, withdrawn: bool

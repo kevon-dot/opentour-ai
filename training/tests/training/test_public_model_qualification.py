@@ -32,13 +32,34 @@ PAYLOADS = {
 }
 
 
+def verified_profile(base: Path) -> dict[str, Any]:
+    """Check the publisher's staged assets before allocating a worker or creating fit evidence."""
+    profile: dict[str, Any] = json.loads(
+        (REPO / "training/profiles/smollm2_135m_lora_v1.json").read_bytes()
+    )
+    for name, expected in profile["files"].items():
+        file = base / name
+        if file.is_symlink() or not file.is_file():
+            raise SystemExit(
+                json.dumps({"state": "held", "reason": "staged_model_file_required", "file": name})
+            )
+        with file.open("rb") as handle:
+            if hashlib.file_digest(handle, "sha256").hexdigest() != expected:
+                raise SystemExit(
+                    json.dumps(
+                        {"state": "held", "reason": "staged_model_hash_mismatch", "file": name}
+                    )
+                )
+    return profile
+
+
 def reference(base: Path, wheel_dir: Path | None = None) -> None:
+    profile = verified_profile(base)
     sys.path.insert(0, str(REPO / "training/src/opentour_training/training"))
     import numpy as np
     import open_weight_worker as worker
     import tokenizers
 
-    profile = json.loads((REPO / "training/profiles/smollm2_135m_lora_v1.json").read_bytes())
     packages = {}
     for name, expected in PAYLOADS.items():
         distribution = importlib.metadata.distribution(name)
@@ -63,9 +84,6 @@ def reference(base: Path, wheel_dir: Path | None = None) -> None:
                 sha = hashlib.file_digest(handle, "sha256").hexdigest()
             assert sha == profile["runtime"][name + "_wheel_sha256"]
             packages[name]["wheel_sha256"] = sha
-    for name, checksum in profile["files"].items():
-        with (base / name).open("rb") as handle:
-            assert hashlib.file_digest(handle, "sha256").hexdigest() == checksum
     tok = tokenizers.Tokenizer.from_file(str(base / "tokenizer.json"))
     texts = [{"question": "refund on invoice"}, {"question": "software crashes during upload"}]
     seq = [tok.encode(worker.prompt(row, ["billing", "technical"])).ids for row in texts]
@@ -106,6 +124,7 @@ def execute(work: Path, base: Path, python: Path, wheel_dir: Path | None = None)
     import qualify_open_weight as qualify
     from opentour_cell.pilot import open_weight as model
 
+    verified_profile(base)
     work.mkdir(mode=0o700, parents=True, exist_ok=True)
     if any(work.iterdir()):
         raise SystemExit("use a new empty private qualification directory")
@@ -352,6 +371,41 @@ def execute(work: Path, base: Path, python: Path, wheel_dir: Path | None = None)
     )
     qualify.record(work / "qualification-result.json", report)
     print(json.dumps(report, sort_keys=True))
+
+
+def test_missing_source_holds_without_allocating_a_worker(tmp_path: Path) -> None:
+    _expect_source_hold(tmp_path, "staged_model_file_required")
+
+
+def test_substituted_source_cannot_produce_a_qualification_receipt(tmp_path: Path) -> None:
+    base = tmp_path / "model-base"
+    base.mkdir()
+    profile = json.loads((REPO / "training/profiles/smollm2_135m_lora_v1.json").read_bytes())
+    for name in profile["files"]:
+        (base / name).write_bytes(b"generated substitute for a publisher asset")
+    _expect_source_hold(tmp_path, "staged_model_hash_mismatch")
+
+
+def _expect_source_hold(directory: Path, reason: str) -> None:
+    output = directory / "qualification"
+    run = subprocess.run(
+        [
+            sys.executable,
+            str(Path(__file__).resolve()),
+            "--model-dir",
+            str(directory / "model-base"),
+            "--numeric-python",
+            str(directory / "unavailable-worker"),
+            "--work-dir",
+            str(output),
+        ],
+        capture_output=True,
+        check=False,
+    )
+    assert run.returncode != 0
+    issue = json.loads(run.stderr)
+    assert issue["state"] == "held" and issue["reason"] == reason
+    assert not output.exists()
 
 
 if __name__ == "__main__":
