@@ -237,6 +237,75 @@ class Closeout:
             local = store.custody_inventory()
             outbound = withdraw_for_custody(self.directory, self.organization)
             custodian, due = row["custodian"], row["due"]
+            for key, kind, present, detail in (
+                (
+                    "approval-requests",
+                    "destination",
+                    any(self.directory.glob("approval-ready-*.json")),
+                    "Account for Slack or Zapier messages already admitted, any "
+                    "pending decision and every recipient copy.",
+                ),
+                (
+                    "source-intake-copies",
+                    "source",
+                    any(self.directory.glob("source-intake-*.json")),
+                    "Reconcile trace and correction exports, protected answers, "
+                    "development projections and source grants.",
+                ),
+                (
+                    "workplace-snapshots",
+                    "source",
+                    (self.directory / "workplace-snapshots").exists(),
+                    "Reconcile paired source versions, verified corrections, private "
+                    "snapshots and their retention.",
+                ),
+                (
+                    "workplace-permissions",
+                    "grant",
+                    any(self.directory.glob("workplace-source-*.json")),
+                    "Revoke the workplace connection and account for evaluation, "
+                    "training and delegated grants.",
+                ),
+                (
+                    "autonomous-cycle-state",
+                    "source",
+                    any(self.directory.glob("cycle-*.json"))
+                    or any(self.directory.glob("cycle-*.lock")),
+                    "Account for scheduled cycles, privately staged plans, source "
+                    "decisions and verifications.",
+                ),
+                (
+                    "plugin-decisions",
+                    "destination",
+                    (self.directory / "zapier-decisions").exists()
+                    or any(self.directory.glob("zapier-approval-za-*.json")),
+                    "Reconcile signed decision returns, admitted challenges, "
+                    "uncertain Zap runs and approved recipient copies.",
+                ),
+                (
+                    "standing-mandate",
+                    "grant",
+                    (self.directory / "learning-mandates.sqlite3").exists(),
+                    "Withdraw delegated training authority, reconcile outstanding fit "
+                    "reservations, and retain the required audit tombstone.",
+                ),
+                (
+                    "managed-repair-copies",
+                    "source",
+                    (self.directory / "managed-outputs").exists(),
+                    "Reconcile run evidence, trained adapters, repair bundles, "
+                    "retrieval keys and every approved recipient copy.",
+                ),
+                (
+                    "model-permissions",
+                    "grant",
+                    any(self.directory.glob("model-grant-*.json")),
+                    "Withdraw scoped fit permissions and confirm the disposition of "
+                    "any previously copied artifacts.",
+                ),
+            ):
+                if present:
+                    self._observe(db, key, kind, custodian, due, detail=detail)
             for name in sorted(LOCAL):
                 self._observe(db, "local-" + name, "local", custodian, due, local[name])
             journal_path = self.directory / "slack-pilot.sqlite3"

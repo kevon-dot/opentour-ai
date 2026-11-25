@@ -1,0 +1,132 @@
+[
+  {
+    "organization": "generated-co",
+    "workflow": "invoice-coding",
+    "field": "account",
+    "event_id": "invoice-1",
+    "policy_version": "chart-1",
+    "source_schema_version": "invoice-1",
+    "source": "trace-export",
+    "customer_id": "client-a",
+    "group_id": "family-1",
+    "decision_at": 100,
+    "features_available_at": 99,
+    "features": {
+      "description": "equipment lease rental"
+    },
+    "incumbent": {
+      "status": "automatic",
+      "label": "purchase"
+    },
+    "slices": []
+  },
+  {
+    "organization": "generated-co",
+    "workflow": "invoice-coding",
+    "field": "account",
+    "event_id": "invoice-2",
+    "policy_version": "chart-1",
+    "source_schema_version": "invoice-1",
+    "source": "trace-export",
+    "customer_id": "client-a",
+    "group_id": "family-2",
+    "decision_at": 110,
+    "features_available_at": 109,
+    "features": {
+      "description": "owner reimbursement"
+    },
+    "incumbent": {
+      "status": "automatic",
+      "label": "purchase"
+    },
+    "slices": [
+      "high-value"
+    ]
+  },
+  {
+    "organization": "generated-co",
+    "workflow": "invoice-coding",
+    "field": "account",
+    "event_id": "invoice-3",
+    "policy_version": "chart-1",
+    "source_schema_version": "invoice-1",
+    "source": "trace-export",
+    "customer_id": "client-a",
+    "group_id": "family-3",
+    "decision_at": 130,
+    "features_available_at": 129,
+    "features": {
+      "description": "packaging supplies"
+    },
+    "incumbent": {
+      "status": "automatic",
+      "label": "purchase"
+    },
+    "slices": []
+  },
+  {
+    "organization": "generated-co",
+    "workflow": "invoice-coding",
+    "field": "account",
+    "event_id": "invoice-4",
+    "policy_version": "chart-1",
+    "source_schema_version": "invoice-1",
+    "source": "trace-export",
+    "customer_id": "client-b",
+    "group_id": "family-4",
+    "decision_at": 230,
+    "features_available_at": 229,
+    "features": {
+      "description": "vehicle advance"
+    },
+    "incumbent": {
+      "status": "automatic",
+      "label": "purchase"
+    },
+    "slices": [
+      "high-value"
+    ]
+  },
+  {
+    "organization": "generated-co",
+    "workflow": "invoice-coding",
+    "field": "account",
+    "event_id": "invoice-5",
+    "policy_version": "chart-1",
+    "source_schema_version": "invoice-1",
+    "source": "trace-export",
+    "customer_id": "client-b",
+    "group_id": "family-5",
+    "decision_at": 250,
+    "features_available_at": 249,
+    "features": {
+      "description": "shipping expense"
+    },
+    "incumbent": {
+      "status": "automatic",
+      "label": "purchase"
+    },
+    "slices": []
+  },
+  {
+    "organization": "generated-co",
+    "workflow": "invoice-coding",
+    "field": "account",
+    "event_id": "invoice-6",
+    "policy_version": "chart-1",
+    "source_schema_version": "invoice-1",
+    "source": "trace-export",
+    "customer_id": "client-b",
+    "group_id": "family-6",
+    "decision_at": 270,
+    "features_available_at": 269,
+    "features": {
+      "description": "managed software subscription"
+    },
+    "incumbent": {
+      "status": "automatic",
+      "label": "loan"
+    },
+    "slices": []
+  }
+]

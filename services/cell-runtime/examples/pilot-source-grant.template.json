@@ -1,0 +1,33 @@
+{
+  "schema_version": "opentour.pilot.source-grant.v1",
+  "organization": "generated-co",
+  "engagement": "REPLACE_WITH_ACTIVE_ENGAGEMENT",
+  "dataset_id": "generated-invoices",
+  "workflow": "invoice-coding",
+  "field": "account",
+  "policy_version": "chart-1",
+  "source_schema_version": "invoice-1",
+  "trace_source": "trace-export",
+  "correction_source": "accountant-ledger",
+  "trace_sha256": "caf53c443a87d3d13a3e3841aa514b7e393860c6b35095702ee13fac937413aa",
+  "correction_sha256": "5efd347bfd851054b02a39464b87ad63e5babae56d60599d344804c3729025c9",
+  "owner_id": "generated-owner",
+  "owner_attestation": "att-1111111111111111",
+  "adjudicators": [
+    "accountant-1"
+  ],
+  "permitted_features": [
+    "description"
+  ],
+  "permitted_slices": [
+    "high-value"
+  ],
+  "evaluation_allowed": true,
+  "as_of": 300,
+  "expires_at": 4102444800,
+  "split": {
+    "mode": "chronological",
+    "cutoff": 200
+  },
+  "retention_terms": "terms-1111111111111111"
+}

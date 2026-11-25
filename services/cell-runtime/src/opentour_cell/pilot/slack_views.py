@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import html
+import math
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
-from opentour_cell.pilot.readout import MAX_CASES, OUTPUT_VERSION
+from opentour_cell.pilot.readout import INPUT_VERSION, MAX_CASES, OUTPUT_VERSION, evaluate_manifest
 from opentour_cell.pilot.text_classifier import (
     CPU_LIMIT_SECONDS,
     EPOCH_CHOICES,
@@ -21,10 +22,56 @@ from opentour_cell.pilot.training_data import EVALUATION_FIELDS, FIELD_NAMES
 
 Block = dict[str, Any]
 SEARCH_LIMIT = 64
+MANAGED_OUTCOMES = {
+    "simple_repair": "The simple repair qualified for handoff.",
+    "rule": "The simple repair qualified for handoff.",
+    "model_candidate": "The open-weight model qualified for handoff.",
+    "model": "The open-weight model qualified for handoff.",
+    "no_change": "Keep the incumbent.",
+    "incumbent": "Keep the incumbent.",
+    "hold": "Hold the handoff. The existing workflow remains in place.",
+    "inconclusive": "Evidence is inconclusive. Hold the handoff.",
+    "stop": "Stop this pilot change.",
+}
+# Only these locally defined descriptions can leave the operator store.
+MANAGED_REASONS = {
+    "insufficient_protected_support": "Too few verified protected cases met the agreed minimum.",
+    "incomplete_protected_evidence": "Some protected outcomes or candidate decisions were missing.",
+    "operating_point_missed_or_undetermined": (
+        "The coverage or error limit was missed or unverified."
+    ),
+    "critical_slice_failed_or_unverified": "A required group failed its check or lacked evidence.",
+    "cost_limit_failed_or_unverified": "The agreed cost limit was exceeded or unverified.",
+    "latency_limit_failed_or_unverified": "The agreed latency limit was exceeded or unverified.",
+    "quality_cost_tradeoff_requires_owner_choice": (
+        "Higher observed cost requires an owner decision."
+    ),
+    "no_confirmed_improvement": "The protected comparison found no verified error reduction.",
+    "protected_improvement_at_agreed_limits": "Verified errors fell at the agreed limits.",
+    "adequate_simple_repair_at_lower_observed_cost": (
+        "The simple repair met the limits at lower observed cost."
+    ),
+    "different_automatic_cases": "The compared methods automated different cases.",
+    "regressed": "The candidate made more verified errors on the same automatic cases.",
+    "insufficient_evidence": "There was too little matched evidence to recommend a change.",
+    "recurring_residual_requires_model_and_compute_rights": (
+        "The recurring error persisted. Separate model and compute authorization is required."
+    ),
+    "insufficient_independent_development_evidence": (
+        "Too few independent development groups supported a candidate."
+    ),
+    "simple_repair_unproven_and_residual_support_insufficient": (
+        "The simple repair and recurring residual had insufficient development support."
+    ),
+    "incumbent_tied_on_same_automatic_cases": (
+        "Both methods had equal errors on the same automatic cases."
+    ),
+}
+
 QUESTION_LABELS = {
     "errors": "Verified errors",
     "coverage": "Coverage and limits",
-    "changes": "What changed?",
+    "changes": "What got worse?",
     "audience": "Who receives it?",
 }
 _REF = re.compile(r"[A-Za-z0-9_.:~-]{1,160}\Z")
@@ -141,6 +188,12 @@ def _model(audit: Mapping[str, Any] | None) -> str:
         return _MODEL
     if audit and audit.get("mode") == "evaluation_only":
         return "supplied incumbent and repair outputs"
+    if audit and audit.get("mode") == "managed_rule":
+        if "model" in audit.get("comparisons", {}):
+            return "managed workflow · simple repair and open-weight model"
+        return "managed workflow · simple repair"
+    if audit and audit.get("mode") == "managed_model":
+        return "managed workflow · open-weight model and simple repair"
     return "incumbent and repair comparison"
 
 
@@ -152,6 +205,7 @@ def _audit_blocks(audit: Mapping[str, Any]) -> list[Block]:
         ("cohort_revision", "Tested cohort"),
         ("evidence_digest", "Evidence digest"),
         ("decision_quality_digest", "Decision quality digest"),
+        ("run_revision", "Frozen workflow comparison"),
         ("reviewer", "Named reviewer"),
         ("viewer", "Opened by"),
         ("team", "Workspace"),
@@ -304,6 +358,12 @@ class _Evidence:
         )
         coverage = f"Coverage {_ratio(current.auto, size)} → {_ratio(repair.auto, size)}. {same}"
         changes_text = f"Paired fixes {fixes}, regressions {regressions}."
+        regressions_text = (
+            f"What got worse? {regressions} of {common} comparable cases became wrong. "
+            f"{fixes} became correct. {excluded} fell outside the paired comparison."
+            if common
+            else "What got worse? Undetermined. There were no comparable cases with verified data."
+        )
         ceiling = (
             f"Error ceiling ≤{bps / 100:g}% · incumbent {current.ceiling(bps)}, "
             f"repair {repair.ceiling(bps)}."
@@ -313,6 +373,7 @@ class _Evidence:
             f"{changes_text} Unknown references {unknown}.\n{ceiling} {finding}"
         )
         details = [
+            _section(regressions_text),
             _section(summary),
             _section(
                 f"Supplied evaluation cases {size}. Known references {known}, unknown {unknown}. "
@@ -330,8 +391,8 @@ class _Evidence:
             ),
             _section(
                 "Observed counts describe this supplied cohort. Upstream exclusions and "
-                "unmatched records belong to the approved intake record. Review counts measure "
-                "routing. Time saved and future performance were not measured."
+                "unmatched records belong to the approved intake record. "
+                "Review counts measure routing."
             ),
         ]
         return cls(
@@ -341,7 +402,9 @@ class _Evidence:
                 "errors": f"{errors} {ceiling} Automatic decisions with unknown references · "
                 f"incumbent {current.unknown}, repair {repair.unknown}.",
                 "coverage": f"{coverage} {ceiling} Eligible pairs {common}/{size}.",
-                "changes": f"{changes_text} Eligible pairs {common}/{size}. {finding}",
+                "changes": (
+                    f"{regressions_text} {changes_text} Eligible pairs {common}/{size}. {finding}"
+                ),
             },
         )
 
@@ -349,6 +412,58 @@ class _Evidence:
 def evidence_available(report: Mapping[str, Any] | None) -> bool:
     """True when the supplied readout has a renderable, internally consistent aggregate."""
     return _Evidence.read(report) is not None
+
+
+def managed_report(value: Mapping[str, Any]) -> Block:
+    """Project the existing v1 numeric schema. Drop row-level and unknown source fields."""
+    template = evaluate_manifest(
+        {"schema_version": INPUT_VERSION, "error_ceiling_bps": 0, "cases": []}
+    )
+
+    def project(original: Any, schema: Any) -> Any:
+        if isinstance(schema, dict):
+            if not isinstance(original, Mapping):
+                raise ValueError("Unverified comparison.")
+            return {key: project(original[key], child) for key, child in schema.items()}
+        if isinstance(schema, str):
+            if original != OUTPUT_VERSION and original not in _FINDINGS:
+                raise ValueError("Unknown comparison.")
+        elif original is not None and (
+            type(original) not in (int, float, bool)
+            or type(original) is float
+            and not math.isfinite(original)
+        ):
+            raise ValueError("Expected aggregate number.")
+        return original
+
+    projected: Block = project(value, template)
+    if not evidence_available(projected):
+        raise ValueError("Unverified comparison.")
+    return projected
+
+
+def managed_operating_point(point: Mapping[str, Any], ceiling: int) -> Block:
+    selected = {
+        key: point[key]
+        for key in (
+            "schema_version",
+            "agreement_revision",
+            "minimum_coverage_bps",
+            "error_ceiling_bps",
+        )
+    }
+    for arm in ("current", "repair"):
+        selected[arm] = {key: point[arm][key] for key in ("coverage", "error", "combined")}
+    _operating_terms({"operating_point": selected, "error_ceiling_bps": ceiling})
+    return selected
+
+
+def _managed_outcome(audit: Mapping[str, Any] | None) -> str:
+    if not audit or audit.get("mode") not in ("managed_rule", "managed_model"):
+        return ""
+    outcome = MANAGED_OUTCOMES[audit["handoff_disposition"]]
+    reason = MANAGED_REASONS.get(audit.get("decision_reason", ""), "")
+    return "Workflow comparison · " + " ".join(filter(None, (outcome, reason)))
 
 
 def _operating_terms(audit: Mapping[str, Any]) -> str:
@@ -394,7 +509,9 @@ def reviewer_help(context: str, message: str = "") -> Block:
             ),
             _section(
                 "Use /opentour data to browse datasets, /opentour search FIELD to find one, "
-                "or /opentour status JOB to inspect an authorized job."
+                "or /opentour status JOB to inspect an authorized job. Named trainers can "
+                "preview a preapproved workflow with /opentour repair SOURCE. "
+                "Only the confirmation button queues the run."
             ),
             _actions(
                 _button("Review results", "ot_readouts", "home"),
@@ -403,6 +520,61 @@ def reviewer_help(context: str, message: str = "") -> Block:
         ]
     )
     return _modal("Pilot help", "ot_help_view", context, blocks)
+
+
+def managed_launch_preview(context: str, summary: Mapping[str, Any]) -> Block:
+    dataset = _ref(summary["dataset_id"])
+    revision = _ref(summary["plan_revision"])
+    conditional = summary["scope"] == "conditional_open_weight"
+    method = (
+        "Start with the incumbent and simple repair. An open-weight adapter may run only "
+        "if the confirmed error persists and separate source, model and compute grants are current."
+        if conditional
+        else "Compare the incumbent and one frozen simple repair on the protected cases. "
+        "This scope permits the simple-repair comparison only."
+    )
+    button = _button("Queue workflow", "ot_repair_confirm", revision)
+    button["style"] = "primary"
+    button["confirm"] = {
+        "title": _text("Queue this workflow?"),
+        "text": _text("The local worker will use this exact plan under its existing permissions."),
+        "confirm": _text("Queue workflow"),
+        "deny": _text("Go back"),
+    }
+    return _modal(
+        "Preview repair",
+        "ot_repair_preview",
+        context,
+        [
+            _section(f"Source {dataset} · trainer {_ref(summary['trainer'])}\nPlan {revision}"),
+            _section(method),
+            _section(
+                "The operator's local worker executes the queue. "
+                "Review the protected comparison before approving an audience or handoff."
+            ),
+            _actions(button, _home()),
+        ],
+    )
+
+
+def managed_launch_status(context: str, run_id: str, state: str, *, review_visible: bool) -> Block:
+    states = {
+        "queued": "Queued for the local worker",
+        "running": "Running on the local worker",
+        "ready": "Completed",
+        "held": "Held for verification",
+        "failed": "Execution failed",
+    }
+    label = states.get(state, "Status requires operator verification")
+    buttons = [_button("Refresh status", "ot_repair_refresh", _ref(run_id))]
+    if review_visible:
+        buttons.append(_button("Review results", "ot_readouts", "home"))
+    return _modal(
+        "Repair status",
+        "ot_repair_progress",
+        context,
+        [_section(f"{label}. Run {_ref(run_id)}."), _actions(*buttons)],
+    )
 
 
 def result_chooser(
@@ -445,6 +617,15 @@ def question_modal(
         "Approve for readout permits presenting this revision. The workflow owner separately "
         "decides whether to use or deploy it.",
     }
+    if audit.get("release_reviewer"):
+        answers["audience"] = (
+            f"The named reviewer is {_display(audit['release_reviewer'])}. "
+            f"Approval of this candidate permits handoff to {_display(audit['recipient'])}. "
+            "The customer separately decides whether to deploy it."
+        )
+    managed_outcome = _managed_outcome(audit)
+    if managed_outcome:
+        answers["changes"] = managed_outcome + "\n" + answers["changes"]
     blocks = [_section(f"Readout revision {_ref(revision)}")]
     if topic:
         blocks.append(_section(answers[topic]))
@@ -520,6 +701,10 @@ def workbench_message(
         scope += f"Requested action · present this revision to {audience or 'unassigned'} only."
         blocks.extend([_section(scope), _section(state_text)])
         fallback += " " + scope
+        result = _managed_outcome(audit)
+        if result:
+            blocks.append(_section(result))
+            fallback += " " + result
         if evidence:
             summary = evidence.summary
             if audit and "operating_point" in audit:
@@ -602,6 +787,8 @@ def home_modal(
     decision_allowed: bool = True,
     audit: Mapping[str, Any] | None = None,
     reviewer_navigation: bool = False,
+    workspace_title: str = "OpenTour pilot workspace",
+    workflow_label: str = "",
 ) -> Block:
     message = workbench_message(
         revision=revision,
@@ -621,6 +808,14 @@ def home_modal(
         audit=audit,
     )
     blocks = message["blocks"][1:]
+    if workspace_title != "OpenTour pilot workspace" or workflow_label:
+        blocks.insert(
+            0,
+            _section(
+                _display(workspace_title)
+                + (" · " + _display(workflow_label) if workflow_label else "")
+            ),
+        )
     if audit and evidence_reviewed and revision:
         blocks.extend(_audit_blocks(audit))
     if reviewer_navigation:
@@ -918,23 +1113,108 @@ def evidence_modal(
     dataset_revision: str | None = None,
     audit: Mapping[str, Any] | None = None,
     questions: bool = False,
+    release_allowed: bool = False,
+    charts_allowed: bool = False,
+    workflow: str = "",
 ) -> Block:
     ref = _ref(revision)
     evidence = _Evidence.read(report)
-    blocks = [_section(f"Readout revision {ref} · {_model(audit)}")]
+    heading = f"Readout revision {ref} · {_model(audit)}"
+    blocks = [_section(f"{_display(workflow)}\n{heading}" if workflow else heading)]
     if dataset_revision:
         blocks.append(_section(f"Frozen dataset revision {_ref(dataset_revision)}."))
-    if recipient:
+    if release_allowed and audit and recipient:
+        blocks.append(
+            _section(
+                f"Named reviewer {_ref(audit['release_reviewer'])} · handoff to "
+                f"{_display(recipient)}. Inspect this exact candidate before deciding."
+            )
+        )
+    elif recipient:
         blocks.append(
             _section(f"Requested action · present this revision to {_display(recipient)}.")
         )
     if evidence:
         blocks.extend(evidence.details)
+        if audit and audit.get("mode") in {"managed_rule", "managed_model"}:
+            if audit.get("population") == 0:
+                blocks.append(
+                    _section("No protected cases were evaluated. No comparable paired cases.")
+                )
+            if "workflow_benchmark" in audit:
+                from opentour_cell.pilot.slack_benchmark import benchmark_summary
+
+                blocks.append(_section(benchmark_summary(audit["workflow_benchmark"])))
+            else:
+                blocks.append(
+                    _section(
+                        "Workflow benchmark unavailable. This revision has no verified figures "
+                        "for reviewer time, latency or cost."
+                    )
+                )
+        else:
+            blocks.append(_section("Time saved and future performance were not measured."))
         if audit:
             blocks.extend(_audit_blocks(audit))
             blocks.append(_section(_operating_terms(audit)))
+            result = _managed_outcome(audit)
+            if result:
+                blocks.append(_section(result))
+                for key, label in (("rule", "Simple repair"), ("model", "Open-weight model")):
+                    pair = audit.get("comparisons", {}).get(key)
+                    if pair:
+                        comparison = _Evidence.read(pair)
+                        if comparison is None:
+                            raise ValueError("Unverified workflow arm.")
+                        blocks.append(
+                            _section(f"{label} against the incumbent\n{comparison.summary}")
+                        )
+        if (
+            release_allowed
+            and audit
+            and recipient
+            and audit.get("release_provider") == "zapier_slack"
+        ):
+            blocks.append(
+                _section(
+                    "This workspace uses Slack Request Approval in Zapier. After you inspect this "
+                    "evidence, use your assigned approval in Slack to approve this candidate or "
+                    "request changes. The local worker stages the request for the configured Zap."
+                )
+            )
+        elif release_allowed and audit and recipient:
+            artifact = _ref(audit["model_revision"])
+            blocks.append(
+                _section(
+                    f"Candidate {artifact}. Approval permits preparing this frozen "
+                    "repair for the named audience. The incumbent stays active "
+                    "until the customer makes a separate deployment decision."
+                )
+            )
+            approve = _button("Approve repair for handoff", "ot_release_approve", ref)
+            approve["style"] = "primary"
+            approve["confirm"] = {
+                "title": _text("Approve this repair?"),
+                "text": _text(f"Permit handoff of {artifact} to {_display(recipient)}?"),
+                "confirm": _text("Approve handoff"),
+                "deny": _text("Go back"),
+            }
+            change = _button("Request changes", "ot_release_changes", ref)
+            change["style"] = "danger"
+            change["confirm"] = {
+                "title": _text("Request changes?"),
+                "text": _text("Keep this candidate on hold for its named audience."),
+                "confirm": _text("Request changes"),
+                "deny": _text("Go back"),
+            }
+            blocks.append(_actions(approve, change))
+        explore = []
         if questions:
-            blocks.append(_actions(_button("Ask about evidence", "ot_question", ref)))
+            explore.append(_button("Ask about evidence", "ot_question", ref))
+        if charts_allowed:
+            explore.append(_button("View comparison charts", "ot_charts", ref))
+        if explore:
+            blocks.append(_actions(*explore))
     else:
         blocks.append(
             _section(
@@ -944,3 +1224,128 @@ def evidence_modal(
         )
     blocks.append(_actions(_home()))
     return _modal("Readout evidence", "ot_evidence_view", context, blocks)
+
+
+def chart_status(context: str, revision: str, figures: str, status: str) -> Block:
+    messages = {
+        "accepted": "Slack accepted a chart message for you in the private pilot channel.",
+        "uncertain": "Slack could not confirm the chart message. The same figures are below.",
+        "numeric": "The available evidence is shown as figures below.",
+    }
+    return _modal(
+        "Comparison charts",
+        "ot_chart_status",
+        context,
+        [
+            _section(messages[status]),
+            _section(figures),
+            _actions(_button("Back to evidence", "ot_evidence", revision), _home()),
+        ],
+    )
+
+
+def release_recorded(context: str, decision: str, artifact: str, audience: str) -> Block:
+    state = "Approved for handoff" if decision == "approved" else "Changes requested. Handoff held"
+    return _modal(
+        "Handoff decision",
+        "ot_release_recorded",
+        context,
+        [
+            _section(f"{state}. Candidate {_ref(artifact)} · audience {_display(audience)}."),
+            _actions(_home()),
+        ],
+    )
+
+
+def app_home_view(
+    context: str = "",
+    title: str = "",
+    workflow: str = "",
+    *,
+    can_review: bool = False,
+    can_tune: bool = False,
+    named_reviewer: bool = False,
+    pending: str = "",
+) -> Block:
+    if not context:
+        return {
+            "type": "home",
+            "blocks": [
+                _section(
+                    "OpenTour access is unavailable. Ask your pilot "
+                    "operator to check your current access."
+                )
+            ],
+        }
+    blocks = [{"type": "header", "text": _text(_display(title))}]
+    if workflow:
+        blocks.append(_section("Workflow · " + _display(workflow)))
+    nav = [
+        _button("Browse data", "ot_app_data", "ot_app_data"),
+        _button("Ask OpenTour", "ot_app_prompt", "ot_app_prompt"),
+    ]
+    if pending:
+        blocks.append(_section("A repair is ready for your review."))
+        first = _button("Review pending repair", "ot_app_pending", pending)
+        first["style"] = "primary"
+        nav.insert(0, first)
+    elif can_review:
+        if named_reviewer:
+            blocks.append(_section("No repair needs your review."))
+        nav.insert(0, _button("Review results", "ot_app_review", "ot_app_review"))
+    if can_tune:
+        nav.append(_button("Preview a repair", "ot_app_repair", "ot_app_repair"))
+    blocks.extend(
+        [
+            _section("Choose a task to open a private view. Access is checked each time."),
+            _actions(*nav),
+        ]
+    )
+    return {
+        "type": "home",
+        "callback_id": "ot_app_home",
+        "private_metadata": _ref(context),
+        "blocks": blocks,
+    }
+
+
+def prompt_modal(context: str, workflow: str, *, repair: bool = False) -> Block:
+    entry: Block = {"type": "plain_text_input", "action_id": "command", "max_length": 160}
+    if repair:
+        entry["initial_value"] = "repair "
+    examples = (
+        "Enter repair followed by your approved source ID. The next screen previews the exact "
+        "plan. Only a separate confirmation can queue it."
+        if repair
+        else "Try review, search FIELD, status RUN, or ask coverage after inspecting a "
+        "result. Named trainers can preview an authorized plan with repair SOURCE."
+    )
+    return _modal(
+        "Ask OpenTour",
+        "ot_prompt_enter",
+        context,
+        [
+            _section(examples),
+            {
+                "type": "input",
+                "block_id": "command",
+                "label": _text("Pilot command" + (" · " + _display(workflow) if workflow else "")),
+                "element": entry,
+            },
+        ],
+        "Continue",
+    )
+
+
+def plugin_held_modal(modal: Block) -> Block:
+    return {
+        **modal,
+        "blocks": [
+            *modal["blocks"][:-1],
+            _section(
+                "Evidence inspected. The Zapier approval request is on hold. Ask the operator "
+                "to check the approval policy and connection, then reopen this evidence."
+            ),
+            modal["blocks"][-1],
+        ],
+    }

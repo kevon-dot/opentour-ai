@@ -1,6 +1,6 @@
 # OpenTour AI
 
-OpenTour helps a workflow owner compare today's decisions with a proposed repair on independently verified, held-out cases. The first-ten pilot runs on an approved customer machine. Teams can supply outputs for evaluation or authorize a small CPU text classifier to train on separate examples.
+For the first ten customers, a workflow owner connects one permitted MCP source with two scoped views, one for workflow events and one for independently verified corrections, and sets the decision, verified correction fields, allowed model, compute limits, and named Slack reviewer. A supervised worker on the customer's machine watches that source for new verified corrections. It tests an executable rule first. Recurring errors that meet the agreed criteria can trigger a bounded local fit of the supported open-weight model. The reviewer inspects the protected comparison in Slack and decides whether that exact version may be handed off.
 
 ## Run the first-ten pilot
 
@@ -15,6 +15,10 @@ python -I -S -B opentour-slack.pyz evaluate --report-dir first-readout generated
 
 Open `first-readout/brief.md` for the comparison. The same kit includes local MCP enrollment, frozen-model replay, a native Slack app, an optional consent-bound Zapier receipt and custody closeout. A workspace administrator handles the private installation. OpenTour provisions zero AWS resources for this pilot.
 
+- [Connect a workplace source and run the autonomous cycle](services/cell-runtime/docs/pilot-autonomous-cycle.md)
+- [Set training limits and renew or withdraw the standing mandate](services/cell-runtime/docs/pilot-learning-mandate.md)
+- [Configure the named reviewer in the Zapier Slack approval action](services/cell-runtime/docs/pilot-zapier-approval.md)
+- [Run the managed simple-repair and open-weight workflows](services/cell-runtime/docs/pilot-managed-repairs.md)
 - [Operator quickstart and reproducible training example](services/cell-runtime/docs/slack-workspace-kit.md)
 - [Client MCP enrollment and consent](services/cell-runtime/docs/pilot-onboarding-mcp.md)
 - [Agree on minimum coverage and maximum error before a comparison](services/cell-runtime/docs/pilot-operating-point.md)

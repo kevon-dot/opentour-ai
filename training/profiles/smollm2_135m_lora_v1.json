@@ -1,0 +1,49 @@
+{
+  "profile": "smollm2_135m_lora_v1",
+  "task": "supervised finite-label text decision",
+  "publisher": "HuggingFaceTB/SmolLM2-135M-Instruct",
+  "revision": "12fd25f77366fa6b3b4b768ec3050bf629380bac",
+  "publisher_model_card": "https://huggingface.co/HuggingFaceTB/SmolLM2-135M-Instruct/blob/12fd25f77366fa6b3b4b768ec3050bf629380bac/README.md",
+  "publisher_model_card_sha256": "4f97533ad95b1b2fea15fbc075c01b94578ebdd7c8138888fa43fa3abd530dc4",
+  "license": "Apache-2.0",
+  "license_text_url": "https://www.apache.org/licenses/LICENSE-2.0.txt",
+  "license_text_sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+  "weights_format": "safetensors/BF16",
+  "files": {
+    "config.json": "8eb740e8bbe4cff95ea7b4588d17a2432deb16e8075bc5828ff7ba9be94d982a",
+    "model.safetensors": "5af571cbf074e6d21a03528d2330792e532ca608f24ac70a143f6b369968ab8c",
+    "tokenizer.json": "9ca9acddb6525a194ec8ac7a87f24fbba7232a9a15ffa1af0c1224fcd888e47c",
+    "tokenizer_config.json": "4ec77d44f62efeb38d7e044a1db318f6a939438425312dfa333b8382dbad98df"
+  },
+  "runtime": {
+    "platform": "Linux x86_64",
+    "python": "3.12.16",
+    "numpy": "2.5.5",
+    "tokenizers": "0.21.4",
+    "blas_threads": 1,
+    "numpy_wheel_sha256": "704d819265e5d1064d932968e9ee85fff2103ccc78c05b878c06943ba27b8507",
+    "tokenizers_wheel_sha256": "51b7eabb104f46c1c50b486520555715457ae833d5aee9ff6ae853d1130506ff"
+  },
+  "template": "smollm2-chatml-decision-v1",
+  "adapter": {
+    "target": "tied lm_head output rows for the single-token A-H decision codes",
+    "rank": 4,
+    "alpha": 4,
+    "seed": 374,
+    "steps": 64,
+    "learning_rate": 0.015,
+    "format": "opentour.output_lora.v1"
+  },
+  "limits": {
+    "max_training_rows": 32,
+    "max_inference_rows": 64,
+    "max_labels": 8,
+    "max_features": 8,
+    "max_tokens": 192,
+    "batch_size": 4,
+    "max_worker_seconds": 300,
+    "max_address_space_bytes": 3221225472,
+    "hourly_cost_cents": 0
+  },
+  "fallback": {"status": "review"}
+}

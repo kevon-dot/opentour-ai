@@ -30,13 +30,14 @@ RESULT_PAGE_SIZE = 12
 SLACK_ID = re.compile(r"[A-Z][A-Z0-9]{2,31}\Z")
 LOCAL_ID = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}\Z")
 ROLES = {"inspect", "tune", "review"}
-CALLBACKS = {"ot_dataset_search", "ot_tune_preview", "ot_tune_start"}
+CALLBACKS = {"ot_dataset_search", "ot_tune_preview", "ot_tune_start", "ot_prompt_enter"}
 ACTIONS = {
     "ot_home",
     "ot_browse",
     "ot_tune",
     "ot_status",
     "ot_evidence",
+    "ot_charts",
     "ot_approve",
     "ot_changes",
     "ot_dataset_open",
@@ -47,6 +48,10 @@ ACTIONS = {
     "ot_result_open",
     "ot_result_prev",
     "ot_result_next",
+    "ot_repair_confirm",
+    "ot_repair_refresh",
+    "ot_release_approve",
+    "ot_release_changes",
     "ot_help",
     "ot_question",
     "ot_question_errors",
@@ -87,6 +92,11 @@ class Settings:
     zapier: bool
     zapier_disposition: bool
     zapier_destination_sha256: str
+    approval_requests: bool = False
+    approval_provider: str = "slack"
+    workspace_title: str = "OpenTour pilot workspace"
+    workflow_label: str = ""
+    config_path: Path | None = None
 
     @property
     def binding(self) -> str:
@@ -128,6 +138,10 @@ class Settings:
             "zapier",
             "zapier_disposition",
             "zapier_destination_sha256",
+            "approval_requests",
+            "approval_provider",
+            "workspace_title",
+            "workflow_label",
         }
         _check(isinstance(doc, dict) and required <= doc.keys() <= required | optional)
         _check(isinstance(doc["organization"], str) and LOCAL_ID.fullmatch(doc["organization"]))
@@ -153,9 +167,20 @@ class Settings:
             )
             _check(type(entry["preview"]) is bool and type(entry["aggregate"]) is bool)
             _check(type(entry["expires_at"]) is int)
-        for name in ("channel_aggregates", "zapier", "zapier_disposition"):
+        for name in ("channel_aggregates", "zapier", "zapier_disposition", "approval_requests"):
             _check(type(doc.get(name, False)) is bool)
         _check(not doc.get("zapier_disposition") or doc.get("zapier"))
+        _check(doc.get("approval_provider", "slack") in {"slack", "zapier_slack"})
+        for field, limit in (("workspace_title", 48), ("workflow_label", 64)):
+            if field in doc:
+                label = doc[field]
+                _check(
+                    isinstance(label, str)
+                    and 0 < len(label) <= limit
+                    and label == label.strip()
+                    and label.isprintable()
+                    and not any(c in label for c in "<>@#&")
+                )
         destination = doc.get("zapier_destination_sha256", "")
         _check(
             isinstance(destination, str)
@@ -174,6 +199,11 @@ class Settings:
             doc.get("zapier", False),
             doc.get("zapier_disposition", False),
             destination,
+            doc.get("approval_requests", False),
+            doc.get("approval_provider", "slack"),
+            doc.get("workspace_title", "OpenTour pilot workspace"),
+            doc.get("workflow_label", ""),
+            path,
         )
 
     def permission(self, actor: str, role: str, dataset: str | None = None) -> Json:
@@ -223,6 +253,9 @@ class Journal:
                     delivery TEXT DEFAULT 'pending');
                 CREATE TABLE IF NOT EXISTS journal_control (id INTEGER PRIMARY KEY,held INTEGER,
                     legacy_unknown INTEGER);
+                CREATE TABLE IF NOT EXISTS approval_posts (
+                    receipt TEXT PRIMARY KEY, revision TEXT NOT NULL, state TEXT NOT NULL,
+                    ts TEXT, exposure TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS exposures (id TEXT PRIMARY KEY,kind TEXT,
                     status TEXT,admitted INTEGER,completed INTEGER);
                 CREATE TABLE IF NOT EXISTS presentations (
@@ -274,6 +307,17 @@ class Journal:
                 "UPDATE exposures SET status=?,completed=? WHERE id=?",
                 (status, int(time.time()), key),
             )
+
+    def claim_charts(self, context: str) -> str:
+        key = self.opaque("chart", context)
+        with self.db() as db:
+            db.execute("BEGIN IMMEDIATE")
+            self.active(db)
+            claimed = db.execute(
+                "INSERT OR IGNORE INTO exposures VALUES(?,'comparison_charts','admitted',?,NULL)",
+                (key, int(time.time())),
+            )
+            return key if claimed.rowcount == 1 else ""
 
     @contextmanager
     def db(self, timeout: float = 4) -> Iterator[sqlite3.Connection]:
@@ -437,13 +481,15 @@ class Journal:
             )
             self._seal(db, "presentation", presentation, create=True)
 
-    def inspected(self, actor: str, revision: str, policy: str) -> bool:
+    def inspected(self, actor: str, revision: str, policy: str, *, chart_context: str = "") -> bool:
         with self.db() as db:
             self.active(db)
             row = db.execute(
                 "SELECT id FROM presentations WHERE actor=? AND revision=? "
-                "AND policy=? AND expires>? ORDER BY rowid DESC LIMIT 1",
-                (actor, revision, policy, int(time.time())),
+                "AND policy=? AND expires>? "
+                "AND (?='' OR json_extract(snapshot,'$.chart_context')=?) "
+                "ORDER BY rowid DESC LIMIT 1",
+                (actor, revision, policy, int(time.time()), chart_context, chart_context),
             ).fetchone()
             if row:
                 self._seal(db, "presentation", row[0])
@@ -555,6 +601,8 @@ class Journal:
                     "readout_revision",
                     "readout",
                     "rendered_digest",
+                    "chart_context",
+                    "release_settings_file",
                 }
             }
             digest = hashlib.sha256(
@@ -634,6 +682,36 @@ def hook_fingerprint(hook: str) -> str:
     return hashlib.sha256(("https://hooks.zapier.com" + _hook_path(hook)).encode()).hexdigest()
 
 
+@contextmanager
+def _evidence_guard(
+    store: Any,
+    dataset: str | None,
+    dataset_revision: str | None,
+    engagement: str,
+    audit: Json | None = None,
+) -> Iterator[None]:
+    if audit and audit.get("mode") in {"managed_rule", "managed_model"}:
+        from opentour_cell.pilot.repair_workflow import check_managed_review
+
+        with store.engagement_guard(engagement_id=engagement):
+            try:
+                check_managed_review(
+                    store.path.parent,
+                    store.organization,
+                    audit["job_id"],
+                    audit["recipient"],
+                    audit["team"],
+                    audit["channel"],
+                    audit["run_revision"],
+                )
+            except (OSError, ValueError, KeyError):
+                raise Refused("Managed readout unavailable.") from None
+            yield
+    else:
+        with store.engagement_guard(dataset, dataset_revision, engagement_id=engagement):
+            yield
+
+
 def flush_receipts(
     journal: Journal,
     hook: str,
@@ -664,10 +742,14 @@ def flush_receipts(
             break
         receipt = row["receipt"]
         try:
-            with training.engagement_guard(
-                row["dataset"], row["dataset_revision"], engagement_id=row["engagement"]
+            historical = journal.receipt(receipt)
+            with _evidence_guard(
+                training,
+                row["dataset"],
+                row["dataset_revision"],
+                row["engagement"],
+                historical["evidence"],
             ):
-                journal.receipt(receipt)
                 current = config()
                 _check(
                     journal.binding == current.binding
@@ -840,6 +922,7 @@ def withdraw_for_custody(directory: Path, organization: str) -> dict[str, int]:
         db.execute("BEGIN IMMEDIATE")
         db.execute("UPDATE journal_control SET held=1 WHERE id=1")
         db.execute("DELETE FROM contexts")
+        db.execute("UPDATE approval_posts SET state='uncertain' WHERE state='claimed'")
         db.execute("UPDATE decisions SET delivery='suppressed' WHERE delivery='pending'")
         db.execute("UPDATE decisions SET delivery='uncertain' WHERE delivery='sending'")
 
@@ -868,6 +951,7 @@ def withdraw_for_custody(directory: Path, organization: str) -> dict[str, int]:
                     "decisions",
                     "launcher",
                     "inspections",
+                    "approval_posts",
                     "exposures",
                 )
             ),
@@ -966,9 +1050,132 @@ class Workbench:
         )
         return known
 
+    def _managed(self, cfg: Settings, actor: str, source: str) -> Target:
+        from opentour_cell.pilot.repair_workflow import (
+            managed_review_evidence,
+            managed_review_sources,
+        )
+
+        entry = cfg.permission(actor, "inspect")
+        _check(entry["aggregate"])
+        allowed = managed_review_sources(
+            cfg.directory, cfg.organization, entry["datasets"], cfg.recipient, cfg.team, cfg.channel
+        )
+        choices = {key: ds for ds, key in allowed}
+        _check(source in choices)
+        run = source.removeprefix("managed:")
+        value = managed_review_evidence(
+            cfg.directory, cfg.organization, run, cfg.recipient, cfg.team, cfg.channel
+        )
+        dataset, metadata = value["dataset_id"], value["audit"]
+        _check(
+            dataset == choices[source]
+            and metadata.get("run_id") == run
+            and metadata["mode"] in {"managed_rule", "managed_model"}
+        )
+        cfg.permission(actor, "inspect", dataset)
+        report = self.views.managed_report(value["readout"])
+        recorded = {
+            key: metadata[key]
+            for key in ("run_revision", "cohort_revision", "aggregate_digest", "brief_digest")
+        }
+        candidate = metadata.get("candidate_digest")
+        _check(
+            all(isinstance(d, str) and re.fullmatch(r"[0-9a-f]{64}", d) for d in recorded.values())
+            and (
+                candidate is None
+                or isinstance(candidate, str)
+                and re.fullmatch(r"[0-9a-f]{64}", candidate)
+            )
+            and isinstance(value["dataset_revision"], str)
+            and re.fullmatch(r"[0-9a-f]{64}", value["dataset_revision"])
+            and metadata["handoff_disposition"] in self.views.MANAGED_OUTCOMES
+        )
+        audit = {
+            **recorded,
+            "organization": cfg.organization,
+            "engagement": self.store.engagement_id,
+            "mode": metadata["mode"],
+            "job_id": run,
+            "dataset_id": dataset,
+            "dataset_revision": value["dataset_revision"],
+            "model_revision": candidate,
+            "handoff_disposition": metadata["handoff_disposition"],
+            "error_ceiling_bps": report["error_ceiling_bps"],
+            "population": report["cohort_size"],
+            "team": cfg.team,
+            "app": cfg.app,
+            "channel": cfg.channel,
+            "reviewer": cfg.reviewer,
+            "recipient": cfg.recipient,
+        }
+        release = value.get("release_review")
+        if isinstance(release, dict) and (
+            {k: release.get(k) for k in ("team", "channel", "audience", "reviewer")}
+            == {
+                "team": cfg.team,
+                "channel": cfg.channel,
+                "audience": cfg.recipient,
+                "reviewer": cfg.reviewer,
+            }
+            and release.get("provider", "slack") == cfg.approval_provider
+            and metadata["handoff_disposition"] in {"simple_repair", "model_candidate"}
+        ):
+            audit["release_reviewer"] = cfg.reviewer
+            audit["release_provider"] = cfg.approval_provider
+        reason = metadata.get("decision_reason")
+        if isinstance(reason, str) and reason in self.views.MANAGED_REASONS:
+            audit["decision_reason"] = reason
+        pairs = metadata.get("comparisons", {})
+        _check(isinstance(pairs, dict) and pairs.keys() <= {"rule", "model"})
+        audit["comparisons"] = {
+            name: self.views.managed_report(pair) for name, pair in pairs.items()
+        }
+        cohorts = metadata.get("comparison_cohorts")
+        if (
+            isinstance(cohorts, dict)
+            and cohorts.keys() == pairs.keys()
+            and cohorts
+            and all(digest == recorded["cohort_revision"] for digest in cohorts.values())
+        ):
+            audit["comparison_cohorts"] = dict(cohorts)
+        if metadata.get("operating_point") is not None:
+            audit["operating_point"] = self.views.managed_operating_point(
+                metadata["operating_point"], report["error_ceiling_bps"]
+            )
+            quality = metadata.get("decision_quality_digest")
+            if quality is not None:
+                _check(isinstance(quality, str) and re.fullmatch(r"[0-9a-f]{64}", quality))
+                audit["decision_quality_digest"] = quality
+        if metadata.get("workflow_benchmark"):
+            from opentour_cell.pilot.slack_benchmark import validated_benchmark
+
+            audit["workflow_benchmark"] = validated_benchmark(
+                metadata["workflow_benchmark"],
+                cohort_revision=recorded["cohort_revision"],
+                population=report["cohort_size"],
+                candidate_arm="model" if metadata["mode"] == "managed_model" else "simple",
+                candidate_revision=candidate,
+            )
+        return self._target(dataset, value["dataset_revision"], report, audit)
+
+    def _target(self, dataset: str, dataset_revision: str, report: Json, audit: Json) -> Target:
+        digest = hashlib.sha256(_json({"audit": audit, "readout": report}).encode()).hexdigest()
+        revision = self.journal.opaque("rev", digest)
+        return Target(
+            revision,
+            dataset,
+            dataset_revision,
+            report,
+            {**audit, "evidence_digest": digest},
+            digest,
+        )
+
     def _readout(self, cfg: Settings, actor: str, job: str) -> Target | None:
         if not job:
             return None
+        if job.startswith("managed:"):
+            return self._managed(cfg, actor, job)
         evaluation = job.startswith("eval:")
         dataset = job[5:] if evaluation else self._authorized_job(cfg, actor, job)["dataset"]
         cfg.permission(actor, "inspect", dataset)
@@ -1036,16 +1243,7 @@ class Workbench:
             )
             audit["operating_point"] = result["operating_point"]
             audit["decision_quality_digest"] = quality_digest
-        digest = hashlib.sha256(_json({"audit": audit, "readout": report}).encode()).hexdigest()
-        revision = self.journal.opaque("rev", digest)
-        return Target(
-            revision,
-            dataset,
-            status["dataset_revision"],
-            report,
-            {**audit, "evidence_digest": digest},
-            digest,
-        )
+        return self._target(dataset, status["dataset_revision"], report, audit)
 
     def _policy(self, cfg: Settings, actor: str) -> str:
         return self.journal.opaque(
@@ -1072,6 +1270,19 @@ class Workbench:
             if data["mode"] == "evaluation_only" and entry["aggregate"]:
                 sources.append((dataset, "eval:" + dataset))
         sources.extend(self.journal.review_jobs(active, self.store.engagement_id, cfg.recipient))
+        if entry["aggregate"]:
+            from opentour_cell.pilot.repair_workflow import managed_review_sources
+
+            sources.extend(
+                managed_review_sources(
+                    cfg.directory,
+                    cfg.organization,
+                    entry["datasets"],
+                    cfg.recipient,
+                    cfg.team,
+                    cfg.channel,
+                )
+            )
         return sorted(sources)
 
     def _recorded_decision(self, revision: str) -> tuple[str, Json]:
@@ -1086,7 +1297,7 @@ class Workbench:
         return "uncertain", {}
 
     def _result_state(self, cfg: Settings, actor: str, source: str) -> tuple[str, str]:
-        if not source.startswith("eval:"):
+        if not source.startswith(("eval:", "managed:")):
             state = self.store.status(source)
             if state["status"] != "completed":
                 label = {
@@ -1110,7 +1321,7 @@ class Workbench:
         return target.revision, labels[disposition]
 
     def _selected(self, cfg: Settings, actor: str, view: str, source: str, old_hash: str) -> None:
-        if not source.startswith("eval:"):
+        if not source.startswith(("eval:", "managed:")):
             state = self.store.status(source)
             entry = cfg.permission(actor, "inspect", state["dataset_id"])
             if state["status"] != "completed" or not entry["aggregate"]:
@@ -1139,9 +1350,13 @@ class Workbench:
             rows.append(
                 {
                     "dataset": dataset,
-                    "method": "Supplied comparison"
-                    if source.startswith("eval:")
-                    else "CPU training job · " + source,
+                    "method": "Managed workflow comparison"
+                    if source.startswith("managed:")
+                    else (
+                        "Supplied comparison"
+                        if source.startswith("eval:")
+                        else "CPU training job · " + source
+                    ),
                     "state": state,
                     "reference": revision or source,
                     "token": token,
@@ -1164,6 +1379,66 @@ class Workbench:
         cfg.permission(actor, "inspect")
         ctx = self.journal.context(actor, cfg.channel, view, "help")
         self._show(view, self.views.reviewer_help(ctx, message), old_hash)
+
+    def _repair_preview(self, cfg: Settings, actor: str, view: str, dataset: str) -> None:
+        from opentour_cell.pilot.managed_launch import managed_launch_summary
+
+        cfg.permission(actor, "inspect", dataset)
+        cfg.permission(actor, "tune", dataset)
+        summary = managed_launch_summary(
+            cfg.directory, cfg.organization, dataset, actor, cfg.team, cfg.channel
+        )
+        _check(
+            summary["dataset_id"] == dataset
+            and summary["trainer"] == actor
+            and summary["scope"] in {"simple_repair", "conditional_open_weight"}
+            and re.fullmatch(r"[0-9a-f]{64}", summary["plan_revision"])
+            and type(summary["expires_at"]) is int
+            and summary["expires_at"] > time.time()
+        )
+        ctx = self.journal.context(
+            actor, cfg.channel, view, "repair_preview", dataset, summary["plan_revision"]
+        )
+        self._show(view, self.views.managed_launch_preview(ctx, summary))
+
+    def _repair_progress(
+        self, cfg: Settings, actor: str, view: str, dataset: str, run: str, old_hash: str = ""
+    ) -> None:
+        from opentour_cell.pilot.managed_launch import managed_status_from_slack
+
+        entry = cfg.permission(actor, "inspect", dataset)
+        cfg.permission(actor, "tune", dataset)
+        status = managed_status_from_slack(
+            cfg.directory, cfg.organization, dataset, actor, cfg.team, cfg.channel, run
+        )
+        _check(status.get("run_id") == run)
+        ctx = self.journal.context(actor, cfg.channel, view, "repair_progress", dataset, run)
+        can_review = bool(
+            entry["aggregate"]
+            and status["state"] in {"ready", "held"}
+            and (dataset, "managed:" + run) in self._result_sources(cfg, actor)
+        )
+        self._show(
+            view,
+            self.views.managed_launch_status(ctx, run, status["state"], review_visible=can_review),
+            old_hash,
+        )
+
+    def _repair_lookup(self, cfg: Settings, actor: str, view: str, run: str) -> None:
+        entry = cfg.permission(actor, "inspect")
+        if entry["aggregate"] and any(
+            source == "managed:" + run for _, source in self._result_sources(cfg, actor)
+        ):
+            self._home(cfg, actor, view, "managed:" + run)
+            return
+        cfg.permission(actor, "tune")
+        for dataset in entry["datasets"]:
+            try:
+                self._repair_progress(cfg, actor, view, dataset, run)
+            except (KeyError, ValueError, OSError):
+                continue
+            return
+        raise Refused()
 
     def _search(
         self, cfg: Settings, actor: str, view: str, source: str, query: str, old_hash: str = ""
@@ -1207,6 +1482,7 @@ class Workbench:
             old_hash,
             dataset=target.dataset,
             dataset_revision=target.dataset_revision,
+            audit=target.audit,
         )
 
     def _show(
@@ -1217,12 +1493,13 @@ class Workbench:
         *,
         dataset: str | None = None,
         dataset_revision: str | None = None,
+        audit: Json | None = None,
     ) -> str:
         # Record every attempted protected disclosure without persisting projected sample rows.
         exposure = ""
         if modal.get("callback_id"):
-            with self.store.engagement_guard(
-                dataset, dataset_revision, engagement_id=self.store.engagement_id
+            with _evidence_guard(
+                self.store, dataset, dataset_revision, self.store.engagement_id, audit
             ):
                 exposure = self.journal.admit_view(modal["callback_id"])
         params = {"view_id": view_id, "view": modal}
@@ -1252,7 +1529,10 @@ class Workbench:
         if (
             not target
             and job
-            and (job.startswith("eval:") or self.store.status(job)["status"] == "completed")
+            and (
+                job.startswith(("eval:", "managed:"))
+                or self.store.status(job)["status"] == "completed"
+            )
         ):
             disposition = "uncertain"
         show = cfg.channel_aggregates and entry["aggregate"]
@@ -1271,12 +1551,12 @@ class Workbench:
             channel_aggregates=show,
             private_evidence=entry["aggregate"],
             witnessed=False,
-            job_id=job if job and not job.startswith("eval:") else None,
+            job_id=job if job and not job.startswith(("eval:", "managed:")) else None,
             evidence_reviewed=inspected,
             dataset_revision=target.dataset_revision if target else None,
             receipt=receipt.get("receipt"),
             tune_allowed="tune" in entry["roles"]
-            and not job.startswith("eval:")
+            and not job.startswith(("eval:", "managed:"))
             and any(
                 row["can_train"] and self.store.can_propose(row["dataset_id"], actor)
                 for row in self._catalog(cfg, actor)
@@ -1284,6 +1564,8 @@ class Workbench:
             audit=target.audit if target else None,
             decision_allowed=actor == cfg.reviewer and "review" in entry["roles"],
             reviewer_navigation=True,
+            workspace_title=cfg.workspace_title,
+            workflow_label=cfg.workflow_label,
         )
         self._show(
             view_id,
@@ -1291,6 +1573,7 @@ class Workbench:
             old_hash,
             dataset=target.dataset if target else None,
             dataset_revision=target.dataset_revision if target else None,
+            audit=target.audit if target else None,
         )
 
     def _browse(
@@ -1410,6 +1693,11 @@ class Workbench:
         token = self.journal.context(
             actor, cfg.channel, view, "evidence", ctx["job"], target.revision
         )
+        charts = bool(
+            target.audit.get("comparison_cohorts")
+            and cfg.reviewer == actor
+            and "review" in entry["roles"]
+        )
         modal = self.views.evidence_modal(
             context=token,
             revision=target.revision,
@@ -1418,12 +1706,25 @@ class Workbench:
             dataset_revision=target.dataset_revision,
             audit={**target.audit, "viewer": actor},
             questions=True,
+            release_allowed=actor == target.audit.get("release_reviewer")
+            and "review" in entry["roles"],
+            charts_allowed=charts,
+            workflow=cfg.workflow_label,
         )
         proof = self._show(
-            view, modal, old_hash, dataset=target.dataset, dataset_revision=target.dataset_revision
+            view,
+            modal,
+            old_hash,
+            dataset=target.dataset,
+            dataset_revision=target.dataset_revision,
+            audit=target.audit,
         )
-        with self.store.engagement_guard(
-            target.dataset, target.dataset_revision, engagement_id=target.audit["engagement"]
+        with _evidence_guard(
+            self.store,
+            target.dataset,
+            target.dataset_revision,
+            target.audit["engagement"],
+            target.audit,
         ):
             current = self.config()
             _check(
@@ -1439,6 +1740,10 @@ class Workbench:
                 "readout": target.report,
                 "rendered_digest": hashlib.sha256(_json(rendered).encode()).hexdigest(),
             }
+            if charts:
+                snapshot["chart_context"] = self.journal.opaque("chartview", token)
+            if target.audit.get("release_reviewer") and current.config_path is not None:
+                snapshot["release_settings_file"] = str(current.config_path)
             self.journal.present(
                 proof,
                 actor,
@@ -1450,14 +1755,163 @@ class Workbench:
                 entry["expires_at"],
             )
 
+        if (
+            actor == target.audit.get("release_reviewer")
+            and "review" in entry["roles"]
+            and (target.audit.get("release_provider") == "zapier_slack")
+        ):
+            from opentour_cell.pilot.zapier_approval import ApprovalBridge
+
+            # The presentation is durable and the engagement write lock is released before staging.
+            try:
+                bridge = ApprovalBridge(
+                    current.directory,
+                    current.organization,
+                    current.directory / "zapier-approval.json",
+                )
+                bridge.issue(
+                    run_id=target.audit["job_id"],
+                    run_revision=target.audit["run_revision"],
+                    artifact_sha=target.audit["model_revision"],
+                    inspection_ref=target.revision,
+                )
+            except (OSError, ValueError, KeyError):
+                self._show(
+                    view,
+                    self.views.plugin_held_modal(modal),
+                    old_hash,
+                    dataset=target.dataset,
+                    dataset_revision=target.dataset_revision,
+                    audit=target.audit,
+                )
+
+    def _charts(
+        self, cfg: Settings, actor: str, view: str, ctx: Json, revision: str, old_hash: str
+    ) -> None:
+        from opentour_cell.pilot.slack_charts import decision_charts
+
+        _check(
+            ctx["kind"] == "evidence"
+            and ctx["job"].startswith("managed:")
+            and revision == ctx["revision"]
+            and cfg.reviewer == actor
+            and cfg.permission(actor, "review")["aggregate"]
+        )
+        context = self.journal.opaque("chartview", ctx["id"])
+        policy = self._policy(cfg, actor)
+        _check(self.journal.inspected(actor, revision, policy, chart_context=context))
+        target = self._managed(cfg, actor, ctx["job"])
+        _check(target.revision == revision and target.audit.get("comparison_cohorts"))
+        payload = decision_charts(target.report, target.audit, revision)
+        self.private_channel(cfg, actor)
+        status = "numeric"
+        with _evidence_guard(
+            self.store,
+            target.dataset,
+            target.dataset_revision,
+            target.audit["engagement"],
+            target.audit,
+        ):
+            current = self.settings(check_engagement=False)
+            _check(
+                current.reviewer == actor
+                and current.permission(actor, "review", target.dataset)["aggregate"]
+                and current.permission(actor, "inspect", target.dataset)["aggregate"]
+                and policy == self._policy(current, actor)
+                and self.journal.inspected(actor, revision, policy, chart_context=context)
+            )
+            exposure = self.journal.claim_charts(ctx["id"])
+            if not exposure:
+                return
+            if any(block["type"] == "data_visualization" for block in payload["blocks"]):
+                try:
+                    response = self.web.chat_postEphemeral(
+                        channel=current.channel, user=actor, **payload
+                    )
+                    _check(
+                        response is not None
+                        and response.get("ok") is True
+                        and response.get("message_ts")
+                    )
+                    status = "accepted"
+                except Exception:
+                    # Slack may have accepted an unacknowledged delivery. Never repeat this click.
+                    status = "uncertain"
+            self.journal.finish_view(exposure, status)
+        current = self.settings()
+        _check(
+            current.reviewer == actor
+            and policy == self._policy(current, actor)
+            and self.journal.inspected(actor, revision, policy, chart_context=context)
+        )
+        self._show(
+            view,
+            self.views.chart_status(ctx["id"], revision, payload["text"], status),
+            old_hash,
+            dataset=target.dataset,
+            dataset_revision=target.dataset_revision,
+            audit=target.audit,
+        )
+
+    def _release(
+        self, cfg: Settings, actor: str, view: str, ctx: Json, action: str, old_hash: str
+    ) -> None:
+        from opentour_cell.pilot.release_gate import record_release
+
+        target = self._readout(cfg, actor, ctx["job"])
+        _check(target and target.revision == ctx["revision"])
+        assert target is not None
+        current = self.settings()
+        entry = current.permission(actor, "review", target.dataset)
+        current.permission(actor, "inspect", target.dataset)
+        _check(
+            current.binding == cfg.binding
+            and current.reviewer == actor
+            and actor == target.audit.get("release_reviewer")
+            and current.approval_provider == target.audit.get("release_provider") == "slack"
+            and entry["aggregate"]
+            and self.journal.inspected(actor, target.revision, self._policy(current, actor))
+        )
+        saved = record_release(
+            current.directory,
+            current.organization,
+            run_id=target.audit["job_id"],
+            run_revision=target.audit["run_revision"],
+            artifact_sha=target.audit["model_revision"],
+            reviewer=actor,
+            team=current.team,
+            channel=current.channel,
+            audience=current.recipient,
+            decision="approved" if action == "ot_release_approve" else "changes_requested",
+            inspection_ref=target.revision,
+            provider="slack",
+        )
+        token = self.journal.context(
+            actor, current.channel, view, "release_recorded", ctx["job"], target.revision
+        )
+        self._show(
+            view,
+            self.views.release_recorded(
+                token, saved["decision"], target.audit["model_revision"], current.recipient
+            ),
+            old_hash,
+            dataset=target.dataset,
+            dataset_revision=target.dataset_revision,
+            audit=target.audit,
+        )
+
     def _decide(
         self, cfg: Settings, actor: str, view: str, ctx: Json, action: str, old_hash: str
     ) -> None:
         target = self._readout(cfg, actor, ctx["job"])
         _check(target and target.revision == ctx["revision"])
         assert target is not None
-        with self.store.engagement_guard(
-            target.dataset, target.dataset_revision, engagement_id=target.audit["engagement"]
+        with _evidence_guard(
+            self.store,
+            target.dataset,
+            target.dataset_revision,
+            target.audit["engagement"],
+            target.audit,
         ):
             current = self.config()
             _check(
@@ -1509,8 +1963,35 @@ class Workbench:
                     old_hash,
                     listing["page"] + (1 if action == "ot_result_next" else -1),
                 )
+        elif action == "ot_repair_confirm":
+            from opentour_cell.pilot.managed_launch import start_managed_from_slack
+
+            _check(ctx["kind"] == "repair_preview" and value == ctx["revision"])
+            current = self.settings()
+            current.permission(actor, "inspect", job)
+            current.permission(actor, "tune", job)
+            self.private_channel(current, actor)
+            key = self.journal.opaque("start", [actor, job, current.team, current.channel, value])
+            started = start_managed_from_slack(
+                current.directory,
+                current.organization,
+                job,
+                actor,
+                current.team,
+                current.channel,
+                value,
+                key,
+            )
+            _check(re.fullmatch(r"run-[0-9a-f]{32}", started["run_id"]))
+            self._repair_progress(current, actor, view, job, started["run_id"], old_hash)
+        elif action == "ot_repair_refresh":
+            _check(ctx["kind"] == "repair_progress" and value == ctx["revision"])
+            self._repair_progress(cfg, actor, view, job, value, old_hash)
         elif action == "ot_home":
-            self._home(cfg, actor, view, job, old_hash)
+            if ctx["kind"] in {"repair_preview", "repair_progress"}:
+                self._results(cfg, actor, view, old_hash)
+            else:
+                self._home(cfg, actor, view, job, old_hash)
         elif action in {"ot_browse", "ot_dataset_back"}:
             self._browse(cfg, actor, view, job, old_hash=old_hash)
         elif action == "ot_dataset_open":
@@ -1560,6 +2041,9 @@ class Workbench:
             _check(ctx["kind"] in {"evidence", "questions"} and value == ctx["revision"])
             topic = "" if action == "ot_question" else action.removeprefix("ot_question_")
             self._questions(cfg, actor, view, job, ctx["revision"], topic, old_hash)
+        elif action in {"ot_release_approve", "ot_release_changes"}:
+            _check(ctx["kind"] == "evidence" and value == ctx["revision"])
+            self._release(cfg, actor, view, ctx, action, old_hash)
         elif action in {"ot_approve", "ot_changes"}:
             _check(ctx["kind"] in {"home", "evidence"} and value == ctx["revision"])
             self._decide(cfg, actor, view, ctx, action, old_hash)
@@ -1583,7 +2067,12 @@ class Workbench:
         values: Json,
         token: str,
     ) -> None:
-        if callback == "ot_dataset_search":
+        if callback == "ot_prompt_enter":
+            _check(ctx["kind"] == "prompt")
+            raw = values["command"]["command"]["value"]
+            _check(isinstance(raw, str) and len(raw) <= 160 and raw.isprintable())
+            self._dispatch_prompt(cfg, actor, view, raw.strip())
+        elif callback == "ot_dataset_search":
             _check(ctx["kind"] == "dataset")
             query = values.get("query", {}).get("query", {}).get("value")
             _check(query is None or isinstance(query, str))
@@ -1710,64 +2199,217 @@ class Workbench:
         view = opened["view"]["id"]
         try:
             self.private_channel(cfg, actor)
-            words = prompt.strip().split(maxsplit=1)
-            command = words[0].casefold() if words else ""
-            argument = words[1] if len(words) == 2 else ""
-            if command == "search":
-                self._search(cfg, actor, view, "", argument)
-                return
-            if command == "data" and not argument:
-                self._browse(cfg, actor, view, "")
-                return
-            if command in {"", "status", "review"} and not argument:
-                self._results(cfg, actor, view)
-                return
-            if command == "ask":
-                aliases = {
-                    "threshold": "coverage",
-                    "limits": "coverage",
-                    "fixes": "changes",
-                    "regressions": "changes",
-                    "who receives it": "audience",
-                    "error rate": "errors",
-                }
-                topic = aliases.get(argument.casefold(), argument.casefold())
-                if topic not in self.views.QUESTION_LABELS:
-                    self._help(
-                        cfg,
-                        actor,
-                        view,
-                        "Ask about errors, coverage, changes or audience from an inspected result.",
-                    )
-                    return
-                sources = self._result_sources(cfg, actor)
-                if len(sources) == 1 and cfg.permission(actor, "inspect")["aggregate"]:
-                    source = sources[0][1]
-                    target = self._readout(cfg, actor, source)
-                    if target and self.journal.inspected(
-                        actor, target.revision, self._policy(cfg, actor)
-                    ):
-                        self._questions(cfg, actor, view, source, target.revision, topic)
-                        return
+            self._dispatch_prompt(cfg, actor, view, prompt)
+        except Exception:
+            self._safe_notice(view)
+
+    def _dispatch_prompt(self, cfg: Settings, actor: str, view: str, prompt: str) -> None:
+        cfg.permission(actor, "inspect")
+        words = prompt.strip().split(maxsplit=1)
+        command = words[0].casefold() if words else ""
+        argument = words[1] if len(words) == 2 else ""
+        if command in {"prompt", "agent"} and argument in {"", "repair"}:
+            if argument == "repair":
+                _check(self._home_repair_access(cfg, actor))
+            ctx = self.journal.context(actor, cfg.channel, view, "prompt")
+            self._show(
+                view, self.views.prompt_modal(ctx, cfg.workflow_label, repair=argument == "repair")
+            )
+            return
+        if command == "search":
+            self._search(cfg, actor, view, "", argument)
+            return
+        if command == "repair":
+            if not LOCAL_ID.fullmatch(argument):
                 self._help(
                     cfg,
                     actor,
                     view,
-                    "Choose the exact readout and open its evidence before asking.",
+                    "Use /opentour repair SOURCE to preview one approved workflow.",
                 )
                 return
-            if command == "status" and LOCAL_ID.fullmatch(argument):
-                self._status(cfg, actor, view, argument)
+            self._repair_preview(cfg, actor, view, argument)
+            return
+        if command == "data" and not argument:
+            self._browse(cfg, actor, view, "")
+            return
+        if command in {"", "status", "review"} and not argument:
+            self._results(cfg, actor, view)
+            return
+        if command == "ask":
+            aliases = {
+                "threshold": "coverage",
+                "limits": "coverage",
+                "fixes": "changes",
+                "regressions": "changes",
+                "what got worse": "changes",
+                "what got worse?": "changes",
+                "who receives it": "audience",
+                "error rate": "errors",
+            }
+            topic = aliases.get(argument.casefold(), argument.casefold())
+            if topic not in self.views.QUESTION_LABELS:
+                self._help(
+                    cfg,
+                    actor,
+                    view,
+                    "Ask about errors, coverage, changes or audience from an inspected result.",
+                )
                 return
-            if len(words) == 1 and words[0].startswith("job-") and LOCAL_ID.fullmatch(words[0]):
-                self._authorized_job(cfg, actor, words[0])
-                self._home(cfg, actor, view, words[0])
-                return
+            sources = self._result_sources(cfg, actor)
+            if len(sources) == 1 and cfg.permission(actor, "inspect")["aggregate"]:
+                source = sources[0][1]
+                target = self._readout(cfg, actor, source)
+                if target and self.journal.inspected(
+                    actor, target.revision, self._policy(cfg, actor)
+                ):
+                    self._questions(cfg, actor, view, source, target.revision, topic)
+                    return
             self._help(
-                cfg, actor, view, "" if command == "help" else "Choose a supported pilot command."
+                cfg,
+                actor,
+                view,
+                "Choose the exact readout and open its evidence before asking.",
             )
+            return
+        if command == "status" and argument.startswith("run-") and LOCAL_ID.fullmatch(argument):
+            self._repair_lookup(cfg, actor, view, argument)
+            return
+        if command == "status" and LOCAL_ID.fullmatch(argument):
+            self._status(cfg, actor, view, argument)
+            return
+        if len(words) == 1 and words[0].startswith("job-") and LOCAL_ID.fullmatch(words[0]):
+            self._authorized_job(cfg, actor, words[0])
+            self._home(cfg, actor, view, words[0])
+            return
+        self._help(
+            cfg, actor, view, "" if command == "help" else "Choose a supported pilot command."
+        )
+
+    def _home_repair_access(self, cfg: Settings, actor: str) -> bool:
+        from opentour_cell.pilot.managed_launch import managed_launch_summary
+
+        entry = cfg.permission(actor, "inspect")
+        if "tune" not in entry["roles"]:
+            return False
+        for dataset in entry["datasets"]:
+            try:
+                managed_launch_summary(
+                    cfg.directory, cfg.organization, dataset, actor, cfg.team, cfg.channel
+                )
+            except (ValueError, KeyError, OSError):
+                continue
+            return True
+        return False
+
+    def _pending_release(self, cfg: Settings, actor: str) -> Target | None:
+        entry = cfg.permission(actor, "inspect")
+        if actor != cfg.reviewer or "review" not in entry["roles"] or not entry["aggregate"]:
+            return None
+        for _, source in self._result_sources(cfg, actor):
+            if not source.startswith("managed:"):
+                continue
+            try:
+                target = self._managed(cfg, actor, source)
+            except (ValueError, KeyError, OSError):
+                continue
+            if target.audit.get("release_reviewer") != actor:
+                continue
+            decision = (
+                cfg.directory / "managed-outputs" / target.audit["job_id"] / "release-decision.json"
+            )
+            if not decision.exists():
+                return target
+        return None
+
+    def _publish_app_home(self, cfg: Settings, event: Json) -> None:
+        actor = event["user"]
+        _check(
+            _slack_id(actor, "UW")
+            and event.get("type") == "app_home_opened"
+            and event.get("tab") == "home"
+        )
+        try:
+            _check(self.store.engagement_active())
+            entry = cfg.permission(actor, "inspect")
+            self.private_channel(cfg, actor)
         except Exception:
-            self._safe_notice(view)
+            # Slack or custody checks may be unavailable; replace any previously personalized Home.
+            self.web.views_publish(user_id=actor, view=self.views.app_home_view())
+            return
+        token = self.journal.opaque("home", [actor, cfg.team, cfg.app, cfg.channel])
+        pending = self._pending_release(cfg, actor)
+        layout = self.views.app_home_view(
+            token,
+            cfg.workspace_title,
+            cfg.workflow_label,
+            can_review=entry["aggregate"],
+            can_tune=self._home_repair_access(cfg, actor),
+            named_reviewer=cfg.reviewer == actor and "review" in entry["roles"],
+            pending=pending.revision if pending else "",
+        )
+        with self.store.engagement_guard(engagement_id=self.store.engagement_id):
+            exposure = self.journal.admit_view("app_home")
+        try:
+            result = self.web.views_publish(user_id=actor, view=layout)
+            _check(result is not None and result.get("ok") is True)
+        except Exception:
+            self.journal.finish_view(exposure, "uncertain")
+            raise
+        self.journal.finish_view(exposure, "presented")
+
+    def _open_app_home(self, cfg: Settings, actor: str, body: Json) -> None:
+        view = body["view"]
+        _check(
+            view.get("type") == "home"
+            and view.get("callback_id") == "ot_app_home"
+            and view.get("private_metadata")
+            == self.journal.opaque("home", [actor, cfg.team, cfg.app, cfg.channel])
+            and body.get("container", {}).get("type") == "view"
+            and body.get("type") == "block_actions"
+            and len(body["actions"]) == 1
+        )
+        action = body["actions"][0]
+        if action.get("action_id") == "ot_app_pending":
+            _check(actor == cfg.reviewer and cfg.permission(actor, "review")["aggregate"])
+            opened = self.web.views_open(
+                trigger_id=body["trigger_id"], view=self.views.notice_modal("checking")
+            )
+            view_id = opened["view"]["id"]
+            try:
+                self.private_channel(cfg, actor)
+                pending = self._pending_release(cfg, actor)
+                _check(pending and action.get("value") == pending.revision)
+                assert pending is not None
+                self._evidence(
+                    cfg,
+                    actor,
+                    view_id,
+                    {"job": "managed:" + pending.audit["job_id"], "revision": pending.revision},
+                    "",
+                )
+            except Exception:
+                self._safe_notice(view_id)
+            return
+        commands = {
+            "ot_app_data": "data",
+            "ot_app_review": "review",
+            "ot_app_prompt": "prompt",
+            "ot_app_repair": "prompt",
+        }
+        route = action.get("action_id")
+        _check(route in commands and action.get("value") == route)
+        entry = cfg.permission(actor, "inspect")
+        if route == "ot_app_review":
+            _check(entry["aggregate"])
+        if route == "ot_app_repair":
+            cfg.permission(actor, "tune")
+        self._launch(
+            cfg,
+            actor,
+            body["trigger_id"],
+            "prompt repair" if route == "ot_app_repair" else commands[route],
+        )
 
     def receive(self, request_type: str, body: Json, ack: Callable[[Json | None], None]) -> None:
         """Dispatch a Slack SDK authenticated Socket Mode envelope, acknowledging exactly once."""
@@ -1778,7 +2420,15 @@ class Workbench:
         authorized_view = ""
         authorized_hash = ""
         try:
-            cfg = self.settings(check_engagement=not submission)
+            cfg = self.settings(check_engagement=not submission and request_type != "events_api")
+            if request_type == "events_api":
+                _check(
+                    body.get("team_id") == cfg.team
+                    and body.get("api_app_id") == cfg.app
+                    and body.get("type") == "event_callback"
+                )
+                self._publish_app_home(cfg, body["event"])
+                return
             if request_type == "slash_commands":
                 actor = body["user_id"]
                 _check(
@@ -1800,6 +2450,15 @@ class Workbench:
             _check(not surfaced or surfaced == cfg.channel)
             if body.get("container", {}).get("type") == "message":
                 box = body["container"]
+                if (
+                    body.get("type") == "block_actions"
+                    and len(body.get("actions", [])) == 1
+                    and body["actions"][0].get("action_id") == "ot_open_approval"
+                ):
+                    from opentour_cell.pilot.approval_inbox import open_approval
+
+                    open_approval(self, cfg, body, body["actions"][0]["value"])
+                    return
                 _check(
                     body["type"] == "block_actions"
                     and surfaced == cfg.channel
@@ -1811,6 +2470,9 @@ class Workbench:
                 self._launch(cfg, actor, body["trigger_id"], "")
                 return
             obj = body["view"]
+            if obj.get("type") == "home":
+                self._open_app_home(cfg, actor, body)
+                return
             view = obj["id"]
             token = obj["private_metadata"]
             # Only trusted local configuration and a bounded indexed lookup precede a modal receipt.
@@ -1828,6 +2490,31 @@ class Workbench:
                 _check(self.store.engagement_active())
             with self.view_locks[hash(view) % len(self.view_locks)]:
                 ctx = self.journal.read_context(token, actor, cfg.channel, view)
+                if not submission and any(
+                    a.get("action_id") == "ot_charts" for a in body.get("actions", [])
+                ):
+                    container = body.get("container", {})
+                    _check(
+                        body.get("type") == "block_actions"
+                        and len(body["actions"]) == 1
+                        and obj.get("type") == "modal"
+                        and obj.get("callback_id") == "ot_evidence_view"
+                        and obj.get("team_id", cfg.team) == cfg.team
+                        and obj.get("app_id", cfg.app) == cfg.app
+                        and container.get("type", "view") == "view"
+                        and container.get("view_id", view) == view
+                        and container.get("channel_id", cfg.channel) == cfg.channel
+                    )
+                    # Stale or unauthorized chart requests cannot trigger a remote view update.
+                    self._charts(
+                        cfg,
+                        actor,
+                        view,
+                        ctx,
+                        body["actions"][0].get("value", ""),
+                        obj.get("hash", ""),
+                    )
+                    return
                 authorized_view = view
                 if not submission:
                     authorized_hash = obj.get("hash", "")
@@ -1871,6 +2558,16 @@ def main(argv: list[str] | None = None) -> int:
     commands = parser.add_mutually_exclusive_group()
     commands.add_argument("--check-config", action="store_true")
     commands.add_argument("--post-launcher", action="store_true")
+    commands.add_argument(
+        "--flush-approvals",
+        action="store_true",
+        help="dispatch eligible opt-in requests for human approval once",
+    )
+    commands.add_argument(
+        "--unresolved-approvals",
+        action="store_true",
+        help="inspect opaque requests with uncertain Slack delivery",
+    )
     commands.add_argument("--flush-zapier", action="store_true")
     commands.add_argument(
         "--auto-flush-zapier",
@@ -1896,6 +2593,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(arguments)
     app = None
     drainer = None
+    approval_drainer = None
     try:
 
         def config() -> Settings:
@@ -1915,6 +2613,11 @@ def main(argv: list[str] | None = None) -> int:
                 )
             )
             print(_json(record))
+            return 0
+        if args.unresolved_approvals:
+            from opentour_cell.pilot.approval_inbox import unresolved
+
+            print(_json(unresolved(cfg)))
             return 0
         if args.fingerprint_zapier:
             print(hook_fingerprint(os.environ.get("OPENTOUR_ZAPIER_HOOK_URL", "")))
@@ -1951,7 +2654,8 @@ def main(argv: list[str] | None = None) -> int:
 
         bot = os.environ.get("SLACK_BOT_TOKEN", "")
         _check(bot.startswith("xoxb-"))
-        web = sdk.WebClient(token=bot)
+        # A post accepted before a lost reply must never be sent again by an SDK retry.
+        web = sdk.WebClient(token=bot, retry_handlers=[])
         verified = web.auth_test()
         _check(verified["team_id"] == cfg.team and bool(verified["bot_id"]))
         app = Workbench(
@@ -1960,6 +2664,11 @@ def main(argv: list[str] | None = None) -> int:
             LocalTrainingStore(cfg.directory / "training.sqlite3", cfg.organization),
             slack_views,
         )
+        if args.flush_approvals:
+            from opentour_cell.pilot.approval_inbox import delivery_cycle
+
+            print(_json(delivery_cycle(app)))
+            return 0
         if args.post_launcher:
             app.post_launcher()
             print("Pilot launcher posted.")
@@ -1982,6 +2691,11 @@ def main(argv: list[str] | None = None) -> int:
         socket.socket_mode_request_listeners.append(listener)
         try:
             socket.connect()
+            if cfg.approval_requests:
+                from opentour_cell.pilot.approval_inbox import ApprovalDrainer
+
+                approval_drainer = ApprovalDrainer(app)
+                approval_drainer.start()
             if args.auto_flush_zapier:
                 drainer = ReceiptDrainer(
                     app.journal,
@@ -2004,6 +2718,8 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 1
     finally:
+        if approval_drainer:
+            approval_drainer.close()
         if drainer:
             drainer.close()
         if app:

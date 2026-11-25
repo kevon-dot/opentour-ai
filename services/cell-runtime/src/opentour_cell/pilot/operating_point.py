@@ -235,12 +235,14 @@ def quality_brief(result: dict[str, Any]) -> str:
             f"| {arm['unknown_reference_automatic']} |"
         )
     paired = result["paired"]
+    fix_word = "fix" if paired["fixes"] == 1 else "fixes"
+    regression_word = "regression" if paired["regressions"] == 1 else "regressions"
     lines.extend(
         [
             "",
             f"The observed comparison is {result['observed_comparison'].replace('_', ' ')}.",
             f"There were {paired['comparable']} comparable pairs, including "
-            f"{paired['fixes']} fixes and {paired['regressions']} regressions.",
+            f"{paired['fixes']} {fix_word} and {paired['regressions']} {regression_word}.",
         ]
     )
     if not result["changes"]["same_automatic_cases"]:

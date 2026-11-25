@@ -1,6 +1,8 @@
 # OpenTour pilot workspace
 
-Run one organization's pilot on its approved machine. Register only the agreed data through a local MCP client. The team can inspect its data in Slack, authorize a bounded training run when permitted, and approve or return the exact evidence for presentation. The machine owns the records, model, job history and decisions. The operator can run the evaluation and onboarding offline.
+Start with [the autonomous pilot guide](pilot-autonomous-cycle.md) to connect one permitted workplace source, bind training limits and supervise the customer-local worker. Each newly discovered set of verified corrections starts with the simpler repair. The supported model can train on the development partition when the residual errors and remaining budget qualify. The named reviewer sees the protected results in Slack before handing off that version.
+
+Use [the two-route repair guide](pilot-managed-repairs.md) to rehearse both repair routes with generated data. For recurring private Slack invitations, enable `approval_requests` in the approved worker configuration. Use `slack CONFIG --flush-approvals` to dispatch outstanding requests and `slack CONFIG --unresolved-approvals` to list uncertain deliveries before reconciliation. The kit can run the offline software checks before a customer installs Slack or configures Zapier.
 
 ## Rehearse both modes
 

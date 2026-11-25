@@ -379,6 +379,7 @@ class LocalTrainingStore:
         *,
         _check_closeout: bool = True,
         _expected_engagement: str | None = None,
+        existing_only: bool = False,
     ):
         self.path = Path(path)
         self.organization = identifier(organization)
@@ -386,6 +387,11 @@ class LocalTrainingStore:
         expected = (
             _custody_hold(self.path, self.organization) if _check_closeout else _expected_engagement
         )
+        if existing_only:
+            _check_file(self.path)
+            if expected is not None or not self.engagement_active():
+                raise TrainingError("engagement_unavailable")
+            return
         try:
             starting = self.path.lstat().st_size == 0
         except FileNotFoundError:
@@ -547,6 +553,12 @@ class LocalTrainingStore:
                 "SELECT (SELECT COUNT(*) FROM jobs WHERE result IS NOT NULL) + "
                 "(SELECT COUNT(*) FROM dataset_scope WHERE baseline_result IS NOT NULL)"
             ).fetchone()[0]
+            if db.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='protected_comparisons'"
+            ).fetchone():
+                outputs += db.execute(
+                    "SELECT COUNT(*) FROM protected_comparisons WHERE result IS NOT NULL"
+                ).fetchone()[0]
             return {"inputs": sizes[0], "heldout": sizes[1], "models": models, "outputs": outputs}
 
     def purge_withdrawn(self) -> dict[str, int]:
@@ -558,6 +570,7 @@ class LocalTrainingStore:
             ):
                 raise TrainingError("withdrawal_required")
             db.execute("PRAGMA secure_delete=ON")
+            db.execute("DROP TABLE IF EXISTS protected_comparisons")
             for table in (
                 "artifacts",
                 "fit_checkpoints",

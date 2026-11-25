@@ -6,6 +6,10 @@
   "reviewer": "UREVIEWER",
   "recipient": "URECIPIENT",
   "directory": "/absolute/owner-only/pilot",
+  "workspace_title": "OpenTour pilot workspace",
+  "workflow_label": "Invoice classification",
+  "approval_requests": false,
+  "approval_provider": "slack",
   "channel_aggregates": false,
   "zapier": false,
   "users": {
