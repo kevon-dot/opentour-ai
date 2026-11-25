@@ -4,6 +4,7 @@ import json
 import os
 import stat
 import sys
+from collections.abc import Callable
 from typing import Any, BinaryIO, Never
 
 from opentour_cell import __version__
@@ -40,13 +41,27 @@ def _reject_constant(_: str) -> Never:
     raise ValueError("Invalid JSON number")
 
 
+ToolCall = Callable[[str, dict[str, Any]], dict[str, Any]]
+
+
+def tool_result(value: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "structuredContent": value,
+        "content": [{"type": "text", "text": json.dumps(value, allow_nan=False)}],
+    }
+
+
+def tool_error(message: str) -> dict[str, Any]:
+    return {"isError": True, "content": [{"type": "text", "text": message}]}
+
+
 class _Session:
-    def __init__(self, readout: dict[str, Any]) -> None:
+    def __init__(self, name: str, tools: list[dict[str, Any]], call: ToolCall) -> None:
         self.phase = "new"
-        self.tool_result = {
-            "structuredContent": readout,
-            "content": [{"type": "text", "text": json.dumps(readout, allow_nan=False)}],
-        }
+        self.name = name
+        self.tools = tools
+        self.tool_names = {tool["name"] for tool in tools}
+        self.call = call
 
     def respond(self, frame: bytes) -> dict[str, Any] | None:
         try:
@@ -109,7 +124,7 @@ class _Session:
             self.phase = "negotiated"
             result = {
                 "protocolVersion": PROTOCOL_VERSION,
-                "serverInfo": {"name": "opentour-offline-evaluation", "version": __version__},
+                "serverInfo": {"name": self.name, "version": __version__},
                 "capabilities": {"tools": {}},
             }
             return {"result": result}
@@ -118,22 +133,26 @@ class _Session:
         if method == "tools/list":
             if params:
                 return _error(-32602, "Invalid listing parameters")
-            return {"result": {"tools": [TOOL]}}
+            return {"result": {"tools": self.tools}}
         if method != "tools/call":
             return _error(-32601, "Method not found")
-        if params.keys() - {"name", "arguments"} or params.get("name") != TOOL_NAME:
+        name = params.get("name")
+        if (
+            params.keys() - {"name", "arguments"}
+            or not isinstance(name, str)
+            or name not in self.tool_names
+        ):
             return _error(-32602, "Unknown tool or invalid call parameters")
         arguments = params.get("arguments", {})
         if not isinstance(arguments, dict):
             return _error(-32602, "Tool arguments must be an object")
-        if arguments:
-            message = {"type": "text", "text": "This tool accepts an empty arguments object."}
-            return {"result": {"isError": True, "content": [message]}}
-        return {"result": self.tool_result}
+        return {"result": self.call(name, arguments)}
 
 
-def _serve(readout: dict[str, Any], source: BinaryIO, destination: BinaryIO) -> int:
-    session = _Session(readout)
+def serve_tools(
+    name: str, tools: list[dict[str, Any]], call: ToolCall, source: BinaryIO, destination: BinaryIO
+) -> int:
+    session = _Session(name, tools, call)
     while frame := source.readline(MAX_FRAME_BYTES + 1):
         response: dict[str, Any] | None
         if len(frame) > MAX_FRAME_BYTES:
@@ -147,6 +166,17 @@ def _serve(readout: dict[str, Any], source: BinaryIO, destination: BinaryIO) -> 
         if len(frame) > MAX_FRAME_BYTES:
             return 2
     return 0
+
+
+def _serve(readout: dict[str, Any], source: BinaryIO, destination: BinaryIO) -> int:
+    result = tool_result(readout)
+
+    def inspect(_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        if arguments:
+            return tool_error("This tool accepts an empty arguments object.")
+        return result
+
+    return serve_tools("opentour-offline-evaluation", [TOOL], inspect, source, destination)
 
 
 def main() -> int:

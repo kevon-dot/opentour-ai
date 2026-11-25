@@ -4,6 +4,8 @@ Use the local readout when a workflow owner wants to know how many automated dec
 
 Before using actual records, confirm who may use them, where they can be processed, which source establishes the answer, and who may receive the report. The cohort owner checks the time cutoff and case-family separation from any development data. The command runs offline on a CPU using the supplied reference labels and decisions.
 
+Keep provenance in a private companion receipt alongside the v1 manifest. Bind the case and family grouping, time window and exclusions, authority for independent references, sources and versions of both methods, the frozen cohort digest, thresholds, exact kit identity and output digests. The three-field input contract below remains compatible with previously produced files. For a fresh repeat, rerun the same manifest in another process and a new output directory and compare both `aggregate.json` and `brief.md`.
+
 ## Run the generated example
 
 From the project root, run the command with the cell package installed or on the Python import path.

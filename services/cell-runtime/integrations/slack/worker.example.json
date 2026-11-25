@@ -1,0 +1,20 @@
+{
+  "organization": "generated-demo",
+  "team": "TEXAMPLE",
+  "app": "AEXAMPLE",
+  "channel": "GEXAMPLE",
+  "reviewer": "UREVIEWER",
+  "recipient": "URECIPIENT",
+  "directory": "/absolute/owner-only/pilot",
+  "channel_aggregates": false,
+  "zapier": false,
+  "users": {
+    "UREVIEWER": {
+      "roles": ["inspect", "tune", "review"],
+      "datasets": ["generated-intake", "generated-supplied"],
+      "preview": false,
+      "aggregate": true,
+      "expires_at": 0
+    }
+  }
+}

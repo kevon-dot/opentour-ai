@@ -1,0 +1,2 @@
+# Official Slack SDK, including its standard-library Socket Mode client.
+slack-sdk==3.47.0 --hash=sha256:8cfab3224d149962ef4313c1430d9ff65b8c3baf09f25988a920858ffa90aaa9

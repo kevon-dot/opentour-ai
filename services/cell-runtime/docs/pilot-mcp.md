@@ -2,6 +2,8 @@
 
 The operator chooses a local case manifest before starting the server. The server computes the descriptive readout once, closes the file and exposes the aggregate to its parent MCP client. Starting a new process selects a new snapshot. Use a client and execution environment approved for the aggregate report.
 
+Use the separate local onboarding connection to register a frozen evaluation or a separately authorized training dataset in the customer’s Slack catalog. [Dataset onboarding](pilot-onboarding-mcp.md)
+
 From the repository root, this command prints the report directly.
 
 ```sh

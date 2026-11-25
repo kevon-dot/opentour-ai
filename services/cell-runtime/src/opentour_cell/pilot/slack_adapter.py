@@ -1,0 +1,1722 @@
+"""Customer-operated Slack Socket Mode workbench for one private pilot installation."""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import hmac
+import http.client
+import importlib
+import json
+import os
+import re
+import secrets
+import sqlite3
+import stat
+import sys
+import threading
+import time
+from collections.abc import Callable, Iterator
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing, contextmanager
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+from urllib.parse import urlsplit
+
+Json = dict[str, Any]
+SESSION_SECONDS = 900
+SLACK_ID = re.compile(r"[A-Z][A-Z0-9]{2,31}\Z")
+LOCAL_ID = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}\Z")
+ROLES = {"inspect", "tune", "review"}
+CALLBACKS = {"ot_dataset_search", "ot_tune_preview", "ot_tune_start"}
+ACTIONS = {
+    "ot_home",
+    "ot_browse",
+    "ot_tune",
+    "ot_status",
+    "ot_evidence",
+    "ot_approve",
+    "ot_changes",
+    "ot_dataset_open",
+    "ot_status_refresh",
+    "ot_dataset_back",
+    "ot_tune_dataset",
+}
+
+
+class Refused(ValueError):
+    """A safe generic refusal. Source and callback values are never copied into its message."""
+
+
+def _check(condition: object) -> None:
+    if not condition:
+        raise Refused("Request unavailable in this pilot.")
+
+
+def _slack_id(value: object, prefix: str) -> bool:
+    return isinstance(value, str) and bool(SLACK_ID.fullmatch(value)) and value[0] in prefix
+
+
+def _json(value: object) -> str:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False)
+
+
+@dataclass(frozen=True)
+class Settings:
+    organization: str
+    team: str
+    app: str
+    channel: str
+    reviewer: str
+    recipient: str
+    directory: Path
+    roles: dict[str, Json]
+    channel_aggregates: bool
+    zapier: bool
+    zapier_disposition: bool
+    zapier_destination_sha256: str
+
+    @property
+    def binding(self) -> str:
+        return _json([self.organization, self.team, self.app, self.channel, str(self.directory)])
+
+    @classmethod
+    def load(cls, path: Path) -> Settings:
+        _check(path.is_absolute())
+        parent = path.parent.lstat()
+        _check(
+            stat.S_ISDIR(parent.st_mode)
+            and parent.st_uid == os.getuid()
+            and parent.st_mode & 0o077 == 0
+        )
+        with os.fdopen(os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), "rb") as stream:
+            info = os.fstat(stream.fileno())
+            _check(
+                stat.S_ISREG(info.st_mode)
+                and info.st_uid == os.getuid()
+                and info.st_nlink == 1
+                and info.st_mode & 0o077 == 0
+                and info.st_size <= 65536
+            )
+            content = stream.read(65537)
+        _check(len(content) <= 65536)
+        doc = json.loads(content)
+        required = {
+            "organization",
+            "team",
+            "app",
+            "channel",
+            "directory",
+            "users",
+            "reviewer",
+            "recipient",
+        }
+        optional = {
+            "channel_aggregates",
+            "zapier",
+            "zapier_disposition",
+            "zapier_destination_sha256",
+        }
+        _check(isinstance(doc, dict) and required <= doc.keys() <= required | optional)
+        _check(isinstance(doc["organization"], str) and LOCAL_ID.fullmatch(doc["organization"]))
+        _check(_slack_id(doc["team"], "T") and _slack_id(doc["app"], "A"))
+        _check(_slack_id(doc["channel"], "CG") and isinstance(doc["users"], dict))
+        _check(
+            _slack_id(doc["reviewer"], "UW")
+            and (_slack_id(doc["recipient"], "UWG") or doc["recipient"] == doc["channel"])
+        )
+        directory = Path(doc["directory"])
+        _check(directory.is_absolute() and directory.is_dir() and not directory.is_symlink())
+        if os.name == "posix":
+            _check(directory.stat().st_mode & 0o077 == 0 and directory.stat().st_uid == os.getuid())
+        for actor, entry in doc["users"].items():
+            _check(_slack_id(actor, "UW") and isinstance(entry, dict))
+            _check(entry.keys() == {"roles", "datasets", "preview", "aggregate", "expires_at"})
+            _check(isinstance(entry["roles"], list) and all(x in ROLES for x in entry["roles"]))
+            _check(
+                isinstance(entry["datasets"], list)
+                and all(
+                    isinstance(x, str) and bool(LOCAL_ID.fullmatch(x)) for x in entry["datasets"]
+                )
+            )
+            _check(type(entry["preview"]) is bool and type(entry["aggregate"]) is bool)
+            _check(type(entry["expires_at"]) is int)
+        for name in ("channel_aggregates", "zapier", "zapier_disposition"):
+            _check(type(doc.get(name, False)) is bool)
+        _check(not doc.get("zapier_disposition") or doc.get("zapier"))
+        destination = doc.get("zapier_destination_sha256", "")
+        _check(
+            isinstance(destination, str)
+            and (destination == "" or re.fullmatch("[0-9a-f]{64}", destination))
+        )
+        return cls(
+            doc["organization"],
+            doc["team"],
+            doc["app"],
+            doc["channel"],
+            doc["reviewer"],
+            doc["recipient"],
+            directory,
+            doc["users"],
+            doc.get("channel_aggregates", False),
+            doc.get("zapier", False),
+            doc.get("zapier_disposition", False),
+            destination,
+        )
+
+    def permission(self, actor: str, role: str, dataset: str | None = None) -> Json:
+        entry = self.roles.get(actor)
+        _check(
+            entry and role in entry["roles"] and (dataset is None or dataset in entry["datasets"])
+        )
+        assert entry is not None
+        _check(int(time.time()) < entry["expires_at"])
+        return entry
+
+
+class Journal:
+    """Local, tenant-bound receipts. Short-lived contexts contain no raw customer examples."""
+
+    def __init__(self, path: Path, binding: str):
+        self.path = path
+        self.binding = binding
+        flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
+        try:
+            os.close(os.open(path, flags, 0o600))
+        except FileExistsError:
+            pass
+        with self.db() as db:
+            legacy = db.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='identity'"
+            ).fetchone()
+            if legacy:
+                existing = db.execute("SELECT binding FROM identity WHERE id=1").fetchone()
+                _check(existing and existing[0] == binding)
+            db.executescript("""
+                CREATE TABLE IF NOT EXISTS identity (
+                    id INTEGER PRIMARY KEY, binding TEXT, key BLOB);
+                CREATE TABLE IF NOT EXISTS contexts (
+                    id TEXT PRIMARY KEY, actor TEXT, channel TEXT, view_id TEXT,
+                    kind TEXT, job TEXT, revision TEXT, expires INTEGER);
+                CREATE TABLE IF NOT EXISTS jobs (
+                    job TEXT PRIMARY KEY, dataset TEXT, requester TEXT);
+                CREATE TABLE IF NOT EXISTS launcher (channel TEXT PRIMARY KEY, ts TEXT);
+                CREATE TABLE IF NOT EXISTS inspections (
+                    actor TEXT, revision TEXT, policy TEXT, expires INTEGER,
+                    PRIMARY KEY(actor,revision,policy));
+                CREATE TABLE IF NOT EXISTS decisions (
+                    revision TEXT PRIMARY KEY, receipt TEXT UNIQUE, actor TEXT,
+                    disposition TEXT, decided INTEGER, exportable INTEGER,
+                    audience TEXT, attempts INTEGER DEFAULT 0,
+                    delivery TEXT DEFAULT 'pending');
+                CREATE TABLE IF NOT EXISTS journal_control (id INTEGER PRIMARY KEY,held INTEGER,
+                    legacy_unknown INTEGER);
+                CREATE TABLE IF NOT EXISTS exposures (id TEXT PRIMARY KEY,kind TEXT,
+                    status TEXT,admitted INTEGER,completed INTEGER);
+                CREATE TABLE IF NOT EXISTS presentations (
+                    id TEXT PRIMARY KEY, actor TEXT, revision TEXT, policy TEXT, scope TEXT,
+                    presented INTEGER, expires INTEGER, snapshot TEXT, rendered TEXT);
+                CREATE INDEX IF NOT EXISTS presentation_lookup
+                    ON presentations(actor,revision,policy,expires);
+                CREATE TABLE IF NOT EXISTS authorizations (
+                    receipt TEXT PRIMARY KEY, presentation TEXT, engagement TEXT,
+                    dataset TEXT,dataset_revision TEXT,destination TEXT,fields TEXT,
+                    transmitted INTEGER,confirmed INTEGER,confirmation_ref TEXT);
+                CREATE TABLE IF NOT EXISTS proposals (
+                    job TEXT PRIMARY KEY, audience TEXT,engagement TEXT);
+                CREATE TABLE IF NOT EXISTS integrity (
+                    kind TEXT, id TEXT, seal TEXT, PRIMARY KEY(kind,id));
+            """)
+            db.execute("INSERT OR IGNORE INTO journal_control VALUES(1,0,?)", (int(bool(legacy)),))
+            db.execute(
+                "INSERT OR IGNORE INTO identity VALUES(1,?,?)", (binding, secrets.token_bytes(32))
+            )
+            row = db.execute("SELECT binding,key FROM identity WHERE id=1").fetchone()
+            _check(row and row[0] == binding)
+            self.key = bytes(row[1])
+            # Older grants have no proof of presentation or agreed export destination.
+            db.execute(
+                "UPDATE decisions SET delivery='legacy_hold' WHERE delivery='pending' "
+                "AND receipt NOT IN (SELECT id FROM integrity WHERE kind='decision')"
+            )
+            db.execute("UPDATE decisions SET delivery='uncertain' WHERE delivery='sending'")
+
+    @staticmethod
+    def active(db: sqlite3.Connection) -> None:
+        row = db.execute("SELECT held FROM journal_control WHERE id=1").fetchone()
+        _check(row and not row[0])
+
+    def admit_view(self, kind: str) -> str:
+        key = secrets.token_urlsafe(18)
+        with self.db() as db:
+            db.execute("BEGIN IMMEDIATE")
+            self.active(db)
+            db.execute(
+                "INSERT INTO exposures VALUES(?,?,'admitted',?,NULL)", (key, kind, int(time.time()))
+            )
+        return key
+
+    def finish_view(self, key: str, status: str) -> None:
+        with self.db() as db:
+            db.execute(
+                "UPDATE exposures SET status=?,completed=? WHERE id=?",
+                (status, int(time.time()), key),
+            )
+
+    @contextmanager
+    def db(self, timeout: float = 4) -> Iterator[sqlite3.Connection]:
+        info = self.path.lstat()
+        _check(stat.S_ISREG(info.st_mode) and info.st_nlink == 1)
+        if os.name == "posix":
+            _check(info.st_uid == os.getuid() and info.st_mode & 0o077 == 0)
+        with closing(sqlite3.connect(self.path, timeout=timeout)) as db:
+            db.row_factory = sqlite3.Row
+            with db:
+                yield db
+
+    def opaque(self, kind: str, value: object) -> str:
+        return (
+            kind + "_" + hmac.new(self.key, _json(value).encode(), hashlib.sha256).hexdigest()[:26]
+        )
+
+    def _seal(self, db: sqlite3.Connection, kind: str, key: str, *, create: bool = False) -> None:
+        if kind == "presentation":
+            row = db.execute(
+                "SELECT id,actor,revision,policy,scope,presented,expires,snapshot,rendered "
+                "FROM presentations WHERE id=?",
+                (key,),
+            ).fetchone()
+        else:
+            row = db.execute(
+                "SELECT d.revision,d.receipt,d.actor,d.disposition,d.decided,d.exportable,"
+                "d.audience,a.presentation,a.engagement,a.dataset,a.dataset_revision,a.destination,"
+                "a.fields FROM decisions d JOIN authorizations a USING(receipt) WHERE receipt=?",
+                (key,),
+            ).fetchone()
+        _check(row)
+        assert row is not None
+        digest = hmac.new(
+            self.key, _json([self.binding, kind, *row]).encode(), hashlib.sha256
+        ).hexdigest()
+        if create:
+            db.execute("INSERT INTO integrity VALUES(?,?,?)", (kind, key, digest))
+        else:
+            record = db.execute(
+                "SELECT seal FROM integrity WHERE kind=? AND id=?", (kind, key)
+            ).fetchone()
+            _check(record and hmac.compare_digest(record[0], digest))
+
+    def context(
+        self, actor: str, channel: str, view_id: str, kind: str, job: str = "", revision: str = ""
+    ) -> str:
+        token = secrets.token_urlsafe(24)
+        now = int(time.time())
+        with self.db() as db:
+            db.execute("BEGIN IMMEDIATE")
+            self.active(db)
+            db.execute("DELETE FROM contexts WHERE expires<=?", (now,))
+            db.execute("DELETE FROM inspections WHERE expires<=?", (now,))
+            db.execute("DELETE FROM contexts WHERE actor=? AND view_id=?", (actor, view_id))
+            db.execute(
+                "INSERT INTO contexts VALUES(?,?,?,?,?,?,?,?)",
+                (token, actor, channel, view_id, kind, job, revision, now + SESSION_SECONDS),
+            )
+        return token
+
+    def read_context(self, token: str, actor: str, channel: str, view: str) -> Json:
+        with self.db(timeout=0.18) as db:
+            self.active(db)
+            row = db.execute(
+                "SELECT * FROM contexts WHERE id=? AND actor=? AND channel=? "
+                "AND view_id=? AND expires>?",
+                (token, actor, channel, view, int(time.time())),
+            ).fetchone()
+        _check(row)
+        return dict(row) if row else {}
+
+    def launcher(self, channel: str, ts: str, *, register: bool = False) -> bool:
+        with self.db() as db:
+            if register:
+                db.execute("INSERT OR REPLACE INTO launcher VALUES(?,?)", (channel, ts))
+            return (
+                db.execute(
+                    "SELECT 1 FROM launcher WHERE channel=? AND ts=?", (channel, ts)
+                ).fetchone()
+                is not None
+            )
+
+    def bind_job(self, job: str, dataset: str, actor: str, audience: str, engagement: str) -> None:
+        with self.db() as db:
+            db.execute("BEGIN IMMEDIATE")
+            self.active(db)
+            db.execute("INSERT OR IGNORE INTO jobs VALUES(?,?,?)", (job, dataset, actor))
+            item = db.execute("SELECT * FROM jobs WHERE job=?", (job,)).fetchone()
+            _check(item and (item["dataset"], item["requester"]) == (dataset, actor))
+            db.execute("INSERT OR IGNORE INTO proposals VALUES(?,?,?)", (job, audience, engagement))
+            pinned = db.execute(
+                "SELECT audience,engagement FROM proposals WHERE job=?", (job,)
+            ).fetchone()
+            _check(pinned and tuple(pinned) == (audience, engagement))
+
+    def job(self, job: str) -> Json:
+        with self.db() as db:
+            row = db.execute(
+                "SELECT j.*,p.audience,p.engagement FROM jobs j LEFT JOIN proposals p "
+                "ON p.job=j.job WHERE j.job=?",
+                (job,),
+            ).fetchone()
+        _check(row)
+        return dict(row) if row else {}
+
+    def latest(self, allowed: list[str]) -> str:
+        with self.db() as db:
+            for row in db.execute("SELECT job,dataset FROM jobs ORDER BY rowid DESC"):
+                if row["dataset"] in allowed:
+                    return str(row["job"])
+        return ""
+
+    def present(
+        self,
+        presentation: str,
+        actor: str,
+        revision: str,
+        policy: str,
+        scope: str,
+        snapshot: Json,
+        rendered: Json,
+        granted_until: int,
+    ) -> None:
+        now = int(time.time())
+        with self.db() as db:
+            db.execute("BEGIN IMMEDIATE")
+            self.active(db)
+            proof = db.execute(
+                "SELECT completed FROM exposures WHERE id=? AND status='presented'", (presentation,)
+            ).fetchone()
+            _check(proof and now < granted_until)
+            db.execute(
+                "INSERT INTO presentations VALUES(?,?,?,?,?,?,?,?,?)",
+                (
+                    presentation,
+                    actor,
+                    revision,
+                    policy,
+                    scope,
+                    proof[0],
+                    min(now + SESSION_SECONDS, granted_until),
+                    _json(snapshot),
+                    _json(rendered),
+                ),
+            )
+            self._seal(db, "presentation", presentation, create=True)
+
+    def inspected(self, actor: str, revision: str, policy: str) -> bool:
+        with self.db() as db:
+            self.active(db)
+            row = db.execute(
+                "SELECT id FROM presentations WHERE actor=? AND revision=? "
+                "AND policy=? AND expires>? ORDER BY rowid DESC LIMIT 1",
+                (actor, revision, policy, int(time.time())),
+            ).fetchone()
+            if row:
+                self._seal(db, "presentation", row[0])
+            return row is not None
+
+    def decision(self, revision: str) -> Json:
+        with self.db() as db:
+            row = db.execute("SELECT * FROM decisions WHERE revision=?", (revision,)).fetchone()
+        return dict(row) if row else {}
+
+    def decide(
+        self, cfg: Settings, actor: str, target: Target, policy: str, disposition: str
+    ) -> Json:
+        _check(disposition in {"approved", "changes_requested"})
+        now = int(time.time())
+        entry = cfg.permission(actor, "review", target.dataset)
+        _check(entry["aggregate"] and cfg.reviewer == actor and cfg.binding == self.binding)
+        export = cfg.zapier and bool(cfg.zapier_destination_sha256)
+        fields = ["event", "receipt"]
+        if cfg.zapier_disposition:
+            fields.append("disposition")
+        with self.db() as db:
+            db.execute("BEGIN IMMEDIATE")
+            self.active(db)
+            presentation = db.execute(
+                "SELECT id,snapshot FROM presentations WHERE actor=? "
+                "AND revision=? AND policy=? AND scope=? AND expires>? ORDER BY rowid DESC LIMIT 1",
+                (actor, target.revision, policy, target.evidence_digest, now),
+            ).fetchone()
+            _check(presentation)
+            self._seal(db, "presentation", presentation[0])
+            receipt = "receipt_" + secrets.token_urlsafe(18)
+            created = db.execute(
+                "INSERT OR IGNORE INTO decisions(revision,receipt,actor,disposition,"
+                "decided,exportable,audience,delivery) VALUES(?,?,?,?,?,?,?,?)",
+                (
+                    target.revision,
+                    receipt,
+                    actor,
+                    disposition,
+                    now,
+                    int(export),
+                    cfg.recipient,
+                    "pending" if export else "local_only",
+                ),
+            ).rowcount
+            if created:
+                db.execute(
+                    "INSERT INTO authorizations(receipt,presentation,engagement,dataset,"
+                    "dataset_revision,destination,fields) VALUES(?,?,?,?,?,?,?)",
+                    (
+                        receipt,
+                        presentation[0],
+                        target.audit["engagement"],
+                        target.dataset,
+                        target.dataset_revision,
+                        cfg.zapier_destination_sha256 if export else "",
+                        _json(fields),
+                    ),
+                )
+                self._seal(db, "decision", receipt, create=True)
+            row = db.execute(
+                "SELECT d.* FROM decisions d JOIN authorizations a USING(receipt) "
+                "WHERE d.revision=?",
+                (target.revision,),
+            ).fetchone()
+            _check(
+                row
+                and row["actor"] == actor
+                and row["disposition"] == disposition
+                and row["audience"] == cfg.recipient
+            )
+            self._seal(db, "decision", row["receipt"])
+            return dict(row)
+
+    def receipt(self, receipt: str) -> Json:
+        with self.db() as db:
+            decision = db.execute("SELECT * FROM decisions WHERE receipt=?", (receipt,)).fetchone()
+            _check(decision)
+            assert decision is not None
+            authorization = db.execute(
+                "SELECT * FROM authorizations WHERE receipt=?", (receipt,)
+            ).fetchone()
+            if not authorization:
+                return {
+                    "decision": dict(decision),
+                    "evidence": None,
+                    "verification": "legacy_unqualified",
+                }
+            self._seal(db, "decision", receipt)
+            self._seal(db, "presentation", authorization["presentation"])
+            details = db.execute(
+                "SELECT * FROM presentations WHERE id=?", (authorization["presentation"],)
+            ).fetchone()
+            _check(details)
+            assert details is not None
+            evidence = json.loads(details["snapshot"])
+            rendered = json.loads(details["rendered"])
+            _check(
+                evidence["rendered_digest"] == hashlib.sha256(_json(rendered).encode()).hexdigest()
+            )
+            audit = {
+                k: v
+                for k, v in evidence.items()
+                if k
+                not in {
+                    "evidence_digest",
+                    "viewer",
+                    "readout_revision",
+                    "readout",
+                    "rendered_digest",
+                }
+            }
+            digest = hashlib.sha256(
+                _json({"audit": audit, "readout": evidence["readout"]}).encode()
+            ).hexdigest()
+            _check(
+                digest == evidence["evidence_digest"]
+                and details["scope"] == digest
+                and self.opaque("rev", digest)
+                == decision["revision"]
+                == details["revision"]
+                == evidence["readout_revision"]
+                and details["presented"] <= decision["decided"] < details["expires"]
+                and details["actor"] == decision["actor"] == evidence["viewer"]
+                and authorization["engagement"] == evidence["engagement"]
+                and authorization["dataset"] == evidence["dataset_id"]
+                and authorization["dataset_revision"] == evidence["dataset_revision"]
+                and decision["audience"] == evidence["recipient"]
+            )
+            return {
+                "decision": dict(decision),
+                "evidence": evidence,
+                "presented_at": details["presented"],
+                "actionable_until": details["expires"],
+                "rendered": rendered,
+                "presentation": details["id"],
+                "delivery": {
+                    "destination_sha256": authorization["destination"],
+                    "permitted_fields": json.loads(authorization["fields"]),
+                    "submitted_at": authorization["transmitted"],
+                    "confirmed_at": authorization["confirmed"],
+                    "downstream_ref": authorization["confirmation_ref"],
+                },
+            }
+
+    def confirm_delivery(self, receipt: str, reference: str) -> None:
+        _check(isinstance(reference, str) and LOCAL_ID.fullmatch(reference))
+        with self.db() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute(
+                "SELECT d.delivery,a.confirmation_ref FROM decisions d JOIN "
+                "authorizations a USING(receipt) WHERE receipt=? AND a.transmitted IS NOT NULL",
+                (receipt,),
+            ).fetchone()
+            _check(
+                row
+                and row[0] in {"sending", "uncertain", "failed", "accepted", "downstream_confirmed"}
+                and (row[1] is None or row[1] == reference)
+            )
+            db.execute(
+                "UPDATE authorizations SET confirmed=COALESCE(confirmed,?),confirmation_ref=? "
+                "WHERE receipt=?",
+                (int(time.time()), reference, receipt),
+            )
+            db.execute(
+                "UPDATE decisions SET delivery='downstream_confirmed' WHERE receipt=?", (receipt,)
+            )
+
+
+def _hook_path(hook: str) -> str:
+    parsed = urlsplit(hook)
+    _check(
+        parsed.scheme == "https"
+        and parsed.netloc == "hooks.zapier.com"
+        and not parsed.query
+        and not parsed.fragment
+        and re.fullmatch(r"/hooks/catch/[0-9]{1,24}/[A-Za-z0-9_-]{2,100}/?", parsed.path)
+    )
+    return parsed.path
+
+
+def hook_fingerprint(hook: str) -> str:
+    return hashlib.sha256(("https://hooks.zapier.com" + _hook_path(hook)).encode()).hexdigest()
+
+
+def flush_receipts(
+    journal: Journal,
+    hook: str,
+    *,
+    config: Callable[[], Settings] | None = None,
+    training: Any = None,
+    include_disposition: bool | None = None,
+    stopping: Callable[[], bool] | None = None,
+) -> int:
+    """Claim at most once, under the engagement lock shared with withdrawal."""
+    destination = hook_fingerprint(hook)
+    _check(config is not None and training is not None)
+    assert config is not None
+    initial = config()
+    _check(journal.binding == initial.binding and training.organization == initial.organization)
+    if initial.zapier and initial.zapier_destination_sha256:
+        _check(initial.zapier_destination_sha256 == destination)
+    with journal.db() as db:
+        pending = db.execute(
+            "SELECT d.receipt,d.disposition,d.actor,d.audience,a.engagement,"
+            "a.dataset,a.dataset_revision,a.destination,a.fields FROM decisions d JOIN "
+            "authorizations a USING(receipt) WHERE d.delivery='pending' AND d.attempts=0 "
+            "ORDER BY d.rowid LIMIT 50"
+        ).fetchall()
+    count = 0
+    for row in pending:
+        if stopping is not None and stopping():
+            break
+        receipt = row["receipt"]
+        try:
+            with training.engagement_guard(
+                row["dataset"], row["dataset_revision"], engagement_id=row["engagement"]
+            ):
+                journal.receipt(receipt)
+                current = config()
+                _check(
+                    journal.binding == current.binding
+                    and training.organization == current.organization
+                )
+                entry = current.permission(row["actor"], "review", row["dataset"])
+                _check(
+                    entry["aggregate"]
+                    and "inspect" in entry["roles"]
+                    and current.zapier
+                    and current.reviewer == row["actor"]
+                    and current.recipient == row["audience"]
+                    and row["destination"] == current.zapier_destination_sha256 == destination
+                )
+                fields = json.loads(row["fields"])
+                _check(fields in (["event", "receipt"], ["event", "receipt", "disposition"]))
+                body = {"event": "pilot_decision_recorded", "receipt": receipt}
+                if (
+                    "disposition" in fields
+                    and current.zapier_disposition
+                    and include_disposition is not False
+                ):
+                    body["disposition"] = {
+                        "approved": "approved_for_readout",
+                        "changes_requested": "changes_requested",
+                    }[row["disposition"]]
+                with journal.db() as db:
+                    db.execute("BEGIN IMMEDIATE")
+                    journal.active(db)
+                    claimed = db.execute(
+                        "UPDATE decisions SET attempts=1,delivery='sending' "
+                        "WHERE receipt=? AND attempts=0 AND delivery='pending'",
+                        (receipt,),
+                    ).rowcount
+                    if claimed:
+                        db.execute(
+                            "UPDATE authorizations SET transmitted=? WHERE receipt=?",
+                            (int(time.time()), receipt),
+                        )
+        except (ValueError, KeyError):
+            with journal.db() as db:
+                db.execute(
+                    "UPDATE decisions SET delivery='suppressed' "
+                    "WHERE receipt=? AND delivery='pending'",
+                    (receipt,),
+                )
+            continue
+        if not claimed:
+            continue
+        # Admission is committed before network I/O. A concurrent withdrawal owns reconciliation.
+        try:
+            with closing(http.client.HTTPSConnection("hooks.zapier.com", timeout=5)) as connection:
+                connection.request(
+                    "POST",
+                    _hook_path(hook),
+                    body=_json(body),
+                    headers={"Content-Type": "application/json"},
+                )
+                status = connection.getresponse().status
+            delivery = "accepted" if 200 <= status < 300 else "failed"
+        except (OSError, http.client.HTTPException):
+            delivery = "uncertain"
+        with journal.db() as db:
+            db.execute(
+                "UPDATE decisions SET delivery=? WHERE receipt=? AND delivery "
+                "IN ('sending','uncertain')",
+                (delivery, receipt),
+            )
+        count += delivery == "accepted"
+    return count
+
+
+class ReceiptDrainer:
+    """Single optional outbound worker. Its wake-up never performs I/O on the Slack callback."""
+
+    def __init__(
+        self,
+        journal: Journal,
+        config: Callable[[], Settings],
+        training: Any,
+        hook: Callable[[], str],
+        interval: float = 30,
+    ):
+        self.journal = journal
+        self.config = config
+        self.training = training
+        self.hook = hook
+        self.interval = interval
+        self._pending = threading.Event()
+        self._stopped = threading.Event()
+        self._thread = threading.Thread(target=self._run, name="pilot-receipts", daemon=True)
+
+    def start(self) -> None:
+        self.wake()
+        self._thread.start()
+
+    def wake(self) -> None:
+        self._pending.set()
+
+    def _run(self) -> None:
+        while not self._stopped.is_set():
+            self._pending.wait(self.interval)
+            self._pending.clear()
+            if self._stopped.is_set():
+                return
+            try:
+                count = flush_receipts(
+                    self.journal,
+                    self.hook(),
+                    config=self.config,
+                    training=self.training,
+                    stopping=self._stopped.is_set,
+                )
+                if count == 50:
+                    self.wake()
+            except (OSError, ValueError, TypeError, KeyError, sqlite3.Error):
+                # A missing secret, permission or busy store does not affect a completed decision.
+                continue
+
+    def close(self) -> None:
+        self._stopped.set()
+        self._pending.set()
+        if self._thread.is_alive():
+            self._thread.join()
+
+
+def withdraw_for_custody(directory: Path, organization: str) -> dict[str, int]:
+    """Invalidate action grants and stop the journal after the organization's training hold."""
+    totals = dict.fromkeys(
+        (
+            "slack_exposed",
+            "slack_possible",
+            "zapier_accepted",
+            "zapier_uncertain",
+            "zapier_suppressed",
+            "decisions",
+            "legacy_unknown",
+            "local_journal_records",
+        ),
+        0,
+    )
+    _check(directory.is_absolute() and not directory.is_symlink())
+    private = directory.stat()
+    _check(
+        stat.S_ISDIR(private.st_mode)
+        and private.st_uid == os.getuid()
+        and private.st_mode & 0o077 == 0
+    )
+    path = directory / "slack-pilot.sqlite3"
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return totals
+    _check(
+        stat.S_ISREG(info.st_mode)
+        and info.st_nlink == 1
+        and info.st_uid == os.getuid()
+        and info.st_mode & 0o077 == 0
+    )
+    with closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True)) as read:
+        binding = read.execute("SELECT binding FROM identity WHERE id=1").fetchone()
+        _check(binding)
+        assert binding is not None
+        identity = json.loads(binding[0])
+        _check(
+            len(identity) == 5 and identity[0] == organization and identity[-1] == str(directory)
+        )
+    journal = Journal(path, binding[0])
+    with journal.db() as db:
+        db.execute("BEGIN IMMEDIATE")
+        db.execute("UPDATE journal_control SET held=1 WHERE id=1")
+        db.execute("DELETE FROM contexts")
+        db.execute("UPDATE decisions SET delivery='suppressed' WHERE delivery='pending'")
+        db.execute("UPDATE decisions SET delivery='uncertain' WHERE delivery='sending'")
+
+        def n(query: str) -> int:
+            return int(db.execute(query).fetchone()[0])
+
+        totals.update(
+            slack_exposed=n("SELECT COUNT(*) FROM exposures WHERE status='presented'"),
+            slack_possible=n("SELECT COUNT(*) FROM exposures WHERE status!='presented'"),
+            zapier_accepted=n(
+                "SELECT COUNT(*) FROM decisions "
+                "WHERE delivery IN ('accepted','downstream_confirmed')"
+            ),
+            zapier_uncertain=n(
+                "SELECT COUNT(*) FROM decisions WHERE delivery IN ('uncertain','sending','failed')"
+            ),
+            zapier_suppressed=n(
+                "SELECT COUNT(*) FROM decisions WHERE delivery IN ('suppressed','legacy_hold')"
+            ),
+            decisions=n("SELECT COUNT(*) FROM decisions"),
+            local_journal_records=sum(
+                n("SELECT COUNT(*) FROM " + table)
+                for table in (
+                    "jobs",
+                    "presentations",
+                    "decisions",
+                    "launcher",
+                    "inspections",
+                    "exposures",
+                )
+            ),
+            legacy_unknown=n("SELECT legacy_unknown FROM journal_control WHERE id=1"),
+        )
+    return totals
+
+
+@dataclass(frozen=True)
+class Target:
+    revision: str
+    dataset: str
+    dataset_revision: str
+    report: Json
+    audit: Json
+    evidence_digest: str
+
+
+class Workbench:
+    def __init__(
+        self,
+        config: Callable[[], Settings],
+        web: Any,
+        training: Any,
+        views: Any,
+        submit: Callable[[Callable[[], None]], Any] | None = None,
+    ):
+        self.config = config
+        first = config()
+        self.binding = (
+            first.organization,
+            first.team,
+            first.app,
+            first.channel,
+            str(first.directory),
+        )
+        self.journal = Journal(first.directory / "slack-pilot.sqlite3", _json(self.binding))
+        self.web = web
+        self.store = training
+        self.views = views
+        self.on_decision: Callable[[], None] | None = None
+        self.pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="pilot-training")
+        self.submit = submit or self.pool.submit
+        self.view_locks = [threading.RLock() for _ in range(31)]
+
+    def settings(self, *, check_engagement: bool = True) -> Settings:
+        current = self.config()
+        _check(
+            self.binding
+            == (
+                current.organization,
+                current.team,
+                current.app,
+                current.channel,
+                str(current.directory),
+            )
+        )
+        if check_engagement:
+            _check(self.store.engagement_active())
+        return current
+
+    def private_channel(self, cfg: Settings, actor: str | None = None) -> None:
+        channel = self.web.conversations_info(channel=cfg.channel)["channel"]
+        _check(
+            channel.get("id") == cfg.channel
+            and channel.get("is_private") is True
+            and channel.get("is_shared") is False
+            and not any(
+                channel.get(k)
+                for k in (
+                    "is_archived",
+                    "is_ext_shared",
+                    "is_org_shared",
+                    "is_shared",
+                    "is_pending_ext_shared",
+                )
+            )
+        )
+        if actor is None:
+            return
+        cursor = ""
+        for _ in range(25):
+            members = self.web.conversations_members(channel=cfg.channel, limit=200, cursor=cursor)
+            if actor in members["members"]:
+                return
+            cursor = members.get("response_metadata", {}).get("next_cursor", "")
+            if not cursor:
+                break
+        raise Refused()
+
+    def _readout(self, cfg: Settings, actor: str, job: str) -> Target | None:
+        if not job:
+            return None
+        evaluation = job.startswith("eval:")
+        dataset = job[5:] if evaluation else self.journal.job(job)["dataset"]
+        cfg.permission(actor, "inspect", dataset)
+        registration = self.store.dataset_summary(dataset)
+        if evaluation:
+            _check(registration["mode"] == "evaluation_only")
+            result = self.store.frozen_evaluation(dataset)
+            status = {
+                "dataset_revision": result["dataset_revision"],
+                "revision": result["aggregate_digest"],
+                "profile": "supplied_outputs",
+                "epochs": None,
+                "cpu_limit_seconds": None,
+                "max_train_updates": None,
+            }
+        else:
+            status = self.store.status(job)
+            _check(status["dataset_id"] == dataset)
+            if status["status"] != "completed":
+                return None
+            try:
+                # Verify the stored model and frozen cohort, rescore locally and reconcile its
+                # aggregate with the recorded one. Only the verified digest and counts reach Slack.
+                result = self.store.frozen_training(job)
+            except ValueError:
+                return None
+        report = result["readout"]
+        _check(registration["dataset_revision"] == status["dataset_revision"])
+        _check(
+            result["dataset_id"] == dataset
+            and result["dataset_revision"] == status["dataset_revision"]
+            and result["cohort_digest"] == registration["cohort_digest"]
+        )
+        audit = {
+            "engagement": self.store.engagement_id,
+            "organization": cfg.organization,
+            "mode": "evaluation_only" if evaluation else "training",
+            "job_id": None if evaluation else job,
+            "dataset_id": dataset,
+            "dataset_revision": status["dataset_revision"],
+            "model_revision": result["artifact_digest"],
+            "profile": status["profile"],
+            "proposal_revision": None if evaluation else status["revision"],
+            "cohort_revision": registration["cohort_digest"],
+            "aggregate_digest": result["aggregate_digest"],
+            "brief_digest": result["brief_digest"],
+            "epochs": status["epochs"],
+            "cpu_limit_seconds": status["cpu_limit_seconds"],
+            "max_train_updates": status["max_train_updates"],
+            "error_ceiling_bps": report["error_ceiling_bps"],
+            "population": report["cohort_size"],
+            "team": cfg.team,
+            "app": cfg.app,
+            "channel": cfg.channel,
+            "reviewer": cfg.reviewer,
+            "recipient": cfg.recipient,
+        }
+        digest = hashlib.sha256(_json({"audit": audit, "readout": report}).encode()).hexdigest()
+        revision = self.journal.opaque("rev", digest)
+        return Target(
+            revision,
+            dataset,
+            status["dataset_revision"],
+            report,
+            {**audit, "evidence_digest": digest},
+            digest,
+        )
+
+    def _policy(self, cfg: Settings, actor: str) -> str:
+        return self.journal.opaque(
+            "policy", [cfg.team, cfg.channel, cfg.roles.get(actor), cfg.reviewer, cfg.recipient]
+        )
+
+    def _catalog(self, cfg: Settings, actor: str, search: str = "") -> list[Json]:
+        entry = cfg.permission(actor, "inspect")
+        _check(isinstance(search, str) and len(search) <= 64)
+        return list(self.store.catalog(query=search, allowed_ids=entry["datasets"]))
+
+    def _show(
+        self,
+        view_id: str,
+        modal: Json,
+        old_hash: str = "",
+        *,
+        dataset: str | None = None,
+        dataset_revision: str | None = None,
+    ) -> str:
+        # Record every attempted protected disclosure without persisting projected sample rows.
+        exposure = ""
+        if modal.get("callback_id"):
+            with self.store.engagement_guard(
+                dataset, dataset_revision, engagement_id=self.store.engagement_id
+            ):
+                exposure = self.journal.admit_view(modal["callback_id"])
+        params = {"view_id": view_id, "view": modal}
+        if old_hash:
+            params["hash"] = old_hash
+        try:
+            response = self.web.views_update(**params)
+            _check(
+                response is not None
+                and response.get("ok") is True
+                and response.get("view", {}).get("id") == view_id
+            )
+        except Exception:
+            if exposure:
+                self.journal.finish_view(exposure, "uncertain")
+            raise
+        if exposure:
+            self.journal.finish_view(exposure, "presented")
+        return exposure
+
+    def _home(self, cfg: Settings, actor: str, view_id: str, job: str, old_hash: str = "") -> None:
+        entry = cfg.permission(actor, "inspect")
+        target = self._readout(cfg, actor, job)
+        revision = target.revision if target else ""
+        ctx = self.journal.context(actor, cfg.channel, view_id, "home", job, revision)
+        receipt = self.journal.decision(revision)
+        disposition = receipt.get("disposition", "ready" if target else "pending")
+        if receipt and self.journal.receipt(receipt["receipt"])["evidence"] is None:
+            receipt = {}
+            disposition = "uncertain"
+        if (
+            not target
+            and job
+            and not job.startswith("eval:")
+            and self.store.status(job)["status"] == "completed"
+        ):
+            disposition = "uncertain"
+        show = cfg.channel_aggregates and entry["aggregate"]
+        inspected = bool(
+            target and self.journal.inspected(actor, revision, self._policy(cfg, actor))
+        )
+        modal = self.views.home_modal(
+            context=ctx,
+            revision=revision or None,
+            reviewer=cfg.reviewer,
+            recipient=cfg.recipient,
+            state="changes" if disposition == "changes_requested" else disposition,
+            report=target.report if target and show else None,
+            channel_aggregates=show,
+            private_evidence=entry["aggregate"],
+            witnessed=False,
+            job_id=job if job and not job.startswith("eval:") else None,
+            evidence_reviewed=inspected,
+            dataset_revision=target.dataset_revision if target else None,
+            receipt=receipt.get("receipt"),
+            tune_allowed="tune" in entry["roles"]
+            and not job.startswith("eval:")
+            and any(row["can_train"] for row in self._catalog(cfg, actor)),
+            audit=target.audit if target else None,
+            decision_allowed=actor == cfg.reviewer and "review" in entry["roles"],
+        )
+        self._show(
+            view_id,
+            modal,
+            old_hash,
+            dataset=target.dataset if target else None,
+            dataset_revision=target.dataset_revision if target else None,
+        )
+
+    def _browse(
+        self,
+        cfg: Settings,
+        actor: str,
+        view: str,
+        job: str,
+        search: str = "",
+        selected: str = "",
+        old_hash: str = "",
+        expected_revision: str = "",
+    ) -> None:
+        rows = self._catalog(cfg, actor, search)
+        detail = None
+        evaluation_target = None
+        if selected:
+            entry = cfg.permission(actor, "inspect", selected)
+            selected_row = self.store.dataset_summary(selected)
+            if expected_revision:
+                _check(selected_row["dataset_revision"] == expected_revision)
+            if selected_row["mode"] == "evaluation_only":
+                job = "eval:" + selected
+                if entry["aggregate"]:
+                    evaluation_target = self._readout(cfg, actor, job)
+            if entry["preview"] and selected_row["can_train"]:
+                detail = self.store.preview(selected)
+                _check(
+                    detail["dataset_revision"] == selected_row["dataset_revision"]
+                    and detail["scope"] == "training_only"
+                )
+            else:
+                detail = {
+                    **selected_row,
+                    "rows": [],
+                    "scope": "training_only" if selected_row["can_train"] else "evaluation_only",
+                    "example_limit": 0,
+                }
+            rows = [selected_row]
+        # Bind row choices to the exact revisions returned by this particular catalog render.
+        pins = {r["dataset_id"]: r["dataset_revision"] for r in rows}
+        ctx = self.journal.context(
+            actor,
+            cfg.channel,
+            view,
+            "eval_detail" if evaluation_target else "dataset",
+            job,
+            evaluation_target.revision if evaluation_target else _json(pins),
+        )
+        self._show(
+            view,
+            self.views.dataset_modal(
+                context=ctx,
+                datasets=rows,
+                query=search,
+                detail=detail,
+                tune_allowed="tune" in cfg.permission(actor, "inspect")["roles"]
+                and any(r["can_train"] for r in rows),
+                evidence_revision=evaluation_target.revision if evaluation_target else None,
+            ),
+            old_hash,
+            dataset=selected or None,
+            dataset_revision=expected_revision or None,
+        )
+
+    def _status(self, cfg: Settings, actor: str, view: str, job: str, old_hash: str = "") -> None:
+        known = self.journal.job(job)
+        entry = cfg.permission(actor, "inspect", known["dataset"])
+        info = self.store.status(job)
+        _check(info["dataset_id"] == known["dataset"])
+        can_start = (
+            actor == known["requester"]
+            and known["audience"] == cfg.recipient
+            and known["engagement"] == self.store.engagement_id
+            and "tune" in entry["roles"]
+            and info["status"] == "awaiting_approval"
+        )
+        mode = "proposal" if can_start else "status"
+        target = (
+            self._readout(cfg, actor, job)
+            if info["status"] == "completed" and entry["aggregate"]
+            else None
+        )
+        revision = target.revision if target else info["revision"]
+        ctx = self.journal.context(actor, cfg.channel, view, mode, job, revision)
+        if can_start:
+            modal = self.views.proposal_modal(context=ctx, job=info, recipient=cfg.recipient)
+        else:
+            # A status-only viewer may see execution state, never an unauthorized readout.
+            aggregate = info if entry["aggregate"] else {**info, "result": None}
+            if entry["aggregate"] and info["status"] == "completed" and target is None:
+                aggregate = {**info, "status": "uncertain", "result": None}
+            modal = self.views.status_modal(
+                context=ctx,
+                job=aggregate,
+                evidence_revision=target.revision if target else None,
+                result_visible=bool(entry["aggregate"]),
+            )
+        self._show(
+            view,
+            modal,
+            old_hash,
+            dataset=known["dataset"],
+            dataset_revision=info["dataset_revision"],
+        )
+
+    def _evidence(self, cfg: Settings, actor: str, view: str, ctx: Json, old_hash: str) -> None:
+        target = self._readout(cfg, actor, ctx["job"])
+        _check(target and target.revision == ctx["revision"])
+        assert target is not None
+        entry = cfg.permission(actor, "inspect", target.dataset)
+        _check(entry["aggregate"] and self.views.evidence_available(target.report))
+        token = self.journal.context(
+            actor, cfg.channel, view, "evidence", ctx["job"], target.revision
+        )
+        modal = self.views.evidence_modal(
+            context=token,
+            revision=target.revision,
+            report=target.report,
+            recipient=cfg.recipient,
+            dataset_revision=target.dataset_revision,
+            audit={**target.audit, "viewer": actor},
+        )
+        proof = self._show(
+            view, modal, old_hash, dataset=target.dataset, dataset_revision=target.dataset_revision
+        )
+        with self.store.engagement_guard(
+            target.dataset, target.dataset_revision, engagement_id=target.audit["engagement"]
+        ):
+            current = self.config()
+            _check(
+                self._policy(cfg, actor) == self._policy(current, actor)
+                and current.binding == cfg.binding
+            )
+            current.permission(actor, "inspect", target.dataset)
+            rendered = {k: v for k, v in modal.items() if k != "private_metadata"}
+            snapshot = {
+                **target.audit,
+                "viewer": actor,
+                "readout_revision": target.revision,
+                "readout": target.report,
+                "rendered_digest": hashlib.sha256(_json(rendered).encode()).hexdigest(),
+            }
+            self.journal.present(
+                proof,
+                actor,
+                target.revision,
+                self._policy(cfg, actor),
+                target.evidence_digest,
+                snapshot,
+                rendered,
+                entry["expires_at"],
+            )
+
+    def _decide(
+        self, cfg: Settings, actor: str, view: str, ctx: Json, action: str, old_hash: str
+    ) -> None:
+        target = self._readout(cfg, actor, ctx["job"])
+        _check(target and target.revision == ctx["revision"])
+        assert target is not None
+        with self.store.engagement_guard(
+            target.dataset, target.dataset_revision, engagement_id=target.audit["engagement"]
+        ):
+            current = self.config()
+            _check(
+                cfg.binding == current.binding
+                and self._policy(cfg, actor) == self._policy(current, actor)
+            )
+            recorded = self.journal.decide(
+                current,
+                actor,
+                target,
+                self._policy(current, actor),
+                "approved" if action == "ot_approve" else "changes_requested",
+            )
+        if recorded["exportable"] and self.on_decision:
+            self.on_decision()
+        self._home(cfg, actor, view, ctx["job"], old_hash)
+
+    def _action(
+        self,
+        cfg: Settings,
+        actor: str,
+        view: str,
+        ctx: Json,
+        action: str,
+        value: str,
+        old_hash: str,
+    ) -> None:
+        job = ctx["job"]
+        if action == "ot_home":
+            self._home(cfg, actor, view, job, old_hash)
+        elif action in {"ot_browse", "ot_dataset_back"}:
+            self._browse(cfg, actor, view, job, old_hash=old_hash)
+        elif action == "ot_dataset_open":
+            _check(ctx["kind"] == "dataset")
+            pins = json.loads(ctx["revision"])
+            _check(value in pins)
+            self._browse(
+                cfg,
+                actor,
+                view,
+                job,
+                selected=value,
+                old_hash=old_hash,
+                expected_revision=pins[value],
+            )
+        elif action in {"ot_tune", "ot_tune_dataset"}:
+            cfg.permission(actor, "tune")
+            rows = [r for r in self._catalog(cfg, actor) if r["can_train"]]
+            if action == "ot_tune_dataset":
+                _check(ctx["kind"] == "dataset")
+                pins = json.loads(ctx["revision"])
+                cfg.permission(actor, "tune", value)
+                row = self.store.dataset_summary(value)
+                _check(row["can_train"] and pins.get(value) == row["dataset_revision"])
+                rows = [row]
+            pins = {r["dataset_id"]: r["dataset_revision"] for r in rows}
+            token = self.journal.context(actor, cfg.channel, view, "tune", job, _json(pins))
+            self._show(view, self.views.tune_modal(context=token, datasets=rows), old_hash)
+        elif action in {"ot_status", "ot_status_refresh"}:
+            _check(job and value in {job, "home", ctx["revision"]})
+            self._status(cfg, actor, view, job, old_hash)
+        elif action == "ot_evidence":
+            _check(
+                ctx["kind"] in {"home", "evidence", "status", "eval_detail"}
+                and value == ctx["revision"]
+            )
+            self._evidence(cfg, actor, view, ctx, old_hash)
+        elif action in {"ot_approve", "ot_changes"}:
+            _check(ctx["kind"] in {"home", "evidence"} and value == ctx["revision"])
+            self._decide(cfg, actor, view, ctx, action, old_hash)
+        else:
+            raise Refused()
+
+    @staticmethod
+    def _field(values: Json, key: str, *, select: bool = False) -> str:
+        item = values[key][key]
+        value = item["selected_option"]["value"] if select else item.get("value", "")
+        _check(isinstance(value, str) and len(value) <= 128)
+        return str(value)
+
+    def _submission(
+        self,
+        cfg: Settings,
+        actor: str,
+        view: str,
+        ctx: Json,
+        callback: str,
+        values: Json,
+        token: str,
+    ) -> None:
+        if callback == "ot_dataset_search":
+            _check(ctx["kind"] == "dataset")
+            self._browse(cfg, actor, view, ctx["job"], search=self._field(values, "query"))
+        elif callback == "ot_tune_preview":
+            _check(ctx["kind"] == "tune")
+            dataset = self._field(values, "dataset", select=True)
+            cfg.permission(actor, "tune", dataset)
+            pins = json.loads(ctx["revision"])
+            current = self.store.dataset_summary(dataset)
+            _check(current["can_train"] and pins.get(dataset) == current["dataset_revision"])
+            profile = self._field(values, "profile", select=True)
+            epoch = self._field(values, "epochs", select=True)
+            _check(profile == "cpu_text_v1" and epoch in {"1", "3", "5"})
+            info = self.store.propose(
+                dataset,
+                profile=profile,
+                epochs=int(epoch),
+                request_id=self.journal.opaque("req", [token, actor, callback]),
+            )
+            _check(info["dataset_revision"] == pins[dataset])
+            self.journal.bind_job(
+                info["job_id"], dataset, actor, cfg.recipient, self.store.engagement_id
+            )
+            self._status(cfg, actor, view, info["job_id"])
+        elif callback == "ot_tune_start":
+            _check(ctx["kind"] == "proposal")
+            job = ctx["job"]
+            known = self.journal.job(job)
+            _check(
+                known["requester"] == actor
+                and known["audience"] == cfg.recipient
+                and known["engagement"] == self.store.engagement_id
+            )
+            cfg.permission(actor, "tune", known["dataset"])
+            info = self.store.status(job)
+            _check(info["revision"] == ctx["revision"])
+            if info["status"] != "awaiting_approval":
+                self._status(cfg, actor, view, job)
+                return
+
+            def work() -> None:
+                try:
+                    now = self.settings()
+                    self.private_channel(now, actor)
+                    now.permission(actor, "tune", known["dataset"])
+                    _check(
+                        now.recipient == known["audience"]
+                        and self.store.engagement_id == known["engagement"]
+                    )
+                    self.store.run(job, reviewer=actor, expected_revision=ctx["revision"])
+                except Exception:
+                    self._notice_if_current(token, actor, cfg.channel, view)
+                    return
+                with self.view_locks[hash(view) % len(self.view_locks)]:
+                    try:
+                        self.journal.read_context(token, actor, cfg.channel, view)
+                    except Refused:
+                        return
+                    try:
+                        now = self.settings()
+                        self.private_channel(now, actor)
+                        self._home(now, actor, view, job)
+                    except Exception:
+                        self._safe_notice(view)
+
+            self.submit(work)
+        else:
+            raise Refused()
+
+    def _safe_notice(self, view: str, old_hash: str = "") -> None:
+        try:
+            self._show(
+                view,
+                self.views.notice_modal("denied"),
+                old_hash,
+            )
+        except Exception:
+            pass
+
+    def _notice_if_current(self, token: str, actor: str, channel: str, view: str) -> None:
+        try:
+            self.journal.read_context(token, actor, channel, view)
+        except Refused:
+            return
+        self._safe_notice(view)
+
+    def post_launcher(self) -> None:
+        cfg = self.settings()
+        self.private_channel(cfg)
+        with self.store.engagement_guard(engagement_id=self.store.engagement_id):
+            exposure = self.journal.admit_view("launcher")
+        posted = self.web.chat_postMessage(
+            channel=cfg.channel,
+            text="Open the private OpenTour pilot workspace.",
+            blocks=[
+                {
+                    "type": "actions",
+                    "elements": [
+                        {
+                            "type": "button",
+                            "action_id": "ot_open_workbench",
+                            "text": {"type": "plain_text", "text": "Open pilot workspace"},
+                            "value": "open",
+                        }
+                    ],
+                }
+            ],
+            unfurl_links=False,
+            unfurl_media=False,
+        )
+        _check(
+            posted.get("ok") is True
+            and posted["channel"] == cfg.channel
+            and isinstance(posted["ts"], str)
+        )
+        self.journal.finish_view(exposure, "presented")
+        self.journal.launcher(cfg.channel, posted["ts"], register=True)
+
+    def _launch(self, cfg: Settings, actor: str, trigger: str, prompt: str) -> None:
+        entry = cfg.permission(actor, "inspect")
+        opened = self.web.views_open(trigger_id=trigger, view=self.views.notice_modal("checking"))
+        view = opened["view"]["id"]
+        try:
+            self.private_channel(cfg, actor)
+            words = prompt.strip().split(maxsplit=1)
+            if words and words[0] == "search":
+                self._browse(cfg, actor, view, "", search=words[1] if len(words) > 1 else "")
+                return
+            if len(words) == 1 and words[0] == "data":
+                self._browse(cfg, actor, view, "")
+                return
+            job = self.journal.latest(entry["datasets"])
+            if job and not words:
+                # A withdrawn prior selection must not block access to the remaining catalog.
+                try:
+                    self.store.status(job)
+                except ValueError:
+                    job = ""
+            if words and words != ["status"]:
+                requested = words[1] if len(words) == 2 and words[0] == "status" else words[0]
+                _check(len(words) == 1 or words[0] == "status")
+                _check(LOCAL_ID.fullmatch(requested))
+                cfg.permission(actor, "inspect", self.journal.job(requested)["dataset"])
+                job = requested
+            if words and words[0] == "status" and job:
+                self._status(cfg, actor, view, job)
+            else:
+                self._home(cfg, actor, view, job)
+        except Exception:
+            self._safe_notice(view)
+
+    def receive(self, request_type: str, body: Json, ack: Callable[[Json | None], None]) -> None:
+        """Dispatch a Slack SDK authenticated Socket Mode envelope, acknowledging exactly once."""
+        submission = request_type == "interactive" and body.get("type") == "view_submission"
+        if not submission:
+            ack(None)
+        acknowledged = not submission
+        authorized_view = ""
+        authorized_hash = ""
+        try:
+            cfg = self.settings(check_engagement=not submission)
+            if request_type == "slash_commands":
+                actor = body["user_id"]
+                _check(
+                    body["team_id"] == cfg.team
+                    and body["api_app_id"] == cfg.app
+                    and body["channel_id"] == cfg.channel
+                    and body["command"] == "/opentour"
+                )
+                self._launch(cfg, actor, body["trigger_id"], body.get("text", ""))
+                return
+            _check(
+                request_type == "interactive"
+                and body["api_app_id"] == cfg.app
+                and body["team"]["id"] == cfg.team
+            )
+            actor = body["user"]["id"]
+            cfg.permission(actor, "inspect")
+            surfaced = body.get("channel", {}).get("id")
+            _check(not surfaced or surfaced == cfg.channel)
+            if body.get("container", {}).get("type") == "message":
+                box = body["container"]
+                _check(
+                    body["type"] == "block_actions"
+                    and surfaced == cfg.channel
+                    and box["channel_id"] == cfg.channel
+                    and len(body["actions"]) == 1
+                    and body["actions"][0]["action_id"] == "ot_open_workbench"
+                    and self.journal.launcher(cfg.channel, box["message_ts"])
+                )
+                self._launch(cfg, actor, body["trigger_id"], "")
+                return
+            obj = body["view"]
+            view = obj["id"]
+            token = obj["private_metadata"]
+            # Only trusted local configuration and a bounded indexed lookup precede a modal receipt.
+            self.journal.read_context(token, actor, cfg.channel, view)
+            if submission:
+                ack(
+                    {
+                        "response_action": "update",
+                        "view": self.views.notice_modal(
+                            "working" if obj["callback_id"] == "ot_tune_start" else "checking"
+                        ),
+                    }
+                )
+                acknowledged = True
+                _check(self.store.engagement_active())
+            with self.view_locks[hash(view) % len(self.view_locks)]:
+                ctx = self.journal.read_context(token, actor, cfg.channel, view)
+                authorized_view = view
+                if not submission:
+                    authorized_hash = obj.get("hash", "")
+                self.private_channel(cfg, actor)
+                if submission:
+                    callback = obj["callback_id"]
+                    _check(callback in CALLBACKS)
+                    self._submission(
+                        cfg,
+                        actor,
+                        view,
+                        ctx,
+                        callback,
+                        obj.get("state", {}).get("values", {}),
+                        token,
+                    )
+                else:
+                    _check(body["type"] == "block_actions" and len(body["actions"]) == 1)
+                    action = body["actions"][0]
+                    _check(action["action_id"] in ACTIONS)
+                    self._action(
+                        cfg,
+                        actor,
+                        view,
+                        ctx,
+                        action["action_id"],
+                        action.get("value", ""),
+                        obj.get("hash", ""),
+                    )
+        except Exception:
+            if authorized_view:
+                self._safe_notice(authorized_view, authorized_hash)
+        finally:
+            if not acknowledged:
+                ack(None)
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("config", type=Path, help="customer-owned configuration JSON")
+    commands = parser.add_mutually_exclusive_group()
+    commands.add_argument("--check-config", action="store_true")
+    commands.add_argument("--post-launcher", action="store_true")
+    commands.add_argument("--flush-zapier", action="store_true")
+    commands.add_argument(
+        "--auto-flush-zapier",
+        action="store_true",
+        help="serve Slack and dispatch eligible receipts in the background",
+    )
+    commands.add_argument("--fingerprint-zapier", action="store_true")
+    commands.add_argument("--receipt", metavar="RECEIPT")
+    commands.add_argument("--confirm-zapier", metavar="RECEIPT")
+    parser.add_argument("--downstream-ref", metavar="OWNER_REFERENCE")
+    arguments = list(sys.argv[1:] if argv is None else argv)
+    for flag in ("--receipt", "--confirm-zapier"):
+        if flag in arguments:
+            index = arguments.index(flag)
+            if index + 1 < len(arguments) and re.fullmatch(
+                r"-[A-Za-z0-9_-]{23}", arguments[index + 1]
+            ):
+                # Older URL-safe 18-byte random identifiers sometimes begin with a hyphen.
+                arguments[index : index + 2] = [flag + "=" + arguments[index + 1]]
+    args = parser.parse_args(arguments)
+    app = None
+    drainer = None
+    try:
+
+        def config() -> Settings:
+            return Settings.load(args.config)
+
+        cfg = config()
+        _check(bool(args.confirm_zapier) == bool(args.downstream_ref))
+        if args.fingerprint_zapier:
+            print(hook_fingerprint(os.environ.get("OPENTOUR_ZAPIER_HOOK_URL", "")))
+            return 0
+        if args.check_config:
+            print("Pilot configuration validated.")
+            return 0
+        from opentour_cell.pilot.training import LocalTrainingStore
+
+        if args.receipt or args.confirm_zapier or args.flush_zapier:
+            _check((cfg.directory / "slack-pilot.sqlite3").is_file())
+            journal = Journal(cfg.directory / "slack-pilot.sqlite3", cfg.binding)
+            if args.receipt:
+                print(_json(journal.receipt(args.receipt)))
+            elif args.confirm_zapier:
+                journal.confirm_delivery(args.confirm_zapier, args.downstream_ref)
+                print("Recorded the owner's independent downstream verification.")
+            else:
+                _check((cfg.directory / "training.sqlite3").is_file())
+                store = LocalTrainingStore(cfg.directory / "training.sqlite3", cfg.organization)
+                count = flush_receipts(
+                    journal,
+                    os.environ.get("OPENTOUR_ZAPIER_HOOK_URL", ""),
+                    config=config,
+                    training=store,
+                )
+                print(f"Accepted receipt deliveries: {count}.")
+            return 0
+        # The official Slack SDK is optional and isolated from the offline pilot kit.
+        sdk = importlib.import_module("slack_sdk")
+        socket_sdk = importlib.import_module("slack_sdk.socket_mode")
+        response = importlib.import_module("slack_sdk.socket_mode.response").SocketModeResponse
+        from opentour_cell.pilot import slack_views
+
+        bot = os.environ.get("SLACK_BOT_TOKEN", "")
+        _check(bot.startswith("xoxb-"))
+        web = sdk.WebClient(token=bot)
+        verified = web.auth_test()
+        _check(verified["team_id"] == cfg.team and bool(verified["bot_id"]))
+        app = Workbench(
+            config,
+            web,
+            LocalTrainingStore(cfg.directory / "training.sqlite3", cfg.organization),
+            slack_views,
+        )
+        if args.post_launcher:
+            app.post_launcher()
+            print("Pilot launcher posted.")
+            return 0
+        token = os.environ.get("SLACK_APP_TOKEN", "")
+        _check(token.startswith("xapp-"))
+        app.private_channel(cfg)
+        socket = socket_sdk.SocketModeClient(app_token=token, web_client=web)
+        workbench = app
+
+        def listener(client: Any, request: Any) -> None:
+            workbench.receive(
+                request.type,
+                request.payload,
+                lambda payload: client.send_socket_mode_response(
+                    response(envelope_id=request.envelope_id, payload=payload)
+                ),
+            )
+
+        socket.socket_mode_request_listeners.append(listener)
+        try:
+            socket.connect()
+            if args.auto_flush_zapier:
+                drainer = ReceiptDrainer(
+                    app.journal,
+                    config,
+                    app.store,
+                    lambda: os.environ.get("OPENTOUR_ZAPIER_HOOK_URL", ""),
+                )
+                app.on_decision = drainer.wake
+                drainer.start()
+            threading.Event().wait()
+        finally:
+            socket.close()
+        return 0
+    except KeyboardInterrupt:
+        return 0
+    except Exception:
+        print(
+            "Pilot operation unavailable. Verify the local configuration, grants and connection.",
+            file=sys.stderr,
+        )
+        return 1
+    finally:
+        if drainer:
+            drainer.close()
+        if app:
+            app.pool.shutdown(wait=True)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

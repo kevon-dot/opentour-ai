@@ -1,6 +1,23 @@
 # OpenTour AI
 
-OpenTour autonomously fine-tunes supported open-weight models and verifies improvements against the customer's authoritative business records. The implementation is being built from the current Linear contracts. This bootstrap is development infrastructure, not a completed or production-qualified application.
+OpenTour helps a workflow owner compare today's decisions with a proposed repair on independently verified, held-out cases. The first-ten pilot runs on an approved customer machine. Teams can supply outputs for evaluation or authorize a small CPU text classifier to train on separate examples.
+
+## Run the first-ten pilot
+
+Use Python 3.12.16 on a supported POSIX machine. From a reviewed source checkout, build the portable kit and unpack it into a new directory. The operator who receives the ZIP can start at the unpack step.
+
+```sh
+python -I -S -B tools/build_slack_pilot_kit.py OpenTour_Slack_Workspace_Kit.zip
+python -m zipfile -e OpenTour_Slack_Workspace_Kit.zip opentour-pilot
+cd opentour-pilot
+python -I -S -B opentour-slack.pyz evaluate --report-dir first-readout generated/readout-input.json
+```
+
+Open `first-readout/brief.md` for the comparison. The same kit includes local MCP enrollment, frozen-model replay, a native Slack app, an optional consent-bound Zapier receipt and custody closeout. A workspace administrator handles the private installation. OpenTour provisions zero AWS resources for this pilot.
+
+- [Operator quickstart and reproducible training example](services/cell-runtime/docs/slack-workspace-kit.md)
+- [Client MCP enrollment and consent](services/cell-runtime/docs/pilot-onboarding-mcp.md)
+- [Install the workspace app and check the approval flow](services/cell-runtime/integrations/slack/README.md)
 
 ## Compare two workflows offline
 
@@ -18,7 +35,7 @@ For an actual evaluation, agree on the decision and acceptable error level with 
 
 - [Manifest format and readout](services/cell-runtime/docs/pilot-readout.md)
 - [Local MCP client setup](services/cell-runtime/docs/pilot-mcp.md)
-- [Reviewer handoff and optional Slack preview](services/cell-runtime/REVIEW.md)
+- [Local exception worklist](services/cell-runtime/REVIEW.md)
 
 ## Development setup
 

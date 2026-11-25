@@ -40,6 +40,10 @@ the reference intact.
 
 ## Preview an optional Slack reminder
 
+For the pilot team's native Slack data browser, training controls, evidence and
+approval buttons, follow the [workspace installation guide](integrations/slack/README.md).
+The command below previews a reminder for the local exception worklist.
+
 ```sh
 python -m opentour_cell.pilot.review services/cell-runtime/examples/pilot-evaluation.json --slack-preview
 ```
