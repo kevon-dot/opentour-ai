@@ -1,0 +1,54 @@
+{
+  "schema_version": "opentour.pilot.case-manifest.v1",
+  "error_ceiling_bps": 1000,
+  "cases": [
+    {
+      "case_id": "example-01",
+      "reference": "category-a",
+      "current": {"status": "automatic", "label": "category-b"},
+      "repair": {"status": "automatic", "label": "category-a"}
+    },
+    {
+      "case_id": "example-02",
+      "reference": "category-b",
+      "current": {"status": "automatic", "label": "category-b"},
+      "repair": {"status": "automatic", "label": "category-b"}
+    },
+    {
+      "case_id": "example-03",
+      "reference": "category-b",
+      "current": {"status": "automatic", "label": "category-b"},
+      "repair": {"status": "review"}
+    },
+    {
+      "case_id": "example-04",
+      "reference": "category-a",
+      "current": {"status": "review"},
+      "repair": {"status": "automatic", "label": "category-a"}
+    },
+    {
+      "case_id": "example-05",
+      "reference": null,
+      "current": {"status": "automatic", "label": "category-c"},
+      "repair": {"status": "automatic", "label": "category-c"}
+    },
+    {
+      "case_id": "example-06",
+      "reference": "category-a",
+      "current": {"status": "missing"},
+      "repair": {"status": "review"}
+    },
+    {
+      "case_id": "example-07",
+      "reference": "category-c",
+      "current": {"status": "automatic", "label": "category-c"},
+      "repair": {"status": "automatic", "label": "category-a"}
+    },
+    {
+      "case_id": "example-08",
+      "reference": "category-c",
+      "current": {"status": "review"},
+      "repair": {"status": "review"}
+    }
+  ]
+}

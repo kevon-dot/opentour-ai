@@ -2,6 +2,24 @@
 
 OpenTour autonomously fine-tunes supported open-weight models and verifies improvements against the customer's authoritative business records. The implementation is being built from the current Linear contracts. This bootstrap is development infrastructure, not a completed or production-qualified application.
 
+## Compare two workflows offline
+
+Use the cell runtime to compare decisions already produced by a current workflow and a proposed repair on the same cases. Try the generated eight-case fixture from the repository root.
+
+```sh
+export PYTHONPATH=services/cell-runtime/src
+python -m opentour_cell.pilot.readout services/cell-runtime/examples/pilot-evaluation.json
+python -m opentour_cell.pilot.review services/cell-runtime/examples/pilot-evaluation.json
+```
+
+The fixture includes one fix, one regression, an unknown reference and a missing prediction. Both alternatives automate five cases, but they automate different cases. Use the paired counts and review workload together when interpreting the result.
+
+For an actual evaluation, agree on the decision and acceptable error level with the workflow owner. Use independently checked references and a held-out population in the approved environment. The operator can run the comparison through the CLI or the read-only local MCP tool. Selected exceptions can go through the team's existing review process.
+
+- [Manifest format and readout](services/cell-runtime/docs/pilot-readout.md)
+- [Local MCP client setup](services/cell-runtime/docs/pilot-mcp.md)
+- [Reviewer handoff and optional Slack preview](services/cell-runtime/REVIEW.md)
+
 ## Development setup
 
 Supported developer profiles are macOS 13.5+ arm64 and Linux arm64/x86_64 with kernel 4.18+, glibc 2.28+ and libstdc++ providing GLIBCXX_3.4.25. These match the [pinned Node runtime requirements](https://github.com/nodejs/node/blob/v24.22.3/BUILDING.md#platform-list); executing Node during preflight also checks that its shared libraries load. macOS x86_64 is planned but unqualified and setup rejects it; its download pins are retained separately for future qualification. Install the exact Python 3.12.16, Node 24.22.3, uv 0.13.8, pnpm 12.18.0 and just 1.59.0 pins in `tools/toolchain.json`. Use the published artifact URLs/checksums there, not a floating installer. The initial Python invocation needs Python 3.12 or newer; uv locates the exact project interpreter without silently selecting a different patch.
