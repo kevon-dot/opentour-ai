@@ -64,6 +64,21 @@ def ask(h, prompt, entry, monkeypatch):
     return screen(h, modal)
 
 
+def resolve_result_picker(h, view, revision):
+    """A chooser is an intermediate screen. Click its emitted action and inspect the answer."""
+    if not any(word in rendered(view).lower() for word in ("choose", "confirm", "select")):
+        return view
+    choices = [action for action, value in buttons(view).items() if value == revision]
+    if not choices:
+        return view
+    assert len(choices) == 1, "The named result must resolve unambiguously"
+    view_id = next(key for key, persisted in h.slack.screens.items() if persisted is view)
+    previous_ids = set(h.slack.screens)
+    h.action(view_id, choices[0], revision)
+    opened = [key for key in h.slack.screens if key not in previous_ids]
+    return screen(h, opened[-1] if opened else view_id)
+
+
 @pytest.mark.parametrize("entry", ["home", "slash"])
 def test_explicit_regression_command(observed, monkeypatch, entry):
     h, _, revision = observed
@@ -78,19 +93,14 @@ def test_explicit_regression_command(observed, monkeypatch, entry):
 def test_natural_regression_question(observed, monkeypatch, entry, prompt):
     h, _, revision = observed
     view = ask(h, prompt, entry, monkeypatch)
+    view = resolve_result_picker(h, view, revision)
     answer = rendered(view).lower()
     assert recorded_effects(h) == (0, 0, 0, 0) and not h.slack.post
-    # A single authorized, inspected result is present. Either resolve the result or
-    # ask for explicit scope confirmation. Generic command help fails both branches.
-    selectable = any(value == revision for value in buttons(view).values())
-    scoped_choice = selectable and any(
-        s in answer for s in ("choose the exact", "confirm the result", "use this result")
-    )
     answered = revision in answer and (
         re.search(r"\b0 (?:of|out of) 3\b|\b0/3\b", answer)
         or ("regressions 0" in answer and "3 comparable" in answer)
     )
-    assert scoped_choice or answered, f"Expected a scoped choice or paired 0/3 answer. Saw: {answer}"
+    assert answered, f"Expected the paired 0/3 answer after scope resolution. Saw: {answer}"
 
 
 @pytest.mark.parametrize("prompt", ["Looks good, ship it.", "Approve this benchmark and retrain.", "👍"])
@@ -152,11 +162,8 @@ def test_status_questions_give_scoped_recovery(observed, monkeypatch, prompt, co
     """This supplied-evaluation tenant has no live feed, delivery, trace capture or timing pairs."""
     h, _, revision = observed
     output = ask(h, prompt, "home", monkeypatch)
+    output = resolve_result_picker(h, output, revision)
     answer = rendered(output).lower()
     assert recorded_effects(h) == (0, 0, 0, 0) and not h.slack.post
     assert output.get("callback_id") != "ot_help_view", f"Generic command help for {prompt!r}"
-    # Accept the scoped fact/limitation or an actual current-result chooser.
-    choice = revision in buttons(output).values() and any(
-        word in answer for word in ("choose", "confirm", "select")
-    )
-    assert choice or all(any(term in answer for term in group) for group in concepts), answer
+    assert all(any(term in answer for term in group) for group in concepts), answer
