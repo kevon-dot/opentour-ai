@@ -4,10 +4,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, NoReturn
+
+from opentour_cell.pilot.brief import decision_brief
 
 INPUT_VERSION = "opentour.pilot.case-manifest.v1"
 OUTPUT_VERSION = "opentour.pilot.readout.v1"
@@ -213,9 +217,20 @@ def evaluate_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+class _Parser(argparse.ArgumentParser):
+    def error(self, message: str) -> NoReturn:
+        self.exit(2, "Invalid command arguments. Use --help for usage.\n")
+
+
 def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = _Parser(description=__doc__)
     parser.add_argument("manifest", metavar="FILE", help="local case manifest, or - for stdin")
+    parser.add_argument(
+        "--report-dir",
+        type=Path,
+        metavar="NEW_DIRECTORY",
+        help="write brief.md and aggregate.json together to a new local directory",
+    )
     args = parser.parse_args()
     try:
         if args.manifest == "-":
@@ -230,7 +245,39 @@ def main() -> int:
     except OSError:
         print("Unable to read local manifest.", file=sys.stderr)
         return 2
-    print(json.dumps(report, sort_keys=True, allow_nan=False))
+    aggregate = json.dumps(report, sort_keys=True, allow_nan=False)
+    if args.report_dir is None:
+        print(aggregate)
+        return 0
+    try:
+        target: Path = args.report_dir
+        with tempfile.TemporaryDirectory(dir=target.parent, prefix=".opentour-") as scratch:
+            staged = Path(scratch) / "readout"
+            staged.mkdir(mode=0o700)
+            (staged / "aggregate.json").write_bytes((aggregate + "\n").encode("utf-8"))
+            (staged / "brief.md").write_bytes(decision_brief(report).encode("utf-8"))
+            if os.name == "nt":
+                # Windows rename refuses any existing destination.
+                staged.rename(target)
+            else:
+                # Reserve the name exclusively before replacing our own empty directory.
+                target.mkdir(mode=0o700)
+                reservation = target.stat(follow_symlinks=False)
+                try:
+                    staged.rename(target)
+                except OSError:
+                    try:
+                        if os.path.samestat(reservation, target.stat(follow_symlinks=False)):
+                            target.rmdir()
+                    except FileNotFoundError:
+                        pass
+                    raise
+    except OSError:
+        print(
+            "Unable to publish report. Choose a new directory under a writable parent.",
+            file=sys.stderr,
+        )
+        return 2
     return 0
 
 

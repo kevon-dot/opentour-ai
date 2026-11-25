@@ -10,6 +10,8 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from opentour_cell.pilot import readout
+from opentour_cell.pilot.brief import decision_brief
 from opentour_cell.pilot.readout import (
     INPUT_VERSION,
     MAX_MANIFEST_BYTES,
@@ -218,13 +220,15 @@ def test_file_parse_bounds_apply_before_processing():
         parse_manifest(b" " * (MAX_MANIFEST_BYTES + 1))
 
 
-def run_cli(argument: str, payload: bytes = b"") -> subprocess.CompletedProcess[bytes]:
+def run_cli(
+    argument: str, payload: bytes = b"", *options: str
+) -> subprocess.CompletedProcess[bytes]:
     src = Path(__file__).resolve().parents[2] / "src"
     paths = [str(src)]
     if existing := os.environ.get("PYTHONPATH"):
         paths.append(existing)
     return subprocess.run(
-        [sys.executable, "-m", "opentour_cell.pilot.readout", argument],
+        [sys.executable, "-m", "opentour_cell.pilot.readout", *options, argument],
         input=payload,
         capture_output=True,
         env=os.environ | {"PYTHONPATH": os.pathsep.join(paths)},
@@ -256,3 +260,102 @@ def test_cli_failure_returns_no_partial_report_and_does_not_echo_values(tmp_path
         assert result.returncode == 2
         assert result.stdout == b""
         assert result.stderr and b"sensitive" not in result.stderr
+
+
+def test_report_dir_publishes_replayable_outputs_after_validation(tmp_path):
+    data = manifest(
+        case("generated-1", LABEL, BAD, GOOD),
+        case("generated-2", LABEL, GOOD, BAD),
+        case("generated-3", LABEL, GOOD, REVIEW),
+        case("generated-4", LABEL, REVIEW, GOOD),
+    )
+    payload = json.dumps(data).encode()
+    target = tmp_path / "new"
+    assert run_cli("-", b"{}", "--report-dir", str(target)).returncode == 2
+    assert list(tmp_path.iterdir()) == []
+    previous = run_cli("-", payload)
+    result = run_cli("-", payload, "--report-dir", str(target))
+    assert (result.returncode, result.stdout, result.stderr) == (0, b"", b"")
+    assert (target / "aggregate.json").read_bytes() == previous.stdout
+    brief = (target / "brief.md").read_text()
+    assert brief == decision_brief(evaluate_manifest(data))
+    for text in (
+        "3/4 (75.00%)",
+        "(fix) | 1",
+        "(regression) | 1",
+        "Whole-arm error rates",
+        "only by the incumbent total 1",
+        "only by the repair total 1",
+    ):
+        assert text in brief
+    assert "generated-" not in brief and "| Decision and next action | |" in brief
+    existing = run_cli("-", json.dumps(manifest()).encode(), "--report-dir", str(target))
+    assert existing.returncode == 2
+    assert (target / "brief.md").read_text() == brief
+    assert (target / "aggregate.json").read_bytes() == previous.stdout
+
+
+def test_empty_and_unverified_briefs_use_true_denominators():
+    empty = decision_brief(evaluate_manifest(manifest()))
+    assert "0/0 (undefined)" in empty and "Undetermined" in empty
+    mixed = manifest(
+        case("generated-1", LABEL, BAD, GOOD),
+        case("generated-2", None, GOOD, MISSING),
+    )
+    result = decision_brief(evaluate_manifest(mixed))
+    for text in (
+        "Insufficient evidence",
+        "1/1 (100.00%) | 0/1 (0.00%)",
+        "Unknown reference | 1",
+        "1/2 (50.00%)",
+        "missing outputs by +1",
+        "paired comparison total 1",
+    ):
+        assert text in result
+
+
+def test_cli_rejects_unknown_arguments_and_existing_empty_output(tmp_path):
+    result = run_cli("-", b"{}", "--generated-private-identifier")
+    assert result.returncode == 2 and result.stdout == b"" and b"private" not in result.stderr
+    vacant = tmp_path / "preexisting"
+    vacant.mkdir()
+    before = vacant.stat()
+    result = run_cli("-", json.dumps(manifest()).encode(), "--report-dir", str(vacant))
+    assert result.returncode == 2 and not list(vacant.iterdir())
+    assert vacant.stat().st_ino == before.st_ino
+
+
+def test_report_publication_failure_cleans_empty_reservation(tmp_path, monkeypatch, capsys):
+    source = tmp_path / "source.json"
+    source.write_text(json.dumps(manifest()))
+    target = tmp_path / "report"
+    monkeypatch.setattr(sys, "argv", ["readout", "--report-dir", str(target), str(source)])
+
+    def fail_rename(staged, destination):
+        assert set(p.name for p in staged.iterdir()) == {"aggregate.json", "brief.md"}
+        if os.name == "posix":
+            assert destination.is_dir() and not list(destination.iterdir())
+            assert destination.stat().st_mode & 0o777 == 0o700
+        raise OSError("generated publication failure")
+
+    monkeypatch.setattr(Path, "rename", fail_rename)
+    assert readout.main() == 2
+    assert capsys.readouterr().out == ""
+    assert list(tmp_path.iterdir()) == [source]
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX uses an exclusive directory reservation")
+def test_failed_publication_leaves_a_replaced_reservation_alone(tmp_path, monkeypatch):
+    source = tmp_path / "source.json"
+    source.write_text(json.dumps(manifest()))
+    target = tmp_path / "report"
+    monkeypatch.setattr(sys, "argv", ["readout", "--report-dir", str(target), str(source)])
+
+    def replace_and_fail(staged, destination):
+        os.rename(destination, tmp_path / "moved-reservation")
+        destination.mkdir()
+        raise OSError("generated replacement")
+
+    monkeypatch.setattr(Path, "rename", replace_and_fail)
+    assert readout.main() == 2
+    assert target.is_dir()

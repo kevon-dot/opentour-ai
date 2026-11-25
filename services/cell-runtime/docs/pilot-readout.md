@@ -15,6 +15,8 @@ PYTHONPATH=services/cell-runtime/src python -m opentour_cell.pilot.readout \
 
 Replace the example filename with a local manifest, or use `-` to read standard input. The command writes one aggregate JSON object to standard output. An unreadable or invalid input exits with code 2, writes a diagnostic to standard error and produces no report. Replaying the same manifest produces identical output. Source files are opened for reading.
 
+Add `--report-dir NEW_DIRECTORY` to write the same aggregate as `aggregate.json` alongside an owner-readable `brief.md`. Use a new directory for each run. The portable offline kit includes its own README and a generated example.
+
 ## Input contract
 
 The UTF-8 JSON object has exactly these three fields.
