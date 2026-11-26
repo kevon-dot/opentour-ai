@@ -236,6 +236,24 @@ def _project(body: Json, snapshot: ReadinessSnapshot) -> Json:
     return {**body, "next_action": action, "next_owner": owner}
 
 
+def _validated_receipt(body: Json, revision: str, encoded: str) -> Json:
+    receipt = json.loads(encoded)
+    _require(
+        isinstance(receipt, dict)
+        and receipt.keys() == body.keys() | {"revision", "readiness_ref", "version", "recorded_at"}
+    )
+    _require(
+        all(receipt.get(key) == value for key, value in body.items())
+        and receipt["revision"] == revision
+        and receipt["readiness_ref"] == "ready-" + revision[:40]
+        and type(receipt["version"]) is int
+        and receipt["version"] > 0
+        and type(receipt["recorded_at"]) is int
+        and receipt["recorded_at"] >= 0
+    )
+    return dict(receipt)
+
+
 class TrainingReadiness:
     def __init__(
         self,
@@ -325,7 +343,7 @@ class TrainingReadiness:
                         self.source.snapshot(actor, workflow_ref) == snapshot
                         and self._body(snapshot) == body
                     )
-                    return _project(json.loads(prior[0]), snapshot)
+                    return _project(_validated_receipt(body, revision, prior[0]), snapshot)
                 version = db.execute(
                     "SELECT COALESCE(MAX(version),0)+1 FROM readiness WHERE scope=?", (scope,)
                 ).fetchone()[0]
@@ -368,11 +386,7 @@ class TrainingReadiness:
                     or self._body(snapshot) != body
                 ):
                     return None
-                receipt = json.loads(row[0])
-                _require(
-                    all(receipt.get(k) == v for k, v in body.items())
-                    and receipt.get("revision") == revision
-                )
+                receipt = _validated_receipt(body, revision, row[0])
                 return _project(receipt, snapshot)
 
     def history(self, workflow_ref: str, *, actor: IntakePrincipal) -> list[Mapping[str, Any]]:

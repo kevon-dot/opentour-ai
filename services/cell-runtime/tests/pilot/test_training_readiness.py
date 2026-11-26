@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
@@ -302,3 +303,25 @@ def test_evidence_changed_while_waiting_for_writer_cannot_publish_old_verdict(fi
             request.result(timeout=5)
     assert registry.read("workflow-1", actor=ACTOR, expected_revision=first["revision"]) is None
     assert len(registry.history("workflow-1", actor=ACTOR)) == 1
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"verdict": "fit_eligible", "reason_code": "fit_eligible", "verified_root_count": 500},
+        {"revision": "restored-other-revision"},
+        {"unexpected_private_field": "not-permitted"},
+        {"workflow_ref": "other-workflow"},
+    ],
+)
+def test_corrupt_or_mismatched_restored_receipt_is_denied_on_retry_and_read(
+    fixture, change
+) -> None:
+    registry, _, _ = fixture
+    registry.refresh("workflow-1", actor=ACTOR)
+    with sqlite3.connect(registry.path) as db:
+        body = json.loads(db.execute("SELECT content FROM readiness").fetchone()[0])
+        db.execute("UPDATE readiness SET content=?", (json.dumps({**body, **change}),))
+    for operation in (registry.refresh, registry.read):
+        with pytest.raises(TrainingError, match="readiness_evidence_unavailable"):
+            operation("workflow-1", actor=ACTOR)
