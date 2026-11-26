@@ -30,7 +30,7 @@ After inspecting a managed comparison, the named reviewer can select **View comp
 
 ## Prepare one private worker
 
-Use Python 3.12.16 on a supported owner-operated POSIX machine. Start in the extracted kit directory. Replace `/private/customer-pilot` everywhere with an approved absolute path. Use a separate mode-0700 directory and worker for each organization. Obtain the released or review-candidate kit's SHA-256 through the operator's approved handoff and verify it before installation.
+For first-release live managed-worker qualification, use Python 3.12.16 and SQLite on an owner-approved Linux x86-64 host. Start in the extracted kit directory. Replace `/private/customer-pilot` everywhere with an approved absolute path. Use a separate mode-0700 directory and worker for each organization. Obtain the released or review-candidate kit's SHA-256 through the operator's approved handoff and verify it before installation.
 
 ```sh
 umask 077

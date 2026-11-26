@@ -5,11 +5,13 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import sqlite3
 import subprocess
 import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 from pathlib import Path
 from typing import Any
 
@@ -381,6 +383,28 @@ def test_unapproved_source_and_counterfeit_confirmation_hold(tmp_path: Path) -> 
     cfg = c.config | {"connector": "foreign-reader"}
     assert cycle.cycle_once(c.owner, c.org, cfg, connector=c.connector)["state"] == "held"
     assert c.connector.pulls == 1
+
+
+def test_freeze_holds_if_previously_confirmed_class_record_is_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    customer = Customer(tmp_path)
+    freeze = source_intake.freeze_intake
+
+    def lose_class_record(*args: Any, **kwargs: Any) -> Json:
+        assert kwargs["confirmation"]
+        with closing(sqlite3.connect(customer.ledger.path)) as db, db:
+            removed = db.execute("DELETE FROM classes WHERE scope=?", (customer.ledger.scope,))
+            assert removed.rowcount == 1
+        return freeze(*args, **kwargs)
+
+    monkeypatch.setattr(source_intake, "freeze_intake", lose_class_record)
+    result = customer.run()
+    assert result["state"] == "held"
+    assert result["reason"] == "delegated_class_confirmation_required"
+    assert not list(customer.owner.glob("cycle-intake-*.json"))
+    with closing(sqlite3.connect(customer.ledger.path)) as db:
+        assert db.execute("SELECT count(*) FROM classes").fetchone() == (0,)
 
 
 def test_no_remaining_budget_for_new_catalog_pair_stops_before_reads(tmp_path: Path) -> None:

@@ -2,9 +2,13 @@
 
 A workflow owner chooses one recurring decision, its authoritative outcome, the minimum automatic coverage and maximum wrong-automatic rate. OpenTour tests a credible simpler change first. A rule that meets the agreed requirements can ship immediately after the protected comparison and owner decision. A confirmed recurring error can instead qualify one supported open-weight model for supervised tuning on approved local compute. The held-out evaluator can recommend the rule, the model, the incumbent, or a hold.
 
+Before upgrading or rolling back a kit against an existing queue, stop all workers and wait for
+them to exit. Follow the [local worker upgrade and rollback procedure](slack-workspace-kit.md#upgrade-the-local-worker).
+In the extracted kit, open **Upgrade the local worker** in `README.md`.
+
 ## Rehearse the rule in the distributed kit
 
-Use a new directory on an approved POSIX machine with Python 3.12.16. These commands use generated data and separately stored operator permissions. The example prepares twelve development cases and four protected cases. It does not contact a provider, authorize a model fit, post to Slack, or count a customer acceptance.
+For first-release managed-worker qualification, use a new directory on an owner-approved Linux x86-64 host with Python 3.12.16 and SQLite. These commands use generated data and separately stored operator permissions. The example prepares twelve development cases and four protected cases. It does not contact a provider, authorize a model fit, post to Slack, or count a customer acceptance.
 
 ```bash
 umask 077

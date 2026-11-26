@@ -18,6 +18,8 @@ from typing import Any, cast
 from opentour_cell.pilot import open_weight
 from opentour_cell.pilot.operating_point import canonical, digest
 from opentour_cell.pilot.simple_repair import RepairError, identifier, validate_features
+from opentour_cell.pilot.text_classifier import TrainingError
+from opentour_cell.pilot.training import LocalTrainingStore
 
 Json = dict[str, Any]
 KIND = "standing_customer_mandate"
@@ -277,6 +279,22 @@ class LearningMandates:
         finally:
             db.close()
 
+    @contextmanager
+    def _authorized_db(self, *, write: bool = True) -> Iterator[sqlite3.Connection]:
+        # Use the same engagement lock as custody before opening a productive mandate
+        # transaction. Read-only checks can also run within an existing intake guard.
+        try:
+            store = LocalTrainingStore(
+                self.directory / "training.sqlite3", self.organization, existing_only=True
+            )
+            with (
+                store.engagement_guard(engagement_id=self.engagement, read_only=not write),
+                self._db(write=write) as db,
+            ):
+                yield db
+        except (OSError, sqlite3.Error, TrainingError) as exc:
+            raise MandateError("standing_engagement_unavailable") from exc
+
     def _owner(self, db: sqlite3.Connection) -> str:
         row = db.execute("SELECT actor FROM owners WHERE scope=?", (self.scope,)).fetchone()
         require(row is not None, "registered_mandate_owner_required")
@@ -324,12 +342,12 @@ class LearningMandates:
         return self._receipt(row, existing)
 
     def enroll(self, spec: Mapping[str, Any], *, actor: str) -> Json:
-        with self._db() as db:
+        with self._authorized_db() as db:
             return self._enroll(db, spec, actor)
 
     def reauthorize(self, previous: str, spec: Mapping[str, Any], *, actor: str) -> Json:
         """Record fresh owner authority without clearing previous use or resurrecting old runs."""
-        with self._db() as db:
+        with self._authorized_db() as db:
             prior, old = self._mandate(db, previous)
             require(
                 actor == self._owner(db) == old["owner_id"], "registered_owner_approval_required"
@@ -415,7 +433,7 @@ class LearningMandates:
             "mandate_scope_mismatch",
         )
         req["fields"] = _list(req["fields"], 8)
-        with self._db() as db:
+        with self._authorized_db() as db:
             row, spec = self._mandate(db, mandate_id)
             self._active(row, spec, actor)
             require(
@@ -475,19 +493,25 @@ class LearningMandates:
         return cast(sqlite3.Row, row)
 
     def check_run(self, run_id: str, *, actor: str) -> Json:
-        with self._db(write=False) as db:
+        with self._authorized_db(write=False) as db:
             run = self._run_row(db, run_id)
             row, spec = self._mandate(db, run["mandate"])
             self._active(row, spec, actor)
             return self._source_receipt(run, row, spec)
 
     def confirm_class(
-        self, run_id: str, *, actor: str, discovery_revision: str, candidate: Mapping[str, Any]
+        self,
+        run_id: str,
+        *,
+        actor: str,
+        discovery_revision: str,
+        candidate: Mapping[str, Any],
+        existing_only: bool = False,
     ) -> Json:
         require(
             _hex(discovery_revision) and isinstance(candidate, Mapping), "invalid_delegated_class"
         )
-        with self._db() as db:
+        with self._authorized_db(write=not existing_only) as db:
             run = self._run_row(db, run_id)
             row, spec = self._mandate(db, run["mandate"])
             self._active(row, spec, actor)
@@ -519,6 +543,7 @@ class LearningMandates:
             if found is not None:
                 require(found[0] == encoded, "delegated_class_conflict")
             else:
+                require(not existing_only, "delegated_class_confirmation_required")
                 db.execute("INSERT INTO classes VALUES(?,?,?)", (self.scope, run_id, encoded))
             return document
 
@@ -534,7 +559,7 @@ class LearningMandates:
             ),
             "immutable_fit_revisions_required",
         )
-        with self._db() as db:
+        with self._authorized_db() as db:
             row, spec = self._mandate(db, mandate_id)
             self._active(row, spec, actor)
             run = self._run_row(db, req["run_id"])
@@ -636,7 +661,7 @@ class LearningMandates:
         }
 
     def grant(self, reservation_id: str, *, actor: str) -> Json:
-        with self._db(write=False) as db:
+        with self._authorized_db(write=False) as db:
             res = self._reservation(db, reservation_id)
             row, spec = self._mandate(db, res["mandate"])
             self._active(row, spec, actor)
@@ -650,7 +675,7 @@ class LearningMandates:
             and output != self.directory,
             "private_new_fit_destination_required",
         )
-        with self._db() as db:
+        with self._authorized_db() as db:
             res = self._reservation(db, reservation_id)
             row, spec = self._mandate(db, res["mandate"])
             self._active(row, spec, actor)
@@ -682,7 +707,10 @@ class LearningMandates:
             and (artifact_sha256 is None or _hex(artifact_sha256)),
             "invalid_fit_settlement",
         )
-        with self._db() as db:
+        # A claimed fit may settle measured usage after a hold. Accepting an artifact
+        # still requires live domain authority.
+        settlement = self._authorized_db() if artifact_sha256 is not None else self._db()
+        with settlement as db:
             res = self._reservation(db, reservation_id)
             row, spec = self._mandate(db, res["mandate"])
             require(actor == spec["delegate"], "standing_delegate_mismatch")

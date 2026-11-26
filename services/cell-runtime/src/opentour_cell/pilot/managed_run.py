@@ -23,6 +23,7 @@ from opentour_cell.pilot.training_data import canonical, digest, identifier
 
 PLAN_VERSION = "opentour.pilot.managed-repair.v1"
 QUEUE_FILE = "managed-runs.sqlite3"
+WORKER_LEASE_FILE = "managed-runs.worker.lock"
 RESOURCE = "owner_local_cpu"
 TARGET_MS = 2 * 3600 * 1000
 HEX = re.compile(r"[0-9a-f]{64}")
@@ -54,6 +55,33 @@ def plan_revision(manifest: dict[str, Any]) -> str:
 
 def _now() -> int:
     return time.time_ns() // 1_000_000
+
+
+def _check_lease(path: Path, descriptor: int) -> None:
+    _check_file(path)
+    opened = os.fstat(descriptor)
+    if opened.st_size or not os.path.samestat(opened, path.lstat()):
+        raise ManagedError("private_state_unavailable")
+
+
+@contextmanager
+def _worker_lease(path: Path) -> Iterator[int | None]:
+    try:
+        descriptor = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
+    except OSError:
+        raise ManagedError("private_state_unavailable") from None
+    try:
+        try:
+            _check_lease(path, descriptor)
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            yield None
+            return
+        except (OSError, TrainingError):
+            raise ManagedError("private_state_unavailable") from None
+        yield descriptor
+    finally:
+        os.close(descriptor)
 
 
 def _safe_result(result: dict[str, Any]) -> tuple[str, int, str]:
@@ -178,6 +206,7 @@ class ManagedSelection:
         self.authorization = authorization
         self.prerequisites = prerequisites
         self.path = directory / QUEUE_FILE
+        self.lease_path = directory / WORKER_LEASE_FILE
         _check_directory(self.path)
 
     def read(self) -> dict[str, Any]:
@@ -462,19 +491,16 @@ class ManagedSelection:
         self.current(data)
         try:
             _check_file(self.path)
+            queue_identity = self.path.lstat()
         except FileNotFoundError:
             return {"state": "idle"}
-        # Crash or exit releases this OS lease. A slow live worker retains it.
-        with os.fdopen(
-            os.open(self.path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), "rb"
-        ) as lease:
-            try:
-                fcntl.flock(lease, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError:
+        # SQLite's own file locks can conflict with flock on the same inode.
+        # The sidecar stays in place when a worker exits or crashes.
+        with _worker_lease(self.lease_path) as lease:
+            if lease is None:
                 return {"state": "busy"}
-            if not os.path.samestat(os.fstat(lease.fileno()), self.path.lstat()):
-                raise ManagedError("private_state_unavailable")
             with self.queue(data, write=True) as (db, grant):
+                self._check_worker_paths(lease, queue_identity)
                 row = db.execute(
                     "SELECT * FROM runs WHERE revision=? AND grant_id=?"
                     " AND state IN ('queued','running')",
@@ -503,6 +529,7 @@ class ManagedSelection:
                     state, reason = "failed", "worker_failed"
             self.current(data)
             with self.queue(data, write=True) as (db, grant):
+                self._check_worker_paths(lease, queue_identity)
                 if digest(grant) != admitted:
                     raise ManagedError("authorization_changed")
                 finished = _now()
@@ -527,3 +554,8 @@ class ManagedSelection:
                 if updated.rowcount != 1:
                     raise ManagedError("worker_claim_changed")
                 return _projection(db.execute("SELECT * FROM runs WHERE id=?", (run,)).fetchone())
+
+    def _check_worker_paths(self, lease: int, queue_identity: os.stat_result) -> None:
+        _check_lease(self.lease_path, lease)
+        if not os.path.samestat(queue_identity, self.path.lstat()):
+            raise ManagedError("private_state_unavailable")

@@ -515,9 +515,10 @@ class LocalTrainingStore:
         dataset_revision: str | None = None,
         *,
         engagement_id: str | None = None,
+        read_only: bool = False,
     ) -> Iterator[None]:
         """Serialize a live grant check and claim with engagement withdrawal."""
-        with self._db(write=True) as db:
+        with self._db(write=not read_only) as db:
             if engagement_id is not None:
                 actual = db.execute("SELECT id FROM engagement WHERE singleton=1").fetchone()[0]
                 if actual != engagement_id:

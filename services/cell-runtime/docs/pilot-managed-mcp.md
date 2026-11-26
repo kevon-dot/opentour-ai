@@ -4,7 +4,7 @@ Once the custodian has prepared and authorized one frozen workflow, a client can
 
 ## Prepare and authorize
 
-Use the pinned Python runtime in the extracted workspace kit. The custodian stages the imported trace, corrections, scoped source grant and managed plan in the same owner-only directory. For a rehearsal use the generated example distributed with this kit. For a customer engagement record the actual source permission, permitted evidence recipient, retention terms and any separately authorized training and resource limits first.
+For first-release managed-worker qualification, use the extracted workspace kit with Python 3.12.16 and SQLite on an owner-approved Linux x86-64 host. The custodian stages the imported trace, corrections, scoped source grant and managed plan in the same owner-only directory. For a rehearsal use the generated example distributed with this kit. For a customer engagement record the actual source permission, permitted evidence recipient, retention terms and any separately authorized training and resource limits first.
 
 Supply the actual private directory and organization. The authorization file must have a fresh filename inside the directory. Keep this file owner-only. The readiness check returns the canonical SHA-256 of the prepared plan. It validates the current source authority without opening protected answers.
 

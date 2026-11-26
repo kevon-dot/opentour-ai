@@ -487,7 +487,7 @@ def test_cohort_workplace_normal_entry_claims_before_provider_and_denies_replay(
     path: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from collections.abc import Callable, Iterator
-    from contextlib import contextmanager
+    from contextlib import AbstractContextManager, contextmanager
 
     from opentour_cell.pilot import workplace_context as workplace
     from test_workplace_context import WorkplaceFixture, put
@@ -531,15 +531,15 @@ def test_cohort_workplace_normal_entry_claims_before_provider_and_denies_replay(
     def attempted_provider(
         cfg: Json,
         root: Path,
-        check_lease: Callable[[], None],
+        dispatch: Callable[[], AbstractContextManager[None]],
     ) -> Iterator[object]:
-        check_lease()
-        attempts.append("connection")
-        # This is the provider transport seam. Assert the committed claim already exists.
-        with closing(sqlite3.connect(path)) as db:
-            assert db.execute(
-                "SELECT event_id FROM cohort_effect WHERE reconciliation_digest IS NULL"
-            ).fetchone() == (begin["event_id"],)
+        with dispatch():
+            attempts.append("connection")
+            # This is the provider transport seam. Assert the committed claim already exists.
+            with closing(sqlite3.connect(path)) as db:
+                assert db.execute(
+                    "SELECT event_id FROM cohort_effect WHERE reconciliation_digest IS NULL"
+                ).fetchone() == (begin["event_id"],)
         yield object()
 
     def catalog(*_: object) -> tuple[Json, Json]:
@@ -587,7 +587,7 @@ def test_lease_is_rechecked_after_provider_opens_before_catalog(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from collections.abc import Callable, Iterator
-    from contextlib import contextmanager
+    from contextlib import AbstractContextManager, contextmanager
 
     from opentour_cell.pilot import workplace_context as workplace
     from test_workplace_context import WorkplaceFixture, put
@@ -632,10 +632,10 @@ def test_lease_is_rechecked_after_provider_opens_before_catalog(
     def revoked_transport(
         cfg: Json,
         root: Path,
-        check_lease: Callable[[], None],
+        dispatch: Callable[[], AbstractContextManager[None]],
     ) -> Iterator[object]:
-        check_lease()
-        calls.append("open")
+        with dispatch():
+            calls.append("open")
         _, terminal = qualification(
             path,
             org,
@@ -657,12 +657,7 @@ def test_lease_is_rechecked_after_provider_opens_before_catalog(
     assert calls == ["open"]
 
 
-@pytest.mark.parametrize(
-    ("operation", "stop_page"), [("discover", 1), ("acquire", 1), ("acquire", 2)]
-)
-def test_native_reader_stops_catalog_continuation_after_lease_withdrawal(
-    path: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operation: str, stop_page: int
-) -> None:
+def _native_cohort_fixture(path: Path, tmp_path: Path, operation: str):
     from opentour_cell.pilot import workplace_context as workplace
     from test_workplace_context import WorkplaceFixture, put
 
@@ -700,6 +695,27 @@ def test_native_reader_stops_catalog_continuation_after_lease_withdrawal(
             )
         ),
     )
+    return fixture
+
+
+@pytest.mark.parametrize(
+    ("operation", "stop_page"), [("discover", 1), ("acquire", 1), ("acquire", 2)]
+)
+@pytest.mark.parametrize(
+    "reason", ["workplace_lease_no_longer_current", "engagement_withdrawn"]
+)
+def test_native_reader_stops_catalog_continuation_after_authority_loss(
+    path: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+    stop_page: int,
+    reason: str,
+) -> None:
+    from opentour_cell.pilot import workplace_context as workplace
+
+    fixture = _native_cohort_fixture(path, tmp_path, operation)
+    org = fixture.grant["organization"]
     original_receive = workplace._Stdio.receive
     paginated_replies = 0
 
@@ -709,15 +725,22 @@ def test_native_reader_stops_catalog_continuation_after_lease_withdrawal(
         if "nextCursor" in response.get("result", {}):
             paginated_replies += 1
             if paginated_replies == stop_page:
-                _, terminal = qualification(
-                    path, org, intent="lost", source_revision=2, event_id="generated-source-lost"
-                )
-                assert terminal["disposition"] == "lost"
+                if reason == "engagement_withdrawn":
+                    assert fixture.store.withdraw()["status"] == "withdrawn"
+                else:
+                    _, terminal = qualification(
+                        path,
+                        org,
+                        intent="lost",
+                        source_revision=2,
+                        event_id="generated-source-lost",
+                    )
+                    assert terminal["disposition"] == "lost"
         return response
 
     monkeypatch.setattr(workplace._Stdio, "receive", withdraw_between_pages)
     use = workplace.discover_workplace if operation == "discover" else workplace.acquire_workplace
-    with pytest.raises(workplace.WorkplaceError, match="workplace_lease_no_longer_current"):
+    with pytest.raises(workplace.WorkplaceError, match=reason):
         use(fixture.store, fixture.connection)
     received = fixture.received()
     requests = [item for item in received if item["method"] == "resources/list"]
@@ -727,3 +750,44 @@ def test_native_reader_stops_catalog_continuation_after_lease_withdrawal(
         0 if stop_page == 1 else 2
     )
     assert not list(fixture.directory.glob("workplace-snapshots/*"))
+
+
+def test_native_reader_dispatch_and_snapshot_fence_register_writers(
+    path: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from opentour_cell.pilot import workplace_context as workplace
+
+    fixture = _native_cohort_fixture(path, tmp_path, "acquire")
+    orig_write, orig_rename = workplace.os.write, workplace.os.rename
+    observed: list[str] = []
+
+    def check_locked(effect: str) -> None:
+        with closing(sqlite3.connect(path, timeout=0)) as other:
+            with pytest.raises(sqlite3.OperationalError, match="database is locked"):
+                other.execute("BEGIN IMMEDIATE")
+        observed.append(effect)
+
+    def checked_write(fd: int, data: bytes) -> int:
+        if b'"method":"resources/read"' in data:
+            check_locked("reader")
+        return orig_write(fd, data)
+
+    def checked_rename(source: Path, destination: Path) -> None:
+        if Path(source).name.startswith(".fetch-"):
+            check_locked("snapshot")
+        orig_rename(source, destination)
+
+    monkeypatch.setattr(workplace.os, "write", checked_write)
+    with monkeypatch.context() as nested:
+        nested.setattr(workplace.os, "rename", checked_rename)
+        published = workplace.acquire_workplace(fixture.store, fixture.connection)
+    assert observed == ["reader", "reader", "snapshot"]
+    assert Path(published["grant_path"]).is_file()
+    _, terminal = qualification(
+        path,
+        fixture.grant["organization"],
+        intent="lost",
+        source_revision=2,
+        event_id="generated-source-lost",
+    )
+    assert terminal["disposition"] == "lost"

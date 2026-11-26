@@ -4,9 +4,11 @@ Start with [the autonomous pilot guide](pilot-autonomous-cycle.md) to connect on
 
 Use [the two-route repair guide](pilot-managed-repairs.md) to rehearse both repair routes with generated data. For recurring private Slack invitations, enable `approval_requests` in the approved worker configuration. Use `slack CONFIG --flush-approvals` to dispatch outstanding requests and `slack CONFIG --unresolved-approvals` to list uncertain deliveries before reconciliation. The kit can run the offline software checks before a customer installs Slack or configures Zapier.
 
+For first-release qualification of the live workplace reader and managed worker, use an owner-approved Linux x86-64 host with Python 3.12.16 and SQLite. See [the workplace reader guide](pilot-workplace-context.md) for the descriptor-backed launch requirements.
+
 ## Rehearse both modes
 
-Use Python 3.12.16 on an owner-approved POSIX system with SQLite support. Unpack the ZIP into a new directory and compare its SHA-256 with the digest from the pilot operator. These commands run without credentials, a repository checkout or network access.
+Use Python 3.12.16 on an owner-approved host with SQLite for these offline software checks. Unpack the ZIP into a new directory and compare its SHA-256 with the digest from the pilot operator. These commands run without credentials, a repository checkout or network access.
 
 ```sh
 sha256sum -c SHA256SUMS
@@ -72,6 +74,19 @@ In the authorized channel, type `/opentour`. Browse or search the dataset and wo
 The customer worker connects outbound through Socket Mode. A separately approved Zapier Catch Hook may receive only permitted receipt fields. Start the configured Slack worker with `--auto-flush-zapier` for automatic handoff, or run `--flush-zapier` for a single operator-initiated flush. Both use the same current permission and destination checks. Verify a matching downstream delivery in the owner's Zap before recording it as confirmed. The first-ten product provisions zero OpenTour-managed AWS services. The administrator controls the Slack workspace and any approved third-party destinations.
 
 After a restart or uncertain request, use the [owner receipt recovery procedure](pilot-receipt-recovery.md) to discover outstanding receipts, inspect a held item and record independently verified downstream disposition. The listing reads private local state without sending an event.
+
+## Upgrade the local worker
+
+For each customer-local directory, stop the existing worker and any supervised or scheduled runner
+that can execute the same queue. Wait for their processes to exit before starting the updated kit.
+Older workers and updated workers acquire their leases on different files. Use the same quiescent
+procedure before a rollback on a host approved for the previous kit.
+
+Keep the existing `managed-runs.sqlite3` and its SQLite state intact. The updated worker creates the
+empty owner-only `managed-runs.worker.lock` alongside the queue on first use. Keep that file in place
+while workers can run. A process exit releases its lease automatically, and a restarted worker can
+recover the original run identity from the queue. Stop the workers before moving or restoring their
+state directory.
 
 ## Withdraw and close an engagement
 

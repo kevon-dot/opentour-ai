@@ -14,7 +14,7 @@ import sys
 import tempfile
 import time
 from collections.abc import Callable, Iterator
-from contextlib import contextmanager
+from contextlib import AbstractContextManager, ExitStack, contextmanager, nullcontext
 from pathlib import Path
 from typing import Any, BinaryIO, NoReturn, cast
 from urllib.parse import urlsplit
@@ -269,13 +269,16 @@ def _launcher(reader: Json) -> Iterator[BinaryIO]:
 
 class _Stdio:
     def __init__(
-        self, child: subprocess.Popen[bytes], deadline: float, check_lease: Callable[[], None]
+        self,
+        child: subprocess.Popen[bytes],
+        deadline: float,
+        dispatch: Callable[[], AbstractContextManager[None]],
     ):
         self.child = child
         self.deadline = deadline
-        self.check_lease = check_lease
         self.pending = bytearray()
         self.number = 0
+        self.dispatch = dispatch
         assert child.stdin is not None
         os.set_blocking(child.stdin.fileno(), False)
 
@@ -288,11 +291,11 @@ class _Stdio:
                 remaining > 0 and select.select([], [self.child.stdin], [], max(0, remaining))[1],
                 "workplace_reader_timeout",
             )
-            self.check_lease()
-            try:
-                sent = os.write(self.child.stdin.fileno(), payload)
-            except BlockingIOError:
-                continue
+            with self.dispatch():
+                try:
+                    sent = os.write(self.child.stdin.fileno(), payload)
+                except BlockingIOError:
+                    continue
             _need(sent, "workplace_reader_disconnected")
             payload = payload[sent:]
 
@@ -336,36 +339,31 @@ class _Stdio:
         raise WorkplaceError("workplace_notification_limit")
 
 
-def _spawn(
-    reader: Json, launcher: BinaryIO, root: Path, check_lease: Callable[[], None]
-) -> subprocess.Popen[bytes]:
-    check_lease()
-    return subprocess.Popen(
-        [reader["executable"]],
-        executable=f"/dev/fd/{launcher.fileno()}",
-        pass_fds=(launcher.fileno(),),
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
-        cwd=root,
-        env={n: os.environ[n] for n in reader["env_names"]},
-    )
-
-
 @contextmanager
-def _session(cfg: Json, root: Path, check_lease: Callable[[], None]) -> Iterator[_Stdio]:
+def _session(
+    cfg: Json, root: Path, dispatch: Callable[[], AbstractContextManager[None]]
+) -> Iterator[_Stdio]:
     reader = cfg["reader"]
     _need(
         all(n in os.environ for n in reader["env_names"]),
         "workplace_connection_credentials_unavailable",
     )
-    with (
-        _launcher(reader) as launcher,
-        _spawn(reader, launcher, root, check_lease) as child,
-    ):
+    with _launcher(reader) as launcher, ExitStack() as session:
+        with dispatch():
+            child = session.enter_context(
+                subprocess.Popen(
+                    [reader["executable"]],
+                    executable=f"/dev/fd/{launcher.fileno()}",
+                    pass_fds=(launcher.fileno(),),
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                    cwd=root,
+                    env={n: os.environ[n] for n in reader["env_names"]},
+                )
+            )
         try:
-            check_lease()
-            client = _Stdio(child, time.monotonic() + SESSION_SECONDS, check_lease)
+            client = _Stdio(child, time.monotonic() + SESSION_SECONDS, dispatch)
             hello = client.call(
                 "initialize",
                 {
@@ -640,7 +638,7 @@ def _snapshot(
     wire_hashes: Json,
     timing: Json,
     training: Path | None,
-    check_lease: Callable[[], None],
+    lease_guard: Callable[[], AbstractContextManager[None]],
 ) -> Json:
     directory = store.path.parent
     hashes = {r: _sha(rows[r]) for r in ROLES}
@@ -657,7 +655,8 @@ def _snapshot(
     snapshot_revision = digest(identity)
     with store.engagement_guard(engagement_id=cfg["scope"]["engagement"]):
         _live(store, context, digest(cfg))
-        check_lease()
+        with lease_guard():
+            pass
         if training is not None:
             grant.update(_training_right(store, training, grant, snapshot_revision))
         grant = _validated_grant(store, grant)
@@ -718,7 +717,8 @@ def _snapshot(
                 "fetch": timing,
                 "counts": counts,
             }
-            if os.path.lexists(location):
+            already_published = os.path.lexists(location)
+            if already_published:
                 _mkdir(location)
                 saved = parse_manifest(intake._read(location / "receipt.json", 32 * 1024))
                 _need(
@@ -733,19 +733,18 @@ def _snapshot(
                 )
             else:
                 intake._publish(staging / "receipt.json", receipt)
-                # Recheck authority after validating both streams, before exposing the pair.
-                _live(store, context, digest(cfg))
-                check_lease()
-                os.rename(staging, location)
-                _fsync_dir(snapshots)
             _live(store, context, digest(cfg))
-            check_lease()
-            if training is not None:
-                _training_right(store, training, grant, snapshot_revision)
-            for version_file, record in bindings:
-                intake._publish(version_file, record)
-            grant_path = directory / ("workplace-source-" + digest(grant) + ".json")
-            intake._publish(grant_path, grant)
+            # Validate streams before taking the register lock for the published effects.
+            with lease_guard():
+                if training is not None:
+                    _training_right(store, training, grant, snapshot_revision)
+                if not already_published:
+                    os.rename(staging, location)
+                    _fsync_dir(snapshots)
+                for version_file, record in bindings:
+                    intake._publish(version_file, record)
+                grant_path = directory / ("workplace-source-" + digest(grant) + ".json")
+                intake._publish(grant_path, grant)
         return {
             **summary,
             "connection_revision": digest(cfg),
@@ -759,14 +758,16 @@ def _snapshot(
         }
 
 
-def _claim_lease(store: LocalTrainingStore, cfg: Json, acquire: bool) -> Callable[[], None]:
+def _claim_lease(
+    store: LocalTrainingStore, cfg: Json, acquire: bool
+) -> Callable[[], AbstractContextManager[None]]:
     if cfg["schema_version"] == COHORT_CONNECTION:
         # Older standalone connection documents keep their deployed behavior.
         from opentour_cell.pilot.cohort_lease import claim_workplace_connection
         from opentour_cell.pilot.qualification import QualificationError
 
         try:
-            check = claim_workplace_connection(
+            guard = claim_workplace_connection(
                 cfg["cohort_lease"],
                 directory=store.path.parent,
                 organization=cfg["scope"]["organization"],
@@ -777,15 +778,17 @@ def _claim_lease(store: LocalTrainingStore, cfg: Json, acquire: bool) -> Callabl
         except QualificationError as error:
             raise WorkplaceError(str(error)) from None
 
-        def recheck() -> None:
+        @contextmanager
+        def recheck() -> Iterator[None]:
             try:
-                check()
+                with guard():
+                    yield
             except QualificationError as error:
                 raise WorkplaceError(str(error)) from None
 
         return recheck
 
-    return lambda: None
+    return lambda: nullcontext()
 
 
 def _operate(
@@ -801,12 +804,22 @@ def _operate(
     try:
         with store.engagement_guard():
             cfg = _live(store, connection, expected_connection_revision)
-        check_lease = _claim_lease(store, cfg, acquire)
-        check_lease()
-        with _session(cfg, store.path.parent, check_lease) as client:
-            check_lease()
+            lease_guard = _claim_lease(store, cfg, acquire)
+        revision = digest(cfg)
+
+        @contextmanager
+        def dispatch() -> Iterator[None]:
+            # Fence dispatch under both current authorities. Await replies outside the guard.
+            with store.engagement_guard(engagement_id=cfg["scope"]["engagement"]):
+                _live(store, connection, revision)
+                with lease_guard():
+                    yield
+
+        with _session(cfg, store.path.parent, dispatch) as client:
+            with dispatch():
+                pass
             pair, summary = _catalog(client, cfg, max_total_rows)
-            summary["connection_revision"] = digest(cfg)
+            summary["connection_revision"] = revision
             if expected_pair_revision is not None:
                 _need(
                     _hex(expected_pair_revision)
@@ -814,15 +827,10 @@ def _operate(
                     "workplace_selected_pair_changed",
                 )
             if not acquire:
-                with store.engagement_guard():
-                    _live(store, connection, digest(cfg))
-                    check_lease()
-                return summary
+                with dispatch():
+                    return summary
             rows, wire_hashes, timing = {}, {}, {}
             for role in ROLES:
-                with store.engagement_guard():
-                    _live(store, connection, digest(cfg))
-                check_lease()
                 started = time.monotonic_ns()
                 observed = int(time.time())
                 rows[role], wire_hashes[role] = _read_rows(client, cfg, role, pair[role])
@@ -831,7 +839,6 @@ def _operate(
                     "finished_at": int(time.time()),
                     "elapsed_ns": time.monotonic_ns() - started,
                 }
-            check_lease()
             again, _ = _catalog(client, cfg, max_total_rows)
             _need(again == pair, "workplace_selected_pair_changed")
         return _snapshot(
@@ -844,7 +851,7 @@ def _operate(
             wire_hashes,
             timing,
             training_confirmation,
-            check_lease,
+            lease_guard,
         )
     except WorkplaceError:
         raise
