@@ -14,12 +14,16 @@ the actual private mandate and related facts. HMAC authenticates the adapter sha
 with the verifier. Keep that verification configuration outside the submitted envelope. Revoking
 the adapter's authorized configuration must stop new submissions before resuming intake.
 
+From the extracted kit directory with Python 3.12.16, run
+
 ```sh
-python -m opentour_cell.pilot.qualification \
+python opentour-slack.pyz qualification \
   --register /private/cohort/qualification.sqlite3 \
   --authority /private/cohort/authority.json \
   --submission /private/cohort/submission.json
 ```
+
+In the source environment, use `python -m opentour_cell.pilot.qualification` with the same arguments.
 
 The authority object has schema version `opentour.pilot.qualification-authority.v1` and the fields
 `organization_ref`, `signer_ref`, `route`, `mapping_ref`, `expires_at` (Unix seconds), and
