@@ -406,12 +406,19 @@ class StarterCases:
                 and set(splits.values()) <= {"development", "reserved", "excluded"},
                 "invalid_family_split",
             )
+            targets: dict[str, str] = {}
             for case in cases:
                 _require(case["status"] != "proposed", "owner_adjudication_required")
                 _require(
                     case["status"] == "resolved" or splits[case["family_id"]] == "excluded",
                     "unresolved_family_must_be_excluded",
                 )
+                if case["status"] == "resolved":
+                    fingerprint = digest(dict(case["decision_inputs"]))
+                    target = case["owner_adjudicated_target"]
+                    _require(
+                        targets.setdefault(fingerprint, target) == target, "starter_truth_conflict"
+                    )
                 case["split_ref"] = splits[case["family_id"]]
             _require("reserved" in splits.values(), "reserved_families_required")
             ref = self._ref(scope)

@@ -556,3 +556,16 @@ def test_changed_branch_cannot_reuse_development_inputs_as_reserved(core):
             OWNER, newer, splits={"fresh-family": "reserved"}, plan=PLAN, expected_revision=1
         )
     assert service.readback(OWNER, newer, operation_ref="read") is None
+
+
+def test_same_input_in_one_family_cannot_freeze_conflicting_owner_truth(core):
+    service, _ = core
+    first = case("SOFTWARE")
+    other = replace(first, case_id="freight", suggestion="FREIGHT")
+    service.propose(OWNER, WORK, (first, other))
+    adjudicate_all(service, (first, other))
+    with pytest.raises(IntakeError, match="truth_conflict"):
+        service.freeze(
+            OWNER, WORK, splits={first.family_id: "reserved"}, plan=PLAN, expected_revision=2
+        )
+    assert service.readback(OWNER, WORK, operation_ref="read") is None
