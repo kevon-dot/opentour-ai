@@ -12,7 +12,7 @@ from dataclasses import asdict, replace
 from pathlib import Path
 
 import pytest
-from opentour_cell.pilot.intake_admission import AuthorizedSource, DurableIntake
+from opentour_cell.pilot.intake_admission import AuthorizedSource, DurableIntake, canonical_intent
 from opentour_cell.pilot.intake_mcp import (
     CatalogPage,
     HistoricalPair,
@@ -192,6 +192,27 @@ def test_equivalent_new_keys_concurrent_and_restart_keep_one_draft(prepared):
         assert db.execute("SELECT materialized FROM benchmarks").fetchone()[0] is None
     with sqlite3.connect(authority.training.path) as db:
         assert db.execute("SELECT COUNT(*) FROM jobs").fetchone()[0] == 0
+
+
+def test_public_canonical_intent_matches_actual_authorized_admission(prepared):
+    intake, _ = prepared
+    receipt = intake.submit_intake(ACTOR, STARTER)
+    with intake.intake.admitted_work(ACTOR, receipt.run_ref) as work:
+        actual = canonical_intent(work.workflow_ref, work.mode, work.resource, work.revisions)
+        with sqlite3.connect(intake.intake.path) as db:
+            stored = db.execute(
+                "SELECT intent FROM intake_runs WHERE run_ref=?", (work.run_ref,)
+            ).fetchone()[0]
+        assert actual == stored
+        assert (
+            canonical_intent(
+                work.workflow_ref,
+                work.mode,
+                replace(work.resource, engagement_epoch="other"),
+                work.revisions,
+            )
+            != stored
+        )
 
 
 def test_crash_after_admission_before_draft_recovers_same_identity(prepared, monkeypatch):

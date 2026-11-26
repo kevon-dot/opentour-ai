@@ -19,7 +19,11 @@ from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any, Protocol
 
-from opentour_cell.pilot.intake_admission import DurableIntake, IntakeWork
+from opentour_cell.pilot.intake_admission import (
+    DurableIntake,
+    IntakeWork,
+    require_readonly_snapshot,
+)
 from opentour_cell.pilot.intake_mcp import (
     AdmissionHold,
     AdmissionReceipt,
@@ -54,6 +58,12 @@ class BenchmarkInspection(Protocol):
         self, actor: IntakePrincipal, workflow_ref: str
     ) -> AbstractContextManager[BenchmarkScope]:
         """Pin explicit current benchmark inspection, separately from live-feed rights."""
+        ...
+
+
+class LiveBenchmarkReadback(Protocol):
+    def read(self, actor: IntakePrincipal, work: IntakeWork) -> BenchmarkView | None:
+        """Resolve an explicitly selected benchmark under its own current intake authority."""
         ...
 
 
@@ -109,6 +119,8 @@ class WorkflowBenchmarks:
             except FileExistsError:
                 pass
         _check_file(self.path)
+        if not write:
+            require_readonly_snapshot(self.path)
         db = sqlite3.connect(
             self.path.as_uri() + ("?mode=rw" if write else "?mode=ro"),
             uri=True,
@@ -117,6 +129,8 @@ class WorkflowBenchmarks:
         )
         db.row_factory = sqlite3.Row
         try:
+            if not write:
+                db.execute("PRAGMA query_only=ON")
             db.execute("PRAGMA trusted_schema=OFF")
             db.execute("BEGIN IMMEDIATE" if write else "BEGIN")
             if write:
@@ -540,10 +554,17 @@ class WorkflowBenchmarks:
 class BenchmarkIntake:
     """Composition for stdio/HTTPS/setup; keeps the deployed intake wire schemas."""
 
-    def __init__(self, intake: DurableIntake, *, inspection: BenchmarkInspection | None = None):
+    def __init__(
+        self,
+        intake: DurableIntake,
+        *,
+        inspection: BenchmarkInspection | None = None,
+        live_readback: LiveBenchmarkReadback | None = None,
+    ):
         self.intake = intake
         self.benchmarks = WorkflowBenchmarks(intake.path.parent)
         self.inspection = inspection
+        self.live_readback = live_readback
 
     def discover_sources(
         self, actor: IntakePrincipal, *, limit: int, cursor: str | None
@@ -566,6 +587,9 @@ class BenchmarkIntake:
             if work.mode != "live":
                 view = self.benchmarks.for_run(actor.tenant, work)
                 return replace(status, benchmark=view or status.benchmark)
+            if self.live_readback is not None:
+                # The requesting live grant is pinned throughout the independent readback.
+                return replace(status, benchmark=self.live_readback.read(actor, work))
         # Live feed authorization alone confers no benchmark inspection rights.
         if self.inspection is not None:
             with self.inspection.guard(actor, status.workflow_ref) as scope:

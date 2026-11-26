@@ -610,6 +610,7 @@ def regression_picker(
     previous: bool,
     more: bool,
     topic: str = "changes",
+    current_workflow: tuple[str, str] | None = None,
 ) -> Block:
     blocks = [
         _section(
@@ -623,6 +624,15 @@ def regression_picker(
             "its evidence to ask about it."
         )
     ]
+    if current_workflow:
+        workflow, token = current_workflow
+        blocks = [
+            _section("Which scope should the training answer use?"),
+            _section(f"Current workflow · {_ref(workflow)}"),
+            _actions(_button("Use current workflow", "ot_current_training", token)),
+        ]
+        if rows:
+            blocks.append(_section("Or choose an inspected frozen comparison."))
     for dataset, source, revision in rows:
         blocks.append(_section(f"Workflow {_ref(dataset)} · {_display(source)} · {_ref(revision)}"))
         blocks.append(_actions(_button("Use this comparison", "ot_result_open", revision)))
@@ -633,7 +643,66 @@ def regression_picker(
         navigation.append(_button("Next", "ot_result_next", "next"))
     navigation.append(_button("Browse results", "ot_readouts", "home"))
     blocks.append(_actions(*navigation))
-    return _modal("Choose comparison", "ot_regression_picker", context, blocks)
+    return _modal(
+        "Choose status scope" if current_workflow else "Choose comparison",
+        "ot_regression_picker",
+        context,
+        blocks,
+    )
+
+
+def current_training_question(
+    context: str, workflow: str, receipt: Mapping[str, Any] | None, *, pin: str, proof: bool
+) -> Block:
+    blocks = [_section(f"Current workflow · {_ref(workflow)}")]
+    if receipt is None:
+        blocks.append(
+            _section(
+                "Current training readiness is unavailable. "
+                "Ask the workflow owner to check for a current worker readiness receipt."
+            )
+        )
+    else:
+        answer = readiness_answer(receipt)
+        families = receipt["independent_family_count"]
+        unit = "family" if families == 1 else "families"
+        blocks.extend(
+            [
+                _section(answer.finding),
+                _section(f"{families} independent {unit}. {answer.basis}"),
+                _section(answer.next_action),
+            ]
+        )
+    nav = [_button("Back to scopes", "ot_training_scopes", "scopes")]
+    if receipt is not None:
+        if proof:
+            blocks.append(
+                _section(
+                    f"Worker receipt {_ref(receipt['readiness_ref'])} · "
+                    f"version {receipt['version']}. "
+                    f"Evidence revision {_ref(receipt['evidence_revision'])}."
+                )
+            )
+            if receipt.get("assessment_ref"):
+                blocks.append(
+                    _section(f"Simple-repair assessment · {_ref(receipt['assessment_ref'])}")
+                )
+            if receipt.get("mandate_ref"):
+                blocks.append(
+                    _section(
+                        f"Training mandate · {_ref(receipt['mandate_ref'])} · "
+                        f"revision {_ref(receipt['mandate_revision'])}"
+                    )
+                )
+        else:
+            nav.insert(0, _button("View readiness receipt", "ot_readiness_proof", pin))
+    blocks.append(_actions(*nav))
+    return _modal(
+        "Readiness receipt" if proof else "Training readiness",
+        "ot_current_training_proof" if proof else "ot_current_training_status",
+        context,
+        blocks,
+    )
 
 
 def status_question_modal(context: str, revision: str, dataset: str, answer: StatusAnswer) -> Block:
@@ -1337,6 +1406,93 @@ def release_recorded(context: str, decision: str, artifact: str, audience: str) 
     )
 
 
+def readiness_answer(receipt: Mapping[str, Any]) -> StatusAnswer:
+    reason = receipt["reason_code"]
+    pending = receipt["pending_count"]
+    if reason == "no_live_decisions":
+        finding = "No live decisions yet."
+    elif reason in {"no_verifier_bound", "awaiting_outcome"}:
+        suffix = "No verifier bound" if reason == "no_verifier_bound" else "Awaiting outcome"
+        finding = (
+            f"{pending} decision{'s' if pending != 1 else ''} awaiting verification · {suffix}"
+        )
+    else:
+        finding = {
+            "too_early_to_train": "Too early to train.",
+            "simpler_route_sufficient": "The simpler repair is sufficient.",
+            "disputed_outcomes": "Independent outcomes are disputed.",
+            "fit_eligible": "The worker recorded fit eligibility.",
+            "committed_action_classification_required": "Missing observed action classification.",
+            "decision_time_input_required": "The original decision input is missing.",
+            "training_mandate_required": "Training needs a current mandate.",
+            "training_rights_required": "Training rights are missing.",
+            "training_budget_required": "Training budget is unavailable.",
+            "untouched_holdout_required": "An independent holdout is missing.",
+            "qualified_model_required": "The selected model needs qualification.",
+            "development_evidence_required": "More independent development evidence is needed.",
+            "repair_assessment_required": "A simple-repair assessment is needed.",
+        }[reason]
+    roots = receipt["verified_root_count"]
+    residuals, threshold = receipt["residual_group_count"], receipt["minimum_residual_groups"]
+    basis = f"{roots} verified root{'s' if roots != 1 else ''}."
+    if residuals is not None and threshold is not None:
+        unit = "group" if residuals == 1 else "groups"
+        basis += f" {residuals} residual {unit} after simple repair · threshold {threshold}."
+    elif roots:
+        basis += " Independent residual groups are unmeasured."
+    basis += f" Augmentation is not enabled. Readiness receipt {_ref(receipt['readiness_ref'])}."
+    next_action = {
+        "bind_verifier": "Choose the authorized independent outcome feed to bind.",
+        "ask_data_custodian_to_bind_verifier": "Ask the data custodian to bind a verifier.",
+        "verify_outcome": "Record an independent outcome.",
+        "observe_committed_decisions": "Record the first committed decision.",
+        "request_authorized_fit_admission": "Request separate fit admission.",
+        "inspect_simple_repair": "Inspect the simpler repair.",
+        "supply_independent_evidence": "Supply independent evidence.",
+        "provide_observed_action_classification": "Supply the observed action classification.",
+        "provide_decision_time_input": "Provide permitted decision-time input.",
+        "authorize_training_scope": "Authorize a training mandate.",
+        "authorize_training_rights": "Review the requested training rights.",
+        "review_training_budget": "Review the training budget.",
+        "supply_independent_holdout": "Supply an independent holdout.",
+        "qualify_selected_model": "Qualify the selected model.",
+        "assess_simple_repair": "Assess the simpler repair.",
+    }[receipt["next_action"]]
+    return StatusAnswer(
+        finding, basis, f"{next_action} Responsible · {_display(receipt['next_owner'])}."
+    )
+
+
+def _live_summary_text(summary: Mapping[str, Any]) -> str:
+    def utc(value: int | None) -> str:
+        if value is None:
+            return "unavailable"
+        try:
+            return datetime.fromtimestamp(value, UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
+        except (ValueError, OverflowError, OSError):
+            return f"{value} Unix seconds"
+
+    text = (
+        f"Unmatched outcomes · {summary['unmatched_outcomes']}. "
+        f"Last event ingested · {utc(summary['last_ingested_at'])}."
+    )
+    page = summary["last_page"]
+    if page is None:
+        return text + " No source-read receipt is available."
+    completion = "complete" if page["complete"] else "partial"
+    unit = "row" if page["row_count"] == 1 else "rows"
+    interval = (
+        "Queried interval unavailable"
+        if page["interval_start"] is None
+        else f"Queried {utc(page['interval_start'])} to {utc(page['interval_end'])}"
+    )
+    return (
+        f"{text} Latest acknowledged source page · {page['row_count']} {unit}, {completion}. "
+        f"Polled {utc(page['polled_at'])}. {interval}. "
+        f"Coverage through {utc(page['coverage_through'])}. Receipt {_ref(page['receipt_ref'])}."
+    )
+
+
 def app_home_view(
     context: str = "",
     title: str = "",
@@ -1347,6 +1503,9 @@ def app_home_view(
     named_reviewer: bool = False,
     pending: str = "",
     can_add_workflow: bool = False,
+    workflow_settings: bool = False,
+    readiness: Mapping[str, Any] | None = None,
+    live_summary: Mapping[str, Any] | None = None,
 ) -> Block:
     if not context:
         return {
@@ -1381,6 +1540,19 @@ def app_home_view(
                 "block_id": "ot_workflow_entry",
             }
         )
+    if live_summary is not None:
+        blocks.append(_section(_live_summary_text(live_summary)))
+    if readiness is not None:
+        answer = readiness_answer(readiness)
+        blocks.extend(
+            [_section(answer.finding), _section(answer.basis), _section(answer.next_action)]
+        )
+        if readiness["next_action"] == "bind_verifier":
+            blocks.append(
+                _actions(_button("Bind verifier", "ot_app_bind_verifier", readiness["revision"]))
+            )
+    if workflow_settings:
+        blocks.append(_actions(_button("Workflow settings", "ot_app_settings", "ot_app_settings")))
     if can_tune:
         nav.append(_button("Preview a repair", "ot_app_repair", "ot_app_repair"))
     blocks.extend(
@@ -1441,12 +1613,76 @@ def starter_charter(context: str, preview: StarterPreview) -> Block:
                 f"Admission {_ref(draft['run_ref'])} · settings {_ref(draft['settings_revision'])}"
             )
         )
+        if preview.benchmark:
+            benchmark = preview.benchmark
+            blocks.append(
+                _section(
+                    f"Benchmark {_ref(benchmark.benchmark_ref)} · version {benchmark.version} "
+                    f"· {_ref(benchmark.benchmark_state)}"
+                )
+            )
+            if benchmark.benchmark_state == "draft":
+                blocks.append(
+                    _section(
+                        "The owner can adjudicate starter cases before freezing this benchmark."
+                    )
+                )
+        else:
+            blocks.append(_section("This starter has no current benchmark receipt."))
+            blocks.append(
+                _actions(
+                    _button("Create benchmark draft", "ot_starter_benchmark", preview.revision)
+                )
+            )
         return _modal("Saved starter draft", "ot_starter_saved", context, blocks)
     blocks += [
         _section("Save this policy-only mandate for local workflow drafting."),
         _actions(_button("Save starter draft", "ot_starter_save", preview.revision)),
     ]
     return _modal("Review starter charter", "ot_starter_preview", context, blocks)
+
+
+def workflow_settings(context: str, workflow: str) -> Block:
+    return _modal(
+        "Workflow settings",
+        "ot_workflow_settings",
+        context,
+        [
+            _section(f"Workflow {_ref(workflow)}"),
+            _actions(_button("Connect live decisions", "ot_connect_live", "ot_connect_live")),
+        ],
+    )
+
+
+def live_connections(
+    context: str,
+    workflow: str,
+    current: Sequence[tuple[str, str]],
+    choices: Sequence[tuple[str, str]],
+    saved: str = "",
+) -> Block:
+    blocks = [_section(f"Workflow {_ref(workflow)}")]
+    if saved:
+        blocks.append(_section(f"Saved binding {_ref(saved)}"))
+    for kind, binding in current:
+        label = "Committed decisions" if kind == "decision" else "Independently verified outcomes"
+        blocks.append(_section(f"{label} · {_ref(binding)}"))
+    if not current:
+        blocks.append(_section("No current live binding."))
+    if choices:
+        select = _select("live_resource", "Authorized feed to connect", choices)
+        del select["element"]["initial_option"]
+        select["element"]["placeholder"] = _text("Choose a permitted feed")
+        blocks.append(select)
+    else:
+        blocks.append(_section("Ask the data custodian to connect a decision or outcome feed."))
+    return _modal(
+        "Connect live decisions",
+        "ot_live_binding",
+        context,
+        blocks,
+        "Save binding" if choices else None,
+    )
 
 
 def workflow_instructions(context: str, route: str) -> Block:
