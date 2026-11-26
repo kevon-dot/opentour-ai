@@ -17,7 +17,6 @@ from opentour_cell.pilot.historical_benchmarks import LocalHistoricalBenchmark
 from opentour_cell.pilot.intake_admission import DurableIntake, IntakeWork
 from opentour_cell.pilot.intake_mcp import IntakeError, IntakePrincipal, require_ref
 from opentour_cell.pilot.operating_point import canonical
-from opentour_cell.pilot.training import _check_file
 from opentour_cell.pilot.workflow_benchmarks import BenchmarkIntake
 
 CONFIG = "opentour.pilot.historical-worker.v1"
@@ -70,14 +69,17 @@ class _ConfiguredProducer(LocalHistoricalBenchmark):
             "historical_worker_config_changed",
         )
         policy = super()._authorize(actor, work)
-        for path, revision in (
-            (self.traces, self.authority.selected.source_revision),
-            (self.corrections, self.authority.selected.correction_revision),
-        ):
-            _require(
-                hashlib.sha256(source_intake._read(path)).hexdigest() == revision,
-                "source_export_digest_mismatch",
-            )
+        # Reacquire current evaluation authority after the policy check and keep
+        # it held while reading source bytes. Do not nest the parent's writer.
+        with self.authority.guard(actor):
+            for path, revision in (
+                (self.traces, self.authority.selected.source_revision),
+                (self.corrections, self.authority.selected.correction_revision),
+            ):
+                _require(
+                    hashlib.sha256(source_intake._read(path)).hexdigest() == revision,
+                    "source_export_digest_mismatch",
+                )
         return policy
 
 
@@ -88,11 +90,13 @@ def execute(config: Path, run_ref: str) -> dict[str, Any]:
     authority = producer.authority
     actor = authority.principal
     # A worker invocation cannot create an intake register or a new admission.
-    _check_file(config.parent / "intake.sqlite3")
-    backend = BenchmarkIntake(DurableIntake(config.parent, authority))
-    with backend.intake.admitted_work(actor, run_ref) as work:
-        pass
+    reader = DurableIntake(config.parent, authority, existing_only=True)
+    with reader.admitted_work(actor, run_ref) as work:
+        _require(work.mode == "historical" and work.benchmark_current)
     producer._authorize(actor, work)
+    # Only an established current admission enters the ordinary writable worker.
+    with authority.guard(actor):
+        backend = BenchmarkIntake(DurableIntake(config.parent, authority))
     completed = backend.materialize(actor, run_ref, producer)
     producer._authorize(actor, work)
     with backend.intake.admitted_work(actor, run_ref) as current:
