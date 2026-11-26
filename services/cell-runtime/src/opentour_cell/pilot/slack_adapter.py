@@ -1627,15 +1627,17 @@ class Workbench:
             approval=approval,
         )
 
-        if topic == StatusTopic.TRAINING:
+        # A dataset revision may be shared by several workflows. Only a workflow
+        # identity supplied by the verified frozen readout can link its status.
+        frozen_workflow = target.audit.get("workflow_ref")
+        if topic == StatusTopic.TRAINING and isinstance(frozen_workflow, str) and frozen_workflow:
             readiness = self._readiness(actor)
             if readiness and (
                 readiness["dataset_ref"] == target.dataset
                 and readiness["dataset_revision"] == target.dataset_revision
                 and readiness["engagement"] == target.audit.get("engagement")
                 and readiness["organization"] == target.audit.get("organization")
-                and target.audit.get("workflow_ref", readiness["workflow_ref"])
-                == readiness["workflow_ref"]
+                and frozen_workflow == readiness["workflow_ref"]
             ):
                 current = self.views.readiness_answer(readiness)
                 return StatusAnswer(

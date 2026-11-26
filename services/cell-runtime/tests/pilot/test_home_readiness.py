@@ -2,11 +2,15 @@
 
 import json
 import sqlite3
+from dataclasses import replace
 
 import pytest
+from opentour_cell.pilot.intake_local import open_intake
+from opentour_cell.pilot.intake_mcp import parse_intake
 from opentour_cell.pilot.readiness_selection import SCHEMA, open_readiness
+from opentour_cell.pilot.status_questions import StatusTopic
 from test_app_home import click, publish
-from test_intake_mcp import _write_private
+from test_intake_mcp import STARTER, _sealed_starter, _write_private
 from test_live_readiness import Case, Contexts, decision, outcome
 from test_live_settings import form, open_live, sign
 from test_reviewer_workflow import buttons, restart, screen, supplied
@@ -187,15 +191,15 @@ def test_evidence_reopened_during_layout_never_publishes_stale_home(ready, monke
     assert "access is unavailable" in json.dumps(home)
 
 
-def test_natural_training_answer_links_only_matching_readout(ready):
+def test_unattributed_frozen_result_keeps_its_ordinary_answer(ready):
     h = ready.h
     ready.worker.refresh()
     _, revision = inspect(h)
     result = answer(h, "Why didn't it train?", revision)
     assert (
         "evaluation-only" in result
-        and ready.workflow in result
-        and "No live decisions yet" in result
+        and ready.workflow not in result
+        and "No live decisions yet" not in result
     )
     other = supplied(h, qualified=True, suffix="-other")
     h.config["users"][ACTOR]["datasets"] = [other]
@@ -262,3 +266,40 @@ def test_unavailable_policy_and_no_outcome_resource_have_no_bind_action(ready):
         {**ready.selection, "policy_file": "../wrong.json"},
     )
     assert "decision awaiting verification" not in json.dumps(ready.home())
+
+
+def test_two_admitted_workflows_sharing_dataset_revision_do_not_share_readout_readiness(ready):
+    h = ready.h
+    root = ready.directory
+    selection = {**json.loads((root / "selected.json").read_bytes()), "grant_ref": "second-grant"}
+    charter = json.loads((root / "starter-intake-grant-policy-scope.json").read_bytes())["grant"]
+    changes = {
+        "creation_ref": "second-creation",
+        "setup_policy_revision": charter["setup_policy_revision"],
+    }
+    _write_private(root / "second-selection.json", selection)
+    _write_private(
+        root / "starter-intake-grant-second-grant.json", _sealed_starter(selection, **changes)
+    )
+    actor, intake = open_intake(root / "second-selection.json")
+    receipt = intake.submit_intake(
+        actor, parse_intake({**STARTER, **changes, "idempotency_key": "second-admission"})
+    )
+    second = intake.get_run(actor, receipt.run_ref).workflow_ref
+    assert second != ready.workflow
+    # Both workflow grants name the exact same tenant, epoch, dataset and revision.
+    sign(h, {**ready.grant, "workflow_ref": second})
+    ready.worker.refresh()
+    cfg = h.app.settings()
+    target = h.app._readout(cfg, ACTOR, "eval:" + ready.grant["dataset_ref"])
+    assert target is not None and target.dataset_revision == ready.grant["dataset_revision"]
+    for frozen_workflow, should_match in ((second, False), (ready.workflow, True)):
+        # Generated output of a producer that explicitly pins frozen workflow identity.
+        pinned = replace(target, audit={**target.audit, "workflow_ref": frozen_workflow})
+        value = h.app._status_answer(cfg, ACTOR, pinned, StatusTopic.TRAINING)
+        assert "evaluation-only" in value.finding
+        assert (ready.workflow in value.basis) == should_match
+    # The actual frozen evaluation producer currently emits no workflow relation.
+    _, revision = inspect(h)
+    normal = answer(h, "Why didn't it train?", revision)
+    assert ready.workflow not in normal and second not in normal

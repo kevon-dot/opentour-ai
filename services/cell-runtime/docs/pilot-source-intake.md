@@ -130,8 +130,8 @@ Private Home reads the persisted current receipt with the authenticated Slack
 principal's live inspection grant and dataset aggregate permission. A pending
 decision can request independent verification. With a signed custodian role
 and permitted outcome resource, **Bind verifier** opens the existing private
-binding form with only independent outcome choices. When a current receipt
-matches the dataset revision of an inspected result, a training question can
-also report the current workflow's readiness alongside its historical result.
+binding form with only independent outcome choices. A training question can also show current readiness when the verified frozen
+result explicitly identifies that workflow and its tenant, engagement, dataset
+and revision all match. An unattributed result keeps its original answer.
 A changed source, mandate or scope is rechecked before Slack receives either
 projection. Reopening Home runs no assessment and creates no readiness record.
