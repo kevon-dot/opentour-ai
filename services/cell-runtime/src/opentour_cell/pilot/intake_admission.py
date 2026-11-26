@@ -496,6 +496,24 @@ class DurableIntake:
                 )
             return RunStatus(run_ref, "queued", "wait_for_worker", None, workflow, benchmark)
 
+    @contextmanager
+    def admitted_work(self, actor: IntakePrincipal, run_ref: str) -> Iterator[IntakeWork]:
+        """Pin current admitted scope for a worker-owned metadata operation.
+
+        This read-only accessor neither dispatches nor marks a run materialized.
+        Consumers must not reacquire the authority's writer lock inside this guard.
+        """
+        _identity(actor)
+        require_ref(run_ref)
+        with self.authority.guard(actor), self._db(write=False) as db:
+            row = db.execute(
+                "SELECT * FROM intake_runs WHERE tenant=? AND run_ref=?", (actor.tenant, run_ref)
+            ).fetchone()
+            workflow, resolved = self._current_run(db, actor, row)
+            yield IntakeWork(
+                run_ref, workflow, resolved.mode, resolved.resource, resolved.revisions
+            )
+
     @staticmethod
     def _materialized(db: sqlite3.Connection, actor: IntakePrincipal, run_ref: str) -> bool:
         return (
