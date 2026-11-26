@@ -266,6 +266,7 @@ class StarterSelection:
 
 @dataclass(frozen=True)
 class VerifiedStarterGrant:
+    custodian_id: str
     policy_resource_ref: str
     source_revision: str
     setup_policy_revision: str
@@ -336,8 +337,8 @@ class LocalStarterAuthority(_LocalAuthority):
             raise IntakeError("intake_unavailable")
         if type(body["expires_at"]) is not int or body["expires_at"] <= 0:
             raise IntakeError("intake_unavailable")
-        require_ref(body["custodian_id"])
         return VerifiedStarterGrant(
+            require_ref(body["custodian_id"]),
             require_ref(body["policy_resource_ref"]),
             require_ref(body["source_revision"]),
             require_ref(body["setup_policy_revision"]),
@@ -348,10 +349,19 @@ class LocalStarterAuthority(_LocalAuthority):
 
     @contextmanager
     def guard(self, actor: IntakePrincipal) -> Iterator[None]:
+        with self.setup_grant(actor):
+            yield
+
+    @contextmanager
+    def setup_grant(
+        self, actor: IntakePrincipal, *, read_only: bool = False
+    ) -> Iterator[VerifiedStarterGrant]:
         selection = self.selected
         try:
             with (
-                self.store.engagement_guard(engagement_id=selection.engagement_epoch),
+                self.store.engagement_guard(
+                    engagement_id=selection.engagement_epoch, read_only=read_only
+                ),
                 self.mandates.guard_registered_owner(selection.owner_id),
             ):
                 if actor != self.principal or StarterSelection.read(self.path) != selection:
@@ -363,7 +373,7 @@ class LocalStarterAuthority(_LocalAuthority):
                     raise VerifiedIntakeExpired("intake_expired")
                 token = self._grant.set(grant)
                 try:
-                    yield
+                    yield grant
                 finally:
                     self._grant.reset(token)
         except (OSError, sqlite3.Error, ManifestError, MandateError, TrainingError) as error:
