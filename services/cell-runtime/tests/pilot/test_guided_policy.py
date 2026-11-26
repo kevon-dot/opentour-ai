@@ -224,17 +224,29 @@ def test_examples_and_hidden_headings_cannot_supply_policy_rules_or_sections(sta
     assert policy.passage(citations[0]) == "If total < 250, REVIEW.\n"
 
 
-def test_unparsed_exception_cannot_be_silently_ignored(starter):
-    source, workflow, _, _ = starter(
-        b"If total < 250, APPROVE.\nExcept when po is missing: MANUAL.\n"
-    )
+@pytest.mark.parametrize(
+    "clause",
+    [b"Except when po is missing: MANUAL.\n", b"Exception: when po is missing, MANUAL.\n"],
+)
+def test_unparsed_exception_cannot_be_silently_ignored(starter, clause):
+    source, workflow, _, _ = starter(b"If total < 250, APPROVE.\n" + clause)
     policy = source.read(source.authority.principal, workflow)
     draft = guided_draft(policy, FIELDS, ACTIONS)
     action, missing = draft.draft_action({"po": None, "total": Decimal("12")})
     assert action is None
-    assert tuple(policy.passage(citation) for citation in missing) == (
-        "Except when po is missing: MANUAL.\n",
+    assert tuple(policy.passage(citation) for citation in missing) == (clause.decode(),)
+
+
+def test_numbered_markdown_rule_retains_its_citation_and_precedence(starter):
+    source, workflow, _, _ = starter(
+        b"# Policy\nApply the first matching rule.\n"
+        b"1. If po is missing, MANUAL.\n2. If total < 250, APPROVE.\n"
     )
+    snapshot = source.read(source.authority.principal, workflow)
+    draft = guided_draft(snapshot, FIELDS, ACTIONS)
+    action, citations = draft.draft_action({"po": None, "total": Decimal("12")})
+    assert action == "MANUAL"
+    assert snapshot.passage(citations[0]) == "1. If po is missing, MANUAL.\n"
 
 
 def test_wrong_canonical_admission_intent_denies_before_policy_read(starter, monkeypatch):
