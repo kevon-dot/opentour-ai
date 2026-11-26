@@ -20,6 +20,8 @@ python -I -S -B opentour-slack.pyz learning-mandate status --directory /private/
 
 First enrollment pins the local operator’s registered owner for the engagement. Customer-controlled local filesystem access authenticates this setup step. The MCP agent lacks an enrollment or limit-increase tool. Subsequent operations must match that owner or the recorded worker identity.
 
+Enroll only against the exact active engagement in the customer’s `training.sqlite3`. The customer custodian’s engagement closeout stops standing source admissions and fit reservations and claims before reconciliation. An older restored training or mandate file stays held while the current custody ledger survives. The owner can still inspect historical usage and settle an already-claimed fit without recording an artifact.
+
 The ledger counts a unique admitted source pair once and reserves compute before fitting. A model attempt consumes one fit and its full reserved seconds. A timeout, unknown completion or interrupted process retains those charges. Retrying the identical source/reservation returns its existing identity. A completed artifact can be replayed without training again. A successful rule comparison spends zero fit budget. The model grant and customer source/class confirmations record delegated provenance and bind the original mandate. Status reports runs, rows, reserved fits and seconds.
 
 Withdraw the current mandate to stop new work, prevent later grant replay and signal any active bound model fit. A fresh owner grant can supersede the withdrawn or expired mandate while preserving the earlier budget ledger.

@@ -106,6 +106,10 @@ def test_reproducible_kit_runs_isolated_data_mcp_and_slack_entrypoints(tmp_path)
     assert b"usage" in run("slack", "--help").lower()
     assert b"--unresolved-receipts" in run("slack", "--help")
     assert b"withdraw" in run("custody", "--help").lower()
+    private_register_options = (b"--register", b"--authority", b"--submission")
+    for command in ("qualification", "cohort-lease"):
+        help_output = run(command, "--help")
+        assert all(option in help_output for option in private_register_options)
     assert (target / "pilot-receipt-recovery.md").is_file()
     verify_operating_agreement(executable, target)
     supplied = "generated/readout-input.json"
