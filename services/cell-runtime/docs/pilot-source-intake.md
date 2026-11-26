@@ -84,3 +84,27 @@ The charter is part of the approved scope. Set the signed starter grant’s `set
 ```
 
 Use the agreed next-check date and name the verifier when known. A policy-only save activates the local drafting scope. Live-source connection and training require separately authorized workflows.
+
+### Connect the existing workflow to a live feed
+
+Open private Slack Home, choose **Workflow settings**, then **Connect live
+decisions**. Select an authorized committed-decision or independent-outcome
+resource and choose **Save binding**. The screen returns the opaque binding
+reference. Opening settings again shows current bindings. Saving the same
+signed selection again returns the same reference. A decision feed can be
+connected while independent verification is pending.
+
+The worker uses the saved starter's workflow identity. To route a separate
+custodian directly to the same admitted workflow, set the optional
+`live_workflow_ref` in the private Slack settings file to that workflow's
+opaque reference. The operator must have provisioned the existing signed
+per-workflow live grant, engagement epoch, resource revision, lease and source
+checkpoint. Its actors map must explicitly authorize the authenticated Slack
+user ID. A user with live inspection can see current bindings and request
+custodian action. Only a user with current live custodian authority can save.
+The starter owner mapping grants no live role.
+
+The intake worker needs its own intake grant to discover the resulting
+`feed_binding_ref` and submit a typed live request. Source ingestion depends
+on an installed authorized reader. The Slack settings action reads no feed
+content and submits no intake, training, approval or release work.
