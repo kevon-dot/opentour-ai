@@ -130,3 +130,53 @@ def test_native_release_status_observes_independent_decision(
     current = answer(h, "Did it ship?", revision)
     assert expected in current and "unconfirmed" in current
     assert counts(h) == before
+
+
+@pytest.mark.parametrize(
+    ("question", "expected"),
+    [
+        ("Was the candidate any quicker than the baseline?", "fit-speed comparison"),
+        ("What prevented our training job from starting?", "evaluation-only"),
+        (
+            "Which inputs were given to the model and what output came back?",
+            "Decision-time model input",
+        ),
+        ("Has the intended recipient received the package yet?", "Handoff delivery is unconfirmed"),
+        (
+            "Have we seen any verified mistakes over the past seven days?",
+            "denominator for the requested window",
+        ),
+        ("How much time did we save?", "fit-speed comparison"),
+        ("What's holding back the model fit?", "evaluation-only"),
+        ("What did the classifier predict?", "Decision-time model input"),
+        ("Did the artifact go through?", "Handoff delivery is unconfirmed"),
+        ("Was this week error-free?", "Verified live errors"),
+    ],
+)
+def test_status_question_forms_reach_selected_evidence(
+    tmp_path: Path, question: str, expected: str
+) -> None:
+    h = Harness(tmp_path)
+    h.config["users"][ACTOR]["datasets"] = [supplied(h, qualified=True)]
+    h.save()
+    _, revision = inspect(h)
+    before = counts(h)
+    assert expected in answer(h, question, revision)
+    assert counts(h) == before
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "Could you send the package?",
+        "Please fit it and ship it",
+        "Has it shipped and how much faster is it?",
+        "Did the package arrive for ForeignTenant?",
+        "Were there five errors this week?",
+        "Did we train it? Ship it",
+    ],
+)
+def test_status_parser_rejects_actions_mixed_clauses_and_unbound_scope(question: str) -> None:
+    from opentour_cell.pilot.status_questions import resolve_status
+
+    assert resolve_status(question) is None
