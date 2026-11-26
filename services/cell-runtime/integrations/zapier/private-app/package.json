@@ -1,0 +1,14 @@
+{
+  "name": "opentour-private-intake",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Owner-bound OpenTour intake reference-plane actions",
+  "main": "index.js",
+  "engines": { "node": "24.22.3" },
+  "scripts": {
+    "test": "node --test test/*.test.js",
+    "validate": "zapier-platform validate --without-style"
+  },
+  "dependencies": { "zapier-platform-core": "19.3.0" },
+  "devDependencies": { "zapier-platform-cli": "19.3.0" }
+}
