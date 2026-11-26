@@ -15,6 +15,9 @@ from zipfile import ZipFile
 
 import pytest
 from opentour_cell.pilot import source_intake as intake
+from opentour_cell.pilot.intake_local import SELECTION_VERSION
+from opentour_cell.pilot.intake_mcp import DISCOVER, GET_RUN, SUBMIT
+from opentour_cell.pilot.learning_mandate import LearningMandates
 from opentour_cell.pilot.mcp import PROTOCOL_VERSION
 from opentour_cell.pilot.operating_point import canonical, digest
 from opentour_cell.pilot.training import LocalTrainingStore
@@ -438,6 +441,35 @@ def packaged_source_command(tmp_path_factory: pytest.TempPathFactory) -> list[st
     return [*python, executable]
 
 
+def packaged_mcp_result(command: list[str | Path], name: str, arguments: Json) -> Json:
+    frames = [
+        {
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": PROTOCOL_VERSION,
+                "capabilities": {},
+                "clientInfo": {"name": "generated-source-fixture", "version": "1"},
+            },
+        },
+        {"method": "notifications/initialized"},
+        {
+            "id": 2,
+            "method": "tools/call",
+            "params": {"name": name, "arguments": arguments},
+        },
+    ]
+    stdin = "".join(canonical({"jsonrpc": "2.0", **frame}) + "\n" for frame in frames)
+    output = subprocess.run(
+        command, input=stdin, env={}, capture_output=True, text=True, timeout=30, check=True
+    )
+    assert not output.stderr
+    initial, reply = (json.loads(line) for line in output.stdout.splitlines())
+    assert initial["id"] == 1 and initial["result"]["protocolVersion"] == PROTOCOL_VERSION
+    assert reply["id"] == 2
+    return reply["result"]
+
+
 def test_packaged_merchant_discovery_quarantines_ambiguous_transaction(
     tmp_path: Path, packaged_source_command: list[str | Path]
 ) -> None:
@@ -461,8 +493,111 @@ def test_packaged_merchant_discovery_quarantines_ambiguous_transaction(
     grant["correction_sha256"] = export(
         corrections, [scope | row for row in fixture["corrections"]]
     )
-    grant_path = private / "grant.json"
+    row_count = len(fixture["traces"]) + len(fixture["corrections"])
+    ledger = LearningMandates(
+        private, store.organization, store.engagement_id, owner=grant["owner_id"]
+    )
+    mandate = json.loads((EXAMPLES / "pilot-learning-mandate.template.json").read_bytes())
+    source_scope = {k: grant[k] for k in ("workflow", "field", "trace_source", "correction_source")}
+    mandate.update(
+        **source_scope,
+        mandate_id="generated-merchant-mandate",
+        owner_id=grant["owner_id"],
+        delegate="generated-worker",
+        trainer="generated-worker",
+        connectors=["generated-local-source"],
+        fields=grant["permitted_features"],
+        model_fields=grant["permitted_features"],
+        labels=["merchant-a", "merchant-b"],
+        permitted_error_pairs=[["merchant-a", "merchant-b"]],
+        agreement_revision=digest([grant["policy_version"], grant["retention_terms"]]),
+        expires_at=int(time.time()) + 600,
+        max_runs=1,
+        max_rows_per_run=row_count,
+        max_total_rows=row_count,
+    )
+    enrolled = ledger.enroll(mandate, actor=grant["owner_id"])
+    delegate = mandate["delegate"]
+    source_receipt = ledger.authorize_source(
+        enrolled["mandate_id"],
+        {
+            **source_scope,
+            "connector": mandate["connectors"][0],
+            "fields": grant["permitted_features"],
+            "rows": row_count,
+            "source_revision": digest([grant["trace_sha256"], grant["correction_sha256"]]),
+            "trace_sha256": grant["trace_sha256"],
+            "correction_sha256": grant["correction_sha256"],
+        },
+        actor=delegate,
+    )
+    grant.update(
+        expires_at=mandate["expires_at"],
+        training_attestation=source_receipt["training_attestation"],
+        training_expires_at=mandate["expires_at"],
+        delegation={
+            "authority_kind": source_receipt["authority_kind"],
+            "run_id": source_receipt["run_id"],
+            "delegate": delegate,
+        },
+    )
+    grant_path = private / f"cycle-source-{source_receipt['run_id']}.json"
     write(grant_path, canonical(grant))
+    request = {
+        "pair_ref": "generated-merchant-pair",
+        "source_revision": grant["trace_sha256"],
+        "correction_revision": grant["correction_sha256"],
+        "policy_revision": source_receipt["agreement_revision"],
+    }
+    selection_path = private / "selection.json"
+    write(
+        selection_path,
+        canonical(
+            {
+                **request,
+                "schema_version": SELECTION_VERSION,
+                "tenant": store.organization,
+                "actor": delegate,
+                "engagement_epoch": store.engagement_id,
+                "mandate_id": enrolled["mandate_id"],
+                "mandate_revision": enrolled["mandate_revision"],
+                "source_run_id": source_receipt["run_id"],
+                "workflow_ref": grant["workflow"],
+                "trace_source": grant["trace_source"],
+                "correction_source": grant["correction_source"],
+            }
+        ),
+    )
+    command = [*packaged_source_command, "mcp-intake", selection_path]
+    catalog = packaged_mcp_result(command, DISCOVER, {})
+    assert catalog["structuredContent"] == {
+        "next_cursor": None,
+        "sources": [
+            {
+                "source_kind": "historical",
+                "source_ref": request["pair_ref"],
+                "source_revision": request["source_revision"],
+            }
+        ],
+    }
+    admission = packaged_mcp_result(command, SUBMIT, request | {"idempotency_key": "first"})
+    receipt = admission["structuredContent"]
+    assert set(receipt) == {"run_ref", "state", "correlation_ref"} and receipt["state"] == "queued"
+    denied = packaged_mcp_result(
+        command,
+        SUBMIT,
+        request | {"idempotency_key": "first", "correction_revision": digest("different-file")},
+    )
+    assert denied["isError"] and denied["content"][0]["text"] == "intake_unavailable"
+    frozen_path = private / "intake.json"
+    assert not frozen_path.exists()
+    queue_path = private / "intake.sqlite3"
+    with sqlite3.connect(queue_path) as db:
+        assert db.execute("SELECT COUNT(*) FROM intake_runs").fetchone() == (1,)
+        assert db.execute("SELECT COUNT(*) FROM intake_keys").fetchone() == (1,)
+
+    # The queue and source command share the grant and raw-file digests. The test runs
+    # source arbitration explicitly because the packaged intake command only queues.
 
     base = [
         *packaged_source_command,
@@ -473,7 +608,6 @@ def test_packaged_merchant_discovery_quarantines_ambiguous_transaction(
         store.organization,
     ]
     inputs = ["--grant", grant_path, "--traces", traces, "--corrections", corrections]
-    frozen_path = private / "intake.json"
 
     def run(*args: str | Path) -> Json:
         return json.loads(subprocess.check_output([*base, *args], env={}, timeout=30))
@@ -495,12 +629,47 @@ def test_packaged_merchant_discovery_quarantines_ambiguous_transaction(
         )
     data = json.loads(frozen_path.read_bytes())
     assert data["excluded"] == expected["excluded"]
+    assert data["authority_revision"] == digest(grant)
+    assert data["delegation"] == grant["delegation"]
     [row] = data["development"]
     assert row["case_id"] == expected["eligible_case"]
     assert row["outcome_id"] == expected["verified_outcome"]
     assert row["incumbent"]["label"] == "merchant-a" and row["reference"] == "merchant-b"
     assert row["decision_at"] < row["outcome_at"] <= row["verified_at"]
     assert data["training_allowed"] and not data["training_case_ids"]
+    restarted = packaged_mcp_result(command, GET_RUN, {"run_ref": receipt["run_ref"]})
+    assert restarted["structuredContent"] == {
+        "run_ref": receipt["run_ref"],
+        "state": "queued",
+        "next_action": "wait_for_worker",
+        "reason_code": None,
+        "workflow_ref": grant["workflow"],
+    }
+    replay = packaged_mcp_result(command, SUBMIT, request | {"idempotency_key": "restarted"})
+    assert replay["structuredContent"] == receipt
+    with sqlite3.connect(queue_path) as db:
+        [run] = db.execute(
+            "SELECT tenant, run_ref, workflow_ref, correlation_ref, request, grant_revision "
+            "FROM intake_runs"
+        ).fetchall()
+        assert run[:4] == (
+            store.organization,
+            receipt["run_ref"],
+            grant["workflow"],
+            receipt["correlation_ref"],
+        )
+        assert json.loads(run[4]) == (request | {"mode": "historical"})
+        assert run[5] == enrolled["mandate_revision"]
+        assert db.execute("SELECT COUNT(*) FROM intake_keys").fetchone() == (2,)
+        assert db.execute("SELECT COUNT(*) FROM intake_workflows").fetchone() == (0,)
+        assert db.execute("SELECT COUNT(*) FROM intake_materialization").fetchone() == (0,)
+    usage = ledger.inspect(enrolled["mandate_id"], actor=delegate)
+    assert (usage["runs"], usage["rows"], usage["reserved_fits"], usage["reserved_seconds"]) == (
+        1,
+        row_count,
+        0,
+        0,
+    )
     with sqlite3.connect(store.path) as db:
         assert db.execute("SELECT COUNT(*) FROM jobs").fetchone()[0] == expected["fit_jobs"]
         assert db.execute("SELECT COUNT(*) FROM fit_checkpoints").fetchone()[0] == 0
@@ -567,11 +736,10 @@ def test_packaged_invoice_coding_routes_missing_payer_to_review(
     grant_path = owner / "source-grant.json"
     write(grant_path, canonical(grant))
 
-    def run(*args: str | Path, stdin: str | None = None) -> str:
+    def run(*args: str | Path) -> str:
         output = subprocess.run(
             [*packaged_source_command, *args],
             env={},
-            input=stdin,
             capture_output=True,
             text=True,
             timeout=30,
@@ -655,27 +823,11 @@ def test_packaged_invoice_coding_routes_missing_payer_to_review(
     )
 
     def call(name: str, arguments: Json) -> Json:
-        frames = [
-            {
-                "id": 1,
-                "method": "initialize",
-                "params": {
-                    "protocolVersion": PROTOCOL_VERSION,
-                    "capabilities": {},
-                    "clientInfo": {"name": "generated-payer", "version": "1"},
-                },
-            },
-            {"method": "notifications/initialized"},
-            {
-                "id": 2,
-                "method": "tools/call",
-                "params": {"name": name, "arguments": arguments},
-            },
-        ]
-        stdin = "".join(canonical({"jsonrpc": "2.0", **frame}) + "\n" for frame in frames)
-        reply = json.loads(run("mcp-workflow", *args, stdin=stdin).splitlines()[-1])
-        assert reply["id"] == 2 and not reply["result"].get("isError")
-        return reply["result"]["structuredContent"]
+        result = packaged_mcp_result(
+            [*packaged_source_command, "mcp-workflow", *args], name, arguments
+        )
+        assert not result.get("isError")
+        return result["structuredContent"]
 
     queued = call(
         "start_offline_evaluation", {"plan_revision": revision, "idempotency_ref": "payer-v1"}
