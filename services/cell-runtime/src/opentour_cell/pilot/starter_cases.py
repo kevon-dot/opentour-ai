@@ -208,6 +208,20 @@ class StarterCases:
         row = db.execute("SELECT * FROM packs WHERE ref=?", (ref,)).fetchone()
         _require(row is not None and row["scope"] == canonical(asdict(scope)))
         assert row is not None
+        return self._validated_pack(db, row)
+
+    @staticmethod
+    def _scope_key(scope: Json) -> tuple[str, str, str]:
+        return (
+            scope["tenant"],
+            scope["work"]["resource"]["engagement_epoch"],
+            scope["work"]["workflow_ref"],
+        )
+
+    def _validated_pack(self, db: sqlite3.Connection, row: sqlite3.Row) -> Json:
+        ref = row["ref"]
+        stored_scope = json.loads(row["scope"])
+        _require(ref == "starter-" + digest(stored_scope)[:40], "starter_receipt_invalid")
         body: Json = json.loads(row["body"])
         _require(row["seal"] == digest(body), "starter_receipt_invalid")
         seal = db.execute("SELECT seal FROM freezes WHERE ref=?", (ref,)).fetchone()
@@ -216,10 +230,53 @@ class StarterCases:
             or (body["frozen"] is not None and seal is not None and seal["seal"] == row["seal"]),
             "starter_receipt_invalid",
         )
-        assigned = dict(db.execute("SELECT family,split FROM families WHERE pack=?", (ref,)))
-        expected = self._assignments(body["cases"]) if body["frozen"] is not None else {}
+        assigned = {tuple(r) for r in db.execute("SELECT * FROM families WHERE pack=?", (ref,))}
+        expected = (
+            {
+                (*self._scope_key(stored_scope), token, ref, split)
+                for token, split in self._assignments(body["cases"]).items()
+            }
+            if body["frozen"] is not None
+            else set()
+        )
         _require(assigned == expected, "starter_reservation_invalid")
         return body
+
+    def _validate_prior_freezes(self, db: sqlite3.Connection, scope: ConfirmedStarterMap) -> None:
+        """A successor must reconcile earlier reservations even if their scope was restored.
+
+        Inspect only prior scope identities globally; protected case bodies are read
+        only for the same tenant/epoch/workflow. A changed scope cannot hide a pack
+        because its immutable reference is derived from that complete scope.
+        """
+        key = self._scope_key(asdict(scope))
+        known = set()
+        relevant = set()
+        for row in db.execute("SELECT ref,scope FROM packs"):
+            stored_scope = json.loads(row["scope"])
+            _require(
+                row["ref"] == "starter-" + digest(stored_scope)[:40], "starter_receipt_invalid"
+            )
+            known.add(row["ref"])
+            if self._scope_key(stored_scope) == key:
+                relevant.add(row["ref"])
+        _require(
+            all(r[0] in known for r in db.execute("SELECT ref FROM freezes")),
+            "starter_receipt_invalid",
+        )
+        for ref in relevant:
+            row = db.execute("SELECT * FROM packs WHERE ref=?", (ref,)).fetchone()
+            assert row is not None
+            self._validated_pack(db, row)
+        _require(
+            all(
+                r[0] in relevant
+                for r in db.execute(
+                    "SELECT pack FROM families WHERE tenant=? AND epoch=? AND workflow=?", key
+                )
+            ),
+            "starter_reservation_invalid",
+        )
 
     @staticmethod
     def _assignments(cases: list[Json]) -> dict[str, str]:
@@ -394,6 +451,7 @@ class StarterCases:
         with self._scope(actor, work, "freeze") as scope, self._db(write=True) as db:
             _require(scope.frozen_plan == plan, "starter_plan_changed")
             body = self._load(db, scope)
+            self._validate_prior_freezes(db, scope)
             intent = digest([splits, asdict(plan), expected_revision])
             if body["frozen"] is not None:
                 _require(body["freeze_intent"] == intent, "starter_successor_required")

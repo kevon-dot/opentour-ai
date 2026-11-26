@@ -569,3 +569,33 @@ def test_same_input_in_one_family_cannot_freeze_conflicting_owner_truth(core):
             OWNER, WORK, splits={first.family_id: "reserved"}, plan=PLAN, expected_revision=2
         )
     assert service.readback(OWNER, WORK, operation_ref="read") is None
+
+
+@pytest.mark.parametrize("column", ["tenant", "epoch", "workflow"])
+def test_restored_reservation_scope_denies_prior_read_and_successor_freeze(core, column):
+    service, auth = core
+    freeze_seven(service)
+    with sqlite3.connect(service.path) as db:
+        db.execute(f"UPDATE families SET {column}=?", ("noncurrent-scope",))
+    with pytest.raises(IntakeError, match="reservation_invalid"):
+        service.readback(WORKER, WORK, operation_ref="read")
+    newer = replace(
+        WORK,
+        run_ref="run-2",
+        revisions=("policy-v2", "settings-v1"),
+        benchmark_version=2,
+        benchmark_parent_run="run-1",
+    )
+    auth.scope = replace(auth.scope, work=newer, policy_revision="policy-v2", map_ref="map-v2")
+    cases = seven()
+    service.propose(OWNER, newer, cases)
+    adjudicate_all(service, cases, newer)
+    with pytest.raises(IntakeError, match="reservation_invalid"):
+        service.freeze(
+            OWNER,
+            newer,
+            splits={c.family_id: "excluded" if c.case_id == "mixed" else "reserved" for c in cases},
+            plan=PLAN,
+            expected_revision=7,
+        )
+    assert service.readback(OWNER, newer, operation_ref="read") is None
