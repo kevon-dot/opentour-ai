@@ -31,6 +31,14 @@ RESOLVED = {
     "live_rows_removed",
 }
 LOCAL = {"inputs", "heldout", "models", "outputs"}
+_EXPORT_OBSERVATIONS = (
+    "slack_exposed",
+    "slack_possible",
+    "zapier_accepted",
+    "zapier_uncertain",
+    "legacy_unknown",
+)
+_ZERO_EXPORT_RECEIPT = "zero_exports"
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS closeout (
  singleton INTEGER PRIMARY KEY CHECK(singleton=1), organization TEXT NOT NULL,
@@ -101,13 +109,29 @@ class Closeout:
 
     @staticmethod
     def _minimal(row: sqlite3.Row) -> dict[str, Any]:
-        return {
+        receipt = {
             "organization": row["organization"],
             "engagement": row["engagement"],
             "state": "closed",
             "retained": "receipt_only",
             "closure_evidence": row["finished_ref"],
         }
+        if json.loads(row["transport"]).get("export_disposition") == _ZERO_EXPORT_RECEIPT:
+            receipt["export_disposition"] = _ZERO_EXPORT_RECEIPT
+        return receipt
+
+    @staticmethod
+    def _zero_exports(db: sqlite3.Connection, delivery: dict[str, Any]) -> bool:
+        # A zero in the worker journal alone cannot account for copies outside the worker.
+        return all(
+            type(delivery.get(key)) is int and delivery[key] == 0 for key in _EXPORT_OBSERVATIONS
+        ) and bool(
+            db.execute(
+                "SELECT 1 FROM items WHERE item='inventory-review' AND kind='inventory'"
+                " AND disposition='inventory_verified' AND evidence IS NOT NULL"
+                " AND NOT EXISTS(SELECT 1 FROM items WHERE kind='destination')"
+            ).fetchone()
+        )
 
     def _store(self, row: sqlite3.Row) -> LocalTrainingStore:
         if not self.training.exists():
@@ -349,7 +373,9 @@ class Closeout:
                 return self._minimal(row)
             items = [dict(v) for v in db.execute("SELECT * FROM items ORDER BY item")]
             outstanding = sum(item["disposition"] not in RESOLVED for item in items)
-            return {
+            delivery = json.loads(row["transport"])
+            closed = bool(row["finished_ref"] and row["reconciled"])
+            report = {
                 "organization": self.organization,
                 "engagement": row["engagement"],
                 "agreement": row["agreement"],
@@ -360,12 +386,15 @@ class Closeout:
                 "trigger": row["trigger"],
                 "withdrawn_at": row["withdrawn_at"],
                 "reconciled": bool(row["reconciled"]),
-                "delivery_inventory": json.loads(row["transport"]),
+                "delivery_inventory": delivery,
                 "outstanding": outstanding,
-                "state": "closed" if row["finished_ref"] and row["reconciled"] else "open",
+                "state": "closed" if closed else "open",
                 "closure_evidence": row["finished_ref"],
                 "items": items,
             }
+            if closed and self._zero_exports(db, delivery):
+                report["export_disposition"] = _ZERO_EXPORT_RECEIPT
+            return report
 
     def record(
         self,
@@ -488,11 +517,17 @@ class Closeout:
             db.execute("UPDATE closeout SET finished_ref=? WHERE singleton=1", (evidence,))
             if receipt_only:
                 # The agreement controls whether even opaque working records may be retained.
+                transport = (
+                    {"export_disposition": _ZERO_EXPORT_RECEIPT}
+                    if self._zero_exports(db, json.loads(row["transport"]))
+                    else {}
+                )
                 db.execute("PRAGMA secure_delete=ON")
                 db.execute("DELETE FROM items")
                 db.execute(
                     "UPDATE closeout SET agreement='',custodian='',support='',due='',revision=NULL,"
-                    " trigger='',withdrawn_at=0,transport='{}',minimized=1 WHERE singleton=1"
+                    " trigger='',withdrawn_at=0,transport=?,minimized=1 WHERE singleton=1",
+                    (json.dumps(transport),),
                 )
         return self.status()
 

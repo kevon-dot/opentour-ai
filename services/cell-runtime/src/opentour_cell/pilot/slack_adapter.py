@@ -32,6 +32,8 @@ LOCAL_ID = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}\Z")
 ROLES = {"inspect", "tune", "review"}
 CALLBACKS = {"ot_dataset_search", "ot_tune_preview", "ot_tune_start", "ot_prompt_enter"}
 ACTIONS = {
+    "ot_workflow_starter",
+    "ot_workflow_historical",
     "ot_home",
     "ot_browse",
     "ot_tune",
@@ -97,6 +99,7 @@ class Settings:
     workspace_title: str = "OpenTour pilot workspace"
     workflow_label: str = ""
     config_path: Path | None = None
+    explicit_recipient: bool = True
 
     @property
     def binding(self) -> str:
@@ -131,9 +134,9 @@ class Settings:
             "directory",
             "users",
             "reviewer",
-            "recipient",
         }
         optional = {
+            "recipient",
             "channel_aggregates",
             "zapier",
             "zapier_disposition",
@@ -147,10 +150,10 @@ class Settings:
         _check(isinstance(doc["organization"], str) and LOCAL_ID.fullmatch(doc["organization"]))
         _check(_slack_id(doc["team"], "T") and _slack_id(doc["app"], "A"))
         _check(_slack_id(doc["channel"], "CG") and isinstance(doc["users"], dict))
-        _check(
-            _slack_id(doc["reviewer"], "UW")
-            and (_slack_id(doc["recipient"], "UWG") or doc["recipient"] == doc["channel"])
-        )
+        _check(_slack_id(doc["reviewer"], "UW"))
+        explicit_recipient = "recipient" in doc
+        recipient = doc.get("recipient", doc["reviewer"])
+        _check(_slack_id(recipient, "UW") or recipient == doc["channel"])
         directory = Path(doc["directory"])
         _check(directory.is_absolute() and directory.is_dir() and not directory.is_symlink())
         if os.name == "posix":
@@ -192,18 +195,19 @@ class Settings:
             doc["app"],
             doc["channel"],
             doc["reviewer"],
-            doc["recipient"],
+            recipient,
             directory,
             doc["users"],
             doc.get("channel_aggregates", False),
-            doc.get("zapier", False),
-            doc.get("zapier_disposition", False),
+            explicit_recipient and doc.get("zapier", False),
+            explicit_recipient and doc.get("zapier_disposition", False),
             destination,
-            doc.get("approval_requests", False),
+            explicit_recipient and doc.get("approval_requests", False),
             doc.get("approval_provider", "slack"),
             doc.get("workspace_title", "OpenTour pilot workspace"),
             doc.get("workflow_label", ""),
             path,
+            explicit_recipient=explicit_recipient,
         )
 
     def permission(self, actor: str, role: str, dataset: str | None = None) -> Json:
@@ -1246,9 +1250,10 @@ class Workbench:
         return self._target(dataset, status["dataset_revision"], report, audit)
 
     def _policy(self, cfg: Settings, actor: str) -> str:
-        return self.journal.opaque(
-            "policy", [cfg.team, cfg.channel, cfg.roles.get(actor), cfg.reviewer, cfg.recipient]
-        )
+        scope = [cfg.team, cfg.channel, cfg.roles.get(actor), cfg.reviewer, cfg.recipient]
+        if not cfg.explicit_recipient:
+            scope.append("local-evaluation-only")
+        return self.journal.opaque("policy", scope)
 
     def _catalog(self, cfg: Settings, actor: str, search: str = "") -> list[Json]:
         entry = cfg.permission(actor, "inspect")
@@ -1711,7 +1716,9 @@ class Workbench:
             dataset_revision=target.dataset_revision,
             audit=view_audit,
             questions=True,
-            release_allowed=named_reviewer and actor == target.audit.get("release_reviewer"),
+            release_allowed=current.explicit_recipient
+            and named_reviewer
+            and actor == target.audit.get("release_reviewer"),
             charts_allowed=charts,
             benchmark_allowed=named_reviewer,
             workflow=cfg.workflow_label,
@@ -1761,7 +1768,8 @@ class Workbench:
             )
 
         if (
-            actor == target.audit.get("release_reviewer")
+            current.explicit_recipient
+            and actor == target.audit.get("release_reviewer")
             and "review" in entry["roles"]
             and (target.audit.get("release_provider") == "zapier_slack")
         ):
@@ -1873,6 +1881,7 @@ class Workbench:
             current.binding == cfg.binding
             and current.reviewer == actor
             and actor == target.audit.get("release_reviewer")
+            and current.explicit_recipient
             and current.approval_provider == target.audit.get("release_provider") == "slack"
             and entry["aggregate"]
             and self.journal.inspected(actor, target.revision, self._policy(current, actor))
@@ -1945,7 +1954,16 @@ class Workbench:
         old_hash: str,
     ) -> None:
         job = ctx["job"]
-        if action == "ot_help":
+        if ctx["kind"] == "workflow_chooser":
+            _check(action in {"ot_workflow_starter", "ot_workflow_historical"})
+            _check(
+                action == "ot_workflow_" + value and self._can_add_workflow(self.settings(), actor)
+            )
+            token = self.journal.context(actor, cfg.channel, view, "workflow_instructions")
+            self._show(view, self.views.workflow_instructions(token, value), old_hash)
+        elif ctx["kind"] == "workflow_instructions":
+            raise Refused("This setup screen has no actions.")
+        elif action == "ot_help":
             self._help(cfg, actor, view, old_hash=old_hash)
         elif action == "ot_readouts":
             self._results(cfg, actor, view, old_hash)
@@ -2309,7 +2327,12 @@ class Workbench:
 
     def _pending_release(self, cfg: Settings, actor: str) -> Target | None:
         entry = cfg.permission(actor, "inspect")
-        if actor != cfg.reviewer or "review" not in entry["roles"] or not entry["aggregate"]:
+        if (
+            not cfg.explicit_recipient
+            or actor != cfg.reviewer
+            or "review" not in entry["roles"]
+            or not entry["aggregate"]
+        ):
             return None
         for _, source in self._result_sources(cfg, actor):
             if not source.startswith("managed:"):
@@ -2327,6 +2350,15 @@ class Workbench:
                 return target
         return None
 
+    def _can_add_workflow(self, cfg: Settings, actor: str) -> bool:
+        entry = cfg.permission(actor, "inspect")
+        return (
+            actor == cfg.reviewer
+            and "review" in entry["roles"]
+            and not cfg.workflow_label
+            and not entry["datasets"]
+        )
+
     def _publish_app_home(self, cfg: Settings, event: Json) -> None:
         actor = event["user"]
         _check(
@@ -2338,6 +2370,7 @@ class Workbench:
             _check(self.store.engagement_active())
             entry = cfg.permission(actor, "inspect")
             self.private_channel(cfg, actor)
+            can_add_workflow = self._can_add_workflow(cfg, actor)
         except Exception:
             # Slack or custody checks may be unavailable; replace any previously personalized Home.
             self.web.views_publish(user_id=actor, view=self.views.app_home_view())
@@ -2352,6 +2385,7 @@ class Workbench:
             can_tune=self._home_repair_access(cfg, actor),
             named_reviewer=cfg.reviewer == actor and "review" in entry["roles"],
             pending=pending.revision if pending else "",
+            can_add_workflow=can_add_workflow,
         )
         with self.store.engagement_guard(engagement_id=self.store.engagement_id):
             exposure = self.journal.admit_view("app_home")
@@ -2375,6 +2409,20 @@ class Workbench:
             and len(body["actions"]) == 1
         )
         action = body["actions"][0]
+        if action.get("action_id") == "ot_app_add_workflow":
+            _check(action.get("value") == "ot_app_add_workflow")
+            opened = self.web.views_open(
+                trigger_id=body["trigger_id"], view=self.views.notice_modal("checking")
+            )
+            view_id = opened["view"]["id"]
+            try:
+                self.private_channel(cfg, actor)
+                _check(self._can_add_workflow(self.settings(), actor))
+                token = self.journal.context(actor, cfg.channel, view_id, "workflow_chooser")
+                self._show(view_id, self.views.workflow_chooser(token))
+            except Exception:
+                self._safe_notice(view_id)
+            return
         if action.get("action_id") == "ot_app_pending":
             _check(actor == cfg.reviewer and cfg.permission(actor, "review")["aggregate"])
             opened = self.web.views_open(
@@ -2450,7 +2498,16 @@ class Workbench:
                 and body["team"]["id"] == cfg.team
             )
             actor = body["user"]["id"]
-            cfg.permission(actor, "inspect")
+            actions = body.get("actions", [])
+            setup_click = (
+                body.get("type") == "block_actions"
+                and len(actions) == 1
+                and actions[0].get("action_id")
+                in {"ot_app_add_workflow", "ot_workflow_starter", "ot_workflow_historical"}
+                and body.get("container", {}).get("type", "view") == "view"
+            )
+            if not setup_click:
+                cfg.permission(actor, "inspect")
             surfaced = body.get("channel", {}).get("id")
             _check(not surfaced or surfaced == cfg.channel)
             if body.get("container", {}).get("type") == "message":
@@ -2481,7 +2538,19 @@ class Workbench:
             view = obj["id"]
             token = obj["private_metadata"]
             # Only trusted local configuration and a bounded indexed lookup precede a modal receipt.
-            self.journal.read_context(token, actor, cfg.channel, view)
+            initial_context = self.journal.read_context(token, actor, cfg.channel, view)
+            if setup_click:
+                box = body.get("container", {})
+                _check(
+                    initial_context["kind"] == "workflow_chooser"
+                    and obj.get("type") == "modal"
+                    and obj.get("callback_id") == "ot_workflow_chooser"
+                    and box.get("type", "view") == "view"
+                    and box.get("view_id", view) == view
+                )
+                authorized_view = view
+                authorized_hash = obj.get("hash", "")
+                cfg.permission(actor, "inspect")
             if submission:
                 ack(
                     {

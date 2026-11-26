@@ -13,8 +13,8 @@ import subprocess
 import sys
 import tempfile
 import time
-from collections.abc import Iterator
-from contextlib import contextmanager
+from collections.abc import Callable, Iterator
+from contextlib import AbstractContextManager, ExitStack, contextmanager
 from pathlib import Path
 from typing import Any, BinaryIO, NoReturn, cast
 from urllib.parse import urlsplit
@@ -263,29 +263,37 @@ def _launcher(reader: Json) -> Iterator[BinaryIO]:
 
 
 class _Stdio:
-    def __init__(self, child: subprocess.Popen[bytes], deadline: float):
+    def __init__(
+        self,
+        child: subprocess.Popen[bytes],
+        deadline: float,
+        dispatch: Callable[[], AbstractContextManager[None]],
+    ):
         self.child = child
         self.deadline = deadline
         self.pending = bytearray()
         self.number = 0
+        self.dispatch = dispatch
         assert child.stdin is not None
         os.set_blocking(child.stdin.fileno(), False)
 
     def send(self, message: Json) -> None:
         assert self.child.stdin is not None
         payload = (canonical({"jsonrpc": "2.0", **message}) + "\n").encode()
-        while payload:
-            remaining = self.deadline - time.monotonic()
-            _need(
-                remaining > 0 and select.select([], [self.child.stdin], [], max(0, remaining))[1],
-                "workplace_reader_timeout",
-            )
-            try:
-                sent = os.write(self.child.stdin.fileno(), payload)
-            except BlockingIOError:
-                continue
-            _need(sent, "workplace_reader_disconnected")
-            payload = payload[sent:]
+        with self.dispatch():
+            while payload:
+                remaining = self.deadline - time.monotonic()
+                _need(
+                    remaining > 0
+                    and select.select([], [self.child.stdin], [], max(0, remaining))[1],
+                    "workplace_reader_timeout",
+                )
+                try:
+                    sent = os.write(self.child.stdin.fileno(), payload)
+                except BlockingIOError:
+                    continue
+                _need(sent, "workplace_reader_disconnected")
+                payload = payload[sent:]
 
     def receive(self, limit: int) -> Json:
         assert self.child.stdout is not None
@@ -328,27 +336,30 @@ class _Stdio:
 
 
 @contextmanager
-def _session(cfg: Json, root: Path) -> Iterator[_Stdio]:
+def _session(
+    cfg: Json, root: Path, dispatch: Callable[[], AbstractContextManager[None]]
+) -> Iterator[_Stdio]:
     reader = cfg["reader"]
     _need(
         all(n in os.environ for n in reader["env_names"]),
         "workplace_connection_credentials_unavailable",
     )
-    with (
-        _launcher(reader) as launcher,
-        subprocess.Popen(
-            [reader["executable"]],
-            executable=f"/dev/fd/{launcher.fileno()}",
-            pass_fds=(launcher.fileno(),),
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            cwd=root,
-            env={n: os.environ[n] for n in reader["env_names"]},
-        ) as child,
-    ):
+    with _launcher(reader) as launcher, ExitStack() as session:
+        with dispatch():
+            child = session.enter_context(
+                subprocess.Popen(
+                    [reader["executable"]],
+                    executable=f"/dev/fd/{launcher.fileno()}",
+                    pass_fds=(launcher.fileno(),),
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                    cwd=root,
+                    env={n: os.environ[n] for n in reader["env_names"]},
+                )
+            )
         try:
-            client = _Stdio(child, time.monotonic() + SESSION_SECONDS)
+            client = _Stdio(child, time.monotonic() + SESSION_SECONDS, dispatch)
             hello = client.call(
                 "initialize",
                 {
@@ -751,9 +762,18 @@ def _operate(
     try:
         with store.engagement_guard():
             cfg = _live(store, connection, expected_connection_revision)
-        with _session(cfg, store.path.parent) as client:
+        revision = digest(cfg)
+
+        @contextmanager
+        def dispatch() -> Iterator[None]:
+            # Fence the actual outbound request. The provider reply is read outside the guard.
+            with store.engagement_guard(engagement_id=cfg["scope"]["engagement"]):
+                _live(store, connection, revision)
+                yield
+
+        with _session(cfg, store.path.parent, dispatch) as client:
             pair, summary = _catalog(client, cfg, max_total_rows)
-            summary["connection_revision"] = digest(cfg)
+            summary["connection_revision"] = revision
             if expected_pair_revision is not None:
                 _need(
                     _hex(expected_pair_revision)
@@ -761,13 +781,10 @@ def _operate(
                     "workplace_selected_pair_changed",
                 )
             if not acquire:
-                with store.engagement_guard():
-                    _live(store, connection, digest(cfg))
-                return summary
+                with dispatch():
+                    return summary
             rows, wire_hashes, timing = {}, {}, {}
             for role in ROLES:
-                with store.engagement_guard():
-                    _live(store, connection, digest(cfg))
                 started = time.monotonic_ns()
                 observed = int(time.time())
                 rows[role], wire_hashes[role] = _read_rows(client, cfg, role, pair[role])
