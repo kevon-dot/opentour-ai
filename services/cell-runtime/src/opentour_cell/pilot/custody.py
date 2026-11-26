@@ -39,6 +39,45 @@ _EXPORT_OBSERVATIONS = (
     "legacy_unknown",
 )
 _ZERO_EXPORT_RECEIPT = "zero_exports"
+# Names only: withdrawal must not reopen policy, source or verifier payloads.
+# Arbitrary customer export filenames remain part of the custodian's inventory review.
+_PRIVATE_STATE = {
+    "intake-records": (
+        "receipt",
+        ("intake.sqlite3*", "benchmark-inspection-selection.json"),
+        "Account for admitted workflow and run records, private selections and SQLite sidecars.",
+    ),
+    "benchmark-records": (
+        "receipt",
+        ("workflow-benchmarks.sqlite3*", "benchmark-worker.lock"),
+        "Account for benchmark versions, materialization receipts and worker recovery state.",
+    ),
+    "starter-permissions": (
+        "grant",
+        ("starter-intake-*.json",),
+        "Reconcile policy grants, private signing material and withdrawal tombstones.",
+    ),
+    "live-source-records": (
+        "source",
+        ("live-evidence.sqlite3*", "live-export-*.json"),
+        "Reconcile committed decisions, independent outcomes, quarantine, read receipts "
+        "and export manifests; inventory the separately named raw exports and backups.",
+    ),
+    "live-permissions": (
+        "grant",
+        ("live-authority-*.json",),
+        "Reconcile live resource grants, lease bindings and private signing material.",
+    ),
+    "readiness-records": (
+        "receipt",
+        (
+            "training-readiness.sqlite3*",
+            "live-repair-assessments.sqlite3*",
+            "readiness-selection.json",
+        ),
+        "Account for readiness and repair assessments and their separately named private policy.",
+    ),
+}
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS closeout (
  singleton INTEGER PRIMARY KEY CHECK(singleton=1), organization TEXT NOT NULL,
@@ -161,7 +200,9 @@ class Closeout:
             "SELECT observed,detail,disposition FROM items WHERE item=?", (item,)
         ).fetchone()
         if existing:
-            appeared_again = kind in {"local", "receipt"} and existing["disposition"] in {
+            appeared_again = (kind in {"local", "receipt"} or item in _PRIVATE_STATE) and existing[
+                "disposition"
+            ] in {
                 "confirmed_deleted",
                 "confirmed_returned",
                 "confirmed_expiry",
@@ -181,6 +222,10 @@ class Closeout:
             (item, kind, owner, due, int(time.time()), observed, detail),
         )
         db.execute("UPDATE closeout SET finished_ref=NULL WHERE singleton=1")
+
+    def _private_state_present(self, item: str) -> bool:
+        # glob includes broken symlinks and never follows them to read a target.
+        return any(any(self.directory.glob(pattern)) for pattern in _PRIVATE_STATE[item][1])
 
     def withdraw(
         self,
@@ -261,6 +306,9 @@ class Closeout:
             local = store.custody_inventory()
             outbound = withdraw_for_custody(self.directory, self.organization)
             custodian, due = row["custodian"], row["due"]
+            for item, (kind, _, detail) in _PRIVATE_STATE.items():
+                if self._private_state_present(item):
+                    self._observe(db, item, kind, custodian, due, detail=detail)
             for key, kind, present, detail in (
                 (
                     "approval-requests",
@@ -447,6 +495,12 @@ class Closeout:
             }:
                 if self._store(row).custody_inventory()[item.removeprefix("local-")]:
                     raise CustodyError("live_data_still_present")
+            if (
+                item in _PRIVATE_STATE
+                and disposition in {"confirmed_deleted", "confirmed_expiry", "confirmed_returned"}
+                and self._private_state_present(item)
+            ):
+                raise CustodyError("private_state_still_present")
             if (
                 item == "local-handoff-journal"
                 and disposition in {"confirmed_deleted", "confirmed_expiry", "confirmed_returned"}
