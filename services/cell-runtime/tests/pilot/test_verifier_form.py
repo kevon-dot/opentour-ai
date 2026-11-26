@@ -4,7 +4,7 @@ import json
 import sqlite3
 
 import pytest
-from opentour_cell.pilot.intake_mcp import IntakeError
+from opentour_cell.pilot.intake_mcp import IntakeError, IntakePrincipal
 from test_app_home import click
 from test_home_readiness import ReadyHome
 from test_live_readiness import decision
@@ -248,3 +248,53 @@ def test_owner_nomination_is_visible_to_custodian_without_creating_verification_
     assert "ot_nominate_verifier" not in buttons(screen(h, custodian))
     assert "ot_app_verify_outcome" not in buttons(ready.home(OTHER))
     assert ready.worker.source.live.path.read_bytes() == before and effects(h) == (0,) * 7
+
+
+def test_dataset_successor_snapshots_remain_retrievable(named):
+    ready = named
+    view = open_form(ready)
+    ready.h.form(view, submission(ready, view), OTHER)
+    live = ready.worker.source.live
+    actor = ready.worker.worker
+    old = live.snapshot(actor, ready.workflow)
+    assert old.verified == 1
+    ready.grant["dataset_revision"] = "next-dataset-revision"
+    sign(ready.h, ready.grant)
+    live.save_binding(
+        IntakePrincipal(actor.tenant, ACTOR, "slack"),
+        ready.workflow,
+        ready.grant["grants"][0]["resource"],
+    )
+    ready.ingest(decision(decision_id="D2"))
+    new = live.snapshot(actor, ready.workflow)
+    assert new.decisions == 1 and new.pending == 1
+    assert new.sequence > old.sequence
+    assert live.snapshot(actor, ready.workflow, as_of_revision=new.sequence) == new
+
+
+def test_binding_save_rechecks_after_acquiring_writer(named, monkeypatch):
+    from contextlib import contextmanager
+
+    ready = named
+    live = ready.worker.source.live
+    actor = IntakePrincipal(ready.worker.worker.tenant, ACTOR, "slack")
+    resource = ready.grant["grants"][1]["resource"]
+    db_open = live._db
+
+    @contextmanager
+    def withdraw_on_lock(*, write=False):
+        with db_open(write=write) as db:
+            if write:
+                ready.grant["actors"][ACTOR] = ["inspect"]
+                sign(ready.h, ready.grant)
+            yield db
+
+    def rows():
+        with db_open() as db:
+            return db.execute("SELECT * FROM live_bindings").fetchall()
+
+    before = rows()
+    monkeypatch.setattr(live, "_db", withdraw_on_lock)
+    with pytest.raises(IntakeError):
+        live.save_binding(actor, ready.workflow, resource)
+    assert rows() == before

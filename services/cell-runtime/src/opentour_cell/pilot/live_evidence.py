@@ -305,7 +305,12 @@ class LiveEvidence:
         *,
         expected_revision: str | None = None,
     ) -> str:
-        with self._scope(actor, workflow) as scope, self._db(write=True) as db:
+        with (
+            self._scope(actor, workflow) as selected,
+            self._db(write=True) as db,
+            self._scope(actor, workflow) as scope,
+        ):
+            _require(scope == selected)
             _require(scope.expires_at > int(time.time()))
             _require(scope.can_bind, "data_custodian_required")
             grants = [g for g in scope.grants if g.resource == resource]
@@ -609,9 +614,14 @@ class LiveEvidence:
         db.execute("INSERT OR IGNORE INTO live_event_origins VALUES (?,?)", (row[0], reference))
 
     def _archive(self, db: sqlite3.Connection, scope: LiveScope) -> None:
-        snapshot = self._snapshot(db, scope)
+        sequence = db.execute(
+            "SELECT coalesce(max(sequence), 0) + 1 FROM live_snapshots "
+            "WHERE tenant=? AND workflow=? AND epoch=?",
+            (scope.tenant, scope.workflow_ref, scope.engagement_epoch),
+        ).fetchone()[0]
+        snapshot = self._snapshot(db, scope, sequence=sequence)
         db.execute(
-            "INSERT OR IGNORE INTO live_snapshots VALUES (?,?,?,?,?)",
+            "INSERT INTO live_snapshots VALUES (?,?,?,?,?)",
             (
                 scope.tenant,
                 scope.workflow_ref,
@@ -661,6 +671,7 @@ class LiveEvidence:
         db: sqlite3.Connection,
         scope: LiveScope,
         *,
+        sequence: int | None = None,
         form_targets: dict[tuple[str, str, int], str] | None = None,
         verifying_actor: str | None = None,
     ) -> LiveSnapshot:
@@ -818,32 +829,22 @@ class LiveEvidence:
         _require(not bindings or matching_scope)
         bound = any(g.kind == "independent_outcome" for g in bound_grants)
         actors = sorted({g.verifier for g in bound_grants if g.verifier})
-        page_rows = db.execute(
-            "SELECT p.rowid,p.binding_ref FROM live_pages p "
-            "JOIN live_bindings b ON b.ref=p.binding_ref "
-            "WHERE b.tenant=? AND b.workflow=? AND b.epoch=?",
-            (
-                scope.tenant,
-                scope.workflow_ref,
-                scope.engagement_epoch,
-            ),
-        ).fetchall()
-        sequence = max(
-            (row[0] for row in page_rows if self._same_scope(self._binding(db, row[1])[0], scope)),
-            default=0,
-        )
-        if db.execute("SELECT 1 FROM sqlite_master WHERE name='live_form_receipts'").fetchone():
-            sequence += db.execute(
-                "SELECT count(*) FROM live_form_receipts WHERE tenant=? AND workflow=? "
-                "AND epoch=? AND dataset=? AND dataset_revision=?",
-                (
-                    scope.tenant,
-                    scope.workflow_ref,
-                    scope.engagement_epoch,
-                    scope.dataset_ref,
-                    scope.dataset_revision,
-                ),
-            ).fetchone()[0]
+        if sequence is None:
+            sequence = int(
+                db.execute(
+                    "SELECT coalesce(max(sequence), 0) FROM live_snapshots "
+                    "WHERE tenant=? AND workflow=? AND epoch=? "
+                    "AND json_extract(body,'$.snapshot.dataset_ref')=? "
+                    "AND json_extract(body,'$.snapshot.dataset_revision')=?",
+                    (
+                        scope.tenant,
+                        scope.workflow_ref,
+                        scope.engagement_epoch,
+                        scope.dataset_ref,
+                        scope.dataset_revision,
+                    ),
+                ).fetchone()[0]
+            )
         quarantined = db.execute(
             "SELECT count(*) FROM live_quarantine WHERE tenant=? AND workflow=? AND epoch=? "
             "AND dataset_ref=? AND dataset_revision=?",
