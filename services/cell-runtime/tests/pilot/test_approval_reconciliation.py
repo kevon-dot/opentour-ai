@@ -13,7 +13,7 @@ from unittest.mock import patch
 import pytest
 from opentour_cell.pilot import zapier_approval
 from opentour_cell.pilot.custody import Closeout
-from test_zapier_approval import HOOK, Case, deliver, make_case, private
+from test_zapier_approval import HOOK, NODE, Case, deliver, make_case, private
 
 
 @pytest.fixture
@@ -25,6 +25,14 @@ def restart(case: Case) -> None:
     case.bridge = zapier_approval.ApprovalBridge(
         case.directory, case.h.store.organization, case.bridge.config
     )
+
+
+def signed_at_clock(case: Case, wire, status: str = "Approved"):
+    # Drive the actual bundled Node signer with the same clock used by the worker.
+    with patch(
+        "test_zapier_approval.NODE", f"Date.now = () => {int(time.time())} * 1000;\n" + NODE
+    ):
+        return case.signed(wire, status=status)
 
 
 def rows(case: Case, table: str) -> list[tuple]:
@@ -100,7 +108,7 @@ def test_expiry_at_clock_boundary_invalidates_nonce_and_keeps_owner_recovery(
         case.h.action(case.view, "ot_evidence", case.revision)
     wire = case.bridge.issue(**case.binding, ttl_seconds=2)
     deliver(case, wire)
-    old = case.signed(wire)
+    old = signed_at_clock(case, wire)
     now = wire["expires_at"]
     result = case.bridge.reconcile(poll_interval=1)
     assert result["counts"] == {"expired": 1}
@@ -340,7 +348,7 @@ def test_transient_local_read_failure_holds_without_permanent_nonce_invalidation
     assert not list(case.directory.glob("zapier-approval-*-reconciled.json"))
     now += 1
     assert case.bridge.reconcile(poll_interval=1)["counts"] == {"pending": 1}
-    assert case.bridge.consume(case.signed(wire))["state"] == "approved"
+    assert case.bridge.consume(signed_at_clock(case, wire))["state"] == "approved"
 
 
 def test_superseded_reminder_is_retired_and_does_not_starve_new_request(
@@ -379,7 +387,7 @@ def test_signed_pending_readback_resolves_uncertain_transport_before_cutover(
 
     case.bridge.flush(wire["request_id"], HOOK, lost)
     assert case.bridge.reconcile(poll_interval=1)["counts"] == {"held": 1}
-    assert case.bridge.consume(case.signed(wire, status="Pending"))["state"] == "pending"
+    assert case.bridge.consume(signed_at_clock(case, wire, status="Pending"))["state"] == "pending"
     now += 1
     observed = case.bridge.reconcile(poll_interval=1)
     assert observed["counts"] == {"pending": 1}
@@ -399,6 +407,10 @@ def test_direct_settings_drift_cannot_bypass_cutover_or_successor_authority(
 ) -> None:
     wire = case.inspect()
     deliver(case, wire)
+    signed = case.signed(wire)
+    case.bridge.reconcile(poll_interval=1)
+    original = dict(case.policy)
+    before_outbox = rows(case, "outbox")
     epoch = case.bridge.pending_summary()["installation_epoch"]
     case.policy.update(change)
     private(case.bridge.config, case.policy)
@@ -408,9 +420,19 @@ def test_direct_settings_drift_cannot_bypass_cutover_or_successor_authority(
         case.bridge.flush(wire["request_id"], HOOK, lambda *_: pytest.fail("no new dispatch"))
     with pytest.raises(ValueError, match="installation_cutover_required"):
         case.bridge.prepare_cutover()
+    with pytest.raises(ValueError, match="installation_cutover_required"):
+        case.bridge.reconcile(poll_interval=1)
+    with pytest.raises(ValueError, match="installation_cutover_required"):
+        case.bridge.claim_notification()
+    assert rows(case, "outbox") == before_outbox
+    assert not list(case.directory.glob("zapier-approval-*-reconciled.json"))
     assert case.bridge.pending_summary()["installation_epoch"] == epoch
     assert len(list(case.directory.glob("zapier-approval-za-*-request.json"))) == 1
     assert not list(case.directory.glob("managed-outputs/*/release-decision.json"))
+    case.policy.clear()
+    case.policy.update(original)
+    private(case.bridge.config, case.policy)
+    assert case.bridge.consume(signed)["state"] == "approved"
 
 
 def test_custody_accounts_for_reconciliation_after_legacy_request_files_are_removed(

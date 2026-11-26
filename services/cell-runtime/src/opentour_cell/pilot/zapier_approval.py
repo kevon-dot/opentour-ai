@@ -395,6 +395,7 @@ class ApprovalBridge:
             "invalid_reconciliation_interval",
         )
         with self._serialized() as journal:
+            self._assert_installed_policy(journal)
             policy, key = self._policy()
             self._inventory(journal, policy, key)
             now = int(time.time())
@@ -567,6 +568,7 @@ class ApprovalBridge:
     def claim_notification(self) -> Json | None:
         """Reserve one opaque local outbox item; an unknown send is never automatically retried."""
         with self._serialized() as journal:
+            self._assert_installed_policy(journal)
             policy, key = self._policy()
             with journal.db() as db:
                 pending = db.execute(
@@ -629,6 +631,7 @@ class ApprovalBridge:
 
     def confirm_notification(self, notification_ref: str) -> Json:
         with self._serialized() as journal:
+            self._assert_installed_policy(journal)
             self._policy()
             with journal.db() as db:
                 row = db.execute(
