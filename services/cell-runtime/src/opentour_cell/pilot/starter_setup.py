@@ -11,16 +11,31 @@ from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from opentour_cell.pilot.intake_admission import AuthorizedSource, DurableIntake
+from opentour_cell.pilot.intake_admission import (
+    AuthorizedSource,
+    DurableIntake,
+    IntakeWork,
+    canonical_intent,
+)
 from opentour_cell.pilot.intake_local import (
     LocalStarterAuthority,
     StarterSelection,
     VerifiedStarterGrant,
 )
-from opentour_cell.pilot.intake_mcp import AdmissionReceipt, IntakeError, IntakePrincipal, Starter
+from opentour_cell.pilot.intake_mcp import (
+    AdmissionReceipt,
+    BenchmarkView,
+    IntakeError,
+    IntakePrincipal,
+    Starter,
+)
 from opentour_cell.pilot.onboarding_mcp import _read_private
 from opentour_cell.pilot.operating_point import digest
 from opentour_cell.pilot.repair_workflow import _record
+from opentour_cell.pilot.workflow_benchmarks import (
+    BenchmarkIntake,
+    WorkflowBenchmarks,
+)
 
 if TYPE_CHECKING:
     from opentour_cell.pilot.slack_adapter import Settings
@@ -93,6 +108,7 @@ class StarterPreview:
     policy_revision: str
     charter: StarterCharter
     draft: dict[str, Any] | None
+    benchmark: BenchmarkView | None = None
 
 
 class StarterSetup(LocalStarterAuthority):
@@ -136,8 +152,11 @@ class StarterSetup(LocalStarterAuthority):
         charter.require_current_plan()
         return super().starter(actor, request)
 
-    def _draft_path(self, creation: str) -> Path:
-        identity = digest([self.selected.tenant, self.selected.engagement_epoch, creation])
+    def _draft_path(self, creation: str, grant_revision: str = "") -> Path:
+        key = [self.selected.tenant, self.selected.engagement_epoch, creation]
+        if grant_revision:
+            key.append(grant_revision)
+        identity = digest(key)
         return self.path.parent / f"source-intake-starter-draft-{identity}.json"
 
     def _receipt(
@@ -165,7 +184,9 @@ class StarterSetup(LocalStarterAuthority):
             },
         }
 
-    def _check_admission(self, grant: VerifiedStarterGrant, draft: dict[str, Any]) -> None:
+    def _check_admission(
+        self, grant: VerifiedStarterGrant, draft: dict[str, Any]
+    ) -> BenchmarkView | None:
         # The separate draft may survive a partial restore of the intake register.
         # Opening a saved card must not initialize, migrate or repair that register.
         from opentour_cell.pilot.receipt_recovery import _open_db
@@ -174,7 +195,7 @@ class StarterSetup(LocalStarterAuthority):
             _require(db is not None)
             assert db is not None
             row = db.execute(
-                "SELECT r.request FROM intake_runs r JOIN intake_workflows w "
+                "SELECT r.request,r.intent FROM intake_runs r JOIN intake_workflows w "
                 "ON r.tenant=w.tenant AND r.workflow_ref=w.workflow_ref "
                 "WHERE r.tenant=? AND r.workflow_ref=? AND r.run_ref=? AND r.grant_revision=? "
                 "AND w.creation_ref=? AND w.resource=? AND w.epoch=?",
@@ -200,6 +221,50 @@ class StarterSetup(LocalStarterAuthority):
                 }
             )
 
+            source = super().starter(self.principal, self._request(grant, "readback"))
+            _require(source)
+            assert source
+            revisions = (grant.source_revision, grant.setup_policy_revision)
+            _require(
+                row[1] == canonical_intent(draft["workflow_ref"], "starter", source, revisions)
+            )
+
+            # Older starter receipts remain readable before their first explicit
+            # benchmark admission. A restore cannot make a stale version current.
+            if not db.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' "
+                "AND name='intake_benchmark_admissions'"
+            ).fetchone():
+                return None
+            order = db.execute(
+                "SELECT b.version,b.parent_run,NOT EXISTS("
+                "SELECT 1 FROM intake_benchmark_admissions newer WHERE newer.tenant=b.tenant "
+                "AND newer.epoch=b.epoch AND newer.workflow_ref=b.workflow_ref "
+                "AND newer.version>b.version) FROM intake_benchmark_admissions b "
+                "WHERE b.tenant=? AND b.epoch=? AND b.workflow_ref=? AND b.run_ref=?",
+                (
+                    self.selected.tenant,
+                    self.selected.engagement_epoch,
+                    draft["workflow_ref"],
+                    draft["run_ref"],
+                ),
+            ).fetchone()
+            if order is None:
+                return None
+            work = IntakeWork(
+                draft["run_ref"],
+                draft["workflow_ref"],
+                "starter",
+                source,
+                revisions,
+                order[0],
+                order[1],
+                bool(order[2]),
+            )
+            benchmark = WorkflowBenchmarks(self.path.parent).for_run(self.selected.tenant, work)
+            _require(benchmark is None or benchmark.version == order[0])
+            return benchmark
+
     def preview(self) -> StarterPreview:
         with self.setup_grant(self.principal, read_only=True) as grant:
             self._current_owner()
@@ -207,12 +272,18 @@ class StarterSetup(LocalStarterAuthority):
                 self.path.parent / self.binding.charter_file, grant.setup_policy_revision
             )
             revision = digest([self.installation, self.slack_actor, grant.revision])
+            benchmark = None
+            draft: dict[str, Any] | None
             try:
-                draft = _read_private(self._draft_path(grant.creation_ref), 8192)
+                draft = _read_private(self._draft_path(grant.creation_ref, grant.revision), 8192)
             except FileNotFoundError:
-                draft = None
+                try:
+                    previous = _read_private(self._draft_path(grant.creation_ref), 8192)
+                    draft = previous if previous.get("scope_revision") == revision else None
+                except FileNotFoundError:
+                    draft = None
             if draft is not None:
-                self._check_admission(grant, draft)
+                benchmark = self._check_admission(grant, draft)
                 _require(
                     draft == self._receipt(grant, charter, draft["workflow_ref"], draft["run_ref"])
                 )
@@ -224,37 +295,44 @@ class StarterSetup(LocalStarterAuthority):
                 grant.source_revision,
                 charter,
                 draft,
+                benchmark,
             )
+
+    @staticmethod
+    def _request(grant: VerifiedStarterGrant, key: str) -> Starter:
+        return Starter(
+            grant.policy_resource_ref,
+            grant.source_revision,
+            grant.setup_policy_revision,
+            key,
+            grant.creation_ref,
+            None,
+        )
 
     def save(self, expected: str, operation_key: str) -> StarterPreview:
         preview = self.preview()
         _require(preview.revision == expected)
-        if preview.draft:
+        if preview.draft and preview.benchmark:
             return preview
         preview.charter.require_current_plan()
         with self.setup_grant(self.principal) as grant:
             self._current_owner()
-            admission = DurableIntake(self.path.parent, self)
-            request = Starter(
-                grant.policy_resource_ref,
-                grant.source_revision,
-                grant.setup_policy_revision,
-                operation_key,
-                grant.creation_ref,
-                None,
-            )
+            admission = BenchmarkIntake(DurableIntake(self.path.parent, self))
+            request = self._request(grant, operation_key)
         receipt = admission.submit_intake(self.principal, request)
         _require(isinstance(receipt, AdmissionReceipt))
         assert isinstance(receipt, AdmissionReceipt)
         run = admission.get_run(self.principal, receipt.run_ref)
+        _require(run.benchmark is not None)
         with self.setup_grant(self.principal):
             self._current_owner()
             charter = StarterCharter.read(
                 self.path.parent / self.binding.charter_file, grant.setup_policy_revision
             )
             charter.require_current_plan()
-            _record(
-                self._draft_path(grant.creation_ref),
-                self._receipt(grant, preview.charter, run.workflow_ref, receipt.run_ref),
-            )
+            if not preview.draft:
+                _record(
+                    self._draft_path(grant.creation_ref, grant.revision),
+                    self._receipt(grant, preview.charter, run.workflow_ref, receipt.run_ref),
+                )
         return self.preview()

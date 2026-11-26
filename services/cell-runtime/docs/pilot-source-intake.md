@@ -84,3 +84,92 @@ The charter is part of the approved scope. Set the signed starter grant’s `set
 ```
 
 Use the agreed next-check date and name the verifier when known. A policy-only save activates the local drafting scope. Live-source connection and training require separately authorized workflows.
+
+### Connect the existing workflow to a live feed
+
+Open private Slack Home, choose **Workflow settings**, then **Connect live
+decisions**. Select an authorized committed-decision or independent-outcome
+resource and choose **Save binding**. The screen returns the opaque binding
+reference. Opening settings again shows current bindings. Saving the same
+signed selection again returns the same reference. A decision feed can be
+connected while independent verification is pending.
+
+The worker uses the saved starter's workflow identity. To route a separate
+custodian directly to the same admitted workflow, set the optional
+`live_workflow_ref` in the private Slack settings file to that workflow's
+opaque reference. The operator must have provisioned the existing signed
+per-workflow live grant, engagement epoch, resource revision, lease and source
+checkpoint. Its actors map must explicitly authorize the authenticated Slack
+user ID. A user with live inspection can see current bindings and request
+custodian action. Only a user with current live custodian authority can save.
+The starter owner mapping grants no live role.
+
+The intake worker needs its own intake grant to discover the resulting
+`feed_binding_ref` and submit a typed live request. Source ingestion depends
+on an installed authorized reader. The Slack settings action reads no feed
+content and submits no intake, training, approval or release work.
+
+### Show current training readiness
+
+Place `readiness-selection.json` in the private worker directory. Use schema
+`opentour.pilot.readiness-selection.v1`, the admitted `workflow_ref`, the
+existing `worker_ref`, and `policy_file` (a private JSON basename, or null
+when no simple-repair policy is configured). The current signed live grant
+must independently permit that worker to inspect and ingest. The optional
+policy identifies the same workflow, engagement and dataset revision and sets
+the development population, repair rule and independent residual threshold.
+
+After processing an authorized live page, the worker calls
+`open_readiness(directory, tenant, workflow_ref, contexts=...).refresh()`.
+An observed decision-context reader may support simple-repair assessment.
+Missing decision-time input or committed-action classification keeps the
+corresponding assessment unmeasured. The call persists the evidence-bound
+readiness receipt and never admits a fit.
+
+Private Home reads the persisted current receipt with the authenticated Slack
+principal's live inspection grant and dataset aggregate permission. A pending
+decision can request independent verification. With a signed custodian role
+and permitted outcome resource, **Bind verifier** opens the existing private
+binding form with only independent outcome choices. A training question can also show current readiness when the verified frozen
+result explicitly identifies that workflow and its tenant, engagement, dataset
+and revision all match. An unattributed result keeps its original answer.
+A changed source, mandate or scope is rechecked before Slack receives either
+projection. Reopening Home runs no assessment and creates no readiness record.
+
+### Read the starter benchmark
+
+Saving the private policy-only draft creates or reuses the versioned workflow
+benchmark. The saved card shows the benchmark reference, version and recorded
+state from the worker ledger. A newly admitted starter is a draft awaiting
+owner adjudication. An approved policy revision submitted on the same creation
+reference creates a successor on the same workflow. Reopening the earlier
+authorized revision preserves its own admission and benchmark history.
+
+A previously saved starter may predate the benchmark ledger. Opening its card
+is read-only. **Create benchmark draft** explicitly retries the existing
+canonical intake under the current signed grant. The existing workflow, run
+and legacy starter receipt survive. Live-feed connections and admissions use
+a separate evidence series. The owner can reopen the starter card to inspect
+the same benchmark after a feed is connected.
+
+### Showing an existing benchmark on live run status
+
+To include benchmark metadata on a live run, the operator can select one previously
+admitted starter or historical run in the same private state directory. Create
+`benchmark-inspection-selection.json` with owner-only permissions and these fields:
+
+```json
+{
+  "schema_version": "opentour.pilot.benchmark-inspection-selection.v1",
+  "source_selection_file": "prior-intake.json",
+  "benchmark_run_ref": "run-example"
+}
+```
+
+Use the basename of the original OPE-430 selection and its actual admitted run
+reference. The authenticated live actor must independently hold that original
+grant for the same tenant, workflow and engagement epoch. Each status request
+rechecks both authorities, the canonical admission and the current benchmark
+version. A withdrawn grant, superseded run or missing benchmark leaves the
+ordinary live status available without benchmark fields. Reading status does
+not create a benchmark or dispatch work.

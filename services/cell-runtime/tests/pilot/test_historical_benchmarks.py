@@ -12,7 +12,11 @@ from pathlib import Path
 
 import pytest
 from opentour_cell.pilot import repair_workflow, simple_repair
-from opentour_cell.pilot.historical_benchmarks import POLICY, LocalHistoricalBenchmark
+from opentour_cell.pilot.historical_benchmarks import (
+    BASELINE_POLICY,
+    POLICY,
+    LocalHistoricalBenchmark,
+)
 from opentour_cell.pilot.intake_admission import DurableIntake
 from opentour_cell.pilot.intake_local import SELECTION_VERSION, LocalHistoricalAuthority
 from opentour_cell.pilot.intake_mcp import HistoricalPair, IntakeError
@@ -29,7 +33,14 @@ def write(path, value):
     path.chmod(0o600)
 
 
-def setup(tmp_path, *, missing_baseline=False, missing_threshold=False):
+def setup(
+    tmp_path,
+    *,
+    missing_baseline=False,
+    missing_threshold=False,
+    baseline_only=False,
+    no_development=False,
+):
     directory = tmp_path / "private"
     subprocess.run(
         [
@@ -57,15 +68,22 @@ def setup(tmp_path, *, missing_baseline=False, missing_threshold=False):
     }
     if missing_threshold:
         del policy["terms"]["minimum_verified_cases"]
+    if baseline_only:
+        policy["schema_version"] = BASELINE_POLICY
+        del policy["rule"]
+        del policy["terms"]["minimum_development_cases"]
+        del policy["terms"]["minimum_residual_errors"]
     agreement = directory / "benchmark-policy.json"
     write(agreement, policy)
     grant = json.loads((directory / "source-grant.json").read_text())
+    if no_development:
+        grant["split"]["cutoff"] = 1
     if missing_baseline:
         import hashlib
 
         path = directory / "trace.jsonl"
         records = [json.loads(line) for line in path.read_text().splitlines()]
-        records[0]["incumbent"] = {"status": "missing"}
+        records[-1 if baseline_only else 0]["incumbent"] = {"status": "missing"}
         path.write_text("".join(canonical(row) + "\n" for row in records))
         grant["trace_sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
     store = LocalTrainingStore(
