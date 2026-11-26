@@ -1267,6 +1267,7 @@ def app_home_view(
     can_tune: bool = False,
     named_reviewer: bool = False,
     pending: str = "",
+    can_add_workflow: bool = False,
 ) -> Block:
     if not context:
         return {
@@ -1294,6 +1295,13 @@ def app_home_view(
         if named_reviewer:
             blocks.append(_section("No repair needs your review."))
         nav.insert(0, _button("Review results", "ot_app_review", "ot_app_review"))
+    if can_add_workflow:
+        blocks.append(
+            {
+                **_actions(_button("Add workflow", "ot_app_add_workflow", "ot_app_add_workflow")),
+                "block_id": "ot_workflow_entry",
+            }
+        )
     if can_tune:
         nav.append(_button("Preview a repair", "ot_app_repair", "ot_app_repair"))
     blocks.extend(
@@ -1308,6 +1316,40 @@ def app_home_view(
         "private_metadata": _ref(context),
         "blocks": blocks,
     }
+
+
+def workflow_chooser(context: str) -> Block:
+    choices = _actions(
+        _button("We’re starting from scratch", "ot_workflow_starter", "starter"),
+        _button("Connect existing decisions", "ot_workflow_historical", "historical"),
+    )
+    choices["block_id"] = "ot_workflow_choices"
+    return _modal(
+        "Add workflow",
+        "ot_workflow_chooser",
+        context,
+        [_section("Choose how to set up this workflow privately."), choices],
+    )
+
+
+def workflow_instructions(context: str, route: str) -> Block:
+    if route == "starter":
+        title = "Start from a policy"
+        message = (
+            "Choose one permitted policy and its revision. Identify the decision it governs "
+            "with your workflow owner. Use private starter setup when available to save a draft."
+        )
+    elif route == "historical":
+        title = "Connect decisions"
+        message = (
+            "Identify the original decision feed and an independent correction source. "
+            "Ask the authorized data custodian to confirm permission for both sources, "
+            "then submit the approved pair through the customer’s intake connection "
+            "using submit_intake."
+        )
+    else:
+        raise ValueError("Unknown workflow route")
+    return _modal(title, "ot_workflow_" + route + "_info", context, [_section(message)])
 
 
 def prompt_modal(context: str, workflow: str, *, repair: bool = False) -> Block:
