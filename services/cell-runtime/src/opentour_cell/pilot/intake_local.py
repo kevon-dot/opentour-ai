@@ -400,8 +400,13 @@ class LocalStarterAuthority(_LocalAuthority):
 
 
 def open_intake(selection: Path) -> tuple[IntakePrincipal, DurableIntake]:
+    from opentour_cell.pilot.live_authority import SELECTION_SCHEMA, open_live_intake
+
+    schema = _selected_json(selection).get("schema_version")
+    if schema == SELECTION_SCHEMA:
+        return open_live_intake(selection)
     authority: LocalHistoricalAuthority | LocalStarterAuthority
-    if _selected_json(selection).get("schema_version") == STARTER_SELECTION_VERSION:
+    if schema == STARTER_SELECTION_VERSION:
         authority = LocalStarterAuthority(selection)
     else:
         authority = LocalHistoricalAuthority(selection)
