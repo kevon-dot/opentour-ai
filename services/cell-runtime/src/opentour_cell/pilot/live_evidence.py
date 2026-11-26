@@ -70,6 +70,10 @@ class LiveAuthority(Protocol):
         """Pin current custody, resource grants and actor rights until operation returns."""
 
 
+def grant_digest(grant: FeedGrant) -> str:
+    return _digest(asdict(grant))
+
+
 @dataclass(frozen=True)
 class VerifiedRoot:
     namespace: str
@@ -270,13 +274,21 @@ class LiveEvidence:
             )
         )
 
-    def save_binding(self, actor: IntakePrincipal, workflow: str, resource: str) -> str:
+    def save_binding(
+        self,
+        actor: IntakePrincipal,
+        workflow: str,
+        resource: str,
+        *,
+        expected_revision: str | None = None,
+    ) -> str:
         with self._scope(actor, workflow) as scope, self._db(write=True) as db:
             _require(scope.expires_at > int(time.time()))
             _require(scope.can_bind, "data_custodian_required")
             grants = [g for g in scope.grants if g.resource == resource]
             _require(len(grants) == 1)
             grant = grants[0]
+            _require(expected_revision is None or expected_revision == grant_digest(grant))
             _require(type(grant.checkpoint) is int and grant.checkpoint >= 0)
             require_ref(grant.lease_ref)
             body = {
@@ -323,6 +335,30 @@ class LiveEvidence:
             )
             _require(scope.expires_at > int(time.time()))
             return reference
+
+    def current_bindings(
+        self, actor: IntakePrincipal, workflow_ref: str
+    ) -> tuple[tuple[str, LiveBinding], ...]:
+        with self._scope(actor, workflow_ref) as scope:
+            _require(scope.can_bind or scope.can_inspect)
+            try:
+                with self._db() as db:
+                    rows = db.execute(
+                        "SELECT ref FROM live_bindings WHERE tenant=? AND workflow=? "
+                        "AND epoch=? AND successor IS NULL ORDER BY ref",
+                        (scope.tenant, workflow_ref, scope.engagement_epoch),
+                    ).fetchall()
+                    current = []
+                    for row in rows:
+                        binding = self.resolve(row[0], actor)
+                        if binding is not None and binding.state == "current":
+                            current.append((str(row[0]), binding))
+                    return tuple(current)
+            except FileNotFoundError:
+                _require(
+                    not any(Path(str(self.path) + s).exists() for s in ("-wal", "-shm", "-journal"))
+                )
+                return ()
 
     def resolve(
         self, feed_binding_ref: str, authenticated_actor: IntakePrincipal
