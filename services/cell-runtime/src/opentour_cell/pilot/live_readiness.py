@@ -392,7 +392,11 @@ class LocalRepairAssessments:
                     authority,
                 ]
             )
-            with sqlite3.connect(self.path.as_uri() + "?mode=ro", uri=True) as db:
+            from opentour_cell.pilot.receipt_recovery import _open_db
+
+            with _open_db(self.path) as db:
+                if db is None:
+                    return None
                 row = db.execute("SELECT body FROM assessments WHERE key=?", (key,)).fetchone()
             if row is None:
                 return None

@@ -302,6 +302,14 @@ class TrainingReadiness:
             else:
                 os.close(fd)
         _check_file(self.path)
+        if not write:
+            from opentour_cell.pilot.receipt_recovery import _open_db
+
+            with _open_db(self.path) as existing:
+                _require(existing is not None)
+                assert existing is not None
+                yield existing
+            return
         db = sqlite3.connect(
             self.path.as_uri() + ("?mode=rw" if write else "?mode=ro"),
             uri=True,

@@ -63,7 +63,8 @@ these with its checkpoint, accepted page receipt, supplied row count and actual
 poll time in the same transaction. Unknown intervals and coverage stay null;
 zero rows alone do not establish complete coverage. Failed pages create no read
 receipt. `read_receipts` only reads current authorized page receipts. Snapshot
-`unmatched_outcomes` counts unresolved exact decision targets;
+`unmatched_outcomes` counts distinct verifier/outcome identities for unresolved
+exact decision targets, deduplicating redelivery and outcome revisions;
 `last_ingested_at` describes the accepted event ingestion time, not source
 freshness or complete interval coverage. The actual adapter and UI exposure of
 these facts are separate integration work.
