@@ -73,6 +73,19 @@ The customer worker connects outbound through Socket Mode. A separately approved
 
 After a restart or uncertain request, use the [owner receipt recovery procedure](pilot-receipt-recovery.md) to discover outstanding receipts, inspect a held item and record independently verified downstream disposition. The listing reads private local state without sending an event.
 
+## Upgrade the local worker
+
+For each customer-local directory, stop the existing worker and any supervised or scheduled runner
+that can execute the same queue. Wait for their processes to exit before starting the updated kit.
+Older workers and updated workers acquire their leases on different files. Use the same quiescent
+procedure before a rollback on a host approved for the previous kit.
+
+Keep the existing `managed-runs.sqlite3` and its SQLite state intact. The updated worker creates the
+empty owner-only `managed-runs.worker.lock` alongside the queue on first use. Keep that file in place
+while workers can run. A process exit releases its lease automatically, and a restarted worker can
+recover the original run identity from the queue. Stop the workers before moving or restoring their
+state directory.
+
 ## Withdraw and close an engagement
 
 Use the same private directory and organization as the worker. The custodian identifies the agreement, support owner and due date. The command below is the form for an actual authorized withdrawal. Replace the uppercase fields with private references. Use `status` to inspect the current closeout without requesting a withdrawal.

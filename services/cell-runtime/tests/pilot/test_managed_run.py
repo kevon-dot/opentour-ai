@@ -1,7 +1,9 @@
 import concurrent.futures
 import json
 import os
+import select
 import sqlite3
+import stat
 import tempfile
 import time
 import unittest
@@ -62,7 +64,10 @@ class TestManagedRuns(unittest.TestCase):
 
     def test_durable_reconnect_and_aggregate_only_first_result(self):
         self.approve(wait=125)
+        self.assertEqual(self.selection.once(evaluate), {"state": "idle"})
+        self.assertFalse(self.selection.lease_path.exists())
         accepted = self.selection.start(self.revision, "request-A")
+        database = self.selection.path.stat()
         self.assertEqual(accepted["state"], "queued")
         self.assertEqual(accepted, self.selection.start(self.revision, "request-A"))
         self.assertNotIn("private-customer-name", json.dumps(accepted))
@@ -76,6 +81,11 @@ class TestManagedRuns(unittest.TestCase):
         self.assertEqual(emitted["timing"]["customer_wait_seconds"], 125)
         self.assertTrue(emitted["timing"]["target_met"])
         self.assertIsInstance(emitted["timing"]["first_result_unix_ms"], int)
+        self.assertTrue(os.path.samestat(database, self.selection.path.stat()))
+        lease = self.selection.lease_path
+        self.assertEqual(lease.read_bytes(), b"")
+        self.assertEqual(stat.S_IMODE(lease.stat().st_mode), 0o600)
+        self.assertEqual(lease.stat().st_uid, os.getuid())
         files = {p.name: p.read_bytes() for p in self.directory.iterdir()}
         self.assertEqual(active.status(accepted["run_id"]), emitted)
         self.assertEqual(files, {p.name: p.read_bytes() for p in self.directory.iterdir()})
@@ -139,6 +149,109 @@ class TestManagedRuns(unittest.TestCase):
         self.assertEqual(self.selection.once(resume)["run_id"], run)
         with sqlite3.connect(self.selection.path) as db:
             self.assertEqual(db.execute("SELECT attempts FROM runs").fetchone()[0], 2)
+
+    def test_processes_serialize_one_queue_without_blocking_another(self):
+        self.approve()
+        run = self.selection.start(self.revision, "one-worker")["run_id"]
+        other = self.directory / "other-queue"
+        other.mkdir(mode=0o700)
+        other_store = LocalTrainingStore(other / "training.sqlite3", self.store.organization)
+        other_plan = {**self.plan, "engagement": other_store.engagement_id}
+        other_path = other / "selected.json"
+        other_path.touch(mode=0o600)
+        other_path.write_text(json.dumps(other_plan))
+        other_selection = ManagedSelection(
+            other,
+            self.store.organization,
+            other_path,
+            other / "scope.json",
+            prerequisites=check_ready,
+        )
+        other_revision = plan_revision(other_plan)
+        other_selection.authorize(
+            other_revision, "att-0123456789abcdef", int(time.time()) + 60, None, check_ready
+        )
+        other_run = other_selection.start(other_revision, "other-worker")["run_id"]
+        ready_read, ready_write = os.pipe()
+        finish_read, finish_write = os.pipe()
+        child = os.fork()
+        if child == 0:
+            os.close(ready_read)
+            os.close(finish_write)
+
+            def work(*args):
+                os.write(ready_write, b"1")
+                if os.read(finish_read, 1) != b"1":
+                    os._exit(73)
+                return evaluate(*args)
+
+            try:
+                result = self.selection.once(work)
+                os._exit(0 if result["state"] == "ready" else 72)
+            finally:
+                os._exit(74)
+        os.close(ready_write)
+        os.close(finish_read)
+        try:
+            self.assertTrue(select.select([ready_read], [], [], 5)[0])
+            self.assertEqual(os.read(ready_read, 1), b"1")
+            self.assertEqual(self.selection.status(run)["state"], "running")
+            self.assertEqual(self.selection.once(evaluate), {"state": "busy"})
+            self.assertEqual(other_selection.once(evaluate)["run_id"], other_run)
+            os.write(finish_write, b"1")
+        finally:
+            os.close(ready_read)
+            os.close(finish_write)
+            _, outcome = os.waitpid(child, 0)
+        self.assertEqual(os.waitstatus_to_exitcode(outcome), 0)
+        self.assertEqual(self.selection.status(run)["state"], "ready")
+        with sqlite3.connect(self.selection.path) as db:
+            self.assertEqual(db.execute("SELECT attempts FROM runs").fetchone()[0], 1)
+
+    def test_worker_refuses_unsafe_existing_lease_without_admitting(self):
+        self.approve()
+        run = self.selection.start(self.revision, "bad-worker-lease")["run_id"]
+        lease = self.selection.lease_path
+        target = self.directory / "generated-file"
+        target.touch(mode=0o600)
+        for label, install in (
+            ("symlink", lambda: lease.symlink_to(target)),
+            ("hardlink", lambda: os.link(target, lease)),
+            ("group readable", lambda: lease.touch(mode=0o640)),
+            ("directory", lambda: lease.mkdir(mode=0o700)),
+            ("nonempty", lambda: lease.write_bytes(b"generated sentinel")),
+        ):
+            with self.subTest(lease=label):
+                install()
+                if label == "group readable":
+                    lease.chmod(0o640)
+                if label == "nonempty":
+                    lease.chmod(0o600)
+                with self.assertRaisesRegex(ManagedError, "private_state_unavailable"):
+                    self.selection.once(evaluate)
+                if label == "directory":
+                    lease.rmdir()
+                else:
+                    lease.unlink()
+        self.assertEqual(self.selection.status(run)["state"], "queued")
+        with sqlite3.connect(self.selection.path) as db:
+            self.assertEqual(db.execute("SELECT attempts FROM runs").fetchone()[0], 0)
+
+    def test_worker_refuses_to_publish_if_the_lease_is_replaced(self):
+        self.approve()
+        run = self.selection.start(self.revision, "replaced-lease")["run_id"]
+        lease = self.selection.lease_path
+
+        def work(*args):
+            lease.rename(lease.with_name("previous-worker.lock"))
+            lease.touch(mode=0o600)
+            return evaluate(*args)
+
+        with self.assertRaisesRegex(ManagedError, "private_state_unavailable"):
+            self.selection.once(work)
+        result = self.selection.status(run)
+        self.assertEqual(result["state"], "running")
+        self.assertIsNone(result["result"])
 
     def test_stale_changed_plan_altered_grant_and_foreign_scope_are_denied(self):
         with self.assertRaisesRegex(ManagedError, "authorization_required"):
