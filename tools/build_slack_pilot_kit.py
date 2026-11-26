@@ -53,6 +53,7 @@ MODULES = (
     "opentour_cell/pilot/slack_adapter.py",
     "opentour_cell/pilot/live_authority.py",
     "opentour_cell/pilot/live_evidence.py",
+    "opentour_cell/pilot/verifier_form.py",
     "opentour_cell/pilot/live_reader.py",
     "opentour_cell/pilot/live_readiness.py",
     "opentour_cell/pilot/training_readiness.py",
