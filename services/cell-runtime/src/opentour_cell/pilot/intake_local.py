@@ -17,8 +17,9 @@ from pathlib import Path
 from typing import Any
 
 from opentour_cell.pilot import source_intake
-from opentour_cell.pilot.intake_admission import AuthorizedSource, DurableIntake
+from opentour_cell.pilot.intake_admission import AuthorizedSource, DurableIntake, IntakeWork
 from opentour_cell.pilot.intake_mcp import (
+    BenchmarkView,
     CatalogPage,
     CatalogSource,
     HistoricalPair,
@@ -35,7 +36,7 @@ from opentour_cell.pilot.operating_point import canonical
 from opentour_cell.pilot.readout import ManifestError
 from opentour_cell.pilot.text_classifier import TrainingError
 from opentour_cell.pilot.training import LocalTrainingStore
-from opentour_cell.pilot.workflow_benchmarks import BenchmarkIntake
+from opentour_cell.pilot.workflow_benchmarks import BenchmarkIntake, WorkflowBenchmarks
 
 SELECTION_VERSION = "opentour.pilot.local-intake-selection.v1"
 STARTER_SELECTION_VERSION = "opentour.pilot.local-starter-selection.v1"
@@ -130,7 +131,8 @@ class _LocalAuthority:
 class LocalHistoricalAuthority(_LocalAuthority):
     """Use existing local custody and mandate records; the wire carries no authority fields."""
 
-    def __init__(self, path: Path):
+    def __init__(self, path: Path, *, read_only: bool = False):
+        self._read_only = read_only
         self.path = path
         self.selected = HistoricalSelection.read(path)
         selection = self.selected
@@ -154,7 +156,9 @@ class LocalHistoricalAuthority(_LocalAuthority):
         try:
             # The existing custody guard comes before the mandate and intake queue locks.
             with (
-                self.store.engagement_guard(engagement_id=selection.engagement_epoch),
+                self.store.engagement_guard(
+                    engagement_id=selection.engagement_epoch, read_only=self._read_only
+                ),
                 self.mandates.guard_evaluation_source(
                     selection.mandate_id, selection.source_run_id, actor=actor.actor
                 ) as grant,
@@ -279,7 +283,8 @@ class VerifiedStarterGrant:
 class LocalStarterAuthority(_LocalAuthority):
     """Consume a sealed setup grant from the owner-local authority producer."""
 
-    def __init__(self, path: Path):
+    def __init__(self, path: Path, *, read_only: bool = False):
+        self._read_only = read_only
         self.path = path
         self.selected = StarterSelection.read(path)
         selection = self.selected
@@ -350,7 +355,7 @@ class LocalStarterAuthority(_LocalAuthority):
 
     @contextmanager
     def guard(self, actor: IntakePrincipal) -> Iterator[None]:
-        with self.setup_grant(actor):
+        with self.setup_grant(actor, read_only=self._read_only):
             yield
 
     @contextmanager
@@ -410,18 +415,85 @@ class LocalStarterAuthority(_LocalAuthority):
         )
 
 
+class LocalBenchmarkReadback:
+    """Optional independent read authority for one original admitted benchmark run."""
+
+    def __init__(self, directory: Path):
+        self.directory = directory
+        self.selector = directory / "benchmark-inspection-selection.json"
+
+    def read(self, actor: IntakePrincipal, work: IntakeWork) -> BenchmarkView | None:
+        if work.mode != "live":
+            return None
+        try:
+            selected = _selected_json(self.selector)
+            if (
+                set(selected) != {"schema_version", "source_selection_file", "benchmark_run_ref"}
+                or selected["schema_version"] != "opentour.pilot.benchmark-inspection-selection.v1"
+                or not isinstance(selected["source_selection_file"], str)
+                or not re.fullmatch(
+                    r"[A-Za-z0-9][A-Za-z0-9_-]{0,80}\.json", selected["source_selection_file"]
+                )
+            ):
+                return None
+            run = require_ref(selected["benchmark_run_ref"])
+            path = self.directory / selected["source_selection_file"]
+            source = _source_authority(
+                path, _selected_json(path).get("schema_version"), read_only=True
+            )
+            if source.principal != actor:
+                return None
+            reader = DurableIntake(self.directory, source, existing_only=True)
+            with reader.admitted_work(actor, run) as prior:
+                if (
+                    prior.mode not in {"starter", "historical"}
+                    or not prior.benchmark_current
+                    or prior.workflow_ref != work.workflow_ref
+                    or prior.resource.engagement_epoch != work.resource.engagement_epoch
+                ):
+                    return None
+                ledger = WorkflowBenchmarks(self.directory)
+                benchmark = ledger.for_run(actor.tenant, prior)
+                if benchmark is None or benchmark.version != prior.benchmark_version:
+                    return None
+            # Reopen the source's current custody/lease after loading metadata;
+            # expiry, withdrawal, re-entry or a different selected run withholds it.
+            with reader.admitted_work(actor, run) as current:
+                if current != prior or _selected_json(self.selector) != selected:
+                    return None
+                return benchmark
+        except (
+            IntakeError,
+            ManifestError,
+            MandateError,
+            TrainingError,
+            OSError,
+            sqlite3.Error,
+            ValueError,
+        ):
+            return None
+
+
+def _source_authority(
+    selection: Path, schema: object, *, read_only: bool = False
+) -> LocalStarterAuthority | LocalHistoricalAuthority:
+    if schema == STARTER_SELECTION_VERSION:
+        return LocalStarterAuthority(selection, read_only=read_only)
+    if schema == SELECTION_VERSION:
+        return LocalHistoricalAuthority(selection, read_only=read_only)
+    raise IntakeError("private_intake_selection_required")
+
+
 def open_intake(selection: Path) -> tuple[IntakePrincipal, BenchmarkIntake]:
     from opentour_cell.pilot.live_authority import SELECTION_SCHEMA, open_live_intake
 
     schema = _selected_json(selection).get("schema_version")
     if schema == SELECTION_SCHEMA:
         principal, admission = open_live_intake(selection)
-        return principal, BenchmarkIntake(admission)
-    authority: LocalHistoricalAuthority | LocalStarterAuthority
-    if schema == STARTER_SELECTION_VERSION:
-        authority = LocalStarterAuthority(selection)
-    else:
-        authority = LocalHistoricalAuthority(selection)
+        return principal, BenchmarkIntake(
+            admission, live_readback=LocalBenchmarkReadback(selection.parent)
+        )
+    authority = _source_authority(selection, schema)
     with authority.guard(authority.principal):
         admission = DurableIntake(selection.parent, authority)
     return authority.principal, BenchmarkIntake(admission)

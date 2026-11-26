@@ -57,6 +57,12 @@ class BenchmarkInspection(Protocol):
         ...
 
 
+class LiveBenchmarkReadback(Protocol):
+    def read(self, actor: IntakePrincipal, work: IntakeWork) -> BenchmarkView | None:
+        """Resolve an explicitly selected benchmark under its own current intake authority."""
+        ...
+
+
 @dataclass(frozen=True)
 class MaterializedBenchmark:
     """Verified worker producer output; unavailable producers never mint this record."""
@@ -427,10 +433,17 @@ class WorkflowBenchmarks:
 class BenchmarkIntake:
     """Composition for stdio/HTTPS/setup; keeps the deployed intake wire schemas."""
 
-    def __init__(self, intake: DurableIntake, *, inspection: BenchmarkInspection | None = None):
+    def __init__(
+        self,
+        intake: DurableIntake,
+        *,
+        inspection: BenchmarkInspection | None = None,
+        live_readback: LiveBenchmarkReadback | None = None,
+    ):
         self.intake = intake
         self.benchmarks = WorkflowBenchmarks(intake.path.parent)
         self.inspection = inspection
+        self.live_readback = live_readback
 
     def discover_sources(
         self, actor: IntakePrincipal, *, limit: int, cursor: str | None
@@ -453,6 +466,9 @@ class BenchmarkIntake:
             if work.mode != "live":
                 view = self.benchmarks.for_run(actor.tenant, work)
                 return replace(status, benchmark=view or status.benchmark)
+            if self.live_readback is not None:
+                # The requesting live grant is pinned throughout the independent readback.
+                return replace(status, benchmark=self.live_readback.read(actor, work))
         # Live feed authorization alone confers no benchmark inspection rights.
         if self.inspection is not None:
             with self.inspection.guard(actor, status.workflow_ref) as scope:

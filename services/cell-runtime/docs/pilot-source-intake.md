@@ -151,3 +151,25 @@ canonical intake under the current signed grant. The existing workflow, run
 and legacy starter receipt survive. Live-feed connections and admissions use
 a separate evidence series. The owner can reopen the starter card to inspect
 the same benchmark after a feed is connected.
+
+### Showing an existing benchmark on live run status
+
+To include benchmark metadata on a live run, the operator can select one previously
+admitted starter or historical run in the same private state directory. Create
+`benchmark-inspection-selection.json` with owner-only permissions and these fields:
+
+```json
+{
+  "schema_version": "opentour.pilot.benchmark-inspection-selection.v1",
+  "source_selection_file": "prior-intake.json",
+  "benchmark_run_ref": "run-example"
+}
+```
+
+Use the basename of the original OPE-430 selection and its actual admitted run
+reference. The authenticated live actor must independently hold that original
+grant for the same tenant, workflow and engagement epoch. Each status request
+rechecks both authorities, the canonical admission and the current benchmark
+version. A withdrawn grant, superseded run or missing benchmark leaves the
+ordinary live status available without benchmark fields. Reading status does
+not create a benchmark or dispatch work.
