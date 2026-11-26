@@ -1,0 +1,194 @@
+from dataclasses import replace
+from unittest.mock import Mock
+
+import pytest
+from opentour_cell.pilot import model_connector as models
+
+
+@pytest.fixture
+def setup_connector():
+    binding = models.ModelBinding(
+        tenant="generated-tenant",
+        model_ref="incumbent",
+        immutable_revision="pinned-v1",
+        task="invoice-route",
+        input_schema="invoice-features-v1",
+        output_schema="invoice-label-v1",
+        preprocessing_revision="preprocessing-v1",
+        route=models.Route.MANAGED,
+        account_or_host="generated-owned-account",
+        region="generated-region",
+        credential_ref="owned-secret-reference",
+    )
+    observed = models.Observation(
+        binding=binding,
+        source_ref="capability-receipt",
+        observed_at=5,
+        expires_at=50,
+        resolved_revision="pinned-v1",
+        inference_supported=True,
+        training_supported=True,
+        hard_cost_cap=True,
+        cancellation=True,
+        progress=True,
+        checkpoint_recovery=True,
+        capture={},
+    )
+    limit = models.FitBound("USD", 500, 60, 20, 100)
+    intent = models.FitIntent(
+        binding,
+        "grant-v1",
+        "benchmark-v1",
+        "sealed-development",
+        "generated-job-intent",
+        frozenset({"permitted"}),
+        limit,
+    )
+    grants = {
+        purpose: models.Grant(
+            purpose.value,
+            binding,
+            purpose,
+            "grant-v1",
+            30,
+            frozenset({"permitted"}),
+            40,
+        )
+        for purpose in models.Purpose
+    }
+
+    def current_grant(actor, selected, purpose):
+        grant = grants.get(purpose)
+        return grant if grant and (grant.actor, grant.binding) == (actor, selected) else None
+
+    clock = Mock(return_value=10)
+    connector = Mock(spec=models.Connector, observe=Mock(return_value=observed))
+    connector.estimate.return_value = models.FitBound("USD", 100, 40, 10, 50)
+    return models.Preflight(connector, current_grant, clock=clock), connector, grants, intent, clock
+
+
+def test_inference_only_authority_cannot_inspect_or_dispatch_training(setup_connector):
+    preflight, adapter, grants, intent, _ = setup_connector
+    del grants[models.Purpose.TRAINING]
+    del grants[models.Purpose.INSPECTION]
+    assert preflight.discover(
+        "baseline_inference", intent.binding, models.Purpose.BASELINE
+    ).state == (models.State.BENCHMARK_ONLY)
+    for actor in ("baseline_inference", "authoring_inference", "external_disclosure"):
+        with pytest.raises(models.CapabilityError, match="model_capability_unavailable"):
+            preflight.prepare(actor, intent)
+    with pytest.raises(models.CapabilityError, match="model_capability_unavailable"):
+        preflight.capture("authoring_inference", intent.binding)
+    adapter.observe.assert_called_once_with(intent.binding, models.Purpose.BASELINE)
+    adapter.estimate.assert_not_called()
+    adapter.submit.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("change", "reason"),
+    [
+        ({"resolved_revision": None}, "exact_training_target_unavailable"),
+        ({"resolved_revision": "changed-alias"}, "exact_training_target_unavailable"),
+        ({"training_supported": False}, "exact_training_target_unavailable"),
+        ({"hard_cost_cap": False}, "enforceable_training_cap_unavailable"),
+        ({"expires_at": 10}, "model_capability_evidence_stale_or_mismatched"),
+    ],
+)
+def test_stale_volatile_or_unbounded_target_holds_before_estimate(setup_connector, change, reason):
+    preflight, adapter, _, intent, _ = setup_connector
+    adapter.observe.return_value = replace(adapter.observe.return_value, **change)
+    with pytest.raises(models.CapabilityError, match=reason):
+        preflight.prepare("training", intent)
+    adapter.estimate.assert_not_called()
+    adapter.serialize_development.assert_not_called()
+    adapter.submit.assert_not_called()
+
+
+def test_mismatched_task_and_region_cannot_use_same_provider_model(setup_connector):
+    preflight, adapter, _, intent, _ = setup_connector
+    adapter.observe.return_value = replace(
+        adapter.observe.return_value,
+        binding=replace(intent.binding, task="different-task", region="foreign-region"),
+    )
+    with pytest.raises(models.CapabilityError, match="evidence_stale_or_mismatched"):
+        preflight.prepare("training", intent)
+    adapter.estimate.assert_not_called()
+
+
+def test_preflight_rechecks_grant_after_estimate_and_before_preparing_payload(setup_connector):
+    preflight, adapter, grants, intent, clock = setup_connector
+    assert preflight.prepare("training", intent) == adapter.estimate.return_value
+
+    def expires_during_estimate(_):
+        clock.return_value = grants[models.Purpose.TRAINING].expires_at
+        return adapter.estimate.return_value
+
+    adapter.estimate.side_effect = expires_during_estimate
+    with pytest.raises(models.CapabilityError, match="model_capability_unavailable"):
+        preflight.prepare("training", intent)
+    adapter.serialize_development.assert_not_called()
+    adapter.submit.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "estimate",
+    [
+        None,
+        models.FitBound("EUR", 100, 40, 10, 50),
+        models.FitBound("USD", 501, 40, 10, 50),
+        models.FitBound("USD", 100, 61, 10, 50),
+        models.FitBound("USD", 100, 40, 21, 50),
+        models.FitBound("USD", 100, 40, 10, 101),
+    ],
+)
+def test_unknown_or_excess_cost_does_not_admit_fits(setup_connector, estimate):
+    preflight, adapter, _, intent, _ = setup_connector
+    adapter.estimate.return_value = estimate
+    with pytest.raises(models.CapabilityError, match="known_training_cost_within_budget_required"):
+        preflight.prepare("training", intent)
+    adapter.submit.assert_not_called()
+
+
+def test_capture_claims_require_separate_live_scope_and_field_evidence(setup_connector):
+    preflight, adapter, grants, intent, _ = setup_connector
+    seen = models.CaptureEvidence(models.Fidelity.OBSERVED, "application", "request", 30)
+    expired = models.CaptureEvidence(models.Fidelity.OBSERVED, "provider", "receipt", 9)
+    grants[models.Purpose.INSPECTION] = replace(
+        grants[models.Purpose.INSPECTION],
+        permitted_fields=frozenset(
+            {models.CaptureField.REQUEST_WITNESS, models.CaptureField.PROVIDER_RECEIPT}
+        ),
+    )
+    adapter.observe.return_value = replace(
+        adapter.observe.return_value,
+        capture={
+            models.CaptureField.REQUEST_WITNESS: seen,
+            models.CaptureField.PROVIDER_RECEIPT: expired,
+            models.CaptureField.SERVED_IDENTITY: seen,
+        },
+    )
+    result = preflight.capture("capture_inspection", intent.binding)
+    assert result[models.CaptureField.REQUEST_WITNESS] == seen
+    assert all(
+        item.fidelity is models.Fidelity.UNAVAILABLE
+        for field, item in result.items()
+        if field is not models.CaptureField.REQUEST_WITNESS
+    )
+    with pytest.raises(models.CapabilityError, match="model_capability_unavailable"):
+        preflight.capture("capture_inspection", replace(intent.binding, tenant="foreign"))
+
+
+def test_result_must_match_completed_job_and_exact_immutable_incumbent(setup_connector):
+    _, _, _, intent, _ = setup_connector
+    job = models.JobReceipt(intent, models.JobState.COMPLETED, "job-a", "fit-evidence")
+    result = models.Candidate(intent, "job-a", "pinned-v1", "artifact-v2", "replay-evidence")
+    models.verify_candidate(job, result)
+    for alternate in (
+        replace(result, parent_revision="substituted"),
+        replace(result, job_ref="other-job"),
+        replace(result, replay_evidence_ref=""),
+    ):
+        with pytest.raises(models.CapabilityError, match="candidate_lineage_unverified"):
+            models.verify_candidate(job, alternate)
+    with pytest.raises(models.CapabilityError, match="candidate_lineage_unverified"):
+        models.verify_candidate(replace(job, state=models.JobState.UNKNOWN), result)
