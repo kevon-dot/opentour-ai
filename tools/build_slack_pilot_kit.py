@@ -101,6 +101,15 @@ ASSETS = {
     "integrations/slack/README.md": f"{CELL}/integrations/slack/README.md",
     "integrations/slack/worker.example.json": f"{CELL}/integrations/slack/worker.example.json",
 }
+for asset in (
+    "health.py",
+    "manifest.example.json",
+    "opentour-health.service",
+    "opentour-worker.service",
+    "README.md",
+):
+    ASSETS[f"integrations/worker-host/{asset}"] = f"{CELL}/integrations/worker-host/{asset}"
+
 ENTRY = """import importlib
 import sys
 

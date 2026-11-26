@@ -39,6 +39,7 @@ TEXT_SUFFIXES = {
     ".tf",
     ".hcl",
     ".ini",
+    ".service",
     ".cfg",
     ".example",
     ".d.ts",
