@@ -11,7 +11,9 @@ import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -71,7 +73,7 @@ def event(**values: Any) -> dict[str, Any]:
             "policy_grant_ref": "generated-policy-grant",
             "verifier_role_ref": "generated-verifier-role",
             "verifier_plan_owner_ref": "generated-verifier-plan-owner",
-            "verifier_next_check": "2026-12-01",
+            "verifier_next_check": (datetime.now(UTC).date() + timedelta(days=7)).isoformat(),
             "verifier_ref": None,
         },
     }
@@ -211,6 +213,31 @@ def test_expired_and_unsigned_discovery_have_no_register_effect(directory: Path)
             == "discovery"
         )
     assert not path.exists()
+
+
+def test_starter_next_check_must_be_current_on_first_admission(
+    directory: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = directory / "cohort.sqlite3"
+    register = QualificationRegister(path)
+    now = int(datetime(2027, 1, 2, tzinfo=UTC).timestamp())
+    monkeypatch.setattr("opentour_cell.pilot.qualification.time", SimpleNamespace(time=lambda: now))
+    credentials = Authority.parse({**authority(), "expires_at": now + 3 * 86400})
+
+    starter = event()
+    starter["charter"]["verifier_next_check"] = "2027-01-01"
+    refused = register.submit(sign(starter), credentials)
+    assert refused["reason"] == "charter_incomplete"
+    assert refused["missing_fields"] == ["verifier_next_check"]
+    assert history(path) == []
+
+    starter["charter"]["verifier_next_check"] = "2027-01-02"
+    envelope = sign(starter)
+    accepted = register.submit(envelope, credentials)
+    assert accepted["disposition"] == "qualified"
+    now += 86400
+    assert register.submit(envelope, credentials) == accepted
+    assert len(history(path)) == 1
 
 
 def test_missing_starter_policy_grant_returns_field_level_gap(directory: Path) -> None:

@@ -358,6 +358,12 @@ class QualificationRegister:
                 or event["intent"] == "lost"
             ):
                 return _receipt("held", "engagement_reentry_unauthorized")
+        if event["intent"] == "starter":
+            next_check = date.fromisoformat(event["charter"]["verifier_next_check"])
+            if next_check < datetime.fromtimestamp(now, UTC).date():
+                return _receipt(
+                    "held", "charter_incomplete", missing_fields=["verifier_next_check"]
+                )
         if event["intent"] == "lost":
             result = _receipt("lost", "engagement_terminal", operation_ref=operation_ref)
         else:
