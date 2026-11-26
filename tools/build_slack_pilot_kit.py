@@ -26,6 +26,8 @@ MODULES = (
     "opentour_cell/pilot/managed_launch.py",
     "opentour_cell/pilot/release_gate.py",
     "opentour_cell/pilot/workplace_context.py",
+    "opentour_cell/pilot/cohort_lease.py",
+    "opentour_cell/pilot/qualification.py",
     "opentour_cell/pilot/autonomous_cycle.py",
     "opentour_cell/pilot/cycle_worker.py",
     "opentour_cell/pilot/approval_inbox.py",
@@ -64,6 +66,8 @@ ASSETS = {
         f"{CELL}/integrations/zapier/slack-approval-signer.cjs"
     ),
     "pilot-workplace-context.md": f"{CELL}/docs/pilot-workplace-context.md",
+    "pilot-cohort-lease.md": f"{CELL}/docs/pilot-cohort-lease.md",
+    "pilot-qualification.md": f"{CELL}/docs/pilot-qualification.md",
     "pilot-zapier-approval.md": f"{CELL}/docs/pilot-zapier-approval.md",
     "pilot-autonomous-cycle.md": f"{CELL}/docs/pilot-autonomous-cycle.md",
     "pilot-managed-repairs.md": f"{CELL}/docs/pilot-managed-repairs.md",

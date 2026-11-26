@@ -12,8 +12,8 @@ import sqlite3
 import stat
 import sys
 import time
-from collections.abc import Mapping
-from contextlib import closing
+from collections.abc import Iterator, Mapping
+from contextlib import closing, contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -302,18 +302,24 @@ class QualificationRegister:
         return self._record(event, now)
 
     def _record(self, event: Json, now: int) -> Json:
-        flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
-        try:
-            os.close(os.open(self.path, flags, 0o600))
-        except FileExistsError:
-            pass
+        with self._transaction() as db:
+            return self._admit(db, event, now)
+
+    @contextmanager
+    def _transaction(self, *, existing_only: bool = False) -> Iterator[sqlite3.Connection]:
+        if not existing_only:
+            flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
+            try:
+                os.close(os.open(self.path, flags, 0o600))
+            except FileExistsError:
+                pass
         _private_record(self.path.lstat())
-        with closing(sqlite3.connect(self.path, timeout=5)) as db:
+        with closing(sqlite3.connect(self.path.as_uri() + "?mode=rw", uri=True, timeout=5)) as db:
             db.row_factory = sqlite3.Row
             db.execute("BEGIN IMMEDIATE")
             with db:
                 db.execute(_SCHEMA)
-                return self._admit(db, event, now)
+                yield db
 
     def _admit(self, db: sqlite3.Connection, event: Json, now: int) -> Json:
         org = event["organization_ref"]
