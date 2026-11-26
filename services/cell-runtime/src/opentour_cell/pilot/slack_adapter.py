@@ -24,6 +24,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
+from opentour_cell.pilot.intake_mcp import IntakePrincipal
+from opentour_cell.pilot.live_evidence import LiveEvidence, LiveScope, binding_candidate
 from opentour_cell.pilot.starter_setup import StarterBinding, StarterPreview, StarterSetup
 from opentour_cell.pilot.status_questions import (
     ApprovalEvidence,
@@ -44,10 +46,17 @@ REGRESSION_QUESTION = re.compile(
     r"(?:(?:got|became) (?:worse|wrong|incorrect)|regressed))\??"
 )
 ROLES = {"inspect", "tune", "review"}
-CALLBACKS = {"ot_dataset_search", "ot_tune_preview", "ot_tune_start", "ot_prompt_enter"}
+CALLBACKS = {
+    "ot_dataset_search",
+    "ot_tune_preview",
+    "ot_tune_start",
+    "ot_prompt_enter",
+    "ot_live_binding",
+}
 ACTIONS = {
     "ot_workflow_starter",
     "ot_starter_save",
+    "ot_connect_live",
     "ot_workflow_historical",
     "ot_home",
     "ot_browse",
@@ -120,6 +129,7 @@ class Settings:
     workflow_label: str = ""
     config_path: Path | None = None
     explicit_recipient: bool = True
+    live_workflow_ref: str = ""
     starter_setup: StarterBinding | None = None
 
     @property
@@ -167,6 +177,7 @@ class Settings:
             "workspace_title",
             "workflow_label",
             "starter_setup",
+            "live_workflow_ref",
         }
         _check(isinstance(doc, dict) and required <= doc.keys() <= required | optional)
         _check(isinstance(doc["organization"], str) and LOCAL_ID.fullmatch(doc["organization"]))
@@ -206,6 +217,12 @@ class Settings:
                     and label.isprintable()
                     and not any(c in label for c in "<>@#&")
                 )
+        live_workflow = doc.get("live_workflow_ref", "")
+        if "live_workflow_ref" in doc:
+            _check(
+                isinstance(live_workflow, str)
+                and re.fullmatch(r"workflow-[0-9a-f]{32}", live_workflow)
+            )
         destination = doc.get("zapier_destination_sha256", "")
         _check(
             isinstance(destination, str)
@@ -230,6 +247,7 @@ class Settings:
             doc.get("workflow_label", ""),
             path,
             explicit_recipient=explicit_recipient,
+            live_workflow_ref=live_workflow,
             starter_setup=StarterBinding.parse(doc["starter_setup"])
             if "starter_setup" in doc
             else None,
@@ -2158,6 +2176,104 @@ class Workbench:
             self.on_decision()
         self._home(cfg, actor, view, ctx["job"], old_hash)
 
+    def _live_workflow(self, cfg: Settings, actor: str) -> str:
+        cfg.permission(actor, "inspect")
+        if cfg.live_workflow_ref:
+            return cfg.live_workflow_ref
+        preview = self._starter_setup(actor).preview()
+        _check(preview.draft)
+        assert preview.draft
+        return str(preview.draft["workflow_ref"])
+
+    @contextmanager
+    def _live_scope(
+        self, actor: str, workflow: str
+    ) -> Iterator[tuple[IntakePrincipal, LiveEvidence, LiveScope]]:
+        cfg = self.settings(check_engagement=False)
+        _check(workflow == self._live_workflow(cfg, actor))
+        principal = IntakePrincipal(cfg.organization, actor, "slack")
+        from opentour_cell.pilot.live_authority import PrivateLiveAuthority
+
+        authority = PrivateLiveAuthority(cfg.directory, cfg.organization, workflow)
+        with authority.guard(principal, workflow) as scope:
+            _check(scope.can_inspect or scope.can_bind)
+            yield principal, LiveEvidence(cfg.directory, authority), scope
+
+    def _live_model(
+        self, actor: str, workflow: str
+    ) -> tuple[str, list[tuple[str, str]], list[tuple[str, str]]]:
+        with self._live_scope(actor, workflow) as (principal, live, scope):
+            current: list[tuple[str, str]] = [
+                (binding.feed_kind, ref)
+                for ref, binding in live.current_bindings(principal, workflow)
+            ]
+            options = []
+            if scope.can_bind:
+                for grant in scope.grants:
+                    revision = binding_candidate(principal, scope, grant)
+                    label = "Decisions" if grant.kind == "decision" else "Independent outcomes"
+                    options.append((f"{label} · {grant.resource[:36]} · {revision[:8]}", revision))
+            revision = self.journal.opaque(
+                "scope",
+                [
+                    workflow,
+                    scope.engagement_epoch,
+                    scope.dataset_ref,
+                    scope.dataset_revision,
+                    scope.custodian,
+                    options,
+                    current,
+                ],
+            )
+            return revision, current, options
+
+    def _live_view(
+        self,
+        cfg: Settings,
+        actor: str,
+        view: str,
+        workflow: str,
+        old_hash: str = "",
+        saved: str = "",
+    ) -> None:
+        model = self._live_model(actor, workflow)
+        revision, current, choices = model
+        _check(not saved or any(ref == saved for _, ref in current))
+        token = self.journal.context(actor, cfg.channel, view, "live_binding", workflow, revision)
+        self._show(
+            view,
+            self.views.live_connections(token, workflow, current, choices, saved),
+            old_hash,
+            authorize=lambda: _check(self._live_model(actor, workflow) == model),
+        )
+
+    def _live_save(self, actor: str, ctx: Json, values: Json) -> str:
+        workflow = ctx["job"]
+        _check(ctx["kind"] == "live_binding" and set(values) == {"live_resource"})
+        field = values["live_resource"]
+        _check(
+            set(field) == {"live_resource"}
+            and set(field["live_resource"]) == {"type", "selected_option"}
+        )
+        selected = field["live_resource"]
+        _check(
+            selected["type"] == "static_select"
+            and set(selected["selected_option"]) == {"text", "value"}
+        )
+        choice = selected["selected_option"]["value"]
+        with self._live_scope(actor, workflow) as (principal, live, scope):
+            _check(scope.can_bind and self._live_model(actor, workflow)[0] == ctx["revision"])
+            matches = [
+                grant
+                for grant in scope.grants
+                if binding_candidate(principal, scope, grant) == choice
+            ]
+            _check(len(matches) == 1)
+            live.initialize()
+            return live.save_binding(
+                principal, workflow, matches[0].resource, expected_revision=choice
+            )
+
     def _starter_setup(self, actor: str) -> StarterSetup:
         # LocalStarterAuthority pins the engagement in its own transaction.
         return StarterSetup(lambda: self.settings(check_engagement=False), actor)
@@ -2189,7 +2305,10 @@ class Workbench:
         old_hash: str,
     ) -> None:
         job = ctx["job"]
-        if ctx["kind"] == "workflow_chooser":
+        if ctx["kind"] == "workflow_settings":
+            _check(action == value == "ot_connect_live")
+            self._live_view(cfg, actor, view, ctx["job"], old_hash)
+        elif ctx["kind"] == "workflow_chooser":
             _check(action in {"ot_workflow_starter", "ot_workflow_historical"})
             current = self.settings()
             _check(action == "ot_workflow_" + value and self._can_add_workflow(current, actor))
@@ -2458,7 +2577,10 @@ class Workbench:
         values: Json,
         token: str,
     ) -> None:
-        if callback == "ot_prompt_enter":
+        if callback == "ot_live_binding":
+            saved = self._live_save(actor, ctx, values)
+            self._live_view(cfg, actor, view, ctx["job"], saved=saved)
+        elif callback == "ot_prompt_enter":
             _check(ctx["kind"] == "prompt")
             raw = values["command"]["command"]["value"]
             _check(isinstance(raw, str) and len(raw) <= 160 and raw.isprintable())
@@ -2754,6 +2876,15 @@ class Workbench:
             return
         token = self.journal.opaque("home", [actor, cfg.team, cfg.app, cfg.channel])
         pending = self._pending_release(cfg, actor)
+        workflow_settings = False
+        if cfg.live_workflow_ref or (cfg.starter_setup and cfg.starter_setup.slack_owner == actor):
+            try:
+                workflow = self._live_workflow(cfg, actor)
+                with self._live_scope(actor, workflow):
+                    workflow_settings = True
+            except Exception:
+                # The existing Home remains usable without current live authority.
+                pass
         layout = self.views.app_home_view(
             token,
             cfg.workspace_title,
@@ -2763,6 +2894,7 @@ class Workbench:
             named_reviewer=cfg.reviewer == actor and "review" in entry["roles"],
             pending=pending.revision if pending else "",
             can_add_workflow=can_add_workflow,
+            workflow_settings=workflow_settings,
         )
         navigation = (
             can_add_workflow
@@ -2795,6 +2927,30 @@ class Workbench:
             and len(body["actions"]) == 1
         )
         action = body["actions"][0]
+        if action.get("action_id") == "ot_app_settings":
+            _check(action.get("value") == "ot_app_settings")
+            opened = self.web.views_open(
+                trigger_id=body["trigger_id"], view=self.views.notice_modal("checking")
+            )
+            view_id = opened["view"]["id"]
+            try:
+                self.private_channel(cfg, actor)
+                workflow = self._live_workflow(self.settings(), actor)
+
+                def authorize() -> None:
+                    with self._live_scope(actor, workflow):
+                        pass
+
+                authorize()
+                token = self.journal.context(
+                    actor, cfg.channel, view_id, "workflow_settings", workflow
+                )
+                self._show(
+                    view_id, self.views.workflow_settings(token, workflow), authorize=authorize
+                )
+            except Exception:
+                self._safe_notice(view_id)
+            return
         if action.get("action_id") == "ot_app_add_workflow":
             _check(action.get("value") == "ot_app_add_workflow")
             opened = self.web.views_open(

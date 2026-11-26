@@ -1347,6 +1347,7 @@ def app_home_view(
     named_reviewer: bool = False,
     pending: str = "",
     can_add_workflow: bool = False,
+    workflow_settings: bool = False,
 ) -> Block:
     if not context:
         return {
@@ -1381,6 +1382,8 @@ def app_home_view(
                 "block_id": "ot_workflow_entry",
             }
         )
+    if workflow_settings:
+        blocks.append(_actions(_button("Workflow settings", "ot_app_settings", "ot_app_settings")))
     if can_tune:
         nav.append(_button("Preview a repair", "ot_app_repair", "ot_app_repair"))
     blocks.extend(
@@ -1447,6 +1450,49 @@ def starter_charter(context: str, preview: StarterPreview) -> Block:
         _actions(_button("Save starter draft", "ot_starter_save", preview.revision)),
     ]
     return _modal("Review starter charter", "ot_starter_preview", context, blocks)
+
+
+def workflow_settings(context: str, workflow: str) -> Block:
+    return _modal(
+        "Workflow settings",
+        "ot_workflow_settings",
+        context,
+        [
+            _section(f"Workflow {_ref(workflow)}"),
+            _actions(_button("Connect live decisions", "ot_connect_live", "ot_connect_live")),
+        ],
+    )
+
+
+def live_connections(
+    context: str,
+    workflow: str,
+    current: Sequence[tuple[str, str]],
+    choices: Sequence[tuple[str, str]],
+    saved: str = "",
+) -> Block:
+    blocks = [_section(f"Workflow {_ref(workflow)}")]
+    if saved:
+        blocks.append(_section(f"Saved binding {_ref(saved)}"))
+    for kind, binding in current:
+        label = "Committed decisions" if kind == "decision" else "Independently verified outcomes"
+        blocks.append(_section(f"{label} · {_ref(binding)}"))
+    if not current:
+        blocks.append(_section("No current live binding."))
+    if choices:
+        select = _select("live_resource", "Authorized feed to connect", choices)
+        del select["element"]["initial_option"]
+        select["element"]["placeholder"] = _text("Choose a permitted feed")
+        blocks.append(select)
+    else:
+        blocks.append(_section("Ask the data custodian to connect a decision or outcome feed."))
+    return _modal(
+        "Connect live decisions",
+        "ot_live_binding",
+        context,
+        blocks,
+        "Save binding" if choices else None,
+    )
 
 
 def workflow_instructions(context: str, route: str) -> Block:
