@@ -6,10 +6,11 @@ import hashlib
 import os
 import re
 import stat
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
-from opentour_cell.pilot.intake_admission import _serial
+from opentour_cell.pilot.intake_admission import DurableIntake, _Resolved, _serial
 from opentour_cell.pilot.intake_local import LocalStarterAuthority, VerifiedStarterGrant
 from opentour_cell.pilot.intake_mcp import IntakePrincipal, Starter
 from opentour_cell.pilot.onboarding_mcp import _private_parent
@@ -18,10 +19,39 @@ from opentour_cell.pilot.receipt_recovery import _open_db
 MAX_POLICY_BYTES = 256 * 1024
 REVISION = re.compile(r"[0-9a-f]{64}\Z")
 HEADING = re.compile(r" {0,3}#{1,6} +\S")
+_FENCE = re.compile(r" {0,3}(`{3,}|~{3,})([^\r\n]*)")
 
 
 class PolicyError(ValueError):
     """Fixed worker diagnostic that never echoes policy text or filenames."""
+
+
+def operative_lines(lines: tuple[str, ...]) -> Iterator[tuple[int, str]]:
+    """Keep original line numbers while excluding Markdown examples and HTML comments."""
+    active_fence: str | None = None
+    comment = False
+    for number, raw in enumerate(lines, start=1):
+        if active_fence is not None:
+            fence = _FENCE.fullmatch(raw.rstrip("\n"))
+            if fence and fence[1].startswith(active_fence) and not fence[2].strip():
+                active_fence = None
+            continue
+        line = raw
+        visible = []
+        while line:
+            if comment:
+                _, end, line = line.partition("-->")
+                comment = not end
+            else:
+                prefix, begin, line = line.partition("<!--")
+                visible.append(prefix)
+                comment = bool(begin)
+        text = " ".join(visible).rstrip("\n")
+        fence = _FENCE.fullmatch(text)
+        if fence:
+            active_fence = fence[1]
+        elif text.strip() and not text.startswith(("    ", "\t")):
+            yield number, text
 
 
 @dataclass(frozen=True)
@@ -50,7 +80,7 @@ class PolicySnapshot:
             raise PolicyError("policy_span_unavailable")
         start = line_start - 1
         section = 0
-        for index, line in enumerate(self.lines[:line_end], start=1):
+        for index, line in operative_lines(self.lines[:line_end]):
             if not HEADING.match(line):
                 continue
             if index > line_start:
@@ -135,6 +165,13 @@ class GuidedPolicySource:
             grant.creation_ref,
             None,
         )
+        authority = self.authority.starter(self.authority.principal, initial_request)
+        if authority is None:
+            raise PolicyError("policy_workflow_unavailable")
+        resolved = _Resolved(
+            authority, (grant.source_revision, grant.setup_policy_revision), "starter"
+        )
+        intent = DurableIntake._intent(workflow_ref, resolved)
         with _open_db(directory / "intake.sqlite3") as db:
             if db is None:
                 raise PolicyError("policy_workflow_unavailable")
@@ -142,7 +179,8 @@ class GuidedPolicySource:
                 "SELECT 1 FROM intake_runs r JOIN intake_workflows w "
                 "ON r.tenant=w.tenant AND r.workflow_ref=w.workflow_ref "
                 "WHERE w.workflow_ref=? AND w.tenant=? AND w.epoch=? "
-                "AND w.creation_ref=? AND w.resource=? AND r.grant_revision=? AND r.request=? "
+                "AND w.creation_ref=? AND w.resource=? AND r.grant_revision=? "
+                "AND r.request=? AND r.intent=? "
                 "LIMIT 1",
                 (
                     workflow_ref,
@@ -152,6 +190,7 @@ class GuidedPolicySource:
                     grant.policy_resource_ref,
                     grant.revision,
                     _serial(initial_request, "starter"),
+                    intent,
                 ),
             ).fetchone()
         if row is None:
