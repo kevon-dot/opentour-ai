@@ -6,7 +6,7 @@ import subprocess
 import sys
 
 import pytest
-from opentour_cell.pilot import comparison_plan, historical_worker
+from opentour_cell.pilot import comparison_plan, historical_worker, source_intake
 from opentour_cell.pilot.workflow_benchmarks import WorkflowBenchmarks
 from test_historical_benchmarks import setup, write
 
@@ -103,6 +103,39 @@ def test_worker_missing_predictions_has_specific_safe_hold(tmp_path):
         "reason": "recorded_baseline_predictions_required",
     }
     assert intake.get_run(actor, admitted.run_ref).benchmark.benchmark_state == "draft"
+
+
+def test_worker_denial_does_not_migrate_existing_register(tmp_path):
+    _, _, _, producer, _, _, config, _ = prepared(tmp_path)
+    path = producer.directory / "intake.sqlite3"
+    with sqlite3.connect(path) as db:
+        db.execute("DROP TABLE intake_live_resources")
+    before = path.read_bytes()
+    assert invoke(config, "run-absent")[0] == 2
+    assert path.read_bytes() == before
+
+
+def test_worker_withdrawal_before_source_read_discloses_no_export_bytes(tmp_path, monkeypatch):
+    _, _, admitted, producer, ledger, mandate, config, _ = prepared(tmp_path)
+    original = historical_worker.LocalHistoricalBenchmark._authorize
+    read = source_intake._read
+    touched = []
+
+    def withdrawn(self, actor, work):
+        policy = original(self, actor, work)
+        ledger.withdraw(mandate["mandate_id"], actor=mandate["owner_id"])
+        return policy
+
+    def observed(path, *args, **kwargs):
+        if path in (producer.traces, producer.corrections):
+            touched.append(path.name)
+        return read(path, *args, **kwargs)
+
+    monkeypatch.setattr(historical_worker.LocalHistoricalBenchmark, "_authorize", withdrawn)
+    monkeypatch.setattr(source_intake, "_read", observed)
+    with pytest.raises(ValueError):
+        historical_worker.execute(config, admitted.run_ref)
+    assert touched == []
 
 
 @pytest.mark.parametrize("change", ["source", "policy", "revocation", "foreign_run"])
