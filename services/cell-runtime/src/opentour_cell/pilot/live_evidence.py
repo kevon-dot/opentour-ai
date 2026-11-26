@@ -141,6 +141,7 @@ def _event(value: Mapping[str, Any], grant: FeedGrant) -> dict[str, Any]:
         require_ref(body[key])
     for key in ("event_revision", "decision_revision"):
         _require(type(body[key]) is int and 0 < body[key] < 2**31, "invalid_live_event")
+    clocks: tuple[str, ...]
     if grant.kind == "decision":
         for key in ("case_id", "family_id", "action_ref", "policy_ref", "source_provenance"):
             require_ref(body[key])
@@ -244,7 +245,8 @@ class LiveEvidence:
     def _key(db: sqlite3.Connection) -> bytes:
         row = db.execute("SELECT key FROM live_identity WHERE id=1").fetchone()
         _require(row is not None and isinstance(row[0], bytes) and len(row[0]) == 32)
-        return row[0]
+        key: bytes = row[0]
+        return key
 
     def _binding(self, db: sqlite3.Connection, reference: str) -> tuple[dict[str, Any], str | None]:
         row = db.execute(
@@ -338,7 +340,7 @@ class LiveEvidence:
                     return None
                 original = body["grant"]
                 exact = next((g for g in scope.grants if asdict(g) == original), None)
-                state = "superseded" if successor else "current"
+                state: Literal["superseded", "current"] = "superseded" if successor else "current"
                 if not successor and exact is None:
                     return None
                 visible_successor = None
@@ -405,7 +407,7 @@ class LiveEvidence:
             ).fetchone()
             if old:
                 _require(old[0] == fingerprint, "source_page_conflict")
-                return old[1]
+                return str(old[1])
             for event, position, epoch in zip(events, source_positions, event_epochs, strict=True):
                 try:
                     _require(
@@ -490,11 +492,13 @@ class LiveEvidence:
             deliveries.setdefault((row["resource"], row["event_id"]), []).append(row)
         decisions: dict[tuple[str, str], list[tuple[dict[str, Any], bool]]] = {}
         outcomes: dict[tuple[str, str, int], list[tuple[dict[str, Any], bool]]] = {}
-        for versions in deliveries.values():
-            latest = max(row["event_revision"] for row in versions)
-            current = [row for row in versions if row["event_revision"] == latest]
-            conflict = len(current) > 1
-            for row in current:
+        for delivery_versions in deliveries.values():
+            latest = max(row["event_revision"] for row in delivery_versions)
+            current_deliveries = [
+                row for row in delivery_versions if row["event_revision"] == latest
+            ]
+            conflict = len(current_deliveries) > 1
+            for row in current_deliveries:
                 event = json.loads(row["payload"])
                 identity = (row["namespace"], event["decision_id"])
                 if event["kind"] == "DecisionRecorded":
@@ -532,7 +536,7 @@ class LiveEvidence:
                 truth.setdefault((outcome["verifier"], outcome["outcome_id"]), []).append(
                     (outcome, conflict)
                 )
-            effective = []
+            effective: list[tuple[dict[str, Any], bool]] = []
             for revisions in truth.values():
                 latest = max(o["outcome_revision"] for o, _ in revisions)
                 effective.extend((o, c) for o, c in revisions if o["outcome_revision"] == latest)
