@@ -60,3 +60,23 @@ def test_retry_recovers_readiness_failure_after_source_commit(tmp_path):
         components.readiness.read(export.case.workflow, actor=export.case.owner)["pending_count"]
         == 1
     )
+
+
+def test_unavailable_post_commit_receipt_is_not_reported_as_complete(tmp_path, monkeypatch):
+    from opentour_cell.pilot.live_readiness import LiveReadinessSource
+
+    export, _ = configured(tmp_path / "owner")
+    run = export.submit(DECISION)
+    monkeypatch.setattr(LiveReadinessSource, "snapshot", lambda *args: None)
+    assert live_reader.main([str(export.selection), run]) == 1
+
+
+def test_other_workflow_readiness_selection_does_not_block_this_export(tmp_path):
+    export, selection = configured(tmp_path / "owner")
+    run = export.submit(DECISION)
+    _write_private(
+        export.directory / "readiness-selection.json",
+        {**selection, "workflow_ref": "different-workflow"},
+    )
+    assert live_reader.main([str(export.selection), run]) == 0
+    assert export.snapshot().pending == 1

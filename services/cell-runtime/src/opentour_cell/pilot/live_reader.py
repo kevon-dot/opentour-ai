@@ -283,7 +283,12 @@ def materialize_live(selection: Path, run_ref: str) -> bool:
             # ingestion. A retry can recover this step without rereading sources.
             from opentour_cell.pilot.readiness_selection import open_readiness
 
-            open_readiness(authority.directory, actor.tenant, authority.workflow_ref).refresh()
+            selected = _read_private(authority.directory / "readiness-selection.json", 4096)
+            if selected.get("workflow_ref") == authority.workflow_ref:
+                receipt = open_readiness(
+                    authority.directory, actor.tenant, authority.workflow_ref
+                ).refresh()
+                _require(receipt is not None)
         return changed
     except (OSError, ValueError, KeyError, TypeError):
         raise IntakeError("live_export_unavailable") from None
