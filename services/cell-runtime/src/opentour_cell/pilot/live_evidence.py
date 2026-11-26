@@ -115,6 +115,8 @@ class LiveSnapshot:
     next_actor: str
     can_bind_verifier: bool
     quarantined: int
+    unmatched_outcomes: int = 0
+    last_ingested_at: int | None = None
 
 
 _COMMON = {"kind", "event_id", "event_revision", "decision_id", "decision_revision"}
@@ -429,10 +431,29 @@ class LiveEvidence:
         source_positions: tuple[int, ...],
         event_epochs: tuple[str, ...],
         checkpoint: int,
+        read_metadata: Mapping[str, Any] | None = None,
     ) -> str:
         """Called by the authorized reader with authenticated source lineage, never raw MCP args."""
         require_ref(page_ref)
         _require(len(events) == len(source_positions) == len(event_epochs) and len(events) <= 1000)
+        if read_metadata is not None:
+            _require(
+                set(read_metadata)
+                == {"interval_start", "interval_end", "coverage_through", "complete", "next_cursor"}
+            )
+            _require(type(read_metadata["complete"]) is bool)
+            for name in ("interval_start", "interval_end", "coverage_through"):
+                value = read_metadata[name]
+                _require(value is None or (type(value) is int and 0 <= value < 2**63))
+            start, end = read_metadata["interval_start"], read_metadata["interval_end"]
+            _require(
+                (start is None and end is None)
+                or (start is not None and end is not None and start <= end)
+            )
+            coverage = read_metadata["coverage_through"]
+            _require(coverage is None or (start is not None and start <= coverage <= end))
+            if read_metadata["next_cursor"] is not None:
+                require_ref(read_metadata["next_cursor"])
         with self._db() as db:
             body, _ = self._binding(db, reference)
         with self._scope(actor, body["workflow_ref"]) as scope, self._db(write=True) as db:
@@ -445,9 +466,16 @@ class LiveEvidence:
             _require(source_revision == grant.source_revision)
             _require(type(checkpoint) is int and checkpoint >= grant.checkpoint)
             _require(all(type(p) is int and p <= checkpoint for p in source_positions))
-            fingerprint = _digest(
-                [source_revision, events, source_positions, event_epochs, checkpoint]
-            )
+            page_identity: list[Any] = [
+                source_revision,
+                events,
+                source_positions,
+                event_epochs,
+                checkpoint,
+            ]
+            if read_metadata is not None:
+                page_identity.append(read_metadata)
+            fingerprint = _digest(page_identity)
             old = db.execute(
                 "SELECT digest,receipt_ref FROM live_pages WHERE binding_ref=? AND page_ref=?",
                 (reference, page_ref),
@@ -476,6 +504,7 @@ class LiveEvidence:
                         ),
                     )
                     continue
+                encoded = _canonical(parsed)
                 db.execute(
                     "INSERT OR IGNORE INTO live_events(tenant,workflow,epoch,resource,binding_ref,"
                     "dataset_ref,dataset_revision,namespace,event_id,event_revision,payload,"
@@ -491,15 +520,62 @@ class LiveEvidence:
                         grant.deciding_namespace,
                         parsed["event_id"],
                         parsed["event_revision"],
-                        _canonical(parsed),
+                        encoded,
                         int(time.time()),
                     ),
+                )
+                row = db.execute(
+                    "SELECT seq FROM live_events WHERE tenant=? AND workflow=? AND epoch=? "
+                    "AND dataset_ref=? AND dataset_revision=? AND resource=? AND event_id=? "
+                    "AND event_revision=? AND payload=?",
+                    (
+                        scope.tenant,
+                        scope.workflow_ref,
+                        scope.engagement_epoch,
+                        scope.dataset_ref,
+                        scope.dataset_revision,
+                        grant.resource,
+                        parsed["event_id"],
+                        parsed["event_revision"],
+                        encoded,
+                    ),
+                ).fetchone()
+                _require(row is not None)
+                db.execute(
+                    "CREATE TABLE IF NOT EXISTS live_event_origins ("
+                    "seq INTEGER NOT NULL, binding_ref TEXT NOT NULL, "
+                    "PRIMARY KEY(seq,binding_ref))"
+                )
+                db.execute(
+                    "INSERT OR IGNORE INTO live_event_origins VALUES (?,?)", (row[0], reference)
                 )
             receipt = "live-" + _digest([reference, page_ref, fingerprint])[:32]
             db.execute(
                 "INSERT INTO live_pages VALUES (?,?,?,?,?)",
                 (reference, page_ref, fingerprint, checkpoint, receipt),
             )
+            if read_metadata is not None:
+                db.execute(
+                    "CREATE TABLE IF NOT EXISTS live_reads (binding_ref TEXT NOT NULL, "
+                    "page_ref TEXT NOT NULL, body TEXT NOT NULL, PRIMARY KEY(binding_ref,page_ref))"
+                )
+                db.execute(
+                    "INSERT INTO live_reads VALUES (?,?,?)",
+                    (
+                        reference,
+                        page_ref,
+                        _canonical(
+                            {
+                                **read_metadata,
+                                "receipt_ref": receipt,
+                                "source_revision": source_revision,
+                                "checkpoint": checkpoint,
+                                "row_count": len(events),
+                                "polled_at": int(time.time()),
+                            }
+                        ),
+                    ),
+                )
             snapshot = self._snapshot(db, scope)
             db.execute(
                 "INSERT OR IGNORE INTO live_snapshots VALUES (?,?,?,?,?)",
@@ -516,6 +592,35 @@ class LiveEvidence:
             _require(scope.expires_at > int(time.time()))
             return receipt
 
+    def read_receipts(self, actor: IntakePrincipal, workflow: str) -> tuple[dict[str, Any], ...]:
+        """Read actual acknowledged source pages; no poll or state initialization."""
+        with self._scope(actor, workflow) as scope:
+            _require(scope.can_inspect)
+            with self._db() as db:
+                if (
+                    db.execute("SELECT 1 FROM sqlite_master WHERE name='live_reads'").fetchone()
+                    is None
+                ):
+                    return ()
+                rows = db.execute(
+                    "SELECT r.binding_ref,r.page_ref,r.body FROM live_reads r "
+                    "JOIN live_bindings b ON b.ref=r.binding_ref "
+                    "WHERE b.tenant=? AND b.workflow=? AND b.epoch=? ORDER BY r.rowid",
+                    (scope.tenant, workflow, scope.engagement_epoch),
+                ).fetchall()
+                receipts = []
+                for row in rows:
+                    body, successor = self._binding(db, row[0])
+                    if (
+                        successor is None
+                        and self._same_scope(body, scope)
+                        and FeedGrant(**body["grant"]) in scope.grants
+                    ):
+                        receipts.append(
+                            {"binding_ref": row[0], "page_ref": row[1], **json.loads(row[2])}
+                        )
+                return tuple(receipts)
+
     def _snapshot(self, db: sqlite3.Connection, scope: LiveScope) -> LiveSnapshot:
         all_rows = db.execute(
             "SELECT * FROM live_events WHERE tenant=? AND workflow=? AND epoch=? "
@@ -528,15 +633,33 @@ class LiveEvidence:
                 scope.dataset_revision,
             ),
         ).fetchall()
-        permitted = {(g.resource, g.deciding_namespace) for g in scope.grants}
+        has_origins = (
+            db.execute("SELECT 1 FROM sqlite_master WHERE name='live_event_origins'").fetchone()
+            is not None
+        )
         rows = []
         for row in all_rows:
-            body, _ = self._binding(db, row["binding_ref"])
-            if self._same_scope(body, scope) and (row["resource"], row["namespace"]) in permitted:
-                rows.append(row)
-        deliveries: dict[tuple[str, str], list[sqlite3.Row]] = {}
+            origins = {row["binding_ref"]}
+            if has_origins:
+                origins.update(
+                    r[0]
+                    for r in db.execute(
+                        "SELECT binding_ref FROM live_event_origins WHERE seq=?", (row["seq"],)
+                    )
+                )
+            namespaces = set()
+            for reference in sorted(origins):
+                body, _ = self._binding(db, reference)
+                grant = FeedGrant(**body["grant"])
+                if self._same_scope(body, scope) and grant in scope.grants:
+                    namespaces.add(grant.deciding_namespace)
+            for namespace in sorted(namespaces):
+                rows.append({**dict(row), "namespace": namespace})
+        deliveries: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
         for row in rows:
-            deliveries.setdefault((row["resource"], row["event_id"]), []).append(row)
+            deliveries.setdefault((row["resource"], row["namespace"], row["event_id"]), []).append(
+                row
+            )
         decisions: dict[tuple[str, str], list[tuple[dict[str, Any], bool]]] = {}
         outcomes: dict[tuple[str, str, int], list[tuple[dict[str, Any], bool]]] = {}
         for delivery_versions in deliveries.values():
@@ -557,6 +680,12 @@ class LiveEvidence:
         verified: list[VerifiedRoot] = []
         pending = disputed = 0
         cases, families = set(), set()
+        known_decisions = {
+            (*identity, event["decision_revision"])
+            for identity, versions in decisions.items()
+            for event, _ in versions
+        }
+        unmatched_outcomes = len(set(outcomes) - known_decisions)
         for identity, versions in decisions.items():
             revision = max(event["decision_revision"] for event, _ in versions)
             current = [
@@ -573,8 +702,12 @@ class LiveEvidence:
                 for event, _ in current
             ]
             event = current[0][0]
-            cases.add(event["case_id"])
-            families.add(event["family_id"])
+            attributed_cases = {e["case_id"] for e, _ in current}
+            attributed_families = {e["family_id"] for e, _ in current}
+            if len(attributed_cases) == 1:
+                cases.update(attributed_cases)
+            if len(attributed_families) == 1:
+                families.update(attributed_families)
             if len({_canonical(v) for v in canonical}) != 1 or any(c for _, c in current):
                 disputed += 1
                 continue
@@ -688,8 +821,10 @@ class LiveEvidence:
             tuple(sorted(verified, key=lambda r: (r.namespace, r.decision_id))),
             bound,
             actors[0] if actors else scope.custodian,
-            scope.can_bind,
+            scope.can_bind and any(g.kind == "independent_outcome" for g in scope.grants),
             quarantined,
+            unmatched_outcomes,
+            max((row["ingested_at"] for row in rows), default=None),
         )
 
     def snapshot(
@@ -718,5 +853,7 @@ class LiveEvidence:
             _require(all(grant in [asdict(g) for g in scope.grants] for grant in saved["grants"]))
             value["verified_roots"] = tuple(VerifiedRoot(**v) for v in value["verified_roots"])
             # Historical evidence survives; historical role claims do not grant current actions.
-            value["can_bind_verifier"] = scope.can_bind
+            value["can_bind_verifier"] = scope.can_bind and any(
+                g.kind == "independent_outcome" for g in scope.grants
+            )
             return LiveSnapshot(**value)
