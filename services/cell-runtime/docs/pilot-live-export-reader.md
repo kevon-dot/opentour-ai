@@ -98,3 +98,8 @@ Write `page`, `catalog` and `envelope` to their respective filenames. Each diges
 Use integer UTC epoch seconds for event times and interval endpoints. An empty page has an empty row list and corresponding empty event, position and epoch lists in its digest. A completed empty poll records a zero-row receipt. Unknown queried intervals have both endpoints null. Unknown coverage has `coverage_through=null`. The worker records its own poll time. The last page has a null cursor. Intermediate pages set `complete=false` and name the next page reference in `next_cursor`.
 
 The worker atomically commits each page's normalized events, checkpoint and read receipt. If page two is unavailable, page one's receipt remains available and the run stays unfinished. A retry validates the original signed catalog and resumes at the first unacknowledged page. Consumers can use the completion flag and coverage fields to distinguish partial progress from a completed, fresh poll. This adapter operates on one bounded resource per admitted run. Its generated tests exercise local software behavior. Customer source qualification and paired cross-resource refresh require their own evidence.
+
+From the installed Slack workspace kit, run
+`python opentour-slack.pyz live-reader <private-selection> <admitted-live-run>`.
+After successful ingestion the worker refreshes configured readiness. On restart
+Home reads the persisted worker verdict and the scoped page receipt.

@@ -148,6 +148,7 @@ COMMANDS = {
     "repair": ("repair_workflow", "main"),
     "bundle": ("repair_bundle", "main"),
     "mcp-intake": ("intake_local", "main"),
+    "live-reader": ("live_reader", "main"),
     "mcp-workflow": ("workflow_mcp", "main"),
     "workflow-authorize": ("workflow_mcp", "authorize_main"),
     "workflow-inspect": ("workflow_mcp", "inspect_main"),
