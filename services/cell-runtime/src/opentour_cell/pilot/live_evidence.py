@@ -63,6 +63,7 @@ class LiveScope:
     can_inspect: bool
     custodian: str
     expires_at: int
+    authority_revision: str = ""
 
 
 class LiveAuthority(Protocol):
@@ -72,6 +73,11 @@ class LiveAuthority(Protocol):
 
 def grant_digest(grant: FeedGrant) -> str:
     return _digest(asdict(grant))
+
+
+def binding_candidate(actor: IntakePrincipal, scope: LiveScope, grant: FeedGrant) -> str:
+    """A displayed selection is bound to the complete current authority context."""
+    return _digest([asdict(actor), asdict(scope), asdict(grant)])
 
 
 @dataclass(frozen=True)
@@ -288,7 +294,10 @@ class LiveEvidence:
             grants = [g for g in scope.grants if g.resource == resource]
             _require(len(grants) == 1)
             grant = grants[0]
-            _require(expected_revision is None or expected_revision == grant_digest(grant))
+            _require(
+                expected_revision is None
+                or expected_revision == binding_candidate(actor, scope, grant)
+            )
             _require(type(grant.checkpoint) is int and grant.checkpoint >= 0)
             require_ref(grant.lease_ref)
             body = {
@@ -356,7 +365,9 @@ class LiveEvidence:
                     return tuple(current)
             except FileNotFoundError:
                 _require(
-                    not any(Path(str(self.path) + s).exists() for s in ("-wal", "-shm", "-journal"))
+                    not any(
+                        os.path.lexists(str(self.path) + s) for s in ("-wal", "-shm", "-journal")
+                    )
                 )
                 return ()
 
