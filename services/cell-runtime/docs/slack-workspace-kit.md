@@ -104,3 +104,18 @@ Withdrawal durably stops new admission and queued handoffs first. Records previo
 Keep the separate custody ledger when restoring engagement data. If an earlier training database and delivery journal are restored beside it, a matching withdrawal still blocks new registrations, training, scoring and queued sends automatically. Run `custody reconcile` to inventory the restored rows and record their disposition under the original agreement. An operator who must also recover the custody ledger should restore the current withdrawal record before reconnecting the worker. Use a separate location for each engagement.
 
 For support, give the named operator the version, digest and a redacted diagnostic through the agreed private route. Hold disputed outputs and use the previously verified kit when authorized. `PROVENANCE.json` identifies the source commit. From that checkout, maintainers can reproduce this ZIP with `python -I -S -B tools/build_slack_pilot_kit.py OpenTour_Slack_Workspace_Kit.zip` and a fresh output path.
+
+
+## Run an admitted historical benchmark
+
+Use the opaque run reference returned by historical intake and the customer's
+existing private worker configuration. The installed command returns the scored
+benchmark reference, version and state or a scoped hold.
+
+```sh
+python -I -S -B opentour-slack.pyz historical-worker \
+  --config /absolute/private/historical-worker.json --run-ref "$run_ref"
+```
+
+The bundled [historical worker guide](pilot-historical-worker.md) describes the
+configuration and repeat behavior.
