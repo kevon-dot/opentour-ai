@@ -1312,7 +1312,7 @@ def run(args: argparse.Namespace) -> Json:
             result["state"] = "imported"
         elif args.command == "verify":
             result["state"] = "verified"
-    elif args.command == "witness":
+    elif args.command in ("witness", "read-witness"):
         result = _replay(spec, members, grant)
         _, count = _learning(spec, members, grant)
         fact = dict(
@@ -1323,17 +1323,35 @@ def run(args: argparse.Namespace) -> Json:
             attestation=_id(args.attestation),
             kind="explicit_recipient_repeat",
         )
-        if os.path.lexists(args.output):
-            previous = parse_manifest(_read(args.output))
-            _require(
-                isinstance(previous.get("witnessed_utc"), str)
-                and {k: v for k, v in previous.items() if k != "witnessed_utc"} == fact,
-                "witness_receipt_conflict",
-            )
-            result = previous
-        else:
+        create = args.command == "witness"
+        path = args.output if create else args.receipt
+        # Serialize the first timestamp and immutable publication with other callers
+        # of this grant and with changes to the current engagement/entitlement.
+        with _current(args.grant, grant):
+            if os.path.lexists(path):
+                previous = parse_manifest(_read(path))
+                stamp = previous.get("witnessed_utc")
+                _require(isinstance(stamp, str), "witness_receipt_conflict")
+                try:
+                    witnessed_at = datetime.fromisoformat(stamp)
+                except ValueError:
+                    raise BundleError("witness_receipt_conflict") from None
+                _require(
+                    witnessed_at.tzinfo == UTC
+                    and canonical({k: v for k, v in previous.items() if k != "witnessed_utc"})
+                    == canonical(fact),
+                    "witness_receipt_conflict",
+                )
+                return previous
+            _require(create, "witness_receipt_unavailable")
             result = dict(fact, witnessed_utc=datetime.now(UTC).isoformat())
-            _publish(args.output, (canonical(result) + "\n").encode(), args.grant, grant)
+            _install(path, _bytes(result))
+            directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
+            return result
     elif args.command == "learning":
         body, count = _learning(spec, members, grant)
         _require(grant.get("materialize_learning") is True, "learning_materialization_denied")
@@ -1382,6 +1400,7 @@ def main() -> int:
         "fallback",
         "learning",
         "witness",
+        "read-witness",
     ):
         sub = commands.add_parser(name)
         if name in ("export", "seal", "issue-entitlement"):
@@ -1393,7 +1412,9 @@ def main() -> int:
             sub.add_argument("--output", type=Path, required=True)
         if name in ("predict", "fallback"):
             sub.add_argument("--input", type=Path, required=True)
-        if name == "witness":
+        if name == "read-witness":
+            sub.add_argument("--receipt", type=Path, required=True)
+        if name in ("witness", "read-witness"):
             sub.add_argument("--attestation", required=True)
         if name == "predict":
             sub.add_argument("--version", required=True)

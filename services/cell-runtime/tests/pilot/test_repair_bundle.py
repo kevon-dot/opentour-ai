@@ -271,6 +271,67 @@ def test_recipient_import_replay_infer_fallback_and_witness_in_fresh_processes(
     )
 
 
+def test_recipient_recovers_existing_witness_after_lost_reply(tmp_path: Path) -> None:
+    fx = OwnerFixture(tmp_path / "first")
+    fx.export()
+    receiver = tmp_path / "independent-receiver"
+    receiver.mkdir(mode=0o700)
+    installed = receiver / "installed.zip"
+    cli(fx.recipient, "import", "--archive", fx.archive, "--output", installed)
+    receipt = receiver / "witness.json"
+    scope = ["--archive", installed, "--attestation", "att-first-repeat"]
+    readback = ["read-witness", "--receipt", receipt, *scope]
+    assert cli(fx.recipient, *readback, success=False)["reason"] == "witness_receipt_unavailable"
+    assert not receipt.exists()
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        replies = list(
+            pool.map(lambda _: cli(fx.recipient, "witness", "--output", receipt, *scope), range(3))
+        )
+    # The receiver has committed. The caller can lose every reply and use a fresh process.
+    original = receipt.read_bytes()
+    modified_ns = receipt.stat().st_mtime_ns
+    recovered = cli(fx.recipient, *readback)
+    assert replies == [recovered] * 3
+    assert recovered == json.loads(original)
+    assert recovered["package_sha256"] == hashlib.sha256(installed.read_bytes()).hexdigest()
+    assert receipt.read_bytes() == original and receipt.stat().st_mtime_ns == modified_ns
+
+    assert cli(fx.operator, *readback, success=False)["reason"] == "handoff_role_denied"
+    assert cli(fx.recipient, *readback[:-1], "other", success=False)["reason"] == (
+        "witness_receipt_conflict"
+    )
+    other = OwnerFixture(tmp_path / "second")
+    other.export()
+    assert (
+        cli(
+            other.recipient,
+            "read-witness",
+            "--receipt",
+            receipt,
+            "--archive",
+            other.archive,
+            "--attestation",
+            "att-first-repeat",
+            success=False,
+        )["reason"]
+        == "witness_receipt_conflict"
+    )
+    for change in (
+        {"package_sha256": "0" * 64},
+        {"arm_readout_digests": {}},
+        {"witnessed_utc": "unknown"},
+        {"witnessed_utc": "2026-01-01T00:00:00"},
+    ):
+        write(receipt, recovered | change)
+        before = receipt.read_bytes()
+        assert cli(fx.recipient, *readback, success=False)["reason"] == "witness_receipt_conflict"
+        assert receipt.read_bytes() == before
+    write(receipt, original)
+    write(fx.recipient, read(fx.recipient) | {"expires_at": 1})
+    assert cli(fx.recipient, *readback, success=False)["reason"] == "handoff_grant_expired"
+    assert receipt.read_bytes() == original
+
+
 @pytest.mark.parametrize("disposition", ["inconclusive", "stop"])
 def test_diagnosis_and_customer_stop_have_no_serving_route(
     tmp_path: Path, disposition: str
