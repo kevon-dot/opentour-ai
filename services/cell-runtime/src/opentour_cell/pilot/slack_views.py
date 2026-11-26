@@ -1566,6 +1566,7 @@ def app_home_view(
     workflow_settings: bool = False,
     readiness: Mapping[str, Any] | None = None,
     live_summary: Mapping[str, Any] | None = None,
+    verify_outcome: str = "",
 ) -> Block:
     if not context:
         return {
@@ -1611,6 +1612,10 @@ def app_home_view(
             blocks.append(
                 _actions(_button("Bind verifier", "ot_app_bind_verifier", readiness["revision"]))
             )
+    if verify_outcome:
+        blocks.append(
+            _actions(_button("Verify an outcome", "ot_app_verify_outcome", verify_outcome))
+        )
     if workflow_settings:
         blocks.append(_actions(_button("Workflow settings", "ot_app_settings", "ot_app_settings")))
     if can_tune:
@@ -1702,15 +1707,37 @@ def starter_charter(context: str, preview: StarterPreview) -> Block:
     return _modal("Review starter charter", "ot_starter_preview", context, blocks)
 
 
-def workflow_settings(context: str, workflow: str) -> Block:
+def workflow_settings(
+    context: str, workflow: str, nomination: str = "", nominee: str = ""
+) -> Block:
+    blocks = [
+        _section(f"Workflow {_ref(workflow)}"),
+        _actions(_button("Connect live decisions", "ot_connect_live", "ot_connect_live")),
+    ]
+    if nominee:
+        blocks.append(_section(f"Verifier nominated for custodian review · {_ref(nominee)}"))
+    if nomination:
+        blocks.append(_actions(_button("Nominate verifier", "ot_nominate_verifier", nomination)))
+    return _modal("Workflow settings", "ot_workflow_settings", context, blocks)
+
+
+def nominate_verifier(context: str, workflow: str) -> Block:
     return _modal(
-        "Workflow settings",
-        "ot_workflow_settings",
+        "Nominate a verifier",
+        "ot_nomination",
         context,
         [
-            _section(f"Workflow {_ref(workflow)}"),
-            _actions(_button("Connect live decisions", "ot_connect_live", "ot_connect_live")),
+            _section(
+                f"Workflow {_ref(workflow)}. Ask the data custodian to authorize a named verifier."
+            ),
+            {
+                "type": "input",
+                "block_id": "nominee",
+                "label": _text("Verifier's Slack member ID"),
+                "element": {"type": "plain_text_input", "action_id": "nominee", "max_length": 32},
+            },
         ],
+        "Save nomination",
     )
 
 
@@ -1742,6 +1769,65 @@ def live_connections(
         context,
         blocks,
         "Save binding" if choices else None,
+    )
+
+
+def verify_outcome(
+    context: str, workflow: str, choices: Sequence[tuple[str, str]], *, more: bool, previous: bool
+) -> Block:
+    blocks = [
+        _section(
+            f"Workflow {_ref(workflow)}. Record an independent outcome for a decision revision."
+        )
+    ]
+    nav = []
+    if previous:
+        nav.append(_button("Previous decisions", "ot_verify_page", "previous"))
+    if more:
+        nav.append(_button("More decisions", "ot_verify_page", "next"))
+    if nav:
+        blocks.append(_actions(*nav))
+    if not choices:
+        blocks.append(_section("No eligible decision revision is available."))
+        return _modal("Verify an outcome", "ot_verify_outcome", context, blocks)
+    short_choices = [
+        (name if len(name) <= 75 else f"{token[:12]} · {name[:56]}", token)
+        for name, token in choices
+    ]
+    detailed = [f"{token[:12]} · {name}" for name, token in choices if len(name) > 75]
+    for start in range(0, len(detailed), 6):
+        blocks.append(_section("\n".join(detailed[start : start + 6])))
+    selector = _select("target", "Decision and revision", short_choices)
+    del selector["element"]["initial_option"]
+    blocks.extend(
+        [
+            selector,
+            _select("finality", "Outcome state", [("Final", "final"), ("Reopened", "reopened")]),
+        ]
+    )
+    for key, label in (
+        ("action", "Verified action reference (final only)"),
+        ("basis", "Evidence basis reference"),
+        ("effective", "Effective time in UTC Unix seconds"),
+    ):
+        blocks.append(
+            {
+                "type": "input",
+                "block_id": key,
+                "label": _text(label),
+                "optional": key == "action",
+                "element": {"type": "plain_text_input", "action_id": key, "max_length": 128},
+            }
+        )
+    return _modal("Verify an outcome", "ot_verify_outcome", context, blocks, "Record outcome")
+
+
+def verification_saved(context: str, receipt: str) -> Block:
+    return _modal(
+        "Outcome recorded",
+        "ot_verified_outcome",
+        context,
+        [_section(f"Recorded outcome receipt · {_ref(receipt)}")],
     )
 
 

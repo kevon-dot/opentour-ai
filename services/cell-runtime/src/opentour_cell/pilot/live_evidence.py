@@ -64,6 +64,9 @@ class LiveScope:
     custodian: str
     expires_at: int
     authority_revision: str = ""
+    slack_verifiers: tuple[tuple[str, str], ...] = ()
+    can_verify: bool = False
+    can_nominate: bool = False
 
 
 class LiveAuthority(Protocol):
@@ -279,6 +282,10 @@ class LiveEvidence:
 
     @staticmethod
     def _same_scope(body: Mapping[str, Any], scope: LiveScope) -> bool:
+        if "grant" in body:
+            assigned = dict(scope.slack_verifiers).get(body["grant"]["resource"])
+            if body.get("slack_verifier") != assigned:
+                return False
         return all(
             body.get(key) == getattr(scope, key)
             for key in (
@@ -318,6 +325,9 @@ class LiveEvidence:
                 "dataset_revision": scope.dataset_revision,
                 "grant": asdict(grant),
             }
+            subject = dict(scope.slack_verifiers).get(resource)
+            if subject is not None:
+                body["slack_verifier"] = subject
             existing = db.execute(
                 "SELECT ref FROM live_bindings WHERE tenant=? AND workflow=? "
                 "AND epoch=? AND kind=? AND successor IS NULL",
@@ -395,6 +405,8 @@ class LiveEvidence:
                     return None
                 if not self._same_scope(body, scope):
                     return None
+                if body.get("slack_verifier") and authenticated_actor.role == "intake":
+                    return None
                 original = body["grant"]
                 exact = next((g for g in scope.grants if asdict(g) == original), None)
                 state: Literal["superseded", "current"] = "superseded" if successor else "current"
@@ -468,7 +480,7 @@ class LiveEvidence:
             _require(scope.expires_at > int(time.time()))
             _require(scope.can_ingest and scope.engagement_epoch == body["engagement_epoch"])
             fresh, successor = self._binding(db, reference)
-            _require(self._same_scope(fresh, scope))
+            _require(self._same_scope(fresh, scope) and fresh.get("slack_verifier") is None)
             grant = FeedGrant(**fresh["grant"])
             _require(successor is None and grant in scope.grants)
             _require(source_revision == grant.source_revision)
@@ -512,51 +524,7 @@ class LiveEvidence:
                         ),
                     )
                     continue
-                encoded = _canonical(parsed)
-                db.execute(
-                    "INSERT OR IGNORE INTO live_events(tenant,workflow,epoch,resource,binding_ref,"
-                    "dataset_ref,dataset_revision,namespace,event_id,event_revision,payload,"
-                    "ingested_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-                    (
-                        scope.tenant,
-                        scope.workflow_ref,
-                        scope.engagement_epoch,
-                        grant.resource,
-                        reference,
-                        scope.dataset_ref,
-                        scope.dataset_revision,
-                        grant.deciding_namespace,
-                        parsed["event_id"],
-                        parsed["event_revision"],
-                        encoded,
-                        int(time.time()),
-                    ),
-                )
-                row = db.execute(
-                    "SELECT seq FROM live_events WHERE tenant=? AND workflow=? AND epoch=? "
-                    "AND dataset_ref=? AND dataset_revision=? AND resource=? AND event_id=? "
-                    "AND event_revision=? AND payload=?",
-                    (
-                        scope.tenant,
-                        scope.workflow_ref,
-                        scope.engagement_epoch,
-                        scope.dataset_ref,
-                        scope.dataset_revision,
-                        grant.resource,
-                        parsed["event_id"],
-                        parsed["event_revision"],
-                        encoded,
-                    ),
-                ).fetchone()
-                _require(row is not None)
-                db.execute(
-                    "CREATE TABLE IF NOT EXISTS live_event_origins ("
-                    "seq INTEGER NOT NULL, binding_ref TEXT NOT NULL, "
-                    "PRIMARY KEY(seq,binding_ref))"
-                )
-                db.execute(
-                    "INSERT OR IGNORE INTO live_event_origins VALUES (?,?)", (row[0], reference)
-                )
+                self._record_event(db, scope, grant, reference, parsed)
             receipt = "live-" + _digest([reference, page_ref, fingerprint])[:32]
             db.execute(
                 "INSERT INTO live_pages VALUES (?,?,?,?,?)",
@@ -584,21 +552,80 @@ class LiveEvidence:
                         ),
                     ),
                 )
-            snapshot = self._snapshot(db, scope)
-            db.execute(
-                "INSERT OR IGNORE INTO live_snapshots VALUES (?,?,?,?,?)",
-                (
-                    scope.tenant,
-                    scope.workflow_ref,
-                    scope.engagement_epoch,
-                    snapshot.sequence,
-                    _canonical(
-                        {"snapshot": asdict(snapshot), "grants": [asdict(g) for g in scope.grants]}
-                    ),
-                ),
-            )
+            self._archive(db, scope)
             _require(scope.expires_at > int(time.time()))
             return receipt
+
+    def _record_event(
+        self,
+        db: sqlite3.Connection,
+        scope: LiveScope,
+        grant: FeedGrant,
+        reference: str,
+        parsed: dict[str, Any],
+    ) -> None:
+        encoded = _canonical(parsed)
+        db.execute(
+            "INSERT OR IGNORE INTO live_events(tenant,workflow,epoch,resource,binding_ref,"
+            "dataset_ref,dataset_revision,namespace,event_id,event_revision,payload,"
+            "ingested_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                scope.tenant,
+                scope.workflow_ref,
+                scope.engagement_epoch,
+                grant.resource,
+                reference,
+                scope.dataset_ref,
+                scope.dataset_revision,
+                grant.deciding_namespace,
+                parsed["event_id"],
+                parsed["event_revision"],
+                encoded,
+                int(time.time()),
+            ),
+        )
+        row = db.execute(
+            "SELECT seq FROM live_events WHERE tenant=? AND workflow=? AND epoch=? "
+            "AND dataset_ref=? AND dataset_revision=? AND resource=? AND event_id=? "
+            "AND event_revision=? AND payload=?",
+            (
+                scope.tenant,
+                scope.workflow_ref,
+                scope.engagement_epoch,
+                scope.dataset_ref,
+                scope.dataset_revision,
+                grant.resource,
+                parsed["event_id"],
+                parsed["event_revision"],
+                encoded,
+            ),
+        ).fetchone()
+        _require(row is not None)
+        db.execute(
+            "CREATE TABLE IF NOT EXISTS live_event_origins ("
+            "seq INTEGER NOT NULL, binding_ref TEXT NOT NULL, "
+            "PRIMARY KEY(seq,binding_ref))"
+        )
+        db.execute("INSERT OR IGNORE INTO live_event_origins VALUES (?,?)", (row[0], reference))
+
+    def _archive(self, db: sqlite3.Connection, scope: LiveScope) -> None:
+        snapshot = self._snapshot(db, scope)
+        db.execute(
+            "INSERT OR IGNORE INTO live_snapshots VALUES (?,?,?,?,?)",
+            (
+                scope.tenant,
+                scope.workflow_ref,
+                scope.engagement_epoch,
+                snapshot.sequence,
+                _canonical(
+                    {
+                        "snapshot": asdict(snapshot),
+                        "grants": [asdict(g) for g in scope.grants],
+                        "slack_verifiers": dict(scope.slack_verifiers),
+                    }
+                ),
+            ),
+        )
 
     def read_receipts(self, actor: IntakePrincipal, workflow: str) -> tuple[dict[str, Any], ...]:
         """Read actual acknowledged source pages; no poll or state initialization."""
@@ -629,7 +656,14 @@ class LiveEvidence:
                         )
                 return tuple(receipts)
 
-    def _snapshot(self, db: sqlite3.Connection, scope: LiveScope) -> LiveSnapshot:
+    def _snapshot(
+        self,
+        db: sqlite3.Connection,
+        scope: LiveScope,
+        *,
+        form_targets: dict[tuple[str, str, int], str] | None = None,
+        verifying_actor: str | None = None,
+    ) -> LiveSnapshot:
         all_rows = db.execute(
             "SELECT * FROM live_events WHERE tenant=? AND workflow=? AND epoch=? "
             "AND dataset_ref=? AND dataset_revision=? ORDER BY seq",
@@ -726,6 +760,8 @@ class LiveEvidence:
             if len({_canonical(v) for v in canonical}) != 1 or any(c for _, c in current):
                 disputed += 1
                 continue
+            if form_targets is not None and event["actor_ref"] != verifying_actor:
+                form_targets[(*identity, revision)] = _digest(canonical[0])
             truth: dict[tuple[str, str], list[tuple[dict[str, Any], bool]]] = {}
             for outcome, conflict in outcomes.get((*identity, revision), []):
                 truth.setdefault((outcome["verifier"], outcome["outcome_id"]), []).append(
@@ -796,6 +832,18 @@ class LiveEvidence:
             (row[0] for row in page_rows if self._same_scope(self._binding(db, row[1])[0], scope)),
             default=0,
         )
+        if db.execute("SELECT 1 FROM sqlite_master WHERE name='live_form_receipts'").fetchone():
+            sequence += db.execute(
+                "SELECT count(*) FROM live_form_receipts WHERE tenant=? AND workflow=? "
+                "AND epoch=? AND dataset=? AND dataset_revision=?",
+                (
+                    scope.tenant,
+                    scope.workflow_ref,
+                    scope.engagement_epoch,
+                    scope.dataset_ref,
+                    scope.dataset_revision,
+                ),
+            ).fetchone()[0]
         quarantined = db.execute(
             "SELECT count(*) FROM live_quarantine WHERE tenant=? AND workflow=? AND epoch=? "
             "AND dataset_ref=? AND dataset_revision=?",
@@ -861,6 +909,7 @@ class LiveEvidence:
             ).fetchone()
             _require(row is not None)
             saved = json.loads(row[0])
+            _require(saved.get("slack_verifiers", {}) == dict(scope.slack_verifiers))
             value = saved["snapshot"]
             _require(self._same_scope(value, scope))
             # Retention is not continuing disclosure authority. Historical receipts
