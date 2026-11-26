@@ -355,3 +355,105 @@ def test_question_answers_keep_undefined_error_and_changed_subsets_explicit() ->
     wording = json.dumps(changed)
     assert "Different cases were automated" in wording and "Eligible pairs 1/3" in wording
     assert "Fewer observed errors" not in wording
+
+
+def test_regression_question_requires_scoped_choice_and_rechecks_selection(tmp_path: Path) -> None:
+    h = Harness(tmp_path)
+    first, second = supplied(h, qualified=True), supplied(h, qualified=True, suffix="-second")
+    h.config["users"][ACTOR]["datasets"] = [first, second]
+    h.config["users"][OTHER]["datasets"] = [second]
+    h.save()
+    prompt = "Which cases regressed?"
+    view = h.launch(prompt=prompt)
+    assert "No currently inspected comparison" in text(h, view)
+    h.action(view, "ot_readouts", "home")
+    choices = {
+        row["text"]["text"].split(" · ")[0]: row["accessory"]["value"]
+        for row in screen(h, view)["blocks"]
+        if "accessory" in row
+    }
+    revisions = []
+    for dataset in (first, second):
+        h.action(view, "ot_result_open", choices[dataset])
+        revision = buttons(screen(h, view))["ot_evidence"]
+        h.action(view, "ot_evidence", revision)
+        revisions.append(revision)
+        h.action(view, "ot_readouts", "home")
+
+    foreign = h.launch(actor=OTHER, prompt=prompt)
+    assert all(revision not in text(h, foreign) for revision in revisions)
+    private = h.launch(prompt=prompt)
+    h.action(private, "ot_result_open", revisions[0], actor=OTHER)
+    assert "0 of 3 comparable" not in text(h, private)
+    for selected in revisions:
+        picker = h.launch(prompt=prompt)
+        assert all(revision in text(h, picker) for revision in revisions)
+        click = h.action(picker, "ot_result_open", selected)
+        assert selected in text(h, picker) and "0 of 3 comparable" in text(h, picker)
+        h.send("interactive", click)
+        assert not h.app.journal.decision(selected)
+
+    stale = h.launch(prompt=prompt)
+    with h.app.journal.db() as db:
+        db.execute("UPDATE presentations SET expires=0 WHERE revision=?", (revisions[0],))
+    h.action(stale, "ot_result_open", revisions[0])
+    assert "0 of 3 comparable" not in text(h, stale)
+    assert revisions[0] not in text(h, h.launch(prompt=prompt))
+
+    revoked = h.launch(prompt=prompt)
+    h.config["users"][ACTOR]["datasets"] = [first]
+    h.save()
+    h.action(revoked, "ot_result_open", revisions[1])
+    assert "0 of 3 comparable" not in text(h, revoked)
+    assert not h.app.journal.latest([first, second]) and not h.slack.post
+    assert all(not h.app.journal.decision(revision) for revision in revisions)
+
+
+@pytest.mark.parametrize("withdrawal", ["dataset", "inspection", "actor"])
+def test_regression_picker_rechecks_every_row_at_admission(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, withdrawal: str
+) -> None:
+    h = Harness(tmp_path)
+    datasets = [supplied(h, qualified=True, suffix=suffix) for suffix in ("-first", "-last")]
+    h.config["users"][ACTOR]["datasets"] = datasets
+    h.save()
+    revisions = []
+    for dataset in datasets:
+        view = h.launch()
+        option = next(
+            row["accessory"]["value"]
+            for row in screen(h, view)["blocks"]
+            if "accessory" in row and row["text"]["text"].startswith(dataset + " · ")
+        )
+        h.action(view, "ot_result_open", option)
+        revision = buttons(screen(h, view))["ot_evidence"]
+        h.action(view, "ot_evidence", revision)
+        revisions.append(revision)
+    original = h.app.views.regression_picker
+    rendered = []
+
+    def withdraw_before_admission(*args: Any, **kwargs: Any) -> Json:
+        modal = original(*args, **kwargs)
+        rendered.append(json.dumps(modal))
+        if withdrawal == "dataset":
+            h.store.revoke(datasets[-1])
+        elif withdrawal == "inspection":
+            with h.app.journal.db() as db:
+                db.execute("UPDATE presentations SET expires=0 WHERE revision=?", (revisions[-1],))
+        else:
+            h.config["users"][ACTOR]["datasets"] = datasets[:1]
+            h.save()
+        return modal
+
+    monkeypatch.setattr(h.app.views, "regression_picker", withdraw_before_admission)
+    picker = h.launch(prompt="What got worse?")
+    assert len(rendered) == 1 and all(revision in rendered[0] for revision in revisions)
+    assert all(ref not in text(h, picker) for ref in datasets + revisions)
+    assert "ot_result_open" not in buttons(screen(h, picker))
+    with h.app.journal.db() as db:
+        assert (
+            db.execute(
+                "SELECT COUNT(*) FROM exposures WHERE kind='ot_regression_picker'"
+            ).fetchone()[0]
+            == 0
+        )

@@ -1,0 +1,22 @@
+[Unit]
+Description=OpenTour reference-plane TLS health endpoint
+After=network.target
+
+[Service]
+User=opentour-health
+Group=opentour-health
+ExecStart=/opt/opentour/python/bin/python3 -I -B /opt/opentour/current/integrations/worker-host/health.py --config /etc/opentour-health/manifest.json --cert /etc/opentour-health/tls.crt --key /etc/opentour-health/tls.key --token /etc/opentour-health/credential
+Restart=on-failure
+RestartSec=3
+UMask=0077
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+InaccessiblePaths=-/var/lib/opentour-worker
+MemoryMax=128M
+TasksMax=16
+
+[Install]
+WantedBy=multi-user.target

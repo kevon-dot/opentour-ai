@@ -34,6 +34,9 @@ MODULES = (
     "opentour_cell/pilot/learning_mandate.py",
     "opentour_cell/pilot/zapier_approval.py",
     "opentour_cell/pilot/managed_run.py",
+    "opentour_cell/pilot/intake_mcp.py",
+    "opentour_cell/pilot/intake_local.py",
+    "opentour_cell/pilot/intake_admission.py",
     "opentour_cell/pilot/open_weight.py",
     "opentour_cell/pilot/pilot_metrics.py",
     "opentour_cell/pilot/repair_bundle.py",
@@ -66,6 +69,10 @@ ASSETS = {
         f"{CELL}/integrations/zapier/slack-approval-signer.cjs"
     ),
     "pilot-workplace-context.md": f"{CELL}/docs/pilot-workplace-context.md",
+    **{
+        f"integrations/zapier/{name}": f"{CELL}/integrations/zapier/{name}"
+        for name in ("approval-recipe-v1.json", "import-approval-recipe.cjs")
+    },
     "pilot-cohort-lease.md": f"{CELL}/docs/pilot-cohort-lease.md",
     "pilot-qualification.md": f"{CELL}/docs/pilot-qualification.md",
     "pilot-zapier-approval.md": f"{CELL}/docs/pilot-zapier-approval.md",
@@ -105,6 +112,15 @@ ASSETS = {
     "integrations/slack/README.md": f"{CELL}/integrations/slack/README.md",
     "integrations/slack/worker.example.json": f"{CELL}/integrations/slack/worker.example.json",
 }
+for asset in (
+    "health.py",
+    "manifest.example.json",
+    "opentour-health.service",
+    "opentour-worker.service",
+    "README.md",
+):
+    ASSETS[f"integrations/worker-host/{asset}"] = f"{CELL}/integrations/worker-host/{asset}"
+
 ENTRY = """import importlib
 import sys
 
@@ -122,6 +138,7 @@ COMMANDS = {
     "zapier-approval": ("zapier_approval", "main"),
     "repair": ("repair_workflow", "main"),
     "bundle": ("repair_bundle", "main"),
+    "mcp-intake": ("intake_local", "main"),
     "mcp-workflow": ("workflow_mcp", "main"),
     "workflow-authorize": ("workflow_mcp", "authorize_main"),
     "workflow-inspect": ("workflow_mcp", "inspect_main"),

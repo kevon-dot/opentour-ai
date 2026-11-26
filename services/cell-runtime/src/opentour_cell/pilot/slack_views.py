@@ -403,7 +403,8 @@ class _Evidence:
                 f"incumbent {current.unknown}, repair {repair.unknown}.",
                 "coverage": f"{coverage} {ceiling} Eligible pairs {common}/{size}.",
                 "changes": (
-                    f"{regressions_text} {changes_text} Eligible pairs {common}/{size}. {finding}"
+                    f"{regressions_text} {changes_text} {coverage} "
+                    f"Eligible pairs {common}/{size}. {finding}"
                 ),
             },
         )
@@ -598,6 +599,30 @@ def result_chooser(
     )
     blocks.append(_actions(*navigation))
     return _modal("Review results", "ot_review_list", context, blocks)
+
+
+def regression_picker(
+    context: str, rows: Sequence[tuple[str, str, str]], *, previous: bool, more: bool
+) -> Block:
+    blocks = [
+        _section(
+            "Choose an inspected frozen comparison to see which decisions became wrong."
+            if rows
+            else "No currently inspected comparison is available. Open a result and inspect "
+            "its evidence before asking which decisions became wrong."
+        )
+    ]
+    for dataset, source, revision in rows:
+        blocks.append(_section(f"Workflow {_ref(dataset)} · {_display(source)} · {_ref(revision)}"))
+        blocks.append(_actions(_button("Use this comparison", "ot_result_open", revision)))
+    navigation = []
+    if previous:
+        navigation.append(_button("Previous", "ot_result_prev", "previous"))
+    if more:
+        navigation.append(_button("Next", "ot_result_next", "next"))
+    navigation.append(_button("Browse results", "ot_readouts", "home"))
+    blocks.append(_actions(*navigation))
+    return _modal("Choose comparison", "ot_regression_picker", context, blocks)
 
 
 def question_modal(
@@ -1106,6 +1131,8 @@ def status_modal(
 
 def evidence_modal(
     *,
+    recipe: bool = False,
+    request_status: Mapping[str, Any] | None = None,
     context: str,
     revision: str,
     report: Mapping[str, Any] | None,
@@ -1176,13 +1203,27 @@ def evidence_modal(
             and recipient
             and audit.get("release_provider") == "zapier_slack"
         ):
-            blocks.append(
-                _section(
-                    "This workspace uses Slack Request Approval in Zapier. After you inspect this "
-                    "evidence, use your assigned approval in Slack to approve this candidate or "
-                    "request changes. The local worker stages the request for the configured Zap."
+            if recipe and request_status:
+                blocks.extend(_plugin_status_blocks(request_status["request_id"], request_status))
+            elif recipe:
+                blocks.append(
+                    _section(
+                        f"Candidate {_ref(audit['model_revision'])}. Evaluation handoff only to "
+                        f"{_display(recipient)}. The incumbent remains the fallback. "
+                        "The request expires within 15 minutes or sooner if authority expires."
+                    )
                 )
-            )
+                proceed = _button("Continue to approval", "ot_plugin_continue", ref)
+                proceed["style"] = "primary"
+                blocks.append(_actions(proceed))
+            else:
+                blocks.append(
+                    _section(
+                        "This workspace uses Slack Request Approval in Zapier. After inspection, "
+                        "use your assigned approval to approve this candidate or request changes. "
+                        "The worker stages the request for the configured Zap."
+                    )
+                )
         elif release_allowed and audit and recipient:
             artifact = _ref(audit["model_revision"])
             blocks.append(
@@ -1210,10 +1251,22 @@ def evidence_modal(
             }
             blocks.append(_actions(approve, change))
         explore = []
+        if recipe and not release_allowed:
+            explore.append(_button("View current status", "ot_managed_review_status", ref))
+        if recipe and report:
+            explore.append(
+                _button(
+                    f"Inspect regression ({report['paired']['regressions']})",
+                    "ot_question_changes",
+                    ref,
+                )
+            )
         if questions:
             explore.append(_button("Ask about evidence", "ot_question", ref))
         if charts_allowed:
-            explore.append(_button("View comparison charts", "ot_charts", ref))
+            explore.append(
+                _button("Compare arms" if recipe else "View comparison charts", "ot_charts", ref)
+            )
         if explore:
             blocks.append(_actions(*explore))
     else:
@@ -1267,6 +1320,7 @@ def app_home_view(
     can_tune: bool = False,
     named_reviewer: bool = False,
     pending: str = "",
+    can_add_workflow: bool = False,
 ) -> Block:
     if not context:
         return {
@@ -1294,6 +1348,13 @@ def app_home_view(
         if named_reviewer:
             blocks.append(_section("No repair needs your review."))
         nav.insert(0, _button("Review results", "ot_app_review", "ot_app_review"))
+    if can_add_workflow:
+        blocks.append(
+            {
+                **_actions(_button("Add workflow", "ot_app_add_workflow", "ot_app_add_workflow")),
+                "block_id": "ot_workflow_entry",
+            }
+        )
     if can_tune:
         nav.append(_button("Preview a repair", "ot_app_repair", "ot_app_repair"))
     blocks.extend(
@@ -1308,6 +1369,40 @@ def app_home_view(
         "private_metadata": _ref(context),
         "blocks": blocks,
     }
+
+
+def workflow_chooser(context: str) -> Block:
+    choices = _actions(
+        _button("We’re starting from scratch", "ot_workflow_starter", "starter"),
+        _button("Connect existing decisions", "ot_workflow_historical", "historical"),
+    )
+    choices["block_id"] = "ot_workflow_choices"
+    return _modal(
+        "Add workflow",
+        "ot_workflow_chooser",
+        context,
+        [_section("Choose how to set up this workflow privately."), choices],
+    )
+
+
+def workflow_instructions(context: str, route: str) -> Block:
+    if route == "starter":
+        title = "Start from a policy"
+        message = (
+            "Choose one permitted policy and its revision. Identify the decision it governs "
+            "with your workflow owner. Use private starter setup when available to save a draft."
+        )
+    elif route == "historical":
+        title = "Connect decisions"
+        message = (
+            "Identify the original decision feed and an independent correction source. "
+            "Ask the authorized data custodian to confirm permission for both sources, "
+            "then submit the approved pair through the customer’s intake connection "
+            "using submit_intake."
+        )
+    else:
+        raise ValueError("Unknown workflow route")
+    return _modal(title, "ot_workflow_" + route + "_info", context, [_section(message)])
 
 
 def prompt_modal(context: str, workflow: str, *, repair: bool = False) -> Block:
@@ -1335,6 +1430,84 @@ def prompt_modal(context: str, workflow: str, *, repair: bool = False) -> Block:
             },
         ],
         "Continue",
+    )
+
+
+def plugin_preview_modal(context: str, preview: Mapping[str, Any]) -> Block:
+    expires = datetime.fromtimestamp(preview["expires_at"], UTC).isoformat()
+    button = _button("Request provider vote", "ot_plugin_request", preview["request_id"])
+    button["style"] = "primary"
+    return _modal(
+        "Confirm approval request",
+        "ot_evidence_view",
+        context,
+        [
+            _section(f"Version {preview['run_revision']}. Candidate {preview['artifact_sha']}."),
+            _section(
+                f"Recipient {_display(preview['audience'])}. Operation: {preview['operation']}. "
+                f"Fallback: {preview['fallback']}. Expires {expires}."
+            ),
+            _actions(button),
+        ],
+    )
+
+
+def managed_review_status(context: str, audit: Mapping[str, Any]) -> Block:
+    return _modal(
+        "Current review status",
+        "ot_evidence_view",
+        context,
+        [
+            _section(_managed_outcome(audit)),
+            _actions(_home()),
+        ],
+    )
+
+
+def _plugin_status_blocks(
+    request_id: str, status: Mapping[str, Any] | None, show_receipt: bool = False
+) -> list[Block]:
+    if status and "receipt_sha256" in status:
+        blocks = [_section(f"Provider decision: {status['state']}.")]
+        if show_receipt:
+            blocks.append(
+                _section(
+                    f"Receipt {status['receipt_sha256']}. Candidate {status['artifact_sha']}. "
+                    f"Evaluation handoff audience: {_display(status['audience'])}."
+                )
+            )
+        else:
+            blocks.append(_actions(_button("View receipt", "ot_plugin_receipt", request_id)))
+    else:
+        blocks = [
+            _section(
+                {
+                    "staged": "The request is staged. The worker has not confirmed dispatch.",
+                    "accepted": "The provider accepted dispatch. Waiting for a signed decision.",
+                    "uncertain": (
+                        "Dispatch is uncertain. Reconcile the original request in Zap history."
+                    ),
+                    "failed": "Dispatch failed. Reconcile the original request in Zap history.",
+                    "expired": "The request expired. Reopen the current evidence.",
+                }[status["state"] if status else "staged"]
+            ),
+            _actions(_button("View current status", "ot_plugin_status", request_id)),
+        ]
+    return blocks
+
+
+def plugin_waiting_modal(
+    context: str,
+    request_id: str,
+    status: Mapping[str, Any] | None = None,
+    *,
+    show_receipt: bool = False,
+) -> Block:
+    return _modal(
+        "Approval request",
+        "ot_evidence_view",
+        context,
+        _plugin_status_blocks(request_id, status, show_receipt),
     )
 
 

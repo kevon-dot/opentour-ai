@@ -1,0 +1,46 @@
+{
+  "schema_version": "opentour.generated.rewards-discovery.v1",
+  "evidence_kind": "generated_owner_local",
+  "request": "Where is my reward?",
+  "clarification": {
+    "question": "Do you mean points or a payout?",
+    "branches": {"points": "points-guide", "payout": "payout-status"}
+  },
+  "cases": [
+    ["points", "points-guide", 100],
+    ["payout", "payout-status", 101],
+    ["points", "points-guide", 102],
+    ["payout", "payout-status", 103],
+    ["points", "points-guide", 104],
+    ["payout", "payout-status", 105],
+    ["points", "points-guide", 106],
+    ["payout", "payout-status", 107],
+    ["points", "points-guide", 108],
+    ["payout", "payout-status", 109],
+    ["points", "points-guide", 110],
+    ["payout", "payout-status", 111],
+    ["points", "points-guide", 210],
+    ["payout", "payout-status", 211],
+    ["points", "points-guide", 212],
+    ["payout", "payout-status", 213],
+    ["payout", "payout-status", 214]
+  ],
+  "late_answer": "reward-16",
+  "unanswered_case": "reward-15",
+  "expected": {
+    "development": 12,
+    "protected": 4,
+    "recurring_groups": 6,
+    "incumbent_errors": 2,
+    "fit_jobs": 0,
+    "excluded": {"reward-16": "future_decision_features"},
+    "answered": {
+      "state": "ready", "outcome": "simple_repair", "winner": "simple",
+      "automatic": 4, "review": 0
+    },
+    "unanswered": {
+      "state": "held", "outcome": "hold", "winner": null,
+      "automatic": 3, "review": 1
+    }
+  }
+}
