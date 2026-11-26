@@ -33,6 +33,7 @@ def prepared_workflow(
     release: bool = False,
     provider: str | None = None,
     slot: str = "",
+    audience: str | None = None,
 ) -> tuple[Harness, Json, ManagedSelection]:
     organization = "generated-" + slot if slot else "generated-co"
     h = Harness(path / "existing", organization=organization)
@@ -59,6 +60,8 @@ def prepared_workflow(
     h.config["directory"] = str(directory)
     h.config["users"][h.config["reviewer"]]["datasets"] = ["generated-repair"]
     h.config["zapier"] = False
+    if audience is not None:
+        h.config["recipient"] = audience
     h.store = LocalTrainingStore(directory / "training.sqlite3", organization)
     h.save()
     restart(h)
@@ -122,9 +125,16 @@ def setup_workflow(
     release: bool = False,
     provider: str | None = None,
     slot: str = "",
+    audience: str | None = None,
 ) -> tuple[Harness, Json, str, str]:
     h, plan, selection = prepared_workflow(
-        path, route, permit_slack=permit_slack, release=release, provider=provider, slot=slot
+        path,
+        route,
+        permit_slack=permit_slack,
+        release=release,
+        provider=provider,
+        slot=slot,
+        audience=audience,
     )
     directory = h.path.parent
     started = selection.start(plan_revision(plan), "initial-result")
