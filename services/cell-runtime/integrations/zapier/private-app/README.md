@@ -78,6 +78,7 @@ guard is test discipline, not a hostile-code sandbox. Run from this app director
 at the exact committed source to be reviewed:
 
 ```sh
+set -eu
 app_dir="$PWD"
 repo_root="$(git rev-parse --show-toplevel)"
 source_head="$(git rev-parse HEAD)"
@@ -86,8 +87,8 @@ git -C "$repo_root" archive "$source_head:services/cell-runtime/integrations/zap
 cd "$stage_dir"
 npm ci --offline --omit=dev --ignore-scripts --no-audit --no-fund --workspaces=false
 node --test test/*.test.js
-NO_UPDATE_NOTIFIER=1 node --require "$repo_root/packages/contracts/common/unit-network-guard.cjs" "$app_dir/node_modules/zapier-platform-cli/src/bin/run" validate --without-style
-NO_UPDATE_NOTIFIER=1 node --require "$repo_root/packages/contracts/common/unit-network-guard.cjs" "$app_dir/node_modules/zapier-platform-cli/src/bin/run" build --skip-dep-install --skip-validation
+NODE_OPTIONS="--require=\"$repo_root/packages/contracts/common/unit-network-guard.cjs\"" NO_UPDATE_NOTIFIER=1 node "$app_dir/node_modules/zapier-platform-cli/src/bin/run" validate --without-style
+NODE_OPTIONS="--require=\"$repo_root/packages/contracts/common/unit-network-guard.cjs\"" NO_UPDATE_NOTIFIER=1 node "$app_dir/node_modules/zapier-platform-cli/src/bin/run" build --skip-dep-install --skip-validation
 python3.12 -B test/archive_contract.py --repository "$repo_root" --commit "$source_head" --build-directory "$stage_dir/build"
 ```
 

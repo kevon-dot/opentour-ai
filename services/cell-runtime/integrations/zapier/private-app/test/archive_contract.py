@@ -84,8 +84,8 @@ def main() -> None:
     runtime = members(args.build_directory / "build.zip")
     packages = json.loads(expected["package-lock.json"])["packages"]
     observed = check_runtime(runtime, packages)
-    for name in ("adapter.js", "index.js", "package.json"):
-        if runtime[name] != expected[name]:
+    for app_name in ("adapter.js", "index.js", "package.json"):
+        if runtime[app_name] != expected[app_name]:
             raise ValueError("runtime app differs from source archive")
     receipt = {
         "source_head": commit,
