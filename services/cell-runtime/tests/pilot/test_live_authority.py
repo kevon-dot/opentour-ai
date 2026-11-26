@@ -3,14 +3,16 @@
 import hmac
 import io
 import json
+import sqlite3
 import time
 from dataclasses import asdict
 from pathlib import Path
 
 import pytest
 from opentour_cell.pilot.intake_admission import DurableIntake
-from opentour_cell.pilot.intake_local import open_intake
+from opentour_cell.pilot.intake_local import SELECTION_VERSION, open_intake
 from opentour_cell.pilot.intake_mcp import IntakeError, IntakePrincipal, parse_intake, serve_intake
+from opentour_cell.pilot.learning_mandate import LearningMandates
 from opentour_cell.pilot.live_authority import (
     SCHEMA,
     SELECTION_SCHEMA,
@@ -19,17 +21,90 @@ from opentour_cell.pilot.live_authority import (
 )
 from opentour_cell.pilot.live_evidence import LiveEvidence, _canonical, binding_candidate
 from opentour_cell.pilot.mcp import PROTOCOL_VERSION
-from test_intake_mcp import STARTER, _starter_only, _write_private
+from opentour_cell.pilot.training import LocalTrainingStore
+from test_intake_mcp import STARTER, _mandate, _starter_only, _write_private
 from test_live_evidence import DECISION, OUTCOME
 
 KEY = bytes.fromhex("6a" * 32)
 
 
+def _historical_selection(path):
+    path.mkdir(mode=0o700)
+    mandate = _mandate(path, "org-a")
+    epoch = LocalTrainingStore(path / "training.sqlite3", "org-a", existing_only=True).engagement_id
+    scope = mandate["scope"]
+    source = {
+        k: scope[k] for k in ("workflow", "trace_source", "correction_source", "field", "fields")
+    }
+    source.update(
+        source_revision="d" * 64,
+        trace_sha256="a" * 64,
+        correction_sha256="b" * 64,
+        rows=2,
+        connector=scope["connectors"][0],
+    )
+    authorized = LearningMandates(path, "org-a", epoch).authorize_source(
+        mandate["mandate_id"], source, actor="worker"
+    )
+    template = Path(__file__).resolve().parents[2] / "examples/pilot-source-grant.template.json"
+    grant = json.loads(template.read_text())
+    grant.update(
+        {
+            k: source[k]
+            for k in (
+                "workflow",
+                "field",
+                "trace_source",
+                "correction_source",
+                "trace_sha256",
+                "correction_sha256",
+            )
+        },
+        organization="org-a",
+        engagement=epoch,
+        owner_id=scope["owner_id"],
+        expires_at=scope["expires_at"],
+        permitted_features=scope["fields"],
+        delegation={
+            "authority_kind": authorized["authority_kind"],
+            "run_id": authorized["run_id"],
+            "delegate": "worker",
+        },
+    )
+    _write_private(path / ("cycle-source-" + authorized["run_id"] + ".json"), grant)
+    request = {
+        "pair_ref": "fixture-pair",
+        "source_revision": source["trace_sha256"],
+        "correction_revision": source["correction_sha256"],
+        "policy_revision": scope["agreement_revision"],
+    }
+    selection = {
+        **request,
+        "schema_version": SELECTION_VERSION,
+        "tenant": "org-a",
+        "actor": "worker",
+        "engagement_epoch": epoch,
+        "mandate_id": mandate["mandate_id"],
+        "mandate_revision": mandate["mandate_revision"],
+        "source_run_id": authorized["run_id"],
+        "workflow_ref": scope["workflow"],
+        "trace_source": scope["trace_source"],
+        "correction_source": scope["correction_source"],
+    }
+    filename = path / "historical-selection.json"
+    _write_private(filename, selection)
+    return filename, selection, {**request, "idempotency_key": "admit"}
+
+
 class SignedCase:
-    def __init__(self, path: Path):
-        selection_path, selection = _starter_only(path)
+    def __init__(self, path: Path, *, historical=False):
+        if historical:
+            selection_path, selection, request_body = _historical_selection(path)
+        else:
+            selection_path, selection = _starter_only(path)
+            request_body = STARTER
         self.actor, admission = open_intake(selection_path)
-        admitted = admission.submit_intake(self.actor, parse_intake(STARTER))
+        admitted = admission.submit_intake(self.actor, parse_intake(request_body))
         self.workflow = admission.get_run(self.actor, admitted.run_ref).workflow_ref
         self.directory = path
         self.body = {
@@ -86,6 +161,51 @@ def request(reference, **changes):
             **changes,
         }
     )
+
+
+def test_historical_admission_can_connect_under_distinct_current_live_grant(tmp_path):
+    case = SignedCase(tmp_path / "historical", historical=True)
+    ledger = case.directory / "workflow-benchmarks.sqlite3"
+    before = ledger.read_bytes()
+    with sqlite3.connect(case.directory / "intake.sqlite3") as db:
+        assert db.execute("SELECT count(*) FROM intake_workflows").fetchone()[0] == 0
+    reference = case.connect()
+    assert case.connect() == reference
+    assert case.live.resolve(reference, case.actor).workflow_ref == case.workflow
+    receipt = case.intake().submit_intake(case.actor, request(reference))
+    assert case.intake().get_run(case.actor, receipt.run_ref).workflow_ref == case.workflow
+    assert ledger.read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    "fault", ["tenant", "epoch", "absent", "orphan", "signed_epoch", "unsigned_actor"]
+)
+def test_neighboring_historical_identity_never_creates_live_state(tmp_path, fault):
+    case = SignedCase(tmp_path / "historical", historical=True)
+    ledger = case.directory / "workflow-benchmarks.sqlite3"
+    if fault in {"tenant", "epoch"}:
+        with sqlite3.connect(ledger) as db:
+            if fault == "tenant":
+                db.execute("UPDATE benchmarks SET tenant='foreign'")
+            else:
+                db.execute("UPDATE benchmarks SET epoch='previous'")
+    if fault == "absent":
+        ledger.unlink()
+    if fault == "orphan":
+        with sqlite3.connect(case.directory / "intake.sqlite3") as db:
+            db.execute("DELETE FROM intake_benchmark_admissions")
+    if fault == "signed_epoch":
+        case.body["engagement_epoch"] = "previous"
+        case.write()
+    if fault == "unsigned_actor":
+        case.body["actors"].pop(case.custodian.actor)
+        case.body["custodian"] = "owner"
+        case.body["actors"]["owner"] = ["custodian"]
+        case.write()
+    before = {p.name: p.read_bytes() for p in case.directory.iterdir() if p.is_file()}
+    with pytest.raises(IntakeError):
+        case.connect()
+    assert before == {p.name: p.read_bytes() for p in case.directory.iterdir() if p.is_file()}
 
 
 def test_actual_binding_store_vectors_and_restart(tmp_path: Path):

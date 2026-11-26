@@ -30,8 +30,9 @@ from opentour_cell.pilot.live_evidence import (
     _digest,
 )
 from opentour_cell.pilot.onboarding_mcp import _read_private
-from opentour_cell.pilot.receipt_recovery import _open_db
+from opentour_cell.pilot.receipt_recovery import _has_table, _open_db
 from opentour_cell.pilot.training import LocalTrainingStore
+from opentour_cell.pilot.workflow_benchmarks import BenchmarkScope, WorkflowBenchmarks
 
 SCHEMA = "opentour.pilot.live-authority.v1"
 SELECTION_SCHEMA = "opentour.pilot.local-live-selection.v1"
@@ -129,7 +130,7 @@ class PrivateLiveAuthority:
             _require(body["engagement_epoch"] == training.engagement_id)
             roles = body["actors"].get(actor.actor, [])
             _require(bool(roles))
-            # This binding cannot invent a workflow. Starter admission owns identity.
+            # Check admitted identity separately from the signed live permissions.
             with _open_db(self.directory / "intake.sqlite3") as db:
                 _require(db is not None)
                 assert db is not None
@@ -137,7 +138,23 @@ class PrivateLiveAuthority:
                     "SELECT epoch FROM intake_workflows WHERE tenant=? AND workflow_ref=?",
                     (self.tenant, self.workflow_ref),
                 ).fetchone()
-                _require(existing and existing[0] == body["engagement_epoch"])
+                if existing is not None:
+                    _require(existing[0] == body["engagement_epoch"])
+                else:
+                    _require(_has_table(db, "intake_benchmark_admissions"))
+                    historical = db.execute(
+                        "SELECT 1 FROM intake_benchmark_admissions b JOIN intake_runs r "
+                        "USING(tenant,run_ref,workflow_ref) "
+                        "WHERE b.tenant=? AND b.workflow_ref=? AND b.epoch=? "
+                        "AND json_type(r.request,'$.pair_ref')='text' LIMIT 1",
+                        (self.tenant, workflow_ref, body["engagement_epoch"]),
+                    ).fetchone()
+                    _require(
+                        historical is not None
+                        and WorkflowBenchmarks(self.directory).observed_workflow(
+                            BenchmarkScope(self.tenant, body["engagement_epoch"], workflow_ref)
+                        )
+                    )
             scope = LiveScope(
                 self.tenant,
                 self.workflow_ref,
@@ -240,9 +257,9 @@ class LocalLiveIntake:
             )
 
     def live_reader_available(self, actor: IntakePrincipal, workflow_ref: str) -> bool:
-        # Admission alone does not attest to an installed source adapter. The
-        # source-reader composition must override this with actual configured capability.
-        return False
+        from opentour_cell.pilot.live_reader import available
+
+        return available(self.authority, actor, workflow_ref)
 
 
 def open_live_intake(selection: Path) -> tuple[IntakePrincipal, DurableIntake]:

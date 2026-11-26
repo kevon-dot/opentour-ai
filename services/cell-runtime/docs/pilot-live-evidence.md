@@ -47,3 +47,23 @@ three equivalent submissions, an empty catalog before binding, restart,
 superseded-binding hold and revoked retry. All records are generated. A passing
 receipt confirms zero source reads and zero live events; this admission witness
 does not certify ingestion, an installed customer, or a complete issue.
+
+Current evidence requires a source origin with the complete current grant,
+including verifier, namespace, lease and checkpoint. Rotating a grant does not
+reauthorize old truth. An actual permitted reread may add a new origin to an
+identical delivery without counting it twice; the namespace comes from that
+origin. Conflicting case/family attributes contribute only independently
+unambiguous grouping identities, so arrival order does not change totals.
+The independent verifier-rotation, grouping-order and namespace-reread probes
+are retained as regression tests in `test_live_evidence.py`.
+
+An authorized reader may attach exactly `interval_start`, `interval_end`,
+`coverage_through`, `complete`, and `next_cursor` to a page. The reducer stores
+these with its checkpoint, accepted page receipt, supplied row count and actual
+poll time in the same transaction. Unknown intervals and coverage stay null;
+zero rows alone do not establish complete coverage. Failed pages create no read
+receipt. `read_receipts` only reads current authorized page receipts. Snapshot
+`unmatched_outcomes` counts unresolved exact decision targets;
+`last_ingested_at` describes the accepted event ingestion time, not source
+freshness or complete interval coverage. The actual adapter and UI exposure of
+these facts are separate integration work.
