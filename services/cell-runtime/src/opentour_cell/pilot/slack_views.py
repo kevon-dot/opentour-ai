@@ -403,7 +403,8 @@ class _Evidence:
                 f"incumbent {current.unknown}, repair {repair.unknown}.",
                 "coverage": f"{coverage} {ceiling} Eligible pairs {common}/{size}.",
                 "changes": (
-                    f"{regressions_text} {changes_text} Eligible pairs {common}/{size}. {finding}"
+                    f"{regressions_text} {changes_text} {coverage} "
+                    f"Eligible pairs {common}/{size}. {finding}"
                 ),
             },
         )
@@ -598,6 +599,30 @@ def result_chooser(
     )
     blocks.append(_actions(*navigation))
     return _modal("Review results", "ot_review_list", context, blocks)
+
+
+def regression_picker(
+    context: str, rows: Sequence[tuple[str, str, str]], *, previous: bool, more: bool
+) -> Block:
+    blocks = [
+        _section(
+            "Choose an inspected frozen comparison to see which decisions became wrong."
+            if rows
+            else "No currently inspected comparison is available. Open a result and inspect "
+            "its evidence before asking which decisions became wrong."
+        )
+    ]
+    for dataset, source, revision in rows:
+        blocks.append(_section(f"Workflow {_ref(dataset)} · {_display(source)} · {_ref(revision)}"))
+        blocks.append(_actions(_button("Use this comparison", "ot_result_open", revision)))
+    navigation = []
+    if previous:
+        navigation.append(_button("Previous", "ot_result_prev", "previous"))
+    if more:
+        navigation.append(_button("Next", "ot_result_next", "next"))
+    navigation.append(_button("Browse results", "ot_readouts", "home"))
+    blocks.append(_actions(*navigation))
+    return _modal("Choose comparison", "ot_regression_picker", context, blocks)
 
 
 def question_modal(
