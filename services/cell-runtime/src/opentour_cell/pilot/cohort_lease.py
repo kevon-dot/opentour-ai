@@ -11,7 +11,8 @@ import secrets
 import sqlite3
 import sys
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, TypeGuard
@@ -329,8 +330,9 @@ class CohortLeaseRegister:
                 db.execute(statement)
             return self._dispatch(db, command, now, authority)
 
-    def check_in_flight(self, envelope: Json, authority: LeaseAuthority) -> None:
-        """Recheck a previously consumed begin before another provider action or local commit."""
+    @contextmanager
+    def guard_in_flight(self, envelope: Json, authority: LeaseAuthority) -> Iterator[None]:
+        """Fence one short provider dispatch or publication against register transitions."""
         command = envelope.get("command")
         if not _command(command) or command["action"] != "begin":
             raise QualificationError("workplace_lease_scope_mismatch")
@@ -357,6 +359,7 @@ class CohortLeaseRegister:
             ).fetchone()
             if effect is None:
                 raise QualificationError("workplace_lease_no_longer_current")
+            yield
 
     def _dispatch(
         self, db: sqlite3.Connection, command: Json, now: int, authority: LeaseAuthority
@@ -623,7 +626,7 @@ def claim_workplace_connection(
     engagement: str,
     connection_revision: str,
     operation: str,
-) -> Callable[[], None]:
+) -> Callable[[], AbstractContextManager[None]]:
     """Consume the owner-selected lease command for one exact source operation."""
     if (
         set(binding)
@@ -666,10 +669,12 @@ def claim_workplace_connection(
     if result["disposition"] != "begin_authorized":
         raise QualificationError("workplace_lease_not_authorized")
 
-    def check() -> None:
-        register.check_in_flight(envelope, LeaseAuthority.parse(_private_json(authority_path)))
+    def guard() -> AbstractContextManager[None]:
+        return register.guard_in_flight(
+            envelope, LeaseAuthority.parse(_private_json(authority_path))
+        )
 
-    return check
+    return guard
 
 
 def main(argv: list[str] | None = None) -> int:

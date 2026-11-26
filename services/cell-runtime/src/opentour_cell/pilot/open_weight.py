@@ -13,7 +13,7 @@ import sys
 import tempfile
 import time
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
-from contextlib import contextmanager
+from contextlib import AbstractContextManager, ExitStack, contextmanager, nullcontext
 from pathlib import Path
 from typing import Any
 
@@ -225,6 +225,7 @@ def _run(
     request: dict[str, Any],
     *,
     check_permission: Callable[[], None] | None = None,
+    dispatch: Callable[[], AbstractContextManager[None]] = nullcontext,
 ) -> dict[str, Any]:
     _check_current(bundle, check_permission)
     worker, profile = _resources()
@@ -251,20 +252,31 @@ def _run(
     }
     deadline = time.monotonic() + grant["max_seconds"]
     try:
-        with subprocess.Popen(
-            args, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=env
-        ) as proc:
+        with ExitStack() as process:
+            with dispatch():
+                _check_current(bundle, check_permission)
+                proc = process.enter_context(
+                    subprocess.Popen(
+                        args,
+                        stdin=subprocess.PIPE,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.DEVNULL,
+                        env=env,
+                    )
+                )
             pending: bytes | None = _bytes(request)
             try:
                 while True:
-                    _check_current(bundle, check_permission)
-                    if time.time() >= grant["expires_at"]:
-                        raise OpenWeightError("current_open_weight_permission_required")
-                    left = deadline - time.monotonic()
-                    if left <= 0:
-                        raise OpenWeightError("open_weight_deadline_exceeded")
                     try:
-                        answer, _ = proc.communicate(pending, timeout=min(left, 0.2))
+                        # communicate may still send buffered input after a timeout.
+                        with dispatch():
+                            _check_current(bundle, check_permission)
+                            if time.time() >= grant["expires_at"]:
+                                raise OpenWeightError("current_open_weight_permission_required")
+                            left = deadline - time.monotonic()
+                            if left <= 0:
+                                raise OpenWeightError("open_weight_deadline_exceeded")
+                            answer, _ = proc.communicate(pending, timeout=min(left, 0.2))
                     except subprocess.TimeoutExpired:
                         pending = None
                         continue
@@ -338,6 +350,7 @@ def fit_open_weight(
     protected_fingerprints: Iterable[str],
     python: str | Path | None = None,
     check_permission: Callable[[], None] | None = None,
+    dispatch: Callable[[], AbstractContextManager[None]] = nullcontext,
 ) -> dict[str, Any]:
     """Fit on the authorized training partition. Protected outcomes never enter the subprocess."""
     grant_hash = _grant(grant)
@@ -414,6 +427,7 @@ def fit_open_weight(
                 "targets": [grant["labels"].index(row["label"]) for row in rows],
             },
             check_permission=check_permission,
+            dispatch=dispatch,
         )
         encoded = _bytes(result.pop("adapter"))
         result.pop("pid")
@@ -443,14 +457,16 @@ def fit_open_weight(
         try:
             _immutable_write(stage / "adapter.json", encoded)
             _immutable_write(stage / "manifest.json", _bytes(manifest))
-            _check_current(path, check_permission)
-            stage.rename(path)
-            try:
+            with dispatch():
                 _check_current(path, check_permission)
-            except BaseException:
-                # Restore private staging if authority changes during publication.
-                path.rename(stage)
-                raise
+                stage.rename(path)
+                try:
+                    _check_current(path, check_permission)
+                except BaseException:
+                    # The engagement cannot withdraw during this guarded publication.
+                    # Restore staging if another permission check fails.
+                    path.rename(stage)
+                    raise
         finally:
             shutil.rmtree(stage, ignore_errors=True)
         return manifest
@@ -464,6 +480,7 @@ def predict_open_weight_batch(
     grant: Mapping[str, Any],
     python: str | Path | None = None,
     check_permission: Callable[[], None] | None = None,
+    dispatch: Callable[[], AbstractContextManager[None]] = nullcontext,
 ) -> list[dict[str, str]]:
     """Fresh-process inference from the saved projection and exact owner-staged base."""
     path = Path(bundle)
@@ -485,6 +502,7 @@ def predict_open_weight_batch(
                 "adapter": adapter,
             },
             check_permission=check_permission,
+            dispatch=dispatch,
         )
         for i, value in zip(valid, result["decisions"], strict=True):
             decisions[i] = value
