@@ -309,14 +309,24 @@ class Preflight:
             raise CapabilityError("model_capability_unavailable")
         now = self.clock()
         unavailable = CaptureEvidence(Fidelity.UNAVAILABLE, "unavailable", "", 0)
-        return {
-            field: observed.capture[field]
-            if field in grant.permitted_fields
-            and field in observed.capture
-            and now < observed.capture[field].expires_at
-            else unavailable
-            for field in CaptureField
-        }
+        visible = dict.fromkeys(CaptureField, unavailable)
+        for field in CaptureField:
+            evidence = observed.capture.get(field)
+            if (
+                field not in grant.permitted_fields
+                or evidence is None
+                or evidence.fidelity is Fidelity.UNAVAILABLE
+                or not evidence.boundary
+                or not evidence.provenance_ref
+                or now >= evidence.expires_at
+                or (
+                    field is CaptureField.SERVED_IDENTITY
+                    and observed.resolved_revision != binding.immutable_revision
+                )
+            ):
+                continue
+            visible[field] = evidence
+        return visible
 
 
 def _within(estimate: FitBound, limit: FitBound) -> bool:

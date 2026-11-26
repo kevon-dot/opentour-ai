@@ -217,6 +217,27 @@ def test_capture_claims_require_separate_live_scope_and_field_evidence(setup_con
         preflight.capture("capture_inspection", replace(intent.binding, tenant="foreign"))
 
 
+def test_unresolved_alias_preserves_observed_answer_without_crediting_served_model(setup_connector):
+    preflight, adapter, grants, intent, _ = setup_connector
+    served = models.CaptureField.SERVED_IDENTITY
+    answer = models.CaptureField.PARSED_OUTPUT
+    grants[models.Purpose.INSPECTION] = replace(
+        grants[models.Purpose.INSPECTION], permitted_fields=frozenset({served, answer})
+    )
+    witness = models.CaptureEvidence(models.Fidelity.OBSERVED, "application", "result", 30)
+    adapter.observe.return_value = replace(
+        adapter.observe.return_value,
+        resolved_revision=None,
+        capture={served: witness, answer: witness},
+    )
+    visible = preflight.capture("capture_inspection", intent.binding)
+    assert visible[served].fidelity is models.Fidelity.UNAVAILABLE
+    assert visible[answer] == witness
+    baseline = preflight.discover("baseline_inference", intent.binding, models.Purpose.BASELINE)
+    assert baseline.state is models.State.BENCHMARK_ONLY
+    assert baseline.exact_model_attribution is False
+
+
 def test_result_must_match_completed_job_and_exact_immutable_incumbent(setup_connector):
     _, _, _, intent, _ = setup_connector
     job = models.JobReceipt(intent, models.JobState.COMPLETED, "job-a", "fit-evidence")
