@@ -2,7 +2,6 @@
   "schema_version": "opentour.ci-policy.v1",
   "repository": "kevon-dot/opentour-ai",
   "required_checks": ["lint", "typecheck", "python-unit", "web-unit", "browser-fixtures", "contract", "local-integration", "spec-traceability", "secret-scan", "dependency-scan", "iac-policy"],
-  "independent_review_context": "independent-review",
   "production_oidc_profiles": [],
   "artifact_retention_days": 7,
   "postgres": {
