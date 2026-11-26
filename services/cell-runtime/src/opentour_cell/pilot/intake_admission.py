@@ -87,6 +87,9 @@ class IntakeWork:
     mode: str
     resource: AuthorizedSource
     revisions: tuple[str, ...]
+    benchmark_version: int | None = None
+    benchmark_parent_run: str | None = None
+    benchmark_current: bool = False
 
 
 def _encode(value: object) -> str:
@@ -95,6 +98,22 @@ def _encode(value: object) -> str:
 
 def _hash(value: object) -> str:
     return hashlib.sha256(_encode(value).encode()).hexdigest()
+
+
+def canonical_intent(
+    workflow_ref: str, mode: str, scope: AuthorizedSource, revisions: tuple[str, ...]
+) -> str:
+    """Pure identity calculation; caller separately establishes current authority."""
+    return _hash(
+        (
+            workflow_ref,
+            mode,
+            scope.purpose,
+            scope.engagement_epoch,
+            scope.binding_id or scope.resource_id,
+            revisions,
+        )
+    )
 
 
 def _require(check: object, code: str = "intake_unavailable") -> None:
@@ -176,6 +195,12 @@ class DurableIntake:
                     CREATE TABLE IF NOT EXISTS intake_keys (
                         tenant TEXT NOT NULL, key_hash TEXT NOT NULL, intent TEXT NOT NULL,
                         PRIMARY KEY(tenant, key_hash))
+                """)
+                db.execute("""
+                    CREATE TABLE IF NOT EXISTS intake_benchmark_admissions (
+                        tenant TEXT NOT NULL, run_ref TEXT NOT NULL, workflow_ref TEXT NOT NULL,
+                        epoch TEXT NOT NULL, version INTEGER NOT NULL, parent_run TEXT,
+                        PRIMARY KEY(tenant,run_ref), UNIQUE(tenant,epoch,workflow_ref,version))
                 """)
                 db.execute("""
                     CREATE TABLE IF NOT EXISTS intake_materialization (
@@ -338,17 +363,7 @@ class DurableIntake:
 
     @staticmethod
     def _intent(workflow_ref: str, resolved: _Resolved) -> str:
-        scope = resolved.resource
-        return _hash(
-            (
-                workflow_ref,
-                resolved.mode,
-                scope.purpose,
-                scope.engagement_epoch,
-                scope.binding_id or scope.resource_id,
-                resolved.revisions,
-            )
-        )
+        return canonical_intent(workflow_ref, resolved.mode, resolved.resource, resolved.revisions)
 
     @staticmethod
     def _live_resource_pin(
@@ -447,11 +462,59 @@ class DurableIntake:
                 db.execute(
                     "INSERT INTO intake_keys VALUES (?,?,?)", (actor.tenant, key_hash, intent)
                 )
+            if resolved.mode != "live":
+                self._benchmark_order(db, actor, run_ref, workflow, scope, create=True)
             if self._materialized(db, actor, run_ref):
                 state = "materialized"
             else:
                 state = "queued" if resolved.reader_available else "pending"
             return AdmissionReceipt(run_ref, state, correlation_ref)
+
+    @staticmethod
+    def _benchmark_order(
+        db: sqlite3.Connection,
+        actor: IntakePrincipal,
+        run_ref: str,
+        workflow: str,
+        scope: AuthorizedSource,
+        *,
+        create: bool = False,
+    ) -> tuple[int | None, str | None]:
+        row = db.execute(
+            "SELECT * FROM intake_benchmark_admissions WHERE tenant=? AND run_ref=?",
+            (actor.tenant, run_ref),
+        ).fetchone()
+        if row is None and create:
+            # Existing deployments can have admissions predating this ledger. Do
+            # not guess their epoch or jump over their actual durable order. Each
+            # must first be re-authorized in order; old wire clients remain readable.
+            unknown_prior = db.execute(
+                "SELECT 1 FROM intake_runs r LEFT JOIN intake_benchmark_admissions b "
+                "ON b.tenant=r.tenant AND b.run_ref=r.run_ref "
+                "WHERE r.tenant=? AND r.workflow_ref=? AND b.run_ref IS NULL "
+                "AND json_extract(r.request,'$.mode') != 'live' "
+                "AND r.rowid < (SELECT rowid FROM intake_runs WHERE tenant=? AND run_ref=?) "
+                "LIMIT 1",
+                (actor.tenant, workflow, actor.tenant, run_ref),
+            ).fetchone()
+            if unknown_prior is not None:
+                return None, None
+            prior = db.execute(
+                "SELECT version,run_ref FROM intake_benchmark_admissions "
+                "WHERE tenant=? AND epoch=? AND workflow_ref=? ORDER BY version DESC LIMIT 1",
+                (actor.tenant, scope.engagement_epoch, workflow),
+            ).fetchone()
+            version = 1 if prior is None else prior["version"] + 1
+            parent = None if prior is None else prior["run_ref"]
+            db.execute(
+                "INSERT INTO intake_benchmark_admissions VALUES(?,?,?,?,?,?)",
+                (actor.tenant, run_ref, workflow, scope.engagement_epoch, version, parent),
+            )
+            return version, parent
+        if row is None:
+            return None, None
+        _require(row["workflow_ref"] == workflow and row["epoch"] == scope.engagement_epoch)
+        return row["version"], row["parent_run"]
 
     def _current_run(
         self, db: sqlite3.Connection, actor: IntakePrincipal, row: sqlite3.Row | None
@@ -495,6 +558,47 @@ class DurableIntake:
                     benchmark,
                 )
             return RunStatus(run_ref, "queued", "wait_for_worker", None, workflow, benchmark)
+
+    @contextmanager
+    def admitted_work(self, actor: IntakePrincipal, run_ref: str) -> Iterator[IntakeWork]:
+        """Pin current admitted scope for a worker-owned metadata operation.
+
+        This read-only accessor neither dispatches nor marks a run materialized.
+        Consumers must not reacquire the authority's writer lock inside this guard.
+        """
+        _identity(actor)
+        require_ref(run_ref)
+        with self.authority.guard(actor), self._db(write=False) as db:
+            row = db.execute(
+                "SELECT * FROM intake_runs WHERE tenant=? AND run_ref=?", (actor.tenant, run_ref)
+            ).fetchone()
+            workflow, resolved = self._current_run(db, actor, row)
+            version, parent = self._benchmark_order(db, actor, run_ref, workflow, resolved.resource)
+            latest = db.execute(
+                "SELECT run_ref FROM intake_benchmark_admissions WHERE tenant=? AND epoch=? "
+                "AND workflow_ref=? ORDER BY version DESC LIMIT 1",
+                (actor.tenant, resolved.resource.engagement_epoch, workflow),
+            ).fetchone()
+            yield IntakeWork(
+                run_ref,
+                workflow,
+                resolved.mode,
+                resolved.resource,
+                resolved.revisions,
+                version,
+                parent,
+                latest is not None and latest["run_ref"] == run_ref,
+            )
+
+    def current_benchmark_run(self, tenant: str, workflow: str, epoch: str) -> str | None:
+        """Metadata only; caller must hold a current exact-scope inspection guard."""
+        with self._db(write=False) as db:
+            row = db.execute(
+                "SELECT run_ref FROM intake_benchmark_admissions WHERE tenant=? AND epoch=? "
+                "AND workflow_ref=? ORDER BY version DESC LIMIT 1",
+                (tenant, epoch, workflow),
+            ).fetchone()
+            return None if row is None else str(row["run_ref"])
 
     @staticmethod
     def _materialized(db: sqlite3.Connection, actor: IntakePrincipal, run_ref: str) -> bool:

@@ -11,6 +11,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
+from opentour_cell.pilot.intake_admission import DurableIntake
 from opentour_cell.pilot.intake_mcp import (
     CatalogFeed,
     CatalogPage,
@@ -33,6 +34,7 @@ from opentour_cell.pilot.receipt_recovery import _open_db
 from opentour_cell.pilot.training import LocalTrainingStore
 
 SCHEMA = "opentour.pilot.live-authority.v1"
+SELECTION_SCHEMA = "opentour.pilot.local-live-selection.v1"
 _FIELDS = {
     "schema_version",
     "tenant",
@@ -241,3 +243,13 @@ class LocalLiveIntake:
         # Admission alone does not attest to an installed source adapter. The
         # source-reader composition must override this with actual configured capability.
         return False
+
+
+def open_live_intake(selection: Path) -> tuple[IntakePrincipal, DurableIntake]:
+    body = _read_private(selection, 4096)
+    _require(set(body) == {"schema_version", "tenant", "workflow_ref", "actor"})
+    _require(body["schema_version"] == SELECTION_SCHEMA)
+    authority = PrivateLiveAuthority(selection.parent, body["tenant"], body["workflow_ref"])
+    intake = LocalLiveIntake(authority, body["actor"])
+    with intake.guard(intake.principal):
+        return intake.principal, DurableIntake(selection.parent, intake)

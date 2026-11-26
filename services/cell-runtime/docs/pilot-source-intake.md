@@ -135,3 +135,19 @@ result explicitly identifies that workflow and its tenant, engagement, dataset
 and revision all match. An unattributed result keeps its original answer.
 A changed source, mandate or scope is rechecked before Slack receives either
 projection. Reopening Home runs no assessment and creates no readiness record.
+
+### Read the starter benchmark
+
+Saving the private policy-only draft creates or reuses the versioned workflow
+benchmark. The saved card shows the benchmark reference, version and recorded
+state from the worker ledger. A newly admitted starter is a draft awaiting
+owner adjudication. An approved policy revision submitted on the same creation
+reference creates a successor on the same workflow. Reopening the earlier
+authorized revision preserves its own admission and benchmark history.
+
+A previously saved starter may predate the benchmark ledger. Opening its card
+is read-only. **Create benchmark draft** explicitly retries the existing
+canonical intake under the current signed grant. The existing workflow, run
+and legacy starter receipt survive. Live-feed connections and admissions use
+a separate evidence series. The owner can reopen the starter card to inspect
+the same benchmark after a feed is connected.

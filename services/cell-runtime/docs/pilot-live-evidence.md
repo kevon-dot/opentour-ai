@@ -20,7 +20,7 @@ provider witness. Generated fixtures contain opaque references only.
 | Verifier enrollment versus binding | A permitted grant alone does not mean a binding was saved | `test_verifier_grant_is_not_a_saved_binding` |
 | Current eligibility after revocation | Removed outcome resource contributes zero verified credit; revision changes | `test_revoked_truth_cannot_continue_to_credit_current_verification` |
 | Real emitted settings action | Connect live decisions saves current custodian-signed binding twice across restart; unchanged benchmark | Pending UI composition and actual worker authority configuration |
-| OPE-430 admission against actual store | Same live admission vectors with durable resolver; superseded no source read/admission; revoked retry no earlier run ref | Pending composed intake authority and SDK proof |
+| OPE-430 admission against actual store | Same live admission vectors with durable resolver; superseded no source read/admission; revoked retry no earlier run ref | `test_actual_binding_store_vectors_and_restart`, `test_normal_intake_factory_uses_explicit_live_selection`, separate `test_live_authority.py` official-SDK executable witness |
 | Authorized reader, atomic cursor and restart | Real scoped source adapter normalization and page lineage; paused feed and two tenants with colliding IDs | Pending reader composition; OPE-434 owns reader extension |
 | Downstream invalidation | Current evidence revision fences stale readiness; existing snapshots/proposals invalidated before use | Pending OPE-542 integration and future snapshot/proposal consumers |
 
@@ -33,3 +33,17 @@ state read-only; neither polls a source, starts a fit, nor changes a benchmark.
 The current implementation does not yet claim a live coverage window, a complete
 empty-source read, original raw model input/output, fit timing, or delivery.
 Those facts require their respective independently sourced producer receipts.
+
+The normal `opentour_cell.pilot.intake_local` stdio executable accepts a private
+`opentour.pilot.local-live-selection.v1` selection with exactly `schema_version`,
+`tenant`, `workflow_ref`, and `actor`. It consumes the existing signed authority;
+the selection itself grants no rights. The current adapter reports
+`live_reader_unavailable` until a real source reader is configured.
+
+The separate SDK witness runs `test_live_authority.py` directly in a pinned
+CPython 3.12.16 / MCP SDK 1.30.0 environment, with the source package and pilot
+test helpers on `PYTHONPATH`. It uses two actual stdio subprocess sessions,
+three equivalent submissions, an empty catalog before binding, restart,
+superseded-binding hold and revoked retry. All records are generated. A passing
+receipt confirms zero source reads and zero live events; this admission witness
+does not certify ingestion, an installed customer, or a complete issue.

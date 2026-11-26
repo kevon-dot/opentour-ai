@@ -56,6 +56,7 @@ CALLBACKS = {
 ACTIONS = {
     "ot_workflow_starter",
     "ot_starter_save",
+    "ot_starter_benchmark",
     "ot_connect_live",
     "ot_workflow_historical",
     "ot_home",
@@ -2406,8 +2407,11 @@ class Workbench:
             )
         elif ctx["kind"] in {"starter_preview", "starter_saved"}:
             _check(
-                ctx["kind"] == "starter_preview"
-                and action == "ot_starter_save"
+                (ctx["kind"], action)
+                in {
+                    ("starter_preview", "ot_starter_save"),
+                    ("starter_saved", "ot_starter_benchmark"),
+                }
                 and value == ctx["revision"]
             )
             saved = self._starter_setup(actor).save(value, self.journal.opaque("save", ctx["id"]))
@@ -3258,9 +3262,13 @@ class Workbench:
                     _check(body["type"] == "block_actions" and len(body["actions"]) == 1)
                     action = body["actions"][0]
                     _check(action["action_id"] in ACTIONS)
-                    if action["action_id"] == "ot_starter_save":
+                    if action["action_id"] in {"ot_starter_save", "ot_starter_benchmark"}:
                         _check(
-                            obj.get("callback_id") == "ot_starter_preview"
+                            (action["action_id"], obj.get("callback_id"))
+                            in {
+                                ("ot_starter_save", "ot_starter_preview"),
+                                ("ot_starter_benchmark", "ot_starter_saved"),
+                            }
                             and not obj.get("state", {}).get("values")
                             and not (
                                 set(action)
