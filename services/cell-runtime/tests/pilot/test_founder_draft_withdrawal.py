@@ -1,6 +1,7 @@
 """Exercise custody after an actual founder draft is saved and resumed."""
 
 import hashlib
+import http.client
 import json
 import os
 import sqlite3
@@ -13,14 +14,17 @@ from typing import Any
 import pytest
 from opentour_cell.pilot import workplace_context
 from opentour_cell.pilot.custody import Closeout, CustodyError
-from opentour_cell.pilot.intake_mcp import GET_RUN
+from opentour_cell.pilot.intake_local import open_intake
+from opentour_cell.pilot.intake_mcp import GET_RUN, IntakeError, parse_intake
 from opentour_cell.pilot.mcp import PROTOCOL_VERSION
 from opentour_cell.pilot.operating_point import digest
 from opentour_cell.pilot.training import LocalTrainingStore
 from test_app_home import click, publish
+from test_intake_mcp import STARTER
 from test_pilot_custody import START, items, record
 from test_reviewer_workflow import buttons, restart, screen, text
 from test_starter_setup import configure_starter, open_starter
+from test_workflow_benchmarks import DiskProducer
 from test_workflow_chooser import Founder
 
 Json = dict[str, Any]
@@ -305,6 +309,143 @@ def test_saved_founder_draft_stays_held_after_custody_and_restore(
         assert "export_disposition" not in terminal
         assert items(terminal)["slack-copies"]["disposition"] == "custody_transferred"
         assert custody_cli(a, "status") == terminal
+    finally:
+        a.app.pool.shutdown()
+        b.app.pool.shutdown()
+
+
+def test_frozen_founder_benchmark_withdrawal_has_one_zero_export_receipt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    a = Founder(tmp_path / "first", local_recipient=False, organization="founder-a")
+    b = Founder(tmp_path / "other", local_recipient=False, organization="founder-b")
+    destination = tmp_path / "generated-recipient.sqlite3"
+    with closing(sqlite3.connect(destination)) as db, db:
+        db.execute("CREATE TABLE copies (organization TEXT NOT NULL, reference TEXT NOT NULL)")
+
+    def observe_copy(organization, reference):
+        with closing(sqlite3.connect(destination)) as db, db:
+            db.execute("INSERT INTO copies VALUES (?,?)", (organization, reference))
+
+    def zapier_transport(*args, **kwargs):
+        observe_copy("unknown", "zapier")
+        pytest.fail("A frozen starter must not connect to a release destination.")
+
+    def slack_transport(organization):
+        def send(**payload):
+            observe_copy(organization, "slack")
+            pytest.fail("A frozen starter must not post to Slack.")
+
+        return send
+
+    monkeypatch.setattr(http.client, "HTTPSConnection", zapier_transport)
+    for founder in (a, b):
+        monkeypatch.setattr(
+            founder.slack, "chat_postMessage", slack_transport(founder.store.organization)
+        )
+
+    def prepare(founder: Founder):
+        directory = founder.path.parent
+        policy = directory / "invoice-policy.md"
+        revision = hashlib.sha256(policy.read_bytes()).hexdigest()
+        policy.chmod(0o600)
+        configure_starter(founder, source_revision=revision)
+        principal, intake = open_intake(directory / "selected.json")
+        request = parse_intake(
+            STARTER
+            | {
+                "source_revision": revision,
+                "setup_policy_revision": digest(
+                    json.loads((directory / "charter.json").read_bytes())
+                ),
+            }
+        )
+        receipt = intake.submit_intake(principal, request)
+        return principal, intake, request, receipt
+
+    try:
+        first_actor, first, first_request, first_run = prepare(a)
+        other_actor, other, other_request, other_run = prepare(b)
+        assert first_request == other_request and first_run.run_ref != other_run.run_ref
+        directory = a.path.parent
+        producer = DiskProducer(directory)
+        producer.state = "frozen_unscored"
+        assert first.materialize(
+            first_actor, first_run.run_ref, producer, target_state="frozen_unscored"
+        )
+        frozen = first.get_run(first_actor, first_run.run_ref).benchmark
+        assert frozen.benchmark_state == "frozen_unscored" and producer.calls == 1
+        normal = read_run(directory, first_run.run_ref)
+        assert normal.returncode == 0 and not normal.stderr
+        current = json.loads(normal.stdout.splitlines()[-1])["result"]["structuredContent"]
+        assert current["benchmark_ref"] == frozen.benchmark_ref
+        assert current["benchmark_state"] == "frozen_unscored"
+
+        backup = tmp_path / "generated-pre-withdrawal-training.sqlite3"
+        copy_database(a.store.path, backup)
+        ledger = directory / "workflow-benchmarks.sqlite3"
+        frozen_before = ledger.read_bytes()
+        publication_count = (directory / "generated-producer-count").read_text()
+        epoch = a.store.engagement_id
+        stopped = custody_cli(a, "withdraw", **START)
+        assert stopped["engagement"] == epoch and stopped["reconciled"]
+        assert items(stopped)["benchmark-records"]["disposition"] == "unresolved"
+        assert not any(row["kind"] == "destination" for row in stopped["items"])
+        assert stopped["delivery_inventory"]["decisions"] == 0
+        copy_database(backup, a.store.path)
+        a.store = LocalTrainingStore(a.store.path, a.store.organization)
+        restart(a)
+
+        denied = read_run(directory, first_run.run_ref)
+        assert denied.returncode == 2 and not denied.stdout
+        assert denied.stderr.strip() == "private_intake_selection_unavailable"
+        with pytest.raises(IntakeError):
+            first.materialize(
+                first_actor, first_run.run_ref, producer, target_state="frozen_unscored"
+            )
+        with pytest.raises(IntakeError):
+            first.submit_intake(first_actor, first_request)
+        assert producer.calls == 1 and producer.readbacks == 0
+        assert (directory / "generated-producer-count").read_text() == publication_count
+        assert ledger.read_bytes() == frozen_before
+        assert not a.store.engagement_active()
+        assert other.submit_intake(other_actor, other_request) == other_run
+        assert other.get_run(other_actor, other_run.run_ref).benchmark.benchmark_state == "draft"
+        assert b.store.engagement_active()
+        assert a.flush() == b.flush() == 0
+        a.assert_no_effects()
+        b.assert_no_effects()
+
+        with closing(sqlite3.connect(destination)) as db:
+            assert db.execute("SELECT organization,reference FROM copies").fetchall() == []
+        evidence = digest(
+            {
+                "epoch": epoch,
+                "frozen_register": hashlib.sha256(frozen_before).hexdigest(),
+                "prior_training": hashlib.sha256(backup.read_bytes()).hexdigest(),
+                "recipient_inventory": hashlib.sha256(destination.read_bytes()).hexdigest(),
+            }
+        )
+        report = custody_cli(a, "reconcile")
+        closeout = Closeout(directory, a.store.organization)
+        record(
+            closeout, "pre-withdrawal-backup", "backup", "custody_transferred", evidence=evidence
+        )
+        for item, row in items(report).items():
+            disposition = {
+                "inventory": "inventory_verified",
+                "support": "handoff_confirmed",
+            }.get(row["kind"], "custody_transferred")
+            record(closeout, item, row["kind"], disposition, evidence=evidence)
+        finished = custody_cli(a, "finish", custodian=START["custodian"], evidence=evidence)
+        assert finished["engagement"] == epoch and finished["closure_evidence"] == evidence
+        assert (finished["state"], finished["outstanding"], finished["export_disposition"]) == (
+            "closed",
+            0,
+            "zero_exports",
+        )
+        assert custody_cli(a, "finish", custodian=START["custodian"], evidence=evidence) == finished
+        assert custody_cli(a, "status") == finished
     finally:
         a.app.pool.shutdown()
         b.app.pool.shutdown()
