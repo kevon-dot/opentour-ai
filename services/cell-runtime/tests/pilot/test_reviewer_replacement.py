@@ -330,3 +330,38 @@ def test_v1_downgrade_renewal_serializes_and_keeps_existing_proposal_held(tmp_pa
             proposal["run_revision"],
             proposal["artifact_sha"],
         )
+
+
+def test_catalog_snapshot_refresh_preserves_frozen_transfer_and_renewal(tmp_path):
+    s = AssignmentSetup(tmp_path)
+    reader = s.customer.real_reader
+    before_connection = deepcopy(reader.cfg)
+    reader.versions = {"trace": "source-refresh", "correction": "source-refresh"}
+    reader.rebuild()
+    assert reader.cfg == before_connection
+    packet, assignment = packet_for(s)
+    first = s.service.save(packet, actor=s.owner)
+    assert first["binding"]["pair_revision"] != s.current["binding"]["pair_revision"]
+    stable = assignments.ReviewerAssignments._source_authority
+    assert stable(first["binding"]) == stable(s.current["binding"])
+    second_packet, second_assignment = packet_for(s, "UTHIRD", "catalog-refreshed-transfer")
+    for key in ("run_id", "run_revision", "artifact_sha", "review_digest", "dataset_revision"):
+        assert assignment["proposals"][0][key] == second_assignment["proposals"][0][key]
+    second = s.service.save(second_packet, actor=s.owner)
+    reader.versions = {"trace": "source-refresh-again", "correction": "source-refresh-again"}
+    reader.rebuild()
+    policy = deepcopy(second["policy"])
+    policy["mandate"].update(mandate_id="catalog-refreshed-renewal", max_runs=3)
+    renewed = s.apply(policy, action="renew")
+    proposal = assignment["proposals"][0]
+    current = assignments.current_review_authority(
+        s.customer.owner,
+        s.customer.org,
+        s.customer.eng,
+        proposal["run_id"],
+        proposal["run_revision"],
+        proposal["artifact_sha"],
+    )
+    assert current["generation"] == renewed["revision"]
+    assert current["reviewer"] == "UTHIRD"
+    assert len(records(s)[0]) == len(records(s)[1]) == 3

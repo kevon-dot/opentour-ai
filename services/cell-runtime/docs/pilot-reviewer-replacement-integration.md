@@ -35,7 +35,10 @@ mandate writers. The new settings head, withdrawal of prior execution authority,
 immutable replacement generation and one reconciliation intent per affected
 proposal share a mandate transaction. Approval-journal/file projections are not
 atomic with that transaction: they must be idempotent and recoverable. The saved
-generation is the canonical fence throughout recovery.
+generation is the canonical fence throughout recovery. Catalog `pair_revision`
+may advance without changing source authority: continuity compares connection,
+grant, data policy and correction authority separately from that discovery
+snapshot. Every proposal still retains its exact original evidence hashes.
 
 ## Coordinator: release and evidence
 
