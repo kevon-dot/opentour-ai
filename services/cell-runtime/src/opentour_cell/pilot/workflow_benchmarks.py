@@ -132,6 +132,10 @@ class WorkflowBenchmarks:
                     "target TEXT, operation_ref TEXT UNIQUE, completed INTEGER NOT NULL DEFAULT 0, "
                     "PRIMARY KEY(tenant,run,target))"
                 )
+                db.execute(
+                    "CREATE TABLE IF NOT EXISTS benchmark_receipts (tenant TEXT, run TEXT, "
+                    "revision TEXT NOT NULL, PRIMARY KEY(tenant,run))"
+                )
             yield db
             db.commit()
         except BaseException:
@@ -181,6 +185,7 @@ class WorkflowBenchmarks:
                     and existing["parent"] == parent,
                     "benchmark_intent_conflict",
                 )
+                self._validated_materialized(db, existing, work)
                 if not work.benchmark_current:
                     db.execute(
                         "UPDATE benchmarks SET superseded=1 WHERE reference=?",
@@ -245,6 +250,90 @@ class WorkflowBenchmarks:
             "scored": set(),
         }[state]
 
+    @staticmethod
+    def _validate_receipt(receipt: MaterializedBenchmark, revisions: tuple[str, ...]) -> None:
+        _require(receipt.state in {"needs_owner_review", "frozen_unscored", "scored"})
+        require_ref(receipt.definition_ref)
+        _require(
+            isinstance(receipt.definition_digest, str)
+            and re.fullmatch("[a-f0-9]{64}", receipt.definition_digest)
+            and receipt.source_revision in revisions
+        )
+        if receipt.state == "scored":
+            require_ref(receipt.result_ref)
+            _require(
+                isinstance(receipt.result_digest, str)
+                and re.fullmatch("[a-f0-9]{64}", receipt.result_digest)
+            )
+        else:
+            _require(receipt.result_ref is None and receipt.result_digest is None)
+
+    @staticmethod
+    def _receipt_revision(row: sqlite3.Row, encoded: str) -> str:
+        return digest(
+            [
+                row["tenant"],
+                row["epoch"],
+                row["workflow"],
+                row["run"],
+                row["reference"],
+                row["version"],
+                row["parent"],
+                row["definition"],
+                encoded,
+            ]
+        )
+
+    def _validated_materialized(
+        self, db: sqlite3.Connection, row: sqlite3.Row, work: IntakeWork | None = None
+    ) -> MaterializedBenchmark | None:
+        """Replay and every disclosure verify the same current receipt binding."""
+        try:
+            definition = json.loads(row["definition"])
+            if work is not None:
+                scope = row["tenant"], work.resource.engagement_epoch, work.workflow_ref
+                parent = (
+                    None
+                    if work.benchmark_parent_run is None
+                    else "benchmark-" + digest([*scope, work.benchmark_parent_run])[:40]
+                )
+                _require(
+                    row["definition"] == self._definition(work)
+                    and row["version"] == work.benchmark_version
+                    and row["parent"] == parent
+                )
+            _require(row["state"] in {"draft", "needs_owner_review", "frozen_unscored", "scored"})
+            if row["materialized"] is None:
+                _require(row["state"] == "draft")
+                return None
+            data = json.loads(row["materialized"])
+            _require(
+                isinstance(data, dict)
+                and set(data) == set(MaterializedBenchmark.__dataclass_fields__)
+            )
+            receipt = MaterializedBenchmark(**data)
+            self._validate_receipt(receipt, tuple(definition["revisions"]))
+            _require(receipt.state == row["state"])
+            # An unsealed legacy record is not silently upgraded into evidence.
+            table = db.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='benchmark_receipts'"
+            ).fetchone()
+            _require(table is not None, "benchmark_receipt_binding_unavailable")
+            sealed = db.execute(
+                "SELECT revision FROM benchmark_receipts WHERE tenant=? AND run=?",
+                (row["tenant"], row["run"]),
+            ).fetchone()
+            _require(
+                sealed is not None
+                and sealed["revision"] == self._receipt_revision(row, canonical(data)),
+                "benchmark_receipt_binding_unavailable",
+            )
+            return receipt
+        except (TypeError, ValueError, KeyError) as error:
+            if isinstance(error, IntakeError):
+                raise
+            raise IntakeError("benchmark_unavailable") from error
+
     def admit_materialization(
         self, tenant: str, work: IntakeWork, target: str
     ) -> tuple[str | None, bool, MaterializedBenchmark | None]:
@@ -256,8 +345,10 @@ class WorkflowBenchmarks:
             ).fetchone()
             _require(row is not None and row["definition"] == self._definition(work))
             _require(not row["superseded"], "immutable_benchmark_version")
+            receipt = self._validated_materialized(db, row, work)
             if row["state"] == target:
-                return None, False, MaterializedBenchmark(**json.loads(row["materialized"]))
+                _require(receipt is not None)
+                return None, False, receipt
             _require(target in self._transitions(row["state"]), "immutable_benchmark_version")
             operation = (
                 "benchmark-operation-"
@@ -292,6 +383,7 @@ class WorkflowBenchmarks:
             if row is None:
                 return None
             _require(row["definition"] == self._definition(work))
+            self._validated_materialized(db, row, work)
             return (
                 self._view(row)
                 if work.benchmark_current
@@ -309,11 +401,10 @@ class WorkflowBenchmarks:
                 "ORDER BY version DESC LIMIT 1",
                 (scope.tenant, scope.engagement_epoch, scope.workflow_ref),
             ).fetchone()
-            return (
-                None
-                if row is None or (expected_run is not None and row["run"] != expected_run)
-                else self._view(row)
-            )
+            if row is None or (expected_run is not None and row["run"] != expected_run):
+                return None
+            self._validated_materialized(db, row)
+            return self._view(row)
 
     def observed_workflow(self, scope: BenchmarkScope) -> bool:
         """Prove an admitted identity under a separately held current authority guard.
@@ -347,6 +438,7 @@ class WorkflowBenchmarks:
             ).fetchone()
             if row is None:
                 return None
+            receipt = self._validated_materialized(db, row)
             return {
                 "benchmark_ref": row["reference"],
                 "version": row["version"],
@@ -357,7 +449,7 @@ class WorkflowBenchmarks:
                     else self._view(row).benchmark_state
                 ),
                 "as_of_state": row["state"],
-                "materialized": json.loads(row["materialized"]) if row["materialized"] else None,
+                "materialized": None if receipt is None else asdict(receipt),
             }
 
     def publish(
@@ -369,24 +461,7 @@ class WorkflowBenchmarks:
         operation_ref: str | None = None,
     ) -> None:
         _require(work.mode != "live", "live_cannot_materialize_benchmark")
-        _require(receipt.state in {"needs_owner_review", "frozen_unscored", "scored"})
-        require_ref(receipt.definition_ref)
-        _require(
-            re.fullmatch("[a-f0-9]{64}", receipt.definition_digest)
-            and receipt.source_revision in work.revisions
-        )
-        _require(
-            (receipt.state == "scored")
-            == (receipt.result_ref is not None and receipt.result_digest is not None)
-        )
-        if receipt.state != "scored":
-            _require(receipt.result_ref is None and receipt.result_digest is None)
-        if receipt.state == "scored":
-            require_ref(receipt.result_ref)
-            _require(
-                isinstance(receipt.result_digest, str)
-                and re.fullmatch("[a-f0-9]{64}", receipt.result_digest)
-            )
+        self._validate_receipt(receipt, work.revisions)
         encoded = canonical(asdict(receipt))
         with self._db(write=True) as db:
             row = db.execute(
@@ -397,6 +472,7 @@ class WorkflowBenchmarks:
                 and row["definition"] == self._definition(work)
                 and not row["superseded"]
             )
+            self._validated_materialized(db, row, work)
             if row["materialized"] == encoded:
                 return
             _require(
@@ -414,6 +490,11 @@ class WorkflowBenchmarks:
             db.execute(
                 "UPDATE benchmarks SET state=?,materialized=? WHERE tenant=? AND run=?",
                 (receipt.state, encoded, tenant, work.run_ref),
+            )
+            db.execute(
+                "INSERT INTO benchmark_receipts VALUES(?,?,?) "
+                "ON CONFLICT(tenant,run) DO UPDATE SET revision=excluded.revision",
+                (tenant, work.run_ref, self._receipt_revision(row, encoded)),
             )
             if operation_ref is not None:
                 changed = db.execute(

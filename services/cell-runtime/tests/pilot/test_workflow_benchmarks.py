@@ -521,6 +521,60 @@ def test_two_fresh_stdio_processes_reuse_draft(prepared):
     assert intake.get_run(ACTOR, first["run_ref"]).benchmark.version == 1
 
 
+@pytest.mark.parametrize(
+    "alteration",
+    [
+        {"source_revision": "restored-unrelated-source"},
+        {"definition_digest": "f" * 64},
+        {"definition_ref": "restored-definition"},
+        {"result_digest": "f" * 64},
+        {"state": "frozen_unscored", "result_ref": None, "result_digest": None},
+        {"unknown_private_field": "untrusted-restored-value"},
+    ],
+)
+def test_corrupted_completion_is_denied_on_replay_and_every_projection(prepared, alteration):
+    intake, authority = prepared
+    admission = intake.submit_intake(ACTOR, STARTER)
+    producer = Producer("scored")
+    assert intake.materialize(ACTOR, admission.run_ref, producer)
+    original = intake.get_run(ACTOR, admission.run_ref)
+    with sqlite3.connect(intake.benchmarks.path) as db:
+        encoded = db.execute("SELECT materialized FROM benchmarks").fetchone()[0]
+        changed = {**json.loads(encoded), **alteration}
+        db.execute("UPDATE benchmarks SET materialized=?", (json.dumps(changed),))
+    scope = BenchmarkScope(ACTOR.tenant, authority.epoch, original.workflow_ref)
+    reads = [
+        lambda: intake.materialize(ACTOR, admission.run_ref, producer),
+        lambda: intake.get_run(ACTOR, admission.run_ref),
+        lambda: intake.submit_intake(ACTOR, replace(STARTER, idempotency_key="retry-key")),
+        lambda: intake.inspect_benchmark(
+            ACTOR, original.workflow_ref, original.benchmark.benchmark_ref
+        ),
+        lambda: intake.benchmarks.current(scope),
+    ]
+    for read in reads:
+        with pytest.raises(IntakeError):
+            read()
+    assert producer.calls == 1 and producer.readbacks == 0
+    with sqlite3.connect(intake.benchmarks.path) as db:
+        db.execute("UPDATE benchmarks SET materialized=?", (encoded,))
+    assert intake.get_run(ACTOR, admission.run_ref) == original
+
+
+def test_unsealed_legacy_receipt_holds_without_resealing_or_redispatch(prepared):
+    intake, _ = prepared
+    admission = intake.submit_intake(ACTOR, STARTER)
+    producer = Producer("scored")
+    assert intake.materialize(ACTOR, admission.run_ref, producer)
+    with sqlite3.connect(intake.benchmarks.path) as db:
+        db.execute("DELETE FROM benchmark_receipts")
+    with pytest.raises(IntakeError, match="benchmark_receipt_binding_unavailable"):
+        intake.materialize(ACTOR, admission.run_ref, producer)
+    with sqlite3.connect(intake.benchmarks.path) as db:
+        assert db.execute("SELECT count(*) FROM benchmark_receipts").fetchone()[0] == 0
+    assert producer.calls == 1 and producer.readbacks == 0
+
+
 if __name__ == "__main__":
     path = Path(sys.argv[1])
     if len(sys.argv) > 2 and sys.argv[2] == "worker":
