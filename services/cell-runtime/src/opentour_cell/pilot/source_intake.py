@@ -255,7 +255,17 @@ def _delegated_run(store: LocalTrainingStore | _BoundEngagement, g: Json) -> tup
     return ledger, receipt
 
 
-def _scope(store: LocalTrainingStore | _BoundEngagement, path: Path) -> Json:
+class BoundSourceGrantExpired(TrainingError):
+    """A fully validated source grant for the selected delegation has expired."""
+
+
+def _scope(
+    store: LocalTrainingStore | _BoundEngagement,
+    path: Path,
+    *,
+    expected_delegation: Json | None = None,
+) -> Json:
+    """Read a private grant. Bound callers verify authority before reporting expiry."""
     require(path.parent == store.path.parent and path != store.path, "local_source_grant_required")
     g = parse_manifest(_read(path, 64 * 1024))
     require(
@@ -308,9 +318,11 @@ def _scope(store: LocalTrainingStore | _BoundEngagement, path: Path) -> Json:
         )
     for key in ("permitted_features", "permitted_slices", "adjudicators"):
         g[key] = _ids(g[key], empty=key == "permitted_slices")
-    require(
-        _time(g["as_of"]) <= time.time() < _time(g["expires_at"]), "source_grant_outside_validity"
-    )
+    if expected_delegation is None:
+        require(
+            _time(g["as_of"]) <= time.time() < _time(g["expires_at"]),
+            "source_grant_outside_validity",
+        )
     split = g["split"]
     require(isinstance(split, dict), "invalid_source_split")
     if split.get("mode") == "chronological":
@@ -326,8 +338,20 @@ def _scope(store: LocalTrainingStore | _BoundEngagement, path: Path) -> Json:
     require(
         not os.path.lexists(_revocation(store, g["owner_attestation"])), "source_grant_withdrawn"
     )
+    if expected_delegation is not None:
+        require(
+            g.get("delegation") == expected_delegation,
+            "source_delegation_scope_mismatch",
+        )
     if "delegation" in g:
         _delegated_run(store, g)
+    if expected_delegation is not None:
+        start, expiry = _time(g["as_of"]), _time(g["expires_at"])
+        require(start < expiry, "source_grant_outside_validity")
+        now = time.time()
+        if now >= expiry:
+            raise BoundSourceGrantExpired("source_grant_outside_validity")
+        require(start <= now, "source_grant_outside_validity")
     return g
 
 
@@ -714,6 +738,7 @@ def freeze_intake(
                         actor=receipt["delegate"],
                         discovery_revision=proposal["discovery_revision"],
                         candidate=match,
+                        existing_only=True,
                     ),
                     "stale_or_unconfirmed_delegation",
                 )

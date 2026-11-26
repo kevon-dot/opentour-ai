@@ -28,6 +28,8 @@ python -I -S -B opentour-slack.pyz slack /private/customer-pilot/worker.json --r
 
 A current installation can reopen its permitted owner-local decision evidence by receipt. After withdrawal the custodian can inspect each unresolved disclosure using its minimal delivery fields. The separate custody ledger remains authoritative when older working databases are restored. Previously queued work with no attempt stays held. A receipt-only closeout returns only its retained closure record. For historical rows without a provable engagement and destination the listing reports `"legacy_scope": "unknown"`. The custodian reconciles these historical obligations against its private closeout inventory.
 
+The custodian first verifies the independent inventory of recipients and copies, then records its opaque evidence reference on the `inventory-review` item. A settled closeout records `"export_disposition": "zero_exports"` only when the private journal shows zero known or possible Slack and Zapier exposures, no unknown history, and the inventory has no destination item. This fact remains in a receipt-only closeout. If a transmission may have occurred, recover the original receipt or record its outstanding disposition and owner using the independent destination evidence.
+
 When the destination owner independently verifies the exact downstream action, record the authorized private evidence reference. Recording this confirmation is an explicit operation separate from reading a page.
 
 ```sh

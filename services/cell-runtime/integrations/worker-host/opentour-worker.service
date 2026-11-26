@@ -1,0 +1,23 @@
+[Unit]
+Description=OpenTour managed evaluation worker
+
+[Service]
+User=opentour-worker
+Group=opentour-worker
+EnvironmentFile=/etc/opentour-worker/site.env
+ExecStart=/opt/opentour/python/bin/python3 -I -B /opt/opentour/current/opentour-slack.pyz workflow-worker --directory /var/lib/opentour-worker --organization ${ORGANIZATION} --manifest /var/lib/opentour-worker/managed-plan.json --authorization /var/lib/opentour-worker/authorization.json --once
+Restart=always
+RestartSec=10
+UMask=0077
+StateDirectory=opentour-worker
+StateDirectoryMode=0700
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+StandardOutput=null
+InaccessiblePaths=-/etc/opentour-health
+
+[Install]
+WantedBy=multi-user.target
