@@ -307,13 +307,13 @@ def test_two_admitted_workflows_sharing_dataset_revision_do_not_share_readout_re
 
 def test_home_live_evidence_distinguishes_unmatched_ingestion_and_read_coverage(ready):
     h = ready.h
-    first = json.dumps(ready.home())
+    first = json.dumps(ready.home(), ensure_ascii=False)
     assert "Unmatched outcomes · 0" in first and "Last event ingested · unavailable" in first
     assert "No source-read receipt" in first
     view = open_live(h, ready.patch)
     h.form(view, form(h, view, 1))
     ready.ingest(outcome(verifier="independent-verifier"), truth=True)
-    unmatched = json.dumps(ready.home())
+    unmatched = json.dumps(ready.home(), ensure_ascii=False)
     assert "Unmatched outcomes · 1" in unmatched
     assert "Last event ingested · unavailable" not in unmatched
     assert "No source-read receipt" in unmatched
@@ -341,22 +341,22 @@ def test_home_live_evidence_distinguishes_unmatched_ingestion_and_read_coverage(
         )
 
     first_page = poll("one", False)
-    partial = json.dumps(ready.home())
+    partial = json.dumps(ready.home(), ensure_ascii=False)
     assert (
         first_page in partial
         and "0 rows, partial" in partial
         and "Coverage through unavailable" in partial
     )
     second = poll("two", True)
-    completed = json.dumps(ready.home())
+    completed = json.dumps(ready.home(), ensure_ascii=False)
     assert second in completed and "0 rows, complete" in completed
     assert "Coverage through 1970-01-01 00:00:25 UTC" in completed
     assert "Unmatched outcomes · 1" in completed
     ready.ingest(decision())
-    assert "Unmatched outcomes · 0" in json.dumps(ready.home())
+    assert "Unmatched outcomes · 0" in json.dumps(ready.home(), ensure_ascii=False)
     h.config["users"][ACTOR]["aggregate"] = False
     h.save()
-    hidden = json.dumps(ready.home())
+    hidden = json.dumps(ready.home(), ensure_ascii=False)
     assert "Unmatched outcomes" not in hidden and second not in hidden
 
 
@@ -371,6 +371,6 @@ def test_revoked_live_scope_at_layout_withholds_source_summary(ready, monkeypatc
         return layout
 
     monkeypatch.setattr(ready.h.app.views, "app_home_view", revoke)
-    home = json.dumps(ready.home())
+    home = json.dumps(ready.home(), ensure_ascii=False)
     assert "access is unavailable" in home and "Unmatched outcomes" not in home
     assert effects(ready.h) == (0,) * 7

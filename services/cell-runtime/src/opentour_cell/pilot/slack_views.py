@@ -1412,13 +1412,13 @@ def _live_summary_text(summary: Mapping[str, Any]) -> str:
         return text + " No source-read receipt is available."
     completion = "complete" if page["complete"] else "partial"
     interval = (
-        "queried interval unavailable"
+        "Queried interval unavailable"
         if page["interval_start"] is None
-        else f"queried {utc(page['interval_start'])} to {utc(page['interval_end'])}"
+        else f"Queried {utc(page['interval_start'])} to {utc(page['interval_end'])}"
     )
     return (
         f"{text} Latest acknowledged source page · {page['row_count']} rows, {completion}. "
-        f"Polled {utc(page['polled_at'])}. {interval.capitalize()}. "
+        f"Polled {utc(page['polled_at'])}. {interval}. "
         f"Coverage through {utc(page['coverage_through'])}. Receipt {_ref(page['receipt_ref'])}."
     )
 
