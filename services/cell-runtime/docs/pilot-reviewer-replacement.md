@@ -58,6 +58,7 @@ from the actual authority-loss reconciliation consumer; that integration is open
 | `test_two_actual_sealed_requests_preserve_unknown_remote_hold` | Both sealed request IDs and fingerprints survive one accepted and one indeterminate send; producer records unknown state and does not resend. |
 | `test_completed_history_under_changed_source_does_not_block_current_assignment` | A genuinely completed old-source run does not block assignment of a later eligible worker artifact. |
 | `test_v2_ordinary_renew_waits_for_serialized_actual_issue` | The shared approval lock orders a changing settings save after actual request sealing. This test supplies the OPE-414 outer wrapper explicitly because that consumer is on a separate integration branch. |
+| `test_v1_downgrade_renewal_serializes_and_keeps_existing_proposal_held` | A signed downgrade also waits for the approval writer; prior successor authority stays held and its request inventory remains durable. |
 | `test_private_projection_ack_is_idempotent_and_grants_no_remote_proof` | Actual current operator scope and exact document digest govern private queue acknowledgment; ACK does not qualify a provider result or notification. |
 
 The generated callback fixtures exercise the actual local consumer with a test

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
+from threading import Event
 from unittest.mock import patch
 
 import pytest
@@ -278,3 +279,54 @@ def test_private_projection_ack_is_idempotent_and_grants_no_remote_proof(tmp_pat
     )
     with pytest.raises(SettingsError, match="current_settings_authority_required"):
         untrusted.pending_reconciliations(actor="forged-operator")
+
+
+def test_v1_downgrade_renewal_serializes_and_keeps_existing_proposal_held(tmp_path):
+    from opentour_cell.pilot.owner_settings import AUTHORITY as V1_AUTHORITY
+    from test_reviewer_replacement_callbacks import inspected_case
+
+    s = AssignmentSetup(tmp_path)
+    _, request, _ = inspected_case(s, tmp_path)
+    packet, assignment = packet_for(s)
+    first = s.service.save(packet, actor=s.owner)
+    authority = read(s.authority)
+    authority["schema_version"] = V1_AUTHORITY
+    del authority["workflow_owner_public_key_file"]
+    del authority["workflow_owner_public_key_sha256"]
+    save(s.authority, authority)
+    policy = deepcopy(first["policy"])
+    policy["mandate"].update(mandate_id="v1-downgrade-renewal", max_runs=3)
+    packet = s.sign(s.preview(policy, action="renew")["claim"])
+    attempted, entered = Event(), Event()
+    original = s.service._head
+
+    def observe(db):
+        entered.set()
+        return original(db)
+
+    def renew():
+        attempted.set()
+        return s.service.save(packet, actor=s.owner)
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        with patch.object(s.service, "_head", observe), s.assignments.serialized():
+            saving = pool.submit(renew)
+            assert attempted.wait(1)
+            # A changing v1 save cannot acquire the engagement writer or inspect
+            # the old request inventory while the approval writer is in flight.
+            assert not entered.wait(0.1)
+        renewed = saving.result()
+    document = records(s)[0][-1]
+    assert document["generation"] == renewed["revision"]
+    assert document["state"] == "review_reauthorization_required"
+    assert document["expired_request_ids"] == [request["request_id"]]
+    proposal = assignment["proposals"][0]
+    with pytest.raises(SettingsError, match="review_reauthorization_required"):
+        assignments.current_review_authority(
+            s.customer.owner,
+            s.customer.org,
+            s.customer.eng,
+            proposal["run_id"],
+            proposal["run_revision"],
+            proposal["artifact_sha"],
+        )
