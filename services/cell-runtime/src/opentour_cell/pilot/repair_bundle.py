@@ -446,6 +446,7 @@ def _entitlement(grant: Json, *, allow_withdrawn: bool = False, enroll: bool = F
         and (allow_withdrawn or time.time() < claim["expires_at"]),
         "recipient_entitlement_mismatch",
     )
+    _require(allow_withdrawn or time.time() < grant["expires_at"], "handoff_grant_expired")
     _hash(claim.get("package_sha256"))
     _require(
         allow_withdrawn or not os.path.lexists(_withdrawal_path(grant)),

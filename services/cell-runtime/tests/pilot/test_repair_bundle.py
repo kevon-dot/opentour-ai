@@ -10,7 +10,9 @@ import shutil
 import subprocess
 import sys
 import time
+from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 from zipfile import ZIP_STORED, ZipFile
@@ -568,6 +570,42 @@ def transfer(
     assert hashlib.sha256(remote_archive.read_bytes()).hexdigest() == issued["package_sha256"]
     assert cli(remote, "enroll-recipient")["spec_sha256"] == issued["spec_sha256"]
     return remote, remote_archive, grant
+
+
+def test_recipient_commit_observes_shorter_local_grant_expiry_under_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    owner, receiver = tmp_path / "sender", tmp_path / "receiver"
+    receiver.mkdir(mode=0o700)
+    fx = OwnerFixture(owner)
+    grant_path, _, grant = transfer(owner, receiver, fx.stage, fx.operator, "recipient-a")
+    signed_end = read(Path(grant["recipient_custody"]["entitlement"]))["claim"]["expires_at"]
+    local_end = signed_end - 60
+    grant["expires_at"] = local_end
+    write(grant_path, grant)
+
+    # Move only the clock when the actual custody lock is acquired, as if another
+    # operation had held it until the boundary. The signed entitlement remains valid.
+    clock = local_end - 2
+    locked_at = local_end - 1
+    monkeypatch.setattr(bundle.time, "time", lambda: clock)
+    acquire = bundle._directory_lock
+
+    @contextmanager
+    def acquire_at_boundary(path: Path) -> Iterator[None]:
+        nonlocal clock
+        with acquire(path):
+            clock = locked_at
+            yield
+
+    monkeypatch.setattr(bundle, "_directory_lock", acquire_at_boundary)
+    with bundle._current(grant_path, grant):
+        assert clock == local_end - 1
+    clock, locked_at = local_end - 2, local_end
+    with pytest.raises(bundle.BundleError, match="handoff_grant_expired"):
+        with bundle._current(grant_path, grant):
+            pytest.fail("expired recipient grant entered the commit boundary")
+    assert clock == local_end < signed_end
 
 
 def test_sealed_recipient_replay_in_disjoint_custody_and_withdrawal(tmp_path: Path) -> None:
