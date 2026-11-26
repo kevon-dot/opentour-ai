@@ -515,11 +515,17 @@ def predict_open_weight_batch(
     python: str | Path | None = None,
     check_permission: Callable[[], None] | None = None,
     dispatch: Callable[[], AbstractContextManager[None]] = nullcontext,
+    expected_artifact_sha256: str | None = None,
 ) -> list[dict[str, str]]:
     """Fresh-process inference from the saved projection and exact owner-staged base."""
     path = Path(bundle)
     _check_current(path, check_permission)
-    _, adapter = _load(path, _grant(grant))
+    manifest, adapter = _load(path, _grant(grant))
+    if (
+        expected_artifact_sha256 is not None
+        and manifest["artifact_sha256"] != expected_artifact_sha256
+    ):
+        raise OpenWeightError("open_weight_candidate_lineage_mismatch")
     if len(features) > 64:
         raise OpenWeightError("inference_batch_outside_profile")
     valid = [i for i, value in enumerate(features) if _feature_row(value, grant["features"])]

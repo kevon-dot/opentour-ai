@@ -363,6 +363,7 @@ def _model_arm(
         python=python,
         check_permission=check_permission,
         dispatch=dispatch,
+        expected_artifact_sha256=model["artifact_sha256"],
     )
     return model, {
         row["case_id"]: decision for row, decision in zip(protected, inferred, strict=True)
