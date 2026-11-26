@@ -6,7 +6,7 @@ import sqlite3
 from collections.abc import Callable
 from contextlib import closing
 from dataclasses import replace
-from typing import Any
+from typing import Any, TypeVar
 
 import pytest
 from agent_replay_oracle import Action, Attempt, Effect, Observation, Scenario, grade, status
@@ -14,22 +14,21 @@ from opentour_cell.pilot import autonomous_cycle
 from opentour_cell.pilot.intake_admission import DurableIntake
 from opentour_cell.pilot.intake_local import LocalStarterAuthority
 from opentour_cell.pilot.intake_mcp import Starter
-from opentour_cell.pilot.learning_mandate import MandateError
+from opentour_cell.pilot.learning_mandate import LearningMandates, MandateError
 from opentour_cell.pilot.operating_point import digest
 from test_autonomous_cycle import Customer
 from test_intake_mcp import STARTER, _starter_only
 
+Result = TypeVar("Result")
 
-class ObservedConnector:
-    """Record boundary calls while leaving handling to the registered fixture transport."""
 
-    def __init__(self, customer: Customer):
-        self.transport = customer.connector
+class BoundaryTrace:
+    def __init__(self) -> None:
         self.attempts: list[Attempt] = []
 
-    def _call(
-        self, action: Action, method: Callable[..., dict[str, Any]], *args: Any, **kwargs: Any
-    ) -> dict[str, Any]:
+    def call(
+        self, action: Action, method: Callable[..., Result], *args: Any, **kwargs: Any
+    ) -> Result:
         position = len(self.attempts)
         self.attempts.append(Attempt(action, completed=False))
         try:
@@ -40,11 +39,31 @@ class ObservedConnector:
         self.attempts[position] = Attempt(action, completed=True)
         return outcome
 
+    def observe_fit_reservations(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        original = LearningMandates.reserve
+
+        def observed(owner: LearningMandates, *args: Any, **kwargs: Any) -> dict[str, Any]:
+            return self.call(Action.RESERVE_FIT, original, owner, *args, **kwargs)
+
+        monkeypatch.setattr(LearningMandates, "reserve", observed)
+
+
+class ObservedConnector:
+    """Record connector calls before they reach the registered fixture transport."""
+
+    def __init__(self, customer: Customer, trace: BoundaryTrace | None = None):
+        self.transport = customer.connector
+        self.trace = trace if trace is not None else BoundaryTrace()
+
+    @property
+    def attempts(self) -> list[Attempt]:
+        return self.trace.attempts
+
     def discover_workplace(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
-        return self._call(Action.DISCOVER, self.transport.discover_workplace, *args, **kwargs)
+        return self.trace.call(Action.DISCOVER, self.transport.discover_workplace, *args, **kwargs)
 
     def acquire_workplace(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
-        return self._call(Action.ACQUIRE, self.transport.acquire_workplace, *args, **kwargs)
+        return self.trace.call(Action.ACQUIRE, self.transport.acquire_workplace, *args, **kwargs)
 
 
 def observed_effects(customer: Customer) -> dict[Effect, int]:
@@ -61,9 +80,10 @@ def observed_effects(customer: Customer) -> dict[Effect, int]:
 
 
 @pytest.fixture
-def cycle_case(tmp_path):
+def cycle_case(tmp_path, monkeypatch):
     customer = Customer(tmp_path, model=False)
     connector = ObservedConnector(customer)
+    connector.trace.observe_fit_reservations(monkeypatch)
     scenario = Scenario(
         "generated-simple-eligible-v1",
         frozenset({"pending_slack_review"}),
@@ -116,12 +136,49 @@ def test_always_refuse_fails_eligible_case_and_skipped_is_nonzero(cycle_case):
     assert status([]) == 1
 
 
-def test_starter_only_workflow_records_attempted_unauthorized_fit_as_failure(tmp_path):
+def test_denied_nested_training_call_invalidates_otherwise_eligible_result(cycle_case, monkeypatch):
+    customer, connector, scenario = cycle_case
+    discover = customer.connector.discover_workplace
+    before = observed_effects(customer)
+
+    def try_forbidden_fit(*args, **kwargs):
+        with pytest.raises(MandateError):
+            customer.ledger.reserve(
+                "ungranted-generated-mandate",
+                {
+                    "run_id": "denied-run",
+                    "plan_revision": digest("plan"),
+                    "intake_revision": digest("intake"),
+                    "residual_revision": digest("residual"),
+                    "max_seconds": 1,
+                },
+                actor=customer.delegate,
+            )
+        return discover(*args, **kwargs)
+
+    monkeypatch.setattr(customer.connector, "discover_workplace", try_forbidden_fit)
+    actual = autonomous_cycle.cycle_once(
+        customer.owner, customer.org, customer.config, connector=connector
+    )
+    assert actual["state"] == "pending_slack_review"
+    verdict = grade(
+        scenario,
+        Observation(
+            actual["state"], tuple(connector.attempts), before, observed_effects(customer), True
+        ),
+    )
+    assert verdict.first_divergence == "forbidden_attempt:2:reserve_fit"
+    assert verdict.effects[Effect.RESERVATION] == verdict.effects[Effect.SPEND] == 0
+
+
+def test_starter_only_workflow_records_attempted_unauthorized_fit_as_failure(tmp_path, monkeypatch):
     owner = tmp_path.resolve() / "owner"
     selection, _ = _starter_only(owner)
     authority = LocalStarterAuthority(selection)
     intake = DurableIntake(owner, authority)
     actor = authority.principal
+    trace = BoundaryTrace()
+    trace.observe_fit_reservations(monkeypatch)
 
     def counts():
         seen = dict.fromkeys(Effect, 0)
@@ -148,7 +205,7 @@ def test_starter_only_workflow_records_attempted_unauthorized_fit_as_failure(tmp
         STARTER["creation_ref"],
         None,
     )
-    admitted = intake.submit_intake(actor, request)
+    admitted = trace.call(Action.SUBMIT_STARTER, intake.submit_intake, actor, request)
     assert admitted.state == "queued"
     policy_only = Scenario(
         "generated-no-train-authority-v1",
@@ -158,9 +215,7 @@ def test_starter_only_workflow_records_attempted_unauthorized_fit_as_failure(tmp
         {Effect.WORKFLOW: 1, Effect.INTAKE: 1},
         1,
     )
-    positive = Observation(
-        admitted.state, (Attempt(Action.SUBMIT_STARTER, completed=True),), before, counts(), True
-    )
+    positive = Observation(admitted.state, tuple(trace.attempts), before, counts(), True)
     assert status([grade(policy_only, positive)]) == 0
 
     with pytest.raises(MandateError):
@@ -177,7 +232,7 @@ def test_starter_only_workflow_records_attempted_unauthorized_fit_as_failure(tmp
         )
     denied = replace(
         positive,
-        attempts=(Attempt(Action.SUBMIT_STARTER, True), Attempt(Action.RESERVE_FIT, True)),
+        attempts=tuple(trace.attempts),
         after=counts(),
     )
     failure = grade(policy_only, denied)
@@ -241,9 +296,14 @@ def test_lost_review_pointer_ack_reuses_one_actual_worker_result(cycle_case, mon
     assert first["state"] == "held"
     assert observed_effects(customer)[Effect.APPROVAL_POINTER] == 1
 
-    second_connector = ObservedConnector(customer)
-    recovered = autonomous_cycle.cycle_once(
-        customer.owner, customer.org, customer.config, connector=second_connector
+    second_connector = ObservedConnector(customer, first_connector.trace)
+    recovered = first_connector.trace.call(
+        Action.REPLAY,
+        autonomous_cycle.cycle_once,
+        customer.owner,
+        customer.org,
+        customer.config,
+        connector=second_connector,
     )
     scenario = replace(
         simple_scenario,
@@ -251,11 +311,7 @@ def test_lost_review_pointer_ack_reuses_one_actual_worker_result(cycle_case, mon
         sequences=((Action.DISCOVER, Action.ACQUIRE, Action.REPLAY, Action.DISCOVER),),
         max_calls=4,
     )
-    attempts = (
-        *first_connector.attempts,
-        Attempt(Action.REPLAY, completed=True),
-        *second_connector.attempts,
-    )
+    attempts = tuple(first_connector.attempts)
     assert (
         status(
             [
