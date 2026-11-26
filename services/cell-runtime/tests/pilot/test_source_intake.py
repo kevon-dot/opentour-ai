@@ -583,6 +583,8 @@ def test_packaged_merchant_discovery_quarantines_ambiguous_transaction(
     admission = packaged_mcp_result(command, SUBMIT, request | {"idempotency_key": "first"})
     receipt = admission["structuredContent"]
     assert set(receipt) == {"run_ref", "state", "correlation_ref"} and receipt["state"] == "queued"
+    status_request = {"run_ref": receipt["run_ref"]}
+    initial_status = packaged_mcp_result(command, GET_RUN, status_request)["structuredContent"]
     denied = packaged_mcp_result(
         command,
         SUBMIT,
@@ -637,16 +639,37 @@ def test_packaged_merchant_discovery_quarantines_ambiguous_transaction(
     assert row["incumbent"]["label"] == "merchant-a" and row["reference"] == "merchant-b"
     assert row["decision_at"] < row["outcome_at"] <= row["verified_at"]
     assert data["training_allowed"] and not data["training_case_ids"]
-    restarted = packaged_mcp_result(command, GET_RUN, {"run_ref": receipt["run_ref"]})
+    with sqlite3.connect(private / "workflow-benchmarks.sqlite3") as db:
+        [draft] = db.execute(
+            "SELECT tenant, epoch, workflow, run, reference, version, parent, state, materialized "
+            "FROM benchmarks"
+        ).fetchall()
+        assert draft[:4] == (
+            store.organization,
+            store.engagement_id,
+            grant["workflow"],
+            receipt["run_ref"],
+        )
+        assert draft[5:] == (1, None, "draft", None)
+        assert db.execute("SELECT COUNT(*) FROM benchmark_operations").fetchone() == (0,)
+        assert db.execute("SELECT COUNT(*) FROM benchmark_receipts").fetchone() == (0,)
+    restarted = packaged_mcp_result(command, GET_RUN, status_request)
     assert restarted["structuredContent"] == {
         "run_ref": receipt["run_ref"],
         "state": "queued",
         "next_action": "wait_for_worker",
         "reason_code": None,
         "workflow_ref": grant["workflow"],
+        "benchmark_ref": draft[4],
+        "version": 1,
+        "benchmark_state": "draft",
     }
+    assert restarted["structuredContent"] == initial_status
     replay = packaged_mcp_result(command, SUBMIT, request | {"idempotency_key": "restarted"})
     assert replay["structuredContent"] == receipt
+    assert (
+        packaged_mcp_result(command, GET_RUN, status_request)["structuredContent"] == initial_status
+    )
     with sqlite3.connect(queue_path) as db:
         [run] = db.execute(
             "SELECT tenant, run_ref, workflow_ref, correlation_ref, request, grant_revision "
