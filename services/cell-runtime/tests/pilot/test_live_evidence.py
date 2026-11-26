@@ -72,6 +72,121 @@ class Case:
         return self.store.snapshot(ACTOR, "workflow-a", **kwargs)
 
 
+def test_changed_verifier_requires_new_authorized_truth(tmp_path):
+    case = Case(tmp_path / "owner")
+    case.ingest(decision())
+    case.ingest(outcome(), outcome=True)
+    assert case.snapshot().verified == 1
+    grant = replace(OUTCOME, revision="new-grant", verifier="second-verifier")
+    case.authority.scope = replace(case.authority.scope, grants=(DECISION, grant))
+    assert case.snapshot().verified == 0
+    case.outcomes = case.store.save_binding(ACTOR, "workflow-a", grant.resource)
+    assert case.snapshot().verified == 0
+    case.ingest(outcome(verifier="second-verifier"), outcome=True)
+    assert case.snapshot().verified == 1
+
+
+def test_disputed_group_attribution_is_order_independent(tmp_path):
+    totals = []
+    versions = (decision(), decision(event_id="alternative", family_id="other", case_id="other"))
+    for index, ordered in enumerate((versions, tuple(reversed(versions)))):
+        case = Case(tmp_path / str(index))
+        for event in ordered:
+            case.ingest(event)
+        case.ingest(decision("D2"))
+        snapshot = case.snapshot()
+        assert (snapshot.decisions, snapshot.disputed) == (2, 1)
+        totals.append((snapshot.cases, snapshot.families))
+    assert totals == [(1, 1), (1, 1)]
+
+
+def test_fresh_identical_delivery_rebinds_namespace_after_authorized_reread(tmp_path):
+    case = Case(tmp_path / "owner")
+    record = decision()
+    case.ingest(record)
+    new_decision = replace(DECISION, deciding_namespace="new-app", revision="new-grant")
+    new_truth = replace(OUTCOME, deciding_namespace="new-app", revision="new-truth")
+    case.authority.scope = replace(case.authority.scope, grants=(new_decision, new_truth))
+    case.decisions = case.store.save_binding(ACTOR, "workflow-a", new_decision.resource)
+    case.outcomes = case.store.save_binding(ACTOR, "workflow-a", new_truth.resource)
+    assert case.snapshot().decisions == 0
+    case.ingest(record)
+    case.ingest(outcome(), outcome=True)
+    snapshot = case.snapshot()
+    assert (snapshot.decisions, snapshot.verified, snapshot.pending) == (1, 1, 0)
+    assert snapshot.verified_roots[0].namespace == "new-app"
+
+
+def test_completed_empty_page_has_durable_read_receipt_but_unknown_coverage(tmp_path):
+    case = Case(tmp_path / "owner")
+    metadata = dict(
+        interval_start=None,
+        interval_end=None,
+        coverage_through=None,
+        complete=True,
+        next_cursor=None,
+    )
+    args = dict(
+        page_ref="empty-page",
+        source_revision="source-v1",
+        events=(),
+        source_positions=(),
+        event_epochs=(),
+        checkpoint=10,
+        read_metadata=metadata,
+    )
+    receipt = case.store.ingest_page(ACTOR, case.decisions, **args)
+    reads = case.store.read_receipts(ACTOR, "workflow-a")
+    assert len(reads) == 1 and reads[0]["receipt_ref"] == receipt
+    assert reads[0]["row_count"] == 0 and reads[0]["coverage_through"] is None
+    assert reads[0]["complete"] and reads[0]["polled_at"] > 0
+    before = case.store.path.read_bytes()
+    assert (
+        LiveEvidence(case.store.path.parent, case.authority).read_receipts(ACTOR, "workflow-a")
+        == reads
+    )
+    assert case.store.path.read_bytes() == before
+    assert case.store.ingest_page(ACTOR, case.decisions, **args) == receipt
+    assert case.store.read_receipts(ACTOR, "workflow-a") == reads
+    with pytest.raises(IntakeError):
+        case.store.ingest_page(
+            ACTOR,
+            case.decisions,
+            **{
+                **args,
+                "page_ref": "invalid",
+                "events": (decision(),),
+                "source_positions": (11,),
+                "event_epochs": ("epoch-a",),
+                "checkpoint": 11,
+                "read_metadata": {**metadata, "coverage_through": 100},
+            },
+        )
+    assert case.snapshot().decisions == 0
+    assert case.store.read_receipts(ACTOR, "workflow-a") == reads
+    case.authority.scope = replace(case.authority.scope, grants=(OUTCOME,))
+    assert case.store.read_receipts(ACTOR, "workflow-a") == ()
+
+
+def test_absent_outcome_grant_does_not_offer_custodian_a_bind_action(tmp_path):
+    case = Case(tmp_path / "owner")
+    case.authority.scope = replace(case.authority.scope, grants=(DECISION,))
+    assert not case.snapshot().can_bind_verifier
+
+
+def test_unmatched_outcomes_remain_visible_and_reconcile_without_truth_invention(tmp_path):
+    case = Case(tmp_path / "owner")
+    assert case.snapshot().last_ingested_at is None
+    case.ingest(outcome(), outcome=True)
+    before = case.snapshot()
+    assert before.unmatched_outcomes == 1
+    assert before.decisions == before.verified == 0 and before.last_ingested_at > 0
+    case.ingest(decision())
+    current = case.snapshot()
+    assert current.unmatched_outcomes == 0 and current.verified == 1
+    assert case.snapshot(as_of_revision=before.sequence) == before
+
+
 def decision(identity="D1", **changes):
     return {
         "kind": "DecisionRecorded",

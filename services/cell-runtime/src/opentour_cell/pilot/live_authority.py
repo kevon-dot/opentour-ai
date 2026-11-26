@@ -240,9 +240,9 @@ class LocalLiveIntake:
             )
 
     def live_reader_available(self, actor: IntakePrincipal, workflow_ref: str) -> bool:
-        # Admission alone does not attest to an installed source adapter. The
-        # source-reader composition must override this with actual configured capability.
-        return False
+        from opentour_cell.pilot.live_reader import available
+
+        return available(self.authority, actor, workflow_ref)
 
 
 def open_live_intake(selection: Path) -> tuple[IntakePrincipal, DurableIntake]:
