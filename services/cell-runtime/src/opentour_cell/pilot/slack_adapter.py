@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
-from opentour_cell.pilot.intake_mcp import IntakePrincipal
+from opentour_cell.pilot.intake_mcp import REF_PATTERN, IntakePrincipal
 from opentour_cell.pilot.live_evidence import LiveEvidence, LiveScope, binding_candidate
 from opentour_cell.pilot.starter_setup import StarterBinding, StarterPreview, StarterSetup
 from opentour_cell.pilot.status_questions import (
@@ -220,10 +220,7 @@ class Settings:
                 )
         live_workflow = doc.get("live_workflow_ref", "")
         if "live_workflow_ref" in doc:
-            _check(
-                isinstance(live_workflow, str)
-                and re.fullmatch(r"workflow-[0-9a-f]{32}", live_workflow)
-            )
+            _check(isinstance(live_workflow, str) and re.fullmatch(REF_PATTERN, live_workflow))
         destination = doc.get("zapier_destination_sha256", "")
         _check(
             isinstance(destination, str)
@@ -2198,6 +2195,42 @@ class Workbench:
             self.on_decision()
         self._home(cfg, actor, view, ctx["job"], old_hash)
 
+    def _live_summary(self, actor: str) -> Json | None:
+        cfg = self.settings(check_engagement=False)
+        try:
+            workflow = self._live_workflow(cfg, actor)
+            with self._live_scope(actor, workflow) as (principal, live, scope):
+                _check(
+                    scope.can_inspect
+                    and cfg.permission(actor, "inspect", scope.dataset_ref)["aggregate"]
+                )
+                snapshot = live.snapshot(principal, workflow)
+                receipts = live.read_receipts(principal, workflow)
+                last = receipts[-1] if receipts else None
+                return {
+                    "workflow": workflow,
+                    "dataset": scope.dataset_ref,
+                    "revision": snapshot.evidence_revision,
+                    "unmatched_outcomes": snapshot.unmatched_outcomes,
+                    "last_ingested_at": snapshot.last_ingested_at,
+                    "last_page": {
+                        key: last[key]
+                        for key in (
+                            "receipt_ref",
+                            "polled_at",
+                            "interval_start",
+                            "interval_end",
+                            "coverage_through",
+                            "complete",
+                            "row_count",
+                        )
+                    }
+                    if last
+                    else None,
+                }
+        except Exception:
+            return None
+
     def _readiness(self, actor: str) -> Json | None:
         from opentour_cell.pilot.readiness_selection import open_readiness
 
@@ -2968,6 +3001,7 @@ class Workbench:
             except Exception:
                 # The existing Home remains usable without current live authority.
                 pass
+        live_summary = self._live_summary(actor) if workflow_settings else None
         readiness = self._readiness(actor) if workflow_settings else None
         layout = self.views.app_home_view(
             token,
@@ -2980,6 +3014,7 @@ class Workbench:
             can_add_workflow=can_add_workflow,
             workflow_settings=workflow_settings,
             readiness=readiness,
+            live_summary=live_summary,
         )
         navigation = (
             can_add_workflow
@@ -2991,8 +3026,13 @@ class Workbench:
             with self.store.engagement_guard(engagement_id=self.store.engagement_id):
                 exposure = self.journal.admit_view(
                     "app_home",
-                    authorize=(lambda: _check(self._readiness(actor) == readiness))
-                    if readiness is not None
+                    authorize=(
+                        lambda: _check(
+                            (readiness is None or self._readiness(actor) == readiness)
+                            and (live_summary is None or self._live_summary(actor) == live_summary)
+                        )
+                    )
+                    if readiness is not None or live_summary is not None
                     else None,
                 )
         except Exception:

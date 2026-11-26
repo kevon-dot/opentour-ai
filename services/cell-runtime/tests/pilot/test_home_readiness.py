@@ -303,3 +303,74 @@ def test_two_admitted_workflows_sharing_dataset_revision_do_not_share_readout_re
     _, revision = inspect(h)
     normal = answer(h, "Why didn't it train?", revision)
     assert ready.workflow not in normal and second not in normal
+
+
+def test_home_live_evidence_distinguishes_unmatched_ingestion_and_read_coverage(ready):
+    h = ready.h
+    first = json.dumps(ready.home())
+    assert "Unmatched outcomes · 0" in first and "Last event ingested · unavailable" in first
+    assert "No source-read receipt" in first
+    view = open_live(h, ready.patch)
+    h.form(view, form(h, view, 1))
+    ready.ingest(outcome(verifier="independent-verifier"), truth=True)
+    unmatched = json.dumps(ready.home())
+    assert "Unmatched outcomes · 1" in unmatched
+    assert "Last event ingested · unavailable" not in unmatched
+    assert "No source-read receipt" in unmatched
+    live = ready.worker.source.live
+    with sqlite3.connect(live.path) as db:
+        ref = db.execute("SELECT ref FROM live_bindings WHERE kind='decision'").fetchone()[0]
+
+    def poll(name, complete):
+        return live.ingest_page(
+            ready.worker.worker,
+            ref,
+            page_ref=name,
+            source_revision="source-v1",
+            events=(),
+            source_positions=(),
+            event_epochs=(),
+            checkpoint=150,
+            read_metadata={
+                "interval_start": 10,
+                "interval_end": 25,
+                "coverage_through": 25 if complete else None,
+                "complete": complete,
+                "next_cursor": None if complete else "next",
+            },
+        )
+
+    first_page = poll("one", False)
+    partial = json.dumps(ready.home())
+    assert (
+        first_page in partial
+        and "0 rows, partial" in partial
+        and "Coverage through unavailable" in partial
+    )
+    second = poll("two", True)
+    completed = json.dumps(ready.home())
+    assert second in completed and "0 rows, complete" in completed
+    assert "Coverage through 1970-01-01 00:00:25 UTC" in completed
+    assert "Unmatched outcomes · 1" in completed
+    ready.ingest(decision())
+    assert "Unmatched outcomes · 0" in json.dumps(ready.home())
+    h.config["users"][ACTOR]["aggregate"] = False
+    h.save()
+    hidden = json.dumps(ready.home())
+    assert "Unmatched outcomes" not in hidden and second not in hidden
+
+
+def test_revoked_live_scope_at_layout_withholds_source_summary(ready, monkeypatch):
+    original = ready.h.app.views.app_home_view
+
+    def revoke(*args, **kwargs):
+        layout = original(*args, **kwargs)
+        if kwargs.get("live_summary"):
+            ready.grant["state"] = "revoked"
+            sign(ready.h, ready.grant)
+        return layout
+
+    monkeypatch.setattr(ready.h.app.views, "app_home_view", revoke)
+    home = json.dumps(ready.home())
+    assert "access is unavailable" in home and "Unmatched outcomes" not in home
+    assert effects(ready.h) == (0,) * 7

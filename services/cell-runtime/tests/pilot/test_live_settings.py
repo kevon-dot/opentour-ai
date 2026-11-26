@@ -234,3 +234,33 @@ def test_invalid_choice_and_wrong_callback_do_not_create_binding(connected_setti
     body["view"].update(callback_id="ot_tune_start", state={"values": values})
     h.send("interactive", {**body, "type": "view_submission"})
     assert not (h.path.parent / "live-evidence.sqlite3").exists() and effects(h) == (0,) * 7
+
+
+def test_historical_workflow_settings_connect_twice_and_reject_neighbor(tmp_path, monkeypatch):
+    from opentour_cell.pilot.training import LocalTrainingStore
+    from test_live_authority import SignedCase
+
+    case = SignedCase(tmp_path / "history", historical=True)
+    assert case.workflow == "purchase-routing"
+    h = Harness(tmp_path / "transport", organization="org-a")
+    h.path = case.directory / "config.json"
+    h.config.update(directory=str(case.directory), live_workflow_ref=case.workflow)
+    h.store = LocalTrainingStore(case.directory / "training.sqlite3", "org-a", existing_only=True)
+    case.body["actors"][ACTOR] = ["custodian", "inspect"]
+    case.body["custodian"] = ACTOR
+    case.write()
+    h.save()
+    restart(h)
+    ledger = case.directory / "workflow-benchmarks.sqlite3"
+    before = ledger.read_bytes()
+    for _ in range(2):
+        view = open_live(h, monkeypatch)
+        h.form(view, form(h, view))
+        assert "feed-" in text(h, view)
+        restart(h)
+    with sqlite3.connect(case.live.path) as db:
+        assert db.execute("SELECT count(*) FROM live_bindings").fetchone()[0] == 1
+    assert ledger.read_bytes() == before
+    h.config["live_workflow_ref"] = "other-routable-workflow"
+    h.save()
+    assert "ot_app_settings" not in buttons(publish(h, monkeypatch))

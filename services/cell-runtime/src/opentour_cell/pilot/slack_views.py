@@ -1394,6 +1394,35 @@ def readiness_answer(receipt: Mapping[str, Any]) -> StatusAnswer:
     )
 
 
+def _live_summary_text(summary: Mapping[str, Any]) -> str:
+    def utc(value: int | None) -> str:
+        if value is None:
+            return "unavailable"
+        try:
+            return datetime.fromtimestamp(value, UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
+        except (ValueError, OverflowError, OSError):
+            return f"{value} Unix seconds"
+
+    text = (
+        f"Unmatched outcomes · {summary['unmatched_outcomes']}. "
+        f"Last event ingested · {utc(summary['last_ingested_at'])}."
+    )
+    page = summary["last_page"]
+    if page is None:
+        return text + " No source-read receipt is available."
+    completion = "complete" if page["complete"] else "partial"
+    interval = (
+        "queried interval unavailable"
+        if page["interval_start"] is None
+        else f"queried {utc(page['interval_start'])} to {utc(page['interval_end'])}"
+    )
+    return (
+        f"{text} Latest acknowledged source page · {page['row_count']} rows, {completion}. "
+        f"Polled {utc(page['polled_at'])}. {interval.capitalize()}. "
+        f"Coverage through {utc(page['coverage_through'])}. Receipt {_ref(page['receipt_ref'])}."
+    )
+
+
 def app_home_view(
     context: str = "",
     title: str = "",
@@ -1406,6 +1435,7 @@ def app_home_view(
     can_add_workflow: bool = False,
     workflow_settings: bool = False,
     readiness: Mapping[str, Any] | None = None,
+    live_summary: Mapping[str, Any] | None = None,
 ) -> Block:
     if not context:
         return {
@@ -1440,6 +1470,8 @@ def app_home_view(
                 "block_id": "ot_workflow_entry",
             }
         )
+    if live_summary is not None:
+        blocks.append(_section(_live_summary_text(live_summary)))
     if readiness is not None:
         answer = readiness_answer(readiness)
         blocks.extend(

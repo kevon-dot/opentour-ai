@@ -67,3 +67,15 @@ receipt. `read_receipts` only reads current authorized page receipts. Snapshot
 `last_ingested_at` describes the accepted event ingestion time, not source
 freshness or complete interval coverage. The actual adapter and UI exposure of
 these facts are separate integration work.
+
+The private Slack workflow selection accepts the same bounded reference as intake,
+including historical workflow names. Connect live decisions checks the selected
+workflow's admission, active engagement and current signed custodian grant on Save.
+The selector alone gives the caller no access.
+
+For a current workflow with aggregate inspection rights, Home reports unmatched
+outcomes and when the worker last ingested an event. It also identifies the latest
+acknowledged source page, its poll time, row count, queried interval, coverage
+through time, and completion state. These values describe the single acknowledged
+page. A zero-row poll can advance coverage without adding an event. An unavailable
+interval or watermark stays unavailable.
