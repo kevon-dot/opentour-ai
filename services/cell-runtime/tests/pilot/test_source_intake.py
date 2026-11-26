@@ -4,14 +4,21 @@ import csv
 import hashlib
 import json
 import os
+import sqlite3
 import subprocess
 import sys
+import time
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
+from zipfile import ZipFile
 
 import pytest
 from opentour_cell.pilot import source_intake as intake
+from opentour_cell.pilot.intake_local import SELECTION_VERSION
+from opentour_cell.pilot.intake_mcp import DISCOVER, GET_RUN, SUBMIT
+from opentour_cell.pilot.learning_mandate import LearningMandates
+from opentour_cell.pilot.mcp import PROTOCOL_VERSION
 from opentour_cell.pilot.operating_point import canonical, digest
 from opentour_cell.pilot.training import LocalTrainingStore
 
@@ -420,3 +427,457 @@ def test_pure_authority_check_works_under_already_held_training_lock(
                 frozen["intake_revision"],
                 require_training=True,
             )
+
+
+@pytest.fixture(scope="module")
+def packaged_source_command(tmp_path_factory: pytest.TempPathFactory) -> list[str | Path]:
+    root = tmp_path_factory.mktemp("source-intake-kit")
+    python = [sys.executable, "-I", "-S", "-B"]
+    archive = root / "kit.zip"
+    builder = RUNTIME.parents[1] / "tools/build_slack_pilot_kit.py"
+    subprocess.run([*python, builder, archive], check=True, capture_output=True, timeout=30)
+    with ZipFile(archive) as kit:
+        executable = kit.extract("opentour-slack.pyz", root)
+    return [*python, executable]
+
+
+def packaged_mcp_result(command: list[str | Path], name: str, arguments: Json) -> Json:
+    frames = [
+        {
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": PROTOCOL_VERSION,
+                "capabilities": {},
+                "clientInfo": {"name": "generated-source-fixture", "version": "1"},
+            },
+        },
+        {"method": "notifications/initialized"},
+        {
+            "id": 2,
+            "method": "tools/call",
+            "params": {"name": name, "arguments": arguments},
+        },
+    ]
+    stdin = "".join(canonical({"jsonrpc": "2.0", **frame}) + "\n" for frame in frames)
+    output = subprocess.run(
+        command, input=stdin, env={}, capture_output=True, text=True, timeout=30, check=True
+    )
+    assert not output.stderr
+    initial, reply = (json.loads(line) for line in output.stdout.splitlines())
+    assert initial["id"] == 1 and initial["result"]["protocolVersion"] == PROTOCOL_VERSION
+    assert reply["id"] == 2
+    return reply["result"]
+
+
+def test_packaged_merchant_discovery_quarantines_ambiguous_transaction(
+    tmp_path: Path, packaged_source_command: list[str | Path]
+) -> None:
+    fixture = json.loads(
+        (Path(__file__).parent / "fixtures/merchant-discovery-v1.json").read_bytes()
+    )
+    assert fixture["schema_version"] == "opentour.generated.merchant-discovery.v1"
+    expected = fixture["expected"]
+    private = tmp_path / "private"
+    private.mkdir(mode=0o700)
+    grant = fixture["grant"]
+    store = LocalTrainingStore(private / "training.sqlite3", grant["organization"])
+    grant["engagement"] = store.engagement_id
+    scope = {
+        k: grant[k]
+        for k in ("organization", "workflow", "field", "policy_version", "source_schema_version")
+    }
+    traces = private / "traces.jsonl"
+    corrections = private / "corrections.jsonl"
+    grant["trace_sha256"] = export(traces, [scope | row for row in fixture["traces"]])
+    grant["correction_sha256"] = export(
+        corrections, [scope | row for row in fixture["corrections"]]
+    )
+    row_count = len(fixture["traces"]) + len(fixture["corrections"])
+    ledger = LearningMandates(
+        private, store.organization, store.engagement_id, owner=grant["owner_id"]
+    )
+    mandate = json.loads((EXAMPLES / "pilot-learning-mandate.template.json").read_bytes())
+    source_scope = {k: grant[k] for k in ("workflow", "field", "trace_source", "correction_source")}
+    mandate.update(
+        **source_scope,
+        mandate_id="generated-merchant-mandate",
+        owner_id=grant["owner_id"],
+        delegate="generated-worker",
+        trainer="generated-worker",
+        connectors=["generated-local-source"],
+        fields=grant["permitted_features"],
+        model_fields=grant["permitted_features"],
+        labels=["merchant-a", "merchant-b"],
+        permitted_error_pairs=[["merchant-a", "merchant-b"]],
+        agreement_revision=digest([grant["policy_version"], grant["retention_terms"]]),
+        expires_at=int(time.time()) + 600,
+        max_runs=1,
+        max_rows_per_run=row_count,
+        max_total_rows=row_count,
+    )
+    enrolled = ledger.enroll(mandate, actor=grant["owner_id"])
+    delegate = mandate["delegate"]
+    source_receipt = ledger.authorize_source(
+        enrolled["mandate_id"],
+        {
+            **source_scope,
+            "connector": mandate["connectors"][0],
+            "fields": grant["permitted_features"],
+            "rows": row_count,
+            "source_revision": digest([grant["trace_sha256"], grant["correction_sha256"]]),
+            "trace_sha256": grant["trace_sha256"],
+            "correction_sha256": grant["correction_sha256"],
+        },
+        actor=delegate,
+    )
+    grant.update(
+        expires_at=mandate["expires_at"],
+        training_attestation=source_receipt["training_attestation"],
+        training_expires_at=mandate["expires_at"],
+        delegation={
+            "authority_kind": source_receipt["authority_kind"],
+            "run_id": source_receipt["run_id"],
+            "delegate": delegate,
+        },
+    )
+    grant_path = private / f"cycle-source-{source_receipt['run_id']}.json"
+    write(grant_path, canonical(grant))
+    request = {
+        "pair_ref": "generated-merchant-pair",
+        "source_revision": grant["trace_sha256"],
+        "correction_revision": grant["correction_sha256"],
+        "policy_revision": source_receipt["agreement_revision"],
+    }
+    selection_path = private / "selection.json"
+    write(
+        selection_path,
+        canonical(
+            {
+                **request,
+                "schema_version": SELECTION_VERSION,
+                "tenant": store.organization,
+                "actor": delegate,
+                "engagement_epoch": store.engagement_id,
+                "mandate_id": enrolled["mandate_id"],
+                "mandate_revision": enrolled["mandate_revision"],
+                "source_run_id": source_receipt["run_id"],
+                "workflow_ref": grant["workflow"],
+                "trace_source": grant["trace_source"],
+                "correction_source": grant["correction_source"],
+            }
+        ),
+    )
+    command = [*packaged_source_command, "mcp-intake", selection_path]
+    catalog = packaged_mcp_result(command, DISCOVER, {})
+    assert catalog["structuredContent"] == {
+        "next_cursor": None,
+        "sources": [
+            {
+                "source_kind": "historical",
+                "source_ref": request["pair_ref"],
+                "source_revision": request["source_revision"],
+            }
+        ],
+    }
+    admission = packaged_mcp_result(command, SUBMIT, request | {"idempotency_key": "first"})
+    receipt = admission["structuredContent"]
+    assert set(receipt) == {"run_ref", "state", "correlation_ref"} and receipt["state"] == "queued"
+    denied = packaged_mcp_result(
+        command,
+        SUBMIT,
+        request | {"idempotency_key": "first", "correction_revision": digest("different-file")},
+    )
+    assert denied["isError"] and denied["content"][0]["text"] == "intake_unavailable"
+    frozen_path = private / "intake.json"
+    assert not frozen_path.exists()
+    queue_path = private / "intake.sqlite3"
+    with sqlite3.connect(queue_path) as db:
+        assert db.execute("SELECT COUNT(*) FROM intake_runs").fetchone() == (1,)
+        assert db.execute("SELECT COUNT(*) FROM intake_keys").fetchone() == (1,)
+
+    # The queue and source command share the grant and raw-file digests. The test runs
+    # source arbitration explicitly because the packaged intake command only queues.
+
+    base = [
+        *packaged_source_command,
+        "source",
+        "--store",
+        store.path,
+        "--organization",
+        store.organization,
+    ]
+    inputs = ["--grant", grant_path, "--traces", traces, "--corrections", corrections]
+
+    def run(*args: str | Path) -> Json:
+        return json.loads(subprocess.check_output([*base, *args], env={}, timeout=30))
+
+    discovery = run("discover", *inputs)
+    frozen = run("freeze", *inputs, "--output", frozen_path)
+    assert frozen == run("inspect", "--intake", frozen_path)
+    assert discovery["suspected_error_classes"] == []
+    assert frozen["confirmed_recurring_error"] is False
+    case_ids = {row["event_id"] for row in fixture["traces"]}
+    for result in (discovery, frozen):
+        assert result["development_count"] == 1
+        assert result["protected_count"] == expected["protected_count"]
+        assert result["excluded_counts"] == {"ambiguous_outcomes": len(expected["excluded"])}
+        assert len(case_ids) == (
+            result["development_count"]
+            + result["protected_count"]
+            + sum(result["excluded_counts"].values())
+        )
+    data = json.loads(frozen_path.read_bytes())
+    assert data["excluded"] == expected["excluded"]
+    assert data["authority_revision"] == digest(grant)
+    assert data["delegation"] == grant["delegation"]
+    [row] = data["development"]
+    assert row["case_id"] == expected["eligible_case"]
+    assert row["outcome_id"] == expected["verified_outcome"]
+    assert row["incumbent"]["label"] == "merchant-a" and row["reference"] == "merchant-b"
+    assert row["decision_at"] < row["outcome_at"] <= row["verified_at"]
+    assert data["training_allowed"] and not data["training_case_ids"]
+    restarted = packaged_mcp_result(command, GET_RUN, {"run_ref": receipt["run_ref"]})
+    assert restarted["structuredContent"] == {
+        "run_ref": receipt["run_ref"],
+        "state": "queued",
+        "next_action": "wait_for_worker",
+        "reason_code": None,
+        "workflow_ref": grant["workflow"],
+    }
+    replay = packaged_mcp_result(command, SUBMIT, request | {"idempotency_key": "restarted"})
+    assert replay["structuredContent"] == receipt
+    with sqlite3.connect(queue_path) as db:
+        [run] = db.execute(
+            "SELECT tenant, run_ref, workflow_ref, correlation_ref, request, grant_revision "
+            "FROM intake_runs"
+        ).fetchall()
+        assert run[:4] == (
+            store.organization,
+            receipt["run_ref"],
+            grant["workflow"],
+            receipt["correlation_ref"],
+        )
+        assert json.loads(run[4]) == (request | {"mode": "historical"})
+        assert run[5] == enrolled["mandate_revision"]
+        assert db.execute("SELECT COUNT(*) FROM intake_keys").fetchone() == (2,)
+        assert db.execute("SELECT COUNT(*) FROM intake_workflows").fetchone() == (0,)
+        assert db.execute("SELECT COUNT(*) FROM intake_materialization").fetchone() == (0,)
+    usage = ledger.inspect(enrolled["mandate_id"], actor=delegate)
+    assert (usage["runs"], usage["rows"], usage["reserved_fits"], usage["reserved_seconds"]) == (
+        1,
+        row_count,
+        0,
+        0,
+    )
+    with sqlite3.connect(store.path) as db:
+        assert db.execute("SELECT COUNT(*) FROM jobs").fetchone()[0] == expected["fit_jobs"]
+        assert db.execute("SELECT COUNT(*) FROM fit_checkpoints").fetchone()[0] == 0
+        assert db.execute("SELECT COUNT(*) FROM artifacts").fetchone()[0] == 0
+
+
+def test_packaged_invoice_coding_routes_missing_payer_to_review(
+    tmp_path: Path, packaged_source_command: list[str | Path]
+) -> None:
+    fixture = json.loads((Path(__file__).parent / "fixtures/payer-routing-v1.json").read_bytes())
+    assert fixture["schema_version"] == "opentour.generated.payer-routing.v1"
+    expected = fixture["expected"]
+    owner = tmp_path / "owner"
+    owner.mkdir(mode=0o700)
+    grant = json.loads((EXAMPLES / "pilot-source-grant.template.json").read_bytes())
+    store = LocalTrainingStore(owner / "training.sqlite3", grant["organization"])
+    grant.update(
+        engagement=store.engagement_id,
+        permitted_features=["payer_identity", "batch"],
+        training_attestation="att-2222222222222222",
+    )
+    scope = {
+        k: grant[k]
+        for k in ("organization", "workflow", "field", "policy_version", "source_schema_version")
+    }
+    traces, corrections = [], []
+    for index, (payer, reference, decision_at) in enumerate(fixture["invoices"]):
+        event_id = f"invoice-{index:02}"
+        features = {"batch": f"batch-{index:02}"}
+        # A missing payer on an otherwise authorized row is eligible for the review fallback.
+        if payer is not None:
+            features["payer_identity"] = payer
+        features.update(fixture["additional_features"].get(event_id, {}))
+        available_at = decision_at + (1 if event_id == fixture["late_payer"] else -1)
+        traces.append(
+            dict(
+                scope,
+                event_id=event_id,
+                source=grant["trace_source"],
+                customer_id="generated-client",
+                group_id=f"group-{index:02}",
+                decision_at=decision_at,
+                features_available_at=available_at,
+                features=features,
+                incumbent={"status": "automatic", "label": "payable"},
+            )
+        )
+        corrections.append(
+            dict(
+                scope,
+                event_id=event_id,
+                outcome_id=f"outcome-{index:02}",
+                source=grant["correction_source"],
+                adjudicator_id=grant["adjudicators"][0],
+                facts_as_of=decision_at,
+                outcome_at=decision_at + 2,
+                verified_at=decision_at + 3,
+                reference=reference,
+            )
+        )
+    trace_path, correction_path = owner / "traces.jsonl", owner / "corrections.jsonl"
+    grant["trace_sha256"] = export(trace_path, traces)
+    grant["correction_sha256"] = export(correction_path, corrections)
+    grant_path = owner / "source-grant.json"
+    write(grant_path, canonical(grant))
+
+    def run(*args: str | Path) -> str:
+        output = subprocess.run(
+            [*packaged_source_command, *args],
+            env={},
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert output.returncode == 0, output.stderr
+        assert not output.stderr
+        return output.stdout
+
+    source = ["source", "--store", store.path, "--organization", store.organization]
+    inputs = ["--grant", grant_path, "--traces", trace_path, "--corrections", correction_path]
+    discovered = json.loads(run(*source, "discover", *inputs))
+    [error_class] = discovered["suspected_error_classes"]
+    assert error_class["count"] == error_class["groups"] == expected["recurring_groups"]
+    confirmation = owner / "confirmation.json"
+    write(
+        confirmation,
+        canonical(
+            {
+                "discovery_revision": discovered["discovery_revision"],
+                "class_id": error_class["class_id"],
+                "owner_id": grant["owner_id"],
+                "attestation": "att-3333333333333333",
+            }
+        ),
+    )
+    frozen_path = owner / "intake.json"
+    frozen = json.loads(
+        run(*source, "freeze", *inputs, "--output", frozen_path, "--confirmation", confirmation)
+    )
+    assert frozen == json.loads(run(*source, "inspect", "--intake", frozen_path))
+    assert frozen["development_count"] == expected["development"]
+    assert frozen["protected_count"] == expected["protected"]
+    assert frozen["excluded_counts"] == expected["excluded_counts"]
+    assert len(traces) == (
+        frozen["development_count"]
+        + frozen["protected_count"]
+        + sum(frozen["excluded_counts"].values())
+    )
+    data = json.loads(frozen_path.read_bytes())
+    assert data["excluded"] == expected["excluded"]
+    assert set(data["allowed_features"]) == {"batch", "payer_identity"}
+    assert frozen["confirmed_recurring_error"] is True
+
+    manifest = owner / "plan.json"
+    write(
+        manifest,
+        canonical(
+            {
+                "schema_version": "opentour.pilot.managed-repair.v1",
+                "organization": store.organization,
+                "engagement": store.engagement_id,
+                "intake_file": frozen_path.name,
+                "intake_revision": frozen["intake_revision"],
+                "incumbent_revision": digest(["always", "payable"]),
+                "audience": "generated-reviewer",
+                "terms": {"minimum_coverage_bps": 10000, "error_ceiling_bps": 2500},
+                "rule": {"feature": "payer_identity", "min_support": 2, "fallback": "review"},
+            }
+        ),
+    )
+    args = [
+        "--directory",
+        owner,
+        "--organization",
+        store.organization,
+        "--manifest",
+        manifest,
+        "--authorization",
+        owner / "authorization.json",
+    ]
+    revision = json.loads(run("workflow-inspect", *args))["plan_revision"]
+    run(
+        "workflow-authorize",
+        *args,
+        "--plan-revision",
+        revision,
+        "--custodian-attestation",
+        "att-5555555555555555",
+        "--expires-at",
+        str(int(time.time()) + 600),
+    )
+
+    def call(name: str, arguments: Json) -> Json:
+        result = packaged_mcp_result(
+            [*packaged_source_command, "mcp-workflow", *args], name, arguments
+        )
+        assert not result.get("isError")
+        return result["structuredContent"]
+
+    queued = call(
+        "start_offline_evaluation", {"plan_revision": revision, "idempotency_ref": "payer-v1"}
+    )
+    assert queued["state"] == "queued"
+    worker = json.loads(run("workflow-worker", *args, "--once"))
+    assert worker == call("get_offline_evaluation", {"run_id": queued["run_id"]})
+    assert worker["state"] == "held" and worker["reason"] == "evaluation_held"
+    result_dir = owner / "managed-outputs" / worker["run_id"]
+    rule = json.loads((result_dir / "rule.json").read_bytes())
+    report = json.loads((result_dir / "comparison.json").read_bytes())
+    assert worker["result"] == {
+        "outcome": "hold",
+        "case_count": expected["protected"],
+        "result_revision": digest(report),
+    }
+    assert rule["source"] == "development_lookup"
+    assert rule["mapping"] == expected["mapping"]
+    assert rule["fallback"] == "review"
+    assert set(report["arms"]) == {"incumbent", "simple"}
+    assert report["arms"]["incumbent"]["metrics"]["incorrect_automatic"] == expected["errors"]
+    assert report["arms"]["simple"]["metrics"]["incorrect_automatic"] == 0
+    assert report["decision"]["winner"] is None
+    assert report["arms"]["simple"]["hold_reason"] == "operating_point_missed_or_undetermined"
+    decisions = {row["case_id"]: row["simple"] for row in report["paired_cases"]}
+    assert decisions == expected["protected_decisions"]
+    assert not decisions.keys() & data["excluded"].keys()
+    assert {path.name for path in result_dir.iterdir()} == {
+        "comparison.json",
+        "plan.json",
+        "rule.json",
+        "run.json",
+    }
+    before_replay = {path.name: path.read_bytes() for path in result_dir.iterdir()}
+    # Each call starts the shipped legacy managed MCP in a fresh process. Both
+    # retry keys must retain the completed result without entering the new intake queue.
+    for key in ("payer-v1", "payer-v1-restarted"):
+        replay = call(
+            "start_offline_evaluation", {"plan_revision": revision, "idempotency_ref": key}
+        )
+        assert replay == worker
+        assert replay["run_id"] == queued["run_id"]
+        assert call("get_offline_evaluation", {"run_id": replay["run_id"]}) == worker
+    assert json.loads(run("workflow-worker", *args, "--once")) == {"state": "idle"}
+    assert {path.name: path.read_bytes() for path in result_dir.iterdir()} == before_replay
+    with sqlite3.connect(owner / "managed-runs.sqlite3") as db:
+        assert db.execute("SELECT id, attempts FROM runs").fetchall() == [(queued["run_id"], 1)]
+        assert db.execute("SELECT COUNT(*) FROM requests").fetchone() == (2,)
+    assert not (owner / "intake.sqlite3").exists()
+    with sqlite3.connect(store.path) as db:
+        assert db.execute("SELECT COUNT(*) FROM jobs").fetchone()[0] == expected["fit_jobs"]
+        assert db.execute("SELECT COUNT(*) FROM fit_checkpoints").fetchone()[0] == 0
+        assert db.execute("SELECT COUNT(*) FROM artifacts").fetchone()[0] == 0
