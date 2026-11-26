@@ -507,3 +507,52 @@ def test_authoring_owner_evaluated_and_evaluator_identities_stay_distinct(core):
     assert not service.path.exists()
     service.propose(OWNER, WORK, (replace(case("SOFTWARE"), authoring_identity="authoring-model"),))
     assert service.review(OWNER, WORK)["cases"][0]["authoring_identity"] == "authoring-model"
+
+
+def test_identical_inputs_cannot_gain_new_family_through_branch_annotation(core):
+    service, auth = core
+    branch = auth.scope.branches[0]
+    auth.scope = replace(auth.scope, branches=(branch, replace(branch, branch_id="alternative")))
+    first = case("SOFTWARE")
+    other = replace(case("FREIGHT"), branch_id="alternative", decision_inputs=first.decision_inputs)
+    with pytest.raises(IntakeError, match="family_conflict"):
+        service.propose(OWNER, WORK, (first, other))
+    assert not service.path.exists()
+
+
+def test_changed_branch_cannot_reuse_development_inputs_as_reserved(core):
+    service, auth = core
+    freeze_seven(service)
+    newer = replace(
+        WORK,
+        run_ref="run-2",
+        revisions=("policy-v2", "settings-v1"),
+        benchmark_version=2,
+        benchmark_parent_run="run-1",
+    )
+    branch = replace(auth.scope.branches[0], branch_id="new-route")
+    auth.scope = replace(
+        auth.scope, work=newer, policy_revision="policy-v2", map_ref="map-v2", branches=(branch,)
+    )
+    old_development = case("UTILITIES")
+    other = replace(
+        old_development,
+        branch_id="new-route",
+        family_id="fresh-family",
+        template_id="fresh-template",
+    )
+    service.propose(OWNER, newer, (other,))
+    service.adjudicate(
+        OWNER,
+        newer,
+        case_id=other.case_id,
+        target="UTILITIES",
+        reason="Owner label",
+        expected_revision=0,
+        operation_ref="owner-label",
+    )
+    with pytest.raises(IntakeError, match="family_already_assigned"):
+        service.freeze(
+            OWNER, newer, splits={"fresh-family": "reserved"}, plan=PLAN, expected_revision=1
+        )
+    assert service.readback(OWNER, newer, operation_ref="read") is None

@@ -32,7 +32,9 @@ targets; worker receipts expose only immutable references and counts.
 
 Family equivalence is an owner-confirmed input, not a semantic inference by this
 core. It additionally rejects conflicting template and identical-input family
-assignments. Unresolved cases remain visible and excluded. New policy, label or
+assignments. Identical-input identity excludes the branch annotation: relabeling
+a branch cannot move the same model input across development and reserved sets.
+Unresolved cases remain visible and excluded. New policy, label or
 split versions require a successor and fresh protected families; this slice
 does not automatically construct successors or reuse protected families.
 The private ledger reconciles its freeze seal and all family/template/input

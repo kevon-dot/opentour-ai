@@ -228,7 +228,7 @@ class StarterCases:
             split = case["split_ref"]
             if split == "excluded":
                 continue
-            fingerprint = digest([case["branch_id"], dict(case["decision_inputs"])])
+            fingerprint = digest(dict(case["decision_inputs"]))
             for identity in (
                 "family:" + case["family_id"],
                 "template:" + case["template_id"],
@@ -282,7 +282,7 @@ class StarterCases:
                 and fields.keys() <= set(branch.decision_fields),
                 "target_leakage",
             )
-            fingerprint = digest([case.branch_id, fields])
+            fingerprint = digest(fields)
             _require(
                 templates.setdefault(case.template_id, case.family_id) == case.family_id
                 and inputs.setdefault(fingerprint, case.family_id) == case.family_id,
