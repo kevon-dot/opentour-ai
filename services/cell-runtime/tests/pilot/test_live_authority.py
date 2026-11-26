@@ -11,7 +11,12 @@ import pytest
 from opentour_cell.pilot.intake_admission import DurableIntake
 from opentour_cell.pilot.intake_local import open_intake
 from opentour_cell.pilot.intake_mcp import IntakeError, IntakePrincipal, parse_intake, serve_intake
-from opentour_cell.pilot.live_authority import SCHEMA, LocalLiveIntake, PrivateLiveAuthority
+from opentour_cell.pilot.live_authority import (
+    SCHEMA,
+    SELECTION_SCHEMA,
+    LocalLiveIntake,
+    PrivateLiveAuthority,
+)
 from opentour_cell.pilot.live_evidence import LiveEvidence, _canonical, binding_candidate
 from opentour_cell.pilot.mcp import PROTOCOL_VERSION
 from test_intake_mcp import STARTER, _starter_only, _write_private
@@ -110,6 +115,24 @@ def test_actual_binding_store_vectors_and_restart(tmp_path: Path):
     with pytest.raises(IntakeError):
         case.intake().submit_intake(case.actor, request(reference))
     assert case.live.resolve(successor, case.actor) is None
+
+
+def test_normal_intake_factory_uses_explicit_live_selection(tmp_path: Path):
+    case = SignedCase(tmp_path / "worker")
+    reference = case.connect()
+    selected = case.directory / "selected-live.json"
+    _write_private(
+        selected,
+        {
+            "schema_version": SELECTION_SCHEMA,
+            "tenant": "org-a",
+            "workflow_ref": case.workflow,
+            "actor": "worker",
+        },
+    )
+    actor, intake = open_intake(selected)
+    receipt = intake.submit_intake(actor, request(reference))
+    assert intake.get_run(actor, receipt.run_ref).workflow_ref == case.workflow
 
 
 def test_explicit_custodian_role_and_stale_candidate(tmp_path: Path):
@@ -226,3 +249,117 @@ def test_emitted_live_request_uses_real_store_and_closed_wire_shape(tmp_path: Pa
     responses = {v["id"]: v for v in map(json.loads, outgoing.getvalue().splitlines())}
     assert responses[2]["result"]["structuredContent"]["run_ref"].startswith("run-")
     assert responses[3]["result"]["isError"] is True
+
+
+async def qualified_sdk():
+    """Separate actual official-SDK subprocess witness; no network/provider calls."""
+    import sys
+    import tempfile
+    from importlib.metadata import version
+
+    from mcp import ClientSession, StdioServerParameters
+    from mcp.client.stdio import stdio_client
+
+    with tempfile.TemporaryDirectory(prefix="live-sdk-") as temporary:
+        case = SignedCase(Path(temporary).resolve() / "worker")
+        selected = case.directory / "selected-live.json"
+        _write_private(
+            selected,
+            {
+                "schema_version": SELECTION_SCHEMA,
+                "tenant": "org-a",
+                "workflow_ref": case.workflow,
+                "actor": "worker",
+            },
+        )
+        parameters = StdioServerParameters(
+            command=sys.executable,
+            args=[
+                "-m",
+                "opentour_cell.pilot.intake_local",
+                str(selected),
+            ],
+            env={
+                "PYTHONPATH": str(Path(__file__).resolve().parents[2] / "src"),
+                "PYTHONDONTWRITEBYTECODE": "1",
+            },
+        )
+        admitted = None
+        async with stdio_client(parameters) as (read, write), ClientSession(read, write) as client:
+            await client.initialize()
+            tools = await client.list_tools()
+            assert {tool.name for tool in tools.tools} == {
+                "discover_sources",
+                "submit_intake",
+                "get_run",
+            }
+            empty = await client.call_tool("discover_sources", {})
+            assert empty.structuredContent["sources"] == []
+            assert not case.live.path.exists()
+            reference = case.connect()
+            catalog = await client.call_tool("discover_sources", {})
+            assert catalog.structuredContent["sources"][0]["feed_binding_ref"] == reference
+            for key in ("first", "duplicate", "retry"):
+                result = await client.call_tool(
+                    "submit_intake",
+                    {
+                        "mode": "live",
+                        "feed_binding_ref": reference,
+                        "source_revision": "source-v1",
+                        "idempotency_key": key,
+                    },
+                )
+                assert result.isError is False
+                if admitted is None:
+                    admitted = result.structuredContent
+                assert result.structuredContent == admitted
+        async with stdio_client(parameters) as (read, write), ClientSession(read, write) as client:
+            await client.initialize()
+            result = await client.call_tool("get_run", {"run_ref": admitted["run_ref"]})
+            assert result.structuredContent["workflow_ref"] == case.workflow
+            assert result.structuredContent["reason_code"] == "live_reader_unavailable"
+            case.body["grants"][0]["revision"] = "successor"
+            case.write()
+            successor = case.connect()
+            held = await client.call_tool(
+                "submit_intake",
+                {
+                    "mode": "live",
+                    "feed_binding_ref": reference,
+                    "source_revision": "source-v1",
+                    "idempotency_key": "first",
+                },
+            )
+            assert held.structuredContent["reason_code"] == "binding_superseded"
+            assert held.structuredContent["successor_feed_binding_ref"] == successor
+            assert "run_ref" not in held.structuredContent
+            case.body["state"] = "revoked"
+            case.write()
+            denied = await client.call_tool(
+                "submit_intake",
+                {
+                    "mode": "live",
+                    "feed_binding_ref": reference,
+                    "source_revision": "source-v1",
+                    "idempotency_key": "first",
+                },
+            )
+            assert denied.isError and admitted["run_ref"] not in denied.model_dump_json()
+        with case.live._db() as db:
+            assert db.execute("SELECT count(*) FROM live_events").fetchone()[0] == 0
+        return {
+            "sdk_version": version("mcp"),
+            "sessions": 2,
+            "redeliveries": 3,
+            "durable_receipt": True,
+            "superseded_held": True,
+            "revoked_invisible": True,
+            "source_reads": 0,
+            "events": 0,
+        }
+
+
+if __name__ == "__main__":
+    import asyncio
+
+    print(json.dumps(asyncio.run(qualified_sdk()), sort_keys=True))
