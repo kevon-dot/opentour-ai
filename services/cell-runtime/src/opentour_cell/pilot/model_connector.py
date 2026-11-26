@@ -89,6 +89,7 @@ class Grant:
     expires_at: int
     permitted_fields: frozenset[str]
     retention_until: int
+    fit_bound: FitBound | None = None
 
 
 @dataclass(frozen=True)
@@ -226,7 +227,10 @@ class Preflight:
         return grant
 
     def _observe(self, binding: ModelBinding, purpose: Purpose) -> Observation:
-        observed = self.connector.observe(binding, purpose)
+        try:
+            observed = self.connector.observe(binding, purpose)
+        except (OSError, ValueError, LookupError):
+            raise CapabilityError("model_capability_evidence_unavailable") from None
         if (
             observed.binding != binding
             or not observed.source_ref
@@ -272,6 +276,8 @@ class Preflight:
             or not intent.idempotency_key
         ):
             raise CapabilityError("training_data_scope_unavailable")
+        if grant.fit_bound is None or not _within(intent.bound, grant.fit_bound):
+            raise CapabilityError("training_budget_not_authorized")
         observed = self._observe(intent.binding, Purpose.TRAINING)
         if (
             not observed.training_supported
@@ -282,7 +288,10 @@ class Preflight:
             raise CapabilityError("enforceable_training_cap_unavailable")
         if self._grant(actor, intent.binding, Purpose.TRAINING) != grant:
             raise CapabilityError("training_data_scope_unavailable")
-        estimate = self.connector.estimate(intent)
+        try:
+            estimate = self.connector.estimate(intent)
+        except (OSError, ValueError, LookupError):
+            raise CapabilityError("known_training_cost_within_budget_required") from None
         if estimate is None or not _within(estimate, intent.bound):
             raise CapabilityError("known_training_cost_within_budget_required")
         if self._grant(actor, intent.binding, Purpose.TRAINING) != grant:

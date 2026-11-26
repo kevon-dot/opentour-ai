@@ -53,6 +53,7 @@ def setup_connector():
             30,
             frozenset({"permitted"}),
             40,
+            limit if purpose is models.Purpose.TRAINING else None,
         )
         for purpose in models.Purpose
     }
@@ -147,6 +148,27 @@ def test_unknown_or_excess_cost_does_not_admit_fits(setup_connector, estimate):
     with pytest.raises(models.CapabilityError, match="known_training_cost_within_budget_required"):
         preflight.prepare("training", intent)
     adapter.submit.assert_not_called()
+
+
+def test_request_cannot_widen_trusted_budget_or_field_mapping(setup_connector):
+    preflight, adapter, _, intent, _ = setup_connector
+    with pytest.raises(models.CapabilityError, match="training_budget_not_authorized"):
+        preflight.prepare(
+            "training", replace(intent, bound=replace(intent.bound, maximum_minor_units=501))
+        )
+    with pytest.raises(models.CapabilityError, match="training_data_scope_unavailable"):
+        preflight.prepare("training", replace(intent, fields=frozenset({"outside-grant"})))
+    adapter.observe.assert_not_called()
+    adapter.estimate.assert_not_called()
+
+
+def test_backend_fault_uses_fixed_reason_without_returning_private_payload(setup_connector):
+    preflight, adapter, _, intent, _ = setup_connector
+    adapter.observe.side_effect = ValueError("private-host-response")
+    result = preflight.discover("training", intent.binding, models.Purpose.TRAINING)
+    assert result.state is models.State.NEEDS_CONFIGURATION
+    assert result.reason == "model_capability_evidence_unavailable"
+    assert result.evidence_ref is None
 
 
 def test_capture_claims_require_separate_live_scope_and_field_evidence(setup_connector):
