@@ -297,6 +297,7 @@ class OwnerSettings:
                 prior_spec = None
         if action in {"pause", "revoke"}:
             _need(head is not None and policy is None, "saved_settings_required")
+            assert head is not None
             p, binding = head["policy"], head["binding"]
         else:
             _need(action != "renew" or head is not None, "saved_settings_required")
@@ -410,7 +411,7 @@ class OwnerSettings:
             ).fetchone()
             if found:
                 _need(json.loads(found["packet"])["claim"] == claim, "settings_receipt_conflict")
-                return json.loads(found["receipt"])
+                return parse_manifest(found["receipt"].encode())
             head = self._head(db)
             _need(
                 claim["prior_revision"] == (head["revision"] if head else None)
@@ -472,6 +473,7 @@ class OwnerSettings:
                 )
                 mid, mrev = mandate["mandate_id"], mandate["mandate_revision"]
             else:
+                assert head is not None  # Validated against the signed prior revision above.
                 mid, mrev = head["mandate_id"], head["mandate_revision"]
             receipt = {
                 "schema_version": RECEIPT,
@@ -550,6 +552,7 @@ class OwnerSettings:
             _need(actor in {a["custodian"], a["operator"]}, "settings_operator_required")
             head = self._head(db)
             _need(head == receipt and head is not None, "stale_settings_receipt")
+            assert head is not None
             _need(head["authority_revision"] == digest(a), "settings_authority_changed")
             _need(head["state"] == "active", "settings_not_active")
             spec = head["policy"]["mandate"]
@@ -605,6 +608,7 @@ def main(argv: list[str] | None = None) -> int:
             result = service.inspect(actor=args.actor)
         else:
             _need(isinstance(value, dict), "settings_input_required")
+            assert isinstance(value, dict)
             method = {
                 "save": service.save,
                 "worker": service.worker_config,
