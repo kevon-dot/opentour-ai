@@ -7,13 +7,18 @@ import json
 import os
 import subprocess
 import sys
+import time
+from collections.abc import Callable, Iterator
+from contextlib import AbstractContextManager, contextmanager
 from copy import deepcopy
 from pathlib import Path
-from typing import Any
+from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
 from opentour_cell.pilot import repair_workflow, source_intake
 from opentour_cell.pilot import workplace_context as workplace
+from opentour_cell.pilot.custody import Closeout
 from opentour_cell.pilot.operating_point import canonical, digest
 from opentour_cell.pilot.training import LocalTrainingStore
 
@@ -320,6 +325,49 @@ def test_real_mcp_catalog_then_only_two_reads_cli_fresh_idempotent(tmp_path: Pat
     second = direct(f, "acquire")
     assert second.returncode == 0 and json.loads(second.stdout) == first
     assert json.loads(Path(first["receipt_path"]).read_bytes()) == receipt
+
+
+def test_withdrawal_between_provider_responses_prevents_next_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    f = WorkplaceFixture.small(tmp_path)
+    wire = f.directory / "generated-protocol-log.jsonl"
+
+    @contextmanager
+    def session(
+        _cfg: Json, _root: Path, dispatch: Callable[[], AbstractContextManager[None]]
+    ) -> Iterator[workplace._Stdio]:
+        with wire.open("w+b", buffering=0) as stdin:
+            child = cast("subprocess.Popen[bytes]", SimpleNamespace(stdin=stdin))
+            yield workplace._Stdio(child, time.monotonic() + 5, dispatch)
+
+    def receive(_client: workplace._Stdio, _limit: int) -> Json:
+        request = f.received()[-1]
+        if request["method"] == "resources/list":
+            result = {"resources": f.catalog}
+        else:
+            assert request["method"] == "resources/read"
+            uri = request["params"]["uri"]
+            Closeout(f.directory, f.store.organization).withdraw(
+                agreement="generated-terms",
+                custodian="generated-custodian",
+                support="generated-support",
+                due="2040-04-01",
+                trigger="withdrawal",
+            )
+            result = {
+                "contents": [
+                    {"uri": uri, "mimeType": "application/json", "text": canonical(f.contents[uri])}
+                ]
+            }
+        return {"jsonrpc": "2.0", "id": request["id"], "result": result}
+
+    monkeypatch.setattr(workplace, "_session", session)
+    monkeypatch.setattr(workplace._Stdio, "receive", receive)
+    with pytest.raises(workplace.WorkplaceError, match="engagement_withdrawn"):
+        workplace.acquire_workplace(f.store, f.connection)
+    assert f.reads() == [f.cfg["roles"]["trace"]["namespace"] + "chosen"]
+    assert not (f.directory / "workplace-snapshots").exists()
 
 
 @pytest.mark.parametrize(
