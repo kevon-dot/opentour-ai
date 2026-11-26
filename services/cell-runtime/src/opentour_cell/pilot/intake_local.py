@@ -35,6 +35,7 @@ from opentour_cell.pilot.operating_point import canonical
 from opentour_cell.pilot.readout import ManifestError
 from opentour_cell.pilot.text_classifier import TrainingError
 from opentour_cell.pilot.training import LocalTrainingStore
+from opentour_cell.pilot.workflow_benchmarks import BenchmarkIntake
 
 SELECTION_VERSION = "opentour.pilot.local-intake-selection.v1"
 STARTER_SELECTION_VERSION = "opentour.pilot.local-starter-selection.v1"
@@ -409,12 +410,13 @@ class LocalStarterAuthority(_LocalAuthority):
         )
 
 
-def open_intake(selection: Path) -> tuple[IntakePrincipal, DurableIntake]:
+def open_intake(selection: Path) -> tuple[IntakePrincipal, BenchmarkIntake]:
     from opentour_cell.pilot.live_authority import SELECTION_SCHEMA, open_live_intake
 
     schema = _selected_json(selection).get("schema_version")
     if schema == SELECTION_SCHEMA:
-        return open_live_intake(selection)
+        principal, admission = open_live_intake(selection)
+        return principal, BenchmarkIntake(admission)
     authority: LocalHistoricalAuthority | LocalStarterAuthority
     if schema == STARTER_SELECTION_VERSION:
         authority = LocalStarterAuthority(selection)
@@ -422,7 +424,7 @@ def open_intake(selection: Path) -> tuple[IntakePrincipal, DurableIntake]:
         authority = LocalHistoricalAuthority(selection)
     with authority.guard(authority.principal):
         admission = DurableIntake(selection.parent, authority)
-    return authority.principal, admission
+    return authority.principal, BenchmarkIntake(admission)
 
 
 def main(argv: list[str] | None = None) -> int:

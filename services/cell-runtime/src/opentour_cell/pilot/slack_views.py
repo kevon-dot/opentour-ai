@@ -1511,6 +1511,27 @@ def starter_charter(context: str, preview: StarterPreview) -> Block:
                 f"Admission {_ref(draft['run_ref'])} · settings {_ref(draft['settings_revision'])}"
             )
         )
+        if preview.benchmark:
+            benchmark = preview.benchmark
+            blocks.append(
+                _section(
+                    f"Benchmark {_ref(benchmark.benchmark_ref)} · version {benchmark.version} "
+                    f"· {_ref(benchmark.benchmark_state)}"
+                )
+            )
+            if benchmark.benchmark_state == "draft":
+                blocks.append(
+                    _section(
+                        "The owner can adjudicate starter cases before freezing this benchmark."
+                    )
+                )
+        else:
+            blocks.append(_section("This starter has no current benchmark receipt."))
+            blocks.append(
+                _actions(
+                    _button("Create benchmark draft", "ot_starter_benchmark", preview.revision)
+                )
+            )
         return _modal("Saved starter draft", "ot_starter_saved", context, blocks)
     blocks += [
         _section("Save this policy-only mandate for local workflow drafting."),
