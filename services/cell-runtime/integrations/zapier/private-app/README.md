@@ -60,16 +60,58 @@ From this directory, with the repository's pinned Node/npm on PATH:
 npm ci --ignore-scripts --no-audit --no-fund --workspaces=false
 node --test test/*.test.js
 NO_UPDATE_NOTIFIER=1 node node_modules/zapier-platform-cli/src/bin/run validate --without-style
-NO_UPDATE_NOTIFIER=1 node node_modules/zapier-platform-cli/src/bin/run build --skip-dep-install --skip-validation
 ```
 
 `--without-style` runs Zapier's local schema validation without sending the app
 definition to its server. It does not establish publishing validation. The
 pinned CLI's `--skip-validation` build flag prevents its default remote `/check`
-call; run the separate local validation first. Build produces ignored
-`build/build.zip` and `build/source.zip`; neither is uploaded.
+call; run the separate local validation first.
 The dependency installation disables lifecycle scripts. Use a clean isolated
 directory and the committed lock when reproducing.
+
+Build from a fresh production-only staging directory. Building directly in a
+developer install with `--skip-dep-install` also includes developer package
+metadata in the runtime ZIP. The following commands keep the pinned external
+CLI outside the stage, use the warmed npm cache offline, and disable Node network
+access during validation/build with the existing repository test guard. That
+guard is test discipline, not a hostile-code sandbox. Run from this app directory
+at the exact committed source to be reviewed:
+
+```sh
+app_dir="$PWD"
+repo_root="$(git rev-parse --show-toplevel)"
+source_head="$(git rev-parse HEAD)"
+stage_dir="$(mktemp -d)"
+git -C "$repo_root" archive "$source_head:services/cell-runtime/integrations/zapier/private-app" | tar -x -C "$stage_dir"
+cd "$stage_dir"
+npm ci --offline --omit=dev --ignore-scripts --no-audit --no-fund --workspaces=false
+node --test test/*.test.js
+NO_UPDATE_NOTIFIER=1 node --require "$repo_root/packages/contracts/common/unit-network-guard.cjs" "$app_dir/node_modules/zapier-platform-cli/src/bin/run" validate --without-style
+NO_UPDATE_NOTIFIER=1 node --require "$repo_root/packages/contracts/common/unit-network-guard.cjs" "$app_dir/node_modules/zapier-platform-cli/src/bin/run" build --skip-dep-install --skip-validation
+python3.12 -B test/archive_contract.py --repository "$repo_root" --commit "$source_head" --build-directory "$stage_dir/build"
+```
+
+Stop on any nonzero exit. A cold npm cache is a prerequisite failure; do not
+silently change this offline build into a networked install. The initial frozen
+developer install above warms that cache. Keep `build/build.zip`, `build/source.zip`
+and the printed artifact receipt in the private evidence location; nothing is
+uploaded. The archive check rejects developer-only or unmapped package files,
+unexpected runtime roots, unsafe/duplicate members and any source ZIP mismatch
+with the exact commit. It also checks the three app runtime files against source.
+The lock remains complete and unchanged, including its development dependency
+records. ZIP timestamps may vary: record each archive SHA and compare the
+separate runtime member-content digest when repeating a build.
+
+**Developer tool limitation:** the 2026-11-26 audit of this lock reports zero
+affected production packages and **44 affected package entries** in the full
+developer install (3 critical, 10 high, 28 moderate, 3 low, including transitive
+meta-vulnerabilities; these are not 44 distinct CVEs). The findings remain open
+in the pinned CLI dependency chain. The production-only build does not repair
+or qualify that developer toolchain. CLI 19.3.0 was the current published version
+when checked; 19.2.1 adds a finding and does not resolve these. No unsupported
+major-version transitive override or audit exemption is applied. Retain the
+separate full and production audit reports with the source receipt, and reassess
+upstream fixes before a provider release.
 
 The standalone worker test needs the existing pinned Python test dependencies
 on `PYTHONPATH`, `openssl`, and an absolute path to pinned Node:
@@ -152,6 +194,7 @@ receipt; this directory supplies instructions, not a rollback witness.
 - [Worker intake/TLS owner OPE-537](https://linear.app/opentourai/issue/OPE-537)
 - [Shared implementation contract](https://linear.app/opentourai/document/first-ten-implementation-contract-intake-evidence-training-and-release-4e23522a139f)
 - [Official CLI/runtime/auth/action/build documentation](https://docs.zapier.com/integrations/build-cli/overview)
+- [Frozen npm installation and omitted dependency behavior](https://docs.npmjs.com/cli/v11/commands/npm-ci/)
 - [Official API-key authentication guidance](https://docs.zapier.com/integrations/build/apikeyauth)
 - [Pinned 19.3.0 schema flag](https://github.com/zapier/zapier-platform/blob/zapier-platform-schema%4019.3.0/packages/schema/lib/schemas/AppFlagsSchema.js)
 - [Official private-app installation guidance](https://help.zapier.com/hc/en-us/articles/8496312360461-Use-private-apps-with-Zapier)

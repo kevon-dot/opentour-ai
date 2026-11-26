@@ -22,6 +22,12 @@ Package-local commands and exit results belong to the exact reviewed commit.
 The final task handoff records those commands and artifact digests. No existing
 repository CI job is relabeled as executing this new package suite.
 
+The local runtime build uses a fresh production-only installation with the full
+committed lock. `test/archive_contract.py` checks the exact source ZIP, app code,
+package inventory and per-build hashes. The full developer CLI audit remains an
+explicit unresolved toolchain finding; the zero-production audit and absence of
+developer packages in the runtime ZIP do not qualify the builder or a hosted run.
+
 Publication, invitation, live Zap activation, provider installation, live source
 access, provider logs, customer callbacks/destination receipt and paid resources
 were **not executed**. Generated tests earn zero customer acceptances.
