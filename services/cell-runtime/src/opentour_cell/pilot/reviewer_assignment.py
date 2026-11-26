@@ -175,7 +175,11 @@ class ReviewerAssignments:
             ]
             _need(len(previous) == 1, "assignment_proposal_adoption_required")
             origin = previous[0]
-            _need(origin["binding"] == head["binding"], "assignment_proposal_scope_changed")
+            _need(
+                self._source_authority(origin["binding"])
+                == self._source_authority(head["binding"]),
+                "assignment_proposal_scope_changed",
+            )
             _need(current_reviewer == head["reviewer"], "assignment_proposal_adoption_required")
             result.append(
                 {
@@ -194,6 +198,12 @@ class ReviewerAssignments:
                 }
             )
         return result
+
+    @staticmethod
+    def _source_authority(binding: Json) -> Json:
+        # Catalog content snapshots may advance under unchanged source authority.
+        # The proposal retains its original intake, dataset, run and review hashes.
+        return {k: v for k, v in binding.items() if k != "pair_revision"}
 
     @staticmethod
     def _choice_required(head: Json, proposals: list[Json], successor: str) -> bool:
@@ -390,7 +400,9 @@ class ReviewerAssignments:
         ).fetchall()
         same_scope = all(
             previous[k] == receipt[k]
-            for k in ("authority_revision", "reviewer", "reviewer_grant_revision", "binding")
+            for k in ("authority_revision", "reviewer", "reviewer_grant_revision")
+        ) and self._source_authority(previous["binding"]) == self._source_authority(
+            receipt["binding"]
         )
         eligible = {p["run_id"] for p in self._proposals(db, previous)} if same_scope else set()
         records = []
