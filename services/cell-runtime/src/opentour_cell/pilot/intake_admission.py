@@ -148,6 +148,30 @@ def _live_source(binding: LiveBinding) -> AuthorizedSource:
     )
 
 
+def require_readonly_snapshot(path: Path) -> None:
+    """Hold closed WAL registers whose SQLite reader would create sidecars."""
+
+    def private_header(candidate: Path, *, header: bool = False) -> bytes:
+        fd = os.open(candidate, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        try:
+            info = os.fstat(fd)
+            _require(
+                stat.S_ISREG(info.st_mode)
+                and info.st_uid == os.getuid()
+                and info.st_nlink == 1
+                and not info.st_mode & 0o077
+                and os.path.samestat(info, candidate.lstat()),
+                "private_intake_required",
+            )
+            return os.read(fd, 20) if header else b""
+        finally:
+            os.close(fd)
+
+    if private_header(path, header=True)[18:20] == b"\x02\x02":
+        for suffix in ("-wal", "-shm"):
+            private_header(Path(str(path) + suffix))
+
+
 class DurableIntake:
     """An admission queue with one operation per authorized canonical intent."""
 
@@ -233,8 +257,10 @@ class DurableIntake:
                 and not info.st_mode & 0o077,
                 "private_intake_required",
             )
-        target = self.path.as_uri() + "?mode=ro" if self.existing_only else str(self.path)
-        db = sqlite3.connect(target, uri=self.existing_only, timeout=5, isolation_level=None)
+        if not write:
+            require_readonly_snapshot(self.path)
+        target = self.path.as_uri() + ("?mode=rw" if write else "?mode=ro")
+        db = sqlite3.connect(target, uri=True, timeout=5, isolation_level=None)
         db.row_factory = sqlite3.Row
         try:
             if not write:

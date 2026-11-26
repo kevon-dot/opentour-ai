@@ -19,7 +19,11 @@ from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any, Protocol
 
-from opentour_cell.pilot.intake_admission import DurableIntake, IntakeWork
+from opentour_cell.pilot.intake_admission import (
+    DurableIntake,
+    IntakeWork,
+    require_readonly_snapshot,
+)
 from opentour_cell.pilot.intake_mcp import (
     AdmissionHold,
     AdmissionReceipt,
@@ -115,6 +119,8 @@ class WorkflowBenchmarks:
             except FileExistsError:
                 pass
         _check_file(self.path)
+        if not write:
+            require_readonly_snapshot(self.path)
         db = sqlite3.connect(
             self.path.as_uri() + ("?mode=rw" if write else "?mode=ro"),
             uri=True,
@@ -123,6 +129,8 @@ class WorkflowBenchmarks:
         )
         db.row_factory = sqlite3.Row
         try:
+            if not write:
+                db.execute("PRAGMA query_only=ON")
             db.execute("PRAGMA trusted_schema=OFF")
             db.execute("BEGIN IMMEDIATE" if write else "BEGIN")
             if write:
