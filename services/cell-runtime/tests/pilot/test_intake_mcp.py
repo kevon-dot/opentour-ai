@@ -117,7 +117,22 @@ class _GeneratedAuthority:
         )
 
     def resolve(self, reference, actor):
-        if actor.tenant != "org-a" or reference not in {"decision-feed", "decision-successor"}:
+        if actor.tenant != "org-a":
+            return None
+        if reference == "outcome-feed" and self.flags.get("include_outcome"):
+            return LiveBinding(
+                actor.tenant,
+                "generated-observed-workflow",
+                "epoch-a",
+                "outcome-binding",
+                "v1",
+                "independent_outcome",
+                "outcome-resource",
+                "grant-outcome",
+                "current",
+                "outcome-v1",
+            )
+        if reference not in {"decision-feed", "decision-successor"}:
             return None
         original = LiveBinding(
             actor.tenant,
@@ -143,13 +158,14 @@ class _GeneratedAuthority:
 
     def discover(self, actor, *, limit, cursor):
         sources = [CatalogSource("policy", "policy-resource", "policy-source-v1")]
-        item = self.resolve("decision-feed", actor)
-        if item is not None and item.state == "current":
-            sources.append(
-                CatalogFeed(
-                    "decision-feed", item.binding_version, item.feed_kind, item.source_revision
+        for ref in ("decision-feed", "outcome-feed"):
+            item = self.resolve(ref, actor)
+            if item is not None and item.state == "current":
+                sources.append(
+                    CatalogFeed(ref, item.binding_version, item.feed_kind, item.source_revision)
                 )
-            )
+            elif ref == "decision-feed" and self.flags.get("stale_catalog_entry"):
+                sources.append(CatalogFeed(ref, "v1", "decision", "feed-v1"))
         if cursor not in (None, "next-page"):
             raise IntakeError("invalid_arguments")
         if cursor:
@@ -157,6 +173,8 @@ class _GeneratedAuthority:
         return CatalogPage(tuple(sources[:limit]), "next-page" if len(sources) > limit else None)
 
     def live_reader_available(self, _actor, _workflow):
+        if self.flags.get("forbid_reader_call"):
+            raise AssertionError("discovery invoked the live reader boundary")
         return not bool(self.flags.get("missing_reader"))
 
     def permits_live_revision(self, _actor, binding, source_revision):
@@ -572,6 +590,29 @@ class TestIntakeMcp(unittest.TestCase):
         self.flags()
         self.assertTrue(queue.materialize(ACTOR_A, ref, lambda _: "current-resource-receipt"))
 
+    def test_discovery_hides_retargeted_or_revoked_feed_without_writing(self):
+        run = self.submit(LIVE)
+        for rejected in (
+            {"resource": "retargeted"},
+            {"revoked": True, "stale_catalog_entry": True},
+        ):
+            with self.subTest(rejected=rejected):
+                self.flags(include_outcome=True, forbid_reader_call=True, **rejected)
+                discovery = self.call(DISCOVER, {})["structuredContent"]
+                self.assertEqual(
+                    [source.get("feed_binding_ref") for source in discovery["sources"]],
+                    [None, "outcome-feed"],
+                )
+                self.assertEqual(discovery["sources"][1]["feed_kind"], "independent_outcome")
+                self.assertEqual(self.records("runs"), [run["run_ref"]])
+                with sqlite3.connect(self.root / "intake.sqlite3") as db:
+                    self.assertEqual(
+                        db.execute("SELECT count(*) FROM intake_live_resources").fetchone()[0], 1
+                    )
+                    self.assertEqual(
+                        db.execute("SELECT count(*) FROM intake_materialization").fetchone()[0], 0
+                    )
+
     def test_normal_starter_uses_only_scoped_policy_and_resumes_its_workflow(self):
         selected_path, selection = _starter_only(self.root / "starter-only")
         directory = selected_path.parent
@@ -847,7 +888,8 @@ async def _official_sdk_probe() -> None:
 
     with tempfile.TemporaryDirectory() as temporary:
         directory = Path(temporary).resolve()
-        (directory / "fixture-state.json").write_text("{}")
+        fixture = directory / "fixture-state.json"
+        fixture.write_text('{"include_outcome":true}')
         _mandate(directory, "org-a")
         parameters = StdioServerParameters(
             command=sys.executable,
@@ -855,7 +897,9 @@ async def _official_sdk_probe() -> None:
             env={"PYTHONPATH": os.environ["PYTHONPATH"]},
         )
 
-        async def visit(requests, expected_states, server_parameters=parameters):
+        async def visit(
+            requests, expected_states, server_parameters=parameters, expected_feeds=None
+        ):
             async with (
                 stdio_client(server_parameters) as (read, write),
                 ClientSession(read, write) as client,
@@ -863,6 +907,15 @@ async def _official_sdk_probe() -> None:
                 await client.initialize()
                 listed = await client.list_tools()
                 assert [tool.name for tool in listed.tools] == [DISCOVER, SUBMIT, GET_RUN]
+                if expected_feeds is not None:
+                    result = await client.call_tool(DISCOVER, {})
+                    assert not result.isError and result.structuredContent is not None
+                    feeds = [
+                        item["feed_binding_ref"]
+                        for item in result.structuredContent["sources"]
+                        if "feed_binding_ref" in item
+                    ]
+                    assert feeds == expected_feeds
                 receipts = []
                 for request, expected_state in zip(requests, expected_states, strict=True):
                     admitted = await client.call_tool(SUBMIT, request)
@@ -876,7 +929,11 @@ async def _official_sdk_probe() -> None:
                     assert status.structuredContent["state"] == expected_state
                 return receipts
 
-        first = await visit([PAIR, STARTER, LIVE], ["queued"] * 3)
+        first = await visit(
+            [PAIR, STARTER, LIVE],
+            ["queued"] * 3,
+            expected_feeds=["decision-feed", "outcome-feed"],
+        )
         queue = DurableIntake(directory, _GeneratedAuthority(directory))
         assert queue.materialize(ACTOR_A, first[2]["run_ref"], lambda _: "sdk-materialized-receipt")
         second = await visit(
@@ -887,6 +944,19 @@ async def _official_sdk_probe() -> None:
             ["queued", "queued", "materialized"],
         )
         assert second == [*first[:2], {**first[2], "state": "materialized"}]
+        stores = [directory / "intake.sqlite3", directory / "learning-mandates.sqlite3"]
+        unchanged_stores = [path.read_bytes() for path in stores]
+        fixture.write_text(
+            json.dumps(
+                {
+                    "include_outcome": True,
+                    "resource": "sdk-unauthorized-retarget",
+                    "forbid_reader_call": True,
+                }
+            )
+        )
+        await visit([], [], expected_feeds=["outcome-feed"])
+        assert unchanged_stores == [path.read_bytes() for path in stores]
         starter_selection, _ = _starter_only(directory / "normal-starter")
         starter_parameters = StdioServerParameters(
             command=sys.executable,
@@ -904,10 +974,16 @@ async def _official_sdk_probe() -> None:
             json.dumps(
                 {
                     "fixture": "generated",
-                    "sdk_sessions": 4,
+                    "sdk_sessions": 5,
                     "stable_receipts": len(first),
                     "durable_materialization_read_back": True,
                     "normal_starter_resume_verified": True,
+                    "adverse_discovery": {
+                        "retargeted_feed_visible": False,
+                        "independent_feed_visible": True,
+                        "reader_calls": 0,
+                        "updated_stores": 0,
+                    },
                 }
             )
         )

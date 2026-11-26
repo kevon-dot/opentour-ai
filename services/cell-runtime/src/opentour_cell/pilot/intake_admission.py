@@ -20,6 +20,7 @@ from opentour_cell.pilot.intake_mcp import (
     AdmissionHold,
     AdmissionReceipt,
     BenchmarkView,
+    CatalogFeed,
     CatalogPage,
     HistoricalPair,
     IntakeError,
@@ -117,6 +118,17 @@ def _run_ref(label: str) -> str:
     return f"{label}-{secrets.token_hex(16)}"
 
 
+def _live_source(binding: LiveBinding) -> AuthorizedSource:
+    return AuthorizedSource(
+        binding.workflow_ref,
+        binding.engagement_epoch,
+        binding.feed_kind,
+        binding.resource,
+        binding.grant_revision,
+        binding_id=binding.binding_id,
+    )
+
+
 class DurableIntake:
     """An admission queue with one operation per authorized canonical intent."""
 
@@ -183,6 +195,8 @@ class DurableIntake:
         db = sqlite3.connect(self.path, timeout=5, isolation_level=None)
         db.row_factory = sqlite3.Row
         try:
+            if not write:
+                db.execute("PRAGMA query_only=ON")
             db.execute("BEGIN IMMEDIATE" if write else "BEGIN")
             yield db
             db.commit()
@@ -199,8 +213,34 @@ class DurableIntake:
         _require(type(limit) is int and 1 <= limit <= MAX_PAGE, "invalid_arguments")
         if cursor is not None:
             require_ref(cursor)
-        with self.authority.guard(actor):
-            return self.authority.discover(actor, limit=limit, cursor=cursor)
+        with self.authority.guard(actor), self._db(write=False) as db:
+            page = self.authority.discover(actor, limit=limit, cursor=cursor)
+            _require(len(page.sources) <= limit)
+            sources = tuple(
+                entry
+                for entry in page.sources
+                if not isinstance(entry, CatalogFeed) or self._visible_live_feed(db, actor, entry)
+            )
+            return CatalogPage(sources, page.next_cursor)
+
+    def _visible_live_feed(
+        self, db: sqlite3.Connection, actor: IntakePrincipal, entry: CatalogFeed
+    ) -> bool:
+        binding = self.authority.resolve(entry.feed_binding_ref, actor)
+        if (
+            binding is None
+            or binding.tenant != actor.tenant
+            or binding.state != "current"
+            or binding.binding_version != entry.binding_version
+            or binding.feed_kind != entry.feed_kind
+            or binding.source_revision != entry.source_revision
+            or not self.authority.permits_live_revision(actor, binding, entry.source_revision)
+        ):
+            return False
+        _, resource, pinned = self._live_resource_pin(
+            db, actor.tenant, _live_source(binding), binding.binding_version
+        )
+        return pinned is None or pinned == resource
 
     def _resolve(self, actor: IntakePrincipal, request: IntakeRequest) -> _Resolved | AdmissionHold:
         if isinstance(request, HistoricalPair):
@@ -243,14 +283,7 @@ class DurableIntake:
             and self.authority.permits_live_revision(actor, binding, request.source_revision)
         )
         return _Resolved(
-            AuthorizedSource(
-                binding.workflow_ref,
-                binding.engagement_epoch,
-                binding.feed_kind,
-                binding.resource,
-                binding.grant_revision,
-                binding_id=binding.binding_id,
-            ),
+            _live_source(binding),
             (binding.binding_version, request.source_revision),
             "live",
             self.authority.live_reader_available(actor, binding.workflow_ref),
@@ -318,25 +351,37 @@ class DurableIntake:
         )
 
     @staticmethod
-    def _check_live_resource(
+    def _live_resource_pin(
         db: sqlite3.Connection,
         tenant: str,
-        workflow: str,
+        scope: AuthorizedSource,
+        binding_version: str,
+    ) -> tuple[str, str, str | None]:
+        version = _hash(
+            (scope.workflow_ref, scope.engagement_epoch, scope.binding_id, binding_version)
+        )
+        resource = _hash((scope.resource_id, scope.purpose))
+        row = db.execute(
+            "SELECT resource FROM intake_live_resources WHERE tenant=? AND binding_version=?",
+            (tenant, version),
+        ).fetchone()
+        return version, resource, None if row is None else str(row["resource"])
+
+    def _check_live_resource(
+        self,
+        db: sqlite3.Connection,
+        tenant: str,
         resolved: _Resolved,
         *,
         create: bool,
     ) -> None:
         if resolved.mode != "live":
             return
-        scope = resolved.resource
-        version = _hash((workflow, scope.engagement_epoch, scope.binding_id, resolved.revisions[0]))
-        resource = _hash((scope.resource_id, scope.purpose))
-        row = db.execute(
-            "SELECT resource FROM intake_live_resources WHERE tenant=? AND binding_version=?",
-            (tenant, version),
-        ).fetchone()
-        if row is not None:
-            _require(row["resource"] == resource)
+        version, resource, pinned = self._live_resource_pin(
+            db, tenant, resolved.resource, resolved.revisions[0]
+        )
+        if pinned is not None:
+            _require(pinned == resource)
         else:
             _require(create)
             db.execute(
@@ -361,7 +406,7 @@ class DurableIntake:
                 return resolved
             scope = resolved.resource
             workflow = self._workflow(db, actor, request, scope, create=True)
-            self._check_live_resource(db, actor.tenant, workflow, resolved, create=True)
+            self._check_live_resource(db, actor.tenant, resolved, create=True)
             intent = self._intent(workflow, resolved)
             key_hash = _hash(require_ref(request.idempotency_key))
             matching_key = db.execute(
@@ -418,7 +463,7 @@ class DurableIntake:
         if isinstance(resolved, AdmissionHold):
             raise IntakeError("intake_unavailable")
         workflow = self._workflow(db, actor, request, resolved.resource, create=False)
-        self._check_live_resource(db, actor.tenant, workflow, resolved, create=False)
+        self._check_live_resource(db, actor.tenant, resolved, create=False)
         _require(
             workflow == row["workflow_ref"]
             and self._intent(workflow, resolved) == row["intent"]
