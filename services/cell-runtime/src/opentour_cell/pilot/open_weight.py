@@ -23,7 +23,62 @@ from opentour_cell.pilot.simple_repair import RepairError, membership, validate_
 PROFILE = "smollm2_135m_lora_v1"
 PROFILE_SHA256 = "4bf04f573c4d762f5c4288f56aca2e680ab00f9c57db183ef58dfbbbddb7804c"
 BASE_SHA256 = "5af571cbf074e6d21a03528d2330792e532ca608f24ac70a143f6b369968ab8c"
+TOKENIZER_SHA256 = "9ca9acddb6525a194ec8ac7a87f24fbba7232a9a15ffa1af0c1224fcd888e47c"
 REVISION = "12fd25f77366fa6b3b4b768ec3050bf629380bac"
+# Fit manifests seal the numeric worker's bytes. Keep this metadata-only command
+# separate so an installation probe never invalidates an existing fitted artifact.
+_INSPECT_INSTALLATION = """
+import hashlib
+import json
+import platform
+import resource
+import sys
+from pathlib import Path
+
+try:
+    document = Path(sys.argv[1]).read_bytes()
+    if hashlib.sha256(document).hexdigest() != sys.argv[2]:
+        raise ValueError("unsupported_profile_lock")
+    profile = json.loads(document)
+    request = json.load(sys.stdin)
+    if set(request) != {"operation", "model_dir", "max_seconds"}:
+        raise ValueError("invalid_installation_probe_request")
+    resource.setrlimit(resource.RLIMIT_AS, (profile["limits"]["max_address_space_bytes"],) * 2)
+    resource.setrlimit(resource.RLIMIT_CPU, (request["max_seconds"],) * 2)
+    resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+    import numpy
+    import tokenizers
+
+    runtime = profile["runtime"]
+    if (
+        platform.python_version() != runtime["python"]
+        or platform.system() != "Linux"
+        or platform.machine() != "x86_64"
+        or numpy.__version__ != runtime["numpy"]
+        or tokenizers.__version__ != runtime["tokenizers"]
+    ):
+        raise ValueError("unqualified_numeric_runtime")
+    directory = Path(request["model_dir"])
+    for name, expected in profile["files"].items():
+        source = directory / name
+        if source.is_symlink() or not source.is_file():
+            raise ValueError("staged_model_file_required")
+        with source.open("rb") as file:
+            if hashlib.file_digest(file, "sha256").hexdigest() != expected:
+                raise ValueError("staged_model_hash_mismatch")
+    print(json.dumps({
+        "profile": profile["profile"],
+        "checkpoint_revision": profile["revision"],
+        "verified_base_sha256": profile["files"]["model.safetensors"],
+        "verified_tokenizer_sha256": profile["files"]["tokenizer.json"],
+    }))
+except (OSError, ValueError, KeyError, ImportError, MemoryError, TypeError) as error:
+    reason = str(error)
+    if not reason.isidentifier() or len(reason) > 64:
+        reason = "invalid_or_unavailable_numeric_runtime"
+    print(json.dumps({"error": reason}))
+    sys.exit(2)
+"""
 GRANTS = (
     "model_authorized",
     "compute_authorized",
@@ -234,11 +289,15 @@ def _run(
         source = directory / name
         if source.is_symlink() or not source.is_file():
             raise OpenWeightError("staged_model_file_required")
-    args = [_python(python), "-I", "-B", str(worker), str(profile)]
+    args = [_python(python), "-I", "-B"]
+    if request["operation"] == "inspect_installation":
+        args.extend(["-c", _INSPECT_INSTALLATION, str(profile), PROFILE_SHA256])
+    else:
+        args.extend([str(worker), str(profile)])
+        request["labels"] = grant["labels"]
     request.update(
         model_dir=str(directory),
         max_seconds=grant["max_seconds"],
-        labels=grant["labels"],
     )
     env = {
         "LANG": "C.UTF-8",
@@ -338,6 +397,38 @@ def inspect_open_weight(bundle: str | Path, *, grant: Mapping[str, Any]) -> dict
     """Check exact model identity, granted scope and saved adapter before allocating compute."""
     manifest, _ = _load(Path(bundle), _grant(grant))
     return manifest
+
+
+def inspect_open_weight_installation(
+    bundle: Path,
+    model_dir: Path,
+    *,
+    grant: Mapping[str, Any],
+    python: str | Path | None = None,
+    check_permission: Callable[[], None],
+    dispatch: Callable[[], AbstractContextManager[None]],
+) -> dict[str, Any]:
+    """Verify the authorized pinned local installation without examples or a fit."""
+    _grant(grant)
+    result = _run(
+        bundle,
+        model_dir,
+        grant,
+        python,
+        {"operation": "inspect_installation"},
+        check_permission=check_permission,
+        dispatch=dispatch,
+    )
+    if (
+        set(result)
+        != {"profile", "checkpoint_revision", "verified_base_sha256", "verified_tokenizer_sha256"}
+        or result["profile"] != PROFILE
+        or result["checkpoint_revision"] != REVISION
+        or result["verified_base_sha256"] != BASE_SHA256
+        or result["verified_tokenizer_sha256"] != TOKENIZER_SHA256
+    ):
+        raise OpenWeightError("open_weight_installation_evidence_invalid")
+    return result
 
 
 def fit_open_weight(
@@ -481,11 +572,17 @@ def predict_open_weight_batch(
     python: str | Path | None = None,
     check_permission: Callable[[], None] | None = None,
     dispatch: Callable[[], AbstractContextManager[None]] = nullcontext,
+    expected_artifact_sha256: str | None = None,
 ) -> list[dict[str, str]]:
     """Fresh-process inference from the saved projection and exact owner-staged base."""
     path = Path(bundle)
     _check_current(path, check_permission)
-    _, adapter = _load(path, _grant(grant))
+    manifest, adapter = _load(path, _grant(grant))
+    if (
+        expected_artifact_sha256 is not None
+        and manifest["artifact_sha256"] != expected_artifact_sha256
+    ):
+        raise OpenWeightError("open_weight_candidate_lineage_mismatch")
     if len(features) > 64:
         raise OpenWeightError("inference_batch_outside_profile")
     valid = [i for i, value in enumerate(features) if _feature_row(value, grant["features"])]

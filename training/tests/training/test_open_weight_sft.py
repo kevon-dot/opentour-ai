@@ -6,6 +6,7 @@ import copy
 import json
 from pathlib import Path
 from typing import Any
+from unittest.mock import Mock
 
 import pytest
 import qualify_open_weight as qualification
@@ -115,6 +116,28 @@ def test_protected_answers_never_enter_numeric_request(
         model.fit_open_weight(**owner)
     assert not owner["bundle"].exists()
     assert not list(owner["bundle"].parent.glob(".fitted.pending-*"))
+
+
+def test_protected_replay_uses_exact_collected_candidate(
+    owner: Json, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    worker = Mock(return_value={"pid": 1, "adapter": {"a": "YQ=="}})
+    monkeypatch.setattr(model, "_run", worker)
+    stored = model.fit_open_weight(**owner)
+    options = {key: owner[key] for key in ("bundle", "model_dir", "grant")}
+    features = [owner["training_rows"][0]["features"]]
+    worker.reset_mock()
+    with pytest.raises(model.OpenWeightError, match="open_weight_candidate_lineage_mismatch"):
+        model.predict_open_weight_batch(
+            **options, features=features, expected_artifact_sha256="0" * 64
+        )
+    worker.assert_not_called()
+
+    worker.return_value = {"decisions": [{"status": "review"}]}
+    assert model.predict_open_weight_batch(
+        **options, features=features, expected_artifact_sha256=stored["artifact_sha256"]
+    ) == [{"status": "review"}]
+    worker.assert_called_once()
 
 
 def test_missing_model_is_a_setup_hold_and_withdrawal_is_durable(owner: Json) -> None:
