@@ -15,10 +15,13 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
-from opentour_cell.pilot import receipt_recovery, slack_adapter
+from opentour_cell.pilot import receipt_recovery, slack_adapter, slack_views
 from opentour_cell.pilot.custody import Closeout
+from opentour_cell.pilot.text_classifier import TrainingError
+from opentour_cell.pilot.training import LocalTrainingStore
 from opentour_cell.pilot.training_data import generated_evaluation_dataset
 from test_slack_adapter import ACTOR, HOOK, Harness
 
@@ -107,6 +110,41 @@ def test_uncertain_fresh_operator_after_withdrawal_and_verified_delivery(
     assert json.loads(cli(h, "--unresolved-receipts").stdout)["receipts"] == []
     assert json.loads(cli(h, "--receipt", receipt).stdout)["state"] == "downstream_confirmed"
     assert len(calls) == 1
+
+
+def test_stale_approval_after_custody_restart_is_fenced_for_only_its_tenant(tmp_path: Path) -> None:
+    first = Harness(tmp_path / "first")
+    other = Harness(tmp_path / "second", organization="second")
+    view, job, revision = first.completed()
+    first.action(view, "ot_evidence", revision)
+    first.action(view, "ot_home", "home")
+    old_click = first.payload(view)
+    old_click.update(type="block_actions", actions=[{"action_id": "ot_approve", "value": revision}])
+    # This worker and the second organization use the same generated workspace and dataset IDs.
+    assert settings(first).team == settings(other).team
+    assert first.config["users"] == other.config["users"]
+
+    root = first.path.parent
+    before = first.store.custody_inventory()
+    state = Closeout(root, "pilot").withdraw(**TERMS)
+    assert state["delivery_inventory"]["decisions"] == 0
+    first.store = LocalTrainingStore(root / "training.sqlite3", "pilot")
+    first.app = slack_adapter.Workbench(
+        lambda: settings(first), first.slack, first.store, slack_views, submit=lambda call: call()
+    )
+    first.send("interactive", old_click)
+    assert first.app.journal.decision(revision) == {}
+    assert first.store.custody_inventory() == before
+    with pytest.raises(TrainingError):
+        first.store.status(job)
+    with patch("http.client.HTTPSConnection") as transport:
+        assert first.flush() == 0
+        transport.assert_not_called()
+    assert Closeout(root, "pilot").reconcile()["delivery_inventory"]["decisions"] == 0
+
+    _, other_receipt = other.approve()
+    assert other.store.engagement_active()
+    assert other.app.journal.receipt(other_receipt)["decision"]["delivery"] == "pending"
 
 
 def test_active_pending_and_inflight_reads_never_change_the_journal(tmp_path: Path) -> None:
