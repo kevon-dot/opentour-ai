@@ -196,10 +196,10 @@ def _admit(
         acquired = repair_workflow._private_json(memo)
     else:
         usage = ledger.inspect(cfg["mandate_id"], actor=cfg["delegate"])
-        cap = min(cap, scope["max_total_rows"] - usage["rows"])
+        cap = min(cap, scope["max_total_rows"] - usage["cumulative_rows"])
         _require(not usage["withdrawn"] and not usage["expired"], "standing_mandate_unavailable")
         _require(
-            usage["runs"] < scope["max_runs"]
+            usage["cumulative_runs"] < scope["max_runs"]
             and cap >= found["counts"]["trace_rows"] + found["counts"]["correction_rows"],
             "standing_source_budget_exhausted",
         )
