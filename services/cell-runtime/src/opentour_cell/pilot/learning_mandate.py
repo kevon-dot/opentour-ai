@@ -383,6 +383,26 @@ class LearningMandates:
                 "reserved_seconds": fits[1],
             }
 
+    @contextmanager
+    def guard_evaluation_source(
+        self, mandate_id: str, run_id: str, *, actor: str
+    ) -> Iterator[Json]:
+        """Pin an already-budgeted source selection until the scoped operation commits."""
+        with self._db() as db:
+            row, spec = self._mandate(db, mandate_id)
+            self._active(row, spec, actor)
+            require("evaluate" in spec["uses"], "evaluation_outside_prospective_scope")
+            run = self._run_row(db, run_id)
+            require(run["mandate"] == mandate_id, "delegated_run_unavailable")
+            yield self._source_receipt(run, row, spec)
+
+    @contextmanager
+    def guard_registered_owner(self, owner_id: str) -> Iterator[None]:
+        """Pin the existing owner identity without admitting learning or consuming budget."""
+        with self._db() as db:
+            require(self._owner(db) == owner_id, "registered_owner_approval_required")
+            yield
+
     def _source_receipt(self, run: sqlite3.Row, row: sqlite3.Row, spec: Json) -> Json:
         rid, rev = run["id"], row["revision"]
         return {
