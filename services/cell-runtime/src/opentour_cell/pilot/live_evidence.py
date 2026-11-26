@@ -190,14 +190,17 @@ class LiveEvidence:
                     seq INTEGER PRIMARY KEY AUTOINCREMENT, tenant TEXT NOT NULL,
                     workflow TEXT NOT NULL, epoch TEXT NOT NULL, resource TEXT NOT NULL,
                     binding_ref TEXT NOT NULL,
+                    dataset_ref TEXT NOT NULL, dataset_revision TEXT NOT NULL,
                     namespace TEXT NOT NULL, event_id TEXT NOT NULL,
                     event_revision INTEGER NOT NULL,
                     payload TEXT NOT NULL, ingested_at INTEGER NOT NULL,
-                    UNIQUE(tenant,workflow,epoch,resource,event_id,event_revision,payload));
+                    UNIQUE(tenant,workflow,epoch,dataset_ref,dataset_revision,
+                           resource,event_id,event_revision,payload));
                 CREATE TABLE IF NOT EXISTS live_quarantine(
                     tenant TEXT NOT NULL, workflow TEXT NOT NULL, epoch TEXT NOT NULL,
+                    dataset_ref TEXT NOT NULL, dataset_revision TEXT NOT NULL,
                     fingerprint TEXT NOT NULL, reason TEXT NOT NULL,
-                    PRIMARY KEY(tenant,workflow,epoch,fingerprint));
+                    PRIMARY KEY(tenant,workflow,epoch,dataset_ref,dataset_revision,fingerprint));
                 CREATE TABLE IF NOT EXISTS live_pages(
                     binding_ref TEXT NOT NULL, page_ref TEXT NOT NULL, digest TEXT NOT NULL,
                     checkpoint INTEGER NOT NULL, receipt_ref TEXT NOT NULL,
@@ -412,11 +415,13 @@ class LiveEvidence:
                     parsed = _event(event, grant)
                 except (IntakeError, TypeError, ValueError, KeyError):
                     db.execute(
-                        "INSERT OR IGNORE INTO live_quarantine VALUES (?,?,?,?,?)",
+                        "INSERT OR IGNORE INTO live_quarantine VALUES (?,?,?,?,?,?,?)",
                         (
                             scope.tenant,
                             scope.workflow_ref,
                             scope.engagement_epoch,
+                            scope.dataset_ref,
+                            scope.dataset_revision,
                             _digest([grant.resource, event, position, epoch]),
                             "invalid_or_unattributable_event",
                         ),
@@ -424,14 +429,16 @@ class LiveEvidence:
                     continue
                 db.execute(
                     "INSERT OR IGNORE INTO live_events(tenant,workflow,epoch,resource,binding_ref,"
-                    "namespace,event_id,event_revision,payload,ingested_at) "
-                    "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                    "dataset_ref,dataset_revision,namespace,event_id,event_revision,payload,"
+                    "ingested_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                     (
                         scope.tenant,
                         scope.workflow_ref,
                         scope.engagement_epoch,
                         grant.resource,
                         reference,
+                        scope.dataset_ref,
+                        scope.dataset_revision,
                         grant.deciding_namespace,
                         parsed["event_id"],
                         parsed["event_revision"],
@@ -462,11 +469,14 @@ class LiveEvidence:
 
     def _snapshot(self, db: sqlite3.Connection, scope: LiveScope) -> LiveSnapshot:
         all_rows = db.execute(
-            "SELECT * FROM live_events WHERE tenant=? AND workflow=? AND epoch=? ORDER BY seq",
+            "SELECT * FROM live_events WHERE tenant=? AND workflow=? AND epoch=? "
+            "AND dataset_ref=? AND dataset_revision=? ORDER BY seq",
             (
                 scope.tenant,
                 scope.workflow_ref,
                 scope.engagement_epoch,
+                scope.dataset_ref,
+                scope.dataset_revision,
             ),
         ).fetchall()
         permitted = {(g.resource, g.deciding_namespace) for g in scope.grants}
@@ -571,8 +581,8 @@ class LiveEvidence:
         _require(not bindings or matching_scope)
         bound = any(g.kind == "independent_outcome" for g in bound_grants)
         actors = sorted({g.verifier for g in bound_grants if g.verifier})
-        sequence = db.execute(
-            "SELECT coalesce(max(p.rowid),0) FROM live_pages p "
+        page_rows = db.execute(
+            "SELECT p.rowid,p.binding_ref FROM live_pages p "
             "JOIN live_bindings b ON b.ref=p.binding_ref "
             "WHERE b.tenant=? AND b.workflow=? AND b.epoch=?",
             (
@@ -580,13 +590,20 @@ class LiveEvidence:
                 scope.workflow_ref,
                 scope.engagement_epoch,
             ),
-        ).fetchone()[0]
+        ).fetchall()
+        sequence = max(
+            (row[0] for row in page_rows if self._same_scope(self._binding(db, row[1])[0], scope)),
+            default=0,
+        )
         quarantined = db.execute(
-            "SELECT count(*) FROM live_quarantine WHERE tenant=? AND workflow=? AND epoch=?",
+            "SELECT count(*) FROM live_quarantine WHERE tenant=? AND workflow=? AND epoch=? "
+            "AND dataset_ref=? AND dataset_revision=?",
             (
                 scope.tenant,
                 scope.workflow_ref,
                 scope.engagement_epoch,
+                scope.dataset_ref,
+                scope.dataset_revision,
             ),
         ).fetchone()[0]
         return LiveSnapshot(

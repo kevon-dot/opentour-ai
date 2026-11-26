@@ -319,6 +319,7 @@ def test_foreign_binding_direct_ingest_and_replay_never_cross_tenant(tmp_path: P
 def test_dataset_rebinding_holds_current_ref_and_historical_projection(tmp_path: Path):
     case = Case(tmp_path / "owner")
     case.ingest(decision())
+    case.ingest(decision("bad", raw_payload="PRIVATE_GENERATED_SENTINEL"))
     before = case.snapshot()
     case.authority.scope = replace(case.authority.scope, dataset_ref="replacement")
     assert case.store.resolve(case.decisions, ACTOR) is None
@@ -328,8 +329,14 @@ def test_dataset_rebinding_holds_current_ref_and_historical_projection(tmp_path:
         case.snapshot()
     with pytest.raises(IntakeError, match="live_evidence_unavailable"):
         case.ingest(decision("D2"))
-    case.store.save_binding(ACTOR, "workflow-a", "decisions")
+    case.decisions = case.store.save_binding(ACTOR, "workflow-a", "decisions")
     assert case.snapshot().decisions == 0
+    assert case.snapshot().quarantined == 0
+    assert case.snapshot().sequence == 0
+    case.ingest(decision())
+    assert case.snapshot().decisions == 1
+    assert case.snapshot().quarantined == 0
+    assert case.snapshot().sequence > before.sequence
 
 
 def test_multiple_resources_order_and_reselection_have_current_durable_refs(tmp_path: Path):
