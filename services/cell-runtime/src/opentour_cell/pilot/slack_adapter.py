@@ -880,6 +880,29 @@ class ReceiptDrainer:
             self._thread.join()
 
 
+def _static_setup_navigation(view: Json, context: str) -> bool:
+    """Compare the complete outgoing private view with a stock, data-free setup screen."""
+    from opentour_cell.pilot import slack_views
+
+    callback = view.get("callback_id")
+    if callback == "ot_app_home":
+        expected = slack_views.app_home_view(
+            context,
+            "OpenTour pilot workspace",
+            can_review=True,
+            named_reviewer=True,
+            can_add_workflow=True,
+        )
+    elif callback == "ot_workflow_chooser":
+        expected = slack_views.workflow_chooser(context)
+    elif callback in {"ot_workflow_starter_info", "ot_workflow_historical_info"}:
+        route = "starter" if callback == "ot_workflow_starter_info" else "historical"
+        expected = slack_views.workflow_instructions(context, route)
+    else:
+        return False
+    return view == expected
+
+
 def withdraw_for_custody(directory: Path, organization: str) -> dict[str, int]:
     """Invalidate action grants and stop the journal after the organization's training hold."""
     totals = dict.fromkeys(
@@ -935,7 +958,12 @@ def withdraw_for_custody(directory: Path, organization: str) -> dict[str, int]:
 
         totals.update(
             slack_exposed=n("SELECT COUNT(*) FROM exposures WHERE status='presented'"),
-            slack_possible=n("SELECT COUNT(*) FROM exposures WHERE status!='presented'"),
+            slack_possible=n(
+                "SELECT COUNT(*) FROM exposures WHERE status IS NOT 'presented' "
+                "AND (status IS NOT 'navigation_presented' OR COALESCE(kind,'') NOT IN "
+                "('app_home','ot_workflow_chooser','ot_workflow_starter_info',"
+                "'ot_workflow_historical_info'))"
+            ),
             zapier_accepted=n(
                 "SELECT COUNT(*) FROM decisions "
                 "WHERE delivery IN ('accepted','downstream_confirmed')"
@@ -1490,6 +1518,13 @@ class Workbench:
             audit=target.audit,
         )
 
+    def _unbound_recipient(self) -> bool:
+        # An unavailable current binding cannot justify excluding a confirmed view.
+        try:
+            return not self.settings().explicit_recipient
+        except Exception:
+            return False
+
     def _show(
         self,
         view_id: str,
@@ -1499,6 +1534,7 @@ class Workbench:
         dataset: str | None = None,
         dataset_revision: str | None = None,
         audit: Json | None = None,
+        setup_context: str | None = None,
     ) -> str:
         # Record every attempted protected disclosure without persisting projected sample rows.
         exposure = ""
@@ -1507,6 +1543,14 @@ class Workbench:
                 self.store, dataset, dataset_revision, self.store.engagement_id, audit
             ):
                 exposure = self.journal.admit_view(modal["callback_id"])
+        navigation = (
+            setup_context is not None
+            and _static_setup_navigation(modal, setup_context)
+            and dataset is None
+            and dataset_revision is None
+            and audit is None
+            and self._unbound_recipient()
+        )
         params = {"view_id": view_id, "view": modal}
         if old_hash:
             params["hash"] = old_hash
@@ -1522,7 +1566,10 @@ class Workbench:
                 self.journal.finish_view(exposure, "uncertain")
             raise
         if exposure:
-            self.journal.finish_view(exposure, "presented")
+            self.journal.finish_view(
+                exposure,
+                "navigation_presented" if navigation and self._unbound_recipient() else "presented",
+            )
         return exposure
 
     def _home(self, cfg: Settings, actor: str, view_id: str, job: str, old_hash: str = "") -> None:
@@ -1956,11 +2003,17 @@ class Workbench:
         job = ctx["job"]
         if ctx["kind"] == "workflow_chooser":
             _check(action in {"ot_workflow_starter", "ot_workflow_historical"})
-            _check(
-                action == "ot_workflow_" + value and self._can_add_workflow(self.settings(), actor)
-            )
+            current = self.settings()
+            _check(action == "ot_workflow_" + value and self._can_add_workflow(current, actor))
             token = self.journal.context(actor, cfg.channel, view, "workflow_instructions")
-            self._show(view, self.views.workflow_instructions(token, value), old_hash)
+            self._show(
+                view,
+                self.views.workflow_instructions(token, value),
+                old_hash,
+                setup_context=None
+                if cfg.explicit_recipient or current.explicit_recipient
+                else token,
+            )
         elif ctx["kind"] == "workflow_instructions":
             raise Refused("This setup screen has no actions.")
         elif action == "ot_help":
@@ -2387,6 +2440,12 @@ class Workbench:
             pending=pending.revision if pending else "",
             can_add_workflow=can_add_workflow,
         )
+        navigation = (
+            can_add_workflow
+            and not cfg.explicit_recipient
+            and _static_setup_navigation(layout, token)
+            and self._unbound_recipient()
+        )
         with self.store.engagement_guard(engagement_id=self.store.engagement_id):
             exposure = self.journal.admit_view("app_home")
         try:
@@ -2395,7 +2454,10 @@ class Workbench:
         except Exception:
             self.journal.finish_view(exposure, "uncertain")
             raise
-        self.journal.finish_view(exposure, "presented")
+        self.journal.finish_view(
+            exposure,
+            "navigation_presented" if navigation and self._unbound_recipient() else "presented",
+        )
 
     def _open_app_home(self, cfg: Settings, actor: str, body: Json) -> None:
         view = body["view"]
@@ -2417,9 +2479,16 @@ class Workbench:
             view_id = opened["view"]["id"]
             try:
                 self.private_channel(cfg, actor)
-                _check(self._can_add_workflow(self.settings(), actor))
+                current = self.settings()
+                _check(self._can_add_workflow(current, actor))
                 token = self.journal.context(actor, cfg.channel, view_id, "workflow_chooser")
-                self._show(view_id, self.views.workflow_chooser(token))
+                self._show(
+                    view_id,
+                    self.views.workflow_chooser(token),
+                    setup_context=None
+                    if cfg.explicit_recipient or current.explicit_recipient
+                    else token,
+                )
             except Exception:
                 self._safe_notice(view_id)
             return
