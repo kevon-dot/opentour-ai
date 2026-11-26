@@ -10,6 +10,7 @@ from decimal import Decimal
 from enum import StrEnum
 
 from opentour_cell.pilot.guided_policy import (
+    HEADING,
     GuidedPolicySource,
     PolicyError,
     PolicySnapshot,
@@ -20,17 +21,16 @@ from opentour_cell.pilot.intake_mcp import IntakePrincipal
 from opentour_cell.pilot.operating_point import canonical, digest
 from opentour_cell.pilot.repair_workflow import _record
 
-_RULE = re.compile(r"(?:[-*] +)?(?:if|when) (.+), *(?:then )?([A-Z][A-Z0-9_]{0,47})\.?", re.I)
+_RULE = re.compile(r"(?:if|when) (.+), *(?:then )?([A-Z][A-Z0-9_]{0,47})\.?", re.I)
 _PRESENCE = re.compile(r"([a-z][a-z0-9_]{0,63}) (?:is )?(missing|present)")
 _COMPARISON = re.compile(
     r"([a-z][a-z0-9_]{0,63})\s*(<=|>=|<|>|below|at or above|at most|above)\s*"
     r"(-?[0-9]{1,12}(?:\.[0-9]{1,8})?)"
 )
 _OPERATORS = {"below": "<", "at most": "<=", "at or above": ">=", "above": ">"}
-_FIRST_MATCH = re.compile(r"(?:[-*] +)?apply the first matching rule\.?", re.I)
-_RULE_PREFIX = re.compile(
-    r"(?:[-*] +)?(?:if|when|unless|except|otherwise|always|never|only if)\b", re.I
-)
+_FIRST_MATCH = re.compile(r"apply the first matching rule\.?", re.I)
+_LIST_MARKER = re.compile(r"^(?:[-+*]|[0-9]{1,9}[.)]) +")
+_HORIZONTAL_RULE = re.compile(r"(?:-{3,}|\*{3,}|_{3,})")
 _ACTION = re.compile(r"[A-Z][A-Z0-9_]{0,47}")
 _FIELD = re.compile(r"[a-z][a-z0-9_]{0,63}")
 MAP_VERSION = "opentour.pilot.guided-decision-map.v1"
@@ -131,16 +131,15 @@ def guided_draft(
     unresolved = []
     priority = None
     for line_number, raw in operative_lines(policy.lines):
-        line = raw.strip()
+        if HEADING.match(raw) or _HORIZONTAL_RULE.fullmatch(raw.strip()):
+            continue
+        line = _LIST_MARKER.sub("", raw.strip(), count=1)
+        citation = policy.cite(line_number, line_number)
         if _FIRST_MATCH.fullmatch(line):
-            citation = policy.cite(line_number, line_number)
             if priority is not None:
                 unresolved.append(citation)
             priority = citation
             continue
-        if not _RULE_PREFIX.match(line):
-            continue
-        citation = policy.cite(line_number, line_number)
         rule = _RULE.fullmatch(line)
         if rule is None or rule[2].upper() not in actions:
             unresolved.append(citation)
