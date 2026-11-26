@@ -1331,7 +1331,8 @@ def run(args: argparse.Namespace) -> Json:
             if os.path.lexists(path):
                 previous = parse_manifest(_read(path))
                 stamp = previous.get("witnessed_utc")
-                _require(isinstance(stamp, str), "witness_receipt_conflict")
+                if not isinstance(stamp, str):
+                    raise BundleError("witness_receipt_conflict")
                 try:
                     witnessed_at = datetime.fromisoformat(stamp)
                 except ValueError:
