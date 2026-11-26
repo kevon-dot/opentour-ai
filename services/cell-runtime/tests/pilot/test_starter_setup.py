@@ -271,3 +271,82 @@ def test_starter_preview_requires_current_complete_approved_charter(
     assert "ot_starter_save" not in buttons(screen(h, denied))
     assert not (directory / "intake.sqlite3").exists()
     assert effects(h) == (0,) * 7
+
+
+@pytest.mark.parametrize("boundary", ["admission", "publication", "already_saved"])
+def test_utc_date_changes_behind_intake_or_final_draft_write(
+    founder: Harness, monkeypatch: pytest.MonkeyPatch, boundary: str
+) -> None:
+    from concurrent.futures import ThreadPoolExecutor
+    from datetime import UTC, datetime, timedelta
+    from threading import Event
+
+    h = founder
+    today = datetime.now(UTC)
+    now = today
+
+    class Clock:
+        @staticmethod
+        def now(zone: object) -> datetime:
+            assert zone is UTC
+            return now
+
+    directory = h.path.parent
+    charter_path = directory / "charter.json"
+    charter = json.loads(charter_path.read_bytes())
+    charter["next_check"] = today.date().isoformat()
+    selection = json.loads((directory / "selected.json").read_bytes())
+    _write_private(charter_path, charter)
+    _write_private(
+        directory / "starter-intake-grant-policy-scope.json",
+        _sealed_starter(selection, setup_policy_revision=digest(charter)),
+    )
+    monkeypatch.setattr(starter_setup, "datetime", Clock)
+    view = open_starter(h, monkeypatch)
+    key = buttons(screen(h, view))["ot_starter_save"]
+    if boundary == "already_saved":
+        h.action(view, "ot_starter_save", key)
+        assert screen(h, view)["callback_id"] == "ot_starter_saved"
+        now = today + timedelta(days=1)
+        assert screen(h, open_starter(h, monkeypatch))["callback_id"] == "ot_starter_saved"
+        return
+    if boundary == "admission":
+        original = starter_setup.DurableIntake.submit_intake
+
+        def after_preview(admission: Any, actor: Any, request: Any) -> Any:
+            nonlocal now
+            entered = Event()
+            open_db = admission._db
+
+            def waiting_for_intake(*args: Any, **kwargs: Any) -> Any:
+                entered.set()
+                return open_db(*args, **kwargs)
+
+            with monkeypatch.context() as m, ThreadPoolExecutor(max_workers=1) as pool:
+                m.setattr(admission, "_db", waiting_for_intake)
+                with sqlite3.connect(directory / "intake.sqlite3") as writer:
+                    writer.execute("BEGIN IMMEDIATE")
+                    pending = pool.submit(original, admission, actor, request)
+                    assert entered.wait(5)
+                    now = today + timedelta(days=1)
+                return pending.result(timeout=10)
+
+        monkeypatch.setattr(starter_setup.DurableIntake, "submit_intake", after_preview)
+        h.action(view, "ot_starter_save", key)
+    else:
+        original_status = starter_setup.DurableIntake.get_run
+
+        def after_worker_receipt(*args: Any) -> Any:
+            nonlocal now
+            status = original_status(*args)
+            now = today + timedelta(days=1)
+            return status
+
+        monkeypatch.setattr(starter_setup.DurableIntake, "get_run", after_worker_receipt)
+        h.action(view, "ot_starter_save", key)
+    assert not list(directory.glob("source-intake-starter-draft-*.json"))
+    with sqlite3.connect(directory / "intake.sqlite3") as db:
+        assert db.execute("SELECT count(*) FROM intake_runs").fetchone()[0] == int(
+            boundary == "publication"
+        )
+    assert effects(h) == (0,) * 7

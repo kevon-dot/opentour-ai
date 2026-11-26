@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from datetime import UTC, date, datetime
@@ -79,6 +80,9 @@ class StarterCharter:
         _require(date.fromisoformat(fields["next_check"]).isoformat() == fields["next_check"])
         return cls(**fields)
 
+    def require_current_plan(self) -> None:
+        _require(date.fromisoformat(self.next_check) >= datetime.now(UTC).date())
+
 
 @dataclass(frozen=True)
 class StarterPreview:
@@ -123,12 +127,13 @@ class StarterSetup(LocalStarterAuthority):
         current = self._read_grant()
         _require(
             current == self._pinned
-            and datetime.now(UTC).timestamp() < current.expires_at
+            and time.time() < current.expires_at
             and StarterSelection.read(self.path) == self.selected
         )
-        StarterCharter.read(
+        charter = StarterCharter.read(
             self.path.parent / self.binding.charter_file, current.setup_policy_revision
         )
+        charter.require_current_plan()
         return super().starter(actor, request)
 
     def _draft_path(self, creation: str) -> Path:
@@ -226,7 +231,7 @@ class StarterSetup(LocalStarterAuthority):
         _require(preview.revision == expected)
         if preview.draft:
             return preview
-        _require(date.fromisoformat(preview.charter.next_check) >= datetime.now(UTC).date())
+        preview.charter.require_current_plan()
         with self.setup_grant(self.principal) as grant:
             self._current_owner()
             admission = DurableIntake(self.path.parent, self)
@@ -244,9 +249,10 @@ class StarterSetup(LocalStarterAuthority):
         run = admission.get_run(self.principal, receipt.run_ref)
         with self.setup_grant(self.principal):
             self._current_owner()
-            StarterCharter.read(
+            charter = StarterCharter.read(
                 self.path.parent / self.binding.charter_file, grant.setup_policy_revision
             )
+            charter.require_current_plan()
             _record(
                 self._draft_path(grant.creation_ref),
                 self._receipt(grant, preview.charter, run.workflow_ref, receipt.run_ref),
