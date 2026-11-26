@@ -27,7 +27,7 @@ selected current authority and existing admission, never from configuration fiel
 Invoke with the opaque run reference returned by durable historical intake:
 
 ```sh
-python -m opentour_cell.pilot.historical_worker \
+python -I -S -B opentour-slack.pyz historical-worker \
   --config /absolute/private/historical-worker.json --run-ref <admitted-run>
 ```
 
@@ -51,8 +51,7 @@ intake intent; it is not a reason to redispatch an uncertain prior operation.
 Generated tests run the actual command in fresh processes, verify one protected
 result across restarts and zero reserved fits, recover a persisted result after
 interruption without scoring again, and deny changed sources/policy, withdrawal,
-foreign runs and unsafe configuration. These are local software checks. Packaged
-kit routing is integrated separately by its assigned owner. Normal intake
+foreign runs and unsafe configuration. These are local software checks. Normal intake
 dispatch scheduling, starter OPE-513/OPE-539 production, Slack exposure and full
 historical/manual-rerun qualification remain acceptance work; this entry does not
 close OPE-505 or establish customer/provider evidence.
