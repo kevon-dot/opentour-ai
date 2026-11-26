@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import hashlib
 import time
 from collections.abc import Callable, Mapping
+from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Protocol
@@ -168,7 +170,9 @@ class Connector(Protocol):
 
     def serialize_development(
         self, intent: FitIntent, rows: tuple[Mapping[str, object], ...]
-    ) -> bytes: ...
+    ) -> bytes:
+        """Validate and encode the authorized development rows locally."""
+        ...
 
     def estimate(self, intent: FitIntent) -> FitBound | None: ...
 
@@ -270,6 +274,10 @@ class Preflight:
         )
 
     def prepare(self, actor: str, intent: FitIntent) -> FitBound:
+        _, _, estimate = self._prepare(actor, intent)
+        return estimate
+
+    def _prepare(self, actor: str, intent: FitIntent) -> tuple[Grant, Observation, FitBound]:
         grant = self._grant(actor, intent.binding, Purpose.TRAINING)
         if (
             grant.revision != intent.grant_revision
@@ -301,13 +309,53 @@ class Preflight:
             raise CapabilityError("training_data_scope_unavailable")
         if self.clock() >= observed.expires_at:
             raise CapabilityError("model_capability_evidence_stale_or_mismatched")
-        return estimate
+        return grant, observed, estimate
+
+    def submit_reserved_fit(
+        self,
+        actor: str,
+        intent: FitIntent,
+        development_rows: tuple[Mapping[str, object], ...],
+        *,
+        reservation_guard: Callable[[], AbstractContextManager[None]],
+    ) -> JobReceipt:
+        """Dispatch under the owner's existing durable fit reservation and idempotency key."""
+        grant, observed, estimate = self._prepare(actor, intent)
+        if not 0 < len(development_rows) <= estimate.maximum_rows or any(
+            row.keys() != intent.fields for row in development_rows
+        ):
+            raise CapabilityError("training_data_scope_unavailable")
+        try:
+            development = self.connector.serialize_development(intent, development_rows)
+        except (OSError, ValueError, LookupError):
+            raise CapabilityError("training_payload_invalid") from None
+        if not isinstance(development, bytes) or (
+            hashlib.sha256(development).hexdigest() != intent.development_digest
+        ):
+            raise CapabilityError("training_payload_invalid")
+
+        with reservation_guard():
+            if self._grant(actor, intent.binding, Purpose.TRAINING) != grant:
+                raise CapabilityError("training_data_scope_unavailable")
+            if self.clock() >= observed.expires_at:
+                raise CapabilityError("model_capability_evidence_stale_or_mismatched")
+            try:
+                receipt = self.connector.submit(intent, development)
+            except OSError:
+                receipt = None
+
+        if receipt is None:
+            return self.reconcile_fit(actor, intent)
+        if self._grant(actor, intent.binding, Purpose.TRAINING) != grant:
+            raise CapabilityError("training_data_scope_unavailable")
+        return _job_receipt(intent, receipt)
 
     def reconcile_fit(self, actor: str, intent: FitIntent) -> JobReceipt:
         """Look up an already submitted intent without creating or resending a job."""
         grant = self._grant(actor, intent.binding, Purpose.TRAINING)
         if (
             grant.revision != intent.grant_revision
+            or not intent.fields <= grant.permitted_fields
             or intent.benchmark_revision not in grant.benchmark_revisions
             or not intent.idempotency_key
         ):
@@ -318,13 +366,7 @@ class Preflight:
             job = None
         if self._grant(actor, intent.binding, Purpose.TRAINING) != grant:
             raise CapabilityError("training_data_scope_unavailable")
-        if job is None:
-            return JobReceipt(intent, JobState.UNKNOWN, "", "")
-        if job.intent != intent or (
-            job.state is not JobState.UNKNOWN and (not job.job_ref or not job.evidence_ref)
-        ):
-            raise CapabilityError("model_job_receipt_mismatched")
-        return job
+        return _job_receipt(intent, job)
 
     def collect_candidate(self, actor: str, job: JobReceipt) -> Candidate:
         """Return candidate metadata only after matching the recorded completed job."""
@@ -350,6 +392,8 @@ class Preflight:
             raise CapabilityError("candidate_lineage_unverified") from None
         if self._grant(actor, intent.binding, Purpose.TRAINING) != grant:
             raise CapabilityError("training_data_scope_unavailable")
+        if self.clock() >= observed.expires_at:
+            raise CapabilityError("model_capability_evidence_stale_or_mismatched")
         verify_candidate(job, candidate)
         return candidate
 
@@ -378,6 +422,18 @@ class Preflight:
                 continue
             visible[field] = evidence
         return visible
+
+
+def _job_receipt(intent: FitIntent, job: JobReceipt | None) -> JobReceipt:
+    if job is None:
+        return JobReceipt(intent, JobState.UNKNOWN, "", "")
+    if (
+        job.intent != intent
+        or not isinstance(job.state, JobState)
+        or (job.state is not JobState.UNKNOWN and (not job.job_ref or not job.evidence_ref))
+    ):
+        raise CapabilityError("model_job_receipt_mismatched")
+    return job
 
 
 def _within(estimate: FitBound, limit: FitBound) -> bool:

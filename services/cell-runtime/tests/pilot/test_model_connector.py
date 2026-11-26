@@ -1,6 +1,7 @@
 import sqlite3
-from contextlib import closing, nullcontext
+from contextlib import closing, contextmanager, nullcontext
 from dataclasses import replace
+from hashlib import sha256
 from unittest.mock import Mock
 
 import pytest
@@ -291,6 +292,8 @@ def test_lookup_denies_foreign_benchmark_and_substituted_job_receipt(setup_conne
 
 def test_generated_backend_recovery_after_committed_but_lost_reply(setup_connector, tmp_path):
     initial, adapter, _, intent, clock = setup_connector
+    payload = b"generated-development"
+    intent = replace(intent, development_digest=sha256(payload).hexdigest())
     store = tmp_path / "generated-provider.sqlite3"
     with closing(sqlite3.connect(store)) as db:
         db.execute(
@@ -331,26 +334,95 @@ def test_generated_backend_recovery_after_committed_but_lost_reply(setup_connect
                 )
         raise TimeoutError
 
-    adapter.submit.side_effect = submit
-    estimate = initial.prepare("training", intent)
-    assert estimate.maximum_minor_units <= intent.bound.maximum_minor_units
-    with pytest.raises(TimeoutError):
-        adapter.submit(intent, b"generated-development")
+    reserved = False
+
+    @contextmanager
+    def reservation_guard():
+        nonlocal reserved
+        reserved = True
+        try:
+            yield
+        finally:
+            reserved = False
+
+    def submit_reserved(selected, development):
+        assert reserved
+        return submit(selected, development)
+
+    adapter.serialize_development.return_value = payload
+    adapter.submit.side_effect = submit_reserved
+    adapter.lookup.side_effect = lookup
+    admitted = initial.submit_reserved_fit(
+        "training", intent, ({"permitted": "generated-value"},), reservation_guard=reservation_guard
+    )
+    assert admitted.job_ref == "generated-single-job"
+    adapter.submit.assert_called_once_with(intent, payload)
+    adapter.lookup.assert_called_once_with(intent)
+    assert not reserved
 
     restarted_backend = Mock(spec=models.Connector)
     restarted_backend.lookup.side_effect = lookup
     restarted = models.Preflight(restarted_backend, initial.current_grant, clock=clock)
-    admitted = restarted.reconcile_fit("training", intent)
-    assert admitted.job_ref == "generated-single-job"
     assert restarted.reconcile_fit("training", intent) == admitted
-    assert adapter.submit(intent, b"generated-development") == admitted
+    assert restarted.reconcile_fit("training", intent) == admitted
+    assert submit(intent, payload) == admitted
     with pytest.raises(ValueError, match="generated_intent_conflict"):
-        adapter.submit(
-            replace(intent, development_digest="different-intent"), b"changed-development"
-        )
+        submit(replace(intent, development_digest="different-intent"), b"changed-development")
     restarted_backend.submit.assert_not_called()
     with closing(sqlite3.connect(store)) as db:
         assert db.execute("SELECT COUNT(*) FROM admitted").fetchone() == (1,)
+
+
+def test_reserved_dispatch_rechecks_grant_before_transfer(setup_connector):
+    preflight, adapter, grants, intent, _ = setup_connector
+    payload = b"generated-development"
+    intent = replace(intent, development_digest=sha256(payload).hexdigest())
+    adapter.serialize_development.return_value = payload
+
+    @contextmanager
+    def revoked_reservation():
+        del grants[models.Purpose.TRAINING]
+        yield
+
+    with pytest.raises(models.CapabilityError, match="model_capability_unavailable"):
+        preflight.submit_reserved_fit(
+            "training", intent, ({"permitted": "value"},), reservation_guard=revoked_reservation
+        )
+    adapter.submit.assert_not_called()
+    adapter.lookup.assert_not_called()
+
+
+def test_reserved_dispatch_rejects_wrong_payload_scope_and_digest(setup_connector):
+    preflight, adapter, _, intent, _ = setup_connector
+    adapter.serialize_development.return_value = b"different-generated-payload"
+    with pytest.raises(models.CapabilityError, match="training_data_scope_unavailable"):
+        preflight.submit_reserved_fit(
+            "training",
+            intent,
+            ({"permitted": "value", "holdout": "private"},),
+            reservation_guard=nullcontext,
+        )
+    adapter.serialize_development.assert_not_called()
+    with pytest.raises(models.CapabilityError, match="training_payload_invalid"):
+        preflight.submit_reserved_fit(
+            "training", intent, ({"permitted": "value"},), reservation_guard=nullcontext
+        )
+    adapter.submit.assert_not_called()
+
+
+def test_reserved_dispatch_with_no_verified_reply_remains_unknown(setup_connector):
+    preflight, adapter, _, intent, _ = setup_connector
+    payload = b"generated-development"
+    intent = replace(intent, development_digest=sha256(payload).hexdigest())
+    adapter.serialize_development.return_value = payload
+    adapter.submit.side_effect = TimeoutError
+    adapter.lookup.return_value = None
+    state = preflight.submit_reserved_fit(
+        "training", intent, ({"permitted": "value"},), reservation_guard=nullcontext
+    )
+    assert state == models.JobReceipt(intent, models.JobState.UNKNOWN, "", "")
+    adapter.submit.assert_called_once_with(intent, payload)
+    adapter.lookup.assert_called_once_with(intent)
 
 
 def test_local_installation_probe_has_only_metadata_and_checks_pinned_hashes(monkeypatch, tmp_path):
