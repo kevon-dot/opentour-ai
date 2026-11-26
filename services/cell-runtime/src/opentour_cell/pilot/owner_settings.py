@@ -15,7 +15,7 @@ import os
 import sqlite3
 import tempfile
 import time
-from contextlib import ExitStack
+from contextlib import ExitStack, nullcontext
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +28,7 @@ from opentour_cell.pilot.training import LocalTrainingStore
 
 Json = dict[str, Any]
 AUTHORITY = "opentour.pilot.owner-settings-authority.v1"
+REPLACEMENT_AUTHORITY = "opentour.pilot.owner-settings-authority.v2"
 CLAIM = "opentour.pilot.owner-settings-save.v1"
 RECEIPT = "opentour.pilot.owner-settings-receipt.v1"
 EXCLUSIONS = [
@@ -110,8 +111,10 @@ class OwnerSettings:
 
     def _authority(self, actor: str, *, save: bool = False) -> Json:
         a = _read(self.authority_file)
+        replacement_keys = {"workflow_owner_public_key_file", "workflow_owner_public_key_sha256"}
+        replacement = a.get("schema_version") == REPLACEMENT_AUTHORITY
         _need(
-            set(a)
+            set(a) - (replacement_keys if replacement else set())
             == {
                 "schema_version",
                 "organization",
@@ -126,7 +129,8 @@ class OwnerSettings:
                 "initial_mandate",
                 "workflow_owner",
             }
-            and a["schema_version"] == AUTHORITY
+            and a["schema_version"] in {AUTHORITY, REPLACEMENT_AUTHORITY}
+            and (not replacement or replacement_keys <= set(a))
             and (a["organization"], a["engagement"]) == (self.organization, self.engagement),
             "settings_authority_scope_mismatch",
         )
@@ -277,7 +281,24 @@ class OwnerSettings:
             result["pair_revision"] = found["pair_revision"]
         return result
 
-    def preview(self, policy: Json | None, *, actor: str, action: str = "save") -> Json:
+    def preview(
+        self,
+        policy: Json | None,
+        *,
+        actor: str,
+        action: str = "save",
+        assignment_revision: str | None = None,
+    ) -> Json:
+        if action == "replace_reviewer":
+            from opentour_cell.pilot.reviewer_assignment import ReviewerAssignments
+
+            _need(
+                isinstance(policy, dict) and isinstance(assignment_revision, str),
+                "saved_owner_assignment_required",
+            )
+            assert isinstance(policy, dict) and isinstance(assignment_revision, str)
+            return ReviewerAssignments(self).preview_save(policy, assignment_revision, actor=actor)
+        _need(assignment_revision is None, "unexpected_owner_assignment")
         a = self._authority(actor, save=True)
         _need(action in {"save", "renew", "pause", "revoke"}, "invalid_settings_action")
         with self.ledger._authorized_db(write=False) as db:
@@ -340,6 +361,7 @@ class OwnerSettings:
         _need(
             isinstance(claim, dict)
             and set(claim)
+            - ({"assignment_revision"} if claim.get("action") == "replace_reviewer" else set())
             == {
                 "schema_version",
                 "organization",
@@ -354,6 +376,10 @@ class OwnerSettings:
                 "expires_at",
             }
             and claim["schema_version"] == CLAIM
+            and (
+                claim.get("action") != "replace_reviewer"
+                or isinstance(claim.get("assignment_revision"), str)
+            )
             and (claim["organization"], claim["engagement"], claim["actor"])
             == (self.organization, self.engagement, a["custodian"])
             and claim["authority_revision"] == digest(a),
@@ -392,16 +418,35 @@ class OwnerSettings:
         packet = parse_manifest(encoded)  # Freeze caller-owned objects before signature validation.
         claim, authority = self._verify(packet, actor)
         action, p = claim["action"], claim["policy"]
-        _need(action in {"save", "renew", "pause", "revoke"}, "invalid_settings_action")
-        changing = action in {"save", "renew"}
+        _need(
+            action in {"save", "renew", "pause", "revoke", "replace_reviewer"},
+            "invalid_settings_action",
+        )
+        changing = action in {"save", "renew", "replace_reviewer"}
+        replacement = None
+        serialization = None
+        if changing and authority["schema_version"] == REPLACEMENT_AUTHORITY:
+            from opentour_cell.pilot.reviewer_assignment import ReviewerAssignments
+
+            serialization = ReviewerAssignments(self)
+        if action == "replace_reviewer":
+            from opentour_cell.pilot.reviewer_assignment import ReviewerAssignments
+
+            replacement = ReviewerAssignments(self)
         if changing:
             p = self._policy(p, authority)
             _need(p == claim["policy"], "noncanonical_settings_policy")
             _need(self._live(p, discover=True) == claim["binding"], "settings_live_binding_changed")
         revision = digest(claim)
-        # Acquire training -> mandate -> lease, but commit the settings transaction
+        # All v2 changing saves take approval -> training -> mandate -> lease,
+        # even before replacement history exists; never decide from a stale ledger read.
+        # Commit the settings transaction
         # before releasing the lease. The empty stack changes no acquisition order.
-        with ExitStack() as guards, self.ledger._authorized_db() as db:
+        with (
+            ExitStack() as guards,
+            serialization.serialized() if serialization else nullcontext(),
+            self.ledger._authorized_db() as db,
+        ):
             # Repeat authentication and revocation after acquiring the admission writer lock.
             self._verify(packet, actor)
             _need(self.ledger._owner(db) == actor, "settings_owner_mismatch")
@@ -433,10 +478,15 @@ class OwnerSettings:
                     p["agreement"]["connection_revision"],
                 )
                 guards.enter_context(workplace._claim_lease(self.store, cfg, False)())
-                _need(
-                    not prior_spec or prior_spec["reviewer"] == p["mandate"]["reviewer"],
-                    "reviewer_replacement_settings_required",
-                )
+                if replacement:
+                    assignment = replacement.check_save(
+                        db, claim["assignment_revision"], p, actor=actor
+                    )
+                else:
+                    _need(
+                        not prior_spec or prior_spec["reviewer"] == p["mandate"]["reviewer"],
+                        "reviewer_replacement_settings_required",
+                    )
                 _need(prior != p["mandate"]["mandate_id"], "fresh_mandate_identifier_required")
                 _need(
                     not db.execute(
@@ -520,6 +570,21 @@ class OwnerSettings:
                 if prior
                 else None,
             }
+            if replacement:
+                receipt["reviewer_replacement"] = replacement.record_replacement(
+                    db, assignment, receipt
+                )
+            elif changing and head is not None:
+                # The import is needed only when the private ledger has replacement history.
+                if db.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' "
+                    "AND name='reviewer_replacements'"
+                ).fetchone():
+                    from opentour_cell.pilot.reviewer_assignment import ReviewerAssignments
+
+                    continued = ReviewerAssignments(self).carry_forward(db, head, receipt)
+                    if continued is not None:
+                        receipt["reviewer_replacement"] = continued
             db.execute(
                 "INSERT INTO owner_settings_revisions VALUES(?,?,?,?)",
                 (self.ledger.scope, revision, canonical(packet), canonical(receipt)),
@@ -595,7 +660,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--authority", type=Path, required=True)
     parser.add_argument("--actor", required=True)
     parser.add_argument("--input", type=Path)
-    parser.add_argument("--action", choices=("save", "renew", "pause", "revoke"), default="save")
+    parser.add_argument(
+        "--action", choices=("save", "renew", "pause", "revoke", "replace_reviewer"), default="save"
+    )
+    parser.add_argument("--assignment-revision")
     args = parser.parse_args(argv)
     try:
         service = OwnerSettings(
@@ -603,7 +671,12 @@ def main(argv: list[str] | None = None) -> int:
         )
         value = _read(args.input) if args.input else None
         if args.command == "preview":
-            result = service.preview(value, actor=args.actor, action=args.action)
+            result = service.preview(
+                value,
+                actor=args.actor,
+                action=args.action,
+                assignment_revision=args.assignment_revision,
+            )
         elif args.command == "status":
             result = service.inspect(actor=args.actor)
         else:
