@@ -29,6 +29,11 @@ SESSION_SECONDS = 900
 RESULT_PAGE_SIZE = 12
 SLACK_ID = re.compile(r"[A-Z][A-Z0-9]{2,31}\Z")
 LOCAL_ID = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}\Z")
+# Only a complete, read-only question may select a frozen comparison.
+REGRESSION_QUESTION = re.compile(
+    r"(?:what (?:got|became) worse|(?:which|what) (?:cases|decisions|answers) "
+    r"(?:(?:got|became) (?:worse|wrong|incorrect)|regressed))\??"
+)
 ROLES = {"inspect", "tune", "review"}
 CALLBACKS = {"ot_dataset_search", "ot_tune_preview", "ot_tune_start", "ot_prompt_enter"}
 ACTIONS = {
@@ -1492,6 +1497,32 @@ class Workbench:
             return
         self._browse(cfg, actor, view, source, search=query, old_hash=old_hash)
 
+    def _regression_picker(
+        self, cfg: Settings, actor: str, view: str, old_hash: str = "", page: int = 0
+    ) -> None:
+        policy = self._policy(cfg, actor)
+        eligible = []
+        if cfg.permission(actor, "inspect")["aggregate"]:
+            for dataset, source in self._result_sources(cfg, actor):
+                target = self._readout(cfg, actor, source)
+                if target and self.journal.inspected(actor, target.revision, policy):
+                    eligible.append((dataset, source, target.revision))
+        page = max(0, min(page, (len(eligible) - 1) // RESULT_PAGE_SIZE))
+        start = page * RESULT_PAGE_SIZE
+        rows = eligible[start : start + RESULT_PAGE_SIZE]
+        current = self.settings()
+        current.permission(actor, "inspect")
+        _check(self._policy(current, actor) == policy)
+        listing = {"page": page, "items": {revision: source for _, source, revision in rows}}
+        ctx = self.journal.context(actor, cfg.channel, view, "regressions", revision=_json(listing))
+        self._show(
+            view,
+            self.views.regression_picker(
+                ctx, rows, previous=bool(page), more=start + len(rows) < len(eligible)
+            ),
+            old_hash,
+        )
+
     def _questions(
         self,
         cfg: Settings,
@@ -2060,6 +2091,22 @@ class Workbench:
         elif action == "ot_readouts":
             self._results(cfg, actor, view, old_hash)
         elif action in {"ot_result_prev", "ot_result_next", "ot_result_open"}:
+            if ctx["kind"] == "regressions":
+                listing = json.loads(ctx["revision"])
+                if action == "ot_result_open":
+                    _check(value in listing["items"])
+                    source = listing["items"][value]
+                    _check(source in {s for _, s in self._result_sources(cfg, actor)})
+                    self._questions(cfg, actor, view, source, value, "changes", old_hash)
+                else:
+                    self._regression_picker(
+                        cfg,
+                        actor,
+                        view,
+                        old_hash,
+                        listing["page"] + (1 if action == "ot_result_next" else -1),
+                    )
+                return
             _check(ctx["kind"] == "results")
             listing = json.loads(ctx["revision"])
             if action == "ot_result_open":
@@ -2446,6 +2493,9 @@ class Workbench:
             return
         if command in {"", "status", "review"} and not argument:
             self._results(cfg, actor, view)
+            return
+        if REGRESSION_QUESTION.fullmatch(" ".join(prompt.casefold().split())):
+            self._regression_picker(cfg, actor, view)
             return
         if command == "ask":
             aliases = {
