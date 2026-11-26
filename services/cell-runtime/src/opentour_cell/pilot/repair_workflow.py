@@ -316,6 +316,16 @@ def _model_arm(
         # SQLite WAL readers do not prevent a concurrent writer from withdrawing.
         return domain.engagement_guard(engagement_id=manifest["engagement"])
 
+    if not (work / "model").exists():
+        open_weight.inspect_open_weight_installation(
+            work / "model",
+            base,
+            grant=grant,
+            python=python,
+            check_permission=check_permission,
+            dispatch=dispatch,
+        )
+
     registry = None
     if grant.get("authority_kind") == "standing_customer_mandate":
         from opentour_cell.pilot.learning_mandate import LearningMandates
@@ -353,6 +363,7 @@ def _model_arm(
         python=python,
         check_permission=check_permission,
         dispatch=dispatch,
+        expected_artifact_sha256=model["artifact_sha256"],
     )
     return model, {
         row["case_id"]: decision for row, decision in zip(protected, inferred, strict=True)

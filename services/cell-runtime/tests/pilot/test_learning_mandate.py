@@ -291,10 +291,16 @@ class TestLearningMandate(unittest.TestCase):
                 )
                 with self.assertRaisesRegex(sqlite3.OperationalError, "locked"):
                     db.execute("BEGIN IMMEDIATE")
+
+        def inspect_fit_dispatch(*args: Any, **kwargs: Any) -> None:
+            inspect_dispatch(*args, **kwargs)
             raise TrainingError("generated_dispatch_checked")
 
         with (
-            patch.object(open_weight, "fit_open_weight", side_effect=inspect_dispatch),
+            patch.object(
+                open_weight, "inspect_open_weight_installation", side_effect=inspect_dispatch
+            ) as inspect_installation,
+            patch.object(open_weight, "fit_open_weight", side_effect=inspect_fit_dispatch),
             self.assertRaisesRegex(TrainingError, "generated_dispatch_checked"),
         ):
             repair_workflow._model_arm(
@@ -308,6 +314,7 @@ class TestLearningMandate(unittest.TestCase):
                 [],
                 lambda: None,
             )
+        inspect_installation.assert_called_once()
 
     def test_numeric_publication_uses_wal_fence_and_cleans_withdrawn_staging(self) -> None:
         with closing(sqlite3.connect(self.store.path)) as db:
