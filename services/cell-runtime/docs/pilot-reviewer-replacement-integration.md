@@ -29,8 +29,8 @@ PEM files. One identity may use both roles only when each is explicitly bound.
 The new owner key fields are accepted only in authority v2; v1 does not imply owner
 assignment authority from possession of a custodian key.
 
-Every v2 changing settings save, including ordinary renewals, takes the approval
-serialization lock before the engagement and
+Every changing settings save, including ordinary renewals and v1 authority
+downgrades, takes the approval serialization lock before the engagement and
 mandate writers. The new settings head, withdrawal of prior execution authority,
 immutable replacement generation and one reconciliation intent per affected
 proposal share a mandate transaction. Approval-journal/file projections are not

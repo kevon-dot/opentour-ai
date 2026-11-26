@@ -10,12 +10,14 @@ from __future__ import annotations
 import argparse
 import base64
 import binascii
+import fcntl
 import json
 import os
 import sqlite3
 import tempfile
 import time
-from contextlib import ExitStack, nullcontext
+from collections.abc import Iterator
+from contextlib import ExitStack, contextmanager, nullcontext
 from pathlib import Path
 from typing import Any
 
@@ -24,7 +26,7 @@ from opentour_cell.pilot import workplace_context as workplace
 from opentour_cell.pilot.learning_mandate import LearningMandates, _normalized
 from opentour_cell.pilot.operating_point import canonical, digest
 from opentour_cell.pilot.readout import parse_manifest
-from opentour_cell.pilot.training import LocalTrainingStore
+from opentour_cell.pilot.training import LocalTrainingStore, _check_file
 
 Json = dict[str, Any]
 AUTHORITY = "opentour.pilot.owner-settings-authority.v1"
@@ -108,6 +110,16 @@ class OwnerSettings:
                 "(scope TEXT, revision TEXT, packet TEXT, receipt TEXT, "
                 "PRIMARY KEY(scope,revision))"
             )
+
+    @contextmanager
+    def _approval_serialized(self) -> Iterator[None]:
+        """Share approval ordering without requiring replacement support for v1."""
+        path = self.directory / "zapier-reconciliation.lock"
+        fd = os.open(path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(fd, "rb") as lock:
+            _check_file(path)
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            yield
 
     def _authority(self, actor: str, *, save: bool = False) -> Json:
         a = _read(self.authority_file)
@@ -424,11 +436,6 @@ class OwnerSettings:
         )
         changing = action in {"save", "renew", "replace_reviewer"}
         replacement = None
-        serialization = None
-        if changing and authority["schema_version"] == REPLACEMENT_AUTHORITY:
-            from opentour_cell.pilot.reviewer_assignment import ReviewerAssignments
-
-            serialization = ReviewerAssignments(self)
         if action == "replace_reviewer":
             from opentour_cell.pilot.reviewer_assignment import ReviewerAssignments
 
@@ -438,13 +445,12 @@ class OwnerSettings:
             _need(p == claim["policy"], "noncanonical_settings_policy")
             _need(self._live(p, discover=True) == claim["binding"], "settings_live_binding_changed")
         revision = digest(claim)
-        # All v2 changing saves take approval -> training -> mandate -> lease,
+        # All changing saves take approval -> training -> mandate -> lease,
         # even before replacement history exists; never decide from a stale ledger read.
-        # Commit the settings transaction
-        # before releasing the lease. The empty stack changes no acquisition order.
+        # Commit before releasing the lease; the empty stack changes no acquisition order.
         with (
             ExitStack() as guards,
-            serialization.serialized() if serialization else nullcontext(),
+            self._approval_serialized() if changing else nullcontext(),
             self.ledger._authorized_db() as db,
         ):
             # Repeat authentication and revocation after acquiring the admission writer lock.

@@ -9,7 +9,6 @@ from __future__ import annotations
 import argparse
 import base64
 import binascii
-import fcntl
 import json
 import os
 import re
@@ -26,7 +25,7 @@ from opentour_cell.pilot.learning_mandate import LearningMandates
 from opentour_cell.pilot.operating_point import canonical, digest
 from opentour_cell.pilot.owner_settings import OwnerSettings, SettingsError, _need
 from opentour_cell.pilot.readout import parse_manifest
-from opentour_cell.pilot.training import LocalTrainingStore, _check_file
+from opentour_cell.pilot.training import LocalTrainingStore
 
 Json = dict[str, Any]
 AUTHORITY = "opentour.pilot.owner-settings-authority.v2"
@@ -258,11 +257,7 @@ class ReviewerAssignments:
     @contextmanager
     def serialized(self) -> Iterator[None]:
         """Use the existing approval lock before the engagement/mandate writers."""
-        path = self.settings.directory / "zapier-reconciliation.lock"
-        fd = os.open(path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
-        with os.fdopen(fd, "rb") as lock:
-            _check_file(path)
-            fcntl.flock(lock, fcntl.LOCK_EX)
+        with self.settings._approval_serialized():
             yield
 
     def check_save(
