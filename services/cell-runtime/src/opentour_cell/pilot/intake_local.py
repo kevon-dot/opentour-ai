@@ -43,6 +43,10 @@ STARTER_PURPOSE = "starter_policy_draft"
 MAX_SELECTION_BYTES = 4096
 
 
+class HistoricalSourceExpired(IntakeError):
+    """The authenticated launcher's selected historical source grant expired."""
+
+
 def _selected_json(path: Path) -> dict[str, Any]:
     if (
         not path.is_absolute()
@@ -154,22 +158,9 @@ class LocalHistoricalAuthority(_LocalAuthority):
                     selection.mandate_id, selection.source_run_id, actor=actor.actor
                 ) as grant,
             ):
-                bound = source_intake._BoundEngagement(
-                    self.store.path, selection.tenant, selection.engagement_epoch
-                )
-                source_grant = source_intake._scope(
-                    bound, self.path.parent / f"cycle-source-{selection.source_run_id}.json"
-                )
                 source = grant["source_request"]
                 if (
-                    HistoricalSelection.read(self.path) != selection
-                    or source_grant.get("delegation")
-                    != {
-                        "authority_kind": grant["authority_kind"],
-                        "run_id": selection.source_run_id,
-                        "delegate": actor.actor,
-                    }
-                    or grant["mandate_revision"] != selection.mandate_revision
+                    grant["mandate_revision"] != selection.mandate_revision
                     or grant["agreement_revision"] != selection.policy_revision
                     or source["workflow"] != selection.workflow_ref
                     or source["trace_source"] != selection.trace_source
@@ -177,6 +168,25 @@ class LocalHistoricalAuthority(_LocalAuthority):
                     or source["trace_sha256"] != selection.source_revision
                     or source["correction_sha256"] != selection.correction_revision
                 ):
+                    raise IntakeError("intake_unavailable")
+                bound = source_intake._BoundEngagement(
+                    self.store.path, selection.tenant, selection.engagement_epoch
+                )
+                try:
+                    source_intake._scope(
+                        bound,
+                        self.path.parent / f"cycle-source-{selection.source_run_id}.json",
+                        expected_delegation={
+                            "authority_kind": grant["authority_kind"],
+                            "run_id": selection.source_run_id,
+                            "delegate": actor.actor,
+                        },
+                    )
+                except source_intake.BoundSourceGrantExpired as error:
+                    if HistoricalSelection.read(self.path) != selection:
+                        raise IntakeError("intake_unavailable") from error
+                    raise HistoricalSourceExpired("intake_expired") from error
+                if HistoricalSelection.read(self.path) != selection:
                     raise IntakeError("intake_unavailable")
                 token = self._scope.set(
                     AuthorizedSource(
@@ -400,6 +410,9 @@ def main(argv: list[str] | None = None) -> int:
         with authority.guard(authority.principal):
             admission = DurableIntake(args.selection.parent, authority)
         return serve_intake(authority.principal, admission, sys.stdin.buffer, sys.stdout.buffer)
+    except HistoricalSourceExpired as error:
+        print(str(error), file=sys.stderr)
+        return 2
     except (IntakeError, ManifestError, MandateError, OSError, sqlite3.Error, TrainingError):
         print("private_intake_selection_unavailable", file=sys.stderr)
         return 2
