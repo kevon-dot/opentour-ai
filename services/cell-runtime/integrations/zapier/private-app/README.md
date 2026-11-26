@@ -83,7 +83,9 @@ app_dir="$PWD"
 repo_root="$(git rev-parse --show-toplevel)"
 source_head="$(git rev-parse HEAD)"
 stage_dir="$(mktemp -d)"
-git -C "$repo_root" archive "$source_head:services/cell-runtime/integrations/zapier/private-app" | tar -x -C "$stage_dir"
+git -C "$repo_root" archive --format=tar --output="$stage_dir/app.tar" "${source_head}:services/cell-runtime/integrations/zapier/private-app"
+tar -xf "$stage_dir/app.tar" -C "$stage_dir"
+rm "$stage_dir/app.tar"
 cd "$stage_dir"
 npm ci --offline --omit=dev --ignore-scripts --no-audit --no-fund --workspaces=false
 node --test test/*.test.js
