@@ -12,7 +12,7 @@ from opentour_cell.pilot.intake_admission import DurableIntake
 from opentour_cell.pilot.intake_local import open_intake
 from opentour_cell.pilot.intake_mcp import IntakeError, IntakePrincipal, parse_intake, serve_intake
 from opentour_cell.pilot.live_authority import SCHEMA, LocalLiveIntake, PrivateLiveAuthority
-from opentour_cell.pilot.live_evidence import LiveEvidence, _canonical, grant_digest
+from opentour_cell.pilot.live_evidence import LiveEvidence, _canonical, binding_candidate
 from opentour_cell.pilot.mcp import PROTOCOL_VERSION
 from test_intake_mcp import STARTER, _starter_only, _write_private
 from test_live_evidence import DECISION, OUTCOME
@@ -117,7 +117,8 @@ def test_explicit_custodian_role_and_stale_candidate(tmp_path: Path):
     case.connect()
     with pytest.raises(IntakeError, match="data_custodian_required"):
         case.live.save_binding(case.owner, case.workflow, "truth")
-    expected = grant_digest(OUTCOME)
+    with case.authority.guard(case.custodian, case.workflow) as scope:
+        expected = binding_candidate(case.custodian, scope, OUTCOME)
     case.body["grants"][1]["revision"] = "successor-truth"
     case.write()
     before = case.live.path.read_bytes()
@@ -125,6 +126,29 @@ def test_explicit_custodian_role_and_stale_candidate(tmp_path: Path):
         case.live.save_binding(case.custodian, case.workflow, "truth", expected_revision=expected)
     assert case.live.path.read_bytes() == before
     assert case.live.current_bindings(case.owner, case.workflow)[0][1].resource == "decisions"
+
+
+def test_stale_candidate_cannot_retarget_to_new_dataset(tmp_path: Path):
+    case = SignedCase(tmp_path / "worker")
+    case.connect()
+    with case.authority.guard(case.custodian, case.workflow) as scope:
+        expected = binding_candidate(case.custodian, scope, OUTCOME)
+    case.body["dataset_ref"] = "new-dataset"
+    case.write()
+    before = case.live.path.read_bytes()
+    with pytest.raises(IntakeError):
+        case.live.save_binding(case.custodian, case.workflow, "truth", expected_revision=expected)
+    assert case.live.path.read_bytes() == before
+
+
+def test_intake_catalog_before_first_saved_binding_is_read_only_empty(tmp_path: Path):
+    case = SignedCase(tmp_path / "worker")
+    assert case.intake().discover_sources(case.actor, limit=1, cursor=None).sources == ()
+    assert not case.live.path.exists()
+    Path(str(case.live.path) + "-journal").touch(mode=0o600)
+    with pytest.raises(IntakeError):
+        case.intake().discover_sources(case.actor, limit=1, cursor=None)
+    assert not case.live.path.exists()
 
 
 @pytest.mark.parametrize(

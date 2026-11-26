@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hmac
+import os
 import re
 import time
 from collections.abc import Iterator
@@ -20,7 +21,13 @@ from opentour_cell.pilot.intake_mcp import (
     Starter,
     require_ref,
 )
-from opentour_cell.pilot.live_evidence import FeedGrant, LiveEvidence, LiveScope, _canonical
+from opentour_cell.pilot.live_evidence import (
+    FeedGrant,
+    LiveEvidence,
+    LiveScope,
+    _canonical,
+    _digest,
+)
 from opentour_cell.pilot.onboarding_mcp import _read_private
 from opentour_cell.pilot.receipt_recovery import _open_db
 from opentour_cell.pilot.training import LocalTrainingStore
@@ -141,6 +148,7 @@ class PrivateLiveAuthority:
                 "inspect" in roles,
                 body["custodian"],
                 body["expires_at"],
+                _digest(body),
             )
             yield scope
             _require(self._document() == body)
@@ -190,16 +198,24 @@ class LocalLiveIntake:
 
     def discover(self, actor: IntakePrincipal, *, limit: int, cursor: str | None) -> CatalogPage:
         _require(type(limit) is int and 1 <= limit <= 50)
-        with (
-            self.authority.guard(actor, self.authority.workflow_ref) as scope,
-            self.live._db() as db,
-        ):
+        with self.authority.guard(actor, self.authority.workflow_ref) as scope:
             _require(scope.can_ingest)
-            rows = db.execute(
-                "SELECT ref FROM live_bindings WHERE tenant=? AND workflow=? AND epoch=? "
-                "AND successor IS NULL ORDER BY ref",
-                (scope.tenant, scope.workflow_ref, scope.engagement_epoch),
-            ).fetchall()
+            try:
+                with self.live._db() as db:
+                    rows = db.execute(
+                        "SELECT ref FROM live_bindings WHERE tenant=? AND workflow=? AND epoch=? "
+                        "AND successor IS NULL ORDER BY ref",
+                        (scope.tenant, scope.workflow_ref, scope.engagement_epoch),
+                    ).fetchall()
+            except FileNotFoundError:
+                _require(
+                    not any(
+                        os.path.lexists(str(self.live.path) + suffix)
+                        for suffix in ("-wal", "-shm", "-journal")
+                    )
+                )
+                _require(cursor is None)
+                return CatalogPage(())
             feeds = []
             for row in rows:
                 binding = self.resolve(row[0], actor)
