@@ -90,6 +90,7 @@ class Grant:
     permitted_fields: frozenset[str]
     retention_until: int
     fit_bound: FitBound | None = None
+    benchmark_revisions: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -273,7 +274,7 @@ class Preflight:
         if (
             grant.revision != intent.grant_revision
             or not intent.fields <= grant.permitted_fields
-            or not intent.benchmark_revision
+            or intent.benchmark_revision not in grant.benchmark_revisions
             or not intent.development_digest
             or not intent.idempotency_key
         ):
@@ -301,6 +302,56 @@ class Preflight:
         if self.clock() >= observed.expires_at:
             raise CapabilityError("model_capability_evidence_stale_or_mismatched")
         return estimate
+
+    def reconcile_fit(self, actor: str, intent: FitIntent) -> JobReceipt:
+        """Look up an already submitted intent without creating or resending a job."""
+        grant = self._grant(actor, intent.binding, Purpose.TRAINING)
+        if (
+            grant.revision != intent.grant_revision
+            or intent.benchmark_revision not in grant.benchmark_revisions
+            or not intent.idempotency_key
+        ):
+            raise CapabilityError("training_data_scope_unavailable")
+        try:
+            job = self.connector.lookup(intent)
+        except (OSError, ValueError, LookupError):
+            job = None
+        if self._grant(actor, intent.binding, Purpose.TRAINING) != grant:
+            raise CapabilityError("training_data_scope_unavailable")
+        if job is None:
+            return JobReceipt(intent, JobState.UNKNOWN, "", "")
+        if job.intent != intent or (
+            job.state is not JobState.UNKNOWN and (not job.job_ref or not job.evidence_ref)
+        ):
+            raise CapabilityError("model_job_receipt_mismatched")
+        return job
+
+    def collect_candidate(self, actor: str, job: JobReceipt) -> Candidate:
+        """Return candidate metadata only after matching the recorded completed job."""
+        if job.state is not JobState.COMPLETED:
+            raise CapabilityError("candidate_lineage_unverified")
+        intent = job.intent
+        if self.reconcile_fit(actor, intent) != job:
+            raise CapabilityError("candidate_lineage_unverified")
+        grant = self._grant(actor, intent.binding, Purpose.TRAINING)
+        if (
+            grant.revision != intent.grant_revision
+            or intent.benchmark_revision not in grant.benchmark_revisions
+        ):
+            raise CapabilityError("training_data_scope_unavailable")
+        observed = self._observe(intent.binding, Purpose.TRAINING)
+        if observed.resolved_revision != intent.binding.immutable_revision:
+            raise CapabilityError("exact_training_target_unavailable")
+        if self._grant(actor, intent.binding, Purpose.TRAINING) != grant:
+            raise CapabilityError("training_data_scope_unavailable")
+        try:
+            candidate = self.connector.collect(job)
+        except (OSError, ValueError, LookupError):
+            raise CapabilityError("candidate_lineage_unverified") from None
+        if self._grant(actor, intent.binding, Purpose.TRAINING) != grant:
+            raise CapabilityError("training_data_scope_unavailable")
+        verify_candidate(job, candidate)
+        return candidate
 
     def capture(self, actor: str, binding: ModelBinding) -> dict[CaptureField, CaptureEvidence]:
         grant = self._grant(actor, binding, Purpose.INSPECTION)

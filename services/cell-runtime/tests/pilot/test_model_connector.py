@@ -56,6 +56,7 @@ def setup_connector():
             frozenset({"permitted"}),
             40,
             limit if purpose is models.Purpose.TRAINING else None,
+            frozenset({"benchmark-v1"}) if purpose is models.Purpose.TRAINING else frozenset(),
         )
         for purpose in models.Purpose
     }
@@ -252,6 +253,39 @@ def test_result_must_match_completed_job_and_exact_immutable_incumbent(setup_con
             models.verify_candidate(job, alternate)
     with pytest.raises(models.CapabilityError, match="candidate_lineage_unverified"):
         models.verify_candidate(replace(job, state=models.JobState.UNKNOWN), result)
+
+
+def test_lost_reply_recovers_same_operation_and_does_not_resubmit(setup_connector):
+    preflight, adapter, grants, intent, _ = setup_connector
+    job = models.JobReceipt(intent, models.JobState.COMPLETED, "original-job", "fit-evidence")
+    candidate = models.Candidate(intent, job.job_ref, "pinned-v1", "artifact-v2", "replay")
+    adapter.lookup.side_effect = [TimeoutError(), None, job, job]
+    adapter.collect.return_value = candidate
+    assert preflight.reconcile_fit("training", intent).state is models.JobState.UNKNOWN
+    assert preflight.reconcile_fit("training", intent).state is models.JobState.UNKNOWN
+    assert preflight.reconcile_fit("training", intent) == job
+    assert preflight.collect_candidate("training", job) == candidate
+    adapter.submit.assert_not_called()
+    assert all(call.args == (intent,) for call in adapter.lookup.call_args_list)
+    del grants[models.Purpose.TRAINING]
+    with pytest.raises(models.CapabilityError, match="model_capability_unavailable"):
+        preflight.reconcile_fit("training", intent)
+    assert adapter.lookup.call_count == 4
+
+
+def test_lookup_denies_foreign_benchmark_and_substituted_job_receipt(setup_connector):
+    preflight, adapter, _, intent, _ = setup_connector
+    foreign = replace(intent, benchmark_revision="foreign-benchmark")
+    with pytest.raises(models.CapabilityError, match="training_data_scope_unavailable"):
+        preflight.reconcile_fit("training", foreign)
+    adapter.lookup.assert_not_called()
+    adapter.lookup.return_value = models.JobReceipt(
+        foreign, models.JobState.COMPLETED, "same-provider-id", "different-evidence"
+    )
+    with pytest.raises(models.CapabilityError, match="model_job_receipt_mismatched"):
+        preflight.reconcile_fit("training", intent)
+    adapter.collect.assert_not_called()
+    adapter.submit.assert_not_called()
 
 
 def test_local_installation_probe_has_only_metadata_and_checks_pinned_hashes(monkeypatch, tmp_path):
