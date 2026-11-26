@@ -23,6 +23,7 @@ from opentour_cell.pilot.simple_repair import RepairError, membership, validate_
 PROFILE = "smollm2_135m_lora_v1"
 PROFILE_SHA256 = "4bf04f573c4d762f5c4288f56aca2e680ab00f9c57db183ef58dfbbbddb7804c"
 BASE_SHA256 = "5af571cbf074e6d21a03528d2330792e532ca608f24ac70a143f6b369968ab8c"
+TOKENIZER_SHA256 = "9ca9acddb6525a194ec8ac7a87f24fbba7232a9a15ffa1af0c1224fcd888e47c"
 REVISION = "12fd25f77366fa6b3b4b768ec3050bf629380bac"
 GRANTS = (
     "model_authorized",
@@ -238,8 +239,9 @@ def _run(
     request.update(
         model_dir=str(directory),
         max_seconds=grant["max_seconds"],
-        labels=grant["labels"],
     )
+    if request["operation"] != "inspect_installation":
+        request["labels"] = grant["labels"]
     env = {
         "LANG": "C.UTF-8",
         "OPENBLAS_NUM_THREADS": "1",
@@ -338,6 +340,38 @@ def inspect_open_weight(bundle: str | Path, *, grant: Mapping[str, Any]) -> dict
     """Check exact model identity, granted scope and saved adapter before allocating compute."""
     manifest, _ = _load(Path(bundle), _grant(grant))
     return manifest
+
+
+def inspect_open_weight_installation(
+    bundle: Path,
+    model_dir: Path,
+    *,
+    grant: Mapping[str, Any],
+    python: str | Path | None = None,
+    check_permission: Callable[[], None],
+    dispatch: Callable[[], AbstractContextManager[None]],
+) -> dict[str, Any]:
+    """Verify the authorized pinned local installation without examples or a fit."""
+    _grant(grant)
+    result = _run(
+        bundle,
+        model_dir,
+        grant,
+        python,
+        {"operation": "inspect_installation"},
+        check_permission=check_permission,
+        dispatch=dispatch,
+    )
+    if (
+        set(result)
+        != {"profile", "checkpoint_revision", "verified_base_sha256", "verified_tokenizer_sha256"}
+        or result["profile"] != PROFILE
+        or result["checkpoint_revision"] != REVISION
+        or result["verified_base_sha256"] != BASE_SHA256
+        or result["verified_tokenizer_sha256"] != TOKENIZER_SHA256
+    ):
+        raise OpenWeightError("open_weight_installation_evidence_invalid")
+    return result
 
 
 def fit_open_weight(

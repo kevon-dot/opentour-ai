@@ -223,6 +223,13 @@ def run(request: dict[str, Any], profile: dict[str, Any]) -> dict[str, Any]:
             if checksum(handle) != expected:
                 raise ValueError("staged_model_hash_mismatch")
             opened[name] = handle
+        if request["operation"] == "inspect_installation":
+            return {
+                "profile": profile["profile"],
+                "checkpoint_revision": profile["revision"],
+                "verified_base_sha256": profile["files"]["model.safetensors"],
+                "verified_tokenizer_sha256": profile["files"]["tokenizer.json"],
+            }
         tokenizer = tokenizers.Tokenizer.from_buffer(opened["tokenizer.json"].read())
         model = FrozenModel(
             np, opened["model.safetensors"], json.load(opened["config.json"]), stack

@@ -1,8 +1,10 @@
+from contextlib import nullcontext
 from dataclasses import replace
 from unittest.mock import Mock
 
 import pytest
 from opentour_cell.pilot import model_connector as models
+from opentour_cell.pilot import open_weight
 
 
 @pytest.fixture
@@ -171,6 +173,21 @@ def test_backend_fault_uses_fixed_reason_without_returning_private_payload(setup
     assert result.evidence_ref is None
 
 
+def test_capability_must_remain_current_while_estimate_is_prepared(setup_connector):
+    preflight, adapter, _, intent, clock = setup_connector
+    adapter.observe.return_value = replace(adapter.observe.return_value, expires_at=15)
+    good_estimate = adapter.estimate.return_value
+
+    def delayed_estimate(_):
+        clock.return_value = 15
+        return good_estimate
+
+    adapter.estimate.side_effect = delayed_estimate
+    with pytest.raises(models.CapabilityError, match="evidence_stale_or_mismatched"):
+        preflight.prepare("training", intent)
+    adapter.submit.assert_not_called()
+
+
 def test_capture_claims_require_separate_live_scope_and_field_evidence(setup_connector):
     preflight, adapter, grants, intent, _ = setup_connector
     seen = models.CaptureEvidence(models.Fidelity.OBSERVED, "application", "request", 30)
@@ -214,3 +231,50 @@ def test_result_must_match_completed_job_and_exact_immutable_incumbent(setup_con
             models.verify_candidate(job, alternate)
     with pytest.raises(models.CapabilityError, match="candidate_lineage_unverified"):
         models.verify_candidate(replace(job, state=models.JobState.UNKNOWN), result)
+
+
+def test_local_installation_probe_has_only_metadata_and_checks_pinned_hashes(monkeypatch, tmp_path):
+    grant = {
+        "profile": open_weight.PROFILE,
+        "organization": "generated-tenant",
+        "engagement": "generated-engagement",
+        "trainer": "generated-trainer",
+        "payer": "generated-custodian",
+        "destination": "generated-owner",
+        "rights_attestation": "generated-attestation",
+        "expires_at": 4102444800,
+        "residual_revision": "a" * 64,
+        "features": ["description"],
+        "labels": ["refund", "sale"],
+        "max_seconds": 5,
+        "max_cost_cents": 0,
+        "hourly_cost_cents": 0,
+        **dict.fromkeys(open_weight.GRANTS, True),
+    }
+    metadata = {
+        "profile": open_weight.PROFILE,
+        "checkpoint_revision": open_weight.REVISION,
+        "verified_base_sha256": open_weight.BASE_SHA256,
+        "verified_tokenizer_sha256": open_weight.TOKENIZER_SHA256,
+    }
+    worker = Mock(return_value=metadata)
+    monkeypatch.setattr(open_weight, "_run", worker)
+    permission = Mock()
+
+    def inspect():
+        return open_weight.inspect_open_weight_installation(
+            tmp_path / "uncreated-bundle",
+            tmp_path / "staged",
+            grant=grant,
+            check_permission=permission,
+            dispatch=nullcontext,
+        )
+
+    assert inspect() == metadata
+    assert worker.call_args.args[4] == {"operation": "inspect_installation"}
+    assert worker.call_args.kwargs["check_permission"] is permission
+    assert not (tmp_path / "uncreated-bundle").exists()
+    for field in ("checkpoint_revision", "verified_base_sha256", "verified_tokenizer_sha256"):
+        worker.return_value = {**metadata, field: "substituted"}
+        with pytest.raises(open_weight.OpenWeightError, match="installation_evidence_invalid"):
+            inspect()

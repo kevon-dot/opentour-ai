@@ -262,6 +262,8 @@ class Preflight:
             return Capability(State.NEEDS_CONFIGURATION, "exact_model_revision_unverified")
         if not observed.training_supported:
             return Capability(State.BENCHMARK_ONLY, "training_unavailable", exact)
+        if grant.fit_bound is None or not observed.hard_cost_cap:
+            return Capability(State.NEEDS_CONFIGURATION, "enforceable_training_budget_required")
         return Capability(
             State.TRAINABLE, "exact_training_target_observed", exact, observed.source_ref
         )
@@ -296,6 +298,8 @@ class Preflight:
             raise CapabilityError("known_training_cost_within_budget_required")
         if self._grant(actor, intent.binding, Purpose.TRAINING) != grant:
             raise CapabilityError("training_data_scope_unavailable")
+        if self.clock() >= observed.expires_at:
+            raise CapabilityError("model_capability_evidence_stale_or_mismatched")
         return estimate
 
     def capture(self, actor: str, binding: ModelBinding) -> dict[CaptureField, CaptureEvidence]:
