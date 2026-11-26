@@ -73,6 +73,13 @@ def setup_connector(request):
     return models.Preflight(connector, current_grant, clock=clock), connector, grants, intent, clock
 
 
+@pytest.fixture
+def with_disclosure(setup_connector):
+    _, _, grants, _, _ = setup_connector
+    grants[models.Purpose.DISCLOSURE] = replace(grants[models.Purpose.DISCLOSURE], actor="training")
+    return setup_connector
+
+
 def test_inference_only_authority_cannot_inspect_or_dispatch_training(setup_connector):
     preflight, adapter, grants, intent, _ = setup_connector
     del grants[models.Purpose.TRAINING]
@@ -290,8 +297,8 @@ def test_lookup_denies_foreign_benchmark_and_substituted_job_receipt(setup_conne
     adapter.submit.assert_not_called()
 
 
-def test_generated_backend_recovery_after_committed_but_lost_reply(setup_connector, tmp_path):
-    initial, adapter, _, intent, clock = setup_connector
+def test_generated_backend_recovery_after_committed_but_lost_reply(with_disclosure, tmp_path):
+    initial, adapter, _, intent, clock = with_disclosure
     payload = b"generated-development"
     intent = replace(intent, development_digest=sha256(payload).hexdigest())
     store = tmp_path / "generated-provider.sqlite3"
@@ -373,8 +380,8 @@ def test_generated_backend_recovery_after_committed_but_lost_reply(setup_connect
         assert db.execute("SELECT COUNT(*) FROM admitted").fetchone() == (1,)
 
 
-def test_reserved_dispatch_rechecks_grant_before_transfer(setup_connector):
-    preflight, adapter, grants, intent, _ = setup_connector
+def test_reserved_dispatch_rechecks_grant_before_transfer(with_disclosure):
+    preflight, adapter, grants, intent, _ = with_disclosure
     payload = b"generated-development"
     intent = replace(intent, development_digest=sha256(payload).hexdigest())
     adapter.serialize_development.return_value = payload
@@ -392,8 +399,8 @@ def test_reserved_dispatch_rechecks_grant_before_transfer(setup_connector):
     adapter.lookup.assert_not_called()
 
 
-def test_reserved_dispatch_rejects_wrong_payload_scope_and_digest(setup_connector):
-    preflight, adapter, _, intent, _ = setup_connector
+def test_reserved_dispatch_rejects_wrong_payload_scope_and_digest(with_disclosure):
+    preflight, adapter, _, intent, _ = with_disclosure
     adapter.serialize_development.return_value = b"different-generated-payload"
     with pytest.raises(models.CapabilityError, match="training_data_scope_unavailable"):
         preflight.submit_reserved_fit(
@@ -410,8 +417,8 @@ def test_reserved_dispatch_rejects_wrong_payload_scope_and_digest(setup_connecto
     adapter.submit.assert_not_called()
 
 
-def test_reserved_dispatch_with_no_verified_reply_remains_unknown(setup_connector):
-    preflight, adapter, _, intent, _ = setup_connector
+def test_reserved_dispatch_with_no_verified_reply_remains_unknown(with_disclosure):
+    preflight, adapter, _, intent, _ = with_disclosure
     payload = b"generated-development"
     intent = replace(intent, development_digest=sha256(payload).hexdigest())
     adapter.serialize_development.return_value = payload
@@ -423,6 +430,67 @@ def test_reserved_dispatch_with_no_verified_reply_remains_unknown(setup_connecto
     assert state == models.JobReceipt(intent, models.JobState.UNKNOWN, "", "")
     adapter.submit.assert_called_once_with(intent, payload)
     adapter.lookup.assert_called_once_with(intent)
+
+
+def test_remote_dispatch_requires_own_disclosure_grant(setup_connector):
+    preflight, adapter, _, intent, _ = setup_connector
+    capability = preflight.discover("training", intent.binding, models.Purpose.TRAINING)
+    assert (capability.state, capability.reason) == (
+        models.State.NEEDS_CONFIGURATION,
+        "training_disclosure_scope_unavailable",
+    )
+    with pytest.raises(models.CapabilityError, match="model_capability_unavailable"):
+        preflight.submit_reserved_fit(
+            "training", intent, ({"permitted": "value"},), reservation_guard=nullcontext
+        )
+    adapter.serialize_development.assert_not_called()
+    adapter.submit.assert_not_called()
+
+
+def test_remote_capability_with_exact_grant_and_disclosure_authority(with_disclosure):
+    preflight, adapter, _, intent, _ = with_disclosure
+    result = preflight.discover("training", intent.binding, models.Purpose.TRAINING)
+    assert result.state is models.State.TRAINABLE
+    assert result.exact_model_attribution
+    adapter.serialize_development.assert_not_called()
+    adapter.submit.assert_not_called()
+
+
+def test_remote_dispatch_rechecks_disclosure_authority_under_reservation(with_disclosure):
+    preflight, adapter, grants, intent, _ = with_disclosure
+    payload = b"generated-development"
+    intent = replace(intent, development_digest=sha256(payload).hexdigest())
+    adapter.serialize_development.return_value = payload
+
+    @contextmanager
+    def rotated_disclosure():
+        grant = grants[models.Purpose.DISCLOSURE]
+        grants[grant.purpose] = replace(grant, revision="grant-v2")
+        yield
+
+    with pytest.raises(models.CapabilityError, match="training_disclosure_scope_unavailable"):
+        preflight.submit_reserved_fit(
+            "training", intent, ({"permitted": "value"},), reservation_guard=rotated_disclosure
+        )
+    adapter.submit.assert_not_called()
+
+
+def test_discovery_requires_valid_grant_limits(setup_connector):
+    preflight, _, grants, intent, _ = setup_connector
+    grants[models.Purpose.TRAINING] = replace(
+        grants[models.Purpose.TRAINING], fit_bound=replace(intent.bound, maximum_seconds=0)
+    )
+    result = preflight.discover("training", intent.binding, models.Purpose.TRAINING)
+    assert result.state is models.State.NEEDS_CONFIGURATION
+    assert result.reason == "enforceable_training_budget_required"
+
+
+def test_discovery_with_evidence_expiring_during_authority_read_holds(setup_connector):
+    preflight, adapter, _, intent, clock = setup_connector
+    adapter.observe.return_value = replace(adapter.observe.return_value, expires_at=20)
+    clock.side_effect = [10, 10, 19, 20]
+    result = preflight.discover("training", intent.binding, models.Purpose.TRAINING)
+    assert result.state is models.State.NEEDS_CONFIGURATION
 
 
 def test_local_installation_probe_has_only_metadata_and_checks_pinned_hashes(monkeypatch, tmp_path):

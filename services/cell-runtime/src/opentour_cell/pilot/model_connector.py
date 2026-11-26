@@ -256,6 +256,8 @@ class Preflight:
             return Capability(State.NEEDS_CONFIGURATION, "model_capability_evidence_unavailable")
         if self._grant(actor, binding, purpose) != grant:
             raise CapabilityError("model_capability_unavailable")
+        if self.clock() >= observed.expires_at:
+            return Capability(State.NEEDS_CONFIGURATION, "model_capability_evidence_unavailable")
         exact = observed.resolved_revision == binding.immutable_revision
         if purpose is not Purpose.TRAINING:
             state = State.BENCHMARK_ONLY if observed.inference_supported else State.UNSUPPORTED
@@ -267,8 +269,27 @@ class Preflight:
             return Capability(State.NEEDS_CONFIGURATION, "exact_model_revision_unverified")
         if not observed.training_supported:
             return Capability(State.BENCHMARK_ONLY, "training_unavailable", exact)
-        if grant.fit_bound is None or not observed.hard_cost_cap:
+        if (
+            grant.fit_bound is None
+            or not _within(grant.fit_bound, grant.fit_bound)
+            or not observed.hard_cost_cap
+        ):
             return Capability(State.NEEDS_CONFIGURATION, "enforceable_training_budget_required")
+        if binding.route is not Route.LOCAL:
+            try:
+                disclosure = self._grant(actor, binding, Purpose.DISCLOSURE)
+            except CapabilityError:
+                disclosure = None
+            if disclosure is None or not grant.permitted_fields <= disclosure.permitted_fields:
+                return Capability(
+                    State.NEEDS_CONFIGURATION, "training_disclosure_scope_unavailable"
+                )
+            if self._grant(actor, binding, purpose) != grant:
+                raise CapabilityError("model_capability_unavailable")
+            if self.clock() >= observed.expires_at:
+                return Capability(
+                    State.NEEDS_CONFIGURATION, "model_capability_evidence_unavailable"
+                )
         return Capability(
             State.TRAINABLE, "exact_training_target_observed", exact, observed.source_ref
         )
@@ -321,6 +342,11 @@ class Preflight:
     ) -> JobReceipt:
         """Dispatch under the owner's existing durable fit reservation and idempotency key."""
         grant, observed, estimate = self._prepare(actor, intent)
+        disclosure = None
+        if intent.binding.route is not Route.LOCAL:
+            disclosure = self._grant(actor, intent.binding, Purpose.DISCLOSURE)
+            if not intent.fields <= disclosure.permitted_fields:
+                raise CapabilityError("training_disclosure_scope_unavailable")
         if not 0 < len(development_rows) <= estimate.maximum_rows or any(
             row.keys() != intent.fields for row in development_rows
         ):
@@ -337,6 +363,10 @@ class Preflight:
         with reservation_guard():
             if self._grant(actor, intent.binding, Purpose.TRAINING) != grant:
                 raise CapabilityError("training_data_scope_unavailable")
+            if disclosure is not None and (
+                self._grant(actor, intent.binding, Purpose.DISCLOSURE) != disclosure
+            ):
+                raise CapabilityError("training_disclosure_scope_unavailable")
             if self.clock() >= observed.expires_at:
                 raise CapabilityError("model_capability_evidence_stale_or_mismatched")
             try:
@@ -403,6 +433,8 @@ class Preflight:
         if self._grant(actor, binding, Purpose.INSPECTION) != grant:
             raise CapabilityError("model_capability_unavailable")
         now = self.clock()
+        if now >= observed.expires_at:
+            raise CapabilityError("model_capability_evidence_stale_or_mismatched")
         unavailable = CaptureEvidence(Fidelity.UNAVAILABLE, "unavailable", "", 0)
         visible = dict.fromkeys(CaptureField, unavailable)
         for field in CaptureField:
