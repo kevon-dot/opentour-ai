@@ -8,7 +8,7 @@ from opentour_cell.pilot import live_reader
 from opentour_cell.pilot.intake_local import open_intake
 from opentour_cell.pilot.intake_mcp import IntakeError
 from opentour_cell.pilot.live_authority import SELECTION_SCHEMA
-from opentour_cell.pilot.live_evidence import _canonical, _digest
+from opentour_cell.pilot.live_evidence import LiveEvidence, _canonical, _digest
 from test_intake_mcp import _write_private
 from test_live_authority import KEY, SignedCase, request
 from test_live_evidence import DECISION, OUTCOME, decision, outcome
@@ -298,3 +298,90 @@ def test_fresh_worker_cli_materializes_once_and_denies_without_effects(tmp_path)
         "live_export_unavailable\n",
     )
     assert before == {p.name: p.read_bytes() for p in export.directory.iterdir() if p.is_file()}
+
+
+def test_actual_reader_replays_business_identity_reversal_and_as_of_history(tmp_path):
+    """A frozen export resumes page by page; all counts come from actual reader effects."""
+    export = Export(tmp_path / "owner")
+    decisions = export.install(
+        DECISION,
+        [
+            [export.row(decision(), 11)] * 3 + [export.row(decision("D2"), 11)],
+            [export.row(decision(event_id="new-delivery-same-decision"), 12)],
+            [export.row(decision(event_id="conflicting-commit", action_ref="ask"), 13)],
+            [export.row(decision(event_id="D1-revised", decision_revision=2), 14)],
+        ],
+    )
+    outcomes = export.install(
+        OUTCOME,
+        [
+            [export.row(outcome(), 21)],
+            [
+                export.row(
+                    outcome(
+                        event_id="reopened",
+                        outcome_revision=2,
+                        finality="reopened",
+                        verified_action_ref=None,
+                    ),
+                    22,
+                )
+            ],
+            [export.row(outcome(), 23)],
+            [export.row(outcome(event_id="final-v3", outcome_revision=3), 24)],
+        ],
+    )
+    staged = {}
+    for page in decisions[1:] + outcomes[1:]:
+        path = export.directory / page["pin"]["file"]
+        staged[path] = path.read_bytes()
+        path.unlink()
+    decision_run = export.submit(DECISION)
+    outcome_run = export.submit(OUTCOME)
+
+    def step(run, pages, index):
+        path = export.directory / pages[index]["pin"]["file"]
+        if index:
+            path.write_bytes(staged[path])
+            path.chmod(0o600)
+        if index < len(pages) - 1:
+            with pytest.raises(IntakeError, match="live_export_unavailable"):
+                live_reader.materialize_live(export.selection, run)
+        else:
+            assert live_reader.materialize_live(export.selection, run)
+            assert not live_reader.materialize_live(export.selection, run)
+        # Recovery must use the acknowledged receipt, not reopen previous source pages.
+        path.unlink()
+        export.case.live = LiveEvidence(export.directory, export.case.authority)
+        value = export.snapshot()
+        assert value.cases == value.families == 1
+        return value
+
+    def counts(value):
+        return value.decisions, value.verified, value.pending, value.disputed
+
+    first = step(decision_run, decisions, 0)
+    assert counts(first) == (2, 0, 2, 0)
+    prior = step(outcome_run, outcomes, 0)
+    assert counts(prior) == (2, 1, 1, 0)
+    assert counts(step(outcome_run, outcomes, 1)) == (2, 0, 2, 0)
+    assert counts(step(outcome_run, outcomes, 2)) == (2, 0, 2, 0)
+    final = step(outcome_run, outcomes, 3)
+    assert counts(final) == (2, 1, 1, 0)
+    assert final.verified_roots[0].input_fidelity == "unavailable"
+    assert counts(step(decision_run, decisions, 1)) == (2, 1, 1, 0)
+    assert counts(step(decision_run, decisions, 2)) == (2, 0, 1, 1)
+    assert counts(step(decision_run, decisions, 3)) == (2, 0, 2, 0)
+    assert len(export.receipts()) == 8
+    assert (
+        export.case.live.snapshot(
+            export.case.owner, export.case.workflow, as_of_revision=prior.sequence
+        )
+        == prior
+    )
+    assert (
+        export.case.live.snapshot(
+            export.case.owner, export.case.workflow, as_of_revision=final.sequence
+        )
+        == final
+    )
