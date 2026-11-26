@@ -4,9 +4,7 @@ from __future__ import annotations
 
 import json
 import re
-import sqlite3
 import time
-from contextlib import closing
 from pathlib import Path
 from typing import Any
 
@@ -16,7 +14,7 @@ from opentour_cell.pilot.repair_workflow import (
     _require,
     managed_review_evidence,
 )
-from opentour_cell.pilot.training import LocalTrainingStore, _check_file
+from opentour_cell.pilot.training import LocalTrainingStore
 
 Json = dict[str, Any]
 
@@ -101,19 +99,20 @@ def _inspection(
     *,
     fresh: bool,
 ) -> Json:
-    from opentour_cell.pilot.slack_adapter import Journal, Settings
+    from opentour_cell.pilot.receipt_recovery import _JournalSnapshot, _open_db
+    from opentour_cell.pilot.slack_adapter import Settings
 
     ledger = directory / "slack-pilot.sqlite3"
-    _check_file(ledger)
-    with closing(sqlite3.connect(ledger.absolute().as_uri() + "?mode=ro", uri=True)) as conn:
-        binding = conn.execute("SELECT binding FROM identity WHERE id=1").fetchone()
-    _require(binding, "review_journal_unavailable")
-    assert binding is not None
-    journal = Journal(ledger, binding[0])
     reviewer, team, channel, audience = (
         policy[k] for k in ("reviewer", "team", "channel", "audience")
     )
-    with journal.db() as db:
+    with _open_db(ledger) as db:
+        _require(db is not None, "review_journal_unavailable")
+        assert db is not None
+        binding = db.execute("SELECT binding FROM identity WHERE id=1").fetchone()
+        _require(binding, "review_journal_unavailable")
+        assert binding is not None
+        journal = _JournalSnapshot(db, ledger, binding[0])
         journal.active(db)
         row = db.execute(
             "SELECT p.id,p.snapshot,p.expires,p.policy FROM presentations p "
@@ -227,31 +226,49 @@ def record_release(
     return value
 
 
+def inspect_recorded_release(
+    directory: Path, organization: str, run_id: str, run_revision: str, artifact_sha: str
+) -> Json | None:
+    """Read a scoped decision. A missing decision does not attest to delivery state."""
+    work, policy = _binding(directory, organization, run_id, run_revision, artifact_sha)
+    try:
+        receipt = _private_json(work / "release-decision.json")
+    except FileNotFoundError:
+        return None
+    _require(
+        all(receipt.get(k) == v for k, v in policy.items())
+        and receipt.get("decision") in {"approved", "changes_requested"}
+        and receipt.get("provider") == policy.get("provider", "slack")
+        and receipt.get("organization") == organization
+        and receipt.get("run_id") == run_id
+        and receipt.get("run_revision") == run_revision
+        and receipt.get("artifact_sha") == artifact_sha,
+        "human_release_approval_required",
+    )
+    _inspection(
+        directory,
+        organization,
+        run_id,
+        run_revision,
+        artifact_sha,
+        policy,
+        receipt["presentation_id"],
+        fresh=False,
+    )
+    return receipt
+
+
 def authorize_release(
     directory: Path, organization: str, run_id: str, run_revision: str, artifact_sha: str
 ) -> Json:
     store = LocalTrainingStore(directory / "training.sqlite3", organization, existing_only=True)
     with store.engagement_guard():
-        work, policy = _binding(directory, organization, run_id, run_revision, artifact_sha)
-        receipt = _private_json(work / "release-decision.json")
+        receipt = inspect_recorded_release(
+            directory, organization, run_id, run_revision, artifact_sha
+        )
         _require(
-            all(receipt.get(k) == v for k, v in policy.items())
-            and receipt["decision"] == "approved"
-            and receipt.get("provider") == policy.get("provider", "slack")
-            and receipt["organization"] == organization
-            and receipt["run_id"] == run_id
-            and receipt["run_revision"] == run_revision
-            and receipt["artifact_sha"] == artifact_sha,
+            receipt is not None and receipt["decision"] == "approved",
             "human_release_approval_required",
         )
-        _inspection(
-            directory,
-            organization,
-            run_id,
-            run_revision,
-            artifact_sha,
-            policy,
-            receipt["presentation_id"],
-            fresh=False,
-        )
-    return receipt
+        assert receipt is not None
+        return receipt

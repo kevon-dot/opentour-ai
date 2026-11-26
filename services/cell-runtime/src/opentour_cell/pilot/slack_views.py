@@ -11,6 +11,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from opentour_cell.pilot.readout import INPUT_VERSION, MAX_CASES, OUTPUT_VERSION, evaluate_manifest
+from opentour_cell.pilot.status_questions import StatusAnswer
 from opentour_cell.pilot.text_classifier import (
     CPU_LIMIT_SECONDS,
     EPOCH_CHOICES,
@@ -459,7 +460,7 @@ def managed_operating_point(point: Mapping[str, Any], ceiling: int) -> Block:
     return selected
 
 
-def _managed_outcome(audit: Mapping[str, Any] | None) -> str:
+def managed_outcome(audit: Mapping[str, Any] | None) -> str:
     if not audit or audit.get("mode") not in ("managed_rule", "managed_model"):
         return ""
     outcome = MANAGED_OUTCOMES[audit["handoff_disposition"]]
@@ -602,14 +603,23 @@ def result_chooser(
 
 
 def regression_picker(
-    context: str, rows: Sequence[tuple[str, str, str]], *, previous: bool, more: bool
+    context: str,
+    rows: Sequence[tuple[str, str, str]],
+    *,
+    previous: bool,
+    more: bool,
+    topic: str = "changes",
 ) -> Block:
     blocks = [
         _section(
-            "Choose an inspected frozen comparison to see which decisions became wrong."
+            (
+                "Choose an inspected frozen comparison to see which decisions became wrong."
+                if topic == "changes"
+                else "Choose the inspected result for your status question."
+            )
             if rows
             else "No currently inspected comparison is available. Open a result and inspect "
-            "its evidence before asking which decisions became wrong."
+            "its evidence to ask about it."
         )
     ]
     for dataset, source, revision in rows:
@@ -623,6 +633,21 @@ def regression_picker(
     navigation.append(_button("Browse results", "ot_readouts", "home"))
     blocks.append(_actions(*navigation))
     return _modal("Choose comparison", "ot_regression_picker", context, blocks)
+
+
+def status_question_modal(context: str, revision: str, dataset: str, answer: StatusAnswer) -> Block:
+    return _modal(
+        "Result status",
+        "ot_status_question",
+        context,
+        [
+            _section(f"Workflow {_ref(dataset)} · readout {_ref(revision)}"),
+            _section(answer.finding),
+            _section(answer.basis),
+            _section(answer.next_action),
+            _actions(_button("View evidence", "ot_evidence", revision), _home()),
+        ],
+    )
 
 
 def question_modal(
@@ -648,9 +673,9 @@ def question_modal(
             f"Approval of this candidate permits handoff to {_display(audit['recipient'])}. "
             "The customer separately decides whether to deploy it."
         )
-    managed_outcome = _managed_outcome(audit)
-    if managed_outcome:
-        answers["changes"] = managed_outcome + "\n" + answers["changes"]
+    outcome = managed_outcome(audit)
+    if outcome:
+        answers["changes"] = outcome + "\n" + answers["changes"]
     blocks = [_section(f"Readout revision {_ref(revision)}")]
     if topic:
         blocks.append(_section(answers[topic]))
@@ -726,7 +751,7 @@ def workbench_message(
         scope += f"Requested action · present this revision to {audience or 'unassigned'} only."
         blocks.extend([_section(scope), _section(state_text)])
         fallback += " " + scope
-        result = _managed_outcome(audit)
+        result = managed_outcome(audit)
         if result:
             blocks.append(_section(result))
             fallback += " " + result
@@ -1185,7 +1210,7 @@ def evidence_modal(
         if audit:
             blocks.extend(_audit_blocks(audit))
             blocks.append(_section(_operating_terms(audit)))
-            result = _managed_outcome(audit)
+            result = managed_outcome(audit)
             if result:
                 blocks.append(_section(result))
                 for key, label in (("rule", "Simple repair"), ("model", "Open-weight model")):
@@ -1458,7 +1483,7 @@ def managed_review_status(context: str, audit: Mapping[str, Any]) -> Block:
         "ot_evidence_view",
         context,
         [
-            _section(_managed_outcome(audit)),
+            _section(managed_outcome(audit)),
             _actions(_home()),
         ],
     )

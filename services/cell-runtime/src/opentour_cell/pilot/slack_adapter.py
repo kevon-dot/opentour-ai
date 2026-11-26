@@ -24,6 +24,14 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
+from opentour_cell.pilot.status_questions import (
+    ApprovalEvidence,
+    StatusAnswer,
+    StatusTopic,
+    read_status,
+    resolve_status,
+)
+
 Json = dict[str, Any]
 SESSION_SECONDS = 900
 RESULT_PAGE_SIZE = 12
@@ -1500,7 +1508,13 @@ class Workbench:
         self._browse(cfg, actor, view, source, search=query, old_hash=old_hash)
 
     def _regression_picker(
-        self, cfg: Settings, actor: str, view: str, old_hash: str = "", page: int = 0
+        self,
+        cfg: Settings,
+        actor: str,
+        view: str,
+        old_hash: str = "",
+        page: int = 0,
+        topic: str = "changes",
     ) -> None:
         policy = self._policy(cfg, actor)
         eligible = []
@@ -1512,12 +1526,16 @@ class Workbench:
         page = max(0, min(page, (len(eligible) - 1) // RESULT_PAGE_SIZE))
         start = page * RESULT_PAGE_SIZE
         rows = eligible[start : start + RESULT_PAGE_SIZE]
-        listing = {"page": page, "items": {revision: source for _, source, revision in rows}}
+        listing = {
+            "page": page,
+            "items": {revision: source for _, source, revision in rows},
+            "topic": topic,
+        }
         ctx = self.journal.context(actor, cfg.channel, view, "regressions", revision=_json(listing))
         self._show(
             view,
             self.views.regression_picker(
-                ctx, rows, previous=bool(page), more=start + len(rows) < len(eligible)
+                ctx, rows, previous=bool(page), more=start + len(rows) < len(eligible), topic=topic
             ),
             old_hash,
             authorize=lambda: self._authorize_question_rows(cfg, actor, rows),
@@ -1537,6 +1555,53 @@ class Workbench:
             _check(target and target.dataset == dataset and target.revision == revision)
             _check(self.journal.inspected(actor, revision, policy))
 
+    def _status_answer(
+        self, cfg: Settings, actor: str, target: Target, topic: StatusTopic
+    ) -> StatusAnswer:
+        approval = None
+        if topic == StatusTopic.DELIVERY:
+            _check(
+                actor == cfg.reviewer
+                and cfg.permission(actor, "review", target.dataset)["aggregate"]
+            )
+            if target.audit.get("release_provider") == "zapier_slack":
+                from opentour_cell.pilot.zapier_approval import ApprovalBridge
+
+                bridge = ApprovalBridge(
+                    cfg.directory, cfg.organization, cfg.directory / "zapier-approval.json"
+                )
+                seen = bridge.existing_status(
+                    run_id=target.audit["job_id"],
+                    run_revision=target.audit["run_revision"],
+                    artifact_sha=target.audit["model_revision"],
+                    team=cfg.team,
+                    actor=actor,
+                )
+                if seen:
+                    approval = ApprovalEvidence(seen["state"], seen["request_id"])
+            elif target.audit.get("release_provider") == "slack":
+                from opentour_cell.pilot.release_gate import inspect_recorded_release
+
+                recorded = inspect_recorded_release(
+                    cfg.directory,
+                    cfg.organization,
+                    target.audit["job_id"],
+                    target.audit["run_revision"],
+                    target.audit["model_revision"],
+                )
+                if recorded:
+                    approval = ApprovalEvidence(recorded["decision"], recorded["presentation_id"])
+            else:
+                state, receipt = self._recorded_decision(target.revision)
+                if state in {"approved", "changes_requested"}:
+                    approval = ApprovalEvidence(state, receipt["receipt"], receipt["decided"])
+        return read_status(
+            topic,
+            target.audit,
+            managed_outcome=self.views.managed_outcome(target.audit),
+            approval=approval,
+        )
+
     def _questions(
         self,
         cfg: Settings,
@@ -1554,21 +1619,29 @@ class Workbench:
         _check(
             entry["aggregate"] and self.journal.inspected(actor, revision, self._policy(cfg, actor))
         )
-        _check(not topic or topic in self.views.QUESTION_LABELS)
+        status_topic = StatusTopic(topic) if topic in StatusTopic else None
+        _check(not topic or status_topic or topic in self.views.QUESTION_LABELS)
         current = self.settings()
         _check(self._policy(cfg, actor) == self._policy(current, actor))
         current.permission(actor, "inspect", target.dataset)
         token = self.journal.context(actor, cfg.channel, view, "questions", source, revision)
+        answer = self._status_answer(current, actor, target, status_topic) if status_topic else None
+
+        def authorize() -> None:
+            self._authorize_question_rows(cfg, actor, [(target.dataset, source, revision)])
+            if status_topic:
+                _check(self._status_answer(self.settings(), actor, target, status_topic) == answer)
+
         self._show(
             view,
-            self.views.question_modal(token, revision, target.report, target.audit, topic),
+            self.views.status_question_modal(token, revision, target.dataset, answer)
+            if answer
+            else self.views.question_modal(token, revision, target.report, target.audit, topic),
             old_hash,
             dataset=target.dataset,
             dataset_revision=target.dataset_revision,
             audit=target.audit,
-            authorize=lambda: self._authorize_question_rows(
-                cfg, actor, [(target.dataset, source, revision)]
-            ),
+            authorize=authorize,
         )
 
     def _unbound_recipient(self) -> bool:
@@ -2115,7 +2188,9 @@ class Workbench:
                     _check(value in listing["items"])
                     source = listing["items"][value]
                     _check(source in {s for _, s in self._result_sources(cfg, actor)})
-                    self._questions(cfg, actor, view, source, value, "changes", old_hash)
+                    self._questions(
+                        cfg, actor, view, source, value, listing.get("topic", "changes"), old_hash
+                    )
                 else:
                     self._regression_picker(
                         cfg,
@@ -2123,6 +2198,7 @@ class Workbench:
                         view,
                         old_hash,
                         listing["page"] + (1 if action == "ot_result_next" else -1),
+                        topic=listing.get("topic", "changes"),
                     )
                 return
             _check(ctx["kind"] == "results")
@@ -2511,6 +2587,10 @@ class Workbench:
             return
         if command in {"", "status", "review"} and not argument:
             self._results(cfg, actor, view)
+            return
+        status_topic = resolve_status(prompt)
+        if status_topic:
+            self._regression_picker(cfg, actor, view, topic=status_topic.value)
             return
         if REGRESSION_QUESTION.fullmatch(" ".join(prompt.casefold().split())):
             self._regression_picker(cfg, actor, view)
