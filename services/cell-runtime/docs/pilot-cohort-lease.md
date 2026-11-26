@@ -15,12 +15,16 @@ permitted `authorized_actions`, and a distinct 32-byte key as `verification_key_
 Provision owner/custodian acceptance and operational/reconciliation authority separately.
 Choose the authority file from trusted local configuration.
 
+From the extracted kit directory with Python 3.12.16, run
+
 ```sh
-python -m opentour_cell.pilot.cohort_lease \
+python opentour-slack.pyz cohort-lease \
   --register /private/cohort/qualification.sqlite3 \
   --authority /private/cohort/lease-authority.json \
   --submission /private/cohort/lease-command.json
 ```
+
+In the source environment, use `python -m opentour_cell.pilot.cohort_lease` with the same arguments.
 
 Send a `command` and lowercase hexadecimal HMAC-SHA-256 `signature`. Sign the command version,
 a newline, and its canonical JSON using the [qualification encoding](pilot-qualification.md).

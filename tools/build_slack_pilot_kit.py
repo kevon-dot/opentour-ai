@@ -125,6 +125,8 @@ ENTRY = """import importlib
 import sys
 
 COMMANDS = {
+    "qualification": ("qualification", "main"),
+    "cohort-lease": ("cohort_lease", "main"),
     "data": ("training", "main"),
     "source": ("source_intake", "main"),
     "workplace": ("workplace_context", "main"),
