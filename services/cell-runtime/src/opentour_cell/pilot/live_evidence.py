@@ -189,6 +189,7 @@ class LiveEvidence:
                 CREATE TABLE IF NOT EXISTS live_events(
                     seq INTEGER PRIMARY KEY AUTOINCREMENT, tenant TEXT NOT NULL,
                     workflow TEXT NOT NULL, epoch TEXT NOT NULL, resource TEXT NOT NULL,
+                    binding_ref TEXT NOT NULL,
                     namespace TEXT NOT NULL, event_id TEXT NOT NULL,
                     event_revision INTEGER NOT NULL,
                     payload TEXT NOT NULL, ingested_at INTEGER NOT NULL,
@@ -248,8 +249,21 @@ class LiveEvidence:
         ).fetchone()
         _require(row is not None)
         expected = hmac.new(self._key(db), row[0].encode(), hashlib.sha256).hexdigest()
-        _require(hmac.compare_digest(row[1], expected))
+        _require(hmac.compare_digest(row[1], expected) and reference == "feed-" + expected[:32])
         return json.loads(row[0]), row[2]
+
+    @staticmethod
+    def _same_scope(body: Mapping[str, Any], scope: LiveScope) -> bool:
+        return all(
+            body.get(key) == getattr(scope, key)
+            for key in (
+                "tenant",
+                "workflow_ref",
+                "engagement_epoch",
+                "dataset_ref",
+                "dataset_revision",
+            )
+        )
 
     def save_binding(self, actor: IntakePrincipal, workflow: str, resource: str) -> str:
         with self._scope(actor, workflow) as scope, self._db(write=True) as db:
@@ -268,12 +282,23 @@ class LiveEvidence:
                 "dataset_revision": scope.dataset_revision,
                 "grant": asdict(grant),
             }
+            existing = db.execute(
+                "SELECT ref FROM live_bindings WHERE tenant=? AND workflow=? "
+                "AND epoch=? AND kind=? AND successor IS NULL",
+                (scope.tenant, workflow, scope.engagement_epoch, grant.kind),
+            ).fetchall()
+            for active in existing:
+                previous, _ = self._binding(db, active[0])
+                if {k: v for k, v in previous.items() if k != "generation"} == body:
+                    return str(active[0])
+            body["generation"] = db.execute(
+                "SELECT count(*) + 1 FROM live_bindings WHERE tenant=? AND workflow=? "
+                "AND epoch=? AND kind=?",
+                (scope.tenant, workflow, scope.engagement_epoch, grant.kind),
+            ).fetchone()[0]
             payload = _canonical(body)
             signature = hmac.new(self._key(db), payload.encode(), hashlib.sha256).hexdigest()
             reference = "feed-" + signature[:32]
-            prior = db.execute("SELECT ref FROM live_bindings WHERE ref=?", (reference,)).fetchone()
-            if prior:
-                return reference
             db.execute(
                 "UPDATE live_bindings SET successor=? WHERE tenant=? AND workflow=? "
                 "AND epoch=? AND kind=? AND successor IS NULL",
@@ -299,27 +324,32 @@ class LiveEvidence:
     ) -> LiveBinding | None:
         try:
             with self._db() as db:
-                body, successor = self._binding(db, feed_binding_ref)
+                body, _ = self._binding(db, feed_binding_ref)
             if body["tenant"] != authenticated_actor.tenant:
                 return None
-            with self._scope(authenticated_actor, body["workflow_ref"]) as scope:
+            with self._scope(authenticated_actor, body["workflow_ref"]) as scope, self._db() as db:
+                body, successor = self._binding(db, feed_binding_ref)
                 if not (scope.can_ingest or scope.can_inspect or scope.can_bind):
                     return None
-                if scope.engagement_epoch != body["engagement_epoch"]:
+                if not self._same_scope(body, scope):
                     return None
                 original = body["grant"]
-                current = [g for g in scope.grants if g.kind == original["kind"]]
-                if not current:
-                    return None
+                exact = next((g for g in scope.grants if asdict(g) == original), None)
                 state = "superseded" if successor else "current"
-                if not successor and asdict(current[0]) != original:
+                if not successor and exact is None:
                     return None
                 visible_successor = None
                 if successor:
-                    with self._db() as db:
-                        newer, _ = self._binding(db, successor)
-                    if any(asdict(g) == newer["grant"] for g in current):
+                    newer, _ = self._binding(db, successor)
+                    if self._same_scope(newer, scope) and any(
+                        asdict(g) == newer["grant"] for g in scope.grants
+                    ):
+                        _require(newer["grant"]["kind"] == original["kind"])
+                        _require(newer["generation"] > body["generation"])
                         visible_successor = successor
+                        exact = FeedGrant(**newer["grant"])
+                if exact is None:
+                    return None
                 return LiveBinding(
                     scope.tenant,
                     scope.workflow_ref,
@@ -328,7 +358,7 @@ class LiveEvidence:
                     feed_binding_ref,
                     original["kind"],
                     original["resource"],
-                    current[0].revision,
+                    exact.revision,
                     state,
                     original["source_revision"],
                     visible_successor,
@@ -357,6 +387,7 @@ class LiveEvidence:
             _require(scope.expires_at > int(time.time()))
             _require(scope.can_ingest and scope.engagement_epoch == body["engagement_epoch"])
             fresh, successor = self._binding(db, reference)
+            _require(self._same_scope(fresh, scope))
             grant = FeedGrant(**fresh["grant"])
             _require(successor is None and grant in scope.grants)
             _require(source_revision == grant.source_revision)
@@ -392,13 +423,15 @@ class LiveEvidence:
                     )
                     continue
                 db.execute(
-                    "INSERT OR IGNORE INTO live_events(tenant,workflow,epoch,resource,namespace,"
-                    "event_id,event_revision,payload,ingested_at) VALUES (?,?,?,?,?,?,?,?,?)",
+                    "INSERT OR IGNORE INTO live_events(tenant,workflow,epoch,resource,binding_ref,"
+                    "namespace,event_id,event_revision,payload,ingested_at) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?)",
                     (
                         scope.tenant,
                         scope.workflow_ref,
                         scope.engagement_epoch,
                         grant.resource,
+                        reference,
                         grant.deciding_namespace,
                         parsed["event_id"],
                         parsed["event_revision"],
@@ -419,7 +452,9 @@ class LiveEvidence:
                     scope.workflow_ref,
                     scope.engagement_epoch,
                     snapshot.sequence,
-                    _canonical(asdict(snapshot)),
+                    _canonical(
+                        {"snapshot": asdict(snapshot), "grants": [asdict(g) for g in scope.grants]}
+                    ),
                 ),
             )
             _require(scope.expires_at > int(time.time()))
@@ -435,7 +470,11 @@ class LiveEvidence:
             ),
         ).fetchall()
         permitted = {(g.resource, g.deciding_namespace) for g in scope.grants}
-        rows = [r for r in all_rows if (r["resource"], r["namespace"]) in permitted]
+        rows = []
+        for row in all_rows:
+            body, _ = self._binding(db, row["binding_ref"])
+            if self._same_scope(body, scope) and (row["resource"], row["namespace"]) in permitted:
+                rows.append(row)
         deliveries: dict[tuple[str, str], list[sqlite3.Row]] = {}
         for row in rows:
             deliveries.setdefault((row["resource"], row["event_id"]), []).append(row)
@@ -521,10 +560,15 @@ class LiveEvidence:
             ),
         ).fetchall()
         bound_grants = []
+        matching_scope = False
         for binding in bindings:
             body, _ = self._binding(db, binding[0])
+            if not self._same_scope(body, scope):
+                continue
+            matching_scope = True
             if any(asdict(g) == body["grant"] for g in scope.grants):
                 bound_grants.append(FeedGrant(**body["grant"]))
+        _require(not bindings or matching_scope)
         bound = any(g.kind == "independent_outcome" for g in bound_grants)
         actors = sorted({g.verifier for g in bound_grants if g.verifier})
         sequence = db.execute(
@@ -594,7 +638,12 @@ class LiveEvidence:
                 ),
             ).fetchone()
             _require(row is not None)
-            value = json.loads(row[0])
+            saved = json.loads(row[0])
+            value = saved["snapshot"]
+            _require(self._same_scope(value, scope))
+            # Retention is not continuing disclosure authority. Historical receipts
+            # stay immutable, but removed/replaced grants hold the entire old view.
+            _require(all(grant in [asdict(g) for g in scope.grants] for grant in saved["grants"]))
             value["verified_roots"] = tuple(VerifiedRoot(**v) for v in value["verified_roots"])
             # Historical evidence survives; historical role claims do not grant current actions.
             value["can_bind_verifier"] = scope.can_bind

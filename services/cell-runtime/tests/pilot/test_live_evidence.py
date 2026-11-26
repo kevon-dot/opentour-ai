@@ -291,3 +291,79 @@ def test_revoked_truth_cannot_continue_to_credit_current_verification(tmp_path: 
     assert totals(after) == (1, 0, 1, 0, 1)
     assert after.evidence_revision != before.evidence_revision
     assert after.verifier_bound is False
+    with pytest.raises(IntakeError, match="live_evidence_unavailable"):
+        case.snapshot(as_of_revision=before.sequence)
+
+
+def test_foreign_binding_direct_ingest_and_replay_never_cross_tenant(tmp_path: Path):
+    case = Case(tmp_path / "owner")
+    case.ingest(decision())
+    case.authority.scope = replace(case.authority.scope, tenant="org-b")
+    foreign = replace(ACTOR, tenant="org-b")
+    for page in ("page-1", "new-page"):
+        with pytest.raises(IntakeError, match="live_evidence_unavailable"):
+            case.store.ingest_page(
+                foreign,
+                case.decisions,
+                page_ref=page,
+                source_revision="source-v1",
+                events=(decision(),),
+                source_positions=(31,),
+                event_epochs=("epoch-a",),
+                checkpoint=31,
+            )
+    assert case.store.snapshot(foreign, "workflow-a").decisions == 0
+    assert case.store.resolve(case.decisions, foreign) is None
+
+
+def test_dataset_rebinding_holds_current_ref_and_historical_projection(tmp_path: Path):
+    case = Case(tmp_path / "owner")
+    case.ingest(decision())
+    before = case.snapshot()
+    case.authority.scope = replace(case.authority.scope, dataset_ref="replacement")
+    assert case.store.resolve(case.decisions, ACTOR) is None
+    with pytest.raises(IntakeError, match="live_evidence_unavailable"):
+        case.snapshot(as_of_revision=before.sequence)
+    with pytest.raises(IntakeError, match="live_evidence_unavailable"):
+        case.snapshot()
+    with pytest.raises(IntakeError, match="live_evidence_unavailable"):
+        case.ingest(decision("D2"))
+    case.store.save_binding(ACTOR, "workflow-a", "decisions")
+    assert case.snapshot().decisions == 0
+
+
+def test_multiple_resources_order_and_reselection_have_current_durable_refs(tmp_path: Path):
+    case = Case(tmp_path / "owner")
+    second = replace(DECISION, resource="second-resource", revision="second-grant")
+    case.authority.scope = replace(case.authority.scope, grants=(DECISION, second, OUTCOME))
+    reference = case.store.save_binding(ACTOR, "workflow-a", second.resource)
+    found = case.store.resolve(reference, ACTOR)
+    assert found.resource == second.resource and found.grant_revision == second.revision
+    case.authority.scope = replace(case.authority.scope, grants=(second, DECISION, OUTCOME))
+    assert case.store.resolve(reference, ACTOR) == found
+    reselected = case.store.save_binding(ACTOR, "workflow-a", DECISION.resource)
+    assert reselected != case.decisions
+    assert case.store.resolve(reselected, ACTOR).state == "current"
+    assert case.store.resolve(reference, ACTOR).successor_ref == reselected
+    assert case.store.save_binding(ACTOR, "workflow-a", DECISION.resource) == reselected
+
+
+def test_resolve_reads_successor_after_entering_current_authority_guard(tmp_path: Path):
+    case = Case(tmp_path / "owner")
+    original_guard = case.authority.guard
+    successor = None
+
+    @contextmanager
+    def changed_before_guard(actor, workflow):
+        nonlocal successor
+        case.authority.guard = original_guard
+        case.authority.scope = replace(
+            case.authority.scope, grants=(replace(DECISION, revision="v2"), OUTCOME)
+        )
+        successor = case.store.save_binding(actor, workflow, "decisions")
+        with original_guard(actor, workflow) as scope:
+            yield scope
+
+    case.authority.guard = changed_before_guard
+    binding = case.store.resolve(case.decisions, ACTOR)
+    assert binding.state == "superseded" and binding.successor_ref == successor
