@@ -1,0 +1,27 @@
+{
+  "schema_version": "opentour.pilot.scheduled-intake-recipe.v1",
+  "name": "OpenTour • Intake • v1",
+  "kind": "disabled-implementation-handoff-not-hosted-template",
+  "enabled": false,
+  "deployable": false,
+  "worker_entry": "opentour_cell.pilot.scheduled_intake",
+  "existing_intake_operations": ["discover_sources", "submit_intake", "get_run"],
+  "default_limits": {
+    "page_size": 10,
+    "pages_per_tick": 2,
+    "operations_per_tick": 22,
+    "tick_seconds": 30,
+    "concurrency": 1
+  },
+  "required_owner_setup": [
+    "custodian-approved installation and current scoped selector",
+    "approved frequency, IANA timezone and monthly provider task allowance",
+    "immutable selected historical pair or current live binding revisions",
+    "authorized backfill watermark and independent per-feed source checkpoints",
+    "reviewed hosted worker invocation and connection remapping",
+    "measured provider tasks per idle/active tick and redacted installed trace"
+  ],
+  "history_fields": ["state", "receipt_ref"],
+  "rollback": "Pause worker and confirm receipt, disable trigger, preserve journals and pending requests.",
+  "open_dependencies": ["OPE-437", "OPE-514", "OPE-519", "OPE-435"]
+}
