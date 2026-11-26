@@ -1,0 +1,16 @@
+{
+  "schema_version": "opentour.pilot.case-manifest.v1",
+  "error_ceiling_bps": 500,
+  "cases": [
+    {"case_id": "case-01", "reference": "route-a", "current": {"status": "automatic", "label": "route-b"}, "repair": {"status": "automatic", "label": "route-a"}},
+    {"case_id": "case-02", "reference": "route-b", "current": {"status": "automatic", "label": "route-b"}, "repair": {"status": "automatic", "label": "route-b"}},
+    {"case_id": "case-03", "reference": "route-a", "current": {"status": "review"}, "repair": {"status": "review"}},
+    {"case_id": "case-04", "reference": "route-b", "current": {"status": "review"}, "repair": {"status": "review"}},
+    {"case_id": "case-05", "reference": "route-a", "current": {"status": "review"}, "repair": {"status": "review"}},
+    {"case_id": "case-06", "reference": "route-b", "current": {"status": "review"}, "repair": {"status": "review"}},
+    {"case_id": "case-07", "reference": "route-a", "current": {"status": "review"}, "repair": {"status": "review"}},
+    {"case_id": "case-08", "reference": "route-b", "current": {"status": "review"}, "repair": {"status": "review"}},
+    {"case_id": "case-09", "reference": "route-a", "current": {"status": "review"}, "repair": {"status": "review"}},
+    {"case_id": "case-10", "reference": "route-b", "current": {"status": "review"}, "repair": {"status": "review"}}
+  ]
+}

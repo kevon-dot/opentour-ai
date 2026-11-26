@@ -1,0 +1,162 @@
+{
+  "schema_version": "opentour.operator.private-pilot-receipt.v1",
+  "record_class": "unclassified",
+  "identity": {
+    "canonical_organization_ref": null,
+    "engagement_ref": null,
+    "receipt_ref": null,
+    "receipt_revision_ref": null,
+    "supersedes_receipt_revision_ref": null
+  },
+  "intake": {
+    "intake_ref": null,
+    "workflow_and_decision_ref": null,
+    "workflow_owner_ref": null,
+    "custodian_ref": null,
+    "operator_ref": null,
+    "authorized_recipient_ref": null,
+    "approved_machine_ref": null,
+    "independent_reference_ref": null,
+    "data_scope_and_authority_ref": null,
+    "case_unit_family_cutoff_ref": null,
+    "excluded_or_ambiguous_cases_ref": null,
+    "source_versions_ref": null,
+    "receipt_record_system_ref": null,
+    "support_owner_ref": null,
+    "retention_terms_ref": null,
+    "retention_due_utc": null,
+    "owner_decision_due_utc": null
+  },
+  "disclosure": {
+    "route": "unselected",
+    "authorized_recipient_ref": null,
+    "approved_fields_and_purpose_ref": null,
+    "confirm_outside_location_ref": null,
+    "private_destination_ref": null
+  },
+  "owner_operating_point": {
+    "agreement_ref": null,
+    "pre_run_attestation_ref": null,
+    "agreed_by_owner_ref": null,
+    "agreed_utc": null,
+    "minimum_coverage_bps": null,
+    "maximum_wrong_automatic_bps": null,
+    "comparator_or_limits_ref": null
+  },
+  "frozen_evidence": {
+    "evaluation_mode": null,
+    "dataset_id_or_ref": null,
+    "dataset_revision_sha256": null,
+    "recorded_input_file_sha256": null,
+    "cohort_digest": null,
+    "current_method_ref": null,
+    "repair_method_ref": null,
+    "verified_model_artifact_digest": null,
+    "job_ref_or_null": null,
+    "kit_source_commit": null,
+    "kit_archive_sha256": null,
+    "canonical_aggregate_file_sha256": null,
+    "canonical_brief_file_sha256": null,
+    "canonical_repeat_file_sha256": null,
+    "owner_readout_revision_ref": null
+  },
+  "observed": {
+    "incumbent": {
+      "automated": null,
+      "total_cases": null,
+      "wrong_automatic": null,
+      "verified_automatic": null,
+      "review": null,
+      "missing": null,
+      "unknown_automatic": null,
+      "coverage_floor_verdict": null,
+      "wrong_rate_ceiling_verdict": null,
+      "operating_point_verdict": null
+    },
+    "repair": {
+      "automated": null,
+      "total_cases": null,
+      "wrong_automatic": null,
+      "verified_automatic": null,
+      "review": null,
+      "missing": null,
+      "unknown_automatic": null,
+      "coverage_floor_verdict": null,
+      "wrong_rate_ceiling_verdict": null,
+      "operating_point_verdict": null
+    },
+    "same_automatic_cases": null,
+    "eligible_pairs": null,
+    "fixes": null,
+    "regressions": null,
+    "observed_comparison": null
+  },
+  "witness": {
+    "permitted_recipient_ref": null,
+    "event_type": null,
+    "event_utc": null,
+    "witness_attestation_ref": null,
+    "frozen_readout_revision_ref": null,
+    "fresh_output_ref": null,
+    "matching_aggregate_file_sha256": null,
+    "matching_brief_file_sha256": null,
+    "discrepancy_ref": null
+  },
+  "presentation": {
+    "channel_or_route": "unrecorded",
+    "reviewer_ref": null,
+    "evidence_revision_ref": null,
+    "presentation_decision_ref": null
+  },
+  "workflow_owner_disposition": {
+    "authorized_owner_ref": null,
+    "owner_attestation_ref": null,
+    "owner_decision_utc": null,
+    "frozen_readout_revision_ref": null,
+    "outcome": null,
+    "next_action_ref": null,
+    "next_responsible_ref": null,
+    "next_due_utc_or_null": null,
+    "explicit_stop_reason_ref": null
+  },
+  "outcome_evidence": {
+    "measured_improvement": {
+      "state": "unassessed",
+      "agreed_coverage_status": "unrecorded",
+      "comparison_evidence_ref": null
+    },
+    "slack_installation": {
+      "state": "unverified",
+      "installation_evidence_ref": null
+    },
+    "authorized_training": {
+      "state": "unverified",
+      "completed_job_ref": null,
+      "fitted_artifact_digest": null
+    },
+    "paid_commitment": {
+      "state": "unconfirmed",
+      "commitment_evidence_ref": null
+    },
+    "production_approval": {
+      "state": "unconfirmed",
+      "release_evidence_ref": null
+    }
+  },
+  "register": {
+    "verification_state": "pending",
+    "decision_evidence_status": "pending",
+    "credit_for_real_org": 0,
+    "dispute_or_correction_ref": null,
+    "register_custodian_ref": null,
+    "commercial_outcome": "unconfirmed",
+    "production_approval_ref": null
+  },
+  "custody_followup": {
+    "support_owner_ref": null,
+    "retention_owner_ref": null,
+    "disposition_or_agreement_ref": null,
+    "due_utc": null,
+    "private_confirmation_ref": null
+  }
+}

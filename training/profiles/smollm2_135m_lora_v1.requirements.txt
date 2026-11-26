@@ -1,0 +1,4 @@
+# CPython 3.12.16 on Linux x86_64. Use only owner-staged binary wheels.
+# The worker uses the local tokenizers Rust API. Hub download helpers are unused.
+numpy==2.5.5 --hash=sha256:704d819265e5d1064d932968e9ee85fff2103ccc78c05b878c06943ba27b8507
+tokenizers==0.21.4 --hash=sha256:51b7eabb104f46c1c50b486520555715457ae833d5aee9ff6ae853d1130506ff
