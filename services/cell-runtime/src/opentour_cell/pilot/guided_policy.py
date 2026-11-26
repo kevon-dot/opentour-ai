@@ -20,6 +20,7 @@ MAX_POLICY_BYTES = 256 * 1024
 REVISION = re.compile(r"[0-9a-f]{64}\Z")
 HEADING = re.compile(r" {0,3}#{1,6} +\S")
 _FENCE = re.compile(r" {0,3}(`{3,}|~{3,})([^\r\n]*)")
+_LIST_ITEM = re.compile(r" {0,3}(?:[-+*]|[0-9]{1,9}[.)]) +(?=\S)")
 
 
 class PolicyError(ValueError):
@@ -29,11 +30,19 @@ class PolicyError(ValueError):
 def operative_lines(lines: tuple[str, ...]) -> Iterator[tuple[int, str]]:
     """Keep original line numbers while excluding Markdown examples and HTML comments."""
     active_fence: str | None = None
+    fence_indent = 0
+    list_indents: list[int] = []
     comment = False
     for number, raw in enumerate(lines, start=1):
+        raw = raw.expandtabs(4).rstrip("\n")
         if active_fence is not None:
-            fence = _FENCE.fullmatch(raw.rstrip("\n"))
-            if fence and fence[1].startswith(active_fence) and not fence[2].strip():
+            fence = _FENCE.fullmatch(raw[fence_indent:])
+            if (
+                fence
+                and raw.startswith(" " * fence_indent)
+                and fence[1].startswith(active_fence)
+                and not fence[2].strip()
+            ):
                 active_fence = None
             continue
         line = raw
@@ -46,12 +55,29 @@ def operative_lines(lines: tuple[str, ...]) -> Iterator[tuple[int, str]]:
                 prefix, begin, line = line.partition("<!--")
                 visible.append(prefix)
                 comment = bool(begin)
-        text = " ".join(visible).rstrip("\n")
-        fence = _FENCE.fullmatch(text)
+        text = " ".join(visible)
+        if not text.strip():
+            continue
+        indent = len(text) - len(text.lstrip(" "))
+        while list_indents and indent < list_indents[-1]:
+            list_indents.pop()
+        depth = list_indents[-1] if list_indents else 0
+        relative = text[depth:]
+        if relative.startswith("    "):
+            continue
+        item = _LIST_ITEM.match(relative)
+        if item:
+            list_indents.append(depth + item.end())
+            fence_indent = list_indents[-1]
+        else:
+            fence_indent = depth
+        fence = _FENCE.fullmatch(text[fence_indent:])
         if fence:
             active_fence = fence[1]
-        elif text.strip() and not text.startswith(("    ", "\t")):
-            yield number, text
+        else:
+            yield number, relative
+    if active_fence is not None or comment:
+        raise PolicyError("policy_markup_unclosed")
 
 
 @dataclass(frozen=True)
@@ -80,7 +106,9 @@ class PolicySnapshot:
             raise PolicyError("policy_span_unavailable")
         start = line_start - 1
         section = 0
-        for index, line in operative_lines(self.lines[:line_end]):
+        for index, line in operative_lines(self.lines):
+            if index > line_end:
+                break
             if not HEADING.match(line):
                 continue
             if index > line_start:

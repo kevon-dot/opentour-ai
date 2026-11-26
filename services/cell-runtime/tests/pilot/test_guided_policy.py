@@ -249,6 +249,27 @@ def test_numbered_markdown_rule_retains_its_citation_and_precedence(starter):
     assert snapshot.passage(citations[0]) == "1. If po is missing, MANUAL.\n"
 
 
+def test_numbered_markdown_continuation_remains_operative(starter):
+    source, workflow, _, _ = starter(
+        b"# Policy\n1. If total < 250, APPROVE.\n    Except when the purchase order is missing.\n"
+    )
+    snapshot = source.read(source.authority.principal, workflow)
+    draft = guided_draft(snapshot, FIELDS, ACTIONS)
+    action, citations = draft.draft_action({"po": None, "total": Decimal("12")})
+    assert action is None
+    assert snapshot.passage(citations[0]).strip() == "Except when the purchase order is missing."
+
+
+def test_fenced_example_inside_numbered_list_never_becomes_an_operative_branch(starter):
+    source, workflow, _, _ = starter(
+        b"# Policy\n1. ~~~text\n   If total < 250, APPROVE.\n   ~~~\n2. If total < 250, REVIEW.\n"
+    )
+    snapshot = source.read(source.authority.principal, workflow)
+    draft = guided_draft(snapshot, FIELDS, ACTIONS)
+    assert len(draft.branches) == 1
+    assert draft.draft_action({"total": Decimal("12")})[0] == "REVIEW"
+
+
 def test_wrong_canonical_admission_intent_denies_before_policy_read(starter, monkeypatch):
     source, workflow, _, intake = starter()
     with closing(sqlite3.connect(intake.path)) as db, db:
