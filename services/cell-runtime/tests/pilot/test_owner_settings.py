@@ -432,13 +432,25 @@ def test_cohort_guard_remains_held_until_successor_commit(tmp_path):
     assert observed == [(receipt["revision"],)]
 
 
-def test_interrupted_worker_publication_has_no_partial_final_and_retries(tmp_path):
+@pytest.mark.parametrize("crash", ["before_rename", "after_rename"])
+def test_interrupted_worker_publication_has_no_partial_final_and_retries(tmp_path, crash):
     s = Setup(tmp_path)
     receipt = s.apply()
-    with patch("opentour_cell.pilot.source_intake.os.link", side_effect=OSError("simulated_crash")):
+    rename = settings.os.replace
+
+    def interrupted(source, target):
+        if crash == "after_rename":
+            rename(source, target)
+        raise OSError("simulated_crash")
+
+    with patch.object(settings.os, "replace", side_effect=interrupted):
         with pytest.raises(MandateError, match="standing_engagement_unavailable"):
             s.service.worker_config(receipt, actor=s.operator)
-    assert not list(s.customer.owner.glob("settings-agreement-*.json"))
+    agreements = list(s.customer.owner.glob("settings-agreement-*.json"))
+    assert len(agreements) == (1 if crash == "after_rename" else 0)
+    if agreements:
+        assert read(agreements[0]) == s.policy["agreement"]
+        assert agreements[0].stat().st_nlink == 1
     assert not list(s.customer.owner.glob("settings-cycle-*.json"))
     assert (
         s.service.worker_config(receipt, actor=s.operator)["config"]["mandate_id"]

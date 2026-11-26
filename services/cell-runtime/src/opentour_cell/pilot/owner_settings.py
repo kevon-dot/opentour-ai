@@ -11,6 +11,7 @@ import argparse
 import base64
 import binascii
 import json
+import os
 import sqlite3
 import tempfile
 import time
@@ -18,7 +19,7 @@ from contextlib import ExitStack
 from pathlib import Path
 from typing import Any
 
-from opentour_cell.pilot import autonomous_cycle, repair_bundle, repair_workflow, source_intake
+from opentour_cell.pilot import autonomous_cycle, repair_bundle, repair_workflow
 from opentour_cell.pilot import workplace_context as workplace
 from opentour_cell.pilot.learning_mandate import LearningMandates, _normalized
 from opentour_cell.pilot.operating_point import canonical, digest
@@ -58,6 +59,29 @@ def _need(check: object, reason: str) -> None:
 
 def _read(path: Path) -> Json:
     return parse_manifest(repair_bundle._read(path, 64 * 1024))
+
+
+def _publish_worker(path: Path, value: Json) -> None:
+    """Publish complete bytes under the mandate writer; a crash leaves no linked temp."""
+    fd, temporary = tempfile.mkstemp(dir=path.parent, prefix=".settings-stage-")
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            stream.write((canonical(value) + "\n").encode())
+            stream.flush()
+            os.fsync(stream.fileno())
+        if os.path.lexists(path):
+            _need(_read(path) == value, "settings_worker_artifact_changed")
+        else:
+            # All settings exporters hold the same SQLite writer throughout this operation.
+            os.replace(temporary, path)
+            directory = os.open(path.parent, os.O_DIRECTORY | os.O_RDONLY)
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
+    finally:
+        if os.path.lexists(temporary):
+            os.unlink(temporary)
 
 
 class OwnerSettings:
@@ -540,7 +564,7 @@ class OwnerSettings:
             if path.exists():
                 _need(_read(path) == agreement, "settings_worker_artifact_changed")
             else:
-                source_intake._publish(path, agreement)
+                _publish_worker(path, agreement)
             cfg = {
                 "schema_version": autonomous_cycle.SCHEMA,
                 "organization": self.organization,
@@ -555,7 +579,7 @@ class OwnerSettings:
             if target.exists():
                 _need(_read(target) == cfg, "settings_worker_artifact_changed")
             else:
-                source_intake._publish(target, cfg)
+                _publish_worker(target, cfg)
             return {"revision": head["revision"], "config": cfg, "config_file": str(target)}
 
 
