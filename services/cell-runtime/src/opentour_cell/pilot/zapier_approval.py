@@ -189,7 +189,8 @@ class ApprovalBridge:
 
     def uses_recipe(self) -> bool:
         policy, _ = self._policy()
-        return policy["schema_version"] == RECIPE_POLICY
+        version: str = policy["schema_version"]
+        return version == RECIPE_POLICY
 
     def details(self, request_id: str, *, team: str, actor: str) -> Json:
         """Called only with the authenticated identity from the tenant's private viewer."""
