@@ -655,3 +655,75 @@ def test_lease_is_rechecked_after_provider_opens_before_catalog(
     with pytest.raises(workplace.WorkplaceError, match="workplace_lease_no_longer_current"):
         workplace.discover_workplace(fixture.store, fixture.connection)
     assert calls == ["open"]
+
+
+@pytest.mark.parametrize(
+    ("operation", "stop_page"), [("discover", 1), ("acquire", 1), ("acquire", 2)]
+)
+def test_native_reader_stops_catalog_continuation_after_lease_withdrawal(
+    path: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operation: str, stop_page: int
+) -> None:
+    from opentour_cell.pilot import workplace_context as workplace
+    from test_workplace_context import WorkplaceFixture, put
+
+    fixture = WorkplaceFixture.small(tmp_path / "generated-workplace")
+    org, engagement = fixture.grant["organization"], fixture.grant["engagement"]
+    charter, _ = qualification(path, org)
+    lease = run(path, acquire(org, charter))
+    fixture.cfg["schema_version"] = workplace.COHORT_CONNECTION
+    fixture.cfg["cohort_lease"] = {
+        "register": str(path),
+        "authority_file": "lease-authority.json",
+        "discover_submission_file": "discover-lease.json",
+        "acquire_submission_file": "acquire-lease.json",
+    }
+    put(fixture.connection, fixture.cfg)
+    put(fixture.directory / "lease-authority.json", configuration(org, "manual", ("begin",)))
+    put(
+        fixture.directory / f"{operation}-lease.json",
+        sign(
+            command(
+                org,
+                action="begin",
+                event_id="generated-connect-workplace",
+                generation=1,
+                lease_ref=lease["lease_ref"],
+                evidence_digest=digest(
+                    [
+                        "opentour.pilot.workplace-lease-effect.v1",
+                        org,
+                        engagement,
+                        digest(fixture.cfg),
+                        operation,
+                    ]
+                ),
+            )
+        ),
+    )
+    original_receive = workplace._Stdio.receive
+    paginated_replies = 0
+
+    def withdraw_between_pages(client: workplace._Stdio, limit: int) -> Json:
+        nonlocal paginated_replies
+        response = original_receive(client, limit)
+        if "nextCursor" in response.get("result", {}):
+            paginated_replies += 1
+            if paginated_replies == stop_page:
+                _, terminal = qualification(
+                    path, org, intent="lost", source_revision=2, event_id="generated-source-lost"
+                )
+                assert terminal["disposition"] == "lost"
+        return response
+
+    monkeypatch.setattr(workplace._Stdio, "receive", withdraw_between_pages)
+    use = workplace.discover_workplace if operation == "discover" else workplace.acquire_workplace
+    with pytest.raises(workplace.WorkplaceError, match="workplace_lease_no_longer_current"):
+        use(fixture.store, fixture.connection)
+    received = fixture.received()
+    requests = [item for item in received if item["method"] == "resources/list"]
+    assert len(requests) == (1 if stop_page == 1 else 3)
+    assert requests[-1]["params"] == {}
+    assert sum(item["method"] == "resources/read" for item in received) == (
+        0 if stop_page == 1 else 2
+    )
+    assert not list(fixture.directory.glob("workplace-snapshots/*"))
