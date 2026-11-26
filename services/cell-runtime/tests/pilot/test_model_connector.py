@@ -7,8 +7,8 @@ from opentour_cell.pilot import model_connector as models
 from opentour_cell.pilot import open_weight
 
 
-@pytest.fixture
-def setup_connector():
+@pytest.fixture(params=[models.Route.MANAGED, models.Route.CUSTOM])
+def setup_connector(request):
     binding = models.ModelBinding(
         tenant="generated-tenant",
         model_ref="incumbent",
@@ -17,7 +17,7 @@ def setup_connector():
         input_schema="invoice-features-v1",
         output_schema="invoice-label-v1",
         preprocessing_revision="preprocessing-v1",
-        route=models.Route.MANAGED,
+        route=request.param,
         account_or_host="generated-owned-account",
         region="generated-region",
         credential_ref="owned-secret-reference",
