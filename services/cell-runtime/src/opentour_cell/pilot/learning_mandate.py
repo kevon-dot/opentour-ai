@@ -500,12 +500,18 @@ class LearningMandates:
             return self._source_receipt(run, row, spec)
 
     def confirm_class(
-        self, run_id: str, *, actor: str, discovery_revision: str, candidate: Mapping[str, Any]
+        self,
+        run_id: str,
+        *,
+        actor: str,
+        discovery_revision: str,
+        candidate: Mapping[str, Any],
+        existing_only: bool = False,
     ) -> Json:
         require(
             _hex(discovery_revision) and isinstance(candidate, Mapping), "invalid_delegated_class"
         )
-        with self._authorized_db() as db:
+        with self._authorized_db(write=not existing_only) as db:
             run = self._run_row(db, run_id)
             row, spec = self._mandate(db, run["mandate"])
             self._active(row, spec, actor)
@@ -537,6 +543,7 @@ class LearningMandates:
             if found is not None:
                 require(found[0] == encoded, "delegated_class_conflict")
             else:
+                require(not existing_only, "delegated_class_confirmation_required")
                 db.execute("INSERT INTO classes VALUES(?,?,?)", (self.scope, run_id, encoded))
             return document
 
