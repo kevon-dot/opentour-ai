@@ -32,27 +32,45 @@ def prepared_workflow(
     trainer: str = ACTOR,
     release: bool = False,
     provider: str | None = None,
+    slot: str = "",
+    audience: str | None = None,
 ) -> tuple[Harness, Json, ManagedSelection]:
-    h = Harness(path / "existing", organization="generated-co")
+    organization = "generated-" + slot if slot else "generated-co"
+    h = Harness(path / "existing", organization=organization)
+    if slot:
+        suffix = slot.upper()
+        h.config.update(
+            team="T" + suffix,
+            channel="C" + suffix,
+            reviewer="U" + suffix,
+            recipient="URECIPIENT" + suffix,
+        )
+        h.config["users"][h.config["reviewer"]] = h.config["users"].pop(ACTOR)
+        h.slack.channel["id"] = h.config["channel"]
+        h.slack.members = [h.config["reviewer"], OTHER]
     directory = path / "pilot"
     old = os.umask(0o077)
     try:
-        runpy.run_path(str(DEMO))["prepare"](directory, "model" if route != "rule" else "rule")
+        runpy.run_path(str(DEMO))["prepare"](
+            directory, "model" if route != "rule" else "rule", organization
+        )
     finally:
         os.umask(old)
     h.path = directory / "slack-config.json"
     h.config["directory"] = str(directory)
-    h.config["users"][ACTOR]["datasets"] = ["generated-repair"]
+    h.config["users"][h.config["reviewer"]]["datasets"] = ["generated-repair"]
     h.config["zapier"] = False
-    h.store = LocalTrainingStore(directory / "training.sqlite3", "generated-co")
+    if audience is not None:
+        h.config["recipient"] = audience
+    h.store = LocalTrainingStore(directory / "training.sqlite3", organization)
     h.save()
     restart(h)
     file = directory / "managed-plan.json"
     plan = json.loads(file.read_text())
     plan["audience"] = h.config["recipient"]
     plan["slack_review"] = {
-        "team": TEAM,
-        "channel": CHANNEL,
+        "team": h.config["team"],
+        "channel": h.config["channel"],
         "audience": plan["audience"],
         "expires_at": int(time.time()) + 600,
         "owner_attestation": "att-abcdef0123456789",
@@ -60,10 +78,10 @@ def prepared_workflow(
     }
     if release:
         plan["release_review"] = {
-            "team": TEAM,
-            "channel": CHANNEL,
+            "team": h.config["team"],
+            "channel": h.config["channel"],
             "audience": plan["audience"],
-            "reviewer": ACTOR,
+            "reviewer": h.config["reviewer"],
         }
         if provider:
             plan["release_review"]["provider"] = provider
@@ -106,9 +124,17 @@ def setup_workflow(
     model_base: Path | None = None,
     release: bool = False,
     provider: str | None = None,
+    slot: str = "",
+    audience: str | None = None,
 ) -> tuple[Harness, Json, str, str]:
     h, plan, selection = prepared_workflow(
-        path, route, permit_slack=permit_slack, release=release, provider=provider
+        path,
+        route,
+        permit_slack=permit_slack,
+        release=release,
+        provider=provider,
+        slot=slot,
+        audience=audience,
     )
     directory = h.path.parent
     started = selection.start(plan_revision(plan), "initial-result")

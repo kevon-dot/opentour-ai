@@ -738,6 +738,7 @@ def freeze_intake(
                         actor=receipt["delegate"],
                         discovery_revision=proposal["discovery_revision"],
                         candidate=match,
+                        existing_only=True,
                     ),
                     "stale_or_unconfirmed_delegation",
                 )

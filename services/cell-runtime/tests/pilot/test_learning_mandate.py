@@ -3,27 +3,44 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import tempfile
 import time
 import unittest
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import AbstractContextManager, closing, contextmanager
 from pathlib import Path
+from threading import Event
 from typing import Any
 from unittest.mock import patch
 
 from opentour_cell.pilot import learning_mandate as lm
-from opentour_cell.pilot import open_weight
+from opentour_cell.pilot import open_weight, repair_workflow
+from opentour_cell.pilot.custody import Closeout
 from opentour_cell.pilot.operating_point import digest
+from opentour_cell.pilot.simple_repair import membership
+from opentour_cell.pilot.text_classifier import TrainingError
+from opentour_cell.pilot.training import LocalTrainingStore
+
+TERMS = {
+    "agreement": "generated-terms",
+    "custodian": "generated-custodian",
+    "support": "generated-support",
+    "due": "2040-04-01",
+    "trigger": "withdrawal",
+}
 
 
 class TestLearningMandate(unittest.TestCase):
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        self.directory = Path(self.temp.name)
+        self.directory = Path(self.temp.name).resolve()
+        self.store = LocalTrainingStore(self.directory / "training.sqlite3", "example-org")
+        self.engagement = self.store.engagement_id
         self.ledger = lm.LearningMandates(
-            self.directory, "example-org", "example-engagement", owner="customer-owner"
+            self.directory, "example-org", self.engagement, owner="customer-owner"
         )
         self.spec = {
             "mandate_id": "standing-one",
@@ -100,9 +117,9 @@ class TestLearningMandate(unittest.TestCase):
 
     def test_owner_and_scope_are_immutable_explicit_and_isolated(self) -> None:
         with self.assertRaisesRegex(lm.MandateError, "registered_owner_mismatch"):
-            lm.LearningMandates(self.directory, "example-org", "example-engagement", owner="other")
+            lm.LearningMandates(self.directory, "example-org", self.engagement, owner="other")
         with self.assertRaisesRegex(lm.MandateError, "registered_mandate_owner_required"):
-            lm.LearningMandates(self.directory, "other-org", "example-engagement")
+            lm.LearningMandates(self.directory, "other-org", self.engagement)
         with self.assertRaisesRegex(lm.MandateError, "registered_owner_approval_required"):
             self.ledger.enroll(self.spec, actor="local-worker")
         with self.assertRaisesRegex(lm.MandateError, "immutable_mandate_conflict"):
@@ -122,6 +139,259 @@ class TestLearningMandate(unittest.TestCase):
         self.assertEqual(
             self.ledger.inspect("standing-one", actor="customer-owner")["reserved_fits"], 0
         )
+
+    def test_closeout_fences_active_and_restored_mandate_authority(self) -> None:
+        with closing(sqlite3.connect(self.store.path)) as db:
+            self.assertEqual(db.execute("PRAGMA journal_mode=WAL").fetchone()[0], "wal")
+        first, second = self.admit(1), self.admit(2)
+        for run in (first, second):
+            self.confirm(run["run_id"])
+        first_fit, second_fit = [
+            self.ledger.reserve(
+                "standing-one", self.reservation(run["run_id"]), actor="local-worker"
+            )["reservation_id"]
+            for run in (first, second)
+        ]
+        self.ledger.claim_fit(
+            first_fit, actor="local-worker", bundle=self.directory / "started/model"
+        )
+        other = self.directory / "other"
+        other.mkdir(mode=0o700)
+        other_store = LocalTrainingStore(other / "training.sqlite3", "neighbor-org")
+        neighbor = lm.LearningMandates(
+            other, "neighbor-org", other_store.engagement_id, owner="customer-owner"
+        )
+        neighbor.enroll(self.spec, actor="customer-owner")
+        backup = sqlite3.connect(":memory:")
+        self.addCleanup(backup.close)
+        with closing(sqlite3.connect(self.store.path)) as active:
+            active.backup(backup)
+
+        Closeout(self.directory, "example-org").withdraw(**TERMS)
+        accounting = self.ledger.inspect("standing-one", actor="customer-owner")
+        with closing(sqlite3.connect(self.store.path)) as restored:
+            backup.backup(restored)
+            self.assertEqual(restored.execute("PRAGMA journal_mode").fetchone()[0], "wal")
+        after_restart = lm.LearningMandates(self.directory, "example-org", self.engagement)
+        denied: list[Callable[[], Any]] = [
+            lambda: after_restart.authorize_source(
+                "standing-one", self.request(1), actor="local-worker"
+            ),
+            lambda: self.admit(3),
+            lambda: after_restart.check_run(first["run_id"], actor="local-worker"),
+            lambda: self.confirm(first["run_id"]),
+            lambda: after_restart.reserve(
+                "standing-one", self.reservation(second["run_id"]), actor="local-worker"
+            ),
+            lambda: after_restart.grant(first_fit, actor="local-worker"),
+            lambda: after_restart.claim_fit(
+                second_fit, actor="local-worker", bundle=self.directory / "untouched/model"
+            ),
+            lambda: after_restart.settle(
+                first_fit,
+                actor="local-worker",
+                elapsed_seconds=1,
+                artifact_sha256=digest("unpublished"),
+            ),
+            lambda: after_restart.enroll(self.spec, actor="customer-owner"),
+        ]
+        for index, action in enumerate(denied):
+            with (
+                self.subTest(action=index),
+                self.assertRaisesRegex(lm.MandateError, "standing_engagement_unavailable"),
+            ):
+                action()
+        self.assertEqual(after_restart.inspect("standing-one", actor="customer-owner"), accounting)
+        settled = after_restart.settle(first_fit, actor="local-worker", elapsed_seconds=1)
+        self.assertIsNone(settled["artifact_sha256"])
+        self.assertFalse((self.directory / "untouched").exists())
+        self.assertTrue(
+            neighbor.authorize_source("standing-one", self.request(1), actor="local-worker")
+        )
+
+    def test_concurrent_mandate_admission_orders_before_durable_withdrawal(self) -> None:
+        entered, resume, closing_started = Event(), Event(), Event()
+        make_receipt = self.ledger._source_receipt
+
+        def pause(*args: Any) -> dict[str, Any]:
+            entered.set()
+            self.assertTrue(resume.wait(3))
+            return make_receipt(*args)
+
+        def withdraw() -> dict[str, Any]:
+            closing_started.set()
+            return Closeout(self.directory, "example-org").withdraw(**TERMS)
+
+        with patch.object(self.ledger, "_source_receipt", pause), ThreadPoolExecutor(2) as workers:
+            first = workers.submit(self.admit)
+            try:
+                self.assertTrue(entered.wait(3))
+                with closing(sqlite3.connect(self.store.path, timeout=0)) as competing:
+                    with self.assertRaisesRegex(sqlite3.OperationalError, "locked"):
+                        competing.execute("BEGIN IMMEDIATE")
+                closeout = workers.submit(withdraw)
+                self.assertTrue(closing_started.wait(3))
+                self.assertFalse(closeout.done())
+            finally:
+                resume.set()
+            self.assertEqual(
+                first.result(timeout=4)["source_revision"], self.request()["source_revision"]
+            )
+            self.assertTrue(closeout.result(timeout=4)["reconciled"])
+        with self.assertRaisesRegex(lm.MandateError, "standing_engagement_unavailable"):
+            self.admit()
+        self.assertEqual(self.ledger.inspect("standing-one")["runs"], 1)
+
+    def test_numeric_worker_input_cannot_dispatch_after_engagement_withdrawal(self) -> None:
+        with closing(sqlite3.connect(self.store.path)) as db:
+            self.assertEqual(db.execute("PRAGMA journal_mode=WAL").fetchone()[0], "wal")
+        profile = self.directory / "profile.json"
+        profile.write_text('{"files":[]}')
+        guards = 0
+
+        @contextmanager
+        def dispatch() -> Iterator[None]:
+            nonlocal guards
+            guards += 1
+            if guards == 2:
+                Closeout(self.directory, "example-org").withdraw(**TERMS)
+            with self.store.engagement_guard(engagement_id=self.engagement):
+                yield
+
+        with (
+            patch.object(open_weight, "_resources", return_value=(profile, profile)),
+            patch.object(open_weight.subprocess, "Popen") as launch,
+        ):
+            worker = launch.return_value.__enter__.return_value
+            worker.poll.return_value = None
+            with self.assertRaisesRegex(TrainingError, "engagement_withdrawn"):
+                open_weight._run(
+                    self.directory / "model",
+                    self.directory,
+                    {"labels": ["billing", "technical"], "max_seconds": 2},
+                    None,
+                    {"operation": "fit"},
+                    dispatch=dispatch,
+                )
+            launch.assert_called_once()
+            worker.communicate.assert_not_called()
+            worker.kill.assert_called_once()
+        self.assertFalse((self.directory / "model").exists())
+
+    def test_managed_worker_dispatch_excludes_wal_writer(self) -> None:
+        with closing(sqlite3.connect(self.store.path)) as db:
+            self.assertEqual(db.execute("PRAGMA journal_mode=WAL").fetchone()[0], "wal")
+
+        def inspect_dispatch(*args: Any, **kwargs: Any) -> None:
+            with kwargs["dispatch"](), closing(sqlite3.connect(self.store.path, timeout=0)) as db:
+                self.assertIsNone(
+                    db.execute("SELECT withdrawn_at FROM engagement WHERE singleton=1").fetchone()[
+                        0
+                    ]
+                )
+                with self.assertRaisesRegex(sqlite3.OperationalError, "locked"):
+                    db.execute("BEGIN IMMEDIATE")
+            raise TrainingError("generated_dispatch_checked")
+
+        with (
+            patch.object(open_weight, "fit_open_weight", side_effect=inspect_dispatch),
+            self.assertRaisesRegex(TrainingError, "generated_dispatch_checked"),
+        ):
+            repair_workflow._model_arm(
+                self.directory,
+                self.directory / "work",
+                {"organization": "example-org", "engagement": self.engagement},
+                {},
+                {"features": ["question"]},
+                {},
+                [],
+                [],
+                lambda: None,
+            )
+
+    def test_numeric_publication_uses_wal_fence_and_cleans_withdrawn_staging(self) -> None:
+        with closing(sqlite3.connect(self.store.path)) as db:
+            self.assertEqual(db.execute("PRAGMA journal_mode=WAL").fetchone()[0], "wal")
+        run = self.admit()
+        self.confirm(run["run_id"])
+        development = [
+            {
+                "case_id": "case-" + label,
+                "family_id": "family-" + label,
+                "features": {"question": "Generated " + label},
+                "label": label,
+            }
+            for label in ("billing", "technical")
+        ]
+        groups = [{"case_id": row["case_id"], "group_id": row["family_id"]} for row in development]
+        residual: dict[str, Any] = {
+            "route": "model",
+            "model_authorized": True,
+            "compute_authorized": True,
+            "residual_count": 2,
+            "schema_version": "opentour.pilot.development-decision.v1",
+            "fit_calls": 0,
+            "development_case_keys": sorted(membership(groups, "case_id")),
+            "development_group_keys": sorted(membership(groups, "group_id")),
+        }
+        revision = digest(residual)
+        residual.update(revision=revision, residual_revision=revision)
+        reservation = self.ledger.reserve(
+            "standing-one",
+            self.reservation(run["run_id"]) | {"residual_revision": revision},
+            actor="local-worker",
+        )
+        grant = self.ledger.grant(reservation["reservation_id"], actor="local-worker")
+        profile = self.directory / "profile.json"
+        profile.write_text('{"files":[]}')
+        nominal = self.directory / "published/model"
+        withdrawn = self.directory / "withdrawn/model"
+        published: list[Path] = []
+        raw_rename = Path.rename
+
+        def checked_rename(stage: Path, target: Path) -> Path:
+            with closing(sqlite3.connect(self.store.path, timeout=0)) as db:
+                with self.assertRaisesRegex(sqlite3.OperationalError, "locked"):
+                    db.execute("BEGIN IMMEDIATE")
+            published.append(target)
+            return raw_rename(stage, target)
+
+        def permission() -> AbstractContextManager[None]:
+            return self.store.engagement_guard(engagement_id=self.engagement)
+
+        def withdraw_then_check() -> AbstractContextManager[None]:
+            Closeout(self.directory, "example-org").withdraw(**TERMS)
+            return permission()
+
+        def fit(
+            bundle: Path, dispatch: Callable[[], AbstractContextManager[None]]
+        ) -> dict[str, Any]:
+            return open_weight.fit_open_weight(
+                bundle,
+                development,
+                model_dir=self.directory,
+                grant=grant,
+                residual=residual,
+                protected_fingerprints=[digest("protected-fixture")],
+                dispatch=dispatch,
+            )
+
+        with (
+            patch.object(open_weight, "_resources", return_value=(profile, profile)),
+            patch.object(
+                open_weight,
+                "_run",
+                side_effect=lambda *args, **kwargs: {"adapter": {"a": "YQ=="}, "pid": 1},
+            ),
+            patch.object(Path, "rename", checked_rename),
+        ):
+            self.assertEqual(fit(nominal, permission)["training_rows"], 2)
+            with self.assertRaisesRegex(TrainingError, "engagement_withdrawn"):
+                fit(withdrawn, withdraw_then_check)
+        self.assertEqual(published, [nominal])
+        self.assertTrue(nominal.is_dir())
+        self.assertFalse(withdrawn.exists())
+        self.assertEqual(list(withdrawn.parent.glob(".model.pending-*")), [])
 
     def test_rules_spend_zero_compute_and_manual_stops_before_source(self) -> None:
         rule = dict(
@@ -246,7 +516,7 @@ class TestLearningMandate(unittest.TestCase):
             claims = list(workers.map(claim, range(6)))
         self.assertEqual(claims.count(permission["rights_attestation"]), 1)
         self.assertEqual(claims.count("fit_claim_already_used"), 5)
-        rest = lm.LearningMandates(self.directory, "example-org", "example-engagement")
+        rest = lm.LearningMandates(self.directory, "example-org", self.engagement)
         self.assertEqual(rest.inspect("standing-one")["reserved_seconds"], 20)
         with self.assertRaisesRegex(open_weight.OpenWeightError, "incomplete"):
             rest.settle(
@@ -369,7 +639,7 @@ class TestLearningMandate(unittest.TestCase):
             "--organization",
             "example-org",
             "--engagement",
-            "example-engagement",
+            self.engagement,
         ]
 
         def invoke(command: str, *args: str) -> tuple[int, dict[str, Any]]:

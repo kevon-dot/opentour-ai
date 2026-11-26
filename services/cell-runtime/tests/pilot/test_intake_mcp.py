@@ -78,10 +78,15 @@ class _GeneratedAuthority:
         self.flags = json.loads((self.directory / "fixture-state.json").read_text())
         if self.flags.get("expired"):
             raise IntakeError("intake_expired")
-        yield
+        store = LocalTrainingStore(
+            self.directory / "training.sqlite3", actor.tenant, existing_only=True
+        )
+        self.epoch = store.engagement_id
+        with store.engagement_guard(engagement_id=self.epoch, read_only=True):
+            yield
 
     def historical(self, actor, request):
-        store = LearningMandates(self.directory, actor.tenant, "epoch-a")
+        store = LearningMandates(self.directory, actor.tenant, self.epoch)
         grant = store.inspect("fixture-mandate", actor=actor.actor)
         if grant["expired"]:
             raise IntakeError("intake_expired")
@@ -97,7 +102,7 @@ class _GeneratedAuthority:
             return None
         return AuthorizedSource(
             scope["workflow"],
-            "epoch-a",
+            self.epoch,
             "evaluation",
             "pair-resource",
             grant["mandate_revision"],
@@ -113,7 +118,7 @@ class _GeneratedAuthority:
         if request.creation_ref not in ("creation-a", "creation-b", None):
             return None
         return AuthorizedSource(
-            request.workflow_ref, "epoch-a", "starter", "policy-resource", "setup-v1"
+            request.workflow_ref, self.epoch, "starter", "policy-resource", "setup-v1"
         )
 
     def resolve(self, reference, actor):
@@ -123,7 +128,7 @@ class _GeneratedAuthority:
             return LiveBinding(
                 actor.tenant,
                 "generated-observed-workflow",
-                "epoch-a",
+                self.epoch,
                 "outcome-binding",
                 "v1",
                 "independent_outcome",
@@ -137,7 +142,7 @@ class _GeneratedAuthority:
         original = LiveBinding(
             actor.tenant,
             "generated-observed-workflow",
-            "epoch-a",
+            self.epoch,
             "binding-id",
             "v1",
             "decision",
@@ -146,7 +151,7 @@ class _GeneratedAuthority:
             "current",
             self.flags.get("revision", "feed-v1"),
         )
-        if original.engagement_epoch != self.flags.get("active_epoch", "epoch-a"):
+        if original.engagement_epoch != self.flags.get("active_epoch", self.epoch):
             return None
         if self.flags.get("foreign_binding"):
             return replace(original, tenant="org-b")
@@ -190,8 +195,9 @@ class _GeneratedAuthority:
         return None
 
 
-def _mandate(directory: Path, tenant: str, engagement: str = "epoch-a", *, max_runs: int = 3):
-    store = LearningMandates(directory, tenant, engagement, owner="owner")
+def _mandate(directory: Path, tenant: str, *, max_runs: int = 3):
+    training = LocalTrainingStore(directory / "training.sqlite3", tenant)
+    store = LearningMandates(directory, tenant, training.engagement_id, owner="owner")
     template = Path(__file__).resolve().parents[2] / "examples/pilot-learning-mandate.template.json"
     scope = json.loads(template.read_text())
     scope.update(
@@ -253,7 +259,9 @@ def _starter_only(directory: Path):
 
 
 def _stdio_main(directory: Path, tenant: str, role: str, crash: bool) -> int:
-    admission = DurableIntake(directory, _GeneratedAuthority(directory))
+    # Tenants have separate authority stores and still collide deliberately in the admission ledger.
+    authority_directory = directory if tenant == ACTOR_A.tenant else directory / "org-b"
+    admission = DurableIntake(directory, _GeneratedAuthority(authority_directory))
     if crash:
         original = admission.submit_intake
 
@@ -277,12 +285,15 @@ class TestIntakeMcp(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name).resolve()
+        self.other = self.root / "org-b"
+        self.other.mkdir(mode=0o700)
         self.flags()
         _mandate(self.root, "org-a")
-        _mandate(self.root, "org-b")
+        _mandate(self.other, "org-b")
 
     def flags(self, **flags):
-        (self.root / "fixture-state.json").write_text(json.dumps(flags))
+        for directory in (self.root, self.other):
+            (directory / "fixture-state.json").write_text(json.dumps(flags))
 
     def conversation(
         self,
@@ -727,9 +738,11 @@ class TestIntakeMcp(unittest.TestCase):
         self.assertEqual((denied.returncode, denied.stderr.strip(), rows), (2, unavailable, {}))
 
     def test_owner_local_command_uses_real_mandate_and_rejects_forged_authority(self):
+        self.root = self.root / "owner-local"
+        self.root.mkdir(mode=0o700)
         training = LocalTrainingStore(self.root / "training.sqlite3", "org-a")
         epoch = training.engagement_id
-        grant = _mandate(self.root, "org-a", epoch, max_runs=1)
+        grant = _mandate(self.root, "org-a", max_runs=1)
         ledger = LearningMandates(self.root, "org-a", epoch)
         scope = grant["scope"]
         source = {

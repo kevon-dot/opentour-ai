@@ -12,6 +12,7 @@ import stat
 import tempfile
 import time
 from collections.abc import Callable
+from contextlib import AbstractContextManager
 from pathlib import Path
 from typing import Any
 
@@ -307,6 +308,14 @@ def _model_arm(
     protected = [projection(row) for row in hidden_inputs]
     base = directory / "model-base"
     python = os.environ.get("OPENTOUR_TRAINING_PYTHON")
+    domain = LocalTrainingStore(
+        directory / "training.sqlite3", manifest["organization"], existing_only=True
+    )
+
+    def dispatch() -> AbstractContextManager[None]:
+        # SQLite WAL readers do not prevent a concurrent writer from withdrawing.
+        return domain.engagement_guard(engagement_id=manifest["engagement"])
+
     registry = None
     if grant.get("authority_kind") == "standing_customer_mandate":
         from opentour_cell.pilot.learning_mandate import LearningMandates
@@ -325,6 +334,7 @@ def _model_arm(
         protected_fingerprints=open_weight.partition_fingerprints(protected),
         python=python,
         check_permission=check_permission,
+        dispatch=dispatch,
     )
     check_permission()
     if registry is not None:
@@ -342,6 +352,7 @@ def _model_arm(
         grant=grant,
         python=python,
         check_permission=check_permission,
+        dispatch=dispatch,
     )
     return model, {
         row["case_id"]: decision for row, decision in zip(protected, inferred, strict=True)
