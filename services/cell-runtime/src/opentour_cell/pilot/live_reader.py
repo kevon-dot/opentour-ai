@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hmac
 import re
+import sys
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
@@ -11,7 +12,11 @@ from typing import Any
 from opentour_cell.pilot.intake_admission import DurableIntake, IntakeWork
 from opentour_cell.pilot.intake_local import open_intake
 from opentour_cell.pilot.intake_mcp import CatalogFeed, IntakeError, IntakePrincipal, require_ref
-from opentour_cell.pilot.live_authority import LocalLiveIntake, PrivateLiveAuthority
+from opentour_cell.pilot.live_authority import (
+    SELECTION_SCHEMA,
+    LocalLiveIntake,
+    PrivateLiveAuthority,
+)
 from opentour_cell.pilot.live_evidence import FeedGrant, LiveScope, _canonical, _digest
 from opentour_cell.pilot.onboarding_mcp import _read_private
 from opentour_cell.pilot.repair_workflow import _record
@@ -272,3 +277,33 @@ def materialize_live(selection: Path, run_ref: str) -> bool:
         return intake.materialize(actor, run_ref, read)
     except (OSError, ValueError, KeyError, TypeError):
         raise IntakeError("live_export_unavailable") from None
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Return bounded status to a local worker operator without disclosing input or paths."""
+    args = sys.argv[1:] if argv is None else argv
+    if len(args) != 2:
+        print("usage: live_reader PRIVATE_SELECTION ADMITTED_RUN", file=sys.stderr)
+        return 2
+    try:
+        selection, run_ref = Path(args[0]), require_ref(args[1])
+        selected = _read_private(selection, 4096)
+        _require(selected.get("schema_version") == SELECTION_SCHEMA)
+        actor, service = open_intake(selection)
+        status = service.get_run(actor, run_ref)
+        if status.state == "materialized":
+            print("already_materialized")
+            return 0
+        if status.state == "queued" and materialize_live(selection, run_ref):
+            print("materialized")
+            return 0
+    except Exception:
+        # CLI boundary: even unexpected parser, filesystem or database errors may
+        # contain private paths, field names or source values.
+        pass
+    print("live_export_unavailable", file=sys.stderr)
+    return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

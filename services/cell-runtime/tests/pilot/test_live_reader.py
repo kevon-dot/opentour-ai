@@ -252,3 +252,49 @@ def test_mapping_revision_rechecked_before_page_effects(tmp_path, monkeypatch):
     with pytest.raises(IntakeError):
         live_reader.materialize_live(export.selection, run)
     assert export.snapshot().decisions == 0 and export.receipts() == ()
+
+
+def test_fresh_worker_cli_materializes_once_and_denies_without_effects(tmp_path):
+    import subprocess
+    import sys
+
+    export = Export(tmp_path / "GENERATED_PRIVATE_PATH_SENTINEL")
+    export.install(DECISION, [[export.row(decision(), 11)]])
+    run = export.submit(DECISION)
+
+    def invoke(run_ref):
+        return subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "opentour_cell.pilot.live_reader",
+                str(export.selection),
+                run_ref,
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=20,
+        )
+
+    before = {p.name: p.read_bytes() for p in export.directory.iterdir() if p.is_file()}
+    denied = invoke("private-unknown-run")
+    assert (denied.returncode, denied.stdout, denied.stderr) == (1, "", "live_export_unavailable\n")
+    assert before == {p.name: p.read_bytes() for p in export.directory.iterdir() if p.is_file()}
+    success = invoke(run)
+    assert (success.returncode, success.stdout, success.stderr) == (0, "materialized\n", "")
+    assert export.snapshot().pending == 1
+    receipts = export.receipts()
+    replay = invoke(run)
+    assert (replay.returncode, replay.stdout, replay.stderr) == (0, "already_materialized\n", "")
+    assert export.receipts() == receipts
+    export.case.body["state"] = "revoked"
+    export.case.write()
+    before = {p.name: p.read_bytes() for p in export.directory.iterdir() if p.is_file()}
+    revoked = invoke(run)
+    assert (revoked.returncode, revoked.stdout, revoked.stderr) == (
+        1,
+        "",
+        "live_export_unavailable\n",
+    )
+    assert before == {p.name: p.read_bytes() for p in export.directory.iterdir() if p.is_file()}
