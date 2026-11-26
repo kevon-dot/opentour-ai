@@ -43,8 +43,8 @@ STARTER_PURPOSE = "starter_policy_draft"
 MAX_SELECTION_BYTES = 4096
 
 
-class HistoricalSourceExpired(IntakeError):
-    """The authenticated launcher's selected historical source grant expired."""
+class VerifiedIntakeExpired(IntakeError):
+    """A verified private intake authorization expired."""
 
 
 def _selected_json(path: Path) -> dict[str, Any]:
@@ -185,7 +185,7 @@ class LocalHistoricalAuthority(_LocalAuthority):
                 except source_intake.BoundSourceGrantExpired as error:
                     if HistoricalSelection.read(self.path) != selection:
                         raise IntakeError("intake_unavailable") from error
-                    raise HistoricalSourceExpired("intake_expired") from error
+                    raise VerifiedIntakeExpired("intake_expired") from error
                 if HistoricalSelection.read(self.path) != selection:
                     raise IntakeError("intake_unavailable")
                 token = self._scope.set(
@@ -208,7 +208,7 @@ class LocalHistoricalAuthority(_LocalAuthority):
                 else "intake_unavailable"
             )
             raise IntakeError(code) from error
-        except (OSError, sqlite3.Error, TrainingError) as error:
+        except (OSError, sqlite3.Error, ManifestError, TrainingError) as error:
             raise IntakeError("intake_unavailable") from error
 
     def discover(self, actor: IntakePrincipal, *, limit: int, cursor: str | None) -> CatalogPage:
@@ -271,6 +271,7 @@ class VerifiedStarterGrant:
     setup_policy_revision: str
     creation_ref: str
     revision: str
+    expires_at: int
 
 
 class LocalStarterAuthority(_LocalAuthority):
@@ -333,10 +334,8 @@ class LocalStarterAuthority(_LocalAuthority):
             raise IntakeError("intake_unavailable")
         if os.path.lexists(directory / f"starter-intake-withdrawn-{wanted.grant_ref}.json"):
             raise IntakeError("intake_unavailable")
-        if type(body["expires_at"]) is not int:
+        if type(body["expires_at"]) is not int or body["expires_at"] <= 0:
             raise IntakeError("intake_unavailable")
-        if body["expires_at"] <= time.time():
-            raise IntakeError("intake_expired")
         require_ref(body["custodian_id"])
         return VerifiedStarterGrant(
             require_ref(body["policy_resource_ref"]),
@@ -344,6 +343,7 @@ class LocalStarterAuthority(_LocalAuthority):
             require_ref(body["setup_policy_revision"]),
             require_ref(body["creation_ref"]),
             seal,
+            body["expires_at"],
         )
 
     @contextmanager
@@ -359,6 +359,8 @@ class LocalStarterAuthority(_LocalAuthority):
                 grant = self._read_grant()
                 if grant != self._pinned:
                     raise IntakeError("intake_unavailable")
+                if grant.expires_at <= time.time():
+                    raise VerifiedIntakeExpired("intake_expired")
                 token = self._grant.set(grant)
                 try:
                     yield
@@ -410,7 +412,7 @@ def main(argv: list[str] | None = None) -> int:
         with authority.guard(authority.principal):
             admission = DurableIntake(args.selection.parent, authority)
         return serve_intake(authority.principal, admission, sys.stdin.buffer, sys.stdout.buffer)
-    except HistoricalSourceExpired as error:
+    except VerifiedIntakeExpired as error:
         print(str(error), file=sys.stderr)
         return 2
     except (IntakeError, ManifestError, MandateError, OSError, sqlite3.Error, TrainingError):
