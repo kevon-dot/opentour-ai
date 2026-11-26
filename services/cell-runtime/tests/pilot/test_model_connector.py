@@ -1,4 +1,5 @@
-from contextlib import nullcontext
+import sqlite3
+from contextlib import closing, nullcontext
 from dataclasses import replace
 from unittest.mock import Mock
 
@@ -286,6 +287,70 @@ def test_lookup_denies_foreign_benchmark_and_substituted_job_receipt(setup_conne
         preflight.reconcile_fit("training", intent)
     adapter.collect.assert_not_called()
     adapter.submit.assert_not_called()
+
+
+def test_generated_backend_recovery_after_committed_but_lost_reply(setup_connector, tmp_path):
+    initial, adapter, _, intent, clock = setup_connector
+    store = tmp_path / "generated-provider.sqlite3"
+    with closing(sqlite3.connect(store)) as db:
+        db.execute(
+            """
+            CREATE TABLE admitted (
+                tenant TEXT NOT NULL, operation TEXT NOT NULL, digest TEXT NOT NULL,
+                job TEXT NOT NULL, PRIMARY KEY (tenant, operation)
+            )
+            """
+        )
+
+    def lookup(selected):
+        with closing(sqlite3.connect(store)) as db:
+            row = db.execute(
+                "SELECT digest, job FROM admitted WHERE tenant=? AND operation=?",
+                (selected.binding.tenant, selected.idempotency_key),
+            ).fetchone()
+        if row is None:
+            return None
+        if row[0] != selected.development_digest:
+            raise ValueError("generated_intent_conflict")
+        return models.JobReceipt(selected, models.JobState.QUEUED, row[1], "admission-evidence")
+
+    def submit(selected, _):
+        existing = lookup(selected)
+        if existing is not None:
+            return existing
+        with closing(sqlite3.connect(store)) as db:
+            with db:
+                db.execute(
+                    "INSERT INTO admitted VALUES (?, ?, ?, ?)",
+                    (
+                        selected.binding.tenant,
+                        selected.idempotency_key,
+                        selected.development_digest,
+                        "generated-single-job",
+                    ),
+                )
+        raise TimeoutError
+
+    adapter.submit.side_effect = submit
+    estimate = initial.prepare("training", intent)
+    assert estimate.maximum_minor_units <= intent.bound.maximum_minor_units
+    with pytest.raises(TimeoutError):
+        adapter.submit(intent, b"generated-development")
+
+    restarted_backend = Mock(spec=models.Connector)
+    restarted_backend.lookup.side_effect = lookup
+    restarted = models.Preflight(restarted_backend, initial.current_grant, clock=clock)
+    admitted = restarted.reconcile_fit("training", intent)
+    assert admitted.job_ref == "generated-single-job"
+    assert restarted.reconcile_fit("training", intent) == admitted
+    assert adapter.submit(intent, b"generated-development") == admitted
+    with pytest.raises(ValueError, match="generated_intent_conflict"):
+        adapter.submit(
+            replace(intent, development_digest="different-intent"), b"changed-development"
+        )
+    restarted_backend.submit.assert_not_called()
+    with closing(sqlite3.connect(store)) as db:
+        assert db.execute("SELECT COUNT(*) FROM admitted").fetchone() == (1,)
 
 
 def test_local_installation_probe_has_only_metadata_and_checks_pinned_hashes(monkeypatch, tmp_path):
