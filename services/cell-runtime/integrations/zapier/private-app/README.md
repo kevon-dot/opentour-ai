@@ -32,7 +32,8 @@ stays held; the app never supplies a guessed source or correction.
 All inputs are opaque references, not source rows, arbitrary text or evidence.
 Unknown input fields and unexpected response fields fail closed. A response is
 limited to 32 KiB and the request to 4 KiB, matching the shipped gateway. TLS
-certificate verification is enabled, redirects are not followed, and no raw
+certificate verification is explicitly required even if the process has an
+insecure TLS environment setting, redirects are not followed, and no raw
 transport/response error is returned to Zap History. The app does not retry.
 On a lost response, preserve the original key and reconcile the same intent;
 never create a new key to bypass an unknown outcome. Once a run reference is

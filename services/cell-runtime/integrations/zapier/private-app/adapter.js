@@ -93,7 +93,7 @@ function request(bound, operation, input) {
     const fail = (code) => reject(new BoundaryError(code));
     let complete = false;
     const req = https.request(`${bound.origin}/v1/${operation}`, {
-      method: 'POST', agent: false, minVersion: 'TLSv1.2',
+      method: 'POST', agent: false, minVersion: 'TLSv1.2', rejectUnauthorized: true,
       headers: {
         Origin: bound.origin, 'X-OpenTour-Audience': bound.audience,
         Authorization: `Bearer ${bound.token}`, 'Content-Type': 'application/json',

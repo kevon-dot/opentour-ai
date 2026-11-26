@@ -104,7 +104,7 @@ test('one exact owner-bound request, no redirects, no automatic resend and immut
   assert.equal(seen[0].options.headers['X-OpenTour-Audience'], authData.audience);
   assert.equal(seen[0].options.headers.Authorization, `Bearer ${authData.access_token}`);
   assert.deepEqual(seen[0].body, historical);
-  assert.equal(seen[0].options.rejectUnauthorized, undefined); // Node default remains true.
+  assert.equal(seen[0].options.rejectUnauthorized, true); // Ambient env cannot weaken trust.
 });
 
 for (const [status, expected] of [[302, 'intake_outcome_unknown'], [403, 'intake_unavailable'], [409, 'idempotency_conflict'], [429, 'intake_rate_limited'], [503, 'intake_outcome_unknown']]) {

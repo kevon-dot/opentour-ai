@@ -217,11 +217,13 @@ def main():
         a, b = owner(work / "a", "org-a"), owner(work / "b", "org-b")
         invocations = 0
 
-        def call(auth, operation, inputs, *, trust=True):
+        def call(auth, operation, inputs, *, trust=True, insecure_env=False):
             nonlocal invocations
             env = {"PATH": os.environ["PATH"]}
             if trust:
                 env["NODE_EXTRA_CA_CERTS"] = str(work / "ca.crt")
+            if insecure_env:
+                env["NODE_TLS_REJECT_UNAUTHORIZED"] = "0"
             proc = run(
                 args.node,
                 str(APP / "test/worker-client.js"),
@@ -276,6 +278,10 @@ def main():
                 "code": "intake_unavailable",
             }
             assert call(auth_a, "discover_sources", {}, trust=False) == {
+                "ok": False,
+                "code": "intake_outcome_unknown",
+            }
+            assert call(auth_a, "discover_sources", {}, trust=False, insecure_env=True) == {
                 "ok": False,
                 "code": "intake_outcome_unknown",
             }
