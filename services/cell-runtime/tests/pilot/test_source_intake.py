@@ -861,6 +861,22 @@ def test_packaged_invoice_coding_routes_missing_payer_to_review(
         "rule.json",
         "run.json",
     }
+    before_replay = {path.name: path.read_bytes() for path in result_dir.iterdir()}
+    # Each call starts the shipped legacy managed MCP in a fresh process. Both
+    # retry keys must retain the completed result without entering the new intake queue.
+    for key in ("payer-v1", "payer-v1-restarted"):
+        replay = call(
+            "start_offline_evaluation", {"plan_revision": revision, "idempotency_ref": key}
+        )
+        assert replay == worker
+        assert replay["run_id"] == queued["run_id"]
+        assert call("get_offline_evaluation", {"run_id": replay["run_id"]}) == worker
+    assert json.loads(run("workflow-worker", *args, "--once")) == {"state": "idle"}
+    assert {path.name: path.read_bytes() for path in result_dir.iterdir()} == before_replay
+    with sqlite3.connect(owner / "managed-runs.sqlite3") as db:
+        assert db.execute("SELECT id, attempts FROM runs").fetchall() == [(queued["run_id"], 1)]
+        assert db.execute("SELECT COUNT(*) FROM requests").fetchone() == (2,)
+    assert not (owner / "intake.sqlite3").exists()
     with sqlite3.connect(store.path) as db:
         assert db.execute("SELECT COUNT(*) FROM jobs").fetchone()[0] == expected["fit_jobs"]
         assert db.execute("SELECT COUNT(*) FROM fit_checkpoints").fetchone()[0] == 0
