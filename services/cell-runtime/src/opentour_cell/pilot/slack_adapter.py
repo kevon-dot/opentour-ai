@@ -37,6 +37,11 @@ ACTIONS = {
     "ot_tune",
     "ot_status",
     "ot_evidence",
+    "ot_plugin_continue",
+    "ot_managed_review_status",
+    "ot_plugin_request",
+    "ot_plugin_status",
+    "ot_plugin_receipt",
     "ot_charts",
     "ot_approve",
     "ot_changes",
@@ -1703,7 +1708,35 @@ class Workbench:
         view_audit = {**target.audit, "viewer": actor}
         if not named_reviewer:
             view_audit.pop("workflow_benchmark", None)
+        recipe = False
+        request_status = None
+        if (
+            named_reviewer
+            and cfg.approval_provider == "zapier_slack"
+            and ctx["job"].startswith("managed:")
+        ):
+            from opentour_cell.pilot.zapier_approval import ApprovalBridge
+
+            try:
+                bridge = ApprovalBridge(
+                    current.directory,
+                    current.organization,
+                    current.directory / "zapier-approval.json",
+                )
+                recipe = bridge.uses_recipe()
+            except (OSError, ValueError):
+                pass
+            if recipe and target.audit.get("release_reviewer") == actor:
+                request_status = bridge.existing_status(
+                    run_id=target.audit["job_id"],
+                    run_revision=target.audit["run_revision"],
+                    artifact_sha=target.audit["model_revision"],
+                    team=cfg.team,
+                    actor=actor,
+                )
         modal = self.views.evidence_modal(
+            recipe=recipe,
+            request_status=request_status,
             context=token,
             revision=target.revision,
             report=target.report,
@@ -1761,7 +1794,8 @@ class Workbench:
             )
 
         if (
-            actor == target.audit.get("release_reviewer")
+            not recipe
+            and actor == target.audit.get("release_reviewer")
             and "review" in entry["roles"]
             and (target.audit.get("release_provider") == "zapier_slack")
         ):
@@ -1779,6 +1813,7 @@ class Workbench:
                     run_revision=target.audit["run_revision"],
                     artifact_sha=target.audit["model_revision"],
                     inspection_ref=target.revision,
+                    expected_policy="opentour.pilot.zapier-slack-policy.v1",
                 )
             except (OSError, ValueError, KeyError):
                 self._show(
@@ -2036,6 +2071,98 @@ class Workbench:
         elif action in {"ot_status", "ot_status_refresh"}:
             _check(job and value in {job, "home", ctx["revision"]})
             self._status(cfg, actor, view, job, old_hash)
+        elif action == "ot_managed_review_status":
+            _check(ctx["kind"] == "evidence" and value == ctx["revision"] and actor == cfg.reviewer)
+            self.private_channel(cfg, actor)
+            target = self._managed(cfg, actor, job)
+            _check(target.revision == value)
+            cfg.permission(actor, "review", target.dataset)
+            self._show(
+                view,
+                self.views.managed_review_status(ctx["id"], target.audit),
+                old_hash,
+                dataset=target.dataset,
+                dataset_revision=target.dataset_revision,
+                audit=target.audit,
+            )
+        elif action in {"ot_plugin_continue", "ot_plugin_request"}:
+            from opentour_cell.pilot.zapier_approval import RECIPE_POLICY, ApprovalBridge
+
+            target = self._managed(cfg, actor, job)
+            _check(cfg.reviewer == actor and target.audit.get("release_reviewer") == actor)
+            cfg.permission(actor, "review", target.dataset)
+            self.private_channel(cfg, actor)
+            bridge = ApprovalBridge(
+                cfg.directory, cfg.organization, cfg.directory / "zapier-approval.json"
+            )
+            binding = {
+                "run_id": target.audit["job_id"],
+                "run_revision": target.audit["run_revision"],
+                "artifact_sha": target.audit["model_revision"],
+                "inspection_ref": target.revision,
+            }
+            if action == "ot_plugin_continue":
+                _check(ctx["kind"] == "evidence" and value == ctx["revision"] == target.revision)
+                preview = bridge.issue(**binding, expected_policy=RECIPE_POLICY, preview_only=True)
+                token = self.journal.context(
+                    actor, cfg.channel, view, "plugin_preview", job, _json(preview)
+                )
+                self._show(
+                    view,
+                    self.views.plugin_preview_modal(token, preview),
+                    old_hash,
+                    dataset=target.dataset,
+                    dataset_revision=target.dataset_revision,
+                    audit=target.audit,
+                )
+                return
+            _check(ctx["kind"] == "plugin_preview")
+            confirmed = json.loads(ctx["revision"])
+            _check(value == confirmed["request_id"])
+            request = bridge.issue(
+                **binding, expected_policy=RECIPE_POLICY, confirmed_preview=confirmed
+            )
+            token = self.journal.context(
+                actor, cfg.channel, view, "plugin_request", job, request["request_id"]
+            )
+            self._show(
+                view, self.views.plugin_waiting_modal(token, request["request_id"]), old_hash
+            )
+        elif action in {"ot_plugin_status", "ot_plugin_receipt"}:
+            from opentour_cell.pilot.zapier_approval import ApprovalBridge
+
+            _check(ctx["kind"] in {"evidence", "plugin_request"})
+            self.private_channel(cfg, actor)
+            bridge = ApprovalBridge(
+                cfg.directory, cfg.organization, cfg.directory / "zapier-approval.json"
+            )
+            target = self._managed(cfg, actor, job)
+            if ctx["kind"] == "evidence":
+                _check(
+                    target.revision == ctx["revision"]
+                    and target.audit.get("release_reviewer") == actor
+                )
+                existing = bridge.existing_status(
+                    run_id=target.audit["job_id"],
+                    run_revision=target.audit["run_revision"],
+                    artifact_sha=target.audit["model_revision"],
+                    team=cfg.team,
+                    actor=actor,
+                )
+                _check(existing and existing["request_id"] == value)
+            else:
+                _check(value == ctx["revision"])
+            status = bridge.decision_status(value, team=cfg.team, actor=actor)
+            self._show(
+                view,
+                self.views.plugin_waiting_modal(
+                    ctx["id"], value, status, show_receipt=action == "ot_plugin_receipt"
+                ),
+                old_hash,
+                dataset=target.dataset,
+                dataset_revision=target.dataset_revision,
+                audit=target.audit,
+            )
         elif action == "ot_evidence":
             _check(
                 ctx["kind"] in {"home", "evidence", "status", "eval_detail", "questions"}

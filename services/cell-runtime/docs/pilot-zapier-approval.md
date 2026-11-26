@@ -1,28 +1,37 @@
 # Approve a specific repair with Zapier’s Slack Request Approval
 
-A reviewer opens **Inspect evidence** in the private OpenTour Slack app and reads the result for their team. When the frozen plan selects `zapier_slack`, that successful presentation queues a request for the first-party **Slack → Request Approval** action in the customer’s Zap. The reviewer can **Approve this release** or **Request changes**. Only a valid terminal decision for that exact version can clear the local release gate. Approval permits the separately authorized handoff or activation. It does not switch production traffic by itself.
+## Versioned recipe for a private installation
 
-The first ten use the customer’s owner workstation, their existing Slack workspace and an authorized Zapier account. The workstation makes an outbound HTTPS request. An existing private return transport or an explicit local import carries the signed decision back. No public callback listener or AWS infrastructure is required.
+Use recipe v1 with worker policy v2. The owner enables it only after witnessing the installed bindings. The administrator needs multi-step Zaps, Webhooks, a customer-owned private Platform integration, Slack access to the private channel and an authenticated read-only tenant evidence viewer. Verify these entitlements on the actual account. [Catch Hook plan and setup](https://help.zapier.com/hc/en-us/articles/8496288690317-Trigger-Zaps-from-webhooks) Template sharing is optional.
 
-## Set up one approved private destination
+1. Make one isolated Zap, Slack connection, signing connection, return transport, fresh 32-byte key and owner policy per customer. Set the worker and frozen plan to `zapier_slack`. The installed private channel, workspace, named reviewer, evaluation recipient and current source/review grants come from the owner settings. Pin the published version. The reviewer can read evidence and vote, the operator can reconcile status, and only the installation administrator may edit connections, mappings or secrets.
+2. Copy the dummy binding below, replace it locally and compare it with the owner policy. Build the field map with `node integrations/zapier/import-approval-recipe.cjs binding.json zapier-approval.json`. Record the printed revision and manifest SHA-256. Keep the map private. Run the worker check-config command below as well. Neither command contacts a provider.
+3. Register the three supplied private app actions. Bind Webhooks → Catch Hook to the locally fingerprinted secret URL. Its versioned input contains only schema_version, request_id, nonce, expires_at and request_signature. Map those five fields to **Verify Approval Reference** on the pinned signer connection. Stop on any failure. The worker retains immutable candidate and audience bindings locally.
+4. Configure Slack → Request Approval on the selected Slack connection. Apply every field from the printed map. Choose the channel and exactly one Approver using installation settings. For the two dynamic values, map **id** and **expiry** from the verify step. Leave optional post-confirmation URLs empty. The Details URL resolves an opaque reference. Every member can open it. The tenant viewer must authenticate the session, call the worker's read-only `ApprovalBridge.details` with authenticated team and actor, and render only the authorized review. Never derive identity from the URL. Wait if this viewer is unavailable. Open evidence, browser navigation and Details grant no vote.
+5. Map those original five trigger fields to **Sign Verified Approval Reference**. Map status only from Slack's Status output. Map an observed authenticated actor ID if the installed version exposes one. Otherwise leave it empty and require the witnessed one-person policy described below. Return signed_decision verbatim through the bound private transport. Zapier documents Status changing from Pending to Approved or Declined when decline is enabled, with conditional branching. Its reviewer guide also describes a decision halting the Zap. If the installed decline stops before the signer, there may be no downstream event. In that case hold, reconcile through independently authenticated terminal readback, and never manufacture a callback from a handle or an operator's observation.
+6. Before enabling, compare posted body, mobile notification, screen-reader fallback, Details denial, full history and exports with the approved fields. The worker emits the single-button invitation. The importer renders the configured card fields and expected fallback. Zapier documents an acting handle in the terminal channel message and exposes no fallback override in the setup guide. If the audience grant excludes that handle, or the installed preview discloses extra data, keep the Zap disabled. Do the same if the installed plan lacks a required feature. Record the published version and the authorized/denied reviewer witnesses separately.
 
-1. Identify the specific workspace ID, private channel ID, one named release reviewer, audience, source scope, opted-in Zap ID and published Zap version with the customer. Bind the worker setting `approval_provider` and managed plan’s `release_review.provider` to `zapier_slack`. The current Slack grant must include both inspect and review authority. Ordinary permission to share a readout is separate.
-2. In a private Zap, use **Webhooks by Zapier → Catch Hook**, then **Slack → Request Approval**. Set the channel to the agreed private channel and set **Approvers** to exactly the named reviewer. Enable the decline button and confirmation dialogs. Label the buttons **Approve this release** and **Request changes**. Include the complete `run_revision`, `artifact_sha`, `audience`, and the `request_id` from the trigger in the message. Suggested wording is “Authorize release of the repair you inspected in OpenTour for audience [audience]. Run [run_revision]. Candidate [artifact_sha]. Request [request_id].” The request contains no individual cases or model weights. [Zapier’s Request Approval guide](https://help.zapier.com/hc/en-us/articles/35891060646413-How-to-set-up-Slack-s-Request-Approval-action-in-Zapier)
-3. Add the private **Sign a Slack Request Approval Decision** action described below. Map the signer’s **Catch Hook** fields from the original trigger and its **status** exclusively from the stock Slack action’s Status output. If the connector exposes the real responding user ID, map it to **actor_id** and use the local policy mode `verified_actor`. The published Slack action documentation promises status, not an actor ID. Where it is absent, leave actor ID empty and use `verified_single_approver` only after the owner witnesses one permitted reviewer and a denied second user on that exact published version. Do not substitute an intended reviewer, display name or static actor ID. [Zapier’s documented action outputs](https://help.zapier.com/hc/en-us/articles/35891060646413-How-to-set-up-Slack-s-Request-Approval-action-in-Zapier)
-4. Return the signer’s **Signed decision JSON** verbatim through the customer-approved private transport. Save it as `<signer id>.json` in the workstation’s private `zapier-decisions/` directory for unattended import. For example, the signer’s ID ends in `.approved` after approval. Existing private synchronization must preserve owner-only modes and publish complete files by atomic rename. A custodian can also copy that exact JSON to a private file and run the explicit import below. Keep the transport and its retention period within the customer’s permission grant.
-5. Record the tested workspace/channel/reviewer, private return, Zap version and permission witness under the owner’s opaque `setup_attestation`. Store the locally approved hook fingerprint with the policy. Supply the actual URL to the approved supervisor through `OPENTOUR_ZAPIER_APPROVAL_HOOK_URL` using its private secret facility. Keep it out of tickets, chat and command history.
+```json
+{"slack_connection":"slack-example","signer_connection":"signer-example","return_connection":"return-example","details_origin":"https://review.example.invalid","team":"TEXAMPLE","channel":"CEXAMPLE","reviewer":"UEXAMPLE","zap_id":"example-zap","zap_version":"example-v1"}
+```
+
+During rotation, disable the Zap and worker policy, fence pending runs, reconcile outstanding returns privately, change the hook fingerprint and signing secret in both locations, and re-witness the new pinned version before a fresh inspection. The vendor expires pending runs after 30 days and superseding the Zap version prevents old pending runs from continuing. The worker's earlier expiry controls. [Setup fields and limits](https://help.zapier.com/hc/en-us/articles/35891060646413-How-to-set-up-Slack-s-Request-Approval-action-in-Zapier) · [Member interaction and terminal visibility](https://help.zapier.com/hc/en-us/articles/35890982165389-How-to-interact-with-Slack-s-approval-bot)
+
+## Reproduce the generated checks
+
+The baseline is commit `609f34e18671967d22307910f8e67dedf2585c9f`, Git tree `fcc20091745f4076f2d16231c4c8100eaff1a0db`. On Linux with pinned Python 3.12.16 and Node 24.22.3 run `python -m pytest -q services/cell-runtime/tests/pilot/test_zapier_approval.py`. The two recipe vector IDs are `test_versioned_recipe_two_installations[alpha]` (positive and replay) and `test_versioned_recipe_two_installations[beta]` (uncertain dispatch and decline). Both exercise inspection, preview, repeated Continue, private Details, wrong bindings, unsigned results and authenticated Pending. The generated accounts use distinct organizations, Slack teams, channels, reviewers, recipients, hook fingerprints, keys and connections. The cross-install vector rejects the other account’s request reference and signed return. Reopening evidence shows the existing request or receipt. An uncertain or failed dispatch calls for reconciliation of the original request. The ineligible managed status vector also exercises withdrawal. The secret remains in connection authentication. Only the opaque request reference and expiry enter authored channel text. Raw case text, candidate digest, recipient, reviewer and signer key stay out of that text and its expected fallback.
 
 ## Register the supplied private signing action
 
 Use a customer-owned private Zapier Platform integration. Place the supplied `integrations/zapier/slack-approval-signer.cjs` in its project root. The standard integration entry point can register it as follows. An existing private app can register the same action in its `creates` object and configure the same connection fields.
 
 ```javascript
-const { action, authentication } = require("./slack-approval-signer.cjs");
+const { action, authentication, verifyAction, referenceSigner } = require("./slack-approval-signer.cjs");
 module.exports = {
   version: require("./package.json").version,
   platformVersion: require("zapier-platform-core").version,
   authentication,
-  creates: { [action.key]: action }
+  creates: { [action.key]: action, [verifyAction.key]: verifyAction, [referenceSigner.key]: referenceSigner }
 };
 ```
 
@@ -34,7 +43,7 @@ Use the existing engagement directory, owned by the custodian with mode `0700`. 
 
 ```json
 {
-  "schema_version": "opentour.pilot.zapier-slack-policy.v1",
+  "schema_version": "opentour.pilot.zapier-slack-policy.v2",
   "enabled": true,
   "organization": "<enrolled organization>",
   "engagement": "<current engagement ID>",
@@ -51,6 +60,8 @@ Use the existing engagement directory, owned by the custodian with mode `0700`. 
   "hook_fingerprint": "<SHA-256 of the exact approved HTTPS Catch Hook URL>"
 }
 ```
+
+Use `verified_actor` only for an observed authenticated actor output. For a provider version with no such output, `verified_single_approver` requires witnessed acceptance by the named reviewer and rejection of a second user on that exact version.
 
 Set `expires_at` to the agreed future UTC Unix second. The signer file contains exactly `{"secret_hex":"<64 lowercase hexadecimal characters>"}`. Generate and transfer the shared key through the customer’s existing secret manager. The hook fingerprint uses the exact URL, including a trailing slash if supplied. In a shell where the secret manager has already set the hook URL, the following prints only its fingerprint.
 
