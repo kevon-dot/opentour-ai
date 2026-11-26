@@ -23,10 +23,15 @@ shows `no_live_decisions` without an error rate. A pending decision distinguishe
 `no_verifier_bound` from `awaiting_outcome`; a reader without the custodian role
 gets `ask_data_custodian_to_bind_verifier`. The renderer owns the actual action.
 
-The worker-only `LocalRepairAssessments` uses a mode-0600 owner-pinned policy and
+The worker-only `LocalRepairAssessments` uses the bounded O_NOFOLLOW reader for
+a mode-0600 owner-pinned policy and
 the existing `simple_repair.assess_development`, on verified development families
 only. A `DecisionContext` implementation must resolve the exact observed input
 reference under current authority and return only allowed decision-time fields.
+Its `read` method returns an `ObservedDecision` with an actual application-boundary
+receipt and observed automatic/review/missing classification. An opaque action
+reference cannot supply that classification. Unobserved classification holds;
+observed defer/ask decisions receive zero automatic-error residual credit.
 Missing/reconstructed input remains unavailable. Protected families are never
 passed to that context port. Duplicate corrections and synthetic context siblings
 cannot add reducer roots. Every residual root must be a current verified root;
@@ -60,7 +65,11 @@ Absent assessment/input produces an unknown residual count. The invoice fixture
 with an observed input and independently verified correction produces 1 root,
 0 residual groups against threshold 3, and `too_early_to_train`. Reopening truth
 removes current credit and makes the prior receipt unavailable; history remains
-private. Retry/restart and concurrent refreshes reuse the same receipt. Both
+private. Viewer `history` exposes only readiness_ref, revision, version and
+recorded_at; current workflow access does not disclose earlier truth, counts or
+grant references after their source authorization changes. Detailed immutable
+transition bodies remain in the worker-local audit database. Retry/restart and
+concurrent refreshes reuse the same receipt. Both
 SQLite files use private permissions and reads use SQLite `mode=ro`.
 
 ## Reproduction

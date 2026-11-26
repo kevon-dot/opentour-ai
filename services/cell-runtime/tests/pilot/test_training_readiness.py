@@ -210,10 +210,17 @@ def test_reopen_fences_old_receipt_and_preserves_transition_history(fixture) -> 
     current = registry.refresh("workflow-1", actor=ACTOR)
     assert current["verified_root_count"] == 0
     assert current["verdict"] == "held"
-    assert [x["verdict"] for x in registry.history("workflow-1", actor=ACTOR)] == [
-        "fit_eligible",
-        "held",
-    ]
+    history = registry.history("workflow-1", actor=ACTOR)
+    assert [x["version"] for x in history] == [1, 2]
+    assert all(set(x) == {"readiness_ref", "revision", "version", "recorded_at"} for x in history)
+    with sqlite3.connect(registry.path) as db:
+        # Full old facts are operator-local audit records, not current-viewer disclosures.
+        import json
+
+        assert [
+            json.loads(r[0])["verdict"]
+            for r in db.execute("SELECT content FROM readiness ORDER BY version")
+        ] == ["fit_eligible", "held"]
 
 
 def test_stale_assessment_is_rejected_and_same_family_cannot_supply_recurrence(fixture) -> None:

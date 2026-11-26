@@ -10,7 +10,7 @@ import json
 import os
 import sqlite3
 from collections.abc import Mapping
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -18,6 +18,7 @@ from opentour_cell.pilot import simple_repair
 from opentour_cell.pilot.intake_mcp import IntakeError, IntakePrincipal
 from opentour_cell.pilot.learning_mandate import LearningMandates, MandateError
 from opentour_cell.pilot.live_evidence import LiveEvidence, LiveSnapshot, VerifiedRoot
+from opentour_cell.pilot.onboarding_mcp import _read_private
 from opentour_cell.pilot.operating_point import canonical, digest
 from opentour_cell.pilot.text_classifier import TrainingError
 from opentour_cell.pilot.training import _check_file
@@ -88,11 +89,25 @@ class LiveReadinessSource:
             return None
 
 
+@dataclass(frozen=True)
+class ObservedDecision:
+    input_ref: str
+    action_ref: str
+    receipt_ref: str
+    features: Mapping[str, Any]
+    incumbent: Mapping[str, Any] | None
+
+
 class DecisionContext(Protocol):
-    def features(
+    def read(
         self, snapshot: LiveSnapshot, root: VerifiedRoot, allowed_fields: tuple[str, ...]
-    ) -> Mapping[str, Any] | None:
-        """Read only the root's current, observed, authorized decision-time input."""
+    ) -> ObservedDecision | None:
+        """Resolve observed input AND the committed action's evidenced classification.
+
+        An opaque action_ref cannot establish automatic vs defer/ask. If the
+        actual application boundary did not capture that classification, return
+        incumbent=None; never infer it from a label or owner policy default.
+        """
         ...
 
 
@@ -127,9 +142,7 @@ class LocalRepairAssessments:
         )
 
     def _policy(self, snapshot: ReadinessSnapshot) -> Json:
-        _check_file(self.policy_path)
-        _require(self.policy_path.stat().st_size <= 262144)
-        value = json.loads(self.policy_path.read_bytes())
+        value = _read_private(self.policy_path, 262144)
         _require(isinstance(value, dict) and value.keys() == _POLICY_KEYS)
         _require(value["schema_version"] == POLICY)
         _require(
@@ -245,21 +258,36 @@ class LocalRepairAssessments:
             )
             rows: list[Json] = []
             missing_input = False
+            missing_classification = False
+            deferred_roots = []
+            context_receipts = []
             for root in actual.verified_roots:
                 if root.family_id not in policy["development_families"]:
                     continue
-                features = None
+                observed = None
                 if root.input_fidelity == "observed" and root.input_ref and self.contexts:
-                    features = self.contexts.features(
-                        actual, root, tuple(policy["allowed_features"])
-                    )
-                if features is None:
+                    observed = self.contexts.read(actual, root, tuple(policy["allowed_features"]))
+                if observed is None:
                     missing_input = True
                     continue
+                _require(
+                    observed.input_ref == root.input_ref and observed.action_ref == root.action_ref
+                )
+                simple_repair.identifier(observed.receipt_ref)
+                context_receipts.append(observed.receipt_ref)
+                features = observed.features
                 _require(set(features) <= set(policy["allowed_features"]))
+                if observed.incumbent is None:
+                    missing_classification = True
+                    continue
+                incumbent = simple_repair.decision(dict(observed.incumbent))
+                if incumbent["status"] != "automatic":
+                    deferred_roots.append(root_ref(root))
+                    continue
                 _require(
                     root.action_ref in policy["labels"]
                     and root.verified_action_ref in policy["labels"]
+                    and incumbent["label"] == root.action_ref
                 )
                 rows.append(
                     {
@@ -267,7 +295,7 @@ class LocalRepairAssessments:
                         "group_id": root.family_id,
                         "features": dict(features),
                         "reference": root.verified_action_ref,
-                        "incumbent": {"status": "automatic", "label": root.action_ref},
+                        "incumbent": incumbent,
                     }
                 )
             decision = simple_repair.assess_development(
@@ -286,8 +314,13 @@ class LocalRepairAssessments:
             missing = list(authority["missing"])
             if missing_input:
                 missing.insert(0, "decision_time_input_required")
+            if missing_classification:
+                missing.insert(0, "committed_action_classification_required")
             if not rows:
-                missing.insert(0, "development_evidence_required")
+                if missing_input or missing_classification:
+                    missing.append("development_evidence_required")
+                else:
+                    missing.insert(0, "development_evidence_required")
             receipt = ReadinessAssessment(
                 snapshot.organization,
                 snapshot.workflow_ref,
@@ -310,6 +343,8 @@ class LocalRepairAssessments:
                 "roots": sorted(root_ref(r) for r in actual.verified_roots),
                 "families": sorted({r.family_id for r in actual.verified_roots}),
                 "policy_digest": digest(policy),
+                "context_receipts": sorted(context_receipts),
+                "nonautomatic_roots": sorted(deferred_roots),
             }
             self._selection(snapshot)
             _require(

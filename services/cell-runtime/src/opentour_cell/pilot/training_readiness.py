@@ -80,6 +80,10 @@ class AssessmentSource(Protocol):
 
 
 _GATE_ACTIONS = {
+    "committed_action_classification_required": (
+        "provide_observed_action_classification",
+        "source_custodian",
+    ),
     "decision_time_input_required": ("provide_decision_time_input", "data_custodian"),
     "training_mandate_required": ("authorize_training_scope", "data_custodian"),
     "training_rights_required": ("authorize_training_rights", "data_custodian"),
@@ -175,6 +179,7 @@ def _verdict(snapshot: ReadinessSnapshot, assessment: ReadinessAssessment | None
                     "decision_time_input_required",
                     "development_evidence_required",
                     "repair_assessment_required",
+                    "committed_action_classification_required",
                 }
             ),
             None,
@@ -381,4 +386,13 @@ class TrainingReadiness:
                 ).fetchall()
                 if self.source.snapshot(actor, workflow_ref) != snapshot:
                     return []
-                return [json.loads(row[0]) for row in rows]
+                # Current workflow access cannot disclose old truth, grants, counts,
+                # or routing facts after their original resource permission changes.
+                # Detailed transition bodies remain in the worker's private audit DB.
+                return [
+                    {
+                        key: json.loads(row[0])[key]
+                        for key in ("readiness_ref", "revision", "version", "recorded_at")
+                    }
+                    for row in rows
+                ]

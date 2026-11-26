@@ -11,7 +11,12 @@ from pathlib import Path
 import pytest
 from opentour_cell.pilot.intake_mcp import IntakeError, IntakePrincipal
 from opentour_cell.pilot.live_evidence import FeedGrant, LiveEvidence, LiveScope
-from opentour_cell.pilot.live_readiness import POLICY, LiveReadinessSource, LocalRepairAssessments
+from opentour_cell.pilot.live_readiness import (
+    POLICY,
+    LiveReadinessSource,
+    LocalRepairAssessments,
+    ObservedDecision,
+)
 from opentour_cell.pilot.text_classifier import TrainingError
 from opentour_cell.pilot.training import LocalTrainingStore
 from opentour_cell.pilot.training_readiness import TrainingReadiness
@@ -60,13 +65,30 @@ class Authority:
 class Contexts:
     def __init__(self):
         self.reads = []
+        self.classification = "automatic"
         self.inputs = {"input-1": {"description": "carrier"}}
         # Optional training children are not live roots and never enter the reducer.
         self.inputs.update({f"synthetic-{i}": {"description": "carrier"} for i in range(100)})
 
-    def features(self, snapshot, root, allowed_fields):
+    def read(self, snapshot, root, allowed_fields):
         self.reads.append(root.input_ref)
-        return self.inputs.get(root.input_ref)
+        features = self.inputs.get(root.input_ref)
+        if features is None:
+            return None
+        incumbent = (
+            {"status": "automatic", "label": root.action_ref}
+            if self.classification == "automatic"
+            else {"status": "review"}
+            if self.classification == "review"
+            else None
+        )
+        return ObservedDecision(
+            root.input_ref,
+            root.action_ref,
+            "observed-action-" + root.decision_id,
+            features,
+            incumbent,
+        )
 
 
 class Case:
@@ -291,3 +313,64 @@ def test_policy_change_fences_stored_assessment_and_foreign_actor_is_unavailable
     assert case.ready.read("workflow", actor=replace(ACTOR, actor="stranger")) is None
     with pytest.raises(TrainingError):
         case.ready.read("workflow", actor=replace(ACTOR, tenant="foreign"))
+
+
+@pytest.mark.parametrize("action", ["defer", "ask"])
+def test_observed_defer_or_ask_does_not_become_an_automatic_error(tmp_path: Path, action: str):
+    case = Case(tmp_path / "private")
+    case.contexts.classification = "review"
+    case.bind_verifier()
+    for index in range(1, 4):
+        case.ingest(decision(f"D{index}", f"supplier-{index}", action_ref=action))
+        case.ingest(outcome(f"D{index}"), truth=True)
+    result = case.refresh()
+    assert result["verdict"] == "held"
+    with sqlite3.connect(case.assessments.path) as db:
+        record = json.loads(db.execute("SELECT body FROM assessments").fetchone()[0])
+    assert record["assessment"]["residual_roots"] == []
+    assert record["decision"]["residual_groups"] == 0
+    assert len(record["nonautomatic_roots"]) == 3
+    assert not (case.directory / "learning-mandates.sqlite3").exists()
+
+
+def test_opaque_action_with_no_observed_classification_requests_that_evidence(tmp_path: Path):
+    case = Case(tmp_path / "private")
+    case.contexts.classification = "unobserved"
+    case.bind_verifier()
+    case.ingest(decision())
+    case.ingest(outcome(), truth=True)
+    result = case.refresh()
+    assert result["reason_code"] == "committed_action_classification_required"
+    assert result["residual_group_count"] is None
+    assert result["verdict"] == "held"
+
+
+def test_revoked_truth_history_contains_only_opaque_version_metadata(tmp_path: Path):
+    case = Case(tmp_path / "private")
+    case.bind_verifier()
+    case.ingest(decision())
+    case.ingest(outcome(), truth=True)
+    case.refresh()
+    case.authority.scope = replace(case.authority.scope, grants=(DECISION,))
+    history = case.ready.history("workflow", actor=ACTOR)
+    assert len(history) == 1
+    assert set(history[0]) == {"readiness_ref", "revision", "version", "recorded_at"}
+    assert not any(
+        key in json.dumps(history)
+        for key in ["verified_root_count", "mandate_ref", "target_ref", "residual_group_count"]
+    )
+    assert case.ready.read("workflow", actor=ACTOR) is None
+
+
+def test_private_policy_symlink_is_denied_before_context_read(tmp_path: Path):
+    case = Case(tmp_path / "private")
+    case.bind_verifier()
+    case.ingest(decision())
+    case.ingest(outcome(), truth=True)
+    original = case.policy_path.with_name("other-policy.json")
+    case.policy_path.rename(original)
+    case.policy_path.symlink_to(original)
+    with pytest.raises(OSError):
+        case.refresh()
+    assert case.contexts.reads == []
+    assert not case.assessments.path.exists()
