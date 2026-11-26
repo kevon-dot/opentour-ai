@@ -871,7 +871,30 @@ class TestIntakeMcp(unittest.TestCase):
         )
         usage = ledger.inspect(grant["mandate_id"], actor="worker")
         self.assertEqual((usage["runs"], usage["rows"], usage["reserved_fits"]), (1, 2, 0))
+
+        # The source grant can expire independently of the still-current standing mandate.
+        before_expiry_probe = queue.path.read_bytes()
+        expired_grant = {**source_grant, "expires_at": int(time.time()) - 1}
+        _write_private(grant_file, expired_grant)
+        with self.assertRaisesRegex(IntakeError, "^intake_expired$"):
+            queue.discover_sources(authority.principal, limit=1, cursor=None)
+        expired, rows = self.conversation((DISCOVER, {}), selection=selection_path)
+        self.assertEqual(
+            (expired.returncode, expired.stderr.strip(), rows), (2, "intake_expired", {})
+        )
+        unrelated_grant = {
+            **expired_grant,
+            "delegation": {**expired_grant["delegation"], "run_id": "learning-unrelated"},
+        }
+        _write_private(grant_file, unrelated_grant)
+        with self.assertRaisesRegex(IntakeError, "^intake_unavailable$"):
+            queue.discover_sources(authority.principal, limit=1, cursor=None)
+
+        _write_private(grant_file, expired_grant)
         source_intake.withdraw_intake(training, source_grant["owner_attestation"])
+        with self.assertRaisesRegex(IntakeError, "^intake_unavailable$"):
+            queue.discover_sources(authority.principal, limit=1, cursor=None)
+        self.assertEqual(queue.path.read_bytes(), before_expiry_probe)
         self.assertFalse(ledger.inspect(grant["mandate_id"], actor="worker")["withdrawn"])
         stopped, rows = self.conversation(selection=selection_path)
         self.assertEqual(stopped.returncode, 2)
