@@ -137,6 +137,8 @@ def test_native_release_status_observes_independent_decision(
     [
         ("Was the candidate any quicker than the baseline?", "fit-speed comparison"),
         ("What prevented our training job from starting?", "evaluation-only"),
+        ("What keeps the model from training?", "evaluation-only"),
+        ("What caused the fit to be skipped?", "evaluation-only"),
         (
             "Which inputs were given to the model and what output came back?",
             "Decision-time model input",
