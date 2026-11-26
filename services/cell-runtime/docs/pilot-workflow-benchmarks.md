@@ -67,6 +67,14 @@ steps prevents publication. A frozen definition cannot change when scored; an
 unscored receipt has neither result reference nor result digest. A scored version
 is immutable. No default model digest, score or evaluation permission is minted.
 
+Completed retries and every benchmark projection validate the stored receipt's
+exact schema, source revision, state and canonical publication digest. That
+digest binds the receipt to its tenant, epoch, workflow, run, version, parent and
+admitted definition and is committed atomically with publication. A restored or
+corrupted body cannot reuse completion to disclose a different result. Legacy
+materialized rows without this publication record hold for explicit recovery;
+reading or retrying never silently seals them or redispatches the producer.
+
 ## Acceptance map and evidence limits
 
 Generated tests in `test_workflow_benchmarks.py` exercise actual private SQLite
@@ -78,6 +86,7 @@ ledgers and the real durable intake/stdio implementation:
 | Crash between admission and dispatch | Injected interruption before draft persistence, recovery under a fresh operation key |
 | Older crash recovery after a new revision | Original version/parent retained; newer admission remains current |
 | Producer retry/concurrency/crash | Call counters show one dispatch per target; uncertain work uses readback only; superseded versions dispatch zero work |
+| Restored/corrupted completion | Completed retry, repeated submit, status and inspection deny altered source, refs, digests, state and schema; unsealed legacy remains held |
 | Reused key with changed intent conflicts | Current durable intake rejects changed policy intent |
 | New revision makes one successor with readable parent | Fresh policy revision, current supersession and explicit as-of inspection |
 | `test_live_admission_leaves_benchmark_unchanged` | Two live feed revisions and restart preserve all benchmark rows and reference/version/state |
