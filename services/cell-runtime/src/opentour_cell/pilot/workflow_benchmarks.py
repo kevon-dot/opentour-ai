@@ -290,6 +290,15 @@ class WorkflowBenchmarks:
         """Replay and every disclosure verify the same current receipt binding."""
         try:
             definition = json.loads(row["definition"])
+            _require(
+                definition["workflow_ref"] == row["workflow"]
+                and definition["resource"]["engagement_epoch"] == row["epoch"]
+                and row["reference"]
+                == "benchmark-"
+                + digest([row["tenant"], row["epoch"], row["workflow"], row["run"]])[:40]
+                and type(row["version"]) is int
+                and row["version"] > 0
+            )
             if work is not None:
                 scope = row["tenant"], work.resource.engagement_epoch, work.workflow_ref
                 parent = (
@@ -303,8 +312,39 @@ class WorkflowBenchmarks:
                     and row["parent"] == parent
                 )
             _require(row["state"] in {"draft", "needs_owner_review", "frozen_unscored", "scored"})
+            tables = {
+                entry[0]
+                for entry in db.execute("SELECT name FROM sqlite_master WHERE type='table'")
+            }
+            sealed = (
+                db.execute(
+                    "SELECT revision FROM benchmark_receipts WHERE tenant=? AND run=?",
+                    (row["tenant"], row["run"]),
+                ).fetchone()
+                if "benchmark_receipts" in tables
+                else None
+            )
+            completed = (
+                [
+                    entry[0]
+                    for entry in db.execute(
+                        "SELECT target FROM benchmark_operations "
+                        "WHERE tenant=? AND run=? AND completed=1",
+                        (row["tenant"], row["run"]),
+                    )
+                ]
+                if "benchmark_operations" in tables
+                else []
+            )
+            progression = {"draft": 0, "needs_owner_review": 1, "frozen_unscored": 2, "scored": 3}
+            _require(
+                all(
+                    target in progression and progression[target] <= progression[row["state"]]
+                    for target in completed
+                )
+            )
             if row["materialized"] is None:
-                _require(row["state"] == "draft")
+                _require(row["state"] == "draft" and sealed is None and not completed)
                 return None
             data = json.loads(row["materialized"])
             _require(
@@ -315,14 +355,6 @@ class WorkflowBenchmarks:
             self._validate_receipt(receipt, tuple(definition["revisions"]))
             _require(receipt.state == row["state"])
             # An unsealed legacy record is not silently upgraded into evidence.
-            table = db.execute(
-                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='benchmark_receipts'"
-            ).fetchone()
-            _require(table is not None, "benchmark_receipt_binding_unavailable")
-            sealed = db.execute(
-                "SELECT revision FROM benchmark_receipts WHERE tenant=? AND run=?",
-                (row["tenant"], row["run"]),
-            ).fetchone()
             _require(
                 sealed is not None
                 and sealed["revision"] == self._receipt_revision(row, canonical(data)),
