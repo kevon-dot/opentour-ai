@@ -4,11 +4,13 @@ import csv
 import hashlib
 import json
 import os
+import sqlite3
 import subprocess
 import sys
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
+from zipfile import ZipFile
 
 import pytest
 from opentour_cell.pilot import source_intake as intake
@@ -420,3 +422,77 @@ def test_pure_authority_check_works_under_already_held_training_lock(
                 frozen["intake_revision"],
                 require_training=True,
             )
+
+
+def test_packaged_merchant_discovery_quarantines_ambiguous_transaction(tmp_path: Path) -> None:
+    fixture = json.loads(
+        (Path(__file__).parent / "fixtures/merchant-discovery-v1.json").read_bytes()
+    )
+    assert fixture["schema_version"] == "opentour.generated.merchant-discovery.v1"
+    expected = fixture["expected"]
+    private = tmp_path / "private"
+    private.mkdir(mode=0o700)
+    grant = fixture["grant"]
+    store = LocalTrainingStore(private / "training.sqlite3", grant["organization"])
+    grant["engagement"] = store.engagement_id
+    scope = {
+        k: grant[k]
+        for k in ("organization", "workflow", "field", "policy_version", "source_schema_version")
+    }
+    traces = private / "traces.jsonl"
+    corrections = private / "corrections.jsonl"
+    grant["trace_sha256"] = export(traces, [scope | row for row in fixture["traces"]])
+    grant["correction_sha256"] = export(
+        corrections, [scope | row for row in fixture["corrections"]]
+    )
+    grant_path = private / "grant.json"
+    write(grant_path, canonical(grant))
+
+    python = [sys.executable, "-I", "-S", "-B"]
+    archive = tmp_path / "kit.zip"
+    builder = RUNTIME.parents[1] / "tools/build_slack_pilot_kit.py"
+    subprocess.run([*python, builder, archive], check=True, capture_output=True, timeout=30)
+    with ZipFile(archive) as kit:
+        executable = kit.extract("opentour-slack.pyz", tmp_path)
+    base = [
+        *python,
+        executable,
+        "source",
+        "--store",
+        store.path,
+        "--organization",
+        store.organization,
+    ]
+    inputs = ["--grant", grant_path, "--traces", traces, "--corrections", corrections]
+    frozen_path = private / "intake.json"
+
+    def run(*args: str | Path) -> Json:
+        return json.loads(subprocess.check_output([*base, *args], env={}, timeout=30))
+
+    discovery = run("discover", *inputs)
+    frozen = run("freeze", *inputs, "--output", frozen_path)
+    assert frozen == run("inspect", "--intake", frozen_path)
+    assert discovery["suspected_error_classes"] == []
+    assert frozen["confirmed_recurring_error"] is False
+    case_ids = {row["event_id"] for row in fixture["traces"]}
+    for result in (discovery, frozen):
+        assert result["development_count"] == 1
+        assert result["protected_count"] == expected["protected_count"]
+        assert result["excluded_counts"] == {"ambiguous_outcomes": len(expected["excluded"])}
+        assert len(case_ids) == (
+            result["development_count"]
+            + result["protected_count"]
+            + sum(result["excluded_counts"].values())
+        )
+    data = json.loads(frozen_path.read_bytes())
+    assert data["excluded"] == expected["excluded"]
+    [row] = data["development"]
+    assert row["case_id"] == expected["eligible_case"]
+    assert row["outcome_id"] == expected["verified_outcome"]
+    assert row["incumbent"]["label"] == "merchant-a" and row["reference"] == "merchant-b"
+    assert row["decision_at"] < row["outcome_at"] <= row["verified_at"]
+    assert data["training_allowed"] and not data["training_case_ids"]
+    with sqlite3.connect(store.path) as db:
+        assert db.execute("SELECT COUNT(*) FROM jobs").fetchone()[0] == expected["fit_jobs"]
+        assert db.execute("SELECT COUNT(*) FROM fit_checkpoints").fetchone()[0] == 0
+        assert db.execute("SELECT COUNT(*) FROM artifacts").fetchone()[0] == 0
