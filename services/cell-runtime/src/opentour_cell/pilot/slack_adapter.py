@@ -78,6 +78,9 @@ ACTIONS = {
     "ot_tune_dataset",
     "ot_readouts",
     "ot_result_open",
+    "ot_current_training",
+    "ot_readiness_proof",
+    "ot_training_scopes",
     "ot_result_prev",
     "ot_result_next",
     "ot_repair_confirm",
@@ -1530,6 +1533,39 @@ class Workbench:
             return
         self._browse(cfg, actor, view, source, search=query, old_hash=old_hash)
 
+    def _current_training(self, actor: str) -> tuple[str, str, Json | None] | None:
+        """Pin one currently inspected live workflow, separately from any frozen readout."""
+        try:
+            cfg = self.settings(check_engagement=False)
+            workflow = self._live_workflow(cfg, actor)
+            with self._live_scope(actor, workflow) as (_, _, scope):
+                entry = cfg.permission(actor, "inspect", scope.dataset_ref)
+                _check(scope.can_inspect and entry["aggregate"])
+                receipt = self._readiness(actor)
+                if receipt is not None:
+                    _check(
+                        receipt["workflow_ref"] == workflow
+                        and receipt["engagement"] == scope.engagement_epoch
+                        and receipt["dataset_ref"] == scope.dataset_ref
+                        and receipt["dataset_revision"] == scope.dataset_revision
+                    )
+                pin = self.journal.opaque(
+                    "workflow",
+                    [
+                        self._policy(cfg, actor),
+                        actor,
+                        workflow,
+                        scope.authority_revision,
+                        scope.engagement_epoch,
+                        scope.dataset_ref,
+                        scope.dataset_revision,
+                        receipt["revision"] if receipt else None,
+                    ],
+                )
+                return workflow, pin, receipt
+        except Exception:
+            return None
+
     def _regression_picker(
         self,
         cfg: Settings,
@@ -1549,19 +1585,32 @@ class Workbench:
         page = max(0, min(page, (len(eligible) - 1) // RESULT_PAGE_SIZE))
         start = page * RESULT_PAGE_SIZE
         rows = eligible[start : start + RESULT_PAGE_SIZE]
+        current = self._current_training(actor) if topic == StatusTopic.TRAINING else None
         listing = {
             "page": page,
             "items": {revision: source for _, source, revision in rows},
             "topic": topic,
+            "current": current[1] if current else None,
         }
         ctx = self.journal.context(actor, cfg.channel, view, "regressions", revision=_json(listing))
+
+        def authorize() -> None:
+            self._authorize_question_rows(cfg, actor, rows)
+            if current is not None:
+                _check(self._current_training(actor) == current)
+
         self._show(
             view,
             self.views.regression_picker(
-                ctx, rows, previous=bool(page), more=start + len(rows) < len(eligible), topic=topic
+                ctx,
+                rows,
+                previous=bool(page),
+                more=start + len(rows) < len(eligible),
+                topic=topic,
+                **({"current_workflow": current[:2]} if current else {}),
             ),
             old_hash,
-            authorize=lambda: self._authorize_question_rows(cfg, actor, rows),
+            authorize=authorize,
         )
 
     def _authorize_question_rows(
@@ -2451,6 +2500,33 @@ class Workbench:
             self._starter_view(self.settings(), actor, view, saved, old_hash)
         elif ctx["kind"] == "workflow_instructions":
             raise Refused("This setup screen has no actions.")
+        elif action in {"ot_current_training", "ot_readiness_proof"}:
+            proof = action == "ot_readiness_proof"
+            if proof:
+                _check(ctx["kind"] == "current_training" and value == ctx["revision"])
+            else:
+                _check(ctx["kind"] == "regressions")
+                listing = json.loads(ctx["revision"])
+                _check(listing["topic"] == StatusTopic.TRAINING and value == listing.get("current"))
+            selected_training = self._current_training(actor)
+            _check(selected_training and selected_training[1] == value)
+            assert selected_training is not None
+            workflow, _, receipt = selected_training
+            _check(not proof or receipt is not None)
+            token = self.journal.context(
+                actor, cfg.channel, view, "current_training", revision=value
+            )
+            self._show(
+                view,
+                self.views.current_training_question(
+                    token, workflow, receipt, pin=value, proof=proof
+                ),
+                old_hash,
+                authorize=lambda: _check(self._current_training(actor) == selected_training),
+            )
+        elif action == "ot_training_scopes":
+            _check(ctx["kind"] == "current_training" and value == "scopes")
+            self._regression_picker(cfg, actor, view, old_hash, topic=StatusTopic.TRAINING.value)
         elif action == "ot_help":
             self._help(cfg, actor, view, old_hash=old_hash)
         elif action == "ot_readouts":

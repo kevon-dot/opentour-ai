@@ -290,6 +290,21 @@ def test_two_admitted_workflows_sharing_dataset_revision_do_not_share_readout_re
     # Both workflow grants name the exact same tenant, epoch, dataset and revision.
     sign(h, {**ready.grant, "workflow_ref": second})
     ready.worker.refresh()
+    stale_view = h.launch(prompt="Why didn't it train?")
+    old_token = buttons(screen(h, stale_view))["ot_current_training"]
+    h.config["live_workflow_ref"] = second
+    h.save()
+    h.action(stale_view, "ot_current_training", old_token)
+    assert "ot_current_training_status" != screen(h, stale_view).get("callback_id")
+    new_view = h.launch(prompt="Why didn't it train?")
+    new_token = buttons(screen(h, new_view))["ot_current_training"]
+    assert old_token != new_token
+    h.action(new_view, "ot_current_training", new_token)
+    second_answer = json.dumps(screen(h, new_view))
+    assert second in second_answer and ready.workflow not in second_answer
+    assert "Current training readiness is unavailable" in second_answer
+    h.config["live_workflow_ref"] = ready.workflow
+    h.save()
     cfg = h.app.settings()
     target = h.app._readout(cfg, ACTOR, "eval:" + ready.grant["dataset_ref"])
     assert target is not None and target.dataset_revision == ready.grant["dataset_revision"]
@@ -374,3 +389,151 @@ def test_revoked_live_scope_at_layout_withholds_source_summary(ready, monkeypatc
     home = json.dumps(ready.home(), ensure_ascii=False)
     assert "access is unavailable" in home and "Unmatched outcomes" not in home
     assert effects(ready.h) == (0,) * 7
+
+
+@pytest.mark.parametrize("surface", ["slash", "home"])
+def test_current_workflow_question_reaches_persisted_answer_and_back(ready, surface):
+    h = ready.h
+    question = "Is training worth it yet?" if surface == "slash" else "Why didn't it train?"
+    if surface == "slash":
+        view = h.launch(prompt=question)
+    else:
+        click(h, ready.home(), "ot_app_prompt")
+        view = list(h.slack.screens)[-1]
+        h.form(view, {"command": {"command": {"value": question}}})
+
+    def choose():
+        action = buttons(screen(h, view))["ot_current_training"]
+        h.action(view, "ot_current_training", action)
+        assert screen(h, view)["callback_id"] == "ot_current_training_status"
+        return json.dumps(screen(h, view), ensure_ascii=False)
+
+    empty = choose()
+    assert "Current training readiness is unavailable" in empty and "0 verified" not in empty
+    assert not ready.worker.readiness.path.exists()
+    ready.ingest(decision())
+    receipt = ready.worker.refresh()
+    h.action(view, "ot_training_scopes", "scopes")
+    pending = choose()
+    assert "1 decision awaiting verification" in pending and receipt["readiness_ref"] in pending
+    assert f"Current workflow · {ready.workflow}" in pending
+    ready.bind()
+    ready.ingest(outcome(verifier="independent-verifier"), truth=True)
+    receipt = ready.worker.refresh()
+    stable = {
+        p: p.read_bytes()
+        for p in (
+            ready.worker.readiness.path,
+            ready.worker.source.live.path,
+            ready.directory / "workflow-benchmarks.sqlite3",
+        )
+    }
+    h.action(view, "ot_training_scopes", "scopes")
+    held = choose()
+    assert "Too early to train" in held and "1 independent family" in held
+    assert "0 residual groups" in held and receipt["readiness_ref"] in held
+    h.action(view, "ot_readiness_proof", buttons(screen(h, view))["ot_readiness_proof"])
+    proof = json.dumps(screen(h, view))
+    assert screen(h, view)["callback_id"] == "ot_current_training_proof"
+    assert receipt["assessment_ref"] in proof and receipt["evidence_revision"] in proof
+    assert all(p.read_bytes() == body for p, body in stable.items()) and effects(h) == (0,) * 7
+
+
+def test_changed_receipt_or_actor_cannot_select_stale_training_scope(ready):
+    h = ready.h
+    first = ready.worker.refresh()
+    view = h.launch(prompt="Why didn't it train?")
+    pin = buttons(screen(h, view))["ot_current_training"]
+    ready.ingest(decision())
+    current = ready.worker.refresh()
+    h.action(view, "ot_current_training", pin)
+    result = json.dumps(screen(h, view))
+    assert current["readiness_ref"] not in result and first["readiness_ref"] not in result
+    view = h.launch(prompt="Why didn't it train?")
+    pin = buttons(screen(h, view))["ot_current_training"]
+    h.action(view, "ot_current_training", pin, OTHER)
+    assert screen(h, view)["callback_id"] != "ot_current_training_status"
+    assert effects(h) == (0,) * 7
+
+
+def test_current_training_question_shows_justified_residual_and_scoped_mandate(ready):
+    import time
+    from pathlib import Path
+
+    from opentour_cell.pilot.learning_mandate import LearningMandates
+
+    h = ready.h
+    owner = "workflow-owner"
+    specification = json.loads(
+        (
+            Path(__file__).resolve().parents[2] / "examples/pilot-learning-mandate.template.json"
+        ).read_text()
+    )
+    specification.update(
+        mandate_id="fixture-current-training",
+        owner_id=owner,
+        workflow=ready.workflow,
+        delegate=ready.worker.worker.actor,
+        trainer=ready.worker.worker.actor,
+        agreement_revision="e" * 64,
+        expires_at=int(time.time()) + 900,
+    )
+    mandates = LearningMandates(ready.directory, h.store.organization, h.store.engagement_id)
+    enrolled = mandates.enroll(specification, actor=owner)
+    ready.policy.update(
+        owner_ref=owner,
+        mandate_ref=enrolled["mandate_id"],
+        mandate_revision=enrolled["mandate_revision"],
+        agreement_revision="e" * 64,
+        target_ref="registered-target",
+        rule_mapping={"carrier": "supplies"},
+    )
+    _write_private(ready.directory / "repair-policy.json", ready.policy)
+    ready.ingest(decision())
+    ready.worker.refresh()
+    ready.bind()
+    for i in range(1, 4):
+        if i != 1:
+            ready.ingest(decision(f"D{i}", f"supplier-{i}"))
+        ready.ingest(outcome(f"D{i}", verifier="independent-verifier"), truth=True)
+    receipt = ready.worker.refresh()
+    assert (
+        receipt["reason_code"] == "untouched_holdout_required"
+        and receipt["residual_group_count"] == 3
+    )
+    view = h.launch(prompt="Why didn't it train?")
+    h.action(view, "ot_current_training", buttons(screen(h, view))["ot_current_training"])
+    result = json.dumps(screen(h, view))
+    assert (
+        "3 independent families" in result
+        and "3 residual groups" in result
+        and "independent holdout" in result
+    )
+    h.action(view, "ot_readiness_proof", buttons(screen(h, view))["ot_readiness_proof"])
+    assert enrolled["mandate_revision"] in json.dumps(screen(h, view))
+    assert (
+        mandates.inspect(enrolled["mandate_id"], actor=ready.worker.worker.actor)["reserved_fits"]
+        == 0
+    )
+    assert effects(h) == (0,) * 7
+
+
+def test_current_training_proof_revocation_at_disclosure_hides_receipt(ready, monkeypatch):
+    receipt = ready.worker.refresh()
+    h = ready.h
+    view = h.launch(prompt="Why didn't it train?")
+    h.action(view, "ot_current_training", buttons(screen(h, view))["ot_current_training"])
+    pin = buttons(screen(h, view))["ot_readiness_proof"]
+    original = h.app.views.current_training_question
+
+    def revoke(*args, **kwargs):
+        modal = original(*args, **kwargs)
+        if kwargs["proof"]:
+            ready.grant["state"] = "revoked"
+            sign(h, ready.grant)
+        return modal
+
+    monkeypatch.setattr(h.app.views, "current_training_question", revoke)
+    h.action(view, "ot_readiness_proof", pin)
+    assert receipt["readiness_ref"] not in json.dumps(screen(h, view))
+    assert effects(h) == (0,) * 7

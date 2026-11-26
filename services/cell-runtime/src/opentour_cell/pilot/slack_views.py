@@ -610,6 +610,7 @@ def regression_picker(
     previous: bool,
     more: bool,
     topic: str = "changes",
+    current_workflow: tuple[str, str] | None = None,
 ) -> Block:
     blocks = [
         _section(
@@ -623,6 +624,15 @@ def regression_picker(
             "its evidence to ask about it."
         )
     ]
+    if current_workflow:
+        workflow, token = current_workflow
+        blocks = [
+            _section("Which scope should the training answer use?"),
+            _section(f"Current workflow · {_ref(workflow)}"),
+            _actions(_button("Use current workflow", "ot_current_training", token)),
+        ]
+        if rows:
+            blocks.append(_section("Or choose an inspected frozen comparison."))
     for dataset, source, revision in rows:
         blocks.append(_section(f"Workflow {_ref(dataset)} · {_display(source)} · {_ref(revision)}"))
         blocks.append(_actions(_button("Use this comparison", "ot_result_open", revision)))
@@ -633,7 +643,66 @@ def regression_picker(
         navigation.append(_button("Next", "ot_result_next", "next"))
     navigation.append(_button("Browse results", "ot_readouts", "home"))
     blocks.append(_actions(*navigation))
-    return _modal("Choose comparison", "ot_regression_picker", context, blocks)
+    return _modal(
+        "Choose status scope" if current_workflow else "Choose comparison",
+        "ot_regression_picker",
+        context,
+        blocks,
+    )
+
+
+def current_training_question(
+    context: str, workflow: str, receipt: Mapping[str, Any] | None, *, pin: str, proof: bool
+) -> Block:
+    blocks = [_section(f"Current workflow · {_ref(workflow)}")]
+    if receipt is None:
+        blocks.append(
+            _section(
+                "Current training readiness is unavailable. "
+                "Ask the workflow owner to check for a current worker readiness receipt."
+            )
+        )
+    else:
+        answer = readiness_answer(receipt)
+        families = receipt["independent_family_count"]
+        unit = "family" if families == 1 else "families"
+        blocks.extend(
+            [
+                _section(answer.finding),
+                _section(f"{families} independent {unit}. {answer.basis}"),
+                _section(answer.next_action),
+            ]
+        )
+    nav = [_button("Back to scopes", "ot_training_scopes", "scopes")]
+    if receipt is not None:
+        if proof:
+            blocks.append(
+                _section(
+                    f"Worker receipt {_ref(receipt['readiness_ref'])} · "
+                    f"version {receipt['version']}. "
+                    f"Evidence revision {_ref(receipt['evidence_revision'])}."
+                )
+            )
+            if receipt.get("assessment_ref"):
+                blocks.append(
+                    _section(f"Simple-repair assessment · {_ref(receipt['assessment_ref'])}")
+                )
+            if receipt.get("mandate_ref"):
+                blocks.append(
+                    _section(
+                        f"Training mandate · {_ref(receipt['mandate_ref'])} · "
+                        f"revision {_ref(receipt['mandate_revision'])}"
+                    )
+                )
+        else:
+            nav.insert(0, _button("View readiness receipt", "ot_readiness_proof", pin))
+    blocks.append(_actions(*nav))
+    return _modal(
+        "Readiness receipt" if proof else "Training readiness",
+        "ot_current_training_proof" if proof else "ot_current_training_status",
+        context,
+        blocks,
+    )
 
 
 def status_question_modal(context: str, revision: str, dataset: str, answer: StatusAnswer) -> Block:
