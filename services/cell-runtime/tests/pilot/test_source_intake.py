@@ -7,6 +7,7 @@ import os
 import sqlite3
 import subprocess
 import sys
+import time
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
@@ -14,6 +15,7 @@ from zipfile import ZipFile
 
 import pytest
 from opentour_cell.pilot import source_intake as intake
+from opentour_cell.pilot.mcp import PROTOCOL_VERSION
 from opentour_cell.pilot.operating_point import canonical, digest
 from opentour_cell.pilot.training import LocalTrainingStore
 
@@ -424,7 +426,21 @@ def test_pure_authority_check_works_under_already_held_training_lock(
             )
 
 
-def test_packaged_merchant_discovery_quarantines_ambiguous_transaction(tmp_path: Path) -> None:
+@pytest.fixture(scope="module")
+def packaged_source_command(tmp_path_factory: pytest.TempPathFactory) -> list[str | Path]:
+    root = tmp_path_factory.mktemp("source-intake-kit")
+    python = [sys.executable, "-I", "-S", "-B"]
+    archive = root / "kit.zip"
+    builder = RUNTIME.parents[1] / "tools/build_slack_pilot_kit.py"
+    subprocess.run([*python, builder, archive], check=True, capture_output=True, timeout=30)
+    with ZipFile(archive) as kit:
+        executable = kit.extract("opentour-slack.pyz", root)
+    return [*python, executable]
+
+
+def test_packaged_merchant_discovery_quarantines_ambiguous_transaction(
+    tmp_path: Path, packaged_source_command: list[str | Path]
+) -> None:
     fixture = json.loads(
         (Path(__file__).parent / "fixtures/merchant-discovery-v1.json").read_bytes()
     )
@@ -448,15 +464,8 @@ def test_packaged_merchant_discovery_quarantines_ambiguous_transaction(tmp_path:
     grant_path = private / "grant.json"
     write(grant_path, canonical(grant))
 
-    python = [sys.executable, "-I", "-S", "-B"]
-    archive = tmp_path / "kit.zip"
-    builder = RUNTIME.parents[1] / "tools/build_slack_pilot_kit.py"
-    subprocess.run([*python, builder, archive], check=True, capture_output=True, timeout=30)
-    with ZipFile(archive) as kit:
-        executable = kit.extract("opentour-slack.pyz", tmp_path)
     base = [
-        *python,
-        executable,
+        *packaged_source_command,
         "source",
         "--store",
         store.path,
@@ -492,6 +501,214 @@ def test_packaged_merchant_discovery_quarantines_ambiguous_transaction(tmp_path:
     assert row["incumbent"]["label"] == "merchant-a" and row["reference"] == "merchant-b"
     assert row["decision_at"] < row["outcome_at"] <= row["verified_at"]
     assert data["training_allowed"] and not data["training_case_ids"]
+    with sqlite3.connect(store.path) as db:
+        assert db.execute("SELECT COUNT(*) FROM jobs").fetchone()[0] == expected["fit_jobs"]
+        assert db.execute("SELECT COUNT(*) FROM fit_checkpoints").fetchone()[0] == 0
+        assert db.execute("SELECT COUNT(*) FROM artifacts").fetchone()[0] == 0
+
+
+def test_packaged_invoice_coding_routes_missing_payer_to_review(
+    tmp_path: Path, packaged_source_command: list[str | Path]
+) -> None:
+    fixture = json.loads((Path(__file__).parent / "fixtures/payer-routing-v1.json").read_bytes())
+    assert fixture["schema_version"] == "opentour.generated.payer-routing.v1"
+    expected = fixture["expected"]
+    owner = tmp_path / "owner"
+    owner.mkdir(mode=0o700)
+    grant = json.loads((EXAMPLES / "pilot-source-grant.template.json").read_bytes())
+    store = LocalTrainingStore(owner / "training.sqlite3", grant["organization"])
+    grant.update(
+        engagement=store.engagement_id,
+        permitted_features=["payer_identity", "batch"],
+        training_attestation="att-2222222222222222",
+    )
+    scope = {
+        k: grant[k]
+        for k in ("organization", "workflow", "field", "policy_version", "source_schema_version")
+    }
+    traces, corrections = [], []
+    for index, (payer, reference, decision_at) in enumerate(fixture["invoices"]):
+        event_id = f"invoice-{index:02}"
+        features = {"batch": f"batch-{index:02}"}
+        # A missing payer on an otherwise authorized row is eligible for the review fallback.
+        if payer is not None:
+            features["payer_identity"] = payer
+        features.update(fixture["additional_features"].get(event_id, {}))
+        available_at = decision_at + (1 if event_id == fixture["late_payer"] else -1)
+        traces.append(
+            dict(
+                scope,
+                event_id=event_id,
+                source=grant["trace_source"],
+                customer_id="generated-client",
+                group_id=f"group-{index:02}",
+                decision_at=decision_at,
+                features_available_at=available_at,
+                features=features,
+                incumbent={"status": "automatic", "label": "payable"},
+            )
+        )
+        corrections.append(
+            dict(
+                scope,
+                event_id=event_id,
+                outcome_id=f"outcome-{index:02}",
+                source=grant["correction_source"],
+                adjudicator_id=grant["adjudicators"][0],
+                facts_as_of=decision_at,
+                outcome_at=decision_at + 2,
+                verified_at=decision_at + 3,
+                reference=reference,
+            )
+        )
+    trace_path, correction_path = owner / "traces.jsonl", owner / "corrections.jsonl"
+    grant["trace_sha256"] = export(trace_path, traces)
+    grant["correction_sha256"] = export(correction_path, corrections)
+    grant_path = owner / "source-grant.json"
+    write(grant_path, canonical(grant))
+
+    def run(*args: str | Path, stdin: str | None = None) -> str:
+        output = subprocess.run(
+            [*packaged_source_command, *args],
+            env={},
+            input=stdin,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert output.returncode == 0, output.stderr
+        assert not output.stderr
+        return output.stdout
+
+    source = ["source", "--store", store.path, "--organization", store.organization]
+    inputs = ["--grant", grant_path, "--traces", trace_path, "--corrections", correction_path]
+    discovered = json.loads(run(*source, "discover", *inputs))
+    [error_class] = discovered["suspected_error_classes"]
+    assert error_class["count"] == error_class["groups"] == expected["recurring_groups"]
+    confirmation = owner / "confirmation.json"
+    write(
+        confirmation,
+        canonical(
+            {
+                "discovery_revision": discovered["discovery_revision"],
+                "class_id": error_class["class_id"],
+                "owner_id": grant["owner_id"],
+                "attestation": "att-3333333333333333",
+            }
+        ),
+    )
+    frozen_path = owner / "intake.json"
+    frozen = json.loads(
+        run(*source, "freeze", *inputs, "--output", frozen_path, "--confirmation", confirmation)
+    )
+    assert frozen == json.loads(run(*source, "inspect", "--intake", frozen_path))
+    assert frozen["development_count"] == expected["development"]
+    assert frozen["protected_count"] == expected["protected"]
+    assert frozen["excluded_counts"] == expected["excluded_counts"]
+    assert len(traces) == (
+        frozen["development_count"]
+        + frozen["protected_count"]
+        + sum(frozen["excluded_counts"].values())
+    )
+    data = json.loads(frozen_path.read_bytes())
+    assert data["excluded"] == expected["excluded"]
+    assert set(data["allowed_features"]) == {"batch", "payer_identity"}
+    assert frozen["confirmed_recurring_error"] is True
+
+    manifest = owner / "plan.json"
+    write(
+        manifest,
+        canonical(
+            {
+                "schema_version": "opentour.pilot.managed-repair.v1",
+                "organization": store.organization,
+                "engagement": store.engagement_id,
+                "intake_file": frozen_path.name,
+                "intake_revision": frozen["intake_revision"],
+                "incumbent_revision": digest(["always", "payable"]),
+                "audience": "generated-reviewer",
+                "terms": {"minimum_coverage_bps": 10000, "error_ceiling_bps": 2500},
+                "rule": {"feature": "payer_identity", "min_support": 2, "fallback": "review"},
+            }
+        ),
+    )
+    args = [
+        "--directory",
+        owner,
+        "--organization",
+        store.organization,
+        "--manifest",
+        manifest,
+        "--authorization",
+        owner / "authorization.json",
+    ]
+    revision = json.loads(run("workflow-inspect", *args))["plan_revision"]
+    run(
+        "workflow-authorize",
+        *args,
+        "--plan-revision",
+        revision,
+        "--custodian-attestation",
+        "att-5555555555555555",
+        "--expires-at",
+        str(int(time.time()) + 600),
+    )
+
+    def call(name: str, arguments: Json) -> Json:
+        frames = [
+            {
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": PROTOCOL_VERSION,
+                    "capabilities": {},
+                    "clientInfo": {"name": "generated-payer", "version": "1"},
+                },
+            },
+            {"method": "notifications/initialized"},
+            {
+                "id": 2,
+                "method": "tools/call",
+                "params": {"name": name, "arguments": arguments},
+            },
+        ]
+        stdin = "".join(canonical({"jsonrpc": "2.0", **frame}) + "\n" for frame in frames)
+        reply = json.loads(run("mcp-workflow", *args, stdin=stdin).splitlines()[-1])
+        assert reply["id"] == 2 and not reply["result"].get("isError")
+        return reply["result"]["structuredContent"]
+
+    queued = call(
+        "start_offline_evaluation", {"plan_revision": revision, "idempotency_ref": "payer-v1"}
+    )
+    assert queued["state"] == "queued"
+    worker = json.loads(run("workflow-worker", *args, "--once"))
+    assert worker == call("get_offline_evaluation", {"run_id": queued["run_id"]})
+    assert worker["state"] == "held" and worker["reason"] == "evaluation_held"
+    result_dir = owner / "managed-outputs" / worker["run_id"]
+    rule = json.loads((result_dir / "rule.json").read_bytes())
+    report = json.loads((result_dir / "comparison.json").read_bytes())
+    assert worker["result"] == {
+        "outcome": "hold",
+        "case_count": expected["protected"],
+        "result_revision": digest(report),
+    }
+    assert rule["source"] == "development_lookup"
+    assert rule["mapping"] == expected["mapping"]
+    assert rule["fallback"] == "review"
+    assert set(report["arms"]) == {"incumbent", "simple"}
+    assert report["arms"]["incumbent"]["metrics"]["incorrect_automatic"] == expected["errors"]
+    assert report["arms"]["simple"]["metrics"]["incorrect_automatic"] == 0
+    assert report["decision"]["winner"] is None
+    assert report["arms"]["simple"]["hold_reason"] == "operating_point_missed_or_undetermined"
+    decisions = {row["case_id"]: row["simple"] for row in report["paired_cases"]}
+    assert decisions == expected["protected_decisions"]
+    assert not decisions.keys() & data["excluded"].keys()
+    assert {path.name for path in result_dir.iterdir()} == {
+        "comparison.json",
+        "plan.json",
+        "rule.json",
+        "run.json",
+    }
     with sqlite3.connect(store.path) as db:
         assert db.execute("SELECT COUNT(*) FROM jobs").fetchone()[0] == expected["fit_jobs"]
         assert db.execute("SELECT COUNT(*) FROM fit_checkpoints").fetchone()[0] == 0
