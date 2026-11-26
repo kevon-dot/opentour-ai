@@ -29,6 +29,11 @@ SESSION_SECONDS = 900
 RESULT_PAGE_SIZE = 12
 SLACK_ID = re.compile(r"[A-Z][A-Z0-9]{2,31}\Z")
 LOCAL_ID = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}\Z")
+# Only a complete, read-only question may select a frozen comparison.
+REGRESSION_QUESTION = re.compile(
+    r"(?:what (?:got|became) worse|(?:which|what) (?:cases|decisions|answers) "
+    r"(?:(?:got|became) (?:worse|wrong|incorrect)|regressed))\??"
+)
 ROLES = {"inspect", "tune", "review"}
 CALLBACKS = {"ot_dataset_search", "ot_tune_preview", "ot_tune_start", "ot_prompt_enter"}
 ACTIONS = {
@@ -300,11 +305,13 @@ class Journal:
         row = db.execute("SELECT held FROM journal_control WHERE id=1").fetchone()
         _check(row and not row[0])
 
-    def admit_view(self, kind: str) -> str:
+    def admit_view(self, kind: str, *, authorize: Callable[[], None] | None = None) -> str:
         key = secrets.token_urlsafe(18)
         with self.db() as db:
             db.execute("BEGIN IMMEDIATE")
             self.active(db)
+            if authorize is not None:
+                authorize()
             db.execute(
                 "INSERT INTO exposures VALUES(?,?,'admitted',?,NULL)", (key, kind, int(time.time()))
             )
@@ -1492,6 +1499,44 @@ class Workbench:
             return
         self._browse(cfg, actor, view, source, search=query, old_hash=old_hash)
 
+    def _regression_picker(
+        self, cfg: Settings, actor: str, view: str, old_hash: str = "", page: int = 0
+    ) -> None:
+        policy = self._policy(cfg, actor)
+        eligible = []
+        if cfg.permission(actor, "inspect")["aggregate"]:
+            for dataset, source in self._result_sources(cfg, actor):
+                target = self._readout(cfg, actor, source)
+                if target and self.journal.inspected(actor, target.revision, policy):
+                    eligible.append((dataset, source, target.revision))
+        page = max(0, min(page, (len(eligible) - 1) // RESULT_PAGE_SIZE))
+        start = page * RESULT_PAGE_SIZE
+        rows = eligible[start : start + RESULT_PAGE_SIZE]
+        listing = {"page": page, "items": {revision: source for _, source, revision in rows}}
+        ctx = self.journal.context(actor, cfg.channel, view, "regressions", revision=_json(listing))
+        self._show(
+            view,
+            self.views.regression_picker(
+                ctx, rows, previous=bool(page), more=start + len(rows) < len(eligible)
+            ),
+            old_hash,
+            authorize=lambda: self._authorize_question_rows(cfg, actor, rows),
+        )
+
+    def _authorize_question_rows(
+        self, cfg: Settings, actor: str, rows: list[tuple[str, str, str]]
+    ) -> None:
+        # Both the withdrawal guard and the exposure transaction are held at admission.
+        current = self.settings()
+        current.permission(actor, "inspect")
+        policy = self._policy(current, actor)
+        _check(policy == self._policy(cfg, actor))
+        for dataset, source, revision in rows:
+            _check(current.permission(actor, "inspect", dataset)["aggregate"])
+            target = self._readout(current, actor, source)
+            _check(target and target.dataset == dataset and target.revision == revision)
+            _check(self.journal.inspected(actor, revision, policy))
+
     def _questions(
         self,
         cfg: Settings,
@@ -1521,6 +1566,9 @@ class Workbench:
             dataset=target.dataset,
             dataset_revision=target.dataset_revision,
             audit=target.audit,
+            authorize=lambda: self._authorize_question_rows(
+                cfg, actor, [(target.dataset, source, revision)]
+            ),
         )
 
     def _unbound_recipient(self) -> bool:
@@ -1540,6 +1588,7 @@ class Workbench:
         dataset_revision: str | None = None,
         audit: Json | None = None,
         setup_context: str | None = None,
+        authorize: Callable[[], None] | None = None,
     ) -> str:
         # Record every attempted protected disclosure without persisting projected sample rows.
         exposure = ""
@@ -1547,7 +1596,7 @@ class Workbench:
             with _evidence_guard(
                 self.store, dataset, dataset_revision, self.store.engagement_id, audit
             ):
-                exposure = self.journal.admit_view(modal["callback_id"])
+                exposure = self.journal.admit_view(modal["callback_id"], authorize=authorize)
         navigation = (
             setup_context is not None
             and _static_setup_navigation(modal, setup_context)
@@ -2060,6 +2109,22 @@ class Workbench:
         elif action == "ot_readouts":
             self._results(cfg, actor, view, old_hash)
         elif action in {"ot_result_prev", "ot_result_next", "ot_result_open"}:
+            if ctx["kind"] == "regressions":
+                listing = json.loads(ctx["revision"])
+                if action == "ot_result_open":
+                    _check(value in listing["items"])
+                    source = listing["items"][value]
+                    _check(source in {s for _, s in self._result_sources(cfg, actor)})
+                    self._questions(cfg, actor, view, source, value, "changes", old_hash)
+                else:
+                    self._regression_picker(
+                        cfg,
+                        actor,
+                        view,
+                        old_hash,
+                        listing["page"] + (1 if action == "ot_result_next" else -1),
+                    )
+                return
             _check(ctx["kind"] == "results")
             listing = json.loads(ctx["revision"])
             if action == "ot_result_open":
@@ -2446,6 +2511,9 @@ class Workbench:
             return
         if command in {"", "status", "review"} and not argument:
             self._results(cfg, actor, view)
+            return
+        if REGRESSION_QUESTION.fullmatch(" ".join(prompt.casefold().split())):
+            self._regression_picker(cfg, actor, view)
             return
         if command == "ask":
             aliases = {

@@ -299,11 +299,11 @@ class QualificationRegister:
             return _receipt("discovery", "discovery_only")
         if intent in _MODES and (missing := _charter_gaps(event)):
             return _receipt("held", "charter_incomplete", missing_fields=missing)
-        return self._record(event, now)
+        return self._record(event, authority.expires_at)
 
-    def _record(self, event: Json, now: int) -> Json:
+    def _record(self, event: Json, authority_expiry: int) -> Json:
         with self._transaction() as db:
-            return self._admit(db, event, now)
+            return self._admit(db, event, authority_expiry)
 
     @contextmanager
     def _transaction(self, *, existing_only: bool = False) -> Iterator[sqlite3.Connection]:
@@ -321,7 +321,12 @@ class QualificationRegister:
                 db.execute(_SCHEMA)
                 yield db
 
-    def _admit(self, db: sqlite3.Connection, event: Json, now: int) -> Json:
+    def _admit(self, db: sqlite3.Connection, event: Json, authority_expiry: int) -> Json:
+        # A competing writer can hold the register past the preflight check.
+        # Refresh time inside the transaction before admission or receipt disclosure.
+        now = int(time.time())
+        if now >= authority_expiry:
+            return _receipt("held", "qualification_authority_unverified")
         org = event["organization_ref"]
         revision = event["engagement_revision"]
         source_revision = event["source_revision"]

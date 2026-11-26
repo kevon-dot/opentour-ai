@@ -56,6 +56,8 @@ must substantiate permission and corrective independence before the issuer submi
 The command gives an opaque candidate and operation reference, a bounded disposition, or the
 field-level gaps for a verified issuer to resolve. The ledger preserves original delivery IDs,
 source revisions and dated dispositions. Identical current delivery returns the original receipt.
+Signing authority must still be current after the register lock is acquired, including on receipt
+replay. A first starter admission checks its verifier date against that same current UTC date.
 A signed Lost event makes its engagement terminal. Re-entry requires the next engagement
 revision and a freshly signed complete charter. A stale delivery cannot reopen a closed engagement.
 
@@ -80,3 +82,5 @@ From the repository root with the pinned environment, run
 fixtures exercise the CLI in fresh processes, compare concurrent replays, inspect the local
 ledger's exact saved references and observed UTC times, and verify scope denial, discovery,
 Lost, stale delivery, re-entry, incomplete authority and independent history cases.
+An independent SQLite writer delays admission across signing expiry and UTC midnight to verify
+that stale preflight time cannot authorize a write or disclose a prior candidate receipt.
