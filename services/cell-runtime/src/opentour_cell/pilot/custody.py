@@ -49,8 +49,15 @@ _PRIVATE_STATE = {
     ),
     "benchmark-records": (
         "receipt",
-        ("workflow-benchmarks.sqlite3*", "benchmark-worker.lock"),
-        "Account for benchmark versions, materialization receipts and worker recovery state.",
+        ("workflow-benchmarks.sqlite3*", "benchmark-worker.lock", "benchmark-intake-*.json"),
+        "Account for benchmark versions, frozen source inputs, protected answers, "
+        "materialization receipts and worker recovery state.",
+    ),
+    "source-intake-copies": (
+        "source",
+        ("source-intake-*.json",),
+        "Reconcile trace and correction exports, protected answers, "
+        "development projections and source grants.",
     ),
     "starter-permissions": (
         "grant",
@@ -316,13 +323,6 @@ class Closeout:
                     any(self.directory.glob("approval-ready-*.json")),
                     "Account for Slack or Zapier messages already admitted, any "
                     "pending decision and every recipient copy.",
-                ),
-                (
-                    "source-intake-copies",
-                    "source",
-                    any(self.directory.glob("source-intake-*.json")),
-                    "Reconcile trace and correction exports, protected answers, "
-                    "development projections and source grants.",
                 ),
                 (
                     "workplace-snapshots",

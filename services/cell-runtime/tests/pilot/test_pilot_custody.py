@@ -111,6 +111,8 @@ def test_early_withdrawal_is_durable_and_safe_on_replay(tmp_path: Path) -> None:
         ("benchmark-inspection-selection.json", "intake-records", "receipt"),
         ("workflow-benchmarks.sqlite3-shm", "benchmark-records", "receipt"),
         ("benchmark-worker.lock", "benchmark-records", "receipt"),
+        ("benchmark-intake-generated.json", "benchmark-records", "receipt"),
+        ("source-intake-starter-draft-generated.json", "source-intake-copies", "source"),
         ("starter-intake-key.json", "starter-permissions", "grant"),
         ("live-evidence.sqlite3-wal", "live-source-records", "source"),
         ("live-export-read-generated.json", "live-source-records", "source"),
