@@ -19,6 +19,8 @@ from opentour_cell.pilot.workflow_benchmarks import MaterializedBenchmark
 
 Json = dict[str, Any]
 POLICY = "opentour.pilot.historical-benchmark-policy.v1"
+BASELINE_POLICY = "opentour.pilot.historical-baseline-policy.v1"
+BASELINE_WORKER = "opentour.pilot.historical-baseline-worker.v1"
 
 
 def _require(condition: object, reason: str = "historical_benchmark_unavailable") -> None:
@@ -70,23 +72,38 @@ class LocalHistoricalBenchmark:
             )
             policy = repair_workflow._private_json(self.agreement)
             _require(digest(policy) == selected.policy_revision, "benchmark_policy_changed")
+            baseline = policy.get("schema_version") == BASELINE_POLICY
             _require(
-                set(policy) == {"schema_version", "incumbent_revision", "terms", "rule"}
-                and policy["schema_version"] == POLICY
+                set(policy)
+                == (
+                    {"schema_version", "incumbent_revision", "terms"}
+                    if baseline
+                    else {"schema_version", "incumbent_revision", "terms", "rule"}
+                )
+                and policy["schema_version"] in {POLICY, BASELINE_POLICY}
                 and isinstance(policy["incumbent_revision"], str)
                 and re.fullmatch("[a-f0-9]{64}", policy["incumbent_revision"])
-                and isinstance(policy["rule"], dict)
-                and set(policy["rule"]) == {"feature", "mapping", "fallback"},
+                and (
+                    baseline
+                    or (
+                        isinstance(policy["rule"], dict)
+                        and set(policy["rule"]) == {"feature", "mapping", "fallback"}
+                    )
+                ),
                 "historical_declared_policy_required",
             )
             terms = comparison_plan._terms(policy["terms"])
             _require(
-                {
-                    "minimum_development_cases",
-                    "minimum_verified_cases",
-                    "minimum_residual_errors",
-                    "minimum_slice_cases",
-                }
+                (
+                    {"minimum_verified_cases", "minimum_slice_cases"}
+                    if baseline
+                    else {
+                        "minimum_development_cases",
+                        "minimum_verified_cases",
+                        "minimum_residual_errors",
+                        "minimum_slice_cases",
+                    }
+                )
                 <= set(terms),
                 "benchmark_thresholds_required",
             )
@@ -103,8 +120,9 @@ class LocalHistoricalBenchmark:
         )
 
     def _manifest(self, work: IntakeWork, policy: Json, intake_path: Path, revision: str) -> Json:
+        baseline = policy["schema_version"] == BASELINE_POLICY
         return {
-            "schema_version": repair_workflow.SCHEMA,
+            "schema_version": BASELINE_WORKER if baseline else repair_workflow.SCHEMA,
             "organization": self.authority.selected.tenant,
             "engagement": work.resource.engagement_epoch,
             "audience": self.authority.selected.actor,
@@ -112,7 +130,7 @@ class LocalHistoricalBenchmark:
             "intake_revision": revision,
             "incumbent_revision": policy["incumbent_revision"],
             "terms": policy["terms"],
-            "rule": policy["rule"],
+            **({} if baseline else {"rule": policy["rule"]}),
         }
 
     def materialize(
@@ -129,15 +147,20 @@ class LocalHistoricalBenchmark:
             self.authority.store, grant, self.traces, self.corrections, intake_path
         )
         terms = policy["terms"]
+        baseline = policy["schema_version"] == BASELINE_POLICY
         _require(
-            len(frozen["development"]) >= terms["minimum_development_cases"]
+            (baseline or len(frozen["development"]) >= terms["minimum_development_cases"])
             and len(frozen["protected"]) >= terms["minimum_verified_cases"],
             "benchmark_cases_required",
         )
         _require(
             all(
                 row["incumbent"]["status"] != "missing"
-                for row in (*frozen["development"], *frozen["protected"])
+                for row in (
+                    frozen["protected"]
+                    if baseline
+                    else (*frozen["development"], *frozen["protected"])
+                )
             ),
             "recorded_baseline_predictions_required",
         )
@@ -147,8 +170,39 @@ class LocalHistoricalBenchmark:
         self._authorize(actor, work)
         _require(repair_workflow._stored_run(self.directory, run) == output)
         repair_workflow._record(output / "benchmark-manifest.json", manifest)
-        result = repair_workflow.execute_managed(self.directory, actor.tenant, manifest, run)
-        _require(result["case_count"] > 0, "baseline_comparison_not_evaluated")
+        if baseline:
+            plan = comparison_plan.freeze_recorded_baseline(
+                organization=actor.tenant,
+                engagement=work.resource.engagement_epoch,
+                audience=actor.actor,
+                intake_revision=frozen["intake_revision"],
+                protected_ids=[row["case_id"] for row in frozen["protected"]],
+                incumbent_revision=policy["incumbent_revision"],
+                terms=terms,
+            )
+            repair_workflow._record(output / "plan.json", plan)
+
+            def current() -> None:
+                self._authorize(actor, work)
+
+            result = comparison_plan.run_recorded_baseline(
+                self.authority.store, plan, frozen, authorize=current
+            )
+            repair_workflow._record(output / "comparison.json", result)
+            self._authorize(actor, work)
+            repair_workflow._record(
+                output / "run.json",
+                {
+                    "run_id": run,
+                    "plan_revision": digest(manifest),
+                    "result_revision": digest(result),
+                    "case_count": result["protected_rows_evaluated"],
+                    "outcome": result["outcome"],
+                },
+            )
+        else:
+            result = repair_workflow.execute_managed(self.directory, actor.tenant, manifest, run)
+            _require(result["case_count"] > 0, "baseline_comparison_not_evaluated")
         return self.readback(actor, work, operation_ref=operation_ref)
 
     def readback(
@@ -175,7 +229,11 @@ class LocalHistoricalBenchmark:
         )
         _require(marker["authority_revision"] == digest(source_grant))
         plan = repair_workflow._private_json(output / "plan.json")
-        comparison_plan._check_plan(plan)
+        baseline = policy["schema_version"] == BASELINE_POLICY
+        if baseline:
+            comparison_plan.check_recorded_baseline_plan(plan)
+        else:
+            comparison_plan._check_plan(plan)
         _require(
             plan["organization"] == actor.tenant
             and plan["engagement"] == work.resource.engagement_epoch
@@ -183,8 +241,14 @@ class LocalHistoricalBenchmark:
             and plan["intake_revision"] == manifest["intake_revision"]
             and plan["terms"] == policy["terms"]
             and plan["incumbent_revision"] == policy["incumbent_revision"]
-            and plan["model_revision"] is None
-            and plan["rule_revision"] == repair_workflow._rule(marker, manifest, [])["revision"]
+            and (
+                baseline
+                or (
+                    plan["model_revision"] is None
+                    and plan["rule_revision"]
+                    == repair_workflow._rule(marker, manifest, [])["revision"]
+                )
+            )
             and plan["protected_membership_digest"] == marker["protected_membership_digest"],
         )
         private_result = repair_workflow._private_json(output / "comparison.json")
@@ -203,7 +267,11 @@ class LocalHistoricalBenchmark:
                 "SELECT result FROM protected_comparisons WHERE revision=?", (plan["revision"],)
             ).fetchone()
             _require(row is not None and row["result"])
-            result = comparison_plan._stored(row["result"], plan)
+            result = (
+                comparison_plan.stored_recorded_baseline(row["result"], plan)
+                if baseline
+                else comparison_plan._stored(row["result"], plan)
+            )
             _require(canonical(result) == canonical(private_result))
         self._authorize(actor, work)
         return MaterializedBenchmark(
