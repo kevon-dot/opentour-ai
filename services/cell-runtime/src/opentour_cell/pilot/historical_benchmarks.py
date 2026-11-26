@@ -7,12 +7,14 @@ supported here. This path has no model, fit, publication or release operation.
 from __future__ import annotations
 
 import re
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
 from opentour_cell.pilot import comparison_plan, repair_workflow, source_intake
 from opentour_cell.pilot.intake_admission import IntakeWork
-from opentour_cell.pilot.intake_local import LocalHistoricalAuthority
+from opentour_cell.pilot.intake_local import HistoricalSelection, LocalHistoricalAuthority
 from opentour_cell.pilot.intake_mcp import HistoricalPair, IntakeError, IntakePrincipal
 from opentour_cell.pilot.operating_point import canonical, digest
 from opentour_cell.pilot.workflow_benchmarks import MaterializedBenchmark
@@ -119,6 +121,31 @@ class LocalHistoricalBenchmark:
             self.directory / "managed-outputs" / run,
         )
 
+    @contextmanager
+    def _commit_authority(self, actor: IntakePrincipal, work: IntakeWork) -> Iterator[None]:
+        """Pin evaluation while caller holds training DB; do not re-enter its writer."""
+        authority, selected = self.authority, self.authority.selected
+        with authority.mandates.guard_evaluation_source(
+            selected.mandate_id, selected.source_run_id, actor=actor.actor
+        ) as grant:
+            source = grant["source_request"]
+            _require(
+                actor == authority.principal
+                and HistoricalSelection.read(authority.path) == selected
+                and grant["mandate_revision"] == selected.mandate_revision
+                and grant["agreement_revision"] == selected.policy_revision
+                and grant["delegation_id"] == work.resource.resource_id
+                and work.resource.engagement_epoch == selected.engagement_epoch
+                and source["workflow"] == work.workflow_ref == selected.workflow_ref
+                and source["trace_source"] == selected.trace_source
+                and source["correction_source"] == selected.correction_source
+                and source["trace_sha256"] == selected.source_revision
+                and source["correction_sha256"] == selected.correction_revision
+                and digest(repair_workflow._private_json(self.agreement))
+                == selected.policy_revision
+            )
+            yield
+
     def _manifest(self, work: IntakeWork, policy: Json, intake_path: Path, revision: str) -> Json:
         baseline = policy["schema_version"] == BASELINE_POLICY
         return {
@@ -186,7 +213,11 @@ class LocalHistoricalBenchmark:
                 self._authorize(actor, work)
 
             result = comparison_plan.run_recorded_baseline(
-                self.authority.store, plan, frozen, authorize=current
+                self.authority.store,
+                plan,
+                frozen,
+                authorize=current,
+                commit_authority=lambda: self._commit_authority(actor, work),
             )
             repair_workflow._record(output / "comparison.json", result)
             self._authorize(actor, work)

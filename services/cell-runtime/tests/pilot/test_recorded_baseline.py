@@ -160,3 +160,27 @@ def test_baseline_missing_recorded_prediction_cannot_publish_score(tmp_path):
         intake.materialize(actor, admission.run_ref, producer)
     assert intake.get_run(actor, admission.run_ref).benchmark.benchmark_state == "draft"
     assert not (producer.directory / "managed-outputs").exists()
+
+
+def test_mandate_withdrawal_during_measurement_rolls_back_result(tmp_path, monkeypatch):
+    intake, actor, request, producer, ledger, mandate = setup(tmp_path, baseline_only=True)
+    admission = intake.submit_intake(actor, request)
+    measure = comparison_plan.arm_metrics
+
+    def withdraw_then_measure(*args, **kwargs):
+        ledger.withdraw(mandate["mandate_id"], actor=mandate["owner_id"])
+        return measure(*args, **kwargs)
+
+    monkeypatch.setattr(comparison_plan, "arm_metrics", withdraw_then_measure)
+    with pytest.raises(ValueError):
+        intake.materialize(actor, admission.run_ref, producer)
+    assert ledger.inspect(mandate["mandate_id"], actor=actor.actor)["withdrawn"]
+    with sqlite3.connect(producer.authority.store.path) as db:
+        assert (
+            db.execute(
+                "SELECT COUNT(*) FROM protected_comparisons WHERE result IS NOT NULL"
+            ).fetchone()[0]
+            == 0
+        )
+        # Reservation remains consumed; denied evaluation cannot free labels for a different intent.
+        assert db.execute("SELECT COUNT(*) FROM protected_comparisons").fetchone()[0] == 1
