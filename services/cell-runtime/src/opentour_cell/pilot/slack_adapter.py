@@ -1620,12 +1620,31 @@ class Workbench:
                 state, receipt = self._recorded_decision(target.revision)
                 if state in {"approved", "changes_requested"}:
                     approval = ApprovalEvidence(state, receipt["receipt"], receipt["decided"])
-        return read_status(
+        answer = read_status(
             topic,
             target.audit,
             managed_outcome=self.views.managed_outcome(target.audit),
             approval=approval,
         )
+
+        if topic == StatusTopic.TRAINING:
+            readiness = self._readiness(actor)
+            if readiness and (
+                readiness["dataset_ref"] == target.dataset
+                and readiness["dataset_revision"] == target.dataset_revision
+                and readiness["engagement"] == target.audit.get("engagement")
+                and readiness["organization"] == target.audit.get("organization")
+                and target.audit.get("workflow_ref", readiness["workflow_ref"])
+                == readiness["workflow_ref"]
+            ):
+                current = self.views.readiness_answer(readiness)
+                return StatusAnswer(
+                    answer.finding,
+                    f"{answer.basis} Current workflow {readiness['workflow_ref']} · "
+                    f"{current.finding} {current.basis}",
+                    current.next_action,
+                )
+        return answer
 
     def _questions(
         self,
@@ -2176,6 +2195,34 @@ class Workbench:
             self.on_decision()
         self._home(cfg, actor, view, ctx["job"], old_hash)
 
+    def _readiness(self, actor: str) -> Json | None:
+        from opentour_cell.pilot.readiness_selection import open_readiness
+
+        cfg = self.settings(check_engagement=False)
+        try:
+            workflow = self._live_workflow(cfg, actor)
+            with self._live_scope(actor, workflow) as (principal, _, scope):
+                _check(
+                    scope.can_inspect
+                    and cfg.permission(actor, "inspect", scope.dataset_ref)["aggregate"]
+                )
+                components = open_readiness(cfg.directory, cfg.organization, workflow)
+                receipt = components.readiness.read(workflow, actor=principal)
+                if receipt is None:
+                    return None
+                _check(
+                    receipt["dataset_ref"] == scope.dataset_ref
+                    and receipt["dataset_revision"] == scope.dataset_revision
+                )
+                if receipt["next_action"] == "bind_verifier" and not (
+                    scope.can_bind and any(g.kind == "independent_outcome" for g in scope.grants)
+                ):
+                    return {**receipt, "next_action": "ask_data_custodian_to_bind_verifier"}
+                return receipt
+        except Exception:
+            # Optional worker evidence may be unavailable or no longer authorized.
+            return None
+
     def _live_workflow(self, cfg: Settings, actor: str) -> str:
         cfg.permission(actor, "inspect")
         if cfg.live_workflow_ref:
@@ -2200,7 +2247,7 @@ class Workbench:
             yield principal, LiveEvidence(cfg.directory, authority), scope
 
     def _live_model(
-        self, actor: str, workflow: str
+        self, actor: str, workflow: str, verifier_only: bool = False
     ) -> tuple[str, list[tuple[str, str]], list[tuple[str, str]]]:
         with self._live_scope(actor, workflow) as (principal, live, scope):
             current: list[tuple[str, str]] = [
@@ -2210,9 +2257,21 @@ class Workbench:
             options = []
             if scope.can_bind:
                 for grant in scope.grants:
+                    if verifier_only and grant.kind != "independent_outcome":
+                        continue
                     revision = binding_candidate(principal, scope, grant)
                     label = "Decisions" if grant.kind == "decision" else "Independent outcomes"
                     options.append((f"{label} · {grant.resource[:36]} · {revision[:8]}", revision))
+            readiness_revision = ""
+            if verifier_only:
+                receipt = self._readiness(actor)
+                _check(
+                    receipt
+                    and receipt["workflow_ref"] == workflow
+                    and receipt["next_action"] == "bind_verifier"
+                )
+                assert receipt
+                readiness_revision = receipt["revision"]
             revision = self.journal.opaque(
                 "scope",
                 [
@@ -2221,6 +2280,7 @@ class Workbench:
                     scope.dataset_ref,
                     scope.dataset_revision,
                     scope.custodian,
+                    readiness_revision,
                     options,
                     current,
                 ],
@@ -2235,21 +2295,31 @@ class Workbench:
         workflow: str,
         old_hash: str = "",
         saved: str = "",
+        verifier_only: bool = False,
     ) -> None:
-        model = self._live_model(actor, workflow)
+        model = self._live_model(actor, workflow, verifier_only)
         revision, current, choices = model
         _check(not saved or any(ref == saved for _, ref in current))
-        token = self.journal.context(actor, cfg.channel, view, "live_binding", workflow, revision)
+        token = self.journal.context(
+            actor,
+            cfg.channel,
+            view,
+            "verifier_binding" if verifier_only else "live_binding",
+            workflow,
+            revision,
+        )
         self._show(
             view,
             self.views.live_connections(token, workflow, current, choices, saved),
             old_hash,
-            authorize=lambda: _check(self._live_model(actor, workflow) == model),
+            authorize=lambda: _check(self._live_model(actor, workflow, verifier_only) == model),
         )
 
     def _live_save(self, actor: str, ctx: Json, values: Json) -> str:
         workflow = ctx["job"]
-        _check(ctx["kind"] == "live_binding" and set(values) == {"live_resource"})
+        _check(
+            ctx["kind"] in {"live_binding", "verifier_binding"} and set(values) == {"live_resource"}
+        )
         field = values["live_resource"]
         _check(
             set(field) == {"live_resource"}
@@ -2262,13 +2332,20 @@ class Workbench:
         )
         choice = selected["selected_option"]["value"]
         with self._live_scope(actor, workflow) as (principal, live, scope):
-            _check(scope.can_bind and self._live_model(actor, workflow)[0] == ctx["revision"])
+            _check(
+                scope.can_bind
+                and self._live_model(actor, workflow, ctx["kind"] == "verifier_binding")[0]
+                == ctx["revision"]
+            )
             matches = [
                 grant
                 for grant in scope.grants
                 if binding_candidate(principal, scope, grant) == choice
             ]
-            _check(len(matches) == 1)
+            _check(
+                len(matches) == 1
+                and (ctx["kind"] != "verifier_binding" or matches[0].kind == "independent_outcome")
+            )
             live.initialize()
             return live.save_binding(
                 principal, workflow, matches[0].resource, expected_revision=choice
@@ -2885,6 +2962,7 @@ class Workbench:
             except Exception:
                 # The existing Home remains usable without current live authority.
                 pass
+        readiness = self._readiness(actor) if workflow_settings else None
         layout = self.views.app_home_view(
             token,
             cfg.workspace_title,
@@ -2895,6 +2973,7 @@ class Workbench:
             pending=pending.revision if pending else "",
             can_add_workflow=can_add_workflow,
             workflow_settings=workflow_settings,
+            readiness=readiness,
         )
         navigation = (
             can_add_workflow
@@ -2902,8 +2981,17 @@ class Workbench:
             and _static_setup_navigation(layout, token)
             and self._unbound_recipient()
         )
-        with self.store.engagement_guard(engagement_id=self.store.engagement_id):
-            exposure = self.journal.admit_view("app_home")
+        try:
+            with self.store.engagement_guard(engagement_id=self.store.engagement_id):
+                exposure = self.journal.admit_view(
+                    "app_home",
+                    authorize=(lambda: _check(self._readiness(actor) == readiness))
+                    if readiness is not None
+                    else None,
+                )
+        except Exception:
+            self.web.views_publish(user_id=actor, view=self.views.app_home_view())
+            return
         try:
             result = self.web.views_publish(user_id=actor, view=layout)
             _check(result is not None and result.get("ok") is True)
@@ -2927,8 +3015,9 @@ class Workbench:
             and len(body["actions"]) == 1
         )
         action = body["actions"][0]
-        if action.get("action_id") == "ot_app_settings":
-            _check(action.get("value") == "ot_app_settings")
+        if action.get("action_id") in {"ot_app_settings", "ot_app_bind_verifier"}:
+            bind = action["action_id"] == "ot_app_bind_verifier"
+            _check(bind or action.get("value") == "ot_app_settings")
             opened = self.web.views_open(
                 trigger_id=body["trigger_id"], view=self.views.notice_modal("checking")
             )
@@ -2936,6 +3025,15 @@ class Workbench:
             try:
                 self.private_channel(cfg, actor)
                 workflow = self._live_workflow(self.settings(), actor)
+                if bind:
+                    receipt = self._readiness(actor)
+                    _check(
+                        receipt
+                        and receipt["revision"] == action.get("value")
+                        and receipt["next_action"] == "bind_verifier"
+                    )
+                    self._live_view(cfg, actor, view_id, workflow, verifier_only=True)
+                    return
 
                 def authorize() -> None:
                     with self._live_scope(actor, workflow):
