@@ -25,7 +25,7 @@ A customer can authorize one local worker to find the approved decision records 
 
 ## Run and repeat
 
-Use the supported Python 3.12.16 runtime. One invocation performs a complete bounded scan, from metadata discovery through the protected decision. The supervised local worker repeats this same operation at the configured interval. Laptops and customer-operated hosts can run it without AWS. Zapier coordinates the approval message and callback through the enrolled Slack integration. Follow the [Zapier and Slack approval setup](pilot-zapier-approval.md) to install the private worker and approvals.
+Use Python 3.12.16 and SQLite on the owner-approved Linux x86-64 host selected for first-release qualification. One invocation performs a complete bounded scan, from metadata discovery through the protected decision. The supervised local worker repeats this same operation at the configured interval. The customer operates that worker without AWS. Zapier coordinates the approval message and callback through the enrolled Slack integration. Follow the [Zapier and Slack approval setup](pilot-zapier-approval.md) to install the private worker and approvals.
 
 ```sh
 python -I -S -B "$KIT" cycle --directory "$PILOT_OWNER" --organization "$ORG" \

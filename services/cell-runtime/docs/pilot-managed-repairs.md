@@ -8,7 +8,7 @@ In the extracted kit, open **Upgrade the local worker** in `README.md`.
 
 ## Rehearse the rule in the distributed kit
 
-Use a new directory on an approved POSIX machine with Python 3.12.16. These commands use generated data and separately stored operator permissions. The example prepares twelve development cases and four protected cases. It does not contact a provider, authorize a model fit, post to Slack, or count a customer acceptance.
+For first-release managed-worker qualification, use a new directory on an owner-approved Linux x86-64 host with Python 3.12.16 and SQLite. These commands use generated data and separately stored operator permissions. The example prepares twelve development cases and four protected cases. It does not contact a provider, authorize a model fit, post to Slack, or count a customer acceptance.
 
 ```bash
 umask 077

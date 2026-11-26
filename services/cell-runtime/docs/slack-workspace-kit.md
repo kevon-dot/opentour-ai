@@ -4,9 +4,11 @@ Start with [the autonomous pilot guide](pilot-autonomous-cycle.md) to connect on
 
 Use [the two-route repair guide](pilot-managed-repairs.md) to rehearse both repair routes with generated data. For recurring private Slack invitations, enable `approval_requests` in the approved worker configuration. Use `slack CONFIG --flush-approvals` to dispatch outstanding requests and `slack CONFIG --unresolved-approvals` to list uncertain deliveries before reconciliation. The kit can run the offline software checks before a customer installs Slack or configures Zapier.
 
+For first-release qualification of the live workplace reader and managed worker, use an owner-approved Linux x86-64 host with Python 3.12.16 and SQLite. See [the workplace reader guide](pilot-workplace-context.md) for the descriptor-backed launch requirements.
+
 ## Rehearse both modes
 
-Use Python 3.12.16 on an owner-approved POSIX system with SQLite support. Unpack the ZIP into a new directory and compare its SHA-256 with the digest from the pilot operator. These commands run without credentials, a repository checkout or network access.
+Use Python 3.12.16 on an owner-approved host with SQLite for these offline software checks. Unpack the ZIP into a new directory and compare its SHA-256 with the digest from the pilot operator. These commands run without credentials, a repository checkout or network access.
 
 ```sh
 sha256sum -c SHA256SUMS
