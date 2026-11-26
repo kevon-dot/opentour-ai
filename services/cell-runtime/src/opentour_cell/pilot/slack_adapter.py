@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
+from opentour_cell.pilot.starter_setup import StarterBinding, StarterPreview, StarterSetup
 from opentour_cell.pilot.status_questions import (
     ApprovalEvidence,
     StatusAnswer,
@@ -46,6 +47,7 @@ ROLES = {"inspect", "tune", "review"}
 CALLBACKS = {"ot_dataset_search", "ot_tune_preview", "ot_tune_start", "ot_prompt_enter"}
 ACTIONS = {
     "ot_workflow_starter",
+    "ot_starter_save",
     "ot_workflow_historical",
     "ot_home",
     "ot_browse",
@@ -118,6 +120,7 @@ class Settings:
     workflow_label: str = ""
     config_path: Path | None = None
     explicit_recipient: bool = True
+    starter_setup: StarterBinding | None = None
 
     @property
     def binding(self) -> str:
@@ -163,6 +166,7 @@ class Settings:
             "approval_provider",
             "workspace_title",
             "workflow_label",
+            "starter_setup",
         }
         _check(isinstance(doc, dict) and required <= doc.keys() <= required | optional)
         _check(isinstance(doc["organization"], str) and LOCAL_ID.fullmatch(doc["organization"]))
@@ -226,6 +230,9 @@ class Settings:
             doc.get("workflow_label", ""),
             path,
             explicit_recipient=explicit_recipient,
+            starter_setup=StarterBinding.parse(doc["starter_setup"])
+            if "starter_setup" in doc
+            else None,
         )
 
     def permission(self, actor: str, role: str, dataset: str | None = None) -> Json:
@@ -2151,6 +2158,26 @@ class Workbench:
             self.on_decision()
         self._home(cfg, actor, view, ctx["job"], old_hash)
 
+    def _starter_setup(self, actor: str) -> StarterSetup:
+        # LocalStarterAuthority pins the engagement in its own transaction.
+        return StarterSetup(lambda: self.settings(check_engagement=False), actor)
+
+    def _starter_view(
+        self, cfg: Settings, actor: str, view: str, preview: StarterPreview, old_hash: str
+    ) -> None:
+        token = self.journal.context(
+            actor,
+            cfg.channel,
+            view,
+            "starter_saved" if preview.draft else "starter_preview",
+            revision=preview.revision,
+        )
+
+        def authorize() -> None:
+            _check(self._starter_setup(actor).preview() == preview)
+
+        self._show(view, self.views.starter_charter(token, preview), old_hash, authorize=authorize)
+
     def _action(
         self,
         cfg: Settings,
@@ -2166,6 +2193,10 @@ class Workbench:
             _check(action in {"ot_workflow_starter", "ot_workflow_historical"})
             current = self.settings()
             _check(action == "ot_workflow_" + value and self._can_add_workflow(current, actor))
+            if value == "starter" and current.starter_setup is not None:
+                starter = self._starter_setup(actor).preview()
+                self._starter_view(current, actor, view, starter, old_hash)
+                return
             token = self.journal.context(actor, cfg.channel, view, "workflow_instructions")
             self._show(
                 view,
@@ -2175,6 +2206,14 @@ class Workbench:
                 if cfg.explicit_recipient or current.explicit_recipient
                 else token,
             )
+        elif ctx["kind"] in {"starter_preview", "starter_saved"}:
+            _check(
+                ctx["kind"] == "starter_preview"
+                and action == "ot_starter_save"
+                and value == ctx["revision"]
+            )
+            saved = self._starter_setup(actor).save(value, self.journal.opaque("save", ctx["id"]))
+            self._starter_view(self.settings(), actor, view, saved, old_hash)
         elif ctx["kind"] == "workflow_instructions":
             raise Refused("This setup screen has no actions.")
         elif action == "ot_help":
@@ -2689,8 +2728,10 @@ class Workbench:
     def _can_add_workflow(self, cfg: Settings, actor: str) -> bool:
         entry = cfg.permission(actor, "inspect")
         return (
-            actor == cfg.reviewer
-            and "review" in entry["roles"]
+            (
+                (actor == cfg.reviewer and "review" in entry["roles"])
+                or (cfg.starter_setup is not None and cfg.starter_setup.slack_owner == actor)
+            )
             and not cfg.workflow_label
             and not entry["datasets"]
         )
@@ -2961,6 +3002,23 @@ class Workbench:
                     _check(body["type"] == "block_actions" and len(body["actions"]) == 1)
                     action = body["actions"][0]
                     _check(action["action_id"] in ACTIONS)
+                    if action["action_id"] == "ot_starter_save":
+                        _check(
+                            obj.get("callback_id") == "ot_starter_preview"
+                            and not obj.get("state", {}).get("values")
+                            and not (
+                                set(action)
+                                - {
+                                    "action_id",
+                                    "value",
+                                    "block_id",
+                                    "text",
+                                    "type",
+                                    "action_ts",
+                                    "style",
+                                }
+                            )
+                        )
                     self._action(
                         cfg,
                         actor,

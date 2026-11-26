@@ -51,3 +51,36 @@ python -I -S -B opentour-slack.pyz source --store /private/training.sqlite3 --or
 ```
 
 This records a durable local hold against that source grant. Restoring an older export, grant or intake cannot re-enable its supported readers. Full engagement withdrawal also blocks access. The original exports, exact frozen file, grant, confirmation, derived files and backups are part of the normal customer custody inventory. Follow the retention agreement for copies, exports and backups. Custody controls apply to supported tools on this machine. Previously disclosed or customer-copied files require custodian follow-up.
+
+### Save a policy-only starter in Slack
+
+The workflow owner reviews their charter in **Add workflow → We’re starting from scratch** and selects **Save starter draft**. Reopening the same private route displays the workflow, intake run, draft and settings revision. The worker can resume an interrupted save against the same admission.
+
+An installation operator maps the authenticated Slack owner to the existing registered mandate owner in the private Slack settings. Supply a current signed OPE-430 starter selection and the matching charter in the private worker directory. The two filenames must be local JSON basenames. The following values are generated examples.
+
+```json
+{
+  "starter_setup": {
+    "slack_owner": "UFOUNDER",
+    "owner_ref": "registered-founder",
+    "selection_file": "starter-selection.json",
+    "charter_file": "starter-charter.json"
+  }
+}
+```
+
+The charter is part of the approved scope. Set the signed starter grant’s `setup_policy_revision` to the SHA-256 of the charter as encoded by `opentour_cell.pilot.operating_point.canonical`. The same grant names the permitted policy, its source revision, the custodian, owner and creation reference. Prepare both files under the worker’s private-file permissions.
+
+```json
+{
+  "schema_version": "opentour.pilot.starter-charter.v1",
+  "intended_decision": "Select the invoice review queue",
+  "local_purpose": "Draft a local evaluation workflow",
+  "verification_plan": "Have the reviewer independently check the next eligible invoice",
+  "responsible_person": "verification-coordinator",
+  "next_check": "2027-01-15",
+  "verifier": null
+}
+```
+
+Use the agreed next-check date and name the verifier when known. A policy-only save activates the local drafting scope. Live-source connection and training require separately authorized workflows.

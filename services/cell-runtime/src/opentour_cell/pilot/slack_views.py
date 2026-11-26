@@ -11,6 +11,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from opentour_cell.pilot.readout import INPUT_VERSION, MAX_CASES, OUTPUT_VERSION, evaluate_manifest
+from opentour_cell.pilot.starter_setup import StarterPreview
 from opentour_cell.pilot.status_questions import StatusAnswer
 from opentour_cell.pilot.text_classifier import (
     CPU_LIMIT_SECONDS,
@@ -1408,6 +1409,44 @@ def workflow_chooser(context: str) -> Block:
         context,
         [_section("Choose how to set up this workflow privately."), choices],
     )
+
+
+def starter_charter(context: str, preview: StarterPreview) -> Block:
+    charter = preview.charter
+    blocks = [
+        _section(f"Policy {_ref(preview.policy)} · revision {_ref(preview.policy_revision)}"),
+        _section(
+            f"Workflow owner {_display(preview.owner)} · "
+            f"data custodian {_display(preview.custodian)}"
+        ),
+        _section("Intended decision · " + _display(charter.intended_decision, 160)),
+        _section("Local evaluation purpose · " + _display(charter.local_purpose, 160)),
+        _section("Future verification · " + _display(charter.verification_plan, 160)),
+        _section(
+            f"Responsible person {_display(charter.responsible_person, 160)} · "
+            f"next check {_ref(charter.next_check)} · verifier "
+            + (_display(charter.verifier, 160) if charter.verifier else "pending")
+        ),
+    ]
+    if preview.draft:
+        draft = preview.draft
+        blocks.insert(
+            0,
+            _section(
+                f"Saved draft {_ref(draft['draft_ref'])} · workflow {_ref(draft['workflow_ref'])}"
+            ),
+        )
+        blocks.append(
+            _section(
+                f"Admission {_ref(draft['run_ref'])} · settings {_ref(draft['settings_revision'])}"
+            )
+        )
+        return _modal("Saved starter draft", "ot_starter_saved", context, blocks)
+    blocks += [
+        _section("Save this policy-only mandate for local workflow drafting."),
+        _actions(_button("Save starter draft", "ot_starter_save", preview.revision)),
+    ]
+    return _modal("Review starter charter", "ot_starter_preview", context, blocks)
 
 
 def workflow_instructions(context: str, route: str) -> Block:
