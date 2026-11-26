@@ -16,11 +16,9 @@ from test_reviewer_workflow import buttons, restart, screen, text
 from test_slack_adapter import ACTOR, OTHER, Harness
 
 
-@pytest.fixture
-def founder(tmp_path: Path) -> Harness:
-    h = Harness(tmp_path)
+def configure_starter(h: Harness, **grant_overrides: str) -> None:
     directory = h.path.parent
-    h.config.pop("recipient")
+    h.config.pop("recipient", None)
     h.config["reviewer"] = OTHER
     h.config["users"][ACTOR].update(roles=["inspect"], datasets=[], aggregate=False, preview=False)
     h.config["starter_setup"] = {
@@ -53,8 +51,14 @@ def founder(tmp_path: Path) -> Harness:
     _write_private(directory / "charter.json", charter)
     _write_private(
         directory / "starter-intake-grant-policy-scope.json",
-        _sealed_starter(select, setup_policy_revision=digest(charter)),
+        _sealed_starter(select, setup_policy_revision=digest(charter), **grant_overrides),
     )
+
+
+@pytest.fixture
+def founder(tmp_path: Path) -> Harness:
+    h = Harness(tmp_path)
+    configure_starter(h)
     return h
 
 

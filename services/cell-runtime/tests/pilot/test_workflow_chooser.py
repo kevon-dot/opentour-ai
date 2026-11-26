@@ -20,14 +20,14 @@ Json = dict[str, Any]
 class Founder(Harness):
     """The two founder settings fixtures from the customer-entry probe on PR #87."""
 
-    def __init__(self, root: Path, local_recipient: bool) -> None:
+    def __init__(self, root: Path, local_recipient: bool, *, organization: str = "founder") -> None:
         root.mkdir(mode=0o700)
         (root / "invoice-policy.md").write_text(
             "Carrier charges on invoices with a purchase order are freight."
         )
         self.path = root / "settings.json"
         self.config = {
-            "organization": "founder",
+            "organization": organization,
             "team": TEAM,
             "app": APP,
             "channel": CHANNEL,
@@ -46,7 +46,7 @@ class Founder(Harness):
         if local_recipient:
             self.config["recipient"] = ACTOR
         self.save()
-        self.store = LocalTrainingStore(root / "training.sqlite3", "founder")
+        self.store = LocalTrainingStore(root / "training.sqlite3", organization)
         self.slack = Slack()
         self.work = MagicMock()
         self.app = slack_adapter.Workbench(
