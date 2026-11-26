@@ -64,6 +64,10 @@ ASSETS = {
         f"{CELL}/integrations/zapier/slack-approval-signer.cjs"
     ),
     "pilot-workplace-context.md": f"{CELL}/docs/pilot-workplace-context.md",
+    **{
+        f"integrations/zapier/{name}": f"{CELL}/integrations/zapier/{name}"
+        for name in ("approval-recipe-v1.json", "import-approval-recipe.cjs")
+    },
     "pilot-zapier-approval.md": f"{CELL}/docs/pilot-zapier-approval.md",
     "pilot-autonomous-cycle.md": f"{CELL}/docs/pilot-autonomous-cycle.md",
     "pilot-managed-repairs.md": f"{CELL}/docs/pilot-managed-repairs.md",

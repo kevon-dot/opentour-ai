@@ -1,0 +1,32 @@
+{
+  "revision": "opentour.slack-approval-recipe.v1",
+  "worker_policy": "opentour.pilot.zapier-slack-policy.v2",
+  "trigger": "Webhooks by Zapier / Catch Hook",
+  "verify": "verify_approval_reference",
+  "provider": "Slack / Request Approval",
+  "fields": {
+    "Approval request message": "Evaluation handoff review {review}. Expires {expiry}.",
+    "Channel": "{channel}",
+    "Approvers": "{reviewer}",
+    "Bot name": "OpenTour",
+    "Bot icon": ":clipboard:",
+    "Approve button label": "Approve handoff",
+    "Add a Decline button": "Yes",
+    "Decline button label": "Request changes",
+    "Add a Details button": "Yes",
+    "Details button URL": "{details_origin}/reviews/{review}",
+    "Details button label": "Details",
+    "Require confirmation": "Yes",
+    "Approve confirmation title": "Approve handoff?",
+    "Approval confirmation message": "Confirm the evaluation handoff you inspected privately.",
+    "Approve confirm button label": "Approve handoff",
+    "Approve cancel button label": "Go back",
+    "Decline confirmation title": "Request changes?",
+    "Decline confirmation message": "Keep this review on hold.",
+    "Decline confirm button label": "Request changes",
+    "Decline cancel button label": "Go back"
+  },
+  "signer": "sign_approval_reference",
+  "status_source": "Slack / Request Approval / Status",
+  "private_return": "signed_decision"
+}

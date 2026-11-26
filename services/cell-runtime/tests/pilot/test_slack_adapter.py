@@ -43,11 +43,11 @@ class Slack:
 
     def conversations_info(self, *, channel: str) -> Json:
         self.calls.append("info")
-        assert channel == CHANNEL
+        assert channel == self.channel["id"]
         return {"channel": self.channel}
 
     def conversations_members(self, *, channel: str, limit: int, cursor: str) -> Json:
-        assert channel == CHANNEL and limit == 200 and not cursor
+        assert channel == self.channel["id"] and limit == 200 and not cursor
         return {"members": self.members}
 
     def views_open(self, *, trigger_id: str, view: Json) -> Json:
@@ -134,8 +134,8 @@ class Harness:
             "slash_commands",
             {
                 "api_app_id": APP,
-                "team_id": TEAM,
-                "channel_id": CHANNEL,
+                "team_id": self.config["team"],
+                "channel_id": self.config["channel"],
                 "user_id": actor,
                 "trigger_id": "test-trigger",
                 "command": "/opentour",
@@ -148,7 +148,7 @@ class Harness:
     def payload(self, view: str, actor: str = ACTOR) -> Json:
         return {
             "api_app_id": APP,
-            "team": {"id": TEAM},
+            "team": {"id": self.config["team"]},
             "user": {"id": actor},
             "view": {"id": view, **deepcopy(self.slack.screens[view])},
         }
