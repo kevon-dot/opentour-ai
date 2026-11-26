@@ -268,9 +268,12 @@ def _launcher(reader: Json) -> Iterator[BinaryIO]:
 
 
 class _Stdio:
-    def __init__(self, child: subprocess.Popen[bytes], deadline: float):
+    def __init__(
+        self, child: subprocess.Popen[bytes], deadline: float, check_lease: Callable[[], None]
+    ):
         self.child = child
         self.deadline = deadline
+        self.check_lease = check_lease
         self.pending = bytearray()
         self.number = 0
         assert child.stdin is not None
@@ -285,6 +288,7 @@ class _Stdio:
                 remaining > 0 and select.select([], [self.child.stdin], [], max(0, remaining))[1],
                 "workplace_reader_timeout",
             )
+            self.check_lease()
             try:
                 sent = os.write(self.child.stdin.fileno(), payload)
             except BlockingIOError:
@@ -361,7 +365,7 @@ def _session(cfg: Json, root: Path, check_lease: Callable[[], None]) -> Iterator
     ):
         try:
             check_lease()
-            client = _Stdio(child, time.monotonic() + SESSION_SECONDS)
+            client = _Stdio(child, time.monotonic() + SESSION_SECONDS, check_lease)
             hello = client.call(
                 "initialize",
                 {
