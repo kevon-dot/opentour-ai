@@ -100,6 +100,22 @@ def _hash(value: object) -> str:
     return hashlib.sha256(_encode(value).encode()).hexdigest()
 
 
+def canonical_intent(
+    workflow_ref: str, mode: str, scope: AuthorizedSource, revisions: tuple[str, ...]
+) -> str:
+    """Pure identity calculation; caller separately establishes current authority."""
+    return _hash(
+        (
+            workflow_ref,
+            mode,
+            scope.purpose,
+            scope.engagement_epoch,
+            scope.binding_id or scope.resource_id,
+            revisions,
+        )
+    )
+
+
 def _require(check: object, code: str = "intake_unavailable") -> None:
     if not check:
         raise IntakeError(code)
@@ -347,17 +363,7 @@ class DurableIntake:
 
     @staticmethod
     def _intent(workflow_ref: str, resolved: _Resolved) -> str:
-        scope = resolved.resource
-        return _hash(
-            (
-                workflow_ref,
-                resolved.mode,
-                scope.purpose,
-                scope.engagement_epoch,
-                scope.binding_id or scope.resource_id,
-                resolved.revisions,
-            )
-        )
+        return canonical_intent(workflow_ref, resolved.mode, resolved.resource, resolved.revisions)
 
     @staticmethod
     def _live_resource_pin(
