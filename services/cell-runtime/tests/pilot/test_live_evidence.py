@@ -276,9 +276,14 @@ def test_verifier_grant_is_not_a_saved_binding(tmp_path: Path):
     store = LiveEvidence(path, authority)
     store.initialize()
     store.save_binding(ACTOR, "workflow-a", "decisions")
-    assert store.snapshot(ACTOR, "workflow-a").verifier_bound is False
+    original = store.snapshot(ACTOR, "workflow-a")
+    assert original.verifier_bound is False
     store.save_binding(ACTOR, "workflow-a", "truth")
-    assert store.snapshot(ACTOR, "workflow-a").verifier_bound is True
+    current = store.snapshot(ACTOR, "workflow-a")
+    assert current.verifier_bound is True
+    assert current.evidence_revision != original.evidence_revision
+    authority.scope = replace(authority.scope, grants=tuple(reversed(authority.scope.grants)))
+    assert store.snapshot(ACTOR, "workflow-a").evidence_revision == current.evidence_revision
 
 
 def test_revoked_truth_cannot_continue_to_credit_current_verification(tmp_path: Path):

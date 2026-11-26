@@ -570,6 +570,7 @@ class LiveEvidence:
             ),
         ).fetchall()
         bound_grants = []
+        active_references = []
         matching_scope = False
         for binding in bindings:
             body, _ = self._binding(db, binding[0])
@@ -578,6 +579,7 @@ class LiveEvidence:
             matching_scope = True
             if any(asdict(g) == body["grant"] for g in scope.grants):
                 bound_grants.append(FeedGrant(**body["grant"]))
+                active_references.append(binding[0])
         _require(not bindings or matching_scope)
         bound = any(g.kind == "independent_outcome" for g in bound_grants)
         actors = sorted({g.verifier for g in bound_grants if g.verifier})
@@ -617,8 +619,10 @@ class LiveEvidence:
                     scope.tenant,
                     scope.workflow_ref,
                     scope.engagement_epoch,
+                    scope.dataset_ref,
                     scope.dataset_revision,
-                    [asdict(g) for g in scope.grants],
+                    sorted((asdict(g) for g in scope.grants), key=_canonical),
+                    sorted(active_references),
                     [r["payload"] for r in rows],
                     quarantined,
                 ]
