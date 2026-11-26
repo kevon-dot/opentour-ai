@@ -97,6 +97,7 @@ class Settings:
     workspace_title: str = "OpenTour pilot workspace"
     workflow_label: str = ""
     config_path: Path | None = None
+    explicit_recipient: bool = True
 
     @property
     def binding(self) -> str:
@@ -131,9 +132,9 @@ class Settings:
             "directory",
             "users",
             "reviewer",
-            "recipient",
         }
         optional = {
+            "recipient",
             "channel_aggregates",
             "zapier",
             "zapier_disposition",
@@ -147,10 +148,10 @@ class Settings:
         _check(isinstance(doc["organization"], str) and LOCAL_ID.fullmatch(doc["organization"]))
         _check(_slack_id(doc["team"], "T") and _slack_id(doc["app"], "A"))
         _check(_slack_id(doc["channel"], "CG") and isinstance(doc["users"], dict))
-        _check(
-            _slack_id(doc["reviewer"], "UW")
-            and (_slack_id(doc["recipient"], "UWG") or doc["recipient"] == doc["channel"])
-        )
+        _check(_slack_id(doc["reviewer"], "UW"))
+        explicit_recipient = "recipient" in doc
+        recipient = doc.get("recipient", doc["reviewer"])
+        _check(_slack_id(recipient, "UW") or recipient == doc["channel"])
         directory = Path(doc["directory"])
         _check(directory.is_absolute() and directory.is_dir() and not directory.is_symlink())
         if os.name == "posix":
@@ -192,18 +193,19 @@ class Settings:
             doc["app"],
             doc["channel"],
             doc["reviewer"],
-            doc["recipient"],
+            recipient,
             directory,
             doc["users"],
             doc.get("channel_aggregates", False),
-            doc.get("zapier", False),
-            doc.get("zapier_disposition", False),
+            explicit_recipient and doc.get("zapier", False),
+            explicit_recipient and doc.get("zapier_disposition", False),
             destination,
-            doc.get("approval_requests", False),
+            explicit_recipient and doc.get("approval_requests", False),
             doc.get("approval_provider", "slack"),
             doc.get("workspace_title", "OpenTour pilot workspace"),
             doc.get("workflow_label", ""),
             path,
+            explicit_recipient=explicit_recipient,
         )
 
     def permission(self, actor: str, role: str, dataset: str | None = None) -> Json:
@@ -1246,9 +1248,10 @@ class Workbench:
         return self._target(dataset, status["dataset_revision"], report, audit)
 
     def _policy(self, cfg: Settings, actor: str) -> str:
-        return self.journal.opaque(
-            "policy", [cfg.team, cfg.channel, cfg.roles.get(actor), cfg.reviewer, cfg.recipient]
-        )
+        scope = [cfg.team, cfg.channel, cfg.roles.get(actor), cfg.reviewer, cfg.recipient]
+        if not cfg.explicit_recipient:
+            scope.append("local-evaluation-only")
+        return self.journal.opaque("policy", scope)
 
     def _catalog(self, cfg: Settings, actor: str, search: str = "") -> list[Json]:
         entry = cfg.permission(actor, "inspect")
@@ -1711,7 +1714,9 @@ class Workbench:
             dataset_revision=target.dataset_revision,
             audit=view_audit,
             questions=True,
-            release_allowed=named_reviewer and actor == target.audit.get("release_reviewer"),
+            release_allowed=current.explicit_recipient
+            and named_reviewer
+            and actor == target.audit.get("release_reviewer"),
             charts_allowed=charts,
             benchmark_allowed=named_reviewer,
             workflow=cfg.workflow_label,
@@ -1761,7 +1766,8 @@ class Workbench:
             )
 
         if (
-            actor == target.audit.get("release_reviewer")
+            current.explicit_recipient
+            and actor == target.audit.get("release_reviewer")
             and "review" in entry["roles"]
             and (target.audit.get("release_provider") == "zapier_slack")
         ):
@@ -1873,6 +1879,7 @@ class Workbench:
             current.binding == cfg.binding
             and current.reviewer == actor
             and actor == target.audit.get("release_reviewer")
+            and current.explicit_recipient
             and current.approval_provider == target.audit.get("release_provider") == "slack"
             and entry["aggregate"]
             and self.journal.inspected(actor, target.revision, self._policy(current, actor))
@@ -2309,7 +2316,12 @@ class Workbench:
 
     def _pending_release(self, cfg: Settings, actor: str) -> Target | None:
         entry = cfg.permission(actor, "inspect")
-        if actor != cfg.reviewer or "review" not in entry["roles"] or not entry["aggregate"]:
+        if (
+            not cfg.explicit_recipient
+            or actor != cfg.reviewer
+            or "review" not in entry["roles"]
+            or not entry["aggregate"]
+        ):
             return None
         for _, source in self._result_sources(cfg, actor):
             if not source.startswith("managed:"):

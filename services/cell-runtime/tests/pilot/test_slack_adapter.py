@@ -300,6 +300,115 @@ def test_config_requires_operator_owned_regular_file(tmp_path: Path) -> None:
     assert slack_adapter.main([str(h.path), "--check-config"]) == 1
 
 
+@pytest.mark.parametrize("explicit_self", [False, True], ids=["no-recipient", "local-reviewer"])
+def test_settings_load_without_external_recipient(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, explicit_self: bool
+) -> None:
+    h = Harness(tmp_path)
+    if explicit_self:
+        h.config["recipient"] = ACTOR
+        h.config.pop("zapier_destination_sha256")
+    else:
+        # Existing transport options alone cannot promote a synthesized audience to a recipient.
+        h.config.pop("recipient")
+        h.config["approval_requests"] = True
+    h.save()
+    cfg = slack_adapter.Settings.load(h.path)
+    assert cfg.recipient == ACTOR
+    assert cfg.explicit_recipient is explicit_self
+    if not explicit_self:
+        assert not cfg.approval_requests
+    assert slack_adapter.main([str(h.path), "--check-config"]) == 0
+
+    data = generated_evaluation_dataset("pilot")
+    dataset = data["dataset_id"]
+    h.store.register(data)
+    h.config["users"][ACTOR]["datasets"] = [dataset]
+    h.save()
+    view = h.launch()
+    h.action(view, "ot_browse", "home")
+    h.action(view, "ot_dataset_open", dataset)
+    revision = next(
+        button["value"]
+        for row in h.slack.screens[view]["blocks"]
+        for button in row.get("elements", [])
+        if button.get("action_id") == "ot_evidence"
+    )
+    h.action(view, "ot_evidence", revision)
+    h.action(view, "ot_home", "home")
+    h.action(view, "ot_approve", revision)
+
+    recorded = h.app.journal.decision(revision)
+    assert recorded["audience"] == ACTOR
+    assert recorded["exportable"] == 0 and recorded["delivery"] == "local_only"
+    attempted = []
+
+    def unexpected_connection(*args: object, **kwargs: object) -> None:
+        attempted.append((args, kwargs))
+        pytest.fail("evaluation-only settings admitted an outbound request")
+
+    monkeypatch.setattr(http.client, "HTTPSConnection", unexpected_connection)
+    assert h.flush() == 0
+    assert not attempted and not h.slack.post
+    h.app.pool.shutdown()
+
+
+@pytest.mark.parametrize(
+    "invalid_fields",
+    [{"recipient": "CUNRELATED"}, {"recipient": "GUNRELATED"}, {"unknown": True}],
+)
+def test_settings_refuse_unrelated_audience_and_unknown_fields(
+    tmp_path: Path, invalid_fields: Json
+) -> None:
+    h = Harness(tmp_path)
+    h.config.update(invalid_fields)
+    h.save()
+    with pytest.raises(slack_adapter.Refused):
+        slack_adapter.Settings.load(h.path)
+    h.app.pool.shutdown()
+
+
+@pytest.mark.parametrize(
+    ("channel", "recipient"),
+    [("GOWNERPRIVATE", "GOWNERPRIVATE"), (CHANNEL, "WENTERPRISEUSER")],
+    ids=["bound-private-channel", "enterprise-user"],
+)
+def test_settings_preserve_valid_explicit_recipients(
+    tmp_path: Path, channel: str, recipient: str
+) -> None:
+    h = Harness(tmp_path)
+    h.config.update(channel=channel, recipient=recipient)
+    h.save()
+    cfg = slack_adapter.Settings.load(h.path)
+    assert cfg.channel == channel and cfg.recipient == recipient
+    assert cfg.explicit_recipient and cfg.zapier
+    assert cfg.zapier_destination_sha256 == slack_adapter.hook_fingerprint(HOOK)
+    h.app.pool.shutdown()
+
+
+def test_new_explicit_recipient_requires_fresh_inspection(tmp_path: Path) -> None:
+    h = Harness(tmp_path)
+    h.config.pop("recipient")
+    h.save()
+    view, job, revision = h.completed()
+    h.action(view, "ot_evidence", revision)
+
+    # An identical resolved recipient does not make a local-only inspection an export grant.
+    h.config["recipient"] = ACTOR
+    h.save()
+    h.action(view, "ot_home", "home")
+    h.action(view, "ot_approve", revision)
+    assert not h.app.journal.decision(revision)
+
+    view = h.launch(prompt=f"status {job}")
+    h.action(view, "ot_evidence", revision)
+    h.action(view, "ot_home", "home")
+    h.action(view, "ot_approve", revision)
+    recorded = h.app.journal.decision(revision)
+    assert recorded["delivery"] == "pending" and recorded["exportable"] == 1
+    h.app.pool.shutdown()
+
+
 def test_only_originating_trainer_confirms_and_prompt_never_approves(tmp_path: Path) -> None:
     h = Harness(tmp_path)
     view, job = h.propose()
@@ -460,12 +569,24 @@ def test_evaluation_only_native_evidence_has_no_fit_or_weights(tmp_path: Path) -
 
 @pytest.mark.parametrize(
     "withdraw",
-    ["dataset", "engagement", "recipient", "reviewer", "expiry", "destination", "disable"],
+    [
+        "dataset",
+        "engagement",
+        "recipient",
+        "implicit_recipient",
+        "reviewer",
+        "expiry",
+        "destination",
+        "disable",
+    ],
 )
 def test_queued_decision_checked_again_before_each_export(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, withdraw: str
 ) -> None:
     h = Harness(tmp_path)
+    if withdraw == "implicit_recipient":
+        h.config["recipient"] = ACTOR
+        h.save()
     _, receipt = h.approve()
     hook = HOOK
     if withdraw == "dataset":
@@ -474,6 +595,8 @@ def test_queued_decision_checked_again_before_each_export(
         h.store.withdraw()
     elif withdraw == "recipient":
         h.config["recipient"] = "UNEW"
+    elif withdraw == "implicit_recipient":
+        h.config.pop("recipient")
     elif withdraw == "reviewer":
         h.config["reviewer"] = OTHER
     elif withdraw == "expiry":

@@ -91,9 +91,10 @@ class Case:
         )
 
 
-@pytest.fixture
-def case(tmp_path: Path) -> Case:
-    h, plan, run, outcome = setup_workflow(tmp_path, "rule", release=True, provider="zapier_slack")
+def make_case(tmp_path: Path, *, audience: str | None = None) -> Case:
+    h, plan, run, outcome = setup_workflow(
+        tmp_path, "rule", release=True, provider="zapier_slack", audience=audience
+    )
     assert outcome == "simple_repair"
     h.config["approval_provider"] = "zapier_slack"
     h.save()
@@ -141,6 +142,11 @@ def case(tmp_path: Path) -> Case:
         view,
         revision,
     )
+
+
+@pytest.fixture
+def case(tmp_path: Path) -> Case:
+    return make_case(tmp_path)
 
 
 def deliver(case: Case, request: Json) -> list[Json]:
@@ -234,6 +240,72 @@ def test_real_evidence_and_signing_action_allow_only_exact_candidate(case: Case)
     assert case.bridge.consume(envelope) == receipt
     with pytest.raises(ValueError, match="conflicting_provider_event"):
         case.bridge.consume(case.signed(request, "Declined"))
+
+
+def test_implicit_self_recipient_fences_queued_zapier_request_and_signed_release(
+    tmp_path: Path,
+) -> None:
+    case = make_case(tmp_path, audience=ACTOR)
+    h = case.h
+    request = case.inspect()
+    assert request["reviewer"] == request["audience"] == ACTOR
+    run = case.binding["run_id"]
+    work = case.directory / "managed-outputs" / run
+    handoff_args = (case.directory, h.store.organization, case.plan, run)
+    request_file = "zapier-approval-" + request["request_id"]
+    admitted = case.directory / (request_file + "-admitted.json")
+    observed: list[Json] = []
+
+    def receive(url: str, payload: Json) -> int:
+        assert url == HOOK
+        observed.append(payload)
+        return 202
+
+    del h.config["recipient"]
+    h.save()
+    settings = h.app.settings()
+    assert settings.recipient == settings.reviewer == ACTOR and not settings.explicit_recipient
+    assert case.bridge.flush_ready(HOOK, receive) == {"accepted": 0, "held": 1}
+    assert observed == [] and not admitted.exists() and not h.slack.post
+
+    h.config["recipient"] = ACTOR
+    h.save()
+    assert case.inspect() == request
+    assert case.bridge.flush_ready(HOOK, receive) == {"accepted": 1, "held": 0}
+    assert observed == [request] and admitted.exists()
+    envelope = case.signed(request)
+    assert envelope["event"]["actor_id"] == ACTOR
+
+    del h.config["recipient"]
+    h.save()
+    with pytest.raises(ValueError, match="release_review_permission_changed"):
+        case.bridge.consume(envelope)
+    assert not (case.directory / (request_file + "-event.json")).exists()
+    assert not (work / "release-decision.json").exists()
+    with pytest.raises((OSError, ValueError)):
+        repair_workflow.prepare_handoff(*handoff_args)
+    assert not (work / "handoff").exists() and observed == [request]
+
+    h.config["recipient"] = ACTOR
+    h.save()
+    assert case.inspect() == request
+    assert case.bridge.consume(envelope)["state"] == "approved"
+    assert case.authorize()["provider"] == "zapier_slack"
+    handoff = repair_workflow.prepare_handoff(*handoff_args)
+    assert handoff["audience"] == ACTOR and handoff["disposition"] == "rule"
+    staged = Path(handoff["spec_path"]).read_bytes()
+    decision = (work / "release-decision.json").read_bytes()
+
+    del h.config["recipient"]
+    h.save()
+    with pytest.raises(ValueError, match="release_review_permission_changed"):
+        case.authorize()
+    with pytest.raises(ValueError, match="release_review_permission_changed"):
+        repair_workflow.prepare_handoff(*handoff_args)
+    assert Path(handoff["spec_path"]).read_bytes() == staged
+    assert (work / "release-decision.json").read_bytes() == decision
+    assert observed == [request] and not h.slack.post
+    h.app.pool.shutdown()
 
 
 def test_stock_decline_means_request_changes_and_fallback_remains(case: Case) -> None:
