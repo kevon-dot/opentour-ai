@@ -127,6 +127,7 @@ ruff check services/cell-runtime/src/opentour_cell/pilot/scheduled_intake.py \
 ```
 
 The existing Python unit selector discovers the new test file. No workflow or
-global wrapper is changed. Exact-commit independent review and actual CI receipts
-are required before publishing this partial draft. Full native OPE-439 acceptance
+global wrapper is changed. Exact-commit independent content review is required
+before publishing this partial draft; actual CI receipts follow on that draft,
+and protected integration is required before acceptance. Full native OPE-439 acceptance
 requires the open producer, hosted, installed and packaged joins listed above.
