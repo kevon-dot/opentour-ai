@@ -399,19 +399,24 @@ class LocalStarterAuthority(_LocalAuthority):
         )
 
 
+def open_intake(selection: Path) -> tuple[IntakePrincipal, DurableIntake]:
+    authority: LocalHistoricalAuthority | LocalStarterAuthority
+    if _selected_json(selection).get("schema_version") == STARTER_SELECTION_VERSION:
+        authority = LocalStarterAuthority(selection)
+    else:
+        authority = LocalHistoricalAuthority(selection)
+    with authority.guard(authority.principal):
+        admission = DurableIntake(selection.parent, authority)
+    return authority.principal, admission
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("selection", type=Path)
     args = parser.parse_args(argv)
     try:
-        authority: LocalHistoricalAuthority | LocalStarterAuthority
-        if _selected_json(args.selection).get("schema_version") == STARTER_SELECTION_VERSION:
-            authority = LocalStarterAuthority(args.selection)
-        else:
-            authority = LocalHistoricalAuthority(args.selection)
-        with authority.guard(authority.principal):
-            admission = DurableIntake(args.selection.parent, authority)
-        return serve_intake(authority.principal, admission, sys.stdin.buffer, sys.stdout.buffer)
+        principal, admission = open_intake(args.selection)
+        return serve_intake(principal, admission, sys.stdin.buffer, sys.stdout.buffer)
     except VerifiedIntakeExpired as error:
         print(str(error), file=sys.stderr)
         return 2

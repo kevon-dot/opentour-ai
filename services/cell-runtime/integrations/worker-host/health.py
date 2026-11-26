@@ -1,4 +1,4 @@
-"""Customer-operated TLS listener for a single authenticated health resource."""
+"""Customer-operated TLS listener for an isolated health or intake connection."""
 
 import argparse
 import asyncio
@@ -30,9 +30,55 @@ def credential(path):
         return value
 
 
-def response(request, config, token_path, body):
+INTAKE_ROUTES = {
+    b"POST /v1/discover_sources HTTP/1.1": "discover_sources",
+    b"POST /v1/submit_intake HTTP/1.1": "submit_intake",
+    b"POST /v1/get_run HTTP/1.1": "get_run",
+}
+MAX_ARGUMENT_BYTES = 4096
+MAX_RESPONSE_BYTES = 32768
+
+
+def authenticated(headers, config, token_path):
+    origin = config["origin"].encode("ascii")
+    if (
+        headers.get(b"host") != origin.removeprefix(b"https://")
+        or headers.get(b"origin") != origin
+        or headers.get(b"x-opentour-audience") != config["audience"].encode("ascii")
+    ):
+        return False
+    try:
+        token = credential(token_path)
+    except (OSError, ValueError):
+        return False
+    return hmac.compare_digest(headers.get(b"authorization", b""), b"Bearer " + token)
+
+
+def intake_connection(selection, config):
+    # The immutable installed zip contains the same resolver and dispatch as mcp-intake.
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "opentour-slack.pyz"))
+    from opentour_cell.pilot.intake_local import open_intake
+    from opentour_cell.pilot.intake_mcp import intake_dispatch
+
+    principal, admission = open_intake(selection)
+    if (principal.tenant, principal.actor) != (config["intake_tenant"], config["intake_actor"]):
+        raise ValueError("private selection mismatch")
+    return intake_dispatch(principal, admission)
+
+
+def unique_object(pairs):
+    obj = dict(pairs)
+    if len(obj) != len(pairs):
+        raise ValueError("duplicate argument")
+    return obj
+
+
+async def response(reader, config, token_path, body, call):
+    request = await reader.readuntil(b"\r\n\r\n")
     lines = request[:-4].split(b"\r\n")
-    if lines[0] != b"GET /v1/health HTTP/1.1":
+    health = call is None and lines[0] == b"GET /v1/health HTTP/1.1"
+    operation = INTAKE_ROUTES.get(lines[0]) if call is not None else None
+    if not health and operation is None:
         return b"404 Not Found", b""
     headers = {}
     for line in lines[1:]:
@@ -41,22 +87,49 @@ def response(request, config, token_path, body):
         if not sep or not re.fullmatch(rb"[a-z0-9-]+", name) or name in headers:
             return b"400 Bad Request", b""
         headers[name] = value.strip(b" \t")
-    if b"transfer-encoding" in headers or headers.get(b"content-length", b"0") != b"0":
+    if b"transfer-encoding" in headers or b"content-encoding" in headers:
         return b"400 Bad Request", b""
-    origin = config["origin"].encode("ascii")
-    if (
-        headers.get(b"host") != origin.removeprefix(b"https://")
-        or headers.get(b"origin") != origin
-        or headers.get(b"x-opentour-audience") != config["audience"].encode("ascii")
-    ):
+    if not authenticated(headers, config, token_path):
         return b"403 Forbidden", b""
+    if health:
+        if headers.get(b"content-length", b"0") != b"0":
+            return b"400 Bad Request", b""
+        return b"200 OK", body
+    if headers.get(b"content-type", b"").lower() != b"application/json":
+        return b"415 Unsupported Media Type", b""
+    length = headers.get(b"content-length", b"")
+    if not re.fullmatch(rb"[1-9][0-9]*", length):
+        return b"400 Bad Request", b""
+    if len(length) > 4 or int(length) > MAX_ARGUMENT_BYTES:
+        return b"413 Content Too Large", b""
     try:
-        token = credential(token_path)
-    except (OSError, ValueError):
+        arguments = json.loads(
+            (await reader.readexactly(int(length))).decode("utf-8"), object_pairs_hook=unique_object
+        )
+        if not isinstance(arguments, dict) or any(
+            type(v) not in (str, int) for v in arguments.values()
+        ):
+            raise ValueError("expected flat argument object")
+    except (ValueError, RecursionError):
+        return b"400 Bad Request", b""
+    # A credential can rotate while the client sends its body.
+    if not authenticated(headers, config, token_path):
         return b"403 Forbidden", b""
-    if not hmac.compare_digest(headers.get(b"authorization", b""), b"Bearer " + token):
-        return b"403 Forbidden", b""
-    return b"200 OK", body
+    result = call(operation, arguments)
+    if result.get("isError"):
+        code = result["content"][0]["text"]
+        status = {
+            "invalid_arguments": b"400 Bad Request",
+            "idempotency_conflict": b"409 Conflict",
+            "intake_rate_limited": b"429 Too Many Requests",
+        }.get(code, b"403 Forbidden")
+        payload = {"error": code}
+    else:
+        status, payload = b"200 OK", result["structuredContent"]
+    encoded = json.dumps(payload, allow_nan=False, separators=(",", ":")).encode()
+    if len(encoded) > MAX_RESPONSE_BYTES:
+        return b"503 Service Unavailable", b""
+    return status, encoded
 
 
 async def bind_server(args):
@@ -77,6 +150,7 @@ async def bind_server(args):
         or config["source_commit"] != provenance["source_commit"]
     ):
         raise ValueError("invalid origin or package binding")
+    call = intake_connection(args.selection, config) if getattr(args, "selection", None) else None
     body = json.dumps(
         {
             "status": "ready",
@@ -94,8 +168,7 @@ async def bind_server(args):
     async def handle(reader, writer):
         try:
             async with asyncio.timeout(4):
-                data = await reader.readuntil(b"\r\n\r\n")
-                status, payload = response(data, config, args.token, body)
+                status, payload = await response(reader, config, args.token, body, call)
                 writer.write(
                     b"HTTP/1.1 " + status + b"\r\nCache-Control: no-store\r\nConnection: close"
                     b"\r\nContent-Type: application/json\r\nContent-Length: "
@@ -132,6 +205,11 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     for option in ("config", "cert", "key", "token"):
         parser.add_argument("--" + option, type=Path, required=True)
+    parser.add_argument(
+        "--selection",
+        type=Path,
+        help="private approved intake selection for a separate connector listener",
+    )
     parser.add_argument("--bind", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8443)
     asyncio.run(serve(parser.parse_args()))

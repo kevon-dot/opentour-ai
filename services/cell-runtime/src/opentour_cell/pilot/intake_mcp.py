@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 import sqlite3
 from collections import deque
+from collections.abc import Callable
 from dataclasses import dataclass
 from time import monotonic
 from typing import Any, BinaryIO, Literal, Protocol
@@ -307,12 +308,9 @@ def _status(status: RunStatus) -> dict[str, Any]:
     return value
 
 
-def serve_intake(
-    principal: IntakePrincipal,
-    admission: IntakeAdmission,
-    source: BinaryIO,
-    destination: BinaryIO,
-) -> int:
+def intake_dispatch(
+    principal: IntakePrincipal, admission: IntakeAdmission
+) -> Callable[[str, dict[str, Any]], dict[str, Any]]:
     """Serve the sole role selected by the trusted launcher before JSON-RPC negotiation."""
     if principal.role != "intake":
         raise IntakeError("intake_role_required")
@@ -352,6 +350,16 @@ def serve_intake(
         except (OSError, sqlite3.Error):
             return tool_error("intake_unavailable")
 
+    return call
+
+
+def serve_intake(
+    principal: IntakePrincipal,
+    admission: IntakeAdmission,
+    source: BinaryIO,
+    destination: BinaryIO,
+) -> int:
+    call = intake_dispatch(principal, admission)
     try:
         return serve_tools("opentour-intake-v1", TOOLS, call, source, destination)
     except BrokenPipeError:
