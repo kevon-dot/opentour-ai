@@ -151,6 +151,7 @@ def _inspection(
             and cfg.channel == channel
             and cfg.reviewer == reviewer
             and cfg.recipient == audience
+            and cfg.explicit_recipient
             and cfg.approval_provider == policy.get("provider", "slack")
             and role["aggregate"]
             and journal.opaque("policy", [cfg.team, cfg.channel, role, cfg.reviewer, cfg.recipient])
