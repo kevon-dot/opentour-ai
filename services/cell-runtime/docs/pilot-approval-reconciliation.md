@@ -3,8 +3,10 @@
 This is the owner-local reconciliation part of OPE-414. It uses the existing signed approval
 bridge and its existing tenant policy. It does not install a Schedule by Zapier job, send a Slack
 message, provision a connection, or establish installed-provider qualification. OPE-435 owns the
-installed reconciler/cutover smoke. OPE-548's saved owner/custodian replacement authority is still
-required before a successor reviewer can be installed; that transition deliberately stays held.
+installed reconciler/cutover smoke. The saved OPE-548 owner/custodian authority now produces the
+replacement generation and immutable reconciliation intents consumed here. Fresh successor
+presentation and release-effect consumers are a separate integration requirement; this source
+stack does not yet prove the successor's positive release path.
 
 Use Python 3.12.16 and the versioned kit's `zapier-approval` command with the same private
 `--directory`, `--organization`, and `--config` used for existing approval requests. The configured
@@ -37,6 +39,10 @@ At most one reminder is queued per request per elapsed configured interval, incl
 bucket boundaries and worker restarts. A trusted signed Pending return can resolve a lost submission
 acknowledgement without approving a release. Preserve that authenticated observation across polls.
 An unsigned status, HTTP acceptance, timeout or missing acknowledgement never grants release authority.
+Catch Hook acceptance alone also cannot close remote uncertainty: the approval action must supply
+an authenticated Pending or terminal observation. Repeated summaries do not count as retry attempts
+or update the last observation time. A later Pending or contradictory terminal event cannot rewrite
+an authenticated terminal provider status.
 
 ## Notifications and recovery
 
@@ -66,8 +72,8 @@ this implementation never invents a replacement owner, reviewer or destination.
    disposition and owner-action outbox from that marker. Repeated polls create no extra reminder.
 4. Only after the earlier lane is closed, have the authorized installer apply the new approved Zap
    revision to the existing private policy. Run `complete-cutover`. An unresolved remote outcome blocks
-   completion. The same reviewer must remain bound: changing the reviewer is held pending the real
-   OPE-548 saved authority producer. Direct version, grant or signer drift outside this sequence cannot
+   completion. The same reviewer must remain bound: reviewer changes use the saved-authority
+   sequence below. Direct version, grant or signer drift outside this sequence cannot
    issue or dispatch requests under the old active installation epoch.
 5. Open and inspect the exact current evidence again, then explicitly issue the new request. It has a
    new nonce and installation epoch. Replay the old signed callback: it produces no new release. Two
@@ -82,17 +88,81 @@ the original approved configuration and perform the drain/fence sequence. Do not
 fabricate a provider status to unblock it. A signed provider readback may resolve an unknown submission;
 if no valid readback exists, the request remains held. Past completed effects are preserved.
 
+## Saved reviewer replacement
+
+Keep the original policy and signer available, including their private filenames. An authorized
+workflow owner assigns the successor and the separately authorized custodian saves the canonical
+settings revision through OPE-548. These role bindings can name one person. Assignment does not
+transfer a vote, fabricate an inspection, or qualify the remote provider's outcome.
+
+1. Under the original installed approval policy, run `reconcile-reviewers --authority
+   /private/tenant/settings-authority.json --actor <operator>`. The current operator/custodian and
+   saved authority are checked. Each bounded queue page verifies the producer's exact sealed
+   request fingerprints, pauses dispatch, preserves completed decisions, and projects its nonce
+   fences and private owner-action outbox. The local projection commits before acknowledging the
+   producer. Repeat until `remaining` is zero; a restart between projection and ACK is idempotent.
+2. An admitted request without authenticated approval-action status stays held even if an old
+   version had already marked it superseded or expired. Preserve the original marker. Use
+   `observe-replaced-status --input /private/tenant/signed-old-status.json` only for an already
+   projected request. It verifies the original policy, signer, nonce and actor. A late observation
+   can resolve remote uncertainty after request expiry but never creates a release decision.
+   Delayed clicks continue to fail through ordinary `import`.
+3. Apply only the saved current reviewer to the approval policy, then run
+   `complete-reviewer-replacement --authority /private/tenant/settings-authority.json --actor
+   <operator>`. Every current proposal must have its exact local projection and current saved
+   grant. Outstanding remote outcomes or missing original authority remain held. A verified
+   completed release retains its original actor and does not infer an otherwise unknown provider
+   status. A repeated adoption returns the same epoch. Zap revision/key changes still use their
+   separate cutover sequence.
+4. Obtain the successor's actual fresh private evidence and explicit confirmation before issuance.
+   Sealed requests bind generation and reviewer-grant revision; issuance, dispatch, callbacks and
+   reminders require those values to match the adopted installation and current saved authority.
+   Same-reviewer renewal and A → B → A cannot bypass adoption. Dispatch rechecks request expiry
+   after obtaining the engagement writer, and retains that writer through the bounded submission.
+   If expiry is observed during admission-file synchronization before any submission, a durable
+   local never-sent receipt permits expiry recovery. A crash without that receipt remains unknown.
+
+The release-gate/Slack integration must preserve both generation fields in the actual sealed
+presentation and recheck the request deadline under the final release writer. These consumers and
+their end-to-end successor tests remain required before local OPE-414 completion. No placeholder
+inspection, local projection ACK or signed provider status substitutes for them.
+
+## Upgrade an older private journal
+
+Earlier bridge versions did not retain original policy or signer fingerprints. If a prior request's
+exact persisted identity is present but original verification material is missing, its lane becomes
+an explicit `original_request_policy_required` or `original_request_signer_required` hold. Unrelated
+current requests remain usable. This compatibility hold grants no event authority, and cutover,
+adoption or reissue of the affected proposal cannot bypass it. Tampered requests and mismatched
+signer fingerprints fail validation.
+
+Restore the original approved policy and its original private signer, then use
+`recover-request-authority --request-id <ref> --original-policy /private/tenant/original-policy.json`.
+The command verifies the original seal against the exact persisted request before restoring the
+archive. An expired original policy can authenticate historical identity; it never becomes current
+dispatch authority. A previously verified, closed wrapper can retain historical identity after
+key retirement, but a new old-provider event still requires the original key. If the original
+material cannot be recovered, leave the visible hold and obtain the missing original material from
+the authorized operator. Do not substitute database row values for cryptographic verification.
+If rotation reused the current signer's filename, place the original secret in a different private
+file and add `--original-key /private/tenant/archived-signer.json`. The verified historical key
+reference is stored separately by policy revision; the original policy and current signer remain
+unchanged. Do not temporarily overwrite the current signer to restore an old request.
+
 ## Local conformance
 
-Run `test_approval_reconciliation.py` and the existing `test_zapier_approval.py` under the pinned,
+Run `test_reviewer_reconciliation.py`, `test_approval_reconciliation.py` and `test_zapier_approval.py` under the pinned,
 guarded Python test runner with Node 24.22.3 available for the actual bundled signer. The tests use
 generated tenants and real signed local bridge calls, with fake delivery functions that make no
 external request. They cover initial foreign scope, cursor isolation, restart after claim, missing
 response, no fresh nonce after an expired unknown attempt, timing boundaries, authenticated Pending
 readback over repeated polls, old/new version callbacks, concurrent approve/decline, concurrent
 cutover/callback, revocation, interrupted invalidation, transient disk failure and stale-reminder
-starvation. The successor's positive path remains unobserved until OPE-548 implements the canonical
-saved settings revision; generated settings edits cannot qualify that authority.
+starvation. Saved replacement tests use the actual signed settings producer and real local bridge,
+including CLI projection, unknown-status recovery, old signer retirement and legacy archive holds.
+The successor's positive path remains unobserved until the actual presentation and release consumers
+join this producer; generated settings edits alone cannot qualify that path.
 
 The operator guide is a source artifact. The executable is already part of the existing portable
-`zapier_approval` module; including this extra guide in the kit remains a serialized packaging change.
+`zapier_approval` module; including this guide, `owner_settings` and `reviewer_assignment` in the kit
+remains a serialized packaging change. Source CLI tests do not establish a packaged installation.

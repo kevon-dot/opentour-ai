@@ -48,6 +48,7 @@ def test_normal_entry_records_epoch_and_reminder_outbox_survives_claim_restart(
     monkeypatch.setattr(time, "time", lambda: now)
     wire = case.inspect()
     deliver(case, wire)
+    case.bridge.consume(signed_at_clock(case, wire, status="Pending"))
     before = case.bridge.pending_summary()
     assert before["counts"] == {"pending": 1}
     assert before["items"][0]["request_id"] == wire["request_id"]
@@ -108,6 +109,7 @@ def test_expiry_at_clock_boundary_invalidates_nonce_and_keeps_owner_recovery(
         case.h.action(case.view, "ot_evidence", case.revision)
     wire = case.bridge.issue(**case.binding, ttl_seconds=2)
     deliver(case, wire)
+    case.bridge.consume(signed_at_clock(case, wire, status="Pending"))
     old = signed_at_clock(case, wire)
     now = wire["expires_at"]
     result = case.bridge.reconcile(poll_interval=1)
@@ -125,6 +127,7 @@ def test_expiry_at_clock_boundary_invalidates_nonce_and_keeps_owner_recovery(
 def test_cutover_fences_old_request_before_fresh_inspection_and_new_issue(case: Case) -> None:
     wire = case.inspect()
     deliver(case, wire)
+    case.bridge.consume(signed_at_clock(case, wire, status="Pending"))
     delayed = case.signed(wire)
     previous_epoch = case.bridge.pending_summary()["installation_epoch"]
     assert case.bridge.prepare_cutover()["counts"] == {"superseded": 1}
@@ -181,6 +184,7 @@ def test_concurrent_decision_conflict_is_quarantined_without_rewriting_first(cas
 def test_cutover_and_old_callback_have_one_durable_order(case: Case) -> None:
     wire = case.inspect()
     deliver(case, wire)
+    case.bridge.consume(case.signed(wire, status="Pending"))
     event = case.signed(wire)
     barrier = Barrier(2)
 
@@ -284,6 +288,7 @@ def test_restart_repairs_marker_committed_before_journal_and_owner_outbox(
 ) -> None:
     wire = case.inspect()
     deliver(case, wire)
+    case.bridge.consume(signed_at_clock(case, wire, status="Pending"))
     event = case.signed(wire)
     with monkeypatch.context() as local:
 
@@ -335,6 +340,7 @@ def test_transient_local_read_failure_holds_without_permanent_nonce_invalidation
     monkeypatch.setattr(time, "time", lambda: now)
     wire = case.inspect()
     deliver(case, wire)
+    case.bridge.consume(signed_at_clock(case, wire, status="Pending"))
     with monkeypatch.context() as local:
 
         def unavailable(*_args, **_kwargs):
@@ -358,6 +364,7 @@ def test_superseded_reminder_is_retired_and_does_not_starve_new_request(
     monkeypatch.setattr(time, "time", lambda: now)
     wire = case.inspect()
     deliver(case, wire)
+    case.bridge.consume(signed_at_clock(case, wire, status="Pending"))
     case.bridge.reconcile(poll_interval=1)
     case.bridge.prepare_cutover()
     case.policy["zap_version"] = "version-2"
@@ -367,6 +374,7 @@ def test_superseded_reminder_is_retired_and_does_not_starve_new_request(
     case.h.action(case.view, "ot_evidence", case.revision)
     fresh = case.bridge.issue(**case.binding)
     deliver(case, fresh)
+    case.bridge.consume(signed_at_clock(case, fresh, status="Pending"))
     now += 1
     case.bridge.reconcile(poll_interval=1)
     assert case.bridge.claim_notification()["kind"] == "owner_action"
@@ -458,6 +466,7 @@ def test_custody_accounts_for_reconciliation_after_legacy_request_files_are_remo
 def test_reconcile_reference_is_scoped_and_repeat_is_throttled(case: Case) -> None:
     wire = case.inspect()
     deliver(case, wire)
+    case.bridge.consume(signed_at_clock(case, wire, status="Pending"))
     result = case.bridge.reconcile(request_id=wire["request_id"])
     assert result["state"] == "reconciled" and result["counts"] == {"pending": 1}
     assert case.bridge.reconcile(request_id=wire["request_id"])["state"] == "throttled"

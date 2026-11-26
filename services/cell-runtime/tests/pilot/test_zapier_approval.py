@@ -493,6 +493,7 @@ def test_repeat_inspection_coalesces_and_expiry_needs_a_new_sealed_exposure(
     assert case.bridge.issue(**case.binding) == first
     deliver(case, first)
     signed = case.signed(first)
+    case.bridge.consume(resign(case, signed, {"status": "Pending"}))
     now += 3
     with pytest.raises(ValueError, match="request_expired"):
         case.bridge.issue(**case.binding)

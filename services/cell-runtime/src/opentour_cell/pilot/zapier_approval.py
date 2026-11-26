@@ -58,6 +58,13 @@ BIND = (
     "audience",
     "inspection_ref",
 )
+REVIEW_AUTHORITY = ("generation", "reviewer_grant_revision")
+MARKER_STATES = {
+    "version_superseded": "superseded",
+    "reviewer_replaced": "superseded",
+    "request_expired": "expired",
+    "current_authority_unavailable": "held",
+}
 
 
 class ApprovalError(ValueError):
@@ -78,6 +85,30 @@ class ReconciliationJournal:
         _check_file(self.path)
         with self.db() as db:
             db.execute("CREATE TABLE IF NOT EXISTS installation (key TEXT PRIMARY KEY,value TEXT)")
+            db.execute(
+                "CREATE TABLE IF NOT EXISTS policies "
+                "(revision TEXT PRIMARY KEY,document TEXT NOT NULL,signer TEXT NOT NULL)"
+            )
+            db.execute(
+                "CREATE TABLE IF NOT EXISTS policy_signers "
+                "(revision TEXT PRIMARY KEY,key_file TEXT NOT NULL)"
+            )
+            db.execute(
+                "CREATE TABLE IF NOT EXISTS reviewer_projections "
+                "(id TEXT PRIMARY KEY,document TEXT NOT NULL,document_sha256 TEXT NOT NULL)"
+            )
+            db.execute(
+                "CREATE TABLE IF NOT EXISTS reviewer_projected_requests "
+                "(request_id TEXT,projection TEXT,PRIMARY KEY(request_id,projection))"
+            )
+            db.execute(
+                "CREATE TABLE IF NOT EXISTS verified_requests "
+                "(id TEXT PRIMARY KEY,wrapper_sha256 TEXT NOT NULL)"
+            )
+            db.execute(
+                "CREATE TABLE IF NOT EXISTS request_recovery "
+                "(id TEXT PRIMARY KEY,state TEXT NOT NULL,reason TEXT)"
+            )
             db.execute(
                 "CREATE TABLE IF NOT EXISTS requests (id TEXT PRIMARY KEY, request TEXT NOT NULL, "
                 "zap_revision TEXT NOT NULL, epoch TEXT NOT NULL, state TEXT NOT NULL, "
@@ -132,6 +163,14 @@ class ReconciliationJournal:
         with self.db() as db:
             for name, value in values.items():
                 db.execute("INSERT OR IGNORE INTO installation VALUES (?,?)", (name, value))
+            current = db.execute(
+                "SELECT value FROM installation WHERE key='policy_revision'"
+            ).fetchone()[0]
+            if current == digest(policy):
+                db.execute(
+                    "INSERT OR IGNORE INTO policies VALUES (?,?,?)",
+                    (current, canonical(policy), hashlib.sha256(key).hexdigest()),
+                )
 
     def record(self, request: Json, policy: Json) -> None:
         with self.db() as db:
@@ -167,23 +206,29 @@ class ReconciliationJournal:
         provider: str,
         *,
         reminder_interval: int | None = None,
+        count_retry: bool = False,
     ) -> None:
         now = int(time.time())
         with self.db() as db:
             row = db.execute(
-                "SELECT state,provider_status FROM requests WHERE id=?", (request_id,)
+                "SELECT state,provider_status,reason FROM requests WHERE id=?", (request_id,)
             ).fetchone()
             require(row is not None, "request_not_in_reconciliation_inventory")
-            if provider not in {"Pending", "Approved", "Declined"}:
+            if row[1] in {"Approved", "Declined"} or provider not in {
+                "Pending",
+                "Approved",
+                "Declined",
+            }:
                 provider = row[1]
             # A conflict or later outage must not rewrite a completed human decision.
             if row[0] in {"approved", "changes_requested"}:
                 state = row[0]
-            db.execute(
-                "UPDATE requests SET state=?,reason=?,provider_status=?,observed_at=?,"
-                "retries=retries+? WHERE id=?",
-                (state, reason, provider, now, int(reason == "remote_outcome_unknown"), request_id),
-            )
+            if (state, provider, reason) != tuple(row) or count_retry:
+                db.execute(
+                    "UPDATE requests SET state=?,reason=?,provider_status=?,observed_at=?,"
+                    "retries=retries+? WHERE id=?",
+                    (state, reason, provider, now, int(count_retry), request_id),
+                )
             kind = (
                 "owner_action"
                 if state in {"held", "superseded", "expired"}
@@ -326,8 +371,8 @@ class ApprovalBridge:
             fcntl.flock(lock, fcntl.LOCK_EX)
             policy, key = self._policy()
             journal = ReconciliationJournal(self.directory, self.organization)
-            self._inventory(journal, policy, key)
             journal.pin_installation(policy, key)
+            self._inventory(journal, policy, key)
             yield journal
 
     def _assert_installed_policy(self, journal: ReconciliationJournal) -> None:
@@ -354,24 +399,93 @@ class ApprovalBridge:
             request_id = path.name.removeprefix("zapier-approval-").removesuffix("-request.json")
             if journal.request_state(request_id) is None:
                 journal.record(self._request(request_id, policy, key, fresh=False), policy)
+            try:
+                self._archived_request(journal, request_id, key)
+            except ApprovalError as error:
+                if str(error) not in {
+                    "original_request_policy_required",
+                    "original_request_signer_required",
+                }:
+                    raise
+                wrapped = _read_private(path, 16_384)
+                with journal.db() as db:
+                    row = db.execute(
+                        "SELECT request,state,reason FROM requests WHERE id=?", (request_id,)
+                    ).fetchone()
+                    require(
+                        row is not None
+                        and json.loads(row["request"]) == wrapped.get("request")
+                        and wrapped["request"]["request_id"] == request_id
+                        and wrapped["request"]["policy_revision"] != digest(policy),
+                        "request_seal_mismatch",
+                    )
+                    db.execute(
+                        "INSERT OR IGNORE INTO request_recovery VALUES (?,?,?)",
+                        (request_id, row["state"], row["reason"]),
+                    )
+                    db.execute("UPDATE requests SET state='held' WHERE id=?", (request_id,))
+                journal.transition(request_id, "held", str(error), "unknown")
+                continue
+            with journal.db() as db:
+                recovery = db.execute(
+                    "SELECT state,reason FROM request_recovery WHERE id=?", (request_id,)
+                ).fetchone()
+                if recovery is not None:
+                    db.execute(
+                        "UPDATE requests SET state=?,reason=? WHERE id=?",
+                        (*recovery, request_id),
+                    )
+                    db.execute("DELETE FROM request_recovery WHERE id=?", (request_id,))
             marker = self._path(request_id, "reconciled")
             if os.path.lexists(marker):
                 closed = _read_private(marker, 1024)
                 reason = closed.get("reason")
-                states = {
-                    "version_superseded": "superseded",
-                    "request_expired": "expired",
-                    "current_authority_unavailable": "held",
-                }
                 require(
                     closed.get("request_id") == request_id
                     and isinstance(reason, str)
-                    and reason in states,
+                    and reason in MARKER_STATES,
                     "invalid_reconciliation_marker",
                 )
                 assert isinstance(reason, str)
                 # The marker fences callbacks first. A crash before the DB commit is recoverable.
-                journal.transition(request_id, states[reason], reason, "reconciled")
+                with journal.db() as db:
+                    status = db.execute(
+                        "SELECT provider_status FROM requests WHERE id=?", (request_id,)
+                    ).fetchone()[0]
+                    projected = (
+                        db.execute(
+                            "SELECT 1 FROM reviewer_projected_requests WHERE request_id=?",
+                            (request_id,),
+                        ).fetchone()
+                        is not None
+                    )
+                replaced = reason == "reviewer_replaced" or projected
+                unknown = replaced and self._unknown_outcome(request_id, status)
+                journal.transition(
+                    request_id,
+                    "held" if unknown else "superseded" if replaced else MARKER_STATES[reason],
+                    "remote_outcome_unknown"
+                    if unknown
+                    else "reviewer_replaced"
+                    if replaced
+                    else reason,
+                    "reconciled",
+                )
+
+    def _unknown_outcome(self, request_id: str, provider_status: str) -> bool:
+        admitted = self._path(request_id, "admitted")
+        refused = self._path(request_id, "not-sent")
+        if os.path.lexists(refused):
+            require(
+                _read_private(refused, 1024)
+                == {"request_id": request_id, "reason": "request_expired_before_submission"},
+                "invalid_local_submission_receipt",
+            )
+            return False
+        # Catch Hook HTTP acceptance is not an observation of the approval action.
+        return provider_status not in {"Pending", "Approved", "Declined"} and os.path.lexists(
+            admitted
+        )
 
     def pending_summary(self, *, limit: int = 25, cursor: str | None = None) -> Json:
         """Owner-local surface; an installed adapter must derive tenant from its connection."""
@@ -379,6 +493,436 @@ class ApprovalBridge:
             policy, key = self._policy()
             self._inventory(journal, policy, key)
             return journal.page(key, limit=limit, cursor=cursor)
+
+    def recover_request_authority(
+        self, request_id: str, *, original_policy: Path, original_key: Path | None = None
+    ) -> Json:
+        """Restore original private verification material; grant no current authority."""
+        with self._serialized() as journal:
+            historical = ApprovalBridge(self.directory, self.organization, original_policy)
+            try:
+                policy, key = historical._policy(fresh=False, signer_path=original_key)
+            except FileNotFoundError:
+                require(original_policy.exists(), "original_request_policy_required")
+                raise ApprovalError("original_request_signer_required") from None
+            request = self._request(request_id, policy, key, fresh=False)
+            with journal.db() as db:
+                recorded = db.execute(
+                    "SELECT request FROM requests WHERE id=?", (request_id,)
+                ).fetchone()
+                require(
+                    recorded is not None and json.loads(recorded[0]) == request,
+                    "reconciliation_identity_conflict",
+                )
+                prior = db.execute(
+                    "SELECT document,signer FROM policies WHERE revision=?", (digest(policy),)
+                ).fetchone()
+                fingerprint = hashlib.sha256(key).hexdigest()
+                require(
+                    prior is None or tuple(prior) == (canonical(policy), fingerprint),
+                    "original_request_signer_mismatch",
+                )
+                db.execute(
+                    "INSERT OR IGNORE INTO policies VALUES (?,?,?)",
+                    (digest(policy), canonical(policy), fingerprint),
+                )
+                if original_key is not None:
+                    db.execute(
+                        "INSERT OR REPLACE INTO policy_signers VALUES (?,?)",
+                        (digest(policy), original_key.name),
+                    )
+            current_policy, current_key = self._policy()
+            self._inventory(journal, current_policy, current_key)
+            return {"request_id": request_id, "state": "original_authority_restored"}
+
+    def _archived_request(
+        self, journal: ReconciliationJournal, request_id: str, key: bytes
+    ) -> tuple[Json, Json, Json, bytes | None]:
+        wrapped = _read_private(self._path(request_id, "request"), 16_384)
+        request = wrapped.get("request")
+        require(isinstance(request, dict), "request_seal_mismatch")
+        assert isinstance(request, dict)
+        with journal.db() as db:
+            row = db.execute(
+                "SELECT document,signer FROM policies WHERE revision=?",
+                (request.get("policy_revision"),),
+            ).fetchone()
+            cached = db.execute(
+                "SELECT wrapper_sha256 FROM verified_requests WHERE id=?", (request_id,)
+            ).fetchone()
+            recorded = db.execute(
+                "SELECT state,request FROM requests WHERE id=?", (request_id,)
+            ).fetchone()
+            signer_path = db.execute(
+                "SELECT key_file FROM policy_signers WHERE revision=?",
+                (request.get("policy_revision"),),
+            ).fetchone()
+        require(row is not None, "original_request_policy_required")
+        assert row is not None
+        policy = json.loads(row["document"])
+        require(
+            policy["organization"] == self.organization
+            and digest(policy) == request["policy_revision"],
+            "request_policy_unavailable",
+        )
+        original_key = key if row["signer"] == hashlib.sha256(key).hexdigest() else None
+        wrapper_sha = digest(wrapped)
+        verified_closed = (
+            cached is not None
+            and cached[0] == wrapper_sha
+            and recorded is not None
+            and recorded["state"] in {"approved", "changes_requested", "superseded", "expired"}
+            and json.loads(recorded["request"]) == request
+        )
+        if original_key is None:
+            key_file = signer_path[0] if signer_path is not None else policy["key_file"]
+            require(
+                isinstance(key_file, str) and re.fullmatch(r"[A-Za-z0-9_-]{1,64}\.json", key_file),
+                "invalid_signer_reference",
+            )
+            try:
+                secret = _read_private(self.directory / key_file, 1024)
+            except FileNotFoundError:
+                pass
+            else:
+                require(
+                    set(secret) == {"secret_hex"}
+                    and isinstance(secret["secret_hex"], str)
+                    and HEX.fullmatch(secret["secret_hex"]),
+                    "original_request_signer_mismatch",
+                )
+                candidate = bytes.fromhex(secret["secret_hex"])
+                if verified_closed and candidate == key and signer_path is None:
+                    # An authorized rotation may reuse the selected signer filename.
+                    # Exact already-verified closures retain identity, never event authority.
+                    return request, policy, wrapped, None
+                require(
+                    hashlib.sha256(candidate).hexdigest() == row["signer"],
+                    "original_request_signer_mismatch",
+                )
+                original_key = candidate
+        if original_key is None:
+            # A past authenticated, closed request may retain its audit identity
+            # after key retirement. This receipt never authenticates a new event.
+            require(
+                verified_closed,
+                "original_request_signer_required",
+            )
+            return request, policy, wrapped, None
+        verified = self._request(request_id, policy, original_key, fresh=False)
+        require(verified == request, "request_seal_mismatch")
+        require(cached is None or cached[0] == wrapper_sha, "request_seal_mismatch")
+        with journal.db() as db:
+            db.execute(
+                "INSERT OR IGNORE INTO verified_requests VALUES (?,?)", (request_id, wrapper_sha)
+            )
+        return verified, policy, wrapped, original_key
+
+    def reconcile_reviewers(self, *, authority: Path, actor: str, limit: int = 50) -> Json:
+        """Project signed settings fences locally; never assert a provider outcome."""
+        from opentour_cell.pilot.owner_settings import OwnerSettings
+        from opentour_cell.pilot.reviewer_assignment import ReviewerAssignments
+
+        require(authority.parent == self.directory, "private_configuration_required")
+        with self._serialized() as journal:
+            self._assert_installed_policy(journal)
+            policy, key = self._policy()
+            service = ReviewerAssignments(
+                OwnerSettings(
+                    self.directory,
+                    self.organization,
+                    policy["engagement"],
+                    authority_file=authority,
+                )
+            )
+            pending = service.pending_reconciliations(actor=actor, limit=limit)
+            projected = []
+            for item in pending["records"]:
+                document = item["document"]
+                require(
+                    document["organization"] == self.organization
+                    and document["engagement"] == policy["engagement"]
+                    and digest(document) == item["document_sha256"]
+                    and item["id"] == "review-reconcile-" + digest(document),
+                    "replacement_projection_scope_mismatch",
+                )
+                requests = []
+                for request_id in document["expired_request_ids"]:
+                    request, previous, wrapped, _ = self._archived_request(journal, request_id, key)
+                    require(
+                        digest(wrapped) == document["request_fingerprints"].get(request_id)
+                        and request["engagement"] == policy["engagement"]
+                        and all(
+                            request[k] == document[k]
+                            for k in ("run_id", "run_revision", "artifact_sha")
+                        ),
+                        "replacement_request_changed",
+                    )
+                    journal.record(request, previous)
+                    requests.append(request)
+                # Pausing is durable before any projection. Current saved authority already
+                # fences effects, even if this process stops before writing the first marker.
+                with journal.db() as db:
+                    db.execute("UPDATE installation SET value='true' WHERE key='paused'")
+                for request in requests:
+                    request_id = request["request_id"]
+                    with journal.db() as db:
+                        row = db.execute(
+                            "SELECT state,provider_status FROM requests WHERE id=?", (request_id,)
+                        ).fetchone()
+                    assert row is not None
+                    if row["state"] in {"approved", "changes_requested"}:
+                        continue
+                    # The producer's observed uncertainty flag cannot clear later local
+                    # uncertainty. Only the bridge's authenticated status history can do so.
+                    unknown = self._unknown_outcome(request_id, row["provider_status"])
+                    self._invalidate(request_id, "reviewer_replaced")
+                    journal.transition(
+                        request_id,
+                        "held" if unknown else "superseded",
+                        "remote_outcome_unknown" if unknown else "reviewer_replaced",
+                        row["provider_status"],
+                    )
+                with journal.db() as db:
+                    previous = db.execute(
+                        "SELECT document_sha256 FROM reviewer_projections WHERE id=?", (item["id"],)
+                    ).fetchone()
+                    require(
+                        previous is None or previous[0] == item["document_sha256"],
+                        "replacement_projection_conflict",
+                    )
+                    db.execute(
+                        "INSERT OR IGNORE INTO reviewer_projections VALUES (?,?,?)",
+                        (item["id"], canonical(document), item["document_sha256"]),
+                    )
+                    db.executemany(
+                        "INSERT OR IGNORE INTO reviewer_projected_requests VALUES (?,?)",
+                        [(request["request_id"], item["id"]) for request in requests],
+                    )
+                # No reconciliation DB transaction remains open when the producer obtains
+                # its training/mandate writers. ACK grants no send or inspection authority.
+                receipt = service.acknowledge_reconciliation(
+                    item["id"], item["document_sha256"], actor=actor
+                )
+                projected.append({"id": item["id"], "receipt_sha256": digest(receipt)})
+            return {
+                "state": "projected",
+                "records": projected,
+                "remaining": service.pending_reconciliations(actor=actor, limit=limit)[
+                    "pending_count"
+                ],
+                "provider_outcome": "not_qualified",
+            }
+
+    def observe_replaced_status(self, envelope: Json) -> Json:
+        """Record authenticated old-provider state without accepting an old vote."""
+        with self._serialized() as journal:
+            _, key = self._policy()
+            require(
+                set(envelope) == {"event", "signature"}
+                and isinstance(envelope["event"], dict)
+                and isinstance(envelope["signature"], str),
+                "invalid_provider_envelope",
+            )
+            event = envelope["event"]
+            require(
+                set(event) == FIELDS and event["schema_version"] == EVENT,
+                "provider_signature_invalid",
+            )
+            request_id = event["request_id"]
+            request, policy, _, original_key = self._archived_request(journal, request_id, key)
+            require(original_key is not None, "original_provider_signer_required")
+            assert original_key is not None
+            require(
+                hmac.compare_digest(envelope["signature"], _sig(original_key, EVENT, event)),
+                "provider_signature_invalid",
+            )
+            marker = _read_private(self._path(request_id, "reconciled"), 1024)
+            with journal.db() as db:
+                projected = db.execute(
+                    "SELECT 1 FROM reviewer_projected_requests WHERE request_id=?", (request_id,)
+                ).fetchone()
+            require(
+                projected is not None
+                and marker.get("request_id") == request_id
+                and marker.get("reason") in MARKER_STATES
+                and event["nonce"] == request["nonce"]
+                and event["zap_id"] == policy["zap_id"]
+                and event["zap_version"] == policy["zap_version"],
+                "provider_scope_mismatch",
+            )
+            _check_file(self._path(request_id, "admitted"))
+            require(
+                type(event["decided_at"]) is int
+                and request["issued_at"] <= event["decided_at"]
+                and event["decided_at"] <= int(time.time())
+                and isinstance(event["event_id"], str)
+                and OPAQUE.fullmatch(event["event_id"])
+                and event["status"] in {"Pending", "Approved", "Declined"},
+                "invalid_provider_event",
+            )
+            require(
+                event["status"] == "Pending"
+                or event["actor_id"] == policy["reviewer"]
+                or (
+                    event["actor_id"] is None
+                    and policy["approver_mode"] == "verified_single_approver"
+                ),
+                "named_approver_unverified",
+            )
+            with journal.db() as db:
+                row = db.execute(
+                    "SELECT state,provider_status FROM requests WHERE id=?", (request_id,)
+                ).fetchone()
+                require(row is not None, "request_not_in_reconciliation_inventory")
+                assert row is not None
+                require(
+                    row["provider_status"] not in {"Approved", "Declined"}
+                    or row["provider_status"] == event["status"],
+                    "conflicting_provider_event",
+                )
+            reference = digest(event)
+            _record(
+                self._path(request_id, "replacement-observation-" + reference[:16]),
+                {"event_sha256": reference, "status": event["status"]},
+            )
+            journal.transition(request_id, "superseded", "reviewer_replaced", event["status"])
+            return {
+                "request_id": request_id,
+                "provider_status": event["status"],
+                "observation_sha256": reference,
+                "release_decision": "not_recorded",
+            }
+
+    def complete_reviewer_replacement(self, *, authority: Path, actor: str) -> Json:
+        """Adopt only the saved current reviewer after local and remote reconciliation."""
+        from opentour_cell.pilot.owner_settings import OwnerSettings
+        from opentour_cell.pilot.reviewer_assignment import (
+            ReviewerAssignments,
+            current_review_authority,
+        )
+
+        require(authority.parent == self.directory, "private_configuration_required")
+        with self._serialized() as journal:
+            policy, key = self._policy()
+            service = ReviewerAssignments(
+                OwnerSettings(
+                    self.directory,
+                    self.organization,
+                    policy["engagement"],
+                    authority_file=authority,
+                )
+            )
+            with service.settings.store.engagement_guard(engagement_id=policy["engagement"]):
+                require(
+                    service.pending_reconciliations(actor=actor)["pending_count"] == 0,
+                    "replacement_projection_required",
+                )
+                with service.settings.ledger._db(write=False) as db:
+                    current = service._current(db, service._operator(actor, db))
+                replacement = current.get("reviewer_replacement")
+                require(isinstance(replacement, dict), "saved_reviewer_replacement_required")
+                assert isinstance(replacement, dict)
+                require(
+                    replacement["generation"] == current["revision"]
+                    and all(
+                        policy[k] == current["policy"]["agreement"]["release_review"][k]
+                        for k in ("reviewer", "team", "channel", "audience")
+                    ),
+                    "current_review_authority_required",
+                )
+                with journal.db() as db:
+                    meta = dict(db.execute("SELECT key,value FROM installation"))
+                    previous = db.execute(
+                        "SELECT document,signer FROM policies WHERE revision=?",
+                        (meta["policy_revision"],),
+                    ).fetchone()
+                    require(previous is not None, "original_request_policy_required")
+                    assert previous is not None
+                    old_policy = json.loads(previous["document"])
+                    require(
+                        previous["signer"] == hashlib.sha256(key).hexdigest()
+                        and {k: v for k, v in old_policy.items() if k != "reviewer"}
+                        == {k: v for k, v in policy.items() if k != "reviewer"},
+                        "reviewer_refresh_scope_changed",
+                    )
+                    projections = {
+                        row["id"]: json.loads(row["document"])
+                        for row in db.execute("SELECT id,document FROM reviewer_projections")
+                    }
+                    requests = db.execute(
+                        "SELECT id,request,state,provider_status FROM requests"
+                    ).fetchall()
+                for proposal in replacement["proposals"]:
+                    reference = proposal["reconciliation_ref"]
+                    require(reference in projections, "replacement_projection_required")
+                    document = projections[reference]
+                    actual = current_review_authority(
+                        self.directory,
+                        self.organization,
+                        policy["engagement"],
+                        document["run_id"],
+                        document["run_revision"],
+                        document["artifact_sha"],
+                    )
+                    require(
+                        actual is not None
+                        and actual == document
+                        and actual["generation"] == current["revision"],
+                        "current_review_authority_required",
+                    )
+                if (
+                    meta.get("generation") == current["revision"]
+                    and meta["policy_revision"] == digest(policy)
+                    and meta.get("reviewer_grant_revision") == current["reviewer_grant_revision"]
+                    and meta["paused"] == "false"
+                ):
+                    return {
+                        "state": "fresh_successor_inspection_required",
+                        "installation_epoch": meta["epoch"],
+                        "generation": current["revision"],
+                    }
+                for row in requests:
+                    with journal.db() as db:
+                        recovery = db.execute(
+                            "SELECT 1 FROM request_recovery WHERE id=?", (row["id"],)
+                        ).fetchone()
+                    require(recovery is None, "original_request_authority_recovery_required")
+                    if self._completed_decision(json.loads(row["request"])) is not None:
+                        continue
+                    require(
+                        not self._unknown_outcome(row["id"], row["provider_status"]),
+                        "remote_reconciliation_required",
+                    )
+                    require(
+                        row["state"] in {"approved", "changes_requested", "superseded", "expired"},
+                        "replacement_projection_required",
+                    )
+                if meta.get("generation") != current["revision"]:
+                    require(meta["paused"] == "true", "dispatch_must_be_paused")
+                    epoch = secrets.token_hex(16)
+                else:
+                    epoch = meta["epoch"]
+                require(self._policy() == (policy, key), "plugin_policy_changed")
+                with journal.db() as db:
+                    values = {
+                        "epoch": epoch,
+                        "paused": "false",
+                        "reviewer": policy["reviewer"],
+                        "policy_revision": digest(policy),
+                        "generation": current["revision"],
+                        "reviewer_grant_revision": current["reviewer_grant_revision"],
+                    }
+                    for name, value in values.items():
+                        db.execute(
+                            "INSERT OR REPLACE INTO installation VALUES (?,?)", (name, value)
+                        )
+                journal.pin_installation(policy, key)
+                return {
+                    "state": "fresh_successor_inspection_required",
+                    "installation_epoch": epoch,
+                    "generation": current["revision"],
+                }
 
     def reconcile(
         self,
@@ -427,6 +971,11 @@ class ApprovalBridge:
                 if request_id is not None and row["id"] != request_id:
                     continue
                 target_id, req = row["id"], json.loads(row["request"])
+                with journal.db() as db:
+                    if db.execute(
+                        "SELECT 1 FROM request_recovery WHERE id=?", (target_id,)
+                    ).fetchone():
+                        continue
                 if row["state"] in {
                     "approved",
                     "changes_requested",
@@ -452,20 +1001,13 @@ class ApprovalBridge:
                     )
                     continue
                 state = status["state"]
-                transport = self._path(target_id, "transport")
-                admitted = self._path(target_id, "admitted")
-                unknown = (
-                    row["provider_status"] not in {"Pending", "Approved", "Declined"}
-                    and os.path.lexists(admitted)
-                    and (
-                        not os.path.lexists(transport)
-                        or _read_private(transport, 1024).get("transport") != "accepted"
-                    )
-                )
+                unknown = self._unknown_outcome(target_id, row["provider_status"])
                 if state in {"approved", "changes_requested"}:
                     journal.transition(target_id, state, None, state)
                 elif unknown:
-                    journal.transition(target_id, "held", "remote_outcome_unknown", "unknown")
+                    journal.transition(
+                        target_id, "held", "remote_outcome_unknown", "unknown", count_retry=True
+                    )
                 elif now >= req["expires_at"]:
                     self._invalidate(target_id, "request_expired")
                     journal.transition(target_id, "expired", "request_expired", "expired")
@@ -503,6 +1045,11 @@ class ApprovalBridge:
                 if row["state"] in {"approved", "changes_requested", "superseded", "expired"}:
                     continue
                 request_id = row["id"]
+                with journal.db() as db:
+                    if db.execute(
+                        "SELECT 1 FROM request_recovery WHERE id=?", (request_id,)
+                    ).fetchone():
+                        continue
                 try:
                     status = self.decision_status(
                         request_id, team=policy["team"], actor=policy["reviewer"]
@@ -511,19 +1058,7 @@ class ApprovalBridge:
                     status = "uncertain"
                 if status in {"approved", "changes_requested"}:
                     journal.transition(request_id, status, None, status)
-                elif row["provider_status"] != "Pending" and (
-                    status in {"uncertain", "failed"}
-                    or (
-                        os.path.lexists(self._path(request_id, "admitted"))
-                        and (
-                            not os.path.lexists(self._path(request_id, "transport"))
-                            or _read_private(self._path(request_id, "transport"), 1024).get(
-                                "transport"
-                            )
-                            != "accepted"
-                        )
-                    )
-                ):
+                elif self._unknown_outcome(request_id, row["provider_status"]):
                     journal.transition(request_id, "held", "remote_outcome_unknown", "unknown")
                 else:
                     self._invalidate(request_id, "version_superseded")
@@ -540,6 +1075,10 @@ class ApprovalBridge:
             )
             require(meta.get("zap_version") != policy["zap_version"], "new_zap_revision_required")
             with journal.db() as db:
+                require(
+                    db.execute("SELECT count(*) FROM request_recovery").fetchone()[0] == 0,
+                    "original_request_authority_recovery_required",
+                )
                 unresolved = db.execute(
                     "SELECT count(*) FROM requests WHERE "
                     "state NOT IN ('approved','changes_requested','superseded','expired')"
@@ -609,6 +1148,7 @@ class ApprovalBridge:
                 "SELECT id,request,provider_status FROM requests "
                 "WHERE state NOT IN ('approved','changes_requested')"
             ).fetchall()
+            recovery = {row[0] for row in db.execute("SELECT id FROM request_recovery")}
         for row in prior:
             request = json.loads(row["request"])
             if not all(
@@ -616,18 +1156,11 @@ class ApprovalBridge:
                 for name in ("run_id", "run_revision", "artifact_sha")
             ):
                 continue
-            admitted = self._path(row["id"], "admitted")
-            transport = self._path(row["id"], "transport")
-            known = row["provider_status"] in {"Pending", "Approved", "Declined"}
-            unknown = (
-                not known
-                and os.path.lexists(admitted)
-                and (
-                    not os.path.lexists(transport)
-                    or _read_private(transport, 1024).get("transport") != "accepted"
-                )
+            require(row["id"] not in recovery, "original_request_authority_recovery_required")
+            require(
+                not self._unknown_outcome(row["id"], row["provider_status"]),
+                "remote_reconciliation_required",
             )
-            require(not unknown, "remote_reconciliation_required")
 
     def confirm_notification(self, notification_ref: str) -> Json:
         with self._serialized() as journal:
@@ -644,7 +1177,7 @@ class ApprovalBridge:
                 db.execute("UPDATE outbox SET state='confirmed' WHERE id=?", (notification_ref,))
             return {"notification_ref": notification_ref, "state": "confirmed"}
 
-    def _policy(self) -> tuple[Json, bytes]:
+    def _policy(self, *, fresh: bool = True, signer_path: Path | None = None) -> tuple[Json, bytes]:
         p = _read_private(self.config, 16_384)
         require(
             set(p)
@@ -701,7 +1234,9 @@ class ApprovalBridge:
             "unverified_plugin_configuration",
         )
         require(
-            type(p["expires_at"]) is int and time.time() < p["expires_at"] < 2**63,
+            type(p["expires_at"]) is int
+            and 0 < p["expires_at"] < 2**63
+            and (not fresh or time.time() < p["expires_at"]),
             "plugin_policy_expired",
         )
         require(
@@ -713,7 +1248,14 @@ class ApprovalBridge:
             isinstance(p["hook_fingerprint"], str) and HEX.fullmatch(p["hook_fingerprint"]),
             "invalid_plugin_destination",
         )
-        key = _read_private(self.directory / p["key_file"], 1024)
+        if signer_path is not None:
+            require(
+                not fresh
+                and signer_path.parent == self.directory
+                and re.fullmatch(r"[A-Za-z0-9_-]{1,64}\.json", signer_path.name),
+                "invalid_signer_reference",
+            )
+        key = _read_private(signer_path or self.directory / p["key_file"], 1024)
         require(
             set(key) == {"secret_hex"}
             and isinstance(key["secret_hex"], str)
@@ -758,6 +1300,7 @@ class ApprovalBridge:
             **{k: policy[k] for k in ("engagement", "team", "channel", "reviewer", "audience")},
             "policy_revision": digest(policy),
         }
+        scope.update(self._review_scope(scope))
         prefix = "za-" + _sig(key, REQUEST + "/scope", scope)[:16]
         for path in self.directory.glob(f"zapier-approval-{prefix}*-request.json"):
             rid = path.name.removeprefix("zapier-approval-").removesuffix("-request.json")
@@ -818,11 +1361,89 @@ class ApprovalBridge:
         )
         return {**scope, "state": receipt["decision"], "receipt_sha256": digest(receipt)}
 
+    def _completed_decision(self, req: Json) -> str | None:
+        """A scope-checked local final receipt does not imply a provider observation."""
+        path = self.directory / "managed-outputs" / req["run_id"] / "release-decision.json"
+        if not os.path.lexists(path):
+            return None
+        _, frozen = release_gate._binding(
+            self.directory,
+            self.organization,
+            req["run_id"],
+            req["run_revision"],
+            req["artifact_sha"],
+        )
+        seen = release_gate._inspection(
+            self.directory,
+            self.organization,
+            req["run_id"],
+            req["run_revision"],
+            req["artifact_sha"],
+            frozen,
+            req["inspection_ref"],
+            fresh=False,
+        )
+        receipt = _read_private(path, 16_384)
+        require(
+            seen["engagement"] == req["engagement"]
+            and all(receipt.get(k) == req[k] for k in BIND)
+            and receipt.get("provider") == "zapier_slack"
+            and receipt.get("decision") in {"approved", "changes_requested"},
+            "receipt_scope_mismatch",
+        )
+        return str(receipt["decision"])
+
     def _path(self, request_id: str, kind: str) -> Path:
         require(isinstance(request_id, str) and REQ.fullmatch(request_id), "invalid_request_id")
         return self.directory / f"zapier-approval-{request_id}-{kind}.json"
 
-    def _inspect(self, req: Json) -> Json:
+    def _review_scope(self, req: Json) -> Json:
+        # Preserve the shipped legacy route without importing uninstalled producer
+        # modules. Once saved replacement history exists, missing code is a hold.
+        ledger = self.directory / "learning-mandates.sqlite3"
+        if not os.path.lexists(ledger):
+            return {}
+        _check_file(ledger)
+        with closing(sqlite3.connect(ledger.as_uri() + "?mode=ro", uri=True)) as db:
+            if not db.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='reviewer_replacements'"
+            ).fetchone():
+                return {}
+        from opentour_cell.pilot.reviewer_assignment import current_review_authority
+
+        current = current_review_authority(
+            self.directory,
+            self.organization,
+            req["engagement"],
+            req["run_id"],
+            req["run_revision"],
+            req["artifact_sha"],
+        )
+        if current is None:
+            return {}
+        require(
+            current["release_review"].get("provider") == "zapier_slack"
+            and all(
+                current["release_review"].get(k) == req[k]
+                for k in ("reviewer", "team", "channel", "audience")
+            ),
+            "current_review_authority_required",
+        )
+        return {k: current[k] for k in REVIEW_AUTHORITY}
+
+    def _inspect(self, req: Json, *, preparing: bool = False) -> Json:
+        scope = self._review_scope(req)
+        if scope:
+            installed = ReconciliationJournal(self.directory, self.organization).installation()
+            require(
+                all(installed.get(k) == v for k, v in scope.items())
+                and installed["paused"] == "false",
+                "reviewer_generation_adoption_required",
+            )
+        require(
+            preparing or {k: req[k] for k in REVIEW_AUTHORITY if k in req} == scope,
+            "review_generation_changed",
+        )
         inspection = release_gate.check_release_inspection(
             self.directory, self.organization, **{k: req[k] for k in BIND}
         )
@@ -830,6 +1451,10 @@ class ApprovalBridge:
             inspection["provider"] == "zapier_slack"
             and inspection["engagement"] == req["engagement"],
             "plugin_not_selected",
+        )
+        require(
+            {k: inspection[k] for k in REVIEW_AUTHORITY if k in inspection} == scope,
+            "fresh_evidence_inspection_required",
         )
         return inspection
 
@@ -933,8 +1558,9 @@ class ApprovalBridge:
         )
         with store.engagement_guard(engagement_id=p["engagement"]):
             require(_read_private(self.config, 16_384) == p, "plugin_policy_changed")
-            inspection = self._inspect(binding)
+            inspection = self._inspect(binding, preparing=True)
             binding["inspection_ref"] = inspection["presentation_id"]
+            binding.update({k: inspection[k] for k in REVIEW_AUTHORITY if k in inspection})
             scope = {k: v for k, v in binding.items() if k != "inspection_ref"}
             prefix = "za-" + _sig(key, REQUEST + "/scope", scope)[:16]
             now = int(time.time())
@@ -1019,17 +1645,24 @@ class ApprovalBridge:
                 self._inspect(req)
                 current = _read_private(self.config, 16_384)
                 require(current == p, "plugin_policy_changed")
+                require(int(time.time()) < req["expires_at"], "request_expired")
                 _record(admitted, {"request_id": request_id, "admitted_at": int(time.time())})
                 dir_fd = os.open(self.directory, os.O_RDONLY | os.O_DIRECTORY)
                 try:
                     os.fsync(dir_fd)
                 finally:
                     os.close(dir_fd)
-            try:
-                status = post(hook, self._wire(req, key, p))
-                disposition = "accepted" if 200 <= status < 300 else "failed"
-            except (OSError, http.client.HTTPException):
-                disposition = "uncertain"
+                if int(time.time()) >= req["expires_at"]:
+                    _record(
+                        self._path(request_id, "not-sent"),
+                        {"request_id": request_id, "reason": "request_expired_before_submission"},
+                    )
+                    raise ApprovalError("request_expired")
+                try:
+                    status = post(hook, self._wire(req, key, p))
+                    disposition = "accepted" if 200 <= status < 300 else "failed"
+                except (OSError, http.client.HTTPException):
+                    disposition = "uncertain"
             receipt = {"request_id": request_id, "transport": disposition}
             _record(final, receipt)
             return receipt
@@ -1121,6 +1754,17 @@ class ApprovalBridge:
             require(
                 event["status"] in ("Pending", "Approved", "Declined"), "invalid_provider_status"
             )
+            self._inspect(req)
+            with ReconciliationJournal(self.directory, self.organization).db() as db:
+                prior = db.execute(
+                    "SELECT provider_status FROM requests WHERE id=?", (request_id,)
+                ).fetchone()
+                require(
+                    prior is None
+                    or prior[0] not in {"Approved", "Declined"}
+                    or prior[0] == event["status"],
+                    "conflicting_provider_event",
+                )
             if event["status"] == "Pending":
                 return {"request_id": request_id, "state": "pending"}
             require(
@@ -1128,7 +1772,6 @@ class ApprovalBridge:
                 or (event["actor_id"] is None and p["approver_mode"] == "verified_single_approver"),
                 "named_approver_unverified",
             )
-            self._inspect(req)
             current_policy, current_key = self._policy()
             require(
                 current_policy == p and hmac.compare_digest(current_key, key),
@@ -1227,6 +1870,18 @@ def main() -> int:
     reconcile.add_argument("--reminder-interval", type=int, default=3600)
     actions.add_parser("prepare-cutover")
     actions.add_parser("complete-cutover")
+    replacements = actions.add_parser("reconcile-reviewers")
+    replacements.add_argument("--authority", type=Path, required=True)
+    replacements.add_argument("--actor", required=True)
+    replacements.add_argument("--limit", type=int, default=50)
+    adoption = actions.add_parser("complete-reviewer-replacement")
+    adoption.add_argument("--authority", type=Path, required=True)
+    adoption.add_argument("--actor", required=True)
+    actions.add_parser("observe-replaced-status").add_argument("--input", type=Path, required=True)
+    recovery = actions.add_parser("recover-request-authority")
+    recovery.add_argument("--request-id", required=True)
+    recovery.add_argument("--original-policy", type=Path, required=True)
+    recovery.add_argument("--original-key", type=Path)
     actions.add_parser("claim-notification")
     actions.add_parser("confirm-notification").add_argument("--notification-ref", required=True)
     args = parser.parse_args()
@@ -1259,6 +1914,21 @@ def main() -> int:
             value = bridge.prepare_cutover()
         elif args.operation == "complete-cutover":
             value = bridge.complete_cutover()
+        elif args.operation == "reconcile-reviewers":
+            value = bridge.reconcile_reviewers(
+                authority=args.authority, actor=args.actor, limit=args.limit
+            )
+        elif args.operation == "complete-reviewer-replacement":
+            value = bridge.complete_reviewer_replacement(authority=args.authority, actor=args.actor)
+        elif args.operation == "observe-replaced-status":
+            require(args.input.is_absolute(), "private_signed_decision_required")
+            value = bridge.observe_replaced_status(_read_private(args.input, 16_384))
+        elif args.operation == "recover-request-authority":
+            value = bridge.recover_request_authority(
+                args.request_id,
+                original_policy=args.original_policy,
+                original_key=args.original_key,
+            )
         elif args.operation == "claim-notification":
             value = {"notification": bridge.claim_notification()}
         elif args.operation == "confirm-notification":
