@@ -17,4 +17,4 @@ Measure a clean fixture on the target CPU with the private workload class record
 
 For the generated rule-only fixture, provision one logical CPU, at least 32 MiB for the worker process and 2 MiB of working disk for the extracted kit, state and a fallback snapshot. The rehearsal measured about 28 MiB worker peak RSS, 0.90 MiB unpacked and 0.18 MiB each for state and fallback. Reserve the downloaded ZIP, previous kit, gateway, interpreter and OS resources separately. These values bound this fixture only.
 
-The test suite starts the packaged worker and health process directly. Record separately whether the target host booted the actual units and whether an independently authorized installed provider reached the endpoint.
+The supervised test starts a trusted TLS listener from the packaged health code, verifies that the health command rejects a mismatched release before binding, and restarts the packaged worker as a subprocess. Record separately whether the target host booted the actual units and whether an independently authorized installed provider reached the endpoint.

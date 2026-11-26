@@ -1,9 +1,12 @@
 """A generated customer-owned install with a real TLS client and managed queue."""
 
+import argparse
+import asyncio
 import hashlib
 import http.client
 import json
 import os
+import runpy
 import secrets
 import shutil
 import sqlite3
@@ -41,7 +44,7 @@ def test_private_tls_rotation(kit, tmp_path):
     folder = kit / "integrations/worker-host"
     revision = json.loads((kit / "PROVENANCE.json").read_text())["source_commit"]
     config = json.loads((folder / "manifest.example.json").read_text())
-    config.update(origin="https://localhost", source_commit=revision)
+    config.update(origin="https://127.0.0.1", source_commit=revision)
     manifest = tmp_path / "manifest.json"
     manifest.write_text(json.dumps(config))
     credential = tmp_path / "credential"
@@ -49,7 +52,7 @@ def test_private_tls_rotation(kit, tmp_path):
     credential.touch(mode=0o600)
     credential.write_text(old)
     extensions = tmp_path / "extensions"
-    extensions.write_text("subjectAltName=DNS:localhost\nextendedKeyUsage=serverAuth\n")
+    extensions.write_text("subjectAltName=IP:127.0.0.1\nextendedKeyUsage=serverAuth\n")
 
     def openssl(*args):
         subprocess.run(
@@ -119,24 +122,33 @@ def test_private_tls_rotation(kit, tmp_path):
     assert rejected.returncode != 0 and not rejected.stdout
     assert b"invalid origin or package binding" in rejected.stderr
     manifest.write_text(json.dumps(config))
-    server = subprocess.Popen(
-        start,
-        cwd=tmp_path,
-        stdout=subprocess.PIPE,
-        text=True,
-    )
-    try:
-        port = int(server.stdout.readline())
+    bind_server = runpy.run_path(str(folder / "health.py"))["bind_server"]
+
+    async def check_listener():
+        server = await bind_server(
+            argparse.Namespace(
+                config=manifest,
+                cert=tmp_path / "tls.crt",
+                key=tmp_path / "tls.key",
+                token=credential,
+                bind="127.0.0.1",
+                port=0,
+            )
+        )
+        async with server:
+            await check_requests(server.sockets[0].getsockname()[1])
+
+    async def check_requests(port):
         trusted = ssl.create_default_context(cafile=tmp_path / "ca.crt")
 
-        def request(token, method="GET", path="/v1/health", ctx=trusted, **changes):
+        def exchange(token, method="GET", path="/v1/health", ctx=trusted, **changes):
             headers = {
-                "Host": "localhost",
+                "Host": "127.0.0.1",
                 "Origin": config["origin"],
                 "X-OpenTour-Audience": config["audience"],
                 "Authorization": "Bearer " + token,
             }
-            client = http.client.HTTPSConnection("localhost", port, context=ctx, timeout=3)
+            client = http.client.HTTPSConnection("127.0.0.1", port, context=ctx, timeout=3)
             try:
                 client.request(method, path, headers=headers | changes)
                 reply = client.getresponse()
@@ -144,7 +156,10 @@ def test_private_tls_rotation(kit, tmp_path):
             finally:
                 client.close()
 
-        status, payload = request(old)
+        async def request(*args, **kwargs):
+            return await asyncio.to_thread(exchange, *args, **kwargs)
+
+        status, payload = await request(old)
         assert status == 200
         assert json.loads(payload) == {
             "status": "ready",
@@ -155,30 +170,29 @@ def test_private_tls_rotation(kit, tmp_path):
             "source_commit": revision,
         }
         with pytest.raises(ssl.SSLCertVerificationError):
-            request(old, ctx=ssl.create_default_context())
+            await request(old, ctx=ssl.create_default_context())
         for change in (
             {"Host": "other"},
             {"Origin": "https://other.invalid"},
             {"X-OpenTour-Audience": "other"},
             {"Authorization": ""},
         ):
-            assert request(old, **change) == (403, b"")
+            assert await request(old, **change) == (403, b"")
         for path in ("/v1/health?x", "/v1/source", "/v1/model", "/v1/submit_intake"):
-            assert request(old, path=path) == (404, b"")
-        assert request(old, method="POST") == (404, b"")
+            assert await request(old, path=path) == (404, b"")
+        assert await request(old, method="POST") == (404, b"")
         replacement = tmp_path / "next"
         replacement.touch(mode=0o600)
         replacement.write_text(new)
         replacement.replace(credential)
-        assert request(old) == (403, b"")
-        assert request(new) == (200, payload)
+        assert await request(old) == (403, b"")
+        assert await request(new) == (200, payload)
         credential.chmod(0o640)
-        assert request(new) == (403, b"")
+        assert await request(new) == (403, b"")
         credential.unlink()
-        assert request(new) == (403, b"")
-    finally:
-        server.terminate()
-        server.wait(timeout=5)
+        assert await request(new) == (403, b"")
+
+    asyncio.run(check_listener())
 
 
 def test_packaged_worker_restart_restore(kit, tmp_path):

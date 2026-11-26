@@ -59,7 +59,7 @@ def response(request, config, token_path, body):
     return b"200 OK", body
 
 
-async def serve(args):
+async def bind_server(args):
     config = json.loads(args.config.read_text())
     provenance = json.loads((Path(__file__).resolve().parents[2] / "PROVENANCE.json").read_text())
     for key in ("site", "audience", "revision"):
@@ -109,7 +109,7 @@ async def serve(args):
         finally:
             writer.close()
 
-    server = await asyncio.start_server(
+    return await asyncio.start_server(
         handle,
         args.bind,
         args.port,
@@ -117,6 +117,10 @@ async def serve(args):
         ssl_handshake_timeout=4,
         limit=8192,
     )
+
+
+async def serve(args):
+    server = await bind_server(args)
     async with server:
         print(server.sockets[0].getsockname()[1], flush=True)
         await server.serve_forever()
