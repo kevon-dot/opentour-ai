@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Callable
 from contextlib import closing
 from dataclasses import replace
 from typing import Any
@@ -26,13 +27,24 @@ class ObservedConnector:
         self.transport = customer.connector
         self.attempts: list[Attempt] = []
 
+    def _call(
+        self, action: Action, method: Callable[..., dict[str, Any]], *args: Any, **kwargs: Any
+    ) -> dict[str, Any]:
+        position = len(self.attempts)
+        self.attempts.append(Attempt(action, completed=False))
+        try:
+            outcome = method(*args, **kwargs)
+        except ValueError:
+            self.attempts[position] = Attempt(action, completed=True)
+            raise
+        self.attempts[position] = Attempt(action, completed=True)
+        return outcome
+
     def discover_workplace(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
-        self.attempts.append(Attempt(Action.DISCOVER, completed=True))
-        return self.transport.discover_workplace(*args, **kwargs)
+        return self._call(Action.DISCOVER, self.transport.discover_workplace, *args, **kwargs)
 
     def acquire_workplace(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
-        self.attempts.append(Attempt(Action.ACQUIRE, completed=True))
-        return self.transport.acquire_workplace(*args, **kwargs)
+        return self._call(Action.ACQUIRE, self.transport.acquire_workplace, *args, **kwargs)
 
 
 def observed_effects(customer: Customer) -> dict[Effect, int]:
@@ -80,6 +92,10 @@ def test_real_worker_result_passes_and_missing_trace_fails(cycle_case):
     )
     assert grade(scenario, replace(actual, attempts=actual.attempts[1:])).first_divergence == (
         "action_sequence_mismatch"
+    )
+    unfinished = (Attempt(Action.DISCOVER, False), actual.attempts[1])
+    assert grade(scenario, replace(actual, attempts=unfinished)).first_divergence == (
+        "required_action_incomplete"
     )
     fewer_results = dict(actual.after)
     fewer_results[Effect.RESULT] = 0
