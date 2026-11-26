@@ -1,12 +1,15 @@
 """Generated tests for the advisory Fable review gate."""
 
 import json
+import os
 import unittest
 from copy import deepcopy
 from pathlib import Path
+from typing import Any
 from unittest.mock import patch
 
 from tools.ci import fable_review as review
+from tools.ci.policy import CHECKS
 
 HEAD = "a" * 40
 BASE = "b" * 40
@@ -22,7 +25,7 @@ ENV = {
 }
 
 
-def fixture_pr():
+def fixture_pr() -> dict[str, Any]:
     return {
         "number": 91,
         "state": "open",
@@ -34,7 +37,7 @@ def fixture_pr():
     }
 
 
-def fixture_event():
+def fixture_event() -> dict[str, Any]:
     return {
         "repository": REPO,
         "workflow_run": {
@@ -51,7 +54,9 @@ def fixture_event():
     }
 
 
-def fixture_response(verdict="approved", blockers=None):
+def fixture_response(
+    verdict: str = "approved", blockers: list[dict[str, str]] | None = None
+) -> dict[str, Any]:
     return {
         "model": review.MODEL,
         "stop_reason": "end_turn",
@@ -63,7 +68,7 @@ def fixture_response(verdict="approved", blockers=None):
 
 
 class FableReviewTests(unittest.TestCase):
-    def test_workflow_uses_trusted_code_and_requires_pilot_opt_in(self):
+    def test_workflow_uses_trusted_code_and_requires_pilot_opt_in(self) -> None:
         file = Path(__file__).resolve().parents[2] / ".github/workflows/fable-review.yml"
         workflow = json.loads(file.read_text())
         self.assertEqual(set(workflow["on"]), {"workflow_run"})
@@ -77,7 +82,7 @@ class FableReviewTests(unittest.TestCase):
         self.assertFalse(job["steps"][0]["with"]["persist-credentials"])
         self.assertEqual(job["steps"][2]["with"]["permission-checks"], "write")
 
-    def test_only_the_selected_ci_and_same_repository_pilot_are_eligible(self):
+    def test_only_the_selected_ci_and_same_repository_pilot_are_eligible(self) -> None:
         for change in (
             {"head_repository": {"id": 2}},
             {"head_branch": "codex/ope-534-fable-review-pilot"},
@@ -89,19 +94,22 @@ class FableReviewTests(unittest.TestCase):
                 event = fixture_event()
                 event["workflow_run"].update(change)
                 self.assertIsNone(review.Candidate.from_event(event))
-        self.assertEqual(review.Candidate.from_event(fixture_event()).head, HEAD)
-
-    def test_ci_requires_every_success_and_matching_screened_artifacts(self):
         candidate = review.Candidate.from_event(fixture_event())
+        assert candidate is not None
+        self.assertEqual(candidate.head, HEAD)
+
+    def test_ci_requires_every_success_and_matching_screened_artifacts(self) -> None:
+        candidate = review.Candidate.from_event(fixture_event())
+        assert candidate is not None
         jobs = [
             {"id": num, "name": name, "status": "completed", "conclusion": "success"}
-            for num, name in enumerate(review.CHECKS)
+            for num, name in enumerate(CHECKS)
         ]
-        artifacts = [{"name": f"{name}-{MERGE}", "expired": False} for name in review.CHECKS]
+        artifacts = [{"name": f"{name}-{MERGE}", "expired": False} for name in CHECKS]
         with patch.object(
             review, "github_object", side_effect=[{"jobs": jobs}, {"artifacts": artifacts}]
         ):
-            self.assertEqual(len(review.ci_evidence(candidate, MERGE, "read")), len(review.CHECKS))
+            self.assertEqual(len(review.ci_evidence(candidate, MERGE, "read")), len(CHECKS))
         for overrides in ({"jobs": jobs[:-1]}, {"artifacts": artifacts[:-1]}):
             with self.subTest(overrides=list(overrides)), patch.object(
                 review, "github_object",
@@ -112,7 +120,7 @@ class FableReviewTests(unittest.TestCase):
             ), self.assertRaises(review.ReviewHeld):
                 review.ci_evidence(candidate, MERGE, "read")
 
-    def test_public_report_contains_only_allowed_domains_and_changed_paths(self):
+    def test_public_report_contains_only_allowed_domains_and_changed_paths(self) -> None:
         result = fixture_response("changes_required", [
             {"domain": "functionality", "path": "src/pilot.py"},
             {"domain": "architecture", "path": "private-input"},
@@ -122,7 +130,7 @@ class FableReviewTests(unittest.TestCase):
             ("changes_required", ["- functionality — src/pilot.py", "- architecture"]),
         )
 
-    def test_invalid_or_incomplete_model_response_cannot_approve(self):
+    def test_invalid_or_incomplete_model_response_cannot_approve(self) -> None:
         for sample in (
             {**fixture_response(), "stop_reason": "max_tokens"},
             {**fixture_response(), "model": "another-model"},
@@ -135,7 +143,7 @@ class FableReviewTests(unittest.TestCase):
                     review.review_verdict(sample, set()), ("insufficient_evidence", [])
                 )
 
-    def test_commit_base_and_criteria_are_rechecked_before_publishing(self):
+    def test_commit_base_and_criteria_are_rechecked_before_publishing(self) -> None:
         for mutation in ("head", "base", "merge_commit_sha", "criteria"):
             with self.subTest(mutation=mutation):
                 final = deepcopy(fixture_pr())
@@ -147,18 +155,27 @@ class FableReviewTests(unittest.TestCase):
                     final, expect_check=False, changed_criteria=mutation == "criteria"
                 )
 
-    def test_publishes_check_only_on_the_reviewed_commit(self):
+    def test_publishes_check_only_on_the_reviewed_commit(self) -> None:
         self.run_pipeline(fixture_pr(), expect_check=True)
 
-    def test_second_delivery_of_the_same_review_reuses_the_receipt(self):
+    def test_second_delivery_of_the_same_review_reuses_the_receipt(self) -> None:
         self.run_pipeline(fixture_pr(), expect_check=True, repeat=True)
 
-    def run_pipeline(self, final, *, expect_check, changed_criteria=False, repeat=False):
+    def run_pipeline(
+        self,
+        final: dict[str, Any],
+        *,
+        expect_check: bool,
+        changed_criteria: bool = False,
+        repeat: bool = False,
+    ) -> None:
         diff = b"diff --git a/src/pilot.py b/src/pilot.py\n--- a/src/pilot.py\n+++ b/src/pilot.py\n"
-        receipts = []
+        receipts: list[dict[str, Any]] = []
         readback_count = 0
 
-        def github_object(path, _token, payload=None):
+        def github_object(
+            path: str, _token: str, payload: dict[str, Any] | None = None
+        ) -> dict[str, Any]:
             nonlocal readback_count
             if path == "pulls/91":
                 readback_count += 1
@@ -173,11 +190,12 @@ class FableReviewTests(unittest.TestCase):
                     for receipt in receipts
                 ]}
             if path == "check-runs":
+                assert payload is not None
                 receipts.append(payload)
                 return {}
             self.fail(f"Unexpected GitHub path {path}")
 
-        def provider(_url, _headers, payload):
+        def provider(_url: str, _headers: dict[str, str], payload: dict[str, Any]) -> bytes:
             data = json.loads(payload["messages"][0]["content"])
             self.assertEqual(
                 (data["head"], data["base"], data["tested_merge"]), (HEAD, BASE, MERGE)
@@ -193,7 +211,7 @@ class FableReviewTests(unittest.TestCase):
         if repeat:
             versions.append(("version-a", criteria))
         with (
-            patch.dict(review.os.environ, ENV),
+            patch.dict(os.environ, ENV),
             patch.object(review, "github_object", side_effect=github_object),
             patch.object(review, "github", return_value=diff),
             patch.object(review, "ci_evidence", return_value=[]),
