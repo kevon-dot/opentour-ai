@@ -30,6 +30,16 @@ A current installation can reopen its permitted owner-local decision evidence by
 
 The custodian first verifies the independent inventory of recipients and copies, then records its opaque evidence reference on the `inventory-review` item. A settled closeout records `"export_disposition": "zero_exports"` only when the private journal shows zero known or possible Slack and Zapier exposures, no unknown history, and the inventory has no destination item. This fact remains in a receipt-only closeout. If a transmission may have occurred, recover the original receipt or record its outstanding disposition and owner using the independent destination evidence.
 
+Closeout also records obligations for private intake and benchmark registers, starter and live
+grants, live evidence and export manifests, and readiness/repair receipts. SQLite sidecars and
+broken links count as present. Inventory discovery inspects filenames only; it does not reopen
+raw policies, decisions or verifier outcomes after withdrawal. The custodian must separately
+account for the raw exports and policy files named by private manifests, backups and remote
+copies. These obligations start unresolved with the recorded custodian and due date. A claimed
+deletion, expiry or return is refused while the corresponding local state remains present;
+record the actual authorized transfer or retention obligation instead. No inventory operation
+deletes these files. Restoring a previously deleted artifact reopens its obligation on reconcile.
+
 When the destination owner independently verifies the exact downstream action, record the authorized private evidence reference. Recording this confirmation is an explicit operation separate from reading a page.
 
 ```sh
