@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hmac
+import os
 import re
 import sys
 from dataclasses import asdict
@@ -274,7 +275,16 @@ def materialize_live(selection: Path, run_ref: str) -> bool:
             return "export-" + _digest(receipts)[:40]
 
     try:
-        return intake.materialize(actor, run_ref, read)
+        changed = intake.materialize(actor, run_ref, read)
+        if intake.get_run(actor, run_ref).state == "materialized" and os.path.lexists(
+            authority.directory / "readiness-selection.json"
+        ):
+            # An independently authorized worker refreshes durable readiness after
+            # ingestion. A retry can recover this step without rereading sources.
+            from opentour_cell.pilot.readiness_selection import open_readiness
+
+            open_readiness(authority.directory, actor.tenant, authority.workflow_ref).refresh()
+        return changed
     except (OSError, ValueError, KeyError, TypeError):
         raise IntakeError("live_export_unavailable") from None
 
@@ -291,12 +301,11 @@ def main(argv: list[str] | None = None) -> int:
         _require(selected.get("schema_version") == SELECTION_SCHEMA)
         actor, service = open_intake(selection)
         status = service.get_run(actor, run_ref)
-        if status.state == "materialized":
-            print("already_materialized")
-            return 0
-        if status.state == "queued" and materialize_live(selection, run_ref):
-            print("materialized")
-            return 0
+        if status.state in {"queued", "materialized"}:
+            changed = materialize_live(selection, run_ref)
+            if changed or status.state == "materialized":
+                print("materialized" if changed else "already_materialized")
+                return 0
     except Exception:
         # CLI boundary: even unexpected parser, filesystem or database errors may
         # contain private paths, field names or source values.

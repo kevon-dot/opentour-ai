@@ -187,6 +187,18 @@ def test_unmatched_outcomes_remain_visible_and_reconcile_without_truth_invention
     assert case.snapshot(as_of_revision=before.sequence) == before
 
 
+def test_unmatched_outcomes_count_distinct_truth_identities_not_missing_targets(tmp_path):
+    case = Case(tmp_path / "owner")
+    case.ingest(outcome(), outcome=True)
+    case.ingest(outcome(event_id="retry-delivery"), outcome=True)
+    case.ingest(outcome(event_id="second-outcome", outcome_id="O2"), outcome=True)
+    assert case.snapshot().unmatched_outcomes == 2
+    case.ingest(outcome(event_id="revised", outcome_revision=2), outcome=True)
+    assert case.snapshot().unmatched_outcomes == 2
+    case.ingest(decision())
+    assert case.snapshot().unmatched_outcomes == 0
+
+
 def decision(identity="D1", **changes):
     return {
         "kind": "DecisionRecorded",

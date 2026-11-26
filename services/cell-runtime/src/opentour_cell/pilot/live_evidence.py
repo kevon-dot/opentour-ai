@@ -230,6 +230,14 @@ class LiveEvidence:
     @contextmanager
     def _db(self, *, write: bool = False) -> Iterator[sqlite3.Connection]:
         _check_file(self.path)
+        if not write:
+            from opentour_cell.pilot.receipt_recovery import _open_db
+
+            with _open_db(self.path) as existing:
+                _require(existing is not None)
+                assert existing is not None
+                yield existing
+            return
         db = sqlite3.connect(self.path.as_uri() + ("?mode=rw" if write else "?mode=ro"), uri=True)
         db.row_factory = sqlite3.Row
         try:
@@ -685,7 +693,14 @@ class LiveEvidence:
             for identity, versions in decisions.items()
             for event, _ in versions
         }
-        unmatched_outcomes = len(set(outcomes) - known_decisions)
+        unmatched_outcomes = len(
+            {
+                (*target, event["verifier"], event["outcome_id"])
+                for target, versions in outcomes.items()
+                if target not in known_decisions
+                for event, _ in versions
+            }
+        )
         for identity, versions in decisions.items():
             revision = max(event["decision_revision"] for event, _ in versions)
             current = [
