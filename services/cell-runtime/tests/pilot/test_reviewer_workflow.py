@@ -407,3 +407,53 @@ def test_regression_question_requires_scoped_choice_and_rechecks_selection(tmp_p
     assert "0 of 3 comparable" not in text(h, revoked)
     assert not h.app.journal.latest([first, second]) and not h.slack.post
     assert all(not h.app.journal.decision(revision) for revision in revisions)
+
+
+@pytest.mark.parametrize("withdrawal", ["dataset", "inspection", "actor"])
+def test_regression_picker_rechecks_every_row_at_admission(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, withdrawal: str
+) -> None:
+    h = Harness(tmp_path)
+    datasets = [supplied(h, qualified=True, suffix=suffix) for suffix in ("-first", "-last")]
+    h.config["users"][ACTOR]["datasets"] = datasets
+    h.save()
+    revisions = []
+    for dataset in datasets:
+        view = h.launch()
+        option = next(
+            row["accessory"]["value"]
+            for row in screen(h, view)["blocks"]
+            if "accessory" in row and row["text"]["text"].startswith(dataset + " · ")
+        )
+        h.action(view, "ot_result_open", option)
+        revision = buttons(screen(h, view))["ot_evidence"]
+        h.action(view, "ot_evidence", revision)
+        revisions.append(revision)
+    original = h.app.views.regression_picker
+    rendered = []
+
+    def withdraw_before_admission(*args: Any, **kwargs: Any) -> Json:
+        modal = original(*args, **kwargs)
+        rendered.append(json.dumps(modal))
+        if withdrawal == "dataset":
+            h.store.revoke(datasets[-1])
+        elif withdrawal == "inspection":
+            with h.app.journal.db() as db:
+                db.execute("UPDATE presentations SET expires=0 WHERE revision=?", (revisions[-1],))
+        else:
+            h.config["users"][ACTOR]["datasets"] = datasets[:1]
+            h.save()
+        return modal
+
+    monkeypatch.setattr(h.app.views, "regression_picker", withdraw_before_admission)
+    picker = h.launch(prompt="What got worse?")
+    assert len(rendered) == 1 and all(revision in rendered[0] for revision in revisions)
+    assert all(ref not in text(h, picker) for ref in datasets + revisions)
+    assert "ot_result_open" not in buttons(screen(h, picker))
+    with h.app.journal.db() as db:
+        assert (
+            db.execute(
+                "SELECT COUNT(*) FROM exposures WHERE kind='ot_regression_picker'"
+            ).fetchone()[0]
+            == 0
+        )

@@ -305,11 +305,13 @@ class Journal:
         row = db.execute("SELECT held FROM journal_control WHERE id=1").fetchone()
         _check(row and not row[0])
 
-    def admit_view(self, kind: str) -> str:
+    def admit_view(self, kind: str, *, authorize: Callable[[], None] | None = None) -> str:
         key = secrets.token_urlsafe(18)
         with self.db() as db:
             db.execute("BEGIN IMMEDIATE")
             self.active(db)
+            if authorize is not None:
+                authorize()
             db.execute(
                 "INSERT INTO exposures VALUES(?,?,'admitted',?,NULL)", (key, kind, int(time.time()))
             )
@@ -1510,9 +1512,6 @@ class Workbench:
         page = max(0, min(page, (len(eligible) - 1) // RESULT_PAGE_SIZE))
         start = page * RESULT_PAGE_SIZE
         rows = eligible[start : start + RESULT_PAGE_SIZE]
-        current = self.settings()
-        current.permission(actor, "inspect")
-        _check(self._policy(current, actor) == policy)
         listing = {"page": page, "items": {revision: source for _, source, revision in rows}}
         ctx = self.journal.context(actor, cfg.channel, view, "regressions", revision=_json(listing))
         self._show(
@@ -1521,7 +1520,22 @@ class Workbench:
                 ctx, rows, previous=bool(page), more=start + len(rows) < len(eligible)
             ),
             old_hash,
+            authorize=lambda: self._authorize_question_rows(cfg, actor, rows),
         )
+
+    def _authorize_question_rows(
+        self, cfg: Settings, actor: str, rows: list[tuple[str, str, str]]
+    ) -> None:
+        # Both the withdrawal guard and the exposure transaction are held at admission.
+        current = self.settings()
+        current.permission(actor, "inspect")
+        policy = self._policy(current, actor)
+        _check(policy == self._policy(cfg, actor))
+        for dataset, source, revision in rows:
+            _check(current.permission(actor, "inspect", dataset)["aggregate"])
+            target = self._readout(current, actor, source)
+            _check(target and target.dataset == dataset and target.revision == revision)
+            _check(self.journal.inspected(actor, revision, policy))
 
     def _questions(
         self,
@@ -1552,6 +1566,9 @@ class Workbench:
             dataset=target.dataset,
             dataset_revision=target.dataset_revision,
             audit=target.audit,
+            authorize=lambda: self._authorize_question_rows(
+                cfg, actor, [(target.dataset, source, revision)]
+            ),
         )
 
     def _unbound_recipient(self) -> bool:
@@ -1571,6 +1588,7 @@ class Workbench:
         dataset_revision: str | None = None,
         audit: Json | None = None,
         setup_context: str | None = None,
+        authorize: Callable[[], None] | None = None,
     ) -> str:
         # Record every attempted protected disclosure without persisting projected sample rows.
         exposure = ""
@@ -1578,7 +1596,7 @@ class Workbench:
             with _evidence_guard(
                 self.store, dataset, dataset_revision, self.store.engagement_id, audit
             ):
-                exposure = self.journal.admit_view(modal["callback_id"])
+                exposure = self.journal.admit_view(modal["callback_id"], authorize=authorize)
         navigation = (
             setup_context is not None
             and _static_setup_navigation(modal, setup_context)
