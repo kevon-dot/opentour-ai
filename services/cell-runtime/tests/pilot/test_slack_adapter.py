@@ -368,6 +368,24 @@ def test_settings_refuse_unrelated_audience_and_unknown_fields(
     h.app.pool.shutdown()
 
 
+@pytest.mark.parametrize(
+    ("channel", "recipient"),
+    [("GOWNERPRIVATE", "GOWNERPRIVATE"), (CHANNEL, "WENTERPRISEUSER")],
+    ids=["bound-private-channel", "enterprise-user"],
+)
+def test_settings_preserve_valid_explicit_recipients(
+    tmp_path: Path, channel: str, recipient: str
+) -> None:
+    h = Harness(tmp_path)
+    h.config.update(channel=channel, recipient=recipient)
+    h.save()
+    cfg = slack_adapter.Settings.load(h.path)
+    assert cfg.channel == channel and cfg.recipient == recipient
+    assert cfg.explicit_recipient and cfg.zapier
+    assert cfg.zapier_destination_sha256 == slack_adapter.hook_fingerprint(HOOK)
+    h.app.pool.shutdown()
+
+
 def test_new_explicit_recipient_requires_fresh_inspection(tmp_path: Path) -> None:
     h = Harness(tmp_path)
     h.config.pop("recipient")
