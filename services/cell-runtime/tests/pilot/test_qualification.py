@@ -13,6 +13,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from threading import Event
 from types import SimpleNamespace
 from typing import Any
 
@@ -178,6 +179,76 @@ def test_three_concurrent_deliveries_create_one_candidate(directory: Path) -> No
     assert all(result == receipts[0] for result in receipts)
     assert receipts[0]["disposition"] == "qualified"
     assert len(history(register)) == 1
+
+
+@pytest.mark.parametrize("replay", [False, True])
+def test_authority_expiring_behind_register_writer_cannot_admit_or_disclose(
+    directory: Path, monkeypatch: pytest.MonkeyPatch, replay: bool
+) -> None:
+    path = directory / "cohort.sqlite3"
+    register = QualificationRegister(path)
+    now = int(time.time())
+    credentials = Authority.parse({**authority(), "expires_at": now + 30})
+    envelope = sign(event())
+    if replay:
+        assert register.submit(envelope, credentials)["disposition"] == "qualified"
+    prelock_check = Event()
+
+    def clock() -> int:
+        observed = now
+        prelock_check.set()
+        return observed
+
+    monkeypatch.setattr("opentour_cell.pilot.qualification.time", SimpleNamespace(time=clock))
+    path.touch(mode=0o600, exist_ok=True)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        with closing(sqlite3.connect(path)) as writer:
+            writer.execute("BEGIN IMMEDIATE")
+            pending = pool.submit(register.submit, envelope, credentials)
+            assert prelock_check.wait(2)
+            assert not pending.done()
+            now = credentials.expires_at
+            writer.commit()
+        result = pending.result(timeout=5)
+    assert result == {
+        "schema_version": "opentour.pilot.qualification-receipt.v1",
+        "disposition": "held",
+        "reason": "qualification_authority_unverified",
+    }
+    assert len(history(path)) == int(replay)
+
+
+def test_verifier_next_check_uses_date_after_register_lock(
+    directory: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = directory / "cohort.sqlite3"
+    register = QualificationRegister(path)
+    now = int(datetime(2027, 1, 1, 23, 59, 59, tzinfo=UTC).timestamp())
+    credentials = Authority.parse({**authority(), "expires_at": now + 600})
+    starter = event()
+    starter["charter"]["verifier_next_check"] = "2027-01-01"
+    envelope = sign(starter)
+    prelock_check = Event()
+
+    def clock() -> int:
+        observed = now
+        prelock_check.set()
+        return observed
+
+    monkeypatch.setattr("opentour_cell.pilot.qualification.time", SimpleNamespace(time=clock))
+    path.touch(mode=0o600)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        with closing(sqlite3.connect(path)) as writer:
+            writer.execute("BEGIN IMMEDIATE")
+            pending = pool.submit(register.submit, envelope, credentials)
+            assert prelock_check.wait(2)
+            assert not pending.done()
+            now += 1
+            writer.commit()
+        result = pending.result(timeout=5)
+    assert result["reason"] == "charter_incomplete"
+    assert result["missing_fields"] == ["verifier_next_check"]
+    assert history(path) == []
 
 
 @pytest.mark.parametrize(
