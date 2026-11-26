@@ -1337,6 +1337,63 @@ def release_recorded(context: str, decision: str, artifact: str, audience: str) 
     )
 
 
+def readiness_answer(receipt: Mapping[str, Any]) -> StatusAnswer:
+    reason = receipt["reason_code"]
+    pending = receipt["pending_count"]
+    if reason == "no_live_decisions":
+        finding = "No live decisions yet."
+    elif reason in {"no_verifier_bound", "awaiting_outcome"}:
+        suffix = "No verifier bound" if reason == "no_verifier_bound" else "Awaiting outcome"
+        finding = (
+            f"{pending} decision{'s' if pending != 1 else ''} awaiting verification · {suffix}"
+        )
+    else:
+        finding = {
+            "too_early_to_train": "Too early to train.",
+            "simpler_route_sufficient": "The simpler repair is sufficient.",
+            "disputed_outcomes": "Independent outcomes are disputed.",
+            "fit_eligible": "The worker recorded fit eligibility.",
+            "committed_action_classification_required": "Missing observed action classification.",
+            "decision_time_input_required": "The original decision input is missing.",
+            "training_mandate_required": "Training needs a current mandate.",
+            "training_rights_required": "Training rights are missing.",
+            "training_budget_required": "Training budget is unavailable.",
+            "untouched_holdout_required": "An independent holdout is missing.",
+            "qualified_model_required": "The selected model needs qualification.",
+            "development_evidence_required": "More independent development evidence is needed.",
+            "repair_assessment_required": "A simple-repair assessment is needed.",
+        }[reason]
+    roots = receipt["verified_root_count"]
+    residuals, threshold = receipt["residual_group_count"], receipt["minimum_residual_groups"]
+    basis = f"{roots} verified root{'s' if roots != 1 else ''}."
+    if residuals is not None and threshold is not None:
+        unit = "group" if residuals == 1 else "groups"
+        basis += f" {residuals} residual {unit} after simple repair · threshold {threshold}."
+    elif roots:
+        basis += " Independent residual groups are unmeasured."
+    basis += f" Augmentation is not enabled. Readiness receipt {_ref(receipt['readiness_ref'])}."
+    next_action = {
+        "bind_verifier": "Choose the authorized independent outcome feed to bind.",
+        "ask_data_custodian_to_bind_verifier": "Ask the data custodian to bind a verifier.",
+        "verify_outcome": "Record an independent outcome.",
+        "observe_committed_decisions": "Record the first committed decision.",
+        "request_authorized_fit_admission": "Request separate fit admission.",
+        "inspect_simple_repair": "Inspect the simpler repair.",
+        "supply_independent_evidence": "Supply independent evidence.",
+        "provide_observed_action_classification": "Supply the observed action classification.",
+        "provide_decision_time_input": "Provide permitted decision-time input.",
+        "authorize_training_scope": "Authorize a training mandate.",
+        "authorize_training_rights": "Review the requested training rights.",
+        "review_training_budget": "Review the training budget.",
+        "supply_independent_holdout": "Supply an independent holdout.",
+        "qualify_selected_model": "Qualify the selected model.",
+        "assess_simple_repair": "Assess the simpler repair.",
+    }[receipt["next_action"]]
+    return StatusAnswer(
+        finding, basis, f"{next_action} Responsible · {_display(receipt['next_owner'])}."
+    )
+
+
 def app_home_view(
     context: str = "",
     title: str = "",
@@ -1348,6 +1405,7 @@ def app_home_view(
     pending: str = "",
     can_add_workflow: bool = False,
     workflow_settings: bool = False,
+    readiness: Mapping[str, Any] | None = None,
 ) -> Block:
     if not context:
         return {
@@ -1382,6 +1440,15 @@ def app_home_view(
                 "block_id": "ot_workflow_entry",
             }
         )
+    if readiness is not None:
+        answer = readiness_answer(readiness)
+        blocks.extend(
+            [_section(answer.finding), _section(answer.basis), _section(answer.next_action)]
+        )
+        if readiness["next_action"] == "bind_verifier":
+            blocks.append(
+                _actions(_button("Bind verifier", "ot_app_bind_verifier", readiness["revision"]))
+            )
     if workflow_settings:
         blocks.append(_actions(_button("Workflow settings", "ot_app_settings", "ot_app_settings")))
     if can_tune:

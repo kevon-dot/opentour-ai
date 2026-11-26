@@ -108,3 +108,30 @@ The intake worker needs its own intake grant to discover the resulting
 `feed_binding_ref` and submit a typed live request. Source ingestion depends
 on an installed authorized reader. The Slack settings action reads no feed
 content and submits no intake, training, approval or release work.
+
+### Show current training readiness
+
+Place `readiness-selection.json` in the private worker directory. Use schema
+`opentour.pilot.readiness-selection.v1`, the admitted `workflow_ref`, the
+existing `worker_ref`, and `policy_file` (a private JSON basename, or null
+when no simple-repair policy is configured). The current signed live grant
+must independently permit that worker to inspect and ingest. The optional
+policy identifies the same workflow, engagement and dataset revision and sets
+the development population, repair rule and independent residual threshold.
+
+After processing an authorized live page, the worker calls
+`open_readiness(directory, tenant, workflow_ref, contexts=...).refresh()`.
+An observed decision-context reader may support simple-repair assessment.
+Missing decision-time input or committed-action classification keeps the
+corresponding assessment unmeasured. The call persists the evidence-bound
+readiness receipt and never admits a fit.
+
+Private Home reads the persisted current receipt with the authenticated Slack
+principal's live inspection grant and dataset aggregate permission. A pending
+decision can request independent verification. With a signed custodian role
+and permitted outcome resource, **Bind verifier** opens the existing private
+binding form with only independent outcome choices. A training question can also show current readiness when the verified frozen
+result explicitly identifies that workflow and its tenant, engagement, dataset
+and revision all match. An unattributed result keeps its original answer.
+A changed source, mandate or scope is rechecked before Slack receives either
+projection. Reopening Home runs no assessment and creates no readiness record.
