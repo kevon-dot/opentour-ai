@@ -7,10 +7,12 @@ authority and are adopted only through a separately configured worker port.
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import re
 import sqlite3
+import stat
 from collections.abc import Iterator
 from contextlib import AbstractContextManager, contextmanager
 from dataclasses import asdict, dataclass, replace
@@ -68,12 +70,23 @@ class MaterializedBenchmark:
 
 
 class BenchmarkMaterializer(Protocol):
-    def materialize(self, actor: IntakePrincipal, work: IntakeWork) -> MaterializedBenchmark | None:
+    def materialize(
+        self, actor: IntakePrincipal, work: IntakeWork, *, operation_ref: str
+    ) -> MaterializedBenchmark | None:
         """Run the actual authorized owner/adjudication or historical freeze producer.
 
         The implementation owns source reads, grouped split, independent truth,
         standing evaluation permission and any scoring; it may return a hold.
         This port receives no protected answers from the draft ledger.
+        """
+        ...
+
+    def readback(
+        self, actor: IntakePrincipal, work: IntakeWork, *, operation_ref: str
+    ) -> MaterializedBenchmark | None:
+        """Read an actual durable producer receipt, with zero new work.
+
+        None is an unresolved operation, not permission to run it again.
         """
         ...
 
@@ -114,6 +127,11 @@ class WorkflowBenchmarks:
                     "superseded INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(tenant,run), "
                     "UNIQUE(tenant,epoch,workflow,version))"
                 )
+                db.execute(
+                    "CREATE TABLE IF NOT EXISTS benchmark_operations (tenant TEXT, run TEXT, "
+                    "target TEXT, operation_ref TEXT UNIQUE, completed INTEGER NOT NULL DEFAULT 0, "
+                    "PRIMARY KEY(tenant,run,target))"
+                )
             yield db
             db.commit()
         except BaseException:
@@ -142,40 +160,127 @@ class WorkflowBenchmarks:
     def admit(self, tenant: str, work: IntakeWork) -> BenchmarkView:
         """Called only inside DurableIntake.admitted_work, before any worker dispatch."""
         _require(work.mode in {"starter", "historical"}, "live_cannot_materialize_benchmark")
+        _require(work.benchmark_version is not None, "benchmark_admission_order_unavailable")
+        assert work.benchmark_version is not None
+        scope = tenant, work.resource.engagement_epoch, work.workflow_ref
+        version = work.benchmark_version
+        parent = (
+            None
+            if work.benchmark_parent_run is None
+            else "benchmark-" + digest([*scope, work.benchmark_parent_run])[:40]
+        )
         definition = self._definition(work)
         with self._db(write=True) as db:
             existing = db.execute(
                 "SELECT * FROM benchmarks WHERE tenant=? AND run=?", (tenant, work.run_ref)
             ).fetchone()
             if existing is not None:
-                _require(existing["definition"] == definition, "benchmark_intent_conflict")
+                _require(
+                    existing["definition"] == definition
+                    and existing["version"] == version
+                    and existing["parent"] == parent,
+                    "benchmark_intent_conflict",
+                )
+                if not work.benchmark_current:
+                    db.execute(
+                        "UPDATE benchmarks SET superseded=1 WHERE reference=?",
+                        (existing["reference"],),
+                    )
+                    return replace(self._view(existing), benchmark_state="superseded")
                 return self._view(existing)
-            scope = tenant, work.resource.engagement_epoch, work.workflow_ref
             prior = db.execute(
                 "SELECT * FROM benchmarks WHERE tenant=? AND epoch=? AND workflow=? "
                 "ORDER BY version DESC LIMIT 1",
                 scope,
             ).fetchone()
-            version = 1 if prior is None else prior["version"] + 1
+            superseded = not work.benchmark_current
             reference = "benchmark-" + digest([*scope, work.run_ref])[:40]
             db.execute(
-                "INSERT INTO benchmarks VALUES(?,?,?,?,?,?,?,?,?,?,0)",
+                "INSERT INTO benchmarks VALUES(?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     *scope,
                     work.run_ref,
                     reference,
                     version,
-                    None if prior is None else prior["reference"],
+                    parent,
                     definition,
                     "draft",
                     None,
+                    int(superseded),
                 ),
             )
             if prior is not None:
                 db.execute(
-                    "UPDATE benchmarks SET superseded=1 WHERE reference=?", (prior["reference"],)
+                    "UPDATE benchmarks SET superseded=1 WHERE tenant=? AND epoch=? "
+                    "AND workflow=? AND version < ?",
+                    (*scope, version),
                 )
-            return BenchmarkView(reference, version, "draft")
+            return BenchmarkView(reference, version, "superseded" if superseded else "draft")
+
+    @contextmanager
+    def worker_guard(self) -> Iterator[None]:
+        """Serialize the producer operation across threads and worker processes."""
+        path = self.path.with_name("benchmark-worker.lock")
+        fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
+        try:
+            info = os.fstat(fd)
+            _require(
+                stat.S_ISREG(info.st_mode)
+                and info.st_uid == os.getuid()
+                and info.st_nlink == 1
+                and not info.st_mode & 0o077
+                and os.path.samestat(info, path.lstat())
+            )
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            yield
+        finally:
+            os.close(fd)
+
+    @staticmethod
+    def _transitions(state: str) -> set[str]:
+        return {
+            "draft": {"needs_owner_review", "frozen_unscored", "scored"},
+            "needs_owner_review": {"frozen_unscored", "scored"},
+            "frozen_unscored": {"scored"},
+            "scored": set(),
+        }[state]
+
+    def admit_materialization(
+        self, tenant: str, work: IntakeWork, target: str
+    ) -> tuple[str | None, bool, MaterializedBenchmark | None]:
+        """Admit one explicit transition before any producer invocation."""
+        _require(target in {"needs_owner_review", "frozen_unscored", "scored"})
+        with self._db(write=True) as db:
+            row = db.execute(
+                "SELECT * FROM benchmarks WHERE tenant=? AND run=?", (tenant, work.run_ref)
+            ).fetchone()
+            _require(row is not None and row["definition"] == self._definition(work))
+            _require(not row["superseded"], "immutable_benchmark_version")
+            if row["state"] == target:
+                return None, False, MaterializedBenchmark(**json.loads(row["materialized"]))
+            _require(target in self._transitions(row["state"]), "immutable_benchmark_version")
+            operation = (
+                "benchmark-operation-"
+                + digest([tenant, work.run_ref, target, row["definition"]])[:40]
+            )
+            previous = db.execute(
+                "SELECT * FROM benchmark_operations WHERE tenant=? AND run=? AND target=?",
+                (tenant, work.run_ref, target),
+            ).fetchone()
+            if previous is not None:
+                _require(previous["operation_ref"] == operation and not previous["completed"])
+                return operation, False, None
+            # An uncertain earlier transition must resolve before another one runs.
+            pending = db.execute(
+                "SELECT 1 FROM benchmark_operations WHERE tenant=? AND run=? AND completed=0",
+                (tenant, work.run_ref),
+            ).fetchone()
+            _require(pending is None, "benchmark_materialization_unresolved")
+            db.execute(
+                "INSERT INTO benchmark_operations VALUES(?,?,?,?,0)",
+                (tenant, work.run_ref, target, operation),
+            )
+            return operation, True, None
 
     def for_run(self, tenant: str, work: IntakeWork) -> BenchmarkView | None:
         if not self.path.exists():
@@ -187,9 +292,15 @@ class WorkflowBenchmarks:
             if row is None:
                 return None
             _require(row["definition"] == self._definition(work))
-            return self._view(row)
+            return (
+                self._view(row)
+                if work.benchmark_current
+                else replace(self._view(row), benchmark_state="superseded")
+            )
 
-    def current(self, scope: BenchmarkScope) -> BenchmarkView | None:
+    def current(
+        self, scope: BenchmarkScope, *, expected_run: str | None = None
+    ) -> BenchmarkView | None:
         if not self.path.exists():
             return None
         with self._db() as db:
@@ -198,7 +309,11 @@ class WorkflowBenchmarks:
                 "ORDER BY version DESC LIMIT 1",
                 (scope.tenant, scope.engagement_epoch, scope.workflow_ref),
             ).fetchone()
-            return None if row is None else self._view(row)
+            return (
+                None
+                if row is None or (expected_run is not None and row["run"] != expected_run)
+                else self._view(row)
+            )
 
     def observed_workflow(self, scope: BenchmarkScope) -> bool:
         """Prove an admitted identity under a separately held current authority guard.
@@ -218,7 +333,9 @@ class WorkflowBenchmarks:
                 is not None
             )
 
-    def inspect(self, scope: BenchmarkScope, reference: str) -> Json | None:
+    def inspect(
+        self, scope: BenchmarkScope, reference: str, *, current_run: str | None = None
+    ) -> Json | None:
         """Only under the caller's explicit benchmark inspection guard, including old versions."""
         if not self.path.exists():
             return None
@@ -234,12 +351,23 @@ class WorkflowBenchmarks:
                 "benchmark_ref": row["reference"],
                 "version": row["version"],
                 "parent_ref": row["parent"],
-                "benchmark_state": self._view(row).benchmark_state,
+                "benchmark_state": (
+                    "superseded"
+                    if current_run is not None and row["run"] != current_run
+                    else self._view(row).benchmark_state
+                ),
                 "as_of_state": row["state"],
                 "materialized": json.loads(row["materialized"]) if row["materialized"] else None,
             }
 
-    def publish(self, tenant: str, work: IntakeWork, receipt: MaterializedBenchmark) -> None:
+    def publish(
+        self,
+        tenant: str,
+        work: IntakeWork,
+        receipt: MaterializedBenchmark,
+        *,
+        operation_ref: str | None = None,
+    ) -> None:
         _require(work.mode != "live", "live_cannot_materialize_benchmark")
         _require(receipt.state in {"needs_owner_review", "frozen_unscored", "scored"})
         require_ref(receipt.definition_ref)
@@ -271,13 +399,9 @@ class WorkflowBenchmarks:
             )
             if row["materialized"] == encoded:
                 return
-            allowed = {
-                "draft": {"needs_owner_review", "frozen_unscored", "scored"},
-                "needs_owner_review": {"frozen_unscored", "scored"},
-                "frozen_unscored": {"scored"},
-                "scored": set(),
-            }
-            _require(receipt.state in allowed[row["state"]], "immutable_benchmark_version")
+            _require(
+                receipt.state in self._transitions(row["state"]), "immutable_benchmark_version"
+            )
             if row["state"] == "frozen_unscored":
                 previous = json.loads(row["materialized"])
                 _require(
@@ -291,6 +415,13 @@ class WorkflowBenchmarks:
                 "UPDATE benchmarks SET state=?,materialized=? WHERE tenant=? AND run=?",
                 (receipt.state, encoded, tenant, work.run_ref),
             )
+            if operation_ref is not None:
+                changed = db.execute(
+                    "UPDATE benchmark_operations SET completed=1 "
+                    "WHERE tenant=? AND run=? AND target=? AND operation_ref=? AND completed=0",
+                    (tenant, work.run_ref, receipt.state, operation_ref),
+                ).rowcount
+                _require(changed == 1)
 
 
 class BenchmarkIntake:
@@ -330,7 +461,14 @@ class BenchmarkIntake:
                     and scope.workflow_ref == status.workflow_ref
                     and scope.engagement_epoch == work.resource.engagement_epoch
                 )
-                return replace(status, benchmark=self.benchmarks.current(scope) or status.benchmark)
+                current_run = self.intake.current_benchmark_run(
+                    scope.tenant, scope.workflow_ref, scope.engagement_epoch
+                )
+                return replace(
+                    status,
+                    benchmark=self.benchmarks.current(scope, expected_run=current_run)
+                    or status.benchmark,
+                )
         return status
 
     def inspect_benchmark(
@@ -340,21 +478,42 @@ class BenchmarkIntake:
             return None
         with self.inspection.guard(actor, workflow) as scope:
             _require(scope.tenant == actor.tenant and scope.workflow_ref == workflow)
-            return self.benchmarks.inspect(scope, require_ref(reference))
+            current_run = self.intake.current_benchmark_run(
+                scope.tenant, workflow, scope.engagement_epoch
+            )
+            return self.benchmarks.inspect(scope, require_ref(reference), current_run=current_run)
 
     def materialize(
-        self, actor: IntakePrincipal, run_ref: str, producer: BenchmarkMaterializer
+        self,
+        actor: IntakePrincipal,
+        run_ref: str,
+        producer: BenchmarkMaterializer,
+        *,
+        target_state: str = "scored",
     ) -> bool:
-        with self.intake.admitted_work(actor, run_ref) as work:
-            _require(work.mode != "live", "live_cannot_materialize_benchmark")
-            self.benchmarks.admit(actor.tenant, work)
-        # The actual producer acquires its own source/evaluation locks. It must
-        # not run inside a nested intake authority writer transaction.
-        receipt = producer.materialize(actor, work)
-        if receipt is None:
-            return False
-        with self.intake.admitted_work(actor, run_ref) as current:
-            _require(current == work)
-            self.benchmarks.publish(actor.tenant, current, receipt)
-        self.intake.materialize(actor, run_ref, lambda _: receipt.definition_ref)
-        return True
+        # Denied actors/runs do not even create the worker lock file.
+        with self.intake.admitted_work(actor, run_ref) as admitted:
+            _require(admitted.mode != "live", "live_cannot_materialize_benchmark")
+            _require(admitted.benchmark_current, "immutable_benchmark_version")
+        with self.benchmarks.worker_guard():
+            with self.intake.admitted_work(actor, run_ref) as work:
+                _require(work.mode != "live", "live_cannot_materialize_benchmark")
+                _require(work.benchmark_current, "immutable_benchmark_version")
+                self.benchmarks.admit(actor.tenant, work)
+                operation, dispatch, receipt = self.benchmarks.admit_materialization(
+                    actor.tenant, work, target_state
+                )
+            # Producer locks are independent of the intake authority writer.
+            # A crash leaves one pending operation; retries only read its receipt.
+            if operation is not None:
+                method = producer.materialize if dispatch else producer.readback
+                receipt = method(actor, work, operation_ref=operation)
+                if receipt is None:
+                    return False
+                _require(receipt.state == target_state, "benchmark_transition_mismatch")
+                with self.intake.admitted_work(actor, run_ref) as current:
+                    _require(current == work)
+                    self.benchmarks.publish(actor.tenant, current, receipt, operation_ref=operation)
+            assert receipt is not None
+            self.intake.materialize(actor, run_ref, lambda _: receipt.definition_ref)
+            return True
