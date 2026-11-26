@@ -7,6 +7,7 @@ import re
 import sqlite3
 import time
 from collections.abc import Callable
+from contextlib import AbstractContextManager
 from itertools import combinations
 from typing import Any
 
@@ -782,6 +783,7 @@ def run_recorded_baseline(
     plan: Json,
     intake: Json,
     *,
+    commit_authority: Callable[[], AbstractContextManager[None]],
     authorize: Callable[[], None] | None = None,
 ) -> Json:
     """Measure recorded predictions under evaluation rights; never qualify a repair.
@@ -843,6 +845,13 @@ def run_recorded_baseline(
     with store._db(write=True) as db:
         _live(intake)
         _reserve(db, reservation, rows)
+        # Training/custody transaction precedes the mandate guard, matching the
+        # existing authority lock order. Commit while that grant remains pinned.
+        with commit_authority():
+            check_current_intake(
+                store.path.parent, store.organization, plan["engagement"], plan["intake_revision"]
+            )
+            db.commit()
     current()
     with store._db(write=True) as db:
         _live(intake)
@@ -933,5 +942,13 @@ def run_recorded_baseline(
                 (canonical(result), plan["revision"]),
             )
         _live(intake)
+        # A withdrawal during scoring must roll back the result. Reacquiring
+        # the current grant here also keeps the check and commit atomic, without
+        # calling a nested training writer from the producer's full authority.
+        with commit_authority():
+            check_current_intake(
+                store.path.parent, store.organization, plan["engagement"], plan["intake_revision"]
+            )
+            db.commit()
     current()
     return result
