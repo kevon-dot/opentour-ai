@@ -87,6 +87,7 @@ def test_early_withdrawal_is_durable_and_safe_on_replay(tmp_path: Path) -> None:
         c.status()
     original = c.withdraw(**START)
     assert original["reconciled"] and original["state"] == "open"
+    assert "export_disposition" not in original
     assert set(items(original)) == {"inventory-review", "support-handoff"}
     assert c.withdraw(**START) == original
     after_restart = Closeout(directory, ORG)
@@ -219,6 +220,7 @@ def test_each_case_requires_support_actual_destination_evidence_and_schedule(
     record(c, "support-handoff", "support", "handoff_confirmed")
     done = c.finish(custodian="custodian-a", evidence="closeout-confirmation")
     assert done["state"] == "closed" and done["outstanding"] == 0
+    assert done["export_disposition"] == "zero_exports"
     assert "accepted" not in done
     assert c.finish(custodian="custodian-a", evidence="closeout-confirmation") == done
     reopened = record(
@@ -226,6 +228,7 @@ def test_each_case_requires_support_actual_destination_evidence_and_schedule(
     )
     assert reopened["state"] == "open" and reopened["outstanding"] == 1
     assert not reopened["closure_evidence"]
+    assert "export_disposition" not in reopened
 
 
 def test_concurrent_withdrawal_and_cli_read_use_same_engagement(tmp_path: Path) -> None:
@@ -297,6 +300,7 @@ def test_receipt_only_finish_requires_settled_obligations_and_discards_working_r
         "state": "closed",
         "retained": "receipt_only",
         "closure_evidence": "closure-receipt",
+        "export_disposition": "zero_exports",
     }
     assert c.status() == c.reconcile() == c.withdraw(**START) == result
     assert (
@@ -306,10 +310,12 @@ def test_receipt_only_finish_requires_settled_obligations_and_discards_working_r
         c.finish(custodian="custodian-a", evidence="different")
     with closing(sqlite3.connect(c.path)) as db:
         assert db.execute("SELECT COUNT(*) FROM items").fetchone()[0] == 0
-        assert db.execute(
+        fields = db.execute(
             "SELECT organization,agreement,custodian,support,due,revision,trigger,"
             "transport FROM closeout"
-        ).fetchone() == (ORG, "", "", "", "", None, "", "{}")
+        ).fetchone()
+        assert fields[:-1] == (ORG, "", "", "", "", None, "")
+        assert json.loads(fields[-1]) == {"export_disposition": "zero_exports"}
     assert not LocalTrainingStore(root / "training.sqlite3", ORG).engagement_active()
 
 
@@ -330,6 +336,38 @@ def test_late_acknowledgement_requires_fresh_destination_reconciliation(tmp_path
     assert state["delivery_inventory"]["zapier_uncertain"] == 0
     assert items(state)["zapier-copies"]["disposition"] == "unresolved"
     assert items(state)["zapier-copies"]["evidence"] is None
+
+
+def test_known_destination_history_cannot_be_projected_as_zero_exports(tmp_path: Path) -> None:
+    directory = workspace(tmp_path, ORG)
+    legacy_journal(directory, ORG)
+    closeout = Closeout(directory, ORG)
+    closeout.withdraw(**START)
+    with closing(sqlite3.connect(directory / "slack-pilot.sqlite3")) as journal:
+        assert journal.execute(
+            "SELECT delivery,COUNT(*) FROM decisions GROUP BY delivery ORDER BY delivery"
+        ).fetchall() == [("accepted", 1), ("legacy_hold", 1), ("uncertain", 1)]
+    record(closeout, "inventory-review", "inventory", "inventory_verified")
+    record(closeout, "support-handoff", "support", "handoff_confirmed")
+    record(closeout, "zapier-copies", "destination", "agreed_retention", owner="archive-owner")
+    held = closeout.status()
+    assert held["delivery_inventory"]["zapier_uncertain"] == 1
+    assert items(held)["zapier-copies"]["disposition"] == "agreed_retention"
+    with pytest.raises(CustodyError, match="obligations_open"):
+        closeout.finish(custodian="custodian-a", evidence="premature")
+    record(
+        closeout,
+        "zapier-copies",
+        "destination",
+        "custody_transferred",
+        evidence="independent-destination-custody",
+    )
+    record(closeout, "historical-destinations", "destination", "custody_transferred")
+    record(closeout, "local-handoff-journal", "receipt", "custody_transferred")
+    done = closeout.finish(custodian="custodian-a", evidence="destination-closeout")
+    assert done["state"] == "closed"
+    assert done["delivery_inventory"]["zapier_uncertain"] == 1
+    assert "export_disposition" not in done
 
 
 def test_restore_of_same_training_store_reasserts_hold_and_reopens_removed_rows(
