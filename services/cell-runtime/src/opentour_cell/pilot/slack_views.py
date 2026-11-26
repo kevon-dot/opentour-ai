@@ -626,10 +626,21 @@ def regression_picker(
     ]
     if current_workflow:
         workflow, token = current_workflow
+        weekly = topic == "live_errors"
         blocks = [
-            _section("Which scope should the training answer use?"),
+            _section(
+                "Which scope should the weekly answer use?"
+                if weekly
+                else "Which scope should the training answer use?"
+            ),
             _section(f"Current workflow · {_ref(workflow)}"),
-            _actions(_button("Use current workflow", "ot_current_training", token)),
+            _actions(
+                _button(
+                    "Use current workflow",
+                    "ot_current_week" if weekly else "ot_current_training",
+                    token,
+                )
+            ),
         ]
         if rows:
             blocks.append(_section("Or choose an inspected frozen comparison."))
@@ -649,6 +660,55 @@ def regression_picker(
         context,
         blocks,
     )
+
+
+def weekly_question(context: str, workflow: str, facts: Mapping[str, Any], pin: str) -> Block:
+    blocks = [_section(f"Current workflow · {_ref(workflow)}")]
+    summary, receipt = facts["summary"], facts["readiness"]
+    if summary is None:
+        blocks.append(
+            _section("Live decision, verification and source-read evidence is unavailable.")
+        )
+    else:
+        blocks.append(
+            _section(
+                f"Current totals across all observed dates · {summary['decisions']} committed, "
+                f"{summary['verified']} verified, {summary['pending']} pending, "
+                f"{summary['disputed']} disputed."
+            )
+        )
+        blocks.append(_section(_live_summary_text(summary)))
+        page = summary["last_page"]
+        if page and page["interval_end"] is not None and page["interval_end"] < facts["week_start"]:
+            blocks.append(
+                _section("The latest recorded source interval ends before this UTC week.")
+            )
+        elif page and page["complete"] and page["row_count"] == 0:
+            blocks.append(_section("The completed source page returned no rows."))
+    blocks.append(
+        _section(
+            "Weekly error count and verified denominator are unavailable. A linked decision and "
+            "outcome coverage receipt for the requested week is required."
+        )
+    )
+    nav = [_button("Back to scopes", "ot_week_scopes", "scopes")]
+    if receipt and receipt["reason_code"] in {"no_verifier_bound", "awaiting_outcome"}:
+        answer = readiness_answer(receipt)
+        blocks.extend(
+            [
+                _section(answer.finding),
+                _section(answer.next_action),
+                _section(f"Readiness receipt · {_ref(receipt['readiness_ref'])}"),
+            ]
+        )
+        if receipt["next_action"] == "bind_verifier":
+            nav.insert(0, _button("Bind verifier", "ot_week_bind", pin))
+    else:
+        blocks.append(
+            _section("Ask the data custodian to check decision and outcome source coverage.")
+        )
+    blocks.append(_actions(*nav))
+    return _modal("Weekly verification", "ot_current_week_status", context, blocks)
 
 
 def current_training_question(

@@ -20,6 +20,7 @@ from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing, contextmanager
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -78,6 +79,9 @@ ACTIONS = {
     "ot_tune_dataset",
     "ot_readouts",
     "ot_result_open",
+    "ot_current_week",
+    "ot_week_bind",
+    "ot_week_scopes",
     "ot_current_training",
     "ot_readiness_proof",
     "ot_training_scopes",
@@ -1533,7 +1537,7 @@ class Workbench:
             return
         self._browse(cfg, actor, view, source, search=query, old_hash=old_hash)
 
-    def _current_training(self, actor: str) -> tuple[str, str, Json | None] | None:
+    def _current_question(self, actor: str, topic: str) -> tuple[str, str, Json | None] | None:
         """Pin one currently inspected live workflow, separately from any frozen readout."""
         try:
             cfg = self.settings(check_engagement=False)
@@ -1549,6 +1553,26 @@ class Workbench:
                         and receipt["dataset_ref"] == scope.dataset_ref
                         and receipt["dataset_revision"] == scope.dataset_revision
                     )
+                facts = receipt
+                if topic == StatusTopic.LIVE_ERRORS:
+                    summary = self._live_summary(actor)
+                    if summary is not None:
+                        _check(
+                            summary["workflow"] == workflow
+                            and summary["dataset"] == scope.dataset_ref
+                        )
+                        if receipt:
+                            _check(summary["revision"] == receipt["evidence_revision"])
+                    today = datetime.now(UTC).date()
+                    facts = {
+                        "readiness": receipt,
+                        "summary": summary,
+                        "week_start": int(
+                            datetime.combine(
+                                today - timedelta(days=today.weekday()), datetime.min.time(), UTC
+                            ).timestamp()
+                        ),
+                    }
                 pin = self.journal.opaque(
                     "workflow",
                     [
@@ -1559,10 +1583,11 @@ class Workbench:
                         scope.engagement_epoch,
                         scope.dataset_ref,
                         scope.dataset_revision,
-                        receipt["revision"] if receipt else None,
+                        topic,
+                        facts,
                     ],
                 )
-                return workflow, pin, receipt
+                return workflow, pin, facts
         except Exception:
             return None
 
@@ -1585,7 +1610,11 @@ class Workbench:
         page = max(0, min(page, (len(eligible) - 1) // RESULT_PAGE_SIZE))
         start = page * RESULT_PAGE_SIZE
         rows = eligible[start : start + RESULT_PAGE_SIZE]
-        current = self._current_training(actor) if topic == StatusTopic.TRAINING else None
+        current = (
+            self._current_question(actor, topic)
+            if topic in {StatusTopic.TRAINING, StatusTopic.LIVE_ERRORS}
+            else None
+        )
         listing = {
             "page": page,
             "items": {revision: source for _, source, revision in rows},
@@ -1597,7 +1626,7 @@ class Workbench:
         def authorize() -> None:
             self._authorize_question_rows(cfg, actor, rows)
             if current is not None:
-                _check(self._current_training(actor) == current)
+                _check(self._current_question(actor, topic) == current)
 
         self._show(
             view,
@@ -2260,6 +2289,10 @@ class Workbench:
                     "workflow": workflow,
                     "dataset": scope.dataset_ref,
                     "revision": snapshot.evidence_revision,
+                    "decisions": snapshot.decisions,
+                    "verified": snapshot.verified,
+                    "pending": snapshot.pending,
+                    "disputed": snapshot.disputed,
                     "unmatched_outcomes": snapshot.unmatched_outcomes,
                     "last_ingested_at": snapshot.last_ingested_at,
                     "last_page": {
@@ -2500,6 +2533,40 @@ class Workbench:
             self._starter_view(self.settings(), actor, view, saved, old_hash)
         elif ctx["kind"] == "workflow_instructions":
             raise Refused("This setup screen has no actions.")
+        elif action in {"ot_current_week", "ot_week_bind"}:
+            open_verifier = action == "ot_week_bind"
+            if open_verifier:
+                _check(ctx["kind"] == "current_week" and value == ctx["revision"])
+            else:
+                _check(ctx["kind"] == "regressions")
+                listing = json.loads(ctx["revision"])
+                _check(
+                    listing["topic"] == StatusTopic.LIVE_ERRORS and value == listing.get("current")
+                )
+            weekly = self._current_question(actor, StatusTopic.LIVE_ERRORS)
+            _check(weekly and weekly[1] == value)
+            assert weekly is not None and weekly[2] is not None
+            workflow, pin, weekly_facts = weekly
+            assert weekly_facts is not None
+            if open_verifier:
+                _check(
+                    weekly_facts["readiness"]
+                    and weekly_facts["readiness"]["next_action"] == "bind_verifier"
+                )
+                self._live_view(cfg, actor, view, workflow, old_hash, verifier_only=True)
+                return
+            token = self.journal.context(actor, cfg.channel, view, "current_week", revision=pin)
+            self._show(
+                view,
+                self.views.weekly_question(token, workflow, weekly_facts, pin),
+                old_hash,
+                authorize=lambda: _check(
+                    self._current_question(actor, StatusTopic.LIVE_ERRORS) == weekly
+                ),
+            )
+        elif action == "ot_week_scopes":
+            _check(ctx["kind"] == "current_week" and value == "scopes")
+            self._regression_picker(cfg, actor, view, old_hash, topic=StatusTopic.LIVE_ERRORS.value)
         elif action in {"ot_current_training", "ot_readiness_proof"}:
             proof = action == "ot_readiness_proof"
             if proof:
@@ -2508,7 +2575,7 @@ class Workbench:
                 _check(ctx["kind"] == "regressions")
                 listing = json.loads(ctx["revision"])
                 _check(listing["topic"] == StatusTopic.TRAINING and value == listing.get("current"))
-            selected_training = self._current_training(actor)
+            selected_training = self._current_question(actor, StatusTopic.TRAINING)
             _check(selected_training and selected_training[1] == value)
             assert selected_training is not None
             workflow, _, receipt = selected_training
@@ -2522,7 +2589,9 @@ class Workbench:
                     token, workflow, receipt, pin=value, proof=proof
                 ),
                 old_hash,
-                authorize=lambda: _check(self._current_training(actor) == selected_training),
+                authorize=lambda: _check(
+                    self._current_question(actor, StatusTopic.TRAINING) == selected_training
+                ),
             )
         elif action == "ot_training_scopes":
             _check(ctx["kind"] == "current_training" and value == "scopes")
