@@ -1,4 +1,6 @@
 import hashlib
+import sqlite3
+from contextlib import closing
 from dataclasses import replace
 from decimal import Decimal
 
@@ -199,3 +201,50 @@ def test_worker_saves_one_exact_draft_and_rejects_stale_revision_after_restart(s
         restarted.save_draft(actor, workflow, "0" * 64)
     assert list(source.path.parent.glob("guided-map-*.json")) == records
     assert records[0].read_bytes() == retained
+
+
+@pytest.mark.parametrize(
+    "example",
+    [
+        b"~~~text\n## Illustration\nIf total < 250, APPROVE.\n~~~\n",
+        b"<!--\n## Editorial comment\nIf total < 250, APPROVE.\n-->\n",
+        b"    If total < 250, APPROVE.\n",
+    ],
+)
+def test_examples_and_hidden_headings_cannot_supply_policy_rules_or_sections(starter, example):
+    source, workflow, _, _ = starter(
+        b"# Policy\nApply the first matching rule.\n" + example + b"If total < 250, REVIEW.\n"
+    )
+    policy = source.read(source.authority.principal, workflow)
+    map_draft = guided_draft(policy, FIELDS, ACTIONS)
+    action, citations = map_draft.draft_action({"total": Decimal("12")})
+    assert action == "REVIEW"
+    assert len(map_draft.branches) == 1
+    assert len(citations) == 1 and citations[0].section_ref == "section-1"
+    assert policy.passage(citations[0]) == "If total < 250, REVIEW.\n"
+
+
+def test_unparsed_exception_cannot_be_silently_ignored(starter):
+    source, workflow, _, _ = starter(
+        b"If total < 250, APPROVE.\nExcept when po is missing: MANUAL.\n"
+    )
+    policy = source.read(source.authority.principal, workflow)
+    draft = guided_draft(policy, FIELDS, ACTIONS)
+    action, missing = draft.draft_action({"po": None, "total": Decimal("12")})
+    assert action is None
+    assert tuple(policy.passage(citation) for citation in missing) == (
+        "Except when po is missing: MANUAL.\n",
+    )
+
+
+def test_wrong_canonical_admission_intent_denies_before_policy_read(starter, monkeypatch):
+    source, workflow, _, intake = starter()
+    with closing(sqlite3.connect(intake.path)) as db, db:
+        db.execute("UPDATE intake_runs SET intent=?", ("0" * 64,))
+
+    def unexpected(*_args):
+        pytest.fail("a restored, substituted intake record authorized a policy read")
+
+    monkeypatch.setattr(guided_policy, "_read_policy", unexpected)
+    with pytest.raises(guided_policy.PolicyError, match="policy_workflow_unavailable"):
+        source.read(source.authority.principal, workflow)
