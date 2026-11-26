@@ -115,13 +115,14 @@ class Producer:
     def __init__(self, state="frozen_unscored"):
         self.state = state
         self.calls = 0
+        self.readbacks = 0
+        self.records = {}
         self.definition_digest = "a" * 64
         self.before_return = lambda: None
 
-    def materialize(self, actor, work):
+    def materialize(self, actor, work, *, operation_ref):
         self.calls += 1
-        self.before_return()
-        return MaterializedBenchmark(
+        receipt = MaterializedBenchmark(
             self.state,
             "definition-1",
             self.definition_digest,
@@ -129,6 +130,36 @@ class Producer:
             "actual-result-1" if self.state == "scored" else None,
             "b" * 64 if self.state == "scored" else None,
         )
+        self.records[operation_ref] = receipt
+        self.before_return()
+        return receipt
+
+    def readback(self, actor, work, *, operation_ref):
+        self.readbacks += 1
+        return self.records.get(operation_ref)
+
+
+class DiskProducer(Producer):
+    """Generated durable producer receipt for process-recovery conformance only."""
+
+    def __init__(self, directory):
+        super().__init__("scored")
+        self.directory = directory
+
+    def materialize(self, actor, work, *, operation_ref):
+        counter = self.directory / "generated-producer-count"
+        count = int(counter.read_text()) if counter.exists() else 0
+        counter.write_text(str(count + 1))
+        counter.chmod(0o600)
+        receipt = super().materialize(actor, work, operation_ref=operation_ref)
+        path = self.directory / (operation_ref + ".json")
+        path.write_text(json.dumps(asdict(receipt)))
+        path.chmod(0o600)
+        return receipt
+
+    def readback(self, actor, work, *, operation_ref):
+        path = self.directory / (operation_ref + ".json")
+        return MaterializedBenchmark(**json.loads(path.read_text())) if path.exists() else None
 
 
 @pytest.fixture
@@ -182,6 +213,41 @@ def test_crash_after_admission_before_draft_recovers_same_identity(prepared, mon
     status = reopened.get_run(ACTOR, receipt.run_ref)
     assert (receipt.run_ref, status.workflow_ref) == (original_run, original_workflow)
     assert status.benchmark.version == 1
+
+
+def test_recover_old_admission_preserves_newer_version_and_parent(prepared):
+    intake, _ = prepared
+    old = intake.intake.submit_intake(ACTOR, STARTER)
+    new = intake.submit_intake(
+        ACTOR, replace(STARTER, source_revision="policy-v2", idempotency_key="next")
+    )
+    newer = intake.get_run(ACTOR, new.run_ref)
+    assert newer.benchmark.version == 2
+    intake.submit_intake(ACTOR, replace(STARTER, idempotency_key="retry-old"))
+    older = intake.get_run(ACTOR, old.run_ref)
+    assert intake.get_run(ACTOR, new.run_ref) == newer
+    assert older.benchmark.benchmark_state == "superseded"
+    assert older.benchmark.version == 1
+    record = intake.inspect_benchmark(ACTOR, newer.workflow_ref, newer.benchmark.benchmark_ref)
+    assert record["parent_ref"] == older.benchmark.benchmark_ref
+
+
+def test_legacy_order_requires_reauthorization_in_durable_order(prepared):
+    intake, _ = prepared
+    old = intake.intake.submit_intake(ACTOR, STARTER)
+    # Simulate a deployed admission which predates the ordering ledger.
+    with sqlite3.connect(intake.intake.path) as db:
+        db.execute("DELETE FROM intake_benchmark_admissions")
+    newer_request = replace(STARTER, source_revision="policy-v2", idempotency_key="new")
+    newer = intake.intake.submit_intake(ACTOR, newer_request)
+    with pytest.raises(IntakeError, match="benchmark_admission_order_unavailable"):
+        intake.submit_intake(ACTOR, newer_request)
+    assert not intake.benchmarks.path.exists()
+    # Reauthorize the earlier actual record; never infer its old epoch from a later grant.
+    intake.submit_intake(ACTOR, replace(STARTER, idempotency_key="recover-legacy"))
+    intake.submit_intake(ACTOR, newer_request)
+    assert intake.get_run(ACTOR, old.run_ref).benchmark.version == 1
+    assert intake.get_run(ACTOR, newer.run_ref).benchmark.version == 2
 
 
 def test_changed_intent_conflicts_and_fresh_policy_creates_one_successor(prepared):
@@ -270,7 +336,7 @@ def test_unscored_has_no_fake_result_and_frozen_definition_cannot_change(prepare
     intake, _ = prepared
     receipt = intake.submit_intake(ACTOR, STARTER)
     producer = Producer()
-    assert intake.materialize(ACTOR, receipt.run_ref, producer)
+    assert intake.materialize(ACTOR, receipt.run_ref, producer, target_state="frozen_unscored")
     status = intake.get_run(ACTOR, receipt.run_ref)
     record = intake.inspect_benchmark(ACTOR, status.workflow_ref, status.benchmark.benchmark_ref)
     assert record["materialized"]["result_ref"] is None
@@ -282,6 +348,9 @@ def test_unscored_has_no_fake_result_and_frozen_definition_cannot_change(prepare
     with pytest.raises(IntakeError, match="frozen_benchmark_changed"):
         intake.materialize(ACTOR, receipt.run_ref, producer)
     producer.definition_digest = "a" * 64
+    producer.records = {
+        key: replace(value, definition_digest="a" * 64) for key, value in producer.records.items()
+    }
     assert intake.materialize(ACTOR, receipt.run_ref, producer)
     assert intake.get_run(ACTOR, receipt.run_ref).benchmark.benchmark_state == "scored"
 
@@ -292,12 +361,121 @@ def test_revocation_during_producer_and_foreign_roles_do_not_publish(prepared):
     producer = Producer()
     producer.before_return = lambda: setattr(authority, "allowed", False)
     with pytest.raises(IntakeError):
-        intake.materialize(ACTOR, receipt.run_ref, producer)
+        intake.materialize(ACTOR, receipt.run_ref, producer, target_state="frozen_unscored")
     with sqlite3.connect(intake.benchmarks.path) as db:
         assert db.execute("SELECT state FROM benchmarks").fetchone()[0] == "draft"
     for actor in (replace(ACTOR, tenant="foreign"), replace(ACTOR, role="evaluation")):
         with pytest.raises(IntakeError):
             intake.get_run(actor, receipt.run_ref)
+
+
+def test_scored_sequential_concurrent_restart_and_status_retries_do_zero_producer_work(prepared):
+    intake, authority = prepared
+    admission = intake.submit_intake(ACTOR, STARTER)
+    producer = Producer("scored")
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        assert all(
+            pool.map(lambda _: intake.materialize(ACTOR, admission.run_ref, producer), range(2))
+        )
+    assert producer.calls == 1 and producer.readbacks == 0
+    reopened = BenchmarkIntake(DurableIntake(authority.directory, authority))
+    assert reopened.materialize(ACTOR, admission.run_ref, producer)
+    for _ in range(3):
+        assert reopened.get_run(ACTOR, admission.run_ref).benchmark.benchmark_state == "scored"
+    assert producer.calls == 1 and producer.readbacks == 0
+
+
+@pytest.mark.parametrize("create_draft", [False, True])
+def test_superseded_version_never_invokes_producer(prepared, create_draft):
+    intake, _ = prepared
+    original = intake.submit_intake(ACTOR, STARTER)
+    request = replace(STARTER, source_revision="policy-v2", idempotency_key="next")
+    (intake if create_draft else intake.intake).submit_intake(ACTOR, request)
+    producer = Producer("scored")
+    with pytest.raises(IntakeError, match="immutable_benchmark_version"):
+        intake.materialize(ACTOR, original.run_ref, producer)
+    assert producer.calls == producer.readbacks == 0
+    status = intake.get_run(ACTOR, original.run_ref)
+    assert status.benchmark.benchmark_state == "superseded"
+    inspected = intake.inspect_benchmark(ACTOR, status.workflow_ref, status.benchmark.benchmark_ref)
+    assert inspected["benchmark_state"] == "superseded"
+
+
+def test_denied_materialization_creates_no_worker_operation_or_lock(prepared):
+    intake, _ = prepared
+    admission = intake.submit_intake(ACTOR, STARTER)
+    for actor in (replace(ACTOR, tenant="foreign"), replace(ACTOR, role="evaluation")):
+        with pytest.raises(IntakeError):
+            intake.materialize(actor, admission.run_ref, Producer("scored"))
+    assert not intake.benchmarks.path.with_name("benchmark-worker.lock").exists()
+    with sqlite3.connect(intake.benchmarks.path) as db:
+        assert db.execute("SELECT COUNT(*) FROM benchmark_operations").fetchone()[0] == 0
+
+
+def test_producer_receipt_after_crash_is_recovered_without_second_dispatch(prepared, monkeypatch):
+    intake, authority = prepared
+    admission = intake.submit_intake(ACTOR, STARTER)
+    producer = Producer("scored")
+    original_publish = intake.benchmarks.publish
+
+    def crash(*args, **kwargs):
+        raise RuntimeError("generated crash after producer receipt")
+
+    monkeypatch.setattr(intake.benchmarks, "publish", crash)
+    with pytest.raises(RuntimeError):
+        intake.materialize(ACTOR, admission.run_ref, producer)
+    assert producer.calls == 1
+    monkeypatch.setattr(intake.benchmarks, "publish", original_publish)
+    reopened = BenchmarkIntake(DurableIntake(authority.directory, authority))
+    assert reopened.materialize(ACTOR, admission.run_ref, producer)
+    assert producer.calls == 1 and producer.readbacks == 1
+    assert reopened.get_run(ACTOR, admission.run_ref).benchmark.benchmark_state == "scored"
+
+
+def test_uncertain_operation_never_blindly_dispatches_again(prepared):
+    intake, _ = prepared
+    admission = intake.submit_intake(ACTOR, STARTER)
+    producer = Producer("scored")
+
+    def no_receipt():
+        producer.records.clear()
+        raise RuntimeError("generated interruption without a receipt")
+
+    producer.before_return = no_receipt
+    with pytest.raises(RuntimeError):
+        intake.materialize(ACTOR, admission.run_ref, producer)
+    assert not intake.materialize(ACTOR, admission.run_ref, producer)
+    assert producer.calls == 1 and producer.readbacks == 1
+    assert intake.get_run(ACTOR, admission.run_ref).benchmark.benchmark_state == "draft"
+    with pytest.raises(IntakeError, match="benchmark_materialization_unresolved"):
+        intake.materialize(ACTOR, admission.run_ref, Producer(), target_state="frozen_unscored")
+
+
+def test_fresh_worker_process_recovers_actual_generated_receipt_without_redispatch(prepared):
+    intake, authority = prepared
+    admission = intake.submit_intake(ACTOR, STARTER)
+    command = [sys.executable, __file__, str(authority.directory), "worker", admission.run_ref]
+    failed = subprocess.run([*command, "crash"], capture_output=True, text=True)
+    assert failed.returncode == 42 and not failed.stderr
+    assert intake.get_run(ACTOR, admission.run_ref).benchmark.benchmark_state == "draft"
+    for _ in range(2):
+        result = subprocess.run(command, capture_output=True, text=True, check=True)
+        assert result.stdout.strip() == "true" and not result.stderr
+    assert (authority.directory / "generated-producer-count").read_text() == "1"
+    assert intake.get_run(ACTOR, admission.run_ref).benchmark.benchmark_state == "scored"
+
+
+def test_explicit_freeze_to_score_dispatches_once_per_transition(prepared):
+    intake, _ = prepared
+    admission = intake.submit_intake(ACTOR, STARTER)
+    producer = Producer()
+    assert intake.materialize(ACTOR, admission.run_ref, producer, target_state="frozen_unscored")
+    assert intake.materialize(ACTOR, admission.run_ref, producer, target_state="frozen_unscored")
+    assert producer.calls == 1
+    producer.state = "scored"
+    assert intake.materialize(ACTOR, admission.run_ref, producer, target_state="scored")
+    assert intake.materialize(ACTOR, admission.run_ref, producer, target_state="scored")
+    assert producer.calls == 2 and len(producer.records) == 2
 
 
 def test_two_fresh_stdio_processes_reuse_draft(prepared):
@@ -345,6 +523,16 @@ def test_two_fresh_stdio_processes_reuse_draft(prepared):
 
 if __name__ == "__main__":
     path = Path(sys.argv[1])
+    if len(sys.argv) > 2 and sys.argv[2] == "worker":
+        backend = BenchmarkIntake(DurableIntake(path, Authority(path)))
+        if len(sys.argv) > 4 and sys.argv[4] == "crash":
+
+            def crash_after_receipt(*args, **kwargs):
+                raise SystemExit(42)
+
+            backend.benchmarks.publish = crash_after_receipt
+        print(json.dumps(backend.materialize(ACTOR, sys.argv[3], DiskProducer(path))))
+        raise SystemExit(0)
     raise SystemExit(
         serve_intake(
             ACTOR,

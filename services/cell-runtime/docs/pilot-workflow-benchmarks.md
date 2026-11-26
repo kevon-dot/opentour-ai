@@ -21,6 +21,11 @@ metadata ledger inside it, but must not reacquire the authority's writer lock.
 The wrapper reserves the draft before returning admission to a dispatcher.
 If the process stops after durable admission but before draft creation, repeating
 the canonical intent recovers the same workflow, run and benchmark identity.
+Benchmark version and parent are reserved atomically inside the durable intake
+transaction, so recovering an older interrupted admission cannot supersede a
+newer admitted version. Existing admissions predating the ordering ledger must
+be reauthorized in durable admission order. An unknown earlier epoch holds new
+benchmark allocation; the code does not guess legacy identity.
 
 The ledger does not store source records, protected answers or a training payload.
 Fresh authorized source/policy intent produces one successor in the same workflow.
@@ -47,7 +52,14 @@ historical or starter producer is installed. An implementation must actually
 recheck its source and evaluation grants, use the existing grouped source joins,
 reserve the protected comparison population, and return a verified immutable
 definition/result receipt. Missing permissions, inputs or producers must hold.
-It must be idempotent for the durable run because retries may invoke it again.
+Each explicit target state has one stable operation reference. A private worker
+lock serializes dispatch across threads and processes, and operation admission
+precedes the producer call. Completed targets and superseded versions never
+invoke the producer. A frozen-to-scored request is a separate explicit target.
+After a crash, retry calls only `readback` for the existing operation; it never
+blindly repeats uncertain work. Missing readback leaves the operation held for
+recovery. The real producer must persist its actual receipt under that operation
+reference. Status reads do neither dispatch nor readback.
 
 The adapter invokes the producer outside the intake writer guard, then pins the
 same current intake again before publishing its result. Revocation between those
@@ -64,6 +76,8 @@ ledgers and the real durable intake/stdio implementation:
 | --- | --- |
 | Equivalent keys, concurrency, restart retain one draft | Concurrent canonical submissions, reopened ledger, two fresh stdio processes |
 | Crash between admission and dispatch | Injected interruption before draft persistence, recovery under a fresh operation key |
+| Older crash recovery after a new revision | Original version/parent retained; newer admission remains current |
+| Producer retry/concurrency/crash | Call counters show one dispatch per target; uncertain work uses readback only; superseded versions dispatch zero work |
 | Reused key with changed intent conflicts | Current durable intake rejects changed policy intent |
 | New revision makes one successor with readable parent | Fresh policy revision, current supersession and explicit as-of inspection |
 | `test_live_admission_leaves_benchmark_unchanged` | Two live feed revisions and restart preserve all benchmark rows and reference/version/state |
