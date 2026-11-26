@@ -4,13 +4,14 @@ An authorized worker can import one immutable revision of a customer-owned, stru
 
 ## Worker command
 
-When the installation contains `readiness-selection.json`, the worker refreshes
+When the installation contains `readiness-selection.json` for the admitted workflow, the worker refreshes
 durable readiness after the source operation is materialized. That selection
 references an independently authorized worker with both live inspect and intake
 rights. It grants no rights itself. Missing repair inputs remain explicit holds.
 If readiness refresh fails after source commit, the command fails without claiming
 readiness success; retry reconciles readiness without rereading acknowledged pages.
-Slack status reads never invoke this refresh.
+An unavailable matching readiness receipt is a hold; a selection for a different
+workflow does not activate this optional step. Slack status reads never invoke this refresh.
 
 Use the existing private worker directory, current signed live authority, current engagement and previously admitted workflow. Its custodian saves a decision or independent-outcome binding through **Connect live decisions**. The selected worker actor needs the intake role. Each currently bound resource needs an entry in the signed export mapping. A decision-only workflow can record pending decisions before an outcome binding exists.
 
