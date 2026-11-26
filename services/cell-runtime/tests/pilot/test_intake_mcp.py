@@ -693,17 +693,23 @@ class TestIntakeMcp(unittest.TestCase):
         directory = selected_path.parent
         grant_path = directory / "starter-intake-grant-registered-starter.json"
         good = _sealed_starter(selection)
+        expired = _sealed_starter(selection, expires_at=1)
         wrong_owner = {**selection, "owner_id": "other-founder"}
-        for selected, grant in (
-            (selection, {**good, "grant": {**good["grant"], "source_revision": "tampered"}}),
-            (selection, _sealed_starter(selection, expires_at=1)),
-            ({**selection, "actor": "other-worker"}, good),
-            (wrong_owner, _sealed_starter(wrong_owner)),
+        unavailable = "private_intake_selection_unavailable"
+        for selected, grant, reason in (
+            (selection, expired, "intake_expired"),
+            (
+                selection,
+                {**expired, "grant": {**expired["grant"], "source_revision": "tampered"}},
+                unavailable,
+            ),
+            ({**selection, "actor": "other-worker"}, good, unavailable),
+            (wrong_owner, _sealed_starter(wrong_owner, expires_at=1), unavailable),
         ):
             _write_private(selected_path, selected)
             _write_private(grant_path, grant)
             denied, rows = self.conversation((DISCOVER, {}), selection=selected_path)
-            self.assertEqual((denied.returncode, rows), (2, {}))
+            self.assertEqual((denied.returncode, denied.stderr.strip(), rows), (2, reason, {}))
             self.assertFalse((directory / "intake.sqlite3").exists())
         _write_private(selected_path, selection)
         _write_private(grant_path, good)
@@ -712,9 +718,9 @@ class TestIntakeMcp(unittest.TestCase):
         _write_private(
             directory / "starter-intake-withdrawn-registered-starter.json", {"withdrawn": True}
         )
-        _write_private(grant_path, good)
+        _write_private(grant_path, expired)
         denied, rows = self.conversation((GET_RUN, {"run_ref": ref}), selection=selected_path)
-        self.assertEqual((denied.returncode, rows), (2, {}))
+        self.assertEqual((denied.returncode, denied.stderr.strip(), rows), (2, unavailable, {}))
 
     def test_owner_local_command_uses_real_mandate_and_rejects_forged_authority(self):
         training = LocalTrainingStore(self.root / "training.sqlite3", "org-a")
@@ -874,6 +880,9 @@ class TestIntakeMcp(unittest.TestCase):
 
         # The source grant can expire independently of the still-current standing mandate.
         before_expiry_probe = queue.path.read_bytes()
+        grant_file.write_text("{")
+        with self.assertRaisesRegex(IntakeError, "^intake_unavailable$"):
+            queue.discover_sources(authority.principal, limit=1, cursor=None)
         expired_grant = {**source_grant, "expires_at": int(time.time()) - 1}
         _write_private(grant_file, expired_grant)
         with self.assertRaisesRegex(IntakeError, "^intake_expired$"):
