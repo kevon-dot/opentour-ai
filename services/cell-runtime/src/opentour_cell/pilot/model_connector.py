@@ -6,7 +6,7 @@ import hashlib
 import time
 from collections.abc import Callable, Mapping
 from contextlib import AbstractContextManager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import StrEnum
 from typing import Protocol
 
@@ -93,6 +93,10 @@ class Grant:
     retention_until: int
     fit_bound: FitBound | None = None
     benchmark_revisions: frozenset[str] = frozenset()
+
+    @property
+    def valid_until(self) -> int:
+        return min(self.expires_at, self.retention_until)
 
 
 @dataclass(frozen=True)
@@ -225,8 +229,7 @@ class Preflight:
             grant is None
             or (grant.actor, grant.binding, grant.purpose) != (actor, binding, purpose)
             or not grant.revision
-            or grant.expires_at <= now
-            or grant.retention_until <= now
+            or grant.valid_until <= now
         ):
             raise CapabilityError("model_capability_unavailable")
         return grant
@@ -256,7 +259,10 @@ class Preflight:
             return Capability(State.NEEDS_CONFIGURATION, "model_capability_evidence_unavailable")
         if self._grant(actor, binding, purpose) != grant:
             raise CapabilityError("model_capability_unavailable")
-        if self.clock() >= observed.expires_at:
+        now = self.clock()
+        if now >= grant.valid_until:
+            raise CapabilityError("model_capability_unavailable")
+        if now >= observed.expires_at:
             return Capability(State.NEEDS_CONFIGURATION, "model_capability_evidence_unavailable")
         exact = observed.resolved_revision == binding.immutable_revision
         if purpose is not Purpose.TRAINING:
@@ -286,7 +292,14 @@ class Preflight:
                 )
             if self._grant(actor, binding, purpose) != grant:
                 raise CapabilityError("model_capability_unavailable")
-            if self.clock() >= observed.expires_at:
+            now = self.clock()
+            if now >= grant.valid_until:
+                raise CapabilityError("model_capability_unavailable")
+            if now >= disclosure.valid_until:
+                return Capability(
+                    State.NEEDS_CONFIGURATION, "training_disclosure_scope_unavailable"
+                )
+            if now >= observed.expires_at:
                 return Capability(
                     State.NEEDS_CONFIGURATION, "model_capability_evidence_unavailable"
                 )
@@ -328,9 +341,19 @@ class Preflight:
             raise CapabilityError("known_training_cost_within_budget_required")
         if self._grant(actor, intent.binding, Purpose.TRAINING) != grant:
             raise CapabilityError("training_data_scope_unavailable")
-        if self.clock() >= observed.expires_at:
-            raise CapabilityError("model_capability_evidence_stale_or_mismatched")
+        self._check_fit_freshness(grant, observed)
         return grant, observed, estimate
+
+    def _check_fit_freshness(
+        self, grant: Grant, observed: Observation, disclosure: Grant | None = None
+    ) -> None:
+        now = self.clock()
+        if now >= grant.valid_until:
+            raise CapabilityError("training_data_scope_unavailable")
+        if disclosure is not None and now >= disclosure.valid_until:
+            raise CapabilityError("training_disclosure_scope_unavailable")
+        if now >= observed.expires_at:
+            raise CapabilityError("model_capability_evidence_stale_or_mismatched")
 
     def submit_reserved_fit(
         self,
@@ -351,6 +374,7 @@ class Preflight:
             row.keys() != intent.fields for row in development_rows
         ):
             raise CapabilityError("training_data_scope_unavailable")
+        self._check_fit_freshness(grant, observed, disclosure)
         try:
             development = self.connector.serialize_development(intent, development_rows)
         except (OSError, ValueError, LookupError):
@@ -367,8 +391,7 @@ class Preflight:
                 self._grant(actor, intent.binding, Purpose.DISCLOSURE) != disclosure
             ):
                 raise CapabilityError("training_disclosure_scope_unavailable")
-            if self.clock() >= observed.expires_at:
-                raise CapabilityError("model_capability_evidence_stale_or_mismatched")
+            self._check_fit_freshness(grant, observed, disclosure)
             try:
                 receipt = self.connector.submit(intent, development)
             except OSError:
@@ -433,6 +456,8 @@ class Preflight:
         if self._grant(actor, binding, Purpose.INSPECTION) != grant:
             raise CapabilityError("model_capability_unavailable")
         now = self.clock()
+        if now >= grant.valid_until:
+            raise CapabilityError("model_capability_unavailable")
         if now >= observed.expires_at:
             raise CapabilityError("model_capability_evidence_stale_or_mismatched")
         unavailable = CaptureEvidence(Fidelity.UNAVAILABLE, "unavailable", "", 0)
@@ -452,7 +477,10 @@ class Preflight:
                 )
             ):
                 continue
-            visible[field] = evidence
+            visible[field] = replace(
+                evidence,
+                expires_at=min(evidence.expires_at, observed.expires_at, grant.valid_until),
+            )
         return visible
 
 

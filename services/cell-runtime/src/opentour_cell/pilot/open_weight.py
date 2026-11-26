@@ -25,6 +25,60 @@ PROFILE_SHA256 = "4bf04f573c4d762f5c4288f56aca2e680ab00f9c57db183ef58dfbbbddb780
 BASE_SHA256 = "5af571cbf074e6d21a03528d2330792e532ca608f24ac70a143f6b369968ab8c"
 TOKENIZER_SHA256 = "9ca9acddb6525a194ec8ac7a87f24fbba7232a9a15ffa1af0c1224fcd888e47c"
 REVISION = "12fd25f77366fa6b3b4b768ec3050bf629380bac"
+# Fit manifests seal the numeric worker's bytes. Keep this metadata-only command
+# separate so an installation probe never invalidates an existing fitted artifact.
+_INSPECT_INSTALLATION = """
+import hashlib
+import json
+import platform
+import resource
+import sys
+from pathlib import Path
+
+try:
+    document = Path(sys.argv[1]).read_bytes()
+    if hashlib.sha256(document).hexdigest() != sys.argv[2]:
+        raise ValueError("unsupported_profile_lock")
+    profile = json.loads(document)
+    request = json.load(sys.stdin)
+    if set(request) != {"operation", "model_dir", "max_seconds"}:
+        raise ValueError("invalid_installation_probe_request")
+    resource.setrlimit(resource.RLIMIT_AS, (profile["limits"]["max_address_space_bytes"],) * 2)
+    resource.setrlimit(resource.RLIMIT_CPU, (request["max_seconds"],) * 2)
+    resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+    import numpy
+    import tokenizers
+
+    runtime = profile["runtime"]
+    if (
+        platform.python_version() != runtime["python"]
+        or platform.system() != "Linux"
+        or platform.machine() != "x86_64"
+        or numpy.__version__ != runtime["numpy"]
+        or tokenizers.__version__ != runtime["tokenizers"]
+    ):
+        raise ValueError("unqualified_numeric_runtime")
+    directory = Path(request["model_dir"])
+    for name, expected in profile["files"].items():
+        source = directory / name
+        if source.is_symlink() or not source.is_file():
+            raise ValueError("staged_model_file_required")
+        with source.open("rb") as file:
+            if hashlib.file_digest(file, "sha256").hexdigest() != expected:
+                raise ValueError("staged_model_hash_mismatch")
+    print(json.dumps({
+        "profile": profile["profile"],
+        "checkpoint_revision": profile["revision"],
+        "verified_base_sha256": profile["files"]["model.safetensors"],
+        "verified_tokenizer_sha256": profile["files"]["tokenizer.json"],
+    }))
+except (OSError, ValueError, KeyError, ImportError, MemoryError, TypeError) as error:
+    reason = str(error)
+    if not reason.isidentifier() or len(reason) > 64:
+        reason = "invalid_or_unavailable_numeric_runtime"
+    print(json.dumps({"error": reason}))
+    sys.exit(2)
+"""
 GRANTS = (
     "model_authorized",
     "compute_authorized",
@@ -235,13 +289,16 @@ def _run(
         source = directory / name
         if source.is_symlink() or not source.is_file():
             raise OpenWeightError("staged_model_file_required")
-    args = [_python(python), "-I", "-B", str(worker), str(profile)]
+    args = [_python(python), "-I", "-B"]
+    if request["operation"] == "inspect_installation":
+        args.extend(["-c", _INSPECT_INSTALLATION, str(profile), PROFILE_SHA256])
+    else:
+        args.extend([str(worker), str(profile)])
+        request["labels"] = grant["labels"]
     request.update(
         model_dir=str(directory),
         max_seconds=grant["max_seconds"],
     )
-    if request["operation"] != "inspect_installation":
-        request["labels"] = grant["labels"]
     env = {
         "LANG": "C.UTF-8",
         "OPENBLAS_NUM_THREADS": "1",

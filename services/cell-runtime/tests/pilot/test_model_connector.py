@@ -475,6 +475,71 @@ def test_remote_dispatch_rechecks_disclosure_authority_under_reservation(with_di
     adapter.submit.assert_not_called()
 
 
+def test_training_cannot_expire_during_disclosure_lookup_at_dispatch(with_disclosure):
+    preflight, adapter, grants, intent, clock = with_disclosure
+    payload = b"generated-development"
+    intent = replace(intent, development_digest=sha256(payload).hexdigest())
+    adapter.serialize_development.return_value = payload
+    grants[models.Purpose.DISCLOSURE] = replace(
+        grants[models.Purpose.DISCLOSURE], expires_at=45, retention_until=45
+    )
+    lookup = preflight.current_grant
+    reserved = False
+
+    @contextmanager
+    def reservation():
+        nonlocal reserved
+        reserved = True
+        yield
+
+    def current(actor, binding, purpose):
+        if reserved and purpose is models.Purpose.DISCLOSURE:
+            clock.return_value = grants[models.Purpose.TRAINING].valid_until
+        return lookup(actor, binding, purpose)
+
+    preflight.current_grant = current
+    with pytest.raises(models.CapabilityError, match="training_data_scope_unavailable"):
+        preflight.submit_reserved_fit(
+            "training", intent, ({"permitted": "value"},), reservation_guard=reservation
+        )
+    adapter.submit.assert_not_called()
+
+
+def test_disclosure_cannot_expire_during_final_training_read(with_disclosure):
+    preflight, _, grants, intent, clock = with_disclosure
+    grants[models.Purpose.DISCLOSURE] = replace(grants[models.Purpose.DISCLOSURE], expires_at=20)
+    lookup = preflight.current_grant
+    found_disclosure = False
+
+    def current(actor, binding, purpose):
+        nonlocal found_disclosure
+        if purpose is models.Purpose.DISCLOSURE:
+            found_disclosure = True
+        elif found_disclosure:
+            clock.return_value = 20
+        return lookup(actor, binding, purpose)
+
+    preflight.current_grant = current
+    result = preflight.discover("training", intent.binding, models.Purpose.TRAINING)
+    assert result.state is models.State.NEEDS_CONFIGURATION
+    assert result.reason == "training_disclosure_scope_unavailable"
+
+
+def test_capture_never_outlives_containing_observation_or_grant(setup_connector):
+    preflight, adapter, grants, intent, _ = setup_connector
+    field = models.CaptureField.REQUEST_WITNESS
+    grants[models.Purpose.INSPECTION] = replace(
+        grants[models.Purpose.INSPECTION], permitted_fields=frozenset({field})
+    )
+    proof = models.CaptureEvidence(models.Fidelity.OBSERVED, "application", "request", 90)
+    for observation_end, want in ((20, 20), (50, 30)):
+        adapter.observe.return_value = replace(
+            adapter.observe.return_value, expires_at=observation_end, capture={field: proof}
+        )
+        visible = preflight.capture("capture_inspection", intent.binding)
+        assert visible[field] == replace(proof, expires_at=want)
+
+
 def test_discovery_requires_valid_grant_limits(setup_connector):
     preflight, _, grants, intent, _ = setup_connector
     grants[models.Purpose.TRAINING] = replace(
