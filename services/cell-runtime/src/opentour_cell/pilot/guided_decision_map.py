@@ -14,6 +14,7 @@ from opentour_cell.pilot.guided_policy import (
     PolicyError,
     PolicySnapshot,
     PolicySpan,
+    operative_lines,
 )
 from opentour_cell.pilot.intake_mcp import IntakePrincipal
 from opentour_cell.pilot.operating_point import canonical, digest
@@ -27,6 +28,9 @@ _COMPARISON = re.compile(
 )
 _OPERATORS = {"below": "<", "at most": "<=", "at or above": ">=", "above": ">"}
 _FIRST_MATCH = re.compile(r"(?:[-*] +)?apply the first matching rule\.?", re.I)
+_RULE_PREFIX = re.compile(
+    r"(?:[-*] +)?(?:if|when|unless|except|otherwise|always|never|only if)\b", re.I
+)
 _ACTION = re.compile(r"[A-Z][A-Z0-9_]{0,47}")
 _FIELD = re.compile(r"[a-z][a-z0-9_]{0,63}")
 MAP_VERSION = "opentour.pilot.guided-decision-map.v1"
@@ -99,7 +103,9 @@ def _condition(clause: str, field_kinds: Mapping[str, FieldKind]) -> Condition |
         return Condition(presence[1], presence[2])
     comparison = _COMPARISON.fullmatch(clause)
     if comparison and field_kinds.get(comparison[1]) is FieldKind.NUMBER:
-        number = format(Decimal(comparison[3]).normalize(), "f")
+        number = format(Decimal(comparison[3]), "f")
+        if "." in number:
+            number = number.rstrip("0").rstrip(".")
         return Condition(comparison[1], _OPERATORS.get(comparison[2], comparison[2]), number)
     return None
 
@@ -124,21 +130,15 @@ def guided_draft(
     branches = []
     unresolved = []
     priority = None
-    fenced = False
-    for line_number, raw in enumerate(policy.lines, start=1):
+    for line_number, raw in operative_lines(policy.lines):
         line = raw.strip()
-        if line.startswith("```"):
-            fenced = not fenced
-            continue
-        if fenced:
-            continue
         if _FIRST_MATCH.fullmatch(line):
             citation = policy.cite(line_number, line_number)
             if priority is not None:
                 unresolved.append(citation)
             priority = citation
             continue
-        if not re.match(r"(?:[-*] +)?(?:if|when)\b", line, re.I):
+        if not _RULE_PREFIX.match(line):
             continue
         citation = policy.cite(line_number, line_number)
         rule = _RULE.fullmatch(line)
