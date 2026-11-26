@@ -18,3 +18,15 @@ Measure a clean fixture on the target CPU with the private workload class record
 For the generated rule-only fixture, provision one logical CPU, at least 32 MiB for the worker process and 2 MiB of working disk for the extracted kit, state and a fallback snapshot. The rehearsal measured about 28 MiB worker peak RSS, 0.90 MiB unpacked and 0.18 MiB each for state and fallback. Reserve the downloaded ZIP, previous kit, gateway, interpreter and OS resources separately. These values bound this fixture only.
 
 The supervised test starts a trusted TLS listener from the packaged health code, verifies that the health command rejects a mismatched release before binding, and restarts the packaged worker as a subprocess. Record separately whether the target host booted the actual units and whether an independently authorized installed provider reached the endpoint.
+
+## Scoped intake connector
+
+For an approved intake connection, launch a **separate** instance of health.py on a separate loopback port with the same TLS options and an absolute `--selection /private/tenant/selection.json`. Use the owner-local intake process identity with access to only this connection's private selection and ledger. Keep the health service and its identity isolated. The intake instance requires its own TLS secret directory, intake-only bearer credential, audience and configuration revision. Add `intake_tenant` and `intake_actor` to this instance's private manifest to match the existing owner-selected grant. Neither the TLS listener nor the stdio command provisions grants. Configure the custodian's ingress to preserve the original approved Host and Origin and to route only these three exact POST paths to that port.
+
+| HTTPS operation | JSON body | Result |
+| --- | --- | --- |
+| /v1/discover_sources | Optional limit (1–50) and scoped cursor | Opaque authorized metadata and next cursor |
+| /v1/submit_intake | Existing historical, starter or live intake arguments | Durable receipt or scoped hold |
+| /v1/get_run | One run_ref | Scoped workflow, run and any existing benchmark metadata |
+
+Send application/json with Content-Length, the approved Origin, X-OpenTour-Audience and bearer credential over verified TLS. Boundaries are 8 KiB headers, 4 KiB arguments, 32 KiB result and 120 allowed calls per minute per listener. Connection, tenant, actor, grant, file paths and callback URLs never come from request arguments. A scoped failure returns an HTTP error and safe code. A held admission returns the same successful held result as stdio. Retry a lost response with the original intent. The equivalent local command is `python -I -S -B opentour-slack.pyz mcp-intake /private/tenant/selection.json`. These transports use the same private admission ledger. Live binding resolution requires the independently supplied scoped owner resolver. Without that authority or a reader, preserve the existing scoped unavailable or pending outcome.

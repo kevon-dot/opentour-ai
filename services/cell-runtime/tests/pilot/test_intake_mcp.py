@@ -146,6 +146,10 @@ class _GeneratedAuthority:
             "current",
             self.flags.get("revision", "feed-v1"),
         )
+        if original.engagement_epoch != self.flags.get("active_epoch", "epoch-a"):
+            return None
+        if self.flags.get("foreign_binding"):
+            return replace(original, tenant="org-b")
         if self.flags.get("revoked"):
             return replace(original, state="revoked")
         if self.flags.get("superseded") and reference == "decision-feed":
