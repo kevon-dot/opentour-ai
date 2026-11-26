@@ -20,8 +20,9 @@ from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing, contextmanager
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
 
 from opentour_cell.pilot.intake_mcp import REF_PATTERN, IntakePrincipal
@@ -34,6 +35,9 @@ from opentour_cell.pilot.status_questions import (
     read_status,
     resolve_status,
 )
+
+if TYPE_CHECKING:
+    from opentour_cell.pilot.verifier_form import VerifierForm
 
 Json = dict[str, Any]
 SESSION_SECONDS = 900
@@ -52,6 +56,8 @@ CALLBACKS = {
     "ot_tune_start",
     "ot_prompt_enter",
     "ot_live_binding",
+    "ot_verify_outcome",
+    "ot_nomination",
 }
 ACTIONS = {
     "ot_workflow_starter",
@@ -78,6 +84,11 @@ ACTIONS = {
     "ot_tune_dataset",
     "ot_readouts",
     "ot_result_open",
+    "ot_current_week",
+    "ot_verify_page",
+    "ot_nominate_verifier",
+    "ot_week_bind",
+    "ot_week_scopes",
     "ot_current_training",
     "ot_readiness_proof",
     "ot_training_scopes",
@@ -1533,7 +1544,7 @@ class Workbench:
             return
         self._browse(cfg, actor, view, source, search=query, old_hash=old_hash)
 
-    def _current_training(self, actor: str) -> tuple[str, str, Json | None] | None:
+    def _current_question(self, actor: str, topic: str) -> tuple[str, str, Json | None] | None:
         """Pin one currently inspected live workflow, separately from any frozen readout."""
         try:
             cfg = self.settings(check_engagement=False)
@@ -1549,6 +1560,26 @@ class Workbench:
                         and receipt["dataset_ref"] == scope.dataset_ref
                         and receipt["dataset_revision"] == scope.dataset_revision
                     )
+                facts = receipt
+                if topic == StatusTopic.LIVE_ERRORS:
+                    summary = self._live_summary(actor)
+                    if summary is not None:
+                        _check(
+                            summary["workflow"] == workflow
+                            and summary["dataset"] == scope.dataset_ref
+                        )
+                        if receipt:
+                            _check(summary["revision"] == receipt["evidence_revision"])
+                    today = datetime.now(UTC).date()
+                    facts = {
+                        "readiness": receipt,
+                        "summary": summary,
+                        "week_start": int(
+                            datetime.combine(
+                                today - timedelta(days=today.weekday()), datetime.min.time(), UTC
+                            ).timestamp()
+                        ),
+                    }
                 pin = self.journal.opaque(
                     "workflow",
                     [
@@ -1559,10 +1590,11 @@ class Workbench:
                         scope.engagement_epoch,
                         scope.dataset_ref,
                         scope.dataset_revision,
-                        receipt["revision"] if receipt else None,
+                        topic,
+                        facts,
                     ],
                 )
-                return workflow, pin, receipt
+                return workflow, pin, facts
         except Exception:
             return None
 
@@ -1585,7 +1617,11 @@ class Workbench:
         page = max(0, min(page, (len(eligible) - 1) // RESULT_PAGE_SIZE))
         start = page * RESULT_PAGE_SIZE
         rows = eligible[start : start + RESULT_PAGE_SIZE]
-        current = self._current_training(actor) if topic == StatusTopic.TRAINING else None
+        current = (
+            self._current_question(actor, topic)
+            if topic in {StatusTopic.TRAINING, StatusTopic.LIVE_ERRORS}
+            else None
+        )
         listing = {
             "page": page,
             "items": {revision: source for _, source, revision in rows},
@@ -1597,7 +1633,7 @@ class Workbench:
         def authorize() -> None:
             self._authorize_question_rows(cfg, actor, rows)
             if current is not None:
-                _check(self._current_training(actor) == current)
+                _check(self._current_question(actor, topic) == current)
 
         self._show(
             view,
@@ -2260,6 +2296,10 @@ class Workbench:
                     "workflow": workflow,
                     "dataset": scope.dataset_ref,
                     "revision": snapshot.evidence_revision,
+                    "decisions": snapshot.decisions,
+                    "verified": snapshot.verified,
+                    "pending": snapshot.pending,
+                    "disputed": snapshot.disputed,
                     "unmatched_outcomes": snapshot.unmatched_outcomes,
                     "last_ingested_at": snapshot.last_ingested_at,
                     "last_page": {
@@ -2328,8 +2368,115 @@ class Workbench:
 
         authority = PrivateLiveAuthority(cfg.directory, cfg.organization, workflow)
         with authority.guard(principal, workflow) as scope:
-            _check(scope.can_inspect or scope.can_bind)
+            _check(scope.can_inspect or scope.can_bind or scope.can_nominate)
             yield principal, LiveEvidence(cfg.directory, authority), scope
+
+    def _verifier_form(self, actor: str) -> VerifierForm:
+        from opentour_cell.pilot.live_authority import PrivateLiveAuthority
+        from opentour_cell.pilot.verifier_form import VerifierForm
+
+        cfg = self.settings(check_engagement=False)
+        workflow = self._live_workflow(cfg, actor)
+        authority = PrivateLiveAuthority(cfg.directory, cfg.organization, workflow)
+        return VerifierForm(
+            LiveEvidence(cfg.directory, authority),
+            IntakePrincipal(cfg.organization, actor, "slack"),
+            workflow,
+        )
+
+    def _verifier_entry(self, actor: str) -> str:
+        try:
+            form = self._verifier_form(actor)
+            choices = form.choices()
+            return (
+                self.journal.opaque("verify", [actor, form.workflow, [c.token for c in choices]])
+                if choices
+                else ""
+            )
+        except Exception:
+            return ""
+
+    def _verify_view(self, cfg: Settings, actor: str, view: str, page: int = 0) -> None:
+        form = self._verifier_form(actor)
+        choices = form.choices()
+        page = max(0, min(page, (len(choices) - 1) // 50))
+        selected = choices[page * 50 : page * 50 + 50]
+        revision = _json({"page": page, "tokens": [c.token for c in selected]})
+        ctx = self.journal.context(
+            actor, cfg.channel, view, "verify_outcome", form.workflow, revision
+        )
+
+        def authorize() -> None:
+            current = self._verifier_form(actor)
+            _check(current.workflow == form.workflow and current.choices() == choices)
+
+        self._show(
+            view,
+            self.views.verify_outcome(
+                ctx,
+                form.workflow,
+                [(f"{c.decision} · rev {c.revision} · {c.namespace}", c.token) for c in selected],
+                more=(page + 1) * 50 < len(choices),
+                previous=page > 0,
+            ),
+            authorize=authorize,
+        )
+
+    def _nomination(
+        self, actor: str, workflow: str, *, nominee: str = "", expected: str = ""
+    ) -> tuple[str, str]:
+        with self.journal.db() as db:
+            if nominee:
+                db.execute("BEGIN IMMEDIATE")
+            with self._live_scope(actor, workflow) as (_, _, scope):
+                if not (scope.can_nominate or scope.can_bind):
+                    return "", ""
+                key = self.journal.opaque(
+                    "nomination",
+                    [
+                        scope.tenant,
+                        workflow,
+                        scope.engagement_epoch,
+                        scope.dataset_ref,
+                        scope.dataset_revision,
+                        scope.authority_revision,
+                    ],
+                )
+                prior = ""
+                if db.execute(
+                    "SELECT 1 FROM sqlite_master WHERE name='verifier_nominations'"
+                ).fetchone():
+                    row = db.execute(
+                        "SELECT nominee FROM verifier_nominations WHERE scope=?", (key,)
+                    ).fetchone()
+                    if row:
+                        prior = str(row[0])
+                token = (
+                    self.journal.opaque("nominate", [key, actor, prior])
+                    if scope.can_nominate
+                    else ""
+                )
+                if nominee:
+                    _check(scope.can_nominate and _slack_id(nominee, "UW") and expected == token)
+                    db.execute(
+                        "CREATE TABLE IF NOT EXISTS verifier_nominations("
+                        "scope TEXT PRIMARY KEY, owner TEXT NOT NULL, nominee TEXT NOT NULL)"
+                    )
+                    db.execute(
+                        "INSERT OR REPLACE INTO verifier_nominations VALUES(?,?,?)",
+                        (key, actor, nominee),
+                    )
+                    prior = nominee
+                return token, prior
+
+    def _workflow_settings_view(self, cfg: Settings, actor: str, workflow: str, view: str) -> None:
+        nomination = self._nomination(actor, workflow)
+        token = self.journal.context(actor, cfg.channel, view, "workflow_settings", workflow)
+        self._show(
+            view,
+            self.views.workflow_settings(token, workflow, *nomination),
+            authorize=lambda: _check(self._nomination(actor, workflow) == nomination),
+        )
 
     def _live_model(
         self, actor: str, workflow: str, verifier_only: bool = False
@@ -2346,6 +2493,8 @@ class Workbench:
                         continue
                     revision = binding_candidate(principal, scope, grant)
                     label = "Decisions" if grant.kind == "decision" else "Independent outcomes"
+                    if grant.resource in dict(scope.slack_verifiers):
+                        label = f"Named verifier {grant.verifier}"
                     options.append((f"{label} · {grant.resource[:36]} · {revision[:8]}", revision))
             readiness_revision = ""
             if verifier_only:
@@ -2468,6 +2617,18 @@ class Workbench:
     ) -> None:
         job = ctx["job"]
         if ctx["kind"] == "workflow_settings":
+            if action == "ot_nominate_verifier":
+                _check(value and self._nomination(actor, ctx["job"])[0] == value)
+                token = self.journal.context(
+                    actor, cfg.channel, view, "nomination", ctx["job"], value
+                )
+                self._show(
+                    view,
+                    self.views.nominate_verifier(token, ctx["job"]),
+                    old_hash,
+                    authorize=lambda: _check(self._nomination(actor, ctx["job"])[0] == value),
+                )
+                return
             _check(action == value == "ot_connect_live")
             self._live_view(cfg, actor, view, ctx["job"], old_hash)
         elif ctx["kind"] == "workflow_chooser":
@@ -2500,6 +2661,48 @@ class Workbench:
             self._starter_view(self.settings(), actor, view, saved, old_hash)
         elif ctx["kind"] == "workflow_instructions":
             raise Refused("This setup screen has no actions.")
+        elif action == "ot_verify_page":
+            _check(ctx["kind"] == "verify_outcome" and value in {"previous", "next"})
+            self._verify_view(
+                cfg,
+                actor,
+                view,
+                json.loads(ctx["revision"])["page"] + (1 if value == "next" else -1),
+            )
+        elif action in {"ot_current_week", "ot_week_bind"}:
+            open_verifier = action == "ot_week_bind"
+            if open_verifier:
+                _check(ctx["kind"] == "current_week" and value == ctx["revision"])
+            else:
+                _check(ctx["kind"] == "regressions")
+                listing = json.loads(ctx["revision"])
+                _check(
+                    listing["topic"] == StatusTopic.LIVE_ERRORS and value == listing.get("current")
+                )
+            weekly = self._current_question(actor, StatusTopic.LIVE_ERRORS)
+            _check(weekly and weekly[1] == value)
+            assert weekly is not None and weekly[2] is not None
+            workflow, pin, weekly_facts = weekly
+            assert weekly_facts is not None
+            if open_verifier:
+                _check(
+                    weekly_facts["readiness"]
+                    and weekly_facts["readiness"]["next_action"] == "bind_verifier"
+                )
+                self._live_view(cfg, actor, view, workflow, old_hash, verifier_only=True)
+                return
+            token = self.journal.context(actor, cfg.channel, view, "current_week", revision=pin)
+            self._show(
+                view,
+                self.views.weekly_question(token, workflow, weekly_facts, pin),
+                old_hash,
+                authorize=lambda: _check(
+                    self._current_question(actor, StatusTopic.LIVE_ERRORS) == weekly
+                ),
+            )
+        elif action == "ot_week_scopes":
+            _check(ctx["kind"] == "current_week" and value == "scopes")
+            self._regression_picker(cfg, actor, view, old_hash, topic=StatusTopic.LIVE_ERRORS.value)
         elif action in {"ot_current_training", "ot_readiness_proof"}:
             proof = action == "ot_readiness_proof"
             if proof:
@@ -2508,7 +2711,7 @@ class Workbench:
                 _check(ctx["kind"] == "regressions")
                 listing = json.loads(ctx["revision"])
                 _check(listing["topic"] == StatusTopic.TRAINING and value == listing.get("current"))
-            selected_training = self._current_training(actor)
+            selected_training = self._current_question(actor, StatusTopic.TRAINING)
             _check(selected_training and selected_training[1] == value)
             assert selected_training is not None
             workflow, _, receipt = selected_training
@@ -2522,7 +2725,9 @@ class Workbench:
                     token, workflow, receipt, pin=value, proof=proof
                 ),
                 old_hash,
-                authorize=lambda: _check(self._current_training(actor) == selected_training),
+                authorize=lambda: _check(
+                    self._current_question(actor, StatusTopic.TRAINING) == selected_training
+                ),
             )
         elif action == "ot_training_scopes":
             _check(ctx["kind"] == "current_training" and value == "scopes")
@@ -2769,7 +2974,40 @@ class Workbench:
         values: Json,
         token: str,
     ) -> None:
-        if callback == "ot_live_binding":
+        if callback == "ot_nomination":
+            _check(ctx["kind"] == "nomination" and set(values) == {"nominee"})
+            self._nomination(
+                actor, ctx["job"], nominee=self._field(values, "nominee"), expected=ctx["revision"]
+            )
+            self._workflow_settings_view(cfg, actor, ctx["job"], view)
+        elif callback == "ot_verify_outcome":
+            _check(
+                ctx["kind"] == "verify_outcome"
+                and set(values) == {"target", "finality", "basis", "effective", "action"}
+            )
+            form = self._verifier_form(actor)
+            target = self._field(values, "target", select=True)
+            _check(form.workflow == ctx["job"] and target in json.loads(ctx["revision"])["tokens"])
+            action = values["action"]["action"].get("value")
+            _check(action is None or isinstance(action, str))
+            stamp = self._field(values, "effective")
+            _check(stamp.isascii() and stamp.isdecimal() and len(stamp) <= 19)
+            receipt = form.submit(
+                target,
+                self._field(values, "finality", select=True),
+                action or "",
+                self._field(values, "basis"),
+                int(stamp),
+            )
+            token = self.journal.context(
+                actor, cfg.channel, view, "verified_outcome", form.workflow
+            )
+            self._show(
+                view,
+                self.views.verification_saved(token, receipt),
+                authorize=lambda: _check(self._verifier_form(actor).permits_receipt(receipt)),
+            )
+        elif callback == "ot_live_binding":
             saved = self._live_save(actor, ctx, values)
             self._live_view(cfg, actor, view, ctx["job"], saved=saved)
         elif callback == "ot_prompt_enter":
@@ -3079,6 +3317,7 @@ class Workbench:
                 pass
         live_summary = self._live_summary(actor) if workflow_settings else None
         readiness = self._readiness(actor) if workflow_settings else None
+        verifier_entry = self._verifier_entry(actor) if cfg.live_workflow_ref else ""
         layout = self.views.app_home_view(
             token,
             cfg.workspace_title,
@@ -3091,6 +3330,7 @@ class Workbench:
             workflow_settings=workflow_settings,
             readiness=readiness,
             live_summary=live_summary,
+            verify_outcome=verifier_entry,
         )
         navigation = (
             can_add_workflow
@@ -3104,11 +3344,12 @@ class Workbench:
                     "app_home",
                     authorize=(
                         lambda: _check(
-                            (readiness is None or self._readiness(actor) == readiness)
+                            (not verifier_entry or self._verifier_entry(actor) == verifier_entry)
+                            and (readiness is None or self._readiness(actor) == readiness)
                             and (live_summary is None or self._live_summary(actor) == live_summary)
                         )
                     )
-                    if readiness is not None or live_summary is not None
+                    if readiness is not None or live_summary is not None or verifier_entry
                     else None,
                 )
         except Exception:
@@ -3137,6 +3378,15 @@ class Workbench:
             and len(body["actions"]) == 1
         )
         action = body["actions"][0]
+        if action.get("action_id") == "ot_app_verify_outcome":
+            self.private_channel(cfg, actor)
+            verifier_token = self._verifier_entry(actor)
+            _check(verifier_token and action.get("value") == verifier_token)
+            opened = self.web.views_open(
+                trigger_id=body["trigger_id"], view=self.views.notice_modal("checking")
+            )
+            self._verify_view(cfg, actor, opened["view"]["id"])
+            return
         if action.get("action_id") in {"ot_app_settings", "ot_app_bind_verifier"}:
             bind = action["action_id"] == "ot_app_bind_verifier"
             _check(bind or action.get("value") == "ot_app_settings")
@@ -3157,17 +3407,7 @@ class Workbench:
                     self._live_view(cfg, actor, view_id, workflow, verifier_only=True)
                     return
 
-                def authorize() -> None:
-                    with self._live_scope(actor, workflow):
-                        pass
-
-                authorize()
-                token = self.journal.context(
-                    actor, cfg.channel, view_id, "workflow_settings", workflow
-                )
-                self._show(
-                    view_id, self.views.workflow_settings(token, workflow), authorize=authorize
-                )
+                self._workflow_settings_view(cfg, actor, workflow, view_id)
             except Exception:
                 self._safe_notice(view_id)
             return
