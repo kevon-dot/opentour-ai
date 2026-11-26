@@ -1,0 +1,132 @@
+"""Exercise public status questions through the actual picker and frozen worker records."""
+
+from pathlib import Path
+from typing import Any
+
+import pytest
+from test_managed_slack import setup_workflow
+from test_reviewer_workflow import buttons, restart, screen, supplied, text
+from test_slack_adapter import ACTOR, Harness
+from test_zapier_approval import deliver, make_case
+
+
+def inspect(h: Harness) -> tuple[str, str]:
+    view = h.launch()
+    revision = buttons(screen(h, view))["ot_evidence"]
+    h.action(view, "ot_evidence", revision)
+    return view, revision
+
+
+def answer(h: Harness, question: str, revision: str) -> str:
+    view = h.launch(prompt=question)
+    assert buttons(screen(h, view))["ot_result_open"] == revision
+    h.action(view, "ot_result_open", revision)
+    assert screen(h, view)["callback_id"] == "ot_status_question"
+    assert buttons(screen(h, view))["ot_evidence"] == revision
+    return text(h, view)
+
+
+def counts(h: Harness) -> tuple[int, ...]:
+    with h.app.journal.db() as db:
+        journal = tuple(
+            int(db.execute("SELECT count(*) FROM " + table).fetchone()[0])
+            for table in ("decisions", "proposals", "approval_posts")
+        )
+    with h.store._db() as db:
+        jobs = int(db.execute("SELECT count(*) FROM jobs").fetchone()[0])
+    return (*journal, jobs, len(h.slack.post))
+
+
+def test_same_training_question_uses_actual_job_and_role_held_rule(tmp_path: Path) -> None:
+    h = Harness(tmp_path / "trained")
+    view, _, revision = h.completed()
+    h.action(view, "ot_evidence", revision)
+    before = counts(h)
+    trained = answer(h, "Why didn't it train?", revision)
+    assert "CPU training job completed" in trained and "3 training epochs" in trained
+    assert counts(h) == before
+    h, _, _, outcome = setup_workflow(tmp_path / "held", "unapproved_model")
+    assert outcome == "hold"
+    _, revision = inspect(h)
+    before = counts(h)
+    held = answer(h, "Why didn't it train?", revision)
+    assert "rule comparison" in held and "Separate model and compute authorization" in held
+    assert counts(h) == before
+
+
+def test_recorded_readout_approval_and_changed_status_at_disclosure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    h = Harness(tmp_path)
+    dataset = supplied(h, qualified=True)
+    h.config["users"][ACTOR]["datasets"] = [dataset]
+    h.config["zapier"] = False
+    h.save()
+    inspected, revision = inspect(h)
+    before = counts(h)
+    missing = answer(h, "Did it ship?", revision)
+    assert "No verified approval receipt" in missing and "unconfirmed" in missing
+    assert counts(h) == before
+
+    # A distinct real reviewer action lands after building the status view, before admission.
+    h.action(inspected, "ot_home", "home")
+    original = h.app.views.status_question_modal
+
+    def approve_between_read_and_render(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        result = original(*args, **kwargs)
+        h.action(inspected, "ot_approve", revision)
+        return result
+
+    with monkeypatch.context() as m:
+        m.setattr(h.app.views, "status_question_modal", approve_between_read_and_render)
+        stale = h.launch(prompt="Did it ship?")
+        h.action(stale, "ot_result_open", revision)
+        assert screen(h, stale).get("callback_id") != "ot_status_question"
+        assert revision not in text(h, stale)
+
+    receipt = h.app.journal.decision(revision)["receipt"]
+    before = counts(h)
+    restart(h)
+    for _ in range(2):
+        current = answer(h, "Did it ship?", revision)
+        assert receipt in current and "Approval recorded" in current and "unconfirmed" in current
+    assert counts(h) == before
+
+
+def test_provider_approval_and_transport_never_attest_artifact_handoff(tmp_path: Path) -> None:
+    case = make_case(tmp_path)
+    request = case.inspect()
+    before = counts(case.h)
+    staged = answer(case.h, "Did it ship?", case.revision)
+    assert request["request_id"] in staged and "Approval request staged" in staged
+    assert counts(case.h) == before
+    sent = deliver(case, request)
+    accepted = answer(case.h, "Did it ship?", case.revision)
+    assert "Approval request transport acknowledged" in accepted and "unconfirmed" in accepted
+    assert case.bridge.consume(case.signed(request))["state"] == "approved"
+    restart(case.h)
+    before = counts(case.h)
+    for _ in range(2):
+        approved = answer(case.h, "Did it ship?", case.revision)
+        assert "Approval recorded" in approved and "Handoff delivery is unconfirmed" in approved
+    assert len(sent) == 1 and counts(case.h) == before
+
+
+@pytest.mark.parametrize(
+    ("action", "expected"),
+    [("ot_release_approve", "Approval recorded"), ("ot_release_changes", "Changes requested")],
+)
+def test_native_release_status_observes_independent_decision(
+    tmp_path: Path, action: str, expected: str
+) -> None:
+    h, _, _, _ = setup_workflow(tmp_path, "rule", release=True)
+    inspected, revision = inspect(h)
+    before = counts(h)
+    missing = answer(h, "Did it ship?", revision)
+    assert "No verified approval receipt" in missing
+    assert counts(h) == before
+    h.action(inspected, action, buttons(screen(h, inspected))[action])
+    before = counts(h)
+    current = answer(h, "Did it ship?", revision)
+    assert expected in current and "unconfirmed" in current
+    assert counts(h) == before

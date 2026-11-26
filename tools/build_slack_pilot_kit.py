@@ -52,6 +52,7 @@ MODULES = (
     "opentour_cell/pilot/receipt_recovery.py",
     "opentour_cell/pilot/slack_adapter.py",
     "opentour_cell/pilot/slack_views.py",
+    "opentour_cell/pilot/status_questions.py",
     "opentour_cell/pilot/slack_charts.py",
     "opentour_cell/pilot/slack_benchmark.py",
     "opentour_cell/pilot/text_classifier.py",
