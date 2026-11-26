@@ -7,6 +7,7 @@ import re
 import sqlite3
 import time
 from collections.abc import Callable
+from contextlib import AbstractContextManager
 from itertools import combinations
 from typing import Any
 
@@ -37,6 +38,8 @@ from opentour_cell.pilot.training import LocalTrainingStore
 Json = dict[str, Any]
 PLAN = "opentour.pilot.protected-plan.v1"
 RESULT = "opentour.pilot.protected-comparison.v1"
+BASELINE_PLAN = "opentour.pilot.recorded-baseline-plan.v1"
+BASELINE_RESULT = "opentour.pilot.recorded-baseline-result.v1"
 _REGISTRY = """CREATE TABLE IF NOT EXISTS protected_comparisons(
  revision TEXT PRIMARY KEY, reserved_at INTEGER NOT NULL, result TEXT)"""
 
@@ -176,6 +179,107 @@ def _check_plan(plan: Json) -> None:
         {k: v for k, v in plan.items() if k != "revision"}
     ):
         raise RepairError("protected_plan_revision_mismatch")
+
+
+def freeze_recorded_baseline(
+    *,
+    organization: str,
+    engagement: str,
+    audience: str,
+    intake_revision: str,
+    protected_ids: list[str],
+    incumbent_revision: str,
+    terms: Json,
+) -> Json:
+    """Freeze only recorded incumbent measurement, without a repair/fit decision."""
+    for value in (organization, engagement, audience):
+        identifier(value)
+    revision(intake_revision)
+    revision(incumbent_revision)
+    _terms(terms)
+    if not {"minimum_verified_cases", "minimum_slice_cases"} <= terms.keys():
+        raise RepairError("baseline_thresholds_required")
+    if not isinstance(protected_ids, list) or len(protected_ids) > MAX_ROWS:
+        raise RepairError("invalid_protected_population")
+    ids = sorted(identifier(value) for value in protected_ids)
+    if len(ids) != len(set(ids)):
+        raise RepairError("invalid_protected_population")
+    plan = {
+        "schema_version": BASELINE_PLAN,
+        "evaluation_purpose": "recorded_baseline",
+        "organization": organization,
+        "engagement": engagement,
+        "audience": audience,
+        "intake_revision": intake_revision,
+        "protected_membership_digest": digest(ids),
+        "protected_count": len(ids),
+        "incumbent_revision": incumbent_revision,
+        "terms": terms,
+    }
+    return {**plan, "revision": digest(plan)}
+
+
+def check_recorded_baseline_plan(plan: Json) -> None:
+    if (
+        set(plan)
+        != {
+            "schema_version",
+            "evaluation_purpose",
+            "organization",
+            "engagement",
+            "audience",
+            "intake_revision",
+            "protected_membership_digest",
+            "protected_count",
+            "incumbent_revision",
+            "terms",
+            "revision",
+        }
+        or plan["schema_version"] != BASELINE_PLAN
+        or plan["evaluation_purpose"] != "recorded_baseline"
+        or plan["revision"]
+        != digest({key: value for key, value in plan.items() if key != "revision"})
+    ):
+        raise RepairError("recorded_baseline_plan_mismatch")
+    _terms(plan["terms"])
+    if not {"minimum_verified_cases", "minimum_slice_cases"} <= plan["terms"].keys():
+        raise RepairError("baseline_thresholds_required")
+
+
+def stored_recorded_baseline(record: str, plan: Json) -> Json:
+    """Validate a durable result without reopening protected answers or rescoring."""
+    check_recorded_baseline_plan(plan)
+    try:
+        result: Json = json.loads(record)
+        if (
+            result["schema_version"] != BASELINE_RESULT
+            or result["evaluation_purpose"] != "recorded_baseline"
+            or result["plan_revision"] != plan["revision"]
+            or any(
+                result[key] != plan[key]
+                for key in (
+                    "organization",
+                    "engagement",
+                    "audience",
+                    "intake_revision",
+                    "protected_membership_digest",
+                    "terms",
+                )
+            )
+            or result["protected_rows_evaluated"] != plan["protected_count"]
+            or set(result["arms"]) != {"incumbent"}
+            or result["arms"]["incumbent"]["revision"] != plan["incumbent_revision"]
+            or result["comparisons"] != {}
+            or result["decision"]
+            != {"disposition": "observe", "winner": None, "reason": "recorded_baseline_only"}
+            or result["outcome"] != "baseline_observed"
+            or result["evidence_revision"]
+            != digest({key: value for key, value in result.items() if key != "evidence_revision"})
+        ):
+            raise RepairError("recorded_baseline_result_mismatch")
+        return result
+    except (TypeError, KeyError, json.JSONDecodeError):
+        raise RepairError("recorded_baseline_result_mismatch") from None
 
 
 def development_hold(plan: Json) -> Json:
@@ -671,4 +775,180 @@ def run_comparison(
                 )
         _live(intake)
     current_authority()
+    return result
+
+
+def run_recorded_baseline(
+    store: LocalTrainingStore,
+    plan: Json,
+    intake: Json,
+    *,
+    commit_authority: Callable[[], AbstractContextManager[None]],
+    authorize: Callable[[], None] | None = None,
+) -> Json:
+    """Measure recorded predictions under evaluation rights; never qualify a repair.
+
+    Shares the actual protected reservation ledger, so this observation cannot
+    silently become a fresh test for another plan or a source of training rows.
+    """
+    from opentour_cell.pilot.source_intake import check_current_intake
+
+    check_recorded_baseline_plan(plan)
+    if (
+        plan["organization"] != store.organization
+        or plan["engagement"] != store.engagement_id
+        or any(
+            intake.get(key) != plan[key]
+            for key in ("organization", "engagement", "intake_revision")
+        )
+        or digest({key: value for key, value in intake.items() if key != "intake_revision"})
+        != plan["intake_revision"]
+    ):
+        raise RepairError("recorded_baseline_scope_mismatch")
+
+    def current() -> None:
+        check_current_intake(
+            store.path.parent, store.organization, plan["engagement"], plan["intake_revision"]
+        )
+        if authorize is not None:
+            authorize()
+
+    current()
+    rows = intake["protected"]
+    if (
+        not isinstance(rows, list)
+        or len(rows) != plan["protected_count"]
+        or digest(sorted(identifier(row["case_id"]) for row in rows))
+        != plan["protected_membership_digest"]
+        or plan["protected_membership_digest"] != intake["protected_membership_digest"]
+        or len({row["case_id"] for row in rows}) != len(rows)
+        or set(membership(rows, "group_id")).intersection(
+            membership(intake["development"], "group_id")
+        )
+    ):
+        raise RepairError("protected_population_mismatch")
+    if len(rows) < plan["terms"]["minimum_verified_cases"]:
+        raise RepairError("baseline_cases_required")
+    if any(decision(row["incumbent"])["status"] == "missing" for row in rows):
+        raise RepairError("recorded_baseline_predictions_required")
+    if not (
+        set(plan["terms"].get("critical_slices", []))
+        | set(plan["terms"].get("material_slices", []))
+    ) <= set(intake.get("allowed_slices", [])):
+        raise RepairError("unpermitted_slice")
+    # Baseline evaluation claims no development population for training. The
+    # existing reserve function owns all protected case/family exclusion keys.
+    reservation = {
+        **plan,
+        "development_decision": {"development_case_keys": [], "development_group_keys": []},
+    }
+    with store._db(write=True) as db:
+        _live(intake)
+        _reserve(db, reservation, rows)
+        # Training/custody transaction precedes the mandate guard, matching the
+        # existing authority lock order. Commit while that grant remains pinned.
+        with commit_authority():
+            check_current_intake(
+                store.path.parent, store.organization, plan["engagement"], plan["intake_revision"]
+            )
+            db.commit()
+    current()
+    with store._db(write=True) as db:
+        _live(intake)
+        saved = db.execute(
+            "SELECT reserved_at,result FROM protected_comparisons WHERE revision=?",
+            (plan["revision"],),
+        ).fetchone()
+        if saved["result"]:
+            result = stored_recorded_baseline(saved["result"], plan)
+        else:
+            started = time.time_ns()
+            measured = [
+                {
+                    "case_id": row["case_id"],
+                    "group_id": row["group_id"],
+                    "slices": row.get("slices", []),
+                    "reference": row["reference"],
+                    "incumbent": decision(row["incumbent"]),
+                }
+                for row in rows
+            ]
+            terms = plan["terms"]
+            arm = _pair(measured, "incumbent", "incumbent", terms["error_ceiling_bps"])["current"]
+            metrics = arm_metrics(arm, measured, "incumbent", terms)
+            metrics["economics"] = economics(measured, None, terms)
+            slices = _slice_results(measured, "incumbent", terms)
+            result = {
+                "schema_version": BASELINE_RESULT,
+                "evaluation_purpose": "recorded_baseline",
+                **{
+                    key: plan[key]
+                    for key in (
+                        "organization",
+                        "engagement",
+                        "audience",
+                        "intake_revision",
+                        "protected_membership_digest",
+                        "terms",
+                    )
+                },
+                "plan_revision": plan["revision"],
+                "protected_rows_evaluated": len(rows),
+                "source_revision": digest(intake["sources"]),
+                "authority_revision": intake["authority_revision"],
+                "policy_version": intake["policy_version"],
+                "source_schema_version": intake["source_schema_version"],
+                "exclusions": intake["excluded_counts"],
+                "split": intake["split"],
+                "independent_reference_digest": digest(
+                    [
+                        [
+                            row["case_id"],
+                            row["reference"],
+                            row.get("outcome_id"),
+                            row.get("adjudicator_id"),
+                            row.get("verified_at"),
+                        ]
+                        for row in rows
+                    ]
+                ),
+                "stages": {
+                    "protected_reserved_unix_ns": saved["reserved_at"],
+                    "score_started_unix_ns": started,
+                    "score_completed_unix_ns": time.time_ns(),
+                },
+                "arms": {
+                    "incumbent": {
+                        "revision": plan["incumbent_revision"],
+                        "prediction_digest": digest(
+                            {row["case_id"]: row["incumbent"] for row in measured}
+                        ),
+                        "metrics": metrics,
+                        "critical_slices": slices,
+                        "hold_reason": _checks(measured, terms, metrics, slices),
+                    }
+                },
+                "comparisons": {},
+                "decision": {
+                    "disposition": "observe",
+                    "winner": None,
+                    "reason": "recorded_baseline_only",
+                },
+                "outcome": "baseline_observed",
+            }
+            result["evidence_revision"] = digest(result)
+            db.execute(
+                "UPDATE protected_comparisons SET result=? WHERE revision=?",
+                (canonical(result), plan["revision"]),
+            )
+        _live(intake)
+        # A withdrawal during scoring must roll back the result. Reacquiring
+        # the current grant here also keeps the check and commit atomic, without
+        # calling a nested training writer from the producer's full authority.
+        with commit_authority():
+            check_current_intake(
+                store.path.parent, store.organization, plan["engagement"], plan["intake_revision"]
+            )
+            db.commit()
+    current()
     return result

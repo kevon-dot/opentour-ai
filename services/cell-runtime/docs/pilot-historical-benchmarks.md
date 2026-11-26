@@ -13,6 +13,15 @@ revision, existing comparison terms and an explicitly declared rule. Coverage,
 error and development/verified/residual/slice thresholds must be present. This
 producer does not infer missing thresholds or fit a rule.
 
+For baseline measurement alone, the standing agreement instead uses
+`opentour.pilot.historical-baseline-policy.v1` with an incumbent revision and
+measurement terms. It has no comparator or development/residual thresholds.
+Its different policy digest creates a distinct authorized intake intent. The
+result uses separate recorded-baseline plan/result schemas, contains only the
+incumbent arm and an `observe` decision, and cannot claim improvement or
+training eligibility. Zero development cases do not block an authorized baseline
+when protected case support and recorded predictions are sufficient.
+
 The producer freezes actual joined independent outcomes and grouped source
 partitions, then uses the preregistered declared comparator and recorded incumbent
 decisions in the existing protected comparison worker. Its manifest contains no
@@ -33,12 +42,16 @@ protected cases, two recorded incumbent errors and zero declared-comparator
 errors, with zero jobs, train-data rows, fit reservations, model artifacts or Slack
 receipts. Tests also cover completed retry, crash/readback, missing predictions,
 missing thresholds, policy change, withdrawal and restored registry corruption.
+Baseline tests measure sixteen protected cases without a comparator or development
+population, preserve a separately assessed repair hold, reject fabricated
+eligibility on readback, and deny reuse of the observed cohort for a new repair
+comparison. Both intents use the actual protected case/family reservation ledger.
 Generated records are software evidence, not a customer or provider result.
 
 This is still a scoped backend follow-on. It does not install the normal worker
 factory or refresh loop, render Slack, supply starter adjudication/scoring, or
-complete OPE-505. The existing managed comparison can hold at its development
-gate; that does not become a scored baseline. A general baseline-only path when
-the declared comparator cannot pass that gate remains separate work. The normal
-worker must surface typed holds and reconcile unknown in-flight operations. No
+complete OPE-505. The existing managed comparison still holds at its development
+gate. Only an explicitly authorized recorded-baseline intent can measure the
+incumbent independently; it does not remove that hold or authorize a fit. The
+normal worker must surface typed holds and reconcile unknown in-flight operations. No
 unobserved operation is automatically retried.

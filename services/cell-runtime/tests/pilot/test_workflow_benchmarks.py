@@ -12,7 +12,7 @@ from dataclasses import asdict, replace
 from pathlib import Path
 
 import pytest
-from opentour_cell.pilot.intake_admission import AuthorizedSource, DurableIntake
+from opentour_cell.pilot.intake_admission import AuthorizedSource, DurableIntake, canonical_intent
 from opentour_cell.pilot.intake_mcp import (
     CatalogPage,
     HistoricalPair,
@@ -192,6 +192,27 @@ def test_equivalent_new_keys_concurrent_and_restart_keep_one_draft(prepared):
         assert db.execute("SELECT materialized FROM benchmarks").fetchone()[0] is None
     with sqlite3.connect(authority.training.path) as db:
         assert db.execute("SELECT COUNT(*) FROM jobs").fetchone()[0] == 0
+
+
+def test_public_canonical_intent_matches_actual_authorized_admission(prepared):
+    intake, _ = prepared
+    receipt = intake.submit_intake(ACTOR, STARTER)
+    with intake.intake.admitted_work(ACTOR, receipt.run_ref) as work:
+        actual = canonical_intent(work.workflow_ref, work.mode, work.resource, work.revisions)
+        with sqlite3.connect(intake.intake.path) as db:
+            stored = db.execute(
+                "SELECT intent FROM intake_runs WHERE run_ref=?", (work.run_ref,)
+            ).fetchone()[0]
+        assert actual == stored
+        assert (
+            canonical_intent(
+                work.workflow_ref,
+                work.mode,
+                replace(work.resource, engagement_epoch="other"),
+                work.revisions,
+            )
+            != stored
+        )
 
 
 def test_crash_after_admission_before_draft_recovers_same_identity(prepared, monkeypatch):
@@ -519,6 +540,116 @@ def test_two_fresh_stdio_processes_reuse_draft(prepared):
     second = invoke({**request, "idempotency_key": "another-transport-key"})
     assert first == second
     assert intake.get_run(ACTOR, first["run_ref"]).benchmark.version == 1
+
+
+@pytest.mark.parametrize(
+    "alteration",
+    [
+        {"source_revision": "restored-unrelated-source"},
+        {"definition_digest": "f" * 64},
+        {"definition_ref": "restored-definition"},
+        {"result_digest": "f" * 64},
+        {"state": "frozen_unscored", "result_ref": None, "result_digest": None},
+        {"unknown_private_field": "untrusted-restored-value"},
+    ],
+)
+def test_corrupted_completion_is_denied_on_replay_and_every_projection(prepared, alteration):
+    intake, authority = prepared
+    admission = intake.submit_intake(ACTOR, STARTER)
+    producer = Producer("scored")
+    assert intake.materialize(ACTOR, admission.run_ref, producer)
+    original = intake.get_run(ACTOR, admission.run_ref)
+    with sqlite3.connect(intake.benchmarks.path) as db:
+        encoded = db.execute("SELECT materialized FROM benchmarks").fetchone()[0]
+        changed = {**json.loads(encoded), **alteration}
+        db.execute("UPDATE benchmarks SET materialized=?", (json.dumps(changed),))
+    scope = BenchmarkScope(ACTOR.tenant, authority.epoch, original.workflow_ref)
+    reads = [
+        lambda: intake.materialize(ACTOR, admission.run_ref, producer),
+        lambda: intake.get_run(ACTOR, admission.run_ref),
+        lambda: intake.submit_intake(ACTOR, replace(STARTER, idempotency_key="retry-key")),
+        lambda: intake.inspect_benchmark(
+            ACTOR, original.workflow_ref, original.benchmark.benchmark_ref
+        ),
+        lambda: intake.benchmarks.current(scope),
+    ]
+    for read in reads:
+        with pytest.raises(IntakeError):
+            read()
+    assert producer.calls == 1 and producer.readbacks == 0
+    with sqlite3.connect(intake.benchmarks.path) as db:
+        db.execute("UPDATE benchmarks SET materialized=?", (encoded,))
+    assert intake.get_run(ACTOR, admission.run_ref) == original
+
+
+@pytest.mark.parametrize("keep_seal", [True, False])
+def test_restored_draft_cannot_hide_completed_publication(prepared, keep_seal):
+    intake, authority = prepared
+    admission = intake.submit_intake(ACTOR, STARTER)
+    producer = Producer("scored")
+    assert intake.materialize(ACTOR, admission.run_ref, producer)
+    original = intake.get_run(ACTOR, admission.run_ref)
+    with sqlite3.connect(intake.benchmarks.path) as db:
+        db.execute("UPDATE benchmarks SET state='draft',materialized=NULL")
+        if not keep_seal:
+            db.execute("DELETE FROM benchmark_receipts")
+    with pytest.raises(IntakeError):
+        intake.get_run(ACTOR, admission.run_ref)
+    with pytest.raises(IntakeError):
+        intake.benchmarks.current(
+            BenchmarkScope(ACTOR.tenant, authority.epoch, original.workflow_ref)
+        )
+    with pytest.raises(IntakeError):
+        intake.materialize(ACTOR, admission.run_ref, producer)
+    assert producer.calls == 1 and producer.readbacks == 0
+
+
+def test_prior_authentic_frozen_receipt_cannot_hide_completed_score(prepared):
+    intake, _ = prepared
+    admission = intake.submit_intake(ACTOR, STARTER)
+    producer = Producer()
+    assert intake.materialize(ACTOR, admission.run_ref, producer, target_state="frozen_unscored")
+    with sqlite3.connect(intake.benchmarks.path) as db:
+        frozen = db.execute("SELECT materialized FROM benchmarks").fetchone()[0]
+        seal = db.execute("SELECT revision FROM benchmark_receipts").fetchone()[0]
+    producer.state = "scored"
+    assert intake.materialize(ACTOR, admission.run_ref, producer)
+    with sqlite3.connect(intake.benchmarks.path) as db:
+        db.execute("UPDATE benchmarks SET state='frozen_unscored',materialized=?", (frozen,))
+        db.execute("UPDATE benchmark_receipts SET revision=?", (seal,))
+    with pytest.raises(IntakeError):
+        intake.get_run(ACTOR, admission.run_ref)
+    with pytest.raises(IntakeError):
+        intake.materialize(ACTOR, admission.run_ref, producer, target_state="frozen_unscored")
+    assert producer.calls == 2 and producer.readbacks == 0
+
+
+def test_legacy_draft_without_publication_tables_remains_readable(prepared):
+    intake, _ = prepared
+    admission = intake.submit_intake(ACTOR, STARTER)
+    original = intake.get_run(ACTOR, admission.run_ref)
+    with sqlite3.connect(intake.benchmarks.path) as db:
+        db.execute("DROP TABLE benchmark_receipts")
+        db.execute("DROP TABLE benchmark_operations")
+    assert intake.get_run(ACTOR, admission.run_ref) == original
+    with sqlite3.connect(intake.benchmarks.path) as db:
+        db.execute("UPDATE benchmarks SET reference='unrelated-draft-reference'")
+    with pytest.raises(IntakeError):
+        intake.get_run(ACTOR, admission.run_ref)
+
+
+def test_unsealed_legacy_receipt_holds_without_resealing_or_redispatch(prepared):
+    intake, _ = prepared
+    admission = intake.submit_intake(ACTOR, STARTER)
+    producer = Producer("scored")
+    assert intake.materialize(ACTOR, admission.run_ref, producer)
+    with sqlite3.connect(intake.benchmarks.path) as db:
+        db.execute("DELETE FROM benchmark_receipts")
+    with pytest.raises(IntakeError, match="benchmark_receipt_binding_unavailable"):
+        intake.materialize(ACTOR, admission.run_ref, producer)
+    with sqlite3.connect(intake.benchmarks.path) as db:
+        assert db.execute("SELECT count(*) FROM benchmark_receipts").fetchone()[0] == 0
+    assert producer.calls == 1 and producer.readbacks == 0
 
 
 if __name__ == "__main__":
