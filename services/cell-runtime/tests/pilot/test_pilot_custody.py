@@ -103,6 +103,81 @@ def test_early_withdrawal_is_durable_and_safe_on_replay(tmp_path: Path) -> None:
     assert not (directory / "slack-pilot.sqlite3").exists()
 
 
+@pytest.mark.parametrize(
+    ("filename", "item", "kind"),
+    [
+        ("intake.sqlite3", "intake-records", "receipt"),
+        ("intake.sqlite3-wal", "intake-records", "receipt"),
+        ("benchmark-inspection-selection.json", "intake-records", "receipt"),
+        ("workflow-benchmarks.sqlite3-shm", "benchmark-records", "receipt"),
+        ("benchmark-worker.lock", "benchmark-records", "receipt"),
+        ("benchmark-intake-generated.json", "benchmark-records", "receipt"),
+        ("source-intake-starter-draft-generated.json", "source-intake-copies", "source"),
+        ("starter-intake-key.json", "starter-permissions", "grant"),
+        ("live-evidence.sqlite3-wal", "live-source-records", "source"),
+        ("live-export-read-generated.json", "live-source-records", "source"),
+        ("live-authority-key.json", "live-permissions", "grant"),
+        ("training-readiness.sqlite3", "readiness-records", "receipt"),
+        ("live-repair-assessments.sqlite3-shm", "readiness-records", "receipt"),
+        ("readiness-selection.json", "readiness-records", "receipt"),
+    ],
+)
+def test_withdrawal_inventories_private_state_without_reading_or_deleting_it(
+    tmp_path: Path, filename: str, item: str, kind: str
+) -> None:
+    directory = workspace(tmp_path, ORG)
+    neighbor = workspace(tmp_path, "generated-custody-b")
+    b = LocalTrainingStore(neighbor / "training.sqlite3", "generated-custody-b")
+    secret = b"GENERATED_PRIVATE_STATE_SENTINEL not a database or grant"
+    for owner in (directory, neighbor):
+        (owner / filename).write_bytes(secret)
+    b_before = (neighbor / "training.sqlite3").read_bytes()
+    closeout = Closeout(directory, ORG)
+    report = closeout.withdraw(**START)
+    obligation = items(report)[item]
+    assert obligation["kind"] == kind and obligation["disposition"] == "unresolved"
+    assert obligation["owner"] == START["custodian"] and obligation["due"] == START["due"]
+    assert secret.decode() not in json.dumps(report)
+    assert (directory / filename).read_bytes() == secret
+    assert (neighbor / filename).read_bytes() == secret
+    assert (neighbor / "training.sqlite3").read_bytes() == b_before and b.engagement_active()
+    assert not LocalTrainingStore(directory / "training.sqlite3", ORG).engagement_active()
+    assert Closeout(directory, ORG).reconcile() == report
+    for disposition in ("confirmed_deleted", "confirmed_returned", "confirmed_expiry"):
+        with pytest.raises(CustodyError, match="private_state_still_present"):
+            record(closeout, item, kind, disposition, due="2020-04-01")
+    record(closeout, "inventory-review", "inventory", "inventory_verified")
+    record(closeout, "support-handoff", "support", "handoff_confirmed")
+    with pytest.raises(CustodyError, match="closeout_obligations_open"):
+        closeout.finish(custodian=START["custodian"], evidence="generated-closeout")
+    record(closeout, item, kind, "custody_transferred", evidence="generated-custodian-receipt")
+    finished = closeout.finish(custodian=START["custodian"], evidence="generated-closeout")
+    assert finished["state"] == "closed" and finished["export_disposition"] == "zero_exports"
+    assert (directory / filename).read_bytes() == secret
+
+
+def test_private_state_restore_and_broken_link_reopen_deleted_obligations(tmp_path: Path) -> None:
+    directory = workspace(tmp_path, ORG)
+    path = directory / "live-export-generated.json"
+    path.write_text("GENERATED_PRIVATE_EXPORT")
+    closeout = Closeout(directory, ORG)
+    closeout.withdraw(**START)
+    path.unlink()
+    record(closeout, "live-source-records", "source", "confirmed_deleted")
+    record(closeout, "inventory-review", "inventory", "inventory_verified")
+    record(closeout, "support-handoff", "support", "handoff_confirmed")
+    assert (
+        closeout.finish(custodian=START["custodian"], evidence="generated-closeout")["state"]
+        == "closed"
+    )
+    path.symlink_to(tmp_path / "absent-foreign-target")
+    restored = Closeout(directory, ORG).reconcile()
+    assert restored["state"] == "open" and restored["closure_evidence"] is None
+    assert items(restored)["live-source-records"]["disposition"] == "unresolved"
+    assert path.is_symlink() and not path.exists()
+    assert not (tmp_path / "absent-foreign-target").exists()
+
+
 def test_org_bound_purge_keeps_other_customer_with_same_case_ids_intact(tmp_path: Path) -> None:
     a_dir = workspace(tmp_path, ORG)
     b_name = "generated-custody-b"
