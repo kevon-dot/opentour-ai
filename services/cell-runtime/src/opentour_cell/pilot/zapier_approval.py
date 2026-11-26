@@ -28,6 +28,8 @@ from opentour_cell.pilot.training_data import identifier
 
 Json = dict[str, Any]
 POLICY = "opentour.pilot.zapier-slack-policy.v1"
+RECIPE_POLICY = "opentour.pilot.zapier-slack-policy.v2"
+REFERENCE = "opentour.pilot.zapier-slack-reference.v1"
 EVENT = "opentour.pilot.zapier-slack-decision.v1"
 REQUEST = "opentour.pilot.zapier-slack-request.v1"
 HEX = re.compile("[0-9a-f]{64}")
@@ -120,7 +122,7 @@ class ApprovalBridge:
             "invalid_plugin_policy",
         )
         require(
-            p["schema_version"] == POLICY
+            p["schema_version"] in {POLICY, RECIPE_POLICY}
             and p["enabled"] is True
             and p["organization"] == self.organization,
             "plugin_not_authorized",
@@ -185,6 +187,91 @@ class ApprovalBridge:
         p, _ = self._policy()
         return {"state": "configured", "provider": "zapier_slack", "policy_revision": digest(p)}
 
+    def uses_recipe(self) -> bool:
+        policy, _ = self._policy()
+        version: str = policy["schema_version"]
+        return version == RECIPE_POLICY
+
+    def details(self, request_id: str, *, team: str, actor: str) -> Json:
+        """Called only with the authenticated identity from the tenant's private viewer."""
+        policy, key = self._policy()
+        require(team == policy["team"] and actor == policy["reviewer"], "reviewer_required")
+        req = self._request(request_id, policy, key)
+        self._inspect(req)
+        return {k: req[k] for k in ("run_revision", "artifact_sha", "audience", "expires_at")}
+
+    def existing_status(
+        self, *, run_id: str, run_revision: str, artifact_sha: str, team: str, actor: str
+    ) -> Json | None:
+        policy, key = self._policy()
+        require(team == policy["team"] and actor == policy["reviewer"], "reviewer_required")
+        scope = {
+            "run_id": run_id,
+            "run_revision": run_revision,
+            "artifact_sha": artifact_sha,
+            **{k: policy[k] for k in ("engagement", "team", "channel", "reviewer", "audience")},
+            "policy_revision": digest(policy),
+        }
+        prefix = "za-" + _sig(key, REQUEST + "/scope", scope)[:16]
+        for path in self.directory.glob(f"zapier-approval-{prefix}*-request.json"):
+            rid = path.name.removeprefix("zapier-approval-").removesuffix("-request.json")
+            req = self._request(rid, policy, key, fresh=False)
+            require(all(req[k] == v for k, v in scope.items()), "request_scope_mismatch")
+            if req["expires_at"] > int(time.time()) or self._path(rid, "event").exists():
+                return self.decision_status(rid, team=team, actor=actor)
+        return None
+
+    def decision_status(self, request_id: str, *, team: str, actor: str) -> Json:
+        policy, key = self._policy()
+        require(team == policy["team"] and actor == policy["reviewer"], "reviewer_required")
+        req = self._request(request_id, policy, key, fresh=False)
+        work, frozen = release_gate._binding(
+            self.directory,
+            self.organization,
+            req["run_id"],
+            req["run_revision"],
+            req["artifact_sha"],
+        )
+        seen = release_gate._inspection(
+            self.directory,
+            self.organization,
+            req["run_id"],
+            req["run_revision"],
+            req["artifact_sha"],
+            frozen,
+            req["inspection_ref"],
+            fresh=False,
+        )
+        require(seen["engagement"] == req["engagement"], "plugin_policy_changed")
+        scope = {
+            k: req[k]
+            for k in ("request_id", "run_revision", "artifact_sha", "audience", "expires_at")
+        }
+        receipt_path = work / "release-decision.json"
+        if not receipt_path.exists():
+            transport_path = self._path(request_id, "transport")
+            if req["expires_at"] <= int(time.time()):
+                state = "expired"
+            elif transport_path.exists():
+                transport = _read_private(transport_path, 1024)
+                state = transport["transport"]
+                require(
+                    transport["request_id"] == request_id
+                    and state in {"accepted", "failed", "uncertain"},
+                    "invalid_transport_receipt",
+                )
+            else:
+                state = "uncertain" if self._path(request_id, "admitted").exists() else "staged"
+            return {**scope, "state": state}
+        receipt = _read_private(receipt_path, 16384)
+        require(
+            all(receipt.get(k) == req[k] for k in BIND)
+            and receipt.get("provider") == "zapier_slack"
+            and receipt.get("decision") in {"approved", "changes_requested"},
+            "receipt_scope_mismatch",
+        )
+        return {**scope, "state": receipt["decision"], "receipt_sha256": digest(receipt)}
+
     def _path(self, request_id: str, kind: str) -> Path:
         require(isinstance(request_id, str) and REQ.fullmatch(request_id), "invalid_request_id")
         return self.directory / f"zapier-approval-{request_id}-{kind}.json"
@@ -220,7 +307,15 @@ class ApprovalBridge:
         return req
 
     @staticmethod
-    def _wire(req: Json, key: bytes) -> Json:
+    def _wire(req: Json, key: bytes, policy: Json) -> Json:
+        if policy["schema_version"] == RECIPE_POLICY:
+            reference = {
+                "schema_version": REFERENCE,
+                **{k: req[k] for k in ("request_id", "nonce", "expires_at")},
+            }
+            scope = {k: policy[k] for k in ("team", "channel", "reviewer", "zap_id", "zap_version")}
+            return reference | {"request_signature": _sig(key, REFERENCE, reference | scope)}
+
         payload = {
             k: req[k]
             for k in (
@@ -246,8 +341,13 @@ class ApprovalBridge:
         artifact_sha: str,
         inspection_ref: str,
         ttl_seconds: int = 900,
+        expected_policy: str | None = None,
+        preview_only: bool = False,
+        confirmed_preview: Json | None = None,
     ) -> Json:
         p, key = self._policy()
+        require(expected_policy in (None, p["schema_version"]), "plugin_policy_changed")
+        require(not preview_only or p["schema_version"] == RECIPE_POLICY, "recipe_required")
         require(
             isinstance(run_id, str)
             and re.fullmatch("run-[a-f0-9]{32}", run_id)
@@ -275,15 +375,43 @@ class ApprovalBridge:
             scope = {k: v for k, v in binding.items() if k != "inspection_ref"}
             prefix = "za-" + _sig(key, REQUEST + "/scope", scope)[:16]
             now = int(time.time())
+            expires = min(p["expires_at"], inspection["expires_at"], now + ttl_seconds)
+            rid = prefix + _sig(key, REQUEST + "/presentation", binding)[:16]
+            prior = None
             for known in self.directory.glob(f"zapier-approval-{prefix}*-request.json"):
                 prior_id = known.name.removeprefix("zapier-approval-").removesuffix("-request.json")
-                prior = self._request(prior_id, p, key, fresh=False)
-                require(all(prior[k] == v for k, v in scope.items()), "request_scope_mismatch")
-                if prior["expires_at"] > now:
-                    self._inspect(prior)
-                    return self._wire(prior, key)
-            # Reopening after expiry generates a new challenge only after a new sealed exposure.
-            rid = prefix + _sig(key, REQUEST + "/presentation", binding)[:16]
+                candidate = self._request(prior_id, p, key, fresh=False)
+                require(all(candidate[k] == v for k, v in scope.items()), "request_scope_mismatch")
+                if candidate["expires_at"] > now:
+                    self._inspect(candidate)
+                    prior = candidate
+                    expires = prior["expires_at"]
+                    rid = prior_id
+                    break
+            if p["schema_version"] == RECIPE_POLICY:
+                work, _ = release_gate._binding(
+                    self.directory, self.organization, run_id, run_revision, artifact_sha
+                )
+                require(not (work / "release-decision.json").exists(), "review_already_decided")
+                if confirmed_preview is not None and prior is None:
+                    pinned = confirmed_preview.get("expires_at")
+                    require(type(pinned) is int and now < pinned <= expires, "preview_expired")
+                    expires = pinned
+                preview = {
+                    "request_id": rid,
+                    "run_revision": run_revision,
+                    "artifact_sha": artifact_sha,
+                    "audience": p["audience"],
+                    "operation": "evaluation handoff only",
+                    "fallback": "keep the incumbent",
+                    "expires_at": expires,
+                    "policy_revision": digest(p),
+                }
+                if preview_only:
+                    return preview
+                require(preview == confirmed_preview, "confirmed_preview_required")
+            if prior is not None:
+                return self._wire(prior, key, p)
             path = self._path(rid, "request")
             if not os.path.lexists(path):
                 req = binding | {
@@ -291,11 +419,11 @@ class ApprovalBridge:
                     "request_id": rid,
                     "nonce": secrets.token_hex(32),
                     "issued_at": now,
-                    "expires_at": min(p["expires_at"], inspection["expires_at"], now + ttl_seconds),
+                    "expires_at": expires,
                 }
                 _record(path, {"request": req, "seal": _sig(key, REQUEST, req)})
             req = self._request(rid, p, key)
-        return self._wire(req, key)
+        return self._wire(req, key, p)
 
     def flush(self, request_id: str, hook: str, post: Callable[[str, Json], int] = _post) -> Json:
         p, key = self._policy()
@@ -326,7 +454,7 @@ class ApprovalBridge:
                 finally:
                     os.close(dir_fd)
             try:
-                status = post(hook, self._wire(req, key))
+                status = post(hook, self._wire(req, key, p))
                 disposition = "accepted" if 200 <= status < 300 else "failed"
             except (OSError, http.client.HTTPException):
                 disposition = "uncertain"

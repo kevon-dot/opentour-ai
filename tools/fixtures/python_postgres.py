@@ -23,6 +23,7 @@ ROOT = Path(__file__).resolve().parents[2]
 PILOT_POSTGRES = "services/control-api/tests/auth/test_browser_private_pilot_postgres.py"
 NODE_PROBE = "services/control-api/tests/auth/private_browser_client_postgres_probe.mjs"
 NODE_GUARD = "packages/contracts/common/unit-network-guard.cjs"
+WORKER_HOST_TLS = "services/cell-runtime/tests/pilot/test_worker_host_install.py"
 TARGETS = {
     "services/control-api/tests/migrations/test_expand_contract.py": "OPE-213",
     "services/control-api/tests/auth/test_identity_postgres.py": "OPE-142",
@@ -33,10 +34,13 @@ TARGETS = {
     "services/control-api/tests/runners/test_enrollment_postgres.py": "OPE-184",
     PILOT_POSTGRES: "OPE-142",
 }
+INTAKE_TLS = "services/cell-runtime/tests/pilot/test_tls_intake.py"
 TLS_TARGETS = {
+    INTAKE_TLS: "OPE-537",
     "services/control-api/tests/auth/test_browser_private_listener.py": "OPE-142",
     "services/control-api/tests/auth/test_browser_private_pilot_listener.py": "OPE-142",
     PILOT_POSTGRES: "OPE-142",
+    WORKER_HOST_TLS: "OPE-424",
 }
 SCHEMA_ID = "urn:opentour:python-postgres-observation:1.0"
 
@@ -74,8 +78,23 @@ def source_paths(target: str) -> tuple[str, ...]:
     )
     if target in TLS_TARGETS:
         paths += ("packages/contracts/common/python-unit/sitecustomize.py",)
+    if target == INTAKE_TLS:
+        paths += (
+            "services/cell-runtime/integrations/worker-host/health.py",
+            "services/cell-runtime/tests/pilot/test_worker_host_install.py",
+            "services/cell-runtime/tests/pilot/test_intake_mcp.py",
+            "services/cell-runtime/src/opentour_cell/pilot/intake_mcp.py",
+            "services/cell-runtime/src/opentour_cell/pilot/intake_local.py",
+            "services/cell-runtime/src/opentour_cell/pilot/intake_admission.py",
+            "tools/build_slack_pilot_kit.py",
+        )
     if target == PILOT_POSTGRES:
         paths += (NODE_PROBE, NODE_GUARD)
+    if target == WORKER_HOST_TLS:
+        paths += (
+            "services/cell-runtime/integrations/worker-host/health.py",
+            "tools/build_slack_pilot_kit.py",
+        )
     return paths
 
 

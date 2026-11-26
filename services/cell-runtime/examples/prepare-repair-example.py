@@ -31,10 +31,9 @@ def save_rows(path, rows):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def prepare(directory, route):
+def prepare(directory, route, org="generated-co"):
     os.umask(0o077)
     directory.mkdir(mode=0o700, exist_ok=False)
-    org = "generated-co"
     store = LocalTrainingStore(directory / "training.sqlite3", org)
     texts = {
         "refund": [

@@ -1,0 +1,48 @@
+{
+  "schema_version": "opentour.generated.payer-routing.v1",
+  "invoices": [
+    ["company", "payable", 100],
+    ["employee", "reimburse", 101],
+    ["company", "payable", 102],
+    ["employee", "reimburse", 103],
+    ["company", "payable", 104],
+    ["employee", "reimburse", 105],
+    ["company", "payable", 106],
+    ["employee", "reimburse", 107],
+    ["company", "payable", 108],
+    ["employee", "reimburse", 109],
+    ["company", "payable", 110],
+    ["employee", "reimburse", 111],
+    ["company", "payable", 210],
+    ["employee", "reimburse", 211],
+    ["company", "payable", 212],
+    ["employee", "reimburse", 213],
+    [null, "reimburse", 214],
+    ["employee", "reimburse", 215],
+    [null, "reimburse", 216]
+  ],
+  "late_payer": "invoice-17",
+  "additional_features": {
+    "invoice-18": {"research_payer": "employee"}
+  },
+  "expected": {
+    "development": 12,
+    "protected": 5,
+    "recurring_groups": 6,
+    "errors": 3,
+    "fit_jobs": 0,
+    "mapping": {"company": "payable", "employee": "reimburse"},
+    "excluded": {
+      "invoice-17": "future_decision_features",
+      "invoice-18": "fields_outside_grant"
+    },
+    "excluded_counts": {"fields_outside_grant": 1, "future_decision_features": 1},
+    "protected_decisions": {
+      "invoice-12": {"status": "automatic", "label": "payable"},
+      "invoice-13": {"status": "automatic", "label": "reimburse"},
+      "invoice-14": {"status": "automatic", "label": "payable"},
+      "invoice-15": {"status": "automatic", "label": "reimburse"},
+      "invoice-16": {"status": "review"}
+    }
+  }
+}

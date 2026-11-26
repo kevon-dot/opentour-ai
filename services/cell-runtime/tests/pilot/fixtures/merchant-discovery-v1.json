@@ -1,0 +1,108 @@
+{
+  "schema_version": "opentour.generated.merchant-discovery.v1",
+  "grant": {
+    "schema_version": "opentour.pilot.source-grant.v1",
+    "organization": "generated-co",
+    "engagement": "REPLACE_WITH_ACTIVE_ENGAGEMENT",
+    "dataset_id": "generated-merchants",
+    "workflow": "receipt-extraction",
+    "field": "merchant",
+    "policy_version": "merchant-v1",
+    "source_schema_version": "transaction-v1",
+    "trace_source": "prediction-journal",
+    "correction_source": "verified-ledger",
+    "owner_id": "generated-owner",
+    "owner_attestation": "att-1111111111111111",
+    "adjudicators": [
+      "verifier-1"
+    ],
+    "permitted_features": [
+      "description"
+    ],
+    "permitted_slices": [
+      "high-value"
+    ],
+    "evaluation_allowed": true,
+    "as_of": 300,
+    "expires_at": 4102444800,
+    "split": {
+      "mode": "chronological",
+      "cutoff": 200
+    },
+    "retention_terms": "terms-1111111111111111",
+    "training_attestation": "att-2222222222222222"
+  },
+  "traces": [
+    {
+      "customer_id": "client-a",
+      "decision_at": 100,
+      "event_id": "txn-1",
+      "features": {
+        "description": "receipt 1"
+      },
+      "features_available_at": 99,
+      "group_id": "group-1",
+      "incumbent": {
+        "label": "merchant-a",
+        "status": "automatic"
+      },
+      "source": "prediction-journal"
+    },
+    {
+      "customer_id": "client-a",
+      "decision_at": 100,
+      "event_id": "txn-2",
+      "features": {
+        "description": "receipt 2"
+      },
+      "features_available_at": 99,
+      "group_id": "group-2",
+      "incumbent": {
+        "label": "merchant-a",
+        "status": "automatic"
+      },
+      "source": "prediction-journal"
+    }
+  ],
+  "corrections": [
+    {
+      "adjudicator_id": "verifier-1",
+      "event_id": "txn-1",
+      "facts_as_of": 100,
+      "outcome_at": 110,
+      "outcome_id": "verification-1",
+      "reference": "merchant-b",
+      "source": "verified-ledger",
+      "verified_at": 120
+    },
+    {
+      "adjudicator_id": "verifier-1",
+      "event_id": "txn-2",
+      "facts_as_of": 100,
+      "outcome_at": 110,
+      "outcome_id": "verification-2",
+      "reference": "merchant-b",
+      "source": "verified-ledger",
+      "verified_at": 120
+    },
+    {
+      "adjudicator_id": "verifier-1",
+      "event_id": "txn-2",
+      "facts_as_of": 100,
+      "outcome_at": 110,
+      "outcome_id": "verification-3",
+      "reference": "merchant-b",
+      "source": "verified-ledger",
+      "verified_at": 120
+    }
+  ],
+  "expected": {
+    "eligible_case": "txn-1",
+    "verified_outcome": "verification-1",
+    "excluded": {
+      "txn-2": "ambiguous_outcomes"
+    },
+    "protected_count": 0,
+    "fit_jobs": 0
+  }
+}

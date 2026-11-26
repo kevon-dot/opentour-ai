@@ -29,14 +29,26 @@ SESSION_SECONDS = 900
 RESULT_PAGE_SIZE = 12
 SLACK_ID = re.compile(r"[A-Z][A-Z0-9]{2,31}\Z")
 LOCAL_ID = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}\Z")
+# Only a complete, read-only question may select a frozen comparison.
+REGRESSION_QUESTION = re.compile(
+    r"(?:what (?:got|became) worse|(?:which|what) (?:cases|decisions|answers) "
+    r"(?:(?:got|became) (?:worse|wrong|incorrect)|regressed))\??"
+)
 ROLES = {"inspect", "tune", "review"}
 CALLBACKS = {"ot_dataset_search", "ot_tune_preview", "ot_tune_start", "ot_prompt_enter"}
 ACTIONS = {
+    "ot_workflow_starter",
+    "ot_workflow_historical",
     "ot_home",
     "ot_browse",
     "ot_tune",
     "ot_status",
     "ot_evidence",
+    "ot_plugin_continue",
+    "ot_managed_review_status",
+    "ot_plugin_request",
+    "ot_plugin_status",
+    "ot_plugin_receipt",
     "ot_charts",
     "ot_approve",
     "ot_changes",
@@ -97,6 +109,7 @@ class Settings:
     workspace_title: str = "OpenTour pilot workspace"
     workflow_label: str = ""
     config_path: Path | None = None
+    explicit_recipient: bool = True
 
     @property
     def binding(self) -> str:
@@ -131,9 +144,9 @@ class Settings:
             "directory",
             "users",
             "reviewer",
-            "recipient",
         }
         optional = {
+            "recipient",
             "channel_aggregates",
             "zapier",
             "zapier_disposition",
@@ -147,10 +160,10 @@ class Settings:
         _check(isinstance(doc["organization"], str) and LOCAL_ID.fullmatch(doc["organization"]))
         _check(_slack_id(doc["team"], "T") and _slack_id(doc["app"], "A"))
         _check(_slack_id(doc["channel"], "CG") and isinstance(doc["users"], dict))
-        _check(
-            _slack_id(doc["reviewer"], "UW")
-            and (_slack_id(doc["recipient"], "UWG") or doc["recipient"] == doc["channel"])
-        )
+        _check(_slack_id(doc["reviewer"], "UW"))
+        explicit_recipient = "recipient" in doc
+        recipient = doc.get("recipient", doc["reviewer"])
+        _check(_slack_id(recipient, "UW") or recipient == doc["channel"])
         directory = Path(doc["directory"])
         _check(directory.is_absolute() and directory.is_dir() and not directory.is_symlink())
         if os.name == "posix":
@@ -192,18 +205,19 @@ class Settings:
             doc["app"],
             doc["channel"],
             doc["reviewer"],
-            doc["recipient"],
+            recipient,
             directory,
             doc["users"],
             doc.get("channel_aggregates", False),
-            doc.get("zapier", False),
-            doc.get("zapier_disposition", False),
+            explicit_recipient and doc.get("zapier", False),
+            explicit_recipient and doc.get("zapier_disposition", False),
             destination,
-            doc.get("approval_requests", False),
+            explicit_recipient and doc.get("approval_requests", False),
             doc.get("approval_provider", "slack"),
             doc.get("workspace_title", "OpenTour pilot workspace"),
             doc.get("workflow_label", ""),
             path,
+            explicit_recipient=explicit_recipient,
         )
 
     def permission(self, actor: str, role: str, dataset: str | None = None) -> Json:
@@ -291,11 +305,13 @@ class Journal:
         row = db.execute("SELECT held FROM journal_control WHERE id=1").fetchone()
         _check(row and not row[0])
 
-    def admit_view(self, kind: str) -> str:
+    def admit_view(self, kind: str, *, authorize: Callable[[], None] | None = None) -> str:
         key = secrets.token_urlsafe(18)
         with self.db() as db:
             db.execute("BEGIN IMMEDIATE")
             self.active(db)
+            if authorize is not None:
+                authorize()
             db.execute(
                 "INSERT INTO exposures VALUES(?,?,'admitted',?,NULL)", (key, kind, int(time.time()))
             )
@@ -876,6 +892,29 @@ class ReceiptDrainer:
             self._thread.join()
 
 
+def _static_setup_navigation(view: Json, context: str) -> bool:
+    """Compare the complete outgoing private view with a stock, data-free setup screen."""
+    from opentour_cell.pilot import slack_views
+
+    callback = view.get("callback_id")
+    if callback == "ot_app_home":
+        expected = slack_views.app_home_view(
+            context,
+            "OpenTour pilot workspace",
+            can_review=True,
+            named_reviewer=True,
+            can_add_workflow=True,
+        )
+    elif callback == "ot_workflow_chooser":
+        expected = slack_views.workflow_chooser(context)
+    elif callback in {"ot_workflow_starter_info", "ot_workflow_historical_info"}:
+        route = "starter" if callback == "ot_workflow_starter_info" else "historical"
+        expected = slack_views.workflow_instructions(context, route)
+    else:
+        return False
+    return view == expected
+
+
 def withdraw_for_custody(directory: Path, organization: str) -> dict[str, int]:
     """Invalidate action grants and stop the journal after the organization's training hold."""
     totals = dict.fromkeys(
@@ -931,7 +970,12 @@ def withdraw_for_custody(directory: Path, organization: str) -> dict[str, int]:
 
         totals.update(
             slack_exposed=n("SELECT COUNT(*) FROM exposures WHERE status='presented'"),
-            slack_possible=n("SELECT COUNT(*) FROM exposures WHERE status!='presented'"),
+            slack_possible=n(
+                "SELECT COUNT(*) FROM exposures WHERE status IS NOT 'presented' "
+                "AND (status IS NOT 'navigation_presented' OR COALESCE(kind,'') NOT IN "
+                "('app_home','ot_workflow_chooser','ot_workflow_starter_info',"
+                "'ot_workflow_historical_info'))"
+            ),
             zapier_accepted=n(
                 "SELECT COUNT(*) FROM decisions "
                 "WHERE delivery IN ('accepted','downstream_confirmed')"
@@ -1246,9 +1290,10 @@ class Workbench:
         return self._target(dataset, status["dataset_revision"], report, audit)
 
     def _policy(self, cfg: Settings, actor: str) -> str:
-        return self.journal.opaque(
-            "policy", [cfg.team, cfg.channel, cfg.roles.get(actor), cfg.reviewer, cfg.recipient]
-        )
+        scope = [cfg.team, cfg.channel, cfg.roles.get(actor), cfg.reviewer, cfg.recipient]
+        if not cfg.explicit_recipient:
+            scope.append("local-evaluation-only")
+        return self.journal.opaque("policy", scope)
 
     def _catalog(self, cfg: Settings, actor: str, search: str = "") -> list[Json]:
         entry = cfg.permission(actor, "inspect")
@@ -1454,6 +1499,44 @@ class Workbench:
             return
         self._browse(cfg, actor, view, source, search=query, old_hash=old_hash)
 
+    def _regression_picker(
+        self, cfg: Settings, actor: str, view: str, old_hash: str = "", page: int = 0
+    ) -> None:
+        policy = self._policy(cfg, actor)
+        eligible = []
+        if cfg.permission(actor, "inspect")["aggregate"]:
+            for dataset, source in self._result_sources(cfg, actor):
+                target = self._readout(cfg, actor, source)
+                if target and self.journal.inspected(actor, target.revision, policy):
+                    eligible.append((dataset, source, target.revision))
+        page = max(0, min(page, (len(eligible) - 1) // RESULT_PAGE_SIZE))
+        start = page * RESULT_PAGE_SIZE
+        rows = eligible[start : start + RESULT_PAGE_SIZE]
+        listing = {"page": page, "items": {revision: source for _, source, revision in rows}}
+        ctx = self.journal.context(actor, cfg.channel, view, "regressions", revision=_json(listing))
+        self._show(
+            view,
+            self.views.regression_picker(
+                ctx, rows, previous=bool(page), more=start + len(rows) < len(eligible)
+            ),
+            old_hash,
+            authorize=lambda: self._authorize_question_rows(cfg, actor, rows),
+        )
+
+    def _authorize_question_rows(
+        self, cfg: Settings, actor: str, rows: list[tuple[str, str, str]]
+    ) -> None:
+        # Both the withdrawal guard and the exposure transaction are held at admission.
+        current = self.settings()
+        current.permission(actor, "inspect")
+        policy = self._policy(current, actor)
+        _check(policy == self._policy(cfg, actor))
+        for dataset, source, revision in rows:
+            _check(current.permission(actor, "inspect", dataset)["aggregate"])
+            target = self._readout(current, actor, source)
+            _check(target and target.dataset == dataset and target.revision == revision)
+            _check(self.journal.inspected(actor, revision, policy))
+
     def _questions(
         self,
         cfg: Settings,
@@ -1483,7 +1566,17 @@ class Workbench:
             dataset=target.dataset,
             dataset_revision=target.dataset_revision,
             audit=target.audit,
+            authorize=lambda: self._authorize_question_rows(
+                cfg, actor, [(target.dataset, source, revision)]
+            ),
         )
+
+    def _unbound_recipient(self) -> bool:
+        # An unavailable current binding cannot justify excluding a confirmed view.
+        try:
+            return not self.settings().explicit_recipient
+        except Exception:
+            return False
 
     def _show(
         self,
@@ -1494,6 +1587,8 @@ class Workbench:
         dataset: str | None = None,
         dataset_revision: str | None = None,
         audit: Json | None = None,
+        setup_context: str | None = None,
+        authorize: Callable[[], None] | None = None,
     ) -> str:
         # Record every attempted protected disclosure without persisting projected sample rows.
         exposure = ""
@@ -1501,7 +1596,15 @@ class Workbench:
             with _evidence_guard(
                 self.store, dataset, dataset_revision, self.store.engagement_id, audit
             ):
-                exposure = self.journal.admit_view(modal["callback_id"])
+                exposure = self.journal.admit_view(modal["callback_id"], authorize=authorize)
+        navigation = (
+            setup_context is not None
+            and _static_setup_navigation(modal, setup_context)
+            and dataset is None
+            and dataset_revision is None
+            and audit is None
+            and self._unbound_recipient()
+        )
         params = {"view_id": view_id, "view": modal}
         if old_hash:
             params["hash"] = old_hash
@@ -1517,7 +1620,10 @@ class Workbench:
                 self.journal.finish_view(exposure, "uncertain")
             raise
         if exposure:
-            self.journal.finish_view(exposure, "presented")
+            self.journal.finish_view(
+                exposure,
+                "navigation_presented" if navigation and self._unbound_recipient() else "presented",
+            )
         return exposure
 
     def _home(self, cfg: Settings, actor: str, view_id: str, job: str, old_hash: str = "") -> None:
@@ -1703,7 +1809,39 @@ class Workbench:
         view_audit = {**target.audit, "viewer": actor}
         if not named_reviewer:
             view_audit.pop("workflow_benchmark", None)
+        recipe = False
+        request_status = None
+        if (
+            named_reviewer
+            and cfg.approval_provider == "zapier_slack"
+            and ctx["job"].startswith("managed:")
+        ):
+            from opentour_cell.pilot.zapier_approval import ApprovalBridge
+
+            try:
+                bridge = ApprovalBridge(
+                    current.directory,
+                    current.organization,
+                    current.directory / "zapier-approval.json",
+                )
+                recipe = bridge.uses_recipe()
+            except (OSError, ValueError):
+                pass
+            if (
+                recipe
+                and current.explicit_recipient
+                and target.audit.get("release_reviewer") == actor
+            ):
+                request_status = bridge.existing_status(
+                    run_id=target.audit["job_id"],
+                    run_revision=target.audit["run_revision"],
+                    artifact_sha=target.audit["model_revision"],
+                    team=cfg.team,
+                    actor=actor,
+                )
         modal = self.views.evidence_modal(
+            recipe=recipe,
+            request_status=request_status,
             context=token,
             revision=target.revision,
             report=target.report,
@@ -1711,7 +1849,9 @@ class Workbench:
             dataset_revision=target.dataset_revision,
             audit=view_audit,
             questions=True,
-            release_allowed=named_reviewer and actor == target.audit.get("release_reviewer"),
+            release_allowed=current.explicit_recipient
+            and named_reviewer
+            and actor == target.audit.get("release_reviewer"),
             charts_allowed=charts,
             benchmark_allowed=named_reviewer,
             workflow=cfg.workflow_label,
@@ -1761,7 +1901,9 @@ class Workbench:
             )
 
         if (
-            actor == target.audit.get("release_reviewer")
+            not recipe
+            and current.explicit_recipient
+            and actor == target.audit.get("release_reviewer")
             and "review" in entry["roles"]
             and (target.audit.get("release_provider") == "zapier_slack")
         ):
@@ -1779,6 +1921,7 @@ class Workbench:
                     run_revision=target.audit["run_revision"],
                     artifact_sha=target.audit["model_revision"],
                     inspection_ref=target.revision,
+                    expected_policy="opentour.pilot.zapier-slack-policy.v1",
                 )
             except (OSError, ValueError, KeyError):
                 self._show(
@@ -1873,6 +2016,7 @@ class Workbench:
             current.binding == cfg.binding
             and current.reviewer == actor
             and actor == target.audit.get("release_reviewer")
+            and current.explicit_recipient
             and current.approval_provider == target.audit.get("release_provider") == "slack"
             and entry["aggregate"]
             and self.journal.inspected(actor, target.revision, self._policy(current, actor))
@@ -1945,11 +2089,42 @@ class Workbench:
         old_hash: str,
     ) -> None:
         job = ctx["job"]
-        if action == "ot_help":
+        if ctx["kind"] == "workflow_chooser":
+            _check(action in {"ot_workflow_starter", "ot_workflow_historical"})
+            current = self.settings()
+            _check(action == "ot_workflow_" + value and self._can_add_workflow(current, actor))
+            token = self.journal.context(actor, cfg.channel, view, "workflow_instructions")
+            self._show(
+                view,
+                self.views.workflow_instructions(token, value),
+                old_hash,
+                setup_context=None
+                if cfg.explicit_recipient or current.explicit_recipient
+                else token,
+            )
+        elif ctx["kind"] == "workflow_instructions":
+            raise Refused("This setup screen has no actions.")
+        elif action == "ot_help":
             self._help(cfg, actor, view, old_hash=old_hash)
         elif action == "ot_readouts":
             self._results(cfg, actor, view, old_hash)
         elif action in {"ot_result_prev", "ot_result_next", "ot_result_open"}:
+            if ctx["kind"] == "regressions":
+                listing = json.loads(ctx["revision"])
+                if action == "ot_result_open":
+                    _check(value in listing["items"])
+                    source = listing["items"][value]
+                    _check(source in {s for _, s in self._result_sources(cfg, actor)})
+                    self._questions(cfg, actor, view, source, value, "changes", old_hash)
+                else:
+                    self._regression_picker(
+                        cfg,
+                        actor,
+                        view,
+                        old_hash,
+                        listing["page"] + (1 if action == "ot_result_next" else -1),
+                    )
+                return
             _check(ctx["kind"] == "results")
             listing = json.loads(ctx["revision"])
             if action == "ot_result_open":
@@ -2036,6 +2211,102 @@ class Workbench:
         elif action in {"ot_status", "ot_status_refresh"}:
             _check(job and value in {job, "home", ctx["revision"]})
             self._status(cfg, actor, view, job, old_hash)
+        elif action == "ot_managed_review_status":
+            _check(ctx["kind"] == "evidence" and value == ctx["revision"] and actor == cfg.reviewer)
+            self.private_channel(cfg, actor)
+            target = self._managed(cfg, actor, job)
+            _check(target.revision == value)
+            cfg.permission(actor, "review", target.dataset)
+            self._show(
+                view,
+                self.views.managed_review_status(ctx["id"], target.audit),
+                old_hash,
+                dataset=target.dataset,
+                dataset_revision=target.dataset_revision,
+                audit=target.audit,
+            )
+        elif action in {"ot_plugin_continue", "ot_plugin_request"}:
+            from opentour_cell.pilot.zapier_approval import RECIPE_POLICY, ApprovalBridge
+
+            target = self._managed(cfg, actor, job)
+            _check(
+                cfg.explicit_recipient
+                and cfg.reviewer == actor
+                and target.audit.get("release_reviewer") == actor
+            )
+            cfg.permission(actor, "review", target.dataset)
+            self.private_channel(cfg, actor)
+            bridge = ApprovalBridge(
+                cfg.directory, cfg.organization, cfg.directory / "zapier-approval.json"
+            )
+            binding = {
+                "run_id": target.audit["job_id"],
+                "run_revision": target.audit["run_revision"],
+                "artifact_sha": target.audit["model_revision"],
+                "inspection_ref": target.revision,
+            }
+            if action == "ot_plugin_continue":
+                _check(ctx["kind"] == "evidence" and value == ctx["revision"] == target.revision)
+                preview = bridge.issue(**binding, expected_policy=RECIPE_POLICY, preview_only=True)
+                token = self.journal.context(
+                    actor, cfg.channel, view, "plugin_preview", job, _json(preview)
+                )
+                self._show(
+                    view,
+                    self.views.plugin_preview_modal(token, preview),
+                    old_hash,
+                    dataset=target.dataset,
+                    dataset_revision=target.dataset_revision,
+                    audit=target.audit,
+                )
+                return
+            _check(ctx["kind"] == "plugin_preview")
+            confirmed = json.loads(ctx["revision"])
+            _check(value == confirmed["request_id"])
+            request = bridge.issue(
+                **binding, expected_policy=RECIPE_POLICY, confirmed_preview=confirmed
+            )
+            token = self.journal.context(
+                actor, cfg.channel, view, "plugin_request", job, request["request_id"]
+            )
+            self._show(
+                view, self.views.plugin_waiting_modal(token, request["request_id"]), old_hash
+            )
+        elif action in {"ot_plugin_status", "ot_plugin_receipt"}:
+            from opentour_cell.pilot.zapier_approval import ApprovalBridge
+
+            _check(ctx["kind"] in {"evidence", "plugin_request"})
+            self.private_channel(cfg, actor)
+            bridge = ApprovalBridge(
+                cfg.directory, cfg.organization, cfg.directory / "zapier-approval.json"
+            )
+            target = self._managed(cfg, actor, job)
+            if ctx["kind"] == "evidence":
+                _check(
+                    target.revision == ctx["revision"]
+                    and target.audit.get("release_reviewer") == actor
+                )
+                existing = bridge.existing_status(
+                    run_id=target.audit["job_id"],
+                    run_revision=target.audit["run_revision"],
+                    artifact_sha=target.audit["model_revision"],
+                    team=cfg.team,
+                    actor=actor,
+                )
+                _check(existing and existing["request_id"] == value)
+            else:
+                _check(value == ctx["revision"])
+            status = bridge.decision_status(value, team=cfg.team, actor=actor)
+            self._show(
+                view,
+                self.views.plugin_waiting_modal(
+                    ctx["id"], value, status, show_receipt=action == "ot_plugin_receipt"
+                ),
+                old_hash,
+                dataset=target.dataset,
+                dataset_revision=target.dataset_revision,
+                audit=target.audit,
+            )
         elif action == "ot_evidence":
             _check(
                 ctx["kind"] in {"home", "evidence", "status", "eval_detail", "questions"}
@@ -2241,6 +2512,9 @@ class Workbench:
         if command in {"", "status", "review"} and not argument:
             self._results(cfg, actor, view)
             return
+        if REGRESSION_QUESTION.fullmatch(" ".join(prompt.casefold().split())):
+            self._regression_picker(cfg, actor, view)
+            return
         if command == "ask":
             aliases = {
                 "threshold": "coverage",
@@ -2309,7 +2583,12 @@ class Workbench:
 
     def _pending_release(self, cfg: Settings, actor: str) -> Target | None:
         entry = cfg.permission(actor, "inspect")
-        if actor != cfg.reviewer or "review" not in entry["roles"] or not entry["aggregate"]:
+        if (
+            not cfg.explicit_recipient
+            or actor != cfg.reviewer
+            or "review" not in entry["roles"]
+            or not entry["aggregate"]
+        ):
             return None
         for _, source in self._result_sources(cfg, actor):
             if not source.startswith("managed:"):
@@ -2327,6 +2606,15 @@ class Workbench:
                 return target
         return None
 
+    def _can_add_workflow(self, cfg: Settings, actor: str) -> bool:
+        entry = cfg.permission(actor, "inspect")
+        return (
+            actor == cfg.reviewer
+            and "review" in entry["roles"]
+            and not cfg.workflow_label
+            and not entry["datasets"]
+        )
+
     def _publish_app_home(self, cfg: Settings, event: Json) -> None:
         actor = event["user"]
         _check(
@@ -2338,6 +2626,7 @@ class Workbench:
             _check(self.store.engagement_active())
             entry = cfg.permission(actor, "inspect")
             self.private_channel(cfg, actor)
+            can_add_workflow = self._can_add_workflow(cfg, actor)
         except Exception:
             # Slack or custody checks may be unavailable; replace any previously personalized Home.
             self.web.views_publish(user_id=actor, view=self.views.app_home_view())
@@ -2352,6 +2641,13 @@ class Workbench:
             can_tune=self._home_repair_access(cfg, actor),
             named_reviewer=cfg.reviewer == actor and "review" in entry["roles"],
             pending=pending.revision if pending else "",
+            can_add_workflow=can_add_workflow,
+        )
+        navigation = (
+            can_add_workflow
+            and not cfg.explicit_recipient
+            and _static_setup_navigation(layout, token)
+            and self._unbound_recipient()
         )
         with self.store.engagement_guard(engagement_id=self.store.engagement_id):
             exposure = self.journal.admit_view("app_home")
@@ -2361,7 +2657,10 @@ class Workbench:
         except Exception:
             self.journal.finish_view(exposure, "uncertain")
             raise
-        self.journal.finish_view(exposure, "presented")
+        self.journal.finish_view(
+            exposure,
+            "navigation_presented" if navigation and self._unbound_recipient() else "presented",
+        )
 
     def _open_app_home(self, cfg: Settings, actor: str, body: Json) -> None:
         view = body["view"]
@@ -2375,6 +2674,27 @@ class Workbench:
             and len(body["actions"]) == 1
         )
         action = body["actions"][0]
+        if action.get("action_id") == "ot_app_add_workflow":
+            _check(action.get("value") == "ot_app_add_workflow")
+            opened = self.web.views_open(
+                trigger_id=body["trigger_id"], view=self.views.notice_modal("checking")
+            )
+            view_id = opened["view"]["id"]
+            try:
+                self.private_channel(cfg, actor)
+                current = self.settings()
+                _check(self._can_add_workflow(current, actor))
+                token = self.journal.context(actor, cfg.channel, view_id, "workflow_chooser")
+                self._show(
+                    view_id,
+                    self.views.workflow_chooser(token),
+                    setup_context=None
+                    if cfg.explicit_recipient or current.explicit_recipient
+                    else token,
+                )
+            except Exception:
+                self._safe_notice(view_id)
+            return
         if action.get("action_id") == "ot_app_pending":
             _check(actor == cfg.reviewer and cfg.permission(actor, "review")["aggregate"])
             opened = self.web.views_open(
@@ -2450,7 +2770,16 @@ class Workbench:
                 and body["team"]["id"] == cfg.team
             )
             actor = body["user"]["id"]
-            cfg.permission(actor, "inspect")
+            actions = body.get("actions", [])
+            setup_click = (
+                body.get("type") == "block_actions"
+                and len(actions) == 1
+                and actions[0].get("action_id")
+                in {"ot_app_add_workflow", "ot_workflow_starter", "ot_workflow_historical"}
+                and body.get("container", {}).get("type", "view") == "view"
+            )
+            if not setup_click:
+                cfg.permission(actor, "inspect")
             surfaced = body.get("channel", {}).get("id")
             _check(not surfaced or surfaced == cfg.channel)
             if body.get("container", {}).get("type") == "message":
@@ -2481,7 +2810,19 @@ class Workbench:
             view = obj["id"]
             token = obj["private_metadata"]
             # Only trusted local configuration and a bounded indexed lookup precede a modal receipt.
-            self.journal.read_context(token, actor, cfg.channel, view)
+            initial_context = self.journal.read_context(token, actor, cfg.channel, view)
+            if setup_click:
+                box = body.get("container", {})
+                _check(
+                    initial_context["kind"] == "workflow_chooser"
+                    and obj.get("type") == "modal"
+                    and obj.get("callback_id") == "ot_workflow_chooser"
+                    and box.get("type", "view") == "view"
+                    and box.get("view_id", view) == view
+                )
+                authorized_view = view
+                authorized_hash = obj.get("hash", "")
+                cfg.permission(actor, "inspect")
             if submission:
                 ack(
                     {

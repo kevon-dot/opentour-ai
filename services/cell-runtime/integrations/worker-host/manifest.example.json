@@ -1,0 +1,9 @@
+{
+  "schema": "opentour.worker-host.v1",
+  "site": "generated-site",
+  "revision": "config-1",
+  "audience": "generated-site-health",
+  "origin": "https://health.example.invalid",
+  "release_version": "1.0.0-rc.4",
+  "source_commit": "replace-with-verified-PROVENANCE-source_commit"
+}

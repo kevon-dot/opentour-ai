@@ -20,8 +20,10 @@ from test_slack_adapter import ACTOR, APP, CHANNEL, OTHER, TEAM, Harness
 Json = dict[str, Any]
 
 
-def stage(path: Path, route: str = "rule") -> tuple[Harness, Json, str, str, Json]:
-    h, plan, run, _ = setup_workflow(path, route, release=True)
+def stage(
+    path: Path, route: str = "rule", *, audience: str | None = None
+) -> tuple[Harness, Json, str, str, Json]:
+    h, plan, run, _ = setup_workflow(path, route, release=True, audience=audience)
     evidence = repair_workflow.managed_review_evidence(
         h.path.parent, h.store.organization, run, plan["audience"], TEAM, CHANNEL
     )
