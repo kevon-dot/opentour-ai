@@ -38,3 +38,13 @@ chunks, a two-attempt operation with one app commit, competing app commits,
 scope denial, and a whitespace-free synthetic content sentinel. Gateway and
 historical adapters and authorized exact-content inspection use the native
 capture contract on their own entry points.
+
+The customer worker can resolve an explicit metadata-only grant with
+`LocalCaptureAuthority`. The local custody operator controls its private key
+and the signed record for one tenant and workflow. The record names an actor
+and source for each recording boundary, the boundaries each inspector can
+read, the active engagement, purpose, policy, mode and expiry. A separately
+retained withdrawal marker fences an old restored signature. Every lookup
+reads current authority. Key rotation also creates a separate capture
+revision. The authenticated application or viewer supplies its actor after
+verification at its own boundary.
