@@ -206,12 +206,57 @@ class ReplayRequest:
         }
 
 
+def _checked_arm_fields(
+    case_id: object, answer: object, citations: object, abstained: object
+) -> tuple[str, str | None, tuple[str, ...], bool]:
+    """The one rule set for an arm output's fields; returns them normalised.
+
+    Citations are materialised exactly once and the materialised tuple is what is validated and
+    returned, so an iterable that yields different content on a second pass cannot pass the
+    check and then deliver something else. The other fields are plain values read once by the
+    caller. Raises ``TypeError`` for a wrong type and ``ValueError`` for an empty ``case_id``.
+    """
+    if not isinstance(case_id, str):
+        raise TypeError("ArmOutput.case_id must be a str")
+    if not case_id:
+        raise ValueError("ArmOutput.case_id must not be empty")
+    if answer is not None and not isinstance(answer, str):
+        raise TypeError("ArmOutput.answer must be a str or None")
+    if not isinstance(citations, list | tuple):
+        raise TypeError("ArmOutput.citations must be a list or tuple of str")
+    try:
+        cites = tuple(citations)
+    except Exception:
+        raise TypeError("ArmOutput.citations could not be read as a sequence") from None
+    if not all(isinstance(citation, str) for citation in cites):
+        raise TypeError("ArmOutput.citations must contain only str")
+    if type(abstained) is not bool:
+        raise TypeError("ArmOutput.abstained must be a bool")
+    return case_id, answer, cites, abstained
+
+
 @dataclass(frozen=True)
 class ArmOutput:
+    """One arm's output for one case. Invalid fields cannot be constructed, whichever arm builds it.
+
+    A malformed instance is a programming error in the producing inference, not untrusted input
+    at this point, so construction raises ``TypeError`` or ``ValueError`` and a mapping from an
+    untrusted connector is translated to ``EveRefusal`` where that connector row is read.
+    """
+
     case_id: str
     answer: str | None
     citations: tuple[str, ...]
     abstained: bool
+
+    def __post_init__(self) -> None:
+        case_id, answer, citations, abstained = _checked_arm_fields(
+            self.case_id, self.answer, self.citations, self.abstained
+        )
+        object.__setattr__(self, "case_id", case_id)
+        object.__setattr__(self, "answer", answer)
+        object.__setattr__(self, "citations", citations)
+        object.__setattr__(self, "abstained", abstained)
 
 
 class GenerativeInference(Protocol):
@@ -568,18 +613,12 @@ class CandidateInference:
                 citations, abstained = item["citations"], item["abstained"]
             except KeyError:
                 raise EveRefusal("output_shape_invalid") from None
-            if (
-                not isinstance(case_id, str)
-                or not case_id
-                or (answer is not None and not isinstance(answer, str))
-                or not isinstance(citations, list | tuple)
-                or not all(isinstance(citation, str) for citation in citations)
-                or type(abstained) is not bool
-            ):
-                raise EveRefusal("output_shape_invalid")
-            outputs.append(ArmOutput(case_id, answer, tuple(citations), abstained))
+            try:
+                fields = _checked_arm_fields(case_id, answer, citations, abstained)
+                outputs.append(ArmOutput(*fields))
+            except (TypeError, ValueError):
+                raise EveRefusal("output_shape_invalid") from None
         return tuple(outputs)
-
 
 
 def run_id_for(manifest: ReplayManifest, arm: ArmSpec) -> str:

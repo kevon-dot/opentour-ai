@@ -10,7 +10,7 @@ V7 credential and qualification fail-closed, E1 end-to-end product path.
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from contextlib import nullcontext
 from dataclasses import replace
 from pathlib import Path
@@ -1138,4 +1138,186 @@ def test_candidate_transport_rejects_malformed_typed_output(env: Env, monkeypatc
 
     monkeypatch.setattr(env.transport, "predict_for_replay", malformed)
     with refuses("output_shape_invalid"):
+        env.replay(env.arm("candidate", infer.served_revision), infer)
+
+
+# --- Replay boundary hardening: ArmOutput invariants hold wherever one is constructed. ---------
+
+
+def _requests() -> tuple[rp.ReplayRequest, ...]:
+    return tuple(rp.ReplayRequest(c.case_id, c.question, c.context) for c in PROTECTED[:5])
+
+
+def _serve(env: Env, monkeypatch, edit: Any) -> rp.CandidateInference:
+    """A candidate whose connector returns the genuine rows after ``edit`` has rewritten them."""
+    infer = env.candidate_inference()
+    predict = env.transport.predict_for_replay
+    monkeypatch.setattr(
+        env.transport,
+        "predict_for_replay",
+        lambda candidate, inputs: edit(predict(candidate, inputs)),
+    )
+    return infer
+
+
+class FlippingCitations(list):
+    """Generated sentinel: iterates differently on each pass, so check-then-use would diverge."""
+
+    def __init__(self, passes: list[list[Any]]) -> None:
+        super().__init__(passes[0])
+        self._passes = passes
+        self.reads = 0
+
+    def __iter__(self) -> Iterator[Any]:
+        content = self._passes[min(self.reads, len(self._passes) - 1)]
+        self.reads += 1
+        return iter(content)
+
+
+def test_candidate_citations_are_read_once_so_a_flipping_iterable_cannot_smuggle_a_non_string(
+    env: Env, monkeypatch
+) -> None:
+    flipping = FlippingCitations([["ok"], [1]])
+    infer = _serve(env, monkeypatch, lambda rows: ({**rows[0], "citations": flipping}, *rows[1:]))
+    outputs = infer.generate(env.arm("candidate", infer.served_revision), _requests())
+    assert all(isinstance(c, str) for out in outputs for c in out.citations)
+    assert outputs[0].citations == ("ok",)
+    assert flipping.reads == 1
+
+
+def test_candidate_citations_materialised_non_string_is_refused_even_if_a_later_pass_is_clean(
+    env: Env, monkeypatch
+) -> None:
+    flipping = FlippingCitations([[1], ["ok"]])
+    infer = _serve(env, monkeypatch, lambda rows: ({**rows[0], "citations": flipping}, *rows[1:]))
+    with refuses("output_shape_invalid"):
+        infer.generate(env.arm("candidate", infer.served_revision), _requests())
+    assert flipping.reads == 1
+
+
+@pytest.mark.parametrize(
+    "edit",
+    [
+        pytest.param(lambda rows: (None, *rows[1:]), id="row-none"),
+        pytest.param(lambda rows: ("generated-p1", *rows[1:]), id="row-not-mapping"),
+        pytest.param(lambda rows: (["generated-p1"], *rows[1:]), id="row-list"),
+        pytest.param(
+            lambda rows: ({k: v for k, v in rows[0].items() if k != "citations"}, *rows[1:]),
+            id="missing-citations",
+        ),
+        pytest.param(
+            lambda rows: ({k: v for k, v in rows[0].items() if k != "case_id"}, *rows[1:]),
+            id="missing-case-id",
+        ),
+        pytest.param(lambda rows: list(rows), id="outer-list"),
+        pytest.param(lambda rows: None, id="outer-none"),
+        pytest.param(lambda rows: iter(rows), id="outer-iterator"),
+        pytest.param(lambda rows: ({**rows[0], "case_id": ""}, *rows[1:]), id="empty-case-id"),
+    ],
+)
+def test_candidate_transport_rejects_malformed_rows_and_outer_results(env: Env, monkeypatch, edit):
+    infer = _serve(env, monkeypatch, edit)
+    with refuses("output_shape_invalid"):
+        env.replay(env.arm("candidate", infer.served_revision), infer)
+
+
+def test_candidate_transport_tolerates_extra_row_fields_and_drops_them(
+    env: Env, monkeypatch
+) -> None:
+    """Documents current behaviour: unknown keys are ignored, never carried into ArmOutput."""
+    EXTRA = "generated-extra-field-sentinel"
+    infer = _serve(
+        env,
+        monkeypatch,
+        lambda rows: tuple({**r, "protected_answer": EXTRA, "extra": 1} for r in rows),
+    )
+    outputs = infer.generate(env.arm("candidate", infer.served_revision), _requests())
+    assert len(outputs) == 5
+    assert EXTRA not in repr(outputs)
+    assert not hasattr(outputs[0], "protected_answer")
+
+
+def test_candidate_valid_output_with_list_citations_still_scores_normally(env: Env) -> None:
+    infer = env.candidate_inference()
+    arm = env.arm("candidate", infer.served_revision)
+    record = env.replay(arm, infer)
+    verdicts = {r.verdict for r in record.rows}
+    assert verdicts <= {rp.Verdict.CORRECT_ANSWER, rp.Verdict.CORRECT_ABSTENTION}
+    assert rp.Verdict.CORRECT_ANSWER in verdicts
+    outputs = infer.generate(arm, _requests())
+    assert all(isinstance(c, str) for out in outputs for c in out.citations)
+
+
+BAD_ARM_OUTPUTS = [
+    pytest.param(dict(case_id=1), TypeError, id="case-id-int"),
+    pytest.param(dict(case_id=None), TypeError, id="case-id-none"),
+    pytest.param(dict(case_id=""), ValueError, id="case-id-empty"),
+    pytest.param(dict(answer={"a": 1}), TypeError, id="answer-dict"),
+    pytest.param(dict(answer=["x"]), TypeError, id="answer-list"),
+    pytest.param(dict(answer=1), TypeError, id="answer-int"),
+    pytest.param(dict(answer=float("nan")), TypeError, id="answer-nan"),
+    pytest.param(dict(answer=float("inf")), TypeError, id="answer-inf"),
+    pytest.param(dict(citations=None), TypeError, id="citations-none"),
+    pytest.param(dict(citations="x"), TypeError, id="citations-string"),
+    pytest.param(dict(citations='["x"]'), TypeError, id="citations-json-string"),
+    pytest.param(dict(citations={"x"}), TypeError, id="citations-set"),
+    pytest.param(dict(citations={"x": 1}), TypeError, id="citations-dict"),
+    pytest.param(dict(citations=(1,)), TypeError, id="citations-int-element"),
+    pytest.param(dict(citations=(["x"],)), TypeError, id="citations-nested-list"),
+    pytest.param(dict(citations=(float("nan"),)), TypeError, id="citations-nan-element"),
+    pytest.param(dict(abstained="false"), TypeError, id="abstained-string"),
+    pytest.param(dict(abstained=1), TypeError, id="abstained-int"),
+    pytest.param(dict(abstained=None), TypeError, id="abstained-none"),
+]
+
+
+def _arm_output(**changes: Any) -> rp.ArmOutput:
+    fields: dict[str, Any] = dict(
+        case_id="generated-p1", answer="generated-answer", citations=("p1-a",), abstained=False
+    )
+    return rp.ArmOutput(**{**fields, **changes})
+
+
+@pytest.mark.parametrize(("changes", "error"), BAD_ARM_OUTPUTS)
+def test_arm_output_refuses_a_bad_field_wherever_it_is_constructed(changes, error) -> None:
+    with pytest.raises(error):
+        _arm_output(**changes)
+
+
+def test_arm_output_materialises_citations_once_and_stores_a_tuple() -> None:
+    flipping = FlippingCitations([["ok"], [1]])
+    out = _arm_output(citations=flipping)
+    assert flipping.reads == 1
+    assert out.citations == ("ok",)
+    assert type(out.citations) is tuple
+    with pytest.raises(TypeError):
+        _arm_output(citations=FlippingCitations([[1], ["ok"]]))
+    assert _arm_output(citations=["a", "b"]).citations == ("a", "b")
+    assert _arm_output(answer=None, citations=(), abstained=True).answer is None
+    assert _arm_output(answer="").answer == ""  # accepted today; see the owner decision on scoring
+
+
+def test_non_candidate_arm_cannot_deliver_a_malformed_arm_output_to_the_scorer(env: Env) -> None:
+    class Hostile(ScriptedInference):
+        def generate(self, arm: rp.ArmSpec, requests: tuple[rp.ReplayRequest, ...]) -> Any:
+            first, *rest = super().generate(arm, requests)
+            return (_arm_output(case_id=first.case_id, answer={"generated": "object"}), *rest)
+
+    worker = env.worker()
+    with pytest.raises(TypeError):
+        env.replay(env.arm("baseline"), Hostile(BASE, BASELINE), worker=worker)
+    assert worker.journal.arm(rp.run_id_for(env.manifest, env.arm("baseline"))) is None
+
+
+def test_candidate_subclass_overriding_generate_cannot_skip_the_arm_output_check(
+    env: Env,
+) -> None:
+    job, candidate = env.fit_and_collect()
+
+    class Overriding(rp.CandidateInference):
+        def generate(self, arm: rp.ArmSpec, requests: tuple[rp.ReplayRequest, ...]) -> Any:
+            return (_arm_output(case_id=requests[0].case_id, citations=[1]),)
+
+    infer = Overriding(env.preflight, "training", job, candidate, env.reg)
+    with pytest.raises(TypeError):
         env.replay(env.arm("candidate", infer.served_revision), infer)
