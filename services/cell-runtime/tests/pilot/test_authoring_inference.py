@@ -229,8 +229,8 @@ def test_model_text_cannot_widen_fields_beyond_the_grant(starter, tmp_path):
 
 
 def test_conflicting_branches_stay_unresolved_for_the_owner(starter, tmp_path):
-    raw = b"# Ordering\nIf total < 250, APPROVE or MANUAL.\n"
-    clash = [branch([BELOW], "APPROVE", 2), branch([BELOW], "MANUAL", 2)]
+    raw = b"# Ordering\nIf total < 250, APPROVE.\nIf total < 250, MANUAL.\n"
+    clash = [branch([BELOW], "APPROVE", 2), branch([BELOW], "MANUAL", 3)]
     service, _, actor, workflow, _, _, _ = make(starter, tmp_path, [reply(clash)] * 3, raw=raw)
     proposal = service.propose(actor, workflow, "generated-key-1")
     assert "conflict_unresolved" in {i.code for i in proposal.issues}
@@ -537,3 +537,33 @@ def test_evidence_marker_is_derived_from_the_profile_not_a_constant(starter, tmp
     proposal = other.propose(actor, workflow, "generated-key-2")
     assert (proposal.stand_in, proposal.evidence_tier) == (False, "unattested")
     assert proposal.external_gate == "real_inference_receipt_unsatisfied"
+
+
+def test_condition_and_action_from_two_different_rules_are_not_grounded(starter, tmp_path):
+    crossed = {"conditions": [BELOW], "action": "MANUAL", "citation": cite(4, 5)}
+    service, _, actor, workflow, _, profile, _ = make(
+        starter, tmp_path, [reply([crossed]), reply(GOOD)]
+    )
+    proposal = service.propose(actor, workflow, "generated-key-1")
+    assert profile.requests[1].prior_issue_codes == ("answer_unsupported",)
+    assert proposal.attempts == 2 and len(proposal.branches) == 3 and proposal.issues == ()
+
+
+def test_genuine_rules_inside_a_multi_line_citation_are_still_accepted(starter, tmp_path):
+    spanning = [
+        {"conditions": [BELOW], "action": "APPROVE", "citation": cite(4, 5)},
+        {"conditions": [ABOVE], "action": "MANUAL", "citation": cite(4, 5)},
+    ]
+    service, _, actor, workflow, _, _, _ = make(starter, tmp_path, [reply(spanning)])
+    proposal = service.propose(actor, workflow, "generated-key-1")
+    assert proposal.attempts == 1 and proposal.issues == ()
+    assert [b.action for b in proposal.branches] == ["APPROVE", "MANUAL"]
+
+
+def test_a_rule_wrapped_across_two_lines_is_accepted(starter, tmp_path):
+    raw = b"# Ordering\nIf total < 250\n and po is missing, REVIEW.\n"
+    wrapped = branch([BELOW, MISSING], "REVIEW", 2)
+    wrapped["citation"] = cite(2, 3)
+    service, _, actor, workflow, _, _, _ = make(starter, tmp_path, [reply([wrapped])], raw=raw)
+    proposal = service.propose(actor, workflow, "generated-key-1")
+    assert proposal.issues == () and [b.action for b in proposal.branches] == ["REVIEW"]

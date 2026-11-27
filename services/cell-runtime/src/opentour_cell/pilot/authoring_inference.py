@@ -31,7 +31,14 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Protocol
 
-from opentour_cell.pilot.guided_decision_map import Branch, Condition, FieldKind
+from opentour_cell.pilot.guided_decision_map import (
+    _LIST_MARKER,
+    _RULE,
+    Branch,
+    Condition,
+    FieldKind,
+    _condition,
+)
 from opentour_cell.pilot.guided_policy import (
     HEADING,
     GuidedPolicySource,
@@ -54,12 +61,6 @@ FORBIDDEN_RESOURCES = frozenset(
 )
 _OPERATORS = frozenset({"<", "<=", ">", ">=", "missing", "present"})
 _COMPARISONS = frozenset({"<", "<=", ">", ">="})
-_COMPARISON_TEXT = re.compile(
-    r"([a-z][a-z0-9_]{0,63})\s*(<=|>=|<|>|below|at or above|at most|above)\s*"
-    r"(-?[0-9]{1,12}(?:\.[0-9]{1,8})?)"
-)
-_PRESENCE_TEXT = re.compile(r"([a-z][a-z0-9_]{0,63}) (?:is )?(missing|present)")
-_WORD_OPERATORS = {"below": "<", "at most": "<=", "at or above": ">=", "above": ">"}
 _FIELD = re.compile(r"[a-z][a-z0-9_]{0,63}\Z")
 _ACTION = re.compile(r"[A-Z][A-Z0-9_]{0,47}\Z")
 _NUMBER = re.compile(r"-?[0-9]{1,12}(?:\.[0-9]{1,8})?")
@@ -187,6 +188,29 @@ def _number(text: str) -> str | None:
     return number.rstrip("0").rstrip(".") if "." in number else number
 
 
+def _states_rule(
+    passage: str,
+    conditions: tuple[Condition, ...],
+    action: str,
+    field_kinds: Mapping[str, FieldKind],
+) -> bool:
+    """True only when ONE rule in the passage states exactly these conditions and this action.
+
+    Candidates are each single line and the whole passage joined (so a rule wrapped across lines
+    still counts). Rules are parsed with the guided grammar, so a condition from one rule can
+    never be paired with the action of another.
+    """
+    lines = [line.strip() for line in passage.splitlines() if line.strip()]
+    for text in [*lines, " ".join(lines)]:
+        rule = _RULE.fullmatch(_LIST_MARKER.sub("", text, count=1))
+        if rule is None or rule[2].upper() != action:
+            continue
+        parsed = [_condition(part.strip(), field_kinds) for part in rule[1].lower().split(" and ")]
+        if None not in parsed and tuple(parsed) == conditions:
+            return True
+    return False
+
+
 def _validate_branch(
     raw: object,
     snapshot: PolicySnapshot,
@@ -218,9 +242,6 @@ def _validate_branch(
         or not 1 <= len(conditions_raw) <= _MAX_CONDITIONS
     ):
         return Issue("branch_schema_invalid", citation)
-    passage = snapshot.passage(citation).lower()
-    if not re.search(rf"\b{action}\b", passage, re.I):
-        return Issue("answer_unsupported", citation)
     conditions = []
     for item in conditions_raw:
         if not isinstance(item, Mapping) or not set(item) <= {"field", "operator", "threshold"}:
@@ -239,20 +260,12 @@ def _validate_branch(
             normalized = _number(threshold)
             if normalized is None:
                 return Issue("predicate_unsupported", citation)
-            stated = {
-                (match[1], _WORD_OPERATORS.get(match[2], match[2]), _number(match[3]))
-                for match in _COMPARISON_TEXT.finditer(passage)
-            }
-            if (field, operator, normalized) not in stated:
-                return Issue("answer_unsupported", citation)  # field, direction and number
         elif threshold is not None:
             return Issue("predicate_unsupported", citation)
-        else:
-            stated_presence = {(m[1], m[2]) for m in _PRESENCE_TEXT.finditer(passage)}
-            if (field, operator) not in stated_presence:
-                return Issue("answer_unsupported", citation)
         conditions.append(Condition(field, operator, normalized))
     frozen = tuple(conditions)
+    if not _states_rule(snapshot.passage(citation), frozen, action, field_kinds):
+        return Issue("answer_unsupported", citation)
     return Branch(_branch_ref(frozen, action), frozen, action, citation)
 
 
