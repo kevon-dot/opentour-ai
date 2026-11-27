@@ -339,6 +339,29 @@ def freeze_protocol(
         for fid in use.family_ids:
             touch(None, fid, None, use.stage)
 
+    # Propagate to a fixpoint: a touched case touches its family and normalized content, a
+    # touched family touches every known member and its content, and touched content touches
+    # every known case carrying it. Case-only uses (threshold selection, model choice, a
+    # variant root) therefore cannot leave a sibling or a near-duplicate eligible.
+    known = [*real_training_roots, *development, *candidates]
+    changed = True
+    while changed:
+        changed = False
+        for k in known:
+            fp = fingerprint(k.text)
+            why = touched_cases.get(k.case_id) or touched_families.get(k.family_id)
+            why = why or touched_prints.get(fp)
+            if why is None:
+                continue
+            for table, key in (
+                (touched_cases, k.case_id),
+                (touched_families, k.family_id),
+                (touched_prints, fp),
+            ):
+                if key not in table:
+                    table[key] = why
+                    changed = True
+
     seen: set[str] = set()
     eligible: list[CaseRef] = []
     excluded: dict[str, str] = {}
@@ -383,6 +406,7 @@ def freeze_protocol(
             "unresolved": sorted(unresolved),
             "group_of": {c.case_id: groups[c.case_id] for c in eligible},
             "slices_of": {c.case_id: sorted(c.slices) for c in eligible},
+            "family_of": {c.case_id: c.family_id for c in eligible},
             "independent_group_count": derived,
             "denominator": len(eligible),
         },
@@ -510,6 +534,9 @@ def measure(
     for use in post_freeze_uses:
         if set(use.case_ids) & eligible_set:
             leaks.append(f"untouched_case_used_in_{use.stage}")
+        raw_families = set(protocol.body["untouched"].get("family_of", {}).values())
+        if set(use.family_ids) & (raw_families | set(protocol.group_of.values())):
+            leaks.append(f"untouched_family_used_in_{use.stage}")
         if use.used_protected_results:
             leaks.append(f"protected_results_used_in_{use.stage}")
     families_by_case = protocol.group_of
@@ -603,6 +630,7 @@ def measure(
     # 5. Score only resolved untouched cases; unresolved stay visible, outside.
     _need(set(eligible) <= set(key.answers), "key_missing_eligible_cases")
     scorable = [c for c in eligible if key.answers[c] is not None]
+    unresolved_by_key = sorted(c for c in eligible if key.answers[c] is None)
     groups = sorted({families_by_case[c] for c in scorable})
     missing = {
         arm: sorted(c for c in scorable if c not in by_id[arm].predictions) for arm in required
@@ -615,7 +643,11 @@ def measure(
             status="complete",
             reasons=["insufficient_independent_real_cases"],
             claim=UNPROVEN,
-            paired={"scorable_cases": len(scorable), "independent_groups": len(groups)},
+            paired={
+                "scorable_cases": len(scorable),
+                "independent_groups": len(groups),
+                "unresolved_by_key_outside_denominator": unresolved_by_key,
+            },
         )
     fixes = sorted(c for c in scorable if _correct(b, key, c) and not _correct(a, key, c))
     new_errors = sorted(c for c in scorable if _correct(a, key, c) and not _correct(b, key, c))
@@ -646,6 +678,7 @@ def measure(
     paired: dict[str, Any] = {
         "scorable_cases": len(scorable),
         "independent_groups": len(groups),
+        "unresolved_by_key_outside_denominator": unresolved_by_key,
         "fixes": len(fixes),
         "new_errors": len(new_errors),
         "missing_output": {k: len(v) for k, v in sorted(missing.items())},
@@ -774,6 +807,7 @@ class SpendLedger:
 
     def settle(self, protocol_digest: str, arm_id: str, kind: str, actual: int) -> str:
         key = f"{protocol_digest}|{arm_id}|{kind}"
+        _count(actual, "settlement_amount_invalid")
         _need(key in self._reserved, "settle_without_reservation")
         _need(actual <= self._reserved[key][1], "actual_exceeds_reservation")
         if key in self._settled:
@@ -797,8 +831,24 @@ class SpendLedger:
     @classmethod
     def from_json(cls, raw: Mapping[str, Any]) -> SpendLedger:
         ledger = cls(spend_cap=raw["spend_cap"], fits_authorized=raw["fits_authorized"])
-        ledger._reserved = {k: (v[0], v[1]) for k, v in raw["reserved"].items()}
-        ledger._settled = dict(raw["settled"])
+        reserved: dict[str, tuple[str, int]] = {}
+        for k, v in raw["reserved"].items():
+            _need(isinstance(v, (list, tuple)) and len(v) == 2, "ledger_forged_reservation", k)
+            _need(v[0] in {"fit", "generation"}, "ledger_forged_reservation", k)
+            _count(v[1], "ledger_forged_reservation")
+            reserved[k] = (v[0], v[1])
+        settled: dict[str, int] = {}
+        for k, amount in raw["settled"].items():
+            _need(k in reserved, "ledger_forged_settlement", k)
+            _need(_count(amount, "ledger_forged_settlement") <= reserved[k][1], "ledger_forged", k)
+            settled[k] = amount
+        _need(
+            sum(1 for kind, _ in reserved.values() if kind == "fit") <= ledger.fits_authorized,
+            "ledger_forged_fit_count",
+        )
+        _need(sum(v for _, v in reserved.values()) <= ledger.spend_cap, "ledger_forged_over_cap")
+        ledger._reserved = reserved
+        ledger._settled = settled
         return ledger
 
 

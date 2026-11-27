@@ -689,3 +689,116 @@ def test_one_real_root_under_two_families_is_refused() -> None:
     with pytest.raises(TuningBenefitError) as e:
         frozen(training=[r1, r2])
     assert e.value.code == "root_identity_conflict"
+
+
+# ---- closer additions: propagation of case-level touches, family leaks, ledger forgery ----
+
+
+def _small_freeze(
+    cands: list[CaseRef],
+    *,
+    uses: list[SelectionUse] | None = None,
+    children: list[dict[str, Any]] | None = None,
+    training: list[CaseRef] | None = None,
+) -> tb.FrozenProtocol:
+    return tb.freeze_protocol(
+        prereg(),
+        candidates=cands,
+        real_training_roots=training or [],
+        development=[],
+        variant_children=children or [],
+        selection_uses=uses or [],
+        answer_key_digest="sha256:generated-key",
+    )
+
+
+_X = CaseRef("generated-x", "generated-fam-f", "generated alpha beta")
+_SIB = CaseRef("generated-sib", "generated-fam-f", "generated gamma delta")
+_DUP = CaseRef("generated-dup", "generated-fam-g", "Generated  ALPHA, beta!")
+_OTHER = CaseRef("generated-other", "generated-fam-h", "generated unrelated text")
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"uses": [SelectionUse("threshold_selection", case_ids=("generated-x",))]},
+        {"uses": [SelectionUse("model_choice", family_ids=("generated-fam-f",))]},
+        {
+            "children": [
+                {
+                    "child_id": "generated-c1",
+                    "origin": "synthetic",
+                    "mode": "training",
+                    "disposition": "rejected",
+                    "root_ref": "generated-x",
+                    "rendered_text": "generated unrelated child",
+                }
+            ]
+        },
+        {"training": [CaseRef("generated-t", "generated-fam-f", "generated tt")]},
+    ],
+)
+def test_case_level_touch_also_excludes_family_siblings_and_duplicate_content(
+    kwargs: dict[str, Any],
+) -> None:
+    proto = _small_freeze([_X, _SIB, _DUP, _OTHER], **kwargs)
+    assert proto.eligible == ("generated-other",)
+    excluded = {k for k, _ in proto.body["untouched"]["excluded"]}
+    assert "generated-sib" in excluded and "generated-dup" in excluded
+
+
+def test_post_freeze_family_only_use_invalidates_and_reports_no_numbers() -> None:
+    proto, key, _ = frozen()
+    fam = proto.body["untouched"]["family_of"][proto.eligible[0]]
+    el = set(proto.eligible)
+    res = run(
+        proto,
+        key,
+        arm(proto, REAL_ONLY, set()),
+        arm(proto, AUGMENTED, el),
+        post_freeze_uses=[SelectionUse("threshold_selection", family_ids=(fam,))],
+    )
+    assert res["body"]["status"] == "invalidated" and res["body"]["paired"] is None
+    assert any("untouched_family_used" in r for r in res["body"]["reasons"])
+
+
+def test_key_unresolved_eligible_cases_stay_visible_outside_the_denominator() -> None:
+    cs = candidates()
+    answers: dict[str, str | None] = {c.case_id: "act-a" for c in cs}
+    answers[cs[0].case_id] = None
+    key = ProtectedKey(answers)
+    proto = tb.freeze_protocol(
+        prereg(),
+        candidates=cs,
+        real_training_roots=[case(i, 0, prefix="t") for i in range(5)],
+        development=[case(i, 0, prefix="d") for i in range(3)],
+        variant_children=[child("var-1", "generated-t-0-0", "generated-fam-t-0")],
+        selection_uses=[],
+        answer_key_digest=tb.key_digest(key),
+    )
+    el = set(proto.eligible)
+    res = run(proto, key, arm(proto, REAL_ONLY, set()), arm(proto, AUGMENTED, el))
+    paired = res["body"]["paired"]
+    assert paired["unresolved_by_key_outside_denominator"] == [cs[0].case_id]
+    assert paired["scorable_cases"] == len(el) - 1
+
+
+def test_ledger_refuses_negative_settlement_and_forged_json() -> None:
+    ledger = SpendLedger(spend_cap=100, fits_authorized=1)
+    ledger.reserve("d", "a", "fit", 10)
+    with pytest.raises(TuningBenefitError) as neg:
+        ledger.settle("d", "a", "fit", -50)
+    assert neg.value.code == "settlement_amount_invalid" and ledger.charged == 0
+    for mutate in (
+        lambda r: r["reserved"].__setitem__("d|b|fit", ["fit", -200]),
+        lambda r: r["reserved"].__setitem__("d|b|fit", ["fit", 1]),  # second fit, one granted
+        lambda r: r["reserved"].__setitem__("d|b|generation", ["generation", 999]),
+        lambda r: r["settled"].__setitem__("d|a|fit", 11),
+        lambda r: r["settled"].__setitem__("d|ghost|fit", 1),
+    ):
+        raw = ledger.to_json()
+        mutate(raw)
+        with pytest.raises(TuningBenefitError) as err:
+            SpendLedger.from_json(raw)
+        assert err.value.code.startswith("ledger_forged")
+    assert SpendLedger.from_json(ledger.to_json()).to_json() == ledger.to_json()
