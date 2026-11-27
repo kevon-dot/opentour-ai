@@ -23,6 +23,16 @@ Guarantees implemented here (software behavior only):
 * Protected answers are refused in training payloads and replay inputs; a tuned-model reference is
   handed off only to a permitted recipient; the training file's retention disposition is recorded.
 
+Trust boundary (stated assumption): the journal has NO integrity protection. Anyone who can write
+the journal directory can set ``cap_verified`` or ``maximum_minor_units`` directly, and ``usage``,
+``_verified`` and the callback path all trust those journaled values. Every guarantee above assumes
+the journal is trusted storage that only this connector can write. Closing that would need
+authenticated events (an HMAC or signature over each event, keyed outside the state directory).
+
+Over-cap usage: provider-reported usage above the journaled approved maximum is returned with its
+real figure, ``cap_status == "over_cap"`` and ``settleable is False``. No code in this repository
+reconciles it; the caller that owns the reservation must handle it (see ``ReportedUsage``).
+
 Simulated: tests drive this connector through a generated in-memory provider double (the transport
 port is the only boundary). Every receipt, evidence ref and tuned-model id is a ``simulated:*``
 sentinel.
@@ -244,7 +254,10 @@ class ReportedUsage(Usage):
     overspend stays visible. ``cap_status`` is ``within_cap`` (at or under the journaled approved
     maximum), ``over_cap`` (above it) or ``cap_unknown`` (no journaled maximum to compare to).
     Anything but ``within_cap`` is not ``settleable``: it must not flow to settlement as ordinary
-    actual spend and needs the caller's explicit decision.
+    actual spend. Forward path: the reservation owner (OPE-418, outside this module) must treat
+    the job as an overspend incident, keep the reservation held, and record the real figure through
+    an explicit operator decision. This module offers no reconcile step and none exists elsewhere
+    in this repository today.
     """
 
     cap_status: str = CAP_UNKNOWN
@@ -833,7 +846,13 @@ class ManagedConnector:
         Only ``job_id`` is used. ``state``, ``tuned_model_id`` and ``usage`` are accepted for call
         compatibility and are IGNORED: the job is re-read from the provider with the credential and
         only that observation can change journaled state. There is no production caller yet; do
-        not wire one without authentication and rate limiting (see the PR's open items).
+        not wire one without authentication and rate limiting.
+
+        PRECONDITION: do not wire this to an inbound route until (1) the callback is authenticated
+        and (2) calls are rate limited per source and per job. Today anyone who knows or guesses a
+        live job id can force a credentialed ``get_job`` under the per-key lock (quota and
+        latency cost), the boolean result is an oracle for whether a job exists and changed state,
+        and every call scans and parses all journals (O(n)); a job-id to key index is also needed.
         """
         for path in sorted((self.root / "jobs").glob("*.jsonl")):
             key = path.stem
