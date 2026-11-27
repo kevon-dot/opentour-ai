@@ -6,7 +6,7 @@ import os
 import tempfile
 import time
 from collections.abc import Callable, Iterator
-from contextlib import AbstractContextManager, contextmanager, nullcontext
+from contextlib import AbstractContextManager, contextmanager
 from pathlib import Path
 
 from opentour_cell.pilot import repair_bundle as bundle
@@ -119,16 +119,17 @@ class LocalRecipientDelivery:
         )
         return receipt
 
-    def receive(
+    def _receive_claimed(
         self,
         release: ApprovedRelease,
         offered: Path,
         *,
-        sender_current: Callable[[], AbstractContextManager[None]] = nullcontext,
+        sender_current: Callable[[], AbstractContextManager[None]],
     ) -> str:
         """Install once after the actual signed bundle and live recipient grant verify."""
         bundle._require(offered.parent == self.grant_file.parent, "recipient_offer_scope_mismatch")
-        grant = bundle._grant(self.grant_file)
+        with sender_current():
+            grant = bundle._grant(self.grant_file)
         slot, claim = self._scope(release, grant)
         offered_bytes = bundle._read(offered, bundle.MAX_ARCHIVE)
         self._verify_package(offered_bytes, release, grant, claim)
@@ -216,7 +217,7 @@ def dispatch_local_release(
             yield
 
     try:
-        receiver.receive(release, offered, sender_current=sender_current)
+        receiver._receive_claimed(release, offered, sender_current=sender_current)
     except OSError:
         # A lost reply can follow a durable destination write. Retain the claim.
         pass

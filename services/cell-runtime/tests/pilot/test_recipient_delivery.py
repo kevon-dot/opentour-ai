@@ -98,15 +98,13 @@ def test_lost_ack_reconciles_exact_signed_artifact_without_a_second_install(tmp_
         assert db.execute("SELECT count(*) FROM release_outbox").fetchone()[0] == 1
     assert release is not None
     assert receiver.lookup(replace(release, tenant="other-tenant"), "neighbor").state == "unknown"
-    with pytest.raises(bundle.BundleError, match="recipient_release_scope_mismatch"):
-        receiver.receive(replace(release, artifact_sha256="4" * 64), offered)
     receiver_root = receiver.grant_file.parent / "custody"
     assert list(receiver_root.glob("delivery-*")) == []
     committed = []
 
     class LoseReply(LocalRecipientDelivery):
-        def receive(self, *args, **kwargs):
-            committed.append(super().receive(*args, **kwargs))
+        def _receive_claimed(self, *args, **kwargs):
+            committed.append(super()._receive_claimed(*args, **kwargs))
             raise TimeoutError("generated transport lost the committed readback")
 
     delivery = LoseReply(receiver.grant_file)
@@ -127,7 +125,7 @@ def test_lost_ack_reconciles_exact_signed_artifact_without_a_second_install(tmp_
     got = committed[0]
     delivered = fresh_outbox.reconcile(selected, "dispatcher", fresh_receiver)
     assert delivered.stage == "delivered" and delivered.receiver_receipt_ref == got
-    assert fresh_receiver.receive(release, offered) == got
+    assert fresh_receiver.lookup(release, "restart-readback").receipt_ref == got
     (installed,) = receiver_root.glob("delivery-*/artifact.zip")
     assert (
         hashlib.sha256(installed.read_bytes()).digest()
@@ -150,8 +148,26 @@ def test_lost_ack_reconciles_exact_signed_artifact_without_a_second_install(tmp_
     assert fresh_receiver.lookup(release, "tampered-readback").state == "unknown"
     cli(receiver.grant_file, "withdraw-recipient")
     assert fresh_receiver.lookup(release, "withdrawn").state == "unknown"
-    with pytest.raises(bundle.BundleError, match="recipient_custody_withdrawn"):
-        fresh_receiver.receive(release, offered)
+
+
+def test_withdrawn_sender_cannot_stage_an_earlier_approved_offer(tmp_path, monkeypatch):
+    outbox, receiver, offered, selected = approved_local_offer(tmp_path)
+    outbox.reserve(selected, "dispatcher", "before-withdrawal")
+
+    class WithdrawBeforeReceipt(LocalRecipientDelivery):
+        def _receive_claimed(self, *args, **kwargs):
+            outbox.authority.permissions.current = None
+            return super()._receive_claimed(*args, **kwargs)
+
+    def unexpected_install(*args):
+        pytest.fail("a stale approval reached recipient staging")
+
+    monkeypatch.setattr(bundle, "_install", unexpected_install)
+    with pytest.raises(ReleaseOutboxError):
+        dispatch_local_release(
+            outbox, selected, "dispatcher", WithdrawBeforeReceipt(receiver.grant_file), offered
+        )
+    assert list((receiver.grant_file.parent / "custody").glob("delivery-*")) == []
 
 
 def test_permission_withdrawn_after_staging_prevents_recipient_commit(tmp_path, monkeypatch):

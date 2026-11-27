@@ -6,9 +6,10 @@ and artifact digest. The authenticated sender supplies the committed release
 reference. The destination id comes from the recipient entitlement and the
 pinned owner key. A different tenant or package cannot access that slot.
 
-The sender claims the durable outbox entry before offering the package. The
-receiver verifies the existing signed handoff, stages the bytes and receipt,
-and checks both the recipient grant and sender claim at publication. The
+The dispatcher claims the durable outbox entry before offering the package.
+The receiver checks the current sender claim before reading the offer,
+verifies the signed handoff, and checks both the recipient grant and sender
+claim again when it publishes the staged bytes and receipt. The
 recipient stores one complete directory per signed specification and
 destination. Each lookup checks the stored bytes and signed proposal and
 artifact identity before returning the opaque receipt, destination and
