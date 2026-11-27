@@ -60,6 +60,11 @@ schema keeps its original encoding. Both profiles retain the 48-token and
 128-case bounds. This encoding does not add targets, suggestions, case identities,
 or a policy classifier. Its tests prove byte fidelity and receipt reuse using
 generated parameters, not the native seven-family end-to-end benchmark scores.
+Receipts bind the input encoding as well as the model artifact. Changing a
+registered schema holds an earlier operation instead of reinterpreting its
+predictions; a separately authorized new execution is required. Historical
+single-field receipts remain readable only under the unchanged single-field
+encoding.
 
 The adapter stores authenticated receipts in `starter-local-predictions.sqlite3`.
 The custodian supplies a separate private 32-byte receipt key; the worker does not
