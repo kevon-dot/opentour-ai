@@ -12,6 +12,8 @@ from opentour_cell.pilot.capture_streams import (
     CaptureGrant,
     CaptureStreams,
     EventRef,
+    RequestMetadata,
+    ResponseMetadata,
 )
 from opentour_cell.pilot.custody import Closeout
 from opentour_cell.pilot.training import LocalTrainingStore
@@ -134,6 +136,65 @@ def test_terminal_gap_survives_restart_and_app_retries_commit_once(tmp_path):
     assert scoped["committed_decisions"] is None and scoped["disputed_decisions"] is None
     assert len(scoped["attempts"]) == 2
     assert SENTINEL not in reopened.store.path.read_bytes()
+
+
+def test_original_attempt_metadata_is_scoped_and_reopens_without_original_bodies(tmp_path):
+    capture, authority = journal(tmp_path / "one")
+    authority.base = replace(authority.base, mode="metadata_only")
+    workflow = authority.base.workflow
+    attempt = CapturedAttempt("operation-a", "attempt-a", "case-a", "family-a", "decision-a", 1)
+    capture.started(
+        "app",
+        workflow,
+        attempt,
+        row(REQUEST, "observed-request", 100),
+        metadata=RequestMetadata("requested-alias", "projection-v1", "prompt-v7"),
+    )
+    capture.observed_chunk("app", workflow, attempt, row(RESPONSE, "chunk"), 0, SENTINEL)
+    capture.terminal(
+        "app",
+        workflow,
+        attempt,
+        row(RESPONSE, "observed-response", 104),
+        "finished",
+        1,
+        metadata=ResponseMetadata("provider-receipt-a", "served-v3", "parsed-output", "parsing-v1"),
+    )
+    full = capture.inspect("owner", workflow, attempt.operation_ref)
+    observed = full["attempts"][0]
+    assert full["committed_decisions"] == 0
+    assert observed["request"] == {
+        "observed_at": 100,
+        "requested_model_ref": "requested-alias",
+        "projection_revision": "projection-v1",
+        "template_revision": "prompt-v7",
+    }
+    assert observed["response"] == {
+        "observed_at": 104,
+        "provider_receipt_ref": "provider-receipt-a",
+        "served_model_ref": "served-v3",
+        "parsed_output_ref": "parsed-output",
+        "parser_revision": "parsing-v1",
+    }
+    assert observed["exact_replay"] == "unavailable"
+    scoped = capture.inspect("response-inspector", workflow, attempt.operation_ref)["attempts"][0]
+    assert "request" not in scoped and scoped["response"] == observed["response"]
+    reopened = CaptureStreams(
+        LocalTrainingStore(capture.store.path, "org-a", existing_only=True),
+        authority,
+        lambda: 110,
+    )
+    assert reopened.inspect("owner", workflow, attempt.operation_ref) == full
+    assert SENTINEL not in capture.store.path.read_bytes()
+    assert SENTINEL.decode() not in json.dumps(full)
+    with capture.store._db(write=True) as db:
+        db.execute(
+            "UPDATE decision_capture_streams SET payload="
+            "json_set(payload, '$.response.served_model_ref', 'invented-served-model') "
+            "WHERE kind='terminal'"
+        )
+    with pytest.raises(CaptureError, match="decision_capture_unavailable"):
+        reopened.inspect("owner", workflow, attempt.operation_ref)
 
 
 def test_conflicting_chunk_and_competing_app_commit_remain_distinct(tmp_path):

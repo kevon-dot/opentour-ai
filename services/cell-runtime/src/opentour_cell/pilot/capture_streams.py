@@ -120,6 +120,71 @@ class EventRef:
         )
 
 
+@dataclass(frozen=True)
+class RequestMetadata:
+    """References observed at the application invocation."""
+
+    requested_model_ref: str
+    projection_revision: str
+    template_revision: str | None = None
+
+    def __post_init__(self) -> None:
+        require_ref(self.requested_model_ref)
+        require_ref(self.projection_revision)
+        if self.template_revision is not None:
+            require_ref(self.template_revision)
+
+
+@dataclass(frozen=True)
+class ResponseMetadata:
+    """Provider and parser references from the original attempt."""
+
+    provider_receipt_ref: str
+    served_model_ref: str | None = None
+    parsed_output_ref: str | None = None
+    parser_revision: str | None = None
+
+    def __post_init__(self) -> None:
+        require_ref(self.provider_receipt_ref)
+        for ref in (self.served_model_ref, self.parsed_output_ref, self.parser_revision):
+            if ref is not None:
+                require_ref(ref)
+        _require((self.parsed_output_ref is None) == (self.parser_revision is None))
+
+
+def _observation_seal(
+    grant: CaptureGrant, attempt: str, observed_at: int, field: str, payload: object
+) -> str:
+    boundary: Boundary = "application_request" if field == "request" else "provider_response"
+    subject = [
+        "opentour.pilot.attempt-metadata.v1",
+        grant.tenant,
+        grant.epoch,
+        grant.workflow,
+        grant.revision,
+        grant.policy_revision,
+        dict(grant.sources)[boundary],
+        attempt,
+        observed_at,
+        field,
+        payload,
+    ]
+    return hmac.digest(grant.opaque_key, canonical(subject).encode(), "sha256").hex()
+
+
+def _seal_observation(
+    grant: CaptureGrant,
+    attempt: CapturedAttempt,
+    event: EventRef,
+    field: str,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    if field not in payload:
+        return payload
+    seal = _observation_seal(grant, canonical(asdict(attempt)), event.observed_at, field, payload)
+    return payload | {"metadata_seal": seal}
+
+
 class CaptureStreams:
     """Journal observations from the existing application invocation and commit boundaries."""
 
@@ -243,10 +308,15 @@ class CaptureStreams:
         event: EventRef,
         *,
         parent_attempt: str | None = None,
+        metadata: RequestMetadata | None = None,
     ) -> None:
         if parent_attempt is not None:
             require_ref(parent_attempt)
             _require(parent_attempt != attempt.attempt_ref)
+        payload: dict[str, Any] = {"parent_attempt": parent_attempt}
+        if metadata is not None:
+            _require(type(metadata) is RequestMetadata)
+            payload["request"] = asdict(metadata)
         self._persist(
             actor,
             workflow,
@@ -254,7 +324,7 @@ class CaptureStreams:
             event,
             "application_request",
             "start",
-            lambda _: {"parent_attempt": parent_attempt},
+            lambda grant: _seal_observation(grant, attempt, event, "request", payload),
         )
 
     def observed_chunk(
@@ -298,6 +368,8 @@ class CaptureStreams:
         event: EventRef,
         state: Literal["finished", "timeout", "failed"],
         expected_chunks: int | None,
+        *,
+        metadata: ResponseMetadata | None = None,
     ) -> None:
         _require(
             (
@@ -307,6 +379,11 @@ class CaptureStreams:
             )
             or (state in {"timeout", "failed"} and expected_chunks is None)
         )
+        payload: dict[str, Any] = {"state": state, "expected_chunks": expected_chunks}
+        if metadata is not None:
+            _require(type(metadata) is ResponseMetadata)
+            _require(state == "finished" or metadata.parsed_output_ref is None)
+            payload["response"] = asdict(metadata)
         self._persist(
             actor,
             workflow,
@@ -314,7 +391,7 @@ class CaptureStreams:
             event,
             "provider_response",
             "terminal",
-            lambda _: {"state": state, "expected_chunks": expected_chunks},
+            lambda grant: _seal_observation(grant, attempt, event, "response", payload),
         )
 
     def committed(
@@ -389,7 +466,7 @@ class CaptureStreams:
                         )
                 else:
                     rows = []
-                view = _view(rows, competing)
+                view = _view(rows, competing, grant)
                 if "application_commit" not in sources:
                     view.update(committed_decisions=None, disputed_decisions=None)
                 _require(self._current(db, actor, workflow, "inspect", None) == grant)
@@ -434,14 +511,46 @@ def _competing_revisions(
     return {(decision, revision) for decision, revision in rows}
 
 
-def _view(rows: list[sqlite3.Row], competing: set[tuple[str, int]]) -> dict[str, Any]:
-    attempts: dict[str, list[tuple[str, str]]] = {}
+def _details(
+    evidence: list[tuple[str, str, int]], grant: CaptureGrant, attempt: str
+) -> dict[str, Any]:
+    details: dict[str, Any] = {}
+    for kind, boundary_field, schema in (
+        ("start", "request", RequestMetadata),
+        ("terminal", "response", ResponseMetadata),
+    ):
+        observations = {(body, when) for name, body, when in evidence if name == kind}
+        if len(observations) != 1:
+            continue
+        body, observed_at = next(iter(observations))
+        payload = json.loads(body)
+        _require(isinstance(payload, dict))
+        metadata = payload.get(boundary_field)
+        if metadata is not None:
+            _require(isinstance(metadata, dict))
+            _require(type(observed_at) is int and 0 <= observed_at < 2**63)
+            signature = payload.pop("metadata_seal", None)
+            _require(
+                isinstance(signature, str)
+                and hmac.compare_digest(
+                    signature,
+                    _observation_seal(grant, attempt, observed_at, boundary_field, payload),
+                )
+            )
+            details[boundary_field] = {"observed_at": observed_at, **asdict(schema(**metadata))}
+    return details
+
+
+def _view(
+    rows: list[sqlite3.Row], competing: set[tuple[str, int]], grant: CaptureGrant
+) -> dict[str, Any]:
+    attempts: dict[str, list[tuple[str, str, int]]] = {}
     identities: dict[str, set[str]] = {}
     deliveries: dict[tuple[str, str, int], set[tuple[str, str, str, int]]] = {}
     commits: dict[tuple[str, int], set[tuple[str, str]]] = {}
     for attempt, source, event, revision, when, kind, body, decision_ref, decision_revision in rows:
         deliveries.setdefault((source, event, revision), set()).add((attempt, kind, body, when))
-        attempts.setdefault(attempt, []).append((kind, body))
+        attempts.setdefault(attempt, []).append((kind, body, when))
         identity = json.loads(attempt)
         _require(
             (identity["decision_ref"], identity["decision_revision"])
@@ -485,12 +594,12 @@ def _view(rows: list[sqlite3.Row], competing: set[tuple[str, int]]) -> dict[str,
         attempt = next(iter(candidate_identities))
         evidence = attempts[attempt]
         chunks: dict[int, set[str]] = {}
-        for kind, serialized in evidence:
+        for kind, serialized, _ in evidence:
             if kind == "chunk":
                 projected = json.loads(serialized)
                 chunks.setdefault(projected["index"], set()).add(projected["opaque_chunk_ref"])
-        starts = {encoded for kind, encoded in evidence if kind == "start"}
-        terminals = {encoded for kind, encoded in evidence if kind == "terminal"}
+        starts = {encoded for kind, encoded, _ in evidence if kind == "start"}
+        terminals = {encoded for kind, encoded, _ in evidence if kind == "terminal"}
         reported = json.loads(next(iter(terminals))) if len(terminals) == 1 else None
         needed = reported["expected_chunks"] if reported else None
         invalid = (
@@ -516,6 +625,7 @@ def _view(rows: list[sqlite3.Row], competing: set[tuple[str, int]]) -> dict[str,
                 "observed_chunks": len(chunks),
                 "missing_indices": gap,
                 "exact_replay": "unavailable",
+                **({} if invalid else _details(evidence, grant, attempt)),
             }
         )
     current: dict[str, int] = {}

@@ -32,6 +32,16 @@ Readers without application-commit permission see unknown decision counts.
 The customer-local verified outcome reducer continues to own verified truth
 and the current live evidence counts.
 
+The application may supply the originally observed requested model,
+projection revision and prompt template reference. The response boundary
+may independently supply a receipt, served model and parsed-output
+references. These optional fields carry their observation time and are
+sealed with the current grant and attempt before persistence. A private
+inspector sees only the permitted boundary. A requested alias never
+fills an unknown served-model reference, and a response never creates
+an application commit. Metadata-only observations leave exact replay
+unavailable.
+
 The [generated stream tests](../tests/pilot/test_capture_streams.py) exercise
 off-to-metadata opt-in, restart with a gap, duplicate and conflicting
 chunks, a two-attempt operation with one app commit, competing app commits,
