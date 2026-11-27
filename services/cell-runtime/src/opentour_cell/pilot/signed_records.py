@@ -33,16 +33,17 @@ custodian; a verdict needs the independent evaluator; an audit receipt needs the
 auditor; a registry needs the operator root. A missing, duplicated or unexpected role, one
 key signing under two roles, or a key signing outside its own role or purposes is refused.
 
-Anti-rollback state: the highest verified registry revision and every pinned customer
-anchor are kept by ``TrustStateStore`` in a strict, versioned format
-(``opentour.pilot.trust-state.v1``). Its location is fixed layout configuration
-(``ANTI_ROLLBACK_DIRECTORY``), never a caller argument and never the worker data directory;
-it must sit outside anything a worker snapshot or restore covers, like credentials. The
-production location is reserved by the worker-host layout (OPE-577) and is not set here,
-so the verifier refuses with ``anti_rollback_location_not_configured`` until it is. This
-is local state: a party who can rewrite that location can reset it. Replay is then still
-bounded by the kit-pinned ``minimum_registry_revision`` and by each document's signed
-``not_after``.
+Anti-rollback state: ``TrustStateStore`` keeps named monotonic records in a strict,
+versioned format (``opentour.pilot.trust-state.v1``). This module uses two namespaces:
+``registry_revision`` (the highest verified registry revision) and
+``customer_anchor:<engagement>`` (changed only by a rotation signed by the previous customer
+key). Further namespaces, such as revocation epochs or withdrawn mandate ids, use the same
+format with their own forward-only rule. The location is fixed worker-host layout
+configuration (``ANTI_ROLLBACK_DIRECTORY``, the ``/var/lib/opentour-antirollback``
+StateDirectory reserved by OPE-577 outside the snapshot volume), never a caller argument
+and never the worker data directory. This is local state: a party who can rewrite that
+location can reset it. Replay is then still bounded by the kit-pinned
+``minimum_registry_revision`` and by each document's signed ``not_after``.
 
 Time: every signed document carries issuer-signed ``issued_at`` and ``not_after``. The local
 clock only shortens validity: refuse after ``not_after`` or more than ``ISSUED_AT_SKEW``
@@ -62,7 +63,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Annotated, Final, Literal
+from typing import Annotated, Any, Final, Literal
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import hashes, serialization
@@ -127,18 +128,20 @@ MAX_SIGNATURES: Final = 4
 MAX_CONFIG_BYTES: Final = 65536
 MAX_STATE_BYTES: Final = 8192
 TRUST_STATE_FORMAT: Final = "opentour.pilot.trust-state.v1"
-FLOOR_NAME: Final = "pilot-issuer-registry-floor.json"
-ANCHORS_NAME: Final = "pilot-customer-anchors"
+RECORDS_NAME: Final = "records"
 LOCK_NAME: Final = "pilot-trust-state.lock"
+# ``namespace`` or ``namespace:subject``; subjects are opaque ids such as engagement ids.
+RECORD_KEY_PATTERN: Final = r"[a-z][a-z0-9_]{0,63}(?::[^\x00-\x1f]{1,512})?"
 
 # Fixed by the kit layout: <kit>/opentour-*.pyz/opentour_cell/pilot/ in a kit and
 # services/cell-runtime/src/opentour_cell/pilot/ in the repository (kit root == CELL root).
 ROOT_PIN_PATH = Path(os.path.abspath(__file__)).parents[3] / "trust" / "pilot-registry-root.json"
 # SHA-256 of the approved root pin file. None until the operator root key ceremony has run.
 APPROVED_ROOT_PIN_SHA256: str | None = None
-# Absolute anti-rollback state location outside every worker snapshot, from the worker-host
-# layout. None until OPE-577 reserves it; the data directory is never an acceptable value.
-ANTI_ROLLBACK_DIRECTORY: Path | None = None
+# Worker-host layout (OPE-577): a dedicated StateDirectory owned by opentour-worker, mode
+# 0700, outside the snapshot volume and unreachable by the health unit. Never the data
+# directory and never a caller argument.
+ANTI_ROLLBACK_DIRECTORY: Path | None = Path("/var/lib/opentour-antirollback")
 
 _ENVELOPE_FIELDS: Final = frozenset({"payload", "signatures"})
 _SIGNATURE_FIELDS: Final = frozenset(
@@ -218,20 +221,6 @@ class _RotationPayload(WireModel):
     customer_key: _CustomerKey
     issued_at: Timestamp
     not_after: Timestamp
-
-
-class _FloorState(WireModel):
-    format: Literal["opentour.pilot.trust-state.v1"]
-    revision: Revision
-    registry_sha256: Sha256
-
-
-class _AnchorState(WireModel):
-    format: Literal["opentour.pilot.trust-state.v1"]
-    engagement_id: Id
-    anchor_revision: Revision
-    customer_key: _CustomerKey
-    record_sha256: Sha256
 
 
 class _Signature(WireModel):
@@ -514,29 +503,42 @@ def _write_atomic(directory: Path, name: str, body: bytes) -> None:
         os.close(directory_fd)
 
 
-def _read_state(path: Path, code: str) -> object | None:
-    if path.is_symlink():
-        raise PilotRecordRefused(code)
-    try:
-        with path.open("rb") as handle:
-            data = handle.read(MAX_STATE_BYTES + 1)
-    except FileNotFoundError:
-        return None
-    except OSError:
-        raise PilotRecordRefused(code) from None
-    try:
-        return strict_json(data, limit=MAX_STATE_BYTES)
-    except JournalError:
-        raise PilotRecordRefused(code) from None
+@dataclass(frozen=True)
+class MonotonicRecord:
+    """One named anti-rollback record: a namespaced key, a sequence and a JSON value.
+
+    ``key`` is ``namespace`` or ``namespace:subject`` (for example ``registry_revision`` or
+    ``customer_anchor:<engagement>``). ``sequence`` never decreases, and an equal sequence
+    is accepted only with an identical value. A namespace adds its own stricter rule.
+    """
+
+    key: str
+    sequence: int
+    value: Mapping[str, object]
+
+
+# A namespace rule sees the current record (or None) and the proposed one, and raises
+# PilotRecordRefused with its own code to refuse. The store's generic rule always follows.
+TransitionRule = Callable[[MonotonicRecord | None, MonotonicRecord], None]
+
+
+class _RecordState(WireModel):
+    format: Literal["opentour.pilot.trust-state.v1"]
+    key: Annotated[str, Field(strict=True, min_length=1, max_length=600)]
+    sequence: Revision
+    value: dict[str, Any]
 
 
 class TrustStateStore:
-    """Anti-rollback state: monotonic registry revision floor and per-engagement anchors.
+    """Anti-rollback state as named monotonic records, outside every worker snapshot.
 
-    Located only by ``ANTI_ROLLBACK_DIRECTORY``. Every file is canonical JSON in the
-    ``opentour.pilot.trust-state.v1`` format; anything else fails closed. Writes are atomic
-    and serialized by an exclusive lock. The store enforces state transitions only; the
-    verifier authenticates the signed documents that justify them.
+    Located only by ``ANTI_ROLLBACK_DIRECTORY``. One file per key under ``records/``, named
+    by the key's SHA-256 and holding canonical JSON in the ``opentour.pilot.trust-state.v1``
+    format; anything else fails closed. ``advance`` must run under ``locked``: it reads the
+    current record, applies the namespace rule and the generic forward-only rule, then
+    writes atomically (temporary file, fsync, rename, directory fsync). New namespaces need
+    no format change. The store enforces transitions only; the verifier authenticates the
+    signed documents that justify them.
     """
 
     def __init__(self) -> None:
@@ -564,79 +566,103 @@ class TrustStateStore:
         finally:
             os.close(lock)
 
-    def advance_registry_floor(self, revision: int, document_sha256: str) -> None:
-        """Hold under ``locked``. Lower revisions and same-revision equivocation refuse."""
-        value = _read_state(self._directory / FLOOR_NAME, "registry_floor_unreadable")
-        if value is not None:
-            try:
-                floor = _FloorState.model_validate(value)
-            except ValidationError:
-                raise PilotRecordRefused("registry_floor_unreadable") from None
-            if revision < int(floor.revision):
-                raise PilotRecordRefused("registry_revision_rolled_back")
-            if revision == int(floor.revision):
-                if document_sha256 != floor.registry_sha256:
-                    raise PilotRecordRefused("registry_revision_equivocated")
-                return
+    def read(self, key: str) -> MonotonicRecord | None:
+        _require_record_key(key)
+        path = self._directory / RECORDS_NAME / _record_name(key)
+        if path.is_symlink():
+            raise PilotRecordRefused("trust_state_unreadable")
+        try:
+            with path.open("rb") as handle:
+                data = handle.read(MAX_STATE_BYTES + 1)
+        except FileNotFoundError:
+            return None
+        except OSError:
+            raise PilotRecordRefused("trust_state_unreadable") from None
+        try:
+            state = _RecordState.model_validate(strict_json(data, limit=MAX_STATE_BYTES))
+            if state.key != key or canonical(state.wire()) != data:
+                raise ValueError("record binding")
+        except (JournalError, ValidationError, ValueError):
+            raise PilotRecordRefused("trust_state_unreadable") from None
+        return MonotonicRecord(state.key, int(state.sequence), state.value)
+
+    def advance(self, record: MonotonicRecord, rule: TransitionRule) -> bool:
+        """Hold under ``locked``. Return False when the identical record is already held."""
+        _require_record_key(record.key)
+        current = self.read(record.key)
+        rule(current, record)
+        if current is not None:
+            if record.sequence < current.sequence:
+                raise PilotRecordRefused("trust_state_regressed")
+            if record.sequence == current.sequence:
+                if dict(record.value) != dict(current.value):
+                    raise PilotRecordRefused("trust_state_conflict")
+                return False
         state = {
             "format": TRUST_STATE_FORMAT,
-            "revision": str(revision),
-            "registry_sha256": document_sha256,
+            "key": record.key,
+            "sequence": str(record.sequence),
+            "value": dict(record.value),
         }
-        _write_atomic(self._directory, FLOOR_NAME, canonical(state))
-
-    def anchor(self, engagement_id: str) -> _AnchorState | None:
-        path = self._directory / ANCHORS_NAME / self._anchor_name(engagement_id)
-        value = _read_state(path, "customer_anchor_unreadable")
-        if value is None:
-            return None
         try:
-            state = _AnchorState.model_validate(value)
-        except ValidationError:
-            raise PilotRecordRefused("customer_anchor_unreadable") from None
-        if state.engagement_id != engagement_id:
-            raise PilotRecordRefused("customer_anchor_unreadable")
-        return state
-
-    def pin_anchor(self, engagement_id: str, key: _CustomerKey, record_sha256: str) -> None:
-        """Hold under ``locked``. First anchor only; an identical enrolment is idempotent."""
-        current = self.anchor(engagement_id)
-        if current is not None:
-            if current.record_sha256 != record_sha256:
-                raise PilotRecordRefused("customer_anchor_already_pinned")
-            return
-        self._write_anchor(engagement_id, 1, key, record_sha256)
-
-    def replace_anchor(
-        self, engagement_id: str, revision: int, key: _CustomerKey, record_sha256: str
-    ) -> None:
-        """Hold under ``locked``. Only the immediate successor revision may replace."""
-        current = self.anchor(engagement_id)
-        if current is None:
-            raise PilotRecordRefused("customer_anchor_missing")
-        if revision != int(current.anchor_revision) + 1:
-            raise PilotRecordRefused("customer_rotation_not_successor")
-        self._write_anchor(engagement_id, revision, key, record_sha256)
-
-    @staticmethod
-    def _anchor_name(engagement_id: str) -> str:
-        return sha256(engagement_id.encode("utf-8")) + ".json"
-
-    def _write_anchor(
-        self, engagement_id: str, revision: int, key: _CustomerKey, record_sha256: str
-    ) -> None:
-        directory = self._directory / ANCHORS_NAME
+            _RecordState.model_validate(state)
+            body = canonical(state)
+        except (JournalError, ValidationError):
+            raise PilotRecordRefused("trust_state_invalid") from None
+        if len(body) > MAX_STATE_BYTES:
+            raise PilotRecordRefused("trust_state_invalid")
+        directory = self._directory / RECORDS_NAME
         if directory.is_symlink():
             raise PilotRecordRefused("anti_rollback_state_unavailable")
         directory.mkdir(mode=0o700, exist_ok=True)
-        state = {
-            "format": TRUST_STATE_FORMAT,
-            "engagement_id": engagement_id,
-            "anchor_revision": str(revision),
-            "customer_key": key.wire(),
-            "record_sha256": record_sha256,
-        }
-        _write_atomic(directory, self._anchor_name(engagement_id), canonical(state))
+        _write_atomic(directory, _record_name(record.key), body)
+        return True
+
+
+def _require_record_key(key: str) -> None:
+    if not re.fullmatch(RECORD_KEY_PATTERN, key):
+        raise PilotRecordRefused("trust_state_key_invalid")
+
+
+def _record_name(key: str) -> str:
+    return sha256(key.encode("utf-8")) + ".json"
+
+
+REGISTRY_REVISION_KEY: Final = "registry_revision"
+
+
+def _anchor_key(engagement_id: str) -> str:
+    return "customer_anchor:" + engagement_id
+
+
+def _registry_rule(current: MonotonicRecord | None, proposed: MonotonicRecord) -> None:
+    if current is None:
+        return
+    if proposed.sequence < current.sequence:
+        raise PilotRecordRefused("registry_revision_rolled_back")
+    if proposed.sequence == current.sequence and dict(proposed.value) != dict(current.value):
+        raise PilotRecordRefused("registry_revision_equivocated")
+
+
+def _pin_rule(current: MonotonicRecord | None, proposed: MonotonicRecord) -> None:
+    # The first anchor only; re-presenting the identical enrolment is idempotent.
+    if current is not None and (
+        current.sequence != proposed.sequence or dict(current.value) != dict(proposed.value)
+    ):
+        raise PilotRecordRefused("customer_anchor_already_pinned")
+
+
+def _rotation_rule(current: MonotonicRecord | None, proposed: MonotonicRecord) -> None:
+    # Authentication by the previous customer key happens before the store is asked.
+    if current is None:
+        raise PilotRecordRefused("customer_anchor_missing")
+    if proposed.sequence != current.sequence + 1:
+        raise PilotRecordRefused("customer_rotation_not_successor")
+
+
+class _AnchorValue(WireModel):
+    customer_key: _CustomerKey
+    record_sha256: Sha256
 
 
 class PilotVerifier:
@@ -668,8 +694,11 @@ class PilotVerifier:
         if revision < int(pin.minimum_registry_revision):
             raise PilotRecordRefused("registry_revision_below_kit_minimum")
         keys = _trust_set(registry.keys, REGISTRY_ROLES)
+        floor = MonotonicRecord(
+            REGISTRY_REVISION_KEY, revision, {"registry_sha256": sha256(registry_document)}
+        )
         with self._store.locked():
-            self._store.advance_registry_floor(revision, sha256(registry_document))
+            self._store.advance(floor, _registry_rule)
         self._registry = _Registry(
             revision,
             datetime.fromisoformat(registry.issued_at),
@@ -718,8 +747,11 @@ class PilotVerifier:
         resolvers[CUSTOMER_OWNER] = _fixed_resolver(customer, "enrolment_key_mismatch")
         _authenticate(payload, signatures, ENROLMENT_PURPOSE, resolvers, "enrolment")
         record_sha256 = sha256(enrolment)
+        value = {"customer_key": body.customer_key.wire(), "record_sha256": record_sha256}
         with self._store.locked():
-            self._store.pin_anchor(body.engagement_id, body.customer_key, record_sha256)
+            self._store.advance(
+                MonotonicRecord(_anchor_key(body.engagement_id), 1, value), _pin_rule
+            )
         return CustomerAnchor(body.engagement_id, customer.key_id, 1, customer.public_key_sha256)
 
     def rotate_customer_key(self, rotation: bytes) -> CustomerAnchor:
@@ -752,8 +784,9 @@ class PilotVerifier:
             self._require_distinct(successor)
             if successor.public_key_sha256 == previous.public_key_sha256:
                 raise PilotRecordRefused("customer_key_not_distinct")
-            self._store.replace_anchor(
-                body.engagement_id, revision, body.customer_key, sha256(rotation)
+            value = {"customer_key": body.customer_key.wire(), "record_sha256": sha256(rotation)}
+            self._store.advance(
+                MonotonicRecord(_anchor_key(body.engagement_id), revision, value), _rotation_rule
             )
         return CustomerAnchor(
             body.engagement_id, successor.key_id, revision, successor.public_key_sha256
@@ -775,8 +808,12 @@ class PilotVerifier:
             raise PilotRecordRefused("customer_key_not_distinct")
 
     def _anchor(self, engagement_id: str, purpose: str | None = None) -> PilotTrustedKey | None:
-        state = self._store.anchor(engagement_id)
-        if state is None:
+        record = self._store.read(_anchor_key(engagement_id))
+        if record is None:
             return None
+        try:
+            value = _AnchorValue.model_validate(dict(record.value))
+        except ValidationError:
+            raise PilotRecordRefused("trust_state_unreadable") from None
         purposes = CONSENT_PURPOSES if purpose is None else frozenset({purpose})
-        return _customer_key(state.customer_key, int(state.anchor_revision), purposes)
+        return _customer_key(value.customer_key, record.sequence, purposes)

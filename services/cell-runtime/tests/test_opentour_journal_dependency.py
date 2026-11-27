@@ -13,7 +13,9 @@ import re
 import tomllib
 from pathlib import Path
 
-PYPROJECT = Path(__file__).resolve().parents[2] / "pyproject.toml"
+# Lives at the end of the cell-runtime test order so CI, which stops at the first failing
+# target, still runs every other cell-runtime test file before this expected failure.
+PYPROJECT = Path(__file__).resolve().parents[1] / "pyproject.toml"
 
 
 def test_cell_runtime_declares_opentour_journal_dependency() -> None:

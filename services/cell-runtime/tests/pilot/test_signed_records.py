@@ -237,7 +237,7 @@ def kit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Kit:
         state=state,
     )
     value.pin()
-    # The production location is pending OPE-577; tests use a temporary location.
+    # Production uses the worker-host location (OPE-577); tests use a temporary one.
     monkeypatch.setattr(sr, "ANTI_ROLLBACK_DIRECTORY", state)
     return value
 
@@ -426,7 +426,7 @@ def test_enrolment_requires_customer_and_operator_signatures(kit: Kit) -> None:
     for signers in ((kit.customer,), (kit.operator,)):
         record = sign(payload, sr.ENROLMENT_PURPOSE, *signers)
         refused("signature_role_missing", partial(verifier.pin_customer_anchor, record))
-    assert not (kit.state / sr.ANCHORS_NAME).exists()
+    assert not record_path(kit, ANCHOR_KEY).exists()
 
 
 def test_enrolment_proves_possession_and_pins_idempotently(kit: Kit) -> None:
@@ -561,9 +561,23 @@ def test_rotation_must_be_the_exact_successor(kit: Kit) -> None:
 # --- Anti-rollback trust-state store -------------------------------------------------
 
 
-def test_store_location_is_fixed_configuration_not_yet_set(
-    kit: Kit, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def record_path(kit: Kit, key: str) -> Path:
+    return kit.state / sr.RECORDS_NAME / (hashlib.sha256(key.encode()).hexdigest() + ".json")
+
+
+def stored(kit: Kit, key: str) -> Json:
+    value: Json = json.loads(record_path(kit, key).read_bytes())
+    return value
+
+
+ANCHOR_KEY = "customer_anchor:" + ENGAGEMENT
+
+
+def accept_any(current: sr.MonotonicRecord | None, proposed: sr.MonotonicRecord) -> None:
+    return None
+
+
+def test_store_location_is_fixed_configuration(kit: Kit, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(sr, "ANTI_ROLLBACK_DIRECTORY", None)
     refused("anti_rollback_location_not_configured", kit.verifier)
     refused("anti_rollback_location_not_configured", sr.TrustStateStore)
@@ -576,60 +590,98 @@ def test_store_location_is_fixed_configuration_not_yet_set(
     refused("anti_rollback_state_unavailable", kit.verifier)
 
 
-def test_shipped_store_location_is_unset_pending_worker_host_layout(
+def test_shipped_store_location_is_the_worker_host_antirollback_directory(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.undo()
-    assert sr.ANTI_ROLLBACK_DIRECTORY is None
+    assert sr.ANTI_ROLLBACK_DIRECTORY == Path("/var/lib/opentour-antirollback")
 
 
-def test_store_state_format_is_strict_and_versioned(kit: Kit) -> None:
+def test_store_record_format_is_strict_and_versioned(kit: Kit) -> None:
     registry = kit.registry()
-    kit.verifier(registry).pin_customer_anchor(kit.enrolment())
-    floor = json.loads((kit.state / sr.FLOOR_NAME).read_bytes())
-    assert floor == {
+    enrolment = kit.enrolment()
+    kit.verifier(registry).pin_customer_anchor(enrolment)
+    assert stored(kit, "registry_revision") == {
         "format": "opentour.pilot.trust-state.v1",
-        "registry_sha256": hashlib.sha256(registry).hexdigest(),
-        "revision": "1",
+        "key": "registry_revision",
+        "sequence": "1",
+        "value": {"registry_sha256": hashlib.sha256(registry).hexdigest()},
     }
-    (anchor_file,) = (kit.state / sr.ANCHORS_NAME).iterdir()
-    anchor = json.loads(anchor_file.read_bytes())
-    assert set(anchor) == {
-        "format",
-        "engagement_id",
-        "anchor_revision",
-        "customer_key",
-        "record_sha256",
+    assert stored(kit, ANCHOR_KEY) == {
+        "format": "opentour.pilot.trust-state.v1",
+        "key": ANCHOR_KEY,
+        "sequence": "1",
+        "value": {
+            "customer_key": kit.customer.public(),
+            "record_sha256": hashlib.sha256(enrolment).hexdigest(),
+        },
     }
-    assert anchor["format"] == "opentour.pilot.trust-state.v1"
-    assert anchor["customer_key"] == kit.customer.public()
-    assert canonical(anchor) == anchor_file.read_bytes()
+    for key in ("registry_revision", ANCHOR_KEY):
+        assert canonical(stored(kit, key)) == record_path(kit, key).read_bytes()
 
 
-def test_store_replace_requires_the_immediate_successor(kit: Kit) -> None:
+def test_store_admits_new_namespaces_without_a_format_change(kit: Kit) -> None:
+    store = sr.TrustStateStore()
+    with store.locked():
+        epoch = sr.MonotonicRecord("revocation_epoch:org-sentinel-0001", 4, {})
+        assert store.advance(epoch, accept_any)
+        assert not store.advance(epoch, accept_any)
+        withdrawn = sr.MonotonicRecord(
+            "withdrawn_mandate:org-sentinel-0001:mandate-0001", 1, {"withdrawn": True}
+        )
+        assert store.advance(withdrawn, accept_any)
+        # The generic rule refuses any backwards move, whatever the namespace rule allows.
+        lower = sr.MonotonicRecord("revocation_epoch:org-sentinel-0001", 3, {})
+        refused("trust_state_regressed", partial(store.advance, lower, accept_any))
+        changed = sr.MonotonicRecord("revocation_epoch:org-sentinel-0001", 4, {"x": 1})
+        refused("trust_state_conflict", partial(store.advance, changed, accept_any))
+        for key in ("Bad", "registry revision", "", "ns:" + "x" * 513, "ns:\n"):
+            refused(
+                "trust_state_key_invalid",
+                partial(store.advance, sr.MonotonicRecord(key, 1, {}), accept_any),
+            )
+    assert stored(kit, "revocation_epoch:org-sentinel-0001")["sequence"] == "4"
+    record = store.read("withdrawn_mandate:org-sentinel-0001:mandate-0001")
+    assert record == sr.MonotonicRecord(
+        "withdrawn_mandate:org-sentinel-0001:mandate-0001", 1, {"withdrawn": True}
+    )
+
+
+def test_store_anchor_rules_require_the_immediate_successor(kit: Kit) -> None:
     kit.enrolled()
     store = sr.TrustStateStore()
-    key = sr._CustomerKey.model_validate(Signer(sr.CUSTOMER_OWNER).public())
+    value = {"customer_key": Signer(sr.CUSTOMER_OWNER).public(), "record_sha256": "0" * 64}
     with store.locked():
-        for revision in (1, 3):
+        for sequence in (1, 3):
             refused(
                 "customer_rotation_not_successor",
-                partial(store.replace_anchor, ENGAGEMENT, revision, key, "0" * 64),
+                partial(
+                    store.advance,
+                    sr.MonotonicRecord(ANCHOR_KEY, sequence, value),
+                    sr._rotation_rule,
+                ),
             )
         refused(
             "customer_anchor_missing",
-            partial(store.replace_anchor, "eng-other", 2, key, "0" * 64),
+            partial(
+                store.advance,
+                sr.MonotonicRecord("customer_anchor:eng-other", 2, value),
+                sr._rotation_rule,
+            ),
         )
         refused(
             "customer_anchor_already_pinned",
-            partial(store.pin_anchor, ENGAGEMENT, key, "0" * 64),
+            partial(store.advance, sr.MonotonicRecord(ANCHOR_KEY, 1, value), sr._pin_rule),
         )
         refused(
             "registry_revision_rolled_back",
-            partial(store.advance_registry_floor, 0, "0" * 64),
+            partial(
+                store.advance,
+                sr.MonotonicRecord("registry_revision", 0, {"registry_sha256": "0" * 64}),
+                sr._registry_rule,
+            ),
         )
-    current = store.anchor(ENGAGEMENT)
-    assert current is not None and current.customer_key.key_id == kit.customer.key_id
+    assert stored(kit, ANCHOR_KEY)["value"]["customer_key"] == kit.customer.public()
 
 
 def test_store_state_is_independent_of_a_restored_data_directory(kit: Kit) -> None:
@@ -669,8 +721,7 @@ def test_older_registry_revision_cannot_resurrect_a_dropped_key(kit: Kit) -> Non
     kit.verifier(kit.registry("2", keys=[kit.operator.entry(), kit.auditor.entry()]))
     # The old registry is still validly signed and unexpired; the floor refuses it.
     refused("registry_revision_rolled_back", partial(kit.verifier, old))
-    floor = json.loads((kit.state / sr.FLOOR_NAME).read_bytes())
-    assert floor["revision"] == "2"
+    assert stored(kit, "registry_revision")["sequence"] == "2"
 
 
 def test_same_revision_with_different_contents_is_equivocation(kit: Kit) -> None:
@@ -685,33 +736,35 @@ def test_registry_below_kit_minimum_refused_without_local_state(kit: Kit) -> Non
     kit.minimum = "5"
     kit.pin()
     refused("registry_revision_below_kit_minimum", partial(kit.verifier, kit.registry("4")))
-    assert not (kit.state / sr.FLOOR_NAME).exists()
+    assert not record_path(kit, "registry_revision").exists()
     assert kit.verifier(kit.registry("5")).registry_revision == 5
 
 
 def test_unreadable_state_fails_closed(kit: Kit) -> None:
     verifier = kit.enrolled()
-    anchors = list((kit.state / sr.ANCHORS_NAME).iterdir())
-    assert len(anchors) == 1
-    anchors[0].write_bytes(b'{"engagement_id":"eng-sentinel-0001"}')
     record = sign(consent(), sr.GRANT_PURPOSE, kit.customer, kit.operator)
-    refused("customer_anchor_unreadable", partial(verifier.verify, record, sr.GRANT_PURPOSE))
-    for floor in (
-        b'{"revision":"0"}',
-        b'{"registry_sha256":"' + b"0" * 64 + b'","revision":"1"}',
-        b'{"format":"opentour.pilot.trust-state.v0","registry_sha256":"'
-        + b"0" * 64
-        + b'","revision":"1"}',
+    anchor_file = record_path(kit, ANCHOR_KEY)
+    good = stored(kit, ANCHOR_KEY)
+    for broken in (
+        b'{"key":"' + ANCHOR_KEY.encode() + b'"}',
+        canonical({**good, "format": "opentour.pilot.trust-state.v0"}),
+        canonical({**good, "key": "customer_anchor:eng-other"}),
+        canonical({**good, "extra": 1}),
+        json.dumps(good, indent=1).encode(),
+        canonical({**good, "value": {"record_sha256": "0" * 64}}),
     ):
-        (kit.state / sr.FLOOR_NAME).write_bytes(floor)
-        refused("registry_floor_unreadable", kit.verifier)
+        anchor_file.write_bytes(broken)
+        refused("trust_state_unreadable", partial(verifier.verify, record, sr.GRANT_PURPOSE))
+    floor_file = record_path(kit, "registry_revision")
+    floor_file.write_bytes(b'{"sequence":"0"}')
+    refused("trust_state_unreadable", kit.verifier)
 
 
 def test_refused_registry_does_not_advance_floor(kit: Kit) -> None:
     kit.verifier(kit.registry("1"))
     bad = kit.registry("9", keys=[kit.operator.entry(purposes=[])])
     refused("trust_key_purposes_invalid", partial(kit.verifier, bad))
-    assert json.loads((kit.state / sr.FLOOR_NAME).read_bytes())["revision"] == "1"
+    assert stored(kit, "registry_revision")["sequence"] == "1"
 
 
 # --- Encoding and canonical form -----------------------------------------------------
@@ -1016,7 +1069,7 @@ def test_expired_registry_and_enrolment_refused(kit: Kit) -> None:
     verifier = kit.verifier()
     old = kit.enrolment(issued_at=stamp(-7200), not_after=stamp(-1))
     refused("enrolment_expired", partial(verifier.pin_customer_anchor, old))
-    assert not (kit.state / sr.ANCHORS_NAME).exists()
+    assert not record_path(kit, ANCHOR_KEY).exists()
 
 
 # --- Verify only ---------------------------------------------------------------------
