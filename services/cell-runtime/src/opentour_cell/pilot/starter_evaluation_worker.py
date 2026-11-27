@@ -8,6 +8,7 @@ import hmac
 import os
 import re
 import sqlite3
+import subprocess
 import time
 from collections.abc import Sequence
 from pathlib import Path
@@ -225,7 +226,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             result = dict(schema_version=RESULT, state="scored", reason_code="completion_published")
         else:
             result = execute(args.invocation)
-    except (ValueError, TypeError, KeyError, OSError, RuntimeError, sqlite3.Error):
+    except (
+        ValueError,
+        TypeError,
+        KeyError,
+        OSError,
+        RuntimeError,
+        sqlite3.Error,
+        subprocess.SubprocessError,
+    ):
         result = dict(
             schema_version=RESULT,
             state="held",
