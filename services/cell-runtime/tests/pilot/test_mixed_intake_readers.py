@@ -467,3 +467,241 @@ def test_pdf_with_very_many_small_objects_is_not_quadratic() -> None:
     many = b"%PDF-1.4\n" + b"".join(b"%d 0 obj\n<<>>\nendobj\n" % i for i in range(1, 70000))
     result = read(many, "x.pdf")[1]
     assert result.state is ExtractionState.CORRUPT and result.reason == "no_catalog"
+
+
+# ------------------------------------------------------------------ OPE-531 fail-open defects
+# Each probe is a generated sentinel. The defect class: text a human cannot see (or that was not
+# fully read) must never be admitted as ELIGIBLE.
+
+_VISIBLE = b"BT /F1 11 Tf 72 700 Td (Visible) Tj ET"
+
+
+def _flagged(content: bytes, flag: str, **kwargs: object) -> None:
+    result = read(_pdf(content, **kwargs), "x.pdf")[1]  # type: ignore[arg-type]
+    assert result.state is ExtractionState.NEEDS_REVIEW, content
+    assert flag in result.reason, (content, result.reason)
+    assert result.next_actor.value == "owner"
+
+
+def _eligible(content: bytes, **kwargs: object) -> None:
+    result = read(_pdf(content, **kwargs), "x.pdf")[1]  # type: ignore[arg-type]
+    assert result.state is ExtractionState.ELIGIBLE, (content, result.reason)
+
+
+def test_pdf_ordinary_black_text_and_headings_in_real_colours_stay_eligible() -> None:
+    _eligible(_VISIBLE)
+    _eligible(b"0 g " + _VISIBLE)
+    for colour in (
+        b"0 0 0 rg",
+        b"0.8 0 0 rg",  # red heading
+        b"0 0 0.5 rg",  # navy heading
+        b"0.5 g",  # mid grey
+        b"0 0 0 1 k",  # CMYK black
+        b"0.2 0.4 0.6 sc",
+        b"0.2 0.4 0.6 scn",
+        b"0.6 0.2 0.1 0 k",
+    ):
+        _eligible(colour + b" " + _VISIBLE)
+    # Ordinary sizes, including small print and a unit font size scaled up through Tm / cm.
+    _eligible(b"BT /F1 4 Tf 72 700 Td (Fine print) Tj ET")
+    _eligible(b"BT /F1 1 Tf 11 0 0 11 72 700 Tm (Scaled by Tm) Tj ET")
+    _eligible(b"q 11 0 0 11 0 0 cm BT /F1 1 Tf 6 60 Td (Scaled by cm) Tj ET Q")
+    _eligible(b"BT /F1 11 Tf 100 Tz 4 Ts 72 700 Td (Superscript) Tj ET")
+    # A clip that covers the whole page is the usual no-op wrapper written by many producers.
+    _eligible(b"q 0 0 612 792 re W n " + _VISIBLE + b" Q")
+    _eligible(b"q 0 0 612 792 re W* n " + _VISIBLE + b" Q")
+
+
+# D1 -------------------------------------------------------------------------------------
+
+
+def test_pdf_q_q_restores_the_text_render_mode() -> None:
+    _flagged(b"BT /F1 11 Tf 3 Tr q 0 Tr Q 72 700 Td (HIDDEN) Tj ET", "hidden_text_present")
+    # The exact probe, without the surrounding positioning.
+    _flagged(b"BT /F1 11 Tf 3 Tr q 0 Tr Q (HIDDEN) Tj ET", "hidden_text_present")
+    _flagged(b"3 Tr q 0 Tr Q BT /F1 11 Tf 72 700 Td (HIDDEN) Tj ET", "hidden_text_present")
+
+
+def test_pdf_q_3_tr_q_does_not_over_flag_visible_text() -> None:
+    _eligible(b"BT /F1 11 Tf q 3 Tr Q 72 700 Td (Visible) Tj ET")
+    _eligible(b"q 3 Tr Q BT /F1 11 Tf 72 700 Td (Visible) Tj ET")
+
+
+def test_pdf_q_q_restores_the_font_size_and_fill_colour() -> None:
+    # Size set inside q is gone after Q; the size outside q was invisible all along.
+    _flagged(b"BT /F1 0 Tf q /F1 12 Tf Q 72 700 Td (TINY) Tj ET", "text_size_invisible")
+    _eligible(b"BT /F1 12 Tf q /F1 0 Tf Q 72 700 Td (Visible) Tj ET")
+    _flagged(b"1 g q 0 g Q BT /F1 11 Tf 72 700 Td (WHITE) Tj ET", "text_color_invisible")
+    _eligible(b"q 1 g Q BT /F1 11 Tf 72 700 Td (Visible) Tj ET")
+
+
+# D2 -------------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        b"BT /F1 0 Tf 72 700 Td (zero) Tj ET",
+        b"BT /F1 -12 Tf 72 700 Td (negative) Tj ET",
+        b"BT /F1 0.001 Tf 72 700 Td (speck) Tj ET",
+        b"BT /F1 1.9 Tf 72 700 Td (just under the floor) Tj ET",
+        b"BT /F1 12 Tf 0.001 0 0 0.001 72 700 Tm (tm scale) Tj ET",
+        b"q 0.001 0 0 0.001 0 0 cm BT /F1 12 Tf 72 700 Td (cm scale) Tj ET Q",
+        b"BT /F1 12 Tf 0 Tz 72 700 Td (no width) Tj ET",
+        b"BT /F1 12 Tf -100 Tz 72 700 Td (mirrored) Tj ET",
+        b"BT /F1 12 Tf 0.1 Tz 72 700 Td (squeezed) Tj ET",
+        b"BT /F1 12 Tf 100000 Ts 72 700 Td (risen) Tj ET",
+        b"BT /F1 12 Tf -100000 Ts 72 700 Td (sunk) Tj ET",
+    ],
+)
+def test_pdf_text_with_no_visible_effective_size_goes_to_review(content: bytes) -> None:
+    _flagged(content, "text_size_invisible")
+
+
+# D3 -------------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "paint",
+    [
+        b"1 g",
+        b"0.95 g",
+        b"1 1 1 rg",
+        b"0.97 0.97 0.97 rg",
+        b"0 0 0 0 k",
+        b"0.02 0.02 0.02 0.02 k",
+        b"1 1 1 sc",
+        b"1 1 1 scn",
+        b"1 sc",
+        b"1 scn",
+        b"0 0 0 0 sc",
+        b"1 1 0 rg",  # yellow on white has a contrast ratio of about 1.07
+    ],
+)
+def test_pdf_near_white_fill_goes_to_review(paint: bytes) -> None:
+    _flagged(paint + b" " + _VISIBLE, "text_color_invisible")
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        b"BT /F1 11 Tf -5000 700 Td (left) Tj ET",
+        b"BT /F1 11 Tf 72 99999 Td (above) Tj ET",
+        b"BT /F1 11 Tf 72 -50 Td (below) Tj ET",
+        b"BT /F1 11 Tf 5000 700 Td (right) Tj ET",
+        b"BT /F1 11 Tf 1 0 0 1 -5000 700 Tm (tm left) Tj ET",
+        b"q 1 0 0 1 9000 9000 cm BT /F1 11 Tf 72 700 Td (moved) Tj ET Q",
+    ],
+)
+def test_pdf_text_outside_the_media_box_goes_to_review(content: bytes) -> None:
+    _flagged(content, "text_outside_page")
+
+
+def test_pdf_text_with_an_unreadable_media_box_goes_to_review() -> None:
+    objects = {
+        1: b"<< /Type /Catalog /Pages 2 0 R >>",
+        2: b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        3: b"<< /Type /Page /Parent 2 0 R /Contents 5 0 R "
+        b"/Resources << /Font << /F1 7 0 R >> >> >>",
+        4: b"<< >>",
+        5: fx._stream(_VISIBLE),
+        6: b"<< >>",
+        7: b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>",
+    }
+    result = read(fx._assemble(objects), "x.pdf")[1]
+    assert result.state is ExtractionState.NEEDS_REVIEW
+    assert "text_outside_page" in result.reason
+    # An inherited MediaBox is honoured.
+    objects[2] = b"<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 612 792] >>"
+    assert read(fx._assemble(objects), "x.pdf")[1].state is ExtractionState.ELIGIBLE
+
+
+@pytest.mark.parametrize(
+    "clip",
+    [
+        b"0 0 1 1 re W n",
+        b"0 0 1 1 re W* n",
+        b"100 100 50 50 re W n",
+        b"0 0 612 792 m 612 0 l 0 0 l h W n",  # not a single rectangle
+    ],
+)
+def test_pdf_clip_region_goes_to_review(clip: bytes) -> None:
+    _flagged(clip + b" " + _VISIBLE, "clip_region_present")
+    _flagged(b"q " + clip + b" " + _VISIBLE + b" Q", "clip_region_present")
+
+
+_IMAGE = b"<< /Type /XObject /Subtype /Image /Width 1 /Height 1 /ColorSpace /DeviceGray "
+_IMAGE += b"/BitsPerComponent 8 /Length 1 >>\nstream\n\x00\nendstream"
+_IMAGE_RESOURCES = b"/Font << /F1 7 0 R >> /XObject << /Im1 8 0 R >>"
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        b"q 612 0 0 792 0 0 cm /Im1 Do Q " + _VISIBLE,  # image first, text can be covered
+        _VISIBLE + b" q 612 0 0 792 0 0 cm /Im1 Do Q",  # image after, text is painted over
+    ],
+)
+def test_pdf_page_with_an_image_and_text_goes_to_review(content: bytes) -> None:
+    flag = "image_text_overlay_unverified"
+    _flagged(content, flag, extra={8: _IMAGE}, resources=_IMAGE_RESOURCES)
+
+
+def test_pdf_image_only_page_is_still_a_rendition_not_a_review() -> None:
+    content = b"q 612 0 0 792 0 0 cm /Im1 Do Q"
+    result = read(_pdf(content, extra={8: _IMAGE}, resources=_IMAGE_RESOURCES), "x.pdf")[1]
+    assert result.state is ExtractionState.NEEDS_RENDITION
+
+
+# D4 -------------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("index", [b"-1", b"-5", b"1.0", b" "])
+def test_xlsx_negative_or_non_integer_shared_string_index_is_corrupt(index: bytes) -> None:
+    _fmt, result = read(_xlsx_variant(b"<v>4</v>", b"<v>" + index + b"</v>"), "x.xlsx")
+    assert result.state is ExtractionState.CORRUPT and not result.spans
+    assert result.reason == "malformed_content" and result.next_actor.value == "owner"
+
+
+# D5 -------------------------------------------------------------------------------------
+
+
+def _pdf_with_contents(contents: bytes, extra: dict[int, bytes] | None = None) -> bytes:
+    return fx._assemble(
+        {
+            1: b"<< /Type /Catalog /Pages 2 0 R >>",
+            2: b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+            3: b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents "
+            + contents
+            + b" /Resources << /Font << /F1 7 0 R >> >> >>",
+            4: fx._stream(_VISIBLE),
+            5: b"<< >>",
+            6: b"<< >>",
+            7: b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>",
+            **(extra or {}),
+        }
+    )
+
+
+def test_pdf_page_contents_that_resolve_stay_eligible() -> None:
+    assert read(_pdf_with_contents(b"4 0 R"), "x.pdf")[1].state is ExtractionState.ELIGIBLE
+    both = {5: fx._stream(b"BT /F1 11 Tf 72 600 Td (Second) Tj ET")}
+    result = read(_pdf_with_contents(b"[4 0 R 5 0 R]", both), "x.pdf")[1]
+    assert result.state is ExtractionState.ELIGIBLE
+
+
+@pytest.mark.parametrize(
+    ("contents", "extra"),
+    [
+        (b"[4 0 R 99 0 R]", None),  # dangling reference beside a readable stream
+        (b"[99 0 R 4 0 R]", None),
+        (b"[4 0 R 5 0 R]", {5: b"<< /Type /Dummy >>"}),  # resolves, but carries no stream
+    ],
+)
+def test_pdf_content_stream_that_cannot_be_resolved_goes_to_review(
+    contents: bytes, extra: dict[int, bytes] | None
+) -> None:
+    result = read(_pdf_with_contents(contents, extra), "x.pdf")[1]
+    assert result.state is ExtractionState.NEEDS_REVIEW
+    assert "content_stream_unresolved" in result.reason
+    assert result.next_actor.value == "owner"

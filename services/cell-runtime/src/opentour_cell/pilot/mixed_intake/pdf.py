@@ -12,9 +12,10 @@ emitting a guess. Objects are scanned directly (the cross-reference table is not
 
 from __future__ import annotations
 
+import math
 import re
 import zlib
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from opentour_cell.pilot.mixed_intake.flags import value_flags
 from opentour_cell.pilot.mixed_intake.model import (
@@ -28,7 +29,17 @@ from opentour_cell.pilot.mixed_intake.model import (
     finish,
 )
 
-PDF_REVISION = "opentour.reader.pdf-text@1.0.2"
+PDF_REVISION = "opentour.reader.pdf-text@1.0.3"
+# Effective text size, in points, below which text is treated as not human-readable. Real
+# fine print is 4 pt or more; below 2 pt (about 0.7 mm) glyphs are specks at any reading size.
+# Applied to the effective em height (Tf x Tm x cm) and em width (also x Tz).
+MIN_VISIBLE_TEXT_POINTS = 2.0
+# A text rise (Ts) beyond this many em is not a super/subscript but a displacement.
+MAX_TEXT_RISE_EM = 2.0
+# Fill colours whose contrast ratio against white paper is below this are treated as invisible.
+# 1.3 is roughly a grey level above 0.89 (about #E3E3E3) and is far below the 3:1 legibility
+# floor, so coloured headings (red, navy, mid grey, brand colours) are never flagged.
+MIN_TEXT_CONTRAST_AGAINST_WHITE = 1.3
 _OBJ = re.compile(rb"(?<![0-9])(\d{1,7})\s+(\d{1,5})\s+obj\b")
 _REF = rb"(\d+)\s+\d+\s+R"
 _NUMBER = re.compile(rb"[+-]?(\d+\.?\d*|\.\d+)")
@@ -241,38 +252,131 @@ def _concat(m: tuple[float, ...], n: tuple[float, ...]) -> tuple[float, ...]:
     )
 
 
+def _relative_luminance(red: float, green: float, blue: float) -> float:
+    def linear(channel: float) -> float:
+        channel = min(max(channel, 0.0), 1.0)
+        return channel / 12.92 if channel <= 0.03928 else ((channel + 0.055) / 1.055) ** 2.4
+
+    return 0.2126 * linear(red) + 0.7152 * linear(green) + 0.0722 * linear(blue)
+
+
+def _invisible_on_white(components: list[float]) -> bool | None:
+    """True when a fill colour is near-invisible on white paper; None when not understood.
+
+    The colour space is inferred from the operand count (1 grey, 3 RGB, 4 CMYK), which is exact
+    for the device spaces and a conservative guess for the rest.
+    """
+    if len(components) == 1:
+        red = green = blue = components[0]
+    elif len(components) == 3:
+        red, green, blue = components
+    elif len(components) == 4:
+        cyan, magenta, yellow, black = (min(max(c, 0.0), 1.0) for c in components)
+        red, green, blue = ((1.0 - c) * (1.0 - black) for c in (cyan, magenta, yellow))
+    else:
+        return None
+    contrast = 1.05 / (_relative_luminance(red, green, blue) + 0.05)
+    return contrast < MIN_TEXT_CONTRAST_AGAINST_WHITE
+
+
+@dataclass(frozen=True)
+class _Graphics:
+    """The graphics-state values that `q` saves and `Q` restores, text state included."""
+
+    ctm: tuple[float, ...] = _IDENTITY
+    render_mode: float = 0.0
+    size: float = 0.0
+    font: bytes = b""
+    leading: float = 0.0
+    h_scale: float = 1.0
+    rise: float = 0.0
+    fill_invisible: bool = False
+
+
+_PAINT = frozenset({b"n", b"S", b"s", b"f", b"F", b"f*", b"B", b"B*", b"b", b"b*"})
+_PATH_BUILD = frozenset({b"m", b"l", b"c", b"v", b"y"})
+
+
 def _fragments(
-    content: bytes, deadline: Deadline, forms: frozenset[bytes] = frozenset()
+    content: bytes,
+    deadline: Deadline,
+    forms: frozenset[bytes] = frozenset(),
+    images: frozenset[bytes] = frozenset(),
+    page_box: tuple[float, float, float, float] | None = None,
 ) -> tuple[list[_Fragment], set[str]]:
     """Return positioned fragments and the review flags the content stream earned.
 
     Positions are mapped through the current transformation matrix (translation and scale are
     honoured). Rotation or skew, invisible text and text living in Form XObjects cannot be put
-    in reading order by this reader, so they are flagged for review instead of guessed.
+    in reading order by this reader, so they are flagged for review instead of guessed. This is
+    not a renderer: invisibility by size, paint, placement, clipping and overpainting is
+    flagged conservatively, never proven absent.
     """
     out: list[_Fragment] = []
     marks: set[str] = set()
+    late: set[str] = set()  # page-level flags that only matter when text was actually read
     stack: list[object] = []
-    lx = ly = x = y = leading = size = 0.0
-    font = b""
+    lx = ly = x = y = 0.0
     array: list[object] | None = None
-    ctm: tuple[float, ...] = _IDENTITY
-    ctm_stack: list[tuple[float, ...]] = []
-    render_mode = 0.0
+    gs = _Graphics()
+    saved: list[_Graphics] = []
+    text_matrix: tuple[float, ...] = _IDENTITY
+    rects: list[tuple[float, float, float, float]] = []
+    path_other = False
+    image_drawn = False
 
     def emit(text: str) -> None:
-        if text.strip():
-            if render_mode in (3.0, 7.0):
-                marks.add("hidden_text_present")
-            out.append(
-                _Fragment(
-                    ctm[0] * x + ctm[2] * y + ctm[4],
-                    ctm[1] * x + ctm[3] * y + ctm[5],
-                    text,
-                    size * abs(ctm[3] or 1.0),
-                    font,
-                )
+        if not text.strip():
+            return
+        if gs.render_mode in (3.0, 7.0):
+            marks.add("hidden_text_present")
+        m = _concat(text_matrix, gs.ctm)
+        scale_x, scale_y = math.hypot(m[0], m[1]), math.hypot(m[2], m[3])
+        size = abs(gs.size)
+        if (
+            gs.size <= 0
+            or gs.h_scale <= 0
+            or size * scale_y < MIN_VISIBLE_TEXT_POINTS
+            or size * scale_x * gs.h_scale < MIN_VISIBLE_TEXT_POINTS
+            or abs(gs.rise) > MAX_TEXT_RISE_EM * size
+        ):
+            marks.add("text_size_invisible")
+        if gs.fill_invisible:
+            marks.add("text_color_invisible")
+        ctm = gs.ctm
+        px = ctm[0] * x + ctm[2] * y + ctm[4]
+        py = ctm[1] * x + ctm[3] * y + ctm[5]
+        raised = y + gs.rise * text_matrix[3]
+        rx = ctm[0] * x + ctm[2] * raised + ctm[4]
+        ry = ctm[1] * x + ctm[3] * raised + ctm[5]
+        # One em of slack: a baseline a hair outside the edge can still show an overhanging glyph.
+        slack = size * scale_y
+        if page_box is None or any(
+            not (
+                page_box[0] - slack <= cx <= page_box[2] + slack
+                and page_box[1] - slack <= cy <= page_box[3] + slack
             )
+            for cx, cy in ((px, py), (rx, ry))
+        ):
+            marks.add("text_outside_page")
+        out.append(_Fragment(px, py, text, gs.size * abs(ctm[3] or 1.0), gs.font))
+
+    def clip_is_noop() -> bool:
+        """Only a single axis-aligned rectangle covering the whole page box is a no-op."""
+        if page_box is None or len(rects) != 1 or path_other:
+            return False
+        a, b, c, d, e, f = gs.ctm
+        if b != 0 or c != 0:
+            return False
+        rx, ry, rw, rh = rects[0]
+        xs = sorted((a * rx + e, a * (rx + rw) + e))
+        ys = sorted((d * ry + f, d * (ry + rh) + f))
+        return (
+            xs[0] <= page_box[0] + 0.5
+            and xs[1] >= page_box[2] - 0.5
+            and ys[0] <= page_box[1] + 0.5
+            and ys[1] >= page_box[3] - 0.5
+        )
 
     for kind, value in _tokens(content):
         deadline.check()
@@ -294,41 +398,72 @@ def _fragments(
         nums = [v for v in stack if isinstance(v, float)]
         if op == b"BT":
             lx = ly = x = y = 0.0
+            text_matrix = _IDENTITY
         elif op == b"Tf" and stack:
-            size = nums[-1] if nums else size
             names = [v for v in stack if isinstance(v, bytes) and not isinstance(v, bool)]
-            font = names[0] if names else font
+            gs = replace(
+                gs, size=nums[-1] if nums else gs.size, font=names[0] if names else gs.font
+            )
         elif op in (b"Td", b"TD") and len(nums) >= 2:
             lx, ly = lx + nums[-2], ly + nums[-1]
             x, y = lx, ly
             if op == b"TD":
-                leading = -nums[-1]
+                gs = replace(gs, leading=-nums[-1])
         elif op == b"Tm" and len(nums) >= 6:
             if nums[-5] != 0 or nums[-4] != 0 or nums[-6] <= 0 or nums[-3] <= 0:
                 marks.add("layout_transform_unverified")
+            text_matrix = tuple(nums[-6:])
             lx, ly = nums[-2], nums[-1]
             x, y = lx, ly
         elif op == b"cm" and len(nums) >= 6:
-            ctm = _concat(tuple(nums[-6:]), ctm)
+            gs = replace(gs, ctm=_concat(tuple(nums[-6:]), gs.ctm))
+            ctm = gs.ctm
             if ctm[1] != 0 or ctm[2] != 0 or ctm[0] <= 0 or ctm[3] <= 0:
                 marks.add("layout_transform_unverified")
         elif op == b"q":
-            ctm_stack.append(ctm)
+            saved.append(gs)
         elif op == b"Q":
-            ctm = ctm_stack.pop() if ctm_stack else _IDENTITY
+            gs = saved.pop() if saved else replace(gs, ctm=_IDENTITY)
         elif op == b"Tr" and nums:
-            render_mode = nums[-1]
-        elif op == b"Do" and stack and isinstance(stack[-1], bytes) and stack[-1] in forms:
-            marks.add("form_xobject_text_unread")
+            gs = replace(gs, render_mode=nums[-1])
+        elif op == b"Tz" and nums:
+            gs = replace(gs, h_scale=nums[-1] / 100.0)
+        elif op == b"Ts" and nums:
+            gs = replace(gs, rise=nums[-1])
+        elif op in (b"g", b"rg", b"k") and nums:
+            wanted = {b"g": 1, b"rg": 3, b"k": 4}[op]
+            if len(nums) >= wanted:
+                gs = replace(gs, fill_invisible=bool(_invisible_on_white(nums[-wanted:])))
+        elif op in (b"sc", b"scn") and nums:
+            verdict = _invisible_on_white(nums)
+            if verdict is not None:
+                gs = replace(gs, fill_invisible=verdict)
+        elif op == b"cs":
+            gs = replace(gs, fill_invisible=False)  # every initial colour is black or darker
+        elif op == b"re" and len(nums) >= 4:
+            rects.append((nums[-4], nums[-3], nums[-2], nums[-1]))
+        elif op in _PATH_BUILD:
+            path_other = True
+        elif op in (b"W", b"W*"):
+            if not clip_is_noop():
+                late.add("clip_region_present")
+        elif op in _PAINT:
+            rects.clear()
+            path_other = False
+        elif op == b"Do" and stack and isinstance(stack[-1], bytes):
+            if stack[-1] in forms:
+                marks.add("form_xobject_text_unread")
+            elif stack[-1] in images:
+                image_drawn = True
         elif op == b"TL" and nums:
-            leading = nums[-1]
+            gs = replace(gs, leading=nums[-1])
         elif op == b"T*":
-            ly -= leading
+            ly -= gs.leading
             x, y = lx, ly
         elif op == b"Tj" and stack and isinstance(stack[-1], bytes):
             emit(_show(stack[-1]))
         elif op in (b"'", b'"') and stack and isinstance(stack[-1], bytes):
-            ly -= leading
+            ly -= gs.leading
             x, y = lx, ly
             emit(_show(stack[-1]))
         elif op == b"TJ" and stack and isinstance(stack[-1], list):
@@ -340,6 +475,10 @@ def _fragments(
                     parts.append(" ")
             emit("".join(parts))
         stack.clear()
+    if out:
+        if image_drawn:
+            late.add("image_text_overlay_unverified")
+        marks |= late
     return out, marks
 
 
@@ -425,10 +564,10 @@ def read_pdf(data: bytes, limits: Limits, deadline: Deadline) -> ReadResult:
     if root is None:
         raise ReaderFailure(ExtractionState.CORRUPT, "no_page_tree", NextActor.OWNER)
 
-    pages: list[tuple[_Object, bytes]] = []
+    pages: list[tuple[_Object, bytes, tuple[float, float, float, float] | None]] = []
     seen: set[int] = set()
 
-    def walk(number: int, inherited: bytes, depth: int) -> None:
+    def walk(number: int, inherited: bytes, inherited_boxes: _Boxes, depth: int) -> None:
         if number in seen or number not in objects:
             raise ReaderFailure(ExtractionState.CORRUPT, "bad_page_tree", NextActor.OWNER)
         if depth > limits.max_xml_depth:
@@ -438,22 +577,26 @@ def read_pdf(data: bytes, limits: Limits, deadline: Deadline) -> ReadResult:
         seen.add(number)
         obj = objects[number]
         resources = _resources(obj.head, objects) or inherited
+        boxes = _Boxes(
+            _box(obj.head, b"MediaBox", objects) or inherited_boxes.media,
+            _box(obj.head, b"CropBox", objects) or inherited_boxes.crop,
+        )
         if re.search(rb"/Type\s*/Pages\b", obj.head):
             kids = re.search(rb"/Kids\s*\[(.*?)\]", obj.head, re.S)
             for kid in re.findall(_REF, kids[1] if kids else b""):
-                walk(int(kid), resources, depth + 1)
+                walk(int(kid), resources, boxes, depth + 1)
         else:
-            pages.append((obj, resources))
+            pages.append((obj, resources, boxes.visible()))
             if len(pages) > limits.max_pages:
                 raise ReaderFailure(
                     ExtractionState.OVERSIZED, "page_limit", NextActor.OWNER, limit="pages"
                 )
 
-    walk(int(root[1]), b"", 0)
+    walk(int(root[1]), b"", _Boxes(None, None), 0)
     spans: list[Span] = []
     image_pages: list[int] = []
     reading_order = 0
-    for page_number, (page, resources) in enumerate(pages, start=1):
+    for page_number, (page, resources, page_box) in enumerate(pages, start=1):
         deadline.check()
         fonts = _named_refs(resources, b"Font", objects)
         images = [
@@ -463,13 +606,17 @@ def read_pdf(data: bytes, limits: Limits, deadline: Deadline) -> ReadResult:
         ]
         contents = re.search(rb"/Contents\s*(\[(.*?)\]|" + _REF + rb")", page.head, re.S)
         refs = re.findall(_REF, contents[0]) if contents else []
-        stream = b"\n".join(_decode(objects[int(r)], limits) for r in refs if int(r) in objects)
+        readable = [r for r in refs if int(r) in objects and objects[int(r)].stream is not None]
+        stream = b"\n".join(_decode(objects[int(r)], limits) for r in readable)
         forms = frozenset(
             name
             for name, obj in _named_refs(resources, b"XObject", objects).items()
             if re.search(rb"/Subtype\s*/Form", obj.head)
         )
-        fragments, marks = _fragments(stream, deadline, forms)
+        fragments, marks = _fragments(stream, deadline, forms, frozenset(images), page_box)
+        if len(readable) != len(refs):
+            # A referenced content stream that cannot be resolved means the page was not read.
+            marks.add("content_stream_unresolved")
         if not fragments:
             if images or marks:
                 image_pages.append(page_number)
@@ -537,6 +684,43 @@ def _passages(lines: list[list[_Fragment]]) -> list[list[list[_Fragment]]]:
                 continue
         passages.append([line])
     return passages
+
+
+@dataclass(frozen=True)
+class _Boxes:
+    media: tuple[float, float, float, float] | None
+    crop: tuple[float, float, float, float] | None
+
+    def visible(self) -> tuple[float, float, float, float] | None:
+        """The page area a viewer can see; None when the MediaBox cannot be read."""
+        if self.media is None:
+            return None
+        if self.crop is None:
+            return self.media
+        return (
+            max(self.media[0], self.crop[0]),
+            max(self.media[1], self.crop[1]),
+            min(self.media[2], self.crop[2]),
+            min(self.media[3], self.crop[3]),
+        )
+
+
+def _box(
+    head: bytes, key: bytes, objects: dict[int, _Object]
+) -> tuple[float, float, float, float] | None:
+    """Parse an inline or singly-indirect rectangle such as `/MediaBox [0 0 612 792]`."""
+    match = re.search(rb"/" + key + rb"\s*(\[[^\]]*\]|" + _REF + rb")", head)
+    if match is None:
+        return None
+    body = match[1]
+    if not body.startswith(b"["):
+        target = objects.get(int(match[2]))
+        body = target.head if target is not None else b""
+    numbers = re.findall(rb"[+-]?(?:\d+\.?\d*|\.\d+)", body)
+    if len(numbers) != 4 or not body.strip().startswith(b"["):
+        return None
+    x0, y0, x1, y1 = (float(n) for n in numbers)
+    return (min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1))
 
 
 def _resources(head: bytes, objects: dict[int, _Object]) -> bytes:
