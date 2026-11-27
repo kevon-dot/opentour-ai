@@ -28,12 +28,12 @@ from test_policy_map_review import (
     prepare_map,
 )
 from test_reviewer_workflow import buttons, restart, screen, text
-from test_slack_adapter import ACTOR, OTHER
+from test_slack_adapter import ACTOR, OTHER, Harness
 from test_starter_case_authoring import P1_OWNER_LABELS, P1_POLICY, SevenInvoiceFamilies
 from test_starter_case_review_ui import choose, open_cases, select
 from test_starter_evaluation_authority import seal
 from test_starter_map_confirmation import sign_case
-from test_starter_setup import effects, open_starter
+from test_starter_setup import configure_starter, effects, open_starter
 
 pytest_plugins = ("test_starter_setup",)
 
@@ -131,9 +131,12 @@ def _authorize_case_review(h, draft, maps, confirmed):
 
 
 @pytest.fixture
-def p1_frozen_from_home(founder, monkeypatch):
-    h = founder
+def p1_frozen_from_home(tmp_path, monkeypatch):
+    h = Harness(tmp_path, seed_generated_dataset=False)
+    configure_starter(h)
     directory = h.path.parent
+    with sqlite3.connect(h.store.path) as db:
+        assert db.execute("SELECT count(*) FROM datasets").fetchone() == (0,)
     assert not any(
         (directory / file).exists()
         for file in (
