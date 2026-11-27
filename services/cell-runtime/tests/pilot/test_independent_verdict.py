@@ -43,7 +43,21 @@ INCUMBENT = sha("incumbent-revision")
 SIMPLE = sha("simple-repair-revision")
 REAL_ONLY = sha("real-only-revision")
 BENCHMARK = sha("benchmark-v1")
-OPERATING_POINT = sha("operating-point-v1")
+# Stand-ins for OPE-571 keyed slice digests. Neither these tests nor the evaluator hold the
+# per-engagement slice key or the plain slice names; only substituted terms are exchanged.
+CRITICAL = sha("keyed-slice-digest-critical-1")
+ABSENT = sha("keyed-slice-digest-critical-absent")
+
+
+def terms_for(critical=()):
+    return {
+        "minimum_coverage_bps": 7000,
+        "error_ceiling_bps": 500,
+        "minimum_verified_cases": 1,
+        "minimum_slice_cases": 1,
+        "critical_slices": sorted(critical),
+        "material_slices": [],
+    }
 
 
 def fit_manifest(steps: int = 64, changed: list[int] | None = None, **identity_over):
@@ -176,9 +190,11 @@ def receipt_for(population, **over):
 
 
 def policy(**over):
+    terms = terms_for(over.get("critical_slices", ()))
     values = {
         "policy_revision": "generated-policy-r1",
-        "operating_point_digest": OPERATING_POINT,
+        "operating_point_digest": digest(terms),
+        "operating_point_terms": terms,
         "minimum_improvement_bps": 200,
         "alpha_bps": 500,
         "coverage_floor_bps": 7000,
@@ -234,7 +250,7 @@ def claim(scenario, *, pol=None, **over):
         "benchmark_digest": BENCHMARK,
         "membership_digest": scenario.population.membership_digest,
         "protected_rows": len(scenario.population.cases),
-        "operating_point_digest": OPERATING_POINT,
+        "operating_point_digest": pol.operating_point_digest,
         "policy_revision": pol.policy_revision,
         "claimed_paired": {
             c: recompute_pairs(scenario, c)
@@ -604,20 +620,20 @@ def test_x4_coverage_reduction_is_an_incompatible_comparison(tmp_path):
 
 def test_x5_critical_slice_regression_despite_aggregate_win(tmp_path):
     def critical(index, codes):
-        return ("critical-1",) if index >= 190 else ()
+        return (CRITICAL,) if index >= 190 else ()
 
     s = Scenario([("WR", 120), ("RR", 70), ("RW", 10)], slice_of=critical)
-    pol = policy(critical_slices=("critical-1",))
+    pol = policy(critical_slices=(CRITICAL,))
     doc = held(run(tmp_path, s, pol=pol), "regression", "critical_slice_veto")
     pair = doc["comparisons"]["incumbent"]
     assert pair["improvement"]["counts"] == [110, 200]  # aggregate still a win
-    assert pair["critical_slices"]["critical-1"] == {
+    assert pair["critical_slices"][CRITICAL] == {
         "comparable": 10,
         "fixes": 0,
         "new_errors": 10,
         "status": "veto",
     }
-    unsupported = policy(critical_slices=("critical-absent",))
+    unsupported = policy(critical_slices=(ABSENT,))
     held(
         run(tmp_path / "b", Scenario(CLEAN_WIN), pol=unsupported),
         "inconclusive",
@@ -972,3 +988,40 @@ def test_x11_non_json_or_non_mapping_outputs_are_recorded_as_malformed(tmp_path)
         "missing_or_malformed_predictions",
     )
     assert doc["comparisons"]["incumbent"]["candidate_arm"]["malformed"] == 2
+
+
+def test_c7_operating_point_is_bound_through_substituted_terms_without_the_slice_key(tmp_path):
+    s = Scenario(CLEAN_WIN)
+    pol = policy(critical_slices=(CRITICAL,))
+    assert iv.operating_point_binding(pol.operating_point_terms, pol.operating_point_digest) is None
+    edited = {**pol.operating_point_terms, "error_ceiling_bps": 9000}
+    held(
+        run(tmp_path / "a", s, pol=policy(operating_point_terms=edited)),
+        "integrity_failure",
+        "operating_point_digest_mismatch",
+    )
+    plain = terms_for(("critical-plain-name",))
+    held(
+        run(
+            tmp_path / "b",
+            s,
+            pol=policy(operating_point_terms=plain, operating_point_digest=digest(plain)),
+        ),
+        "integrity_failure",
+        "operating_point_slice_names_not_substituted",
+    )
+    unbound = policy(critical_slices=(CRITICAL,), operating_point_terms=terms_for())
+    held(
+        run(
+            tmp_path / "c",
+            s,
+            pol=iv.GatePolicy(
+                **{**unbound.__dict__, "operating_point_digest": digest(terms_for())}
+            ),
+        ),
+        "integrity_failure",
+        "critical_slices_not_bound_to_operating_point",
+    )
+    doc = run(tmp_path / "d", s, pol=pol).document
+    assert doc["operating_point_digest"] == pol.operating_point_digest
+    assert doc["policy"]["operating_point_terms"]["critical_slices"] == [CRITICAL]

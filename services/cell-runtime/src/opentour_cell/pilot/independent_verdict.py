@@ -20,6 +20,10 @@ What it verifies, as three separately reported statements:
      practical threshold under family-level uncertainty, coverage, missing-output and
      critical-slice gates.
 
+The operating point is supplied in its OPE-571 form, the frozen terms with every slice name
+already replaced by its keyed digest plus the plain SHA-256 over them, and is checked by
+``operating_point_binding`` alone. The evaluator never holds the slice key or plain slice names.
+
 One idempotent verdict exists per verdict key (tenant, experiment, exact result revision,
 artifact digest, comparators, benchmark digest, answer key, inputs, target metric, operating
 point, policy, audit receipt, rubric, evaluator). A replay returns the stored original; a changed
@@ -200,6 +204,9 @@ class GatePolicy:
 
     policy_revision: str
     operating_point_digest: str
+    # OPE-571 form: the frozen ``terms`` with every critical/material slice name already
+    # replaced by its keyed digest. The evaluator never holds the slice key or plain names.
+    operating_point_terms: Mapping[str, Any]
     minimum_improvement_bps: int
     alpha_bps: int
     coverage_floor_bps: int
@@ -228,6 +235,7 @@ class GatePolicy:
         if (
             not _ID.fullmatch(self.policy_revision)
             or not _is_sha(self.operating_point_digest)
+            or not isinstance(self.operating_point_terms, Mapping)
             or not all(type(v) is int and v >= 0 for v in ints)
             or not 0 < self.alpha_bps < 10_000
             or self.min_families < 2
@@ -246,6 +254,7 @@ class GatePolicy:
         return {
             "policy_revision": self.policy_revision,
             "operating_point_digest": self.operating_point_digest,
+            "operating_point_terms": dict(self.operating_point_terms),
             "target_metric": TARGET_METRIC,
             "minimum_improvement_bps": self.minimum_improvement_bps,
             "interval_method": INTERVAL_METHOD,
@@ -568,6 +577,33 @@ def _normal(prediction: object) -> Mapping[str, Any] | None:
         except (TypeError, ValueError):
             pass
     return {"malformed_output_type": type(prediction).__name__}
+
+
+def operating_point_binding(
+    substituted_terms: Mapping[str, Any], operating_point_digest: str
+) -> str | None:
+    """Check an operating-point digest against its slice-substituted terms (OPE-571 form).
+
+    REBASE POINT (OPE-571, branch claude/ope-571-slice-digests, unmerged): the digest is a plain
+    SHA-256 over ``terms`` after every ``critical_slices``/``material_slices`` name has been
+    replaced by its keyed digest, so it is checkable without the per-engagement slice key. Until
+    OPE-571 publishes its own canonical helper this uses ``operating_point.digest`` (the
+    canonicalization ``comparison_packet`` applies to ``terms`` today); switch to the OPE-571
+    helper on rebase. Returns ``None`` when bound, else the hold reason.
+    """
+    if not isinstance(substituted_terms, Mapping) or not _is_sha(operating_point_digest):
+        return "operating_point_unverifiable"
+    for key in ("critical_slices", "material_slices"):
+        names = substituted_terms.get(key, [])
+        if not isinstance(names, list) or not all(_is_sha(n) for n in names):
+            return "operating_point_slice_names_not_substituted"
+    try:
+        computed = digest(dict(substituted_terms))
+    except (TypeError, ValueError):
+        return "operating_point_unverifiable"
+    if computed != operating_point_digest:
+        return "operating_point_digest_mismatch"
+    return None
 
 
 def _is_sha(value: object) -> bool:
@@ -898,6 +934,16 @@ class IndependentEvaluator:
             or claim.policy_revision != policy.policy_revision
         ):
             reasons.add("integrity_failure", "operating_point_or_policy_mismatch")
+        unbound = operating_point_binding(
+            policy.operating_point_terms, policy.operating_point_digest
+        )
+        if unbound:
+            reasons.add("integrity_failure", unbound)
+        elif set(policy.critical_slices) != set(
+            policy.operating_point_terms.get("critical_slices", [])
+        ):
+            # The slice veto must gate exactly the slices the bound operating point registered.
+            reasons.add("integrity_failure", "critical_slices_not_bound_to_operating_point")
 
     def _job_statement(self, claim: ClaimedResult, manifest: Mapping[str, Any] | None) -> Json:
         if claim.candidate_kind == "simple_repair":
