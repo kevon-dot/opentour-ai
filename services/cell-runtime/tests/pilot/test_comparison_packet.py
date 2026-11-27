@@ -321,7 +321,7 @@ class Bundle:
         )
         self.authority = Authority(self.ctx)
         tmp_path.mkdir(parents=True, exist_ok=True)
-        self.store = cp.PacketOutbox(tmp_path / "outbox.sqlite3")
+        self.store = cp.PacketOutbox(tmp_path / "outbox.sqlite3", allow_generated_fixture=True)
         self.sink = Sink()
 
     def stage(self, **over):
@@ -646,8 +646,8 @@ def test_conflicting_restage_of_same_proposal_is_refused_unchanged(runs, tmp_pat
     b = Bundle(runs["winner"], tmp_path)
     b.stage()
     before = b.store.snapshot()
-    observed = make_receipt(evidence_origin="observed")
-    out = b.stage(receipt=observed, verdict=make_verdict(b.comparison, observed, b.ctx))
+    changed = make_receipt(successor_of="audit-generated-predecessor")
+    out = b.stage(receipt=changed, verdict=make_verdict(b.comparison, changed, b.ctx))
     assert out.reason == "restage_conflict" and b.store.snapshot() == before
 
 
@@ -662,7 +662,7 @@ def test_crash_before_commit_leaves_nothing_then_restart_stages_exactly_one(runs
         with pytest.raises(SystemExit):
             b.stage(fault=lambda p, point=point: crash(p) if p == point else None)
         assert empty(b.store)
-    restarted = cp.PacketOutbox(b.store.path)
+    restarted = cp.PacketOutbox(b.store.path, allow_generated_fixture=True)
     b.store = restarted
     assert b.stage().status == "staged"
     b.dispatch()
@@ -685,7 +685,7 @@ def test_hard_process_exit_after_commit_then_restart_emits_exactly_one(runs, tmp
         "q=json.load(sys.stdin)\n"
         "class A:\n"
         "    def current(self, r): return cp.PacketContext(**q['ctx'])\n"
-        "s=cp.PacketOutbox(q['path'])\n"
+        "s=cp.PacketOutbox(q['path'], allow_generated_fixture=True)\n"
         "o=s.stage(q['comparison'],q['receipt'],q['verdict'],authority=A(),run_ref='generated-run-1'"
         ",now=1000)\n"
         "assert o.status=='staged'\n"
@@ -719,7 +719,7 @@ def test_crash_after_delivery_before_mark_redelivers_same_key_one_effect(runs, t
     with pytest.raises(SystemExit):
         b.dispatch(fault=die)
     assert len(b.sink.calls) == 1
-    b.store = cp.PacketOutbox(b.store.path)
+    b.store = cp.PacketOutbox(b.store.path, allow_generated_fixture=True)
     assert b.dispatch()[0][1] == "delivered"
     assert len(b.sink.calls) == 2 and len(b.sink.effects) == 1  # at-least-once, effect once
     assert b.dispatch() == []
@@ -776,16 +776,27 @@ def test_callback_before_dispatch_is_ignored_and_never_recorded_as_delivered(run
     assert b.dispatch() == []
 
 
-def test_forged_self_consistent_receipt_is_marked_unauthenticated(runs, tmp_path):
-    """V3: a self-consistent forged receipt and verdict pass, but are never presented as proven."""
+def test_forged_observed_receipt_and_verdict_stage_nothing(runs, tmp_path):
     b = Bundle(runs["winner"], tmp_path)
     forged = make_receipt(evidence_origin="observed", population_kind="real_sample")
     out = b.stage(receipt=forged, verdict=make_verdict(b.comparison, forged, b.ctx))
-    assert out.status == "staged"
-    assert out.packet["audit"]["issuer_authenticated"] is False
-    assert out.packet["audit"]["integrity"] == "digest_self_consistent_only"
-    assert out.packet["claim"]["accuracy_claim_eligible"] is False
-    assert out.packet["authority"] == {"release": False, "delivery": False}
+    assert out.reason == "audit_and_verdict_issuers_unverified"
+    assert out.packet is None
+    assert empty(b.store)
+
+
+def test_live_store_refuses_generated_improvement_and_fences_existing_row(runs, tmp_path):
+    b = Bundle(runs["winner"], tmp_path)
+    live = cp.PacketOutbox(b.store.path)
+    out = live.stage(
+        b.comparison, b.receipt, b.verdict, authority=b.authority, run_ref=b.ctx.run_ref, now=NOW
+    )
+    assert out.reason == "audit_and_verdict_issuers_unverified"
+    assert empty(live)
+
+    staged = b.stage()
+    assert live.dispatch(b.sink, b.authority, now=NOW) == [(staged.event_id, "fenced")]
+    assert b.sink.calls == []
 
 
 def test_receipt_free_text_cannot_enter_a_packet_or_a_refusal(runs, tmp_path):
@@ -953,11 +964,17 @@ def test_replay_reproduces_identical_packet_digest_for_two_independent_consumers
     """L2: in-process and fresh-interpreter replays, plus a pointer-only consumer, agree."""
     b = Bundle(runs["winner"], tmp_path)
     out = b.stage()
-    again, reason = cp.assemble_packet(b.comparison, b.receipt, b.verdict, b.ctx)
+    again, reason = cp.assemble_packet(
+        b.comparison, b.receipt, b.verdict, b.ctx, allow_generated_fixture=True
+    )
     assert reason is None and again == out.packet
-    assert cp.verify_packet(out.packet, b.comparison, b.receipt, b.verdict, b.ctx)
+    assert cp.verify_packet(
+        out.packet, b.comparison, b.receipt, b.verdict, b.ctx, allow_generated_fixture=True
+    )
     forged = {**out.packet, "authority": {"release": True, "delivery": True}}
-    assert not cp.verify_packet(forged, b.comparison, b.receipt, b.verdict, b.ctx)
+    assert not cp.verify_packet(
+        forged, b.comparison, b.receipt, b.verdict, b.ctx, allow_generated_fixture=True
+    )
     # Consumer 1: fresh interpreter re-derives the packet from the source documents.
     payload = {
         "comparison": b.comparison,
@@ -970,7 +987,7 @@ def test_replay_reproduces_identical_packet_digest_for_two_independent_consumers
         "from opentour_cell.pilot import comparison_packet as cp\n"
         "q=json.load(sys.stdin)\n"
         "p,r=cp.assemble_packet(q['comparison'],q['receipt'],q['verdict'],"
-        "cp.PacketContext(**q['ctx']))\n"
+        "cp.PacketContext(**q['ctx']),allow_generated_fixture=True)\n"
         "print(p['packet_digest'] if p else r)\n"
     )
     proc = subprocess.run(

@@ -32,9 +32,9 @@ transaction (zero or one of each, never two). Delivery is AT-LEAST-ONCE under th
 deduplicating on that key; here that is proven only against a test double, never against the
 Codex-side consumer. This module does not and cannot claim exactly-once delivery.
 
-Authenticity: a packet whose audit section says ``issuer_authenticated: false`` was built from
-documents that are digest self-consistent only. A forged but self-consistent receipt and
-verdict pair is indistinguishable from a real one until OPE-526/OPE-528 provide signatures.
+Authenticity: digests alone cannot authenticate an auditor or independent verifier.
+Improvement staging holds until this boundary can verify both issuers. An explicit fixture
+option exercises the staging mechanics with generated evidence only.
 """
 
 from __future__ import annotations
@@ -262,7 +262,12 @@ def _missing_units(arms: Json) -> list[Json]:
 
 
 def _assemble(
-    comparison: Json, receipt: Json | None, verdict: Json | None, ctx: PacketContext
+    comparison: Json,
+    receipt: Json | None,
+    verdict: Json | None,
+    ctx: PacketContext,
+    *,
+    allow_generated_fixture: bool,
 ) -> tuple[Json | None, str | None]:
     """Pure and deterministic: identical inputs reproduce the identical packet digest."""
     decision = comparison["decision"]
@@ -274,6 +279,9 @@ def _assemble(
         failure = _improvement_checks(comparison, receipt, verdict, ctx, winner)
         if failure:
             return None, failure
+        assert receipt is not None
+        if not (allow_generated_fixture and receipt.get("evidence_origin") == "generated"):
+            return None, "audit_and_verdict_issuers_unverified"
     arms = {name: _arm_aggregate(arm) for name, arm in sorted(comparison["arms"].items())}
     pairs = {
         name: {**pair["paired"], "observed_comparison": pair["observed_comparison"]}
@@ -315,8 +323,8 @@ def _assemble(
             "integrity": "digest_self_consistent_only",
         },
         "claim": {
-            "evidence_tier": origin if origin else "none",
-            "scope": "implementation_only" if origin != "observed" else "named_population",
+            "evidence_tier": "generated" if origin == "generated" else "none",
+            "scope": "implementation_only",
             "provider_or_customer_evidence": False,
             "accuracy_claim_eligible": False,
         },
@@ -404,7 +412,12 @@ def _improvement_checks(
 
 
 def assemble_packet(
-    comparison: Any, receipt: Json | None, verdict: Json | None, ctx: PacketContext
+    comparison: Any,
+    receipt: Json | None,
+    verdict: Json | None,
+    ctx: PacketContext,
+    *,
+    allow_generated_fixture: bool = False,
 ) -> tuple[Json | None, str | None]:
     """Return ``(packet, None)`` or ``(None, reason)``. Never raises on a governance failure."""
     if not ctx.valid():
@@ -413,14 +426,24 @@ def assemble_packet(
         return None, "comparison_unverified"
     if comparison.get("organization") != ctx.tenant:
         return None, "comparison_scope_mismatch"
-    return _assemble(comparison, receipt, verdict, ctx)
+    return _assemble(
+        comparison, receipt, verdict, ctx, allow_generated_fixture=allow_generated_fixture
+    )
 
 
 def verify_packet(
-    packet: Json, comparison: Json, receipt: Json | None, verdict: Json | None, ctx: PacketContext
+    packet: Json,
+    comparison: Json,
+    receipt: Json | None,
+    verdict: Json | None,
+    ctx: PacketContext,
+    *,
+    allow_generated_fixture: bool = False,
 ) -> bool:
     """Independent consumer replay: re-derive the packet from its sources and compare digests."""
-    rebuilt, reason = assemble_packet(comparison, receipt, verdict, ctx)
+    rebuilt, reason = assemble_packet(
+        comparison, receipt, verdict, ctx, allow_generated_fixture=allow_generated_fixture
+    )
     return reason is None and rebuilt == packet and _sealed(packet, "packet_digest")
 
 
@@ -468,8 +491,9 @@ _TABLES = ("packets", "outbox", "superseded_receipts", "reconciliations")
 class PacketOutbox:
     """File-backed transactional store. Reopening the file is the restart path."""
 
-    def __init__(self, path: Path | str):
+    def __init__(self, path: Path | str, *, allow_generated_fixture: bool = False):
         self.path = Path(path)
+        self.allow_generated_fixture = allow_generated_fixture
         with closing(sqlite3.connect(self.path, timeout=5)) as db:
             db.executescript(_SCHEMA)
 
@@ -520,7 +544,9 @@ class PacketOutbox:
         ctx = authority.current(run_ref) if _ID.fullmatch(run_ref or "") else None
         if ctx is None or ctx.run_ref != run_ref:
             return _refuse("authority_unavailable")
-        packet, reason = assemble_packet(comparison, receipt, verdict, ctx)
+        packet, reason = assemble_packet(
+            comparison, receipt, verdict, ctx, allow_generated_fixture=self.allow_generated_fixture
+        )
         if packet is None:
             return _refuse(reason or "comparison_unverified")
         if ctx.expires_at <= now:
@@ -661,6 +687,12 @@ class PacketOutbox:
         fault: Callable[[str], None] | None,
     ) -> str:
         packet = json.loads(row["packet"])
+        if packet["kind"] == "measured_improvement" and not (
+            self.allow_generated_fixture and packet["claim"]["evidence_tier"] == "generated"
+        ):
+            with self._db() as db:
+                self._fence(db, [row["packet_id"]], "audit_and_verdict_issuers_unverified")
+            return "fenced"
         bound = packet["binding"]
         current = authority.current(bound["run_ref"])
         if current is None:
