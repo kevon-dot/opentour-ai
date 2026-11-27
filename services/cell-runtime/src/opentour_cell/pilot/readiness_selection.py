@@ -53,7 +53,11 @@ def open_readiness(
 ) -> ReadinessComponents:
     selection = _read_private(directory / "readiness-selection.json", 4096)
     if (
-        set(selection) != {"schema_version", "workflow_ref", "worker_ref", "policy_file"}
+        set(selection)
+        not in (
+            {"schema_version", "workflow_ref", "worker_ref", "policy_file"},
+            {"schema_version", "workflow_ref", "worker_ref", "policy_file", "context_file"},
+        )
         or selection["schema_version"] != SCHEMA
         or selection["workflow_ref"] != workflow_ref
     ):
@@ -70,8 +74,23 @@ def open_readiness(
             raise IntakeError("readiness_worker_unavailable")
         live = LiveEvidence(directory, authority)
         source = LiveReadinessSource(live)
+        context_revision = None
+        if selection.get("context_file") is not None:
+            from opentour_cell.pilot.local_decision_context import PrivateDecisionContext
+
+            if contexts is not None or not policy or not isinstance(selection["context_file"], str):
+                raise IntakeError("readiness_context_unavailable")
+            contexts = PrivateDecisionContext(authority, worker, scope, selection["context_file"])
+            context_revision = contexts.revision
         assessments = (
-            LocalRepairAssessments(directory, live, worker, directory / policy, contexts=contexts)
+            LocalRepairAssessments(
+                directory,
+                live,
+                worker,
+                directory / policy,
+                contexts=contexts,
+                context_revision=context_revision,
+            )
             if policy
             else None
         )
