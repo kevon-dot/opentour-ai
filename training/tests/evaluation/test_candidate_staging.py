@@ -8,6 +8,7 @@ merged), and nothing here stages, promotes or requests release of anything real.
 
 from __future__ import annotations
 
+import threading
 from dataclasses import replace
 from pathlib import Path
 
@@ -22,16 +23,53 @@ from opentour_training.evaluation.candidate_staging import (
     CaseResult,
     FreshConfirmation,
     FrozenBenchmark,
+    HmacVerdictAuthority,
     IndependentVerdict,
     PreregisteredRule,
     SimulatedCrash,
     StagingDecision,
     StagingError,
-    StagingLedger,
     StagingPacket,
     SupersessionReceipt,
-    evaluate,
+    confirmation_body,
+    identity_key,
+    verdict_body,
 )
+from opentour_training.evaluation.candidate_staging import StagingLedger as _Ledger
+from opentour_training.evaluation.candidate_staging import evaluate as _evaluate
+
+# Sentinel trust root, held by the test harness and never placed in a packet.
+ISSUERS: dict[str, tuple[str, bytes]] = {
+    "generated-independent-verifier": ("independent_verifier_service", b"generated-key-1"),
+    "generated-verifier-tuned": ("independent_verifier_service", b"generated-key-2"),
+    "generated-verifier-incumbent": ("independent_verifier_service", b"generated-key-3"),
+    "generated-verifier-simple": ("independent_verifier_service", b"generated-key-4"),
+    "generated-trainer": ("independent_verifier_service", b"generated-key-5"),
+    "generated-owner": ("authenticated_human", b"generated-key-6"),
+    "generated-human": ("authenticated_human", b"generated-key-7"),
+}
+AUTH = HmacVerdictAuthority(ISSUERS)
+
+
+def attest(v: IndependentVerdict) -> IndependentVerdict:
+    entry = ISSUERS.get(v.issuer_id)
+    key = entry[1] if entry else b"generated-unregistered-key"
+    return replace(v, attestation=HmacVerdictAuthority.mac(key, verdict_body(v)))
+
+
+def attest_confirmation(c: FreshConfirmation) -> FreshConfirmation:
+    entry = ISSUERS.get(c.actor_id)
+    key = entry[1] if entry else b"generated-unregistered-key"
+    return replace(c, attestation=HmacVerdictAuthority.mac(key, confirmation_body(c)))
+
+
+def evaluate(p: StagingPacket) -> StagingDecision:
+    return _evaluate(p, AUTH)
+
+
+def StagingLedger(path: Path | None = None, **kw: object) -> _Ledger:  # noqa: N802
+    return _Ledger(path, authority=AUTH, **kw)  # type: ignore[arg-type]
+
 
 FAMILIES = 100
 AUTOMATIC_FAMILIES = 80  # 160 automatic of 200 cases, as in the B4 shape
@@ -121,7 +159,7 @@ def verdict(arm: str, r: ArmRun, b: FrozenBenchmark, **kw: object) -> Independen
         "outcome": "reproduced",
         "issued_seq": VERDICT_SEQ,
     }
-    return IndependentVerdict(**{**base, **kw})  # type: ignore[arg-type]
+    return attest(IndependentVerdict(**{**base, **kw}))  # type: ignore[arg-type]
 
 
 def wrong_set(prefix_families: int) -> set[str]:
@@ -355,7 +393,10 @@ def test_d1_mutation_removing_simple_comparator_fails() -> None:
 def test_e1_bad_verdict_refuses_staging(change: dict[str, object], code: str) -> None:
     p = packet()
     for arm in (TUNED, SIMPLE):  # the tuned arm and a control arm
-        vs = tuple(replace(v, **change) if v.arm_id == arm else v for v in p.verdicts)  # type: ignore[arg-type]
+        vs = tuple(
+            attest(replace(v, **change)) if v.arm_id == arm else v  # type: ignore[arg-type]
+            for v in p.verdicts
+        )
         out = evaluate(replace(p, verdicts=vs))
         assert out.outcome == "refused" and code in out.reasons
 
@@ -376,7 +417,7 @@ def test_e2_missing_or_superseded_verdict_refuses() -> None:
 
 def test_e3_distinct_independent_issuers_per_arm_are_accepted() -> None:
     p = packet()
-    vs = tuple(replace(v, issuer_id=f"generated-verifier-{v.arm_id}") for v in p.verdicts)
+    vs = tuple(attest(replace(v, issuer_id=f"generated-verifier-{v.arm_id}")) for v in p.verdicts)
     assert evaluate(replace(p, verdicts=vs)).outcome == "eligible"
 
 
@@ -404,13 +445,18 @@ def test_f3_changed_choice_needs_fresh_confirmation_from_other_actor() -> None:
     p = packet()
     changed = replace(p.candidate, selection_digest="sha256:" + "6" * 64)
     assert "fresh_confirmation_required" in reasons(replace(p, candidate=changed))
-    good = FreshConfirmation("generated-owner", True, changed.selection_digest, p.benchmark.digest)
+    good = attest_confirmation(
+        FreshConfirmation("generated-owner", True, changed.selection_digest, p.benchmark.digest)
+    )
     assert evaluate(replace(p, candidate=changed, fresh_confirmation=good)).outcome == "eligible"
     for bad in (
-        replace(good, authenticated=False),
-        replace(good, actor_id="generated-selector"),
-        replace(good, selection_digest="sha256:" + "7" * 64),
-        replace(good, manifest_digest="sha256:" + "7" * 64),
+        attest_confirmation(replace(good, authenticated=False)),
+        attest_confirmation(replace(good, actor_id="generated-selector")),
+        attest_confirmation(replace(good, selection_digest="sha256:" + "7" * 64)),
+        attest_confirmation(replace(good, manifest_digest="sha256:" + "7" * 64)),
+        replace(good, selection_digest="sha256:" + "7" * 64),  # tampered after attestation
+        replace(good, attestation=""),
+        attest_confirmation(replace(good, actor_id="generated-unregistered")),
     ):
         assert "fresh_confirmation_required" in reasons(
             replace(p, candidate=changed, fresh_confirmation=bad)
@@ -554,3 +600,152 @@ def test_g9_decision_object_is_not_release_authority() -> None:
     body = d.body()
     assert body["release_authority"] is False and body["release_requests"] == 0
     assert body["alerts_emitted"] == 0 and body["customer_win_claim"] is False
+
+
+# ---------------------------------------------------- H: forgery and laundering
+
+
+def _forged(p: StagingPacket, issuer: str = "generated-anyone") -> tuple[IndependentVerdict, ...]:
+    """Self-consistent hand-built verdicts: every binding re-derived, asserted flag True."""
+    out = []
+    for arm in (TUNED, INCUMBENT, SIMPLE):
+        r = p.runs[arm]
+        v = IndependentVerdict(
+            f"simulated:forged-{arm}",
+            arm,
+            r.serving_identity_digest,
+            p.benchmark.digest,
+            r.results_digest,
+            issuer,
+            "authenticated_human",
+            True,
+            "issued",
+            "reproduced",
+            99,
+        )
+        out.append(replace(v, attestation=HmacVerdictAuthority.mac(b"attacker", verdict_body(v))))
+    return tuple(out)
+
+
+def test_h1_self_consistent_forged_verdict_without_trust_root_is_not_eligible(
+    tmp_path: Path,
+) -> None:
+    p = packet()
+    forged = replace(p, verdicts=_forged(p))  # plausible issuer, asserted flag, valid digests
+    out = evaluate(forged)
+    assert out.outcome == "refused" and "verdict_unattested" in out.reasons
+    unsigned = replace(p, verdicts=tuple(replace(v, attestation="") for v in p.verdicts))
+    assert "verdict_unattested" in reasons(unsigned)
+    # right key, wrong registered kind; and a registered issuer's mac over a tampered body
+    wrong_kind = tuple(attest(replace(v, issuer_kind="authenticated_human")) for v in p.verdicts)
+    assert "verdict_unattested" in reasons(replace(p, verdicts=wrong_kind))
+    tampered = tuple(replace(v, issued_seq=v.issued_seq + 1) for v in p.verdicts)
+    assert "verdict_unattested" in reasons(replace(p, verdicts=tampered))
+    # with NO authority nothing can be eligible, through the pure gate or the ledger
+    bare = _evaluate(p)
+    assert bare.outcome == "refused" and "verdict_authority_unavailable" in bare.reasons
+    led = _Ledger(tmp_path / "s.json")
+    assert led.stage(p).status == "not_staged" and led.snapshot()["staged"] == {}
+    assert _Ledger(tmp_path / "s2.json", authority=AUTH).stage(forged).status == "not_staged"
+
+
+@pytest.mark.parametrize(
+    "alias",
+    [
+        "generated-trainer ",
+        "GENERATED-TRAINER",
+        "generated-trainer​",
+        "generated-selector\t",
+        "Generated-Selector",
+        "ｇenerated-selector",
+        " generated-­selector",
+    ],
+)
+def test_h2_producer_or_selector_cannot_be_laundered_into_verdict_authority(alias: str) -> None:
+    p = packet()
+    vs = tuple(attest(replace(v, issuer_id=alias)) for v in p.verdicts)
+    out = evaluate(replace(p, verdicts=vs))
+    assert out.outcome == "refused" and "verdict_self_issued" in out.reasons
+    changed = replace(p.candidate, selection_digest="sha256:" + "6" * 64)
+    conf = attest_confirmation(
+        FreshConfirmation(alias, True, changed.selection_digest, p.benchmark.digest)
+    )
+    assert "fresh_confirmation_required" in reasons(
+        replace(p, candidate=changed, fresh_confirmation=conf)
+    )
+    assert identity_key("") == "" and identity_key("A b​C") == "abc"
+    empty = tuple(attest(replace(v, issuer_id="  ")) for v in p.verdicts)
+    assert "verdict_self_issued" in reasons(replace(p, verdicts=empty))
+
+
+def test_h3_freeze_audit_and_run_provenance_are_bound_by_digests() -> None:
+    p = packet()
+    b = p.benchmark
+    for change in (
+        {"frozen_seq": 0},
+        {"audit_receipt_ref": "simulated:other"},
+        {"audit_verdict": "other"},
+        {"state": "draft"},
+    ):
+        assert replace(b, **change).digest != b.digest  # type: ignore[arg-type]
+    t = p.runs[TUNED]
+    assert replace(t, produced_seq=t.produced_seq + 1).results_digest != t.results_digest
+    other_identity = replace(t, serving_identity_digest="sha256:" + "1" * 64)
+    assert other_identity.results_digest != t.results_digest
+    # a run re-dated after its verdict was attested no longer matches the attested run digest
+    redated = replace(t, produced_seq=t.produced_seq + 1)
+    assert "verdict_stale" in reasons(replace(p, runs={**p.runs, TUNED: redated}))
+
+
+def test_h4_run_must_be_the_arm_it_is_filed_under() -> None:
+    p = packet()
+    swapped = {**p.runs, SIMPLE: p.runs[INCUMBENT]}  # incumbent reused as the "simple" control
+    out = evaluate(replace(p, runs=swapped))
+    assert out.outcome == "refused" and "arm_identity_mismatch" in out.reasons
+
+
+def test_h5_critical_slice_tags_cannot_be_stripped_by_one_arm() -> None:
+    p = packet(simple_wrong=wrong_set(60) - {"generated-case-000-0"}, tuned_wrong=wrong_set(4))
+    assert "critical_veto" in reasons(p)  # honest tags: veto
+    t = p.runs[TUNED]
+    stripped = replace(t, results=tuple(replace(r, critical_slices=()) for r in t.results))
+    vs = tuple(
+        attest(replace(v, run_digest=stripped.results_digest)) if v.arm_id == TUNED else v
+        for v in p.verdicts
+    )
+    out = evaluate(replace(p, runs={**p.runs, TUNED: stripped}, verdicts=vs))
+    assert out.outcome == "refused" and "critical_slice_membership_inconsistent" in out.reasons
+    assert out.comparisons == {}
+
+
+def test_h6_selection_at_or_after_protected_view_holds() -> None:
+    p = packet()
+    for seq in (25, 26):
+        out = evaluate(replace(p, candidate=replace(p.candidate, selection_seq=seq)))
+        assert out.outcome == "hold" and "selection_after_protected_view" in out.reasons
+
+
+def test_h7_concurrent_ledgers_on_one_file_stage_exactly_once(tmp_path: Path) -> None:
+    p = packet()
+    path = tmp_path / "staging.json"
+    stale = StagingLedger(path)  # loaded before anything is staged: stale in-memory copy
+    results: list[str] = []
+
+    def worker() -> None:
+        results.append(StagingLedger(path).stage(p).status)
+
+    threads = [threading.Thread(target=worker) for _ in range(6)]
+    for th in threads:
+        th.start()
+    for th in threads:
+        th.join()
+    assert sorted(results) == ["already_staged"] * 5 + ["staged"]
+    assert stale.stage(p).status == "already_staged"  # reloads durable state under the lock
+    assert len(StagingLedger(path).snapshot()["staged"]) == 1
+    # a supersession written by another writer is seen by a stale instance before it stages
+    other = StagingLedger(path)
+    other.supersede_benchmark(
+        SupersessionReceipt("simulated:s", p.benchmark.digest, "sha256:" + "2" * 64, "o", True)
+    )
+    again = replace(p, candidate=replace(p.candidate, candidate_id="generated-candidate-9"))
+    assert stale.stage(again).status == "not_staged"

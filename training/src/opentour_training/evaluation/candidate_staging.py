@@ -17,6 +17,13 @@ A candidate stages only when every gate holds affirmatively:
   the arm's result digest and its serving identity. Model text and a pending request grant
   nothing.
 
+The trust root is NOT in the packet. Verdict and confirmation authenticity is decided by an
+injected ``VerdictAuthority`` (the OPE-528/OPE-421/OPE-418 boundary, none implemented yet): a
+packet's own ``issuer_authenticated`` flag is never sufficient, and with no authority supplied
+nothing can be eligible (``verdict_authority_unavailable``). Verdict bindings to the manifest,
+the arm's result digest and the serving identity are re-derived from the frozen benchmark and
+the arm run, and the authority must attest the whole verdict body.
+
 Anything absent, stale, superseded, inconsistent or unqualified yields ``hold`` or ``refused``
 with explicit reason codes, never a silent pass. Zero eligible comparisons is an explicit hold.
 
@@ -27,22 +34,31 @@ modelled by the ``IndependentVerdict`` and ledger records only.
 
 What is NOT proven: tests use generated sentinel data and prove software behaviour only. No
 provider, GPU, customer or real-EVE evidence exists here; a generated result can never satisfy
-a provider or customer gate. Authentication of ``issuer_authenticated`` is asserted by the
-caller; no identity provider is exercised.
+a provider or customer gate. The only authority implementation here is a
+sentinel HMAC registry; no identity provider is exercised. Protected-view and critical-slice
+facts (``protected_view_seq``, per-case slice tags) remain caller-supplied.
 """
 
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import math
 import os
 import tempfile
 import threading
-from collections.abc import Callable, Mapping
+import unicodedata
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, Protocol
+
+try:  # POSIX advisory lock for cross-process ledger writers
+    import fcntl
+except ImportError:  # pragma: no cover - non-POSIX
+    fcntl = None  # type: ignore[assignment]
 
 from opentour_training.evaluation.statistics_kernel import independent_family_interval
 
@@ -160,6 +176,10 @@ class FrozenBenchmark:
                 "critical_slices": sorted(self.critical_slices),
                 "preregistered_selection_digest": self.preregistered_selection_digest,
                 "audit_receipt_digest": self.audit_receipt_digest,
+                "audit_receipt_ref": self.audit_receipt_ref,
+                "audit_verdict": self.audit_verdict,
+                "state": self.state,
+                "frozen_seq": self.frozen_seq,
             }
         )
 
@@ -184,10 +204,16 @@ class ArmRun:
     @property
     def results_digest(self) -> str:
         return digest(
-            sorted(
-                [r.case_id, r.automatic, r.wrong, r.cost, sorted(r.critical_slices)]
-                for r in self.results
-            )
+            {
+                "arm_id": self.arm_id,
+                "manifest_digest": self.manifest_digest,
+                "serving_identity_digest": self.serving_identity_digest,
+                "produced_seq": self.produced_seq,
+                "results": sorted(
+                    [r.case_id, r.automatic, r.wrong, r.cost, sorted(r.critical_slices)]
+                    for r in self.results
+                ),
+            }
         )
 
 
@@ -205,6 +231,23 @@ class IndependentVerdict:
     outcome: str  # "reproduced" only
     issued_seq: int
     superseded_by: str | None = None
+    attestation: str = ""  # authority proof over ``verdict_body``; never self-sufficient
+
+
+def verdict_body(v: IndependentVerdict) -> dict[str, Any]:
+    """Everything an authority must attest (all fields except the attestation itself)."""
+    return {
+        "verdict_id": v.verdict_id,
+        "arm_id": v.arm_id,
+        "subject_identity_digest": v.subject_identity_digest,
+        "manifest_digest": v.manifest_digest,
+        "run_digest": v.run_digest,
+        "issuer_id": v.issuer_id,
+        "issuer_kind": v.issuer_kind,
+        "status": v.status,
+        "outcome": v.outcome,
+        "issued_seq": v.issued_seq,
+    }
 
 
 @dataclass(frozen=True)
@@ -225,6 +268,65 @@ class FreshConfirmation:
     authenticated: bool
     selection_digest: str
     manifest_digest: str
+    attestation: str = ""
+
+
+def confirmation_body(c: FreshConfirmation) -> dict[str, Any]:
+    return {
+        "actor_id": c.actor_id,
+        "selection_digest": c.selection_digest,
+        "manifest_digest": c.manifest_digest,
+    }
+
+
+class VerdictAuthority(Protocol):
+    """Trust root for verdicts and confirmations, held OUTSIDE the packet (OPE-528 boundary)."""
+
+    def verify_verdict(self, verdict: IndependentVerdict) -> bool: ...
+
+    def verify_confirmation(self, confirmation: FreshConfirmation) -> bool: ...
+
+
+class HmacVerdictAuthority:
+    """Sentinel authority: issuer id -> (kind, secret). Not an identity provider.
+
+    Verifies the issuer is registered with the claimed kind and that the HMAC over the full
+    verdict body matches. A hand-built record without the key cannot verify.
+    """
+
+    def __init__(self, issuers: Mapping[str, tuple[str, bytes]]) -> None:
+        self._issuers = dict(issuers)
+
+    @staticmethod
+    def mac(secret: bytes, body: object) -> str:
+        return hmac.new(secret, canonical(body), hashlib.sha256).hexdigest()
+
+    def verify_verdict(self, verdict: IndependentVerdict) -> bool:
+        entry = self._issuers.get(verdict.issuer_id)
+        if entry is None or entry[0] != verdict.issuer_kind or not verdict.attestation:
+            return False
+        return hmac.compare_digest(self.mac(entry[1], verdict_body(verdict)), verdict.attestation)
+
+    def verify_confirmation(self, confirmation: FreshConfirmation) -> bool:
+        entry = self._issuers.get(confirmation.actor_id)
+        if entry is None or not confirmation.attestation:
+            return False
+        return hmac.compare_digest(
+            self.mac(entry[1], confirmation_body(confirmation)), confirmation.attestation
+        )
+
+
+def identity_key(value: str) -> str:
+    """Normalise an actor id so case, whitespace, format characters and compat forms collapse."""
+    folded = unicodedata.normalize("NFKC", value).casefold()
+    return "".join(
+        ch for ch in folded if unicodedata.category(ch)[0] not in {"Z", "C"} and not ch.isspace()
+    )
+
+
+def _same_actor(actor: str, *others: str) -> bool:
+    key = identity_key(actor)
+    return not key or any(key == identity_key(other) for other in others)
 
 
 @dataclass(frozen=True)
@@ -337,7 +439,10 @@ def _run_map(run: ArmRun, bench: FrozenBenchmark, reasons: set[str]) -> dict[str
 
 
 def _check_verdicts(
-    packet: StagingPacket, runs: Mapping[str, ArmRun], reasons: set[str]
+    packet: StagingPacket,
+    runs: Mapping[str, ArmRun],
+    reasons: set[str],
+    authority: VerdictAuthority | None,
 ) -> tuple[str, ...]:
     cand, bench = packet.candidate, packet.benchmark
     chosen: list[str] = []
@@ -361,8 +466,12 @@ def _check_verdicts(
             reasons.add("verdict_issuer_not_authority")
         if not verdict.issuer_authenticated:
             reasons.add("verdict_unauthenticated")
-        if verdict.issuer_id in (cand.producer_id, cand.selector_id):
+        if _same_actor(verdict.issuer_id, cand.producer_id, cand.selector_id):
             reasons.add("verdict_self_issued")
+        if authority is None:
+            reasons.add("verdict_authority_unavailable")
+        elif not authority.verify_verdict(verdict):
+            reasons.add("verdict_unattested")
         if verdict.outcome != "reproduced":
             reasons.add("verdict_not_reproduced")
         run = runs.get(arm)
@@ -467,7 +576,7 @@ def _optional(packet: StagingPacket, eligible: set[str]) -> dict[str, Any]:
     return report
 
 
-def evaluate(packet: StagingPacket) -> StagingDecision:
+def evaluate(packet: StagingPacket, authority: VerdictAuthority | None = None) -> StagingDecision:
     """Pure gate. Default is not staged; ``eligible`` requires every gate affirmatively."""
     bench, rule, cand = packet.benchmark, packet.rule, packet.candidate
     reasons: set[str] = set()
@@ -500,12 +609,14 @@ def evaluate(packet: StagingPacket) -> StagingDecision:
     if SIMPLE not in packet.runs:
         reasons.add("simple_comparator_missing")
     maps = {arm: _run_map(run, bench, reasons) for arm, run in packet.runs.items()}
+    if any(run.arm_id != arm for arm, run in packet.runs.items()):
+        reasons.add("arm_identity_mismatch")
     tuned_run = packet.runs.get(TUNED)
     if tuned_run is not None and tuned_run.serving_identity_digest != cand.identity_digest:
         reasons.add("stale_identity")
-    verdict_ids = _check_verdicts(packet, packet.runs, reasons)
+    verdict_ids = _check_verdicts(packet, packet.runs, reasons, authority)
 
-    if packet.protected_view_seq is not None and cand.selection_seq > packet.protected_view_seq:
+    if packet.protected_view_seq is not None and cand.selection_seq >= packet.protected_view_seq:
         reasons.add("selection_after_protected_view")
     if cand.selection_digest != bench.preregistered_selection_digest:
         fresh = packet.fresh_confirmation
@@ -514,7 +625,9 @@ def evaluate(packet: StagingPacket) -> StagingDecision:
             or not fresh.authenticated
             or fresh.selection_digest != cand.selection_digest
             or fresh.manifest_digest != bench.digest
-            or fresh.actor_id in (cand.producer_id, cand.selector_id)
+            or _same_actor(fresh.actor_id, cand.producer_id, cand.selector_id)
+            or authority is None
+            or not authority.verify_confirmation(fresh)
         ):
             reasons.add("fresh_confirmation_required")
 
@@ -526,10 +639,16 @@ def evaluate(packet: StagingPacket) -> StagingDecision:
         "tuned_run_missing",
         "incumbent_run_missing",
         "simple_comparator_missing",
+        "arm_identity_mismatch",
     }
     if len(maps) == 3 and not reasons & (structural | {"no_eligible_comparisons"}):
         autos = {arm: {c for c, r in m.items() if r.automatic} for arm, m in maps.items()}
-        if not (autos[TUNED] == autos[INCUMBENT] == autos[SIMPLE]):
+        tags = {
+            arm: {c: frozenset(r.critical_slices) for c, r in m.items()} for arm, m in maps.items()
+        }
+        if not (tags[TUNED] == tags[INCUMBENT] == tags[SIMPLE]):
+            reasons.add("critical_slice_membership_inconsistent")
+        elif not (autos[TUNED] == autos[INCUMBENT] == autos[SIMPLE]):
             reasons.add("coverage_not_fixed")
         else:
             for control in CONTROLS:
@@ -614,9 +733,11 @@ class StagingLedger:
         path: Path | None = None,
         *,
         fault: Callable[[str], None] | None = None,
+        authority: VerdictAuthority | None = None,
     ) -> None:
         self._path = path
         self._fault = fault
+        self._authority = authority
         self._lock = threading.Lock()
         self._memory: dict[str, Any] = self._empty()
         if path is not None and path.exists():
@@ -625,6 +746,27 @@ class StagingLedger:
     @staticmethod
     def _empty() -> dict[str, Any]:
         return {"decided": {}, "staged": {}, "superseded": {}, "reconciliation": [], "acks": {}}
+
+    @contextmanager
+    def _exclusive(self) -> Iterator[None]:
+        """Serialise writers across threads AND processes, then re-read the durable state.
+
+        Without the reload a second process holding a stale in-memory copy could restage an
+        already-staged candidate or overwrite another writer's record (lost update).
+        """
+        with self._lock:
+            if self._path is None or fcntl is None:
+                yield
+                return
+            lock_path = self._path.with_name(self._path.name + ".lock")
+            with open(lock_path, "a") as handle:
+                fcntl.flock(handle, fcntl.LOCK_EX)
+                try:
+                    if self._path.exists():
+                        self._memory = json.loads(self._path.read_text())
+                    yield
+                finally:
+                    fcntl.flock(handle, fcntl.LOCK_UN)
 
     def _save(self, state: dict[str, Any]) -> None:
         if self._path is not None:
@@ -635,6 +777,11 @@ class StagingLedger:
                     handle.flush()
                     os.fsync(handle.fileno())
                 os.replace(tmp, self._path)
+                dir_fd = os.open(self._path.parent, os.O_RDONLY)
+                try:
+                    os.fsync(dir_fd)
+                finally:
+                    os.close(dir_fd)
             except BaseException:
                 if os.path.exists(tmp):
                     os.unlink(tmp)
@@ -664,8 +811,8 @@ class StagingLedger:
         return tuple(self._memory["reconciliation"])
 
     def stage(self, packet: StagingPacket) -> StageResult:
-        decision = evaluate(packet)
-        with self._lock:
+        decision = evaluate(packet, self._authority)
+        with self._exclusive():
             state = self._copy()
             key = _key(decision.candidate_id, decision.identity_digest)
             reasons = list(decision.reasons)
@@ -705,7 +852,7 @@ class StagingLedger:
 
     def acknowledge(self, callback_id: str, decision_digest: str) -> Literal["recorded", "ignored"]:
         """Record a worker staging callback once. Late or duplicate callbacks change nothing."""
-        with self._lock:
+        with self._exclusive():
             state = self._copy()
             live = [
                 k
@@ -726,7 +873,7 @@ class StagingLedger:
             or receipt.superseded_manifest_digest == receipt.successor_manifest_digest
         ):
             raise StagingError("invalid_supersession_receipt")
-        with self._lock:
+        with self._exclusive():
             state = self._copy()
             old = receipt.superseded_manifest_digest
             if old in state["superseded"]:
