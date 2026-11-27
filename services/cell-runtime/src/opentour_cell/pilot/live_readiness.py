@@ -307,6 +307,9 @@ class LocalRepairAssessments:
                     missing_classification = True
                     continue
                 incumbent = simple_repair.decision(dict(observed.incumbent))
+                if incumbent["status"] == "missing":
+                    missing_classification = True
+                    continue
                 if incumbent["status"] != "automatic":
                     deferred_roots.append(root_ref(root))
                     continue
