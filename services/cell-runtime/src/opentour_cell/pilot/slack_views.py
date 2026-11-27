@@ -1567,6 +1567,7 @@ def app_home_view(
     readiness: Mapping[str, Any] | None = None,
     live_summary: Mapping[str, Any] | None = None,
     verify_outcome: str = "",
+    decision_map_entry: str = "",
 ) -> Block:
     if not context:
         return {
@@ -1585,6 +1586,8 @@ def app_home_view(
         _button("Browse data", "ot_app_data", "ot_app_data"),
         _button("Ask OpenTour", "ot_app_prompt", "ot_app_prompt"),
     ]
+    if decision_map_entry:
+        blocks.append(_actions(_button("Review decision map", "ot_app_map", decision_map_entry)))
     if pending:
         blocks.append(_section("A repair is ready for your review."))
         first = _button("Review pending repair", "ot_app_pending", pending)
@@ -1648,7 +1651,7 @@ def workflow_chooser(context: str) -> Block:
     )
 
 
-def starter_charter(context: str, preview: StarterPreview) -> Block:
+def starter_charter(context: str, preview: StarterPreview, map_entry: str = "") -> Block:
     charter = preview.charter
     blocks = [
         _section(f"Policy {_ref(preview.policy)} · revision {_ref(preview.policy_revision)}"),
@@ -1699,6 +1702,8 @@ def starter_charter(context: str, preview: StarterPreview) -> Block:
                     _button("Create benchmark draft", "ot_starter_benchmark", preview.revision)
                 )
             )
+        if map_entry:
+            blocks.append(_actions(_button("Review decision map", "ot_map_open", map_entry)))
         return _modal("Saved starter draft", "ot_starter_saved", context, blocks)
     blocks += [
         _section("Save this policy-only mandate for local workflow drafting."),
@@ -1969,3 +1974,267 @@ def plugin_held_modal(modal: Block) -> Block:
             modal["blocks"][-1],
         ],
     }
+
+
+def map_clause(
+    context: str,
+    resource: str,
+    revision: str,
+    section: str,
+    lines: str,
+    passage: str,
+    page: int,
+    owner_assertion: str = "",
+) -> Block:
+    """Render complete source text in bounded pages, preserving line and list boundaries."""
+    width = 1800
+    start = page * width
+    if page < 0 or (start and start >= len(passage)):
+        raise ValueError("invalid citation page")
+    buttons = [_button("Back to map", "ot_map_back", "back")]
+    if page:
+        buttons.append(_button("Previous passage", "ot_map_clause_page", "previous"))
+    if start + width < len(passage):
+        buttons.append(_button("Next passage", "ot_map_clause_page", "next"))
+    return _modal(
+        "Policy clause",
+        "ot_map_clause",
+        context,
+        [
+            _section(f"{_ref(resource)} · {_ref(section)} · lines {_display(lines)}"),
+            _section(f"Source revision {_ref(revision)}"),
+            {"type": "section", "text": _text(passage[start : start + width])},
+            *([_section(_display(owner_assertion, 1800))] if owner_assertion else []),
+            _actions(*buttons),
+        ],
+    )
+
+
+def map_conflict(context: str, prior: str, current: str, changes: Sequence[str]) -> Block:
+    blocks = [
+        _section(f"The map changed while you were editing. Your version · {_ref(prior)}"),
+        _section(f"Current version · {_ref(current)}"),
+    ]
+    summary: list[str] = []
+    for change in changes:
+        line = _display(change, 850)
+        if sum(len(item) + 1 for item in summary) + len(line) > 2900:
+            blocks.append(_section("\n".join(summary)))
+            summary = []
+        summary.append(line)
+    if summary:
+        blocks.append(_section("\n".join(summary)))
+    actions = [_button("Review current map", "ot_map_back", "back")]
+    blocks.append(_actions(*actions))
+    return _modal("Review map changes", "ot_map_conflict", context, blocks)
+
+
+@dataclass(frozen=True)
+class MapReviewRow:
+    branch_ref: str
+    trigger: str
+    inputs: str
+    predicate: str
+    precedence: str
+    action: str
+    fallback: str
+    support: str
+    disposition: str
+
+
+def decision_map(
+    context: str,
+    workflow: str,
+    revision: str,
+    rows: Sequence[MapReviewRow],
+    questions: Sequence[str],
+    page: int,
+    editable: bool,
+    confirmed_ref: str = "",
+    can_set_precedence: bool = False,
+    *,
+    version: int,
+    source_revision: str,
+    draft_revision: str,
+    priority_citation: str = "",
+    priority_assertion: str = "",
+) -> Block:
+    per_page = 5
+    if page < 0 or (page and page * per_page >= len(rows)):
+        raise ValueError("invalid map page")
+    blocks = [
+        _section(f"Workflow {_ref(workflow)} · saved review version {version}"),
+        _section(f"Policy revision {_ref(source_revision)}\nGuided draft {_ref(draft_revision)}"),
+    ]
+    if priority_citation:
+        blocks.append(
+            _actions(_button("Inspect precedence clause", "ot_map_priority", priority_citation))
+        )
+    if priority_assertion:
+        blocks.append(_section(_display(priority_assertion, 1500)))
+    if confirmed_ref:
+        blocks.append(_section("Confirmed map · " + _ref(confirmed_ref)))
+    for question in questions[:5]:
+        blocks.append(_section(_display(question, 600)))
+    if can_set_precedence and editable and len(rows) >= 2:
+        blocks.append(_actions(_button("Resolve precedence", "ot_map_precedence", revision)))
+    if not rows:
+        blocks.append(_section("No decision branch is ready for review."))
+    for row in rows[page * per_page : (page + 1) * per_page]:
+        blocks.extend(
+            [
+                _section(
+                    f"{_display(row.action)} · {_display(row.disposition)}\n"
+                    f"Trigger · {_display(row.trigger)}\n"
+                    f"Inputs at decision time · {_display(row.inputs, 300)}\n"
+                    f"Predicate · {_display(row.predicate, 500)}\n"
+                    f"Precedence · {_display(row.precedence, 250)}\n"
+                    f"Fallback · {_display(row.fallback, 250)}\n"
+                    f"Support · {_display(row.support, 250)}"
+                ),
+                _actions(
+                    _button("Inspect clause", "ot_map_citation", row.branch_ref),
+                    *(
+                        [_button("Review branch", "ot_map_edit", row.branch_ref)]
+                        if editable
+                        else []
+                    ),
+                ),
+            ]
+        )
+    nav = []
+    if page:
+        nav.append(_button("Previous branches", "ot_map_page", "previous"))
+    if (page + 1) * per_page < len(rows):
+        nav.append(_button("Next branches", "ot_map_page", "next"))
+    if nav:
+        blocks.append(_actions(*nav))
+    return _modal("Review decision map", "ot_map_review", context, blocks)
+
+
+def _map_text_input(
+    key: str, label: str, *, initial: str = "", multiline: bool = False, optional: bool = False
+) -> Block:
+    element: Block = {
+        "type": "plain_text_input",
+        "action_id": key,
+        "multiline": multiline,
+        "max_length": 1000 if key == "reason" else 3000 if multiline else 160,
+    }
+    if initial:
+        element["initial_value"] = initial
+    return {
+        "type": "input",
+        "block_id": key,
+        "label": _text(label),
+        "optional": optional,
+        "element": element,
+    }
+
+
+def map_branch_edit(
+    context: str,
+    branch: str,
+    action: str | None,
+    predicates: str,
+    available_actions: Sequence[str],
+) -> Block:
+    disposition = _select(
+        "disposition",
+        "Your decision",
+        [
+            ("Confirm the cited branch", "accepted"),
+            ("Correct this branch", "corrected"),
+            ("Leave unresolved", "unresolved"),
+            ("Mark out of scope", "out_of_scope"),
+        ],
+    )
+    del disposition["element"]["initial_option"]
+    disposition["element"]["placeholder"] = _text("Choose a disposition")
+    decision = _select(
+        "action",
+        "Decision if corrected",
+        [(v, v) for v in available_actions],
+        list(available_actions).index(action) if action is not None else 0,
+    )
+    if action is None:
+        decision["optional"] = True
+        del decision["element"]["initial_option"]
+        decision["element"]["placeholder"] = _text("Choose a supported decision")
+        disposition["element"]["options"] = [
+            opt for opt in disposition["element"]["options"] if opt["value"] != "accepted"
+        ]
+    return _modal(
+        "Review branch",
+        "ot_map_branch_save",
+        context,
+        [
+            _section(
+                f"Branch {_ref(branch)}. Confirm the proposal as written, or choose a correction."
+            ),
+            disposition,
+            decision,
+            _section(
+                "For a correction, enter one condition per line, such as total < 250 or po missing."
+            ),
+            _map_text_input(
+                "conditions",
+                "Conditions at decision time",
+                initial=predicates,
+                multiline=True,
+                optional=True,
+            ),
+            _map_text_input("reason", "Reason or owner assertion", multiline=True),
+        ],
+        "Save decision",
+    )
+
+
+def map_precedence(context: str, question: str, options: Sequence[tuple[str, str]]) -> Block:
+    if not 2 <= len(options) <= 128:
+        raise ValueError("precedence choices unavailable")
+    blocks = [_section(_display(question, 450))]
+    if len(options) > 30:
+        for start in range(0, len(options), 15):
+            blocks.append(
+                _section(
+                    "\n".join(
+                        f"{i + 1}. {_display(options[i][0])}"
+                        for i in range(start, min(start + 15, len(options)))
+                    )
+                )
+            )
+        blocks.append(
+            _map_text_input(
+                "order", "Branch numbers in priority order, separated by commas", multiline=True
+            )
+        )
+    for index in range(len(options) if len(options) <= 30 else 0):
+        position = _select(f"rank_{index}", f"Priority {index + 1}", options)
+        del position["element"]["initial_option"]
+        position["element"]["placeholder"] = _text("Choose branch")
+        blocks.append(position)
+    blocks.append(_map_text_input("reason", "Why this order applies", multiline=True))
+    return _modal("Resolve precedence", "ot_map_precedence_save", context, blocks, "Save order")
+
+
+def map_reapply(layout: Block, form: Block, values: Mapping[str, Any]) -> Block:
+    # Restore only the fields the user submitted, into current allowed options.
+    # The second save is explicit. No proposal text is kept in the journal.
+    for block in form["blocks"]:
+        key = block.get("block_id")
+        if not key or key not in values:
+            continue
+        element = block["element"]
+        submitted = values[key][key]
+        if element["type"] == "static_select" and submitted.get("selected_option"):
+            selected = submitted["selected_option"]["value"]
+            element["initial_option"] = next(
+                o for o in element["options"] if o["value"] == selected
+            )
+        elif element["type"] == "plain_text_input" and submitted.get("value"):
+            element["initial_value"] = submitted["value"]
+    form["blocks"] = layout["blocks"] + form["blocks"]
+    form["title"] = layout["title"]
+    form["submit"]["text"] = "Reapply my edit"
+    return form
