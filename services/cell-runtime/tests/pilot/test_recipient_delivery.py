@@ -138,11 +138,25 @@ def test_lost_ack_reconciles_exact_signed_artifact_without_a_second_install(tmp_
     )
     receipt_path = installed.with_name("receipt.json")
     genuine = read(receipt_path)
-    changed = replace(release, artifact_sha256="5" * 64)
-    rebound = {key: value for key, value in genuine.items() if key != "receipt_ref"}
-    rebound.update(release_ref=changed.reference, artifact_sha256=changed.artifact_sha256)
-    write(receipt_path, rebound | {"receipt_ref": "received-" + digest(rebound)[:48]})
-    assert fresh_receiver.lookup(changed, "rebound-receipt").state == "unknown"
+    for changed in (
+        replace(release, artifact_sha256="5" * 64),
+        replace(release, approving_grant_revision="rebound-grant"),
+    ):
+        body = {
+            key: value
+            for key, value in genuine.items()
+            if key not in {"receipt_ref", "receipt_signature"}
+        }
+        body.update(release_ref=changed.reference, artifact_sha256=changed.artifact_sha256)
+        write(
+            receipt_path,
+            body
+            | {
+                "receipt_ref": "received-" + digest(body)[:48],
+                "receipt_signature": genuine["receipt_signature"],
+            },
+        )
+        assert fresh_receiver.lookup(changed, "rebound-receipt").state == "unknown"
     write(receipt_path, genuine)
     installed.write_bytes(b"GENERATED_MUTATED_OFFER")
     assert fresh_receiver.lookup(release, "tampered-readback").state == "unknown"

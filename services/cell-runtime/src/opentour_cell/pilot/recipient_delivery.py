@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import base64
 import os
+import subprocess
 import tempfile
 import time
 from collections.abc import Callable, Iterator
 from contextlib import AbstractContextManager, contextmanager
 from pathlib import Path
+from zipfile import BadZipFile
 
 from opentour_cell.pilot import repair_bundle as bundle
 from opentour_cell.pilot.intake_mcp import require_ref
@@ -23,6 +26,7 @@ from opentour_cell.pilot.release_outbox import (
 )
 
 SCHEMA = "opentour.pilot.recipient-delivery.v1"
+MAX_RECEIPT = 4096
 
 
 def _receiver_ref(entitlement: bundle.Json, owner_key_sha256: str) -> str:
@@ -33,6 +37,21 @@ def _receiver_ref(entitlement: bundle.Json, owner_key_sha256: str) -> str:
             + [owner_key_sha256]
         )[:48]
     )
+
+
+def _verify_receipt_signature(certificate: bytes, signature: bytes, receipt: bundle.Json) -> None:
+    public = bundle._crypto(
+        ["x509", "-pubkey", "-noout"], certificate, "recipient_signer_unavailable"
+    )
+    with tempfile.TemporaryDirectory() as private:
+        key, sealed = Path(private) / "public", Path(private) / "signature"
+        bundle._write_private(key, public)
+        bundle._write_private(sealed, signature)
+        bundle._crypto(
+            ["dgst", "-sha256", "-verify", str(key), "-signature", str(sealed)],
+            bundle._bytes(receipt),
+            "invalid_recipient_delivery_signature",
+        )
 
 
 class LocalRecipientDelivery:
@@ -83,7 +102,7 @@ class LocalRecipientDelivery:
     @staticmethod
     def _verify_package(
         data: bytes, release: ApprovedRelease, grant: bundle.Json, claim: bundle.Json
-    ) -> None:
+    ) -> bytes:
         bundle._require(
             bundle._sha(data) == claim["package_sha256"],
             "package_not_in_owner_entitlement",
@@ -99,12 +118,38 @@ class LocalRecipientDelivery:
             },
             "recipient_release_scope_mismatch",
         )
+        certificate = bundle._read(Path(grant["recipient_certificate"]))
+        sealed_certificates = {
+            asset["certificate_sha256"]
+            for asset in spec["assets"].values()
+            if asset["mode"] == "sealed"
+        }
+        bundle._require(
+            sealed_certificates == {bundle._sha(certificate)}, "recipient_certificate_mismatch"
+        )
+        return certificate
+
+    @staticmethod
+    def _sign_receipt(receipt: bundle.Json, grant: bundle.Json, certificate: bytes) -> str:
+        with tempfile.TemporaryDirectory() as private:
+            key = Path(private) / "recipient-key"
+            bundle._write_private(key, bundle._read(Path(grant["recipient_key"])))
+            signature = bundle._crypto(
+                ["dgst", "-sha256", "-sign", str(key), "-passin", "pass:"],
+                bundle._bytes(receipt),
+                "recipient_receipt_signing_failed",
+            )
+        _verify_receipt_signature(certificate, signature, receipt)
+        return base64.b64encode(signature).decode("ascii")
 
     def _receipt(
         self, slot: Path, release: ApprovedRelease, grant: bundle.Json, claim: bundle.Json
     ) -> bundle.Json:
         bundle._private_directory(slot)
-        receipt = parse_manifest(bundle._read(slot / "receipt.json"))
+        receipt = parse_manifest(bundle._read(slot / "receipt.json", MAX_RECEIPT))
+        encoded_signature = receipt.pop("receipt_signature", None)
+        bundle._require(isinstance(encoded_signature, str), "recipient_delivery_receipt_mismatch")
+        assert isinstance(encoded_signature, str)
         body = self._binding(release, claim)
         when = receipt.get("received_at")
         bundle._require(
@@ -114,8 +159,11 @@ class LocalRecipientDelivery:
         body["received_at"] = when
         expected = body | {"receipt_ref": "received-" + digest(body)[:48]}
         bundle._require(receipt == expected, "recipient_delivery_receipt_mismatch")
-        self._verify_package(
+        certificate = self._verify_package(
             bundle._read(slot / "artifact.zip", bundle.MAX_ARCHIVE), release, grant, claim
+        )
+        _verify_receipt_signature(
+            certificate, base64.b64decode(encoded_signature, validate=True), receipt
         )
         return receipt
 
@@ -136,14 +184,18 @@ class LocalRecipientDelivery:
             if os.path.lexists(slot):
                 return str(self._receipt(slot, release, grant, claim)["receipt_ref"])
             offered_bytes = bundle._read(offered, bundle.MAX_ARCHIVE)
-            self._verify_package(offered_bytes, release, grant, claim)
+            certificate = self._verify_package(offered_bytes, release, grant, claim)
             check_sender()
             with tempfile.TemporaryDirectory(dir=slot.parent) as staged:
                 staged_path = Path(staged)
                 bundle._install(staged_path / "artifact.zip", offered_bytes)
                 body = self._binding(release, claim) | {"received_at": self.clock()}
                 receipt = body | {"receipt_ref": "received-" + digest(body)[:48]}
-                bundle._install(staged_path / "receipt.json", bundle._bytes(receipt))
+                signature = self._sign_receipt(receipt, grant, certificate)
+                bundle._install(
+                    staged_path / "receipt.json",
+                    bundle._bytes(receipt | {"receipt_signature": signature}),
+                )
                 with bundle._directory_lock(staged_path):
                     bundle._require(
                         bundle._grant(self.grant_file) == grant
@@ -178,7 +230,7 @@ class LocalRecipientDelivery:
                 return ReceiverObservation(
                     "delivered", *args, receipt["receipt_ref"], receipt["received_at"]
                 )
-        except (OSError, KeyError, TypeError, ValueError):
+        except (BadZipFile, OSError, KeyError, TypeError, ValueError, subprocess.SubprocessError):
             return ReceiverObservation(
                 "unknown",
                 release.reference,
