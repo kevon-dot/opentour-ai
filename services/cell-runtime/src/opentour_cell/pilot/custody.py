@@ -88,13 +88,17 @@ _PRIVATE_STATE = {
     ),
 }
 _ENGAGEMENT_LEDGER = ("engagement-epochs.sqlite3", "engagement-fences.jsonl")
+# What the closeout has seen of the engagement ledger. It only ever strengthens:
+# NULL (closeout predates this record) < absent < present < bound (row for this engagement).
+_LEDGER_SEEN = (None, "absent", "present", "bound")
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS closeout (
  singleton INTEGER PRIMARY KEY CHECK(singleton=1), organization TEXT NOT NULL,
  engagement TEXT NOT NULL, agreement TEXT NOT NULL, custodian TEXT NOT NULL,
  support TEXT NOT NULL, due TEXT NOT NULL, revision TEXT, trigger TEXT NOT NULL,
  withdrawn_at INTEGER NOT NULL, reconciled INTEGER NOT NULL DEFAULT 0, finished_ref TEXT,
- transport TEXT NOT NULL DEFAULT '{}', minimized INTEGER NOT NULL DEFAULT 0
+ transport TEXT NOT NULL DEFAULT '{}', minimized INTEGER NOT NULL DEFAULT 0,
+ engagement_ledger TEXT
 );
 CREATE TABLE IF NOT EXISTS items (
  item TEXT PRIMARY KEY, kind TEXT NOT NULL, owner TEXT NOT NULL, due TEXT NOT NULL,
@@ -146,6 +150,9 @@ class Closeout:
                 db.executescript(_SCHEMA)
             with db:
                 db.execute("BEGIN IMMEDIATE")
+                columns = {r[1] for r in db.execute("PRAGMA table_info(closeout)")}
+                if columns and "engagement_ledger" not in columns:
+                    db.execute("ALTER TABLE closeout ADD COLUMN engagement_ledger TEXT")
                 yield db
 
     def _row(self, db: sqlite3.Connection) -> sqlite3.Row:
@@ -282,8 +289,14 @@ class Closeout:
                 stopped = store.withdraw()
                 db.execute(
                     "INSERT INTO closeout(singleton,organization,agreement,custodian,support,due,"
-                    "revision,trigger,engagement,withdrawn_at) VALUES(1,?,?,?,?,?,?,?,?,?)",
-                    (*binding, store.engagement_id, stopped["withdrawn_at"]),
+                    "revision,trigger,engagement,withdrawn_at,engagement_ledger)"
+                    " VALUES(1,?,?,?,?,?,?,?,?,?,?)",
+                    (
+                        *binding,
+                        store.engagement_id,
+                        stopped["withdrawn_at"],
+                        "present" if self._ledger_present() else "absent",
+                    ),
                 )
                 self._observe(
                     db,
@@ -303,25 +316,58 @@ class Closeout:
                     detail="Confirm support contact, handoff date and outstanding duties.",
                 )
         if minimal is not None:
-            self._retire_engagement_epoch(minimal["engagement"])
+            self._retire_engagement_epoch(old)
             return minimal
         return self.reconcile()
 
-    def _retire_engagement_epoch(self, engagement: str) -> None:
+    def _ledger_present(self) -> bool:
+        return any(os.path.lexists(self.directory / name) for name in _ENGAGEMENT_LEDGER)
+
+    def _grant_requires_ledger(self) -> bool:
+        """Names only: a live grant here means live work that needs the engagement ledger.
+
+        Every grant the live authority accepts requires the ledger, so custody does not
+        reopen grant payloads to decide; any grant file, readable or not, requires it.
+        """
+        return any(
+            path.name != "live-authority-key.json"
+            for path in self.directory.glob("live-authority-*.json")
+        )
+
+    def _retire_engagement_epoch(self, row: sqlite3.Row) -> None:
         """Bridge withdrawal to the engagement ledger after the closeout hold has committed.
 
         The epoch is this closeout's committed engagement and the revocation epoch is the
         ledger's own, so no operator argument selects either. The ledger persists the terminal
         state before it frees the slot; repeating after any interruption completes the release.
+        A ledger the closeout has seen, or one a live grant needs, must still be present and
+        hold this engagement; otherwise the closeout stays unreconciled.
         """
-        if not any(os.path.lexists(self.directory / name) for name in _ENGAGEMENT_LEDGER):
-            return
-        try:
-            ledger = EngagementLedger(self.directory)
-            if ledger.get(self.organization, engagement) is not None:
-                ledger.retire(self.organization, engagement)
-        except (EngagementError, TrainingError, OSError, sqlite3.Error):
-            raise CustodyError("engagement_ledger_unavailable") from None
+        engagement = row["engagement"]
+        recorded = row["engagement_ledger"] if "engagement_ledger" in row.keys() else None
+        if recorded not in _LEDGER_SEEN:
+            raise CustodyError("engagement_ledger_unavailable")
+        required = self._grant_requires_ledger()
+        seen = recorded
+        if not self._ledger_present():
+            if required or recorded in {"present", "bound"}:
+                raise CustodyError("engagement_ledger_unavailable")
+            seen = "absent"
+        else:
+            try:
+                ledger = EngagementLedger(self.directory)
+                if ledger.get(self.organization, engagement) is None:
+                    if required or recorded == "bound":
+                        raise CustodyError("engagement_ledger_unavailable")
+                    seen = "present"
+                else:
+                    ledger.retire(self.organization, engagement)
+                    seen = "bound"
+            except (EngagementError, TrainingError, OSError, sqlite3.Error):
+                raise CustodyError("engagement_ledger_unavailable") from None
+        if _LEDGER_SEEN.index(seen) > _LEDGER_SEEN.index(recorded):
+            with self._db() as db:
+                db.execute("UPDATE closeout SET engagement_ledger=? WHERE singleton=1", (seen,))
 
     def reconcile(self) -> dict[str, Any]:
         # Persist the hold on closeout if a journal, training file or inventory cannot be verified.
@@ -332,7 +378,7 @@ class Closeout:
             else:
                 db.execute("UPDATE closeout SET reconciled=0 WHERE singleton=1")
         # Outside any closeout transaction: the ledger takes its own withdrawal lock.
-        self._retire_engagement_epoch(row["engagement"])
+        self._retire_engagement_epoch(row)
         if row["minimized"]:
             return self._minimal(row)
         with self._db() as db:

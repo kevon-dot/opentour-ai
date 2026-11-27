@@ -19,7 +19,11 @@ from pathlib import Path
 
 import pytest
 from opentour_cell.pilot.custody import Closeout, CustodyError
-from opentour_cell.pilot.engagement_epochs import EngagementHold, EngagementLedger
+from opentour_cell.pilot.engagement_epochs import (
+    EngagementError,
+    EngagementHold,
+    EngagementLedger,
+)
 from opentour_cell.pilot.intake_mcp import IntakeError
 from opentour_cell.pilot.text_classifier import TrainingError
 from opentour_cell.pilot.training import LocalTrainingStore
@@ -217,6 +221,7 @@ def test_new_epoch_binding_excludes_prior_rows_after_custody_withdrawal(tmp_path
     case.ledger.observe_positions(ORG, first, 31)
     case.ledger.bind(ORG, first, "queue", "queue-1")
     case.ledger.grant_approval(ORG, first, "approval-1")
+    assert case.ledger.reserve_budget(ORG, first, "fit-1", 30)
     assert totals(case.snapshot()) == (1, 0, 1, 0, 1)
 
     Closeout(case.root, ORG).withdraw(**START)  # the custody path, not a direct ledger call
@@ -234,6 +239,20 @@ def test_new_epoch_binding_excludes_prior_rows_after_custody_withdrawal(tmp_path
     assert case.ledger.counts(ORG, SUCCESSOR) == {"decision": 0, "read": 0, "fit": 0, "export": 0}
     case.ingest(decision(), position=35)  # old row redelivered at/before the new checkpoint
     assert totals(case.snapshot()) == (0, 0, 0, 0, 0)
+    assert case.snapshot().quarantined == 1
+
+    # The withdrawn epoch grants, spends and counts nothing, and its rows are refused later.
+    assert not case.ledger.authorize(ORG, first, "queue", "queue-1")
+    assert not case.ledger.has_approval(ORG, first, "approval-1")
+    for kind in ("fit", "export", "read"):
+        assert case.ledger.record_effect(ORG, first, kind, "late-" + kind) is False
+    with pytest.raises(EngagementError, match="epoch_not_live"):
+        case.ledger.reserve_budget(ORG, first, "fit-2", 1)
+    assert case.ledger.get(ORG, SUCCESSOR).budget_spent == 0
+    late = case.ledger.admit_row(
+        ORG, SUCCESSOR, resource="decisions", lease_ref="lease-b", row_epoch=first, position=500
+    )
+    assert (late.verdict, late.reason) == ("deny", "prior_epoch")
 
     before = (case.snapshot(), case.reads(), case.page_rows(), case.ledger.counts(ORG, SUCCESSOR))
     with pytest.raises(IntakeError, match="engagement_epoch_fenced"):
@@ -248,6 +267,8 @@ def test_new_epoch_binding_excludes_prior_rows_after_custody_withdrawal(tmp_path
     ) == before
 
     case.ingest(decision("D2", case_id="invoice-2"), position=92)
+    assert case.snapshot().pending == 1
+    case.ingest(decision("D2", case_id="invoice-2"), position=93)  # redelivery counts once
     assert case.snapshot().pending == 1
     (history,) = case.ledger.historical(ORG, before=SUCCESSOR)
     assert history["epoch"] == first and history["historical"] is True
@@ -372,14 +393,23 @@ def test_revocation_epoch_is_assigned_by_the_ledger_not_supplied(tmp_path: Path)
     ledger = EngagementLedger(directory)
     enroll(ledger, ORG, "earlier-epoch", "lease-0", 5)
     ledger.activate(ORG, "earlier-epoch")
-    ledger.withdraw(ORG, "earlier-epoch", revocation_epoch=5)
-    ledger.release_slot(ORG, "earlier-epoch")
+    assert ledger.retire(ORG, "earlier-epoch").revocation_epoch == 1
     enroll(ledger, ORG, epoch, "lease-a", 10)
     ledger.activate(ORG, epoch)
 
+    # The public withdraw only confirms the ledger's own epoch; any other value is refused.
+    with pytest.raises(EngagementError, match="revocation_epoch_not_assigned"):
+        ledger.withdraw(ORG, epoch, revocation_epoch=5)
+    with pytest.raises(EngagementError, match="revocation_epoch_not_monotonic"):
+        ledger.withdraw(ORG, epoch, revocation_epoch=1)
+    with pytest.raises(EngagementError, match="revocation_epoch_conflict"):
+        ledger.withdraw(ORG, "earlier-epoch", revocation_epoch=2)
+    assert raw_row(directory, ORG, epoch) == ("active", None, 0)
+    assert len(fences(directory)) == 1
+
     Closeout(directory, ORG).withdraw(**START)
-    assert raw_row(directory, ORG, epoch) == ("terminal", 6, 1)
-    assert [f["revocation_epoch"] for f in fences(directory)] == [5, 6]
+    assert raw_row(directory, ORG, epoch) == ("terminal", 2, 1)
+    assert [f["revocation_epoch"] for f in fences(directory)] == [1, 2]
 
 
 def test_released_slot_without_persisted_terminal_epoch_is_impossible(tmp_path: Path) -> None:
@@ -407,6 +437,22 @@ def test_released_slot_without_persisted_terminal_epoch_is_impossible(tmp_path: 
             with db:
                 db.execute("DELETE FROM fence")
 
+    # Plain SQL that inserts the fence row first does satisfy the triggers (they guard code
+    # paths, not the owning uid), but without the fsynced journal entry no successor enters.
+    forged_dir, forged = engaged(tmp_path / "forged")
+    with closing(sqlite3.connect(forged_dir / "engagement-epochs.sqlite3")) as db, db:
+        db.execute("INSERT INTO fence VALUES (?,?,1)", (ORG, forged))
+        db.execute(
+            "UPDATE engagement SET state='terminal', revocation_epoch=1, slot_released=1 "
+            "WHERE epoch=?",
+            (forged,),
+        )
+    assert raw_row(forged_dir, ORG, forged) == ("terminal", 1, 1)
+    assert fences(forged_dir) == []
+    with pytest.raises(EngagementHold, match="prior_termination_not_journaled"):
+        successor(EngagementLedger(forged_dir))
+    assert [e.epoch for e in EngagementLedger(forged_dir).engagements(ORG)] == [forged]
+
 
 def test_unverifiable_ledger_keeps_the_closeout_hold(tmp_path: Path) -> None:
     directory, epoch = engaged(tmp_path)
@@ -421,3 +467,95 @@ def test_unverifiable_ledger_keeps_the_closeout_hold(tmp_path: Path) -> None:
             engagement=epoch, agreement="terms-a", custodian="custodian-a", evidence="generated"
         )
     assert raw_row(directory, ORG, epoch) == ("active", None, 0)
+
+
+def test_fence_rows_cannot_be_replaced(tmp_path: Path) -> None:
+    directory, epoch = engaged(tmp_path)
+    Closeout(directory, ORG).withdraw(**START)
+    with closing(sqlite3.connect(directory / "engagement-epochs.sqlite3")) as db:
+        for statement in (
+            "INSERT OR REPLACE INTO fence VALUES (?,?,9)",
+            "REPLACE INTO fence VALUES (?,?,10)",
+            "INSERT OR IGNORE INTO fence VALUES (?,?,11)",
+        ):
+            with pytest.raises(sqlite3.IntegrityError, match="fence_is_permanent"):
+                with db:
+                    db.execute(statement, (ORG, epoch))
+        with db:
+            db.execute("INSERT OR IGNORE INTO fence VALUES (?,?,1)", (ORG, epoch))  # same row
+        assert db.execute("SELECT org, epoch, revocation_epoch FROM fence").fetchall() == [
+            (ORG, epoch, 1)
+        ]
+    assert_retired_once(directory, epoch)
+
+
+def test_ledger_the_closeout_has_seen_must_stay_present(tmp_path: Path) -> None:
+    # Closeout opened while the ledger was present, interrupted before retiring the epoch.
+    directory, epoch = engaged(tmp_path)
+    crash_withdrawal(directory, "before_fence")
+    database = directory / "engagement-epochs.sqlite3"
+    moved = tmp_path / "moved-away.bin"
+    database.rename(moved)
+    with pytest.raises(CustodyError, match="engagement_ledger_unavailable"):
+        Closeout(directory, ORG).reconcile()
+    with pytest.raises(CustodyError, match="engagement_ledger_unavailable"):
+        Closeout(directory, ORG).withdraw(**START)
+    held = Closeout(directory, ORG)
+    assert held.status()["reconciled"] is False
+    with pytest.raises(CustodyError, match="reconcile_before_purge"):
+        held.purge_local(
+            engagement=epoch, agreement="terms-a", custodian="custodian-a", evidence="generated"
+        )
+    moved.rename(database)
+    assert raw_row(directory, ORG, epoch) == ("active", None, 0)
+    assert Closeout(directory, ORG).reconcile()["reconciled"] is True
+    assert_retired_once(directory, epoch)
+
+    # Once retired, deleting the whole ledger cannot quietly lift the requirement.
+    database.unlink()
+    (directory / "engagement-fences.jsonl").unlink()
+    with pytest.raises(CustodyError, match="engagement_ledger_unavailable"):
+        Closeout(directory, ORG).reconcile()
+    assert Closeout(directory, ORG).status()["reconciled"] is False
+
+
+def test_live_grant_requires_the_ledger_and_this_engagements_row(tmp_path: Path) -> None:
+    case = SignedCase(tmp_path / "worker")
+    case.body["engagement_ledger_required"] = True
+    case.write()
+    epoch = case.body["engagement_epoch"]
+    ledger = EngagementLedger(case.directory)
+    if ledger.get("org-a", epoch) is None:  # the fixture may already enroll its epoch
+        enroll(
+            ledger,
+            "org-a",
+            epoch,
+            DECISION.lease_ref,
+            DECISION.checkpoint,
+            resources=(DECISION.resource, OUTCOME.resource),
+        )
+        ledger.activate("org-a", epoch)
+    database = case.directory / "engagement-epochs.sqlite3"
+    elsewhere = tmp_path / "elsewhere.sqlite3"
+    database.rename(elsewhere)  # absent before the closeout ever opens
+    with pytest.raises(CustodyError, match="engagement_ledger_unavailable"):
+        Closeout(case.directory, "org-a").withdraw(**START)
+    assert Closeout(case.directory, "org-a").status()["reconciled"] is False
+    elsewhere.rename(database)
+    assert Closeout(case.directory, "org-a").reconcile()["reconciled"] is True
+    retired = EngagementLedger(case.directory).get("org-a", epoch)
+    assert (retired.state, retired.revocation_epoch, retired.slot_released) == ("terminal", 1, True)
+
+    # A live grant with a ledger that lacks this engagement's row is a hold, not a no-op.
+    directory = private(tmp_path / ORG)
+    LocalTrainingStore(directory / "training.sqlite3", ORG)
+    other = EngagementLedger(directory)
+    enroll(other, ORG, "unrelated-epoch", "lease-u", 10)
+    other.activate(ORG, "unrelated-epoch")
+    grant = directory / "live-authority-generated.json"
+    grant.write_text("{}")
+    grant.chmod(0o600)
+    with pytest.raises(CustodyError, match="engagement_ledger_unavailable"):
+        Closeout(directory, ORG).withdraw(**START)
+    assert Closeout(directory, ORG).status()["reconciled"] is False
+    assert raw_row(directory, ORG, "unrelated-epoch") == ("active", None, 0)
