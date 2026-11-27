@@ -590,3 +590,33 @@ def test_home_does_not_recreate_closed_wal_sidecars(authorized, journal):
     reader = StarterInspectionAuthority(owner.settings, owner.actor)
     assert reader.entry(p.execution_ref) is None
     assert files(h.path.parent) == before
+
+
+@pytest.mark.parametrize("change", ["evaluator", "plan", "model", "freeze", "fields"])
+def test_signed_successor_cannot_read_policy_outside_original_freeze_identity(
+    authorized, monkeypatch, change
+):
+    from dataclasses import replace
+
+    from opentour_cell.pilot import starter_evaluation_authority as implementation
+
+    h, owner, _, _, authority, p, execution, *_ = authorized
+    actor = authority.actor
+    if change == "evaluator":
+        actor = replace(actor, actor="another-evaluator")
+        execution["permission"]["evaluator"] = actor.actor
+    elif change == "plan":
+        execution["permission"]["plan_digest"] = "0" * 64
+    elif change == "model":
+        execution["permission"]["model_ref"] = "another-model"
+    elif change == "freeze":
+        execution["permission"]["freeze_ref"] = "another-freeze"
+    else:
+        execution["permission"]["input_fields"] = ["unpermitted_field"]
+    seal(h.path.parent, "execution-a.json", execution)
+    replacement = StarterEvaluationAuthority(owner.settings, actor)
+    monkeypatch.setattr(
+        implementation, "_read_policy", lambda *a: pytest.fail("unauthorized policy read")
+    )
+    with pytest.raises(IntakeError):
+        replacement.work(p.execution_ref)
