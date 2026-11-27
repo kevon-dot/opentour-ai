@@ -114,7 +114,7 @@ def enter_map(h, monkeypatch, actor):
     return view
 
 
-def prepare_map(h, monkeypatch, policy=None):
+def prepare_map(h, monkeypatch, policy=None, **capability):
     import json
     from hashlib import sha256
 
@@ -152,6 +152,7 @@ def prepare_map(h, monkeypatch, policy=None):
         workflow,
         grant_ref="owner-review-v1",
         editors={ACTOR: selection["owner_id"], OTHER: "second-owner"},
+        **capability,
     )
     return workflow
 
@@ -825,4 +826,106 @@ def test_dated_examples_and_effective_clause_use_current_reader_authority(founde
     _write_private(h.path.parent / "map-review-withdrawn-owner-review-v1.json", {})
     h.action(view, "ot_map_date_clause", ref, reader)
     assert clause not in text(h, view)
+    assert effects(h) == (0,) * 7
+
+
+def test_owner_inspects_and_corrects_exact_category_under_current_grant(founder, monkeypatch):
+    from test_reviewer_workflow import screen, text
+    from test_slack_adapter import ACTOR
+    from test_starter_setup import effects
+
+    h = founder
+    policy = b'# Routing\nIf po equals "Alpha", APPROVE.\nIf po equals "mixed_Case", REVIEW.\n'
+    workflow = prepare_map(h, monkeypatch, policy)
+    service, actor = h.app._map_service(ACTOR, workflow)
+    view = enter_map(h, monkeypatch, ACTOR)
+    visible = text(h, view)
+    assert "po=Alpha → APPROVE" in visible and "po=mixed_Case → REVIEW" in visible
+    rows = service.preview(actor).branches
+    h.action(view, "ot_map_citation", rows[1].branch_ref)
+    assert (
+        screen(h, view)["blocks"][2]["text"]["text"].strip() == 'If po equals "mixed_Case", REVIEW.'
+    )
+    h.action(view, "ot_map_back", "back")
+    h.action(view, "ot_map_edit", rows[1].branch_ref)
+    assert "field == Token" in text(h, view)
+    original = service.preview(actor)
+    h.form(
+        view,
+        branch_values(screen(h, view), disposition="corrected", conditions="posted_code == Alpha"),
+    )
+    assert service.preview(actor) == original
+    view = enter_map(h, monkeypatch, ACTOR)
+    h.action(view, "ot_map_edit", rows[1].branch_ref)
+    h.form(view, branch_values(screen(h, view), disposition="corrected", conditions="po == Alpha"))
+    changed = service.preview(actor)
+    assert changed.question and changed.branches[1].source_support == "owner_assertion"
+    assert (
+        changed.branches[1].actor_ref == ACTOR
+        and changed.branches[1].conditions[0].threshold == "Alpha"
+    )
+    assert "po=Alpha → Unresolved" in text(h, view)
+    assert "po=mixed_Case → REVIEW" not in text(h, view) and effects(h) == (0,) * 7
+
+
+def test_reference_example_can_avoid_an_exact_token_matching_the_default_reference(
+    founder, monkeypatch
+):
+    from test_reviewer_workflow import text
+    from test_slack_adapter import ACTOR
+
+    policy = b'# Routing\nApply the first matching rule.\nIf po equals "example-reference", MANUAL.\nIf po is present, REVIEW.\n'
+    prepare_map(founder, monkeypatch, policy)
+    view = enter_map(founder, monkeypatch, ACTOR)
+    visible = text(founder, view)
+    assert "po=example-reference → MANUAL" in visible and "po=example-0 → REVIEW" in visible
+
+
+def test_dated_invoice_examples_for_each_cited_category_are_read_only_to_reader(
+    founder, monkeypatch
+):
+    from test_reviewer_workflow import screen, text
+    from test_slack_adapter import ACTOR
+    from test_starter_setup import effects
+
+    pairs = {
+        "annual_software_subscription": "SOFTWARE",
+        "carrier_freight": "FREIGHT",
+        "office_supplies": "SUPPLIES",
+        "utility_service": "UTILITIES",
+        "tax_remittance": "TAX",
+    }
+    clauses = [
+        f'If category equals "{category}" and po is present, {action}.'
+        for category, action in pairs.items()
+    ]
+    policy = "# Invoice coding\nEffective from 2026-03-01.\n" + "\n".join(
+        [*clauses, "If po is missing, REVIEW."]
+    )
+    h = founder
+    workflow = prepare_map(
+        h,
+        monkeypatch,
+        policy.encode(),
+        field_kinds={"category": "reference", "po": "reference"},
+        actions=sorted({*pairs.values(), "REVIEW"}),
+    )
+    reader = "UREADER"
+    h.config["users"][reader] = dict(h.config["users"][ACTOR])
+    h.slack.members.append(reader)
+    h.save()
+    service, principal = h.app._map_service(reader, workflow)
+    original = service.preview(principal)
+    view = enter_map(h, monkeypatch, reader)
+    visible = text(h, view)
+    for category, action in pairs.items():
+        assert (
+            f"Decision date 2026-03-01 · category={category}, po=example-reference → {action}"
+            in visible
+        )
+    assert not any(name == "ot_map_edit" for name, _ in actions(screen(h, view)))
+    h.action(view, "ot_map_page", "next", reader)
+    assert "po=missing → REVIEW" in text(h, view)
+    h.action(view, "ot_map_edit", original.branches[-1].branch_ref, reader)
+    assert "ot_map_branch_save" not in text(h, view) and service.preview(principal) == original
     assert effects(h) == (0,) * 7
