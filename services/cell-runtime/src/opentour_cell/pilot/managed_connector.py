@@ -261,6 +261,7 @@ class _View:
     job_id: str = ""
     state: mc.JobState = mc.JobState.UNKNOWN
     terminal: bool = False
+    cap_verified: bool = False
     tuned_model_id: str = ""
     usage: ProviderUsage | None = None
     cancel_requested: bool = False
@@ -418,6 +419,8 @@ class ManagedConnector:
                 view.file_id = event["file_id"]
             elif kind == "job":
                 view.job_id = event["job_id"]
+            elif kind == "cap_verified":
+                view.cap_verified = True
             elif kind == "progress" and not view.terminal:
                 view.state = mc.JobState(event["state"])
             elif kind == "terminal" and not view.terminal:
@@ -446,6 +449,8 @@ class ManagedConnector:
         """Report only what the provider confirmed. A pending cancel is not a stopped job."""
         if view.cancel_requested and view.terminal:
             return mc.JobState.CANCELED  # cancel wins a race with completion: no candidate
+        if view.state is mc.JobState.COMPLETED and not view.cap_verified:
+            return mc.JobState.UNKNOWN
         return view.state
 
     def _receipt(self, intent: mc.FitIntent, key: str, view: _View) -> mc.JobReceipt:
@@ -457,10 +462,7 @@ class ManagedConnector:
         )
 
     # ------------------------------------------------------------------ provider state
-    def _absorb(self, key: str, view: _View, job: ProviderJob) -> None:
-        """Fold one provider observation into the journal. A terminal state is final."""
-        if view.terminal:
-            return
+    def _require_same_job(self, key: str, view: _View, job: ProviderJob) -> None:
         if (
             job.job_id != view.job_id
             or job.client_token != self._token(key)
@@ -468,6 +470,12 @@ class ManagedConnector:
             or (view.file_id and view.file_id != job.file_id)
         ):
             raise ValueError("provider_job_identity_mismatched")
+
+    def _absorb(self, key: str, view: _View, job: ProviderJob) -> None:
+        """Fold one provider observation into the journal. A terminal state is final."""
+        if view.terminal:
+            return
+        self._require_same_job(key, view, job)
         state = _STATES.get(job.state, mc.JobState.UNKNOWN)
         if state is mc.JobState.COMPLETED and not job.tuned_model_id:
             state = mc.JobState.UNKNOWN  # success without a usable tuned-model id is not success
@@ -505,7 +513,9 @@ class ManagedConnector:
     def _token(self, key: str) -> str:
         return f"opentour-{key}"
 
-    def _reconcile(self, key: str, view: _View) -> _View | None:
+    def _reconcile(
+        self, key: str, view: _View, maximum_minor_units: int | None = None
+    ) -> _View | None:
         """Read-only toward the provider: find by client token. ``None`` means unverifiable."""
         binding = self._binding_of(view)
         job = self.transport.find_job(binding, self._token(key))
@@ -513,6 +523,9 @@ class ManagedConnector:
             return None
         self._adopt(key, view, job)
         view = self._view(key)
+        if maximum_minor_units is not None and not view.cancel_requested:
+            if not self._confirm_cap(key, view, job, maximum_minor_units):
+                return self._view(key)
         self._absorb(key, view, job)
         view = self._view(key)
         if view.cancel_requested and not view.terminal:
@@ -537,8 +550,8 @@ class ManagedConnector:
             if view.exists:
                 if view.intent_sha != digest:
                     raise ValueError("idempotency_conflict")
-                if not view.job_id:
-                    reconciled = self._reconcile(key, view)
+                if not view.job_id or (not view.cap_verified and not view.terminal):
+                    reconciled = self._reconcile(key, view, intent.bound.maximum_minor_units)
                     if reconciled is None:
                         raise OSError("dispatch_outcome_unknown")
                     view = reconciled
@@ -569,11 +582,7 @@ class ManagedConnector:
             )
             self._adopt(key, self._view(key), job)
             view = self._view(key)
-            if (
-                job.cap_minor_units is None
-                or job.cap_minor_units > intent.bound.maximum_minor_units
-            ):
-                self._cancel_unbounded(key, view, intent.binding)
+            if not self._confirm_cap(key, view, job, intent.bound.maximum_minor_units):
                 raise ValueError("provider_cap_not_enforced")
             self._absorb(key, view, job)
             return self._receipt(intent, key, self._view(key))
@@ -602,6 +611,18 @@ class ManagedConnector:
         if development != canonical_payload:
             raise ValueError("training_payload_invalid")
 
+    def _confirm_cap(
+        self, key: str, view: _View, job: ProviderJob, maximum_minor_units: int
+    ) -> bool:
+        self._require_same_job(key, view, job)
+        cap = job.cap_minor_units
+        if type(cap) is not int or not 0 <= cap <= maximum_minor_units:
+            self._cancel_unbounded(key, view, self._binding_of(view))
+            return False
+        if not view.cap_verified:
+            _append(self._journal(key), {"event": "cap_verified"})
+        return True
+
     def _cancel_unbounded(self, key: str, view: _View, binding: mc.ModelBinding) -> None:
         _append(self._journal(key), {"event": "cancel_requested"})
         self._cancel_at_provider(key, self._view(key), binding)
@@ -615,8 +636,8 @@ class ManagedConnector:
                 return None  # nothing was ever dispatched from here; lookup never creates
             if view.intent_sha != digest:
                 raise ValueError("idempotency_conflict")
-            if not view.job_id:
-                reconciled = self._reconcile(key, view)
+            if not view.job_id or (not view.cap_verified and not view.terminal):
+                reconciled = self._reconcile(key, view, intent.bound.maximum_minor_units)
                 if reconciled is None:
                     return None
                 view = reconciled
@@ -630,7 +651,10 @@ class ManagedConnector:
                 raise ValueError("job_receipt_mismatched")
             if not view.terminal and view.job_id:
                 provider = self.transport.get_job(self._binding_of(view), view.job_id)
-                self._absorb(key, view, provider)
+                if view.cancel_requested or self._confirm_cap(
+                    key, view, provider, job.intent.bound.maximum_minor_units
+                ):
+                    self._absorb(key, view, provider)
                 view = self._view(key)
             return self._receipt(job.intent, key, view)
 
@@ -655,6 +679,7 @@ class ManagedConnector:
             view.intent_sha != intent_digest(job.intent)
             or view.cancel_requested
             or not view.terminal
+            or not view.cap_verified
             or view.state is not mc.JobState.COMPLETED
             or not view.tuned_model_id
         ):
@@ -680,6 +705,7 @@ class ManagedConnector:
             or view.intent_sha != intent_digest(candidate.intent)
             or view.cancel_requested
             or not view.terminal
+            or not view.cap_verified
             or view.state is not mc.JobState.COMPLETED
             or not view.tuned_model_id
             or view.tuned_model_id != candidate.artifact_or_serving_revision
@@ -770,7 +796,12 @@ class ManagedConnector:
                 view = self._view(key)
                 if view.job_id != job_id:
                     continue
-                if view.terminal or view.cancel_requested or self._fenced():
+                if (
+                    view.terminal
+                    or view.cancel_requested
+                    or not view.cap_verified
+                    or self._fenced()
+                ):
                     return False
                 try:
                     observed = self.transport.get_job(self._binding_of(view), job_id)

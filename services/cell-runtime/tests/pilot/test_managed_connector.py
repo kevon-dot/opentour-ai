@@ -812,3 +812,16 @@ def test_r7_forged_receipt_changes_nothing(stack):
     with pytest.raises(ValueError, match="job_not_collectable"):
         connector.collect(forged)
     assert provider.cancel_calls == 0 and connector.lookup(intent) == real
+
+
+def test_lost_create_ack_does_not_bypass_required_provider_cap(stack):
+    provider, connector, pre, intent, reservations = stack
+    provider.cap_ack = None
+    provider.drop_create_response = True
+    receipt = dispatch(pre, intent, reservations)
+    assert receipt.state is mc.JobState.CANCELED
+    assert provider.executions == 1
+    assert provider.cancel_calls == 1
+    with pytest.raises(mc.CapabilityError, match="candidate_lineage_unverified"):
+        pre.collect_candidate(ACTOR, receipt)
+    assert connector.lookup(intent).state is mc.JobState.CANCELED
