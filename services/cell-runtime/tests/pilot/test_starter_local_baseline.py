@@ -379,3 +379,77 @@ def test_structured_profile_requires_full_current_schema_and_field_grants(
     with pytest.raises(IntakeError):
         baseline.execute(request, inputs)
     assert calls == [] and not baseline.path.exists()
+
+
+def test_changed_registered_encoding_holds_prior_operation_without_prediction(
+    local_setup, monkeypatch
+):
+    setup, baseline = local_setup
+    _, authority, _, document, path = setup
+    request, inputs = request_inputs(setup)
+    original = baseline.execute(request, inputs)
+    document["models"][0]["input_schema"] = "starter-structured-fields-v1"
+    write(path, document)
+    baseline.input_field = None
+    assert request_inputs(setup)[0] == request
+    calls = []
+    predict = cpu.predict
+    monkeypatch.setattr(cpu, "predict", lambda *args: calls.append(args))
+    with pytest.raises(IntakeError):
+        baseline.lookup(request)
+    with pytest.raises(IntakeError):
+        baseline.execute(request, inputs)
+    assert calls == []
+    with sqlite3.connect(baseline.path) as db:
+        assert db.execute("SELECT count(*) FROM receipts").fetchone() == (1,)
+    authority.permission = replace(
+        authority.permission, execution_ref="explicit-second-execution", revision="next-grant"
+    )
+    baseline.permission = authority.permission
+    monkeypatch.setattr(cpu, "predict", predict)
+    fresh_request, inputs = request_inputs(setup)
+    fresh = baseline.execute(fresh_request, inputs)
+    assert fresh.request != original.request and baseline.lookup(fresh_request) == fresh
+
+
+def test_historical_legacy_receipt_retains_only_legacy_encoding(local_setup):
+    setup, baseline = local_setup
+    request, inputs = request_inputs(setup)
+    baseline.execute(request, inputs)
+    with sqlite3.connect(baseline.path) as db:
+        body = json.loads(db.execute("SELECT body FROM receipts").fetchone()[0])
+        body.pop("input_encoding")
+        serialized = canonical(body)
+        seal = baseline._seal(baseline.receipt_key.read_bytes(), serialized)
+        db.execute("UPDATE receipts SET body=?, seal=?", (serialized, seal))
+    assert baseline.lookup(request).outputs == body["outputs"]
+    _, _, _, document, path = setup
+    document["models"][0]["input_schema"] = "starter-structured-fields-v1"
+    write(path, document)
+    baseline.input_field = None
+    with pytest.raises(IntakeError):
+        baseline.lookup(request)
+
+
+def test_input_encoding_change_during_prediction_rolls_back_entire_receipt(
+    local_setup, monkeypatch
+):
+    setup, baseline = local_setup
+    _, _, _, document, path = setup
+    request, inputs = request_inputs(setup)
+    predict = cpu.predict
+    calls = []
+
+    def change_encoding(fitted, text):
+        calls.append(text)
+        document["models"][0]["input_schema"] = "starter-structured-fields-v1"
+        write(path, document)
+        baseline.input_field = None
+        return predict(fitted, text)
+
+    monkeypatch.setattr(cpu, "predict", change_encoding)
+    with pytest.raises(IntakeError):
+        baseline.execute(request, inputs)
+    assert len(calls) == 1
+    with sqlite3.connect(baseline.path) as db:
+        assert not db.execute("SELECT name FROM sqlite_master WHERE name='receipts'").fetchall()

@@ -98,6 +98,15 @@ class LocalStarterBaseline:
         self.artifact, self.receipt_key, self.input_field = artifact, receipt_key, input_field
         self.reference, self.revision = permission.model_ref, permission.model_revision
 
+    def _encoding(self) -> Json:
+        return {
+            "input_schema": "starter-structured-fields-v1"
+            if self.input_field is None
+            else "starter-text-" + self.input_field + "-v1",
+            "preprocessing_revision": cpu.PROFILE,
+            "input_fields": list(self.permission.input_fields),
+        }
+
     def _text(self, fields: Mapping[str, object]) -> str:
         """Apply only the registered input encoding, before CPU feature extraction."""
         _require(set(fields) == set(self.permission.input_fields))
@@ -137,12 +146,7 @@ class LocalStarterBaseline:
             and binding.immutable_revision == self.revision
             and binding.route is model.Route.LOCAL
             and binding.task == "classification"
-            and binding.input_schema
-            == (
-                "starter-structured-fields-v1"
-                if self.input_field is None
-                else "starter-text-" + self.input_field + "-v1"
-            )
+            and binding.input_schema == self._encoding()["input_schema"]
             and binding.output_schema == "action-output-v1"
             and binding.preprocessing_revision == cpu.PROFILE
         )
@@ -326,45 +330,69 @@ class LocalStarterBaseline:
         _require(hmac.compare_digest(row[1], self._seal(key, row[0])))
         body = json.loads(row[0])
         _require(body["request"] == asdict(request))
+        # The raw artifact digest alone does not identify its input encoding.
+        # A registry schema change cannot reinterpret a prior operation's output.
+        # Historical receipts predate this metadata and used only the legacy
+        # single-text-field profile, whose encoding remains unchanged.
+        _require(
+            body.get("input_encoding") == self._encoding()
+            or ("input_encoding" not in body and self.input_field is not None)
+        )
         return PredictionReceipt(request, "local-prediction-" + digest(body)[:40], body["outputs"])
 
     def lookup(self, request: PredictionRequest) -> PredictionReceipt | None:
+        encoding = self._encoding()
         _, key, _ = self._current(request)
+        _require(self._encoding() == encoding)
         if not os.path.lexists(self.path):
             self._absent()
             return None
         with self._db() as db:
             receipt = self._receipt(db, request, key)
-            _require(self._current(request)[1] == key)
+            _require(self._current(request)[1] == key and self._encoding() == encoding)
             return receipt
 
     def execute(
         self, request: PredictionRequest, inputs: Mapping[str, Mapping[str, object]]
     ) -> PredictionReceipt:
+        encoding = self._encoding()
         fitted, key, expected = self._current(request)
-        _require(canonical(inputs) == canonical(expected))
+        _require(canonical(inputs) == canonical(expected) and self._encoding() == encoding)
+
+        def unchanged() -> None:
+            _require(
+                self._current(request) == (fitted, key, expected) and self._encoding() == encoding
+            )
+
         with self._db(write=True) as db:
-            _require(self._current(request) == (fitted, key, expected))
+            unchanged()
             existing = self._receipt(db, request, key)
             if existing is not None:
-                _require(self._current(request) == (fitted, key, expected))
+                unchanged()
                 return existing
             outputs = {}
             for handle, fields in expected.items():
-                _require(self._current(request) == (fitted, key, expected))
+                unchanged()
                 label = cpu.predict(fitted, self._text(fields))
+                unchanged()
                 outputs[handle] = (
                     {"status": "review"}
                     if label == "REVIEW"
                     else {"status": "automatic", "label": label}
                 )
-            body = canonical({"request": asdict(request), "outputs": outputs})
-            _require(self._current(request) == (fitted, key, expected))
+            body = canonical(
+                {
+                    "request": asdict(request),
+                    "outputs": outputs,
+                    "input_encoding": encoding,
+                }
+            )
+            unchanged()
             db.execute(
                 "INSERT INTO receipts VALUES(?,?,?)",
                 (request.operation_ref, body, self._seal(key, body)),
             )
             receipt = self._receipt(db, request, key)
             assert receipt is not None
-            _require(self._current(request) == (fitted, key, expected))
+            unchanged()
         return receipt
