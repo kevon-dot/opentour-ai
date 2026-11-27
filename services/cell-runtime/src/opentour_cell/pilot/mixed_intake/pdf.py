@@ -28,13 +28,12 @@ from opentour_cell.pilot.mixed_intake.model import (
     finish,
 )
 
-PDF_REVISION = "opentour.reader.pdf-text@1.0.1"
+PDF_REVISION = "opentour.reader.pdf-text@1.0.2"
 _OBJ = re.compile(rb"(?<![0-9])(\d{1,7})\s+(\d{1,5})\s+obj\b")
 _REF = rb"(\d+)\s+\d+\s+R"
 _NUMBER = re.compile(rb"[+-]?(\d+\.?\d*|\.\d+)")
 _WS = b" \t\r\n\x0c\x00"
 _DELIM = b"()<>[]/%"
-_STD_ENCODINGS = {b"WinAnsiEncoding", b"MacRomanEncoding", b"StandardEncoding"}
 _ESCAPES = {
     ord("n"): 10,
     ord("r"): 13,
@@ -344,7 +343,7 @@ def _fragments(
     return out, marks
 
 
-def _font_ok(fonts: dict[bytes, _Object], name: bytes) -> bool:
+def _font_ok(fonts: dict[bytes, _Object], name: bytes, text: str) -> bool:
     """Only a font whose byte-to-character mapping is provably standard is trusted."""
     obj = fonts.get(name)
     if obj is None:
@@ -359,13 +358,24 @@ def _font_ok(fonts: dict[bytes, _Object], name: bytes) -> bool:
     if re.search(rb"/Encoding\s*(?:<<|\d+\s+\d+\s+R)", head):
         return False  # inline or indirect encoding dictionary
     encoding = re.search(rb"/Encoding\s*/(\w+)", head)
+    if encoding and encoding[1] == b"WinAnsiEncoding":
+        return all(ord(char) >= 32 and char not in "\x7f\ufffd" for char in text)
+    standard_subset = all(32 <= ord(char) <= 126 and char not in "'`" for char in text)
     if encoding:
-        return encoding[1] in _STD_ENCODINGS
-    # No encoding at all: only an un-embedded, non-symbolic standard Type1 font is safe.
+        # This reader decodes with WinAnsi. Only shared ASCII glyphs may be trusted
+        # when a different supported font encoding is declared.
+        return encoding[1] in {b"MacRomanEncoding", b"StandardEncoding"} and standard_subset
+    # Default font encodings are only known for the unembedded standard text fonts.
     return (
-        re.search(rb"/Subtype\s*/Type1\b", head) is not None
+        standard_subset
+        and re.search(rb"/Subtype\s*/Type1\b", head) is not None
         and b"/FontDescriptor" not in head
-        and re.search(rb"/BaseFont\s*/(Symbol|ZapfDingbats)", head) is None
+        and re.search(
+            rb"/BaseFont\s*/(?:Courier(?:-Bold(?:Oblique)?|-Oblique)?"
+            rb"|Helvetica(?:-Bold(?:Oblique)?|-Oblique)?|Times-(?:Roman|Bold(?:Italic)?|Italic))\b",
+            head,
+        )
+        is not None
     )
 
 
@@ -463,7 +473,7 @@ def read_pdf(data: bytes, limits: Limits, deadline: Deadline) -> ReadResult:
             if images or marks:
                 image_pages.append(page_number)
             continue
-        flagged_font = any(not _font_ok(fonts, f.font) for f in fragments)
+        flagged_font = any(not _font_ok(fonts, f.font, f.text) for f in fragments)
         passages = _passages(_lines(fragments))
         for index, lines in enumerate(passages, start=1):
             reading_order += 1

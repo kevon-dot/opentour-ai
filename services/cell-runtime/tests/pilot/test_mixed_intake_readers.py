@@ -349,6 +349,15 @@ def test_pdf_with_a_standard_font_stays_eligible() -> None:
     assert [s.text for s in result.spans] == ["First line", "Second"]
 
 
+@pytest.mark.parametrize("encoding", [b"MacRomanEncoding", b"StandardEncoding"])
+def test_pdf_unverified_extended_glyph_requires_review(encoding: bytes) -> None:
+    font = b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /" + encoding + b" >>"
+    content = b"BT /F1 11 Tf (Total \x8e before tax) Tj ET"
+    result = read(_pdf(content, font=font), "x.pdf")[1]
+    assert result.state is ExtractionState.NEEDS_REVIEW
+    assert "font_encoding_unverified" in result.reason
+
+
 @pytest.mark.parametrize(
     ("label", "kwargs", "flag"),
     [
