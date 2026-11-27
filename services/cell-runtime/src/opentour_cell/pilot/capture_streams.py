@@ -169,11 +169,18 @@ class CaptureStreams:
                 "tenant TEXT NOT NULL,epoch TEXT NOT NULL,workflow TEXT NOT NULL,"
                 "grant_revision TEXT NOT NULL,policy_revision TEXT NOT NULL,"
                 "operation_ref TEXT NOT NULL,attempt TEXT NOT NULL,"
+                "case_ref TEXT NOT NULL,decision_revision INTEGER NOT NULL,"
                 "source_ref TEXT NOT NULL,event_ref TEXT NOT NULL,event_revision INTEGER NOT NULL,"
                 "observed_at INTEGER NOT NULL,kind TEXT NOT NULL,payload TEXT NOT NULL,"
                 "PRIMARY KEY(tenant,epoch,workflow,grant_revision,policy_revision,"
                 "operation_ref,attempt,"
                 "source_ref,event_ref,event_revision,observed_at,kind,payload))"
+            )
+            db.execute(
+                "CREATE INDEX IF NOT EXISTS capture_business_commit "
+                "ON decision_capture_streams("
+                "tenant,epoch,workflow,grant_revision,policy_revision,source_ref,"
+                "case_ref,decision_revision,operation_ref) WHERE kind='commit'"
             )
             scope = (
                 grant.tenant,
@@ -196,11 +203,14 @@ class CaptureStreams:
             ).fetchone()
             _require(other is None, "capture_event_scope_changed")
             db.execute(
-                "INSERT OR IGNORE INTO decision_capture_streams VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "INSERT OR IGNORE INTO decision_capture_streams "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     *scope,
                     attempt.operation_ref,
                     identity,
+                    attempt.case_ref,
+                    attempt.decision_revision,
                     event.source_ref,
                     event.event_ref,
                     event.event_revision,
@@ -215,6 +225,8 @@ class CaptureStreams:
                 (*scope, attempt.operation_ref),
             ).fetchone()[0]
             _require(count <= MAX_EVENTS, "capture_operation_limit")
+            _require(self._current(db, actor, workflow, "record", boundary) == grant)
+            _require(not os.path.lexists(self.store.path.with_name("custody.sqlite3")))
 
     def started(
         self,
@@ -334,6 +346,7 @@ class CaptureStreams:
                     for kind, boundary in _BOUNDARY.items()
                     if boundary in sources
                 ]
+                competing: set[tuple[str, int]] = set()
                 if (
                     permitted
                     and db.execute(
@@ -344,7 +357,7 @@ class CaptureStreams:
                     filters = ",".join("(?,?)" for _ in permitted)
                     rows = db.execute(
                         "SELECT attempt,source_ref,event_ref,event_revision,"
-                        "observed_at,kind,payload "
+                        "observed_at,kind,payload,case_ref,decision_revision "
                         "FROM decision_capture_streams WHERE "
                         "(tenant,epoch,workflow,grant_revision,policy_revision,operation_ref)"
                         f"=(?,?,?,?,?,?) AND (kind,source_ref) IN (VALUES {filters}) LIMIT ?",
@@ -360,9 +373,13 @@ class CaptureStreams:
                         ),
                     ).fetchall()
                     _require(len(rows) <= MAX_EVENTS, "capture_operation_limit")
+                    if "application_commit" in sources:
+                        competing = _competing_revisions(
+                            db, grant, sources["application_commit"], operation_ref
+                        )
                 else:
                     rows = []
-                view = _view(rows)
+                view = _view(rows, competing)
                 if "application_commit" not in sources:
                     view.update(committed_decisions=None, disputed_decisions=None)
                 _require(self._current(db, actor, workflow, "inspect", None) == grant)
@@ -374,18 +391,52 @@ class CaptureStreams:
             raise CaptureError("decision_capture_unavailable") from None
 
 
-def _view(rows: list[sqlite3.Row]) -> dict[str, Any]:
+def _competing_revisions(
+    db: sqlite3.Connection, grant: CaptureGrant, source: str, operation_ref: str
+) -> set[tuple[str, int]]:
+    # The caller has permission to inspect only the requested operation. Return
+    # a dispute flag for its revisions without returning competing references.
+    rows = db.execute(
+        "SELECT DISTINCT current.case_ref,current.decision_revision "
+        "FROM decision_capture_streams AS current "
+        "WHERE (current.tenant,current.epoch,current.workflow,current.grant_revision,"
+        "current.policy_revision,current.operation_ref,current.source_ref)=(?,?,?,?,?,?,?) "
+        "AND current.kind='commit' AND EXISTS ("
+        "SELECT 1 FROM decision_capture_streams AS competing "
+        "WHERE (competing.tenant,competing.epoch,competing.workflow,competing.grant_revision,"
+        "competing.policy_revision,competing.source_ref,competing.case_ref,"
+        "competing.decision_revision)=(current.tenant,current.epoch,current.workflow,"
+        "current.grant_revision,current.policy_revision,current.source_ref,current.case_ref,"
+        "current.decision_revision) "
+        "AND competing.kind='commit' AND competing.operation_ref<>current.operation_ref)",
+        (
+            grant.tenant,
+            grant.epoch,
+            grant.workflow,
+            grant.revision,
+            grant.policy_revision,
+            operation_ref,
+            source,
+        ),
+    )
+    return {(case, revision) for case, revision in rows}
+
+
+def _view(rows: list[sqlite3.Row], competing: set[tuple[str, int]]) -> dict[str, Any]:
     attempts: dict[str, list[tuple[str, str]]] = {}
     identities: dict[str, set[str]] = {}
     deliveries: dict[tuple[str, str, int], set[tuple[str, str, str, int]]] = {}
     commits: dict[tuple[str, int], set[tuple[str, str]]] = {}
-    for attempt, source, event, revision, when, kind, body in rows:
+    for attempt, source, event, revision, when, kind, body, case_ref, decision_revision in rows:
         deliveries.setdefault((source, event, revision), set()).add((attempt, kind, body, when))
         attempts.setdefault(attempt, []).append((kind, body))
         identity = json.loads(attempt)
+        _require(
+            (identity["case_ref"], identity["decision_revision"]) == (case_ref, decision_revision)
+        )
         identities.setdefault(identity["attempt_ref"], set()).add(attempt)
         if kind == "commit":
-            commits.setdefault((identity["case_ref"], identity["decision_revision"]), set()).add(
+            commits.setdefault((case_ref, decision_revision), set()).add(
                 (attempt, json.loads(body)["commit_ref"])
             )
     conflicting = {
@@ -453,8 +504,10 @@ def _view(rows: list[sqlite3.Row]) -> dict[str, Any]:
             }
         )
     disputed = sum(
-        len(events) > 1 or any(attempt in conflicting_commits for attempt, _ in events)
-        for events in commits.values()
+        revision in competing
+        or len(events) > 1
+        or any(attempt in conflicting_commits for attempt, _ in events)
+        for revision, events in commits.items()
     )
     return {
         "attempts": result,

@@ -5,6 +5,7 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
+from opentour_cell.pilot import capture_streams
 from opentour_cell.pilot.capture_streams import (
     CapturedAttempt,
     CaptureError,
@@ -145,6 +146,60 @@ def test_conflicting_chunk_and_competing_app_commit_remain_distinct(tmp_path):
     capture.committed("app", workflow, a1, row(COMMIT, "competing"), "commit-a")
     conflicting = capture.inspect("owner", workflow, a1.operation_ref)
     assert conflicting["committed_decisions"] == 0 and conflicting["disputed_decisions"] == 1
+
+
+@pytest.mark.parametrize("change", ["consent", "source", "expiry"])
+def test_current_record_grant_is_rechecked_after_chunk_projection(tmp_path, monkeypatch, change):
+    capture, authority = journal(tmp_path / "one")
+    current = replace(authority.base, mode="metadata_only")
+    authority.base = current
+    attempt = CapturedAttempt("operation-a", "a1", "case-a", "family-a", 1)
+    capture.started("app", current.workflow, attempt, row(REQUEST, "start"))
+    original = capture_streams.hmac.digest
+    changes = {
+        "consent": replace(current, mode="off"),
+        "source": replace(
+            current, sources=(REQUEST, ("provider_response", "replacement-journal"), COMMIT)
+        ),
+        "expiry": replace(current, expires_at=110),
+    }
+
+    def project_then_change(*args, **kwargs):
+        fingerprint = original(*args, **kwargs)
+        authority.base = changes[change]
+        return fingerprint
+
+    monkeypatch.setattr(capture_streams.hmac, "digest", project_then_change)
+    with pytest.raises(CaptureError):
+        capture.observed_chunk("app", current.workflow, attempt, row(RESPONSE, "late"), 0, SENTINEL)
+    authority.base = current
+    attempt_view = capture.inspect("owner", current.workflow, attempt.operation_ref)["attempts"][0]
+    assert attempt_view["observed_chunks"] == 0
+    with capture.store._db() as db:
+        assert db.execute("SELECT kind FROM decision_capture_streams").fetchall()[0][0] == "start"
+        assert db.execute("SELECT count(*) FROM decision_capture_streams").fetchone()[0] == 1
+
+
+def test_competing_business_revision_is_disputed_across_operations(tmp_path):
+    capture, authority = journal(tmp_path / "one")
+    authority.base = replace(authority.base, mode="metadata_only")
+    workflow = authority.base.workflow
+    first = CapturedAttempt("operation-a", "a1", "case-a", "family-a", 1)
+    second = replace(first, operation_ref="operation-b", attempt_ref="a2")
+    successor = replace(first, operation_ref="operation-c", decision_revision=2)
+    another_case = replace(first, operation_ref="operation-d", case_ref="case-b")
+    for attempt in (first, successor, another_case, second):
+        ref = attempt.operation_ref
+        capture.committed("app", workflow, attempt, row(COMMIT, ref), "commit-" + ref)
+    for attempt in (first, second):
+        view = capture.inspect("owner", workflow, attempt.operation_ref)
+        assert (view["committed_decisions"], view["disputed_decisions"]) == (0, 1)
+        assert [item["attempt_ref"] for item in view["attempts"]] == [attempt.attempt_ref]
+    for attempt in (successor, another_case):
+        view = capture.inspect("owner", workflow, attempt.operation_ref)
+        assert (view["committed_decisions"], view["disputed_decisions"]) == (1, 0)
+    scoped = capture.inspect("response-inspector", workflow, first.operation_ref)
+    assert scoped["committed_decisions"] is None and scoped["disputed_decisions"] is None
 
 
 def test_actor_source_policy_and_withdrawal_scope_normal_reads(tmp_path):
