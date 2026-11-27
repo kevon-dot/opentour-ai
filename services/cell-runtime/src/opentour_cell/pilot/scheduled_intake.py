@@ -28,6 +28,7 @@ from opentour_cell.pilot.intake_mcp import (
     HistoricalPair,
     IntakeError,
     IntakePrincipal,
+    RunStatus,
     parse_intake,
     require_ref,
 )
@@ -191,7 +192,7 @@ class ScheduledIntake:
         finally:
             db.close()
 
-    def _initialize(self) -> None:
+    def _initialize(self) -> bool:
         with self._db() as db:
             db.execute("""CREATE TABLE IF NOT EXISTS schedule_heads (
                 identity TEXT PRIMARY KEY, revision TEXT NOT NULL, state TEXT NOT NULL,
@@ -220,6 +221,10 @@ class ScheduledIntake:
             ).fetchone()
             if row is None:
                 if self.config["enabled"]:
+                    if time.time() >= self.config["expires_at"]:
+                        # Expiry cannot open a source factory or bind a fresh,
+                        # possibly mistyped installation identity permanently.
+                        return False
                     # Do not bind a fresh installation irreversibly to a mistyped actor.
                     self._factory()
                 db.execute(
@@ -232,6 +237,7 @@ class ScheduledIntake:
                 )
             else:
                 _need(row[0] == self.revision, "schedule_configuration_changed")
+        return True
 
     def _head(self) -> sqlite3.Row:
         with self._db() as db:
@@ -251,7 +257,8 @@ class ScheduledIntake:
         """Local pause/revoke/resume; revocation is terminal for this installation."""
         _need(state in _STATES)
         with self._lease():
-            self._initialize()
+            if not self._initialize():
+                return self._finish("expired", 0, 0, [])
             previous = self._head()["state"]
             _need(previous != "revoked" or state == "revoked")
             if state == "enabled":
@@ -398,7 +405,8 @@ class ScheduledIntake:
 
     def tick(self) -> dict[str, str]:
         with self._lease():
-            self._initialize()
+            if not self._initialize():
+                return self._finish("expired", 0, 0, [])
             head = self._head()
             if head["state"] != "enabled":
                 return self._finish(str(head["state"]), 0, 0, [])
@@ -507,7 +515,8 @@ class ScheduledIntake:
         Last successful observations remain historical on an unavailable readback.
         """
         with self._lease():
-            self._initialize()
+            if not self._initialize():
+                return self._finish("expired", 0, 0, [])
             head = self._head()
             if head["state"] != "enabled":
                 return self._finish(str(head["state"]), 0, 0, [])
@@ -517,15 +526,16 @@ class ScheduledIntake:
                 return self._finish("cadence_held", 0, 0, [])
             deadline = time.monotonic() + self.config["tick_seconds"]
             with self._db() as db:
-                db.execute(
-                    "UPDATE schedule_heads SET last_start=? WHERE identity=?",
-                    (time.time(), self.identity),
-                )
                 work = db.execute(
                     "SELECT run_ref FROM schedule_work WHERE identity=? "
                     "AND observed_state!='materialized' ORDER BY checks,run_ref LIMIT ?",
                     (self.identity, self.config["operations_per_tick"]),
                 ).fetchall()
+                if work:
+                    db.execute(
+                        "UPDATE schedule_heads SET last_start=? WHERE identity=?",
+                        (time.time(), self.identity),
+                    )
             if not work:
                 return self._finish("idle", 0, 0, [])
             used = 0
@@ -545,7 +555,8 @@ class ScheduledIntake:
                     try:
                         status = admission.get_run(actor, run_ref)
                         _need(
-                            status.run_ref == run_ref
+                            isinstance(status, RunStatus)
+                            and status.run_ref == run_ref
                             and status.state in {"pending", "queued", "materialized"}
                         )
                     except (

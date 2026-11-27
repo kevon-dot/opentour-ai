@@ -95,7 +95,10 @@ tenant-scoped `BenchmarkIntake.get_run`. It starts at most `operations_per_tick`
 status calls, charges each attempt against the same monthly allowance and shares
 the tick lease, cadence, local controls and cooperative deadline. Least-checked
 runs come first; an unavailable run does not discard or permanently block another
-current run. A call already started can return after the deadline. No source page
+current run. An empty reconciliation poll does not advance the cadence, so it
+cannot starve discovery; a fresh expired enabled configuration opens no source
+factory and does not bind a new installation identity. A call already started can
+return after the deadline. No source page
 is dispatched by either command. Hosting or alternating the commands remains an
 operator setup step, not an installed scheduled Zap.
 

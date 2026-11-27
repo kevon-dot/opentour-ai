@@ -797,6 +797,22 @@ def test_reconcile_monthly_quota_retains_run_without_status_call(tmp_path, clock
     assert retained(case.worker()) == before
 
 
+def test_missing_status_is_unknown_not_completion(tmp_path, clock, monkeypatch):
+    case = Case(tmp_path / "worker")
+    case.signed.connect()
+    case.worker().tick()
+    actor, intake = open_intake(case.selected)
+    monkeypatch.setattr(intake, "get_run", lambda *_args: None)
+    monkeypatch.setattr(scheduled, "open_intake", lambda _path: (actor, intake))
+    before = retained(case.worker())[0]
+    clock.advance()
+    assert case.worker().reconcile()["state"] == "unavailable"
+    after = retained(case.worker())[0]
+    assert after["observed_state"] == before["observed_state"] == "pending"
+    assert after["observed_at"] == before["observed_at"]
+    assert after["availability"] == "unavailable" and after["checks"] == 1
+
+
 def test_reconcile_quota_fairness_and_shared_cadence(tmp_path, clock):
     case = Case(tmp_path / "worker", pages_per_tick=4, operations_per_tick=1)
     case.signed.connect()
@@ -916,4 +932,35 @@ def test_actual_reconcile_cli_returns_only_state_and_receipt(tmp_path):
     )
     assert retained(worker)[0]["checks"] == 1
     case.no_reader_effects()
+
+
+@pytest.mark.parametrize("action", ["tick", "reconcile", "pause"])
+def test_fresh_expired_schedule_opens_no_factory_or_binds_identity(tmp_path, monkeypatch, action):
+    case = Case(tmp_path / "worker", expires_at=1)
+    worker = case.worker()
+    with monkeypatch.context() as patch:
+        patch.setattr(scheduled, "open_intake", lambda _path: pytest.fail("fresh expired factory"))
+        result = worker.control("paused") if action == "pause" else getattr(worker, action)()
+    assert result["state"] == "expired"
+    with worker._db() as db:
+        assert db.execute("SELECT count(*) FROM schedule_heads").fetchone()[0] == 0
+        assert db.execute("SELECT count(*) FROM schedule_work").fetchone()[0] == 0
+    # No live identity/revision was sealed. A corrected first valid configuration works.
+    case.body["expires_at"] = int(time.time()) + 3000
+    _write_private(case.configuration, case.body)
+    case.signed.connect()
+    assert case.worker().tick()["state"] == "pending"
+
+
+def test_idle_reconcile_does_not_starve_discovery_cadence(tmp_path, clock):
+    case = Case(tmp_path / "worker")
+    worker = case.worker()
+    assert worker.reconcile()["state"] == "idle"
+    assert worker._head()["last_start"] == 0
+    for _ in range(3):
+        clock.advance()
+        assert case.worker().reconcile()["state"] == "idle"
+    case.signed.connect()
+    assert case.worker().tick()["state"] == "pending"
+    assert len(retained(case.worker())) == 1
     assert len(case.live_runs()) == 1
