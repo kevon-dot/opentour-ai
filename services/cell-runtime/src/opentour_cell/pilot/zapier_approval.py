@@ -14,6 +14,7 @@ import re
 import secrets
 import sqlite3
 import sys
+import tempfile
 import time
 from collections.abc import Callable, Iterator
 from contextlib import closing, contextmanager
@@ -387,12 +388,7 @@ class ApprovalBridge:
     def _invalidate(self, request_id: str, reason: str) -> None:
         marker = self._path(request_id, "reconciled")
         if not os.path.lexists(marker):
-            _record(marker, {"request_id": request_id, "reason": reason})
-            directory_fd = os.open(self.directory, os.O_RDONLY | os.O_DIRECTORY)
-            try:
-                os.fsync(directory_fd)
-            finally:
-                os.close(directory_fd)
+            self._record_observation(marker, {"request_id": request_id, "reason": reason})
 
     def _inventory(self, journal: ReconciliationJournal, policy: Json, key: bytes) -> None:
         for path in sorted(self.directory.glob("zapier-approval-za-*-request.json")):
@@ -460,11 +456,34 @@ class ApprovalBridge:
                         is not None
                     )
                 replaced = reason == "reviewer_replaced" or projected
-                unknown = replaced and self._unknown_outcome(request_id, status)
+                unknown = self._unknown_outcome(request_id, status)
+                conflicts = sorted(
+                    self.directory.glob(f"zapier-approval-{request_id}-status-conflict-*.json")
+                )
+                for conflict in conflicts:
+                    evidence = _read_private(conflict, 1024)
+                    require(
+                        set(evidence) == {"request_id", "event_sha256", "status"}
+                        and evidence["request_id"] == request_id
+                        and isinstance(evidence["event_sha256"], str)
+                        and HEX.fullmatch(evidence["event_sha256"])
+                        and evidence["status"] in {"Pending", "Approved", "Declined"}
+                        and conflict
+                        == self._path(
+                            request_id, "status-conflict-" + evidence["event_sha256"][:16]
+                        ),
+                        "invalid_provider_conflict_receipt",
+                    )
                 journal.transition(
                     request_id,
-                    "held" if unknown else "superseded" if replaced else MARKER_STATES[reason],
-                    "remote_outcome_unknown"
+                    "held"
+                    if unknown or conflicts
+                    else "superseded"
+                    if replaced
+                    else MARKER_STATES[reason],
+                    "conflicting_provider_event"
+                    if conflicts
+                    else "remote_outcome_unknown"
                     if unknown
                     else "reviewer_replaced"
                     if replaced
@@ -482,6 +501,10 @@ class ApprovalBridge:
                 "invalid_local_submission_receipt",
             )
             return False
+        if provider_status == "Pending" and os.path.lexists(self._path(request_id, "event")):
+            # A verified terminal reservation may precede a stopped local effect.
+            # An earlier Pending observation does not settle that later event.
+            return True
         # Catch Hook HTTP acceptance is not an observation of the approval action.
         return provider_status not in {"Pending", "Approved", "Declined"} and os.path.lexists(
             admitted
@@ -726,6 +749,39 @@ class ApprovalBridge:
 
     def observe_replaced_status(self, envelope: Json) -> Json:
         """Record authenticated old-provider state without accepting an old vote."""
+        return self._observe_fenced_status(envelope, replaced=True)
+
+    def observe_fenced_status(self, envelope: Json) -> Json:
+        """Resolve an expired or paused ordinary request without importing its vote."""
+        return self._observe_fenced_status(envelope, replaced=False)
+
+    def _record_observation(self, path: Path, value: Json) -> None:
+        # Every caller holds the approval writer. Rename keeps the published file
+        # single-linked even if the process stops immediately after publication.
+        require(path.parent == self.directory, "private_configuration_required")
+        if os.path.lexists(path):
+            require(_read_private(path, 16_384) == value, "existing_result_conflict")
+        else:
+            temporary = None
+            try:
+                with tempfile.NamedTemporaryFile(
+                    dir=self.directory, prefix=".zapier-reconcile-", delete=False
+                ) as pending:
+                    temporary = Path(pending.name)
+                    pending.write((canonical(value) + "\n").encode())
+                    pending.flush()
+                    os.fsync(pending.fileno())
+                os.replace(temporary, path)
+            finally:
+                if temporary is not None:
+                    temporary.unlink(missing_ok=True)
+        directory_fd = os.open(self.directory, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+
+    def _observe_fenced_status(self, envelope: Json, *, replaced: bool) -> Json:
         with self._serialized() as journal:
             _, key = self._policy()
             require(
@@ -747,21 +803,50 @@ class ApprovalBridge:
                 hmac.compare_digest(envelope["signature"], _sig(original_key, EVENT, event)),
                 "provider_signature_invalid",
             )
-            marker = _read_private(self._path(request_id, "reconciled"), 1024)
+            marker_path = self._path(request_id, "reconciled")
+            marker = _read_private(marker_path, 1024) if os.path.lexists(marker_path) else None
             with journal.db() as db:
                 projected = db.execute(
                     "SELECT 1 FROM reviewer_projected_requests WHERE request_id=?", (request_id,)
                 ).fetchone()
+                row = db.execute(
+                    "SELECT state,provider_status FROM requests WHERE id=?", (request_id,)
+                ).fetchone()
+            require(row is not None, "request_not_in_reconciliation_inventory")
+            assert row is not None
             require(
-                projected is not None
-                and marker.get("request_id") == request_id
-                and marker.get("reason") in MARKER_STATES
-                and event["nonce"] == request["nonce"]
+                marker is None
+                or (
+                    marker.get("request_id") == request_id and marker.get("reason") in MARKER_STATES
+                ),
+                "invalid_reconciliation_marker",
+            )
+            if replaced:
+                require(projected is not None and marker is not None, "provider_scope_mismatch")
+            else:
+                require(projected is None, "reviewer_replacement_observation_required")
+                require(
+                    row["state"] not in {"approved", "changes_requested"}
+                    and self._completed_decision(request) is None,
+                    "completed_request_observation_not_required",
+                )
+                require(
+                    marker is not None
+                    or int(time.time()) >= request["expires_at"]
+                    or journal.installation()["paused"] == "true",
+                    "request_not_fenced",
+                )
+            require(
+                event["nonce"] == request["nonce"]
                 and event["zap_id"] == policy["zap_id"]
                 and event["zap_version"] == policy["zap_version"],
                 "provider_scope_mismatch",
             )
             _check_file(self._path(request_id, "admitted"))
+            require(
+                not os.path.lexists(self._path(request_id, "not-sent")),
+                "request_was_not_submitted",
+            )
             require(
                 type(event["decided_at"]) is int
                 and request["issued_at"] <= event["decided_at"]
@@ -780,23 +865,71 @@ class ApprovalBridge:
                 ),
                 "named_approver_unverified",
             )
+            reservation = self._path(request_id, "event")
+            reservation_conflict = False
+            if os.path.lexists(reservation):
+                stamp = _read_private(reservation, 1024)
+                require(
+                    set(stamp) == {"event_identity", "first_event_sha256", "request_id"}
+                    and stamp["request_id"] == request_id
+                    and all(
+                        isinstance(stamp[k], str) and HEX.fullmatch(stamp[k])
+                        for k in ("event_identity", "first_event_sha256")
+                    ),
+                    "invalid_provider_event_reservation",
+                )
+                reservation_conflict = stamp["event_identity"] != digest(
+                    {k: v for k, v in event.items() if k != "decided_at"}
+                )
+            reason = (
+                "reviewer_replaced"
+                if replaced
+                else marker["reason"]
+                if marker is not None
+                else "request_expired"
+                if int(time.time()) >= request["expires_at"]
+                else "version_superseded"
+            )
+            # Authenticate first, then fence durably before recording the observation.
+            # If the worker stops here, inventory retains any unknown remote outcome.
+            self._invalidate(request_id, reason)
             with journal.db() as db:
                 row = db.execute(
                     "SELECT state,provider_status FROM requests WHERE id=?", (request_id,)
                 ).fetchone()
                 require(row is not None, "request_not_in_reconciliation_inventory")
                 assert row is not None
-                require(
-                    row["provider_status"] not in {"Approved", "Declined"}
-                    or row["provider_status"] == event["status"],
-                    "conflicting_provider_event",
+                conflicting = reservation_conflict or (
+                    row["provider_status"] in {"Approved", "Declined"}
+                    and row["provider_status"] != event["status"]
                 )
+            if conflicting:
+                reference = digest(event)
+                self._record_observation(
+                    self._path(request_id, "status-conflict-" + reference[:16]),
+                    {
+                        "request_id": request_id,
+                        "event_sha256": reference,
+                        "status": event["status"],
+                    },
+                )
+                journal.transition(
+                    request_id, "held", "conflicting_provider_event", row["provider_status"]
+                )
+                raise ApprovalError("conflicting_provider_event")
+            require(
+                not any(
+                    self.directory.glob(f"zapier-approval-{request_id}-status-conflict-*.json")
+                ),
+                "conflicting_provider_event",
+            )
             reference = digest(event)
-            _record(
-                self._path(request_id, "replacement-observation-" + reference[:16]),
+            prefix = "replacement-observation-" if replaced else "fenced-observation-"
+            self._record_observation(
+                self._path(request_id, prefix + reference[:16]),
                 {"event_sha256": reference, "status": event["status"]},
             )
-            journal.transition(request_id, "superseded", "reviewer_replaced", event["status"])
+            journal.transition(request_id, MARKER_STATES[reason], reason, event["status"])
             return {
                 "request_id": request_id,
                 "provider_status": event["status"],
@@ -1056,9 +1189,11 @@ class ApprovalBridge:
             self._inventory(journal, policy, key)
             with journal.db() as db:
                 rows = db.execute(
-                    "SELECT id,state,provider_status FROM requests ORDER BY id"
+                    "SELECT id,state,provider_status,reason FROM requests ORDER BY id"
                 ).fetchall()
             for row in rows:
+                if row["reason"] == "conflicting_provider_event":
+                    continue
                 if row["state"] in {"approved", "changes_requested", "superseded", "expired"}:
                     continue
                 request_id = row["id"]
@@ -1162,7 +1297,7 @@ class ApprovalBridge:
         journal = ReconciliationJournal(self.directory, self.organization)
         with journal.db() as db:
             prior = db.execute(
-                "SELECT id,request,provider_status FROM requests "
+                "SELECT id,request,provider_status,reason FROM requests "
                 "WHERE state NOT IN ('approved','changes_requested')"
             ).fetchall()
             recovery = {row[0] for row in db.execute("SELECT id FROM request_recovery")}
@@ -1173,6 +1308,7 @@ class ApprovalBridge:
                 for name in ("run_id", "run_revision", "artifact_sha")
             ):
                 continue
+            require(row["reason"] != "conflicting_provider_event", "conflicting_provider_event")
             require(row["id"] not in recovery, "original_request_authority_recovery_required")
             require(
                 not self._unknown_outcome(row["id"], row["provider_status"]),
@@ -1917,6 +2053,7 @@ def main() -> int:
     adoption.add_argument("--authority", type=Path, required=True)
     adoption.add_argument("--actor", required=True)
     actions.add_parser("observe-replaced-status").add_argument("--input", type=Path, required=True)
+    actions.add_parser("observe-fenced-status").add_argument("--input", type=Path, required=True)
     recovery = actions.add_parser("recover-request-authority")
     recovery.add_argument("--request-id", required=True)
     recovery.add_argument("--original-policy", type=Path, required=True)
@@ -1962,6 +2099,9 @@ def main() -> int:
         elif args.operation == "observe-replaced-status":
             require(args.input.is_absolute(), "private_signed_decision_required")
             value = bridge.observe_replaced_status(_read_private(args.input, 16_384))
+        elif args.operation == "observe-fenced-status":
+            require(args.input.is_absolute(), "private_signed_decision_required")
+            value = bridge.observe_fenced_status(_read_private(args.input, 16_384))
         elif args.operation == "recover-request-authority":
             value = bridge.recover_request_authority(
                 args.request_id,
