@@ -383,6 +383,9 @@ class LocalRepairAssessments:
                 os.close(fd)
             _check_file(self.path)
             with sqlite3.connect(self.path) as db:
+                db.execute("BEGIN IMMEDIATE")
+                if self.context_revision:
+                    _require(self.context_revision(actual) == context)
                 db.execute(
                     "CREATE TABLE IF NOT EXISTS assessments (key TEXT PRIMARY KEY, body TEXT)"
                 )
@@ -390,6 +393,13 @@ class LocalRepairAssessments:
                 old = db.execute("SELECT body FROM assessments WHERE key=?", (key,)).fetchone()
                 _require(old is None or old[0] == canonical(body))
                 db.execute("INSERT OR IGNORE INTO assessments VALUES(?,?)", (key, canonical(body)))
+                self._selection(snapshot)
+                _require(
+                    self._policy(snapshot) == policy
+                    and self._authority(snapshot, policy) == authority
+                )
+                if self.context_revision:
+                    _require(self.context_revision(actual) == context)
             return receipt
 
     def assessment(self, snapshot: ReadinessSnapshot) -> ReadinessAssessment | None:

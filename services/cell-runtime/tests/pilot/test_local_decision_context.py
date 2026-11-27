@@ -28,11 +28,17 @@ def sign(export, grant):
     )
 
 
-def prepared(tmp_path, slack_actor=None):
+def prepared(tmp_path, slack_actor=None, extra_decision_resource=False):
     export, selection = configured(tmp_path / "owner")
     scope = export.case.body
     if slack_actor:
         scope["actors"][slack_actor] = ["inspect", "custodian"]
+        export.case.write()
+    if extra_decision_resource:
+        original = next(g for g in scope["grants"] if g["resource"] == DECISION.resource)
+        scope["grants"].append(
+            dict(original, resource="other-decisions", source_revision="other-revision")
+        )
         export.case.write()
     policy = dict(
         Case(tmp_path / "generated-template").policy,
@@ -224,6 +230,65 @@ def test_context_rotation_during_source_read_cannot_publish(tmp_path, monkeypatc
     monkeypatch.setattr(local_decision_context, "_read_private", rotated)
     assert live_reader.main([str(export.selection), run]) == 1
     assert not (export.directory / "live-repair-assessments.sqlite3").exists()
+
+
+@pytest.mark.parametrize("stage", ["writer_open", "assessment_insert"])
+def test_context_withdrawal_inside_assessment_transaction_rolls_back(tmp_path, monkeypatch, stage):
+    export, _, _, _, run = prepared(tmp_path)
+    path = export.directory / "live-repair-assessments.sqlite3"
+    connect = sqlite3.connect
+
+    def withdraw():
+        _write_private(export.directory / "decision-context-withdrawn-context-access-v1.json", {})
+
+    class WithdrawingConnection(sqlite3.Connection):
+        def execute(self, sql, *args, **kwargs):
+            result = super().execute(sql, *args, **kwargs)
+            if stage == "assessment_insert" and sql.startswith("INSERT OR IGNORE INTO assessments"):
+                withdraw()
+            return result
+
+    def opened(database, *args, **kwargs):
+        if database == path:
+            kwargs["factory"] = WithdrawingConnection
+        db = connect(database, *args, **kwargs)
+        if database == path and stage == "writer_open":
+            withdraw()
+        return db
+
+    monkeypatch.setattr(sqlite3, "connect", opened)
+    assert live_reader.main([str(export.selection), run]) == 1
+    assert (export.directory / "decision-context-withdrawn-context-access-v1.json").exists()
+    with connect(path) as db:
+        if db.execute("SELECT 1 FROM sqlite_master WHERE name='assessments'").fetchone():
+            assert db.execute("SELECT count(*) FROM assessments").fetchone() == (0,)
+
+
+@pytest.mark.parametrize("matching_origin", [True, False])
+def test_context_permission_requires_actual_decision_resource_before_raw_read(
+    tmp_path, monkeypatch, matching_origin
+):
+    export, grant, _, _, run = prepared(tmp_path, extra_decision_resource=True)
+    if not matching_origin:
+        grant.update(resource="other-decisions", source_revision="other-revision")
+    sign(export, grant)
+    reads = []
+    read = local_decision_context._read_private
+
+    def observed(path, *args):
+        if path.name == "decision-context-body.json":
+            reads.append(path.name)
+        return read(path, *args)
+
+    monkeypatch.setattr(local_decision_context, "_read_private", observed)
+    code = live_reader.main([str(export.selection), run])
+    _, receipt = current(export)
+    if matching_origin:
+        assert code == 0 and reads
+        assert receipt["reason_code"] == "too_early_to_train"
+        assert (receipt["verified_root_count"], receipt["residual_group_count"]) == (1, 0)
+    else:
+        assert code == 1 and not reads and receipt is None
 
 
 def context_home_witness(tmp_path, monkeypatch, command=None):

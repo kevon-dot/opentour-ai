@@ -35,8 +35,11 @@ in these features. Those come from the separately bound verifier resource.
 
 On explicit `live-reader` materialization, the existing owner policy selects
 development families and permitted features. The worker validates metadata before
-opening the pinned body, checks exact decision/action/policy identity, and rechecks
-current permission before publishing the assessment. Protected families are not
+opening the pinned body, checks exact decision/action/policy identity and the
+authenticated origin binding for the permitted decision resource. Sharing a
+namespace with another resource does not grant access. The worker rechecks
+current permission after acquiring the assessment writer and before committing
+the assessment. Protected families are not
 read for repair. Missing, reconstructed, stale or denied contexts cannot produce
 a successful repair claim. No fit, reservation, release or benchmark change is
 authorized by a context receipt.

@@ -3,18 +3,21 @@
 from __future__ import annotations
 
 import hmac
+import json
 import os
 import re
 import time
+from dataclasses import asdict
 from typing import Any
 
 from opentour_cell.pilot import simple_repair
 from opentour_cell.pilot.intake_mcp import IntakePrincipal, require_ref
 from opentour_cell.pilot.live_authority import PrivateLiveAuthority
-from opentour_cell.pilot.live_evidence import LiveScope, LiveSnapshot, VerifiedRoot
+from opentour_cell.pilot.live_evidence import LiveEvidence, LiveScope, LiveSnapshot, VerifiedRoot
 from opentour_cell.pilot.live_readiness import ObservedDecision
 from opentour_cell.pilot.onboarding_mcp import _read_private
 from opentour_cell.pilot.operating_point import canonical, digest
+from opentour_cell.pilot.receipt_recovery import _has_table, _open_db
 from opentour_cell.pilot.text_classifier import TrainingError
 
 GRANT = "opentour.pilot.decision-context-grant.v1"
@@ -162,6 +165,56 @@ class PrivateDecisionContext:
     def revision(self, snapshot: LiveSnapshot) -> str:
         return digest(self._grant(snapshot))
 
+    def _has_origin(self, root: VerifiedRoot, grant: dict[str, Any]) -> bool:
+        """Only normalized commit metadata is read here, before any raw input."""
+        live = LiveEvidence(self.authority.directory, self.authority)
+        scope = self.scope
+        expected = next(g for g in scope.grants if g.resource == grant["resource"])
+        with _open_db(live.path) as db:
+            _require(db is not None)
+            assert db is not None
+            rows = db.execute(
+                "SELECT seq,binding_ref,payload FROM live_events WHERE tenant=? AND workflow=? "
+                "AND epoch=? AND dataset_ref=? AND dataset_revision=? AND resource=?",
+                (
+                    scope.tenant,
+                    scope.workflow_ref,
+                    scope.engagement_epoch,
+                    scope.dataset_ref,
+                    scope.dataset_revision,
+                    grant["resource"],
+                ),
+            ).fetchall()
+            for row in rows:
+                event = json.loads(row["payload"])
+                if event.get("kind") != "DecisionRecorded" or any(
+                    event.get(key) != getattr(root, key)
+                    for key in (
+                        "decision_id",
+                        "decision_revision",
+                        "case_id",
+                        "family_id",
+                        "input_ref",
+                        "action_ref",
+                        "policy_ref",
+                        "input_fidelity",
+                    )
+                ):
+                    continue
+                references = {row["binding_ref"]}
+                if _has_table(db, "live_event_origins"):
+                    references.update(
+                        r[0]
+                        for r in db.execute(
+                            "SELECT binding_ref FROM live_event_origins WHERE seq=?", (row["seq"],)
+                        )
+                    )
+                for reference in references:
+                    body, _ = live._binding(db, reference)
+                    if live._same_scope(body, scope) and body["grant"] == asdict(expected):
+                        return True
+        return False
+
     def read(
         self, snapshot: LiveSnapshot, root: VerifiedRoot, allowed_fields: tuple[str, ...]
     ) -> ObservedDecision | None:
@@ -169,6 +222,7 @@ class PrivateDecisionContext:
         _require(root in snapshot.verified_roots and root.input_fidelity == "observed")
         _require(root.namespace == grant["deciding_namespace"])
         _require(set(allowed_fields) <= set(grant["allowed_fields"]))
+        _require(self._has_origin(root, grant))
         body = _read_private(self.authority.directory / grant["body"]["file"], 2_097_152)
         _require(digest(body) == grant["body"]["sha256"])
         _require(set(body) == {"schema_version", "records"} and body["schema_version"] == BODY)
