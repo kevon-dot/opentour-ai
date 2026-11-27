@@ -10,7 +10,6 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
-import math
 import os
 import sqlite3
 import stat
@@ -27,7 +26,7 @@ from opentour_cell.pilot.intake_admission import IntakeWork, require_readonly_sn
 from opentour_cell.pilot.intake_mcp import IntakeError, IntakePrincipal
 from opentour_cell.pilot.model_registry import ModelRegistry
 from opentour_cell.pilot.operating_point import canonical, digest
-from opentour_cell.pilot.starter_cases import StarterCases
+from opentour_cell.pilot.starter_cases import StarterCases, _input_fields
 from opentour_cell.pilot.starter_scoring import (
     EvaluationAuthority,
     EvaluationPermission,
@@ -109,17 +108,7 @@ class LocalStarterBaseline:
             assert isinstance(value, str)
             text = value
         else:
-            _require(
-                all(
-                    value is None
-                    or type(value) is bool
-                    or (type(value) is int and abs(value) <= 2**53)
-                    or (type(value) is float and math.isfinite(value))
-                    or (isinstance(value, str) and len(value) <= 8192)
-                    for value in fields.values()
-                )
-            )
-            text = canonical(dict(fields))
+            text = canonical(_input_fields(tuple(fields.items())))
         cpu.words(text)
         return text
 

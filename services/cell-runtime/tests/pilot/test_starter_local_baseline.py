@@ -267,7 +267,7 @@ def test_ambiguous_missing_journal_is_held_without_new_prediction(local_setup, m
 
 
 @pytest.fixture
-def structured_setup(tmp_path, monkeypatch):
+def structured_setup(tmp_path, monkeypatch, request):
     original = scoring_tests.seven
     facts = {
         "software": "annual_subscription",
@@ -285,7 +285,14 @@ def structured_setup(tmp_path, monkeypatch):
                 item,
                 decision_inputs=(
                     ("category", facts[item.case_id]),
-                    ("po", None if item.case_id == "review" else "generated-reference"),
+                    (
+                        "po",
+                        None
+                        if item.case_id == "review"
+                        else request.param
+                        if hasattr(request, "param")
+                        else "generated-reference",
+                    ),
                 ),
             )
             for item in original()
@@ -318,13 +325,36 @@ def test_structured_profile_receives_exact_frozen_facts_and_replays(structured_s
     receipt = baseline.execute(request, inputs)
     assert sorted(calls) == sorted(canonical(fields) for fields in inputs.values())
     assert {row["category"] for row in inputs.values()} == {
-        "annual_subscription", "carrier_freight", "office_supply"
+        "annual_subscription",
+        "carrier_freight",
+        "office_supply",
     }
     assert sum(row["po"] is None for row in inputs.values()) == 1
     assert not any(token in " ".join(calls) for token in ("target", "suggestion", "REVIEW"))
     assert len(calls) == 4 and set(receipt.outputs) == set(inputs)
     assert baseline.lookup(request) == baseline.execute(request, inputs) == receipt
     assert len(calls) == 4
+
+
+@pytest.mark.parametrize("structured_setup", [2**63 - 1, -(2**63) + 1], indirect=True)
+def test_structured_profile_preserves_frozen_exact_integer_domain(structured_setup, monkeypatch):
+    setup, baseline = structured_setup
+    request, inputs = request_inputs(setup)
+    seen = []
+    original = cpu.predict
+
+    def observe(fitted, text):
+        seen.append(json.loads(text))
+        return original(fitted, text)
+
+    monkeypatch.setattr(cpu, "predict", observe)
+    assert set(baseline.execute(request, inputs).outputs) == set(inputs)
+    assert seen == list(inputs.values())
+    assert sum(row["po"] is None for row in seen) == 1
+    assert all(
+        row["po"] is None or (type(row["po"]) is int and abs(row["po"]) == 2**63 - 1)
+        for row in seen
+    )
 
 
 @pytest.mark.parametrize("denial", ["field_grant", "schema", "substitution", "scope"])
