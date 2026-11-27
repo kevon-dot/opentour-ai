@@ -324,9 +324,12 @@ class CaptureStreams:
         attempt: CapturedAttempt,
         event: EventRef,
         commit_ref: str,
+        *,
+        decision_payload_ref: str,
     ) -> None:
-        """Record the app-observed commit reference under separate source authority."""
+        """Record app receipt provenance and its opaque, canonical payload identity."""
         require_ref(commit_ref)
+        require_ref(decision_payload_ref)
         self._persist(
             actor,
             workflow,
@@ -334,7 +337,7 @@ class CaptureStreams:
             event,
             "application_commit",
             "commit",
-            lambda _: {"commit_ref": commit_ref},
+            lambda _: {"commit_ref": commit_ref, "decision_payload_ref": decision_payload_ref},
         )
 
     def inspect(self, actor: str, workflow: str, operation_ref: str) -> dict[str, Any]:
@@ -416,7 +419,8 @@ def _competing_revisions(
         "current.grant_revision,current.policy_revision,current.source_ref,current.decision_ref,"
         "current.decision_revision) "
         "AND competing.kind='commit' AND competing.operation_ref<>current.operation_ref "
-        "AND competing.payload<>current.payload)",
+        "AND json_extract(competing.payload,'$.decision_payload_ref') "
+        "IS NOT json_extract(current.payload,'$.decision_payload_ref'))",
         (
             grant.tenant,
             grant.epoch,
@@ -445,8 +449,10 @@ def _view(rows: list[sqlite3.Row], competing: set[tuple[str, int]]) -> dict[str,
         )
         identities.setdefault(identity["attempt_ref"], set()).add(attempt)
         if kind == "commit":
+            committed = json.loads(body)
+            require_ref(committed["commit_ref"])
             commits.setdefault((decision_ref, decision_revision), set()).add(
-                (attempt, json.loads(body)["commit_ref"])
+                (attempt, require_ref(committed["decision_payload_ref"]))
             )
     conflicting = {
         attempt
@@ -514,7 +520,7 @@ def _view(rows: list[sqlite3.Row], competing: set[tuple[str, int]]) -> dict[str,
         )
     disputed = sum(
         revision in competing
-        or len({commit_ref for _, commit_ref in events}) > 1
+        or len({payload_ref for _, payload_ref in events}) > 1
         or any(attempt in conflicting_commits for attempt, _ in events)
         for revision, events in commits.items()
     )

@@ -114,7 +114,14 @@ def test_terminal_gap_survives_restart_and_app_retries_commit_once(tmp_path):
     assert reopened.inspect("owner", workflow, first.operation_ref) == incomplete
     reopened.observed_chunk("app", workflow, second, row(RESPONSE, "chunk-1"), 1, b"plies")
     for _ in range(2):
-        reopened.committed("app", workflow, second, row(COMMIT, "commit"), "invoice-committed")
+        reopened.committed(
+            "app",
+            workflow,
+            second,
+            row(COMMIT, "commit"),
+            "invoice-committed",
+            decision_payload_ref="opaque-committed-payload",
+        )
     complete = reopened.inspect("owner", workflow, first.operation_ref)
     assert complete["committed_decisions"] == 1 and complete["disputed_decisions"] == 0
     a2 = complete["attempts"][1]
@@ -139,11 +146,25 @@ def test_conflicting_chunk_and_competing_app_commit_remain_distinct(tmp_path):
     capture.terminal("app", workflow, a2, row(RESPONSE, "finish"), "finished", 1)
     capture.observed_chunk("app", workflow, a2, row(RESPONSE, "chunk"), 0, b"data-a")
     capture.observed_chunk("app", workflow, a2, row(RESPONSE, "chunk"), 0, b"data-b")
-    capture.committed("app", workflow, a2, row(COMMIT, "commit-two"), "commit-b")
+    capture.committed(
+        "app",
+        workflow,
+        a2,
+        row(COMMIT, "commit-two"),
+        "commit-b",
+        decision_payload_ref="opaque-payload-b",
+    )
     one = capture.inspect("owner", workflow, a1.operation_ref)
     assert one["attempts"][0]["state"] == "disputed"
     assert one["committed_decisions"] == 1
-    capture.committed("app", workflow, a1, row(COMMIT, "competing"), "commit-a")
+    capture.committed(
+        "app",
+        workflow,
+        a1,
+        row(COMMIT, "competing"),
+        "commit-a",
+        decision_payload_ref="opaque-payload-a",
+    )
     conflicting = capture.inspect("owner", workflow, a1.operation_ref)
     assert conflicting["committed_decisions"] == 0 and conflicting["disputed_decisions"] == 1
 
@@ -191,14 +212,33 @@ def test_competing_business_revision_is_disputed_across_operations(tmp_path):
     redundant_delivery = replace(first, operation_ref="operation-e")
     for attempt in (first, successor, another_decision):
         ref = attempt.operation_ref
-        capture.committed("app", workflow, attempt, row(COMMIT, ref), "commit-" + ref)
+        capture.committed(
+            "app",
+            workflow,
+            attempt,
+            row(COMMIT, ref),
+            "commit-" + ref,
+            decision_payload_ref="opaque-payload-" + ref,
+        )
     capture.committed(
-        "app", workflow, redundant_delivery, row(COMMIT, "redelivery"), "commit-operation-a"
+        "app",
+        workflow,
+        redundant_delivery,
+        row(COMMIT, "redelivery"),
+        "new-receipt",
+        decision_payload_ref="opaque-payload-operation-a",
     )
     for attempt in (first, redundant_delivery, another_decision):
         view = capture.inspect("owner", workflow, attempt.operation_ref)
         assert (view["committed_decisions"], view["disputed_decisions"]) == (1, 0)
-    capture.committed("app", workflow, second, row(COMMIT, "operation-b"), "competing-commit")
+    capture.committed(
+        "app",
+        workflow,
+        second,
+        row(COMMIT, "operation-b"),
+        "competing-commit",
+        decision_payload_ref="changed-payload",
+    )
     for attempt in (first, second):
         view = capture.inspect("owner", workflow, attempt.operation_ref)
         assert (view["committed_decisions"], view["disputed_decisions"]) == (0, 1)
@@ -218,9 +258,23 @@ def test_actor_source_policy_and_withdrawal_scope_normal_reads(tmp_path):
     workflow = authority.base.workflow
     attempt = CapturedAttempt("operation-a", "a1", "case-a", "family-a", "decision-a", 1)
     with pytest.raises(CaptureError):
-        capture.committed("app", workflow, attempt, row(RESPONSE, "forged"), "commit")
+        capture.committed(
+            "app",
+            workflow,
+            attempt,
+            row(RESPONSE, "forged"),
+            "commit",
+            decision_payload_ref="opaque-payload",
+        )
     capture.started("app", workflow, attempt, row(REQUEST, "start"))
-    capture.committed("app", workflow, attempt, row(COMMIT, "genuine"), "commit")
+    capture.committed(
+        "app",
+        workflow,
+        attempt,
+        row(COMMIT, "genuine"),
+        "commit",
+        decision_payload_ref="opaque-payload",
+    )
     with pytest.raises(CaptureError, match="capture_event_scope_changed"):
         capture.committed(
             "app",
@@ -228,6 +282,7 @@ def test_actor_source_policy_and_withdrawal_scope_normal_reads(tmp_path):
             replace(attempt, operation_ref="foreign-operation"),
             row(COMMIT, "genuine"),
             "commit",
+            decision_payload_ref="opaque-payload",
         )
     assert neighbor.inspect("owner", workflow, attempt.operation_ref)["committed_decisions"] == 0
     with pytest.raises(CaptureError):
