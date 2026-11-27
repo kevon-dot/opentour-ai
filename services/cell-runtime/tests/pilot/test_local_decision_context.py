@@ -129,6 +129,7 @@ def test_private_config_worker_materializes_observed_one_root_no_residual_then_r
     assert invoke(export, run) == (0, "materialized", "")
     components, receipt = current(export)
     assert receipt["reason_code"] == "too_early_to_train"
+    assert receipt["incumbent_automatic"] == {"wrong": 1, "verified": 1}
     assert (
         receipt["verified_root_count"],
         receipt["residual_group_count"],
@@ -147,6 +148,60 @@ def test_private_config_worker_materializes_observed_one_root_no_residual_then_r
     assert "carrier" not in json.dumps(receipt) and "description" not in json.dumps(receipt)
     assert "features" not in assessment
     assert components.assessments is not None
+
+
+def test_edited_cached_incumbent_summary_cannot_be_disclosed(tmp_path):
+    export, _, _, _, run = prepared(tmp_path)
+    assert invoke(export, run) == (0, "materialized", "")
+    _, receipt = current(export)
+    assert receipt["incumbent_automatic"] == {"wrong": 1, "verified": 1}
+    with sqlite3.connect(export.directory / "live-repair-assessments.sqlite3") as db:
+        (key, raw) = db.execute("SELECT key,body FROM assessments").fetchone()
+        body = json.loads(raw)
+        body["incumbent_automatic"]["counts"]["wrong"] = 0
+        db.execute("UPDATE assessments SET body=? WHERE key=?", (json.dumps(body), key))
+    _, restored = current(export)
+    assert restored is None
+
+
+def test_fresh_worker_refresh_preserves_legacy_assessment_and_receipt(tmp_path):
+    export, _, _, _, run = prepared(tmp_path)
+    assert live_reader.main([str(export.selection), run]) == 0
+    components = open_readiness(export.directory, "org-a", export.case.workflow)
+    # Simulate the previously shipped worker, which had no aggregate attestation.
+    components.assessments.seal_aggregate = None
+    key_path = export.directory / "live-repair-assessments.sqlite3"
+    with sqlite3.connect(key_path) as db:
+        db.execute("DELETE FROM assessments")
+    legacy = components.refresh()
+    assert "incumbent_automatic" not in legacy
+    with sqlite3.connect(key_path) as db:
+        (legacy_row,) = db.execute("SELECT key,body FROM assessments").fetchall()
+    assert invoke(export, run) == (0, "already_materialized", "")
+    fresh, receipt = current(export)
+    assert receipt["incumbent_automatic"] == {"wrong": 1, "verified": 1}
+    assert receipt["readiness_ref"] != legacy["readiness_ref"]
+    history = fresh.readiness.history(export.case.workflow, actor=export.case.owner)
+    assert legacy["readiness_ref"] in {row["readiness_ref"] for row in history}
+    with sqlite3.connect(key_path) as db:
+        assert legacy_row in db.execute("SELECT key,body FROM assessments").fetchall()
+
+
+@pytest.mark.parametrize(
+    ("incumbent", "expected"), [(None, None), ({"status": "review"}, {"wrong": 0, "verified": 0})]
+)
+def test_incumbent_summary_requires_classification_and_preserves_zero_denominator(
+    tmp_path, incumbent, expected
+):
+    export, grant, body, _, run = prepared(tmp_path)
+    body["records"][0]["incumbent"] = incumbent
+    _write_private(export.directory / "decision-context-body.json", body)
+    grant["body"]["sha256"] = digest(body)
+    sign(export, grant)
+    assert invoke(export, run) == (0, "materialized", "")
+    _, receipt = current(export)
+    assert receipt["verified_root_count"] == 1
+    assert receipt.get("incumbent_automatic") == expected
 
 
 @pytest.mark.parametrize(
