@@ -19,7 +19,6 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Literal, Protocol
 
-from opentour_cell.pilot.engagement_epochs import EngagementError, EngagementLedger
 from opentour_cell.pilot.intake_mcp import IntakeError, IntakePrincipal, LiveBinding, require_ref
 from opentour_cell.pilot.training import _check_file
 
@@ -68,6 +67,19 @@ class LiveScope:
     slack_verifiers: tuple[tuple[str, str], ...] = ()
     can_verify: bool = False
     can_nominate: bool = False
+
+
+class EngagementGate(Protocol):
+    """Worker-owned engagement-epoch ledger port (OPE-543); see `engagement_epochs`.
+
+    Declared here so this module's import closure is unchanged. Its errors are `ValueError`.
+    """
+
+    def live_gate(self, org: str, epoch: str, resource: str, lease_ref: str) -> int: ...
+
+    def known_prior_epoch(self, org: str, epoch: str) -> bool: ...
+
+    def observe_positions(self, org: str, epoch: str, high: int) -> None: ...
 
 
 class LiveAuthority(Protocol):
@@ -189,7 +201,7 @@ class LiveEvidence:
         self,
         directory: Path,
         authority: LiveAuthority,
-        engagements: EngagementLedger | None = None,
+        engagements: EngagementGate | None = None,
     ):
         self.path = directory / "live-evidence.sqlite3"
         self.authority = authority
@@ -204,7 +216,7 @@ class LiveEvidence:
             recorded = self.engagements.live_gate(
                 scope.tenant, scope.engagement_epoch, grant.resource, grant.lease_ref
             )
-        except EngagementError:
+        except ValueError:
             raise IntakeError("engagement_epoch_hold") from None
         _require(grant.checkpoint >= recorded, "engagement_epoch_hold")
         return recorded
