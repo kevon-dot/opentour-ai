@@ -33,6 +33,9 @@ MODULES = (
     "opentour_cell/pilot/approval_inbox.py",
     "opentour_cell/pilot/learning_mandate.py",
     "opentour_cell/pilot/zapier_approval.py",
+    "opentour_cell/pilot/approval_reconciler.py",
+    "opentour_cell/pilot/owner_settings.py",
+    "opentour_cell/pilot/reviewer_assignment.py",
     "opentour_cell/pilot/managed_run.py",
     "opentour_cell/pilot/intake_mcp.py",
     "opentour_cell/pilot/intake_local.py",
@@ -88,11 +91,22 @@ ASSETS = {
     "pilot-workplace-context.md": f"{CELL}/docs/pilot-workplace-context.md",
     **{
         f"integrations/zapier/{name}": f"{CELL}/integrations/zapier/{name}"
-        for name in ("approval-recipe-v1.json", "import-approval-recipe.cjs")
+        for name in (
+            "approval-recipe-v1.json",
+            "import-approval-recipe.cjs",
+            "reconciliation-recipe-v1.json",
+        )
     },
     "pilot-cohort-lease.md": f"{CELL}/docs/pilot-cohort-lease.md",
     "pilot-qualification.md": f"{CELL}/docs/pilot-qualification.md",
     "pilot-zapier-approval.md": f"{CELL}/docs/pilot-zapier-approval.md",
+    "pilot-approval-reconciliation.md": f"{CELL}/docs/pilot-approval-reconciliation.md",
+    "pilot-approval-schedule.md": f"{CELL}/docs/pilot-approval-schedule.md",
+    "pilot-owner-settings.md": f"{CELL}/docs/pilot-owner-settings.md",
+    "pilot-reviewer-replacement.md": f"{CELL}/docs/pilot-reviewer-replacement.md",
+    "pilot-reviewer-replacement-integration.md": (
+        f"{CELL}/docs/pilot-reviewer-replacement-integration.md"
+    ),
     "pilot-autonomous-cycle.md": f"{CELL}/docs/pilot-autonomous-cycle.md",
     "pilot-managed-repairs.md": f"{CELL}/docs/pilot-managed-repairs.md",
     "protected-comparison.md": f"{CELL}/docs/protected-comparison.md",
@@ -156,6 +170,9 @@ COMMANDS = {
     "cycle-worker": ("cycle_worker", "main"),
     "slack-launch-authorize": ("managed_launch", "main"),
     "zapier-approval": ("zapier_approval", "main"),
+    "approval-reconciler": ("approval_reconciler", "main"),
+    "owner-settings": ("owner_settings", "main"),
+    "reviewer-assignment": ("reviewer_assignment", "main"),
     "repair": ("repair_workflow", "main"),
     "bundle": ("repair_bundle", "main"),
     "mcp-intake": ("intake_local", "main"),

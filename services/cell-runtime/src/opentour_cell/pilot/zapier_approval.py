@@ -9,6 +9,7 @@ import hashlib
 import hmac
 import http.client
 import json
+import math
 import os
 import re
 import secrets
@@ -38,6 +39,7 @@ REQUEST = "opentour.pilot.zapier-slack-request.v1"
 HEX = re.compile("[0-9a-f]{64}")
 OPAQUE = re.compile("[a-zA-Z0-9_.:-]{1,96}")
 REQ = re.compile("za-[a-f0-9]{32}")
+SCHEDULE_RECEIPT_PREFIX = "last_scheduled_reconcile:"
 FIELDS = {
     "schema_version",
     "request_id",
@@ -208,6 +210,7 @@ class ReconciliationJournal:
         *,
         reminder_interval: int | None = None,
         count_retry: bool = False,
+        schedule_action: str | None = None,
     ) -> None:
         now = int(time.time())
         with self.db() as db:
@@ -215,6 +218,11 @@ class ReconciliationJournal:
                 "SELECT state,provider_status,reason FROM requests WHERE id=?", (request_id,)
             ).fetchone()
             require(row is not None, "request_not_in_reconciliation_inventory")
+            if schedule_action is not None:
+                db.execute(
+                    "INSERT OR REPLACE INTO installation VALUES (?,?)",
+                    (SCHEDULE_RECEIPT_PREFIX + request_id, schedule_action),
+                )
             if row[1] in {"Approved", "Declined"} or provider not in {
                 "Pending",
                 "Approved",
@@ -363,14 +371,53 @@ class ApprovalBridge:
         _check_directory(config)
 
     @contextmanager
-    def _serialized(self) -> Iterator[ReconciliationJournal]:
+    def _serialized(
+        self, *, expected: Json | None = None, deadline: float | None = None
+    ) -> Iterator[ReconciliationJournal]:
+        require(
+            expected is None
+            or (
+                isinstance(expected, dict)
+                and set(expected) == {"installation_epoch", "policy_revision"}
+                and isinstance(expected["installation_epoch"], str)
+                and re.fullmatch("[0-9a-f]{32}", expected["installation_epoch"])
+                and isinstance(expected["policy_revision"], str)
+                and HEX.fullmatch(expected["policy_revision"])
+            ),
+            "invalid_reconciliation_binding",
+        )
+        require(
+            deadline is None
+            or (type(deadline) in (int, float) and math.isfinite(deadline) and deadline >= 0),
+            "invalid_reconciliation_deadline",
+        )
         self._policy()
         path = self.directory / "zapier-reconciliation.lock"
         fd = os.open(path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
         with os.fdopen(fd, "rb") as lock:
             _check_file(path)
             fcntl.flock(lock, fcntl.LOCK_EX)
+            require(deadline is None or time.monotonic() < deadline, "reconciliation_deadline")
             policy, key = self._policy()
+            if expected is not None:
+                ledger = self.directory / "zapier-reconciliation.sqlite3"
+                _check_file(ledger)
+                with closing(sqlite3.connect(ledger.as_uri() + "?mode=ro", uri=True)) as db:
+                    meta = dict(
+                        db.execute(
+                            "SELECT key,value FROM installation WHERE key IN "
+                            "('organization','epoch','policy_revision','signer_fingerprint')"
+                        )
+                    )
+                require(
+                    meta.get("organization") == self.organization
+                    and meta.get("epoch") == expected["installation_epoch"]
+                    and meta.get("policy_revision") == expected["policy_revision"]
+                    and digest(policy) == expected["policy_revision"]
+                    and meta.get("signer_fingerprint") == hashlib.sha256(key).hexdigest(),
+                    "reconciliation_binding_changed",
+                )
+            require(deadline is None or time.monotonic() < deadline, "reconciliation_deadline")
             journal = ReconciliationJournal(self.directory, self.organization)
             journal.pin_installation(policy, key)
             self._inventory(journal, policy, key)
@@ -1089,91 +1136,157 @@ class ApprovalBridge:
             "invalid_reconciliation_interval",
         )
         with self._serialized() as journal:
-            self._assert_installed_policy(journal)
-            policy, key = self._policy()
-            self._inventory(journal, policy, key)
-            now = int(time.time())
+            return self._reconcile(
+                journal,
+                request_id=request_id,
+                poll_interval=poll_interval,
+                reminder_interval=reminder_interval,
+            )
+
+    def _reconcile(
+        self,
+        journal: ReconciliationJournal,
+        *,
+        request_id: str | None = None,
+        poll_interval: int = 60,
+        reminder_interval: int = 3600,
+        schedule_action: str | None = None,
+    ) -> Json:
+        """Shared core; caller holds this bridge writer and no SQLite transaction."""
+        require(
+            type(poll_interval) is int
+            and 1 <= poll_interval <= 86400
+            and type(reminder_interval) is int
+            and 1 <= reminder_interval <= 86400,
+            "invalid_reconciliation_interval",
+        )
+        self._assert_installed_policy(journal)
+        policy, key = self._policy()
+        self._inventory(journal, policy, key)
+        now = int(time.time())
+        require(
+            schedule_action is None
+            or (
+                request_id is not None
+                and isinstance(schedule_action, str)
+                and HEX.fullmatch(schedule_action)
+            ),
+            "invalid_schedule_action",
+        )
+        schedule_key = (
+            SCHEDULE_RECEIPT_PREFIX + request_id
+            if request_id is not None and schedule_action is not None
+            else None
+        )
+        if schedule_key is not None:
             with journal.db() as db:
-                if request_id is not None:
-                    require(
-                        isinstance(request_id, str)
-                        and REQ.fullmatch(request_id)
-                        and db.execute(
-                            "SELECT 1 FROM requests WHERE id=?", (request_id,)
-                        ).fetchone()
-                        is not None,
-                        "request_not_in_reconciliation_inventory",
-                    )
-                poll_key = "last_poll" if request_id is None else "last_poll:" + request_id
-                db.execute("INSERT OR IGNORE INTO installation VALUES (?,'0')", (poll_key,))
-                last = int(
-                    db.execute(
-                        "SELECT value FROM installation WHERE key=?", (poll_key,)
-                    ).fetchone()[0]
+                prior = db.execute(
+                    "SELECT value FROM installation WHERE key=?", (schedule_key,)
+                ).fetchone()
+            if prior is not None and prior[0] == schedule_action:
+                return journal.page(key, limit=50, cursor=None) | {"state": "reconciled"}
+        with journal.db() as db:
+            if request_id is not None:
+                require(
+                    isinstance(request_id, str)
+                    and REQ.fullmatch(request_id)
+                    and db.execute("SELECT 1 FROM requests WHERE id=?", (request_id,)).fetchone()
+                    is not None,
+                    "request_not_in_reconciliation_inventory",
                 )
-                if now < last + poll_interval:
-                    return {"state": "throttled", "retry_after_seconds": last + poll_interval - now}
-                db.execute("UPDATE installation SET value=? WHERE key=?", (str(now), poll_key))
-                rows = db.execute(
-                    "SELECT id,request,state,provider_status FROM requests ORDER BY id"
-                ).fetchall()
-            for row in rows:
-                if request_id is not None and row["id"] != request_id:
+            poll_key = "last_poll" if request_id is None else "last_poll:" + request_id
+            db.execute("INSERT OR IGNORE INTO installation VALUES (?,'0')", (poll_key,))
+            last = int(
+                db.execute("SELECT value FROM installation WHERE key=?", (poll_key,)).fetchone()[0]
+            )
+            if now < last + poll_interval:
+                return {"state": "throttled", "retry_after_seconds": last + poll_interval - now}
+            db.execute("UPDATE installation SET value=? WHERE key=?", (str(now), poll_key))
+            rows = db.execute(
+                "SELECT id,request,state,provider_status FROM requests ORDER BY id"
+            ).fetchall()
+        for row in rows:
+            if request_id is not None and row["id"] != request_id:
+                continue
+            target_id, req = row["id"], json.loads(row["request"])
+            with journal.db() as db:
+                if db.execute("SELECT 1 FROM request_recovery WHERE id=?", (target_id,)).fetchone():
                     continue
-                target_id, req = row["id"], json.loads(row["request"])
-                with journal.db() as db:
-                    if db.execute(
-                        "SELECT 1 FROM request_recovery WHERE id=?", (target_id,)
-                    ).fetchone():
-                        continue
-                if row["state"] in {
-                    "approved",
-                    "changes_requested",
-                    "superseded",
+            if row["state"] in {
+                "approved",
+                "changes_requested",
+                "superseded",
+                "expired",
+            } or os.path.lexists(self._path(target_id, "reconciled")):
+                continue
+            try:
+                status = self.decision_status(
+                    target_id, team=policy["team"], actor=policy["reviewer"]
+                )
+                if now < req["expires_at"]:
+                    self._inspect(req)
+            except (OSError, KeyError, sqlite3.Error):
+                journal.transition(
+                    target_id,
+                    "held",
+                    "local_state_unavailable",
+                    row["provider_status"],
+                    schedule_action=schedule_action,
+                )
+                continue
+            except ValueError:
+                self._invalidate(target_id, "current_authority_unavailable")
+                journal.transition(
+                    target_id,
+                    "held",
+                    "current_authority_unavailable",
+                    "unknown",
+                    schedule_action=schedule_action,
+                )
+                continue
+            state = status["state"]
+            unknown = self._unknown_outcome(target_id, row["provider_status"])
+            if state in {"approved", "changes_requested"}:
+                journal.transition(target_id, state, None, state, schedule_action=schedule_action)
+            elif unknown:
+                journal.transition(
+                    target_id,
+                    "held",
+                    "remote_outcome_unknown",
+                    "unknown",
+                    count_retry=True,
+                    schedule_action=schedule_action,
+                )
+            elif int(time.time()) >= req["expires_at"]:
+                self._invalidate(target_id, "request_expired")
+                journal.transition(
+                    target_id,
                     "expired",
-                } or os.path.lexists(self._path(target_id, "reconciled")):
-                    continue
-                try:
-                    status = self.decision_status(
-                        target_id, team=policy["team"], actor=policy["reviewer"]
-                    )
-                    if now < req["expires_at"]:
-                        self._inspect(req)
-                except (OSError, KeyError, sqlite3.Error):
-                    journal.transition(
-                        target_id, "held", "local_state_unavailable", row["provider_status"]
-                    )
-                    continue
-                except ValueError:
-                    self._invalidate(target_id, "current_authority_unavailable")
-                    journal.transition(
-                        target_id, "held", "current_authority_unavailable", "unknown"
-                    )
-                    continue
-                state = status["state"]
-                unknown = self._unknown_outcome(target_id, row["provider_status"])
-                if state in {"approved", "changes_requested"}:
-                    journal.transition(target_id, state, None, state)
-                elif unknown:
-                    journal.transition(
-                        target_id, "held", "remote_outcome_unknown", "unknown", count_retry=True
-                    )
-                elif now >= req["expires_at"]:
-                    self._invalidate(target_id, "request_expired")
-                    journal.transition(target_id, "expired", "request_expired", "expired")
-                else:
-                    if state == "uncertain" and row["provider_status"] == "Pending":
-                        state = "accepted"
-                    journal.transition(
-                        target_id,
-                        "pending",
-                        None,
-                        row["provider_status"] if row["provider_status"] == "Pending" else state,
-                        reminder_interval=reminder_interval if state == "accepted" else None,
-                    )
-            result = journal.page(key, limit=50, cursor=None)
-            result["state"] = "reconciled"
-            return result
+                    "request_expired",
+                    "expired",
+                    schedule_action=schedule_action,
+                )
+            else:
+                if state == "uncertain" and row["provider_status"] == "Pending":
+                    state = "accepted"
+                journal.transition(
+                    target_id,
+                    "pending",
+                    None,
+                    row["provider_status"] if row["provider_status"] == "Pending" else state,
+                    reminder_interval=reminder_interval if state == "accepted" else None,
+                    schedule_action=schedule_action,
+                )
+        if schedule_key is not None:
+            # Terminal/fenced/recovery rows can complete without a new transition.
+            with journal.db() as db:
+                db.execute(
+                    "INSERT OR REPLACE INTO installation VALUES (?,?)",
+                    (schedule_key, schedule_action),
+                )
+        result = journal.page(key, limit=50, cursor=None)
+        result["state"] = "reconciled"
+        return result
 
     def prepare_cutover(self) -> Json:
         """Fence dispatch before inventory; callers must drain known signed decisions first."""
