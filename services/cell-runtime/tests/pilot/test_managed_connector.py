@@ -25,6 +25,7 @@ M18 retention disposition recorded once; usage unknown is None, never zero
 M19 concurrent identical dispatches execute once
 M20 shared conformance suite passes against this connector
 M21 binding for another account or region is refused; evidence tier is fixture
+R1-R7 independent-review regressions (false-trust class): see the bottom of this file
 """
 
 import json
@@ -390,9 +391,11 @@ def test_m9_cancel_is_durable_first_retryable_and_never_publishes(stack):
     with pytest.raises(OSError):
         connector.cancel(job)
     assert "cancel_requested" in journal_text(connector)
-    assert connector.lookup(intent).state is mc.JobState.CANCELED  # intent already durable
-    with pytest.raises(mc.CapabilityError):
-        pre.collect_candidate(ACTOR, connector.lookup(intent))
+    # the intent is durable but the provider has not stopped: never reported as canceled
+    pending = connector.lookup(intent)
+    assert pending.state is mc.JobState.RUNNING and connector.usage(pending) is None
+    with pytest.raises(ValueError, match="job_not_collectable"):
+        connector.collect(pending)
     provider.fail_cancel = False
     canceled = connector.cancel(job)
     assert canceled.state is mc.JobState.CANCELED
@@ -680,3 +683,122 @@ def test_m21_foreign_binding_refused_and_evidence_tier_is_fixture(stack):
         BINDING.immutable_revision
     )
     json.dumps(managed._binding_document(BINDING))
+
+
+# ------------------------------------------------------------------ independent-review regressions
+class StubbornProvider(FakeProvider):
+    """A provider that acknowledges a cancel but leaves the job running."""
+
+    def cancel_job(self, binding, job_id):
+        self._auth(binding)
+        self.cancel_calls += 1
+        return self._by_id(job_id)[1]
+
+
+def _live(tmp_path, provider):
+    connector = managed.ManagedConnector(provider, SETTINGS, tmp_path / "s")
+    intent = make_intent()
+    pre = mc.Preflight(connector, conformance.standard_grants(BINDING, intent))
+    return connector, pre, intent, dispatch(pre, intent, Reservations())
+
+
+def test_r1_cancel_the_provider_did_not_honor_is_not_reported_canceled(tmp_path):
+    provider = StubbornProvider(autocomplete=False)
+    connector, _, intent, live = _live(tmp_path, provider)
+    receipt = connector.cancel(live)
+    assert receipt.state is mc.JobState.RUNNING  # still spending: the caller must keep its hold
+    assert connector.lookup(intent).state is mc.JobState.RUNNING
+    assert connector.usage(receipt) is None
+
+
+def test_r2_fence_never_lists_a_job_the_provider_did_not_stop(tmp_path):
+    provider = StubbornProvider(autocomplete=False)
+    connector, pre, _, _ = _live(tmp_path, provider)
+    with pytest.raises(ValueError, match="fence_job_not_stopped"):
+        connector.fence("generated-scope")
+    later = make_intent("generated-after-fence")  # the fence itself is durable anyway
+    with pytest.raises(mc.CapabilityError):
+        dispatch(
+            mc.Preflight(connector, conformance.standard_grants(BINDING, later)),
+            later,
+            Reservations(),
+        )
+    assert provider.executions == 1
+
+
+def test_r3_cost_incurred_by_a_job_that_completed_after_cancel_is_irreversible(stack):
+    provider, connector, pre, intent, reservations = stack
+    done = dispatch(pre, intent, reservations)  # provider completed and billed 80
+    canceled = connector.cancel(done)
+    usage = connector.usage(canceled)
+    assert canceled.state is mc.JobState.CANCELED
+    assert (usage.incurred_minor_units, usage.irreversible) == (80, True)
+    assert provider.deleted == []  # declared gap: the tuned model is not deleted here
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        managed.ProviderUsage("USD", -5, 1, 1, 1),
+        managed.ProviderUsage("", 5, 1, 1, 1),
+        managed.ProviderUsage("USD", 5.5, 1, 1, 1),
+        managed.ProviderUsage("USD", True, 1, 1, 1),
+    ],
+)
+def test_r4_malformed_provider_usage_is_unknown_never_settleable(stack, bad):
+    provider, connector, pre, intent, reservations = stack
+    provider._usage = lambda: bad
+    receipt = dispatch(pre, intent, reservations)
+    assert receipt.state is mc.JobState.COMPLETED
+    assert connector.usage(receipt) is None  # None holds the reservation; no estimate stands in
+
+
+def test_r5_direct_submit_rechecks_the_bytes_that_leave(stack):
+    provider, connector, _, intent, _ = stack
+    rows = tuple({**row, "answer_key": "generated-secret-answer"} for row in ROWS)
+    payload = managed.serialize_rows(rows)
+    forged = replace(
+        intent,
+        development_digest=managed._sha(payload),
+        fields=FIELDS | {"answer_key"},
+    )
+    with pytest.raises(ValueError, match="training_payload_invalid"):
+        connector.submit(forged, payload)
+    many = tuple({**ROWS[0], "label": f"generated-{i}"} for i in range(21))
+    oversize = replace(intent, development_digest=managed.development_digest(many))
+    with pytest.raises(ValueError, match="training_payload_invalid"):
+        connector.submit(oversize, managed.serialize_rows(many))
+    assert provider.uploaded == [] and provider.executions == 0
+    assert journal_text(connector) == ""
+
+
+def test_r6_handoff_and_replay_are_verified_against_the_journal(tmp_path):
+    provider = FakeProvider()
+    connector, pre, intent, done = _live(tmp_path, provider)
+    candidate = pre.collect_candidate(ACTOR, done)
+    forged = replace(candidate, artifact_or_serving_revision="simulated:tuned-model-other")
+    with pytest.raises(ValueError, match="candidate_lineage_unverified"):
+        connector.handoff_reference(forged, "simulated:recipient-1")
+    foreign = replace(candidate, intent=replace(intent, benchmark_revision="benchmark-other"))
+    with pytest.raises(ValueError, match="candidate_lineage_unverified"):
+        connector.predict_for_replay(foreign, ())
+    assert connector.handoff_reference(candidate, "simulated:recipient-1")
+    connector.cancel(done)  # cancel after collection: the earlier candidate is now void
+    with pytest.raises(ValueError, match="candidate_lineage_unverified"):
+        connector.handoff_reference(candidate, "simulated:recipient-1")
+    with pytest.raises(ValueError, match="candidate_lineage_unverified"):
+        connector.predict_for_replay(candidate, ({"input_text": "x"},))
+    assert provider.predictions == []
+
+
+def test_r7_forged_receipt_changes_nothing(stack):
+    provider, connector, pre, intent, reservations = stack
+    real = dispatch(pre, intent, reservations)
+    other = make_intent("generated-never-dispatched")
+    forged = mc.JobReceipt(other, mc.JobState.COMPLETED, real.job_ref, real.evidence_ref)
+    for call in (connector.status, connector.cancel):
+        with pytest.raises(ValueError, match="job_receipt_mismatched"):
+            call(forged)
+    with pytest.raises(ValueError, match="job_not_collectable"):
+        connector.collect(forged)
+    assert provider.cancel_calls == 0 and connector.lookup(intent) == real

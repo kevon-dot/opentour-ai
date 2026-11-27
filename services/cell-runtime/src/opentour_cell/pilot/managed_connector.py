@@ -231,6 +231,16 @@ def intent_digest(intent: mc.FitIntent) -> str:
     )
 
 
+def _usage_valid(usage: ProviderUsage) -> bool:
+    """Provider-reported usage that is malformed is unknown (``None``), never settleable."""
+    counts = (usage.minor_units, usage.seconds, usage.rows, usage.steps)
+    return (
+        isinstance(usage.currency, str)
+        and bool(usage.currency)
+        and all(type(count) is int and count >= 0 for count in counts)
+    )
+
+
 def _append(path: Path, event: Mapping[str, Any]) -> None:
     descriptor = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o600)
     try:
@@ -295,6 +305,32 @@ class ManagedConnector:
             or binding.preprocessing_revision != settings.preprocessing_revision
         ):
             raise ValueError("binding_not_served_by_connector")
+
+    @contextmanager
+    def _gate(self, *, exclusive: bool) -> Iterator[None]:
+        """Orders a new dispatch's first journal write against ``fence`` (no missed job)."""
+        descriptor = os.open(
+            self.root / "fence.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600
+        )
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)
+            yield
+        finally:
+            os.close(descriptor)
+
+    @staticmethod
+    def _write_marker(marker: Path, scope: str) -> None:
+        try:
+            descriptor = os.open(
+                marker, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600
+            )
+        except FileExistsError:
+            return
+        try:
+            os.write(descriptor, _canonical({"scope": scope}))
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
 
     # ------------------------------------------------------------------ capability
     def observe(self, binding: mc.ModelBinding, purpose: mc.Purpose) -> mc.Observation:
@@ -407,8 +443,9 @@ class ManagedConnector:
         return mc.ModelBinding(**{**document, "route": mc.Route(document["route"])})  # type: ignore[arg-type]
 
     def _state_of(self, view: _View) -> mc.JobState:
-        if view.cancel_requested:
-            return mc.JobState.CANCELED
+        """Report only what the provider confirmed. A pending cancel is not a stopped job."""
+        if view.cancel_requested and view.terminal:
+            return mc.JobState.CANCELED  # cancel wins a race with completion: no candidate
         return view.state
 
     def _receipt(self, intent: mc.FitIntent, key: str, view: _View) -> mc.JobReceipt:
@@ -431,7 +468,7 @@ class ManagedConnector:
             event: dict[str, Any] = {"event": "terminal", "state": state.value}
             if state is mc.JobState.COMPLETED:
                 event["tuned_model_id"] = job.tuned_model_id
-            if job.usage is not None:
+            if job.usage is not None and _usage_valid(job.usage):
                 event["usage"] = {
                     "currency": job.usage.currency,
                     "minor_units": job.usage.minor_units,
@@ -495,14 +532,17 @@ class ManagedConnector:
                 return self._receipt(intent, key, view)
             if _sha(development) != intent.development_digest:
                 raise ValueError("training_payload_invalid")
-            _append(
-                self._journal(key),
-                {
-                    "event": "dispatching",
-                    "intent_sha256": digest,
-                    "binding": _binding_document(intent.binding),
-                },
-            )
+            self._check_payload(intent, development)
+            with self._gate(exclusive=False):
+                self._require_open()  # re-checked: a fence may have landed since the first check
+                _append(
+                    self._journal(key),
+                    {
+                        "event": "dispatching",
+                        "intent_sha256": digest,
+                        "binding": _binding_document(intent.binding),
+                    },
+                )
             token = self._token(key)
             uploaded = self.transport.put_file(intent.binding, token, development)
             _append(self._journal(key), {"event": "file", "file_id": uploaded.file_id})
@@ -524,6 +564,24 @@ class ManagedConnector:
                 raise ValueError("provider_cap_not_enforced")
             self._absorb(key, view, job)
             return self._receipt(intent, key, self._view(key))
+
+    def _check_payload(self, intent: mc.FitIntent, development: bytes) -> None:
+        """Defense in depth: the bytes about to leave are re-checked, not trusted by digest."""
+        try:
+            rows = [json.loads(line)["fields"] for line in development.decode().splitlines()]
+        except (ValueError, KeyError, TypeError):
+            raise ValueError("training_payload_invalid") from None
+        if (
+            not rows
+            or len(rows) > intent.bound.maximum_rows
+            or any(
+                not isinstance(row, dict)
+                or set(row) != set(intent.fields)
+                or set(row) & self.settings.protected_fields
+                for row in rows
+            )
+        ):
+            raise ValueError("training_payload_invalid")
 
     def _cancel_unbounded(self, key: str, view: _View, binding: mc.ModelBinding) -> None:
         _append(self._journal(key), {"event": "cancel_requested"})
@@ -594,28 +652,38 @@ class ManagedConnector:
             f"simulated:managed-replay:{key}",
         )
 
+    def _verified(self, candidate: mc.Candidate) -> _View:
+        """A candidate is only as good as the journal: no hand-built or stale candidate passes."""
+        key = self._key_from_ref(candidate.job_ref)
+        view = self._view(key)
+        if (
+            not view.exists
+            or view.intent_sha != intent_digest(candidate.intent)
+            or view.cancel_requested
+            or not view.terminal
+            or view.state is not mc.JobState.COMPLETED
+            or not view.tuned_model_id
+            or view.tuned_model_id != candidate.artifact_or_serving_revision
+            or candidate.parent_revision != candidate.intent.binding.immutable_revision
+        ):
+            raise ValueError("candidate_lineage_unverified")
+        return view
+
     def handoff_reference(self, candidate: mc.Candidate, recipient: str) -> str:
         """Release the tuned-model id only to a recipient the customer permitted."""
         self._require_open()
         if recipient not in self.settings.permitted_recipients:
             raise ValueError("recipient_not_permitted")
-        return candidate.artifact_or_serving_revision
+        return self._verified(candidate).tuned_model_id
 
     def predict_for_replay(
         self, candidate: mc.Candidate, inputs: tuple[Mapping[str, object], ...]
     ) -> tuple[Mapping[str, object], ...]:
         self._require_open()
-        key = self._key_from_ref(candidate.job_ref)
-        view = self._view(key)
-        if (
-            view.cancel_requested
-            or view.state is not mc.JobState.COMPLETED
-            or view.tuned_model_id != candidate.artifact_or_serving_revision
-        ):
-            raise ValueError("candidate_lineage_unverified")
+        view = self._verified(candidate)
         if any(set(row) & self.settings.protected_fields for row in inputs):
             raise ValueError("protected_field_in_payload")
-        return self.transport.predict(candidate.intent.binding, view.tuned_model_id, inputs)
+        return self.transport.predict(self._binding_of(view), view.tuned_model_id, inputs)
 
     # ------------------------------------------------------------------ usage, disposition
     def usage(self, job: mc.JobReceipt) -> Usage | None:
@@ -634,7 +702,8 @@ class ManagedConnector:
             reported.rows,
             reported.steps,
             UsageSource.PROVIDER_REPORTED,
-            irreversible=reported.minor_units > 0 and state is not mc.JobState.COMPLETED,
+            irreversible=reported.minor_units > 0
+            and (state is not mc.JobState.COMPLETED or view.cancel_requested),
         )
 
     def dispose_training_file(self, job: mc.JobReceipt) -> str:
@@ -696,20 +765,10 @@ class ManagedConnector:
 
     def fence(self, scope: str) -> FenceReceipt:
         """Durably block new work, then stop live jobs. Repeatable if the provider is down."""
-        marker = self.root / "FENCED"
-        try:
-            descriptor = os.open(
-                marker, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600
-            )
-        except FileExistsError:
-            pass
-        else:
-            try:
-                os.write(descriptor, _canonical({"scope": scope}))
-                os.fsync(descriptor)
-            finally:
-                os.close(descriptor)
+        with self._gate(exclusive=True):  # waits for any dispatch that has not journaled yet
+            self._write_marker(self.root / "FENCED", scope)
         canceled: list[str] = []
+        unstopped: list[str] = []
         for path in sorted((self.root / "jobs").glob("*.jsonl")):
             key = path.stem
             with self._locked(key):
@@ -724,7 +783,13 @@ class ManagedConnector:
                     found = self._reconcile(key, view)
                     view = found if found is not None else view
                 self._cancel_at_provider(key, view, binding)
-                canceled.append(self._job_ref(key))
+                if self._view(key).terminal:
+                    canceled.append(self._job_ref(key))
+                else:
+                    unstopped.append(self._job_ref(key))
+        if unstopped:
+            # The fence itself is durable; never report a job stopped that the provider has not.
+            raise ValueError("fence_job_not_stopped")
         return FenceReceipt(
             scope, tuple(canceled), f"simulated:managed-fence:{_sha(scope.encode())[:16]}"
         )
