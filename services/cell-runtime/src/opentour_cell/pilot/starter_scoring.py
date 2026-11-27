@@ -53,6 +53,16 @@ class EvaluationPermission:
 
 
 class EvaluationAuthority(Protocol):
+    def revalidate(
+        self, actor: IntakePrincipal, work: IntakeWork, permission: EvaluationPermission
+    ) -> None:
+        """Read current capability/epoch under an already-held guard, without a new writer.
+
+        Deny a revoked, expired, rebound or superseded capability immediately.
+        This is not satisfied by returning the original captured permission.
+        """
+        ...
+
     def guard(
         self, actor: IntakePrincipal, work: IntakeWork, execution_ref: str
     ) -> AbstractContextManager[EvaluationPermission]:
@@ -94,7 +104,11 @@ class PredictionPort(Protocol):
     def execute(
         self, request: PredictionRequest, inputs: Mapping[str, Mapping[str, object]]
     ) -> PredictionReceipt:
-        """Use the stable operation key. Inputs contain no answer-key metadata."""
+        """Use the stable operation key and return only a durably queryable receipt.
+
+        Inputs contain no answer key. The caller holds the current evaluation
+        authority and checks the current baseline grant at this boundary.
+        """
         ...
 
 
@@ -227,6 +241,21 @@ class StarterScoring:
         )
         return binding
 
+    def _current(
+        self,
+        actor: IntakePrincipal,
+        work: IntakeWork,
+        permission: EvaluationPermission,
+        frozen: FrozenEvaluationInputs,
+        *,
+        inference: bool = True,
+    ) -> None:
+        self.authority.revalidate(actor, work, permission)
+        _require(self.cases.evaluation_inputs(actor, work) == frozen, "starter_freeze_changed")
+        self._permission(actor, work, permission, frozen)
+        if inference:
+            self._model(permission)
+
     @staticmethod
     def _held(permission: EvaluationPermission, reason: str) -> Json:
         return {
@@ -257,6 +286,7 @@ class StarterScoring:
                 "comparator_revision": self.comparator.revision,
             }
             with self._db(write=True) as db:
+                self._current(actor, work, permission, frozen, inference=False)
                 old = db.execute(
                     "SELECT definition FROM evaluations WHERE ref=?", (execution_ref,)
                 ).fetchone()
@@ -270,6 +300,7 @@ class StarterScoring:
             try:
                 self._model(permission)
             except (IntakeError, model.CapabilityError):
+                self._current(actor, work, permission, frozen, inference=False)
                 return self._held(permission, "baseline_inference_unavailable")
             if not inputs:
                 return self._held(permission, "reserved_denominator_unavailable")
@@ -290,7 +321,7 @@ class StarterScoring:
                 self._permission(actor, work, now, self.cases.evaluation_inputs(actor, work))
                 self._model(now)
                 with self._db(write=True) as db:
-                    self._model(now)
+                    self._current(actor, work, now, frozen)
                     old = db.execute(
                         "SELECT request,receipt FROM predictions WHERE ref=?",
                         (request.operation_ref,),
@@ -306,12 +337,21 @@ class StarterScoring:
                     )
                 receipt = port.lookup(request)
                 if receipt is None and fresh:
+                    # Lookup is an independent adapter boundary. It may reveal
+                    # withdrawn or changed capability before execution starts.
+                    self._current(actor, work, now, frozen)
                     try:
                         receipt = port.execute(request, json.loads(canonical(inputs)))
                     except OSError:
                         receipt = port.lookup(request)
                 if receipt is None:
+                    self._current(actor, work, now, frozen, inference=False)
                     return self._held(permission, "prediction_outcome_unknown")
+                durable = port.lookup(request)
+                if durable is None:
+                    self._current(actor, work, now, frozen, inference=False)
+                    return self._held(permission, "prediction_outcome_unknown")
+                _require(durable == receipt, "prediction_receipt_changed")
                 _require(receipt.request == request, "prediction_receipt_mismatch")
                 require_ref(receipt.receipt_ref)
                 body: Json = {
@@ -322,6 +362,13 @@ class StarterScoring:
                     },
                 }
                 _require(set(body["outputs"]) <= set(inputs), "prediction_population_mismatch")
+                _require(
+                    all(
+                        not (value["status"] == "automatic" and value["label"] == "REVIEW")
+                        for value in body["outputs"].values()
+                    ),
+                    "prediction_abstention_contract_mismatch",
+                )
                 self._model(now)
                 _require(
                     self.cases.evaluation_inputs(actor, work) == frozen,
@@ -331,12 +378,12 @@ class StarterScoring:
                     _require(old["receipt"] == canonical(body), "prediction_receipt_changed")
                 else:
                     with self._db(write=True) as db:
-                        self._model(now)
+                        self._current(actor, work, now, frozen)
                         db.execute(
                             "UPDATE predictions SET receipt=? WHERE ref=? AND receipt IS NULL",
                             (canonical(body), request.operation_ref),
                         )
-                        self._model(now)
+                        self._current(actor, work, now, frozen)
                 _require(body["request"] == asdict(request), "prediction_receipt_mismatch")
                 outputs[arm] = body
         with self.authority.guard(actor, work, execution_ref) as now:
@@ -378,7 +425,7 @@ class StarterScoring:
             result["result_digest"] = digest(result)
             result["result_ref"] = "starter-result-" + result["result_digest"][:40]
             with self._db(write=True) as db:
-                self._model(now)
+                self._current(actor, work, now, frozen)
                 old = db.execute(
                     "SELECT result FROM evaluations WHERE ref=?", (execution_ref,)
                 ).fetchone()
@@ -390,7 +437,7 @@ class StarterScoring:
                     "UPDATE evaluations SET result=? WHERE ref=?",
                     (canonical(result), execution_ref),
                 )
-                self._model(now)
+                self._current(actor, work, now, frozen)
             return result
 
 

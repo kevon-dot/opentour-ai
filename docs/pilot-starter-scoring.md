@@ -16,6 +16,10 @@ The evaluation authority supplies an explicit execution identity, exact freeze,
 plan and comparator revision, model identity, baseline grant revision, allowed
 fields, row bound and expiry. A new transport key cannot create a rerun. The
 authority must separately admit a new execution against the unchanged freeze.
+Its metadata-only `revalidate` method must observe current revocation, actor
+binding, source epoch and intent revision under the held guard. The worker calls
+it after lookup and at journal commit boundaries; returning a captured capability
+without checking current state does not satisfy this port.
 The normal model registry must still contain a current baseline-inference grant.
 This initial adapter accepts local execution with exact observed model identity;
 remote execution needs a separately bounded processor/disclosure adapter.
@@ -27,6 +31,9 @@ worker persists the operation before calling the adapter. After uncertain
 acceptance it looks up that exact operation; an unknown result stays unscored
 and cannot blindly trigger another execution. Cached predictions are compared
 with the independently reconciled adapter receipt before scoring.
+An execution response must already be queryable through lookup before its first
+score can publish. An automatic action labeled REVIEW is a malformed response
+under the frozen review policy and cannot inflate automation coverage.
 
 The evaluator opens the answer key only after both prediction receipts exist.
 Per-case output preserves generated origin and separates automatic, REVIEW and

@@ -49,6 +49,10 @@ class Authority:
             raise IntakeError("rerun_permission_required")
         yield self.permission
 
+    def revalidate(self, actor, work, permission):
+        if not self.allowed or actor != EVALUATOR or work != WORK or permission != self.permission:
+            raise IntakeError("evaluation_permission_changed")
+
 
 class Port:
     def __init__(self, reference, revision, binding=None):
@@ -385,3 +389,65 @@ def test_stored_scalar_violation_is_rejected_even_with_updated_local_seal(scored
         db.execute("UPDATE freezes SET seal=? WHERE ref=?", (digest(body), ref))
     with pytest.raises(IntakeError, match="invalid_starter_inputs"):
         scorer.cases.evaluation_inputs(EVALUATOR, WORK)
+
+
+def test_lookup_revocation_is_checked_before_executing_model(scored_setup, monkeypatch):
+    scorer, _, _, document, path = scored_setup
+    lookup = scorer.baseline.lookup
+
+    def withdraw(request):
+        document["grants"] = []
+        write(path, document)
+        return lookup(request)
+
+    monkeypatch.setattr(scorer.baseline, "lookup", withdraw)
+    with pytest.raises(IntakeError):
+        run(scored_setup)
+    assert not scorer.baseline.calls and not scorer.comparator.calls
+
+
+def test_automatic_review_response_cannot_count_as_automation(scored_setup, monkeypatch):
+    scorer, *_ = scored_setup
+    execute = scorer.baseline.execute
+
+    def malformed(request, inputs):
+        receipt = execute(request, inputs)
+        receipt = replace(
+            receipt, outputs={key: {"status": "automatic", "label": "REVIEW"} for key in inputs}
+        )
+        scorer.baseline.receipts[request.operation_ref] = receipt
+        return receipt
+
+    monkeypatch.setattr(scorer.baseline, "execute", malformed)
+    with pytest.raises(IntakeError, match="prediction_abstention_contract_mismatch"):
+        run(scored_setup)
+    assert not scorer.comparator.calls
+
+
+def test_receipt_must_be_durably_queryable_before_first_score(scored_setup, monkeypatch):
+    scorer, *_ = scored_setup
+    execute = scorer.baseline.execute
+
+    def unrecorded(request, inputs):
+        receipt = execute(request, inputs)
+        scorer.baseline.receipts.clear()
+        return receipt
+
+    monkeypatch.setattr(scorer.baseline, "execute", unrecorded)
+    first = run(scored_setup)
+    assert first["state"] == "frozen_unscored" and first["result_digest"] is None
+    assert run(scored_setup) == first
+    assert len(scorer.baseline.calls) == 1 and not scorer.comparator.calls
+
+
+def test_lookup_withdraws_evaluator_capability_before_any_inference(scored_setup, monkeypatch):
+    scorer, authority, *_ = scored_setup
+
+    def withdraw(_):
+        authority.allowed = False
+        return None
+
+    monkeypatch.setattr(scorer.baseline, "lookup", withdraw)
+    with pytest.raises(IntakeError, match="evaluation_permission_changed"):
+        run(scored_setup)
+    assert not scorer.baseline.calls and not scorer.comparator.calls
