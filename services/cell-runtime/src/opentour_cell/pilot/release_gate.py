@@ -179,7 +179,9 @@ def record_release(
     decision: str,
     inspection_ref: str,
     provider: str,
+    provider_request_expires_at: int | None = None,
 ) -> Json:
+    """Record a named decision. The bridge supplies the authenticated request deadline."""
     _require(
         decision in {"approved", "changes_requested"} and provider in {"slack", "zapier_slack"},
         "release_reviewer_mismatch",
@@ -212,7 +214,7 @@ def record_release(
     store = LocalTrainingStore(directory / "training.sqlite3", organization, existing_only=True)
     with store.engagement_guard(engagement_id=seen["engagement"]):
         _binding(directory, organization, run_id, run_revision, artifact_sha)
-        _inspection(
+        locked_inspection = _inspection(
             directory,
             organization,
             run_id,
@@ -222,7 +224,21 @@ def record_release(
             seen["presentation_id"],
             fresh=True,
         )
-        _record(work / "release-decision.json", value)
+        if provider == "zapier_slack":
+            _require(
+                type(provider_request_expires_at) is int
+                and 0 < provider_request_expires_at <= locked_inspection["expires_at"],
+                "sealed_provider_deadline_required",
+            )
+            assert provider_request_expires_at is not None
+
+            def check_request_deadline() -> None:
+                _require(int(time.time()) < provider_request_expires_at, "request_expired")
+
+            check_request_deadline()
+            _record(work / "release-decision.json", value, before_publish=check_request_deadline)
+        else:
+            _record(work / "release-decision.json", value)
     return value
 
 
