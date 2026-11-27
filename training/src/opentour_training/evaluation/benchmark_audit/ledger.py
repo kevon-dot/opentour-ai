@@ -76,13 +76,16 @@ class AuditLedger:
             self.effects[event["effect_id"]] = DependentEffect(
                 event["effect_id"], event["receipt_id"], bool(event["consumed"])
             )
-            if (
-                self.status.get(event["receipt_id"]) == "archived_superseded"
-                and not event["consumed"]
-            ):
-                self.fenced.add(event["effect_id"])
+            if self.status.get(event["receipt_id"]) == "archived_superseded":
+                if event["consumed"]:  # reported late: still owed a reconciliation
+                    self._reconcile_late(event["receipt_id"], event["effect_id"])
+                else:
+                    self.fenced.add(event["effect_id"])
         elif kind == "disclosure":
             self.disclosures.setdefault(event["receipt_id"], []).extend(event["families"])
+            if self.status.get(event["receipt_id"]) == "archived_superseded":
+                for family in event["families"]:
+                    self._reconcile_late(event["receipt_id"], f"disclosure:{family}")
         elif kind == "superseded":
             old, new = event["old"], event["new"]
             self.status[old] = "archived_superseded"
@@ -97,6 +100,12 @@ class AuditLedger:
         else:
             raise LedgerError(f"unknown event kind {kind}")
         return True
+
+    def _reconcile_late(self, receipt_id: str, item: str) -> None:
+        owed = self.reconciliation.setdefault(receipt_id, [])
+        if item not in owed:
+            owed.append(item)
+            owed.sort()
 
     def issue(self, key: str, receipt: dict[str, Any]) -> bool:
         return self._apply({"key": key, "kind": "issued", "receipt": receipt})

@@ -11,7 +11,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
-from itertools import combinations
+from fractions import Fraction
 
 from opentour_training.evaluation.benchmark_audit.model import canonical_digest
 
@@ -71,17 +71,37 @@ class ProtectedManifest:
 
 
 def isolated_families(released: list[frozenset[str]], universe: frozenset[str]) -> frozenset[str]:
-    """Families a viewer could pin down from released cells, complements and differences."""
-    derived: set[frozenset[str]] = set()
+    """Families a viewer could pin down from released cell counts, however they are combined.
+
+    Each released cell (and the universe total) is an indicator row over the universe. A family
+    is isolated exactly when its unit vector lies in the row space, which covers complements,
+    nested differencing and non-nested combinations such as ``a+b``, ``b+c`` and ``a+c``.
+    Exact rational elimination keeps the decision deterministic.
+    """
+    order = sorted(universe)
+    rows = [[Fraction(1)] * len(order)]
     for cell in released:
-        derived.add(cell)
-        derived.add(universe - cell)
-    derived.add(universe)
-    found: set[str] = {next(iter(c)) for c in derived if len(c) == 1}
-    for a, b in combinations(derived, 2):
-        for big, small in ((a, b), (b, a)):
-            if small < big and len(big - small) == 1:
-                found.update(big - small)
+        rows.append([Fraction(int(fid in cell)) for fid in order])
+    pivots: list[int] = []
+    rank = 0
+    for col in range(len(order)):
+        pick = next((r for r in range(rank, len(rows)) if rows[r][col] != 0), None)
+        if pick is None:
+            continue
+        rows[rank], rows[pick] = rows[pick], rows[rank]
+        lead = rows[rank][col]
+        rows[rank] = [v / lead for v in rows[rank]]
+        for r in range(len(rows)):
+            if r != rank and rows[r][col] != 0:
+                factor = rows[r][col]
+                rows[r] = [a - factor * b for a, b in zip(rows[r], rows[rank], strict=True)]
+        pivots.append(col)
+        rank += 1
+    found = {
+        order[col]
+        for row, col in zip(rows, pivots, strict=False)
+        if sum(1 for v in row if v != 0) == 1
+    }
     return frozenset(found)
 
 

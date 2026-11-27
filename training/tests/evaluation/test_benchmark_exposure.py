@@ -229,3 +229,33 @@ def test_unknown_receipt_cannot_be_superseded_and_held_verdicts_never_promote() 
     held = audit(inputs_for(baseline_records(), consumed_features=("refund_settled_at",)))
     ledger.issue("held", held)
     assert not ledger.promotion_allowed(held["receipt_id"])
+
+
+def test_non_nested_pairwise_cells_that_solve_one_family_are_suppressed() -> None:
+    """a+b, b+c and a+c together reveal each family by linear algebra; no cell is a subset."""
+    g = guard()
+    first = g.evaluate(request("ab", {"generated-f01", "generated-f02"}))
+    second = g.evaluate(request("bc", {"generated-f02", DISAGREE}))
+    third = g.evaluate(request("ac", {"generated-f01", DISAGREE}))
+    assert first.allowed and second.allowed
+    assert not third.allowed and third.reason == "suppressed_answer_revealing_arm_disagreement"
+    assert [e.decision for e in g.log] == ["released", "released", "suppressed"]
+    three = [
+        frozenset({"generated-f01", "generated-f02"}),
+        frozenset({"generated-f02", DISAGREE}),
+        frozenset({"generated-f01", DISAGREE}),
+    ]
+    assert isolated_families(three[:2], UNIVERSE) == frozenset()
+    assert DISAGREE in isolated_families(three, UNIVERSE)
+
+
+def test_late_consumed_effect_and_disclosure_after_supersession_are_reconciled() -> None:
+    old = audit(inputs_for(baseline_records()))
+    successor = relabeled_successor(old)
+    ledger = AuditLedger()
+    ledger.issue("k1", old)
+    ledger.supersede("s1", old["receipt_id"], successor)
+    ledger.register_effect("fx-consumed", DependentEffect("e-late", old["receipt_id"], True))
+    ledger.log_disclosure("d1", old["receipt_id"], ["generated-f03"])
+    assert ledger.reconciliation[old["receipt_id"]] == ["disclosure:generated-f03", "e-late"]
+    assert AuditLedger.replay(ledger.events).state_digest() == ledger.state_digest()
