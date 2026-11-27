@@ -53,8 +53,9 @@ separate training project and private interpreter, exactly as for the reference 
    and evidence with `parameters_changed`, `base_sha256_before` and `base_sha256_after`; `predict` accepts
    `adapter: null` for the base). `SubprocessFamilyRunner` supervises it. Do not install CUDA in the control workspace.
 5. Register the family with `ProfileRegistry` under the owner's model reference.
-6. Run `connector_conformance.run_conformance` and `qualify_family` on the staged installation. Only a pinned profile
-   with `FixtureKind.INSTALLED_MODEL` reaches `SOFTWARE_QUALIFIED`. Both families must use the same scorer and
+6. Run `connector_conformance.run_conformance` and `qualify_family` on the staged installation. Only a pinned, non-`generated-*` profile
+   with `FixtureKind.INSTALLED_MODEL` reaches `SOFTWARE_QUALIFIED`; `QualificationRecord` refuses any higher tier
+   without that evidence, and the witnessed tiers need a `witness_ref`. Both families must use the same scorer and
    benchmark contract (`require_distinct_families_on_one_benchmark`).
 
 ## Qualification matrix (current)
@@ -66,3 +67,13 @@ separate training project and private interpreter, exactly as for the reference 
 | `generated-toy-linear-v1`, `generated-toy-normmlp-v1` | generated | FIXTURE | Real update on generated parameters only | Software conformance of the harness. Not a model. |
 
 A fixture result never satisfies a provider, installed-model or customer gate.
+
+## Known contract gaps (recorded, not invented)
+
+* `Preflight` has no distinct "credential missing" reason. A connector that cannot obtain a credential raises
+  `LookupError`, which `Preflight` reports as `model_capability_evidence_unavailable`. A distinct reason needs a change
+  to `model_connector.py` (OPE-506).
+* `fence` writes its durable marker first. If a live job cannot be confirmed stopped within `cancel_wait_seconds` it
+  raises `FENCE_JOB_NOT_STOPPED` instead of returning a receipt that claims the job was canceled.
+* `usage` for a `FAILED` or `CANCELED` job reports measured zero cost with zero seconds because the journal records
+  wall time only on completion.

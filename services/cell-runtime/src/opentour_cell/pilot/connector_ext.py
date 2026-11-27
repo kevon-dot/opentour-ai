@@ -45,6 +45,23 @@ class Usage:
     source: UsageSource
     irreversible: bool = False
 
+    def __post_init__(self) -> None:
+        # A plain string such as "estimated" must not slip past the identity check below.
+        try:
+            object.__setattr__(self, "source", UsageSource(self.source))
+        except ValueError:
+            raise ValueError("INVALID_USAGE") from None
+        counts = (self.incurred_minor_units, self.seconds, self.rows, self.steps)
+        if (
+            not isinstance(self.job_ref, str)
+            or not self.job_ref
+            or not isinstance(self.currency, str)
+            or not self.currency
+            or any(type(count) is not int or count < 0 for count in counts)
+            or type(self.irreversible) is not bool
+        ):
+            raise ValueError("INVALID_USAGE")
+
     @property
     def settleable(self) -> bool:
         return self.source is not UsageSource.ESTIMATED

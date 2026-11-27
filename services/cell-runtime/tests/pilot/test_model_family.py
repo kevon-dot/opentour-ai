@@ -57,10 +57,51 @@ def test_generated_results_are_fixture_tier_with_unsatisfied_gates(tmp_path: Pat
     assert not record.qualified
     assert "installed_model_and_gpu_or_cpu_run_not_performed" in record.external_gates
     assert "customer_witness_not_recorded" in record.external_gates
-    installed = fam.build_record(family.profile, fam.FixtureKind.INSTALLED_MODEL, results)
+    # A generated family can never be qualified, even if a caller labels the run INSTALLED_MODEL.
+    mislabeled = fam.build_record(family.profile, fam.FixtureKind.INSTALLED_MODEL, results)
+    assert mislabeled.tier is EvidenceTier.FIXTURE and not mislabeled.qualified
+    assert "generated_family_is_never_a_qualified_model" in mislabeled.external_gates
+    # Structural path only: a pinned, non-generated profile with an installed-model run.
+    pinned = replace(family.profile, family_id="structural-pinned-profile")
+    installed = fam.build_record(pinned, fam.FixtureKind.INSTALLED_MODEL, results)
     assert installed.tier is EvidenceTier.SOFTWARE_QUALIFIED and installed.qualified
     # Software qualification still never records customer or provider witness.
     assert "customer_witness_not_recorded" in installed.external_gates
+
+
+def test_a_record_cannot_claim_a_tier_its_evidence_does_not_support(tmp_path: Path) -> None:
+    family = toy.Family(tmp_path, "generated-toy-linear")
+    base = fam.build_record(family.profile, fam.FixtureKind.GENERATED, {})
+
+    def claim(tier: EvidenceTier, **changes: object) -> fam.QualificationRecord:
+        return replace(base, tier=tier, **changes)  # type: ignore[arg-type]
+
+    for tier in (
+        EvidenceTier.SOFTWARE_QUALIFIED,
+        EvidenceTier.PROVIDER_WITNESSED,
+        EvidenceTier.CUSTOMER_WITNESSED,
+    ):
+        with pytest.raises(fam.FamilyError, match="EVIDENCE_TIER_UNSUPPORTED"):
+            claim(tier)  # generated fixture, generated family
+        with pytest.raises(fam.FamilyError, match="EVIDENCE_TIER_UNSUPPORTED"):
+            claim(
+                tier,
+                fixture_kind=fam.FixtureKind.INSTALLED_MODEL,
+                family_id="structural-pinned-profile",
+                external_gates=("profile_pin_missing:revision",),
+            )
+    with pytest.raises(fam.FamilyError, match="INVALID_EVIDENCE_TIER"):
+        claim("customer_witnessed")  # type: ignore[arg-type]
+    real = {
+        "fixture_kind": fam.FixtureKind.INSTALLED_MODEL,
+        "family_id": "structural-pinned-profile",
+        "external_gates": (),
+    }
+    # A witnessed tier additionally needs a witness reference; a lower tier is not enough.
+    with pytest.raises(fam.FamilyError, match="EVIDENCE_TIER_UNSUPPORTED"):
+        claim(EvidenceTier.CUSTOMER_WITNESSED, **real)
+    assert claim(EvidenceTier.CUSTOMER_WITNESSED, witness_ref="generated-witness", **real)
+    assert claim(EvidenceTier.SOFTWARE_QUALIFIED, **real).tier is EvidenceTier.SOFTWARE_QUALIFIED
 
 
 def test_missing_or_failed_required_check_is_never_a_pass(tmp_path: Path) -> None:

@@ -643,3 +643,22 @@ def test_unpinned_second_family_cannot_be_trained(tmp_path: Path) -> None:
     runner = owc.SubprocessFamilyRunner(candidate, tmp_path, toy.WORKER, tmp_path / "p.json")
     with pytest.raises(ValueError, match="FAMILY_NOT_PINNED"):
         runner.installed_revision()
+
+
+def test_fence_never_reports_a_job_stopped_when_its_worker_still_holds_it(
+    family: toy.Family, tmp_path: Path
+) -> None:
+    connector = family.connector(tmp_path / "state")
+    connector.cancel_wait_seconds = 0.2
+    job_dir = connector.root / "jobs" / ("a" * 32)
+    job_dir.mkdir(mode=0o700)
+    owc._append(job_dir / "journal.jsonl", {"event": "accepted", "intent_sha256": "0" * 64})
+    owner = owc._Lock(job_dir / "lock")
+    assert owner.acquire()
+    try:
+        with pytest.raises(owc.ConnectorRefusal, match="FENCE_JOB_NOT_STOPPED"):
+            connector.fence("generated-stuck")
+        # The fence itself is durable even though the stop could not be confirmed.
+        assert (connector.root / "FENCED").exists()
+    finally:
+        owner.release()

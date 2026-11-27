@@ -522,6 +522,9 @@ class OpenWeightConnector:
                         lock.release()
                     break
                 time.sleep(0.02)
+            if _events(journal)[-1]["event"] not in _TERMINAL:
+                # The fence itself is durable; never report a job stopped that is not.
+                raise ConnectorRefusal("FENCE_JOB_NOT_STOPPED")
             canceled.append(self._job_ref(job_dir.name))
         return FenceReceipt(
             scope,
