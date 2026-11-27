@@ -101,3 +101,8 @@ declaration holds the result. Invalid or competing date clauses stay
 unresolved. An authorized source edit with a retroactive date requires a
 new review. The prior receipt and proof keep their original source and
 interpretation.
+
+When a policy includes a recognized effective date, the review shows its date
+and links to the operative source passage. Each generated branch example uses
+the effective date as its explicitly labeled decision date. A caller inspecting
+a dated policy without a date, or with an earlier date, receives no proposed action.

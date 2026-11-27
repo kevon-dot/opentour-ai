@@ -784,3 +784,45 @@ def test_two_admitted_workflows_choose_privately_and_withdrawn_choice_denies(fou
     grant.unlink()
     h.action(view, "ot_choose_map", choices[second], ACTOR)
     assert "total &lt; 99" not in str(screen(h, view)) and effects(h) == (0,) * 7
+
+
+def test_dated_examples_and_effective_clause_use_current_reader_authority(founder, monkeypatch):
+    from datetime import date
+
+    from opentour_cell.pilot.map_inspection import branch_example
+    from test_guided_policy import PURCHASE_POLICY
+    from test_intake_mcp import _write_private
+    from test_reviewer_workflow import screen, text
+    from test_slack_adapter import ACTOR
+    from test_starter_setup import effects
+
+    h = founder
+    clause = "Effective from 2026-03-01."
+    workflow = prepare_map(h, monkeypatch, (clause + "\n").encode() + PURCHASE_POLICY)
+    reader = "UREADER"
+    h.config["users"][reader] = dict(h.config["users"][ACTOR])
+    h.slack.members.append(reader)
+    h.save()
+    service, principal = h.app._map_service(reader, workflow)
+    snap = service.preview(principal)
+    row = next(r for r in snap.branches if r.action == "APPROVE")
+    for prior in (None, date(2026, 2, 28)):
+        assert branch_example(snap, row, decision_date=prior).action is None
+    assert branch_example(snap, row, decision_date=date(2026, 3, 1)).action == "APPROVE"
+    view = enter_map(h, monkeypatch, reader)
+    visible = text(h, view)
+    assert "Policy effective from 2026-03-01" in visible
+    assert "Decision date 2026-03-01 · po=example-reference, total=0 → APPROVE" in visible
+    emitted = dict(actions(screen(h, view)))
+    assert "ot_map_edit" not in emitted
+    ref = emitted["ot_map_date_clause"]
+    h.action(view, "ot_map_date_clause", ref, reader)
+    assert clause in text(h, view)
+    view = enter_map(h, monkeypatch, reader)
+    h.action(view, "ot_map_date_clause", emitted["ot_map_priority"], reader)
+    assert clause not in text(h, view)
+    view = enter_map(h, monkeypatch, reader)
+    _write_private(h.path.parent / "map-review-withdrawn-owner-review-v1.json", {})
+    h.action(view, "ot_map_date_clause", ref, reader)
+    assert clause not in text(h, view)
+    assert effects(h) == (0,) * 7
