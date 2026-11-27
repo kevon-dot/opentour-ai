@@ -33,6 +33,9 @@ The single writer of `training/gpu/pyproject.toml`, `training/gpu/uv.lock` and
 person who holds that lane in Linear. Until then, nobody else changes these files. Other
 issues request pin changes from that lane. They do not edit the lock in parallel.
 
+**Status:** no person is named yet. OPE-579 item 1 ("a named single writer") stays open until
+the OPE-579 owner names one. This file does not satisfy that item.
+
 ## Pinned stack
 
 | Component | Pin | Notes |
@@ -45,9 +48,9 @@ issues request pin changes from that lane. They do not edit the lock in parallel
 | accelerate | 1.15.0 | |
 | safetensors | 0.8.0 | |
 | tokenizers | 0.23.3 | |
-| huggingface-hub | 2.4.0 | Offline at train time |
+| huggingface-hub | 2.4.0 | Set to offline mode in the image. Network isolation is enforced by the operator. |
 | CUDA runtime wheels | `cuda-toolkit` 13.0.3.0, `nvidia-cuda-runtime` 13.0.96, `nvidia-cublas` 13.1.1.3, `nvidia-cudnn-cu13` 9.24.0.43, `nvidia-nccl-cu13` 2.30.7, `nvidia-nvjitlink` 13.0.88, `cuda-bindings` 13.0.3, `triton` 3.8.0 | Full set and hashes in `uv.lock` |
-| Base image | `nvidia/cuda:13.0.3-runtime-ubuntu24.04` linux/amd64 `sha256:1d66a0c2041af1dfff8a13072a2e8f0543bbdf7a44224c2c96fd9d6445fb7c9a` | Index `sha256:76f46f3e649824ebd3685d3d86c42b0ea62af04f59242f419f56cd5804a72efb`. Checked on 2026-11-27 against registry-1.docker.io and Docker Hub. |
+| Base image | `nvidia/cuda:13.0.3-runtime-ubuntu24.04` linux/amd64 `sha256:1d66a0c2041af1dfff8a13072a2e8f0543bbdf7a44224c2c96fd9d6445fb7c9a` | Index `sha256:76f46f3e649824ebd3685d3d86c42b0ea62af04f59242f419f56cd5804a72efb`. Digests checked on 2026-11-27 against registry-1.docker.io and Docker Hub. Not verified: whether the image's CUDA libraries match the locked wheels. The independent review's registry read was rate-limited. Check this when the image is first built on OPE-565. |
 
 The lock uses `exclude-newer = 2026-11-16T00:00:00Z` so transitive pins re-resolve to the
 same set.
@@ -96,7 +99,22 @@ a recorded commit. Each run records:
    bf16 compute) first. Try bf16 LoRA only if the 4-bit kernels fail compatibility. Record the
    fallback as a separate route, with the NF4 failure that triggered it.
 9. **Runtime isolation.** The container runs with `--network none`, as UID 10001, with the
-   weights mounted read-only.
+   weights mounted read-only. The image cannot enforce this. Its offline variables only stop
+   the Hub and package clients from trying to connect. The operator enforces
+   `--network none`, and the record must show it.
+10. **Base image libraries.** Record the CUDA library versions in the built image (cudart,
+    cuBLAS, cuSPARSE, NVTX, NCCL) next to the locked wheel versions. Their match has not been
+    independently verified.
+
+## Follow-ups for other owners
+
+- **Dependency scan.** The OSV scan in `tools/ci/run.py` (`dependency_scan_command`) covers
+  only `uv.lock`, `training/uv.lock` and `pnpm-lock.yaml`. It does not scan
+  `training/gpu/uv.lock`. Adding `--lockfile=training/gpu/uv.lock` is a follow-up for the
+  owner of `tools/ci/run.py`. The file's history does not name an owner, so confirm it. AGENTS.md
+  assigns command wrappers to OPE-123. This lane does not edit that file.
+- **Toolchain pointer.** `tools/toolchain.json` (OPE-122/OPE-123) could name this lock.
+  `gpu_qualification.status` stays `NOT_RUN`.
 
 ## Evidence limits
 
