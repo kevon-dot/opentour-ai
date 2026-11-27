@@ -1,0 +1,169 @@
+"""Protected-answer exposure controls for charts, text, exports, tooltips and filters.
+
+Every release path (private Slack and worker UI alike) goes through one guard. A dual-role
+evaluator/selector must not receive a cell, or a complementary/differencing combination of
+cells, that isolates one protected family. Suppression and authorized disclosure are both
+logged; earlier as-of manifests are never mutated.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Callable
+from dataclasses import dataclass
+from enum import StrEnum
+from itertools import combinations
+
+from opentour_training.evaluation.benchmark_audit.model import canonical_digest
+
+
+class Surface(StrEnum):
+    CHART = "chart"
+    ACCESSIBLE_TEXT = "accessible_text"
+    EXPORT = "export"
+    TOOLTIP = "tooltip"
+    NL_FILTER = "nl_filter"
+
+
+class Channel(StrEnum):
+    PRIVATE_SLACK = "private_slack"
+    WORKER_UI = "worker_ui"
+
+
+@dataclass(frozen=True)
+class QueryRequest:
+    query_id: str
+    surface: Surface
+    channel: Channel
+    cell: frozenset[str]  # protected families the worker resolved from the request
+    roles: frozenset[str]
+
+
+@dataclass(frozen=True)
+class QueryDecision:
+    allowed: bool
+    reason: str
+    isolated_digest: str | None
+    log_index: int
+
+
+@dataclass(frozen=True)
+class LogEntry:
+    index: int
+    query_id: str
+    surface: str
+    channel: str
+    cell_digest: str
+    decision: str
+    reason: str
+    authorized_by: str | None
+
+
+@dataclass(frozen=True)
+class ProtectedManifest:
+    version: int
+    family_ids: frozenset[str]
+    predecessor_digest: str | None = None
+
+    def digest(self) -> str:
+        return canonical_digest(
+            {"v": self.version, "f": sorted(self.family_ids), "p": self.predecessor_digest}
+        )
+
+
+def isolated_families(released: list[frozenset[str]], universe: frozenset[str]) -> frozenset[str]:
+    """Families a viewer could pin down from released cells, complements and differences."""
+    derived: set[frozenset[str]] = set()
+    for cell in released:
+        derived.add(cell)
+        derived.add(universe - cell)
+    derived.add(universe)
+    found: set[str] = {next(iter(c)) for c in derived if len(c) == 1}
+    for a, b in combinations(derived, 2):
+        for big, small in ((a, b), (b, a)):
+            if small < big and len(big - small) == 1:
+                found.update(big - small)
+    return frozenset(found)
+
+
+class ExposureGuard:
+    """Single release gate shared by every surface and channel."""
+
+    def __init__(self, universe: frozenset[str], arm_disagreements: frozenset[str]) -> None:
+        self._universe = universe
+        self._arm_disagreements = arm_disagreements
+        self._released: list[frozenset[str]] = []
+        self._log: list[LogEntry] = []
+        self._exposed: set[str] = set()
+
+    @property
+    def log(self) -> tuple[LogEntry, ...]:
+        return tuple(self._log)
+
+    @property
+    def exposed_families(self) -> frozenset[str]:
+        return frozenset(self._exposed)
+
+    def _record(self, request: QueryRequest, decision: str, reason: str, by: str | None) -> int:
+        index = len(self._log)
+        self._log.append(
+            LogEntry(
+                index,
+                request.query_id,
+                request.surface.value,
+                request.channel.value,
+                canonical_digest(sorted(request.cell)),
+                decision,
+                reason,
+                by,
+            )
+        )
+        return index
+
+    def _would_isolate(self, request: QueryRequest) -> frozenset[str]:
+        if not request.cell <= self._universe or not request.cell:
+            return self._universe  # malformed cell: treat as maximally revealing
+        return isolated_families(self._released + [request.cell], self._universe)
+
+    def evaluate(self, request: QueryRequest) -> QueryDecision:
+        dual = {"evaluator", "selector"} <= request.roles
+        isolated = self._would_isolate(request) if dual else frozenset()
+        newly = isolated - isolated_families(self._released, self._universe)
+        if dual and newly:
+            reason = (
+                "suppressed_answer_revealing_arm_disagreement"
+                if newly & self._arm_disagreements
+                else "suppressed_single_family_isolation"
+            )
+            digest = canonical_digest(sorted(newly))
+            index = self._record(request, "suppressed", reason, None)
+            return QueryDecision(False, reason, digest, index)
+        self._released.append(request.cell)
+        return QueryDecision(True, "released", None, self._record(request, "released", "ok", None))
+
+    def authorize_disclosure(self, request: QueryRequest, authorized_by: str) -> QueryDecision:
+        """Release an isolating cell with a logged authorization; affected families retire."""
+        if not authorized_by.strip():
+            raise ValueError("authorization requires a named authorizer")
+        newly = self._would_isolate(request) - isolated_families(self._released, self._universe)
+        self._released.append(request.cell)
+        self._exposed.update(newly)
+        index = self._record(request, "authorized_disclosure", "authorized", authorized_by)
+        return QueryDecision(True, "authorized_disclosure", canonical_digest(sorted(newly)), index)
+
+    def release(
+        self, request: QueryRequest, compute: Callable[[frozenset[str]], object]
+    ) -> tuple[QueryDecision, object | None]:
+        """Run ``compute`` only for an allowed request, so suppression never touches answers."""
+        decision = self.evaluate(request)
+        return decision, (compute(request.cell) if decision.allowed else None)
+
+
+def successor_protected_manifest(
+    manifest: ProtectedManifest, exposed: frozenset[str]
+) -> ProtectedManifest:
+    """New manifest without exposed families; the predecessor object stays untouched."""
+    return ProtectedManifest(
+        version=manifest.version + 1,
+        family_ids=manifest.family_ids - exposed,
+        predecessor_digest=manifest.digest(),
+    )
