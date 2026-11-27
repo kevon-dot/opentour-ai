@@ -13,7 +13,7 @@ import os
 import re
 import sqlite3
 import stat
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import AbstractContextManager, contextmanager
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
@@ -102,12 +102,15 @@ class BenchmarkMaterializer(Protocol):
 
 
 class WorkflowBenchmarks:
-    def __init__(self, directory: Path):
+    def __init__(self, directory: Path, *, check_write: Callable[[], None] | None = None):
         self.path = directory.absolute() / "workflow-benchmarks.sqlite3"
+        self._check_write = check_write
 
     @contextmanager
     def _db(self, *, write: bool = False) -> Iterator[sqlite3.Connection]:
         if write:
+            if self._check_write is not None:
+                self._check_write()
             parent = self.path.parent
             _require(parent.resolve(strict=True) == parent and parent.is_dir())
             info = parent.stat()
@@ -151,6 +154,8 @@ class WorkflowBenchmarks:
                     "revision TEXT NOT NULL, PRIMARY KEY(tenant,run))"
                 )
             yield db
+            if write and self._check_write is not None:
+                self._check_write()
             db.commit()
         except BaseException:
             db.rollback()
@@ -619,6 +624,35 @@ class BenchmarkIntake:
                 scope.tenant, workflow, scope.engagement_epoch
             )
             return self.benchmarks.inspect(scope, require_ref(reference), current_run=current_run)
+
+    def adopt_starter_state(
+        self,
+        actor: IntakePrincipal,
+        work: IntakeWork,
+        proposal: MaterializedBenchmark,
+        freeze: MaterializedBenchmark | None,
+        *,
+        check_current: Callable[[], None],
+    ) -> None:
+        """Caller holds the worker lock and current independent starter-materialization scope."""
+        _require(work.mode == "starter" and work.benchmark_current)
+        _require(proposal.state == "needs_owner_review")
+        _require(freeze is None or freeze.state == "frozen_unscored")
+        ledger = WorkflowBenchmarks(self.benchmarks.path.parent, check_write=check_current)
+        check_current()
+        current = ledger.admit(actor.tenant, work)
+        observations = [proposal]
+        if freeze is not None:
+            observations = (
+                [freeze] if current.benchmark_state == freeze.state else [proposal, freeze]
+            )
+        for receipt in observations:
+            operation, _, previous = ledger.admit_materialization(actor.tenant, work, receipt.state)
+            if operation is None:
+                _require(previous == receipt, "benchmark_receipt_changed")
+            else:
+                ledger.publish(actor.tenant, work, receipt, operation_ref=operation)
+        check_current()
 
     def materialize(
         self,

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hmac
 import json
 import re
 import time
@@ -76,7 +77,7 @@ def check_release_inspection(
         ),
         "release_reviewer_mismatch",
     )
-    return _inspection(
+    checked = _inspection(
         directory,
         organization,
         run_id,
@@ -86,6 +87,8 @@ def check_release_inspection(
         inspection_ref,
         fresh=True,
     )
+    del checked["presented_at"]
+    return checked
 
 
 def _inspection(
@@ -98,6 +101,7 @@ def _inspection(
     inspection_ref: str,
     *,
     fresh: bool,
+    decision_body: Json | None = None,
 ) -> Json:
     from opentour_cell.pilot.receipt_recovery import _JournalSnapshot, _open_db
     from opentour_cell.pilot.slack_adapter import Settings
@@ -115,7 +119,7 @@ def _inspection(
         journal = _JournalSnapshot(db, ledger, binding[0])
         journal.active(db)
         row = db.execute(
-            "SELECT p.id,p.snapshot,p.expires,p.policy FROM presentations p "
+            "SELECT p.id,p.snapshot,p.expires,p.policy,p.presented FROM presentations p "
             "JOIN exposures e ON e.id=p.id "
             "WHERE p.actor=? AND (p.id=? OR p.revision=?) AND "
             "e.status='presented' ORDER BY p.presented DESC,p.rowid DESC LIMIT 1",
@@ -157,12 +161,53 @@ def _inspection(
             == row[3],
             "release_review_permission_changed",
         )
-        return {
+        result: Json = {
             "engagement": seen["engagement"],
             "expires_at": row[2],
+            "presented_at": row[4],
             "provider": cfg.approval_provider,
             "presentation_id": row[0],
         }
+        if decision_body is not None:
+            result["decision_seal"] = journal.opaque(
+                "release",
+                [
+                    "opentour.pilot.release-decision.v1",
+                    journal.binding,
+                    seen["engagement"],
+                    decision_body,
+                ],
+            )
+        return result
+
+
+def _check_recorded_at(receipt: Json, presentation: Json) -> None:
+    if "recorded_at" in receipt:
+        recorded = receipt["recorded_at"]
+        _require(
+            type(recorded) is int
+            and presentation["presented_at"] <= recorded < presentation["expires_at"]
+            and recorded <= int(time.time()),
+            "release_record_time_invalid",
+        )
+
+
+def _decision_body(receipt: Json) -> Json | None:
+    if "recorded_at" not in receipt and "decision_seal" not in receipt:
+        return None
+    return {key: value for key, value in receipt.items() if key != "decision_seal"}
+
+
+def _check_decision_seal(receipt: Json, presentation: Json) -> None:
+    if "decision_seal" in presentation:
+        supplied = receipt.get("decision_seal")
+        _require(
+            "recorded_at" in receipt
+            and isinstance(supplied, str)
+            and supplied.isascii()
+            and hmac.compare_digest(supplied, presentation["decision_seal"]),
+            "release_decision_integrity_unavailable",
+        )
 
 
 def record_release(
@@ -214,7 +259,20 @@ def record_release(
     store = LocalTrainingStore(directory / "training.sqlite3", organization, existing_only=True)
     with store.engagement_guard(engagement_id=seen["engagement"]):
         _binding(directory, organization, run_id, run_revision, artifact_sha)
-        locked_inspection = _inspection(
+        path = work / "release-decision.json"
+        try:
+            saved = _private_json(path)
+        except FileNotFoundError:
+            create = True
+            saved = value | {"recorded_at": int(time.time())}
+        else:
+            create = False
+            _require(
+                {k: v for k, v in saved.items() if k not in {"recorded_at", "decision_seal"}}
+                == value,
+                "existing_result_conflict",
+            )
+        presentation = _inspection(
             directory,
             organization,
             run_id,
@@ -223,23 +281,31 @@ def record_release(
             policy,
             seen["presentation_id"],
             fresh=True,
+            decision_body=_decision_body(saved),
         )
-        if provider == "zapier_slack":
-            _require(
-                type(provider_request_expires_at) is int
-                and 0 < provider_request_expires_at <= locked_inspection["expires_at"],
-                "sealed_provider_deadline_required",
-            )
-            assert provider_request_expires_at is not None
+        _check_recorded_at(saved, presentation)
+        if create:
+            saved["decision_seal"] = presentation["decision_seal"]
+            if provider == "zapier_slack":
+                _require(
+                    type(provider_request_expires_at) is int
+                    and 0 < provider_request_expires_at <= presentation["expires_at"],
+                    "sealed_provider_deadline_required",
+                )
+                assert provider_request_expires_at is not None
 
-            def check_request_deadline() -> None:
-                _require(int(time.time()) < provider_request_expires_at, "request_expired")
+                def check_request_deadline() -> None:
+                    _require(int(time.time()) < provider_request_expires_at, "request_expired")
 
-            check_request_deadline()
-            _record(work / "release-decision.json", value, before_publish=check_request_deadline)
+                check_request_deadline()
+                _record(path, saved, before_publish=check_request_deadline)
+            else:
+                _record(path, saved)
         else:
-            _record(work / "release-decision.json", value)
-    return value
+            # A retry must preserve the time of the first durable decision. Old
+            # receipts remain usable for their existing approval-only pathways.
+            _check_decision_seal(saved, presentation)
+        return saved
 
 
 def inspect_recorded_release(
@@ -261,7 +327,7 @@ def inspect_recorded_release(
         and receipt.get("artifact_sha") == artifact_sha,
         "human_release_approval_required",
     )
-    _inspection(
+    presentation = _inspection(
         directory,
         organization,
         run_id,
@@ -270,7 +336,10 @@ def inspect_recorded_release(
         policy,
         receipt["presentation_id"],
         fresh=False,
+        decision_body=_decision_body(receipt),
     )
+    _check_recorded_at(receipt, presentation)
+    _check_decision_seal(receipt, presentation)
     return receipt
 
 
