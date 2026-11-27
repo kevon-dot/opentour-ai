@@ -6,6 +6,7 @@ import json
 import re
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass, replace
+from datetime import date
 from decimal import Decimal
 from enum import StrEnum
 
@@ -29,6 +30,7 @@ _COMPARISON = re.compile(
 )
 _OPERATORS = {"below": "<", "at most": "<=", "at or above": ">=", "above": ">"}
 _FIRST_MATCH = re.compile(r"apply the first matching rule\.?", re.I)
+_EFFECTIVE_FROM = re.compile(r"effective from ([0-9]{4}-[0-9]{2}-[0-9]{2})\.?", re.I)
 _LIST_MARKER = re.compile(r"^(?:[-+*]|[0-9]{1,9}[.)]) +")
 _HORIZONTAL_RULE = re.compile(r"(?:-{3,}|\*{3,}|_{3,})")
 _ACTION = re.compile(r"[A-Z][A-Z0-9_]{0,47}")
@@ -73,6 +75,15 @@ class Branch:
 
 
 @dataclass(frozen=True)
+class EffectiveFrom:
+    iso_date: str
+    citation: PolicySpan
+
+    def applies(self, decision_date: date | None) -> bool:
+        return type(decision_date) is date and decision_date.isoformat() >= self.iso_date
+
+
+@dataclass(frozen=True)
 class GuidedMap:
     revision: str
     policy_revision: str
@@ -80,11 +91,14 @@ class GuidedMap:
     branches: tuple[Branch, ...]
     first_match_clause: PolicySpan | None
     unresolved: tuple[PolicySpan, ...]
+    effective_from: EffectiveFrom | None = None
 
     def draft_action(
-        self, fields: Mapping[str, str | Decimal | None]
+        self, fields: Mapping[str, str | Decimal | None], *, decision_date: date | None = None
     ) -> tuple[str | None, tuple[PolicySpan, ...]]:
         """Return the supported action or the exact clauses needing a precedence decision."""
+        if self.effective_from and not self.effective_from.applies(decision_date):
+            return None, (self.effective_from.citation,)
         matched = [
             branch
             for branch in self.branches
@@ -130,11 +144,21 @@ def guided_draft(
     branches = []
     unresolved = []
     priority = None
+    effective_dates: list[EffectiveFrom] = []
     for line_number, raw in operative_lines(policy.lines):
         if HEADING.match(raw) or _HORIZONTAL_RULE.fullmatch(raw.strip()):
             continue
         line = _LIST_MARKER.sub("", raw.strip(), count=1)
         citation = policy.cite(line_number, line_number)
+        effective = _EFFECTIVE_FROM.fullmatch(line)
+        if effective:
+            try:
+                valid_from = date.fromisoformat(effective[1]).isoformat()
+            except ValueError:
+                unresolved.append(citation)
+            else:
+                effective_dates.append(EffectiveFrom(valid_from, citation))
+            continue
         if _FIRST_MATCH.fullmatch(line):
             if priority is not None:
                 unresolved.append(citation)
@@ -156,24 +180,28 @@ def guided_draft(
             reference = "branch-" + digest([[asdict(item) for item in predicates], action])[:32]
             branches.append(Branch(reference, tuple(predicates), action, citation))
 
-    revision = digest(
-        {
-            "schema_version": MAP_VERSION,
-            "policy_revision": policy.source_revision,
-            "field_kinds": dict(field_kinds),
-            "actions": sorted(actions),
-            "branches": [asdict(branch) for branch in branches],
-            "first_match_clause": asdict(priority) if priority is not None else None,
-            "unresolved": [asdict(span) for span in unresolved],
-        }
-    )
+    effective_from = effective_dates[0] if len(effective_dates) == 1 else None
+    if len(effective_dates) > 1:
+        unresolved.extend(effective.citation for effective in effective_dates)
+    meaning = {
+        "schema_version": MAP_VERSION,
+        "policy_revision": policy.source_revision,
+        "field_kinds": dict(field_kinds),
+        "actions": sorted(actions),
+        "branches": [asdict(branch) for branch in branches],
+        "first_match_clause": asdict(priority) if priority is not None else None,
+        "unresolved": [asdict(span) for span in unresolved],
+    }
+    if effective_from:
+        meaning["effective_from"] = asdict(effective_from)
     return GuidedMap(
-        revision,
+        digest(meaning),
         policy.source_revision,
         policy.grant_revision,
         tuple(branches),
         priority,
         tuple(unresolved),
+        effective_from,
     )
 
 
@@ -213,6 +241,9 @@ class GuidedMapService:
                 raise PolicyError("guided_map_stale_revision")
             scope = [selection.tenant, selection.engagement_epoch, workflow_ref, draft.revision]
             path = authority.path.parent / f"guided-map-{digest(scope)}.json"
+            saved = asdict(draft)
+            if draft.effective_from is None:
+                del saved["effective_from"]
             _record(
                 path,
                 {
@@ -221,7 +252,7 @@ class GuidedMapService:
                     "grant_revision": grant.revision,
                     "field_kinds": self.field_kinds,
                     "actions": sorted(self.actions),
-                    "map": json.loads(canonical(asdict(draft))),
+                    "map": json.loads(canonical(saved)),
                 },
             )
         return draft

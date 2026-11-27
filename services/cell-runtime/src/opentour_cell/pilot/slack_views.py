@@ -2040,6 +2040,16 @@ class MapReviewRow:
     fallback: str
     support: str
     disposition: str
+    example: str = ""
+
+
+def map_choices(context: str, choices: Sequence[tuple[str, str]]) -> Block:
+    return _modal(
+        "Choose workflow",
+        "ot_map_choices",
+        context,
+        [_actions(_button(workflow, "ot_choose_map", token)) for workflow, token in choices],
+    )
 
 
 def decision_map(
@@ -2057,20 +2067,39 @@ def decision_map(
     source_revision: str,
     draft_revision: str,
     priority_citation: str = "",
+    effective_date: str = "",
+    effective_citation: str = "",
     priority_assertion: str = "",
     assertion_basis: str = "",
+    unit_of_work: str | None = None,
+    verifier_plan: str = "",
 ) -> Block:
     per_page = 5
     if page < 0 or (page and page * per_page >= len(rows)):
         raise ValueError("invalid map page")
     blocks = [
         _section(f"Workflow {_ref(workflow)} · saved review version {version}"),
+        _section(f"Unit of work · {_display(unit_of_work or 'Unspecified')}"),
+        _section(
+            f"Verifier plan · {_display(verifier_plan or 'Unavailable for this workflow', 800)}"
+        ),
         _section(f"Policy revision {_ref(source_revision)}\nGuided draft {_ref(draft_revision)}"),
     ]
     if assertion_basis:
         blocks.append(_section(_display(assertion_basis, 1800)))
     if editable:
         blocks.append(_actions(_button("Edit trigger and fallback", "ot_map_assertions", revision)))
+    if effective_date and effective_citation:
+        blocks.extend(
+            [
+                _section(f"Policy effective from {_display(effective_date)}"),
+                _actions(
+                    _button(
+                        "Inspect effective date clause", "ot_map_date_clause", effective_citation
+                    )
+                ),
+            ]
+        )
     if priority_citation:
         blocks.append(
             _actions(_button("Inspect precedence clause", "ot_map_priority", priority_citation))
@@ -2095,7 +2124,8 @@ def decision_map(
                     f"Predicate · {_display(row.predicate, 500)}\n"
                     f"Precedence · {_display(row.precedence, 250)}\n"
                     f"Fallback · {_display(row.fallback, 250)}\n"
-                    f"Support · {_display(row.support, 250)}"
+                    f"Support · {_display(row.support, 250)}\n"
+                    f"Proposed example · {_display(row.example, 500)}"
                 ),
                 _actions(
                     _button("Inspect clause", "ot_map_citation", row.branch_ref),
@@ -2251,6 +2281,7 @@ def map_assertions(
     trigger: str | None,
     fallback: str | None,
     permitted: Sequence[str],
+    unit_of_work: str | None = None,
 ) -> Block:
     choices = [("Leave unresolved", "unresolved")] + [(action, action) for action in permitted]
     selected = next((i for i, (_, value) in enumerate(choices) if value == fallback), 0)
@@ -2266,6 +2297,7 @@ def map_assertions(
                 "Describe when the workflow starts and the fallback when no reviewed rule matches."
             ),
             trigger_input,
+            _map_text_input("unit", "Unit of work", initial=unit_of_work or "", optional=True),
             _select("fallback", "Intended fallback", choices, selected),
             _map_text_input("reason", "Basis for this owner assertion", multiline=True),
         ],

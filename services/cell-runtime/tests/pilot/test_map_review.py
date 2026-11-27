@@ -707,3 +707,25 @@ def test_unconfirmed_or_unresolved_branch_prevents_fallback_truth(starter):
         changes=(BranchEdit(current.branches[0].branch_ref, "unresolved", "Unclear rule"),),
     )
     assert unresolved.expected_action({"total": Decimal("300")})[0] is None
+
+
+def test_examples_hold_ambiguous_and_shadowed_rules_and_follow_actual_threshold(starter):
+    from opentour_cell.pilot.map_inspection import branch_example
+
+    policy = b"# Routing\nIf total >= 30, MANUAL.\nIf total >= 50, REVIEW.\n"
+    source, wf, _, _ = starter(policy)
+    service, _ = stage_map_review(source, wf)
+    snap = service.preview(OWNER_A)
+    later = snap.branches[1]
+    proposed = branch_example(snap, later)
+    assert proposed.action is None and set(proposed.citations) == {
+        r.citation_ref for r in snap.branches
+    }
+    assert dict(proposed.inputs)["total"] >= Decimal(50)
+    source, wf, _, _ = starter(
+        policy.replace(b"# Routing\n", b"# Routing\nApply the first matching rule.\n")
+    )
+    service, _ = stage_map_review(source, wf)
+    snap = service.preview(OWNER_A)
+    assert branch_example(snap, snap.branches[1]).action is None
+    assert branch_example(snap, snap.branches[0]).action == "MANUAL"
