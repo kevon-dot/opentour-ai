@@ -380,6 +380,10 @@ def test_p1_invoice_commit_then_independent_truth(
         return current
 
     snapshot((1, 0, 1, 0))
+    pending_home = json.dumps(publish(h, monkeypatch), ensure_ascii=False)
+    assert "Live evidence · 1 decision" in pending_home
+    assert "Verified 0 · Pending 1 · Disputed 0" in pending_home
+    assert "Incumbent wrong / verified automatic decisions · Unavailable" in pending_home
     assert "ot_app_verify_outcome" not in buttons(publish(h, monkeypatch, OTHER))
     body["grants"].append(asdict(replace(OUTCOME, verifier=OTHER)))
     body["actors"][OTHER] = ["verify"]
@@ -431,20 +435,31 @@ def test_p1_invoice_commit_then_independent_truth(
             repaired["residual_group_count"],
             repaired["minimum_residual_groups"],
         ) == ("too_early_to_train", 1, 0, 3)
-        first_home = json.dumps(publish(h, monkeypatch))
+        assert repaired["incumbent_automatic"] == {"wrong": 1, "verified": 1}
+        assert repaired["repair_route"] == "simple"
+        first_home = json.dumps(publish(h, monkeypatch), ensure_ascii=False)
         assert "Too early to train" in first_home and "0 residual groups" in first_home
+        assert "Verified 1 · Pending 0 · Disputed 0" in first_home
+        assert "Incumbent wrong / verified automatic decisions · 1/1" in first_home
         assert "carrier_freight" not in first_home and "po-a" not in first_home
+        assert "Incumbent wrong" not in json.dumps(publish(h, monkeypatch, OTHER))
     verify("reopened")
     snapshot((1, 0, 1, 0))
     if observed:
-        assert readiness()["pending_count"] == 1
+        pending = readiness()
+        assert pending["pending_count"] == 1 and "incumbent_automatic" not in pending
+        after_reopen = json.dumps(publish(h, monkeypatch), ensure_ascii=False)
+        assert "Verified 0 · Pending 1 · Disputed 0" in after_reopen
+        assert "Incumbent wrong / verified automatic decisions · Unavailable" in after_reopen
     h.send("interactive", original)
     snapshot((1, 0, 1, 0))
     restart(h)
     verify("final")
     assert snapshot((1, 1, 0, 0)).verified_roots == first.verified_roots
     if observed:
-        assert readiness()["reason_code"] == "too_early_to_train"
+        reverified = readiness()
+        assert reverified["reason_code"] == "too_early_to_train"
+        assert reverified["incumbent_automatic"] == {"wrong": 1, "verified": 1}
         assert _stored_score(directory, permission.execution_ref) == score
     assert live.snapshot(actor, workflow, as_of_revision=first.sequence) == first
     assert owner.review() == pack
