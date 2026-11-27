@@ -35,6 +35,19 @@ Codex-side consumer. This module does not and cannot claim exactly-once delivery
 Authenticity: digests alone cannot authenticate an auditor or independent verifier.
 Improvement staging holds until this boundary can verify both issuers. An explicit fixture
 option exercises the staging mechanics with generated evidence only.
+
+Current behavior, stated plainly: no signing or key-custody contract exists in this project, so
+no issuer can ever be verified here and ``issuer_authenticated`` is always ``False``. Live
+(non-fixture) measured-improvement staging is therefore disabled, deliberately, until such a
+contract lands. Hold and no-change packets are not gated by it and are delivered.
+
+Free text: a sealed comparison proves only that its bytes are self-consistent, not that its
+strings are safe. Every string that this module copies from a comparison into a packet (the
+decision reason, fallback and disposition, the winner, the metric, each arm's hold reason, arm
+and pair names, comparison verdicts, slice statuses, economics basis, uncertainty method) is
+checked against a closed vocabulary derived from what ``comparison_plan`` can emit, on every
+path including holds. A value outside its vocabulary refuses the comparison with the fixed code
+``comparison_unverified``, which never echoes the offending value.
 """
 
 from __future__ import annotations
@@ -69,6 +82,50 @@ _VERDICTS = (
     "insufficient_evidence",
     "invalid",
     "stale",
+)
+# Closed vocabularies for strings copied from a comparison into a packet. Derived from what
+# ``comparison_plan`` (``_pick``, ``_checks``, ``development_hold``, ``_score``) and
+# ``simple_repair.assess_development`` can emit. Tuples, not sets: membership must never raise
+# on an unhashable value.
+_HOLD_REASONS = (
+    None,
+    "insufficient_protected_support",
+    "incomplete_protected_evidence",
+    "operating_point_missed_or_undetermined",
+    "critical_slice_failed_or_unverified",
+    "cost_limit_failed_or_unverified",
+    "latency_limit_failed_or_unverified",
+)
+_OBSERVED = ("improved", "regressed", "equivalent", "insufficient_evidence")
+_DECISION_REASONS = (
+    "protected_improvement_at_agreed_limits",
+    "adequate_simple_repair_at_lower_observed_cost",
+    "no_confirmed_improvement",
+    "equivalent_to_incumbent",
+    "quality_cost_tradeoff_requires_owner_choice",
+    *(r for r in _HOLD_REASONS if r),
+    *(r for r in _OBSERVED if r not in ("improved", "equivalent")),
+    # Development-stage hold reasons carried by ``development_hold``.
+    "insufficient_independent_development_evidence",
+    "recurring_residual_requires_model_and_compute_rights",
+    "simple_repair_unproven_and_residual_support_insufficient",
+)
+_FALLBACKS = ("incumbent",)
+_METRICS = (None, "verified_wrong_automatic")  # the planner default; a custom metric is refused
+_DISPOSITIONS = ("recommend", "hold", "no_change")
+_WINNERS = (None, "incumbent", "simple", "model")
+_ARM_NAMES = ("incumbent", "simple", "model")
+_PAIR_NAMES = ("incumbent_vs_simple", "incumbent_vs_model", "simple_vs_model")
+_SLICE_STATUSES = ("met", "missed", "undetermined")
+_ECON_BASES = ("unavailable", "observed", "modeled", "generated")
+_UNCERTAINTY = ("wilson_95_independent_verified_cases", "unavailable")
+_PAIRED_FIELDS = (
+    "comparable",
+    "excluded",
+    "fixes",
+    "regressions",
+    "ties_correct",
+    "ties_incorrect",
 )
 _ARM_FIELDS = ("automatic", "incorrect_automatic", "review", "missing")
 _ECON_FIELDS = (
@@ -179,6 +236,66 @@ def _sealed(value: Mapping[str, Any], field: str) -> bool:
     return value.get(field) == digest({k: v for k, v in value.items() if k != field})
 
 
+def _count(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _digest_ok(value: Any) -> bool:
+    return isinstance(value, str) and bool(_SHA.fullmatch(value))
+
+
+def _arm_vocab_ok(arm: Any) -> bool:
+    """Closed-vocabulary and type checks for everything ``_arm_aggregate`` copies."""
+    if not isinstance(arm, dict) or not isinstance(arm.get("metrics"), dict):
+        return False
+    metrics = arm["metrics"]
+    slices = arm.get("critical_slices")
+    economics = metrics.get("economics")
+    uncertainty = metrics.get("uncertainty")
+    return (
+        arm.get("hold_reason") in _HOLD_REASONS
+        and _digest_ok(arm.get("revision"))
+        and _digest_ok(arm.get("prediction_digest"))
+        and all(_count(metrics.get(k)) for k in _ARM_FIELDS)
+        and isinstance(slices, dict)
+        and all(isinstance(v, dict) and v.get("status") in _SLICE_STATUSES for v in slices.values())
+        and isinstance(economics, dict)
+        and economics.get("basis") in _ECON_BASES
+        and isinstance(uncertainty, dict)
+        and uncertainty.get("method") in _UNCERTAINTY
+    )
+
+
+def _comparison_vocab_ok(comparison: Json) -> bool:
+    """Free text cannot reach a packet or a refusal: every copied string is from a closed set.
+
+    Runs on every path (hold, no-change and improvement) because a hold packet is delivered
+    without any receipt or verdict.
+    """
+    decision = comparison["decision"]
+    arms, pairs = comparison["arms"], comparison["comparisons"]
+    return (
+        decision.get("reason") in _DECISION_REASONS
+        and decision.get("fallback") in _FALLBACKS
+        and decision.get("disposition") in _DISPOSITIONS
+        and decision.get("winner") in _WINNERS
+        and comparison.get("metric") in _METRICS
+        and all(name in _ARM_NAMES for name in arms)
+        and all(_arm_vocab_ok(arm) for arm in arms.values())
+        and all(name in _PAIR_NAMES for name in pairs)
+        and all(
+            isinstance(pair, dict)
+            and pair.get("observed_comparison") in _OBSERVED
+            and isinstance(pair.get("paired"), dict)
+            and pair["paired"].keys() == set(_PAIRED_FIELDS)
+            and all(_count(v) for v in pair["paired"].values())
+            for pair in pairs.values()
+        )
+        and _digest_ok(comparison.get("plan_revision"))
+        and _digest_ok(comparison.get("protected_membership_digest"))
+    )
+
+
 def _comparison_ok(comparison: Any) -> bool:
     return (
         isinstance(comparison, dict)
@@ -188,6 +305,7 @@ def _comparison_ok(comparison: Any) -> bool:
         and isinstance(comparison.get("decision"), dict)
         and isinstance(comparison.get("arms"), dict)
         and isinstance(comparison.get("comparisons"), dict)
+        and _comparison_vocab_ok(comparison)
     )
 
 

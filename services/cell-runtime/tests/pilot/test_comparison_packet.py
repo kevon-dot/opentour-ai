@@ -1021,3 +1021,126 @@ def test_no_delivery_or_release_before_a_separately_authorized_human_decision(ru
     )
     assert out.packet["authority"]["release"] is False
     assert out.packet["next_action"] == "separate_human_decision_required"
+
+
+# ------------------------------------------- E7b: comparison free text (OPE-421 follow-up)
+
+# Generated sentinels only. Each stands in for a case, group, label or person reference that
+# must never reach a published packet or a refusal reason.
+SENTINELS = {
+    "reason": "case-77 sentinel-address-A1",
+    "fallback": "group-9",
+    "metric": "case-5",
+    "hold_reason": "case-123 label",
+}
+_PLAIN_HOLD = "insufficient"  # a hold: needs no receipt or verdict
+
+
+def tampered(comparison, field, value, *, arm="incumbent"):
+    """Reseal a copy of a comparison with one free-text field replaced."""
+    changed = copy.deepcopy(comparison)
+    if field in ("reason", "fallback"):
+        changed["decision"][field] = value
+    elif field == "metric":
+        changed["metric"] = value
+    else:
+        changed["arms"][arm]["hold_reason"] = value
+    return seal(changed)
+
+
+def live_bundle(comparison, tmp_path):
+    """A hold bundle on a LIVE store: the default flag off, as production constructs it."""
+    b = Bundle(comparison, tmp_path)
+    b.store = cp.PacketOutbox(tmp_path / "live.sqlite3")
+    assert b.store.allow_generated_fixture is False
+    b.receipt = b.verdict = None
+    return b
+
+
+def assert_no_leak(out, store):
+    assert out.status == "refused" and out.reason == "comparison_unverified", out
+    assert out.packet is None and out.event_id is None
+    assert empty(store), "a refusal must leave no packet, no event and no authority"
+    shown = json.dumps([out.reason, out.scoped_hold], sort_keys=True)
+    assert not any(s in shown for s in SENTINELS.values())
+
+
+@pytest.mark.parametrize("field", sorted(SENTINELS))
+def test_comparison_free_text_is_refused_on_the_live_hold_path(runs, tmp_path, field):
+    """E7b: a hold in a live store with the flag off needs no receipt; free text must not stage."""
+    base = runs[_PLAIN_HOLD]
+    assert base["decision"]["disposition"] == "hold"
+    b = live_bundle(tampered(base, field, SENTINELS[field]), tmp_path)
+    out = b.stage()
+    assert_no_leak(out, b.store)
+    assert b.dispatch() == [] and b.sink.calls == []
+
+
+@pytest.mark.parametrize("field", sorted(SENTINELS))
+def test_comparison_free_text_is_refused_on_the_staging_path(runs, tmp_path, field):
+    """E7b: with the fixture flag on, a resealed recommendation cannot carry free text either."""
+    b = Bundle(runs["winner"], tmp_path)
+    sealed = tampered(runs["winner"], field, SENTINELS[field])
+    out = b.stage(comparison=sealed, verdict=make_verdict(sealed, b.receipt, b.ctx))
+    assert_no_leak(out, b.store)
+
+
+def test_all_four_comparison_free_text_fields_together_are_refused_everywhere(runs, tmp_path):
+    """E7b: the reviewer's combined probe, on the live hold path and the fixture staging path."""
+    hold = runs[_PLAIN_HOLD]
+    for field in SENTINELS:
+        hold = tampered(hold, field, SENTINELS[field])
+    live = live_bundle(hold, tmp_path / "hold")
+    assert_no_leak(live.stage(), live.store)
+    rec = runs["winner"]
+    for field in SENTINELS:
+        rec = tampered(rec, field, SENTINELS[field])
+    b = Bundle(rec, tmp_path / "rec")
+    assert_no_leak(b.stage(verdict=make_verdict(rec, b.receipt, b.ctx)), b.store)
+
+
+def test_vocabulary_check_rejects_non_string_and_unhashable_values_without_raising(runs, tmp_path):
+    """E7b: the check must itself fail closed on any type, never raise."""
+    for value in (["case-1"], {"k": "case-1"}, 7, True, ""):
+        for field in SENTINELS:
+            b = live_bundle(tampered(runs[_PLAIN_HOLD], field, value), tmp_path / field)
+            out = b.stage()
+            assert out.status == "refused" and out.reason == "comparison_unverified"
+            assert empty(b.store)
+
+
+@pytest.mark.parametrize("name", ["missing_slice", "insufficient", "no_change", "zero_eligible"])
+def test_honest_holds_still_stage_in_a_live_store(runs, tmp_path, name):
+    """E7b: planner-emitted hold and no-change values stay inside the vocabulary (live store)."""
+    b = live_bundle(runs[name], tmp_path)
+    out = b.stage()
+    assert out.status == "staged", out
+    assert out.packet["kind"] == "hold"
+    assert b.dispatch() == [(out.event_id, "delivered")]
+    assert len(b.sink.effects) == 1
+
+
+@pytest.mark.parametrize("name", ["winner", "hand", "tie", "coverage_loss_model"])
+def test_honest_recommendations_still_stage_with_the_fixture_flag(runs, tmp_path, name):
+    """E7b: planner-emitted recommend values stay inside the vocabulary (fixture staging)."""
+    out = Bundle(runs[name], tmp_path).stage()
+    assert out.status == "staged" and out.packet["kind"] == "measured_improvement"
+
+
+def test_honest_recommendation_in_a_live_store_is_still_held_for_unverified_issuers(runs, tmp_path):
+    """E7b: unchanged behavior. Live improvement staging stays disabled; this change does not
+    re-enable it."""
+    b = Bundle(runs["winner"], tmp_path)
+    b.store = cp.PacketOutbox(tmp_path / "live.sqlite3")
+    refused(b, "audit_and_verdict_issuers_unverified")
+
+
+def test_every_value_the_planner_emitted_in_these_runs_is_inside_the_vocabularies(runs):
+    """E7b drift guard: a planner value missing from the closed sets would refuse honest work."""
+    for comparison in runs.values():
+        decision = comparison["decision"]
+        assert decision["reason"] in cp._DECISION_REASONS
+        assert decision["fallback"] in cp._FALLBACKS
+        assert comparison.get("metric") in cp._METRICS
+        for arm in comparison["arms"].values():
+            assert arm["hold_reason"] in cp._HOLD_REASONS
