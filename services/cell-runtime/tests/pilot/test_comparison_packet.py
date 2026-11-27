@@ -281,7 +281,9 @@ def make_verdict(comparison, receipt, ctx, **over):
         "comparison_evidence_revision": comparison["evidence_revision"],
         "candidate_digest": arms["simple"]["revision"],
         "comparator_digest": arms["incumbent"]["revision"],
-        "operating_point_digest": digest(comparison["terms"]),
+        "operating_point_digest": cp.operating_point_digest(
+            cp.slice_substituted_terms(comparison["terms"], key_for(comparison))
+        ),
         "benchmark_digest": ctx.benchmark_digest,
         "denominator": {
             "protected_rows": comparison["protected_rows_evaluated"],
@@ -1950,3 +1952,129 @@ def test_the_previous_out_of_set_fixture_key_is_refused(runs, tmp_path):
     out = b.stage()
     assert out.reason == "comparison_unverified" and not _leaks(out, "late_feature")
     assert empty(b.store)
+
+
+# ---------------- P: operating-point digest over slice-substituted terms (OPE-571 follow-up)
+
+
+def named_material_run(root):
+    """A real run whose terms name both a critical and a material slice."""
+    dev, protected = rows("dev"), rows("protected")
+    for r in dev + protected:
+        r["slices"] = list(SLICE_NAMES)
+    comparison = compare(
+        root,
+        development=dev,
+        protected=protected,
+        terms={
+            **STRICT,
+            "critical_slices": [SLICE_NAMES[0]],
+            "material_slices": [SLICE_NAMES[1]],
+        },
+        allowed_slices=list(SLICE_NAMES),
+    )[0]
+    assert comparison["decision"]["disposition"] == "recommend", comparison["decision"]
+    return comparison
+
+
+def test_operating_point_digest_cannot_confirm_a_guessed_slice_name(tmp_path):
+    """P1 adverse: knowing every other term exactly, a guesser still cannot confirm a name.
+
+    The guesser tries the TRUE names, plain and under a wrong key; nothing matches. Only the
+    engagement key reproduces the published digest (positive control)."""
+    comparison = named_material_run(tmp_path)
+    out = Bundle(comparison, tmp_path / "stage").stage()
+    assert out.status == "staged", out
+    published = out.packet["comparison"]["operating_point_digest"]
+    terms = comparison["terms"]
+    wrong = bytes.fromhex(digest("guesser-key"))
+    guesses = [
+        digest(terms),  # the pre-change digest over raw names
+        digest({**terms, "critical_slices": ["acme_corp"], "material_slices": ["jane_doe"]}),
+        cp.operating_point_digest(cp.slice_substituted_terms(terms, wrong)),
+        cp.operating_point_digest(
+            {
+                **terms,
+                "critical_slices": [digest(n) for n in terms["critical_slices"]],
+                "material_slices": [digest(n) for n in terms["material_slices"]],
+            }
+        ),
+    ]
+    assert published not in guesses
+    key = key_for(comparison)
+    assert published == cp.operating_point_digest(cp.slice_substituted_terms(terms, key))
+
+
+def test_operating_point_digest_is_verifiable_from_substituted_terms_without_the_key(tmp_path):
+    """P2: a verifier holding only the substituted terms (no key, fresh interpreter, plain
+    hashlib over the repository canonical form) reproduces the published binding."""
+    comparison = named_material_run(tmp_path)
+    b = Bundle(comparison, tmp_path / "stage")
+    out = b.stage()
+    substituted = cp.slice_substituted_terms(comparison["terms"], key_for(comparison))
+    for name in SLICE_NAMES:
+        assert mentions(substituted, name) == [], name
+    assert {k: v for k, v in substituted.items() if not k.endswith("_slices")} == {
+        k: v for k, v in comparison["terms"].items() if not k.endswith("_slices")
+    }
+    script = (
+        "import hashlib,json,sys\n"
+        "from opentour_cell.pilot.operating_point import canonical\n"
+        "t=json.load(sys.stdin)\n"
+        "print(hashlib.sha256(canonical(t).encode()).hexdigest())\n"
+    )
+    proc = subprocess.run(
+        [sys.executable, "-B", "-c", script],
+        input=json.dumps(substituted),
+        text=True,
+        capture_output=True,
+        timeout=30,
+        check=True,
+    )
+    published = out.packet["comparison"]["operating_point_digest"]
+    assert proc.stdout.strip() == published == b.verdict["operating_point_digest"]
+
+
+def test_verdict_bound_to_the_pre_change_digest_is_refused_with_a_distinct_code(tmp_path):
+    """P3 adverse: a stored verdict carrying the old raw-terms digest is refused with its own
+    code, distinct from a generic mismatch, and is never silently re-digested."""
+    comparison = named_material_run(tmp_path)
+    b = Bundle(comparison, tmp_path / "stage")
+    legacy = make_verdict(
+        comparison, b.receipt, b.ctx, operating_point_digest=digest(comparison["terms"])
+    )
+    out = b.stage(verdict=legacy)
+    assert out.status == "refused", out
+    assert out.reason == "operating_point_digest_predates_slice_digests"
+    assert out.packet is None and empty(b.store)
+    assert legacy["operating_point_digest"] == digest(comparison["terms"])  # untouched
+    other = make_verdict(comparison, b.receipt, b.ctx, operating_point_digest=digest("other"))
+    assert b.stage(verdict=other).reason == "verdict_binding_mismatch"
+    assert b.stage().status == "staged"  # the substituted binding still stages
+
+
+def test_terms_without_slice_names_keep_their_digest(runs, tmp_path):
+    """P3 positive: with no slice names there is nothing to substitute or to leak, so the
+    digest is unchanged and an existing verdict still binds."""
+    comparison = runs["winner"]
+    terms = comparison["terms"]
+    assert not terms.get("critical_slices") and not terms.get("material_slices")
+    key = key_for(comparison)
+    assert cp.operating_point_digest(cp.slice_substituted_terms(terms, key)) == digest(terms)
+    b = Bundle(comparison, tmp_path)
+    plain = make_verdict(comparison, b.receipt, b.ctx, operating_point_digest=digest(terms))
+    assert b.stage(verdict=plain).status == "staged"
+
+
+@pytest.mark.parametrize(
+    "terms_slices",
+    [{"critical_slices": "jane_doe"}, {"material_slices": [7]}, {"critical_slices": ["a b"]}],
+    ids=["not-a-list", "not-a-string", "bad-shape"],
+)
+def test_malformed_slice_terms_refuse_without_raising(runs, tmp_path, terms_slices):
+    """P4 adverse: digested terms are still checked, so substitution can never raise."""
+    changed = copy.deepcopy(runs[_PLAIN_HOLD])
+    changed["terms"] = {**changed["terms"], **terms_slices}
+    b = live_bundle(runs[_PLAIN_HOLD], tmp_path)  # the helper's verdict needs valid terms
+    out = b.stage(comparison=seal(changed))
+    assert out.reason == "comparison_unverified" and empty(b.store), out

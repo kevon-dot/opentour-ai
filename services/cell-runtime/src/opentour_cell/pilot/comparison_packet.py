@@ -77,6 +77,13 @@ never falls back to plain hashing. Until a signing and key-custody contract land
 key is engagement-local and caller-injected (``SliceKeyView``), and the packet states that the
 digest is not issuer-authenticated. Because the key never leaves the worker, only the key holder
 can re-derive the slice digests; a consumer without it can check self-consistency and pointers.
+
+The operating-point digest follows the same rule. It is a plain canonical SHA-256 over the
+terms with every critical- and material-slice name first replaced by its keyed digest
+(``slice_substituted_terms``), so a guessed name cannot be confirmed against it, while a
+verifier (including OPE-528's evaluator) can still check the binding from the substituted terms
+without the key. A verdict bound to the earlier digest over raw terms is refused with
+``operating_point_digest_predates_slice_digests`` and is never re-digested.
 """
 
 from __future__ import annotations
@@ -101,6 +108,10 @@ EVENT = "opentour.pilot.comparison-completed-event.v1"
 VERDICT = "opentour.pilot.independent-verdict.v1"
 RECEIPT = "opentour.benchmark-audit-receipt.v1"
 SLICE_DIGEST = "opentour.pilot.critical-slice-digest.v1"
+_SLICE_TERMS = ("critical_slices", "material_slices")
+# A verdict bound to the pre-OPE-571 operating-point digest (plain SHA-256 over raw terms that
+# carry slice names). Refused with its own code and never re-digested on the caller's behalf.
+_LEGACY_POINT = "operating_point_digest_predates_slice_digests"
 EVENT_REVISION = 1
 _FIXTURE_REFUSAL = "generated_fixture_not_permitted_in_live_context"
 _ID = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9_.:@/-]{0,127}")
@@ -369,6 +380,36 @@ def slice_digest(name: str, key: bytes) -> str:
     return hmac.digest(scoped, name.encode(), "sha256").hex()
 
 
+def slice_substituted_terms(terms: Json, key: bytes) -> Json:
+    """``terms`` with every critical- and material-slice name replaced by its keyed digest.
+
+    Order and every other term are kept, so the canonical form differs only in the names.
+    """
+    return {
+        k: [slice_digest(name, key) for name in v] if k in _SLICE_TERMS else v
+        for k, v in terms.items()
+    }
+
+
+def operating_point_digest(substituted_terms: Json) -> str:
+    """Plain canonical SHA-256 over SLICE-SUBSTITUTED terms (OPE-571 follow-up).
+
+    Deliberately unkeyed: a verifier, including the OPE-528 evaluator, checks the binding from
+    the substituted terms alone, without the engagement key. The names inside it are already
+    keyed digests, so a guessed name cannot be confirmed against it. Never pass raw terms.
+    """
+    return digest(substituted_terms)
+
+
+def _terms_ok(terms: Any) -> bool:
+    """Terms are digested, not copied, but each slice name must be a planner-shaped string."""
+    return isinstance(terms, dict) and all(
+        isinstance(terms.get(k, []), list)
+        and all(isinstance(n, str) and bool(_SLICE_NAME.fullmatch(n)) for n in terms.get(k, []))
+        for k in _SLICE_TERMS
+    )
+
+
 def _engagement_key(keys: SliceKeyView | None, tenant: str, comparison: Any) -> bytes | None:
     engagement = comparison.get("engagement") if isinstance(comparison, dict) else None
     if keys is None or not (isinstance(engagement, str) and _IDENTIFIER.fullmatch(engagement)):
@@ -470,6 +511,7 @@ def _comparison_ok(comparison: Any) -> bool:
         and isinstance(comparison.get("arms"), dict)
         and isinstance(comparison.get("comparisons"), dict)
         and _comparison_vocab_ok(comparison)
+        and _terms_ok(comparison.get("terms", {}))
     )
 
 
@@ -563,7 +605,7 @@ def _assemble(
     if improvement and winner != "simple":
         return None, "model_winner_branch_not_in_this_packet"
     if improvement:
-        failure = _improvement_checks(comparison, receipt, verdict, ctx, winner)
+        failure = _improvement_checks(comparison, receipt, verdict, ctx, winner, slice_key)
         if failure:
             return None, failure
         assert receipt is not None
@@ -592,7 +634,9 @@ def _assemble(
             "evidence_revision": comparison["evidence_revision"],
             "plan_revision": comparison["plan_revision"],
             "protected_membership_digest": comparison["protected_membership_digest"],
-            "operating_point_digest": digest(comparison.get("terms", {})),
+            "operating_point_digest": operating_point_digest(
+                slice_substituted_terms(comparison.get("terms", {}), slice_key)
+            ),
             "metric": comparison.get("metric"),
         },
         "denominator": {
@@ -657,6 +701,7 @@ def _improvement_checks(
     verdict: Json | None,
     ctx: PacketContext,
     winner: str,
+    slice_key: bytes,
 ) -> str | None:
     if receipt is None:
         return "audit_receipt_missing"
@@ -698,12 +743,18 @@ def _improvement_checks(
         or coverage["numerator"] * 10_000 < floor * coverage["denominator"]
     ):
         return "decision_inconsistent_with_evidence"
+    terms = comparison.get("terms", {})
+    point = operating_point_digest(slice_substituted_terms(terms, slice_key))
+    claimed = verdict.get("operating_point_digest")
+    if claimed != point and claimed == digest(terms):
+        # Bound to the pre-change digest over raw slice names: refused, never re-digested.
+        return _LEGACY_POINT
     bound = {
         "audit_receipt_digest": receipt["receipt_digest"],
         "comparison_evidence_revision": comparison["evidence_revision"],
         "candidate_digest": arms[winner]["revision"],
         "comparator_digest": arms["incumbent"]["revision"],
-        "operating_point_digest": digest(comparison["terms"]),
+        "operating_point_digest": point,
         "benchmark_digest": ctx.benchmark_digest,
     }
     if any(verdict.get(k) != v for k, v in bound.items()):
