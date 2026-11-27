@@ -1569,6 +1569,7 @@ def app_home_view(
     verify_outcome: str = "",
     decision_map_entry: str = "",
     case_entry: str = "",
+    starter_score_entry: str = "",
 ) -> Block:
     if not context:
         return {
@@ -1587,6 +1588,10 @@ def app_home_view(
         _button("Browse data", "ot_app_data", "ot_app_data"),
         _button("Ask OpenTour", "ot_app_prompt", "ot_app_prompt"),
     ]
+    if starter_score_entry:
+        blocks.append(
+            _actions(_button("Open starter benchmark", "ot_app_starter_score", starter_score_entry))
+        )
     if case_entry:
         blocks.append(_actions(_button("Review starter cases", "ot_app_cases", case_entry)))
     if decision_map_entry:
@@ -2505,3 +2510,87 @@ def starter_case_clause(context: str, passage: str, page: int) -> Block:
             _actions(*buttons),
         ],
     )
+
+
+def starter_score_readout(
+    context: str, entry: Mapping[str, Any], summary: Mapping[str, Any]
+) -> Block:
+    if summary["evidence_origin"] != "expert_reviewed_generated_starter":
+        raise ValueError("Unexpected starter benchmark origin")
+    if (summary["workflow_ref"], summary["execution_ref"]) != (
+        entry["workflow_ref"],
+        entry["execution_ref"],
+    ):
+        raise ValueError("Starter evaluation scope changed")
+    blocks = [
+        _section("Expert-reviewed starter benchmark · generated examples"),
+        _section(
+            f"Workflow {_ref(entry['workflow_ref'])} · Evaluation {_ref(entry['execution_ref'])}"
+        ),
+        _section(
+            f"Freeze {_ref(summary['freeze_ref'])}\nRevision {_ref(summary['freeze_revision'])}"
+        ),
+        _section(
+            f"Reserved cases {summary['reserved']} · Unresolved {summary['unresolved']} · Excluded {summary['excluded']}"
+        ),
+    ]
+    blocks.extend(
+        [
+            _section(
+                f"Selected model {_ref(summary['model_ref'])} · Revision {_ref(summary['model_revision'])}"
+            ),
+            _section(
+                f"Policy comparator {_ref(summary['comparator_ref'])} · Revision {_ref(summary['comparator_revision'])}"
+            ),
+        ]
+    )
+    if summary["state"] == "frozen_unscored":
+        blocks.append(
+            _section(
+                "Frozen, unscored. Ask the model custodian to check the selected model and its inference permission."
+            )
+        )
+    elif summary["state"] == "held":
+        blocks.append(
+            _section(
+                "Evaluation outcome unknown. Ask the evaluation operator to reconcile this execution."
+            )
+        )
+    elif summary["state"] == "scored":
+        metrics = summary["metrics"]
+        for arm, title in (("model", "Selected model"), ("comparator", "Simple policy comparator")):
+            result = metrics[arm]
+            details = [title]
+            for key, label in (
+                ("exact_action", "Exact action agreement"),
+                ("coverage", "Automatic coverage"),
+                ("wrong_automatic", "Wrong automatic decisions"),
+            ):
+                rate = result[key]
+                n, d = rate["numerator"], rate["denominator"]
+                value = f"{n}/{d}" if d else f"Unavailable ({n}/{d})"
+                details.append(f"{label} · {value}")
+            details.append(f"Missing predictions · {result['missing']}")
+            blocks.append(_section("\n".join(details)))
+        paired = metrics["paired"]
+        blocks.append(
+            _section(
+                f"Comparator versus model · {paired['denominator']} paired cases\n"
+                f"Fixed {paired['fixed']} · Regressed {paired['regressed']} · "
+                f"Excluded for missing predictions {paired['excluded_missing']}"
+            )
+        )
+    else:
+        raise ValueError("Unexpected evaluation state")
+    return _modal("Starter benchmark", "ot_starter_score", context, blocks)
+
+
+def starter_score_choices(context: str, entries: Sequence[tuple[Mapping[str, Any], str]]) -> Block:
+    blocks = []
+    for entry, token in entries:
+        block = _section(
+            f"Workflow {_ref(entry['workflow_ref'])} · Evaluation {_ref(entry['execution_ref'])}"
+        )
+        block["accessory"] = _button("Open result", "ot_starter_score_choice", token)
+        blocks.append(block)
+    return _modal("Choose evaluation", "ot_starter_scores", context, blocks)

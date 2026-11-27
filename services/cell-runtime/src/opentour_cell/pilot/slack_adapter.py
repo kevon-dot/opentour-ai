@@ -77,6 +77,7 @@ ACTIONS = {
     "ot_case_splits",
     "ot_case_citation",
     "ot_case_back",
+    "ot_starter_score_choice",
     "ot_case_clause_page",
     "ot_case_commit",
     "ot_choose_map",
@@ -2624,6 +2625,51 @@ class Workbench:
                 principal, workflow, matches[0].resource, expected_revision=choice
             )
 
+    def _starter_score_session(self, actor: str):
+        from opentour_cell.pilot.starter_evaluation_session import StarterEvaluationSession
+
+        cfg = self.settings(check_engagement=False)
+        cfg.permission(actor, "inspect")
+        return StarterEvaluationSession(
+            lambda: self.settings(check_engagement=False),
+            IntakePrincipal(cfg.organization, actor, "slack"),
+        )
+
+    def _starter_scores(self, actor: str) -> tuple[str, list[tuple[Json, str]]]:
+        try:
+            session = self._starter_score_session(actor)
+            entries = sorted(session.entries(), key=lambda e: e["execution_ref"])
+            items = [
+                (entry, self.journal.opaque("starter-result", [actor, entry])) for entry in entries
+            ]
+            return (
+                (
+                    self.journal.opaque("starter-results", [actor, [token for _, token in items]]),
+                    items,
+                )
+                if items
+                else ("", [])
+            )
+        except (ImportError, OSError, KeyError, TypeError, ValueError, sqlite3.Error):
+            return "", []
+
+    def _open_starter_score(self, cfg: Settings, actor: str, view: str, entry: Json) -> None:
+        execution = entry["execution_ref"]
+        session = self._starter_score_session(actor)
+        _check(session.entry(execution) == entry)
+        summary = session.summary(execution)
+        token = self.journal.context(
+            actor, cfg.channel, view, "starter_score", execution, entry["revision"]
+        )
+
+        def authorize() -> None:
+            current = self._starter_score_session(actor)
+            _check(current.entry(execution) == entry and current.summary(execution) == summary)
+
+        self._show(
+            view, self.views.starter_score_readout(token, entry, summary), authorize=authorize
+        )
+
     def _case_session(self, actor: str) -> tuple[StarterCaseSession, StarterCaseEntry]:
         from opentour_cell.pilot.starter_map_confirmation import StarterCaseSession
 
@@ -3227,6 +3273,13 @@ class Workbench:
         old_hash: str,
     ) -> None:
         job = ctx["job"]
+        if ctx["kind"] == "starter_scores":
+            version, items = self._starter_scores(actor)
+            _check(action == "ot_starter_score_choice" and version and version == ctx["revision"])
+            selected = [item for item, token in items if value == token]
+            _check(len(selected) == 1)
+            self._open_starter_score(cfg, actor, view, selected[0])
+            return
         if ctx["kind"] in {"case_entry", "case_detail", "case_clause", "case_preview"}:
             self._case_action(cfg, actor, view, ctx, action, value)
             return
@@ -4215,6 +4268,7 @@ class Workbench:
         readiness = self._readiness(actor) if workflow_settings else None
         map_entry = self._map_entry(actor)
         case_entry = self._case_entry(actor)
+        score_entry, _ = self._starter_scores(actor)
         verifier_entry = self._verifier_entry(actor) if cfg.live_workflow_ref else ""
         layout = self.views.app_home_view(
             token,
@@ -4231,6 +4285,7 @@ class Workbench:
             verify_outcome=verifier_entry,
             decision_map_entry=map_entry,
             case_entry=case_entry,
+            starter_score_entry=score_entry,
         )
         navigation = (
             can_add_workflow
@@ -4244,7 +4299,8 @@ class Workbench:
                     "app_home",
                     authorize=(
                         lambda: _check(
-                            (not case_entry or self._case_entry(actor) == case_entry)
+                            (not score_entry or self._starter_scores(actor)[0] == score_entry)
+                            and (not case_entry or self._case_entry(actor) == case_entry)
                             and (not map_entry or self._map_entry(actor) == map_entry)
                             and (
                                 not verifier_entry or self._verifier_entry(actor) == verifier_entry
@@ -4258,6 +4314,7 @@ class Workbench:
                     or verifier_entry
                     or map_entry
                     or case_entry
+                    or score_entry
                     else None,
                 )
         except Exception:
@@ -4286,6 +4343,26 @@ class Workbench:
             and len(body["actions"]) == 1
         )
         action = body["actions"][0]
+        if action.get("action_id") == "ot_app_starter_score":
+            self.private_channel(cfg, actor)
+            version, items = self._starter_scores(actor)
+            _check(version and action.get("value") == version)
+            opened = self.web.views_open(
+                trigger_id=body["trigger_id"], view=self.views.notice_modal("checking")
+            )
+            view_id = opened["view"]["id"]
+            if len(items) == 1:
+                self._open_starter_score(cfg, actor, view_id, items[0][0])
+            else:
+                token = self.journal.context(
+                    actor, cfg.channel, view_id, "starter_scores", "", version
+                )
+                self._show(
+                    view_id,
+                    self.views.starter_score_choices(token, items),
+                    authorize=lambda: _check(self._starter_scores(actor)[0] == version),
+                )
+            return
         if action.get("action_id") == "ot_app_cases":
             self.private_channel(cfg, actor)
             _, case_entry = self._case_session(actor)
