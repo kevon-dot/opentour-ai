@@ -4,19 +4,21 @@ import { createHash } from 'node:crypto';
 import { it, mock } from 'node:test';
 import { exportJWK, generateKeyPair, SignJWT } from 'jose';
 import type { AccountEntryStartupOptions } from '../features/account-entry/server.js';
-import type { AuthTransaction } from '../lib/server/authkit-adapter.js';
+import type { AuthTransaction, ServerSession } from '../lib/server/authkit-adapter.js';
 
 mock.module('server-only', { namedExports: {} });
 const { configureAccountEntry } = await import('../features/account-entry/server.js');
 const { IdentityFailure } = await import('../lib/server/authkit-adapter.js');
 const { GET: signin } = await import('../app/auth/signin/route.js');
 const { GET: callback } = await import('../app/auth/callback/route.js');
+const { POST: signout } = await import('../app/auth/signout/route.js');
 
 const now = Date.UTC(2026, 10, 18);
 const issuedAt = now / 1000 - 30;
 const subject = 'generated_user';
 const sessionId = 'generated_session';
 const handle = 'a'.repeat(43);
+const csrfToken = 'generated_csrf';
 const workosApiKey = 'entry-fixture-key';
 const profile: AccountEntryStartupOptions['profile'] = {
   origin: 'https://app.example.invalid',
@@ -35,6 +37,9 @@ it('shares one trusted startup across sign-in and callback with the existing pro
   let admitted = 0;
   let codeExchanges = 0;
   let verifier: string | undefined;
+  let committed: ServerSession | undefined;
+  let endCalls = 0;
+  let endConfirmed = false;
   const unexpected = async (): Promise<never> => { throw new Error('Unexpected account entry port'); };
 
   const { publicKey, privateKey } = await generateKeyPair('RS256');
@@ -92,10 +97,10 @@ it('shares one trusted startup across sign-in and callback with the existing pro
         assert.equal(credentials.userId, subject);
         assert.equal(claims.organizationId, null);
         admitted++;
-        return {
+        committed = {
           handle,
           credentials,
-          csrfToken: 'generated_csrf',
+          csrfToken,
           ended: false,
           reconciliationRequired: false,
           identity: {
@@ -107,10 +112,23 @@ it('shares one trusted startup across sign-in and callback with the existing pro
             assurance_level: 'unknown',
           },
         };
+        return committed;
       },
-      current: unexpected,
+      async current(requested) {
+        assert.equal(requested, handle);
+        if (!committed) throw new IdentityFailure('SESSION_INVALID');
+        return committed;
+      },
       replaceCredentials: unexpected,
-      end: unexpected,
+      async end(requested, generation) {
+        assert.equal(requested, handle);
+        assert.equal(generation, 0);
+        endCalls++;
+        // An unacknowledged durable denial stays unconfirmed; the route may not claim success.
+        if (!endConfirmed) throw new IdentityFailure('SESSION_END_UNCONFIRMED', 503, false);
+        committed = { handle, csrfToken, ended: true, generation: generation + 1 };
+        return { sessionId, generation: generation + 1 };
+      },
       requireReconciliation: unexpected,
     },
     selections: { authorize: unexpected, commit: unexpected },
@@ -118,7 +136,14 @@ it('shares one trusted startup across sign-in and callback with the existing pro
 
   const signinRequest = new Request(`${profile.origin}/auth/signin`);
   const initialCallback = new Request(profile.callbackURI);
-  for (const result of [await signin(signinRequest), await callback(initialCallback)]) {
+  const signoutRequest = (headers: Record<string, string>) =>
+    new Request(`${profile.origin}/auth/signout`, {
+      method: 'POST',
+      headers: { Cookie: `opentour-session=${handle}`, ...headers },
+    });
+  const browserSignout = () => signoutRequest({ Origin: profile.origin, 'X-CSRF-Token': csrfToken });
+  for (const result of [await signin(signinRequest), await callback(initialCallback),
+    await signout(browserSignout())]) {
     assert.equal(result.status, 503);
     assert.equal((await result.json()).code, 'IDENTITY_NOT_CONFIGURED');
     assert.equal(result.headers.get('set-cookie'), null);
@@ -171,4 +196,40 @@ it('shares one trusted startup across sign-in and callback with the existing pro
   assert.equal((await replay.json()).code, 'CALLBACK_INVALID');
   assert.equal(codeExchanges, 1);
   assert.equal(admitted, 1);
+
+  // The signout route is a composition seam: the shared adapter refuses before any local denial.
+  for (const refused of [
+    await signout(signoutRequest({ Origin: 'https://attacker.example.invalid', 'X-CSRF-Token': csrfToken })),
+    await signout(signoutRequest({ Origin: profile.origin })),
+  ]) {
+    assert.equal(refused.status, 403);
+    assert.equal((await refused.json()).code, 'CSRF_INVALID');
+    assert.equal(refused.headers.get('set-cookie'), null);
+    assert.equal(refused.headers.get('location'), null);
+  }
+  assert.equal(endCalls, 0);
+
+  const unconfirmed = await signout(browserSignout());
+  const unconfirmedBody = await unconfirmed.json();
+  assert.equal(unconfirmed.status, 503);
+  assert.equal(unconfirmedBody.code, 'SESSION_END_UNCONFIRMED');
+  assert.equal(unconfirmedBody.retryable, false);
+  assert.equal(unconfirmed.headers.get('set-cookie'), null);
+  assert.equal(unconfirmed.headers.get('location'), null);
+  assert.equal(endCalls, 1);
+
+  endConfirmed = true;
+  const ended = await signout(browserSignout());
+  assert.equal(ended.status, 303);
+  const logout = ended.headers.get('location');
+  assert.ok(logout);
+  assert.equal(new URL(logout).origin, profile.providerOrigins[0]);
+  assert.ok(logout.includes(sessionId));
+  assert.deepEqual(ended.headers.getSetCookie(), [
+    'opentour-session=; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=0',
+  ]);
+  assert.equal(ended.headers.get('cache-control'), 'no-store');
+  assert.equal(endCalls, 2);
+  // The configured logout destination is built locally; signout adds no provider traffic.
+  assert.equal(providerFetch.mock.callCount(), 2);
 });
