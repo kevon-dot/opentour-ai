@@ -26,6 +26,7 @@ from tools.schema_validate import schema_registry, valid_instance
 
 CONTEXT = "/v1/session/context"
 SELECTION = "/v1/session:select-organization"
+TERMS = "/v1/organization-terms"
 PRIVATE_PILOT_PATHS = (
     ("/internal/browser-identity/v1/flows/create", "create_flow"),
     ("/internal/browser-identity/v1/flows/consume", "consume_flow"),
@@ -269,10 +270,13 @@ def test_public_control_factory_does_not_expose_private_browser_pilot(
         assert {path: set(operations) for path, operations in app.openapi()["paths"].items()} == {
             CONTEXT: {"get"},
             SELECTION: {"post"},
+            TERMS: {"get"},
         }
         with TestClient(app) as client:
             assert client.get(CONTEXT).status_code == 401
             assert client.post(SELECTION, json={}).status_code == 401
+            terms = client.get(TERMS)
+            assert (terms.status_code, terms.json()["code"]) == (503, "TERMS_UNAVAILABLE")
             for path, _ in PRIVATE_PILOT_PATHS + PRIVATE_DEV_PATHS:
                 assert client.post(path, json={}).status_code == 404
         for name in ("identity_connect", "selection_connect"):

@@ -19,16 +19,21 @@ from opentour_control.auth.repository import connection_factory
 from opentour_control.auth.runtime import ControlAuthRuntime, create_control_auth_runtime
 from opentour_control.auth.runtime_server import serve_auth_runtime
 from opentour_control.platform import schema_compatibility
+from opentour_control.tenants.models import TermsView
+from opentour_control.tenants.repository import read_public_organization_terms
 from psycopg.conninfo import conninfo_to_dict, make_conninfo
+from psycopg.rows import dict_row
 
 
 def create_control_service(
     runtime: ControlAuthRuntime,
     schema_connect: Callable[[], psycopg.Connection[Any]],
     reader_version: int,
+    *,
+    read_terms: Callable[[], TermsView] | None = None,
 ) -> FastAPI:
-    """Attach the infrastructure probe to the registered session API."""
-    app = create_control_api(runtime)
+    """Attach the infrastructure probe to the registered account-entry API."""
+    app = create_control_api(runtime, read_terms=read_terms)
 
     @app.get("/health/ready", include_in_schema=False)
     def readiness() -> JSONResponse:
@@ -119,6 +124,33 @@ def configure_auth_runtime(env: Mapping[str, str]) -> tuple[ControlAuthRuntime, 
     return runtime, identity_dsn
 
 
+def _configure_terms_reader(env: Mapping[str, str]) -> Callable[[], TermsView] | None:
+    if "OPENTOUR_TERMS_DATABASE_URL" not in env:
+        return None
+    terms = _database_profile(_required(env, "OPENTOUR_TERMS_DATABASE_URL"))
+    identity = _database_profile(_required(env, "OPENTOUR_CONTROL_DATABASE_URL"))
+    selection = _database_profile(_required(env, "OPENTOUR_SELECTION_DATABASE_URL"))
+    if any(terms[key] != identity[key] for key in ("host", "port", "dbname")) or terms["user"] in {
+        identity["user"],
+        selection["user"],
+    }:
+        raise ValueError("Terms reads require their own principal on the control database")
+    dsn = make_conninfo(**terms)
+
+    def connect() -> psycopg.Connection[dict[str, Any]]:
+        return psycopg.connect(
+            dsn,
+            row_factory=dict_row,
+            connect_timeout=3,
+            options="-c statement_timeout=2000 -c default_transaction_read_only=on",
+        )
+
+    def read() -> TermsView:
+        return read_public_organization_terms(connect)
+
+    return read
+
+
 def _configure(
     env: Mapping[str, str],
 ) -> tuple[ControlAuthRuntime, Callable[[], psycopg.Connection[Any]], int, int]:
@@ -141,12 +173,13 @@ def _configure(
 
 def main() -> None:
     try:
+        read_terms = _configure_terms_reader(os.environ)
         runtime, schema_connect, reader_version, connection_limit = _configure(os.environ)
     except (AuthError, ValueError, psycopg.Error):
         raise SystemExit("Control API deployment configuration is missing or invalid") from None
 
     def configure() -> uvicorn.Config:
-        app = create_control_service(runtime, schema_connect, reader_version)
+        app = create_control_service(runtime, schema_connect, reader_version, read_terms=read_terms)
         # Each admitted handler holds at most one connection at a time. Uvicorn
         # counts the incoming connection in the concurrency threshold as well.
         return uvicorn.Config(

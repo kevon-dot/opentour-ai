@@ -1,18 +1,23 @@
-"""Unpublished OpenAPI registration for the control session routes."""
+"""Unpublished OpenAPI registration for account entry on the control plane."""
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from http import HTTPStatus
 from typing import Any
 
 from fastapi import FastAPI
 from fastapi.routing import iter_route_contexts
 from opentour_control.auth.runtime import ControlAuthRuntime
+from opentour_control.tenants.create import create_organization_terms_router
+from opentour_control.tenants.models import TermsView
 
 _COMMON = "urn:opentour:common-contract:1.0#/$defs/"
 _CONTEXT = "urn:opentour:auth-context:1.0#/$defs/SessionContextView"
 _CONTEXT_PATH = "/v1/session/context"
 _SELECTION_PATH = "/v1/session:select-organization"
+_TERMS_PATH = "/v1/organization-terms"
+_TERMS_VIEW = "urn:opentour:organization:1.0#/$defs/TermsView"
 _BEARER = "HTTPBearer"
 _COOKIE = "APIKeyCookie"
 
@@ -40,6 +45,7 @@ def _register_session_operations(document: dict[str, Any]) -> None:
     if {path: set(operations) for path, operations in paths.items()} != {
         _CONTEXT_PATH: {"get"},
         _SELECTION_PATH: {"post"},
+        _TERMS_PATH: {"get"},
     }:
         raise ValueError("Control session routes do not match their registration")
 
@@ -94,10 +100,19 @@ def _register_session_operations(document: dict[str, Any]) -> None:
             }
         },
     }
+    terms = paths[_TERMS_PATH]["get"]
+    terms["operationId"] = "getOrganizationTerms"
+    terms["x-opentour-plane"] = "control"
+    terms["security"] = []
+    terms["responses"] = _responses({"$ref": _TERMS_VIEW}, (503,))
 
 
-def create_control_api(runtime: ControlAuthRuntime) -> FastAPI:
-    """Mount the configured session router. The caller owns its startup and shutdown."""
+def create_control_api(
+    runtime: ControlAuthRuntime,
+    *,
+    read_terms: Callable[[], TermsView] | None = None,
+) -> FastAPI:
+    """Mount account entry routes with explicitly configured services."""
     app = FastAPI(
         title="OpenTour Control API",
         version="unpublished",
@@ -106,9 +121,11 @@ def create_control_api(runtime: ControlAuthRuntime) -> FastAPI:
         redoc_url=None,
     )
     app.include_router(runtime.router)
+    app.include_router(create_organization_terms_router(read_terms))
     expected_routes = {
         (_CONTEXT_PATH, frozenset({"GET"})),
         (_SELECTION_PATH, frozenset({"POST"})),
+        (_TERMS_PATH, frozenset({"GET"})),
     }
     routes = [
         (route.path, frozenset(route.methods or ())) for route in iter_route_contexts(app.routes)

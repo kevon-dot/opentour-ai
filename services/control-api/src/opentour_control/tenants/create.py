@@ -107,6 +107,27 @@ class OrganizationService:
         )
 
 
+def create_organization_terms_router(read_terms: Callable[[], TermsView] | None) -> APIRouter:
+    """Expose only the current public terms projection."""
+    router = APIRouter()
+    headers = {"Cache-Control": "no-store", "Vary": "Authorization, Cookie"}
+
+    @router.get("/v1/organization-terms")
+    def terms() -> JSONResponse:
+        request_id = secrets.token_hex(16)
+        try:
+            if read_terms is None:
+                raise SetupError("TERMS_UNAVAILABLE", 503)
+            return JSONResponse(read_terms().model_dump(), headers=headers)
+        except (AuthError, SetupError) as error:
+            return JSONResponse(error.wire(request_id), status_code=error.status, headers=headers)
+        except (psycopg.Error, ValidationError):
+            unavailable = SetupError("TERMS_UNAVAILABLE", 503)
+            return JSONResponse(unavailable.wire(request_id), status_code=503, headers=headers)
+
+    return router
+
+
 def create_organization_router(service: OrganizationService) -> APIRouter:
     """BFF sends a verified bearer token plus opaque session binding; never AuthContext.
 
@@ -114,6 +135,7 @@ def create_organization_router(service: OrganizationService) -> APIRouter:
     control API handlers require the bearer credential as well as the binding.
     """
     router = APIRouter()
+    router.include_router(create_organization_terms_router(service.terms))
     headers = {"Cache-Control": "no-store", "Vary": "Authorization, Cookie"}
 
     def credentials(request: Request) -> tuple[str, str]:
@@ -137,16 +159,6 @@ def create_organization_router(service: OrganizationService) -> APIRouter:
                 raise SetupError("SCHEMA_INVALID", 422)
             chunks.append(chunk)
         return b"".join(chunks)
-
-    @router.get("/v1/organization-terms")
-    def terms() -> JSONResponse:
-        request_id = secrets.token_hex(16)
-        try:
-            return JSONResponse(service.terms().model_dump(), headers=headers)
-        except (SetupError, AuthError) as error:
-            return error_response(error, request_id)
-        except (psycopg.Error, ValidationError):
-            return error_response(SetupError("TERMS_UNAVAILABLE", 503), request_id)
 
     @router.post("/v1/organizations")
     async def create(request: Request) -> JSONResponse:
