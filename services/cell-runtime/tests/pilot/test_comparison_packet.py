@@ -757,16 +757,79 @@ def test_duplicate_dispatch_and_late_callbacks_have_zero_additional_effects(runs
     assert b.store.snapshot() == settled and len(b.sink.calls) == 1
 
 
-def test_callback_before_dispatch_acknowledges_once_and_blocks_redelivery(runs, tmp_path):
-    """E6b: an early consumer acknowledgement settles the event; dispatch then adds nothing."""
+def test_callback_before_dispatch_is_ignored_and_never_recorded_as_delivered(runs, tmp_path):
+    """E6b: an unauthenticated early callback cannot mark an undispatched event delivered."""
     b = Bundle(runs["winner"], tmp_path)
     out = b.stage()
     resource = "comparison/" + b.ctx.run_ref
+    before = b.store.snapshot()
+    assert b.store.acknowledge(resource, out.event_id, 1, "generated-receipt-1") == (
+        "not_dispatched_ignored"
+    )
+    assert b.store.snapshot() == before
+    b.sink.fail = True
+    assert b.dispatch()[0][1] == "uncertain"
     assert b.store.acknowledge(resource, out.event_id, 1, "bad receipt!") == (
         "invalid_receipt_ignored"
     )
     assert b.store.acknowledge(resource, out.event_id, 1, "generated-receipt-1") == "acknowledged"
-    assert b.dispatch() == [] and b.sink.calls == []
+    assert b.dispatch() == []
+
+
+def test_forged_self_consistent_receipt_is_marked_unauthenticated(runs, tmp_path):
+    """V3: a self-consistent forged receipt and verdict pass, but are never presented as proven."""
+    b = Bundle(runs["winner"], tmp_path)
+    forged = make_receipt(evidence_origin="observed", population_kind="real_sample")
+    out = b.stage(receipt=forged, verdict=make_verdict(b.comparison, forged, b.ctx))
+    assert out.status == "staged"
+    assert out.packet["audit"]["issuer_authenticated"] is False
+    assert out.packet["audit"]["integrity"] == "digest_self_consistent_only"
+    assert out.packet["claim"]["accuracy_claim_eligible"] is False
+    assert out.packet["authority"] == {"release": False, "delivery": False}
+
+
+def test_receipt_free_text_cannot_enter_a_packet_or_a_refusal(runs, tmp_path):
+    """E7: origin and verdict are closed vocabularies; free text is refused as unverified."""
+    b = Bundle(runs["winner"], tmp_path)
+    for over in ({"evidence_origin": "case-123 label"}, {"verdict": "case-77 group-9"}):
+        bad = make_receipt(**over)
+        refused(
+            b,
+            "audit_receipt_unverified",
+            receipt=bad,
+            verdict=make_verdict(b.comparison, bad, b.ctx),
+        )
+
+
+def test_recommendation_inconsistent_with_its_own_evidence_is_refused(runs, tmp_path):
+    """A7: a resealed 'recommend' whose winner lost coverage, is held, or is not improved."""
+    b = Bundle(runs["winner"], tmp_path)
+    lost = copy.deepcopy(runs["winner"])
+    lost["arms"]["simple"]["metrics"]["coverage"] = {"numerator": 2, "denominator": 4, "value": 0.5}
+    held = copy.deepcopy(runs["winner"])
+    held["arms"]["simple"]["hold_reason"] = "operating_point_missed_or_undetermined"
+    tied = copy.deepcopy(runs["winner"])
+    tied["comparisons"]["incumbent_vs_simple"]["observed_comparison"] = "equivalent"
+    for comparison in (lost, held, tied):
+        sealed = seal(comparison)
+        refused(
+            b,
+            "decision_inconsistent_with_evidence",
+            comparison=sealed,
+            verdict=make_verdict(sealed, b.receipt, b.ctx),
+        )
+
+
+def test_uncertain_delivery_then_receipt_supersession_reconciles_as_possibly_disclosed(
+    runs, tmp_path
+):
+    """C3c: an uncertain send may have disclosed, so its reconciliation entry says so."""
+    b = Bundle(runs["winner"], tmp_path)
+    b.stage()
+    b.sink.fail = True
+    assert b.dispatch()[0][1] == "uncertain"
+    b.store.record_receipt_supersession(b.receipt["receipt_id"])
+    assert b.store.reconciliations()[0]["event_delivered"] == 1
 
 
 # ---------------------------------------------------------------- C: supersession and fences

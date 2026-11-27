@@ -25,6 +25,16 @@ What is NOT proven: no provider, Zapier, Slack or customer behavior; no installe
 customer evidence; no OPE-526 receipt issued by a landed audit; no OPE-528 verdict from an
 independent verifier. Passing tests prove software behavior over generated data only. A packet
 is never a release decision, grants no release authority and triggers no delivery.
+
+Exactly-one claim, stated precisely: the packet and its single outbox row commit in one
+transaction (zero or one of each, never two). Delivery is AT-LEAST-ONCE under the stable key
+(resource, event id, event revision). The exactly-one EFFECT therefore depends on the consumer
+deduplicating on that key; here that is proven only against a test double, never against the
+Codex-side consumer. This module does not and cannot claim exactly-once delivery.
+
+Authenticity: a packet whose audit section says ``issuer_authenticated: false`` was built from
+documents that are digest self-consistent only. A forged but self-consistent receipt and
+verdict pair is indistinguishable from a real one until OPE-526/OPE-528 provide signatures.
 """
 
 from __future__ import annotations
@@ -51,6 +61,15 @@ _ID = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9_.:@/-]{0,127}")
 _SHA = re.compile(r"[0-9a-f]{64}")
 _REPRODUCED = "reproduced"
 _ALLOWED = "evaluation_allowed"
+_ORIGINS = ("generated", "observed")
+_VERDICTS = (
+    "evaluation_allowed",
+    "starter_only",
+    "claim_limited_to_named_population",
+    "insufficient_evidence",
+    "invalid",
+    "stale",
+)
 _ARM_FIELDS = ("automatic", "incorrect_automatic", "review", "missing")
 _ECON_FIELDS = (
     "basis",
@@ -181,7 +200,8 @@ def _receipt_ok(receipt: Any) -> bool:
         isinstance(receipt.get("receipt_digest"), str)
         and receipt["receipt_digest"] == digest(body)
         and receipt.get("receipt_id") == "audit-" + receipt["receipt_digest"][:16]
-        and isinstance(receipt.get("verdict"), str)
+        and receipt.get("verdict") in _VERDICTS
+        and receipt.get("evidence_origin", "generated") in _ORIGINS
         and isinstance(bindings, dict)
         and isinstance(bindings.get("frozen"), dict)
         and isinstance(bindings.get("current"), dict)
@@ -290,6 +310,9 @@ def _assemble(
             "receipt_digest": receipt.get("receipt_digest") if receipt else None,
             "verdict": receipt.get("verdict") if receipt else None,
             "independent_verdict_digest": verdict.get("verdict_digest") if verdict else None,
+            # No signature exists on either document yet (OPE-526/OPE-528 unlanded).
+            "issuer_authenticated": False,
+            "integrity": "digest_self_consistent_only",
         },
         "claim": {
             "evidence_tier": origin if origin else "none",
@@ -352,6 +375,16 @@ def _improvement_checks(
         "membership_digest": comparison["protected_membership_digest"],
     }:
         return "denominator_changed"
+    pair = comparison["comparisons"].get("incumbent_vs_" + winner)
+    coverage = arms[winner]["metrics"]["coverage"]
+    floor = comparison.get("terms", {}).get("minimum_coverage_bps", 0)
+    if (
+        arms[winner]["hold_reason"]
+        or not isinstance(pair, dict)
+        or pair.get("observed_comparison") != "improved"
+        or coverage["numerator"] * 10_000 < floor * coverage["denominator"]
+    ):
+        return "decision_inconsistent_with_evidence"
     bound = {
         "audit_receipt_digest": receipt["receipt_digest"],
         "comparison_evidence_revision": comparison["evidence_revision"],
@@ -579,8 +612,10 @@ class PacketOutbox:
                 "SELECT packet_id FROM packets WHERE receipt_id=?", (receipt_id,)
             ).fetchall()
             for (pid,) in rows:
+                # 'sending' is an uncertain delivery: it may have disclosed, so treat it as such.
                 delivered = db.execute(
-                    "SELECT 1 FROM outbox WHERE packet_id=? AND state='delivered'", (pid,)
+                    "SELECT 1 FROM outbox WHERE packet_id=? AND state IN ('delivered','sending')",
+                    (pid,),
                 ).fetchone()
                 db.execute(
                     "INSERT OR IGNORE INTO reconciliations VALUES(?,?,?,'open')",
@@ -672,6 +707,8 @@ class PacketOutbox:
                 return "duplicate_ignored"
             if row[0] == "fenced":
                 return "fenced_ignored"
+            if row[0] != "sending":
+                return "not_dispatched_ignored"
             if not isinstance(receipt_ref, str) or not _ID.fullmatch(receipt_ref):
                 return "invalid_receipt_ignored"
             db.execute(
