@@ -24,6 +24,7 @@ from opentour_training.training.eve_qualification import (
     digest,
     qualify,
     serialization_dry_run,
+    verify_record,
 )
 
 TRUSTED = frozenset({"simulated:verifier"})
@@ -117,6 +118,7 @@ def admit(reg: QualificationRegistry, d: str, **changes: object) -> dict[str, ob
         "scope": "customer",
         "hard_cap_mandate": True,
         "trusted_verifiers": TRUSTED,
+        "allow_simulated_verifiers": True,  # software tests only; production default is False
     }
     args.update(changes)
     return admit_fit(reg, d, **args)  # type: ignore[arg-type]
@@ -385,3 +387,96 @@ def test_a11_default_verifier_never_qualifies() -> None:
 def test_a11_unavailable_backend_holds_qualification() -> None:
     body = qualify(request(backend=backend(available=False)), SimulatedVerifier())["body"]
     assert body["state"] == "benchmark_only_hold" and "backend_unavailable" in body["holds"]
+
+
+# Review additions: forged records, journal integrity, cross-process freshness, simulated trust.
+def _forged(**body_changes: object) -> dict[str, object]:
+    body = json.loads(json.dumps(qualify(request())["body"]))
+    body.update(body_changes)
+    return {"body": body, "record_digest": digest(body)}
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"state": "qualified", "witness": {"verifier_id": "x", "witness_ref": "r"}},
+        {
+            "state": "qualified",
+            "evidence_tier": "generated",
+            "witness": {"verifier_id": "x", "witness_ref": "r"},
+        },
+        {
+            "state": "qualified",
+            "evidence_tier": "observed",
+            "holds": ["capability_missing"],
+            "witness": {"verifier_id": "x", "witness_ref": "r"},
+        },
+        {"checkpoint_digest": dg("forged")},
+        {"backend_digest": dg("forged")},
+        {"pair_key": dg("forged")},
+        {"training_submissions": 1},
+        {"witness": {"verifier_id": "x", "witness_ref": "r"}},
+    ],
+)
+def test_review_self_consistent_forged_record_refused(
+    tmp_path: Path, changes: dict[str, object]
+) -> None:
+    forged = _forged(**changes)
+    with pytest.raises(AdmissionRefused):
+        verify_record(forged)
+    with pytest.raises(AdmissionRefused):
+        registry(tmp_path).register(forged)
+
+
+def test_review_simulated_verifier_refused_by_default(tmp_path: Path) -> None:
+    reg, d = qualified(tmp_path)
+    assert refusal(reg, d, allow_simulated_verifiers=False) == "witness_verifier_simulated"
+
+
+def _two_entry_journal(tmp_path: Path) -> tuple[Path, str]:
+    reg, old = qualified(tmp_path)
+    reg.register(qualify(request(estimate=ResourceEstimate(None, None, None, None))))
+    return tmp_path / "journal.jsonl", old
+
+
+def test_review_deleted_superseding_entry_cannot_reinstate_old_record(tmp_path: Path) -> None:
+    path, _ = _two_entry_journal(tmp_path)
+    # Removing the first entry leaves seq starting at 2: detected.
+    path.write_text(path.read_text().splitlines()[1] + "\n")
+    with pytest.raises(AdmissionRefused) as caught:
+        QualificationRegistry(path)
+    assert caught.value.code == "journal_corrupt"
+
+
+def test_review_reordered_journal_refused(tmp_path: Path) -> None:
+    path, _ = _two_entry_journal(tmp_path)
+    first, second = path.read_text().splitlines()
+    path.write_text(second + "\n" + first + "\n")
+    with pytest.raises(AdmissionRefused) as caught:
+        QualificationRegistry(path)
+    assert caught.value.code == "journal_corrupt"
+
+
+def test_review_torn_trailing_line_refused_fail_closed(tmp_path: Path) -> None:
+    path, _ = _two_entry_journal(tmp_path)
+    path.write_bytes(path.read_bytes()[:-15])
+    with pytest.raises(AdmissionRefused) as caught:
+        QualificationRegistry(path)
+    assert caught.value.code == "journal_corrupt"
+
+
+def test_review_second_instance_sees_supersession_without_restart(tmp_path: Path) -> None:
+    writer, old = qualified(tmp_path)
+    reader = QualificationRegistry(tmp_path / "journal.jsonl")
+    assert admit(reader, old)["fit_authorized"] is False
+    writer.register(qualify(request(estimate=ResourceEstimate(None, None, None, None))))
+    assert refusal(reader, old) == "qualification_superseded"
+
+
+def test_review_stale_writer_appends_with_correct_supersedes_link(tmp_path: Path) -> None:
+    first, old = qualified(tmp_path)
+    stale = QualificationRegistry(tmp_path / "journal.jsonl")
+    first.register(qualify(request(estimate=ResourceEstimate(None, None, None, None))))
+    stale.register(qualify(request(estimate=ResourceEstimate(1, None, None, None))))
+    # Replay verifies seq/supersedes; a stale-view append would have broken the chain.
+    assert len(QualificationRegistry(tmp_path / "journal.jsonl")._entries) == 3

@@ -24,6 +24,7 @@ cannot admit a customer fit, and a mixture-of-experts checkpoint needs its own q
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
 import os
@@ -62,6 +63,7 @@ AUTHORITY_FIELDS = (
     "release_decision_owner",
 )
 FORBIDDEN_ROW_KEYS = frozenset({"expected_answer", "reference_answer", "answer_key", "label"})
+SIMULATED_PREFIXES = ("simulated:", "generated")
 STATES = ("benchmark_only_hold", "software_checked_unwitnessed", "qualified")
 _REVISION = re.compile(r"[0-9a-f]{40}")
 _DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
@@ -384,32 +386,113 @@ def qualify(request: QualificationRequest, verifier: WitnessVerifier | None = No
 
 
 def verify_record(record: Mapping[str, Any]) -> Json:
-    """Recompute the digest and reject a record whose body was altered."""
+    """Recompute the digest and reject a record that is altered or internally inconsistent.
+
+    The digest is not a signature: anyone who can rewrite a body can recompute it. So beyond the
+    digest this re-derives every pinned identity from the embedded descriptors and enforces the
+    invariants `qualify` guarantees, so a hand-built record cannot claim `qualified` without a
+    witness of an accepted tier, with open holds, or with an identity that does not match.
+    """
     body = record.get("body")
     if not isinstance(body, dict) or record.get("record_digest") != digest(body):
         raise AdmissionRefused("record_digest_mismatch")
     if (
         body.get("schema") != SCHEMA
         or body.get("fit_authorized") is not False
+        or body.get("training_submissions") != 0
         or body.get("state") not in STATES
+        or body.get("scope") not in SCOPES
     ):
         raise AdmissionRefused("record_schema_invalid")
+    try:
+        _check_consistency(body)
+    except (KeyError, TypeError, AttributeError) as error:
+        raise AdmissionRefused("record_inconsistent") from error
     return body
 
 
+def _check_consistency(body: Mapping[str, Any]) -> None:
+    checkpoint, backend = body["checkpoint"], body["backend"]
+    pair = digest(
+        {
+            "model_ref": checkpoint["model_ref"],
+            "backend_id": backend["backend_id"],
+            "route": backend["route"],
+            "scope": body["scope"],
+        }
+    )
+    consistent = (
+        body["checkpoint_digest"] == digest(checkpoint)
+        and body["backend_digest"] == digest(backend)
+        and body["pair_key"] == pair
+        and body["route"] == backend["route"]
+        and backend["route"] in ROUTES
+    )
+    witness = body["witness"]
+    if body["state"] == "qualified":
+        consistent = (
+            consistent
+            and not body["holds"]
+            and not body["missing_authority"]
+            and not body["capabilities"]["missing"]
+            and body["hard_cost_cap_enforceable"] is True
+            and body["dry_run"] is not None
+            and body["evidence_tier"] in WITNESS_TIERS
+            and isinstance(witness, dict)
+            and bool(witness["verifier_id"])
+            and bool(witness["witness_ref"])
+        )
+    else:
+        consistent = consistent and witness is None and body["evidence_tier"] == "generated"
+    if not consistent:
+        raise AdmissionRefused("record_inconsistent")
+
+
 class QualificationRegistry:
-    """Append-only, file-backed journal of qualification records; replayed on construction."""
+    """Append-only, file-backed journal of qualification records.
+
+    Every read replays the file under a shared lock and every write re-replays and appends under
+    an exclusive lock, so a second process or a restarted one sees supersessions immediately.
+    Replay verifies each record, a contiguous `seq` and the `supersedes` link, so deleting,
+    reordering or splicing entries and torn lines are refused (`journal_corrupt`). Truncating
+    the tail of the file cannot be detected without an external anchor and is NOT defended here.
+    """
 
     def __init__(self, path: Path) -> None:
         self.path = path
-        self._entries: list[Json] = []
-        if path.exists():
-            for line in path.read_text().splitlines():
+        self._entries = self._load()
+
+    @staticmethod
+    def _parse(raw: bytes) -> list[Json]:
+        if not raw:
+            return []
+        if not raw.endswith(b"\n"):
+            raise AdmissionRefused("journal_corrupt")
+        entries: list[Json] = []
+        latest: dict[str, str] = {}
+        for index, line in enumerate(raw[:-1].split(b"\n")):
+            try:
                 entry = json.loads(line)
-                verify_record(entry["record"])
-                self._entries.append(entry)
+                record = entry["record"]
+                body = verify_record(record)
+                key = body["pair_key"]
+                if entry["seq"] != index + 1 or entry["supersedes"] != latest.get(key):
+                    raise AdmissionRefused("journal_corrupt")
+            except (ValueError, KeyError, TypeError) as error:
+                raise AdmissionRefused("journal_corrupt") from error
+            latest[key] = record["record_digest"]
+            entries.append(entry)
+        return entries
+
+    def _load(self) -> list[Json]:
+        if not self.path.exists():
+            return []
+        with self.path.open("rb") as handle:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_SH)
+            return self._parse(handle.read())
 
     def active(self, key: str) -> Json | None:
+        self._entries = self._load()
         for entry in reversed(self._entries):
             if entry["record"]["body"]["pair_key"] == key:
                 result: Json = entry["record"]
@@ -417,6 +500,7 @@ class QualificationRegistry:
         return None
 
     def find(self, record_digest: str) -> Json | None:
+        self._entries = self._load()
         for entry in self._entries:
             if entry["record"]["record_digest"] == record_digest:
                 result: Json = entry["record"]
@@ -426,20 +510,27 @@ class QualificationRegistry:
     def register(self, record: Mapping[str, Any]) -> Json:
         """Idempotent for the identical record; a different record for the pair supersedes."""
         body = verify_record(record)
-        current = self.active(body["pair_key"])
-        if current is not None and current["record_digest"] == record["record_digest"]:
-            return {"result": "unchanged", "record_digest": record["record_digest"]}
-        entry = {
-            "seq": len(self._entries) + 1,
-            "supersedes": current["record_digest"] if current else None,
-            "record": dict(record),
-        }
-        line = json.dumps(entry, sort_keys=True, separators=(",", ":")) + "\n"
-        with self.path.open("ab") as handle:
+        with self.path.open("ab+") as handle:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            handle.seek(0)
+            self._entries = self._parse(handle.read())
+            current = None
+            for existing in reversed(self._entries):
+                if existing["record"]["body"]["pair_key"] == body["pair_key"]:
+                    current = existing["record"]
+                    break
+            if current is not None and current["record_digest"] == record["record_digest"]:
+                return {"result": "unchanged", "record_digest": record["record_digest"]}
+            entry = {
+                "seq": len(self._entries) + 1,
+                "supersedes": current["record_digest"] if current else None,
+                "record": dict(record),
+            }
+            line = json.dumps(entry, sort_keys=True, separators=(",", ":")) + "\n"
             handle.write(line.encode())
             handle.flush()
             os.fsync(handle.fileno())
-        self._entries.append(entry)
+            self._entries.append(entry)
         return {
             "result": "superseded" if current else "registered",
             "record_digest": record["record_digest"],
@@ -455,8 +546,12 @@ def admit_fit(
     scope: str,
     hard_cap_mandate: bool,
     trusted_verifiers: frozenset[str],
+    allow_simulated_verifiers: bool = False,
 ) -> Json:
     """Refuse unless the presented pair is exactly the current qualified pair.
+
+    A simulated or generated verifier id is refused unless the caller passes
+    `allow_simulated_verifiers=True`, which only software tests may do.
 
     Admission is readiness only. It returns no authority: the caller must still hold a grant,
     a reservation and a cap, and `fit_authorized` stays false.
@@ -479,6 +574,8 @@ def admit_fit(
     witness = body["witness"]
     if not witness or witness["verifier_id"] not in trusted_verifiers:
         raise AdmissionRefused("witness_verifier_untrusted")
+    if witness["verifier_id"].startswith(SIMULATED_PREFIXES) and not allow_simulated_verifiers:
+        raise AdmissionRefused("witness_verifier_simulated")
     if checkpoint.checkpoint_digest != body["checkpoint_digest"]:
         raise AdmissionRefused("checkpoint_digest_drift")
     if not backend.available:
