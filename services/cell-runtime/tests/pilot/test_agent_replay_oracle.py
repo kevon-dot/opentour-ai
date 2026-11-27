@@ -328,3 +328,49 @@ def test_lost_review_pointer_ack_reuses_one_actual_worker_result(cycle_case, mon
     )
     assert acknowledged[0] == acknowledged[1] == recovered["review_receipt"]
     assert customer.connector.pulls == 1
+
+
+def test_withdrawal_during_discovery_holds_without_content_or_effects(cycle_case, monkeypatch):
+    customer, connector, _ = cycle_case
+    before = observed_effects(customer)
+    discover = customer.connector.discover_workplace
+
+    def withdraw_after_metadata(*args, **kwargs):
+        catalog = discover(*args, **kwargs)
+        assert catalog["state"] == "ready"
+        customer.ledger.withdraw(customer.mandate, actor="generated-owner")
+        return catalog
+
+    monkeypatch.setattr(customer.connector, "discover_workplace", withdraw_after_metadata)
+    result = autonomous_cycle.cycle_once(
+        customer.owner, customer.org, customer.config, connector=connector
+    )
+    assert result["reason"] == "standing_mandate_unavailable"
+    held = Scenario(
+        "generated-withdrawal-after-metadata-v1",
+        frozenset({"held"}),
+        ((Action.DISCOVER,),),
+        frozenset({Action.ACQUIRE, Action.RESERVE_FIT}),
+        {},
+        1,
+    )
+    after = observed_effects(customer)
+    observation = Observation(result["state"], tuple(connector.attempts), before, after, True)
+    assert status([grade(held, observation)]) == 0
+
+    retry_start = len(connector.attempts)
+    retry_connector = ObservedConnector(customer, connector.trace)
+    retry = autonomous_cycle.cycle_once(
+        customer.owner, customer.org, customer.config, connector=retry_connector
+    )
+    assert retry["reason"] == "standing_mandate_unavailable"
+    retry_case = replace(held, name="generated-withdrawal-retry-v1", sequences=((),), max_calls=0)
+    retry_observation = Observation(
+        retry["state"],
+        tuple(retry_connector.attempts[retry_start:]),
+        after,
+        observed_effects(customer),
+        True,
+    )
+    assert status([grade(retry_case, retry_observation)]) == 0
+    assert customer.connector.listed == 1 and customer.connector.pulls == 0
