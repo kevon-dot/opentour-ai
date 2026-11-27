@@ -88,6 +88,26 @@ terms with every critical- and material-slice name first replaced by its keyed d
 verifier (including OPE-528's evaluator) can still check the binding from the substituted terms
 without the key. A verdict bound to the earlier digest over raw terms is refused with
 ``operating_point_digest_predates_slice_digests`` and is never re-digested.
+
+Threat model for the caller-injected engagement key. Until OPE-566 defines key custody, the
+key is caller-supplied authority, so this module makes the narrow claim below and no more.
+
+* Only someone holding the key can confirm a guessed slice name, by keyed-hashing the guess.
+  A consumer without the key cannot. Whoever controls ``SliceKeyView`` holds the key, so that
+  caller can confirm guesses, and can choose a key that is weak or known to others, which lets
+  those others confirm guesses too. Nothing here detects a known or reused key: ``_key_ok``
+  checks only that it is 32 bytes. Name privacy is therefore exactly as strong as the caller's
+  key handling.
+* Key control does not let anyone forge a comparison, audit receipt or verdict. Assembly still
+  requires the comparison, the receipt and the independent verdict to agree on exact digests,
+  denominator and expiry. A different key changes the substituted operating-point digest, so a
+  verdict bound under one key does not verify under another, and is refused rather than
+  re-bound.
+* Key control does not grant release authority. A packet is never a release decision.
+* A key controller can always deny service, by supplying no key, a malformed key or a raising
+  keyring. Every such case refuses closed.
+* The digests are not issuer-authenticated. They are at most ``locally_keyed``, and the packet
+  says so.
 """
 
 from __future__ import annotations
