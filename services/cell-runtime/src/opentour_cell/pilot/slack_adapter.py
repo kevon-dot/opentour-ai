@@ -38,6 +38,7 @@ from opentour_cell.pilot.status_questions import (
 
 if TYPE_CHECKING:
     from opentour_cell.pilot.map_review import MapReviewService
+    from opentour_cell.pilot.starter_map_confirmation import StarterCaseEntry, StarterCaseSession
     from opentour_cell.pilot.verifier_form import VerifierForm
 
 Json = dict[str, Any]
@@ -60,12 +61,24 @@ CALLBACKS = {
     "ot_verify_outcome",
     "ot_nomination",
     "ot_map_branch_save",
+    "ot_case_adjudicate",
+    "ot_case_freeze",
     "ot_map_assertions_save",
     "ot_map_precedence_save",
 }
 ACTIONS = {
     "ot_workflow_starter",
     "ot_map_open",
+    "ot_case_review",
+    "ot_case_generate",
+    "ot_case_page_previous",
+    "ot_case_page_next",
+    "ot_case_edit",
+    "ot_case_splits",
+    "ot_case_citation",
+    "ot_case_back",
+    "ot_case_clause_page",
+    "ot_case_commit",
     "ot_choose_map",
     "ot_map_page",
     "ot_map_citation",
@@ -2608,6 +2621,193 @@ class Workbench:
                 principal, workflow, matches[0].resource, expected_revision=choice
             )
 
+    def _case_session(self, actor: str) -> tuple[StarterCaseSession, StarterCaseEntry]:
+        from opentour_cell.pilot.starter_map_confirmation import StarterCaseSession
+
+        cfg = self.settings(check_engagement=False)
+        cfg.permission(actor, "inspect")
+        session = StarterCaseSession(
+            lambda: self.settings(check_engagement=False),
+            IntakePrincipal(cfg.organization, actor, "slack"),
+        )
+        entry = session.entry()
+        _check(entry is not None)
+        assert entry is not None
+        return session, entry
+
+    def _case_entry(self, actor: str) -> str:
+        try:
+            return self._case_session(actor)[1].revision
+        except (ImportError, OSError, KeyError, TypeError, ValueError, sqlite3.Error):
+            return ""
+
+    def _check_case_state(self, entry: StarterCaseEntry, pack: Json, state: Json) -> None:
+        _check(
+            entry.revision == state["entry"]
+            and pack["revision"] == state["revision"]
+            and pack["authority"]["map_confirmation_ref"] == state["map"]
+            and pack["authority"]["run_ref"] == entry.run_ref
+            and bool(pack["frozen"]) == state["frozen"]
+            and 0 <= state["index"] < len(pack["cases"])
+            and pack["cases"][state["index"]]["case_id"] == state["case_id"]
+        )
+
+    def _current_case_state(self, actor: str, state: Json) -> None:
+        session, entry = self._case_session(actor)
+        self._check_case_state(entry, session.review(), state)
+
+    def _case_view(self, cfg: Settings, actor: str, view: str, index: int) -> None:
+        session, entry = self._case_session(actor)
+        pack = session.review()
+        _check(0 <= index < len(pack["cases"]))
+        state = dict(
+            entry=entry.revision,
+            revision=pack["revision"],
+            map=pack["authority"]["map_confirmation_ref"],
+            frozen=bool(pack["frozen"]),
+            index=index,
+            case_id=pack["cases"][index]["case_id"],
+        )
+        token = self.journal.context(
+            actor, cfg.channel, view, "case_detail", entry.run_ref, _json(state)
+        )
+        self._show(
+            view,
+            self.views.starter_case_detail(token, pack, index),
+            authorize=lambda: self._current_case_state(actor, state),
+        )
+
+    def _case_action(
+        self, cfg: Settings, actor: str, view: str, ctx: Json, action: str, value: str
+    ) -> None:
+        if ctx["kind"] == "case_clause":
+            state = json.loads(ctx["revision"])
+            self._current_case_state(actor, state)
+            if action == "ot_case_back":
+                _check(value == "back")
+                self._case_view(cfg, actor, view, state["index"])
+            else:
+                _check(action == "ot_case_clause_page" and value in {"previous", "next"})
+                self._case_clause(
+                    cfg, actor, view, state, state["clause_page"] + (1 if value == "next" else -1)
+                )
+            return
+        if ctx["kind"] in {"case_entry", "case_detail", "case_preview"}:
+            session, entry = self._case_session(actor)
+            _check(entry.run_ref == ctx["job"])
+            if ctx["kind"] == "case_entry":
+                _check(entry.revision == ctx["revision"])
+                if action == "ot_case_generate":
+                    from opentour_cell.pilot.starter_case_authoring import guided_case_provider
+
+                    _check(value == "generate" and entry.can_propose)
+                    session.propose(guided_case_provider())
+                else:
+                    _check(action == "ot_case_review" and value == "open")
+                self._case_view(cfg, actor, view, 0)
+            else:
+                state = json.loads(ctx["revision"])
+                pack = session.review()
+                self._check_case_state(entry, pack, state)
+                index = state["index"]
+                if ctx["kind"] == "case_preview":
+                    _check(action == "ot_case_commit" and value == "freeze" and entry.can_freeze)
+                    session.freeze(splits=state["splits"], expected_revision=state["revision"])
+                    self._case_view(cfg, actor, view, index)
+                    return
+                if action == "ot_case_citation":
+                    _check(value == "citation" and not pack["frozen"])
+                    self._case_clause(cfg, actor, view, state, 0)
+                    return
+                if action in {"ot_case_page_previous", "ot_case_page_next"}:
+                    _check(action == f"ot_case_page_{value}")
+                    _check(value in {"previous", "next"})
+                    self._case_view(cfg, actor, view, index + (1 if value == "next" else -1))
+                else:
+                    if action == "ot_case_edit":
+                        _check(value == "edit" and entry.can_adjudicate and not pack["frozen"])
+                        form = self.views.adjudicate_starter_case
+                        args = (pack["cases"][index], pack["authority"]["allowed_actions"])
+                        kind = "case_edit"
+                    else:
+                        _check(
+                            action == "ot_case_splits"
+                            and value == "splits"
+                            and entry.can_freeze
+                            and not pack["frozen"]
+                            and all(c["status"] != "proposed" for c in pack["cases"])
+                        )
+                        self._case_splits(cfg, actor, view, entry, pack, state, {})
+                        return
+                    token = self.journal.context(
+                        actor, cfg.channel, view, kind, entry.run_ref, ctx["revision"]
+                    )
+                    self._show(
+                        view,
+                        form(token, *args),
+                        authorize=lambda: self._current_case_state(actor, state),
+                    )
+            return
+
+    def _case_clause(self, cfg: Settings, actor: str, view: str, state: Json, page: int) -> None:
+        session, entry = self._case_session(actor)
+        pack = session.review()
+        self._check_case_state(entry, pack, state)
+        service, principal = self._map_service(actor, entry.workflow_ref)
+        ref = pack["cases"][state["index"]]["citation"]
+        revision = pack["authority"]["map_review_revision"]
+        passage = service.citation(principal, expected_revision=revision, citation_ref=ref)
+        tok = self.journal.context(
+            actor,
+            cfg.channel,
+            view,
+            "case_clause",
+            entry.run_ref,
+            _json(state | {"clause_page": page}),
+        )
+
+        def authorize() -> None:
+            self._current_case_state(actor, state)
+            current, p = self._map_service(actor, entry.workflow_ref)
+            _check(current.citation(p, expected_revision=revision, citation_ref=ref) == passage)
+
+        self._show(view, self.views.starter_case_clause(tok, passage, page), authorize=authorize)
+
+    def _case_splits(
+        self,
+        cfg: Settings,
+        actor: str,
+        view: str,
+        entry: StarterCaseEntry,
+        pack: Json,
+        state: Json,
+        splits: dict[str, str],
+    ) -> None:
+        pending = sorted({c["family_id"] for c in pack["cases"]} - splits.keys())
+        page = pending[:20]
+        if not page:
+            _check(
+                "reserved" in splits.values()
+                and all(
+                    c["status"] == "resolved" or splits[c["family_id"]] == "excluded"
+                    for c in pack["cases"]
+                )
+            )
+        token = self.journal.context(
+            actor,
+            cfg.channel,
+            view,
+            "case_splits" if page else "case_preview",
+            entry.run_ref,
+            _json(state | {"splits": splits, "page": page}),
+        )
+        layout = (
+            self.views.starter_family_splits(token, page)
+            if page
+            else self.views.starter_freeze_preview(token, pack, splits)
+        )
+        self._show(view, layout, authorize=lambda: self._current_case_state(actor, state))
+
     def _map_choices(self, actor: str) -> dict[str, tuple[MapReviewService, str]]:
         from opentour_cell.pilot.map_review import open_map_review
         from opentour_cell.pilot.onboarding_mcp import _read_private
@@ -3024,6 +3224,9 @@ class Workbench:
         old_hash: str,
     ) -> None:
         job = ctx["job"]
+        if ctx["kind"] in {"case_entry", "case_detail", "case_clause", "case_preview"}:
+            self._case_action(cfg, actor, view, ctx, action, value)
+            return
         if ctx["kind"] in {"map_review", "map_clause", "map_conflict"} or (
             action == "ot_map_back"
             and ctx["kind"] in {"map_edit", "map_precedence", "map_assertions"}
@@ -3625,7 +3828,44 @@ class Workbench:
         values: Json,
         token: str,
     ) -> None:
-        if callback in {"ot_map_assertions_save", "ot_map_branch_save", "ot_map_precedence_save"}:
+        if callback in {"ot_case_adjudicate", "ot_case_freeze"}:
+            state = json.loads(ctx["revision"])
+            session, entry = self._case_session(actor)
+            _check(entry.run_ref == ctx["job"])
+            pack = session.review()
+            self._check_case_state(entry, pack, state)
+            if callback == "ot_case_adjudicate":
+                _check(
+                    ctx["kind"] == "case_edit"
+                    and entry.can_adjudicate
+                    and set(values) == {"target", "reason"}
+                )
+                choice = self._field(values, "target", select=True)
+                options = pack["authority"]["allowed_actions"]
+                _check(choice == "unresolved" or choice in {str(i) for i in range(len(options))})
+                reason = self._field(values, "reason").strip()
+                session.adjudicate(
+                    case_id=state["case_id"],
+                    target=None if choice == "unresolved" else options[int(choice)],
+                    reason=reason,
+                    expected_revision=state["revision"],
+                    operation_ref=self.journal.opaque("case-save", [ctx["id"], actor]),
+                )
+            else:
+                _check(ctx["kind"] == "case_splits" and entry.can_freeze)
+                families = state["page"]
+                _check(set(values) == {f"family_{i}" for i in range(len(families))})
+                splits = {
+                    family: self._field(values, f"family_{i}", select=True)
+                    for i, family in enumerate(families)
+                }
+                _check(set(splits.values()) <= {"development", "reserved", "excluded"})
+                self._case_splits(
+                    cfg, actor, view, entry, pack, state, state.get("splits", {}) | splits
+                )
+                return
+            self._case_view(cfg, actor, view, state["index"])
+        elif callback in {"ot_map_assertions_save", "ot_map_branch_save", "ot_map_precedence_save"}:
             self._map_submit(cfg, actor, view, ctx, callback, values)
         elif callback == "ot_nomination":
             _check(ctx["kind"] == "nomination" and set(values) == {"nominee"})
@@ -3971,6 +4211,7 @@ class Workbench:
         live_summary = self._live_summary(actor) if workflow_settings else None
         readiness = self._readiness(actor) if workflow_settings else None
         map_entry = self._map_entry(actor)
+        case_entry = self._case_entry(actor)
         verifier_entry = self._verifier_entry(actor) if cfg.live_workflow_ref else ""
         layout = self.views.app_home_view(
             token,
@@ -3986,6 +4227,7 @@ class Workbench:
             live_summary=live_summary,
             verify_outcome=verifier_entry,
             decision_map_entry=map_entry,
+            case_entry=case_entry,
         )
         navigation = (
             can_add_workflow
@@ -3999,7 +4241,8 @@ class Workbench:
                     "app_home",
                     authorize=(
                         lambda: _check(
-                            (not map_entry or self._map_entry(actor) == map_entry)
+                            (not case_entry or self._case_entry(actor) == case_entry)
+                            and (not map_entry or self._map_entry(actor) == map_entry)
                             and (
                                 not verifier_entry or self._verifier_entry(actor) == verifier_entry
                             )
@@ -4011,6 +4254,7 @@ class Workbench:
                     or live_summary is not None
                     or verifier_entry
                     or map_entry
+                    or case_entry
                     else None,
                 )
         except Exception:
@@ -4039,6 +4283,25 @@ class Workbench:
             and len(body["actions"]) == 1
         )
         action = body["actions"][0]
+        if action.get("action_id") == "ot_app_cases":
+            self.private_channel(cfg, actor)
+            _, case_entry = self._case_session(actor)
+            _check(case_entry.revision == action.get("value"))
+            view = self.web.views_open(
+                trigger_id=body["trigger_id"], view=self.views.notice_modal("checking")
+            )["view"]["id"]
+            token = self.journal.context(
+                actor, cfg.channel, view, "case_entry", case_entry.run_ref, case_entry.revision
+            )
+            layout = self.views.starter_case_entry(
+                token, case_entry.workflow_ref, case_entry.run_ref, case_entry.can_propose
+            )
+            self._show(
+                view,
+                layout,
+                authorize=lambda: _check(self._case_entry(actor) == case_entry.revision),
+            )
+            return
         if action.get("action_id") == "ot_app_map":
             self.private_channel(cfg, actor)
             map_entry = self._map_entry(actor)
