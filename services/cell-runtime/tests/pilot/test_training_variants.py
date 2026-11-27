@@ -922,3 +922,40 @@ def test_records_are_json_serializable_but_domain_objects_are_not_asdict_safe() 
     json.dumps(ledger.children())
     with pytest.raises(TypeError):
         dataclasses.asdict(POLICY)
+
+
+def test_rotating_validators_then_correcting_the_plan_is_not_poisoned() -> None:
+    """R1: a rejected attempt under a wrong pin must not block the corrected attempt."""
+    ledger = VariantLedger()
+    ledger.run(plan((PARAPHRASE,)), VALIDATOR, now=NOW)
+    other = plan(
+        (LAYOUT,), approved_validators=frozenset({"generated-other-validator"}), plan_ref="p-wrong"
+    )
+    ledger.run(other, VALIDATOR, now=NOW)
+    assert ledger.children()[-1]["reason"] == "root_pin_mismatch"
+    ledger.run(plan((LAYOUT,), plan_ref="p-right"), VALIDATOR, now=NOW)
+    last = ledger.children()[-1]
+    assert (last["disposition"], last["plan_ref"]) == (ADMITTED, "p-right")
+    assert [c["reason"] for c in ledger.children()].count("root_pin_mismatch") == 1
+
+
+def test_a_label_ref_equal_to_an_existing_case_ref_is_a_duplicate() -> None:
+    """R3: case and label refs are compared against both columns."""
+    ledger = VariantLedger()
+    ledger.run(plan((PARAPHRASE,)), VALIDATOR, now=NOW)
+    crossed = root(
+        root_ref="generated-root-x",
+        case_ref="generated-case-2",
+        label_ref="generated-case-1",
+        family_id="generated-fam-2",
+    )
+    ledger.run(plan((LAYOUT,), crossed, plan_ref="generated-plan-x"), VALIDATOR, now=NOW)
+    flipped = root(
+        root_ref="generated-root-y",
+        case_ref="generated-case-3",
+        label_ref="generated-label-1",
+        family_id="generated-fam-3",
+    )
+    ledger.run(plan((LAYOUT,), flipped, plan_ref="generated-plan-y"), VALIDATOR, now=NOW)
+    assert [c["reason"] for c in ledger.children()[1:]] == ["duplicate_case"] * 2
+    assert manifest(ledger)["observed_mistake_count"] == 1

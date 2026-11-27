@@ -8,6 +8,12 @@ that sees the policy and the changed fields, but never the proposed label, can.
 Everything here is a worker-local, deterministic, no-spend port. Generators and validators are
 supplied by the caller; this module performs no model calls and fits nothing.
 
+Recorded gaps: (R2) a retracted root keeps its case/label, so a case cannot be re-registered
+under a new root_ref after reopening (needs an explicit reopen operation the spec does not
+define); (R4) the seal digest is not part of the root pin, so children of a later plan carry
+that plan's split_digest while manifests use the root's stored one; (R5) ledger files made by
+earlier revisions are not migrated (nothing is released).
+
 Simulated, not proven: all generators, validators, grants and fit gates are caller-supplied
 local doubles. Nothing here is provider, customer-evidence or fit-qualification evidence, and a
 validated child is never a real observation.
@@ -573,8 +579,9 @@ class VariantLedger:
     def _duplicate_case(db: sqlite3.Connection, root: SeedRoot) -> tuple[str, Json | None] | None:
         """One real case or label is one root: re-registering it never adds a mistake."""
         found = db.execute(
-            "SELECT 1 FROM roots WHERE root_ref<>? AND (case_ref=? OR label_ref=?) LIMIT 1",
-            (root.root_ref, root.case_ref, root.label_ref),
+            "SELECT 1 FROM roots WHERE root_ref<>? AND (case_ref IN (?,?) OR label_ref IN (?,?))"
+            " LIMIT 1",
+            (root.root_ref, root.case_ref, root.label_ref, root.case_ref, root.label_ref),
         ).fetchone()
         return ("duplicate_case", None) if found else None
 
@@ -638,6 +645,7 @@ class VariantLedger:
                 plan.generator.ref,
                 plan.generator.revision,
                 plan.mode,
+                _pin(plan),  # a corrected plan is a new attempt, not a replay of a rejected one
             ]
         )
 
