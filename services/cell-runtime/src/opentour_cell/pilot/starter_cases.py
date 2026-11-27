@@ -13,7 +13,7 @@ import os
 import sqlite3
 from collections.abc import Iterator
 from contextlib import AbstractContextManager, contextmanager
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol
@@ -445,6 +445,47 @@ class StarterCases:
                     (ref, canonical(_scope_record(scope)), proposal, canonical(body), digest(body)),
                 )
                 return ref
+
+    def add_counterexample(
+        self,
+        actor: IntakePrincipal,
+        work: IntakeWork,
+        *,
+        case: ProposedCase,
+        expected_revision: int,
+        operation_ref: str,
+    ) -> int:
+        """Record a named owner's example for blind review before the freeze."""
+        require_ref(operation_ref)
+        _require(type(expected_revision) is int and expected_revision >= 0)
+        _require(case.authoring_identity is None, "counterexample_requires_named_owner")
+        authored = replace(case, case_origin="owner_counterexample")
+        intent = digest(["owner-counterexample", asdict(authored), expected_revision])
+        with self._scope(actor, work, "adjudicate") as scope, self._db(write=True) as db:
+            body = self._load(db, scope)
+            replay = body["operations"].get(operation_ref)
+            if replay is not None:
+                _require(replay["intent"] == intent, "starter_action_conflict")
+                return int(replay["revision"])
+            _require(body["frozen"] is None, "starter_successor_required")
+            _require(body["revision"] == expected_revision, "starter_revision_changed")
+            _require(len(body["cases"]) < 1000, "invalid_starter_cases")
+            (row,) = self._cases(scope, (authored,))
+            fingerprint = digest(_input_fields(row["decision_inputs"]))
+            for previous in body["cases"]:
+                _require(previous["case_id"] != row["case_id"], "invalid_starter_cases")
+                if (
+                    previous["template_id"] == row["template_id"]
+                    or digest(_input_fields(previous["decision_inputs"])) == fingerprint
+                ):
+                    _require(previous["family_id"] == row["family_id"], "starter_family_conflict")
+            row["counterexample_owner"] = scope.owner_id
+            row["counterexample_operation"] = operation_ref
+            body["cases"].append(row)
+            body["revision"] += 1
+            body["operations"][operation_ref] = dict(intent=intent, revision=body["revision"])
+            self._save(db, scope, body)
+            return int(body["revision"])
 
     def adjudicate(
         self,
