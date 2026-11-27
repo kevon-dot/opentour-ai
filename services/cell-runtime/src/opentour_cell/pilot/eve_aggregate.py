@@ -8,7 +8,7 @@ body with the journal and the manifest, field by field:
   disclosure and the improvement claim) against values summed or derived from journal rows;
 * every other field (schema version, benchmark, registration identity, scorer identity and
   self-check flags, evidence tier, claim scope, authorization flags, external gates, redacted
-  exclusions) against constants or values derived from the manifest;
+  exclusions) against literals written in this module or values derived from the manifest;
 * the exact set of body keys, so an added claim is not silently ignored.
 
 A result body edited after it was built (even when re-digested), a journal row edited after the
@@ -32,7 +32,8 @@ The worker journal is unsigned (no OPE-566 custody is applied to it here), so an
 rewrite the whole journal consistently can still pass this check.
 
 The replay worker never imports this module, and this module never imports the scorer
-(``tests/pilot/test_eve_import_boundary.py``). It reads ``eve_replay``'s schema constants only.
+(``tests/pilot/test_eve_import_boundary.py``). It imports nothing from ``eve_replay`` at run time;
+its expected tier, schema version and external gates are its own literals.
 """
 
 from __future__ import annotations
@@ -41,10 +42,25 @@ import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from opentour_cell.pilot.eve_replay import EXTERNAL_GATES, TIER, VERSION, ReplayManifest
 from opentour_cell.pilot.eve_task import EveRefusal, canonical, digest
+
+if TYPE_CHECKING:
+    from opentour_cell.pilot.eve_replay import ReplayManifest
+
+# What a result body must say, written here as literals. They are never read back from
+# ``eve_replay``: a check that took its expectations from the code it checks could not catch a
+# wrong tier, version or gate list there.
+EXPECTED_SCHEMA_VERSION = "opentour.pilot.eve-protected-replay.v1"
+EXPECTED_TIER = "generated"
+EXPECTED_CLAIM_SCOPE = "implementation_only"
+EXPECTED_EXTERNAL_GATES = (
+    "real_eve_inference_capacity_unavailable",
+    "provider_or_trainer_authorization_unavailable",
+    "independent_evaluator_and_reviewer_unavailable",
+    "installed_provider_and_customer_evidence_unavailable",
+)
 
 BASIS = "aggregation re-derived from journaled verdicts"
 LIMITATION = "verdicts are summed as journaled; no verdict is re-scored and no output is seen"
@@ -366,14 +382,14 @@ def reconcile(result: Any, *, journal_path: Path, manifest: ReplayManifest) -> R
         mismatches.append("body.keys")
 
     for field, want in (
-        ("schema_version", VERSION),
+        ("schema_version", EXPECTED_SCHEMA_VERSION),
         ("benchmark_id", manifest.benchmark_id),
         ("benchmark_revision", manifest.benchmark_revision),
         ("manifest_digest", manifest.digest),
         ("registration_identity", manifest.registration_identity),
-        ("evidence_tier", TIER),
-        ("claim_scope", "implementation_only"),
-        ("unsatisfied_external_gates", list(EXTERNAL_GATES)),
+        ("evidence_tier", EXPECTED_TIER),
+        ("claim_scope", EXPECTED_CLAIM_SCOPE),
+        ("unsatisfied_external_gates", list(EXPECTED_EXTERNAL_GATES)),
         ("fit_authorized", False),
         ("release_authorized", False),
         (

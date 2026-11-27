@@ -737,3 +737,81 @@ def test_f4_a_present_commitment_is_not_a_verified_one(env: Env) -> None:
     assert worker.journal.arm(rp.run_id_for(env.manifest, env.arm("baseline"))) is not None
     # ... only verify_output, holding the run key, checks its value.
     assert not verify(env, worker, 1, output(1, "correct"))
+
+
+# ---------------------------------------------------------------- review round 3 (PR #210)
+PINNED_GATES = (
+    "real_eve_inference_capacity_unavailable",
+    "provider_or_trainer_authorization_unavailable",
+    "independent_evaluator_and_reviewer_unavailable",
+    "installed_provider_and_customer_evidence_unavailable",
+)
+
+
+def test_r1_aggregator_expectations_are_its_own_literals_not_the_replay_modules() -> None:
+    import ast
+
+    source = Path(ag.__file__).read_text()
+    from_replay = {
+        alias.name
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.ImportFrom) and node.module == "opentour_cell.pilot.eve_replay"
+        for alias in node.names
+    }
+    assert from_replay <= {"ReplayManifest"}, from_replay  # types only, no expected values
+    assert ag.EXPECTED_SCHEMA_VERSION == "opentour.pilot.eve-protected-replay.v1"
+    assert ag.EXPECTED_TIER == "generated"
+    assert ag.EXPECTED_EXTERNAL_GATES == PINNED_GATES
+
+
+@pytest.mark.parametrize(
+    ("constant", "value", "mismatch"),
+    [
+        pytest.param("TIER", "customer_witnessed", "evidence_tier", id="tier"),
+        pytest.param("EXTERNAL_GATES", PINNED_GATES[:2], "unsatisfied_external_gates", id="gates"),
+        pytest.param("VERSION", "opentour.pilot.eve-protected-replay.v9", "schema_version",
+                     id="version"),
+    ],
+)  # fmt: skip
+def test_r1_a_wrong_constant_in_the_replay_module_is_caught_by_reconcile(
+    env: Env, monkeypatch: pytest.MonkeyPatch, constant: str, value: Any, mismatch: str
+) -> None:
+    monkeypatch.setattr(rp, constant, value)
+    worker = env.worker()
+    result = full_result(env, worker)
+    check = ag.reconcile(result, journal_path=worker.journal.path, manifest=env.manifest)
+    assert not check.consistent and check.mismatches == (mismatch,)
+
+
+def test_r2_a_staging_scorer_with_another_identity_cannot_stage(env: Env) -> None:
+    worker = env.worker()
+    result = full_result(env, worker)
+    someone = sc.DeterministicScorer(
+        env.manifest.scorer_version, env.manifest.rubric_revision, scorer_id="someone-else"
+    )
+    assert rp.scorer_selfcheck(someone)
+    records = {r.spec.arm_id: r for r in worker.journal.arms_for(env.manifest.digest)}
+    with refuses("scorer_identity_drift"):
+        env.result(records, journal=worker.journal, scorer_=someone)
+    decision = rp.stage_decision(
+        result, recomputed_digest=result["result_digest"], **env.staging(worker.journal, someone)
+    )
+    assert decision.reasons == ("rebuild_refused_scorer_identity_drift",)
+
+
+def test_r2_an_unattributed_staging_scorer_cannot_stage(env: Env) -> None:
+    worker = env.worker()
+    result = full_result(env, worker)
+    anonymous = replace_scorer_id(env, None)
+    assert rp.scorer_selfcheck(anonymous)
+    rebuilt = env.result(
+        {r.spec.arm_id: r for r in worker.journal.arms_for(env.manifest.digest)},
+        journal=worker.journal,
+        scorer_=anonymous,
+    )
+    assert rebuilt["body"]["scorer"]["staging_selfcheck_passed"] is False
+    decision = rp.stage_decision(
+        result, recomputed_digest=result["result_digest"], **env.staging(worker.journal, anonymous)
+    )
+    assert not decision.stageable
+    assert "staging_scorer_unattributed" in decision.reasons

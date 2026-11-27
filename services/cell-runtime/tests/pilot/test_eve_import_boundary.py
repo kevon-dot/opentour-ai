@@ -155,12 +155,17 @@ def test_b5_the_scanner_flags_every_forbidden_form(source: str) -> None:
 
 
 # Dynamic imports cannot be followed statically, so none is allowed anywhere in the closure.
-_DYNAMIC_MODULES = frozenset({"importlib", "runpy"})
-_DYNAMIC_NAMES = frozenset({"__import__", "import_module", "find_spec", "run_module", "run_path"})
+_DYNAMIC_MODULES = frozenset({"importlib", "runpy", "builtins", "pkgutil"})
+_DYNAMIC_ATTRS = frozenset(
+    {"__import__", "import_module", "find_spec", "run_module", "run_path", "resolve_name"}
+)
+# Bare names: the builtins that import or run code from a string, and the builtins namespace.
+_DYNAMIC_NAMES = _DYNAMIC_ATTRS | {"exec", "eval", "compile", "__builtins__"}
 
 
 def dynamic_import_uses(source: str) -> list[str]:
-    """Every use of a dynamic import facility: importlib, runpy, __import__ or sys.modules."""
+    """Every use of a dynamic import facility: importlib, runpy, pkgutil, builtins, __import__,
+    exec, eval, compile or sys.modules. ``re.compile`` and the like are attributes, not flagged."""
     found = []
     for node in ast.walk(ast.parse(source)):
         if isinstance(node, ast.Import):
@@ -174,7 +179,7 @@ def dynamic_import_uses(source: str) -> list[str]:
         elif isinstance(node, ast.Name) and node.id in _DYNAMIC_NAMES:
             found.append(node.id)
         elif isinstance(node, ast.Attribute):
-            if node.attr in _DYNAMIC_NAMES or (
+            if node.attr in _DYNAMIC_ATTRS or (
                 node.attr == "modules" and getattr(node.value, "id", None) == "sys"
             ):
                 found.append(node.attr)
@@ -212,6 +217,15 @@ def test_b6_nothing_reachable_from_the_replay_worker_or_aggregator_imports_dynam
         pytest.param("import sys\nsys.modules['opentour_cell.pilot.x']\n", id="sys-modules"),
         pytest.param("from sys import modules\nmodules['x']\n", id="from-sys-modules"),
         pytest.param("def f():\n    __import__('x')\n", id="lazy-dunder"),
+        pytest.param("exec('import opentour_cell.pilot.eve_scorer')\n", id="exec"),
+        pytest.param("eval('1')\n", id="eval"),
+        pytest.param("code = compile('import x', 'f', 'exec')\n", id="compile"),
+        pytest.param("import builtins\nbuiltins.__dict__['imp' + 'ort']\n", id="builtins-dict"),
+        pytest.param("from builtins import __dict__ as d\n", id="from-builtins"),
+        pytest.param("__builtins__['x']\n", id="dunder-builtins"),
+        pytest.param("import pkgutil\npkgutil.resolve_name('x:y')\n", id="pkgutil"),
+        pytest.param("from pkgutil import resolve_name\n", id="from-pkgutil"),
+        pytest.param("f = getattr(__builtins__, 'ev' + 'al')\n", id="getattr-built-name"),
     ],
 )
 def test_b7_the_dynamic_import_scanner_flags_every_form(source: str) -> None:

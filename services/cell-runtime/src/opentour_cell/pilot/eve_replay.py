@@ -1203,7 +1203,16 @@ def build_result(
     replay_selfcheck_passed = all(
         r.scorer is not None and r.scorer.selfcheck_passed is True for r in arms.values()
     )
-    staging_selfcheck_passed = scorer_selfcheck(scorer)
+    # The staging scorer must be the scorer the manifest names, as replay requires. A declared
+    # other identity is refused; an undeclared one cannot pass the staging gate.
+    try:
+        staging_attribution: tuple[str, str, str] | None = scorer_attribution(scorer)
+    except EveRefusal:
+        staging_attribution = None
+    frozen = (manifest.scorer_id, manifest.scorer_version, manifest.rubric_revision)
+    if staging_attribution is not None and staging_attribution != frozen:
+        raise EveRefusal("scorer_identity_drift")
+    staging_selfcheck_passed = staging_attribution is not None and scorer_selfcheck(scorer)
     treatment = arms.get("candidate") or arms.get("simple_repair")
     control = arms.get("simple_repair") if "candidate" in arms else arms.get("baseline")
     if "candidate" in arms and control is None:
@@ -1297,15 +1306,21 @@ def stage_decision(
     checks body and journal consistency, and cannot check any verdict. It shares ``build_result``'s
     aggregation code, so an aggregation bug is caught only by the separate ``eve_aggregate``. Every
     contributing arm must record a passing replay-time self-check under the manifest's scorer
-    identity; the ``scorer`` passed here is self-checked as well, but a passing scorer handed in at
-    staging cannot stand in for a failing one at replay. Scorer identity is declared and checked
-    against the manifest, not authenticated. Two journaled runs of one arm id are ambiguous and
-    not stageable.
+    identity; the ``scorer`` passed here must carry that same identity (another declared identity
+    is refused, an undeclared one is not stageable) and is self-checked as well, but a passing
+    scorer handed in at staging cannot stand in for a failing one at replay. Scorer identity is
+    declared and checked against the manifest, not authenticated. Two journaled runs of one arm id
+    are ambiguous and not stageable.
     """
     try:
         rebuilt = _rebuild(manifest, journal, scorer, key)
     except EveRefusal as refusal:
         return StageDecision(False, (f"rebuild_refused_{refusal}",))
+    try:
+        scorer_attribution(scorer)
+        unattributed: tuple[str, ...] = ()
+    except EveRefusal:
+        unattributed = ("staging_scorer_unattributed",)
     body, derived = rebuilt["body"], rebuilt["result_digest"]
     try:
         supplied_body, supplied_digest = result["body"], result["result_digest"]
@@ -1337,6 +1352,7 @@ def stage_decision(
         return StageDecision(False, ("result_malformed",))
     if body["improvement_claim"] != "observed_net_fixes":
         reasons.append(f"improvement_{body['improvement_claim']}")
+    reasons.extend(unattributed)
     return StageDecision(not reasons, tuple(reasons))
 
 

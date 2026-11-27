@@ -896,6 +896,26 @@ def test_v6_matched_settings_make_the_tuning_comparison_available(env: Env) -> N
     assert set(body["unsatisfied_external_gates"]) == set(rp.EXTERNAL_GATES)
 
 
+PINNED_EXTERNAL_GATES = [
+    "real_eve_inference_capacity_unavailable",
+    "provider_or_trainer_authorization_unavailable",
+    "independent_evaluator_and_reviewer_unavailable",
+    "installed_provider_and_customer_evidence_unavailable",
+]
+
+
+def test_v6_result_tier_version_and_gates_are_pinned_to_literals(env: Env) -> None:
+    """Compared against literals, never against the module's own constants (OPE-573)."""
+    body = full_result(env)["body"]
+    assert body["schema_version"] == "opentour.pilot.eve-protected-replay.v1"
+    assert body["evidence_tier"] == "generated"
+    assert body["claim_scope"] == "implementation_only"
+    assert body["unsatisfied_external_gates"] == PINNED_EXTERNAL_GATES
+    assert rp.VERSION == "opentour.pilot.eve-protected-replay.v1"
+    assert rp.TIER == "generated"
+    assert list(rp.EXTERNAL_GATES) == PINNED_EXTERNAL_GATES
+
+
 # ---------------------------------------------------------------- V7 fail closed
 def test_v7_missing_credentials_fail_closed_without_leaking(env: Env) -> None:
     env.credentials.available = False
