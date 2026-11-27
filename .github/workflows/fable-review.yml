@@ -1,0 +1,72 @@
+{
+  "name": "OpenTour Fable review pilot",
+  "on": {
+    "workflow_run": {
+      "workflows": [
+        "OpenTour verified CI"
+      ],
+      "types": [
+        "completed"
+      ],
+      "branches": [
+        "codex/ope-535-*"
+      ]
+    }
+  },
+  "permissions": {
+    "actions": "read",
+    "contents": "read",
+    "pull-requests": "read"
+  },
+  "concurrency": {
+    "group": "fable-review-${{ github.event.workflow_run.head_branch }}-${{ github.event.workflow_run.head_sha }}",
+    "cancel-in-progress": false
+  },
+  "jobs": {
+    "review": {
+      "name": "Run advisory Fable review",
+      "if": "${{ github.repository == 'kevon-dot/opentour-ai' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'pull_request' && github.event.workflow_run.head_repository.full_name == github.repository && vars.FABLE_REVIEW_ENABLED == 'true' }}",
+      "runs-on": "ubuntu-24.04",
+      "timeout-minutes": 12,
+      "environment": "fable-review",
+      "steps": [
+        {
+          "name": "Check out the trusted workflow source",
+          "uses": "actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8",
+          "with": {
+            "ref": "${{ github.sha }}",
+            "persist-credentials": false
+          }
+        },
+        {
+          "name": "Use the pinned Python runtime",
+          "uses": "actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1",
+          "with": {
+            "python-version": "3.12.16"
+          }
+        },
+        {
+          "name": "Mint a repository-scoped Checks token",
+          "id": "check_token",
+          "uses": "actions/create-github-app-token@f418cff399f7aef4c2f0ad47e25ca7a6abbdd6fc",
+          "with": {
+            "client-id": "${{ vars.FABLE_REVIEW_APP_CLIENT_ID }}",
+            "private-key": "${{ secrets.FABLE_REVIEW_APP_PRIVATE_KEY }}",
+            "permission-checks": "write"
+          }
+        },
+        {
+          "name": "Review the qualified candidate",
+          "run": "python -m tools.ci.fable_review",
+          "env": {
+            "GITHUB_TOKEN": "${{ github.token }}",
+            "FABLE_CHECK_TOKEN": "${{ steps.check_token.outputs.token }}",
+            "FABLE_CHECK_APP": "${{ steps.check_token.outputs.app-slug }}",
+            "FABLE_LINEAR_API_KEY": "${{ secrets.FABLE_LINEAR_API_KEY }}",
+            "ANTHROPIC_API_KEY": "${{ secrets.ANTHROPIC_API_KEY }}"
+          }
+        }
+      ]
+    }
+  }
+}
