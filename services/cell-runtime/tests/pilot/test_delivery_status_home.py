@@ -50,6 +50,7 @@ def test_private_status_refresh_reads_only_current_independent_receiver(tmp_path
         return view
 
     def click(view, action):
+        h.slack.screens[view]["hash"] = "generated-current-modal"
         h.action(view, action, buttons(screen(h, view))[action], actor)
 
     view = open_status(home=True)
@@ -82,6 +83,25 @@ def test_private_status_refresh_reads_only_current_independent_receiver(tmp_path
     assert committed[0] in text(h, view)
     assert "ot_delivery_status" not in buttons(screen(h, view))
     assert counts(h) == before and len(committed) == 1
+
+    # A direct question opened on the same inspected result did not select a workflow.
+    view = open_status()
+    previous_pin = buttons(screen(h, view))["ot_release_receipt"]
+    click(view, "ot_evidence")
+    revision = buttons(screen(h, view))["ot_question"]
+    h.action(view, "ot_question_delivery", revision, actor)
+    # The public action allowlist already rejects this legacy callback. Direct
+    # callers of the shared handler must also receive only approval evidence.
+    assert "Access unavailable" in text(h, view)
+    h.app._questions(
+        h.app.settings(), actor, view, "managed:" + permit.proposal_ref, revision, "delivery"
+    )
+    assert "Handoff delivery is unconfirmed" in text(h, view)
+    assert permit.destination_ref not in text(h, view) and committed[0] not in text(h, view)
+    assert "ot_release_receipt" not in buttons(screen(h, view))
+    h.slack.screens[view]["hash"] = "generated-unscoped-modal"
+    h.action(view, "ot_release_receipt", previous_pin, actor)
+    assert screen(h, view).get("callback_id") != "ot_handoff_receipt"
 
     view = open_status()
     original = h.app.views.handoff_modal
@@ -134,12 +154,14 @@ def test_approval_opens_scoped_receipt_and_old_button_denies_changed_destination
     h.action(view, "ot_release_approve", approve, actor)
     assert "Approved for handoff" in text(h, view)
     pin = buttons(screen(h, view))["ot_release_receipt"]
+    h.slack.screens[view]["hash"] = "generated-approval-modal"
     h.action(view, "ot_release_receipt", pin, actor)
     assert permit.destination_ref in text(h, view)
     refresh = buttons(screen(h, view))["ot_delivery_status"]
     signed_permission(
         directory, permit, actors={actor: ["inspect"]}, destination_ref="other-recipient"
     )
+    h.slack.screens[view]["hash"] = "generated-receipt-modal"
     h.action(view, "ot_delivery_status", refresh, actor)
     assert permit.destination_ref not in text(h, view) and "other-recipient" not in text(h, view)
     assert screen(h, view).get("callback_id") != "ot_handoff_receipt"

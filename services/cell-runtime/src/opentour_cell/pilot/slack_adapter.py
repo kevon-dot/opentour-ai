@@ -1853,10 +1853,9 @@ class Workbench:
         current = self.settings()
         _check(self._policy(cfg, actor) == self._policy(current, actor))
         current.permission(actor, "inspect", target.dataset)
-        token = self.journal.context(actor, cfg.channel, view, "questions", source, revision)
         receipt = (
             self._handoff_receipt(current, actor, target)
-            if status_topic == StatusTopic.DELIVERY
+            if status_topic == StatusTopic.DELIVERY and expected_receipt_pin
             else None
         )
         answer = (
@@ -1867,10 +1866,12 @@ class Workbench:
         pin = self._receipt_pin(actor, revision, receipt) if receipt else ""
         if expected_receipt_pin is not None:
             _check(pin == expected_receipt_pin)
+        kind = "handoff_question" if pin else "questions"
+        token = self.journal.context(actor, cfg.channel, view, kind, source, revision)
 
         def authorize() -> None:
             self._authorize_question_rows(cfg, actor, [(target.dataset, source, revision)])
-            if status_topic == StatusTopic.DELIVERY:
+            if receipt:
                 _check(self._handoff_receipt(self.settings(), actor, target) == receipt)
             if status_topic:
                 _check(
@@ -2333,7 +2334,12 @@ class Workbench:
         old_hash: str,
     ) -> None:
         job = ctx["job"]
-        kinds = {"release_recorded", "questions"} if action == "ot_release_receipt" else {"handoff"}
+        _check(bool(old_hash))
+        kinds = (
+            {"release_recorded", "handoff_question"}
+            if action == "ot_release_receipt"
+            else {"handoff"}
+        )
         _check(ctx["kind"] in kinds)
         target = self._readout(cfg, actor, job)
         _check(target and target.revision == ctx["revision"])
@@ -3527,7 +3533,8 @@ class Workbench:
             )
         elif action == "ot_evidence":
             _check(
-                ctx["kind"] in {"home", "evidence", "status", "eval_detail", "questions"}
+                ctx["kind"]
+                in {"home", "evidence", "status", "eval_detail", "questions", "handoff_question"}
                 and value == ctx["revision"]
             )
             self._evidence(cfg, actor, view, ctx, old_hash)

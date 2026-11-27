@@ -659,7 +659,8 @@ def regression_picker(
             )
             blocks.append(_actions(_button("Use this handoff", "ot_result_open", revision)))
             continue
-        blocks.append(_section(f"Workflow {_ref(dataset)} · {_display(source)} · {_ref(revision)}"))
+        label = "Dataset" if topic == "delivery" else "Workflow"
+        blocks.append(_section(f"{label} {_ref(dataset)} · {_display(source)} · {_ref(revision)}"))
         blocks.append(_actions(_button("Use this comparison", "ot_result_open", revision)))
     navigation = []
     if previous:
