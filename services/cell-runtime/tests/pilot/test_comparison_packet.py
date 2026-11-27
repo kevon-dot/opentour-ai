@@ -1158,7 +1158,7 @@ def test_every_value_the_planner_emitted_in_these_runs_is_inside_the_vocabularie
             assert arm["hold_reason"] in cp._HOLD_REASONS
 
 
-# ------------------------------- E8: the fixture flag cannot be enabled in a live context
+# ---------- E8: the fixture flag is refused while PYTEST_CURRENT_TEST is unset (accident guard)
 
 
 def test_fixture_flag_works_in_fixture_context(runs, tmp_path):
@@ -1168,7 +1168,7 @@ def test_fixture_flag_works_in_fixture_context(runs, tmp_path):
 
 
 def test_live_store_refuses_the_fixture_flag_loudly(tmp_path, monkeypatch):
-    """E8: a live PacketOutbox cannot be built with the flag, whatever the caller passes."""
+    """E8: with PYTEST_CURRENT_TEST unset, a PacketOutbox cannot be built with the flag."""
     monkeypatch.delenv("PYTEST_CURRENT_TEST")
     assert cp._fixture_context() is False
     path = tmp_path / "live.sqlite3"
@@ -1626,3 +1626,29 @@ def test_drift_guard_fails_when_only_the_slice_identifier_call_is_removed():
     mutated_source = source.replace(needle, "len({v for v in items}) != len(items)")
     assert 'identifier(value["metric"])' in mutated_source  # the unrelated call survives
     assert slice_names_validated(ast.parse(mutated_source)) is False
+
+
+def test_drift_guard_itself_reports_drift_when_only_the_slice_identifier_call_is_removed(
+    monkeypatch,
+):
+    """E10: the guard end to end, not only its helper. ``planner_emitted`` and
+    ``vocabulary_gaps`` run on a planner source with just the slice ``identifier()`` call
+    removed, so a guard that stopped using ``slice_names_validated`` (for example by going
+    back to "any ``identifier()`` anywhere in ``_terms``") is caught here."""
+    assert vocabulary_gaps(planner_emitted())["slice_shape"] == set()  # unmutated: no drift
+    source = (_PILOT / "comparison_plan.py").read_text()
+    needle = "len({identifier(v) for v in items}) != len(items)"
+    assert source.count(needle) == 1, "planner source changed; update this mutation"
+    mutated = ast.parse(source.replace(needle, "len({v for v in items}) != len(items)"))
+    real_tree = _tree
+    monkeypatch.setitem(
+        globals(),
+        "_tree",
+        lambda name: mutated if name == "comparison_plan.py" else real_tree(name),
+    )
+    emitted = planner_emitted()
+    gaps = vocabulary_gaps(emitted)
+    assert gaps["slice_shape"] == {"<planner no longer validates slice names>"}
+    assert {k: v for k, v in gaps.items() if k != "slice_shape"} == {
+        k: set() for k in gaps if k != "slice_shape"
+    }  # only the slice check drifted; the planner's other vocabularies are unchanged

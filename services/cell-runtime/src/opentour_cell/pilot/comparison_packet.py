@@ -50,9 +50,13 @@ both documents against pinned issuer keys inside this module, replacing the hard
 packets are not gated by this and are delivered.
 
 Fixture flag: ``allow_generated_fixture`` exercises staging mechanics with generated evidence
-only. It is honored solely in a test context (``PYTEST_CURRENT_TEST`` is set, as pytest does).
-Outside one, ``PacketOutbox`` refuses to construct and ``assemble_packet`` refuses, with the
-closed code ``generated_fixture_not_permitted_in_live_context``, so a misconfiguration is loud.
+only. It is honored only while ``PYTEST_CURRENT_TEST`` is set (pytest sets it). Otherwise
+``PacketOutbox`` refuses to construct and ``assemble_packet`` refuses, with the closed code
+``generated_fixture_not_permitted_in_live_context``, so a misconfiguration is loud. This is a
+guard against accidentally enabling generated fixtures in a live process, nothing more. The
+variable is caller-controlled, so it authenticates nothing and is not a security control. The
+real barrier to live improvement staging is the issuer hold above: an authenticatable OPE-526
+audit plus an OPE-528 independent verdict, neither of which exists yet.
 
 Free text: a sealed comparison proves only that its bytes are self-consistent, not that its
 strings are safe. Every string that this module copies from a comparison into a packet (the
@@ -199,7 +203,8 @@ _ECON_FIELDS = (
 
 
 def _fixture_context() -> bool:
-    """True only under a test runner. The repository has no other live/fixture switch."""
+    """True while ``PYTEST_CURRENT_TEST`` is set. An accident guard, not authentication: the
+    variable is caller-controlled. The repository has no other live/fixture switch."""
     return "PYTEST_CURRENT_TEST" in os.environ
 
 
