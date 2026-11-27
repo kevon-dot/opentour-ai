@@ -152,3 +152,67 @@ def test_b4_importing_the_replay_module_loads_neither_at_runtime() -> None:
 def test_b5_the_scanner_flags_every_forbidden_form(source: str) -> None:
     names = imported_names(source, "opentour_cell.pilot.generated_probe")
     assert {SCORER, AGGREGATOR} & names, names
+
+
+# Dynamic imports cannot be followed statically, so none is allowed anywhere in the closure.
+_DYNAMIC_MODULES = frozenset({"importlib", "runpy"})
+_DYNAMIC_NAMES = frozenset({"__import__", "import_module", "find_spec", "run_module", "run_path"})
+
+
+def dynamic_import_uses(source: str) -> list[str]:
+    """Every use of a dynamic import facility: importlib, runpy, __import__ or sys.modules."""
+    found = []
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Import):
+            found += [a.name for a in node.names if a.name.split(".")[0] in _DYNAMIC_MODULES]
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            root = node.module.split(".")[0]
+            if root in _DYNAMIC_MODULES or (
+                root == "sys" and any(a.name == "modules" for a in node.names)
+            ):
+                found.append(node.module)
+        elif isinstance(node, ast.Name) and node.id in _DYNAMIC_NAMES:
+            found.append(node.id)
+        elif isinstance(node, ast.Attribute):
+            if node.attr in _DYNAMIC_NAMES or (
+                node.attr == "modules" and getattr(node.value, "id", None) == "sys"
+            ):
+                found.append(node.attr)
+        elif isinstance(node, ast.Constant) and node.value in _DYNAMIC_NAMES:
+            found.append(str(node.value))  # getattr(module, "import_module") and the like
+    return found
+
+
+def test_b6_nothing_reachable_from_the_replay_worker_or_aggregator_imports_dynamically() -> None:
+    for root in (REPLAY, AGGREGATOR):
+        reachable = closure(root)
+        assert REPLAY in reachable  # the aggregator reads the replay module's constants
+        for name in sorted(reachable):
+            path = module_file(name)
+            if path is not None:
+                assert dynamic_import_uses(path.read_text()) == [], (root, name)
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        pytest.param("from importlib import import_module as im\nim('x')\n", id="alias"),
+        pytest.param(
+            "import importlib\nimportlib.import_module('.eve_scorer', 'opentour_cell.pilot')\n",
+            id="relative-import-module",
+        ),
+        pytest.param("import importlib\nimportlib.import_module(name='x')\n", id="name-keyword"),
+        pytest.param(
+            "import importlib\nimportlib.import_module('opentour_cell.pilot.' + 'eve_scorer')\n",
+            id="string-built",
+        ),
+        pytest.param("m = __builtins__\ngetattr(m, '__import__')('x')\n", id="getattr-dunder"),
+        pytest.param("import runpy\nrunpy.run_module('x')\n", id="runpy"),
+        pytest.param("from importlib.util import find_spec\nfind_spec('x')\n", id="find-spec"),
+        pytest.param("import sys\nsys.modules['opentour_cell.pilot.x']\n", id="sys-modules"),
+        pytest.param("from sys import modules\nmodules['x']\n", id="from-sys-modules"),
+        pytest.param("def f():\n    __import__('x')\n", id="lazy-dunder"),
+    ],
+)
+def test_b7_the_dynamic_import_scanner_flags_every_form(source: str) -> None:
+    assert dynamic_import_uses(source), source

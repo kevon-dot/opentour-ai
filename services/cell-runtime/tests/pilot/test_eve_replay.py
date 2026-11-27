@@ -206,6 +206,8 @@ class Credentials:
 class Env:
     def __init__(self, tmp_path: Path, *, train: bool = True, training_supported: bool = True):
         self.root = tmp_path
+        # Commitment keys live outside the journal's directory tree (OPE-573).
+        self.keys_dir = tmp_path.parent / f"{tmp_path.name}-commitment-keys"
         self.reg = registration(train=train)
         self.registry = task.EveRegistry(tmp_path / "eve-registry.json")
         self.registry.register(self.reg)
@@ -242,7 +244,7 @@ class Env:
             preflight=self.preflight,
             credentials=self.credentials,
             journal=rp.ReplayJournal(self.root / name),
-            keys=rp.CommitmentKeyStore(self.root / "commitment-keys" / f"{name}.keys"),
+            keys=rp.CommitmentKeyStore(self.keys_dir / f"{name}.keys"),
             log=self.logs.append,
         )
 
@@ -532,7 +534,7 @@ def test_v1_version_drift_is_refused_not_coerced(env: Env) -> None:
     worker = rp.EveReplayWorker(
         registry=other, preflight=env.preflight, credentials=env.credentials,
         journal=rp.ReplayJournal(env.root / "j2.jsonl"),
-        keys=rp.CommitmentKeyStore(env.root / "commitment-keys" / "j2.keys"),
+        keys=rp.CommitmentKeyStore(env.keys_dir / "j2.keys"),
     )  # fmt: skip
     with refuses("model_version_drift"):
         env.replay(env.arm("baseline"), infer, worker=worker)

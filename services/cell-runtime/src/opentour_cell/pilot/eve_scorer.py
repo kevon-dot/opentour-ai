@@ -16,11 +16,20 @@ from __future__ import annotations
 from opentour_cell.pilot.eve_replay import ArmOutput, Expectation, ProtectedAnswer, Verdict
 from opentour_cell.pilot.eve_task import EveCase, EveRefusal
 
+DEFAULT_SCORER_ID = "generated:opentour-eve-deterministic-stand-in"
+
 
 class DeterministicScorer:
-    """Exact-match stand-in for the independent evaluator. Unverifiable claims never score."""
+    """Exact-match stand-in for the independent evaluator. Unverifiable claims never score.
 
-    def __init__(self, version: str, rubric_revision: str) -> None:
+    ``scorer_id`` names the attributed party and ``version`` its code revision; both are frozen
+    into the replay manifest and journaled on every verdict row.
+    """
+
+    def __init__(
+        self, version: str, rubric_revision: str, scorer_id: str = DEFAULT_SCORER_ID
+    ) -> None:
+        self.scorer_id = scorer_id
         self.version = version
         self.rubric_revision = rubric_revision
 

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import stat
 from collections.abc import Callable
@@ -22,6 +23,7 @@ from typing import Any
 import pytest
 from opentour_cell.pilot import eve_aggregate as ag
 from opentour_cell.pilot import eve_replay as rp
+from opentour_cell.pilot import eve_scorer as sc
 from opentour_cell.pilot import eve_task as task
 from test_eve_replay import BASE, BASELINE, SIMPLE, Env, ScriptedInference, full_result, output
 
@@ -183,7 +185,7 @@ def test_c6_an_edited_verdict_or_moved_commitment_fails_against_the_genuine_outp
     worker2, _ = baseline_run(env2)
 
     def swap(arm: str, rows: list[list[Any]]) -> list[list[Any]]:
-        rows[0][6], rows[1][6] = rows[1][6], rows[0][6]
+        rows[0][7], rows[1][7] = rows[1][7], rows[0][7]
         return rows
 
     rewrite_rows(worker2.journal.path, swap)
@@ -199,7 +201,7 @@ def test_c7_commitment_text_leaks_no_protected_answer(env: Env) -> None:
     for line in journal.splitlines():
         event = json.loads(line)
         if event["event"] == "arm":
-            assert all(COMMITMENT.fullmatch(r[6]) for r in event["record"]["rows"])
+            assert all(COMMITMENT.fullmatch(r[7]) for r in event["record"]["rows"])
 
 
 # ---------------------------------------------------------------- A scorer attribution
@@ -236,12 +238,14 @@ def test_a2_every_reader_rejects_an_unattributed_row(env: Env) -> None:
 @pytest.mark.parametrize(
     ("index", "value", "code"),
     [
-        pytest.param(4, "", "verdict_unattributed", id="blank-scorer"),
-        pytest.param(5, "", "verdict_unattributed", id="blank-rubric"),
-        pytest.param(4, None, "verdict_unattributed", id="null-scorer"),
-        pytest.param(5, 7, "verdict_unattributed", id="int-rubric"),
-        pytest.param(6, "", "verdict_uncommitted", id="blank-commitment"),
-        pytest.param(6, "sha256:" + "0" * 64, "verdict_uncommitted", id="bare-digest-commitment"),
+        pytest.param(4, "", "verdict_unattributed", id="blank-scorer-id"),
+        pytest.param(4, None, "verdict_unattributed", id="null-scorer-id"),
+        pytest.param(5, "", "verdict_unattributed", id="blank-scorer-version"),
+        pytest.param(5, None, "verdict_unattributed", id="null-scorer-version"),
+        pytest.param(6, "", "verdict_unattributed", id="blank-rubric"),
+        pytest.param(6, 7, "verdict_unattributed", id="int-rubric"),
+        pytest.param(7, "", "verdict_uncommitted", id="blank-commitment"),
+        pytest.param(7, "sha256:" + "0" * 64, "verdict_uncommitted", id="bare-digest-commitment"),
     ],
 )
 def test_a3_blank_or_mistyped_attribution_or_commitment_is_rejected(
@@ -259,7 +263,9 @@ def test_a3_blank_or_mistyped_attribution_or_commitment_is_rejected(
     with refuses(code):
         ag.rederive(worker.journal.path, env.manifest)
     mac = "hmac-sha256:" + "a" * 64
-    row = rp.ScoredRow("r", rp.Verdict.CORRECT_ANSWER, True, "d", "s", "r1", mac)
+    row = rp.ScoredRow("r", rp.Verdict.CORRECT_ANSWER, True, "d", "id", "s", "r1", mac)
+    with refuses("verdict_unattributed"):
+        replace(row, scorer_id="")
     with refuses("verdict_unattributed"):
         replace(row, scorer_version="")
     with refuses("verdict_uncommitted"):
@@ -269,7 +275,11 @@ def test_a3_blank_or_mistyped_attribution_or_commitment_is_rejected(
 def test_a4_a_row_attributed_to_another_scorer_or_rubric_is_rejected_not_accepted(
     env: Env,
 ) -> None:
-    for index, value in ((4, "generated-scorer-v2"), (5, "generated-rubric-r9")):
+    for index, value in (
+        (4, "generated-other-scorer"),
+        (5, "generated-scorer-v2"),
+        (6, "generated-rubric-r9"),
+    ):
         e = Env(env.root / f"attr-{index}")
         worker = e.worker()
         arms = e.baseline_and_simple(worker)
@@ -302,6 +312,7 @@ def test_g1_aggregator_rederives_the_scorecard_totals_from_journaled_verdicts(en
     assert derived["basis"] == "aggregation re-derived from journaled verdicts"
     assert derived["verdicts_rechecked"] is False
     assert derived["scorer"] == {
+        "scorer_id": env.manifest.scorer_id,
         "version": "generated-scorer-v1",
         "rubric_revision": "generated-rubric-r1",
     }
@@ -488,3 +499,241 @@ def test_s5_a_journal_holding_no_arm_for_the_manifest_cannot_stage_a_result(env:
     )
     assert not decision.stageable
     assert decision.reasons == ("rebuild_refused_arm_not_journaled",)
+
+
+# ---------------------------------------------------------------- review round 2 (PR #210)
+class Lenient:
+    """Fails scorer_selfcheck, yet carries the manifest's scorer id, version and rubric labels."""
+
+    def __init__(self, env: Env) -> None:
+        self.scorer_id = env.manifest.scorer_id
+        self.version = env.manifest.scorer_version
+        self.rubric_revision = env.manifest.rubric_revision
+
+    def score(self, case_: Any, expected: Any, out: rp.ArmOutput | None) -> rp.Verdict:
+        if out is not None and out.answer is not None and out.citations:
+            return rp.Verdict.CORRECT_ANSWER
+        return rp.Verdict.MISSING if out is None else rp.Verdict.INAPPROPRIATE_REFUSAL
+
+
+def rewrite_scorer(path: Path, edit: Callable[[list[Any]], Any]) -> None:
+    lines = []
+    for line in path.read_text().splitlines():
+        event = json.loads(line)
+        if event["event"] == "arm":
+            event["record"]["scorer"] = edit(event["record"]["scorer"])
+        lines.append(json.dumps(event, sort_keys=True, separators=(",", ":")))
+    path.write_text("\n".join(lines) + "\n")
+
+
+def test_f1a_replay_refuses_a_scorer_that_fails_its_selfcheck(env: Env) -> None:
+    lenient = Lenient(env)
+    assert not rp.scorer_selfcheck(lenient)
+    worker = env.worker()
+    infer = ScriptedInference(BASE, BASELINE)
+    with refuses("scorer_selfcheck_failed"):
+        env.replay(env.arm("baseline"), infer, worker=worker, scorer_=lenient)
+    assert infer.calls == 0
+    assert not worker.journal.path.exists() and not worker.keys.path.exists()
+
+
+def test_f1b_each_journaled_arm_records_its_scorer_identity_and_selfcheck(env: Env) -> None:
+    worker = env.worker()
+    result = full_result(env, worker)
+    frozen = rp.ScorerRecord(
+        env.manifest.scorer_id, env.manifest.scorer_version, env.manifest.rubric_revision, True
+    )
+    for record in worker.journal.arms_for(env.manifest.digest):
+        assert record.scorer == frozen
+        assert all(
+            (r.scorer_id, r.scorer_version, r.rubric_revision) == tuple(frozen.document()[:3])
+            for r in record.rows
+        )
+    assert result["body"]["scorer"] == {
+        "scorer_id": env.manifest.scorer_id,
+        "version": env.manifest.scorer_version,
+        "rubric_revision": env.manifest.rubric_revision,
+        "replay_selfcheck_passed": True,
+        "staging_selfcheck_passed": True,
+        "selfcheck_passed": True,
+    }
+
+
+def test_f1c_a_passing_staging_scorer_cannot_stand_in_for_a_failing_replay(env: Env) -> None:
+    worker = env.worker()
+    result = full_result(env, worker)
+    arms = {r.spec.arm_id: r for r in worker.journal.arms_for(env.manifest.digest)}
+    rewrite_scorer(
+        worker.journal.path, lambda s: [*s[:3], False]
+    )  # replayed under a failing scorer
+    with refuses("arm_selfcheck_failed"):
+        env.result(arms, journal=worker.journal)
+    with refuses("arm_selfcheck_failed"):
+        ag.rederive(worker.journal.path, env.manifest)
+    with refuses("arm_selfcheck_failed"):
+        env.replay(env.arm("baseline"), ScriptedInference(BASE, BASELINE), worker=worker)
+    decision = rp.stage_decision(  # the honest DeterministicScorer is handed in at staging
+        result, recomputed_digest=result["result_digest"], **env.staging(worker.journal)
+    )
+    assert decision.reasons == ("rebuild_refused_arm_selfcheck_failed",)
+
+
+@pytest.mark.parametrize(
+    ("edit", "code"),
+    [
+        pytest.param(lambda s: ["generated-other-scorer", *s[1:]], "verdict_attribution_mismatch",
+                     id="other-scorer-id"),
+        pytest.param(lambda s: [s[0], "generated-scorer-v9", *s[2:]],
+                     "verdict_attribution_mismatch", id="other-version"),
+        pytest.param(lambda s: None, "arm_scorer_unrecorded", id="unrecorded"),
+        pytest.param(lambda s: s[:3], "arm_scorer_unrecorded", id="no-selfcheck"),
+        pytest.param(lambda s: [*s[:3], 1], "arm_scorer_unrecorded", id="selfcheck-not-bool"),
+        pytest.param(lambda s: ["", *s[1:]], "arm_scorer_unrecorded", id="blank-scorer-id"),
+    ],
+)  # fmt: skip
+def test_f1d_an_arm_without_its_frozen_scorer_record_is_refused(
+    env: Env, edit: Callable[[list[Any]], Any], code: str
+) -> None:
+    worker, _ = baseline_run(env)
+    rewrite_scorer(worker.journal.path, edit)
+    for read in (
+        lambda: rp.build_result(
+            env.manifest,
+            {"baseline": rp.ArmRecord.parse(json.loads(worker.journal.path.read_text())["record"])},
+            scorer=env.scorer,
+            journal=worker.journal,
+            key=env.key,
+        ),
+        lambda: ag.rederive(worker.journal.path, env.manifest),
+        lambda: env.replay(env.arm("baseline"), ScriptedInference(BASE, BASELINE), worker=worker),
+    ):
+        with refuses(code):
+            read()
+
+
+def test_f1e_replay_refuses_a_scorer_with_another_or_no_identity(env: Env) -> None:
+    other = replace_scorer_id(env, "generated-other-scorer")
+    with refuses("scorer_identity_drift"):
+        env.replay(env.arm("baseline"), ScriptedInference(BASE, BASELINE), scorer_=other)
+    anonymous = replace_scorer_id(env, None)
+    with refuses("scorer_unattributed"):
+        env.replay(env.arm("baseline"), ScriptedInference(BASE, BASELINE), scorer_=anonymous)
+
+
+def replace_scorer_id(env: Env, scorer_id: str | None) -> Any:
+    scorer = sc.DeterministicScorer(env.manifest.scorer_version, env.manifest.rubric_revision)
+    if scorer_id is None:
+        del scorer.scorer_id
+    else:
+        scorer.scorer_id = scorer_id
+    return scorer
+
+
+def _body_edit(field: str, value: Any) -> Callable[[dict[str, Any]], dict[str, Any]]:
+    return lambda body: {**body, field: value}
+
+
+@pytest.mark.parametrize(
+    ("edit", "mismatch"),
+    [
+        pytest.param(_body_edit("release_authorized", True), "release_authorized", id="release"),
+        pytest.param(_body_edit("fit_authorized", True), "fit_authorized", id="fit"),
+        pytest.param(_body_edit("fit_authorized", 0), "fit_authorized", id="fit-zero-not-false"),
+        pytest.param(_body_edit("evidence_tier", "provider_witnessed"), "evidence_tier",
+                     id="provider-witnessed"),
+        pytest.param(_body_edit("claim_scope", "release"), "claim_scope", id="claim-scope"),
+        pytest.param(_body_edit("schema_version", "other"), "schema_version", id="schema"),
+        pytest.param(_body_edit("benchmark_id", "generated-other"), "benchmark_id", id="benchmark"),
+        pytest.param(_body_edit("registration_identity", "sha256:" + "9" * 64),
+                     "registration_identity", id="registration"),
+        pytest.param(_body_edit("excluded_redacted", []), "excluded_redacted", id="excluded"),
+        pytest.param(_body_edit("unsatisfied_external_gates", []), "unsatisfied_external_gates",
+                     id="gates"),
+        pytest.param(lambda b: {**b, "scorer": {**b["scorer"], "selfcheck_passed": False}},
+                     "scorer.selfcheck_passed", id="selfcheck-flipped"),
+        pytest.param(lambda b: {**b, "scorer": {**b["scorer"], "scorer_id": "x"}},
+                     "scorer.scorer_id", id="scorer-id"),
+        pytest.param(lambda b: {**b, "causal_tuning_comparison": {
+                         **b["causal_tuning_comparison"], "available": False}},
+                     "causal_tuning_comparison.available", id="causal"),
+        pytest.param(lambda b: {**b, "verified_by": "generated-third-party"}, "body.keys",
+                     id="extra-key"),
+    ],
+)  # fmt: skip
+def test_f2_reconcile_flags_a_redigested_edit_to_any_non_aggregation_field(
+    env: Env, edit: Callable[[dict[str, Any]], dict[str, Any]], mismatch: str
+) -> None:
+    worker = env.worker()
+    result = full_result(env, worker)
+    honest = ag.reconcile(result, journal_path=worker.journal.path, manifest=env.manifest)
+    assert honest.consistent
+    body = edit(result["body"])
+    check = ag.reconcile(
+        {"body": body, "result_digest": task.digest(body)},
+        journal_path=worker.journal.path,
+        manifest=env.manifest,
+    )
+    assert not check.consistent and check.mismatches == (mismatch,)
+
+
+def test_f3_key_store_anywhere_under_the_journal_directory_or_linked_to_it_is_refused(
+    env: Env,
+) -> None:
+    common = {"registry": env.registry, "preflight": env.preflight, "credentials": env.credentials}
+    jdir = env.root / "j"
+    jdir.mkdir()
+    journal = jdir / "journal.jsonl"
+    journal.write_text("")
+    elsewhere = env.root / "elsewhere"
+    elsewhere.mkdir()
+    os.link(journal, elsewhere / "hardlink.keys")
+    (elsewhere / "symlink.keys").symlink_to(journal)
+    for keys_path in (
+        jdir / "keys" / "k.keys",  # subdirectory
+        jdir / "a" / "b" / "k.keys",  # any depth
+        elsewhere / "hardlink.keys",  # same inode, another path
+        elsewhere / "symlink.keys",  # resolves to the journal
+    ):
+        with refuses("commitment_key_colocated"):
+            rp.EveReplayWorker(
+                **common, journal=rp.ReplayJournal(journal), keys=rp.CommitmentKeyStore(keys_path)
+            )
+    # a journal that has a second hard link anywhere is refused too
+    other = env.root / "other"
+    other.mkdir()
+    linked = other / "journal.jsonl"
+    linked.write_text("")
+    os.link(linked, elsewhere / "journal-copy.jsonl")
+    with refuses("commitment_key_colocated"):
+        rp.EveReplayWorker(
+            **common,
+            journal=rp.ReplayJournal(linked),
+            keys=rp.CommitmentKeyStore(env.root / "k2" / "k.keys"),
+        )
+
+
+def test_f3b_a_foreign_line_in_the_journal_is_a_clean_refusal_not_a_crash(env: Env) -> None:
+    worker, _ = baseline_run(env)
+    with worker.journal.path.open("a") as handle:
+        handle.write(json.dumps({"run_id": "x", "key": "00" * 32}) + "\n")
+    with refuses("replay_journal_unavailable"):
+        worker.journal.arm(rp.run_id_for(env.manifest, env.arm("baseline")))
+    with refuses("replay_journal_unavailable"):
+        worker.journal.settle(env.manifest.digest, "sha256:" + "0" * 64)
+    with refuses("replay_journal_unavailable"):
+        env.replay(env.arm("baseline"), ScriptedInference(BASE, BASELINE), worker=worker)
+
+
+def test_f4_a_present_commitment_is_not_a_verified_one(env: Env) -> None:
+    worker, _ = baseline_run(env)
+
+    def zero(arm: str, rows: list[list[Any]]) -> list[list[Any]]:
+        for row in rows:
+            row[7] = "hmac-sha256:" + "0" * 64
+        return rows
+
+    rewrite_rows(worker.journal.path, zero)
+    # Readers check that a commitment is present and well formed, not that it is correct ...
+    assert worker.journal.arm(rp.run_id_for(env.manifest, env.arm("baseline"))) is not None
+    # ... only verify_output, holding the run key, checks its value.
+    assert not verify(env, worker, 1, output(1, "correct"))
