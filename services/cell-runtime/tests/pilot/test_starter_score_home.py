@@ -40,7 +40,17 @@ def test_retained_owner_score_opens_after_inference_withdrawal_without_execution
     monkeypatch.setattr(StarterEvaluationSession, "run", forbidden)
     db = h.path.parent / "starter-evaluations.sqlite3"
     before = db.read_bytes()
+    original_summary = StarterEvaluationSession.summary
+    revisions = []
+
+    def pinned_summary(session, execution_ref, *, expected_revision):
+        assert expected_revision == session.entry(execution_ref)["revision"]
+        revisions.append(expected_revision)
+        return original_summary(session, execution_ref, expected_revision=expected_revision)
+
+    monkeypatch.setattr(StarterEvaluationSession, "summary", pinned_summary)
     view = open_summary(h, monkeypatch)
+    assert len(revisions) == 2 and revisions[0] == revisions[1]
     visible = text(h, view)
     assert "Expert-reviewed starter benchmark · generated examples" in visible
     assert "Exact action agreement · 4/5" in visible and "Exact action agreement · 5/5" in visible
