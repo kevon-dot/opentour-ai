@@ -372,7 +372,8 @@ def _font_ok(fonts: dict[bytes, _Object], name: bytes, text: str) -> bool:
         and b"/FontDescriptor" not in head
         and re.search(
             rb"/BaseFont\s*/(?:Courier(?:-Bold(?:Oblique)?|-Oblique)?"
-            rb"|Helvetica(?:-Bold(?:Oblique)?|-Oblique)?|Times-(?:Roman|Bold(?:Italic)?|Italic))\b",
+            rb"|Helvetica(?:-Bold(?:Oblique)?|-Oblique)?|Times-(?:Roman|Bold(?:Italic)?|Italic))"
+            rb"(?=[\x00\x09\x0a\x0c\x0d ()<>\[\]{}/%]|$)",
             head,
         )
         is not None
