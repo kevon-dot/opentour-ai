@@ -2210,7 +2210,9 @@ def map_branch_edit(
             disposition,
             decision,
             _section(
-                "For a correction, enter one condition per line, such as total < 250 or po missing."
+                "For a correction, enter one condition per line. Use field == Token for an exact, "
+                "case-sensitive reference value, field missing or present for presence, "
+                "or a numeric comparison such as total < 250."
             ),
             _map_text_input(
                 "conditions",
