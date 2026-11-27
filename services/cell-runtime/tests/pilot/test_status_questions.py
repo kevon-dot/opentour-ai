@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from opentour_cell.pilot import release_gate, source_intake, zapier_approval
+from opentour_cell.pilot import release_gate, slack_adapter, source_intake, zapier_approval
 from test_app_home import click as click_home
 from test_app_home import publish as publish_home
 from test_approval_reconciliation import signed_at_clock
@@ -23,6 +23,13 @@ def inspect(h: Harness) -> tuple[str, str]:
     revision = buttons(screen(h, view))["ot_evidence"]
     h.action(view, "ot_evidence", revision)
     return view, revision
+
+
+def home_delivery_picker(h: Harness, monkeypatch: pytest.MonkeyPatch) -> str:
+    click_home(h, publish_home(h, monkeypatch, ACTOR), "ot_app_prompt", ACTOR)
+    view = list(h.slack.screens)[-1]
+    h.form(view, {"command": {"command": {"value": "Did it ship?"}}}, ACTOR)
+    return view
 
 
 def answer(h: Harness, question: str, revision: str) -> str:
@@ -460,9 +467,7 @@ def test_native_release_status_observes_independent_decision(
     inspected, revision = inspect(h)
 
     def open_picker() -> str:
-        click_home(h, publish_home(h, monkeypatch, ACTOR), "ot_app_prompt", ACTOR)
-        view = list(h.slack.screens)[-1]
-        h.form(view, {"command": {"command": {"value": "Did it ship?"}}}, ACTOR)
+        view = home_delivery_picker(h, monkeypatch)
         assert buttons(screen(h, view))["ot_result_open"] == revision
         return view
 
@@ -496,8 +501,8 @@ def test_native_release_status_observes_independent_decision(
     saved = path.read_bytes()
     restart(h)
     before = counts(h)
-    for _ in range(2):
-        view, current = current_answer()
+
+    def assert_decision(view: str, current: str) -> None:
         assert expected in current and finding in current and "unconfirmed" in current
         assert recorded["presentation_id"] in current
         if legacy:
@@ -507,20 +512,93 @@ def test_native_release_status_observes_independent_decision(
         assert "ot_release_receipt" not in buttons(screen(h, view))
         assert "Delivered to the selected destination" not in current
 
+    def assert_denied(view: str) -> None:
+        denied = text(h, view)
+        assert screen(h, view).get("callback_id") != "ot_status_question"
+        assert "Access unavailable" in denied
+        assert recorded["presentation_id"] not in denied and stamp not in denied
+        assert recorded["audience"] not in denied and expected not in denied
+
+    for _ in range(2):
+        assert_decision(*current_answer())
+
+    stale = open_picker()
+    h.config["live_workflow_ref"] = "different-workflow"
+    h.save()
+    h.action(stale, "ot_result_open", revision, ACTOR)
+    assert_denied(stale)
+    fresh = home_delivery_picker(h, monkeypatch)
+    assert "ot_result_open" not in buttons(screen(h, fresh))
+    assert revision not in text(h, fresh) and recorded["presentation_id"] not in text(h, fresh)
+
+    h.config.pop("live_workflow_ref")
+    h.save()
+    assert_decision(*current_answer())
+    stale = open_picker()
+    h.config["live_workflow_ref"] = intake["workflow"]
+    h.save()
+    h.action(stale, "ot_result_open", revision, ACTOR)
+    assert_denied(stale)
+    assert_decision(*current_answer())
+
+    stale = open_picker()
+    modal = h.app.views.status_question_modal
+
+    def switch_during_render(*args, **kwargs):
+        rendered = modal(*args, **kwargs)
+        h.config.pop("live_workflow_ref")
+        h.save()
+        return rendered
+
+    with monkeypatch.context() as race:
+        race.setattr(h.app.views, "status_question_modal", switch_during_render)
+        h.action(stale, "ot_result_open", revision, ACTOR)
+    assert_denied(stale)
+    h.config["live_workflow_ref"] = intake["workflow"]
+    h.save()
+    assert_decision(*current_answer())
+
     stale = open_picker()
     h.config["users"][ACTOR]["roles"] = ["inspect"]
     h.save()
     h.action(stale, "ot_result_open", revision, ACTOR)
-    denied = text(h, stale)
-    assert "Access unavailable" in denied
-    assert recorded["presentation_id"] not in denied and stamp not in denied
-    assert recorded["audience"] not in denied and expected not in denied
+    assert_denied(stale)
     assert counts(h) == before
     with h.store._db() as db:
         assert not db.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='release_outbox'"
         ).fetchone()
     assert path.read_bytes() == saved
+
+
+def test_delivery_picker_paging_keeps_selected_workflow(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(slack_adapter, "RESULT_PAGE_SIZE", 1)
+    h = Harness(tmp_path)
+    h.config["users"][ACTOR]["datasets"] = [supplied(h, suffix=s) for s in ("-a", "-b")]
+    h.save()
+    for page in (0, 1):
+        view = h.launch()
+        if page:
+            h.action(view, "ot_result_next", buttons(screen(h, view))["ot_result_next"])
+        option = next(
+            b["accessory"]["value"] for b in screen(h, view)["blocks"] if "accessory" in b
+        )
+        h.action(view, "ot_result_open", option)
+        h.action(view, "ot_evidence", buttons(screen(h, view))["ot_evidence"])
+
+    view = home_delivery_picker(h, monkeypatch)
+    first = buttons(screen(h, view))
+    h.action(view, "ot_result_next", first["ot_result_next"], ACTOR)
+    second = buttons(screen(h, view))
+    assert second["ot_result_open"] != first["ot_result_open"]
+    before = counts(h)
+    h.config["live_workflow_ref"] = "different-workflow"
+    h.save()
+    h.action(view, "ot_result_prev", second["ot_result_prev"], ACTOR)
+    denied = text(h, view)
+    assert "Access unavailable" in denied
+    assert first["ot_result_open"] not in denied and second["ot_result_open"] not in denied
+    assert counts(h) == before
 
 
 @pytest.mark.parametrize(
