@@ -230,18 +230,23 @@ class Witness:
     witness_ref: str
     tier: str
     expires_at: int
+    scope: str
 
 
 class WitnessVerifier(Protocol):
     """Boundary to whoever can attest a real provider or customer qualification run."""
 
-    def verify(self, checkpoint_digest: str, backend_digest: str) -> Witness | None: ...
+    def verify(
+        self, checkpoint_digest: str, backend_digest: str, scope: str
+    ) -> Witness | None: ...
 
 
 class UnavailableWitnessVerifier:
     """Default: no real GPU/provider witness exists, so nothing can reach `qualified`."""
 
-    def verify(self, checkpoint_digest: str, backend_digest: str) -> Witness | None:
+    def verify(
+        self, checkpoint_digest: str, backend_digest: str, scope: str
+    ) -> Witness | None:
         return None
 
 
@@ -343,9 +348,12 @@ def qualify(
         dry_run = None
         check("serialization_dry_run", False, str(error))
 
-    witness = None if holds else verifier.verify(cp.checkpoint_digest, be.backend_digest)
+    witness = (
+        None if holds else verifier.verify(cp.checkpoint_digest, be.backend_digest, request.scope)
+    )
     if witness is not None and (
         witness.tier not in WITNESS_TIERS
+        or witness.scope != request.scope
         or type(witness.expires_at) is not int
         or witness.expires_at <= clock()
     ):
@@ -389,6 +397,7 @@ def qualify(
                 "verifier_id": witness.verifier_id,
                 "witness_ref": witness.witness_ref,
                 "expires_at": witness.expires_at,
+                "scope": witness.scope,
             }
             if witness else None
         ),
@@ -459,6 +468,7 @@ def _check_consistency(body: Mapping[str, Any]) -> None:
             and bool(witness["witness_ref"])
             # Old records remain readable, but admission requires a current expiry.
             and ("expires_at" not in witness or type(witness["expires_at"]) is int)
+            and ("scope" not in witness or witness["scope"] == body["scope"])
         )
     else:
         consistent = consistent and witness is None and body["evidence_tier"] == "generated"
@@ -616,9 +626,9 @@ def admit_fit(
         raise AdmissionRefused("qualification_expired")
     if verifier is None:
         raise AdmissionRefused("witness_verifier_unavailable")
-    current_witness = verifier.verify(checkpoint.checkpoint_digest, backend.backend_digest)
+    current_witness = verifier.verify(checkpoint.checkpoint_digest, backend.backend_digest, scope)
     if current_witness != Witness(
-        witness["verifier_id"], witness["witness_ref"], body["evidence_tier"], expires_at
+        witness["verifier_id"], witness["witness_ref"], body["evidence_tier"], expires_at, scope
     ):
         raise AdmissionRefused("witness_not_current")
     active = registry.active(key)

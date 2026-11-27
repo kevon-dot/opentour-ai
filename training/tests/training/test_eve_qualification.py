@@ -40,8 +40,10 @@ class SimulatedVerifier:
     def __init__(self, tier: str = "installed-provider", verifier_id: str = "simulated:verifier"):
         self.tier, self.verifier_id = tier, verifier_id
 
-    def verify(self, checkpoint_digest: str, backend_digest: str) -> Witness | None:
-        return Witness(self.verifier_id, "simulated:witness-ref", self.tier, 2_000_000_000)
+    def verify(
+        self, checkpoint_digest: str, backend_digest: str, scope: str
+    ) -> Witness | None:
+        return Witness(self.verifier_id, "simulated:witness-ref", self.tier, 2_000_000_000, scope)
 
 
 def checkpoint(**changes: object) -> CheckpointDescriptor:
@@ -507,3 +509,14 @@ def test_digest_consistent_forged_witness_ref_is_not_admitted(tmp_path: Path) ->
     reg = registry(tmp_path)
     reg.register(record)
     assert refusal(reg, forged) == "witness_not_current"
+
+
+def test_public_witness_cannot_qualify_or_admit_customer_scope(tmp_path: Path) -> None:
+    class RehearsalVerifier(SimulatedVerifier):
+        def verify(self, checkpoint_digest: str, backend_digest: str, scope: str) -> Witness | None:
+            return super().verify(checkpoint_digest, backend_digest, "public_rehearsal")
+
+    verifier = RehearsalVerifier()
+    assert qualify(request(), verifier)["body"]["state"] == "software_checked_unwitnessed"
+    journal, d = qualified(tmp_path)
+    assert refusal(journal, d, verifier=verifier) == "witness_not_current"
