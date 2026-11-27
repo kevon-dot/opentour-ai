@@ -10,6 +10,7 @@ import pytest
 
 from infrastructure.environment_contract import (
     EnvironmentError,
+    EnvironmentPolicy,
     ResourceBinding,
     prepare_stack,
     validate_manifest,
@@ -187,7 +188,10 @@ def test_control_parameter_refusal_before_provider(parameter: str, value: Any) -
         )
 
 
-def test_approved_application_inputs_and_foreign_role_refusal() -> None:
+@pytest.fixture
+def application_inputs() -> tuple[
+    dict[str, Any], EnvironmentPolicy, dict[str, ResourceBinding], dict[str, Any]
+]:
     parameters, policy, inventory = control_inputs()
     parameters["ApplicationEnabled"] = "true"
     images = set()
@@ -204,12 +208,42 @@ def test_approved_application_inputs_and_foreign_role_refusal() -> None:
         "approved_images": frozenset(images),
         "approved_ecr_s3_prefix_lists": frozenset(["pl-00000000"]),
     }
+    return parameters, policy, inventory, kwargs
+
+
+def test_approved_application_inputs_and_foreign_role_refusal(application_inputs) -> None:
+    parameters, policy, inventory, kwargs = application_inputs
     assert (
         prepare_stack("control-plane", parameters, policy, inventory, **kwargs).environment == "dev"
     )
     arn = parameters["ApiTaskRoleArn"]
     inventory[arn] = replace(inventory[arn], environment="test")
     with pytest.raises(EnvironmentError, match="CROSS_ENVIRONMENT_REFERENCE"):
+        prepare_stack("control-plane", parameters, policy, inventory, **kwargs)
+
+
+@pytest.mark.parametrize(
+    ("role", "alternate_role_path"),
+    [
+        pytest.param("BffTaskRoleArn", None, id="same-task-arn"),
+        pytest.param("TaskExecutionRoleArn", None, id="same-execution-arn"),
+        pytest.param("WorkerTaskRoleArn", "DEV-APITASKROLEARN", id="same-name-different-case"),
+        pytest.param(
+            "TaskExecutionRoleArn", "generated/nested/dev-ApiTaskRoleArn", id="same-name-new-path"
+        ),
+    ],
+)
+def test_application_rejects_reused_role_name(
+    application_inputs, role: str, alternate_role_path: str | None
+) -> None:
+    parameters, policy, inventory, kwargs = application_inputs
+    arn = parameters["ApiTaskRoleArn"]
+    if alternate_role_path is not None:
+        alternate_arn = f"arn:aws:iam::{NONPROD}:role/{alternate_role_path}"
+        inventory[alternate_arn] = replace(inventory[arn], arn=alternate_arn)
+        arn = alternate_arn
+    parameters[role] = arn
+    with pytest.raises(EnvironmentError, match="^APPLICATION_ROLES_NOT_DISTINCT$"):
         prepare_stack("control-plane", parameters, policy, inventory, **kwargs)
 
 
