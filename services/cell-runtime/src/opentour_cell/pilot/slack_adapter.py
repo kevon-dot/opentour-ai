@@ -3373,22 +3373,52 @@ class Workbench:
             reapply = current.can_edit and state.get("source") == current.source_revision
             before = state["rev"]
 
-            def description(row: Any) -> str:
-                if row is None:
-                    return "Unavailable in this version"
-                clauses = [
-                    " ".join(str(v) for v in (c.field, c.operator, c.threshold) if v is not None)
-                    for c in row.conditions
-                ]
-                return f"{' and '.join(clauses)} → {row.action or 'Unresolved'} · {row.disposition}"
-
-            diff = [
-                (
-                    f"{change.branch_ref} · Before · {description(change.before)}. "
-                    f"Current · {description(change.after)}."
+            diff: list[str] = []
+            previous = stale.previous
+            if previous is not None:
+                for label, old, new in (
+                    ("Trigger", previous.settings_trigger, current.settings_trigger),
+                    ("Fallback", previous.fallback_action, current.fallback_action),
+                    ("Assertion basis", previous.settings_reason, current.settings_reason),
+                    ("Assertion owner", previous.settings_editor_ref, current.settings_editor_ref),
+                    ("Priority basis", previous.precedence_reason, current.precedence_reason),
+                    ("Priority owner", previous.precedence_actor_ref, current.precedence_actor_ref),
+                ):
+                    if old != new:
+                        diff.append(f"{label} · {old or 'Unspecified'} → {new or 'Unspecified'}")
+            for change in stale.diff:
+                older, newer = change.before, change.after
+                if older is None or newer is None:
+                    status = "Current branch" if newer else "Absent from current map"
+                    diff.append(f"{change.branch_ref} · {status}")
+                    continue
+                old_predicate, new_predicate = (
+                    " and ".join(
+                        " ".join(
+                            str(v) for v in (c.field, c.operator, c.threshold) if v is not None
+                        )
+                        for c in row.conditions
+                    )
+                    for row in (older, newer)
                 )
-                for change in stale.diff
-            ]
+                branch_diff = []
+                for label, before_value, after_value in (
+                    ("Conditions", old_predicate, new_predicate),
+                    ("Decision", older.action, newer.action),
+                    ("Review", older.disposition, newer.disposition),
+                    ("Priority", older.precedence, newer.precedence),
+                    ("Support", older.source_support, newer.source_support),
+                    ("Owner", older.editor_ref, newer.editor_ref),
+                    ("Reason", older.reason, newer.reason),
+                    ("Source", older.citation_ref, newer.citation_ref),
+                ):
+                    if before_value != after_value:
+                        branch_diff.append(
+                            f"{label} · {before_value or 'Unspecified'} → "
+                            f"{after_value or 'Unspecified'}"
+                        )
+                if branch_diff:
+                    diff.append(f"{change.branch_ref} · " + " | ".join(branch_diff))
             eligible = [
                 r
                 for r in current.branches
@@ -3404,13 +3434,6 @@ class Workbench:
             )
             reapply_settings = reapply and settings_edit is not None
             if reapply_settings and settings_edit is not None:
-                if stale.previous is not None:
-                    diff.extend(
-                        [
-                            f"Previous trigger · {stale.previous.trigger}",
-                            f"Previous fallback · {stale.previous.fallback_action or 'Unresolved'}",
-                        ]
-                    )
                 diff.extend(
                     [
                         f"Current trigger · {current.trigger}",

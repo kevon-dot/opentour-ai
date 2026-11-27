@@ -649,3 +649,21 @@ def test_trigger_fallback_assertion_requires_current_source_on_save(founder, mon
     assert service.preview(owner) == current
     current_view = enter_map(h, monkeypatch, ACTOR)
     assert "Purchase request accepted" not in str(screen(h, current_view))
+
+
+def test_stale_branch_edit_shows_actual_trigger_change(founder, monkeypatch):
+    from test_reviewer_workflow import screen
+    from test_slack_adapter import ACTOR, OTHER
+
+    h = founder
+    prepare_map(h, monkeypatch)
+    a = open_assertions(h, monkeypatch, ACTOR)
+    b = enter_map(h, monkeypatch, OTHER)
+    branch = next(v for k, v in actions(screen(h, b)) if k == "ot_map_edit")
+    h.action(b, "ot_map_edit", branch, OTHER)
+    change = branch_values(screen(h, b))
+    h.form(a, assertion_values("New purchase request trigger", "unresolved"), ACTOR)
+    h.form(b, change, OTHER)
+    diff = screen(h, b)
+    assert diff["submit"]["text"] == "Reapply my edit"
+    assert "New purchase request trigger" in str(diff)
