@@ -380,9 +380,10 @@ class StarterCaseSession:
                     (row.citation_ref,),
                     plan.scorer_ref,
                     row.branch_ref in cap["critical_branches"],
+                    coverage_actions=(row.action,),
                 )
                 for row in snapshot.branches
-                if row.confirmed
+                if row.confirmed and row.action is not None
             )
             _require(branches and set(cap["critical_branches"]) <= {b.branch_id for b in branches})
             authority = {

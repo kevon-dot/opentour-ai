@@ -55,3 +55,11 @@ normal benchmark publication with zero model jobs. It is not the seven-family
 P1 clean-install oracle. That categorical map, its owner review controls and
 the complete OPE-515 witness remain integration gates, as do separate evaluator
 authority and scoring. Missing freeze/evaluate permission stays a hold.
+
+The permitted correction-label list is distinct from required coverage. Each
+confirmed branch declares its actual material action as a coverage cell, while
+the owner can still correct a wrong suggestion to any current permitted label.
+All five reviewed purchase-order families cover the three material branches;
+excluding both missing-PO families leaves only REVIEW uncovered. The core's
+optional coverage contract preserves the exact identities of earlier freezes
+that did not declare separate coverage cells.
