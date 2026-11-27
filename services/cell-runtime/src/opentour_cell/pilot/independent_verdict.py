@@ -8,6 +8,9 @@ count from those predictions and the sealed answer key. Caller-asserted totals a
 expected values: they are only compared against the recomputation, and a mismatch is an
 integrity failure.
 
+The private per-case rows are this evaluator's own record. They share no row contract with the
+OPE-573 worker journal, which keeps a separate, positional row of its own.
+
 What it verifies, as three separately reported statements:
   1. ``job_produced_candidate``: the designated open-weight fit manifest is digest
      self-consistent, pinned to the exact base/revision/profile, records nonzero training steps
@@ -1314,6 +1317,8 @@ class IndependentEvaluator:
             "candidate_total_wrong": cand_arm["wrong_automatic"],
             "comparator_total_wrong": comp_arm["wrong_automatic"],
             "newly_automated": pair["newly_automated"],
+            "shared_fixes": pair["fixes"],
+            "shared_new_errors": pair["new_errors"],
             "supported_cases": sum(len(v) for v in families.values()),
         }
         outcome, reason = self._decide(
@@ -1363,10 +1368,32 @@ class IndependentEvaluator:
         policy: GatePolicy,
         family_count: int,
     ) -> tuple[str, str]:
+        """Regression gates run first and are never skipped by an earlier hold.
+
+        Order: identity/copy (exactly zero change) -> every regression gate (shared-case paired
+        errors, newly automated errors over the ceiling, critical-slice veto, interval wholly
+        below zero) -> holds (missing outputs, comparator gaps, coverage, no ceiling) -> the
+        residual total-wrong check -> support -> the interval decision. Only after no regression
+        gate fires may an excess of total wrong decisions that is entirely newly automated (and
+        within the ceiling) map to ``coverage_expansion_within_ceiling``.
+        """
         if claim.candidate_digest == claim.comparator_digests[name]:
             return "no_material_gain", "candidate_is_comparator"
         if arms["candidate"] == arms[name]:
             return "no_material_gain", "predictions_identical_to_comparator"
+        newly_wrong, newly = checks["newly_automated"]
+        ceiling = policy.operating_point_terms.get("error_ceiling_bps")
+        available = interval["status"] == "available"
+        # ---- regression gates
+        if checks["shared_new_errors"] > checks["shared_fixes"]:
+            return "regression", "shared_case_errors_increased"
+        if newly and type(ceiling) is int and newly_wrong * 10_000 > ceiling * newly:
+            return "regression", "newly_automated_errors_exceed_ceiling"
+        if any(v["status"] == "veto" for v in slices.values()):
+            return "regression", "critical_slice_veto"
+        if available and Fraction(interval["upper"]) < 0:
+            return "regression", "upper_bound_below_zero"
+        # ---- holds: incompatible or unbounded comparisons
         if checks["candidate_missing"] > policy.max_missing:
             return "inconclusive", "missing_or_malformed_predictions"
         if checks["comparator_missing"] > policy.max_missing:
@@ -1378,31 +1405,25 @@ class IndependentEvaluator:
             (comp_cov - cand_cov) * 10_000 > policy.max_coverage_loss_bps
         ):
             return "inconclusive", "coverage_incompatible"
-        newly_wrong, newly = checks["newly_automated"]
-        ceiling = policy.operating_point_terms.get("error_ceiling_bps")
         if newly and type(ceiling) is not int:
             return "inconclusive", "newly_automated_without_error_ceiling"
-        if newly and newly_wrong * 10_000 > ceiling * newly:
-            return "regression", "newly_automated_errors_exceed_ceiling"
+        # ---- residual total-wrong check, safe only after the shared-case gate above
         if checks["candidate_total_wrong"] > checks["comparator_total_wrong"]:
             if checks["candidate_total_wrong"] - newly_wrong <= checks["comparator_total_wrong"]:
-                # The extra errors all come from newly automated cases, within the ceiling:
-                # more automation, not a worse decision on shared cases. Still no gain claim.
+                # The excess is all newly automated, within the ceiling, with no shared-case,
+                # slice or interval regression: more automation, not a gain. Never alerts.
                 return "inconclusive", "coverage_expansion_within_ceiling"
             return "regression", "total_wrong_automatic_increased"
-        if any(v["status"] == "veto" for v in slices.values()):
-            return "regression", "critical_slice_veto"
+        # ---- support and the interval decision
         if any(v["status"] == "unsupported" for v in slices.values()):
             return "inconclusive", "critical_slice_unsupported"
         if checks["supported_cases"] < policy.term("minimum_verified_cases"):
             return "inconclusive", "below_minimum_verified_cases"
-        if interval["status"] != "available" or family_count < policy.min_families:
+        if not available or family_count < policy.min_families:
             return "inconclusive", "uncertainty_unavailable_or_insufficient_support"
         lower, upper = Fraction(interval["lower"]), Fraction(interval["upper"])
         if lower > threshold:
             return "verified_gain", "lower_bound_clears_threshold"
-        if upper < 0:
-            return "regression", "upper_bound_below_zero"
         if upper < threshold:
             return "no_material_gain", "upper_bound_below_threshold"
         return "inconclusive", "interval_spans_threshold"

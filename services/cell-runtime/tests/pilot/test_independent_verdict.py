@@ -663,7 +663,7 @@ def test_x5_critical_slice_regression_despite_aggregate_win(tmp_path):
 
 def test_x6_real_regression_is_visible(tmp_path):
     s = Scenario([("RW", 120), ("RR", 80)])
-    doc = held(run(tmp_path, s), "regression", "total_wrong_automatic_increased")
+    doc = held(run(tmp_path, s), "regression", "shared_case_errors_increased")
     assert doc["comparisons"]["incumbent"]["improvement"]["counts"] == [-120, 200]
     assert doc["comparisons"]["incumbent"]["uncertainty"]["upper"].startswith("-")
 
@@ -1414,3 +1414,51 @@ def test_q5_coverage_expansion_within_the_ceiling_is_not_called_a_regression(tmp
     assert pair["newly_automated"] == {"wrong": 1, "total": 30}
     assert pair["total_wrong_automatic"] == {"candidate": 1, "comparator": 0}
     assert doc["outcome"] != "regression"
+
+
+# ----------------------------------------------------------------- M: delta-review probes
+
+
+LOOSE = {"max_coverage_loss_bps": 10000, "coverage_floor_bps": 0}
+
+
+def test_m3_shared_and_newly_automated_errors_mixed_is_a_regression(tmp_path):
+    """Probe m3: RR150, RW3, DW2, DR45. Three new errors on shared cases, no fixes."""
+    s = Scenario([("RR", 150), ("RW", 3), ("DW", 2), ("DR", 45)])
+    doc = held(run(tmp_path, s, pol=policy(**LOOSE)), "regression", "shared_case_errors_increased")
+    assert doc["comparisons"]["incumbent"]["newly_automated"] == {"wrong": 2, "total": 47}
+
+
+def test_m4_candidate_deferrals_cannot_offset_shared_case_regressions(tmp_path):
+    """Probe m4: RR100, WD40, RW40, DR19, DW1. 40 new shared errors, 0 fixes, upper < 0."""
+    s = Scenario([("RR", 100), ("WD", 40), ("RW", 40), ("DR", 19), ("DW", 1)])
+    doc = held(run(tmp_path, s, pol=policy(**LOOSE)), "regression", "shared_case_errors_increased")
+    pair = doc["comparisons"]["incumbent"]
+    assert (pair["paired"]["fixes"], pair["paired"]["new_errors"]) == (0, 40)
+    # The comparator's 40 errors on cases the candidate deferred balance the totals exactly.
+    assert pair["total_wrong_automatic"] == {"candidate": 41, "comparator": 40}
+    assert pair["newly_automated"] == {"wrong": 1, "total": 20}
+    assert pair["uncertainty"]["upper"].startswith("-")
+    assert "coverage_expansion_within_ceiling" not in json.dumps(doc["reasons"])
+
+
+def test_m5_candidate_deferrals_cannot_hide_a_critical_slice_veto(tmp_path):
+    """Probe m5: 20 fixes offset 20 shared new errors that all fall in the critical slice."""
+
+    def critical(index, codes):
+        return (CRITICAL,) if 20 <= index < 40 else ()  # the RW block
+
+    s = Scenario(
+        [("WR", 20), ("RW", 20), ("RR", 140), ("WD", 1), ("DW", 2), ("DR", 38)],
+        slice_of=critical,
+    )
+    pol = policy(critical_slices=(CRITICAL,), **LOOSE)
+    doc = held(run(tmp_path, s, pol=pol), "regression", "critical_slice_veto")
+    pair = doc["comparisons"]["incumbent"]
+    assert pair["critical_slices"][CRITICAL] == {
+        "comparable": 20,
+        "fixes": 0,
+        "new_errors": 20,
+        "status": "veto",
+    }
+    assert "coverage_expansion_within_ceiling" not in json.dumps(doc["reasons"])
