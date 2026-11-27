@@ -1,4 +1,5 @@
 import hashlib
+import json
 import sqlite3
 from contextlib import closing
 from dataclasses import replace
@@ -116,6 +117,66 @@ def test_changed_policy_and_withdrawal_hold_instead_of_refreshing_under_old_revi
     _write_private(source.path.parent / "starter-intake-withdrawn-registered-starter.json", {})
     with pytest.raises(IntakeError, match="intake_unavailable"):
         source.read(actor, workflow)
+
+
+def test_current_policy_successor_admitted_by_existing_workflow_is_readable(starter, monkeypatch):
+    initial, workflow, request, _ = starter(PURCHASE_POLICY)
+    actor = initial.authority.principal
+    original = initial.read(actor, workflow)
+    revised = PURCHASE_POLICY.replace(b"250", b"300")
+    revision = hashlib.sha256(revised).hexdigest()
+    initial.path.write_bytes(revised)
+    authority_path = initial.authority.path
+    source_directory = authority_path.parent
+    settings = json.loads(authority_path.read_bytes())
+    _write_private(
+        source_directory / "starter-intake-grant-registered-starter.json",
+        _sealed_starter(settings, source_revision=revision),
+    )
+    authority = LocalStarterAuthority(authority_path)
+    reader = guided_policy.GuidedPolicySource(authority, initial.path)
+    read = guided_policy._read_policy
+    calls = []
+
+    def observe(*args):
+        calls.append(args[0])
+        return read(*args)
+
+    monkeypatch.setattr(guided_policy, "_read_policy", observe)
+    with pytest.raises(guided_policy.PolicyError, match="policy_workflow_unavailable"):
+        reader.read(actor, workflow)
+    assert calls == []
+    admission = DurableIntake(source_directory, authority)
+    result = admission.submit_intake(
+        actor,
+        replace(
+            request,
+            idempotency_key="existing-workflow-successor",
+            creation_ref=None,
+            workflow_ref=workflow,
+            source_revision=revision,
+        ),
+    )
+    assert admission.get_run(actor, result.run_ref).workflow_ref == workflow
+    restarted = guided_policy.GuidedPolicySource(
+        LocalStarterAuthority(authority_path), initial.path
+    )
+    current = restarted.read(actor, workflow)
+    assert current.source_revision == revision and len(calls) == 1
+    assert "300" in current.passage(current.cite(4, 4))
+    assert "250" in original.passage(original.cite(4, 4))
+    with closing(sqlite3.connect(admission.path)) as db, db:
+        (raw_request,) = db.execute(
+            "SELECT request FROM intake_runs WHERE run_ref=?", (result.run_ref,)
+        ).fetchone()
+        altered = json.loads(raw_request) | {"workflow_ref": "workflow-foreign"}
+        db.execute(
+            "UPDATE intake_runs SET request=? WHERE run_ref=?",
+            (json.dumps(altered, sort_keys=True, separators=(",", ":")), result.run_ref),
+        )
+    with pytest.raises(guided_policy.PolicyError, match="policy_workflow_unavailable"):
+        restarted.read(actor, workflow)
+    assert len(calls) == 1
 
 
 def test_private_policy_file_cannot_be_redirected(starter, tmp_path):

@@ -7,7 +7,7 @@ import os
 import re
 import stat
 from collections.abc import Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from opentour_cell.pilot.intake_admission import DurableIntake, _Resolved, _serial
@@ -196,6 +196,7 @@ class GuidedPolicySource:
         authority = self.authority.starter(self.authority.principal, initial_request)
         if authority is None:
             raise PolicyError("policy_workflow_unavailable")
+        existing_request = replace(initial_request, creation_ref=None, workflow_ref=workflow_ref)
         resolved = _Resolved(
             authority, (grant.source_revision, grant.setup_policy_revision), "starter"
         )
@@ -208,7 +209,7 @@ class GuidedPolicySource:
                 "ON r.tenant=w.tenant AND r.workflow_ref=w.workflow_ref "
                 "WHERE w.workflow_ref=? AND w.tenant=? AND w.epoch=? "
                 "AND w.creation_ref=? AND w.resource=? AND r.grant_revision=? "
-                "AND r.request=? AND r.intent=? "
+                "AND r.request IN (?,?) AND r.intent=? "
                 "LIMIT 1",
                 (
                     workflow_ref,
@@ -218,6 +219,7 @@ class GuidedPolicySource:
                     grant.policy_resource_ref,
                     grant.revision,
                     _serial(initial_request, "starter"),
+                    _serial(existing_request, "starter"),
                     intent,
                 ),
             ).fetchone()
