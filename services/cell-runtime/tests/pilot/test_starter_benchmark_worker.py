@@ -3,6 +3,7 @@
 import json
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 from opentour_cell.pilot import guided_policy
@@ -15,8 +16,10 @@ pytest_plugins = ("test_starter_map_confirmation",)
 
 
 def call(path, run):
+    kit = next((p for p in Path(worker.__file__).parents if p.suffix == ".pyz"), None)
+    command = [str(kit), "starter-benchmark-worker"] if kit else ["-m", worker.__name__]
     return subprocess.run(
-        [sys.executable, "-B", "-m", worker.__name__, str(path), run],
+        [sys.executable, "-B", *command, str(path), run],
         text=True,
         capture_output=True,
         timeout=30,
