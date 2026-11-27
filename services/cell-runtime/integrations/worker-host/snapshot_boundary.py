@@ -4,7 +4,8 @@ Run as the installer with ``python3 -I -S -B snapshot_boundary.py``; standard li
 ``boundary`` prints the paths inside and outside restorable snapshots. ``check`` is a
 best-effort screen of entry names and metadata. It never reads file contents, so it cannot
 prove that a snapshot is free of secrets. It refuses names that look like credentials, keys,
-environment files or anti-rollback state, a staged model base, links, special files, hard
+environment files or anti-rollback state, the staged model base and the root-only staging
+area (both stay in the volume but out of snapshots), links, special files, hard
 links, special mode bits, widened permissions, entries not owned by the worker identity and
 any restore target other than the exact worker volume.
 """
@@ -23,20 +24,20 @@ VOLUME = "/var/lib/opentour-worker"
 ANTI_ROLLBACK = "/var/lib/opentour-antirollback"
 WORKER = "opentour-worker"
 INSIDE = (VOLUME,)
-EXCLUDED_FROM_VOLUME = ("model-base", "model-base.held", ".model-base.staging")
+EXCLUDED_FROM_VOLUME = ("model-base", ".opentour-staging")
 # Never in a worker snapshot, so a restore cannot bring an old value back.
 OUTSIDE = {
     "/etc/opentour-worker/site.env": "root:root 0600; organization and numeric runtime path",
     "/etc/opentour-worker/cycle.env": "root:root 0600; workplace reader credentials",
     "/etc/opentour-health": "root:opentour-health 0750; health manifest, TLS and credential",
     ANTI_ROLLBACK: "opentour-worker:opentour-worker 0700; reserved, not yet written (OPE-566)",
-    "/var/lib/opentour-staging": "root:root 0700; model staging, previous and held bases",
+    "/var/lib/opentour-worker/.opentour-staging": "root:root 0700; staging, previous, held base",
     "/opt/opentour": "root:root 0755; interpreter, releases, current link, numeric runtime",
     "/var/lib/opentour-worker/model-base": "root:root 0555, files 0444; re-staged, not restored",
 }
-LIVE_STATE = (VOLUME, ANTI_ROLLBACK, "/var/lib/opentour-staging", "/etc", "/opt/opentour")
+LIVE_STATE = (VOLUME, ANTI_ROLLBACK, "/etc", "/opt/opentour")
 FORBIDDEN_NAMES = frozenset(
-    {"credential", "credentials", "opentour-health", "opentour-antirollback", "opentour-staging"}
+    {"credential", "credentials", "opentour-health", "opentour-antirollback"}
 )
 FORBIDDEN_FRAGMENTS = (".env", "token", "credential", "secret", "password", "passwd", "apikey")
 FORBIDDEN_SUFFIXES = (".pem", ".key", ".crt", ".p12", ".pfx", ".der", ".jks", ".keystore")
@@ -65,8 +66,10 @@ def _name_findings(name):
     folded = unicodedata.normalize("NFKC", visible).casefold()
     if folded != visible.casefold():
         findings.add("non_normalized_name")
-    if folded in EXCLUDED_FROM_VOLUME or folded.startswith(".model-base"):
+    if folded == "model-base":
         findings.add("model_base_in_snapshot")
+    if folded == ".opentour-staging":
+        findings.add("staging_area_in_snapshot")
     if (
         folded in FORBIDDEN_NAMES
         or folded.endswith(FORBIDDEN_SUFFIXES)

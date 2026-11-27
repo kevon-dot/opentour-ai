@@ -2,10 +2,12 @@
 
 Run as root with the release interpreter: ``python3 -I -S -B stage_open_weight.py``.
 The standard library is the only dependency. Staging, the previous base and any held base
-live in a root-only work directory outside the worker volume, on the same filesystem. The
-worker volume is reached only through directory descriptors opened without following links.
-Any missing or mismatched file holds the model route by leaving no ``model-base`` in the
-volume. Rules-only workflows do not read ``model-base`` and keep running.
+live in the root-only work directory ``.opentour-staging`` inside the worker volume, so the
+volume can be its own filesystem. The worker can rename that directory's entry but cannot
+read or change its contents. Every step goes through directory descriptors opened without
+following links, and the work directory's identity is re-checked before each step. Any
+missing or mismatched file holds the model route by leaving no ``model-base`` in the volume.
+Rules-only workflows do not read ``model-base`` and keep running.
 """
 
 import argparse
@@ -23,6 +25,7 @@ REVISION = "12fd25f77366fa6b3b4b768ec3050bf629380bac"
 PROFILE_PATH = "training/profiles/" + PROFILE + ".json"
 LOCK_PATH = "training/profiles/" + PROFILE + ".requirements.txt"
 MODEL_NAME = "model-base"
+WORK_NAME = ".opentour-staging"
 DIRECTORY_MODE = 0o555
 FILE_MODE = 0o444
 _DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
@@ -234,43 +237,58 @@ def _sync(*directory_fds):
         os.fsync(fd)
 
 
-def open_areas(model_dir, work_dir, owner_uid):
-    """Open the worker volume and the root-only work directory as descriptors."""
-    volume = model_dir.parent
-    if (
-        model_dir.name != MODEL_NAME
-        or not work_dir.is_absolute()
-        or work_dir == volume
-        or volume in work_dir.parents
-    ):
-        raise Unverified("staging_area_invalid")
-    try:
-        volume_fd = os.open(volume, _DIR_FLAGS)
-    except OSError as error:
-        raise Unverified("worker_volume_required") from error
-    try:
-        work_fd = os.open(work_dir, _DIR_FLAGS)
-    except OSError as error:
-        os.close(volume_fd)
-        raise Unverified("staging_area_invalid") from error
-    work = os.fstat(work_fd)
-    if (
-        work.st_uid != owner_uid
-        or stat.S_IMODE(work.st_mode) != 0o700
-        or work.st_dev != os.fstat(volume_fd).st_dev
-    ):
-        os.close(volume_fd)
-        os.close(work_fd)
-        raise Unverified("staging_area_invalid")
-    return volume_fd, work_fd
+class Areas:
+    """The worker volume and its root-only work directory, held as descriptors.
+
+    The worker owns the volume, so it can rename the work directory's entry but cannot read
+    or change what is inside it. Every operation goes through these descriptors, and the
+    work directory's identity is re-checked before each step.
+    """
+
+    def __init__(self, model_dir, owner_uid):
+        if model_dir.name != MODEL_NAME or not model_dir.is_absolute():
+            raise Unverified("staging_area_invalid")
+        self.owner_uid = owner_uid
+        try:
+            self.volume = os.open(model_dir.parent, _DIR_FLAGS)
+        except OSError as error:
+            raise Unverified("worker_volume_required") from error
+        try:
+            try:
+                os.mkdir(WORK_NAME, 0o700, dir_fd=self.volume)
+                os.fsync(self.volume)
+            except FileExistsError:
+                pass
+            self.work = os.open(WORK_NAME, _DIR_FLAGS, dir_fd=self.volume)
+        except OSError as error:
+            os.close(self.volume)
+            raise Unverified("staging_area_invalid") from error
+        info = os.fstat(self.work)
+        if info.st_uid != owner_uid or stat.S_IMODE(info.st_mode) != 0o700:
+            self.close()
+            raise Unverified("staging_area_invalid")
+        self.identity = (info.st_dev, info.st_ino)
+
+    def check(self):
+        """Hold if the work directory's entry no longer names the directory opened."""
+        try:
+            info = os.stat(WORK_NAME, dir_fd=self.volume, follow_symlinks=False)
+        except OSError as error:
+            raise Held("staging_area_replaced") from error
+        if (info.st_dev, info.st_ino) != self.identity:
+            raise Held("staging_area_replaced")
+
+    def close(self):
+        os.close(self.work)
+        os.close(self.volume)
 
 
-def hold(volume_fd, work_fd):
-    """Move whatever is at model-base out of the volume into the root-only held slot."""
-    if _exists_at(volume_fd, MODEL_NAME):
-        _remove_at(work_fd, "held")
-        os.rename(MODEL_NAME, "held", src_dir_fd=volume_fd, dst_dir_fd=work_fd)
-        _sync(volume_fd, work_fd)
+def hold(areas):
+    """Move whatever is at model-base into the root-only work directory's held slot."""
+    if _exists_at(areas.volume, MODEL_NAME):
+        _remove_at(areas.work, "held")
+        os.rename(MODEL_NAME, "held", src_dir_fd=areas.volume, dst_dir_fd=areas.work)
+        _sync(areas.volume, areas.work)
 
 
 def _result(route, reason):
@@ -292,43 +310,45 @@ def _checked_release(release, wheel_dir, python):
     return profile
 
 
-def _verify_installed(volume_fd, profile, owner_uid, expected_identity=None):
+def _verify_installed(areas, profile, expected_identity=None):
     try:
-        model_fd = os.open(MODEL_NAME, _DIR_FLAGS, dir_fd=volume_fd)
+        model_fd = os.open(MODEL_NAME, _DIR_FLAGS, dir_fd=areas.volume)
     except OSError as error:
         raise Held("staged_model_file_required") from error
     try:
         info = os.fstat(model_fd)
         if expected_identity is not None and (info.st_dev, info.st_ino) != expected_identity:
             raise Held("model_base_replaced")
-        verify_model_tree(model_fd, profile, owner_uid)
+        verify_model_tree(model_fd, profile, areas.owner_uid)
     finally:
         os.close(model_fd)
 
 
-def verify(release, model_dir, wheel_dir, python, work_dir, owner_uid=0):
+def verify(release, model_dir, wheel_dir, python, owner_uid=0):
     """Verify an installed base and runtime. Any failure holds the model route."""
     try:
-        volume_fd, work_fd = open_areas(model_dir, work_dir, owner_uid)
+        areas = Areas(model_dir, owner_uid)
     except Unverified as error:
         return _result("unverified", str(error))
     try:
         try:
-            _verify_installed(volume_fd, _checked_release(release, wheel_dir, python), owner_uid)
+            profile = _checked_release(release, wheel_dir, python)
+            areas.check()
+            _verify_installed(areas, profile)
+            areas.check()
         except Held as error:
-            hold(volume_fd, work_fd)
+            hold(areas)
             return _result("held", str(error))
         return _result("ready", "verified")
     finally:
-        os.close(volume_fd)
-        os.close(work_fd)
+        areas.close()
 
 
-def _copy_verified(source_dir, work_fd, profile):
+def _copy_verified(source_dir, areas, profile):
     """Copy into a fresh root-only staging directory, hashing the bytes actually written."""
-    _remove_at(work_fd, "staging")
-    os.mkdir("staging", 0o700, dir_fd=work_fd)
-    staging_fd = os.open("staging", _DIR_FLAGS, dir_fd=work_fd)
+    _remove_at(areas.work, "staging")
+    os.mkdir("staging", 0o700, dir_fd=areas.work)
+    staging_fd = os.open("staging", _DIR_FLAGS, dir_fd=areas.work)
     try:
         for name, digest in profile["files"].items():
             try:
@@ -356,6 +376,7 @@ def _copy_verified(source_dir, work_fd, profile):
                 raise Held("staged_model_hash_mismatch")
         os.fchmod(staging_fd, DIRECTORY_MODE)
         os.fsync(staging_fd)
+        _sync(areas.work)
         info = os.fstat(staging_fd)
         return staging_fd, (info.st_dev, info.st_ino)
     except BaseException:
@@ -363,10 +384,10 @@ def _copy_verified(source_dir, work_fd, profile):
         raise
 
 
-def stage(release, source_dir, revision, model_dir, wheel_dir, python, work_dir, owner_uid=0):
+def stage(release, source_dir, revision, model_dir, wheel_dir, python, owner_uid=0):
     """Copy the pinned files from an offline source, verify them, promote, then re-verify."""
     try:
-        volume_fd, work_fd = open_areas(model_dir, work_dir, owner_uid)
+        areas = Areas(model_dir, owner_uid)
     except Unverified as error:
         return _result("unverified", str(error))
     try:
@@ -374,29 +395,33 @@ def stage(release, source_dir, revision, model_dir, wheel_dir, python, work_dir,
             if revision != REVISION:
                 raise Held("checkpoint_revision_mismatch")
             profile = _checked_release(release, wheel_dir, python)
-            staging_fd, identity = _copy_verified(source_dir, work_fd, profile)
+            areas.check()
+            staging_fd, identity = _copy_verified(source_dir, areas, profile)
             try:
                 verify_model_tree(staging_fd, profile, owner_uid)
             finally:
                 os.close(staging_fd)
-            _remove_at(work_fd, "previous")
-            if _exists_at(volume_fd, MODEL_NAME):
-                os.rename(MODEL_NAME, "previous", src_dir_fd=volume_fd, dst_dir_fd=work_fd)
-            os.rename("staging", MODEL_NAME, src_dir_fd=work_fd, dst_dir_fd=volume_fd)
-            _sync(volume_fd, work_fd)
+            areas.check()
+            _remove_at(areas.work, "previous")
+            if _exists_at(areas.volume, MODEL_NAME):
+                os.rename(MODEL_NAME, "previous", src_dir_fd=areas.volume, dst_dir_fd=areas.work)
+            areas.check()
+            os.rename("staging", MODEL_NAME, src_dir_fd=areas.work, dst_dir_fd=areas.volume)
+            _sync(areas.volume, areas.work)
             # The volume is worker-writable: check that the promoted inode is still in place.
-            _verify_installed(volume_fd, profile, owner_uid, identity)
+            areas.check()
+            _verify_installed(areas, profile, identity)
+            areas.check()
         except (Held, OSError) as error:
-            _remove_at(work_fd, "staging")
-            hold(volume_fd, work_fd)
+            _remove_at(areas.work, "staging")
+            hold(areas)
             return _result("held", str(error) if isinstance(error, Held) else "staging_failed")
-        _remove_at(work_fd, "previous")
-        _remove_at(work_fd, "held")
-        _sync(work_fd)
+        _remove_at(areas.work, "previous")
+        _remove_at(areas.work, "held")
+        _sync(areas.work)
         return _result("ready", "verified")
     finally:
-        os.close(volume_fd)
-        os.close(work_fd)
+        areas.close()
 
 
 def main(argv=None):
@@ -407,13 +432,12 @@ def main(argv=None):
         command.add_argument("--release", type=Path, required=True)
         command.add_argument("--model-dir", type=Path, required=True)
         command.add_argument("--wheel-dir", type=Path, required=True)
-        command.add_argument("--work-dir", type=Path, required=True)
         command.add_argument("--python", required=True)
         if name == "stage":
             command.add_argument("--source", type=Path, required=True)
             command.add_argument("--revision", required=True)
     args = parser.parse_args(argv)
-    for path in (args.release, args.model_dir, args.wheel_dir, args.work_dir):
+    for path in (args.release, args.model_dir, args.wheel_dir):
         if not path.is_absolute():
             parser.error("use absolute paths")
     if args.model_dir.name != MODEL_NAME:
@@ -422,16 +446,10 @@ def main(argv=None):
         result = _result("unverified", "installer_root_required")
     elif args.command == "stage":
         result = stage(
-            args.release,
-            args.source,
-            args.revision,
-            args.model_dir,
-            args.wheel_dir,
-            args.python,
-            args.work_dir,
+            args.release, args.source, args.revision, args.model_dir, args.wheel_dir, args.python
         )
     else:
-        result = verify(args.release, args.model_dir, args.wheel_dir, args.python, args.work_dir)
+        result = verify(args.release, args.model_dir, args.wheel_dir, args.python)
     print(json.dumps(result, sort_keys=True))
     return 0 if result["route"] == "ready" else 2
 

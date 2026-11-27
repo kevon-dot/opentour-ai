@@ -226,9 +226,6 @@ def site(tmp_path):
     lib = tmp_path / "var/lib"
     volume = lib / "opentour-worker"
     volume.mkdir(parents=True, mode=0o700)
-    work = lib / "opentour-staging"
-    work.mkdir(mode=0o700)
-    work.chmod(0o700)
     (volume / "ledger.sqlite3").write_bytes(b"generated rules-only ledger")
     (volume / "cycle.json").write_text('{"generated": true}')
     return {
@@ -237,7 +234,7 @@ def site(tmp_path):
         "wheels": wheels,
         "python": python,
         "volume": volume,
-        "work": work,
+        "work": volume / ".opentour-staging",
         "model": volume / "model-base",
         "profile": profile,
         "write_release": write_release,
@@ -253,20 +250,39 @@ def staged(site, revision=REVISION, owner=OWNER):
         site["model"],
         site["wheels"],
         str(site["python"]),
-        site["work"],
         owner,
     )
 
 
 def verified(site, owner=OWNER):
     return stage_module["verify"](
-        site["release"], site["model"], site["wheels"], str(site["python"]), site["work"], owner
+        site["release"], site["model"], site["wheels"], str(site["python"]), owner
     )
+
+
+def cli_arguments(site):
+    return [
+        "--release",
+        str(site["release"]),
+        "--model-dir",
+        str(site["model"]),
+        "--wheel-dir",
+        str(site["wheels"]),
+        "--python",
+        str(site["python"]),
+    ]
 
 
 def rules_only_state_unchanged(site):
     assert (site["volume"] / "ledger.sqlite3").read_bytes() == b"generated rules-only ledger"
     assert (site["volume"] / "cycle.json").read_text() == '{"generated": true}'
+
+
+def tamper(path, data=b"tampered"):
+    """Change a staged file's bytes while keeping its owner and 0444 mode."""
+    path.chmod(0o644)
+    path.write_bytes(data)
+    path.chmod(0o444)
 
 
 def test_stage_accepts_a_correct_sentinel_set_and_promotes_read_only(site):
@@ -282,30 +298,22 @@ def test_stage_accepts_a_correct_sentinel_set_and_promotes_read_only(site):
     assert stat.S_IMODE(model.stat().st_mode) == 0o555 and model.stat().st_uid == OWNER
     assert {stat.S_IMODE(p.stat().st_mode) for p in model.iterdir()} == {0o444}
     assert sorted(p.name for p in site["volume"].iterdir()) == [
+        ".opentour-staging",
         "cycle.json",
         "ledger.sqlite3",
         "model-base",
     ]
-    # Staging, previous and held copies never appear in the worker volume.
+    work = site["work"].stat()
+    assert stat.S_IMODE(work.st_mode) == 0o700 and work.st_uid == OWNER
+    # Staging, previous and held copies are cleaned out of the root-only work directory.
     assert list(site["work"].iterdir()) == []
     assert verified(site)["route"] == "ready"
     rules_only_state_unchanged(site)
 
 
-def test_stage_cli_runs_isolated_and_requires_root(site):
-    arguments = [
-        "--release",
-        str(site["release"]),
-        "--model-dir",
-        str(site["model"]),
-        "--wheel-dir",
-        str(site["wheels"]),
-        "--work-dir",
-        str(site["work"]),
-        "--python",
-        str(site["python"]),
-    ]
+def test_stage_cli_runs_isolated_as_root(site):
     script = str(HOST / "stage_open_weight.py")
+    arguments = cli_arguments(site)
     command = [*ISOLATED, script, "stage", *arguments, "--source", str(site["source"])]
     ready = subprocess.run(
         [*command, "--revision", REVISION],
@@ -322,8 +330,7 @@ def test_stage_cli_runs_isolated_and_requires_root(site):
         return
     assert ready.returncode == 0, ready.stderr
     assert json.loads(ready.stdout)["route"] == "ready"
-    os.chmod(site["model"] / "config.json", 0o644)
-    (site["model"] / "config.json").write_bytes(b"tampered")
+    tamper(site["model"] / "config.json")
     held = subprocess.run(
         [*ISOLATED, script, "verify", *arguments],
         capture_output=True,
@@ -333,8 +340,33 @@ def test_stage_cli_runs_isolated_and_requires_root(site):
         env={},
     )
     assert held.returncode == 2
-    assert json.loads(held.stdout)["reason"] == "model_base_mode_invalid"
+    assert json.loads(held.stdout)["reason"] == "staged_model_hash_mismatch"
     assert not site["model"].exists() and (site["work"] / "held").is_dir()
+
+
+@pytest.mark.parametrize("command", ["stage", "verify"])
+def test_cli_refuses_to_act_without_root(site, monkeypatch, capsys, command):
+    monkeypatch.setattr(os, "geteuid", lambda: 1000)
+    extra = ["--source", str(site["source"]), "--revision", REVISION] if command == "stage" else []
+    assert stage_module["main"]([command, *cli_arguments(site), *extra]) == 2
+    assert json.loads(capsys.readouterr().out)["reason"] == "installer_root_required"
+    assert not site["model"].exists() and not site["work"].exists()
+    rules_only_state_unchanged(site)
+
+
+def test_verify_holds_a_restored_base_whose_bytes_changed(site):
+    """A restore or tamper that keeps owner and modes is still caught by the digests."""
+    assert staged(site)["route"] == "ready"
+    tamper(site["model"] / "model.safetensors", b"restored older generated weights")
+    assert verified(site) == {
+        "schema": "opentour.open-weight-staging.v1",
+        "route": "held",
+        "reason": "staged_model_hash_mismatch",
+        "profile": "smollm2_135m_lora_v1",
+        "checkpoint_revision": REVISION,
+    }
+    assert not site["model"].exists() and (site["work"] / "held").is_dir()
+    rules_only_state_unchanged(site)
 
 
 @pytest.mark.parametrize(
@@ -391,14 +423,14 @@ def test_stage_holds_the_model_route_on_any_mismatch(site, case, reason):
 def test_a_base_swapped_in_after_promotion_is_held(site, monkeypatch):
     """A worker-identity process replaces model-base between the rename and re-verification."""
     real_rename = os.rename
-    planted = site["volume"].parent / "planted"
+    planted = site["volume"] / "planted"
 
     def racing_rename(src, dst, *, src_dir_fd=None, dst_dir_fd=None):
         real_rename(src, dst, src_dir_fd=src_dir_fd, dst_dir_fd=dst_dir_fd)
         if src == "staging" and dst == "model-base":
-            # Same owner, modes and digests: only the inode identity check can tell.
+            # Same filesystem, owner, modes and digests: only the inode identity can tell.
             shutil.copytree(site["model"], planted, copy_function=shutil.copy2)
-            real_rename(site["model"], site["volume"].parent / "stolen")
+            real_rename(site["model"], site["volume"] / "stolen")
             real_rename(planted, site["model"])
 
     monkeypatch.setattr(os, "rename", racing_rename)
@@ -409,14 +441,108 @@ def test_a_base_swapped_in_after_promotion_is_held(site, monkeypatch):
     assert (site["work"] / "held").is_dir()
 
 
-def test_a_worker_planted_staging_name_in_the_volume_is_never_promoted(site):
-    planted = site["volume"] / ".model-base.staging"
-    planted.mkdir()
-    (planted / "config.json").write_text("planted")
-    (site["source"] / "tokenizer.json").unlink()
-    assert staged(site)["reason"] == "staged_model_file_required"
+@pytest.mark.parametrize("swap", ["renamed_away", "replaced", "replaced_by_link"])
+def test_a_work_directory_renamed_or_swapped_mid_stage_holds(site, monkeypatch, swap):
+    """The worker owns the volume: it renames the work directory entry while root copies."""
+    original = stage_module["_copy_verified"]
+    moved = site["volume"] / "moved-staging"
+
+    def racing_copy(source_dir, areas, profile):
+        result = original(source_dir, areas, profile)
+        os.rename(site["work"], moved)
+        if swap == "replaced":
+            site["work"].mkdir(mode=0o700)
+            site["work"].chmod(0o700)
+        elif swap == "replaced_by_link":
+            site["work"].symlink_to(moved)
+        return result
+
+    monkeypatch.setitem(stage_module, "_copy_verified", racing_copy)
+    result = staged(site)
+    assert (result["route"], result["reason"]) == ("held", "staging_area_replaced")
     assert not site["model"].exists()
-    assert (planted / "config.json").read_text() == "planted"
+    # The staging copy never left the original root-only directory, wherever its entry went.
+    assert stat.S_IMODE(moved.lstat().st_mode) == 0o700
+    assert not (moved / "staging").exists()
+    rules_only_state_unchanged(site)
+
+
+def test_staging_works_when_the_volume_reports_its_own_device(site, monkeypatch):
+    """Simulate the documented layout: the volume is a separate mount with its own st_dev."""
+    volume = str(site["volume"])
+    real = {name: getattr(os, name) for name in ("stat", "lstat", "fstat")}
+    shifted = []
+
+    def inside(path):
+        return path == volume or path.startswith(volume + "/")
+
+    def shift(result, path):
+        if not inside(path):
+            return result
+        shifted.append(path)
+        fields = list(result[:10])
+        fields[2] += 7919
+        return os.stat_result(fields)
+
+    def fake_stat(path, *, dir_fd=None, follow_symlinks=True):
+        result = real["stat"](path, dir_fd=dir_fd, follow_symlinks=follow_symlinks)
+        base = os.readlink(f"/proc/self/fd/{dir_fd}") if dir_fd is not None else ""
+        return shift(result, os.path.join(base, os.fspath(path)))
+
+    def fake_lstat(path, *, dir_fd=None):
+        return fake_stat(path, dir_fd=dir_fd, follow_symlinks=False)
+
+    def fake_fstat(fd):
+        return shift(real["fstat"](fd), os.readlink(f"/proc/self/fd/{fd}"))
+
+    monkeypatch.setattr(os, "stat", fake_stat)
+    monkeypatch.setattr(os, "lstat", fake_lstat)
+    monkeypatch.setattr(os, "fstat", fake_fstat)
+    assert staged(site)["route"] == "ready"
+    assert verified(site)["route"] == "ready"
+    monkeypatch.undo()
+    assert any(path.endswith("/.opentour-staging") for path in shifted)
+    assert real["stat"](site["volume"]).st_dev == real["stat"](site["volume"].parent).st_dev
+
+
+def test_staging_works_with_the_volume_on_a_separate_mount(site, tmp_path):
+    """Root only: mount a private tmpfs at the volume path, as the documented layout does."""
+    if OWNER != 0 or shutil.which("unshare") is None:
+        pytest.skip("needs root and unshare to mount a private tmpfs volume")
+    probe = subprocess.run(
+        ["unshare", "-m", "--propagation", "private", "true"], capture_output=True, check=False
+    )
+    if probe.returncode != 0:
+        pytest.skip("this host refuses a private mount namespace")
+    volume = site["volume"]
+    script = str(HOST / "stage_open_weight.py")
+    arguments = " ".join(f"'{a}'" for a in cli_arguments(site))
+    isolated = " ".join(ISOLATED)
+    shell = (
+        f"mount -t tmpfs -o mode=0700 tmpfs '{volume}' && "
+        f"stat -c %d '{volume}' '{volume.parent}' && "
+        f"{isolated} '{script}' stage {arguments} --source '{site['source']}' "
+        f"--revision {REVISION} && "
+        f"{isolated} '{script}' verify {arguments} && "
+        f"stat -c %d '{volume}/.opentour-staging' && "
+        f"stat -c '%a %u' '{volume}/.opentour-staging'"
+    )
+    completed = subprocess.run(
+        ["unshare", "-m", "--propagation", "private", "sh", "-c", shell],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    lines = completed.stdout.splitlines()
+    volume_dev, parent_dev = lines[0], lines[1]
+    assert volume_dev != parent_dev
+    assert json.loads(lines[2])["route"] == "ready"
+    assert json.loads(lines[3])["route"] == "ready"
+    assert lines[4] == volume_dev and lines[5] == "700 0"
+    # The private mount is gone: nothing was staged on the underlying directory.
+    assert not site["model"].exists()
 
 
 def test_verify_refuses_a_base_not_owned_by_the_installer_or_with_wrong_modes(site):
@@ -465,6 +591,7 @@ def test_removal_in_the_work_directory_never_follows_links(site):
     outside = site["volume"].parent / "keep"
     outside.mkdir()
     (outside / "file").write_text("keep")
+    assert staged(site)["route"] == "ready"
     held = site["work"] / "held"
     held.mkdir()
     (held / "link").symlink_to(outside)
@@ -475,25 +602,26 @@ def test_removal_in_the_work_directory_never_follows_links(site):
     assert (outside / "file").read_text() == "keep"
 
 
-@pytest.mark.parametrize("problem", ["inside_volume", "wide_mode", "link", "missing"])
+@pytest.mark.parametrize("problem", ["wide_mode", "link", "file", "foreign_owner"])
 def test_an_unsafe_work_directory_leaves_the_volume_unchanged(site, problem):
     assert staged(site)["route"] == "ready"
     work = site["work"]
-    if problem == "inside_volume":
-        work = site["volume"] / "work"
-        work.mkdir(mode=0o700)
-    elif problem == "wide_mode":
+    owner = OWNER
+    if problem == "wide_mode":
         work.chmod(0o755)
     elif problem == "link":
-        shutil.rmtree(work)
-        target = site["volume"].parent / "real-work"
+        work.rmdir()
+        target = site["volume"] / "worker-made"
         target.mkdir(mode=0o700)
         work.symlink_to(target)
+    elif problem == "file":
+        work.rmdir()
+        work.write_text("worker-made")
+    elif OWNER == 0:  # a work directory the worker identity created first
+        os.chown(work, 54321, -1)
     else:
-        shutil.rmtree(work)
-    result = stage_module["verify"](
-        site["release"], site["model"], site["wheels"], str(site["python"]), work, OWNER
-    )
+        owner = OWNER + 1
+    result = verified(site, owner)
     assert (result["route"], result["reason"]) == ("unverified", "staging_area_invalid")
     assert site["model"].is_dir()
 
@@ -525,6 +653,7 @@ def test_documented_copy_passes_and_careless_copies_of_the_layout_are_refused(tm
     (volume / "authorization.json").write_text('{"generated": "grant"}')
     (volume / "model-base").mkdir()
     (volume / "model-base/config.json").write_text("generated")
+    (volume / ".opentour-staging/held").mkdir(parents=True)
     for outside in layout["outside"]:
         path = host / outside.lstrip("/")
         if outside.endswith(".env"):
@@ -538,16 +667,24 @@ def test_documented_copy_passes_and_careless_copies_of_the_layout_are_refused(tm
         path.chmod(0o700 if path.is_dir() else 0o600)
 
     documented = tmp_path / "documented/opentour-worker"
-    shutil.copytree(volume, documented, ignore=shutil.ignore_patterns("model-base"))
+    shutil.copytree(
+        volume, documented, ignore=shutil.ignore_patterns("model-base", ".opentour-staging")
+    )
     assert screen(documented, VOLUME) == []
 
     whole_lib = tmp_path / "careless-lib"
     shutil.copytree(host / "var/lib", whole_lib)
     whole = screen(whole_lib)
-    assert {"model_base_in_snapshot", "out_of_boundary_material"} <= set(whole)
+    assert {
+        "model_base_in_snapshot",
+        "staging_area_in_snapshot",
+        "out_of_boundary_material",
+    } <= set(whole)
 
     with_etc = tmp_path / "careless-etc/opentour-worker"
-    shutil.copytree(volume, with_etc, ignore=shutil.ignore_patterns("model-base"))
+    shutil.copytree(
+        volume, with_etc, ignore=shutil.ignore_patterns("model-base", ".opentour-staging")
+    )
     shutil.copytree(host / "etc", with_etc / "etc")
     assert "out_of_boundary_material" in screen(with_etc)
 
@@ -587,13 +724,13 @@ def test_every_path_the_units_hold_secrets_or_state_in_is_outside_the_volume():
         ("health-token", "out_of_boundary_material"),
         ("api.key", "out_of_boundary_material"),
         ("client-secret.json", "out_of_boundary_material"),
-        ("site​.env", "hidden_character_in_name"),
-        ("site​.env", "out_of_boundary_material"),
-        ("ｓｉｔｅ.env", "non_normalized_name"),
-        ("CRED‍ENTIAL", "out_of_boundary_material"),
+        ("site\u200b.env", "hidden_character_in_name"),
+        ("site\u200b.env", "out_of_boundary_material"),
+        ("\uff53\uff49\uff54\uff45.env", "non_normalized_name"),
+        ("CRED\u200dENTIAL", "out_of_boundary_material"),
         ("opentour-antirollback", "out_of_boundary_material"),
         ("Model-Base", "model_base_in_snapshot"),
-        (".model-base.previous", "model_base_in_snapshot"),
+        (".opentour-staging", "staging_area_in_snapshot"),
     ],
 )
 def test_snapshot_names_that_bypassed_the_first_screen_are_refused(tmp_path, name, finding):
