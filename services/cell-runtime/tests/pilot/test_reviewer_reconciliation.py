@@ -352,8 +352,10 @@ def test_same_filename_signer_rotation_preserves_verified_closure_and_key_recove
     assert signer == bytes.fromhex(read(original_key)["secret_hex"])
 
 
-def test_replaced_pending_before_projection_cannot_reopen_active_request(tmp_path):
+def test_replaced_pending_before_projection_cannot_reopen_active_request(tmp_path, monkeypatch):
     s, case, wire, envelope, _ = pending(tmp_path)
+    clock = int(time.time())
+    monkeypatch.setattr(time, "time", lambda: clock)
     before = case.bridge.pending_summary()
     with pytest.raises(ValueError):
         case.bridge.consume(resign(case, envelope, {"status": "Pending"}))
