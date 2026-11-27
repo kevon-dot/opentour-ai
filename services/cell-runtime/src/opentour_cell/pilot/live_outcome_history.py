@@ -1,7 +1,8 @@
 """Authorized comparison of an archived verification snapshot with current counts."""
 
+import json
 import re
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import date, datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -143,9 +144,25 @@ def compare_snapshots(
             == (scope.engagement_epoch, scope.dataset_ref, scope.dataset_revision)
         )
         _require(any(g.kind == "independent_outcome" for g in bound.grants))
-        historical = counts(
-            live.snapshot(actor, scope.workflow_ref, as_of_revision=historical_sequence)
-        )
+        with live._db() as db:
+            row = db.execute(
+                "SELECT body FROM live_snapshots WHERE tenant=? AND workflow=? "
+                "AND epoch=? AND sequence=?",
+                (scope.tenant, scope.workflow_ref, scope.engagement_epoch, historical_sequence),
+            ).fetchone()
+            _require(row is not None)
+            try:
+                archived = json.loads(row[0])
+            except (TypeError, ValueError) as exc:
+                raise IntakeError("outcome_history_unavailable") from exc
+            _require(isinstance(archived, dict))
+            seal = archived.pop("archive_authentication", None)
+            authority._verify_snapshot_archive(archived, seal)
+            _require(archived["slack_verifiers"] == dict(bound.slack_verifiers))
+            _require(
+                all(g in [asdict(current) for current in bound.grants] for g in archived["grants"])
+            )
+            historical = counts(LiveSnapshot(**archived["snapshot"]))
         _require(
             historical.sequence == historical_sequence
             and historical.evidence_revision == historical_evidence_revision

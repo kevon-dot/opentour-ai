@@ -72,6 +72,35 @@ class PrivateLiveAuthority:
         _require(directory.is_absolute() and directory.resolve(strict=True) == directory)
         self.path = directory / f"live-authority-{workflow_ref}.json"
 
+    def _archive_mac(self, revision: str, body: dict[str, Any]) -> str:
+        keys = _read_private(self.directory / "live-authority-key.json", 4096)
+        _require(set(keys) == {"key"})
+        key = keys["key"]
+        _require(isinstance(key, str) and re.fullmatch("[0-9a-f]{64}", key))
+        purpose = hmac.digest(bytes.fromhex(key), b"opentour.live-aggregate-archive.v1", "sha256")
+        return hmac.digest(purpose, _canonical([revision, body]).encode(), "sha256").hex()
+
+    def _seal_snapshot_archive(self, scope: LiveScope, body: dict[str, Any]) -> dict[str, str]:
+        _require(scope.authority_revision == _digest(self._document()))
+        return {
+            "version": "v1",
+            "authority_revision": scope.authority_revision,
+            "mac": self._archive_mac(scope.authority_revision, body),
+        }
+
+    def _verify_snapshot_archive(self, body: dict[str, Any], seal: Any) -> None:
+        _require(isinstance(seal, dict) and set(seal) == {"version", "authority_revision", "mac"})
+        _require(
+            seal["version"] == "v1"
+            and all(
+                isinstance(seal[k], str) and re.fullmatch("[0-9a-f]{64}", seal[k])
+                for k in ("authority_revision", "mac")
+            )
+        )
+        _require(
+            hmac.compare_digest(seal["mac"], self._archive_mac(seal["authority_revision"], body))
+        )
+
     def _document(self) -> dict[str, Any]:
         keys = _read_private(self.directory / "live-authority-key.json", 4096)
         envelope = _read_private(self.path, 32768)

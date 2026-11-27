@@ -5,3 +5,11 @@
 The window annotation answers whether the latest accepted ingestion visible in each snapshot occurred in the selected local dates. Counts describe the whole snapshot. A late delivery, a replay and an accountant's original effective date can have different times. The stored snapshots do not record an independently authorized event history or a snapshot creation time. The returned detail status is `outcome_event_detail_unavailable`. An accountant-specific answer giving finality revisions, effective time or source details needs a separately permitted projection for those fields. The existing `verify` role by itself allows the named verification form and does not authorize this reader.
 
 The generated test uses the actual form for a final response, reopening, replaying the old response and a new final response. Both final snapshots can show one verified decision and zero pending decisions while retaining distinct revisions. A caller rendering this pair later must recheck the current viewer and evidence before disclosure.
+
+New private live-authority archive writes attest the complete aggregate, original
+grant provenance and sequence with a purpose-specific MAC in the same transaction.
+The inspection reader verifies the saved body under the current local custody key
+and checks current grants before returning counts. Legacy rows and receipts from
+a retired key remain unavailable to this projection. Inspection performs no
+migration or signing. The MAC authenticates what the reducer recorded at write
+time. It supplies neither an outcome's effective timestamp nor row-detail authority.

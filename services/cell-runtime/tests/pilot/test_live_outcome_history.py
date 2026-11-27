@@ -122,7 +122,7 @@ def test_scope_or_window_mismatch_and_revocation_hold(named, monkeypatch):
 
     def revoke(self, *args, **kwargs):
         value = original(self, *args, **kwargs)
-        if kwargs.get("as_of_revision") is not None:
+        if kwargs.get("as_of_revision") is None:
             ready.grant["actors"][ACTOR] = ["custodian"]
             sign(ready.h, ready.grant)
         return value
@@ -149,3 +149,80 @@ def test_dispute_or_missing_independent_authority_withholds_pair(named):
     sign(ready.h, ready.grant)
     with pytest.raises(IntakeError):
         query(old)
+
+
+@pytest.mark.parametrize("damage", ["legacy", "counts", "sequence", "workflow", "tenant"])
+def test_archived_projection_requires_original_attestation(named, damage):
+    import sqlite3
+
+    view = open_form(named)
+    named.h.form(view, submission(named, view), OTHER)
+    actor, scope, query = setup_query(named)
+    live = named.worker.source.live
+    old = live.snapshot(actor, named.workflow)
+    assert query(old).historical.sequence == old.sequence
+    where = (scope.tenant, scope.workflow_ref, scope.engagement_epoch, old.sequence)
+    with sqlite3.connect(named.directory / "live-evidence.sqlite3") as db:
+        import json
+
+        row = db.execute(
+            "SELECT body FROM live_snapshots WHERE tenant=? AND workflow=? "
+            "AND epoch=? AND sequence=?",
+            where,
+        ).fetchone()
+        saved = json.loads(row[0])
+        if damage == "legacy":
+            del saved["archive_authentication"]
+        elif damage == "counts":
+            saved["snapshot"].update(decisions=85, verified=0, pending=85)
+        elif damage == "sequence":
+            saved["snapshot"]["sequence"] += 1
+        else:
+            saved["snapshot"]["workflow_ref" if damage == "workflow" else "tenant"] = "foreign"
+        db.execute(
+            "UPDATE live_snapshots SET body=? WHERE tenant=? AND workflow=? "
+            "AND epoch=? AND sequence=?",
+            (json.dumps(saved), *where),
+        )
+    with pytest.raises(IntakeError):
+        query(old)
+    if damage == "legacy":
+        assert live.snapshot(actor, named.workflow, as_of_revision=old.sequence) == old
+
+
+def test_current_key_rotation_does_not_reseal_old_receipt(named, monkeypatch):
+    import test_live_settings
+    from opentour_cell.pilot.live_authority import _read_private
+    from test_live_settings import _write_private
+
+    view = open_form(named)
+    named.h.form(view, submission(named, view), OTHER)
+    actor, _, query = setup_query(named)
+    old = named.worker.source.live.snapshot(actor, named.workflow)
+    query(old)
+    key_path = named.directory / "live-authority-key.json"
+    key = bytes.fromhex(_read_private(key_path, 4096)["key"])
+    replacement = bytes(value ^ 255 for value in key)
+    _write_private(key_path, {"key": replacement.hex()})
+    monkeypatch.setattr(test_live_settings, "KEY", replacement)
+    sign(named.h, named.grant)
+    assert named.worker.source.live.snapshot(actor, named.workflow) == old
+    with pytest.raises(IntakeError):
+        query(old)
+
+
+def test_failed_archive_attestation_rolls_back_ingestion(named, monkeypatch):
+    from opentour_cell.pilot.live_authority import PrivateLiveAuthority
+    from test_live_evidence import decision
+
+    actor, _, _ = setup_query(named)
+    live = named.worker.source.live
+    before = live.snapshot(actor, named.workflow)
+
+    def unavailable(self, scope, body):
+        raise IntakeError("live_evidence_unavailable")
+
+    monkeypatch.setattr(PrivateLiveAuthority, "_seal_snapshot_archive", unavailable)
+    with pytest.raises(IntakeError):
+        named.ingest(decision(decision_id="D2", event_id="E2"))
+    assert live.snapshot(actor, named.workflow) == before

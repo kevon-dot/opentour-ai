@@ -620,6 +620,14 @@ class LiveEvidence:
             (scope.tenant, scope.workflow_ref, scope.engagement_epoch),
         ).fetchone()[0]
         snapshot = self._snapshot(db, scope, sequence=sequence)
+        body = {
+            "snapshot": asdict(snapshot),
+            "grants": [asdict(g) for g in scope.grants],
+            "slack_verifiers": dict(scope.slack_verifiers),
+        }
+        seal = getattr(self.authority, "_seal_snapshot_archive", None)
+        if seal is not None:
+            body["archive_authentication"] = seal(scope, body)
         db.execute(
             "INSERT INTO live_snapshots VALUES (?,?,?,?,?)",
             (
@@ -627,13 +635,7 @@ class LiveEvidence:
                 scope.workflow_ref,
                 scope.engagement_epoch,
                 snapshot.sequence,
-                _canonical(
-                    {
-                        "snapshot": asdict(snapshot),
-                        "grants": [asdict(g) for g in scope.grants],
-                        "slack_verifiers": dict(scope.slack_verifiers),
-                    }
-                ),
+                _canonical(body),
             ),
         )
 
