@@ -2,10 +2,11 @@
 
 The owner-local reader reports a current, verifiable observation for one completed
 live intake run in a workflow with a scored historical benchmark. It uses the live
-worker's signed selection and the historical benchmark worker's existing selection.
+worker's private selection and the historical benchmark worker's existing selection.
 The selected actor must already have live intake and inspection permission plus
 current historical evaluation permission. A selection supplies locations and refs;
-the corresponding authority and admitted run must resolve inside the worker.
+the signed live authority, standing evaluation grant and admitted runs must resolve
+inside the worker.
 
 Run the source entry point in the pinned worker environment:
 
