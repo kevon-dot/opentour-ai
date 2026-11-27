@@ -845,3 +845,81 @@ def test_callback_rechecks_provider_cap_before_adopting_candidate(tmp_path):
     assert connector.status(receipt).state is mc.JobState.CANCELED
     with pytest.raises(mc.CapabilityError, match="candidate_lineage_unverified"):
         pre.collect_candidate(ACTOR, receipt)
+
+
+# --------------------------------------------------------- follow-up: usage cap, value types
+@pytest.mark.parametrize(
+    "minor_units, status, settleable",
+    [
+        (10**9, "over_cap", False),  # the reviewer's reproduction: 10**9 against a cap of 500
+        (501, "over_cap", False),
+        (500, "within_cap", True),  # exactly at the approved cap is not over it
+        (499, "within_cap", True),
+        (0, "within_cap", True),
+    ],
+)
+def test_u1_provider_usage_is_compared_to_the_approved_cap_and_never_clamped(
+    stack, minor_units, status, settleable
+):
+    provider, connector, pre, intent, reservations = stack
+    provider._usage = lambda: managed.ProviderUsage("USD", minor_units, 25, 4, 12)
+    receipt = dispatch(pre, intent, reservations)
+    usage = connector.usage(receipt)
+    assert usage.incurred_minor_units == minor_units  # the real figure, never clamped
+    assert usage.source is UsageSource.PROVIDER_REPORTED
+    assert usage.cap_status == status
+    assert usage.approved_maximum_minor_units == 500
+    assert usage.settleable is settleable
+
+
+def test_u2_unknown_approved_maximum_is_not_settleable(stack):
+    provider, connector, pre, intent, reservations = stack
+    receipt = dispatch(pre, intent, reservations)
+    path = connector._journal(connector._key(intent))
+    rewritten = []
+    for line in path.read_text().splitlines():
+        event = json.loads(line)
+        event.pop("maximum_minor_units", None)
+        rewritten.append(json.dumps(event))
+    path.write_text("\n".join(rewritten) + "\n")
+    usage = connector.usage(receipt)
+    assert usage.incurred_minor_units == 80 and usage.cap_status == "cap_unknown"
+    assert usage.settleable is False
+
+
+@pytest.mark.parametrize(
+    "bad_row",
+    [
+        {"input_text": {"n": [1]}, "label": "b"},
+        {"input_text": ["a"], "label": "b"},
+        {"input_text": "a", "label": {"nested": "x"}},
+        {"input_text": 7, "label": "b"},
+        {"input_text": None, "label": "b"},
+        {"input_text": True, "label": "b"},
+    ],
+)
+def test_v1_non_string_field_values_are_refused_in_the_outbound_envelope(stack, bad_row):
+    provider, connector, _, intent, _ = stack
+    payload = managed.serialize_rows((bad_row,))
+    forged = replace(intent, development_digest=managed._sha(payload))
+    with pytest.raises(ValueError, match="training_payload_invalid"):
+        connector.submit(forged, payload)
+    with pytest.raises(ValueError, match="training_row_value_not_string"):
+        connector.serialize_development(intent, (bad_row,))
+    assert provider.uploaded == [] and provider.executions == 0
+    assert journal_text(connector) == ""
+
+
+def test_v2_ordinary_string_values_are_still_accepted(stack):
+    provider, connector, pre, intent, reservations = stack
+    rows = (
+        {"input_text": "", "label": "unicode-é-ok"},
+        {"input_text": "x" * 50, "label": "b"},
+    )
+    intent = replace(intent, development_digest=managed.development_digest(rows))
+    reservations.reserve(intent)
+    receipt = pre.submit_reserved_fit(
+        ACTOR, intent, rows, reservation_guard=reservations.guard_for(intent)
+    )
+    assert receipt.state is mc.JobState.COMPLETED
+    assert provider.uploaded == [managed.serialize_rows(rows)]

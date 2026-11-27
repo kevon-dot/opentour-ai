@@ -231,6 +231,30 @@ def intent_digest(intent: mc.FitIntent) -> str:
     )
 
 
+CAP_WITHIN = "within_cap"
+CAP_OVER = "over_cap"
+CAP_UNKNOWN = "cap_unknown"
+
+
+@dataclass(frozen=True)
+class ReportedUsage(Usage):
+    """Provider-reported usage plus a closed-vocabulary comparison to the approved cap.
+
+    ``incurred_minor_units`` is always the provider's real figure and is never clamped, so genuine
+    overspend stays visible. ``cap_status`` is ``within_cap`` (at or under the journaled approved
+    maximum), ``over_cap`` (above it) or ``cap_unknown`` (no journaled maximum to compare to).
+    Anything but ``within_cap`` is not ``settleable``: it must not flow to settlement as ordinary
+    actual spend and needs the caller's explicit decision.
+    """
+
+    cap_status: str = CAP_UNKNOWN
+    approved_maximum_minor_units: int | None = None
+
+    @property
+    def settleable(self) -> bool:
+        return self.cap_status == CAP_WITHIN and super().settleable
+
+
 def _usage_valid(usage: ProviderUsage) -> bool:
     """Provider-reported usage that is malformed is unknown (``None``), never settleable."""
     counts = (usage.minor_units, usage.seconds, usage.rows, usage.steps)
@@ -375,6 +399,8 @@ class ManagedConnector:
                 raise ValueError("protected_field_in_payload")
             if set(row) != set(intent.fields):
                 raise ValueError("training_row_fields_outside_scope")
+            if not all(type(value) is str for value in row.values()):
+                raise ValueError("training_row_value_not_string")
         return serialize_rows(rows)
 
     # ------------------------------------------------------------------ journal
@@ -603,6 +629,7 @@ class ManagedConnector:
                 not isinstance(row, dict)
                 or set(row) != set(intent.fields)
                 or set(row) & self.settings.protected_fields
+                or not all(type(value) is str for value in row.values())
                 for row in rows
             )
         ):
@@ -744,7 +771,14 @@ class ManagedConnector:
             return None
         reported = view.usage
         state = view.state
-        return Usage(
+        approved = view.maximum_minor_units
+        if type(approved) is not int or approved < 0:
+            status = CAP_UNKNOWN
+        elif reported.minor_units > approved:
+            status = CAP_OVER
+        else:
+            status = CAP_WITHIN
+        return ReportedUsage(
             self._job_ref(key),
             reported.currency,
             reported.minor_units,
@@ -754,6 +788,8 @@ class ManagedConnector:
             UsageSource.PROVIDER_REPORTED,
             irreversible=reported.minor_units > 0
             and (state is not mc.JobState.COMPLETED or view.cancel_requested),
+            cap_status=status,
+            approved_maximum_minor_units=approved if type(approved) is int else None,
         )
 
     def dispose_training_file(self, job: mc.JobReceipt) -> str:
@@ -792,7 +828,13 @@ class ManagedConnector:
         tuned_model_id: str | None = None,
         usage: ProviderUsage | None = None,
     ) -> bool:
-        """Treat an event for a live job as a hint to get a credentialed observation."""
+        """Treat an event for a live job as a hint to get a credentialed observation.
+
+        Only ``job_id`` is used. ``state``, ``tuned_model_id`` and ``usage`` are accepted for call
+        compatibility and are IGNORED: the job is re-read from the provider with the credential and
+        only that observation can change journaled state. There is no production caller yet; do
+        not wire one without authentication and rate limiting (see the PR's open items).
+        """
         for path in sorted((self.root / "jobs").glob("*.jsonl")):
             key = path.stem
             with self._locked(key):
