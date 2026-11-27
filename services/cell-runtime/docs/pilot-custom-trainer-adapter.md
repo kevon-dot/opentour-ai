@@ -52,11 +52,11 @@ silent degradation.
    candidate, even if the trainer finishes anyway.
 5. Usage the trainer reports above the authorized bound, malformed, or in another currency stops
    the job. It is reported `FAILED` only once the trainer confirms the stop; an unhonored stop
-   stays `RUNNING` with a durable cancel intent. Malformed usage raises `invalid_usage`.
+   stays `RUNNING` with a durable cancel intent. Malformed usage raises `INVALID_USAGE`.
 6. `fence(tenant)` is durable across restart: it blocks new submit, collect and replay and stops
    live jobs. `canceled_job_refs` lists only jobs the trainer confirmed stopped for that exact
    job; if any live job (including one whose dispatch was never acknowledged) cannot be confirmed
-   stopped, `fence` raises `fence_job_not_stopped` and the marker stays. `usable_target` keeps
+   stopped, `fence` raises `FENCE_JOB_NOT_STOPPED` and the marker stays. `usable_target` keeps
    returning the prior pinned revision.
 7. Versions are re-verified with the trainer at dispatch and at collect (never taken from the
    result). Cancel and fence do not wait on version agreement. Result signatures use a
@@ -90,8 +90,9 @@ empty result is not a pass.
 
 ## Open gates
 
-- OPE-507 `connector_ext` / `connector_conformance` are not on `main` yet. This module carries
-  small mirrors of `EvidenceTier`, `Usage` and `FenceReceipt` and should switch to the shared
-  definitions, and run the shared `run_conformance`, once they land.
+- The OPE-507 shared definitions are in use. `Usage`, `FenceReceipt`, `EvidenceTier` and
+  `UsageSource` are imported from `opentour_cell.pilot.connector_ext`, and the local mirrors have
+  been removed. The shared `connector_conformance.run_conformance` suite also runs against this
+  connector, alongside `run_trainer_conformance`.
 - A real customer trainer has not been qualified (software-qualified tier) or witnessed
   (customer-witnessed tier).
