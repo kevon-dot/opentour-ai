@@ -8,7 +8,7 @@ import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from opentour_cell.pilot.readout import INPUT_VERSION, MAX_CASES, OUTPUT_VERSION, evaluate_manifest
 from opentour_cell.pilot.starter_setup import StarterPreview
@@ -20,6 +20,10 @@ from opentour_cell.pilot.text_classifier import (
     MAX_TRAIN_ROWS,
     PROFILE,
 )
+
+if TYPE_CHECKING:
+    from opentour_cell.pilot.handoff_readback import HandoffReadback
+
 from opentour_cell.pilot.training_data import EVALUATION_FIELDS, FIELD_NAMES
 
 Block = dict[str, Any]
@@ -611,6 +615,7 @@ def regression_picker(
     more: bool,
     topic: str = "changes",
     current_workflow: tuple[str, str] | None = None,
+    delivery_workflows: Mapping[str, str] | None = None,
 ) -> Block:
     blocks = [
         _section(
@@ -645,7 +650,17 @@ def regression_picker(
         if rows:
             blocks.append(_section("Or choose an inspected frozen comparison."))
     for dataset, source, revision in rows:
-        blocks.append(_section(f"Workflow {_ref(dataset)} · {_display(source)} · {_ref(revision)}"))
+        if delivery_workflows and revision in delivery_workflows:
+            blocks.append(
+                _section(
+                    f"Workflow {_ref(delivery_workflows[revision])} · Dataset {_ref(dataset)} · "
+                    f"{_display(source)} · {_ref(revision)}"
+                )
+            )
+            blocks.append(_actions(_button("Use this handoff", "ot_result_open", revision)))
+            continue
+        label = "Dataset" if topic == "delivery" else "Workflow"
+        blocks.append(_section(f"{label} {_ref(dataset)} · {_display(source)} · {_ref(revision)}"))
         blocks.append(_actions(_button("Use this comparison", "ot_result_open", revision)))
     navigation = []
     if previous:
@@ -765,17 +780,22 @@ def current_training_question(
     )
 
 
-def status_question_modal(context: str, revision: str, dataset: str, answer: StatusAnswer) -> Block:
+def status_question_modal(
+    context: str, revision: str, dataset: str, answer: StatusAnswer, *, receipt_pin: str = ""
+) -> Block:
+    controls = [_button("View evidence", "ot_evidence", revision), _home()]
+    if receipt_pin:
+        controls.insert(0, _button("View receipt", "ot_release_receipt", receipt_pin))
     return _modal(
         "Result status",
         "ot_status_question",
         context,
         [
-            _section(f"Workflow {_ref(dataset)} · readout {_ref(revision)}"),
+            _section(f"Dataset {_ref(dataset)} · readout {_ref(revision)}"),
             _section(answer.finding),
             _section(answer.basis),
             _section(answer.next_action),
-            _actions(_button("View evidence", "ot_evidence", revision), _home()),
+            _actions(*controls),
         ],
     )
 
@@ -1453,7 +1473,57 @@ def chart_status(context: str, revision: str, figures: str, status: str) -> Bloc
     )
 
 
-def release_recorded(context: str, decision: str, artifact: str, audience: str) -> Block:
+def handoff_status(receipt: HandoffReadback, audit: Mapping[str, Any]) -> StatusAnswer:
+    def when(timestamp: int) -> str:
+        return datetime.fromtimestamp(timestamp, UTC).isoformat()
+
+    delivery = receipt.delivery
+    basis = (
+        f"Workflow {_ref(receipt.selection.workflow_ref)} · Proposal {_ref(audit['job_id'])} "
+        f"revision {_ref(audit['run_revision'])} · Artifact {_ref(audit['model_revision'])}\n"
+        f"Destination {_ref(receipt.destination_ref)} · Approved {when(receipt.approved_at)}."
+    )
+    if delivery and delivery.last_checked_at is not None:
+        basis += f" Last checked {when(delivery.last_checked_at)}."
+    else:
+        basis += " No independent check time is recorded."
+    if delivery and delivery.stage == "delivered":
+        assert delivery.received_at is not None and delivery.receiver_receipt_ref
+        return StatusAnswer(
+            "Delivered to the selected destination.",
+            f"{basis} Receiver receipt {_ref(delivery.receiver_receipt_ref)} "
+            f"at {when(delivery.received_at)}.",
+            "The recipient can independently replay the artifact.",
+        )
+    finding = "Approval recorded. Delivery is unconfirmed."
+    if delivery and delivery.stage == "queued":
+        finding = "Approval recorded. Awaiting delivery."
+    return StatusAnswer(finding, basis, "The authorized handoff operator can reconcile delivery.")
+
+
+def handoff_modal(
+    context: str, revision: str, receipt: HandoffReadback, audit: Mapping[str, Any]
+) -> Block:
+    answer = handoff_status(receipt, audit)
+    controls = [_home()]
+    if not receipt.delivery or receipt.delivery.stage != "delivered":
+        controls.insert(0, _button("Check delivery status", "ot_delivery_status", revision))
+    return _modal(
+        "Handoff receipt",
+        "ot_handoff_receipt",
+        context,
+        [
+            _section(answer.finding),
+            _section(answer.basis),
+            _section(answer.next_action),
+            _actions(*controls),
+        ],
+    )
+
+
+def release_recorded(
+    context: str, decision: str, artifact: str, audience: str, *, revision: str = ""
+) -> Block:
     state = "Approved for handoff" if decision == "approved" else "Changes requested. Handoff held"
     return _modal(
         "Handoff decision",
@@ -1461,7 +1531,9 @@ def release_recorded(context: str, decision: str, artifact: str, audience: str) 
         context,
         [
             _section(f"{state}. Candidate {_ref(artifact)} · audience {_display(audience)}."),
-            _actions(_home()),
+            _actions(_button("View receipt", "ot_release_receipt", revision), _home())
+            if revision
+            else _actions(_home()),
         ],
     )
 

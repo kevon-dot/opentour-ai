@@ -43,6 +43,11 @@ MODULES = (
     "opentour_cell/pilot/open_weight.py",
     "opentour_cell/pilot/pilot_metrics.py",
     "opentour_cell/pilot/repair_bundle.py",
+    "opentour_cell/pilot/handoff_readback.py",
+    "opentour_cell/pilot/local_handoff_permissions.py",
+    "opentour_cell/pilot/recipient_delivery.py",
+    "opentour_cell/pilot/release_authority.py",
+    "opentour_cell/pilot/release_outbox.py",
     "opentour_cell/pilot/repair_workflow.py",
     "opentour_cell/pilot/simple_repair.py",
     "opentour_cell/pilot/source_intake.py",
@@ -107,6 +112,8 @@ ASSETS = {
     "pilot-starter-scoring.md": "docs/pilot-starter-scoring.md",
     "README.md": f"{CELL}/docs/slack-workspace-kit.md",
     "operator-guide.md": f"{CELL}/docs/pilot-kit.md",
+    "pilot-recipient-delivery.md": f"{CELL}/docs/pilot-recipient-delivery.md",
+    "pilot-release-outbox.md": f"{CELL}/docs/pilot-release-outbox.md",
     "pilot-learning-mandate.md": f"{CELL}/docs/pilot-learning-mandate.md",
     "templates/pilot-learning-mandate.template.json": (
         f"{CELL}/examples/pilot-learning-mandate.template.json"
