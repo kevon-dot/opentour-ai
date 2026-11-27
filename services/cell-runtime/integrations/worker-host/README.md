@@ -25,6 +25,8 @@ This writes the owner-only grant at the path configured in opentour-worker.servi
 
 ## Install the cycle worker
 
+> **Not in the distributed kit yet.** `opentour-cycle.service`, `stage_open_weight.py` and `snapshot_boundary.py` are not in the kit's worker-host files. Adding them to the kit builder's worker-host asset list is a handoff to OPE-369. Until that ships, take these three files from a verified source checkout at the release's exact `source_commit` from PROVENANCE.json. Confirm that the checkout's HEAD commit matches, then copy the files into a root-owned directory such as `/opt/opentour/worker-host-<source_commit>`. Set `HOST_FILES` to that directory in the commands below. Once the kit ships them, use `HOST_FILES=/opt/opentour/current/integrations/worker-host`.
+
 `opentour-cycle.service` runs the packaged `cycle-worker` entry point: discovery, the low-cost repair and, only when the standing mandate allows it, the local model fit. It uses the opentour-worker identity, the same volume and the same sandbox as `opentour-worker.service`. It has no access to the health identity's files. Install it only after the worker is authorized.
 
 1. As opentour-worker, write `/var/lib/opentour-worker/cycle.json`, the workplace connection and the standing agreement by following pilot-autonomous-cycle.md in the kit. The config must be in the volume directory itself. Pin the workplace reader at a root-owned path under /opt/opentour that no group or other user can write. Keep Slack credentials and model weights out of the config.
@@ -33,25 +35,35 @@ This writes the owner-only grant at the path configured in opentour-worker.servi
 4. Stage and verify the runtime and base model offline, as described in the next section. You can skip this step for rules-only use.
 5. Copy `opentour-cycle.service` to /etc/systemd/system. Run `systemctl daemon-reload`, then `systemctl enable --now opentour-cycle`. The worker runs one bounded cycle every 300 seconds. It restarts 300 seconds after any failure. A held cycle writes only a safe reason to the journal. Standard output stays off, like the managed worker.
 
-The model base path is fixed. The worker always reads `<directory>/model-base`, which is `/var/lib/opentour-worker/model-base`; site.env cannot move it. Both worker units mount it read-only. No unit waits for a staged model, so rules-only workflows start and keep running without one.
+The cycle unit is capped at `MemoryMax=4G` and `TasksMax=128`. That covers the profile's 3 GiB address-space limit for the fit child, the worker and the tokenizer threads. These values are not measured. Re-measure them on the customer host and record the result privately.
+
+Both worker units set `ProtectProc=invisible` and `ProcSubset=pid` (systemd 247 or later; Linux 5.8 or later for `invisible`). This hides other users' processes. Both worker units run as opentour-worker, so this does not stop the managed worker from reading the cycle process's environment, which holds the cycle.env credentials. Treat both units as one trust domain for those credentials.
+
+The model base path is fixed. The worker always reads `<directory>/model-base`, which is `/var/lib/opentour-worker/model-base`; site.env cannot move it. Both worker units mount it read-only. The `-` prefix on `ReadOnlyPaths` means systemd mounts nothing if model-base is missing when the unit starts. A process running as opentour-worker could then create its own model-base. `verify` refuses any base that root does not own. The worker also re-checks every pinned digest before each fit, so a base with different bytes holds the model route. No unit waits for a staged model, so rules-only workflows start and keep running without one.
 
 ## Stage the numeric runtime and base model offline
 
-Obtain the four checkpoint files listed in training/profiles/smollm2_135m_lora_v1.json from publisher revision `12fd25f77366fa6b3b4b768ec3050bf629380bac`. Obtain the two Linux x86-64 wheels named in the hash lock through the custodian's approved channel. Keep the checkpoint in a root-only directory such as /opt/opentour/staging/checkpoint. Keep the wheels in /opt/opentour/staging/wheels. Build the runtime offline from the release's lock, using the commands in pilot-open-weight.md with `/opt/opentour/model-python` as the environment. Then, as root and with the worker units stopped:
+Obtain the four checkpoint files listed in training/profiles/smollm2_135m_lora_v1.json from publisher revision `12fd25f77366fa6b3b4b768ec3050bf629380bac`. Obtain the two Linux x86-64 wheels named in the hash lock through the custodian's approved channel. Keep the checkpoint in a root-only directory such as /opt/opentour/staging/checkpoint. Keep the wheels in /opt/opentour/staging/wheels. Build the runtime offline from the release's lock, using the commands in pilot-open-weight.md with `/opt/opentour/model-python` as the environment.
+
+Create the work directory `/var/lib/opentour-staging`, owned by root, mode 0700, on the same filesystem as the worker volume. It must not be inside the worker volume. It holds the staging copy, the previous base and any held base, out of the worker's reach. Then, as root, stop both worker units and run:
 
 ```sh
-/opt/opentour/python/bin/python3 -I -S -B /opt/opentour/current/integrations/worker-host/stage_open_weight.py stage \
+/opt/opentour/python/bin/python3 -I -S -B "$HOST_FILES/stage_open_weight.py" stage \
   --release /opt/opentour/current --source /opt/opentour/staging/checkpoint \
   --revision 12fd25f77366fa6b3b4b768ec3050bf629380bac \
-  --model-dir /var/lib/opentour-worker/model-base --wheel-dir /opt/opentour/staging/wheels \
-  --python /opt/opentour/model-python/bin/python
+  --model-dir /var/lib/opentour-worker/model-base --work-dir /var/lib/opentour-staging \
+  --wheel-dir /opt/opentour/staging/wheels --python /opt/opentour/model-python/bin/python
 ```
 
-The script uses only the standard library. It reads the profile and lock only if they match the release's SHA256SUMS. It checks the pinned revision, then confirms that the lock and profile agree on NumPy 2.5.5 and tokenizers 0.21.4 and their wheel digests. It requires exactly one matching wheel per locked package and no other wheels. It asks the runtime interpreter for its Python, platform and package versions. Then it copies each checkpoint file, refusing links, and checks every SHA-256. The verified copy replaces model-base in one rename: directory mode 0555, files mode 0444, owned by root. Output is one JSON line. `route:"ready"` means exit code 0. `route:"held"` with a safe `reason` means exit code 2.
+The script uses only the standard library and refuses to run unless it runs as root. It reads the profile and lock only if they match the release's SHA256SUMS. It checks the pinned revision, then confirms that the lock and profile agree on NumPy 2.5.5 and tokenizers 0.21.4 and their wheel digests. It requires exactly one matching wheel per locked package and no other wheels. It asks the runtime interpreter for its Python, platform and package versions.
 
-Any wrong revision, missing or extra file, hash mismatch, missing wheel or missing or different runtime holds the model route. The script moves any existing model-base to `model-base.held` and does not promote the new copy. The worker then finds no base and holds only the model branch. The rule, supplied-output and managed workflows keep working. To return to the model route, correct the source and run `stage` again. Run `verify` with the same `--release`, `--model-dir`, `--wheel-dir` and `--python` after every upgrade or restore, and before relying on the model route. The worker also re-checks the runtime and every checkpoint digest itself before each fit.
+It then copies each checkpoint file into the root-only work directory, refusing links. It hashes the bytes it writes and fsyncs each file. It sets the directory to mode 0555 and each file to 0444, owned by root. Promotion is two renames through directory descriptors opened without following links. First any current base moves to the work directory, then the staging copy moves into the volume. Both directories are fsynced. The script then reopens model-base and checks that it is the same directory it staged, with the same owner, modes and digests. A base swapped in after the rename holds the route. Output is one JSON line. `route:"ready"` means exit code 0. `route:"held"` with a safe `reason` means exit code 2. `route:"unverified"` means the script did not act, for example when not run as root or with an invalid work directory, and also exits 2.
 
-The script does not prove that the interpreter's installed packages came from the staged wheels. The hash-locked offline install proves that. A local generated run proves the package only. It is not a customer-host installation.
+Any wrong revision, missing or extra file, hash mismatch, wrong owner or mode, missing wheel, or missing or different runtime holds the model route. The script moves any existing model-base into the work directory as `held` and does not promote the new copy. The worker then finds no base and holds only the model branch. The rule, supplied-output and managed workflows keep working. To return to the model route, correct the source and run `stage` again. Run `verify` with the same `--release`, `--model-dir`, `--work-dir`, `--wheel-dir` and `--python` after every upgrade or restore, and before relying on the model route.
+
+A running unit keeps its read-only mount of the directory that was at model-base when it started. Moving or replacing model-base takes effect only after a restart, so stop the worker units before `stage` or `verify` and start them afterwards. Otherwise run `systemctl restart opentour-cycle opentour-worker` right after.
+
+The script does not prove that the interpreter's installed packages came from the staged wheels. The hash-locked offline install proves that. Between runs of `verify`, the worker identity controls its own volume. The digest check the worker runs before each fit is the last guard. A local generated run proves the package only. It is not a customer-host installation.
 
 ## Installed witness
 
@@ -68,29 +80,30 @@ Keep unit status, cycle outcomes, run IDs, staging output, paths, timings and al
 
 ## Snapshot and restore
 
-A restorable worker snapshot is a copy of the quiescent volume `/var/lib/opentour-worker` (opentour-worker:opentour-worker, mode 0700). It includes SQLite journals, source grants, manifest, cycle config, inputs and receipts. It does not include `model-base`, `model-base.held` or the staging directories; re-stage the base after a restore. Nothing outside the volume enters a snapshot, so a restore cannot bring back an old value:
+A restorable worker snapshot is a copy of the quiescent volume `/var/lib/opentour-worker` (opentour-worker:opentour-worker, mode 0700). It includes SQLite journals, source grants, manifest, cycle config, inputs and receipts. It does not include `model-base`; re-stage the base after a restore. Nothing outside the volume enters a snapshot, so a restore cannot bring back an old value:
 
 | Outside the snapshot | Owner and mode | Contents |
 | --- | --- | --- |
 | `/etc/opentour-worker/site.env` | root:root 0600 | Organization and numeric runtime path |
 | `/etc/opentour-worker/cycle.env` | root:root 0600 | Workplace reader credentials |
 | `/etc/opentour-health` | root:opentour-health 0750 | Health manifest, TLS chain and key, health credential |
-| `/var/lib/opentour-antirollback` | opentour-worker:opentour-worker 0700 | Reserved for anti-rollback state |
+| `/var/lib/opentour-antirollback` | opentour-worker:opentour-worker 0700 | Reserved for anti-rollback state; not yet written (OPE-566) |
+| `/var/lib/opentour-staging` | root:root 0700 | Model staging copy, previous base and held base |
 | `/opt/opentour` | root:root 0755 | Interpreter, releases, current link, numeric runtime, offline staging |
 | `/var/lib/opentour-worker/model-base` | root:root 0555, files 0444 | Verified base model, re-staged rather than restored |
 
-Both worker units create `/var/lib/opentour-antirollback` as a second systemd state directory. It is the worker's own anti-rollback state: the highest verified issuer-registry revision and each engagement's pinned customer anchor. The authority-record verifier defines its format. Never copy it into a snapshot, never restore it, never reset it during an upgrade or revert. The health unit cannot read it.
+Both worker units create `/var/lib/opentour-antirollback` as a second systemd state directory. It is reserved for the worker's anti-rollback state: the highest verified issuer-registry revision and each engagement's pinned customer anchor. Nothing writes it yet. The authority-record verifier (OPE-566) defines its format. Never copy it into a snapshot, never restore it, and never reset it during an upgrade or revert. The health unit cannot read it.
 
 Stop the cycle unit, the managed worker and all writers and admission clients. Copy the volume without model-base to a private encrypted fallback, keeping owner and permissions. Before restoring, run:
 
 ```sh
-/opt/opentour/python/bin/python3 -I -S -B /opt/opentour/current/integrations/worker-host/snapshot_boundary.py check \
+/opt/opentour/python/bin/python3 -I -S -B "$HOST_FILES/snapshot_boundary.py" check \
   --snapshot /private/fallback/opentour-worker --restore-to /var/lib/opentour-worker
 ```
 
-It refuses a snapshot that contains credentials, TLS material, environment files, anti-rollback state, a model base, links, special files, hard links or group- or other-readable entries. It also refuses a restore target that is not the worker volume or that overlaps live state. `snapshot_boundary.py boundary` prints the same layout as JSON.
+This is a best-effort screen of entry names and metadata. It never reads file contents, so it cannot prove a snapshot holds no secrets. It refuses names that look like credentials, tokens, secrets, keys, certificates, environment files, anti-rollback state or a model base. It matches case-insensitively after Unicode NFKC normalization and refuses zero-width and other hidden characters. It also refuses links, special files, hard links, setuid, setgid and sticky bits, group or other permissions, entries not owned by opentour-worker, and any restore target except exactly `/var/lib/opentour-worker`. `snapshot_boundary.py boundary` prints the layout as JSON.
 
-The package enforces this boundary through the layout, the unit sandboxes and the check. A restore cannot bring back old health credentials, TLS keys, environment credentials or anti-rollback state, and it cannot change which base model is verified. It can still bring back older authority recorded inside the volume. That includes a grant file, model grant or standing mandate that was withdrawn or replaced after the snapshot. Before resuming, check the current grants, mandate and engagement against the custodian's current authority. Delete or re-withdraw anything revoked since the snapshot. Rotate the workplace credential if a revocation depends on it.
+The package keeps this boundary through the layout, the unit sandboxes and the screen. A restore cannot bring back old health credentials, TLS keys, environment credentials or anti-rollback state, and it cannot change which base model is verified. It can still bring back older authority recorded inside the volume. That includes a grant file, model grant or standing mandate that was withdrawn or replaced after the snapshot. The package does not detect that. Before resuming, check the current grants, mandate and engagement against the custodian's current authority. Delete or re-withdraw anything revoked since the snapshot. Rotate the workplace credential if a revocation depends on it.
 
 Retain the previous verified kit and digest and record the exact volume path. Before an upgrade record a queued run ID. Restart on the new package, retrieve that same run and check that one attempt produced one result. To revert, stop writers, move the current volume aside privately, restore the compatible fallback at the identical absolute path, switch the package link back, run `verify` on the model route and check the current grants and engagement before resuming. Run one worker iteration and look up the original result. Count jobs/attempts and source reads before admitting anything else.
 
