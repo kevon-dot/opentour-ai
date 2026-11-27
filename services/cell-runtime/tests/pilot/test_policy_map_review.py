@@ -295,7 +295,7 @@ def test_read_only_and_revoked_actor_cannot_edit_or_disclose_clause(founder, mon
     h.slack.members.append(reader)
     h.save()
     view = enter_map(h, monkeypatch, reader)
-    assert not any(a == "ot_map_edit" for a, _ in actions(screen(h, view)))
+    assert not any(a in {"ot_map_edit", "ot_map_assertions"} for a, _ in actions(screen(h, view)))
     ref = next(v for a, v in actions(screen(h, view)) if a == "ot_map_citation")
     service, principal = h.app._map_service(ACTOR, workflow)
     initial = service.preview(principal)
@@ -526,3 +526,126 @@ def test_duplicate_confirm_payload_after_restart_creates_no_second_version(found
     fresh, principal = h.app._map_service(ACTOR, workflow)
     assert fresh.preview(principal) == saved and saved.version == 1
     assert effects(h) == (0,) * 7
+
+
+def open_assertions(h, monkeypatch, actor):
+    from test_reviewer_workflow import screen
+
+    view = enter_map(h, monkeypatch, actor)
+    choice = next(v for key, v in actions(screen(h, view)) if key == "ot_map_assertions")
+    h.action(view, "ot_map_assertions", choice, actor)
+    assert screen(h, view)["callback_id"] == "ot_map_assertions_save"
+    return view
+
+
+def assertion_values(trigger, fallback, reason="The named owner described the purchase review."):
+    return {
+        "trigger": {"trigger": {"type": "plain_text_input", "value": trigger}},
+        "fallback": {"fallback": {"type": "static_select", "selected_option": {"value": fallback}}},
+        "reason": {"reason": {"type": "plain_text_input", "value": reason}},
+    }
+
+
+def test_owner_explicitly_sets_and_clears_trigger_and_fallback_without_dispatch(
+    founder, monkeypatch
+):
+    from test_reviewer_workflow import restart, screen
+    from test_slack_adapter import ACTOR
+    from test_starter_setup import effects
+
+    h = founder
+    workflow = prepare_map(h, monkeypatch)
+    service, owner = h.app._map_service(ACTOR, workflow)
+    initial = service.preview(owner)
+    assert initial.settings_trigger is None and initial.fallback_action is None
+    view = open_assertions(h, monkeypatch, ACTOR)
+    assert service.preview(owner) == initial
+    benchmark = h.path.parent / "workflow-benchmarks.sqlite3"
+    held = benchmark.read_bytes()
+    h.form(view, assertion_values("A purchase request is submitted.", "MANUAL"))
+    saved = service.preview(owner)
+    assert (saved.settings_trigger, saved.fallback_action, saved.settings_actor_ref) == (
+        "A purchase request is submitted.",
+        "MANUAL",
+        ACTOR,
+    )
+    assert saved.settings_support == "owner_assertion" and saved.settings_reason
+    assert (
+        saved.confirmed_ref is None
+        and saved.expected_action({"po": "po", "total": None})[0] is None
+    )
+    restart(h)
+    view = enter_map(h, monkeypatch, ACTOR)
+    assert "A purchase request is submitted." in str(screen(h, view))
+    assert "MANUAL" in str(screen(h, view)) and saved.settings_editor_ref in str(screen(h, view))
+    for action, ref in list(actions(screen(h, view))):
+        if action == "ot_map_edit":
+            h.action(view, action, ref)
+            h.form(view, branch_values(screen(h, view)))
+    approved = service.preview(owner)
+    assert approved.expected_action({"po": "po", "total": None}) == (
+        "MANUAL",
+        (approved.settings_ref,),
+    )
+    clear = open_assertions(h, monkeypatch, ACTOR)
+    h.form(clear, assertion_values(None, "unresolved", "Unset the previously declared assertions."))
+    cleared = service.preview(owner)
+    assert cleared.settings_trigger is None and cleared.fallback_action is None
+    assert cleared.expected_action({"po": "po", "total": None})[0] is None
+    assert benchmark.read_bytes() == held and effects(h) == (0,) * 7
+
+
+def test_owner_assertion_stale_diff_requires_reapply_and_foreign_choice_has_zero_effect(
+    founder, monkeypatch
+):
+    from test_reviewer_workflow import screen
+    from test_slack_adapter import ACTOR, OTHER
+
+    h = founder
+    workflow = prepare_map(h, monkeypatch)
+    a = open_assertions(h, monkeypatch, ACTOR)
+    b = open_assertions(h, monkeypatch, OTHER)
+    h.form(a, assertion_values("Owner A trigger", "REVIEW"), ACTOR)
+    service, owner = h.app._map_service(ACTOR, workflow)
+    a_saved = service.preview(owner)
+    proposal = assertion_values("Owner B trigger", "MANUAL")
+    h.form(b, proposal, OTHER)
+    diff = screen(h, b)
+    assert diff["submit"]["text"] == "Reapply my edit"
+    assert "Owner A trigger" in str(diff) and "Owner B trigger" in str(diff)
+    assert service.preview(owner) == a_saved
+    h.form(b, proposal, OTHER)
+    b_saved = service.preview(owner)
+    assert b_saved.settings_trigger == "Owner B trigger" and b_saved.settings_actor_ref == OTHER
+    forged = open_assertions(h, monkeypatch, ACTOR)
+    h.form(forged, assertion_values("Forged", "EXTERNAL_ACTION"))
+    assert service.preview(owner) == b_saved
+
+
+def test_trigger_fallback_assertion_requires_current_source_on_save(founder, monkeypatch):
+    from test_guided_policy import PURCHASE_POLICY
+    from test_reviewer_workflow import screen
+    from test_slack_adapter import ACTOR
+
+    h = founder
+    workflow = prepare_map(h, monkeypatch)
+    first = open_assertions(h, monkeypatch, ACTOR)
+    h.form(first, assertion_values("Purchase request accepted", "MANUAL"))
+    service, owner = h.app._map_service(ACTOR, workflow)
+    old = service.preview(owner)
+    assert old.settings_ref
+    pending = open_assertions(h, monkeypatch, ACTOR)
+    assert prepare_map(h, monkeypatch, PURCHASE_POLICY.replace(b"250", b"200")) == workflow
+    service, owner = h.app._map_service(ACTOR, workflow)
+    current = service.preview(owner)
+    assert current.source_revision != old.source_revision
+    assert (
+        current.settings_trigger is None
+        and current.fallback_action is None
+        and not current.settings_ref
+    )
+    h.form(pending, assertion_values("Old source trigger", "APPROVE"))
+    assert "Reapply my edit" not in str(screen(h, pending))
+    assert service.preview(owner) == current
+    current_view = enter_map(h, monkeypatch, ACTOR)
+    assert "Purchase request accepted" not in str(screen(h, current_view))

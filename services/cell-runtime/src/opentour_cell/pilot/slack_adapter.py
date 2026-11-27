@@ -60,6 +60,7 @@ CALLBACKS = {
     "ot_verify_outcome",
     "ot_nomination",
     "ot_map_branch_save",
+    "ot_map_assertions_save",
     "ot_map_precedence_save",
 }
 ACTIONS = {
@@ -70,6 +71,7 @@ ACTIONS = {
     "ot_map_priority",
     "ot_map_clause_page",
     "ot_map_edit",
+    "ot_map_assertions",
     "ot_map_back",
     "ot_map_precedence",
     "ot_starter_save",
@@ -2688,6 +2690,12 @@ class Workbench:
             version=snap.version,
             source_revision=snap.source_revision,
             draft_revision=snap.map_revision,
+            assertion_basis=(
+                f"Trigger and fallback assertion by {snap.settings_editor_ref} "
+                f"({snap.settings_actor_ref}) · {snap.settings_reason}"
+                if snap.settings_support == "owner_assertion"
+                else ""
+            ),
             priority_citation=priority,
             priority_assertion=(
                 f"Priority confirmed by {snap.precedence_actor_ref} · {snap.precedence_reason}"
@@ -2716,7 +2724,30 @@ class Workbench:
             _check(ctx["kind"] == "map_review" and value in ("next", "previous"))
             self._map_view(cfg, actor, view, workflow, page + (1 if value == "next" else -1))
             return
-        if action == "ot_map_precedence":
+        if action == "ot_map_assertions":
+            _check(ctx["kind"] == "map_review" and snap.can_edit and value == state["rev"])
+            token = self.journal.context(
+                actor,
+                cfg.channel,
+                view,
+                "map_assertions",
+                workflow,
+                _json(
+                    {
+                        "rev": snap.review_revision,
+                        "source": snap.source_revision,
+                        "grant": service.entry(principal),
+                        "actions": snap.actions,
+                    }
+                ),
+            )
+            layout = self.views.map_assertions(
+                token,
+                trigger=snap.settings_trigger,
+                fallback=snap.fallback_action,
+                permitted=snap.actions,
+            )
+        elif action == "ot_map_precedence":
             _check(
                 ctx["kind"] == "map_review"
                 and snap.can_edit
@@ -2871,7 +2902,8 @@ class Workbench:
     ) -> None:
         job = ctx["job"]
         if ctx["kind"] in {"map_review", "map_clause", "map_conflict"} or (
-            action == "ot_map_back" and ctx["kind"] in {"map_edit", "map_precedence"}
+            action == "ot_map_back"
+            and ctx["kind"] in {"map_edit", "map_precedence", "map_assertions"}
         ):
             self._map_action(cfg, actor, view, ctx, action, value)
             return
@@ -3234,7 +3266,7 @@ class Workbench:
         self, cfg: Settings, actor: str, view: str, ctx: Json, callback: str, values: Json
     ) -> None:
         from opentour_cell.pilot.guided_decision_map import Condition
-        from opentour_cell.pilot.map_review import BranchEdit, StaleMapError
+        from opentour_cell.pilot.map_review import BranchEdit, MapSettingsEdit, StaleMapError
 
         workflow = ctx["job"]
         state = json.loads(ctx["revision"])
@@ -3245,9 +3277,30 @@ class Workbench:
         changes: tuple[BranchEdit, ...] = ()
         order = None
         order_reason = None
+        settings_edit = None
         reason = values["reason"]["reason"].get("value")
         _check(isinstance(reason, str) and 0 < len(reason.strip()) <= 1000)
-        if callback == "ot_map_precedence_save":
+        if callback == "ot_map_assertions_save":
+            _check(
+                ctx["kind"] == "map_assertions" and set(values) == {"trigger", "fallback", "reason"}
+            )
+            trigger = values["trigger"]["trigger"].get("value")
+            _check(
+                trigger is None
+                or (
+                    isinstance(trigger, str)
+                    and len(trigger) <= 160
+                    and (not trigger or trigger.isprintable())
+                )
+            )
+            fallback = self._field(values, "fallback", select=True)
+            _check(fallback == "unresolved" or fallback in state["actions"])
+            settings_edit = MapSettingsEdit(
+                (trigger or "").strip() or None,
+                None if fallback == "unresolved" else fallback,
+                reason,
+            )
+        elif callback == "ot_map_precedence_save":
             _check(ctx["kind"] == "map_precedence")
             refs = state["refs"]
             if len(refs) > 30:
@@ -3312,6 +3365,7 @@ class Workbench:
                 changes=changes,
                 precedence=order,
                 precedence_reason=order_reason,
+                settings=settings_edit,
             )
         except StaleMapError as stale:
             current = stale.current
@@ -3348,7 +3402,24 @@ class Workbench:
             reapply_order = (
                 reapply and order is not None and set(order) == {r.branch_ref for r in eligible}
             )
-            reapply = reapply_branch or reapply_order
+            reapply_settings = reapply and settings_edit is not None
+            if reapply_settings and settings_edit is not None:
+                if stale.previous is not None:
+                    diff.extend(
+                        [
+                            f"Previous trigger · {stale.previous.trigger}",
+                            f"Previous fallback · {stale.previous.fallback_action or 'Unresolved'}",
+                        ]
+                    )
+                diff.extend(
+                    [
+                        f"Current trigger · {current.trigger}",
+                        f"Current fallback · {current.fallback_action or 'Unresolved'}",
+                        f"Your trigger · {settings_edit.trigger or 'Unspecified'}",
+                        f"Your fallback · {settings_edit.fallback_action or 'Unresolved'}",
+                    ]
+                )
+            reapply = reapply_branch or reapply_order or reapply_settings
             token = self.journal.context(
                 actor,
                 cfg.channel,
@@ -3359,7 +3430,14 @@ class Workbench:
             )
             layout = self.views.map_conflict(token, before, current.review_revision, diff)
             if reapply:
-                if reapply_order:
+                if reapply_settings and settings_edit is not None:
+                    form = self.views.map_assertions(
+                        token,
+                        trigger=settings_edit.trigger,
+                        fallback=settings_edit.fallback_action,
+                        permitted=current.actions,
+                    )
+                elif reapply_order:
                     form = self.views.map_precedence(
                         token,
                         current.question
@@ -3387,7 +3465,7 @@ class Workbench:
         values: Json,
         token: str,
     ) -> None:
-        if callback in {"ot_map_branch_save", "ot_map_precedence_save"}:
+        if callback in {"ot_map_assertions_save", "ot_map_branch_save", "ot_map_precedence_save"}:
             self._map_submit(cfg, actor, view, ctx, callback, values)
         elif callback == "ot_nomination":
             _check(ctx["kind"] == "nomination" and set(values) == {"nominee"})

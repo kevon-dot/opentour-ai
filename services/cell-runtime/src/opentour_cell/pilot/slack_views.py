@@ -2058,6 +2058,7 @@ def decision_map(
     draft_revision: str,
     priority_citation: str = "",
     priority_assertion: str = "",
+    assertion_basis: str = "",
 ) -> Block:
     per_page = 5
     if page < 0 or (page and page * per_page >= len(rows)):
@@ -2066,6 +2067,10 @@ def decision_map(
         _section(f"Workflow {_ref(workflow)} · saved review version {version}"),
         _section(f"Policy revision {_ref(source_revision)}\nGuided draft {_ref(draft_revision)}"),
     ]
+    if assertion_basis:
+        blocks.append(_section(_display(assertion_basis, 1800)))
+    if editable:
+        blocks.append(_actions(_button("Edit trigger and fallback", "ot_map_assertions", revision)))
     if priority_citation:
         blocks.append(
             _actions(_button("Inspect precedence clause", "ot_map_priority", priority_citation))
@@ -2238,3 +2243,31 @@ def map_reapply(layout: Block, form: Block, values: Mapping[str, Any]) -> Block:
     form["title"] = layout["title"]
     form["submit"]["text"] = "Reapply my edit"
     return form
+
+
+def map_assertions(
+    context: str,
+    *,
+    trigger: str | None,
+    fallback: str | None,
+    permitted: Sequence[str],
+) -> Block:
+    choices = [("Leave unresolved", "unresolved")] + [(action, action) for action in permitted]
+    selected = next((i for i, (_, value) in enumerate(choices) if value == fallback), 0)
+    trigger_input = _map_text_input(
+        "trigger", "Workflow trigger", initial=trigger or "", optional=True
+    )
+    return _modal(
+        "Trigger and fallback",
+        "ot_map_assertions_save",
+        context,
+        [
+            _section(
+                "Describe when the workflow starts and the fallback when no reviewed rule matches."
+            ),
+            trigger_input,
+            _select("fallback", "Intended fallback", choices, selected),
+            _map_text_input("reason", "Basis for this owner assertion", multiline=True),
+        ],
+        "Save assertion",
+    )
