@@ -1,5 +1,6 @@
 """Drive the signed worker permission through the real approval and recipient route."""
 
+import hashlib
 import hmac
 import time
 
@@ -133,13 +134,14 @@ def test_revocation_during_staging_fences_restored_permission(tmp_path, monkeypa
         handoff_outbox(generated.store).status(selection, "inspector")
 
 
-def test_two_approved_tenants_cannot_swap_destination_or_receipt(tmp_path):
+def test_two_approved_tenants_cannot_swap_destination_or_receipt(tmp_path, monkeypatch):
     def approved(slot):
         generated, receiver, offered, selection = approved_local_offer(tmp_path / slot, slot=slot)
         worker = generated.store.path.parent
         permit = generated.authority.permissions.current
-        write(worker / "handoff-permission-key.json", {"key": KEY.hex()})
-        signed_permission(worker, permit)
+        key = hashlib.sha256(KEY + slot.encode()).digest()
+        write(worker / "handoff-permission-key.json", {"key": key.hex()})
+        signed_permission(worker, permit, key)
         outbox = handoff_outbox(generated.store)
         queued = outbox.reserve(selection, "dispatcher", "generated-request")
         with outbox.store._db() as db:
@@ -151,10 +153,20 @@ def test_two_approved_tenants_cannot_swap_destination_or_receipt(tmp_path):
     second, second_receiver, second_offer, second_selection, second_release = approved("second")
     assert first_release.tenant != second_release.tenant
     assert first_release.destination_ref != second_release.destination_ref
-    with pytest.raises(repair_bundle.BundleError, match="recipient_release_scope_mismatch"):
-        dispatch_local_release(first, first_selection, "dispatcher", second_receiver, second_offer)
+    read = repair_bundle._read
+
+    def read_before_claim(path, *args):
+        assert path != second_offer
+        return read(path, *args)
+
+    with monkeypatch.context() as effects:
+        effects.setattr(repair_bundle, "_read", read_before_claim)
+        pending = dispatch_local_release(
+            first, first_selection, "dispatcher", second_receiver, second_offer
+        )
+    assert pending.stage == "delivery_unconfirmed" and pending.claimed_at is None
     assert not list(second_receiver.grant_file.parent.glob("custody/delivery-*"))
-    assert first.status(first_selection, "inspector").stage == "delivery_unconfirmed"
+    assert first.status(first_selection, "inspector") == pending
     assert first.reconcile(first_selection, "dispatcher", second_receiver).stage == (
         "delivery_unconfirmed"
     )
