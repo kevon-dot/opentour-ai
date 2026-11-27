@@ -8,6 +8,24 @@ replaced by a reference model.
 Simulated: the unit tests exercise the record rules with generated sentinel fixtures.
 Not proven: no real checkpoint, GPU or provider capacity is used here. A record built from a
 generated fixture has ``EvidenceTier.FIXTURE`` and lists its unsatisfied external gates.
+
+Trust boundary of ``QualificationRecord``: qualification here is caller-asserted and
+self-consistent only, and there is no signing contract. Nothing in this module authenticates the
+party that built a record, signs it, holds a key for it or checks it against an authority. What is
+enforced is internal consistency: a tier above ``FIXTURE`` is refused unless the record is an
+installed-model record of a pinned (40-hex) revision, names a family that is not a generated
+fixture, carries exactly one boolean outcome for every check its role requires, lists no
+missing-pin gate, and (for the witnessed tiers) carries a ``witness_ref`` of a defined shape.
+``witness_ref`` is an unverified opaque string: its shape is checked, its meaning never is. A
+record is a frozen dataclass and Python cannot make that tamper-proof (``object.__setattr__``
+bypasses it), so a consumer that needs authority must obtain it from a signed or journaled source
+outside this module, not from a record's own fields.
+
+Precondition on the caller: records are assumed NOT to cross a trust boundary. The checks above
+hold only while the record is built and read inside one trusted process by code that does not
+forge it. If a record is ever stored, transmitted or accepted from another party it needs signing
+(signature and key custody), which this project does not have. These checks are a real floor
+(coverage, normalized generated-family ban, ``witness_ref`` and ``revision`` shape), not a proof.
 """
 
 from __future__ import annotations
@@ -15,6 +33,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import unicodedata
 from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
@@ -26,6 +45,36 @@ from opentour_cell.pilot.model_connector import ModelBinding
 
 VERSION = "opentour.pilot.model-family.v1"
 _DIGEST = re.compile("[0-9a-f]{64}")
+_REVISION = re.compile("[0-9a-f]{40}")
+# An opaque, unverified reference: one token, no whitespace or control characters, bounded length.
+_WITNESS_REF = re.compile("[A-Za-z0-9][A-Za-z0-9._:/#@-]{0,255}")
+_GENERATED = "generated"
+
+
+def _identity_key(text: str) -> str:
+    """Fold a family id the way the sibling modules fold identity keys.
+
+    NFKC, drop invisible format characters (category Cf), casefold and strip surrounding
+    whitespace. Deliberately nothing more: separators inside the id are kept, so distinct ids stay
+    distinct.
+    """
+    folded = unicodedata.normalize("NFKC", text)
+    return "".join(ch for ch in folded if unicodedata.category(ch) != "Cf").casefold().strip()
+
+
+def is_generated_family_id(family_id: object) -> bool:
+    """True when the id names a generated fixture family under any case, spacing or separator.
+
+    ``generated`` followed by a non-alphanumeric separator (``-``, ``_``, a space, ...) or standing
+    alone is a generated family. ``generatedx`` or ``regenerated-x`` is a different id and is not.
+    """
+    if not isinstance(family_id, str):
+        return False
+    key = _identity_key(family_id)
+    if not key.startswith(_GENERATED):
+        return False
+    rest = key[len(_GENERATED) :]
+    return not rest or not rest[0].isalnum()
 
 
 class FamilyError(ValueError):
@@ -85,7 +134,7 @@ class ModelFamilyProfile:
     def pin_gaps(self) -> tuple[str, ...]:
         """Name every missing pin. A profile with a gap can never be called qualified."""
         gaps = []
-        if not self.revision or not re.fullmatch("[0-9a-f]{40}", self.revision):
+        if not self.revision or not _REVISION.fullmatch(self.revision):
             gaps.append("revision")
         if not self.license:
             gaps.append("license")
@@ -107,7 +156,7 @@ class ModelFamilyProfile:
     @property
     def is_fixture(self) -> bool:
         """Generated families are software fixtures and never production families."""
-        return self.family_id.startswith("generated-")
+        return is_generated_family_id(self.family_id)
 
     @property
     def identity(self) -> str:
@@ -293,7 +342,13 @@ class QualificationRecord:
     witness_ref: str = ""
 
     def __post_init__(self) -> None:
-        """Refuse a tier the record's own evidence cannot support (fail closed)."""
+        """Refuse a tier the record's own evidence cannot support (fail closed).
+
+        Choice: refuse at construction rather than only report ``qualified == False``. A record
+        that claims ``SOFTWARE_QUALIFIED`` or above with no or partial check coverage is not a weak
+        qualification, it is an inconsistent claim, and the existing tier rules already refuse
+        inconsistent claims here. ``qualified`` re-checks coverage as defence in depth.
+        """
         if not isinstance(self.tier, EvidenceTier):
             raise FamilyError("INVALID_EVIDENCE_TIER")
         if self.tier is EvidenceTier.FIXTURE:
@@ -301,27 +356,59 @@ class QualificationRecord:
         witnessed = self.tier in (EvidenceTier.PROVIDER_WITNESSED, EvidenceTier.CUSTOMER_WITNESSED)
         if (
             self.fixture_kind is not FixtureKind.INSTALLED_MODEL
-            or self.family_id.startswith("generated-")
-            or self.revision is None
+            or not isinstance(self.family_id, str)
+            or is_generated_family_id(self.family_id)
+            or not isinstance(self.revision, str)
+            or not _REVISION.fullmatch(self.revision)
             or any(gate.startswith("profile_pin_missing:") for gate in self.external_gates)
-            or (witnessed and not self.witness_ref)
+            or not self.covers_required_checks
+            or not _witness_ref_ok(self.witness_ref, required=witnessed)
         ):
             raise FamilyError("EVIDENCE_TIER_UNSUPPORTED")
 
     @property
+    def covers_required_checks(self) -> bool:
+        """Exactly one boolean outcome for every check this role requires, and no others."""
+        try:
+            names = [name for name, _ in self.results]
+            outcomes = [ok for _, ok in self.results]
+            required = {check.value for check in required_checks_for_role(self.role)}
+        except (TypeError, ValueError):
+            return False
+        return (
+            len(names) == len(set(names))
+            and set(names) == required
+            and all(type(ok) is bool for ok in outcomes)
+        )
+
+    @property
     def passed(self) -> bool:
-        return all(ok for _, ok in self.results)
+        """Every required check was recorded and passed. No recorded evidence is never a pass."""
+        return self.covers_required_checks and all(ok for _, ok in self.results)
 
     @property
     def qualified(self) -> bool:
         return self.passed and self.tier is not EvidenceTier.FIXTURE
 
 
-def required_checks(profile: ModelFamilyProfile) -> tuple[Check, ...]:
+def _witness_ref_ok(value: object, *, required: bool) -> bool:
+    """A witness reference must be a well-formed opaque string; the witnessed tiers need one."""
+    if not isinstance(value, str):
+        return False
+    if not value:
+        return not required
+    return _WITNESS_REF.fullmatch(value) is not None
+
+
+def required_checks_for_role(role: Role) -> tuple[Check, ...]:
     checks: list[Check] = [c for c in Check if c is not Check.REFERENCE_REPRODUCED]
-    if profile.role is Role.REFERENCE:
+    if Role(role) is Role.REFERENCE:
         checks.insert(0, Check.REFERENCE_REPRODUCED)
     return tuple(checks)
+
+
+def required_checks(profile: ModelFamilyProfile) -> tuple[Check, ...]:
+    return required_checks_for_role(profile.role)
 
 
 def build_record(
