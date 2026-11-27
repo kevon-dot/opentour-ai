@@ -226,3 +226,54 @@ def test_failed_archive_attestation_rolls_back_ingestion(named, monkeypatch):
     with pytest.raises(IntakeError):
         named.ingest(decision(decision_id="D2", event_id="E2"))
     assert live.snapshot(actor, named.workflow) == before
+
+
+@pytest.mark.parametrize("fault", ["withdraw", "rotate"])
+def test_authority_change_while_signing_rolls_back_page(named, monkeypatch, fault):
+    import sqlite3
+
+    import test_live_settings
+    from opentour_cell.pilot.live_authority import PrivateLiveAuthority
+    from test_live_evidence import decision
+    from test_live_settings import _write_private
+
+    path = named.directory / "live-evidence.sqlite3"
+
+    def persisted():
+        with sqlite3.connect(path) as db:
+            return tuple(db.iterdump())
+
+    before = persisted()
+    original = PrivateLiveAuthority._archive_mac
+
+    def change(key, revision, body):
+        value = original(key, revision, body)
+        if fault == "rotate":
+            new_key = bytes(v ^ 255 for v in key)
+            _write_private(named.directory / "live-authority-key.json", {"key": new_key.hex()})
+            monkeypatch.setattr(test_live_settings, "KEY", new_key)
+        else:
+            del named.grant["actors"][named.worker.worker.actor]
+        sign(named.h, named.grant)
+        return value
+
+    monkeypatch.setattr(PrivateLiveAuthority, "_archive_mac", staticmethod(change))
+    with pytest.raises(IntakeError):
+        named.ingest(decision(decision_id="D2", event_id="E2"))
+    assert persisted() == before
+
+
+@pytest.mark.parametrize("broken", ["[]", "null", "{", '{"snapshot": [], "grants": null}'])
+def test_malformed_archive_has_bounded_hold(named, broken):
+    import sqlite3
+
+    actor, scope, query = setup_query(named)
+    old = named.worker.source.live.snapshot(actor, named.workflow)
+    with sqlite3.connect(named.directory / "live-evidence.sqlite3") as db:
+        db.execute(
+            "UPDATE live_snapshots SET body=? WHERE tenant=? AND workflow=? "
+            "AND epoch=? AND sequence=?",
+            (broken, scope.tenant, scope.workflow_ref, scope.engagement_epoch, old.sequence),
+        )
+    with pytest.raises(IntakeError, match="outcome_history_unavailable"):
+        query(old)

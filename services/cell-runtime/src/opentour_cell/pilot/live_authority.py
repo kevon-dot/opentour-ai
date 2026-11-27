@@ -72,20 +72,21 @@ class PrivateLiveAuthority:
         _require(directory.is_absolute() and directory.resolve(strict=True) == directory)
         self.path = directory / f"live-authority-{workflow_ref}.json"
 
-    def _archive_mac(self, revision: str, body: dict[str, Any]) -> str:
-        keys = _read_private(self.directory / "live-authority-key.json", 4096)
-        _require(set(keys) == {"key"})
-        key = keys["key"]
-        _require(isinstance(key, str) and re.fullmatch("[0-9a-f]{64}", key))
-        purpose = hmac.digest(bytes.fromhex(key), b"opentour.live-aggregate-archive.v1", "sha256")
+    @staticmethod
+    def _archive_mac(key: bytes, revision: str, body: dict[str, Any]) -> str:
+        purpose = hmac.digest(key, b"opentour.live-aggregate-archive.v1", "sha256")
         return hmac.digest(purpose, _canonical([revision, body]).encode(), "sha256").hex()
 
     def _seal_snapshot_archive(self, scope: LiveScope, body: dict[str, Any]) -> dict[str, str]:
-        _require(scope.authority_revision == _digest(self._document()))
+        document, key = self._authenticated_document()
+        _require(scope.authority_revision == _digest(document))
+        mac = self._archive_mac(key, scope.authority_revision, body)
+        # Check again inside the live writer, before it can commit the page or form.
+        _require(self._authenticated_document() == (document, key))
         return {
             "version": "v1",
             "authority_revision": scope.authority_revision,
-            "mac": self._archive_mac(scope.authority_revision, body),
+            "mac": mac,
         }
 
     def _verify_snapshot_archive(self, body: dict[str, Any], seal: Any) -> None:
@@ -97,11 +98,14 @@ class PrivateLiveAuthority:
                 for k in ("authority_revision", "mac")
             )
         )
+        _, key = self._authenticated_document()
         _require(
-            hmac.compare_digest(seal["mac"], self._archive_mac(seal["authority_revision"], body))
+            hmac.compare_digest(
+                seal["mac"], self._archive_mac(key, seal["authority_revision"], body)
+            )
         )
 
-    def _document(self) -> dict[str, Any]:
+    def _authenticated_document(self) -> tuple[dict[str, Any], bytes]:
         keys = _read_private(self.directory / "live-authority-key.json", 4096)
         envelope = _read_private(self.path, 32768)
         _require(set(keys) == {"key"} and set(envelope) == {"grant", "seal_sha256"})
@@ -159,7 +163,10 @@ class PrivateLiveAuthority:
                     for g in body["grants"]
                 )
             )
-        return dict(body)
+        return dict(body), bytes.fromhex(key)
+
+    def _document(self) -> dict[str, Any]:
+        return self._authenticated_document()[0]
 
     @contextmanager
     def guard(self, actor: IntakePrincipal, workflow_ref: str) -> Iterator[LiveScope]:

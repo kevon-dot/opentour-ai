@@ -153,11 +153,18 @@ def compare_snapshots(
             _require(row is not None)
             try:
                 archived = json.loads(row[0])
-            except (TypeError, ValueError) as exc:
+            except (TypeError, ValueError, RecursionError) as exc:
                 raise IntakeError("outcome_history_unavailable") from exc
             _require(isinstance(archived, dict))
             seal = archived.pop("archive_authentication", None)
-            authority._verify_snapshot_archive(archived, seal)
+            _require(set(archived) == {"grants", "snapshot", "slack_verifiers"})
+            _require(isinstance(archived["grants"], list) and bool(archived["grants"]))
+            _require(isinstance(archived["snapshot"], dict))
+            _require(set(archived["snapshot"]) == set(LiveSnapshot.__dataclass_fields__))
+            try:
+                authority._verify_snapshot_archive(archived, seal)
+            except (TypeError, ValueError, RecursionError) as exc:
+                raise IntakeError("outcome_history_unavailable") from exc
             _require(archived["slack_verifiers"] == dict(bound.slack_verifiers))
             _require(
                 all(g in [asdict(current) for current in bound.grants] for g in archived["grants"])
