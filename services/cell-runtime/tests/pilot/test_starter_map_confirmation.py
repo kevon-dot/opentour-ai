@@ -447,8 +447,13 @@ def test_missing_frozen_plan_term_denies_before_authoring(joined, field):
 
 @pytest.mark.parametrize("omit_review", [False, True])
 def test_material_coverage_is_separate_from_permitted_owner_corrections(joined, omit_review):
-    _, session, _, _, _ = joined
+    h, session, _, _, _ = joined
     session.propose(FiveFamilies())
+    preview = session.review()["coverage_evidence"]
+    assert len(preview) == 3
+    assert all(
+        cell["state"] == "awaiting_freeze" and cell["reserved_families"] is None for cell in preview
+    )
     adjudicate(session)
     split = {
         f"family-{i}": "excluded" if omit_review and i in (0, 1) else "reserved" for i in range(5)
@@ -462,3 +467,109 @@ def test_material_coverage_is_separate_from_permitted_owner_corrections(joined, 
         "APPROVE": 1,
         "MANUAL": 2,
     }
+    before = {p.name: p.read_bytes() for p in h.path.parent.iterdir() if p.is_file()}
+    reopened = StarterCaseSession(session.settings, session.actor)
+    pack = reopened.review()
+    assert canonical(pack["frozen"]) == canonical(asdict(frozen))
+    assert pack["coverage_evidence"] == session.review()["coverage_evidence"]
+    cells = {cell["action"]: cell for cell in pack["coverage_evidence"]}
+    citations = {case["branch_id"]: case["citation"] for case in pack["cases"]}
+    assert set(cells) == {"APPROVE", "MANUAL", "REVIEW"}
+    for branch, action, count in frozen.coverage:
+        assert cells[action] == {
+            "branch_ref": branch,
+            "action": action,
+            "citation_ref": citations[branch],
+            "evidence_source": {"kind": "policy_citation", "reference": citations[branch]},
+            "critical": True,
+            "state": "covered" if count else "uncovered",
+            "reserved_families": count,
+            "next_evidence": None if count else "collect_independent_reserved_family",
+        }
+    assert reopened.freeze(splits=split, expected_revision=5) == frozen
+    assert {p.name: p.read_bytes() for p in h.path.parent.iterdir() if p.is_file()} == before
+
+
+def test_coverage_evidence_uses_reviewed_assertion_and_unresolved_map_dispositions(joined):
+    h, session, cap, maps, _ = joined
+    current = maps.preview(session.actor)
+    by_action = {row.action: row for row in current.branches}
+    approve = by_action["APPROVE"]
+    changed = maps.save(
+        session.actor,
+        expected_revision=current.review_revision,
+        operation_ref="coverage-owner-assertion",
+        changes=(
+            BranchEdit(approve.branch_ref, "corrected", "Owner confirmed the intended action"),
+            BranchEdit(
+                by_action["REVIEW"].branch_ref, "unresolved", "Requires policy clarification"
+            ),
+            BranchEdit(by_action["MANUAL"].branch_ref, "out_of_scope", "Outside this benchmark"),
+        ),
+    )
+    assert changed.confirmed_ref is not None
+    sign_case(
+        h.path.parent,
+        cap
+        | {
+            "map_confirmation_ref": changed.confirmed_ref,
+            "critical_branches": [approve.branch_ref],
+        },
+    )
+
+    class OneFamily:
+        def propose(self, snapshot):
+            (branch,) = (row for row in snapshot.branches if row.confirmed)
+            return (
+                ProposedCase(
+                    "generated-case",
+                    "generated-family",
+                    "generated-template",
+                    branch.branch_ref,
+                    (("po", "generated-order"), ("total", 12)),
+                    branch.action,
+                    "Generated owner review input",
+                    branch.citation_ref,
+                ),
+            )
+
+    session.propose(OneFamily())
+    cells = {row["branch_ref"]: row for row in session.review()["coverage_evidence"]}
+    assert cells[approve.branch_ref] == {
+        "branch_ref": approve.branch_ref,
+        "action": "APPROVE",
+        "citation_ref": approve.citation_ref,
+        "evidence_source": {"kind": "owner_assertion", "reference": changed.confirmed_ref},
+        "critical": True,
+        "state": "awaiting_freeze",
+        "reserved_families": None,
+        "next_evidence": None,
+    }
+    for action, state, next_evidence in (
+        ("REVIEW", "unresolved", "resolve_policy_clause"),
+        ("MANUAL", "out_of_scope", None),
+    ):
+        cell = cells[by_action[action].branch_ref]
+        assert cell["state"] == state and cell["next_evidence"] == next_evidence
+        assert cell["action"] is None and cell["reserved_families"] is None
+        assert not cell["critical"]
+
+
+def test_coverage_evidence_requires_current_named_owner_through_readback(joined, monkeypatch):
+    h, session, _, _, _ = joined
+    session.propose(FiveFamilies())
+    other = StarterCaseSession(session.settings, replace(session.actor, actor=OTHER))
+    with pytest.raises(IntakeError, match="starter_case_owner_required"):
+        other.review()
+    body_before = session.core.path.read_bytes()
+    review = session.core.review
+
+    def revoke_after_read(actor, work):
+        body = review(actor, work)
+        _write_private(h.path.parent / "starter-case-withdrawn-case-permission.json", {})
+        return body
+
+    monkeypatch.setattr(session.core, "review", revoke_after_read)
+    with pytest.raises(IntakeError):
+        session.review()
+    assert session.core.path.read_bytes() == body_before
