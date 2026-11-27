@@ -91,6 +91,36 @@ the original approved configuration and perform the drain/fence sequence. Do not
 fabricate a provider status to unblock it. A signed provider readback may resolve an unknown submission;
 if no valid readback exists, the request remains held. Past completed effects are preserved.
 
+## Read back an expired or paused ordinary request
+
+An admitted request with a lost reply can outlive the local review deadline. Ordinary
+`import` must continue to reject its old vote. For an authentic original provider observation,
+use `observe-fenced-status --input /private/tenant/signed-old-status.json`. This owner-local
+operation requires an expired request, an existing valid nonce fence, or a durably paused
+installation. It refuses an active unfenced request and a completed local decision; use the
+existing import path for a timely current vote.
+
+The observation verifies the archived original policy, signer, exact nonce and Zap revision,
+event time and named actor. It fences the nonce before recording Pending/Approved/Declined as
+historical provider state, without creating a release decision, sending a reminder or dispatching
+anything. A worker stop between fencing and the journal commit preserves an unknown hold; replay
+the same authenticated observation after restart. An unsigned status or unavailable original key
+cannot resolve that hold. A contradictory terminal observation cannot rewrite authenticated
+history. Its separate immutable digest receipt quarantines the request across restart; neither
+cutover nor a new request can bypass that hold. Repeated conflicting observations retain one
+receipt and owner-action item. The authorized operator must investigate the original provider
+evidence; this path offers no automatic conflict override. Keep saved reviewer replacement on `observe-replaced-status` and its saved-authority path.
+
+Once every ordinary request is accounted for, continue the cutover drill and obtain a fresh actual
+inspection and a new nonce. The old observation never transfers a vote to the new request. A retained terminal-event reservation
+must match the observed event identity; conflicting evidence is quarantined without inferring the
+original vote from a digest. An earlier Pending observation cannot settle that later reservation.
+Resolving remote uncertainty does not restore lost current authority: an authority-loss fence still
+requires its separate authorized recovery or saved reviewer-replacement path.
+`test_fenced_approval_readback.py` exercises generated lost replies, expiry, pause, restart, denial,
+conflicting history and the real bundled signer. These source tests do not qualify an installed
+provider readback or a customer delivery.
+
 ## Saved reviewer replacement
 
 Keep the original policy and signer available, including their private filenames. An authorized
