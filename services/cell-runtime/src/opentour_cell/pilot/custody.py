@@ -14,7 +14,9 @@ from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 
+from opentour_cell.pilot.engagement_epochs import EngagementError, EngagementLedger
 from opentour_cell.pilot.slack_adapter import withdraw_for_custody
+from opentour_cell.pilot.text_classifier import TrainingError
 from opentour_cell.pilot.training import LocalTrainingStore, _check_directory, _check_file
 from opentour_cell.pilot.training_data import identifier
 
@@ -85,6 +87,7 @@ _PRIVATE_STATE = {
         "Account for readiness and repair assessments and their separately named private policy.",
     ),
 }
+_ENGAGEMENT_LEDGER = ("engagement-epochs.sqlite3", "engagement-fences.jsonl")
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS closeout (
  singleton INTEGER PRIMARY KEY CHECK(singleton=1), organization TEXT NOT NULL,
@@ -251,14 +254,16 @@ class Closeout:
         if trigger not in TRIGGERS:
             raise CustodyError("invalid_trigger")
         _date(due)
+        minimal: dict[str, Any] | None = None
         with self._db(create=True) as db:
             old = db.execute("SELECT * FROM closeout WHERE singleton=1").fetchone()
             binding = (self.organization, agreement, custodian, support, due, revision, trigger)
-            if old:
+            if old and old["minimized"]:
                 self._row(db)
-                if old["minimized"]:
-                    self._store(old)
-                    return self._minimal(old)
+                self._store(old)
+                minimal = self._minimal(old)
+            elif old:
+                self._row(db)
                 columns = (
                     "organization",
                     "agreement",
@@ -297,7 +302,26 @@ class Closeout:
                     due,
                     detail="Confirm support contact, handoff date and outstanding duties.",
                 )
+        if minimal is not None:
+            self._retire_engagement_epoch(minimal["engagement"])
+            return minimal
         return self.reconcile()
+
+    def _retire_engagement_epoch(self, engagement: str) -> None:
+        """Bridge withdrawal to the engagement ledger after the closeout hold has committed.
+
+        The epoch is this closeout's committed engagement and the revocation epoch is the
+        ledger's own, so no operator argument selects either. The ledger persists the terminal
+        state before it frees the slot; repeating after any interruption completes the release.
+        """
+        if not any(os.path.lexists(self.directory / name) for name in _ENGAGEMENT_LEDGER):
+            return
+        try:
+            ledger = EngagementLedger(self.directory)
+            if ledger.get(self.organization, engagement) is not None:
+                ledger.retire(self.organization, engagement)
+        except (EngagementError, TrainingError, OSError, sqlite3.Error):
+            raise CustodyError("engagement_ledger_unavailable") from None
 
     def reconcile(self) -> dict[str, Any]:
         # Persist the hold on closeout if a journal, training file or inventory cannot be verified.
@@ -305,8 +329,12 @@ class Closeout:
             row = self._row(db)
             if row["minimized"]:
                 self._store(row)
-                return self._minimal(row)
-            db.execute("UPDATE closeout SET reconciled=0 WHERE singleton=1")
+            else:
+                db.execute("UPDATE closeout SET reconciled=0 WHERE singleton=1")
+        # Outside any closeout transaction: the ledger takes its own withdrawal lock.
+        self._retire_engagement_epoch(row["engagement"])
+        if row["minimized"]:
+            return self._minimal(row)
         with self._db() as db:
             row = self._row(db)
             store = self._store(row)
