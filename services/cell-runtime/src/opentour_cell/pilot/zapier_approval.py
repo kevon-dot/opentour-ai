@@ -2169,7 +2169,7 @@ class ApprovalBridge:
     def consume(self, envelope: Json) -> Json:
         with self._serialized() as journal:
             try:
-                result = self._consume(envelope)
+                result, request, policy = self._consume(envelope)
             except ApprovalError as error:
                 if str(error) == "conflicting_provider_event":
                     request_id = envelope["event"]["request_id"]
@@ -2186,14 +2186,17 @@ class ApprovalBridge:
                         )
                         journal.transition(request_id, "held", str(error), event["status"])
                 raise
-            policy, key = self._policy()
-            journal.record(self._request(result["request_id"], policy, key), policy)
+            if result["state"] == "pending":
+                require(int(time.time()) < request["expires_at"], "request_expired")
+            # A terminal receipt admitted by the effect writer remains terminal if
+            # the request clock expires before bookkeeping. Reuse its verified scope.
+            journal.record(request, policy)
             journal.transition(
                 result["request_id"], result["state"], None, envelope["event"]["status"]
             )
             return result
 
-    def _consume(self, envelope: Json) -> Json:
+    def _consume(self, envelope: Json) -> tuple[Json, Json, Json]:
         p, key = self._policy()
         require(
             set(envelope) == {"event", "signature"}
@@ -2245,7 +2248,7 @@ class ApprovalBridge:
                     "conflicting_provider_event",
                 )
             if event["status"] == "Pending":
-                return {"request_id": request_id, "state": "pending"}
+                return {"request_id": request_id, "state": "pending"}, req, p
             require(
                 event["actor_id"] == p["reviewer"]
                 or (event["actor_id"] is None and p["approver_mode"] == "verified_single_approver"),
@@ -2278,12 +2281,17 @@ class ApprovalBridge:
                 **{k: req[k] for k in BIND},
                 decision=decision,
                 provider="zapier_slack",
+                provider_request_expires_at=req["expires_at"],
             )
-            return {
-                "request_id": request_id,
-                "state": decision,
-                "release_receipt_sha256": digest(receipt),
-            }
+            return (
+                {
+                    "request_id": request_id,
+                    "state": decision,
+                    "release_receipt_sha256": digest(receipt),
+                },
+                req,
+                p,
+            )
 
     def import_ready(self) -> Json:
         """Drain signed files from the customer's private, preconfigured return transport."""
