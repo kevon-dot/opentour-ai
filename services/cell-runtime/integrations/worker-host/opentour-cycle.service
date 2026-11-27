@@ -1,0 +1,25 @@
+[Unit]
+Description=OpenTour autonomous cycle worker
+
+[Service]
+User=opentour-worker
+Group=opentour-worker
+EnvironmentFile=/etc/opentour-worker/site.env
+EnvironmentFile=-/etc/opentour-worker/cycle.env
+ExecStart=/opt/opentour/python/bin/python3 -I -B /opt/opentour/current/opentour-slack.pyz cycle-worker --directory /var/lib/opentour-worker --organization ${ORGANIZATION} --config /var/lib/opentour-worker/cycle.json --interval 300
+Restart=always
+RestartSec=300
+UMask=0077
+StateDirectory=opentour-worker opentour-antirollback
+StateDirectoryMode=0700
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+StandardOutput=null
+InaccessiblePaths=-/etc/opentour-health
+ReadOnlyPaths=-/var/lib/opentour-worker/model-base
+
+[Install]
+WantedBy=multi-user.target

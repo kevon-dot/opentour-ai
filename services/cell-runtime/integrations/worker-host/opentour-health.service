@@ -15,6 +15,7 @@ PrivateTmp=yes
 NoNewPrivileges=yes
 CapabilityBoundingSet=
 InaccessiblePaths=-/var/lib/opentour-worker
+InaccessiblePaths=-/var/lib/opentour-antirollback
 MemoryMax=128M
 TasksMax=16
 
