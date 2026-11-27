@@ -273,6 +273,10 @@ class FreshConfirmation:
     selection_digest: str
     manifest_digest: str
     attestation: str = ""
+    # Binding to the exact candidate and arm confirmed; empty never matches a real candidate.
+    candidate_id: str = ""
+    identity_digest: str = ""
+    arm_id: str = ""
 
 
 def confirmation_body(c: FreshConfirmation) -> dict[str, Any]:
@@ -281,6 +285,9 @@ def confirmation_body(c: FreshConfirmation) -> dict[str, Any]:
         "authenticated": c.authenticated,
         "selection_digest": c.selection_digest,
         "manifest_digest": c.manifest_digest,
+        "candidate_id": c.candidate_id,
+        "identity_digest": c.identity_digest,
+        "arm_id": c.arm_id,
     }
 
 
@@ -645,6 +652,10 @@ def evaluate(packet: StagingPacket, authority: VerdictAuthority | None = None) -
             or not fresh.authenticated
             or fresh.selection_digest != cand.selection_digest
             or fresh.manifest_digest != bench.digest
+            or not cand.candidate_id
+            or fresh.candidate_id != cand.candidate_id
+            or fresh.identity_digest != cand.identity_digest
+            or fresh.arm_id != TUNED
             or _same_actor(fresh.actor_id, cand.producer_id, cand.selector_id)
             or authority is None
             or not authority.verify_confirmation(fresh)

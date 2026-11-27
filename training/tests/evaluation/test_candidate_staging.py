@@ -447,7 +447,15 @@ def test_f3_changed_choice_needs_fresh_confirmation_from_other_actor() -> None:
     changed = replace(p.candidate, selection_digest="sha256:" + "6" * 64)
     assert "fresh_confirmation_required" in reasons(replace(p, candidate=changed))
     good = attest_confirmation(
-        FreshConfirmation("generated-owner", True, changed.selection_digest, p.benchmark.digest)
+        FreshConfirmation(
+            "generated-owner",
+            True,
+            changed.selection_digest,
+            p.benchmark.digest,
+            candidate_id=changed.candidate_id,
+            identity_digest=changed.identity_digest,
+            arm_id=TUNED,
+        )
     )
     assert evaluate(replace(p, candidate=changed, fresh_confirmation=good)).outcome == "eligible"
     for bad in (
@@ -458,6 +466,9 @@ def test_f3_changed_choice_needs_fresh_confirmation_from_other_actor() -> None:
         replace(good, selection_digest="sha256:" + "7" * 64),  # tampered after attestation
         replace(good, attestation=""),
         attest_confirmation(replace(good, actor_id="generated-unregistered")),
+        attest_confirmation(replace(good, candidate_id="generated-candidate-2")),
+        attest_confirmation(replace(good, identity_digest="sha256:" + "e" * 64)),
+        attest_confirmation(replace(good, arm_id=INCUMBENT)),
     ):
         assert "fresh_confirmation_required" in reasons(
             replace(p, candidate=changed, fresh_confirmation=bad)
@@ -851,3 +862,52 @@ def test_i3_self_asserted_flags_are_inside_the_attested_bodies() -> None:
         other_c = attest_confirmation(replace(conf, authenticated=flipped))
         assert not AUTH.verify_confirmation(replace(att_c, attestation=other_c.attestation))
     assert confirmation_body(conf)["authenticated"] is False
+
+
+def _other_candidate_packet(p: StagingPacket, *, new_identity: bool) -> StagingPacket:
+    """A second candidate claiming the same selection digest (and optionally its own identity)."""
+    cand = replace(p.candidate, candidate_id="generated-candidate-2")
+    if not new_identity:
+        return replace(p, candidate=cand)
+    ident = "sha256:" + "e" * 64
+    run_t = replace(p.runs[TUNED], serving_identity_digest=ident)
+    runs = {**p.runs, TUNED: run_t}
+    verdicts = tuple(
+        verdict(TUNED, run_t, p.benchmark) if v.arm_id == TUNED else v for v in p.verdicts
+    )
+    cand = replace(cand, identity_digest=ident, producer_id="generated-trainer-2")
+    return replace(p, candidate=cand, runs=runs, verdicts=verdicts)
+
+
+def _bound(c: CandidateRecord, p: StagingPacket) -> FreshConfirmation:
+    return attest_confirmation(
+        FreshConfirmation(
+            "generated-owner",
+            True,
+            c.selection_digest,
+            p.benchmark.digest,
+            candidate_id=c.candidate_id,
+            identity_digest=c.identity_digest,
+            arm_id=TUNED,
+        )
+    )
+
+
+def test_j1_confirmation_cannot_be_replayed_against_another_candidate() -> None:
+    p = packet()
+    a = replace(p.candidate, selection_digest="sha256:" + "6" * 64)
+    pa = replace(p, candidate=a, fresh_confirmation=_bound(a, p))
+    assert evaluate(pa).outcome == "eligible"  # honest confirmation for its own candidate
+    for new_identity in (False, True):
+        other = _other_candidate_packet(pa, new_identity=new_identity)
+        assert other.candidate.selection_digest == a.selection_digest
+        out = evaluate(other)
+        assert out.outcome == "hold" and "fresh_confirmation_required" in out.reasons
+    # an unbound (legacy-shape) confirmation never confirms anything
+    legacy = attest_confirmation(
+        FreshConfirmation("generated-owner", True, a.selection_digest, p.benchmark.digest)
+    )
+    assert "fresh_confirmation_required" in reasons(replace(pa, fresh_confirmation=legacy))
+    # binding fields are inside the attested body
+    for field_name in ("candidate_id", "identity_digest", "arm_id"):
+        assert field_name in confirmation_body(pa.fresh_confirmation)  # type: ignore[arg-type]
