@@ -31,6 +31,7 @@ Json = dict[str, Any]
 AUTHORITY = "opentour.pilot.owner-settings-authority.v2"
 CLAIM = "opentour.pilot.reviewer-assignment.v1"
 RECEIPT = "opentour.pilot.reviewer-assignment-receipt.v1"
+RECOVERY = "opentour.pilot.owner-review-recovery.v1"
 HEX = re.compile(r"[0-9a-f]{64}")
 
 
@@ -511,6 +512,238 @@ class ReviewerAssignments:
                     for row in rows
                 ],
             }
+
+    def owner_recovery(
+        self, run_id: str, run_revision: str, artifact_sha: str, *, actor: str
+    ) -> Json | None:
+        """Read one current recovery item from the saved proposal, regardless of projection."""
+        _need(
+            isinstance(run_id, str)
+            and re.fullmatch(r"run-[0-9a-f]{32}", run_id)
+            and isinstance(run_revision, str)
+            and HEX.fullmatch(run_revision)
+            and isinstance(artifact_sha, str)
+            and HEX.fullmatch(artifact_sha),
+            "invalid_review_recovery_scope",
+        )
+        s = self.settings
+        with s.ledger._authorized_db(write=False) as db:
+            authority = s._authority(actor)
+            _need(
+                actor
+                in {authority["workflow_owner"], authority["custodian"], authority["operator"]},
+                "review_recovery_actor_required",
+            )
+            head = s._head(db)
+            _need(
+                head is not None
+                and head["authority_revision"] == digest(authority)
+                and head["workflow_owner_role_revision"]
+                == role_revision(authority, s.organization, s.engagement),
+                "current_settings_authority_required",
+            )
+            assert head is not None
+            replacement = head.get("reviewer_replacement")
+            if replacement is None:
+                return None
+            _need(
+                isinstance(replacement, dict) and replacement["generation"] == head["revision"],
+                "review_recovery_record_unavailable",
+            )
+            entries = [entry for entry in replacement["proposals"] if entry["run_id"] == run_id]
+            if not entries:
+                return None
+            _need(len(entries) == 1, "review_recovery_record_unavailable")
+            reference = entries[0]["reconciliation_ref"]
+            document = self._replacement(db, run_id)
+            queued = db.execute(
+                "SELECT document,state FROM reviewer_reconciliation WHERE scope=? AND id=?",
+                (s.ledger.scope, reference),
+            ).fetchone()
+            _need(
+                document is not None
+                and queued is not None
+                and queued["state"] in {"pending", "projected"}
+                and parse_manifest(str(queued["document"]).encode()) == document
+                and reference == "review-reconcile-" + digest(document)
+                and document["generation"] == head["revision"]
+                and document["organization"] == s.organization
+                and document["engagement"] == s.engagement
+                and document["run_id"] == run_id
+                and document["run_revision"] == run_revision
+                and document["artifact_sha"] == artifact_sha,
+                "review_recovery_record_unavailable",
+            )
+            assert document is not None
+            reason = document["state"]
+            actions = {
+                "fresh_successor_inspection_required": "check_reviewer_replacement_reconciliation",
+                "review_reauthorization_required": "reauthorize_named_reviewer",
+            }
+            _need(reason in actions, "review_recovery_record_unavailable")
+            decision_path = s.directory / "managed-outputs" / run_id / "release-decision.json"
+            if os.path.lexists(decision_path):
+                try:
+                    completed = self._historical_terminal(document, decision_path)
+                except (OSError, ValueError, KeyError, TypeError, sqlite3.Error):
+                    completed = False
+                if completed:
+                    return None
+            _need(s._authority(actor) == authority, "current_settings_authority_required")
+            return {
+                "schema_version": RECOVERY,
+                "recovery_ref": reference,
+                "proposal_ref": run_id,
+                "settings_generation": head["revision"],
+                "state": "review_on_hold",
+                "reason": reason,
+                "next_action": actions[reason],
+            }
+
+    def _historical_terminal(self, document: Json, decision_path: Path) -> bool:
+        """Authenticate the archived original presentation without reopening its grant."""
+        from opentour_cell.pilot.receipt_recovery import _JournalSnapshot, _open_db
+
+        decision = repair_workflow._private_json(decision_path)
+        policy = document["release_review"]
+        original = document["original_reviewer"]
+        presentation = decision.get("presentation_id")
+        if not (
+            isinstance(presentation, str)
+            and decision.get("inspection_ref") == presentation
+            and decision.get("decision") in {"approved", "changes_requested"}
+            and all(
+                decision.get(key) == document[key]
+                for key in ("organization", "run_id", "run_revision", "artifact_sha")
+            )
+            and decision.get("reviewer") == original
+            and all(
+                decision.get(key) == policy[key]
+                for key in ("provider", "team", "channel", "audience")
+            )
+            and not {"generation", "reviewer_grant_revision"}.intersection(decision)
+        ):
+            return False
+        ledger = self.settings.directory / "slack-pilot.sqlite3"
+        with _open_db(ledger) as db:
+            if db is None:
+                return False
+            identity = db.execute("SELECT binding FROM identity WHERE id=1").fetchone()
+            row = db.execute(
+                "SELECT p.snapshot FROM presentations p JOIN exposures e ON e.id=p.id "
+                "WHERE p.id=? AND p.actor=? AND e.status='presented'",
+                (presentation, original),
+            ).fetchone()
+            if identity is None or row is None:
+                return False
+            journal = _JournalSnapshot(db, ledger, identity[0])
+            journal._seal(db, "presentation", presentation)
+            seen = parse_manifest(str(row[0]).encode())
+            expected = {
+                "organization": document["organization"],
+                "engagement": document["engagement"],
+                "job_id": document["run_id"],
+                "run_revision": document["run_revision"],
+                "model_revision": document["artifact_sha"],
+                "dataset_revision": document["dataset_revision"],
+                "viewer": original,
+                "release_reviewer": original,
+                "release_provider": policy["provider"],
+                "team": policy["team"],
+                "channel": policy["channel"],
+                "recipient": policy["audience"],
+            }
+            if not all(seen.get(key) == value for key, value in expected.items()):
+                return False
+        return self._original_terminal_event(document, decision)
+
+    def _original_terminal_event(self, document: Json, decision: Json) -> bool:
+        """Bind the recorded decision to the original authenticated Zapier reservation."""
+        from opentour_cell.pilot.receipt_recovery import _open_db
+        from opentour_cell.pilot.zapier_approval import BIND, EVENT, REQ, REQUEST
+
+        if document["release_review"]["provider"] != "zapier_slack":
+            return False
+        directory = self.settings.directory
+        candidates = []
+        for request_id in document["expired_request_ids"]:
+            if not isinstance(request_id, str) or not REQ.fullmatch(request_id):
+                return False
+            wrapped = repair_workflow._private_json(
+                directory / f"zapier-approval-{request_id}-request.json"
+            )
+            fingerprint = digest(wrapped)
+            if fingerprint != document["request_fingerprints"].get(request_id):
+                return False
+            request = wrapped["request"]
+            if (
+                request["request_id"] == request_id
+                and request["schema_version"] == REQUEST
+                and request["engagement"] == document["engagement"]
+                and all(request[key] == decision[key] for key in (*BIND, "run_id"))
+                and not {"generation", "reviewer_grant_revision"}.intersection(request)
+            ):
+                candidates.append((request, fingerprint))
+        if len(candidates) != 1:
+            return False
+        request, fingerprint = candidates[0]
+        request_id = request["request_id"]
+        ledger = directory / "zapier-reconciliation.sqlite3"
+        with _open_db(ledger) as db:
+            if db is None:
+                return False
+            tenant = db.execute(
+                "SELECT value FROM installation WHERE key='organization'"
+            ).fetchone()
+            saved = db.execute(
+                "SELECT r.request,v.wrapper_sha256,p.document FROM requests r "
+                "JOIN verified_requests v USING(id) JOIN policies p ON p.revision=? WHERE r.id=?",
+                (request["policy_revision"], request_id),
+            ).fetchone()
+            if (
+                tenant is None
+                or tenant[0] != document["organization"]
+                or saved is None
+                or saved[1] != fingerprint
+                or parse_manifest(str(saved[0]).encode()) != request
+            ):
+                return False
+            policy = parse_manifest(str(saved[2]).encode())
+        if (
+            digest(policy) != request["policy_revision"]
+            or policy["organization"] != document["organization"]
+            or any(
+                policy[key] != request[key]
+                for key in ("reviewer", "team", "channel", "audience", "engagement")
+            )
+            or policy["approver_mode"] not in {"verified_actor", "verified_single_approver"}
+        ):
+            return False
+        status = "Approved" if decision["decision"] == "approved" else "Declined"
+        event = {
+            "schema_version": EVENT,
+            "request_id": request_id,
+            "nonce": request["nonce"],
+            "zap_id": policy["zap_id"],
+            "zap_version": policy["zap_version"],
+            "event_id": request_id + "." + status.lower(),
+            "status": status,
+            "actor_id": request["reviewer"],
+        }
+        identities = {digest(event)}
+        if policy["approver_mode"] == "verified_single_approver":
+            identities.add(digest({**event, "actor_id": None}))
+        stamp = repair_workflow._private_json(
+            directory / f"zapier-approval-{request_id}-event.json"
+        )
+        return (
+            set(stamp) == {"event_identity", "first_event_sha256", "request_id"}
+            and stamp["request_id"] == request_id
+            and isinstance(stamp["first_event_sha256"], str)
+            and bool(HEX.fullmatch(stamp["first_event_sha256"]))
+            and isinstance(stamp["event_identity"], str)
+            and stamp["event_identity"] in identities
+        )
 
     def acknowledge_reconciliation(
         self, reference: str, document_sha256: str, *, actor: str
