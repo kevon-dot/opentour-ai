@@ -89,23 +89,32 @@ class StarterReconnect:
         return cap
 
     def _idle(self, execution: str) -> None:
-        # Restored local adapter receipts can survive a missing scoring journal.
-        # Reconnect is not an instruction to restart an uncertain execution.
-        for filename in (
-            "starter-local-predictions.sqlite3",
-            "starter-comparator-receipts.sqlite3",
-        ):
-            with _open_db(self.directory / filename) as db:
-                if db is not None:
+        # An edited adapter identity cannot prove a surviving receipt unrelated.
+        with _open_db(self.directory / "starter-evaluations.sqlite3") as scoring:
+            for filename in (
+                "starter-local-predictions.sqlite3",
+                "starter-comparator-receipts.sqlite3",
+            ):
+                with _open_db(self.directory / filename) as db:
+                    if db is None:
+                        continue
                     _require(_has_table(db, "receipts"))
-                    _require(
-                        db.execute(
-                            "SELECT 1 FROM receipts "
-                            "WHERE json_extract(body,'$.request.execution_ref')=? LIMIT 1",
-                            (execution,),
+                    for row in db.execute(
+                        "SELECT operation, json_extract(body, '$.request') AS request FROM receipts"
+                    ):
+                        _require(scoring is not None)
+                        assert scoring is not None
+                        original = scoring.execute(
+                            "SELECT request, json_extract(request, '$.execution_ref') AS execution "
+                            "FROM predictions WHERE ref=?",
+                            (row["operation"],),
                         ).fetchone()
-                        is None
-                    )
+                        _require(
+                            original is not None
+                            and row["request"] == original["request"]
+                            and isinstance(original["execution"], str)
+                            and original["execution"] != execution
+                        )
 
     def entry(self, execution_ref: str, *, expected_revision: str) -> Json | None:
         try:
@@ -151,6 +160,9 @@ class StarterReconnect:
             )
             self._idle(execution_ref)
             _require(intake.get_run(setup.principal, permission.run_ref) == current)
+            _require(
+                self.session.summary(execution_ref, expected_revision=expected_revision) == summary
+            )
             _require(self._grant(execution_ref, expected_revision) == cap)
             self.session.settings().permission(actor.actor, "inspect")
             return {

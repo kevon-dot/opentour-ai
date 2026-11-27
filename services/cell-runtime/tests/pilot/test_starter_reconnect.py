@@ -5,6 +5,7 @@ import json
 import sqlite3
 from dataclasses import replace
 
+import pytest
 from opentour_cell.pilot.intake_admission import DurableIntake
 from opentour_cell.pilot.operating_point import canonical, digest
 from opentour_cell.pilot.starter_evaluation_authority import StarterInspectionAuthority
@@ -135,9 +136,27 @@ def test_recorded_score_or_restored_adapter_receipt_denies_reconnect(installed):
             (p.execution_ref,),
         ).fetchone() == (1,)
     assert inspect() is None
+    for name in ("starter-local-predictions.sqlite3", "starter-comparator-receipts.sqlite3"):
+        with sqlite3.connect(directory / name) as db:
+            assert (
+                db.execute(
+                    "UPDATE receipts SET body="
+                    "json_set(body,'$.request.execution_ref','other-execution')"
+                ).rowcount
+                == 1
+            )
+    assert inspect() is None
 
 
-def test_withdrawal_during_readback_cannot_disclose_reconnect(installed, monkeypatch):
+@pytest.mark.parametrize(
+    "marker",
+    [
+        "starter-reconnect-withdrawn-generated-reconnect.json",
+        "starter-evaluation-withdrawn-inspection-a.json",
+        "starter-case-withdrawn-case-permission.json",
+    ],
+)
+def test_withdrawal_during_readback_cannot_disclose_reconnect(installed, monkeypatch, marker):
     directory, *_ = installed
     cap, write, inspect = configure(installed)
     write(cap)
@@ -145,7 +164,7 @@ def test_withdrawal_during_readback_cannot_disclose_reconnect(installed, monkeyp
 
     def withdrawn(self, execution):
         idle(self, execution)
-        (directory / "starter-reconnect-withdrawn-generated-reconnect.json").touch(mode=0o600)
+        (directory / marker).touch(mode=0o600)
 
     monkeypatch.setattr(StarterReconnect, "_idle", withdrawn)
     assert inspect() is None
