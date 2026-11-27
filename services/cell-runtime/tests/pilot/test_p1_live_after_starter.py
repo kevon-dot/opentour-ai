@@ -116,8 +116,8 @@ def test_p1_invoice_commit_then_independent_truth(p1_frozen_from_home, monkeypat
     _write_private(scope, selected | {"tenant": tenant})
     emit(scope, "initialize")
     attempt(scope, "operation-D1", "attempt-1")
-    commit(scope, "D1", "attempt-1", action="SUPPLIES", success=False)
-    commit(scope, "D1", "attempt-1", action="review")
+    commit(scope, "D1", "attempt-1", action="unsupported-invoice-action", success=False)
+    commit(scope, "D1", "attempt-1", action="supplies")
     receipt, page = export_page(scope, "invoice-page", 10, 11)
     install_application_page(directory, body, scope, receipt, page)
     selection = directory / "live-worker.json"
@@ -190,7 +190,7 @@ def test_p1_invoice_commit_then_independent_truth(p1_frozen_from_home, monkeypat
     [root] = first.verified_roots
     assert (root.decision_id, root.action_ref, root.verified_action_ref) == (
         "D1",
-        "review",
+        "supplies",
         "FREIGHT",
     )
     verify("reopened")
