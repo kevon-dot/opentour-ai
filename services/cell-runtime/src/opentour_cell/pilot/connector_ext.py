@@ -13,6 +13,12 @@ contract, no key custody and no authority that confirms it. ``Usage`` is likewis
 ``settleable`` is a guard for a consumer to apply, and no code in this package consumes it yet.
 The frozen dataclasses here cannot be made tamper-proof in Python (``object.__setattr__``
 bypasses ``frozen``), so neither type is a proof of anything on its own.
+
+Precondition on the caller: these objects are assumed NOT to cross a trust boundary. The
+guarantees below hold only while every ``Usage`` and ``QualificationRecord`` is built and read
+inside one trusted process by code that does not forge them. If they are ever stored, sent or
+accepted from another party, they need a signing contract (signature plus key custody) that does
+not exist in this project; until then, treat any received instance as unverified.
 """
 
 from __future__ import annotations
@@ -41,7 +47,18 @@ class UsageSource(StrEnum):
 
 @dataclass(frozen=True)
 class Usage:
-    """Resources a job actually incurred. ``ESTIMATED`` usage can never settle as actual spend."""
+    """Resources a job actually incurred. ``ESTIMATED`` usage can never settle as actual spend.
+
+    Enforcement status: this type only records the settleable/estimated distinction. No code in
+    ``src`` reads ``settleable`` or ``UsageSource`` today, so the guard protects nothing until a
+    settlement path checks it. Any future settlement path MUST check ``settleable``.
+
+    What construction does enforce: a known ``UsageSource``, non-empty string ``job_ref`` and
+    ``currency``, non-negative ``int`` counts and a ``bool`` ``irreversible``. Known limits: there
+    is no upper bound (``incurred_minor_units=10**30`` is accepted), ``currency`` and ``job_ref``
+    have no format check (``"x"`` and ``" "`` pass), and the instance is a caller-asserted value
+    that ``object.__setattr__`` can alter.
+    """
 
     job_ref: str
     currency: str

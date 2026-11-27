@@ -110,6 +110,18 @@ A fixture result never satisfies a provider, installed-model or customer gate.
   rows and steps only on completion. A corrupt or malformed `completed` event also reads as `None`. Only a `COMPLETED`
   job reports `MEASURED` usage.
 
+### Precondition on the caller
+
+The guarantees above assume `QualificationRecord` and `Usage` objects do not cross a trust boundary: they are built and
+read inside one trusted process by code that does not forge them. There is no signature and no key custody in this
+project, so the ceiling is caller-asserted and digest self-consistent. If these objects are ever stored, sent or accepted
+from another party, they need a signing contract first. The field checks above are a real floor against malformed or
+inconsistent records; they are not proof that any run happened.
+
+`Usage.settleable` and `UsageSource` are currently consumed by nothing in `src`. The type records the settleable/estimated
+distinction, but no caller acts on it, so any future settlement path must check it. `Usage` also accepts an unbounded
+`incurred_minor_units` and has no format check on `currency` or `job_ref` (known limits, not fixed here).
+
 ## Error codes
 
 Besides the connector's own refusal codes, these are raised by the shared value types:

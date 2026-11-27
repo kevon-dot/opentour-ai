@@ -20,6 +20,12 @@ missing-pin gate, and (for the witnessed tiers) carries a ``witness_ref`` of a d
 record is a frozen dataclass and Python cannot make that tamper-proof (``object.__setattr__``
 bypasses it), so a consumer that needs authority must obtain it from a signed or journaled source
 outside this module, not from a record's own fields.
+
+Precondition on the caller: records are assumed NOT to cross a trust boundary. The checks above
+hold only while the record is built and read inside one trusted process by code that does not
+forge it. If a record is ever stored, transmitted or accepted from another party it needs signing
+(signature and key custody), which this project does not have. These checks are a real floor
+(coverage, normalized generated-family ban, ``witness_ref`` and ``revision`` shape), not a proof.
 """
 
 from __future__ import annotations
