@@ -78,6 +78,9 @@ ACTIONS = {
     "ot_case_citation",
     "ot_case_back",
     "ot_starter_score_choice",
+    "ot_score_next",
+    "ot_score_previous",
+    "ot_score_reconnect",
     "ot_case_clause_page",
     "ot_case_commit",
     "ot_choose_map",
@@ -2653,13 +2656,50 @@ class Workbench:
         except (ImportError, OSError, KeyError, TypeError, ValueError, sqlite3.Error):
             return "", []
 
-    def _open_starter_score(self, cfg: Settings, actor: str, view: str, entry: Json) -> None:
+    def _open_starter_score(
+        self,
+        cfg: Settings,
+        actor: str,
+        view: str,
+        entry: Json,
+        *,
+        page: int = 0,
+        previous: Json | None = None,
+        old_hash: str = "",
+    ) -> None:
         execution = entry["execution_ref"]
         session = self._starter_score_session(actor)
         _check(session.entry(execution) == entry)
         summary = session.summary(execution, expected_revision=entry["revision"])
+
+        def permission() -> Json | None:
+            if summary["state"] != "frozen_unscored":
+                return None
+            try:
+                from opentour_cell.pilot.starter_reconnect import StarterReconnect
+
+                return StarterReconnect(session).entry(
+                    execution, expected_revision=entry["revision"]
+                )
+            except (ImportError, OSError, ValueError, KeyError, TypeError, sqlite3.Error):
+                return None
+
+        reconnect = permission()
+        pin = self.journal.opaque("starter-page", [actor, entry, summary])
+        if previous is not None:
+            _check(previous["pin"] == pin)
+        if page == 2:
+            _check(
+                previous
+                and reconnect
+                and reconnect["state"] == "setup_required"
+                and previous["reconnect"] == reconnect["revision"]
+            )
+        state = dict(
+            entry=entry, pin=pin, page=page, reconnect=reconnect["revision"] if reconnect else None
+        )
         token = self.journal.context(
-            actor, cfg.channel, view, "starter_score", execution, entry["revision"]
+            actor, cfg.channel, view, "starter_score", execution, _json(state)
         )
 
         def authorize() -> None:
@@ -2667,10 +2707,14 @@ class Workbench:
             _check(
                 current.entry(execution) == entry
                 and current.summary(execution, expected_revision=entry["revision"]) == summary
+                and (reconnect is None or permission() == reconnect)
             )
 
         self._show(
-            view, self.views.starter_score_readout(token, entry, summary), authorize=authorize
+            view,
+            self.views.starter_score_readout(token, entry, summary, page=page, reconnect=reconnect),
+            old_hash,
+            authorize=authorize,
         )
 
     def _case_session(self, actor: str) -> tuple[StarterCaseSession, StarterCaseEntry]:
@@ -3276,12 +3320,35 @@ class Workbench:
         old_hash: str,
     ) -> None:
         job = ctx["job"]
+        if ctx["kind"] == "starter_score":
+            _check(isinstance(old_hash, str) and bool(old_hash))
+            state = json.loads(ctx["revision"])
+            page = state["page"]
+            if action == "ot_score_next":
+                _check(value == "next" and page == 0)
+                target = 1
+            elif action == "ot_score_previous":
+                _check(value == "previous" and page in (1, 2))
+                target = page - 1
+            else:
+                _check(
+                    action == "ot_score_reconnect"
+                    and value == "setup"
+                    and page == 1
+                    and state["reconnect"]
+                )
+                target = 2
+            _check(state["entry"]["execution_ref"] == ctx["job"])
+            self._open_starter_score(
+                cfg, actor, view, state["entry"], page=target, previous=state, old_hash=old_hash
+            )
+            return
         if ctx["kind"] == "starter_scores":
             version, items = self._starter_scores(actor)
             _check(action == "ot_starter_score_choice" and version and version == ctx["revision"])
             selected = [item for item, token in items if value == token]
             _check(len(selected) == 1)
-            self._open_starter_score(cfg, actor, view, selected[0])
+            self._open_starter_score(cfg, actor, view, selected[0], old_hash=old_hash)
             return
         if ctx["kind"] in {"case_entry", "case_detail", "case_clause", "case_preview"}:
             self._case_action(cfg, actor, view, ctx, action, value)

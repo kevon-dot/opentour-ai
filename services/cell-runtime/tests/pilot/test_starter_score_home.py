@@ -63,7 +63,24 @@ def test_retained_owner_score_opens_after_inference_withdrawal_without_execution
         and p.execution_ref in visible
         and p.freeze_revision in visible
     )
-    assert "case-0" not in visible and not actions(screen(h, view))
+    assert "case-0" not in visible
+    assert actions(screen(h, view)) == [("ot_score_next", "next")]
+    hashes = []
+    update = h.slack.views_update
+
+    def record_hash(**kwargs):
+        hashes.append(kwargs.get("hash"))
+        return update(**kwargs)
+
+    monkeypatch.setattr(h.slack, "views_update", record_hash)
+    h.slack.screens[view]["hash"] = "generated-results-hash"
+    h.action(view, "ot_score_next", "next")
+    assert actions(screen(h, view)) == [("ot_score_previous", "previous")]
+    assert "evaluation details" in text(h, view)
+    h.slack.screens[view]["hash"] = "generated-details-hash"
+    h.action(view, "ot_score_previous", "previous")
+    assert hashes == ["generated-results-hash", "generated-details-hash"]
+    assert text(h, view).count("Exact action agreement") == 2
     assert "ot_app_starter_score" not in dict(actions(publish(h, monkeypatch, OTHER)))
     assert (
         db.read_bytes() == before
@@ -130,4 +147,24 @@ def test_explicit_choice_rechecks_two_separately_selected_inspection_grants(
     choice = item["accessory"]
     h.action(view, choice["action_id"], choice["value"])
     assert "Evaluation execution-b" in text(h, view) and "Frozen, unscored" in text(h, view)
+    assert effects(h) == (0,) * 7
+
+
+def test_benchmark_navigation_rejects_wrong_endpoint_and_withdrawn_inspection(
+    authorized, monkeypatch
+):
+    h, _, _, _, _, p, *_ = authorized
+    for action, value, revoked in (
+        ("ot_score_previous", "previous", False),
+        ("ot_score_reconnect", "setup", False),
+        ("ot_score_next", "next", True),
+    ):
+        view = open_summary(h, monkeypatch)
+        h.slack.screens[view]["hash"] = "generated-current-view"
+        if revoked:
+            _write_private(h.path.parent / "starter-evaluation-withdrawn-inspection-a.json", {})
+        h.action(view, action, value)
+        assert "evaluation details" not in text(
+            h, view
+        ) and "Selected model setup required" not in text(h, view)
     assert effects(h) == (0,) * 7
