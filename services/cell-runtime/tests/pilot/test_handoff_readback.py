@@ -91,6 +91,24 @@ def test_selected_readback_recovers_the_same_handoff_without_sending(tmp_path, m
     assert restored.stage == "delivered" and restored.receiver_receipt_ref == effects[0]
     assert len(effects) == 1
 
+    # A surviving independently recorded effect fences an older queued row.
+    with fresh_store._db(write=True) as db:
+        db.execute(
+            "UPDATE release_outbox SET stage='queued',claimed_at=NULL,last_checked_at=NULL,"
+            "receiver_receipt_ref=NULL,received_at=NULL WHERE ref=?",
+            (restored.reference,),
+        )
+    reopened_outbox = handoff_outbox(fresh_store)
+    old_queue = reopened_outbox.status(selection, "inspector")
+    assert old_queue.stage == "delivery_unconfirmed" and old_queue.last_checked_at is None
+    with monkeypatch.context() as absent:
+        absent.setattr(receiver, "lookup", unexpected_read)
+        assert not reopened_outbox.claim(selection, "dispatcher", receiver).dispatch
+    assert (
+        reopened_outbox.reconcile(selection, "dispatcher", receiver).receiver_receipt_ref
+        == (effects[0])
+    )
+
     status = ReleaseOutbox.status
 
     def withdraw_after_status(*args, **kwargs):

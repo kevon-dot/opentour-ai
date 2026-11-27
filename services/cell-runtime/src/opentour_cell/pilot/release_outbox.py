@@ -265,7 +265,7 @@ class ReleaseOutbox:
             row["receiver_receipt_ref"],
             row["received_at"],
         )
-        if status.stage != "delivered" or self.seal_received is None:
+        if self.seal_received is None:
             return status
         table = db.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='release_receiver_seals'"
@@ -277,9 +277,12 @@ class ReleaseOutbox:
             if table is not None
             else None
         )
+        if status.stage != "delivered" and recorded is None:
+            return status
         try:
             if (
-                recorded
+                status.stage == "delivered"
+                and recorded
                 and isinstance(recorded["seal"], str)
                 and hmac.compare_digest(recorded["seal"], self.seal_received(grant, status))
             ):
@@ -375,7 +378,11 @@ class ReleaseOutbox:
             assert row is not None
             status = self._status(db, row, grant)
             if status.stage == "delivered" or (
-                action == "claim" and (row["stage"] == "delivered" or row["claimed_at"] is not None)
+                action == "claim"
+                and (
+                    status.claimed_at is not None
+                    or (status.stage == "delivery_unconfirmed" and status.last_checked_at is None)
+                )
             ):
                 self._check_current(db, grant, actor, action)
                 return Claim(status, False)
@@ -476,7 +483,7 @@ class ReleaseOutbox:
             dispatch = False
         else:
             _require(observed.receipt_ref is None and observed.received_at is None)
-            if row["stage"] == "delivered":
+            if previous.stage == "delivery_unconfirmed" and previous.last_checked_at is None:
                 # Hold a restored unverified claim for independent confirmation.
                 return Claim(previous, False)
             dispatch = (
