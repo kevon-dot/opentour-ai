@@ -2589,7 +2589,8 @@ def starter_score_readout(
             _section(
                 "Frozen, unscored. Open evaluation details to inspect the selected model setup."
                 if reconnect
-                else "Frozen, unscored. Ask the model custodian to check the selected model and its inference permission."
+                else "Frozen, unscored. Ask the model custodian to check the selected model and "
+                "its inference permission."
             )
         )
     elif summary["state"] == "held":
@@ -2628,23 +2629,28 @@ def starter_score_readout(
         blocks = [
             _section("Starter benchmark · evaluation details"),
             _section(
-                f"Workflow {_ref(entry['workflow_ref'])} · Evaluation {_ref(entry['execution_ref'])}"
+                f"Workflow {_ref(entry['workflow_ref'])} · "
+                f"Evaluation {_ref(entry['execution_ref'])}"
             ),
             _section(
-                f"Frozen benchmark {_ref(summary['freeze_ref'])} · Revision {_ref(summary['freeze_revision'])}"
+                f"Frozen benchmark {_ref(summary['freeze_ref'])} · Revision "
+                f"{_ref(summary['freeze_revision'])}"
             ),
             _section(
                 f"Selected model {_ref(summary['model_ref'])} · "
                 f"Revision {_ref(summary['model_revision'])}"
             ),
             _section(
-                f"Comparator {_ref(summary['comparator_ref'])} · Revision {_ref(summary['comparator_revision'])}"
+                f"Comparator {_ref(summary['comparator_ref'])} · Revision "
+                f"{_ref(summary['comparator_revision'])}"
             ),
         ]
         if summary["state"] == "scored":
             blocks.append(
                 _section(
-                    "Exact action agreement includes correct review decisions. Automatic coverage uses reserved cases as its denominator. Wrong automatic decisions uses only automatic decisions."
+                    "Exact action agreement includes correct review decisions. Automatic "
+                    "coverage uses reserved cases as its denominator. Wrong automatic decisions "
+                    "uses only automatic decisions."
                 )
             )
         elif summary["state"] == "frozen_unscored":
@@ -2652,7 +2658,8 @@ def starter_score_readout(
                 _section(
                     "Review setup for the selected model revision."
                     if reconnect
-                    else "Ask the model custodian to check the selected model and its inference permission."
+                    else "Ask the model custodian to check the selected model and its inference "
+                    "permission."
                 )
             )
         else:
@@ -2663,20 +2670,25 @@ def starter_score_readout(
         blocks = [
             _section("Selected model setup required"),
             _section(
-                f"Benchmark {_ref(reconnect['benchmark_ref'])} · Version {reconnect['benchmark_version']}\n"
+                f"Benchmark {_ref(reconnect['benchmark_ref'])} · Version "
+                f"{reconnect['benchmark_version']}\n"
                 f"Model custodian {_ref(reconnect['custodian_ref'])}"
             ),
             _section(
-                f"Workflow {_ref(reconnect['workflow_ref'])} · Run {_ref(reconnect['run_ref'])} · Evaluation {_ref(reconnect['execution_ref'])}"
+                f"Workflow {_ref(reconnect['workflow_ref'])} · Run {_ref(reconnect['run_ref'])} "
+                f"· Evaluation {_ref(reconnect['execution_ref'])}"
             ),
             _section(
-                f"Frozen benchmark {_ref(reconnect['freeze_ref'])} · Revision {_ref(reconnect['freeze_revision'])}"
+                f"Frozen benchmark {_ref(reconnect['freeze_ref'])} · Revision "
+                f"{_ref(reconnect['freeze_revision'])}"
             ),
             _section(
-                f"Model {_ref(reconnect['model_ref'])} · Revision {_ref(reconnect['model_revision'])}"
+                f"Model {_ref(reconnect['model_ref'])} · Revision "
+                f"{_ref(reconnect['model_revision'])}"
             ),
             _section(
-                "The model custodian must configure this exact model revision and its inference permission in the installation. This view only shows the required setup."
+                "The model custodian must configure this exact model revision and its inference "
+                "permission in the installation. This view only shows the required setup."
             ),
         ]
     elif page != 0:
