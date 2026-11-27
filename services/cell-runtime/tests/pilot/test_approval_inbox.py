@@ -21,18 +21,23 @@ Json = dict[str, Any]
 
 
 def stage(
-    path: Path, route: str = "rule", *, audience: str | None = None
+    path: Path, route: str = "rule", *, audience: str | None = None, slot: str = ""
 ) -> tuple[Harness, Json, str, str, Json]:
-    h, plan, run, _ = setup_workflow(path, route, release=True, audience=audience)
+    h, plan, run, _ = setup_workflow(path, route, release=True, audience=audience, slot=slot)
     evidence = repair_workflow.managed_review_evidence(
-        h.path.parent, h.store.organization, run, plan["audience"], TEAM, CHANNEL
+        h.path.parent,
+        h.store.organization,
+        run,
+        plan["audience"],
+        h.config["team"],
+        h.config["channel"],
     )
     audit = evidence["audit"]
     info = {
-        "team": TEAM,
-        "channel": CHANNEL,
+        "team": h.config["team"],
+        "channel": h.config["channel"],
         "audience": plan["audience"],
-        "reviewer": ACTOR,
+        "reviewer": h.config["reviewer"],
         "run_revision": audit["run_revision"],
     }
     receipt = inbox.enqueue_ready(h.path.parent, h.store.organization, run, **info)["receipt"]
@@ -46,12 +51,12 @@ def stage(
 def callback(h: Harness, receipt: str, *, actor: str = ACTOR, ts: str = "101.101") -> Json:
     return {
         "api_app_id": APP,
-        "team": {"id": TEAM},
+        "team": {"id": h.config["team"]},
         "user": {"id": actor},
         "type": "block_actions",
         "trigger_id": "generated-trigger",
-        "channel": {"id": CHANNEL},
-        "container": {"type": "message", "channel_id": CHANNEL, "message_ts": ts},
+        "channel": {"id": h.config["channel"]},
+        "container": {"type": "message", "channel_id": h.config["channel"], "message_ts": ts},
         "actions": [{"action_id": "ot_open_approval", "value": receipt}],
         "message": {"app_id": APP, "ts": ts, "blocks": deepcopy(h.slack.post["blocks"])},
     }

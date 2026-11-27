@@ -8,7 +8,7 @@ import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from opentour_cell.pilot.readout import INPUT_VERSION, MAX_CASES, OUTPUT_VERSION, evaluate_manifest
 from opentour_cell.pilot.starter_setup import StarterPreview
@@ -20,6 +20,10 @@ from opentour_cell.pilot.text_classifier import (
     MAX_TRAIN_ROWS,
     PROFILE,
 )
+
+if TYPE_CHECKING:
+    from opentour_cell.pilot.handoff_readback import HandoffReadback
+
 from opentour_cell.pilot.training_data import EVALUATION_FIELDS, FIELD_NAMES
 
 Block = dict[str, Any]
@@ -611,6 +615,7 @@ def regression_picker(
     more: bool,
     topic: str = "changes",
     current_workflow: tuple[str, str] | None = None,
+    delivery_workflows: Mapping[str, str] | None = None,
 ) -> Block:
     blocks = [
         _section(
@@ -645,7 +650,21 @@ def regression_picker(
         if rows:
             blocks.append(_section("Or choose an inspected frozen comparison."))
     for dataset, source, revision in rows:
-        blocks.append(_section(f"Workflow {_ref(dataset)} · {_display(source)} · {_ref(revision)}"))
+        if delivery_workflows and revision in delivery_workflows:
+            blocks.append(
+                _section(
+                    f"Workflow {_ref(delivery_workflows[revision])} · Dataset {_ref(dataset)} · "
+                    f"{_display(source)} · {_ref(revision)}"
+                )
+            )
+            blocks.append(_actions(_button("Use this handoff", "ot_result_open", revision)))
+            continue
+        label = (
+            "Dataset"
+            if topic in {"delivery", "independent_workplace_cases", "synthetic_benefit"}
+            else "Workflow"
+        )
+        blocks.append(_section(f"{label} {_ref(dataset)} · {_display(source)} · {_ref(revision)}"))
         blocks.append(_actions(_button("Use this comparison", "ot_result_open", revision)))
     navigation = []
     if previous:
@@ -765,17 +784,22 @@ def current_training_question(
     )
 
 
-def status_question_modal(context: str, revision: str, dataset: str, answer: StatusAnswer) -> Block:
+def status_question_modal(
+    context: str, revision: str, dataset: str, answer: StatusAnswer, *, receipt_pin: str = ""
+) -> Block:
+    controls = [_button("View evidence", "ot_evidence", revision), _home()]
+    if receipt_pin:
+        controls.insert(0, _button("View receipt", "ot_release_receipt", receipt_pin))
     return _modal(
         "Result status",
         "ot_status_question",
         context,
         [
-            _section(f"Workflow {_ref(dataset)} · readout {_ref(revision)}"),
+            _section(f"Dataset {_ref(dataset)} · readout {_ref(revision)}"),
             _section(answer.finding),
             _section(answer.basis),
             _section(answer.next_action),
-            _actions(_button("View evidence", "ot_evidence", revision), _home()),
+            _actions(*controls),
         ],
     )
 
@@ -1453,7 +1477,57 @@ def chart_status(context: str, revision: str, figures: str, status: str) -> Bloc
     )
 
 
-def release_recorded(context: str, decision: str, artifact: str, audience: str) -> Block:
+def handoff_status(receipt: HandoffReadback, audit: Mapping[str, Any]) -> StatusAnswer:
+    def when(timestamp: int) -> str:
+        return datetime.fromtimestamp(timestamp, UTC).isoformat()
+
+    delivery = receipt.delivery
+    basis = (
+        f"Workflow {_ref(receipt.selection.workflow_ref)} · Proposal {_ref(audit['job_id'])} "
+        f"revision {_ref(audit['run_revision'])} · Artifact {_ref(audit['model_revision'])}\n"
+        f"Destination {_ref(receipt.destination_ref)} · Approved {when(receipt.approved_at)}."
+    )
+    if delivery and delivery.last_checked_at is not None:
+        basis += f" Last checked {when(delivery.last_checked_at)}."
+    else:
+        basis += " No independent check time is recorded."
+    if delivery and delivery.stage == "delivered":
+        assert delivery.received_at is not None and delivery.receiver_receipt_ref
+        return StatusAnswer(
+            "Delivered to the selected destination.",
+            f"{basis} Receiver receipt {_ref(delivery.receiver_receipt_ref)} "
+            f"at {when(delivery.received_at)}.",
+            "The recipient can independently replay the artifact.",
+        )
+    finding = "Approval recorded. Delivery is unconfirmed."
+    if delivery and delivery.stage == "queued":
+        finding = "Approval recorded. Awaiting delivery."
+    return StatusAnswer(finding, basis, "The authorized handoff operator can reconcile delivery.")
+
+
+def handoff_modal(
+    context: str, revision: str, receipt: HandoffReadback, audit: Mapping[str, Any]
+) -> Block:
+    answer = handoff_status(receipt, audit)
+    controls = [_home()]
+    if not receipt.delivery or receipt.delivery.stage != "delivered":
+        controls.insert(0, _button("Check delivery status", "ot_delivery_status", revision))
+    return _modal(
+        "Handoff receipt",
+        "ot_handoff_receipt",
+        context,
+        [
+            _section(answer.finding),
+            _section(answer.basis),
+            _section(answer.next_action),
+            _actions(*controls),
+        ],
+    )
+
+
+def release_recorded(
+    context: str, decision: str, artifact: str, audience: str, *, revision: str = ""
+) -> Block:
     state = "Approved for handoff" if decision == "approved" else "Changes requested. Handoff held"
     return _modal(
         "Handoff decision",
@@ -1461,7 +1535,9 @@ def release_recorded(context: str, decision: str, artifact: str, audience: str) 
         context,
         [
             _section(f"{state}. Candidate {_ref(artifact)} · audience {_display(audience)}."),
-            _actions(_home()),
+            _actions(_button("View receipt", "ot_release_receipt", revision), _home())
+            if revision
+            else _actions(_home()),
         ],
     )
 
@@ -1523,6 +1599,36 @@ def readiness_answer(receipt: Mapping[str, Any]) -> StatusAnswer:
     )
 
 
+def _live_counts(summary: Mapping[str, Any], readiness: Mapping[str, Any] | None) -> str:
+    rate = "Unavailable"
+    if (
+        readiness
+        and summary.get("workflow")
+        and summary.get("revision")
+        and summary["workflow"] == readiness.get("workflow_ref")
+        and summary["revision"] == readiness.get("evidence_revision")
+        and summary.get("dataset") == readiness.get("dataset_ref")
+    ):
+        counts = readiness.get("incumbent_automatic")
+        if isinstance(counts, Mapping):
+            wrong, verified = counts.get("wrong"), counts.get("verified")
+            if (
+                type(wrong) is int
+                and type(verified) is int
+                and 0 <= wrong <= verified <= summary["verified"]
+                and verified
+            ):
+                rate = f"{wrong}/{verified}"
+    decisions = summary["decisions"]
+    unit = "decision" if decisions == 1 else "decisions"
+    return (
+        f"Live evidence · {decisions} {unit}\n"
+        f"Verified {summary['verified']} · Pending "
+        f"{summary['pending']} · Disputed {summary['disputed']}\n"
+        f"Incumbent wrong / verified automatic decisions · {rate}"
+    )
+
+
 def _live_summary_text(summary: Mapping[str, Any]) -> str:
     def utc(value: int | None) -> str:
         if value is None:
@@ -1568,6 +1674,8 @@ def app_home_view(
     live_summary: Mapping[str, Any] | None = None,
     verify_outcome: str = "",
     decision_map_entry: str = "",
+    case_entry: str = "",
+    starter_score_entry: str = "",
 ) -> Block:
     if not context:
         return {
@@ -1586,6 +1694,12 @@ def app_home_view(
         _button("Browse data", "ot_app_data", "ot_app_data"),
         _button("Ask OpenTour", "ot_app_prompt", "ot_app_prompt"),
     ]
+    if starter_score_entry:
+        blocks.append(
+            _actions(_button("Open starter benchmark", "ot_app_starter_score", starter_score_entry))
+        )
+    if case_entry:
+        blocks.append(_actions(_button("Review starter cases", "ot_app_cases", case_entry)))
     if decision_map_entry:
         blocks.append(_actions(_button("Review decision map", "ot_app_map", decision_map_entry)))
     if pending:
@@ -1605,6 +1719,7 @@ def app_home_view(
             }
         )
     if live_summary is not None:
+        blocks.append(_section(_live_counts(live_summary, readiness)))
         blocks.append(_section(_live_summary_text(live_summary)))
     if readiness is not None:
         answer = readiness_answer(readiness)
@@ -2210,7 +2325,9 @@ def map_branch_edit(
             disposition,
             decision,
             _section(
-                "For a correction, enter one condition per line, such as total < 250 or po missing."
+                "For a correction, enter one condition per line. Use field == Token for an exact, "
+                "case-sensitive reference value, field missing or present for presence, "
+                "or a numeric comparison such as total < 250."
             ),
             _map_text_input(
                 "conditions",
@@ -2303,3 +2420,384 @@ def map_assertions(
         ],
         "Save assertion",
     )
+
+
+def starter_case_entry(context: str, workflow: str, run: str, propose: bool) -> Block:
+    buttons = [_button("Open saved cases", "ot_case_review", "open")]
+    if propose:
+        buttons.append(_button("Generate guided cases", "ot_case_generate", "generate"))
+    return _modal(
+        "Starter cases",
+        "ot_case_entry",
+        context,
+        [
+            _section(f"Workflow {_ref(workflow)} · Run {_ref(run)}"),
+            _actions(*buttons),
+        ],
+    )
+
+
+def starter_case_detail(context: str, pack: Mapping[str, Any], index: int) -> Block:
+    case = pack["cases"][index]
+    authority = pack["authority"]
+    if pack["frozen"]:
+        frozen = pack["frozen"]
+        excluded_families = {
+            row["family_id"] for row in pack["cases"] if row["split_ref"] == "excluded"
+        }
+        return _modal(
+            "Frozen starter benchmark",
+            "ot_case_frozen",
+            context,
+            [
+                _section(f"Frozen, unscored · {_ref(frozen['reference'])}"),
+                _section(
+                    f"Freeze revision {_ref(frozen['revision'])} · "
+                    f"Map {_ref(authority['map_confirmation_ref'])} · "
+                    f"Settings {_ref(authority['map_settings_ref'])}"
+                ),
+                _section(
+                    f"{frozen['proposed']} generated · {frozen['reviewed']} reviewed · "
+                    f"{frozen['resolved']} resolved · {frozen['unresolved']} unresolved · "
+                    f"{frozen['excluded']} excluded cases"
+                ),
+                _section(
+                    f"Independent families · Development {frozen['development']} · "
+                    f"Reserved {frozen['reserved']} · Excluded {len(excluded_families)}"
+                ),
+                _section(
+                    "Reserved family coverage\n"
+                    + _display(
+                        ", ".join(
+                            f"{branch} / {action}: {count}"
+                            for branch, action, count in frozen["coverage"]
+                        ),
+                        2400,
+                    )
+                ),
+                _section(
+                    "Collect independent reserved families for uncovered critical branches."
+                    if frozen["uncovered_critical"]
+                    else "Scoring requires a separate evaluation."
+                ),
+                _section(
+                    "Critical gaps · "
+                    + _display(", ".join(frozen["uncovered_critical"]) or "None", 900)
+                ),
+            ],
+        )
+    inputs = ", ".join(
+        f"{field}={value if value is not None else 'missing'}"
+        for field, value in case["decision_inputs"]
+    )
+    origin = {
+        "generated_starter": "Generated case",
+        "owner_counterexample": "Owner counterexample",
+    }[case["case_origin"]]
+    blocks = [
+        _section(
+            f"{sum(c['status'] == 'proposed' for c in pack['cases'])} awaiting review · "
+            f"{sum(c['status'] == 'resolved' for c in pack['cases'])} resolved · "
+            f"{sum(c['status'] == 'unresolved' for c in pack['cases'])} unresolved · "
+            f"{len({c['family_id'] for c in pack['cases']})} independent families"
+        ),
+        _section(f"{origin} {index + 1} of {len(pack['cases'])} · {_ref(case['case_id'])}"),
+        _section(f"Family {_ref(case['family_id'])} · Branch {_ref(case['branch_id'])}"),
+        _section(f"Decision-time inputs · {_display(inputs, 1800)}"),
+        _section(
+            f"Suggested action · {_display(case['suggestion'])}\n"
+            f"Basis · {_display(case['rationale'], 1000)}\nCitation · {_ref(case['citation'])}"
+        ),
+        _section(
+            f"Owner decision · {_display(case['owner_adjudicated_target'] or case['status'])}"
+        ),
+    ]
+    if case["adjudicator"]:
+        blocks.append(
+            _section(
+                f"Reviewed by {_display(case['adjudicator'])} · "
+                f"{_display(case['adjudication_reason'], 1000)}"
+            )
+        )
+    buttons = []
+    if index:
+        buttons.append(_button("Previous case", "ot_case_page_previous", "previous"))
+    if index + 1 < len(pack["cases"]):
+        buttons.append(_button("Next case", "ot_case_page_next", "next"))
+    buttons.append(_button("Inspect policy clause", "ot_case_citation", "citation"))
+    if authority["can_adjudicate"]:
+        buttons.append(_button("Adjudicate case", "ot_case_edit", "edit"))
+    if authority["can_freeze"] and all(c["status"] != "proposed" for c in pack["cases"]):
+        buttons.append(_button("Assign family splits", "ot_case_splits", "splits"))
+    if buttons:
+        blocks.append(_actions(*buttons))
+    return _modal("Review starter cases", "ot_case_detail", context, blocks)
+
+
+def adjudicate_starter_case(context: str, case: Mapping[str, Any], choices: Sequence[str]) -> Block:
+    return _modal(
+        "Adjudicate case",
+        "ot_case_adjudicate",
+        context,
+        [
+            _section(f"Case {_ref(case['case_id'])} · Suggested {_display(case['suggestion'])}"),
+            _select(
+                "target",
+                "Owner decision",
+                [("Choose an outcome", "choose"), ("Leave unresolved", "unresolved")]
+                + [(action, str(i)) for i, action in enumerate(choices)],
+            ),
+            _map_text_input("reason", "Reason for your decision", multiline=True),
+        ],
+        "Save decision",
+    )
+
+
+def starter_family_splits(context: str, families: Sequence[str]) -> Block:
+    blocks = [
+        _section("Assign each whole family to development, reserved evaluation, or exclusion.")
+    ]
+    for index, family in enumerate(families):
+        blocks.append(
+            _select(
+                f"family_{index}",
+                family,
+                [
+                    ("Select split", "choose"),
+                    ("Development", "development"),
+                    ("Reserved evaluation", "reserved"),
+                    ("Excluded", "excluded"),
+                ],
+            )
+        )
+    return _modal("Assign family splits", "ot_case_freeze", context, blocks, "Review splits")
+
+
+def starter_freeze_preview(
+    context: str, pack: Mapping[str, Any], splits: Mapping[str, str]
+) -> Block:
+    rows = pack["cases"]
+    counts = [
+        f"{name.capitalize()} {sum(s == name for s in splits.values())}"
+        for name in ("development", "reserved", "excluded")
+    ]
+    coverage = []
+    for branch in pack["authority"]["branches"]:
+        for action in branch["coverage_actions"] or branch["allowed_actions"]:
+            count = len(
+                {
+                    r["family_id"]
+                    for r in rows
+                    if r["branch_id"] == branch["branch_id"]
+                    and r["owner_adjudicated_target"] == action
+                    and splits[r["family_id"]] == "reserved"
+                }
+            )
+            coverage.append(f"{branch['branch_id']} / {action} · {count} reserved")
+    return _modal(
+        "Review family splits",
+        "ot_case_freeze_preview",
+        context,
+        [
+            _section("Independent families · " + " · ".join(counts)),
+            _section(_display(", ".join(coverage), 2400)),
+            _actions(_button("Freeze benchmark", "ot_case_commit", "freeze")),
+        ],
+    )
+
+
+def starter_case_clause(context: str, passage: str, page: int) -> Block:
+    width = 1800
+    start = width * page
+    if page < 0 or start >= len(passage):
+        raise ValueError("Invalid source passage page")
+    buttons = [_button("Back to case", "ot_case_back", "back")]
+    if page:
+        buttons.append(_button("Previous passage", "ot_case_clause_page", "previous"))
+    if start + width < len(passage):
+        buttons.append(_button("Next passage", "ot_case_clause_page", "next"))
+    return _modal(
+        "Cited policy clause",
+        "ot_case_clause",
+        context,
+        [
+            _section(passage[start : start + width]),
+            _actions(*buttons),
+        ],
+    )
+
+
+def starter_score_readout(
+    context: str,
+    entry: Mapping[str, Any],
+    summary: Mapping[str, Any],
+    *,
+    page: int = 0,
+    reconnect: Mapping[str, Any] | None = None,
+) -> Block:
+    if summary["evidence_origin"] != "expert_reviewed_generated_starter":
+        raise ValueError("Unexpected starter benchmark origin")
+    if (summary["workflow_ref"], summary["execution_ref"]) != (
+        entry["workflow_ref"],
+        entry["execution_ref"],
+    ):
+        raise ValueError("Starter evaluation scope changed")
+    blocks = [
+        _section("Expert-reviewed starter benchmark · generated examples"),
+        _section(
+            f"Workflow {_ref(entry['workflow_ref'])} · Evaluation {_ref(entry['execution_ref'])}"
+        ),
+        _section(
+            f"Freeze {_ref(summary['freeze_ref'])}\nRevision {_ref(summary['freeze_revision'])}"
+        ),
+        _section(
+            f"Reserved cases {summary['reserved']} "
+            f"· Unresolved {summary['unresolved']} · Excluded {summary['excluded']}"
+        ),
+    ]
+    blocks.extend(
+        [
+            _section(
+                f"Selected model {_ref(summary['model_ref'])} · "
+                f"Revision {_ref(summary['model_revision'])}"
+            ),
+            _section(
+                f"Policy comparator {_ref(summary['comparator_ref'])} "
+                f"· Revision {_ref(summary['comparator_revision'])}"
+            ),
+        ]
+    )
+    if summary["state"] == "frozen_unscored":
+        blocks.append(
+            _section(
+                "Frozen, unscored. Open evaluation details to inspect the selected model setup."
+                if reconnect
+                else "Frozen, unscored. Ask the model custodian to check the selected model and "
+                "its inference permission."
+            )
+        )
+    elif summary["state"] == "held":
+        blocks.append(
+            _section(
+                "Evaluation outcome unknown. Ask the evaluation "
+                "operator to reconcile this execution."
+            )
+        )
+    elif summary["state"] == "scored":
+        metrics = summary["metrics"]
+        for arm, title in (("model", "Selected model"), ("comparator", "Simple policy comparator")):
+            result = metrics[arm]
+            details = [title]
+            for key, label in (
+                ("exact_action", "Exact action agreement"),
+                ("coverage", "Automatic coverage"),
+                ("wrong_automatic", "Wrong automatic decisions"),
+            ):
+                rate = result[key]
+                n, d = rate["numerator"], rate["denominator"]
+                value = f"{n}/{d}" if d else f"Unavailable ({n}/{d})"
+                details.append(f"{label} · {value}")
+            details.append(f"Missing predictions · {result['missing']}")
+            blocks.append(_section("\n".join(details)))
+        paired = metrics["paired"]
+        blocks.append(
+            _section(
+                f"Comparator versus model · {paired['denominator']} paired cases\n"
+                f"Fixed {paired['fixed']} · Regressed {paired['regressed']} · "
+                f"Excluded for missing predictions {paired['excluded_missing']}"
+            )
+        )
+    else:
+        raise ValueError("Unexpected evaluation state")
+    if page == 1:
+        blocks = [
+            _section("Starter benchmark · evaluation details"),
+            _section(
+                f"Workflow {_ref(entry['workflow_ref'])} · "
+                f"Evaluation {_ref(entry['execution_ref'])}"
+            ),
+            _section(
+                f"Frozen benchmark {_ref(summary['freeze_ref'])} · Revision "
+                f"{_ref(summary['freeze_revision'])}"
+            ),
+            _section(
+                f"Selected model {_ref(summary['model_ref'])} · "
+                f"Revision {_ref(summary['model_revision'])}"
+            ),
+            _section(
+                f"Comparator {_ref(summary['comparator_ref'])} · Revision "
+                f"{_ref(summary['comparator_revision'])}"
+            ),
+        ]
+        if summary["state"] == "scored":
+            blocks.append(
+                _section(
+                    "Exact action agreement includes correct review decisions. Automatic "
+                    "coverage uses reserved cases as its denominator. Wrong automatic decisions "
+                    "uses only automatic decisions."
+                )
+            )
+        elif summary["state"] == "frozen_unscored":
+            blocks.append(
+                _section(
+                    "Review setup for the selected model revision."
+                    if reconnect
+                    else "Ask the model custodian to check the selected model and its inference "
+                    "permission."
+                )
+            )
+        else:
+            blocks.append(
+                _section("Ask the evaluation operator to reconcile the unknown execution.")
+            )
+    elif page == 2 and reconnect is not None:
+        blocks = [
+            _section("Selected model setup required"),
+            _section(
+                f"Benchmark {_ref(reconnect['benchmark_ref'])} · Version "
+                f"{reconnect['benchmark_version']}\n"
+                f"Model custodian {_ref(reconnect['custodian_ref'])}"
+            ),
+            _section(
+                f"Workflow {_ref(reconnect['workflow_ref'])} · Run {_ref(reconnect['run_ref'])} "
+                f"· Evaluation {_ref(reconnect['execution_ref'])}"
+            ),
+            _section(
+                f"Frozen benchmark {_ref(reconnect['freeze_ref'])} · Revision "
+                f"{_ref(reconnect['freeze_revision'])}"
+            ),
+            _section(
+                f"Model {_ref(reconnect['model_ref'])} · Revision "
+                f"{_ref(reconnect['model_revision'])}"
+            ),
+            _section(
+                "The model custodian must configure this exact model revision and its inference "
+                "permission in the installation. This view only shows the required setup."
+            ),
+        ]
+    elif page != 0:
+        raise ValueError("Invalid starter benchmark page")
+    if page == 0:
+        nav = _button("Next →", "ot_score_next", "next")
+        nav["accessibility_label"] = "Next: evaluation details"
+    else:
+        nav = _button("← Previous", "ot_score_previous", "previous")
+        nav["accessibility_label"] = (
+            "Previous: benchmark results" if page == 1 else "Previous: evaluation details"
+        )
+    controls = [nav]
+    if reconnect is not None and page == 1:
+        controls.append(_button("Reconnect selected model", "ot_score_reconnect", "setup"))
+    blocks.append(_actions(*controls))
+    return _modal("Starter benchmark", "ot_starter_score", context, blocks)
+
+
+def starter_score_choices(context: str, entries: Sequence[tuple[Mapping[str, Any], str]]) -> Block:
+    blocks = []
+    for entry, token in entries:
+        block = _section(
+            f"Workflow {_ref(entry['workflow_ref'])} · Evaluation {_ref(entry['execution_ref'])}"
+        )
+        block["accessory"] = _button("Open result", "ot_starter_score_choice", token)
+        blocks.append(block)
+    return _modal("Choose evaluation", "ot_starter_scores", context, blocks)

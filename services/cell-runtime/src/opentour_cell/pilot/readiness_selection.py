@@ -75,6 +75,7 @@ def open_readiness(
         live = LiveEvidence(directory, authority)
         source = LiveReadinessSource(live)
         context_revision = None
+        seal_aggregate = None
         if selection.get("context_file") is not None:
             from opentour_cell.pilot.local_decision_context import PrivateDecisionContext
 
@@ -82,6 +83,7 @@ def open_readiness(
                 raise IntakeError("readiness_context_unavailable")
             contexts = PrivateDecisionContext(authority, worker, scope, selection["context_file"])
             context_revision = contexts.revision
+            seal_aggregate = contexts.seal_aggregate
         assessments = (
             LocalRepairAssessments(
                 directory,
@@ -90,6 +92,7 @@ def open_readiness(
                 directory / policy,
                 contexts=contexts,
                 context_revision=context_revision,
+                seal_aggregate=seal_aggregate,
             )
             if policy
             else None

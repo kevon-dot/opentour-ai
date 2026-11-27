@@ -47,6 +47,12 @@ authorized by a context receipt.
 Readiness records bind the context permission revision and observation receipt.
 Opening Home reads only metadata and persisted assessments; it never reopens raw
 context data. Revocation or replacement invalidates an old readiness verdict.
+An independently classified set covering every current verified decision can
+also supply the wrong-automatic numerator and verified-automatic denominator.
+The worker seals both counts with the current evidence, context grant and
+assessment. A zero automatic denominator leaves the rate unavailable. Partial
+or edited evidence cannot supply the rate. These counts are separate from
+residual groups after simple repair.
 An already authorized historical assessment can remain readable if its raw export
 is moved after successful materialization. The next worker refresh needs the
 original pinned input again and holds if it is unavailable. Account for context

@@ -6,11 +6,12 @@ grant. No event, prompt, generated child, or readiness receipt supplies a grant.
 
 from __future__ import annotations
 
+import hmac
 import json
 import os
 import sqlite3
 from collections.abc import Callable, Mapping
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -23,6 +24,7 @@ from opentour_cell.pilot.operating_point import canonical, digest
 from opentour_cell.pilot.text_classifier import TrainingError
 from opentour_cell.pilot.training import _check_file
 from opentour_cell.pilot.training_readiness import (
+    AutomaticCounts,
     ReadinessAssessment,
     ReadinessSnapshot,
 )
@@ -132,6 +134,7 @@ class LocalRepairAssessments:
         *,
         contexts: DecisionContext | None = None,
         context_revision: Callable[[LiveSnapshot], str] | None = None,
+        seal_aggregate: Callable[[LiveSnapshot, Json], str] | None = None,
     ):
         self.directory = directory.absolute()
         self.path = self.directory / "live-repair-assessments.sqlite3"
@@ -142,6 +145,11 @@ class LocalRepairAssessments:
             contexts,
         )
         self.context_revision = context_revision
+        self.seal_aggregate = seal_aggregate
+
+    @staticmethod
+    def _aggregate_key(assessment_key: str) -> str:
+        return digest(["opentour.live-incumbent-aggregate.v1", assessment_key])
 
     def _key(
         self, snapshot: ReadinessSnapshot, policy: Json, authority: Json, context: str | None
@@ -299,6 +307,9 @@ class LocalRepairAssessments:
                     missing_classification = True
                     continue
                 incumbent = simple_repair.decision(dict(observed.incumbent))
+                if incumbent["status"] == "missing":
+                    missing_classification = True
+                    continue
                 if incumbent["status"] != "automatic":
                     deferred_roots.append(root_ref(root))
                     continue
@@ -367,6 +378,29 @@ class LocalRepairAssessments:
                 "context_receipts": sorted(context_receipts),
                 "nonautomatic_roots": sorted(deferred_roots),
             }
+            # Preserve legacy bodies. An aggregate requires a complete, signed
+            # classification of each verified decision, including deferred ones.
+            del body["assessment"]["incumbent_automatic"]
+            key = self._key(snapshot, policy, authority, context)
+            if (
+                self.seal_aggregate is not None
+                and context is not None
+                and len(rows) + len(deferred_roots) == snapshot.verified
+            ):
+                counts = AutomaticCounts(
+                    sum(row["incumbent"]["label"] != row["reference"] for row in rows), len(rows)
+                )
+                summary = {
+                    "assessment_key": key,
+                    "assessment": body["assessment"],
+                    "counts": asdict(counts),
+                }
+                body["incumbent_automatic"] = {
+                    "counts": summary["counts"],
+                    "seal": self.seal_aggregate(actual, summary),
+                }
+                key = self._aggregate_key(key)
+                receipt = replace(receipt, incumbent_automatic=counts)
             if self.context_revision:
                 body["context_permission_revision"] = context
             self._selection(snapshot)
@@ -389,7 +423,6 @@ class LocalRepairAssessments:
                 db.execute(
                     "CREATE TABLE IF NOT EXISTS assessments (key TEXT PRIMARY KEY, body TEXT)"
                 )
-                key = self._key(snapshot, policy, authority, context)
                 old = db.execute("SELECT body FROM assessments WHERE key=?", (key,)).fetchone()
                 _require(old is None or old[0] == canonical(body))
                 db.execute("INSERT OR IGNORE INTO assessments VALUES(?,?)", (key, canonical(body)))
@@ -415,15 +448,45 @@ class LocalRepairAssessments:
             with _open_db(self.path) as db:
                 if db is None:
                     return None
-                row = db.execute("SELECT body FROM assessments WHERE key=?", (key,)).fetchone()
+                aggregate = None
+                if self.seal_aggregate is not None and context is not None:
+                    aggregate = db.execute(
+                        "SELECT body FROM assessments WHERE key=?", (self._aggregate_key(key),)
+                    ).fetchone()
+                row = (
+                    aggregate
+                    or db.execute("SELECT body FROM assessments WHERE key=?", (key,)).fetchone()
+                )
             if row is None:
                 return None
             body = json.loads(row[0])
             if self.context_revision:
                 _require(body.get("context_permission_revision") == context)
             value = body["assessment"]
+            receipt_fields = dict(value)
             value["residual_roots"] = tuple(value["residual_roots"])
             value["missing_gates"] = tuple(value["missing_gates"])
-            return ReadinessAssessment(**value)
-        except (IntakeError, TrainingError, OSError, sqlite3.Error, ValueError, KeyError):
+            receipt = ReadinessAssessment(**value)
+            _require(receipt.incumbent_automatic is None)
+            if aggregate is not None:
+                assert self.seal_aggregate is not None
+                packet = body["incumbent_automatic"]
+                counts = AutomaticCounts(**packet["counts"])
+                summary = {
+                    "assessment_key": key,
+                    "assessment": receipt_fields,
+                    "counts": asdict(counts),
+                }
+                _require(hmac.compare_digest(packet["seal"], self.seal_aggregate(actual, summary)))
+                return replace(receipt, incumbent_automatic=counts)
+            return receipt
+        except (
+            IntakeError,
+            TrainingError,
+            OSError,
+            sqlite3.Error,
+            ValueError,
+            TypeError,
+            KeyError,
+        ):
             return None
