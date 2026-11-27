@@ -267,6 +267,8 @@ def _root(case_id: str) -> str:
 def _components(cases: Sequence[DevelopmentCase]) -> dict[str, str]:
     """Cases sharing an entity or a family are one independent group (union-find)."""
     parent: dict[str, str] = {}
+    # Identifiers are compared case-insensitively: merging more is the conservative direction
+    # for independence, so "Entity-A" and "entity-a" can never count as two groups.
 
     def find(x: str) -> str:
         parent.setdefault(x, x)
@@ -276,10 +278,11 @@ def _components(cases: Sequence[DevelopmentCase]) -> dict[str, str]:
         return x
 
     for case in cases:
-        a, b = find("e:" + case.entity_id), find("f:" + case.family_id)
+        a = find("e:" + case.entity_id.casefold())
+        b = find("f:" + case.family_id.casefold())
         if a != b:
             parent[max(a, b)] = min(a, b)
-    return {c.case_id: "grp-" + digest(find("e:" + c.entity_id))[:24] for c in cases}
+    return {c.case_id: "grp-" + digest(find("e:" + c.entity_id.casefold()))[:24] for c in cases}
 
 
 def _validate_cases(cases: Sequence[DevelopmentCase]) -> None:
@@ -301,6 +304,8 @@ def _input_revision(request: RoutingRequest) -> str:
     return digest(
         [
             request.terms.revision,
+            request.snapshot.workflow_ref,
+            request.snapshot.as_of,
             request.policy.policy_ref,
             request.snapshot.evidence_revision,
             request.snapshot.documentation_revision,
@@ -738,13 +743,21 @@ class RepairRoutingStore:
             reason = "not_fit_eligible"
         elif not mandate.active:
             reason = "mandate_withdrawn_or_expired"
-        elif mandate.mandate_revision != receipt["mandate_revision"]:
+        elif (
+            mandate.mandate_ref != receipt["mandate_ref"]
+            or mandate.mandate_revision != receipt["mandate_revision"]
+        ):
             reason = "mandate_revision_changed"
         elif (
-            snapshot.evidence_revision != receipt["evidence_revision"]
+            snapshot.organization != receipt["organization"]
+            or snapshot.run_id != receipt["run_id"]
+            or snapshot.evidence_revision != receipt["evidence_revision"]
+            or snapshot.documentation_revision != receipt["documentation_revision"]
             or snapshot.snapshot_ref != receipt["snapshot_ref"]
         ):
             reason = "evidence_revision_changed"
+        elif "train" not in mandate.uses:
+            reason = "training_rights_required"
         elif not mandate.has_budget:
             reason = "training_budget_required"
         return {

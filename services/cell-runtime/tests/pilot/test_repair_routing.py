@@ -6,6 +6,7 @@ Local and simulated only: no provider, protected set, ledger reservation or fit 
 from __future__ import annotations
 
 import sqlite3
+import threading
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -452,3 +453,62 @@ def test_store_is_private_and_holds_one_row(store: rr.RepairRoutingStore) -> Non
     assert store.path.stat().st_mode & 0o077 == 0
     with sqlite3.connect(store.path) as db:
         assert db.execute("SELECT count(*) FROM evaluations").fetchone()[0] == 1
+
+
+def test_grouping_is_transitive_and_case_insensitive(store: rr.RepairRoutingStore) -> None:
+    # e1-f1, e2-f1, e2-f2 chain into one group; the casing variant joins it too.
+    chain = [
+        case("c1", "z", "b", "a", entity="generated-e1", family="generated-f1"),
+        case("c2", "z", "b", "a", entity="generated-e2", family="generated-f1"),
+        case("c3", "z", "b", "a", entity="Generated-E2", family="GENERATED-F2"),
+        case("c4", "z", "b", "a", entity="GENERATED-E1", family="generated-f9"),
+    ]
+    r = store.evaluate(request(group("fx", 2, "x", "b", "a") + chain + correct()))
+    assert (r["outcome"], r["reason_code"]) == ("request_evidence", "residual_not_independent")
+    assert r["independent_residual_groups"] == 1
+    assert (r["fit_starts"], r["reservations"], r["protected_reads"]) == (0, 0, 0)
+
+
+def test_changed_clock_or_workflow_on_same_key_conflicts(store: rr.RepairRoutingStore) -> None:
+    store.evaluate(request(independent_residual()))
+    base = request(independent_residual())
+    for snap in (
+        replace(base.snapshot, as_of=AS_OF + 1),
+        replace(base.snapshot, workflow_ref="generated-other-workflow"),
+    ):
+        with pytest.raises(rr.RoutingError, match="EVALUATION_CONFLICT"):
+            store.evaluate(replace(base, snapshot=snap))
+    assert store.count() == 1
+
+
+def test_concurrent_triggers_record_one_evaluation(store: rr.RepairRoutingStore) -> None:
+    out: list[dict[str, Any]] = []
+
+    def go() -> None:
+        out.append(rr.RepairRoutingStore(store.path.parent).evaluate(request(data_fix())))
+
+    threads = [threading.Thread(target=go) for _ in range(6)]
+    for th in threads:
+        th.start()
+    for th in threads:
+        th.join()
+    assert len(out) == 6 and len({o["evaluation_id"] for o in out}) == 1
+    assert sorted(o["replayed"] for o in out) == [False] + [True] * 5
+    assert store.count() == 1
+
+
+def test_current_eligibility_rejects_foreign_mandate_and_lost_training_right(
+    store: rr.RepairRoutingStore,
+) -> None:
+    r = store.evaluate(request(independent_residual()))
+    snap = request(independent_residual()).snapshot
+    foreign = mandate(mandate_ref="generated-mandate-other")
+    got = store.current_eligibility(r["evaluation_id"], snapshot=snap, mandate=foreign)
+    assert (got["eligible"], got["reason_code"]) == (False, "mandate_revision_changed")
+    no_train = mandate(uses=frozenset({"inspect", "evaluate"}))
+    got = store.current_eligibility(r["evaluation_id"], snapshot=snap, mandate=no_train)
+    assert (got["eligible"], got["reason_code"]) == (False, "training_rights_required")
+    docs = replace(snap, documentation_revision="generated-docs-2")
+    got = store.current_eligibility(r["evaluation_id"], snapshot=docs, mandate=mandate())
+    assert got["reason_code"] == "evidence_revision_changed"
+    assert got["reservations"] == 0 and got["automatic_promotion"] is False
