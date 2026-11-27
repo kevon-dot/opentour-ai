@@ -2657,14 +2657,17 @@ class Workbench:
         execution = entry["execution_ref"]
         session = self._starter_score_session(actor)
         _check(session.entry(execution) == entry)
-        summary = session.summary(execution)
+        summary = session.summary(execution, expected_revision=entry["revision"])
         token = self.journal.context(
             actor, cfg.channel, view, "starter_score", execution, entry["revision"]
         )
 
         def authorize() -> None:
             current = self._starter_score_session(actor)
-            _check(current.entry(execution) == entry and current.summary(execution) == summary)
+            _check(
+                current.entry(execution) == entry
+                and current.summary(execution, expected_revision=entry["revision"]) == summary
+            )
 
         self._show(
             view, self.views.starter_score_readout(token, entry, summary), authorize=authorize
