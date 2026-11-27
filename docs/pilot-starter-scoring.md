@@ -42,9 +42,28 @@ not increase automation coverage. With no automatic decisions the wrong-automati
 denominator is zero and its value is unavailable. Fixed/regressed counts use
 the same paired cases and report missing-output exclusions.
 
+`LocalStarterBaseline` provides a durable adapter for the existing `cpu_text_v1`
+profile. It loads pre-existing owner-private parameters and verifies their exact
+SHA-256 against the registered immutable model revision. It never trains,
+accepts a fitted-candidate substitute, or sends a network request. Its one text
+field, classification schema and action output schema must match the registry
+and current baseline grant. It rechecks evaluator authority and the actual frozen
+input projection before each bounded prediction and receipt commit. A REVIEW
+label remains an abstention, including when selected by model parameters.
+
+The adapter stores authenticated receipts in `starter-local-predictions.sqlite3`.
+The custodian supplies a separate private 32-byte receipt key; the worker does not
+create or distribute that key. Changed inputs, model bytes, scope or operation
+identity are rejected. Restart and lost acknowledgment reconcile the exact
+receipt, and concurrent callers share one committed local prediction batch.
+Lookup does not create a journal or sidecars. The model, receipt key and journal
+must be included in the installed custody inventory before this route is wired.
+Tests use generated pre-existing CPU parameters, with no training or actual-model
+qualification claim. The comparator remains a separate typed port.
+
 This module is a backend core, not a complete installed route. The current
 owner-confirmed OPE-538 map producer, explicit evaluator/execution capability,
-durable baseline adapter and private read-only Home composition are still needed
+normal factory/custody integration and private read-only Home composition are still needed
 for normal-entry integration. Generated deterministic adapters test the required
 four-case scores and recovery protocol; they do not claim a real selected-model
 or customer evaluation. OPE-406/W2 owns the separate actual-model witness.
