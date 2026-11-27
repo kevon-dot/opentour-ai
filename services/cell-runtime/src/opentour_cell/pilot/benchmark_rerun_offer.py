@@ -211,13 +211,37 @@ class BenchmarkRerunOffers:
             )
             work = worker.work(rerun)
             _require(work.benchmark_current and work.benchmark_version == cap["benchmark_version"])
+            # The local custody writer replaces authority files and creates withdrawal
+            # markers here. Pin directory changes as well as in-place model registry
+            # edits across the final independent reads; no model inference is involved.
+            registry_path = self.directory / "model-registration.json"
+
+            def generation() -> tuple[tuple[int, int, int], ...]:
+                return tuple(
+                    (state.st_dev, state.st_ino, state.st_ctime_ns)
+                    for state in (self.directory.stat(), registry_path.lstat())
+                )
+
+            pinned = generation()
             baseline = self._baseline(invocation, new_permission)
             _require(worker._grant(rerun) == (new_grant, new_permission))
             _require(self.owner.summary(original, expected_revision=inspection_revision) == summary)
             invocation.settings()
             _require(self._baseline(invocation, new_permission) == baseline)
+            _require(worker._grant(rerun) == (new_grant, new_permission))
+            invocation.settings()
+            _require(authority._grant(original) == (original_grant, permission))
             self.owner.settings().permission(actor.actor, "inspect")
             _require(self._grant(original, rerun, inspection_revision) == cap)
+            valid_until = min(
+                cap["expires_at"],
+                original_grant["expires_at"],
+                invocation.cap["expires_at"],
+                new_grant["expires_at"],
+                new_permission.expires_at,
+                baseline[1].valid_until,
+            )
+            _require(generation() == pinned and time.time() < valid_until)
             return RerunOffer(
                 digest(cap),
                 cap["workflow_ref"],

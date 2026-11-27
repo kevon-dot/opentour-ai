@@ -5,6 +5,7 @@ import json
 import sqlite3
 from dataclasses import asdict, replace
 
+import pytest
 from opentour_cell.pilot.benchmark_rerun_offer import GRANT, BenchmarkRerunOffers
 from opentour_cell.pilot.operating_point import canonical, digest
 from opentour_cell.pilot.starter_benchmark_worker import main as publish
@@ -155,7 +156,10 @@ def test_offer_denies_mismatched_or_withdrawn_independent_authority(publication,
     assert read() is None
 
 
-def test_offer_withdrawal_during_final_model_check_is_held(publication, installed, monkeypatch):
+@pytest.mark.parametrize("withdrawn", ["offer", "invocation", "execution", "inspection", "model"])
+def test_offer_withdrawal_during_final_model_check_is_held(
+    publication, installed, monkeypatch, withdrawn
+):
     directory = publication[0]
     request, write, read, _, service = prepare(publication, installed)
     write(request)
@@ -167,7 +171,23 @@ def test_offer_withdrawal_during_final_model_check_is_held(publication, installe
         current = original(*args)
         checks.append(current)
         if len(checks) == 2:
-            (directory / "benchmark-rerun-withdrawn-generated-rerun-offer.json").touch(mode=0o600)
+            invocation, permission = args
+            if withdrawn == "model":
+                path = directory / "model-registration.json"
+                _write_private(path, json.loads(path.read_bytes()) | {"grants": []})
+            else:
+                selection = json.loads(
+                    (directory / "starter-evaluation-selection.json").read_bytes()
+                )
+                filename = selection["inspections"][request["original_execution_ref"]]
+                inspection = json.loads((directory / filename).read_bytes())["grant"]["grant_ref"]
+                marker = {
+                    "offer": f"benchmark-rerun-withdrawn-{request['grant_ref']}",
+                    "invocation": f"starter-worker-withdrawn-{invocation.cap['invocation_ref']}",
+                    "execution": f"starter-evaluation-withdrawn-{permission.revision}",
+                    "inspection": f"starter-evaluation-withdrawn-{inspection}",
+                }[withdrawn]
+                (directory / f"{marker}.json").touch(mode=0o600)
         return current
 
     monkeypatch.setattr(service, "_baseline", withdraw)

@@ -20,3 +20,9 @@ authorized evaluator and retries it. Two executions retain one frozen benchmark.
 
 Private confirmation and durable admission for Slack, the definition editor
 and benchmark proof actions remain open under OPE-500.
+
+The offer reader checks the evaluator invocation, execution permission, viewer
+inspection and offer again after resolving the model. It also checks the earliest
+applicable expiry and detects changes to the private directory or registry during
+these reads. A concurrent file replacement can temporarily hide the offer until
+the next read establishes a consistent view.
