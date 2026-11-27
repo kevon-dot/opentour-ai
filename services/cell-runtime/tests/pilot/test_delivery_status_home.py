@@ -1,7 +1,10 @@
 """Generated private Slack reviewer opens the current worker and receiver receipts."""
 
+from datetime import UTC, datetime
+
 from opentour_cell.pilot.local_handoff_permissions import handoff_outbox
 from opentour_cell.pilot.recipient_delivery import LocalRecipientDelivery, dispatch_local_release
+from opentour_cell.pilot.release_gate import inspect_recorded_release
 from test_local_handoff_permissions import KEY, signed_permission
 from test_repair_bundle import write
 from test_reviewer_workflow import buttons, restart, screen, text
@@ -34,6 +37,26 @@ def test_private_status_refresh_reads_only_current_independent_receiver(tmp_path
     h.config["live_workflow_ref"] = permit.workflow_ref
     h.save()
 
+    def stamp(timestamp):
+        return datetime.fromtimestamp(timestamp, UTC).isoformat()
+
+    decision = inspect_recorded_release(
+        directory,
+        h.store.organization,
+        permit.proposal_ref,
+        permit.proposal_revision,
+        permit.artifact_sha256,
+    )
+    assert decision and decision["decision_seal"]
+    approval = f"Approved {stamp(decision['recorded_at'])}."
+    scope = (
+        f"Workflow {permit.workflow_ref} · Proposal {permit.proposal_ref} "
+        f"revision {permit.proposal_revision} · Artifact {permit.artifact_sha256}\n"
+        f"Destination {permit.destination_ref}"
+    )
+    no_check = "No independent check time is recorded."
+    reconcile_action = "The authorized handoff operator can reconcile delivery."
+
     def open_status(*, home=False):
         if home:
             from test_app_home import click as home_click
@@ -53,12 +76,31 @@ def test_private_status_refresh_reads_only_current_independent_receiver(tmp_path
         h.slack.screens[view]["hash"] = "generated-current-modal"
         h.action(view, action, buttons(screen(h, view))[action], actor)
 
+    def sections(modal):
+        return [b["text"]["text"] for b in modal["blocks"] if b["type"] == "section"]
+
+    def assert_timeline(view, *rows, can_refresh):
+        receipt = screen(h, view)
+        assert receipt["callback_id"] == "ot_handoff_receipt"
+        assert sections(receipt) == [scope, approval, *rows]
+        assert set(buttons(receipt)) == (
+            {"ot_home", "ot_delivery_status"} if can_refresh else {"ot_home"}
+        )
+
     view = open_status(home=True)
-    assert "Approval recorded. Delivery is unconfirmed." in text(h, view)
+    assert sections(screen(h, view))[1:] == [
+        "Approval recorded. Delivery is unconfirmed.",
+        f"{scope} · {approval} {no_check}",
+        reconcile_action,
+    ]
     click(view, "ot_release_receipt")
-    assert permit.destination_ref in text(h, view)
+    assert_timeline(
+        view, f"Delivery is unconfirmed.\n{no_check}", reconcile_action, can_refresh=True
+    )
     click(view, "ot_delivery_status")
-    assert "No independent check time" in text(h, view)
+    assert_timeline(
+        view, f"Delivery is unconfirmed.\n{no_check}", reconcile_action, can_refresh=True
+    )
     committed = []
 
     class LoseAck(LocalRecipientDelivery):
@@ -67,21 +109,42 @@ def test_private_status_refresh_reads_only_current_independent_receiver(tmp_path
             raise TimeoutError("generated missing acknowledgment")
 
     outbox = handoff_outbox(h.store)
-    outbox.reserve(selection, "dispatcher", "selected-delivery")
+    queued = outbox.reserve(selection, "dispatcher", "selected-delivery")
+    assert queued.stage == "queued" and queued.last_checked_at is None
+    click(view, "ot_delivery_status")
+    assert_timeline(view, f"Awaiting delivery.\n{no_check}", reconcile_action, can_refresh=True)
+    assert outbox.status(selection, actor) == queued
     dispatch_local_release(outbox, selection, "dispatcher", LoseAck(receiver.grant_file), offered)
     restart(h)
+    pending = outbox.status(selection, actor)
+    assert pending and pending.stage == "delivery_unconfirmed"
+    checked = (
+        no_check
+        if pending.last_checked_at is None
+        else f"Last checked {stamp(pending.last_checked_at)}."
+    )
     before = counts(h)
-    for _ in range(2):
-        view = open_status()
+    for home in (True, False):
+        view = open_status(home=home)
         click(view, "ot_release_receipt")
         click(view, "ot_delivery_status")
-        assert "Delivery is unconfirmed" in text(h, view)
+        assert_timeline(
+            view, f"Delivery is unconfirmed.\n{checked}", reconcile_action, can_refresh=True
+        )
+        assert outbox.status(selection, actor) == pending
     assert counts(h) == before and len(committed) == 1
-    outbox.reconcile(selection, "dispatcher", receiver)
+    delivered = outbox.reconcile(selection, "dispatcher", receiver)
+    assert delivered.last_checked_at is not None and delivered.received_at is not None
+    assert delivered.receiver_receipt_ref == committed[0]
     click(view, "ot_delivery_status")
-    assert "Delivered to the selected destination" in text(h, view)
-    assert committed[0] in text(h, view)
-    assert "ot_delivery_status" not in buttons(screen(h, view))
+    assert_timeline(
+        view,
+        f"Delivered to the selected destination.\nLast checked {stamp(delivered.last_checked_at)}.",
+        f"Receiver receipt {committed[0]} at {stamp(delivered.received_at)}.",
+        "The recipient can independently replay the artifact.",
+        can_refresh=False,
+    )
+    assert outbox.status(selection, actor) == delivered
     assert counts(h) == before and len(committed) == 1
 
     # A direct question opened on the same inspected result did not select a workflow.
@@ -114,6 +177,8 @@ def test_private_status_refresh_reads_only_current_independent_receiver(tmp_path
     monkeypatch.setattr(h.app.views, "handoff_modal", revoke)
     click(view, "ot_release_receipt")
     assert committed[0] not in text(h, view) and permit.destination_ref not in text(h, view)
+    assert approval not in text(h, view) and scope not in sections(screen(h, view))
+    assert screen(h, view).get("callback_id") != "ot_handoff_receipt"
     assert len(committed) == 1
 
 
