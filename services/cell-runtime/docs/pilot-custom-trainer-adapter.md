@@ -45,12 +45,23 @@ silent degradation.
    that cannot confirm the job yields `UNKNOWN`. `UNKNOWN` never authorizes a retry and is never
    read as success. A retry needs a new fit intent and therefore a new reservation by the caller.
 3. An unrecognized trainer state is `UNKNOWN`. A terminal state is final: a late callback or poll
-   for a settled job changes nothing (`settle_callback` returns `False`).
+   for a settled job changes nothing (`settle_callback` returns `False`). A callback is only a
+   wake-up hint: its claimed state is never applied; the connector re-reads the job from the
+   trainer under the server-side credential.
 4. Cancel records its intent durably before the stop is sent. A canceled job never yields a
    candidate, even if the trainer finishes anyway.
-5. Usage the trainer reports above the authorized bound stops the job and fails it.
+5. Usage the trainer reports above the authorized bound, malformed, or in another currency stops
+   the job. It is reported `FAILED` only once the trainer confirms the stop; an unhonored stop
+   stays `RUNNING` with a durable cancel intent. Malformed usage raises `invalid_usage`.
 6. `fence(tenant)` is durable across restart: it blocks new submit, collect and replay and stops
-   live jobs. `usable_target` keeps returning the prior pinned revision.
+   live jobs. `canceled_job_refs` lists only jobs the trainer confirmed stopped for that exact
+   job; if any live job (including one whose dispatch was never acknowledged) cannot be confirmed
+   stopped, `fence` raises `fence_job_not_stopped` and the marker stays. `usable_target` keeps
+   returning the prior pinned revision.
+7. Versions are re-verified with the trainer at dispatch and at collect (never taken from the
+   result). Cancel and fence do not wait on version agreement. Result signatures use a
+   length-unambiguous encoding under the server-side credential; the first collected artifact is
+   final.
 
 Credentials are resolved server-side from `binding.credential_ref`, wrapped in a redacting
 `Credential`, and never placed in errors, payloads or journals. A missing credential fails closed

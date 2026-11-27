@@ -32,6 +32,7 @@ import fcntl
 import hashlib
 import hmac
 import json
+import math
 import os
 import time
 from collections.abc import Callable, Mapping, Sequence
@@ -75,6 +76,27 @@ class Usage:
     steps: int
     source: UsageSource
     irreversible: bool = False
+
+    def __post_init__(self) -> None:
+        # A plain string such as "estimated" must not slip past the identity check in settleable.
+        try:
+            object.__setattr__(self, "source", UsageSource(self.source))
+        except ValueError:
+            raise ValueError("invalid_usage") from None
+        counts = (self.incurred_minor_units, self.seconds, self.rows, self.steps)
+        if (
+            not isinstance(self.job_ref, str)
+            or not self.job_ref
+            or not isinstance(self.currency, str)
+            or not self.currency
+            or any(type(count) is not int or count < 0 for count in counts)
+            or type(self.irreversible) is not bool
+        ):
+            raise ValueError("invalid_usage")
+
+    @property
+    def settleable(self) -> bool:
+        return self.source is not UsageSource.ESTIMATED
 
 
 @dataclass(frozen=True)
@@ -267,16 +289,19 @@ def integration_tier(
 def sign_result(secret: str, result: TrainerResult | Mapping[str, str]) -> str:
     """The signature a trainer must attach to its result (HMAC-SHA256 under the shared secret)."""
     data = result if isinstance(result, Mapping) else asdict(result)
-    body = "|".join(
-        data[key]
-        for key in (
-            "job_id",
-            "client_token",
-            "trainer_version",
-            "parent_revision",
-            "artifact_ref",
-            "artifact_digest",
-        )
+    # Length-unambiguous encoding: a delimiter inside one field cannot shift into the next.
+    body = _canon(
+        [
+            data[key]
+            for key in (
+                "job_id",
+                "client_token",
+                "trainer_version",
+                "parent_revision",
+                "artifact_ref",
+                "artifact_digest",
+            )
+        ]
     )
     return hmac.new(secret.encode(), body.encode(), hashlib.sha256).hexdigest()
 
@@ -287,7 +312,13 @@ def replay_matches(
     mode: str,
     tolerance: float,
 ) -> bool:
-    """Deterministic equality, or equality within the declared numeric tolerance."""
+    """Deterministic equality, or equality within the declared numeric tolerance.
+
+    Fails closed: an unknown mode, a negative or non-finite tolerance, and NaN or infinite drift
+    never match (``abs(nan) > tolerance`` is False, so the comparison is written as ``not <=``).
+    """
+    if mode not in _REPLAY_MODES or not math.isfinite(tolerance) or tolerance < 0:
+        return False
     if len(first) != len(second):
         return False
     for left, right in zip(first, second, strict=True):
@@ -300,7 +331,7 @@ def replay_matches(
                 for item in (value, other)
             )
             if mode == "tolerance" and numeric:
-                if abs(float(value) - float(other)) > tolerance:  # type: ignore[arg-type]
+                if not abs(float(value) - float(other)) <= tolerance:  # type: ignore[arg-type]
                     return False
             elif value != other:
                 return False
@@ -380,7 +411,7 @@ class _Journal:
                 entry.cancel_requested = True
             elif kind == "state" and entry.state not in _TERMINAL:
                 entry.state = record["state"]
-            elif kind == "collected":
+            elif kind == "collected" and not entry.artifact_ref:  # first collection is final
                 entry.artifact_ref, entry.artifact_digest = record["ref"], record["digest"]
         return fold
 
@@ -527,6 +558,48 @@ class CustomTrainerConnector:
         }
         return _canon(payload).encode()
 
+    @staticmethod
+    def _check_payload(
+        intent: mc.FitIntent, registration: TrainerRegistration, development: bytes
+    ) -> None:
+        """Re-validate the outbound bytes: no protected field, in-bound rows, exact shape."""
+        if intent.fields & registration.protected_fields:
+            raise ValueError("protected_field_in_development")
+        try:
+            payload = json.loads(development)
+        except (ValueError, UnicodeDecodeError):
+            raise ValueError("development_payload_invalid") from None
+        keys = {
+            "serializer",
+            "task",
+            "input_schema",
+            "output_schema",
+            "preprocessing",
+            "fields",
+            "row_count",
+            "rows",
+        }
+        if (
+            not isinstance(payload, dict)
+            or set(payload) != keys
+            or _canon(payload).encode() != development
+            or payload["serializer"] != registration.serializer_version
+            or payload["task"] != intent.binding.task
+            or payload["input_schema"] != intent.binding.input_schema
+            or payload["output_schema"] != intent.binding.output_schema
+            or payload["preprocessing"] != intent.binding.preprocessing_revision
+            or payload["fields"] != sorted(intent.fields)
+        ):
+            raise ValueError("development_payload_invalid")
+        rows = payload["rows"]
+        if (
+            not isinstance(rows, list)
+            or not 0 < len(rows) <= intent.bound.maximum_rows
+            or payload["row_count"] != len(rows)
+            or any(not isinstance(row, dict) or set(row) != set(intent.fields) for row in rows)
+        ):
+            raise ValueError("development_rows_invalid")
+
     def estimate(self, intent: mc.FitIntent) -> mc.FitBound | None:
         _, credential, _ = self._gate(intent.binding)
         return self.transport.quote(credential, intent.binding.task, intent.bound)
@@ -541,6 +614,8 @@ class CustomTrainerConnector:
             raise ValueError("task_unsupported")
         if manifest.model_revision != binding.immutable_revision:
             raise ValueError("installed_model_mismatch")
+        # The digest only proves the bytes are the ones the caller meant; check what they contain.
+        self._check_payload(intent, registration, development)
         token, digest = _token(intent), _intent_digest(intent)
 
         def plan(fold: _Fold) -> list[dict[str, Any]]:
@@ -549,6 +624,8 @@ class CustomTrainerConnector:
                 raise ValueError("idempotency_conflict")
             if entry is not None:
                 return []
+            if binding.tenant in fold.fenced:  # decided under the same lock as the fence marker
+                raise ValueError("connector_fenced")
             return [
                 {
                     "t": "intent",
@@ -625,15 +702,26 @@ class CustomTrainerConnector:
         if view.client_token != token or view.job_id != entry.job_id:
             raise ValueError("trainer_identity_mismatch")
         observed = view.state if view.state in _STATE else "unknown"
-        if view.usage is not None and _exceeds(view.usage, intent.bound):
+        if view.usage is not None and not _within(view.usage, intent.bound):
+            # Over the bound, malformed, or in a foreign currency: the cap can no longer be
+            # verified. Stop the job. FAILED is claimed only once the trainer says it stopped:
+            # an unhonored stop leaves the job RUNNING (still spending) with durable cancel intent.
             self.journal.append({"t": "cancel_intent", "k": token})
-            self.transport.request_cancel(self._credential(intent.binding), entry.job_id)
-            observed = "failed"
+            stopped = self.transport.request_cancel(self._credential(intent.binding), entry.job_id)
+            self._same_job(stopped, token, entry)
+            if observed in _TERMINAL or stopped.state in _TERMINAL:
+                observed = "failed"
         elif entry.cancel_requested and observed == "completed":
             observed = "canceled"  # a stopped job never publishes a winner
         if observed in _TERMINAL:
             entry = self.journal.append({"t": "state", "k": token, "state": observed}).jobs[token]
         return self._receipt(intent, token, entry, live=observed)
+
+    @staticmethod
+    def _same_job(view: TrainerView, token: str, entry: _Entry) -> None:
+        """A trainer reply about some other job proves nothing about this one."""
+        if view.client_token != token or view.job_id != entry.job_id:
+            raise ValueError("trainer_identity_mismatch")
 
     def lookup(self, intent: mc.FitIntent) -> mc.JobReceipt | None:
         """Read-only. Recovers a lost acknowledgement from the trainer by client token."""
@@ -651,6 +739,8 @@ class CustomTrainerConnector:
             return None  # cannot prove the trainer never got it: UNKNOWN, never a retry
         if entry is None:
             return None  # an unrecorded intent is not ours to adopt
+        if view.client_token != token or not view.job_id:
+            raise ValueError("trainer_identity_mismatch")  # never journal a foreign identity
         if not entry.job_id:
             self.journal.append(
                 {
@@ -691,11 +781,16 @@ class CustomTrainerConnector:
         entry = self._known(job, token)
         if entry.state in _TERMINAL:
             return self._receipt(intent, token, entry)
-        manifest = self._gate(intent.binding)[2]
-        if not manifest.cancellation:
+        # Stopping spend must never wait on version agreement: only the destination and the
+        # credential are resolved, and the trainer must still declare that it can cancel.
+        self._require_custom(intent.binding)
+        self._registration(intent.binding)
+        credential = self._credential(intent.binding)
+        if not self.transport.describe(credential).cancellation:
             raise ValueError("cancellation_unsupported")
         self.journal.append({"t": "cancel_intent", "k": token})  # durable before the stop
-        view = self.transport.request_cancel(self._credential(intent.binding), entry.job_id)
+        view = self.transport.request_cancel(credential, entry.job_id)
+        self._same_job(view, token, entry)
         outcome = {"canceled": "canceled", "completed": "canceled", "failed": "failed"}.get(
             view.state
         )
@@ -715,7 +810,10 @@ class CustomTrainerConnector:
             raise ValueError("job_canceled")
         if entry.state != "completed":
             raise ValueError("job_not_completed")
-        credential = self._credential(intent.binding)
+        # Versions are re-verified with the trainer now, not taken from the result it hands back.
+        _, credential, manifest = self._gate(intent.binding)
+        if manifest.trainer_version != entry.trainer_version:
+            raise ValueError("trainer_version_changed")
         result = self.transport.fetch_result(credential, entry.job_id)
         if (
             result.job_id != entry.job_id
@@ -729,14 +827,20 @@ class CustomTrainerConnector:
             raise ValueError("candidate_artifact_missing")
         if not hmac.compare_digest(result.signature, sign_result(credential.value, result)):
             raise ValueError("result_signature_invalid")
-        self.journal.append(
-            {
-                "t": "collected",
-                "k": token,
-                "ref": result.artifact_ref,
-                "digest": result.artifact_digest,
-            }
-        )
+        if entry.artifact_ref and (
+            (result.artifact_ref, result.artifact_digest)
+            != (entry.artifact_ref, entry.artifact_digest)
+        ):
+            raise ValueError("candidate_artifact_changed")  # the first collection is final
+        if not entry.artifact_ref:
+            self.journal.append(
+                {
+                    "t": "collected",
+                    "k": token,
+                    "ref": result.artifact_ref,
+                    "digest": result.artifact_digest,
+                }
+            )
         evidence = hashlib.sha256(result.signature.encode()).hexdigest()[:32]
         return mc.Candidate(
             intent,
@@ -755,7 +859,9 @@ class CustomTrainerConnector:
         entry = self.journal.read().jobs.get(_token(intent))
         if (
             entry is None
+            or entry.intent_digest != _intent_digest(intent)
             or entry.job_id != candidate.job_ref
+            or not entry.artifact_ref
             or entry.artifact_ref != candidate.artifact_or_serving_revision
         ):
             raise ValueError("candidate_not_collected")
@@ -777,10 +883,10 @@ class CustomTrainerConnector:
         intent = job.intent
         entry = self._known(job, _token(intent))
         view = self.transport.poll(self._credential(intent.binding), entry.job_id)
-        if view.usage is None or view.job_id != entry.job_id:
+        if view.usage is None or view.job_id != entry.job_id or view.client_token != _token(intent):
             return None
         reported = view.usage
-        return Usage(
+        return Usage(  # raises ValueError("invalid_usage") on malformed trainer values
             entry.job_id,
             reported.currency,
             reported.minor_units,
@@ -791,22 +897,42 @@ class CustomTrainerConnector:
         )
 
     def fence(self, scope: str) -> FenceReceipt:
-        """Durably block new submit/collect/replay for a tenant, then stop its live jobs."""
+        """Durably block new submit/collect/replay for a tenant, then stop its live jobs.
+
+        ``canceled_job_refs`` lists only jobs the trainer itself confirmed stopped (a reply for
+        that exact job). If any live job, including one whose dispatch was never acknowledged,
+        cannot be confirmed stopped, the durable marker stays and ``fence_job_not_stopped`` is
+        raised instead of returning a receipt that would over-report.
+        """
         fold = self.journal.append({"t": "fence", "scope": scope})
         canceled: list[str] = []
+        unresolved = 0
         for token, entry in fold.jobs.items():
-            if entry.tenant != scope or not entry.job_id or entry.state in _TERMINAL:
+            if entry.tenant != scope or entry.state in _TERMINAL:
                 continue
             self.journal.append({"t": "cancel_intent", "k": token})
             try:
-                view = self.transport.request_cancel(
-                    self._credential_by_ref(scope, entry.credential_ref), entry.job_id
-                )
-            except (OSError, ValueError):
-                continue  # intent stays durable; collect is already refused
+                credential = self._credential_by_ref(scope, entry.credential_ref)
+                job_id = entry.job_id
+                if not job_id:  # lost acknowledgement: find (read-only) it, then stop it
+                    found = self.transport.find(credential, token)
+                    if found is None or found.client_token != token or not found.job_id:
+                        unresolved += 1
+                        continue
+                    job_id = found.job_id
+                view = self.transport.request_cancel(credential, job_id)
+                if view.client_token != token or view.job_id != job_id:
+                    raise ValueError("trainer_identity_mismatch")
+            except (OSError, LookupError, ValueError):
+                unresolved += 1  # intent stays durable; collect is already refused
+                continue
             if view.state in ("canceled", "completed"):
                 self.journal.append({"t": "state", "k": token, "state": "canceled"})
-                canceled.append(entry.job_id)
+                canceled.append(job_id)
+            else:
+                unresolved += 1
+        if unresolved:
+            raise ValueError("fence_job_not_stopped")
         evidence = hashlib.sha256(_canon([scope, sorted(canceled)]).encode()).hexdigest()[:32]
         return FenceReceipt(scope, tuple(sorted(canceled)), f"fence-receipt:{evidence}")
 
@@ -821,23 +947,34 @@ class CustomTrainerConnector:
         return binding.immutable_revision
 
 
-def _exceeds(usage: TrainerUsage, bound: mc.FitBound) -> bool:
+def _within(usage: TrainerUsage, bound: mc.FitBound) -> bool:
+    """True only for well-formed usage in the bound's currency and inside every limit.
+
+    Malformed values (non-int, bool, negative, NaN) or a foreign currency return False: a cap
+    that cannot be verified is treated as breached, never as satisfied.
+    """
+    counts = (usage.minor_units, usage.seconds, usage.rows, usage.steps)
+    if any(type(count) is not int or count < 0 for count in counts):
+        return False
     return (
-        usage.currency != bound.currency
-        or usage.minor_units > bound.maximum_minor_units
-        or usage.seconds > bound.maximum_seconds
-        or usage.rows > bound.maximum_rows
-        or usage.steps > bound.maximum_steps
+        isinstance(usage.currency, str)
+        and usage.currency == bound.currency
+        and usage.minor_units <= bound.maximum_minor_units
+        and usage.seconds <= bound.maximum_seconds
+        and usage.rows <= bound.maximum_rows
+        and usage.steps <= bound.maximum_steps
     )
 
 
 def settle_callback(
     connector: CustomTrainerConnector, intent: mc.FitIntent, view: TrainerView
 ) -> bool:
-    """Apply an asynchronous trainer callback. Returns whether it changed anything.
+    """Treat an asynchronous trainer callback as a wake-up hint. Returns whether it settled a job.
 
-    A callback for an unknown job, a mismatched client token, or a job that is already settled
-    changes nothing.
+    The callback is not authenticated (its client token is derived from the idempotency key, not a
+    secret), so its claimed state is never applied. The authoritative state is re-read from the
+    trainer under the server-side credential. A callback for an unknown job, a mismatched client
+    token, or a job that is already settled changes nothing.
     """
     token = _token(intent)
     entry = connector.journal.read().jobs.get(token)
@@ -850,5 +987,11 @@ def settle_callback(
     ):
         return False
     before = entry.state
-    receipt = connector._settle(intent, token, entry, view)
+    try:
+        authoritative = connector.transport.poll(
+            connector._credential(intent.binding), entry.job_id
+        )
+    except (OSError, LookupError, ValueError):
+        return False  # nothing confirmed: nothing changes
+    receipt = connector._settle(intent, token, entry, authoritative)
     return receipt.state.value in _TERMINAL and before not in _TERMINAL

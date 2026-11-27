@@ -26,6 +26,7 @@ from opentour_cell.pilot.custom_trainer_connector import (
     TrainerRegistration,
     TrainerTransport,
     check_compatibility,
+    replay_matches,
     sign_result,
 )
 
@@ -137,7 +138,10 @@ def run_trainer_conformance(harness: TrainerHarness, workdir: Path) -> tuple[Tra
         second = transport.predict(credential, artifact, harness.inputs)
         if len(first) != len(harness.inputs):
             return "prediction_count_mismatch"
-        return None if first == second else "replay_nondeterministic"
+        matched = replay_matches(
+            first, second, harness.registration.replay_mode, harness.registration.replay_tolerance
+        )
+        return None if matched else "replay_nondeterministic"
 
     def rejects_bad_credential() -> str | None:
         try:

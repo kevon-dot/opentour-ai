@@ -279,7 +279,7 @@ def test_trainer_version_change_between_accept_and_collect_is_refused(env):
     env.trainer.run_pending()
     done = env.connector.status(receipt)
     env.trainer.manifest = replace(env.trainer.manifest, trainer_version="generated-upgraded-2")
-    with pytest.raises(ValueError, match="trainer_identity_mismatch"):
+    with pytest.raises(ValueError, match="trainer_version_unsupported"):
         env.connector.collect(done)
 
 
@@ -583,6 +583,18 @@ def test_late_callback_for_settled_job_changes_nothing(env):
     assert env.connector.status(receipt) == done
 
 
+def test_late_trainer_state_after_terminal_changes_nothing(env):
+    receipt = env.dispatch()
+    env.trainer.run_pending()
+    done = env.connector.status(receipt)
+
+    class Reopens(Proxy):
+        def poll(self, credential, job_id):
+            return replace(self.inner.poll(credential, job_id), state="running")
+
+    assert env.make_connector(Reopens(env.trainer)).status(receipt) == done
+
+
 def test_callback_with_wrong_token_or_unknown_job_is_ignored(env):
     receipt = env.dispatch()
     assert (
@@ -600,9 +612,16 @@ def test_callback_with_wrong_token_or_unknown_job_is_ignored(env):
 
 def test_valid_callback_settles_once(env):
     receipt = env.dispatch()
-    assert settle_callback(env.connector, env.intent, TrainerView(receipt.job_ref, TOKEN, "failed"))
+
+    class Failed(Proxy):
+        def poll(self, credential, job_id):
+            return replace(self.inner.poll(credential, job_id), state="failed")
+
+    connector = env.make_connector(Failed(env.trainer))
+    hint = TrainerView(receipt.job_ref, TOKEN, "failed")
+    assert settle_callback(connector, env.intent, hint)
     assert not settle_callback(
-        env.connector, env.intent, TrainerView(receipt.job_ref, TOKEN, "completed")
+        connector, env.intent, TrainerView(receipt.job_ref, TOKEN, "completed")
     )
     assert env.connector.status(receipt).state is mc.JobState.FAILED
 
@@ -805,9 +824,10 @@ def test_fence_with_unreachable_trainer_still_blocks_collect(env):
             raise OSError("simulated:trainer-down")
 
     connector = env.make_connector(Down(env.trainer))
-    assert connector.fence("generated-tenant").canceled_job_refs == ()
+    with pytest.raises(ValueError, match="fence_job_not_stopped"):
+        connector.fence("generated-tenant")
     env.trainer.run_pending()
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="connector_fenced"):
         connector.collect(receipt)
 
 
@@ -937,3 +957,361 @@ def test_reservation_guard_is_entered_once_per_dispatch(env):
 
     env.preflight.submit_reserved_fit("training", env.intent, ROWS, reservation_guard=guard)
     assert entries == [1]
+
+
+# ---- independent review (OPE-509 closer): trust that must be verified, not assumed ----
+
+
+def test_forged_callback_cannot_settle_a_running_job(env):
+    """A callback is only a wake-up: the token is derived from the key and is not a secret."""
+    receipt = env.dispatch()
+    forged = TrainerView(receipt.job_ref, TOKEN, "failed")
+    assert settle_callback(env.connector, env.intent, forged) is False
+    assert env.connector.status(receipt).state is mc.JobState.QUEUED
+    forged_done = TrainerView(receipt.job_ref, TOKEN, "completed")
+    assert settle_callback(env.connector, env.intent, forged_done) is False
+    assert env.connector.status(receipt).state is mc.JobState.QUEUED
+
+
+def test_callback_is_confirmed_by_the_trainer_before_it_settles(env):
+    receipt = env.dispatch()
+    env.trainer.run_pending()
+    hint = TrainerView(receipt.job_ref, TOKEN, "failed")  # lies about the outcome
+    assert settle_callback(env.connector, env.intent, hint) is True
+    assert env.connector.status(receipt).state is mc.JobState.COMPLETED
+
+
+def test_collect_rechecks_versions_with_the_trainer_now(env):
+    receipt = env.dispatch()
+    env.trainer.run_pending()
+    done = env.connector.status(receipt)
+    upgraded = replace(env.trainer.manifest, trainer_version="generated-upgraded-2")
+
+    class Upgraded(Proxy):
+        def describe(self, credential):
+            return upgraded  # results still claim the version the job started under
+
+    with pytest.raises(ValueError, match="trainer_version_unsupported"):
+        env.make_connector(Upgraded(env.trainer)).collect(done)
+
+
+def test_collect_refuses_a_supported_but_different_trainer_version(tmp_path):
+    other = "generated-reference-trainer-1.1"
+    env = Env(tmp_path)
+    env.registration = registration(supported_trainer_versions=frozenset({TRAINER_VERSION, other}))
+    env.connector = env.make_connector()
+    receipt = env.direct_submit()
+    env.trainer.run_pending()
+    done = env.connector.status(receipt)
+    changed = replace(env.trainer.manifest, trainer_version=other)
+
+    class Changed(Proxy):
+        def describe(self, credential):
+            return changed
+
+    with pytest.raises(ValueError, match="trainer_version_changed"):
+        env.make_connector(Changed(env.trainer)).collect(done)
+
+
+@pytest.mark.parametrize(
+    "version", [TRAINER_VERSION.upper(), f" {TRAINER_VERSION}", f"{TRAINER_VERSION}\t"]
+)
+def test_version_strings_differing_in_case_or_whitespace_are_unsupported(tmp_path, version):
+    manifest = replace(reference_manifest(REVISION, frozenset({TASK})), trainer_version=version)
+    env = Env(tmp_path, manifest=manifest)
+    verdict = env.connector.check_compatibility(env.binding)
+    assert (verdict.ok, verdict.reason) == (False, "trainer_version_unsupported")
+
+
+def test_signature_cannot_be_reused_across_shifted_field_boundaries(env):
+    receipt = env.dispatch()
+    env.trainer.run_pending()
+
+    class Moved(Proxy):
+        def fetch_result(self, credential, job_id):
+            base = self.inner.fetch_result(credential, job_id)
+            signed = replace(base, artifact_digest="x|y")
+            signed = replace(signed, signature=sign_result(SECRET, signed))
+            # same signature, different field meaning
+            return replace(signed, artifact_ref=signed.artifact_ref + "|x", artifact_digest="y")
+
+    done = env.connector.status(receipt)
+    with pytest.raises(ValueError, match="result_signature_invalid"):
+        env.make_connector(Moved(env.trainer)).collect(done)
+
+
+def test_unsigned_result_and_signature_under_another_key_are_rejected(env):
+    foreign = sign_result(
+        "generated-other-secret",
+        {
+            "job_id": "a",
+            "client_token": "b",
+            "trainer_version": "c",
+            "parent_revision": "d",
+            "artifact_ref": "e",
+            "artifact_digest": "f",
+        },
+    )
+    for signature in ("", foreign):
+        connector, done = _tampered(env, lambda r, s=signature: replace(r, signature=s))
+        with pytest.raises(ValueError, match="result_signature_invalid"):
+            connector.collect(done)
+
+
+def test_a_second_collect_cannot_swap_the_collected_artifact(env):
+    receipt = env.dispatch()
+    env.trainer.run_pending()
+    done = env.connector.status(receipt)
+    first = env.connector.collect(done)
+
+    class Swap(Proxy):
+        def fetch_result(self, credential, job_id):
+            base = self.inner.fetch_result(credential, job_id)
+            swapped = replace(base, artifact_ref="generated-artifact-swapped")
+            return replace(swapped, signature=sign_result(SECRET, swapped))
+
+    with pytest.raises(ValueError, match="candidate_artifact_changed"):
+        env.make_connector(Swap(env.trainer)).collect(done)
+    assert env.connector.collect(done) == first
+    assert env.connector.predict_for_replay(first, FROZEN) == EXPECTED
+
+
+def test_overspend_whose_stop_was_not_honored_is_not_reported_failed(env):
+    receipt = env.dispatch()
+
+    class Stubborn(Proxy):
+        def poll(self, credential, job_id):
+            view = self.inner.poll(credential, job_id)
+            return replace(view, state="running", usage=TrainerUsage("USD", 501, 1, 1, 1))
+
+        def request_cancel(self, credential, job_id):
+            return replace(self.inner.poll(credential, job_id), state="running")
+
+    connector = env.make_connector(Stubborn(env.trainer))
+    reported = connector.status(receipt)
+    assert reported.state is mc.JobState.RUNNING  # still spending: never release on FAILED
+    with pytest.raises(ValueError, match="job_canceled"):
+        connector.collect(receipt)
+
+
+@pytest.mark.parametrize(
+    "usage",
+    [
+        TrainerUsage("USD", float("nan"), 1, 1, 1),
+        TrainerUsage("USD", -1, 1, 1, 1),
+        TrainerUsage("USD", True, 1, 1, 1),
+        TrainerUsage("USD", 1.5, 1, 1, 1),
+        TrainerUsage("EUR", 1, 1, 1, 1),
+        TrainerUsage("", 1, 1, 1, 1),
+    ],
+)
+def test_malformed_or_foreign_currency_usage_cannot_bypass_the_cap(env, usage):
+    receipt = env.dispatch()
+    stops = []
+
+    class Garbage(Proxy):
+        def poll(self, credential, job_id):
+            return replace(self.inner.poll(credential, job_id), state="running", usage=usage)
+
+        def request_cancel(self, credential, job_id):
+            stops.append(job_id)
+            return self.inner.request_cancel(credential, job_id)
+
+    connector = env.make_connector(Garbage(env.trainer))
+    assert connector.status(receipt).state is mc.JobState.FAILED
+    assert stops == [receipt.job_ref]
+
+
+@pytest.mark.parametrize("bad", [-1, 1.5, True, float("nan")])
+def test_usage_report_rejects_malformed_values(env, bad):
+    receipt = env.dispatch()
+
+    class Garbage(Proxy):
+        def poll(self, credential, job_id):
+            view = self.inner.poll(credential, job_id)
+            return replace(view, usage=TrainerUsage("USD", bad, 1, 1, 1))
+
+    with pytest.raises(ValueError, match="invalid_usage"):
+        env.make_connector(Garbage(env.trainer)).usage(receipt)
+
+
+def test_usage_is_never_estimated_or_settleable_by_string(env):
+    from opentour_cell.pilot.custom_trainer_connector import Usage
+
+    with pytest.raises(ValueError, match="invalid_usage"):
+        Usage("job", "USD", 1, 1, 1, 1, "bogus")  # type: ignore[arg-type]
+    estimated = Usage("job", "USD", 1, 1, 1, 1, "estimated")  # type: ignore[arg-type]
+    assert estimated.source.value == "estimated" and not estimated.settleable
+    receipt = env.dispatch()
+    env.trainer.run_pending()
+    assert env.connector.usage(receipt).settleable
+
+
+def test_cancel_is_not_blocked_by_a_trainer_upgrade(env):
+    receipt = env.dispatch()
+    env.trainer.manifest = replace(env.trainer.manifest, trainer_version="generated-upgraded-2")
+    assert env.connector.cancel(receipt).state is mc.JobState.CANCELED
+
+
+def test_cancel_response_for_another_job_is_not_trusted(env):
+    receipt = env.dispatch()
+
+    class Liar(Proxy):
+        def request_cancel(self, credential, job_id):
+            return TrainerView("generated-job-other", "0" * 64, "canceled")
+
+    with pytest.raises(ValueError, match="trainer_identity_mismatch"):
+        env.make_connector(Liar(env.trainer)).cancel(receipt)
+    assert env.connector.status(receipt).state is mc.JobState.QUEUED
+
+
+def _payload(rows, **changes):
+    base = {
+        "serializer": SERIALIZER_VERSION,
+        "task": TASK,
+        "input_schema": "text-v1",
+        "output_schema": "label-v1",
+        "preprocessing": "preprocessing-v1",
+        "fields": ["label", "text"],
+        "row_count": len(rows),
+        "rows": rows,
+    }
+    return {**base, **changes}
+
+
+def _craft(env, payload, **intent_changes):
+    development = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    digest = hashlib.sha256(development).hexdigest()
+    return development, replace(env.intent, development_digest=digest, **intent_changes)
+
+
+def test_direct_submit_refuses_protected_fields_even_with_a_matching_digest(env):
+    rows = [{"gold_answer": "x", "label": "a", "text": "t"}]
+    development, intent = _craft(
+        env,
+        _payload(rows, fields=["gold_answer", "label", "text"]),
+        fields=frozenset({"text", "label", "gold_answer"}),
+    )
+    with pytest.raises(ValueError, match="protected_field_in_development"):
+        env.connector.submit(intent, development)
+    assert env.executions() == 0
+
+
+def test_direct_submit_refuses_rows_beyond_the_bound_and_malformed_payloads(env):
+    rows = [{"label": "a", "text": f"t{i}"} for i in range(LIMIT.maximum_rows + 1)]
+    development, intent = _craft(env, _payload(rows))
+    with pytest.raises(ValueError, match="development_rows_invalid"):
+        env.connector.submit(intent, development)
+    few = rows[:2]
+    for broken in (
+        _payload(few, serializer="generated-other"),
+        _payload(few, row_count=99),
+        _payload(few, task="generated-other-task"),
+        _payload([{"label": "a"}]),
+        _payload(few, extra=1),
+        _payload(few, fields=["text"]),
+    ):
+        development, intent = _craft(env, broken)
+        with pytest.raises(ValueError, match="development_(rows|payload)_invalid"):
+            env.connector.submit(intent, development)
+    junk = b"not-json"
+    junk_intent = replace(env.intent, development_digest=hashlib.sha256(junk).hexdigest())
+    with pytest.raises(ValueError, match="development_payload_invalid"):
+        env.connector.submit(junk_intent, junk)
+    assert env.executions() == 0
+
+
+def test_replay_refuses_a_candidate_built_around_another_intent(env):
+    candidate = _collected(env)
+    other = replace(candidate.intent, benchmark_revision="benchmark-v2")
+    with pytest.raises(ValueError, match="candidate_not_collected"):
+        env.connector.predict_for_replay(replace(candidate, intent=other), FROZEN)
+
+
+def test_replay_tolerance_rejects_nan_inf_and_invalid_declarations():
+    one = ({"score": 0.5},)
+    nan = ({"score": float("nan")},)
+    assert not replay_matches(one, nan, "tolerance", 0.5)
+    assert not replay_matches(nan, nan, "tolerance", 0.5)
+    assert not replay_matches(one, ({"score": float("inf")},), "tolerance", 0.5)
+    assert not replay_matches(one, one, "tolerance", float("nan"))
+    assert not replay_matches(one, one, "tolerance", -1.0)
+    assert not replay_matches(one, one, "bogus", 0.0)
+
+
+def test_lookup_does_not_journal_a_foreign_trainer_identity(tmp_path):
+    env = Env(tmp_path, wrap=LostAck)
+    with pytest.raises(OSError):
+        env.direct_submit()
+
+    class Poison(Proxy):
+        def find(self, credential, client_token):
+            return TrainerView("generated-job-evil", "0" * 64, "running")
+
+    with pytest.raises(ValueError, match="trainer_identity_mismatch"):
+        env.make_connector(Poison(env.trainer)).lookup(env.intent)
+    genuine = env.make_connector(env.trainer).lookup(env.intent)
+    assert genuine is not None and genuine.job_ref != "generated-job-evil"
+
+
+def test_fence_that_cannot_stop_a_live_job_does_not_claim_it_stopped(env):
+    receipt = env.dispatch()
+
+    class Down(Proxy):
+        def request_cancel(self, credential, job_id):
+            raise OSError("simulated:trainer-down")
+
+    connector = env.make_connector(Down(env.trainer))
+    with pytest.raises(ValueError, match="fence_job_not_stopped"):
+        connector.fence("generated-tenant")
+    with pytest.raises(ValueError, match="connector_fenced"):  # the marker is still durable
+        env.make_connector().collect(receipt)
+    assert env.trainer.poll(Credential(SECRET), receipt.job_ref).state == "queued"
+
+
+def test_fence_does_not_trust_a_stop_confirmation_for_another_job(env):
+    receipt = env.dispatch()
+
+    class Liar(Proxy):
+        def request_cancel(self, credential, job_id):
+            return TrainerView("generated-job-other", "0" * 64, "canceled")
+
+    with pytest.raises(ValueError, match="fence_job_not_stopped"):
+        env.make_connector(Liar(env.trainer)).fence("generated-tenant")
+    assert env.trainer.poll(Credential(SECRET), receipt.job_ref).state == "queued"
+
+
+def test_fence_reaches_a_job_whose_acknowledgement_was_lost(tmp_path):
+    env = Env(tmp_path, wrap=LostAck)
+    with pytest.raises(OSError):
+        env.direct_submit()
+    receipt = env.make_connector(env.trainer).fence("generated-tenant")
+    assert receipt.scope == "generated-tenant"
+    stored = env.trainer.find(Credential(SECRET), TOKEN)
+    assert stored is not None and stored.state == "canceled"
+
+
+def test_fence_with_an_unconfirmable_dispatch_is_not_reported_stopped(tmp_path):
+    env = Env(tmp_path, wrap=NeverArrives)
+    env.dispatch()  # UNKNOWN: nothing is known about the trainer's side
+    with pytest.raises(ValueError, match="fence_job_not_stopped"):
+        env.connector.fence("generated-tenant")
+
+
+def test_conformance_replay_honours_a_declared_tolerance(tmp_path):
+    class Drifting(ReferenceTrainer):
+        calls = 0
+
+        def predict(self, credential, artifact_ref, inputs):
+            Drifting.calls += 1
+            return tuple({"score": 0.5 + 0.001 * (Drifting.calls % 2)} for _ in inputs)
+
+    def make(path):
+        return Drifting(tmp_path / "drift", SECRET, REVISION, frozenset({TASK}))
+
+    harness = _harness(tmp_path, make)
+    harness = replace(
+        harness, registration=registration(replay_mode="tolerance", replay_tolerance=0.01)
+    )
+    results = tc.run_trainer_conformance(harness, tmp_path)
+    assert {r.name: r.outcome for r in results}["replay_deterministic"] is tc.Outcome.PASSED
