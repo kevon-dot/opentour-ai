@@ -1,11 +1,15 @@
 """Exercise private status questions through the actual picker and frozen worker records."""
 
+import json
 import time
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 import pytest
-from opentour_cell.pilot import zapier_approval
+from opentour_cell.pilot import release_gate, source_intake, zapier_approval
+from test_app_home import click as click_home
+from test_app_home import publish as publish_home
 from test_approval_reconciliation import signed_at_clock
 from test_fenced_approval_readback import lose_reply, short_request
 from test_managed_slack import setup_workflow
@@ -437,22 +441,86 @@ def test_declined_local_readout_holds_readout_only(tmp_path: Path) -> None:
         ("ot_release_changes", "Changes requested", "Release is held pending changes."),
     ],
 )
+@pytest.mark.parametrize("legacy", [False, True], ids=["sealed-time", "legacy"])
 def test_native_release_status_observes_independent_decision(
-    tmp_path: Path, action: str, expected: str, finding: str
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    action: str,
+    expected: str,
+    finding: str,
+    legacy: bool,
 ) -> None:
-    h, _, _, _ = setup_workflow(tmp_path, "rule", release=True)
+    h, plan, run, _ = setup_workflow(tmp_path, "rule", release=True)
+    directory, organization = h.path.parent, h.store.organization
+    intake = source_intake.check_current_intake(
+        directory, organization, h.store.engagement_id, plan["intake_revision"]
+    )
+    h.config["live_workflow_ref"] = intake["workflow"]
+    h.save()
     inspected, revision = inspect(h)
+
+    def open_picker() -> str:
+        click_home(h, publish_home(h, monkeypatch, ACTOR), "ot_app_prompt", ACTOR)
+        view = list(h.slack.screens)[-1]
+        h.form(view, {"command": {"command": {"value": "Did it ship?"}}}, ACTOR)
+        assert buttons(screen(h, view))["ot_result_open"] == revision
+        return view
+
+    def current_answer() -> tuple[str, str]:
+        view = open_picker()
+        h.action(view, "ot_result_open", revision, ACTOR)
+        assert screen(h, view)["callback_id"] == "ot_status_question"
+        return view, text(h, view)
+
     before = counts(h)
-    missing = answer(h, "Did it ship?", revision)
+    _, missing = current_answer()
     assert "No verified approval receipt" in missing
     assert counts(h) == before
     h.action(inspected, action, buttons(screen(h, inspected))[action])
+
+    path = directory / "managed-outputs" / run / "release-decision.json"
+    recorded = json.loads(path.read_bytes())
+    scope = directory, organization, run, recorded["run_revision"], recorded["artifact_sha"]
+    assert release_gate.inspect_recorded_release(*scope) == recorded
+    assert recorded["decision_seal"]
+    recorded_at = recorded["recorded_at"]
+    stamp = datetime.fromtimestamp(recorded_at, UTC).strftime("%Y-%m-%d %H:%M UTC")
+    later = recorded_at + 120
+    monkeypatch.setattr(time, "time", lambda: later)
+    if legacy:
+        del recorded["recorded_at"]
+        del recorded["decision_seal"]
+        path.write_text(json.dumps(recorded))
+        assert release_gate.inspect_recorded_release(*scope) == recorded
+
+    saved = path.read_bytes()
     restart(h)
     before = counts(h)
     for _ in range(2):
-        current = answer(h, "Did it ship?", revision)
+        view, current = current_answer()
         assert expected in current and finding in current and "unconfirmed" in current
+        assert recorded["presentation_id"] in current
+        if legacy:
+            assert f"{expected} at " not in current
+        else:
+            assert f"{expected} at {stamp}" in current
+        assert "ot_release_receipt" not in buttons(screen(h, view))
+        assert "Delivered to the selected destination" not in current
+
+    stale = open_picker()
+    h.config["users"][ACTOR]["roles"] = ["inspect"]
+    h.save()
+    h.action(stale, "ot_result_open", revision, ACTOR)
+    denied = text(h, stale)
+    assert "Access unavailable" in denied
+    assert recorded["presentation_id"] not in denied and stamp not in denied
+    assert recorded["audience"] not in denied and expected not in denied
     assert counts(h) == before
+    with h.store._db() as db:
+        assert not db.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='release_outbox'"
+        ).fetchone()
+    assert path.read_bytes() == saved
 
 
 @pytest.mark.parametrize(

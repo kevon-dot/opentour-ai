@@ -1865,7 +1865,9 @@ class Workbench:
                         if recorded["decision"] == "changes_requested"
                         else recorded["decision"]
                     )
-                    approval = ApprovalEvidence(stage, recorded["presentation_id"])
+                    approval = ApprovalEvidence(
+                        stage, recorded["presentation_id"], recorded.get("recorded_at")
+                    )
             else:
                 state, decision_receipt = self._recorded_decision(target.revision)
                 if state in {"approved", "changes_requested"}:
