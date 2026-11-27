@@ -18,7 +18,12 @@ from pathlib import Path
 
 import pytest
 import test_intake_mcp as vectors
+from opentour_cell.pilot.intake_local import open_intake
+from opentour_cell.pilot.intake_mcp import parse_intake
+from test_live_evidence import DECISION, OUTCOME, decision, outcome
+from test_live_worker_readiness import configured
 from test_worker_host_install import PYTHON, kit  # noqa: F401
+from test_workflow_benchmarks import DiskProducer
 
 DISCOVER, SUBMIT, STATUS = vectors.DISCOVER, vectors.SUBMIT, vectors.GET_RUN
 
@@ -248,6 +253,130 @@ def test_tls_limits_before_admission(connector):
         assert counts(selection.parent) == (0, 0, 0)
 
 
+def live_cross_transport(connector):
+    export, _ = configured(connector.work / "owner")
+    home, selection = export.directory, export.selection
+    launcher = [*PYTHON, connector.kit / "opentour-slack.pyz"]
+    command = [*launcher, "mcp-intake", selection]
+
+    original_selection = home / "selection.json"
+    actor, starter = open_intake(original_selection)
+    original = starter.submit_intake(actor, parse_intake(vectors.STARTER))
+    producer = DiskProducer(home)
+    producer.state = "frozen_unscored"
+    assert starter.materialize(actor, original.run_ref, producer, target_state="frozen_unscored")
+    frozen = starter.get_run(actor, original.run_ref).benchmark
+    assert frozen is not None and frozen.benchmark_state == "frozen_unscored"
+    ledger = home / "workflow-benchmarks.sqlite3"
+    frozen_bytes = ledger.read_bytes()
+    vectors._write_private(
+        home / "benchmark-inspection-selection.json",
+        {
+            "schema_version": "opentour.pilot.benchmark-inspection-selection.v1",
+            "source_selection_file": original_selection.name,
+            "benchmark_run_ref": original.run_ref,
+        },
+    )
+    assert counts(home) == (1, 1, 1)
+
+    def refresh(grant, expected_feeds, expected_total):
+        ref = export.case.connect(grant.resource)
+        request = {
+            "mode": "live",
+            "feed_binding_ref": ref,
+            "source_revision": grant.source_revision,
+            "idempotency_key": grant.resource,
+        }
+        with connector.listen(selection):
+            catalog = stdio(command, DISCOVER, {})
+            assert connector.post(DISCOVER, {}) == (200, catalog)
+            assert {source["feed_kind"] for source in catalog["sources"]} == expected_feeds
+            code, admitted = connector.post(SUBMIT, request)
+            assert code == 200 and admitted["state"] == "queued"
+            cross_key = request | {"idempotency_key": grant.resource + "-stdio"}
+            assert stdio(command, SUBMIT, cross_key) == admitted
+            lookup = {"run_ref": admitted["run_ref"]}
+            assert connector.post(STATUS, lookup, headers={"Authorization": "Bearer invalid"}) == (
+                403,
+                None,
+            )
+            queued = stdio(command, STATUS, lookup)
+            assert connector.post(STATUS, lookup) == (200, queued)
+            assert queued["state"] == "queued" and queued["workflow_ref"] == export.case.workflow
+            assert queued["benchmark_ref"] == frozen.benchmark_ref
+            assert counts(home) == (1 + expected_total, 1, expected_total)
+            assert len(export.receipts()) == expected_total - 1
+
+        def materialize(expected):
+            result = subprocess.run(
+                [*launcher, "live-reader", selection, admitted["run_ref"]],
+                text=True,
+                capture_output=True,
+                check=True,
+                timeout=30,
+            )
+            assert (result.stdout.strip(), result.stderr) == (expected, "")
+
+        materialize("materialized")
+        recorded = export.receipts()
+        assert len(recorded) == expected_total
+        page = recorded[-1]
+        assert (page["binding_ref"], page["source_revision"], page["checkpoint"]) == (
+            ref,
+            grant.source_revision,
+            grant.checkpoint + 1,
+        )
+        assert page["row_count"] == 1 and page["complete"] is True
+        catalog_file = export.resources[grant.resource]["file"]
+        (pinned,) = json.loads((home / catalog_file).read_text())["pages"]
+        assert page["page_ref"] == pinned["page_ref"]
+        with sqlite3.connect(export.case.live.path) as db:
+            assert db.execute(
+                "SELECT digest,receipt_ref FROM live_pages WHERE binding_ref=? AND page_ref=?",
+                (ref, pinned["page_ref"]),
+            ).fetchall() == [(pinned["page_digest"], page["receipt_ref"])]
+        materialize("already_materialized")
+
+        with connector.listen(selection):
+            settled = stdio(command, STATUS, lookup)
+            assert connector.post(STATUS, lookup) == (200, settled)
+            assert (
+                settled["state"] == "materialized"
+                and settled["workflow_ref"] == queued["workflow_ref"]
+            )
+            assert settled["benchmark_ref"] == frozen.benchmark_ref
+            replay = admitted | {"state": "materialized"}
+            assert connector.post(SUBMIT, cross_key) == (200, replay)
+            assert stdio(command, SUBMIT, request) == replay
+        assert export.receipts() == recorded
+        assert counts(home) == (1 + expected_total, 1, 1 + expected_total)
+        assert ledger.read_bytes() == frozen_bytes
+        return admitted["run_ref"]
+
+    decisions = refresh(DECISION, {"decision"}, 1)
+    pending = export.snapshot()
+    assert (pending.decisions, pending.pending, pending.verified) == (1, 1, 0)
+    assert (home / "generated-producer-count").read_text() == "1"
+    assert len(export.receipts()) == 1
+
+    export.install(OUTCOME, [[export.row(outcome(), 21)]])
+    outcomes = refresh(OUTCOME, {"decision", "independent_outcome"}, 2)
+    assert decisions != outcomes
+    verified = export.snapshot()
+    assert (verified.decisions, verified.pending, verified.verified) == (1, 0, 1)
+    assert verified.verified_roots[0].decision_id == decision()["decision_id"]
+    assert len({page["receipt_ref"] for page in export.receipts()}) == 2
+    assert (home / "generated-producer-count").read_text() == "1"
+    with sqlite3.connect(home / "learning-mandates.sqlite3") as db:
+        assert db.execute("SELECT count(*) FROM reservations").fetchone() == (0,)
+    with sqlite3.connect(home / "training.sqlite3") as db:
+        assert db.execute("SELECT count(*) FROM jobs").fetchone() == (0,)
+
+
+def test_enabled_live_reader_cross_transport_and_restart(connector):
+    live_cross_transport(connector)
+
+
 def test_historical_live_replay_authority_and_bounds(connector):
     root = connector.work / "fixture"
     root.mkdir(mode=0o700)
@@ -366,6 +495,8 @@ if __name__ == "__main__":
     package = parser.parse_args().packaged_proof.resolve(strict=True)
     with tempfile.TemporaryDirectory() as work:
         test_packaged_starter_cross_transport_and_lost_reply(PackagedProcess(package, Path(work)))
+    with tempfile.TemporaryDirectory() as work:
+        live_cross_transport(PackagedProcess(package, Path(work)))
     print(
         json.dumps(
             {
@@ -374,6 +505,12 @@ if __name__ == "__main__":
                 "starter_runs": 1,
                 "lost_reply_recovered": True,
                 "withdrawn_retry_denied": True,
+                "live_admissions": 2,
+                "live_source_receipts": 2,
+                "verified_roots": 1,
+                "live_restarts_verified": True,
+                "frozen_benchmark_preserved": True,
+                "fit_reservations": 0,
             }
         )
     )
