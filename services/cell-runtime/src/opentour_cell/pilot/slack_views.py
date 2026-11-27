@@ -1523,6 +1523,35 @@ def readiness_answer(receipt: Mapping[str, Any]) -> StatusAnswer:
     )
 
 
+def _live_counts(summary: Mapping[str, Any], readiness: Mapping[str, Any] | None) -> str:
+    rate = "Unavailable"
+    if (
+        readiness
+        and summary.get("workflow")
+        and summary.get("revision")
+        and summary["workflow"] == readiness.get("workflow_ref")
+        and summary["revision"] == readiness.get("evidence_revision")
+        and summary.get("dataset") == readiness.get("dataset_ref")
+    ):
+        counts = readiness.get("incumbent_automatic")
+        if isinstance(counts, Mapping):
+            wrong, verified = counts.get("wrong"), counts.get("verified")
+            if (
+                type(wrong) is int
+                and type(verified) is int
+                and 0 <= wrong <= verified <= summary["verified"]
+                and verified
+            ):
+                rate = f"{wrong}/{verified}"
+    decisions = summary["decisions"]
+    unit = "decision" if decisions == 1 else "decisions"
+    return (
+        f"Live evidence · {decisions} {unit}\n"
+        f"Verified {summary['verified']} · Pending {summary['pending']} · Disputed {summary['disputed']}\n"
+        f"Incumbent wrong / verified automatic decisions · {rate}"
+    )
+
+
 def _live_summary_text(summary: Mapping[str, Any]) -> str:
     def utc(value: int | None) -> str:
         if value is None:
@@ -1613,6 +1642,7 @@ def app_home_view(
             }
         )
     if live_summary is not None:
+        blocks.append(_section(_live_counts(live_summary, readiness)))
         blocks.append(_section(_live_summary_text(live_summary)))
     if readiness is not None:
         answer = readiness_answer(readiness)
