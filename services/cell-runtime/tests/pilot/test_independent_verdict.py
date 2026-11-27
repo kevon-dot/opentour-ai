@@ -105,8 +105,9 @@ def _pred(code: str, truth: str):
 
 
 class Replay:
-    def __init__(self, artifact, preds, *, served=None, alternate=None):
+    def __init__(self, artifact, preds, *, served=None, alternate=None, manifest=None):
         self.artifact = artifact
+        self.manifest = manifest or MANIFEST["manifest_sha256"]
         self.preds = preds
         self.served = served
         self.alternate = alternate
@@ -116,7 +117,7 @@ class Replay:
     def served_identity(self):
         if self.served is not None:
             return self.served
-        return {"artifact_sha256": self.artifact, **PINS}
+        return {"artifact_sha256": self.artifact, "manifest_sha256": self.manifest, **PINS}
 
     def predict(self, features, *, expected_artifact):
         self.calls.append([dict(f) for f in features])
@@ -130,7 +131,9 @@ class Replay:
 class Scenario:
     """A generated population with per-arm transitions against one or more comparators."""
 
-    def __init__(self, plan, *, comparators=("incumbent",), family_size=1, slice_of=None):
+    def __init__(
+        self, plan, *, comparators=("incumbent",), family_size=1, slice_of=None, prefix=""
+    ):
         cases, labels = [], {}
         self.preds = {"candidate": {}, **{c: {} for c in comparators}}
         index = 0
@@ -138,14 +141,14 @@ class Scenario:
             if isinstance(codes, str):
                 codes = {comparators[0]: codes[0], "candidate": codes[1]}
             for _ in range(count):
-                case_id = f"case-{index:04d}"
+                case_id = f"{prefix}case-{index:04d}"
                 truth = A if index % 2 == 0 else B
                 labels[case_id] = truth
                 slices = slice_of(index, codes) if slice_of else ()
                 cases.append(
                     iv.DecisionCase(
                         case_id,
-                        f"family-{index // family_size:04d}",
+                        f"{prefix}family-{index // family_size:04d}",
                         {"case_ref": case_id, "text": f"generated-input-{index}"},
                         tuple(slices),
                     )
@@ -252,6 +255,7 @@ def claim(scenario, *, pol=None, **over):
         "protected_rows": len(scenario.population.cases),
         "operating_point_digest": pol.operating_point_digest,
         "policy_revision": pol.policy_revision,
+        "policy_digest": pol.digest(),
         "claimed_paired": {
             c: recompute_pairs(scenario, c)
             for c in scenario.comparators
@@ -265,7 +269,10 @@ def claim(scenario, *, pol=None, **over):
 
 def evaluator(tmp_path, **kw):
     return iv.IndependentEvaluator(
-        evaluator_id=EVALUATOR, custody_dir=tmp_path / "evaluator-custody", **kw
+        evaluator_id=EVALUATOR,
+        custody_dir=tmp_path / "evaluator-custody",
+        worker_data_dirs=[tmp_path / "worker-data"],
+        **kw,
     )
 
 
@@ -318,10 +325,15 @@ def test_c1_clean_win_verifies_all_three_statements_and_is_alert_eligible(tmp_pa
     doc = v.document
     assert doc["outcome"] == "verified_gain" and doc["verdict"] == "reproduced"
     st = doc["statements"]
-    assert st["job_produced_candidate"]["status"] == "verified"
-    assert st["job_produced_candidate"]["training_steps"] == 64
-    assert st["job_produced_candidate"]["changed_trainable_parameters"] == 192
-    assert st["candidate_served_evaluation"]["status"] == "verified"
+    assert st["job_produced_candidate"]["status"] == "self_consistent_manifest"
+    assert st["job_produced_candidate"]["manifest_states_training_steps"] == 64
+    assert st["job_produced_candidate"]["manifest_states_changed_trainable_parameters"] == 192
+    assert st["candidate_served_evaluation"]["status"] == "readback_consistent"
+    assert st["candidate_served_evaluation"]["drift_checks"] == {
+        "bundle_manifest": "checked",
+        "reload": "checked",
+        "tokenizer_sha256": "checked",
+    }
     assert st["paired_gain_cleared_gates"]["status"] == "verified_gain"
     pair = doc["comparisons"]["incumbent"]
     assert pair["paired"] == {
@@ -643,8 +655,9 @@ def test_x5_critical_slice_regression_despite_aggregate_win(tmp_path):
 
 def test_x6_real_regression_is_visible(tmp_path):
     s = Scenario([("RW", 120), ("RR", 80)])
-    doc = held(run(tmp_path, s), "regression", "upper_bound_below_zero")
+    doc = held(run(tmp_path, s), "regression", "total_wrong_automatic_increased")
     assert doc["comparisons"]["incumbent"]["improvement"]["counts"] == [-120, 200]
+    assert doc["comparisons"]["incumbent"]["uncertainty"]["upper"].startswith("-")
 
 
 def test_x7_tuned_candidate_must_win_against_both_incumbent_and_simple_repair(tmp_path):
@@ -739,7 +752,7 @@ def test_x9_replay_drift_and_selection_after_readout(tmp_path):
         "inconclusive",
         "fresh_confirmation_cohort_required",
     )
-    fresh = Scenario([("WR", 121), ("RR", 80)])
+    fresh = Scenario([("WR", 121), ("RR", 80)], prefix="fresh-")
     assert run(tmp_path, fresh, ev=ev, selection_basis="after_protected_readout").outcome == (
         "verified_gain"
     )
@@ -788,10 +801,13 @@ def test_k1_one_idempotent_verdict_and_replay_returns_the_original(tmp_path):
     assert len(replays["candidate"].calls) == 1  # the replay did not re-run inference
     changed = run(tmp_path, s, ev=ev, result_revision=sha("result-r2"))
     assert changed.verdict_key != first.verdict_key and not changed.replayed
-    # The key binds artifact, inputs and answer key, not replay output: the same frozen
-    # artifact on the same sealed inputs returns the first verdict even if a replay differs.
+    # The key binds the whole claim (including its claimed counts), not replay output: the
+    # same claim on the same frozen artifact and sealed inputs returns the first verdict even
+    # if a replay would now differ.
+    drifted = s.replays(candidate=Replay(CANDIDATE, s.preds["incumbent"]))
+    assert run(tmp_path, s, ev=ev, replays=drifted).document == first.document
+    assert drifted["candidate"].calls == []
     regressed = Scenario([("RW", 120), ("RR", 80)])
-    assert run(tmp_path, regressed, ev=ev).document == first.document
     non_win = run(tmp_path, regressed, ev=ev, result_revision=sha("result-r3"))
     again = run(tmp_path, regressed, ev=ev, result_revision=sha("result-r3"))
     assert (
@@ -853,7 +869,9 @@ def test_k4_custody_must_be_private_and_separate_from_worker_data(tmp_path):
     loose.mkdir(mode=0o755)
     os.chmod(loose, 0o755)
     with pytest.raises(iv.CustodyError, match="not_private"):
-        iv.IndependentEvaluator(evaluator_id=EVALUATOR, custody_dir=loose)
+        iv.IndependentEvaluator(
+            evaluator_id=EVALUATOR, custody_dir=loose, worker_data_dirs=[tmp_path / "w"]
+        )
 
 
 # ----------------------------------------------------------------- I: identity, scope, signing
@@ -879,7 +897,7 @@ def test_i2_unsigned_record_is_locally_keyed_and_consumable_by_the_packet_bounda
     assert doc["evidence"] == {
         "evidence_tier": "locally_keyed",
         "evidence_origin": "generated",
-        "evaluator_identity_separate_from_producer": True,
+        "producer_distinct_from_evaluator": "caller_asserted_identity_labels",
         "custody_separated": False,
         "issuer_authenticated": False,
         "claim_scope": "implementation_only",
@@ -970,9 +988,20 @@ def test_o1_open_weight_adapter_binds_lineage_and_batches_within_profile(tmp_pat
         inspect_fn=inspect,
         predict_fn=predict,
     )
-    assert replay.served_identity() == {"artifact_sha256": CANDIDATE, **PINS}
+    # Only what the bundle states: no hardcoded tokenizer digest, no assumed reload.
+    assert replay.served_identity() == {
+        "artifact_sha256": CANDIDATE,
+        "manifest_sha256": MANIFEST["manifest_sha256"],
+        "base_sha256": ow.BASE_SHA256,
+        "inference_config_sha256": ow.PROFILE_SHA256,
+    }
     v = run(tmp_path, s, replays=s.replays(candidate=replay))
     assert v.outcome == "verified_gain"
+    assert v.document["statements"]["candidate_served_evaluation"]["drift_checks"] == {
+        "bundle_manifest": "checked",
+        "reload": "unavailable",
+        "tokenizer_sha256": "unavailable",
+    }
     assert [c["n"] for c in calls] == [64, 64, 2]
     assert {c["expected"] for c in calls} == {CANDIDATE}
 
@@ -1025,3 +1054,262 @@ def test_c7_operating_point_is_bound_through_substituted_terms_without_the_slice
     doc = run(tmp_path / "d", s, pol=pol).document
     assert doc["operating_point_digest"] == pol.operating_point_digest
     assert doc["policy"]["operating_point_terms"]["critical_slices"] == [CRITICAL]
+
+
+# ----------------------------------------------------------------- R: review probes (P1-P9)
+
+
+def test_r1_p1_comparator_missing_outputs_cannot_hide_candidate_errors(tmp_path):
+    """Probe P1: WRx120 + MWx130. Candidate wrong 130 where the comparator emitted nothing."""
+    s = Scenario([("WR", 120), ("MW", 130)])
+    loose = policy(max_coverage_loss_bps=10000, coverage_floor_bps=0)
+    for path, pol in ((tmp_path / "loose", loose), (tmp_path / "default", policy())):
+        doc = held(run(path, s, pol=pol), "inconclusive", "comparator_missing_or_malformed_outputs")
+        pair = doc["comparisons"]["incumbent"]
+        assert pair["comparator_gaps"] == 130
+        assert pair["total_wrong_automatic"] == {"candidate": 130, "comparator": 120}
+
+
+def test_r2_p2_newly_automated_errors_count_against_the_candidate(tmp_path):
+    """Probe P2: WRx120 + DWx130. Comparator deferred 130; candidate automated them wrong."""
+    s = Scenario([("WR", 120), ("DW", 130)])
+    loose = policy(max_coverage_loss_bps=10000, coverage_floor_bps=0)
+    doc = held(run(tmp_path, s, pol=loose), "regression", "total_wrong_automatic_increased")
+    pair = doc["comparisons"]["incumbent"]
+    assert pair["newly_automated"] == {"wrong": 130, "total": 130}
+    assert pair["total_wrong_automatic"] == {"candidate": 130, "comparator": 120}
+    assert pair["uncertainty"]["families"] == 250  # newly automated cases are in the effects
+    assert pair["uncertainty"]["estimate"].startswith("-")
+    # Fewer total errors, but the newly automated ones breach the 500 bps error ceiling.
+    t = Scenario([("WR", 120), ("RR", 60), ("DW", 5), ("DR", 15)])
+    doc = held(run(tmp_path / "b", t, pol=loose), "regression", "newly_automated_errors_exceed")
+    assert doc["comparisons"]["incumbent"]["newly_automated"] == {"wrong": 5, "total": 20}
+
+
+def test_r3_p3_overlapping_cohort_is_not_fresh_and_marker_follows_issue(tmp_path):
+    """Probe P3: a 201-case superset of a scored 200-case cohort is not a fresh cohort."""
+    ev = evaluator(tmp_path)
+    s = Scenario(CLEAN_WIN)
+    held(
+        run(tmp_path, s, ev=ev, benchmark_digest=sha("benchmark-v0")),
+        "stale",
+        "benchmark_digest_mismatch",
+    )
+    # The stale verdict scored nothing, so it marked nothing as viewed.
+    assert list((tmp_path / "evaluator-custody" / "cohorts").iterdir()) == []
+    assert run(tmp_path, s, ev=ev, selection_basis="after_protected_readout").outcome == (
+        "verified_gain"
+    )
+    superset = Scenario([("WR", 120), ("RR", 80), ("RR", 1)])
+    held(
+        run(
+            tmp_path,
+            superset,
+            ev=ev,
+            result_revision=sha("reselected"),
+            selection_basis="after_protected_readout",
+        ),
+        "inconclusive",
+        "fresh_confirmation_cohort_required",
+    )
+    disjoint = Scenario(CLEAN_WIN, prefix="disjoint-")
+    assert run(tmp_path, disjoint, ev=ev, selection_basis="after_protected_readout").outcome == (
+        "verified_gain"
+    )
+    assert "per custody directory" in (iv.__doc__ or "")
+
+
+def test_r4_p4_a_different_claim_never_replays_another_claims_verdict(tmp_path):
+    """Probe P4: same population/artifact, different kind, selection basis and claimed counts."""
+    ev = evaluator(tmp_path)
+    s = Scenario(CLEAN_WIN)
+    first = run(
+        tmp_path, s, ev=ev, manifest=None, candidate_kind="simple_repair", job_manifest_digest=None
+    )
+    assert first.outcome == "verified_gain" and first.document["candidate_kind"] == "simple_repair"
+    inflated = {"incumbent": {**recompute_pairs(s, "incumbent"), "fixes": 999}}
+    second = run(
+        tmp_path, s, ev=ev, selection_basis="after_protected_readout", claimed_paired=inflated
+    )
+    assert not second.replayed and second.verdict_key != first.verdict_key
+    doc = held(second, "integrity_failure", "claimed_counts_not_reproduced_incumbent")
+    assert doc["candidate_kind"] == "open_weight_fit"
+    # A stored verdict that no longer matches the claim under its key is refused distinctly.
+    path = tmp_path / "evaluator-custody" / "verdicts" / (first.verdict_key + ".json")
+    stored = json.loads(path.read_bytes())
+    stored["document"]["claim_digest"] = sha("another-claim")
+    body = {k: x for k, x in stored["document"].items() if k != "verdict_digest"}
+    stored["document"]["verdict_digest"] = digest(body)
+    stored["local_seal"] = ev._commit({"document": stored["document"], "signature": None})
+    path.write_text(json.dumps(stored))
+    with pytest.raises(iv.CustodyError, match="stored_verdict_claim_mismatch"):
+        run(
+            tmp_path,
+            s,
+            ev=ev,
+            manifest=None,
+            candidate_kind="simple_repair",
+            job_manifest_digest=None,
+        )
+
+
+def test_r5_p5_full_policy_and_operating_point_terms_are_bound_and_enforced(tmp_path):
+    """Probe P5: same revision label, loosened thresholds; terms minimums were ignored."""
+    s = Scenario(B4, comparators=("real_only",))
+    strict = policy(required_comparators=("real_only",))
+    loose = policy(
+        required_comparators=("real_only",),
+        alpha_bps=9999,
+        minimum_improvement_bps=0,
+        coverage_floor_bps=0,
+    )
+    assert strict.policy_revision == loose.policy_revision and strict.digest() != loose.digest()
+    committed = claim(s, pol=strict)
+    v = evaluator(tmp_path).evaluate(
+        claim=committed,
+        population=s.population,
+        audit_receipt=receipt_for(s.population),
+        policy=loose,
+        replays=s.replays(),
+        fit_manifest=MANIFEST,
+    )
+    held(v, "integrity_failure", "policy_digest_mismatch")
+    # Terms minimums are enforced even when the gate policy is laxer.
+    w = Scenario(CLEAN_WIN)
+    for name, value, reason in (
+        ("minimum_coverage_bps", 10001, "coverage_incompatible"),
+        ("minimum_verified_cases", 1000, "below_minimum_verified_cases"),
+    ):
+        t = {**terms_for(), name: value}
+        p = policy(coverage_floor_bps=0, operating_point_terms=t, operating_point_digest=digest(t))
+        held(run(tmp_path / name, w, pol=p), "inconclusive", reason)
+
+    def critical(index, codes):
+        return (CRITICAL,) if index < 10 else ()
+
+    sliced = Scenario(CLEAN_WIN, slice_of=critical)
+    t = {**terms_for((CRITICAL,)), "minimum_slice_cases": 11}
+    p = policy(
+        critical_slices=(CRITICAL,), operating_point_terms=t, operating_point_digest=digest(t)
+    )
+    doc = held(run(tmp_path / "slice", sliced, pol=p), "inconclusive", "critical_slice_unsupported")
+    assert doc["comparisons"]["incumbent"]["critical_slices"][CRITICAL]["comparable"] == 10
+
+
+def test_r6_p6_slice_substitution_check_is_format_only_and_says_so():
+    """Probe P6: a plain SHA-256 of a name is indistinguishable from a keyed digest here."""
+    import hashlib
+
+    plain = hashlib.sha256(b"generated-plain-slice-name").hexdigest()
+    t = terms_for((plain,))
+    assert iv.operating_point_binding(t, digest(t)) is None
+    doc = iv.operating_point_binding.__doc__ or ""
+    assert "FORMAT ONLY" in doc and "comparison_packet.operating_point_digest" in doc
+
+
+def test_r7_p7_signature_is_inside_the_seal_and_expired_records_are_unreadable(
+    tmp_path, monkeypatch
+):
+    """Probe P7: a swapped signature envelope was accepted; expired reads relied on purge."""
+    ev = evaluator(tmp_path)
+    s = Scenario(CLEAN_WIN)
+    v = run(tmp_path, s, ev=ev)
+    path = tmp_path / "evaluator-custody" / "verdicts" / (v.verdict_key + ".json")
+    stored = json.loads(path.read_bytes())
+    stored["signature"] = {"forged": True}
+    path.write_text(json.dumps(stored))
+    with pytest.raises(iv.CustodyError, match="stored_verdict_tampered"):
+        run(tmp_path, s, ev=ev)
+    ev2 = evaluator(tmp_path / "second")
+    v2 = run(tmp_path / "second", s, ev=ev2)
+    now = int(iv.time.time())
+    monkeypatch.setattr(iv.time, "time", lambda: now + 31 * 86_400)
+    with pytest.raises(iv.CustodyError, match="private_predictions_expired"):
+        ev2.private_predictions(v2.verdict_key, accessor_id=EVALUATOR)
+    assert "caller-asserted" in (iv.IndependentEvaluator.private_predictions.__doc__ or "")
+
+
+def test_r8_p8_job_statement_is_self_consistency_and_bundle_readback_must_match(tmp_path):
+    """Probe P8: resealed training stats were reported as a verified job."""
+    forged = dict(MANIFEST)
+    forged["training"] = {"steps": 1, "changed_parameters": [1]}
+    forged.pop("manifest_sha256")
+    forged["manifest_sha256"] = ow._digest(forged)
+    s = Scenario(CLEAN_WIN)
+    doc = held(
+        run(tmp_path, s, manifest=forged, job_manifest_digest=forged["manifest_sha256"]),
+        "integrity_failure",
+        "served_bundle_manifest_mismatch",
+    )
+    job = doc["statements"]["job_produced_candidate"]
+    assert job["status"] == "self_consistent_manifest"
+    assert job["evidence"] == "unauthenticated_manifest_self_consistency"
+    # Even when the bundle reads back the same resealed manifest, nothing says "verified".
+    same = Replay(CANDIDATE, s.preds["candidate"], manifest=forged["manifest_sha256"])
+    v = run(
+        tmp_path / "b",
+        s,
+        manifest=forged,
+        job_manifest_digest=forged["manifest_sha256"],
+        replays=s.replays(candidate=same),
+    )
+    st = v.document["statements"]
+    assert "verified" not in json.dumps(
+        [st["job_produced_candidate"], st["candidate_served_evaluation"]]
+    )
+    missing = Replay(CANDIDATE, s.preds["candidate"], served={"artifact_sha256": CANDIDATE, **PINS})
+    held(
+        run(tmp_path / "c", s, replays=s.replays(candidate=missing)),
+        "integrity_failure",
+        "served_bundle_manifest_unavailable",
+    )
+
+
+def test_r9_p9_issuer_time_is_in_the_payload_and_expiry_forces_a_fresh_verdict(
+    tmp_path, monkeypatch
+):
+    """Probe P9: no not_after in the verdict payload."""
+    ev = evaluator(tmp_path)
+    s = Scenario(CLEAN_WIN)
+    v = run(tmp_path, s, ev=ev)
+    doc = v.document
+    assert doc["not_after"] == doc["issued_at"] + policy().verdict_validity_seconds
+    assert json.loads(iv.signing_transcript(doc))["payload"]["not_after"] == doc["not_after"]
+    now = int(iv.time.time())
+    monkeypatch.setattr(iv.time, "time", lambda: now + 8 * 86_400)
+    fresh = run(tmp_path, s, ev=ev)
+    assert not fresh.replayed and fresh.document["issued_at"] > doc["issued_at"]
+    archived = sorted(p.name for p in (tmp_path / "evaluator-custody" / "expired").iterdir())
+    assert archived == [
+        f"predictions-{v.verdict_key}-{doc['issued_at']}.json",
+        f"verdicts-{v.verdict_key}-{doc['issued_at']}.json",
+    ]
+
+
+def test_r10_worker_separation_is_mandatory_and_fit_digest_is_pinned(tmp_path):
+    for dirs in ((), [], None):
+        with pytest.raises((iv.CustodyError, TypeError)):
+            iv.IndependentEvaluator(
+                evaluator_id=EVALUATOR, custody_dir=tmp_path / "c", worker_data_dirs=dirs
+            )
+    with pytest.raises(TypeError):
+        iv.IndependentEvaluator(evaluator_id=EVALUATOR, custody_dir=tmp_path / "c")
+    samples = [MANIFEST, MANIFEST["identity"], {"non_ascii": "café", "n": [1, 2.5]}]
+    assert [iv.fit_manifest_digest(x) for x in samples] == [ow._digest(x) for x in samples]
+
+
+def test_r11_attributed_rows_carry_scorer_version(tmp_path):
+    ev = evaluator(tmp_path)
+    v = run(tmp_path, Scenario(CLEAN_WIN), ev=ev)
+    rows = ev.private_predictions(v.verdict_key, accessor_id=EVALUATOR)["record"]["rows"]
+    assert set(rows[0]) == {
+        "ref",
+        "arm",
+        "verdict",
+        "scorer_id",
+        "scorer_version",
+        "rubric_revision",
+    }
+    assert {r["scorer_version"] for r in rows} == {iv.SCORER_VERSION}
+    assert {r["verdict"] for r in rows} <= set(iv.CASE_VERDICTS)
+    assert v.document["scorer"]["scorer_version"] == iv.SCORER_VERSION

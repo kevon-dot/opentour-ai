@@ -9,12 +9,15 @@ expected values: they are only compared against the recomputation, and a mismatc
 integrity failure.
 
 What it verifies, as three separately reported statements:
-  1. ``job_produced_candidate``: the designated open-weight fit manifest is self-consistent,
-     pinned to the exact base/revision/profile, records real training steps and changed
-     trainable parameters, and its artifact digest is the claimed candidate;
-  2. ``candidate_served_evaluation``: the artifact the evaluator's own fresh-process replay
-     served is that digest (no mutable alias), with the pinned base, tokenizer and inference
-     configuration, and every comparator served its frozen revision;
+  1. ``job_produced_candidate``: the designated open-weight fit manifest is digest
+     self-consistent, pinned to the exact base/revision/profile, records nonzero training steps
+     and changed trainable parameters, and its artifact digest is the claimed candidate. This is
+     ``self_consistent_manifest`` evidence only: the training statistics are the manifest's own
+     unauthenticated statements (anyone can reseal a manifest), never independently observed;
+  2. ``candidate_served_evaluation``: the replay's serving readback names that digest (no
+     mutable alias), the pinned base and inference configuration, and the same fit manifest the
+     evaluator was given; every comparator reads back its frozen revision. Fields the readback
+     cannot observe (tokenizer bytes, process reload) are reported as unavailable, not assumed;
   3. ``paired_gain_cleared_gates``: on the same untouched population and fixed operating point,
      the candidate's paired improvement against each required comparator clears the registered
      practical threshold under family-level uncertainty, coverage, missing-output and
@@ -24,11 +27,21 @@ The operating point is supplied in its OPE-571 form, the frozen terms with every
 already replaced by its keyed digest plus the plain SHA-256 over them, and is checked by
 ``operating_point_binding`` alone. The evaluator never holds the slice key or plain slice names.
 
-One idempotent verdict exists per verdict key (tenant, experiment, exact result revision,
-artifact digest, comparators, benchmark digest, answer key, inputs, target metric, operating
-point, policy, audit receipt, rubric, evaluator). A replay returns the stored original; a changed
-input is a new key and a new verdict. Verified non-wins (no material gain, regression,
-inconclusive) are first-class outcomes and are stored the same way.
+Comparator gaps never hide candidate errors: cases the comparator left missing or malformed
+hold the comparison as incompatible, the candidate's total wrong automatic decisions may not
+exceed the comparator's, and cases the comparator deferred but the candidate automated count
+against the candidate when wrong (in the family effects, the slice veto and an error ceiling).
+
+One idempotent verdict exists per verdict key (the digest of the whole claim, including its
+claimed counts, kind, job manifest, selection basis and producer, plus the full policy digest,
+benchmark, answer key, inputs, audit receipt, rubric, scorer version and evaluator). A replay
+returns the stored original after re-checking it against the current claim; a changed input is
+a new key and a new verdict; a verdict past its ``not_after`` is archived and re-evaluated.
+Verified non-wins (no material gain, regression, inconclusive) are first-class outcomes.
+
+The fresh-cohort register is per custody directory: a candidate selected after a protected
+readout is held when its cases or families overlap any cohort a verdict in this directory
+scored. Another evaluator's custody directory does not share it.
 
 Evidence tier, stated precisely: every record is ``locally_keyed``. The evaluator commits its
 private predictions with an HMAC key held in its own custody directory, but that directory sits on
@@ -77,6 +90,8 @@ INTERVAL_METHOD = "bounded_independent_family_hoeffding_v1"
 TARGET_METRIC = "wrong_automatic_decisions"
 SCORER_ID = "opentour.pilot.independent-decision-scorer"
 RUBRIC_REVISION = "exact-label-fixed-threshold.v1"
+# Code version of this scorer implementation; bump on any change to scoring or aggregation.
+SCORER_VERSION = "independent-decision-scorer.code.v2"
 OUTCOMES = (
     "verified_gain",
     "no_material_gain",
@@ -219,6 +234,7 @@ class GatePolicy:
     decoding: str = "deterministic"
     repeat_runs: int = 1
     retention_seconds: int = 30 * 86_400
+    verdict_validity_seconds: int = 7 * 86_400
 
     def validate(self) -> None:
         ints = (
@@ -230,6 +246,15 @@ class GatePolicy:
             self.min_families,
             self.repeat_runs,
             self.retention_seconds,
+            self.verdict_validity_seconds,
+        )
+        terms: tuple[object, ...] = (
+            tuple(
+                self.operating_point_terms.get(k, 0)
+                for k in ("minimum_coverage_bps", "minimum_slice_cases", "minimum_verified_cases")
+            )
+            if isinstance(self.operating_point_terms, Mapping)
+            else (None,)
         )
         names = (*self.required_comparators, *self.optional_comparators)
         if (
@@ -241,6 +266,8 @@ class GatePolicy:
             or self.min_families < 2
             or self.repeat_runs < 1
             or self.retention_seconds < 1
+            or self.verdict_validity_seconds < 1
+            or not all(type(v) is int and v >= 0 for v in terms)
             or not self.required_comparators
             or len(set(names)) != len(names)
             or "candidate" in names
@@ -269,7 +296,16 @@ class GatePolicy:
             "decoding": self.decoding,
             "repeat_runs": self.repeat_runs,
             "retention_seconds": self.retention_seconds,
+            "verdict_validity_seconds": self.verdict_validity_seconds,
         }
+
+    def digest(self) -> str:
+        """Binds every threshold, floor, alpha and minimum, not only the revision label."""
+        return digest(self.as_json())
+
+    def term(self, name: str) -> int:
+        value = self.operating_point_terms.get(name, 0)
+        return value if type(value) is int else 0
 
 
 @dataclass(frozen=True)
@@ -288,6 +324,7 @@ class ClaimedResult:
     protected_rows: int
     operating_point_digest: str
     policy_revision: str
+    policy_digest: str
     claimed_paired: Mapping[str, Mapping[str, int]]
     job_manifest_digest: str | None = None
     selection_basis: str = "frozen_before_readout"
@@ -300,6 +337,7 @@ class ClaimedResult:
             self.benchmark_digest,
             self.membership_digest,
             self.operating_point_digest,
+            self.policy_digest,
             *self.comparator_digests.values(),
         )
         if (
@@ -319,6 +357,32 @@ class ClaimedResult:
         if self.candidate_kind not in _KINDS:
             # Managed/custom provider verification is a separate route (not built here).
             raise VerdictInputError("unsupported_candidate_route")
+
+    def digest(self) -> str:
+        """Every claimed field, so a different claim can never replay another's verdict."""
+        return digest(
+            {
+                "tenant": self.tenant,
+                "experiment_id": self.experiment_id,
+                "producer_id": self.producer_id,
+                "result_revision": self.result_revision,
+                "candidate_kind": self.candidate_kind,
+                "candidate_digest": self.candidate_digest,
+                "comparator_digests": dict(sorted(self.comparator_digests.items())),
+                "benchmark_digest": self.benchmark_digest,
+                "membership_digest": self.membership_digest,
+                "protected_rows": self.protected_rows,
+                "operating_point_digest": self.operating_point_digest,
+                "policy_revision": self.policy_revision,
+                "policy_digest": self.policy_digest,
+                "claimed_paired": {
+                    k: {f: v[f] for f in _PAIR_FIELDS}
+                    for k, v in sorted(self.claimed_paired.items())
+                },
+                "job_manifest_digest": self.job_manifest_digest,
+                "selection_basis": self.selection_basis,
+            }
+        )
 
 
 class ArtifactReplay(Protocol):
@@ -366,6 +430,7 @@ class DecisionScorer:
     """Exact-label scorer at a fixed operating point. Holds no state and reads no totals."""
 
     scorer_id = SCORER_ID
+    scorer_version = SCORER_VERSION
     rubric_revision = RUBRIC_REVISION
 
     def score_case(
@@ -501,10 +566,21 @@ def _exclusion(comp: str, cand: str) -> str:
 
 
 def _pair(comp: Sequence[str], cand: Sequence[str]) -> Json:
-    """Paired fixed-threshold transitions on cases both arms decided automatically."""
+    """Paired fixed-threshold transitions on cases both arms decided automatically.
+
+    Cases outside that set are still counted: ``newly_automated`` (comparator deferred, candidate
+    automated) with how many of those the candidate got wrong, and the comparator's own missing
+    or malformed outputs, so no gate can be satisfied by hiding candidate errors there.
+    """
     out: Json = {f: 0 for f in _PAIR_FIELDS}
     excluded: dict[str, int] = {}
+    newly, newly_wrong, comp_gaps = 0, 0, 0
     for c, t in zip(comp, cand, strict=True):
+        if c in ("missing_output", "malformed_output"):
+            comp_gaps += 1
+        if c == "deferred" and _is_auto(t):
+            newly += 1
+            newly_wrong += t == "wrong_automatic"
         if not (_is_auto(c) and _is_auto(t)):
             reason = _exclusion(c, t)
             excluded[reason] = excluded.get(reason, 0) + 1
@@ -521,6 +597,8 @@ def _pair(comp: Sequence[str], cand: Sequence[str]) -> Json:
     out["comparator_wrong"] = out["unchanged_wrong"] + out["fixes"]
     out["candidate_wrong"] = out["unchanged_wrong"] + out["new_errors"]
     out["excluded"] = dict(sorted(excluded.items()))
+    out["newly_automated"] = [newly_wrong, newly]
+    out["comparator_gaps"] = comp_gaps
     return out
 
 
@@ -586,10 +664,15 @@ def operating_point_binding(
 
     REBASE POINT (OPE-571, branch claude/ope-571-slice-digests, unmerged): the digest is a plain
     SHA-256 over ``terms`` after every ``critical_slices``/``material_slices`` name has been
-    replaced by its keyed digest, so it is checkable without the per-engagement slice key. Until
-    OPE-571 publishes its own canonical helper this uses ``operating_point.digest`` (the
-    canonicalization ``comparison_packet`` applies to ``terms`` today); switch to the OPE-571
-    helper on rebase. Returns ``None`` when bound, else the hold reason.
+    replaced by its keyed digest, so it is checkable without the per-engagement slice key. The
+    rebase target is ``comparison_packet.operating_point_digest`` (comparison_packet.py:411 on
+    that branch); until it merges this uses ``operating_point.digest``, the canonicalization
+    ``comparison_packet`` applies to ``terms`` on main. Returns ``None`` when bound, else the
+    hold reason.
+
+    The substitution check is FORMAT ONLY: a slice entry must be 64 lowercase hex. Without the
+    slice key the evaluator cannot tell a keyed digest from a plain SHA-256 of a name (or a name
+    that happens to be hex-shaped); keeping plain names out is the worker's OPE-571 obligation.
     """
     if not isinstance(substituted_terms, Mapping) or not _is_sha(operating_point_digest):
         return "operating_point_unverifiable"
@@ -608,6 +691,19 @@ def operating_point_binding(
 
 def _is_sha(value: object) -> bool:
     return isinstance(value, str) and bool(_SHA.fullmatch(value))
+
+
+def fit_manifest_digest(value: object) -> str:
+    """SHA-256 of the bytes ``open_weight`` seals a fit manifest with.
+
+    Equivalent to ``open_weight``'s private sealing digest: sorted-key compact JSON, non-ASCII
+    kept, NaN refused, one trailing newline. A test pins this to ``open_weight``'s own output, so
+    a change there fails loudly instead of silently diverging.
+    """
+    encoded = json.dumps(
+        value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False
+    )
+    return hashlib.sha256((encoded + "\n").encode()).hexdigest()
 
 
 def signing_transcript(document: Json) -> bytes:
@@ -701,13 +797,17 @@ class IndependentEvaluator:
         *,
         evaluator_id: str,
         custody_dir: str | Path,
-        worker_data_dirs: Sequence[str | Path] = (),
+        worker_data_dirs: Sequence[str | Path],
         scorer: DecisionScorer | None = None,
         signer: EvaluatorSigner | None = None,
     ) -> None:
         if not isinstance(evaluator_id, str) or not _ID.fullmatch(evaluator_id):
             raise VerdictInputError("invalid_evaluator_identity")
         root = Path(custody_dir).resolve()
+        if isinstance(worker_data_dirs, (str, Path)) or not worker_data_dirs:
+            # The separation check is the only thing keeping custody off worker data; it is
+            # mandatory, never skipped for an empty or missing list.
+            raise CustodyError("worker_data_dirs_required")
         for other in worker_data_dirs:
             worker = Path(other).resolve()
             if root == worker or root.is_relative_to(worker) or worker.is_relative_to(root):
@@ -716,7 +816,7 @@ class IndependentEvaluator:
         self.scorer = scorer or DecisionScorer()
         self.signer = signer
         self._root = root
-        for sub in ("", "verdicts", "predictions", "cohorts"):
+        for sub in ("", "verdicts", "predictions", "cohorts", "expired"):
             (root / sub).mkdir(mode=0o700, parents=True, exist_ok=True)
             mode = (root / sub).stat().st_mode
             if (root / sub).is_symlink() or mode & 0o077:
@@ -745,7 +845,10 @@ class IndependentEvaluator:
             document, signature = stored["document"], stored["signature"]
             body = {k: v for k, v in document.items() if k != "verdict_digest"}
             sealed = document["verdict_digest"] == digest(body)
-            keyed = hmac.compare_digest(stored["local_seal"], self._commit(document))
+            # The local seal covers the signature envelope too, so neither can be swapped alone.
+            keyed = hmac.compare_digest(
+                stored["local_seal"], self._commit({"document": document, "signature": signature})
+            )
         except (OSError, ValueError, KeyError, TypeError):
             raise CustodyError("stored_verdict_corrupt") from None
         if not (sealed and keyed and document["verdict_key"] == key):
@@ -753,7 +856,12 @@ class IndependentEvaluator:
         return IndependentVerdict(document, signature, replayed=True)
 
     def private_predictions(self, verdict_key: str, *, accessor_id: str) -> Json:
-        """Only the evaluator identity may read its private per-case record."""
+        """Return the private per-case record while it is within its retention limit.
+
+        ``accessor_id`` is a caller-asserted label, not authentication: it stops an accidental
+        read by the worker's code path. Real access control is the custody directory's
+        file-system permissions and, later, separated custody (OPE-566).
+        """
         if accessor_id != self.evaluator_id:
             raise CustodyError("private_predictions_access_denied")
         if not _is_sha(verdict_key):
@@ -763,6 +871,9 @@ class IndependentEvaluator:
             stored: Json = json.loads(path.read_bytes())
         except FileNotFoundError:
             raise CustodyError("private_predictions_absent_or_purged") from None
+        until = stored.get("retention_until")
+        if type(until) is not int or until <= int(time.time()):
+            raise CustodyError("private_predictions_expired")
         verdict = self._load_verdict(verdict_key)
         if verdict is None or verdict.document["predictions_commitment"] != self._commit(
             stored["record"]
@@ -796,18 +907,14 @@ class IndependentEvaluator:
         return digest(
             {
                 "schema_version": VERDICT,
-                "tenant": claim.tenant,
-                "experiment_id": claim.experiment_id,
-                "result_revision": claim.result_revision,
-                "candidate_digest": claim.candidate_digest,
-                "comparators": dict(sorted(claim.comparator_digests.items())),
-                "benchmark_digest": claim.benchmark_digest,
+                "claim_digest": claim.digest(),
                 "answer_key_digest": population.answer_key_digest,
                 "inputs_digest": population.inputs_digest,
                 "target_metric": TARGET_METRIC,
-                "operating_point_digest": claim.operating_point_digest,
-                "policy_digest": digest(policy.as_json()),
+                "policy_digest": policy.digest(),
                 "audit_receipt_digest": audit_receipt.get("receipt_digest"),
+                "scorer_id": self.scorer.scorer_id,
+                "scorer_version": self.scorer.scorer_version,
                 "rubric_revision": self.scorer.rubric_revision,
                 "evaluator_id": self.evaluator_id,
             }
@@ -832,7 +939,17 @@ class IndependentEvaluator:
         key = self.verdict_key(claim, population, policy, audit_receipt)
         existing = self._load_verdict(key)
         if existing is not None:
-            return existing
+            stored = existing.document
+            if (
+                stored.get("claim_digest") != claim.digest()
+                or stored.get("policy_digest") != policy.digest()
+                or stored.get("candidate_kind") != claim.candidate_kind
+                or stored.get("producer_id") != claim.producer_id
+            ):
+                raise CustodyError("stored_verdict_claim_mismatch")
+            if int(time.time()) <= stored["not_after"]:
+                return existing
+            self._archive(key, stored["issued_at"])
 
         reasons = _Reasons()
         qualified, qualification = qualify_scorer(self.scorer)
@@ -934,6 +1051,8 @@ class IndependentEvaluator:
             or claim.policy_revision != policy.policy_revision
         ):
             reasons.add("integrity_failure", "operating_point_or_policy_mismatch")
+        if claim.policy_digest != policy.digest():
+            reasons.add("integrity_failure", "policy_digest_mismatch")
         unbound = operating_point_binding(
             policy.operating_point_terms, policy.operating_point_digest
         )
@@ -958,11 +1077,10 @@ class IndependentEvaluator:
             training = manifest["training"]
             changed = training["changed_parameters"]
             steps = training["steps"]
-            # ``open_weight`` owns the fit manifest digest; reuse it rather than re-deriving it.
             consistent = (
                 manifest["schema"] == FIT_MANIFEST
-                and manifest["manifest_sha256"] == ow._digest(seal)
-                and manifest["artifact_sha256"] == ow._digest(identity)
+                and manifest["manifest_sha256"] == fit_manifest_digest(seal)
+                and manifest["artifact_sha256"] == fit_manifest_digest(identity)
             )
             pinned = (
                 identity["profile"] == ow.PROFILE
@@ -991,12 +1109,14 @@ class IndependentEvaluator:
         if manifest["artifact_sha256"] != claim.candidate_digest:
             return {"status": "failed", "reason": "job_artifact_is_not_the_candidate"}
         return {
-            "status": "verified",
+            "status": "self_consistent_manifest",
             "reason": "fit_manifest_self_consistent_and_pinned",
             "artifact_digest": manifest["artifact_sha256"],
-            "training_steps": steps,
-            "changed_trainable_parameters": sum(changed),
-            "evidence": "digest_self_consistent_fit_manifest",
+            "manifest_digest": manifest["manifest_sha256"],
+            # The manifest's own statements; a resealed manifest can claim any value.
+            "manifest_states_training_steps": steps,
+            "manifest_states_changed_trainable_parameters": sum(changed),
+            "evidence": "unauthenticated_manifest_self_consistency",
         }
 
     def _served_statement(
@@ -1008,6 +1128,7 @@ class IndependentEvaluator:
     ) -> tuple[Json, dict[str, str]]:
         expected = {"candidate": claim.candidate_digest, **claim.comparator_digests}
         identities: dict[str, str] = {}
+        drift: Json = {}
         for name in ("candidate", *policy.required_comparators, *policy.optional_comparators):
             if name not in replays:
                 continue
@@ -1023,23 +1144,36 @@ class IndependentEvaluator:
             if artifact != expected[name]:
                 return {"status": "failed", "reason": name + "_served_other_artifact"}, identities
             if name == "candidate" and claim.candidate_kind == "open_weight_fit":
-                pins = (
+                pins = [
                     served.get("base_sha256") == ow.BASE_SHA256,
-                    served.get("tokenizer_sha256") == ow.TOKENIZER_SHA256,
                     served.get("inference_config_sha256") == ow.PROFILE_SHA256,
-                    served.get("reload") == "fresh_process",
-                )
+                ]
+                # Observed only when the readback reports them; never assumed from constants.
+                optional = {"tokenizer_sha256": ow.TOKENIZER_SHA256, "reload": "fresh_process"}
+                for field_name, pinned in optional.items():
+                    if field_name not in served:
+                        drift[field_name] = "unavailable"
+                    else:
+                        pins.append(served[field_name] == pinned)
+                        drift[field_name] = "checked"
                 if not all(pins):
                     return {"status": "failed", "reason": "served_configuration_drift"}, identities
                 if job.get("artifact_digest") not in (None, artifact):
                     return {"status": "failed", "reason": "served_is_not_job_artifact"}, identities
+                bundle_manifest = served.get("manifest_sha256")
+                if not _is_sha(bundle_manifest):
+                    return {"status": "failed", "reason": "bundle_manifest_unavailable"}, identities
+                if bundle_manifest != job.get("manifest_digest"):
+                    return {"status": "failed", "reason": "bundle_manifest_mismatch"}, identities
+                drift["bundle_manifest"] = "checked"
             identities[name] = str(artifact)
         if "candidate" not in identities:
             return {"status": "failed", "reason": "candidate_not_replayed"}, identities
         return {
-            "status": "verified",
-            "reason": "evaluator_replay_served_frozen_revisions",
+            "status": "readback_consistent",
+            "reason": "replay_readback_names_frozen_revisions",
             "served": dict(sorted(identities.items())),
+            "drift_checks": dict(sorted(drift.items())),
         }, identities
 
     def _replay(
@@ -1084,6 +1218,7 @@ class IndependentEvaluator:
                     "arm": name,
                     "verdict": verdict,
                     "scorer_id": self.scorer.scorer_id,
+                    "scorer_version": self.scorer.scorer_version,
                     "rubric_revision": self.scorer.rubric_revision,
                 }
                 for name in sorted(rows)
@@ -1140,9 +1275,13 @@ class IndependentEvaluator:
             s: {"comparable": 0, "fixes": 0, "new_errors": 0} for s in policy.critical_slices
         }
         for case, c, t in zip(population.cases, comp, cand, strict=True):
-            if not (_is_auto(c) and _is_auto(t)):
+            if _is_auto(c) and _is_auto(t):
+                effect = (t == "correct_automatic") - (c == "correct_automatic")
+            elif c == "deferred" and _is_auto(t):
+                # Newly automated: no credit when right, a full error when wrong.
+                effect = -1 if t == "wrong_automatic" else 0
+            else:
                 continue
-            effect = (t == "correct_automatic") - (c == "correct_automatic")
             families.setdefault(case.family_id, []).append(effect)
             for s in case.slices:
                 if s in slices:
@@ -1155,29 +1294,27 @@ class IndependentEvaluator:
             pair["comparator_wrong"] - pair["candidate_wrong"], pair["comparable"] or 1
         )
         threshold = Fraction(policy.minimum_improvement_bps, 10_000)
+        min_slice = max(1, policy.term("minimum_slice_cases"))
         for v in slices.values():
             v["status"] = (
                 "unsupported"
-                if v["comparable"] == 0
+                if v["comparable"] < min_slice
                 else "veto"
                 if v["new_errors"] > v["fixes"]
                 else "ok"
             )
-        missing = cand_arm["missing"] + cand_arm["malformed"]
-        cand_cov = Fraction(*cand_arm["coverage"])
-        comp_cov = Fraction(*comp_arm["coverage"])
+        checks = {
+            "candidate_missing": cand_arm["missing"] + cand_arm["malformed"],
+            "comparator_missing": pair["comparator_gaps"],
+            "candidate_coverage": Fraction(*cand_arm["coverage"]),
+            "comparator_coverage": Fraction(*comp_arm["coverage"]),
+            "candidate_total_wrong": cand_arm["wrong_automatic"],
+            "comparator_total_wrong": comp_arm["wrong_automatic"],
+            "newly_automated": pair["newly_automated"],
+            "supported_cases": sum(len(v) for v in families.values()),
+        }
         outcome, reason = self._decide(
-            claim,
-            name,
-            arms,
-            interval,
-            threshold,
-            slices,
-            missing,
-            cand_cov,
-            comp_cov,
-            policy,
-            len(families),
+            claim, name, arms, interval, threshold, slices, checks, policy, len(families)
         )
         return {
             "comparator_digest": claim.comparator_digests[name],
@@ -1188,6 +1325,15 @@ class IndependentEvaluator:
                 "candidate": [pair["candidate_wrong"], pair["comparable"]],
                 "comparator": [pair["comparator_wrong"], pair["comparable"]],
             },
+            "total_wrong_automatic": {
+                "candidate": cand_arm["wrong_automatic"],
+                "comparator": comp_arm["wrong_automatic"],
+            },
+            "newly_automated": {
+                "wrong": pair["newly_automated"][0],
+                "total": pair["newly_automated"][1],
+            },
+            "comparator_gaps": pair["comparator_gaps"],
             "improvement": {
                 "fraction": [improvement.numerator, improvement.denominator]
                 if pair["comparable"]
@@ -1210,9 +1356,7 @@ class IndependentEvaluator:
         interval: Json,
         threshold: Fraction,
         slices: Mapping[str, Json],
-        missing: int,
-        cand_cov: Fraction,
-        comp_cov: Fraction,
+        checks: Mapping[str, Any],
         policy: GatePolicy,
         family_count: int,
     ) -> tuple[str, str]:
@@ -1220,16 +1364,31 @@ class IndependentEvaluator:
             return "no_material_gain", "candidate_is_comparator"
         if arms["candidate"] == arms[name]:
             return "no_material_gain", "predictions_identical_to_comparator"
-        if missing > policy.max_missing:
+        if checks["candidate_missing"] > policy.max_missing:
             return "inconclusive", "missing_or_malformed_predictions"
-        if cand_cov * 10_000 < policy.coverage_floor_bps or (
+        if checks["comparator_missing"] > policy.max_missing:
+            # Dropping these would hide whatever the candidate did on them.
+            return "inconclusive", "comparator_missing_or_malformed_outputs"
+        cand_cov, comp_cov = checks["candidate_coverage"], checks["comparator_coverage"]
+        floor = max(policy.coverage_floor_bps, policy.term("minimum_coverage_bps"))
+        if cand_cov * 10_000 < floor or (
             (comp_cov - cand_cov) * 10_000 > policy.max_coverage_loss_bps
         ):
             return "inconclusive", "coverage_incompatible"
+        if checks["candidate_total_wrong"] > checks["comparator_total_wrong"]:
+            return "regression", "total_wrong_automatic_increased"
+        newly_wrong, newly = checks["newly_automated"]
+        ceiling = policy.operating_point_terms.get("error_ceiling_bps")
+        if newly and type(ceiling) is not int:
+            return "inconclusive", "newly_automated_without_error_ceiling"
+        if newly and newly_wrong * 10_000 > ceiling * newly:
+            return "regression", "newly_automated_errors_exceed_ceiling"
         if any(v["status"] == "veto" for v in slices.values()):
             return "regression", "critical_slice_veto"
         if any(v["status"] == "unsupported" for v in slices.values()):
             return "inconclusive", "critical_slice_unsupported"
+        if checks["supported_cases"] < policy.term("minimum_verified_cases"):
+            return "inconclusive", "below_minimum_verified_cases"
         if interval["status"] != "available" or family_count < policy.min_families:
             return "inconclusive", "uncertainty_unavailable_or_insufficient_support"
         lower, upper = Fraction(interval["lower"]), Fraction(interval["upper"])
@@ -1252,11 +1411,35 @@ class IndependentEvaluator:
     def _check_selection(
         self, claim: ClaimedResult, population: SealedPopulation, reasons: _Reasons
     ) -> None:
-        marker = self._root / "cohorts" / (population.membership_digest + ".json")
-        seen = marker.exists()
-        _write_once(marker, json.dumps({"first_candidate": claim.candidate_digest}).encode())
-        if claim.selection_basis == "after_protected_readout" and seen:
-            reasons.add("inconclusive", "fresh_confirmation_cohort_required")
+        """A post-readout selection needs cases and families no scored verdict here has seen."""
+        if claim.selection_basis != "after_protected_readout":
+            return
+        cases = {c.case_id for c in population.cases}
+        families = {c.family_id for c in population.cases}
+        for path in sorted((self._root / "cohorts").glob("*.json")):
+            try:
+                seen = json.loads(path.read_bytes())
+                overlap = cases & set(seen["cases"]) or families & set(seen["families"])
+            except (OSError, ValueError, KeyError, TypeError):
+                raise CustodyError("cohort_register_corrupt") from None
+            if overlap:
+                reasons.add("inconclusive", "fresh_confirmation_cohort_required")
+                return
+
+    def _mark_viewed(self, key: str, population: SealedPopulation) -> None:
+        """Record exactly the cases and families a scored, issued verdict used."""
+        marker = {
+            "cases": [c.case_id for c in population.cases],
+            "families": sorted({c.family_id for c in population.cases}),
+        }
+        _write_once(self._root / "cohorts" / (key + ".json"), json.dumps(marker).encode())
+
+    def _archive(self, key: str, issued_at: int) -> None:
+        """Move an expired verdict and its private record aside so a fresh one can be issued."""
+        for sub in ("verdicts", "predictions"):
+            source = self._root / sub / (key + ".json")
+            if source.exists():
+                os.replace(source, self._root / "expired" / f"{sub}-{key}-{issued_at}.json")
 
     def _issue(
         self,
@@ -1277,7 +1460,10 @@ class IndependentEvaluator:
         # must carry claimed counts, and those counts must equal the recomputation.
         stated = all(n in claim.claimed_paired for n in policy.required_comparators)
         reproduced = outcome == "verified_gain" and stated
-        alert = reproduced and statements["candidate_served_evaluation"]["status"] == "verified"
+        alert = (
+            reproduced
+            and statements["candidate_served_evaluation"]["status"] == "readback_consistent"
+        )
         primary = policy.required_comparators[0]
         body: Json = {
             "schema_version": VERDICT,
@@ -1286,6 +1472,10 @@ class IndependentEvaluator:
             "experiment_id": claim.experiment_id,
             "producer_id": claim.producer_id,
             "verifier_id": self.evaluator_id,
+            "claim_digest": claim.digest(),
+            "policy_digest": policy.digest(),
+            "selection_basis": claim.selection_basis,
+            "job_manifest_digest": claim.job_manifest_digest,
             "outcome": outcome,
             "reasons": reasons.reasons(),
             # Compatibility with the OPE-421 consumer: "reproduced" means the improvement claim
@@ -1312,6 +1502,7 @@ class IndependentEvaluator:
             },
             "scorer": {
                 "scorer_id": self.scorer.scorer_id,
+                "scorer_version": self.scorer.scorer_version,
                 "rubric_revision": self.scorer.rubric_revision,
                 "qualification": "passed"
                 if "scorer_failed_fixture_oracle" not in reasons.reasons()
@@ -1328,20 +1519,24 @@ class IndependentEvaluator:
             "evidence": {
                 "evidence_tier": EVIDENCE_TIER,
                 "evidence_origin": population.evidence_origin,
-                "evaluator_identity_separate_from_producer": True,
+                # Only the identity labels differ; who actually runs each side is asserted by
+                # the caller and not established by this record.
+                "producer_distinct_from_evaluator": "caller_asserted_identity_labels",
                 "custody_separated": False,
                 "issuer_authenticated": False,
                 "claim_scope": "implementation_only",
                 "accuracy_claim_eligible": False,
             },
+            # Issuer time inside the signed payload (OPE-566 section 5): the evaluator's clock.
             "issued_at": now,
+            "not_after": now + policy.verdict_validity_seconds,
         }
         document = {**body, "verdict_digest": digest(body)}
         signature = _envelope(document, self.signer) if self.signer is not None else None
         stored = {
             "document": document,
             "signature": signature,
-            "local_seal": self._commit(document),
+            "local_seal": self._commit({"document": document, "signature": signature}),
         }
         path = self._root / "verdicts" / (key + ".json")
         private = {"retention_until": now + policy.retention_seconds, "record": record}
@@ -1350,6 +1545,8 @@ class IndependentEvaluator:
             original = self._load_verdict(key)  # lost a race: the first issued verdict stands
             assert original is not None
             return original
+        if record["rows"]:
+            self._mark_viewed(key, population)
         return IndependentVerdict(document, signature, replayed=False)
 
 
@@ -1362,6 +1559,8 @@ class OpenWeightReplay:
     Identity comes from ``inspect_open_weight`` (manifest, pins and adapter bytes re-verified);
     inference is ``predict_open_weight_batch`` in a fresh process with the verified artifact as
     ``expected_artifact_sha256``, so a lineage mismatch is refused by ``open_weight`` itself.
+    The readback reports only what the bundle states: it does not report tokenizer bytes or a
+    reload, so the evaluator records those drift checks as unavailable.
     """
 
     def __init__(
@@ -1386,10 +1585,9 @@ class OpenWeightReplay:
         identity = manifest["identity"]
         return {
             "artifact_sha256": manifest["artifact_sha256"],
+            "manifest_sha256": manifest["manifest_sha256"],
             "base_sha256": identity["base_sha256"],
-            "tokenizer_sha256": ow.TOKENIZER_SHA256,  # pinned through profile_sha256
             "inference_config_sha256": identity["profile_sha256"],
-            "reload": "fresh_process",
         }
 
     def predict(
