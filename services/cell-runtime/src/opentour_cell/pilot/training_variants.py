@@ -18,12 +18,14 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+import unicodedata
 from collections import Counter
-from collections.abc import Iterable, Iterator, Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from fractions import Fraction
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any, Literal, Protocol
 
 from opentour_cell.pilot.operating_point import digest
@@ -76,6 +78,10 @@ class Policy:
     required_inputs: tuple[str, ...]
     clauses: Mapping[str, str]
 
+    def __post_init__(self) -> None:
+        # A validator receives this object: never share a mutable mapping with it.
+        object.__setattr__(self, "clauses", MappingProxyType(dict(self.clauses)))
+
 
 @dataclass(frozen=True)
 class Recipe:
@@ -120,6 +126,9 @@ class SeedRoot:
     target_verifier_ref: str
     verifier_independent: bool
 
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "fields", MappingProxyType(dict(self.fields)))
+
 
 @dataclass(frozen=True)
 class SplitSeal:
@@ -157,6 +166,9 @@ class ProposedChild:
     proposed_label: str
     cost: int = 1
 
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "edits", MappingProxyType(dict(self.edits)))
+
 
 @dataclass(frozen=True)
 class GenerationPlan:
@@ -171,6 +183,9 @@ class GenerationPlan:
     proposals: tuple[ProposedChild, ...]
     fit_gate: FitGate | None = None
     max_children_per_root: int = DEFAULT_MAX_CHILDREN_PER_ROOT
+    max_children_per_family: int = DEFAULT_MAX_CHILDREN_PER_ROOT
+    # Independent validators this plan authorizes; empty means nothing can be admitted.
+    approved_validators: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -215,14 +230,32 @@ class SubmitResult:
 
 def derive_label(policy: Policy, base_target: str, fields: Mapping[str, str]) -> str | None:
     """Label from customer policy only. None when the policy cannot decide one answer."""
-    labels = {label for name, label in policy.clauses.items() if not fields.get(name)}
+    return _derive(policy.clauses, base_target, fields)
+
+
+def _derive(clauses: Mapping[str, str], base_target: str, fields: Mapping[str, str]) -> str | None:
+    labels = {label for name, label in clauses.items() if not fields.get(name)}
     if not labels:
         return base_target
     return next(iter(labels)) if len(labels) == 1 else None
 
 
+def _identity(value: str) -> str:
+    """Canonical form for comparing actor identities (width, case, invisible characters)."""
+    text = unicodedata.normalize("NFKC", value)
+    text = "".join(c for c in text if unicodedata.category(c) not in {"Cf", "Cc"})
+    return text.strip().casefold()
+
+
+def _tokens(value: str) -> str:
+    """Order-, case-, width-, accent- and punctuation-insensitive token multiset."""
+    text = unicodedata.normalize("NFKD", value)
+    text = "".join(c for c in text if unicodedata.category(c) not in {"Mn", "Cf", "Cc"})
+    return " ".join(sorted(re.findall(r"[^\W_]+", text.casefold())))
+
+
 def _normal(fields: Mapping[str, str]) -> str:
-    return digest(sorted((k, re.sub(r"[\W_]+", " ", v.lower()).strip()) for k, v in fields.items()))
+    return digest(sorted((_identity(k), _tokens(v)) for k, v in fields.items()))
 
 
 def render_with_spans(policy: Policy, fields: Mapping[str, str]) -> tuple[str, list[Json]]:
@@ -277,7 +310,9 @@ def _seed_reason(
 
 _SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS roots (
-    root_ref TEXT PRIMARY KEY, family_id TEXT NOT NULL, state TEXT NOT NULL, reason TEXT NOT NULL
+    root_ref TEXT PRIMARY KEY, family_id TEXT NOT NULL, state TEXT NOT NULL,
+    reason TEXT NOT NULL, policy_revision TEXT NOT NULL, seal_digest TEXT NOT NULL,
+    cap_root INTEGER NOT NULL, cap_family INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS children (
     seq INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -316,6 +351,11 @@ class VariantLedger:
         db = self._shared or sqlite3.connect(self._path, isolation_level=None, timeout=30)
         try:
             db.execute("BEGIN IMMEDIATE")
+        except BaseException:
+            if self._shared is None:
+                db.close()
+            raise
+        try:
             yield db
             db.execute("COMMIT")
         except BaseException:
@@ -384,18 +424,30 @@ class VariantLedger:
         with self._tx() as db:
             root = plan.root
             row = db.execute(
-                "SELECT state FROM roots WHERE root_ref=?", (root.root_ref,)
+                "SELECT state, family_id FROM roots WHERE root_ref=?", (root.root_ref,)
             ).fetchone()
             invalid_root = row is not None and row[0] != "live"
-            seed_block = (
-                None
-                if invalid_root
-                else _seed_reason(root, plan.policy, plan.grant, plan.seal, now)
-            )
+            seed_block: tuple[str, Json | None] | None = None
+            if invalid_root:
+                pass
+            elif row is not None and row[1] != root.family_id:
+                seed_block = ("root_identity_conflict", None)
+            else:
+                seed_block = self._lineage_block(db, root) or _seed_reason(
+                    root, plan.policy, plan.grant, plan.seal, now
+                )
             if row is None and seed_block is None:
                 db.execute(
-                    "INSERT INTO roots VALUES (?,?,?,?)",
-                    (root.root_ref, root.family_id, "live", ""),
+                    "INSERT INTO roots (root_ref, family_id, state, reason, policy_revision,"
+                    " seal_digest, cap_root, cap_family) VALUES (?,?,'live','',?,?,?,?)",
+                    (
+                        root.root_ref,
+                        root.family_id,
+                        plan.policy.revision,
+                        plan.seal.digest,
+                        plan.max_children_per_root,
+                        plan.max_children_per_family,
+                    ),
                 )
             for index, proposal in enumerate(plan.proposals):
                 if stopped:
@@ -403,46 +455,106 @@ class VariantLedger:
                     continue
                 key = self._key(plan, proposal)
                 existing = db.execute(
-                    "SELECT child_id, disposition, reason FROM children WHERE idem_key=?", (key,)
+                    "SELECT child_id, disposition, reason, record FROM children WHERE idem_key=?",
+                    (key,),
                 ).fetchone()
-                if existing is not None and existing[1] == REJECTED and existing[2] in _RETRYABLE:
-                    db.execute("DELETE FROM children WHERE idem_key=?", (key,))
-                    existing = None  # zero-cost rejection: re-evaluate under current state
-                if existing is not None:
+                if existing is not None and not (
+                    existing[1] == REJECTED and existing[2] in _RETRYABLE
+                ):
                     ids.append(str(existing[0]))
                     replayed += 1
                     continue
                 base = self._base_record(plan, proposal, index)
-                if invalid_root:
-                    cid = self._insert(
-                        db, key, plan, REJECTED, "root_invalidated", 0, self._bare(base)
-                    )
-                elif seed_block is not None:
-                    extra: Json = {"request": seed_block[1]} if seed_block[1] else {}
-                    cid = self._insert(
-                        db, key, plan, REJECTED, seed_block[0], 0, {**self._bare(base), **extra}
-                    )
+                disposition, reason, cost, record, hit_stop = self._evaluate(
+                    db, plan, proposal, base, invalid_root, seed_block
+                )
+                stopped = stopped or hit_stop
+                if existing is None:
+                    cid = self._insert(db, key, plan, disposition, reason, cost, record)
+                    created += 1
                 else:
-                    reason, request, record = self._static_checks(db, plan, proposal, base)
-                    cost = proposal.cost if reason is None else 0
-                    if reason is None and (
-                        cost < 0 or self._spent(db, plan.grant.grant_ref) + cost > plan.grant.budget
-                    ):
-                        reason, request, cost, stopped = "authorization_exhausted", None, 0, True
-                    if request:
-                        record = {**record, "request": request}
-                    cid = self._insert(
-                        db,
-                        key,
-                        plan,
-                        HELD if reason is None else REJECTED,
-                        reason or "independent_validation_absent",
-                        cost,
-                        record,
-                    )
+                    # Re-evaluate a state-dependent rejection in place; keep the audit trail.
+                    cid = str(existing[0])
+                    if reason == existing[2] and disposition == REJECTED:
+                        replayed += 1
+                    else:
+                        prior: Json = json.loads(existing[3])
+                        history = [
+                            *prior.get("history", []),
+                            {
+                                "disposition": existing[1],
+                                "reason": existing[2],
+                                "plan_ref": prior.get("plan_ref"),
+                            },
+                        ]
+                        record = {
+                            **record,
+                            "child_id": cid,
+                            "history": history,
+                            "disposition": disposition,
+                            "reason": reason,
+                        }
+                        db.execute(
+                            "UPDATE children SET disposition=?, reason=?, cost=?, plan_ref=?,"
+                            " record=? WHERE child_id=?",
+                            (
+                                disposition,
+                                reason,
+                                cost,
+                                plan.plan_ref,
+                                json.dumps(record, sort_keys=True),
+                                cid,
+                            ),
+                        )
+                        created += 1
                 ids.append(cid)
-                created += 1
         return SubmitResult(tuple(ids), created, replayed, stopped, not_attempted)
+
+    @staticmethod
+    def _lineage_block(db: sqlite3.Connection, root: SeedRoot) -> tuple[str, Json | None] | None:
+        """A synthetic child (or a copy of one) can never be registered as a real root."""
+        refs = (root.root_ref, root.case_ref, root.label_ref)
+        if (
+            root.root_ref.startswith("var-")
+            or db.execute(
+                "SELECT 1 FROM children WHERE child_id IN (?,?,?) LIMIT 1", refs
+            ).fetchone()
+        ):
+            return "synthetic_lineage_seed", None
+        want = _normal(root.fields)
+        for (rec_json,) in db.execute(
+            "SELECT record FROM children WHERE root_ref<>? AND disposition IN (?,?,?)",
+            (root.root_ref, *_LIVE),
+        ):
+            if _normal(json.loads(rec_json).get("fields", {})) == want:
+                return "synthetic_lineage_seed", None
+        return None
+
+    def _evaluate(
+        self,
+        db: sqlite3.Connection,
+        plan: GenerationPlan,
+        proposal: ProposedChild,
+        base: Json,
+        invalid_root: bool,
+        seed_block: tuple[str, Json | None] | None,
+    ) -> tuple[str, str, int, Json, bool]:
+        if invalid_root:
+            return REJECTED, "root_invalidated", 0, self._bare(base), False
+        if seed_block is not None:
+            extra: Json = {"request": seed_block[1]} if seed_block[1] else {}
+            return REJECTED, seed_block[0], 0, {**self._bare(base), **extra}, False
+        reason, request, record = self._static_checks(db, plan, proposal, base)
+        cost = proposal.cost if reason is None else 0
+        stop = False
+        if reason is None and (
+            cost < 0 or self._spent(db, plan.grant.grant_ref) + cost > plan.grant.budget
+        ):
+            reason, request, cost, stop = "authorization_exhausted", None, 0, True
+        if request:
+            record = {**record, "request": request}
+        disposition = HELD if reason is None else REJECTED
+        return disposition, reason or "independent_validation_absent", cost, record, stop
 
     @staticmethod
     def _key(plan: GenerationPlan, proposal: ProposedChild) -> str:
@@ -454,6 +566,7 @@ class VariantLedger:
                 proposal.recipe_id,
                 recipe.revision if recipe else None,
                 sorted(proposal.edits.items()),
+                proposal.proposed_label,
                 plan.generator.ref,
                 plan.generator.revision,
                 plan.mode,
@@ -472,6 +585,7 @@ class VariantLedger:
             "parent_label_ref",
             "root_ref",
             "family_id",
+            "grant_ref",
             "policy_revision",
             "split_digest",
             "recipe",
@@ -494,7 +608,11 @@ class VariantLedger:
             "family_id": plan.root.family_id,
             "source_revision": plan.root.source_revision,
             "policy_revision": plan.policy.revision,
+            "grant_ref": plan.grant.grant_ref,
             "split_digest": plan.seal.digest,
+            "base_target": plan.root.target,
+            "policy_clauses": dict(plan.policy.clauses),
+            "approved_validators": sorted(plan.approved_validators),
             "recipe": {
                 "recipe_id": proposal.recipe_id,
                 "revision": recipe.revision if recipe else None,
@@ -553,36 +671,49 @@ class VariantLedger:
                 child[name] = value
         text, spans = render_with_spans(policy, child)
         base = {**base, "fields": child, "evidence_spans": spans, "rendered_text": text}
-        # Near-copies of the root or of any live sibling under the same root are one example.
+        # Near-copies of the root or of any live sibling in the family (same mode) are one example.
         if _normal(child) == _normal(root.fields):
             return "near_duplicate", None, base
-        marks = ",".join("?" * (len(_LIVE) + 1))
+        marks = ",".join("?" * len(_LIVE))
         for (rec_json,) in db.execute(
-            f"SELECT record FROM children WHERE root_ref=? AND disposition IN ({marks})",
-            (root.root_ref, *_LIVE, QUARANTINED),
+            "SELECT record FROM children WHERE family_id=? AND mode=?"
+            f" AND disposition IN ({marks})",
+            (root.family_id, plan.mode, *_LIVE),
         ):
             if _normal(json.loads(rec_json).get("fields", {})) == _normal(child):
                 return "near_duplicate", None, base
-        marks = ",".join("?" * len(_LIVE))
-        live = db.execute(
-            f"SELECT COUNT(*) FROM children WHERE root_ref=? AND disposition IN ({marks})",
-            (root.root_ref, *_LIVE),
+        caps = db.execute(
+            "SELECT cap_root, cap_family FROM roots WHERE root_ref=?", (root.root_ref,)
+        ).fetchone()
+        cap_root = min(plan.max_children_per_root, caps[0])
+        cap_family = min(plan.max_children_per_family, caps[1])
+        live_root = db.execute(
+            "SELECT COUNT(*) FROM children WHERE root_ref=? AND mode=?"
+            f" AND disposition IN ({marks})",
+            (root.root_ref, plan.mode, *_LIVE),
         ).fetchone()[0]
-        if live >= plan.max_children_per_root:
+        if live_root >= cap_root:
             return "root_cap_exceeded", None, base
+        live_family = db.execute(
+            "SELECT COUNT(*) FROM children WHERE family_id=? AND mode=?"
+            f" AND disposition IN ({marks})",
+            (root.family_id, plan.mode, *_LIVE),
+        ).fetchone()[0]
+        if live_family >= cap_family:
+            return "family_cap_exceeded", None, base
         return None, None, base
 
-    def validate(
-        self, child_id: str, decision: ValidatorDecision | None, *, base_target: str
-    ) -> str:
+    def validate(self, child_id: str, decision: ValidatorDecision | None) -> str:
         """Apply an independent validator decision; return the child's resulting disposition.
 
-        Serves first calls and late callbacks alike. An invalidated child or a retracted root
-        can never be admitted by a callback.
+        The base target, policy clauses and authorized validators come from the stored record,
+        never from the caller. Serves first calls and late callbacks alike: an invalidated child
+        or a retracted root can never be admitted by a callback.
         """
         with self._tx() as db:
             row = db.execute(
-                "SELECT record, root_ref, mode FROM children WHERE child_id=?", (child_id,)
+                "SELECT record, root_ref, mode, family_id FROM children WHERE child_id=?",
+                (child_id,),
             ).fetchone()
             if row is None:
                 raise TrainingError("unknown_variant")
@@ -595,8 +726,13 @@ class VariantLedger:
                 return current
             if decision is None:
                 return HELD  # validation absent: hold, never pass
-            if not decision.validator_ref or decision.validator_ref == record["generator"]["ref"]:
+            ref = _identity(decision.validator_ref)
+            if not ref or ref == _identity(record["generator"]["ref"]):
                 raise TrainingError("self_validation_rejected")
+            if ref not in {_identity(v) for v in record["approved_validators"]}:
+                raise TrainingError("validator_not_authorized")
+            base_target = str(record["base_target"])
+            own = _derive(record["policy_clauses"], base_target, record["fields"])
             record = {
                 **record,
                 "validator_ref": decision.validator_ref,
@@ -607,6 +743,8 @@ class VariantLedger:
                 new, why = QUARANTINED, "ambiguous_target"
             elif decision.label != record["proposed_label"]:
                 new, why = QUARANTINED, "label_disagreement"
+            elif decision.label != own:
+                new, why = QUARANTINED, "validator_policy_disagreement"
             elif kind in INVARIANT_KINDS and decision.label != base_target:
                 new, why = QUARANTINED, "invariant_label_changed"
             elif row[2] == "preview":
@@ -615,7 +753,7 @@ class VariantLedger:
                 new, why = ADMITTED, "validated"
             self._update(db, child_id, new, why, record)
             if new == ADMITTED:
-                self._reweigh(db, str(row[1]))
+                self._reweigh(db, str(row[3]))
             return new
 
     def run(self, plan: GenerationPlan, validator: Validator | None, *, now: int) -> SubmitResult:
@@ -630,19 +768,20 @@ class VariantLedger:
                     ValidationRequest(
                         plan.policy,
                         plan.root.target,
-                        child["fields"],
+                        MappingProxyType(dict(child["fields"])),
                         tuple(child["changed_fields"]),
                     )
                 )
-            self.validate(child["child_id"], decision, base_target=plan.root.target)
+            self.validate(child["child_id"], decision)
         return result
 
     @staticmethod
-    def _reweigh(db: sqlite3.Connection, root_ref: str) -> None:
-        """Split a root's synthetic influence cap (one real-example unit) across its siblings."""
+    def _reweigh(db: sqlite3.Connection, family_id: str) -> None:
+        """Split a family's synthetic influence cap (one real-example unit) across its children."""
         rows = db.execute(
-            "SELECT child_id, record FROM children WHERE root_ref=? AND disposition=? ORDER BY seq",
-            (root_ref, ADMITTED),
+            "SELECT child_id, record FROM children WHERE family_id=? AND disposition=?"
+            " ORDER BY seq",
+            (family_id, ADMITTED),
         ).fetchall()
         for child_id, rec_json in rows:
             rec: Json = json.loads(rec_json)
@@ -660,8 +799,9 @@ class VariantLedger:
         identifier(reason)
         with self._tx() as db:
             db.execute(
-                "INSERT INTO roots VALUES (?,?,'retracted',?) ON CONFLICT(root_ref)"
-                " DO UPDATE SET state='retracted', reason=excluded.reason",
+                "INSERT INTO roots (root_ref, family_id, state, reason, policy_revision,"
+                " seal_digest, cap_root, cap_family) VALUES (?,?,'retracted',?,'','',0,0)"
+                " ON CONFLICT(root_ref) DO UPDATE SET state='retracted', reason=excluded.reason",
                 (root_ref, family_id, reason),
             )
             prior: list[str] = []
@@ -676,6 +816,7 @@ class VariantLedger:
                 rec["weight"] = None
                 self._update(db, child_id, INVALIDATED, f"root_{reason}", rec)
                 prior.append(str(child_id))
+            self._reweigh(db, family_id)
             return tuple(prior)
 
     def children(self, root_ref: str | None = None) -> list[Json]:
@@ -699,30 +840,44 @@ class VariantLedger:
         policy_revision: str,
         grant_ref: str,
         mode: Mode,
-        real_roots: Sequence[SeedRoot],
         coverage_required_groups: int | None = None,
     ) -> Json:
-        """Sealed admission/rejection manifest. Real counts come only from real roots."""
-        rows = self.children()
-        with self._tx() as db:
-            retracted = {
-                str(r[0]) for r in db.execute("SELECT root_ref FROM roots WHERE state<>'live'")
-            }
-        live_roots = [
+        """Sealed manifest for one (seal, policy revision, grant, mode) scope.
+
+        Family and mistake counts are derived from the ledger's own admitted roots and the
+        sealed split, never from caller-supplied roots.
+        """
+        every = self.children()
+        rows = [
             r
-            for r in real_roots
-            if r.root_ref not in retracted and r.split == "training" and r.target_verified
+            for r in every
+            if r["mode"] == mode
+            and r["policy_revision"] == policy_revision
+            and r["grant_ref"] == grant_ref
+            and r["split_digest"] == seal.digest
         ]
+        with self._tx() as db:
+            roots = db.execute(
+                "SELECT root_ref, family_id FROM roots WHERE state='live' AND policy_revision=?"
+                " AND seal_digest=?",
+                (policy_revision, seal.digest),
+            ).fetchall()
+        live_roots = [
+            (str(a), str(b)) for a, b in roots if seal.assignments.get(b) == ("training",)
+        ]
+        child_ids = {r["child_id"] for r in every}
         by_state = Counter(r["disposition"] for r in rows)
         reasons = Counter(
             r["reason"] for r in rows if r["disposition"] in {REJECTED, QUARANTINED, INVALIDATED}
         )
         siblings = Counter(r["root_ref"] for r in rows if r["disposition"] == ADMITTED)
-        families = sorted({r.family_id for r in live_roots})
+        family_siblings = Counter(r["family_id"] for r in rows if r["disposition"] == ADMITTED)
+        families = sorted({fam for _, fam in live_roots})
         body: Json = {
             "schema_version": MANIFEST_SCHEMA,
             "mode": mode,
             "policy_revision": policy_revision,
+            "grant_ref": grant_ref,
             "split_digest": seal.digest,
             "generated_count": len(rows),
             "admitted_count": by_state[ADMITTED],
@@ -732,11 +887,14 @@ class VariantLedger:
             "rejected_count": by_state[REJECTED],
             "invalidated_count": by_state[INVALIDATED],
             "exclusion_reasons": dict(sorted(reasons.items())),
-            "observed_mistake_count": len({r.root_ref for r in live_roots}),
+            "observed_mistake_count": len(live_roots),
             "independent_family_count": len(families),
             "independent_families": families,
-            "children_in_independent_count": 0,
+            "children_in_independent_count": sum(
+                1 for ref, _ in live_roots if ref in child_ids or ref.startswith("var-")
+            ),
             "root_sibling_counts": dict(sorted(siblings.items())),
+            "family_sibling_counts": dict(sorted(family_siblings.items())),
             "final_weights": {
                 r["child_id"]: r["weight"] for r in rows if r["disposition"] == ADMITTED
             },

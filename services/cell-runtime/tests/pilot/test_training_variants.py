@@ -7,7 +7,9 @@ is provider, customer-evidence or fit-qualification evidence.
 from __future__ import annotations
 
 import dataclasses
+import inspect
 import json
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -105,6 +107,7 @@ def plan(
         generator=GEN,
         proposals=props,
         fit_gate=GATE,
+        approved_validators=frozenset({VALIDATOR.validator_ref}),
     )
     return dataclasses.replace(base, **kw)  # type: ignore[arg-type]
 
@@ -118,13 +121,12 @@ def by_reason(ledger: VariantLedger) -> dict[str, str]:
     return {c["child_id"]: c["reason"] for c in ledger.children()}
 
 
-def manifest(ledger: VariantLedger, roots: list[SeedRoot] | None = None, **kw: object) -> dict:
+def manifest(ledger: VariantLedger, **kw: object) -> dict:
     return ledger.manifest(
         seal=SEAL,
         policy_revision=POLICY.revision,
         grant_ref=GRANT.grant_ref,
         mode="training",
-        real_roots=roots or [root()],
         **kw,  # type: ignore[arg-type]
     )
 
@@ -227,6 +229,7 @@ def test_ambiguous_paraphrase_is_quarantined() -> None:
 
 
 def test_validator_never_sees_the_proposed_label() -> None:
+    marker = "GENERATED-PROPOSED-LABEL-MARKER"
     seen: list[ValidationRequest] = []
 
     class Spy:
@@ -235,10 +238,15 @@ def test_validator_never_sees_the_proposed_label() -> None:
             return PolicyValidator("generated-independent-validator").validate(request)
 
     ledger = VariantLedger()
-    ledger.run(plan((PARAPHRASE,)), Spy(), now=NOW)
+    leaky = ProposedChild("paraphrase-v1", {"vendor_note": "generated spy wording"}, marker)
+    ledger.run(plan((leaky,)), Spy(), now=NOW)
     names = {f.name for f in dataclasses.fields(ValidationRequest)}
     assert not any("label" in n or "generator" in n for n in names)
-    assert seen and "FREIGHT_PROPOSED" not in repr(seen[0]).replace("FREIGHT_PROPOSED", "")
+    assert len(seen) == 1
+    assert marker not in repr(seen[0])
+    assert not any(marker in str(v) for v in vars(seen[0]).values())
+    # The marker disagrees with the policy-derived label, proving a label was available to leak.
+    assert ledger.children()[0]["reason"] == "label_disagreement"
 
 
 def test_missing_validation_holds_and_never_passes() -> None:
@@ -254,9 +262,7 @@ def test_self_validation_by_generator_is_rejected() -> None:
     ledger = VariantLedger()
     result = ledger.submit(plan((PARAPHRASE,)), now=NOW)
     with pytest.raises(TrainingError, match="self_validation_rejected"):
-        ledger.validate(
-            result.child_ids[0], ValidatorDecision(GEN.ref, "FREIGHT"), base_target="FREIGHT"
-        )
+        ledger.validate(result.child_ids[0], ValidatorDecision(GEN.ref, "FREIGHT"))
     assert ledger.children()[0]["disposition"] == HELD
 
 
@@ -389,7 +395,9 @@ def test_one_mistake_plus_100_children_is_still_one_mistake_one_family() -> None
         ProposedChild("paraphrase-v1", {"vendor_note": f"generated wording variant {i}"}, "FREIGHT")
         for i in range(100)
     )
-    ledger.run(plan(props, max_children_per_root=100), VALIDATOR, now=NOW)
+    ledger.run(
+        plan(props, max_children_per_root=100, max_children_per_family=100), VALIDATOR, now=NOW
+    )
     m = manifest(ledger, coverage_required_groups=3)
     assert m["admitted_count"] == 100
     assert m["observed_mistake_count"] == 1
@@ -413,7 +421,7 @@ def test_three_independent_real_families_fill_the_coverage_gate() -> None:
             VALIDATOR,
             now=NOW,
         )
-    m = manifest(ledger, roots, coverage_required_groups=3)
+    m = manifest(ledger, coverage_required_groups=3)
     assert m["coverage"]["filled"] is True
     assert m["independent_family_count"] == 3 and m["observed_mistake_count"] == 3
 
@@ -429,7 +437,6 @@ def test_preview_validates_but_never_admits_for_fit() -> None:
             policy_revision=POLICY.revision,
             grant_ref=GRANT.grant_ref,
             mode="preview",
-            real_roots=[root()],
         )["admitted_count"]
         == 0
     )
@@ -486,7 +493,6 @@ def test_retracted_root_invalidates_descendants_and_late_callback_cannot_readmit
         PolicyValidator("generated-independent-validator").validate(
             ValidationRequest(POLICY, "FREIGHT", {}, ())
         ),
-        base_target="FREIGHT",
     )
     assert late == INVALIDATED
     assert {c["disposition"] for c in ledger.children()} == {INVALIDATED}
@@ -535,3 +541,246 @@ def test_split_seal_carries_no_labels_and_flags_cross_split_families() -> None:
     assert other.digest != SEAL.digest
     with pytest.raises(TrainingError, match="invalid_split"):
         SplitSeal.from_rows([("generated-case-1", "generated-fam-1", "generated-bad-split")])
+
+
+# ------------------------------------------------------------- independent-review regressions
+
+
+def test_family_count_is_derived_from_the_ledger_and_seal_not_from_the_caller() -> None:
+    """F4: only roots the ledger itself admitted, still sealed as training, are counted."""
+    ledger = VariantLedger()
+    seeds = (
+        root(1),
+        root(2, verifier_independent=False),
+        root(4, family_id="generated-fam-cross"),
+        root(5, family_id="generated-fam-not-in-seal"),
+    )
+    for seed in seeds:
+        pref = f"generated-plan-{seed.root_ref}"
+        ledger.run(plan((PARAPHRASE,), seed, plan_ref=pref), VALIDATOR, now=NOW)
+    m = manifest(ledger)
+    assert m["independent_families"] == ["generated-fam-1"]
+    assert m["independent_family_count"] == 1 and m["observed_mistake_count"] == 1
+    assert "real_roots" not in inspect.signature(VariantLedger.manifest).parameters
+    # A different sealed split (or policy revision) can never reuse these counts.
+    other = SplitSeal.from_rows([("generated-case-1", "generated-fam-1", "development")])
+    swapped = ledger.manifest(
+        seal=other, policy_revision=POLICY.revision, grant_ref=GRANT.grant_ref, mode="training"
+    )
+    assert swapped["independent_family_count"] == 0
+    revised = ledger.manifest(
+        seal=SEAL, policy_revision="generated-policy-r9", grant_ref=GRANT.grant_ref, mode="training"
+    )
+    assert revised["independent_family_count"] == 0
+
+
+def test_a_synthetic_child_cannot_be_resubmitted_as_a_real_root() -> None:
+    """F4: no grandchildren and no inflated counts from a child presented as a root."""
+    ledger = VariantLedger()
+    ledger.run(plan((PARAPHRASE,)), VALIDATOR, now=NOW)
+    child = ledger.children()[0]
+    attacks = (
+        root(
+            root_ref=child["child_id"], case_ref="generated-case-9", label_ref="generated-label-9"
+        ),
+        root(root_ref="generated-root-9", case_ref=child["child_id"]),
+        root(root_ref="generated-root-8", fields=child["fields"], family_id="generated-fam-2"),
+    )
+    for n, attack in enumerate(attacks):
+        pref = f"generated-plan-attack-{n}"
+        ledger.run(plan((LAYOUT,), attack, plan_ref=pref), VALIDATOR, now=NOW)
+    assert [c["reason"] for c in ledger.children()[1:]] == ["synthetic_lineage_seed"] * 3
+    m = manifest(ledger)
+    assert m["admitted_count"] == 1 and m["independent_family_count"] == 1
+    assert m["children_in_independent_count"] == 0
+
+
+def test_a_root_cannot_change_family_after_registration() -> None:
+    ledger = VariantLedger()
+    ledger.run(plan((PARAPHRASE,)), VALIDATOR, now=NOW)
+    moved = root(1, family_id="generated-fam-2")
+    ledger.run(plan((LAYOUT,), moved), VALIDATOR, now=NOW)
+    assert ledger.children()[-1]["reason"] == "root_identity_conflict"
+
+
+def test_preview_does_not_block_or_consume_the_training_equivalent() -> None:
+    """F1: preview must precede training without poisoning it."""
+    ledger = VariantLedger()
+    ledger.run(plan((PARAPHRASE, LAYOUT), mode="preview", fit_gate=None), VALIDATOR, now=NOW)
+    assert [c["disposition"] for c in ledger.children()] == [PREVIEW_VALID, PREVIEW_VALID]
+    ledger.run(plan((PARAPHRASE, NO_PO)), VALIDATOR, now=NOW)
+    training = [c for c in ledger.children() if c["mode"] == "training"]
+    assert [c["disposition"] for c in training] == [ADMITTED, ADMITTED]
+    assert manifest(ledger)["admitted_count"] == 2
+
+
+@pytest.mark.parametrize(
+    "variant",
+    [
+        "ｇｅｎｅｒａｔｅｄ ｆｒｅｉｇｈｔ wording",
+        "wording freight generated",
+        "generated fréight wording",
+        "generated fre​ight wording",
+        "GENERATED   freight--wording",
+    ],
+)
+def test_near_duplicate_bypasses_are_caught(variant: str) -> None:
+    """F2: width, order, accent, invisible-character and punctuation tricks are one example."""
+    ledger = VariantLedger()
+    base = ProposedChild("paraphrase-v1", {"vendor_note": "generated freight wording"}, "FREIGHT")
+    twin = ProposedChild("paraphrase-v1", {"vendor_note": variant}, "FREIGHT")
+    roomy = plan((base, twin), max_children_per_root=5, max_children_per_family=5)
+    ledger.run(roomy, VALIDATOR, now=NOW)
+    assert [c["disposition"] for c in ledger.children()] == [ADMITTED, REJECTED]
+    assert ledger.children()[1]["reason"] == "near_duplicate"
+
+
+def test_forged_validation_cannot_admit() -> None:
+    """F3: authority comes from the stored plan, not from whatever the caller passes."""
+    ledger = VariantLedger()
+    result = ledger.submit(plan((PARAPHRASE, NO_PO)), now=NOW)
+    first, second = result.child_ids
+    assert "base_target" not in inspect.signature(VariantLedger.validate).parameters
+    for ref in ("x-other", "generated-independent-validator-2"):
+        with pytest.raises(TrainingError, match="validator_not_authorized"):
+            ledger.validate(first, ValidatorDecision(ref, "FREIGHT"))
+    for ref in (GEN.ref + " ", GEN.ref.upper(), GEN.ref + "​", ""):
+        with pytest.raises(TrainingError, match="self_validation_rejected"):
+            ledger.validate(first, ValidatorDecision(ref, "FREIGHT"))
+    # An authorized validator that contradicts the stored policy cannot admit either.
+    wrong_policy = ValidatorDecision("generated-independent-validator", "SUPPLIES")
+    assert ledger.validate(first, wrong_policy) == QUARANTINED
+    # The second child's proposal is REVIEW; a validator answering FREIGHT disagrees.
+    forged = ValidatorDecision("generated-independent-validator", "FREIGHT")
+    assert ledger.validate(second, forged) == QUARANTINED
+    assert ledger.children()[1]["reason"] == "label_disagreement"
+    assert manifest(ledger)["admitted_count"] == 0
+
+
+def test_validator_agreeing_with_a_wrong_generator_but_not_the_policy_is_quarantined() -> None:
+    ledger = VariantLedger()
+    wrong = ProposedChild("no-po-v1", {"purchase_order": None}, "SUPPLIES")
+    result = ledger.submit(plan((wrong,)), now=NOW)
+    decision = ValidatorDecision("generated-independent-validator", "SUPPLIES")
+    assert ledger.validate(result.child_ids[0], decision) == QUARANTINED
+    assert ledger.children()[0]["reason"] == "validator_policy_disagreement"
+
+
+def test_manifest_is_scoped_to_its_mode_policy_grant_and_seal() -> None:
+    """F6: a sealed manifest cannot mix modes, grants or policy revisions."""
+    ledger = VariantLedger()
+    ledger.run(plan((PARAPHRASE,), mode="preview", fit_gate=None), VALIDATOR, now=NOW)
+    other_grant = dataclasses.replace(GRANT, grant_ref="generated-grant-2")
+    other_policy = dataclasses.replace(POLICY, revision="generated-policy-r2")
+    ledger.run(plan((LAYOUT,), grant=other_grant, plan_ref="generated-plan-g2"), VALIDATOR, now=NOW)
+    seed_p2 = root(2, policy_revision="generated-policy-r2")
+    ledger.run(
+        plan((PARAPHRASE,), seed_p2, policy=other_policy, plan_ref="generated-plan-p2"),
+        VALIDATOR,
+        now=NOW,
+    )
+    ledger.run(plan((NO_PO,), plan_ref="generated-plan-main"), VALIDATOR, now=NOW)
+    m = manifest(ledger)
+    assert (m["generated_count"], m["admitted_count"], m["preview_valid_count"]) == (1, 1, 0)
+    assert m["independent_families"] == ["generated-fam-1"]
+    assert m["spend"] == 3  # spend is grant-wide: preview, training and policy-r2 children
+    preview = ledger.manifest(
+        seal=SEAL, policy_revision=POLICY.revision, grant_ref=GRANT.grant_ref, mode="preview"
+    )
+    counts = (preview["generated_count"], preview["preview_valid_count"], preview["admitted_count"])
+    assert counts == (1, 1, 0)
+    g2 = ledger.manifest(
+        seal=SEAL, policy_revision=POLICY.revision, grant_ref="generated-grant-2", mode="training"
+    )
+    assert g2["generated_count"] == 1 and g2["spend"] == 1
+
+
+def test_a_later_plan_cannot_raise_the_per_root_or_per_family_cap() -> None:
+    """F5: caps are fixed when the root is first registered and are family-wide."""
+    ledger = VariantLedger()
+    third = ProposedChild("layout-v1", {"layout": "stacked"}, "FREIGHT")
+    ledger.run(plan((PARAPHRASE, NO_PO)), VALIDATOR, now=NOW)
+    raised = plan(
+        (third,),
+        plan_ref="generated-plan-raise",
+        max_children_per_root=50,
+        max_children_per_family=50,
+    )
+    ledger.run(raised, VALIDATOR, now=NOW)
+    assert ledger.children()[-1]["reason"] == "root_cap_exceeded"
+    assert manifest(ledger)["admitted_count"] == 2
+    # A second root in the same family cannot double the family's synthetic influence.
+    sibling = root(6, family_id="generated-fam-1", case_ref="generated-case-6")
+    ledger.run(plan((LAYOUT,), sibling, plan_ref="generated-plan-sib"), VALIDATOR, now=NOW)
+    assert ledger.children()[-1]["reason"] == "family_cap_exceeded"
+    m = manifest(ledger)
+    assert m["admitted_count"] == 2 and m["family_sibling_counts"] == {"generated-fam-1": 2}
+    assert set(m["final_weights"].values()) == {"1/2"}
+
+
+def test_policy_and_inputs_are_immutable_for_validators() -> None:
+    """F7: a hostile validator cannot rewrite the rules used for later derivations."""
+    clauses = {"purchase_order": "REVIEW"}
+    policy = dataclasses.replace(POLICY, clauses=clauses)
+    clauses["purchase_order"] = "FREIGHT"  # caller later mutates its own dict
+    assert policy.clauses["purchase_order"] == "REVIEW"
+
+    class Hostile:
+        def validate(self, request: ValidationRequest) -> ValidatorDecision:
+            with pytest.raises(TypeError):
+                request.policy.clauses["purchase_order"] = "FREIGHT"  # type: ignore[index]
+            with pytest.raises(TypeError):
+                request.child_fields["layout"] = "x"  # type: ignore[index]
+            return PolicyValidator("generated-independent-validator").validate(request)
+
+    ledger = VariantLedger()
+    ledger.run(plan((NO_PO,), policy=policy), Hostile(), now=NOW)
+    assert ledger.children()[0]["disposition"] == ADMITTED
+    assert policy.clauses["purchase_order"] == "REVIEW"
+
+
+def test_a_corrected_label_is_a_new_row_and_the_quarantined_one_stays() -> None:
+    """F8: resubmitting with the right label is not swallowed by the earlier wrong one."""
+    ledger = VariantLedger()
+    wrong = ProposedChild(
+        "paraphrase-v1", {"vendor_note": "generated corrected wording"}, "SUPPLIES"
+    )
+    right = dataclasses.replace(wrong, proposed_label="FREIGHT")
+    ledger.run(plan((wrong,)), VALIDATOR, now=NOW)
+    ledger.run(plan((right,)), VALIDATOR, now=NOW)
+    assert [c["disposition"] for c in ledger.children()] == [QUARANTINED, ADMITTED]
+
+
+def test_retryable_rejection_keeps_its_history_when_it_flips() -> None:
+    """F8: re-evaluating a state-dependent rejection never erases the earlier outcome."""
+    ledger = VariantLedger()
+    closed = plan((PARAPHRASE,), fit_gate=FitGate(False, "generated-gate-0"))
+    ledger.run(closed, VALIDATOR, now=NOW)
+    ledger.run(plan((PARAPHRASE,)), VALIDATOR, now=NOW)
+    (child,) = ledger.children()
+    assert child["disposition"] == ADMITTED
+    assert child["history"] == [
+        {"disposition": REJECTED, "reason": "fit_gate_closed", "plan_ref": "generated-plan-1"}
+    ]
+
+
+def test_lock_contention_is_reported_as_such_not_as_a_rollback_error(tmp_path: Path) -> None:
+    """F8: failing to start a transaction must surface the real error."""
+    path = tmp_path / "variants.sqlite3"
+    ledger = VariantLedger(path)
+    blocker = sqlite3.connect(path, isolation_level=None)
+    blocker.execute("BEGIN IMMEDIATE")
+    original = sqlite3.connect
+
+    def quick(*args: object, **kwargs: object) -> sqlite3.Connection:
+        kwargs["timeout"] = 0.05
+        return original(*args, **kwargs)  # type: ignore[arg-type]
+
+    try:
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(sqlite3, "connect", quick)
+            with pytest.raises(sqlite3.OperationalError, match="locked"):
+                ledger.spent("generated-grant-1")
+    finally:
+        blocker.execute("ROLLBACK")
+        blocker.close()
