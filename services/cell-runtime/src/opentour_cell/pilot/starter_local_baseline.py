@@ -199,8 +199,8 @@ class LocalStarterBaseline:
             (frozen.freeze_ref, frozen.freeze_revision, frozen.plan.evaluator_ref)
             == (p.freeze_ref, p.freeze_revision, self.actor.actor)
             and digest(asdict(frozen.plan)) == p.plan_digest
-            and frozen.plan.baseline_ref == self.reference
-            and frozen.plan.evaluated_model_ref == self.reference
+            and frozen.plan.baseline_ref in {"baseline-pending", self.reference}
+            and frozen.plan.evaluated_model_ref in {None, self.reference}
             and 0 < len(frozen.cases) <= p.maximum_cases
         )
         inputs = {
@@ -244,6 +244,8 @@ class LocalStarterBaseline:
         if write:
             parent = self.path.parent.stat()
             _require(parent.st_uid == os.getuid() and not parent.st_mode & 0o077)
+            if not os.path.lexists(self.path):
+                self._absent()
             try:
                 os.close(
                     os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o600)
@@ -283,6 +285,16 @@ class LocalStarterBaseline:
             key, b"opentour.starter-local-receipt.v1\0" + body.encode(), "sha256"
         ).hexdigest()
 
+    def _absent(self) -> None:
+        # A database lost during restore is not a fresh operation if any of its
+        # rollback/WAL state remains. Do not open SQLite or replace those files.
+        _require(
+            not any(
+                os.path.lexists(str(self.path) + suffix)
+                for suffix in ("", "-wal", "-shm", "-journal")
+            )
+        )
+
     def _receipt(
         self, db: sqlite3.Connection, request: PredictionRequest, key: bytes
     ) -> PredictionReceipt | None:
@@ -302,7 +314,8 @@ class LocalStarterBaseline:
 
     def lookup(self, request: PredictionRequest) -> PredictionReceipt | None:
         _, key, _ = self._current(request)
-        if not self.path.exists():
+        if not os.path.lexists(self.path):
+            self._absent()
             return None
         with self._db() as db:
             receipt = self._receipt(db, request, key)

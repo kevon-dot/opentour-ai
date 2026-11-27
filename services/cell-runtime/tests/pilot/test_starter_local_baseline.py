@@ -5,8 +5,10 @@ import json
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, replace
+from pathlib import Path
 
 import pytest
+import test_starter_scoring as scoring_tests
 from opentour_cell.pilot import model_connector as model
 from opentour_cell.pilot import text_classifier as cpu
 from opentour_cell.pilot.intake_mcp import IntakeError
@@ -212,3 +214,53 @@ def test_lost_ack_recovers_actual_durable_receipt(local_setup, monkeypatch):
     result = run(setup)
     assert result["state"] == "scored" and len(calls) == 1
     assert run(setup) == result and len(calls) == 1
+
+
+@pytest.mark.parametrize("pending", [True, False])
+def test_current_model_can_reconnect_pending_freeze_but_not_replace_pinned_model(
+    tmp_path, monkeypatch, pending
+):
+    original = scoring_tests.replace
+
+    def frozen_plan(obj, **changes):
+        if obj is scoring_tests.PLAN:
+            changes.update(
+                baseline_ref="baseline-pending" if pending else "another-model",
+                evaluated_model_ref=None if pending else "another-model",
+            )
+        return original(obj, **changes)
+
+    monkeypatch.setattr(scoring_tests, "replace", frozen_plan)
+    setup = scoring_tests.scored_setup.__wrapped__(tmp_path)
+    _, baseline = local_setup.__wrapped__(setup)
+    request, inputs = request_inputs(setup)
+    if pending:
+        before = setup[0].cases.path.read_bytes()
+        receipt = baseline.execute(request, inputs)
+        assert baseline.lookup(request) == receipt
+        assert setup[0].cases.path.read_bytes() == before
+        assert run(setup)["state"] == "scored"
+    else:
+        with pytest.raises(IntakeError):
+            baseline.execute(request, inputs)
+        assert not baseline.path.exists()
+
+
+@pytest.mark.parametrize("suffix", ["-wal", "-shm", "-journal"])
+def test_ambiguous_missing_journal_is_held_without_new_prediction(local_setup, monkeypatch, suffix):
+    setup, baseline = local_setup
+    request, inputs = request_inputs(setup)
+    baseline.execute(request, inputs)
+    baseline.path.rename(baseline.path.with_suffix(".backup"))
+    sidecar = Path(str(baseline.path) + suffix)
+    sidecar.write_bytes(b"generated-pre-existing-restore-state")
+    sidecar.chmod(0o600)
+    before = {p.name: p.read_bytes() for p in baseline.path.parent.iterdir()}
+    calls = []
+    monkeypatch.setattr(cpu, "predict", lambda *args: calls.append(args))
+    with pytest.raises(IntakeError):
+        baseline.lookup(request)
+    with pytest.raises(IntakeError):
+        baseline.execute(request, inputs)
+    assert calls == []
+    assert {p.name: p.read_bytes() for p in baseline.path.parent.iterdir()} == before
