@@ -142,10 +142,12 @@ def project_cohort(
             continue
         if not window_start <= seed < window_end:
             continue
+        history = by_workflow[workflow.scope]
+        _require(all(item.effective_at >= seed or item.disposition == "held" for item in history))
         events = sorted(
-            by_workflow[workflow.scope], key=lambda item: (item.effective_at, item.revision)
+            (item for item in history if item.effective_at >= seed),
+            key=lambda item: (item.effective_at, item.revision),
         )
-        _require(all(item.effective_at >= seed for item in events))
         first_ready = next((item for item in events if item.disposition == "fit_ready"), None)
         if first_ready:
             ready_seconds.append(first_ready.effective_at - seed)

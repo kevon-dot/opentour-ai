@@ -1,5 +1,6 @@
 """Recount the generated readiness and person-time cohort independently."""
 
+import time
 from dataclasses import replace
 from fractions import Fraction
 
@@ -13,6 +14,8 @@ from opentour_cell.pilot.readiness_cohort import (
     project_cohort,
     verified_person_seconds,
 )
+from opentour_cell.pilot.training_readiness import TrainingReadiness
+from test_live_readiness import ACTOR, Case, decision, outcome
 
 
 def workflow(ref, seed, *, policy_only=False):
@@ -96,6 +99,69 @@ def test_unknown_seed_denied_scope_conflicting_receipts_and_boundary_hold():
     for receipts in ((foreign,), (current, replace(current, disposition="held"))):
         with pytest.raises(ValueError, match="readiness_cohort_evidence_unavailable"):
             project_cohort((seed,), receipts, **settings)
+
+
+def test_rebuild_includes_actual_worker_holds_before_the_first_verified_seed(tmp_path, monkeypatch):
+    case = Case(tmp_path / "private")
+    start = int(time.time())
+    now = [start]
+    monkeypatch.setattr(time, "time", lambda: now[0])
+    empty = case.ready.refresh("workflow", actor=ACTOR)
+    assert empty["reason_code"] == "no_live_decisions"
+    now[0] += 1
+    case.ingest(decision())
+    pending = case.ready.refresh("workflow", actor=ACTOR)
+    assert pending["reason_code"] == "no_verifier_bound"
+    now[0] += 1
+    case.bind_verifier()
+    case.ingest(outcome(), truth=True)
+    seeded = case.refresh()
+    assert seeded["verified_root_count"] == 1
+
+    reopened = TrainingReadiness(
+        case.ready.directory,
+        case.ready.organization,
+        case.ready.engagement,
+        source=case.ready.source,
+        assessments=case.ready.assessments,
+    )
+    history = reopened.history("workflow", actor=ACTOR)
+    assert [row["readiness_ref"] for row in history] == [
+        empty["readiness_ref"],
+        pending["readiness_ref"],
+        seeded["readiness_ref"],
+    ]
+    assert reopened.read("workflow", actor=ACTOR) == seeded
+    member = CohortWorkflow(
+        ACTOR.tenant, "workflow", case.ready.engagement, now[0], seeded["readiness_ref"]
+    )
+    observations = tuple(
+        ReadinessTransition(
+            member.scope,
+            row["readiness_ref"],
+            row["version"],
+            row["recorded_at"],
+            row["recorded_at"],
+            row["verdict"],
+        )
+        for row in (empty, pending, seeded)
+    )
+    settings = {
+        "window_start": start,
+        "window_end": start + 3,
+        "cutoff": start + 4,
+        "may_disclose": True,
+    }
+    report = project_cohort((member,), observations, **settings)
+    assert (report.workflows, report.ever_fit_ready, dict(report.current)) == (1, 0, {"held": 1})
+    assert (
+        report.revision
+        == project_cohort((member,), tuple(reversed(observations)), **settings).revision
+    )
+    assert dict(project_cohort((member,), observations[:2], **settings).current) == {"pending": 1}
+    impossible = replace(observations[0], disposition="fit_ready")
+    with pytest.raises(ValueError, match="readiness_cohort_evidence_unavailable"):
+        project_cohort((member,), (impossible, *observations[1:]), **settings)
 
 
 def test_expert_time_is_person_time_and_shared_effort_counts_once():

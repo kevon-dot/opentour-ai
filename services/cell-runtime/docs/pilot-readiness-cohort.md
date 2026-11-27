@@ -8,6 +8,9 @@ state have separate counts. The lifetime first-ready transition and
 current disposition are reported separately, so a reopened workflow can
 return to held while the earlier milestone remains in its as-of history.
 Events received after the cutoff do not alter that as-of result.
+Authorized holds before the first verified seed stay in the source
+history. Readiness and current state for the seeded cohort come from
+observations at or after the seed.
 
 Confirmed person-time comes from session intervals. Repeated receipts and
 overlapping intervals for the same reviewer count once. Distinct reviewers
