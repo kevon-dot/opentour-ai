@@ -159,3 +159,22 @@ def test_expiry_recent_and_action_visibility_are_independent(index):
         proposals=(replace(rows[0], action_until=150), replace(rows[1], visible_until=149)),
     )
     assert [(r.group, r.action) for r in api.page(ACTOR).rows] == [("waiting", None)]
+
+
+@pytest.mark.parametrize("operation", ["page", "select"])
+@pytest.mark.parametrize("deadline", ["visible_until", "deadline", "action_until", "membership"])
+def test_clock_crossing_guard_exit_denies_old_projection(index, operation, deadline):
+    api, grants, _, rows = index
+    if deadline == "membership":
+        grants.current = replace(grants.current, valid_until=175)
+    else:
+        grants.current = replace(grants.current, proposals=(replace(rows[0], **{deadline: 175}),))
+    now = [150]
+    api.clock = lambda: now[0]
+    pin = api.page(ACTOR).rows[0].selection
+    grants.after_read = lambda: now.__setitem__(0, 175)
+    with pytest.raises(IntakeError):
+        if operation == "page":
+            api.page(ACTOR)
+        else:
+            api.select(ACTOR, pin)

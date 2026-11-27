@@ -101,7 +101,7 @@ class WorkflowIndex:
         self.authority = authority
         self.clock = clock
 
-    def _rows(self, actor: IntakePrincipal, scope: IndexScope) -> tuple[IndexRow, ...]:
+    def _rows(self, actor: IntakePrincipal, scope: IndexScope) -> tuple[tuple[IndexRow, ...], int]:
         now = self.clock()
         if scope.actor != actor or now >= scope.valid_until:
             _deny()
@@ -200,9 +200,7 @@ class WorkflowIndex:
                 row.proposal_ref,
             )
         )
-        if self.clock() >= next_expiry:
-            _deny()
-        return tuple(rows)
+        return tuple(rows), next_expiry
 
     def page(
         self, actor: IntakePrincipal, *, size: int = 10, cursor: str | None = None
@@ -210,7 +208,7 @@ class WorkflowIndex:
         if type(size) is not int or not 1 <= size <= 25:
             _deny()
         with self.authority.guard(actor) as scope:
-            rows = self._rows(actor, scope)
+            rows, valid_until = self._rows(actor, scope)
             # Bind continuations only to this actor's visible, ordered projection.
             generation = digest(
                 [
@@ -239,15 +237,20 @@ class WorkflowIndex:
                 _deny()
             start = offsets[cursor] if cursor is not None else 0
             end = start + size
-            return IndexPage(
+            page = IndexPage(
                 rows[start:end], digest([generation, size, end]) if end < len(rows) else None
             )
+
+        if self.clock() >= valid_until:
+            _deny()
+        return page
 
     def select(self, actor: IntakePrincipal, selection: str) -> IndexRow:
         """Re-resolve a prior visible navigation handle against current authority."""
         require_ref(selection)
         with self.authority.guard(actor) as scope:
-            for row in self._rows(actor, scope):
-                if row.selection == selection:
-                    return row
-        raise IntakeError("workflow_index_unavailable")
+            rows, valid_until = self._rows(actor, scope)
+            selected = next((row for row in rows if row.selection == selection), None)
+        if selected is None or self.clock() >= valid_until:
+            raise IntakeError("workflow_index_unavailable")
+        return selected
