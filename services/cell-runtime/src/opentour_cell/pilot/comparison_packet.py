@@ -35,11 +35,42 @@ Codex-side consumer. This module does not and cannot claim exactly-once delivery
 Authenticity: digests alone cannot authenticate an auditor or independent verifier.
 Improvement staging holds until this boundary can verify both issuers. An explicit fixture
 option exercises the staging mechanics with generated evidence only.
+
+DELIBERATE DECISION, NOT AN UNFINISHED FEATURE. No signing or key-custody contract exists in
+this project, so no auditor or independent-verifier issuer can be verified here, and
+``issuer_authenticated`` is hard-coded ``False``. Live (non-fixture) measured-improvement
+staging therefore always holds with ``audit_and_verdict_issuers_unverified``. There is no
+re-enable path short of a code change, and that is intended. It stands until a signing contract
+lands. Lifting it requires, together: (1) a landed contract defining issuer keys, custody and
+rotation for the OPE-526 audit receipt and the OPE-528 verdict; (2) signature verification of
+both documents against pinned issuer keys inside this module, replacing the hard-coded
+``False``; (3) tests that a forged, unsigned, wrong-key or replayed document is refused; and
+(4) independent review of that change. Do not "fix" the hold by loosening the gate, widening
+``allow_generated_fixture`` or trusting a self-asserted ``evidence_origin``. Hold and no-change
+packets are not gated by this and are delivered.
+
+Fixture flag: ``allow_generated_fixture`` exercises staging mechanics with generated evidence
+only. It is honored only while ``PYTEST_CURRENT_TEST`` is set (pytest sets it). Otherwise
+``PacketOutbox`` refuses to construct and ``assemble_packet`` refuses, with the closed code
+``generated_fixture_not_permitted_in_live_context``, so a misconfiguration is loud. This is a
+guard against accidentally enabling generated fixtures in a live process, nothing more. The
+variable is caller-controlled, so it authenticates nothing and is not a security control. The
+real barrier to live improvement staging is the issuer hold above: an authenticatable OPE-526
+audit plus an OPE-528 independent verdict, neither of which exists yet.
+
+Free text: a sealed comparison proves only that its bytes are self-consistent, not that its
+strings are safe. Every string that this module copies from a comparison into a packet (the
+decision reason, fallback and disposition, the winner, the metric, each arm's hold reason, arm
+and pair names, comparison verdicts, slice statuses, economics basis, uncertainty method) is
+checked against a closed vocabulary derived from what ``comparison_plan`` can emit, on every
+path including holds. A value outside its vocabulary refuses the comparison with the fixed code
+``comparison_unverified``, which never echoes the offending value.
 """
 
 from __future__ import annotations
 
 import json
+import os
 import re
 import sqlite3
 from collections.abc import Callable, Iterator, Mapping
@@ -57,6 +88,7 @@ EVENT = "opentour.pilot.comparison-completed-event.v1"
 VERDICT = "opentour.pilot.independent-verdict.v1"
 RECEIPT = "opentour.benchmark-audit-receipt.v1"
 EVENT_REVISION = 1
+_FIXTURE_REFUSAL = "generated_fixture_not_permitted_in_live_context"
 _ID = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9_.:@/-]{0,127}")
 _SHA = re.compile(r"[0-9a-f]{64}")
 _REPRODUCED = "reproduced"
@@ -70,6 +102,94 @@ _VERDICTS = (
     "invalid",
     "stale",
 )
+# Closed vocabularies for strings copied from a comparison into a packet. Sources, per value:
+#   * hold reasons: ``comparison_plan._checks`` return values.
+#   * observed comparison: ``readout.evaluate_manifest`` (``comparison = ...`` assignments).
+#   * decision reasons: ``comparison_plan._pick`` (``outcome(...)`` literals, the literals
+#     appended to ``reasons``, every arm hold reason, and every observed comparison other than
+#     ``improved``), plus the development-hold reasons from
+#     ``simple_repair.assess_development`` carried by ``comparison_plan.development_hold``.
+#   * caps: ``pilot_metrics.economics``; basis: ``pilot_metrics.economics`` and ``_unavailable``.
+#   * operating-point and slice statuses: ``operating_point._arm`` and ``comparison_plan``.
+#   * exclusion keys: ``source_intake`` (``_reason``, ``_partition`` and its caller).
+# Tuples, not sets: membership must never raise on an unhashable value.
+_HOLD_REASONS = (
+    None,
+    "insufficient_protected_support",
+    "incomplete_protected_evidence",
+    "operating_point_missed_or_undetermined",
+    "critical_slice_failed_or_unverified",
+    "cost_limit_failed_or_unverified",
+    "latency_limit_failed_or_unverified",
+)
+_OBSERVED = (
+    "improved",
+    "regressed",
+    "equivalent",
+    "insufficient_evidence",
+    "different_automatic_cases",
+)
+_DECISION_REASONS = (
+    "protected_improvement_at_agreed_limits",
+    "adequate_simple_repair_at_lower_observed_cost",
+    "no_confirmed_improvement",
+    "equivalent_to_incumbent",
+    "quality_cost_tradeoff_requires_owner_choice",
+    *(r for r in _HOLD_REASONS if r),
+    *(r for r in _OBSERVED if r not in ("improved", "equivalent")),
+    # Development-stage hold reasons carried by ``development_hold``.
+    "insufficient_independent_development_evidence",
+    "recurring_residual_requires_model_and_compute_rights",
+    "simple_repair_unproven_and_residual_support_insufficient",
+)
+_FALLBACKS = ("incumbent",)
+_METRICS = (None, "verified_wrong_automatic")  # the planner default; a custom metric is refused
+_DISPOSITIONS = ("recommend", "hold", "no_change")
+_WINNERS = (None, "incumbent", "simple", "model")
+_ARM_NAMES = ("incumbent", "simple", "model")
+_PAIR_NAMES = ("incumbent_vs_simple", "incumbent_vs_model", "simple_vs_model")
+_SLICE_STATUSES = ("met", "missed", "undetermined")
+_COMBINED = ("met", "missed", "undetermined")
+_CAPS = ("met", "missed", "unavailable")
+_EXCLUSION_KEYS = (
+    "changed_policy_or_schema",
+    "fields_outside_grant",
+    "future_decision_features",
+    "missing_outcome",
+    "contradictory_outcomes",
+    "ambiguous_outcomes",
+    "reused_outcome",
+    "unapproved_adjudicator",
+    "outcome_unavailable",
+    "facts_unavailable_at_decision",
+    "inconsistent_outcome_time",
+    "verification_after_cutoff",
+    "ambiguous_trace",
+    "group_crosses_split",
+    "development_label_after_split",
+)
+# Critical-slice names are customer-chosen, so no closed vocabulary exists. This is a
+# WELL-FORMEDNESS check only, NOT a disclosure control: it is exactly the identifier shape the
+# planner enforces (``simple_repair.identifier``, used by ``comparison_plan._terms``), so every
+# planner-legal name passes, including names that carry customer identifiers. Keeping
+# customer-chosen names out of the published packet is owned by OPE-571 (publish slice names as
+# digests). A test pins this pattern to the planner's own.
+_SLICE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}")
+# Rendered decimal measurements (``pilot_metrics.rendered``): six fixed places, or absent.
+_DECIMAL = re.compile(r"[0-9]{1,40}\.[0-9]{6}")
+# The planner's own identifier shape (``simple_repair.identifier``). ``freeze_plan`` requires only
+# this of ``incumbent_revision``, so the incumbent revision cannot be required to be a digest.
+_IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}")
+_ECON_BASES = ("unavailable", "observed", "modeled", "generated")
+_UNCERTAINTY = ("wilson_95_independent_verified_cases", "unavailable")
+_PAIRED_FIELDS = (
+    "comparable",
+    "excluded",
+    "fixes",
+    "regressions",
+    "ties_correct",
+    "ties_incorrect",
+)
 _ARM_FIELDS = ("automatic", "incorrect_automatic", "review", "missing")
 _ECON_FIELDS = (
     "basis",
@@ -80,6 +200,12 @@ _ECON_FIELDS = (
     "cost_cap",
     "latency_cap",
 )
+
+
+def _fixture_context() -> bool:
+    """True while ``PYTEST_CURRENT_TEST`` is set. An accident guard, not authentication: the
+    variable is caller-controlled. The repository has no other live/fixture switch."""
+    return "PYTEST_CURRENT_TEST" in os.environ
 
 
 class PacketStoreError(RuntimeError):
@@ -179,6 +305,116 @@ def _sealed(value: Mapping[str, Any], field: str) -> bool:
     return value.get(field) == digest({k: v for k, v in value.items() if k != field})
 
 
+def _count(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _digest_ok(value: Any) -> bool:
+    return isinstance(value, str) and bool(_SHA.fullmatch(value))
+
+
+def _decimal_ok(value: Any) -> bool:
+    return value is None or (isinstance(value, str) and bool(_DECIMAL.fullmatch(value)))
+
+
+def _bound_ok(value: Any) -> bool:
+    return value is None or (
+        isinstance(value, float) and not isinstance(value, bool) and 0.0 <= value <= 1.0
+    )
+
+
+def _fraction_ok(value: Any) -> bool:
+    return (
+        isinstance(value, dict)
+        and _count(value.get("numerator"))
+        and _count(value.get("denominator"))
+    )
+
+
+def _arm_vocab_ok(name: str, arm: Any) -> bool:
+    """Closed-vocabulary and type checks for everything ``_arm_aggregate`` copies."""
+    if not isinstance(arm, dict) or not isinstance(arm.get("metrics"), dict):
+        return False
+    metrics = arm["metrics"]
+    slices = arm.get("critical_slices")
+    economics = metrics.get("economics")
+    uncertainty = metrics.get("uncertainty")
+    operating = metrics.get("operating_point")
+    revision = arm.get("revision")
+    revision_ok = (
+        isinstance(revision, str) and bool(_IDENTIFIER.fullmatch(revision))
+        if name == "incumbent"
+        else _digest_ok(revision)
+    )
+    return (
+        arm.get("hold_reason") in _HOLD_REASONS
+        and revision_ok
+        and _digest_ok(arm.get("prediction_digest"))
+        and all(_count(metrics.get(k)) for k in _ARM_FIELDS)
+        and _fraction_ok(metrics.get("coverage"))
+        and _fraction_ok(metrics.get("observed_error_rate"))
+        and isinstance(operating, dict)
+        and operating.get("combined") in _COMBINED
+        and isinstance(slices, dict)
+        and all(
+            isinstance(key, str)
+            and bool(_SLICE_NAME.fullmatch(key))
+            and isinstance(v, dict)
+            and v.get("status") in _SLICE_STATUSES
+            for key, v in slices.items()
+        )
+        and isinstance(economics, dict)
+        and economics.get("basis") in _ECON_BASES
+        and economics.get("cost_cap") in _CAPS
+        and economics.get("latency_cap") in _CAPS
+        and all(_decimal_ok(economics.get(k)) for k in _ECON_FIELDS[1:5])
+        and isinstance(uncertainty, dict)
+        and uncertainty.get("method") in _UNCERTAINTY
+        and _bound_ok(uncertainty.get("lower"))
+        and _bound_ok(uncertainty.get("upper"))
+        and (uncertainty.get("small_sample") is None or type(uncertainty["small_sample"]) is bool)
+    )
+
+
+def _exclusions_ok(exclusions: Any) -> bool:
+    """Keys are intake exclusion reasons, values non-negative counts; anything else refuses."""
+    return isinstance(exclusions, dict) and all(
+        key in _EXCLUSION_KEYS and _count(value) and value >= 0 for key, value in exclusions.items()
+    )
+
+
+def _comparison_vocab_ok(comparison: Json) -> bool:
+    """Free text cannot reach a packet or a refusal: every copied string is from a closed set.
+
+    Runs on every path (hold, no-change and improvement) because a hold packet is delivered
+    without any receipt or verdict.
+    """
+    decision = comparison["decision"]
+    arms, pairs = comparison["arms"], comparison["comparisons"]
+    return (
+        decision.get("reason") in _DECISION_REASONS
+        and decision.get("fallback") in _FALLBACKS
+        and decision.get("disposition") in _DISPOSITIONS
+        and decision.get("winner") in _WINNERS
+        and comparison.get("metric") in _METRICS
+        and all(name in _ARM_NAMES for name in arms)
+        and all(_arm_vocab_ok(name, arm) for name, arm in arms.items())
+        and ("exclusions" not in comparison or _exclusions_ok(comparison["exclusions"]))
+        and _count(comparison.get("protected_rows_evaluated"))
+        and all(name in _PAIR_NAMES for name in pairs)
+        and all(
+            isinstance(pair, dict)
+            and pair.get("observed_comparison") in _OBSERVED
+            and isinstance(pair.get("paired"), dict)
+            and pair["paired"].keys() == set(_PAIRED_FIELDS)
+            and all(_count(v) for v in pair["paired"].values())
+            for pair in pairs.values()
+        )
+        and _digest_ok(comparison.get("plan_revision"))
+        and _digest_ok(comparison.get("protected_membership_digest"))
+    )
+
+
 def _comparison_ok(comparison: Any) -> bool:
     return (
         isinstance(comparison, dict)
@@ -188,6 +424,7 @@ def _comparison_ok(comparison: Any) -> bool:
         and isinstance(comparison.get("decision"), dict)
         and isinstance(comparison.get("arms"), dict)
         and isinstance(comparison.get("comparisons"), dict)
+        and _comparison_vocab_ok(comparison)
     )
 
 
@@ -282,6 +519,13 @@ def _assemble(
         assert receipt is not None
         if not (allow_generated_fixture and receipt.get("evidence_origin") == "generated"):
             return None, "audit_and_verdict_issuers_unverified"
+    else:
+        # A hold needs neither document, but whatever is supplied is copied into the packet
+        # (ids, digests, verdict), so it is validated here exactly as on the improvement path.
+        if receipt is not None and not _receipt_ok(receipt):
+            return None, "audit_receipt_unverified"
+        if verdict is not None and not _verdict_ok(verdict):
+            return None, "independent_verdict_unverified"
     arms = {name: _arm_aggregate(arm) for name, arm in sorted(comparison["arms"].items())}
     pairs = {
         name: {**pair["paired"], "observed_comparison": pair["observed_comparison"]}
@@ -420,6 +664,8 @@ def assemble_packet(
     allow_generated_fixture: bool = False,
 ) -> tuple[Json | None, str | None]:
     """Return ``(packet, None)`` or ``(None, reason)``. Never raises on a governance failure."""
+    if allow_generated_fixture and not _fixture_context():
+        return None, _FIXTURE_REFUSAL
     if not ctx.valid():
         return None, "invalid_packet_context"
     if not _comparison_ok(comparison):
@@ -492,6 +738,8 @@ class PacketOutbox:
     """File-backed transactional store. Reopening the file is the restart path."""
 
     def __init__(self, path: Path | str, *, allow_generated_fixture: bool = False):
+        if allow_generated_fixture and not _fixture_context():
+            raise PacketStoreError(_FIXTURE_REFUSAL)
         self.path = Path(path)
         self.allow_generated_fixture = allow_generated_fixture
         with closing(sqlite3.connect(self.path, timeout=5)) as db:
