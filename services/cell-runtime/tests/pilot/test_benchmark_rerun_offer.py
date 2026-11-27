@@ -192,3 +192,33 @@ def test_offer_withdrawal_during_final_model_check_is_held(
 
     monkeypatch.setattr(service, "_baseline", withdraw)
     assert read() is None and len(checks) == 2
+
+
+def test_original_case_expires_immediately_before_offer_disclosure(joined, monkeypatch):
+    import time
+
+    from test_starter_completion import publication as build_publication
+    from test_starter_evaluation_authority import authorized as build_authorized
+    from test_starter_evaluation_session import installed as build_installed
+    from test_starter_map_confirmation import sign_case
+
+    harness, _, case, _, _ = joined
+    case["expires_at"] = int(time.time()) + 120
+    sign_case(harness.path.parent, case)
+    installed = build_installed.__wrapped__(build_authorized.__wrapped__(joined))
+    publication = build_publication.__wrapped__(installed)
+    request, write, read, _, service = prepare(publication, installed)
+    write(request)
+    assert read() is not None
+    original = service._grant
+    checks = []
+
+    def expire(*args):
+        grant = original(*args)
+        checks.append(grant)
+        if len(checks) == 2:
+            monkeypatch.setattr(time, "time", lambda: case["expires_at"])
+        return grant
+
+    monkeypatch.setattr(service, "_grant", expire)
+    assert read() is None and len(checks) == 2

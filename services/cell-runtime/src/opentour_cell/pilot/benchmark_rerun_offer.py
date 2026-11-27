@@ -13,6 +13,7 @@ from typing import Any
 from opentour_cell.pilot import model_connector as model
 from opentour_cell.pilot.intake_admission import DurableIntake
 from opentour_cell.pilot.intake_mcp import IntakeError, require_ref
+from opentour_cell.pilot.map_review import open_map_review
 from opentour_cell.pilot.model_registry import ModelRegistry
 from opentour_cell.pilot.onboarding_mcp import _read_private
 from opentour_cell.pilot.operating_point import canonical, digest
@@ -153,7 +154,8 @@ class BenchmarkRerunOffers:
             original_grant, permission = authority._grant(original)
             _require(digest(original_grant) == inspection_revision)
             _require((permission.epoch, permission.run_ref) == (cap["epoch"], cap["run_ref"]))
-            setup = authority._metadata(original_grant, permission).setup
+            owner_metadata = authority._metadata(original_grant, permission)
+            setup = owner_metadata.setup
             intake = BenchmarkIntake(DurableIntake(self.directory, setup, existing_only=True))
             benchmark = intake.get_run(setup.principal, permission.run_ref).benchmark
             _require(
@@ -209,6 +211,16 @@ class BenchmarkRerunOffers:
                     permission.maximum_cases,
                 )
             )
+            worker_metadata = worker._metadata(new_grant, new_permission)
+            service = open_map_review(self.directory, actor.tenant, permission.workflow_ref)
+            source_expiries = [
+                min(
+                    metadata.capability["expires_at"],
+                    principal._map_capability(service, metadata)["expires_at"],
+                    metadata.setup._read_grant().expires_at,
+                )
+                for principal, metadata in ((authority, owner_metadata), (worker, worker_metadata))
+            ]
             work = worker.work(rerun)
             _require(work.benchmark_current and work.benchmark_version == cap["benchmark_version"])
             # The local custody writer replaces authority files and creates withdrawal
@@ -225,15 +237,17 @@ class BenchmarkRerunOffers:
             pinned = generation()
             baseline = self._baseline(invocation, new_permission)
             _require(worker._grant(rerun) == (new_grant, new_permission))
-            _require(self.owner.summary(original, expected_revision=inspection_revision) == summary)
             invocation.settings()
             _require(self._baseline(invocation, new_permission) == baseline)
+            _require(self.owner.summary(original, expected_revision=inspection_revision) == summary)
+            _require(worker.work(rerun) == work)
             _require(worker._grant(rerun) == (new_grant, new_permission))
             invocation.settings()
             _require(authority._grant(original) == (original_grant, permission))
             self.owner.settings().permission(actor.actor, "inspect")
             _require(self._grant(original, rerun, inspection_revision) == cap)
             valid_until = min(
+                *source_expiries,
                 cap["expires_at"],
                 original_grant["expires_at"],
                 invocation.cap["expires_at"],
