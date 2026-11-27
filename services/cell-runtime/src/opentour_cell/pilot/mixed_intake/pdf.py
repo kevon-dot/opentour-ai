@@ -28,7 +28,7 @@ from opentour_cell.pilot.mixed_intake.model import (
     finish,
 )
 
-PDF_REVISION = "opentour.reader.pdf-text@1.0.0"
+PDF_REVISION = "opentour.reader.pdf-text@1.0.1"
 _OBJ = re.compile(rb"(?<![0-9])(\d{1,7})\s+(\d{1,5})\s+obj\b")
 _REF = rb"(\d+)\s+\d+\s+R"
 _NUMBER = re.compile(rb"[+-]?(\d+\.?\d*|\.\d+)")
