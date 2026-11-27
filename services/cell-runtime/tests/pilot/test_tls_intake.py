@@ -14,12 +14,17 @@ import tempfile
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import contextmanager
+from dataclasses import asdict
 from pathlib import Path
 
 import pytest
 import test_intake_mcp as vectors
+from opentour_cell.pilot.historical_worker import CONFIG as HISTORICAL_WORKER_CONFIG
 from opentour_cell.pilot.intake_local import open_intake
 from opentour_cell.pilot.intake_mcp import parse_intake
+from opentour_cell.pilot.operating_point import digest
+from test_historical_benchmarks import setup as setup_historical
+from test_historical_benchmarks import write
 from test_live_evidence import DECISION, OUTCOME, decision, outcome
 from test_live_worker_readiness import configured
 from test_worker_host_install import PYTHON, kit  # noqa: F401
@@ -251,6 +256,119 @@ def test_tls_limits_before_admission(connector):
             assert connector.post(DISCOVER, {"limit": 1})[0] == 200
         assert connector.post(SUBMIT, vectors.STARTER) == (429, {"error": "intake_rate_limited"})
         assert counts(selection.parent) == (0, 0, 0)
+
+
+def test_packaged_historical_pair_cross_transport_and_restart(connector):
+    _, actor, pair, producer, mandates, mandate = setup_historical(
+        connector.work, baseline_only=True, no_development=True
+    )
+    home = producer.directory
+    selection = producer.authority.path
+    connector.config.update(intake_tenant=actor.tenant, intake_actor=actor.actor)
+    connector.manifest.write_text(json.dumps(connector.config))
+    launcher = [*PYTHON, connector.kit / "opentour-slack.pyz"]
+    command = [*launcher, "mcp-intake", selection]
+    request = asdict(pair)
+    with connector.listen(selection):
+        catalog = {
+            "sources": [
+                {
+                    "source_kind": "historical",
+                    "source_ref": pair.pair_ref,
+                    "source_revision": pair.source_revision,
+                }
+            ],
+            "next_cursor": None,
+        }
+        assert connector.post(DISCOVER, {}) == (200, catalog)
+        assert stdio(command, DISCOVER, {}) == catalog
+        assert counts(home) == (0, 0, 0)
+        code, admitted = connector.post(SUBMIT, request)
+        assert code == 200 and admitted["state"] == "queued"
+        assert stdio(command, SUBMIT, request | {"idempotency_key": "stdio-replay"}) == admitted
+        lookup = {"run_ref": admitted["run_ref"]}
+        queued = stdio(command, STATUS, lookup)
+        assert connector.post(STATUS, lookup) == (200, queued)
+        assert queued["state"] == "queued" and queued["benchmark_state"] == "draft"
+        assert queued["workflow_ref"] == producer.authority.selected.workflow_ref
+        assert counts(home) == (1, 0, 0)
+
+    config = home / "historical-worker.json"
+    write(
+        config,
+        {
+            "schema_version": HISTORICAL_WORKER_CONFIG,
+            "selection": selection.name,
+            "traces": producer.traces.name,
+            "corrections": producer.corrections.name,
+            "agreement": producer.agreement.name,
+        },
+    )
+
+    def run_worker():
+        result = subprocess.run(
+            [*launcher, "historical-worker", "--config", config, "--run-ref", lookup["run_ref"]],
+            text=True,
+            capture_output=True,
+            check=True,
+            timeout=30,
+        )
+        assert not result.stderr
+        return json.loads(result.stdout)
+
+    completed = run_worker()
+    assert completed["status"] == "completed" and completed["run_ref"] == lookup["run_ref"]
+    assert completed["benchmark"] == {
+        "benchmark_ref": queued["benchmark_ref"],
+        "benchmark_state": "scored",
+        "version": 1,
+    }
+    [comparison_path] = (home / "managed-outputs").glob("*/comparison.json")
+    original_comparison = comparison_path.read_bytes()
+    original_write_time = comparison_path.stat().st_mtime_ns
+    assert run_worker() == completed
+
+    with connector.listen(selection):
+        status = stdio(command, STATUS, lookup)
+        assert connector.post(STATUS, lookup) == (200, status)
+        assert status["state"] == "materialized"
+        assert status["workflow_ref"] == queued["workflow_ref"]
+        assert all(status[key] == value for key, value in completed["benchmark"].items())
+        assert connector.post(SUBMIT, request | {"idempotency_key": "https-restart"}) == (
+            200,
+            admitted | {"state": "materialized"},
+        )
+        assert connector.post(STATUS, lookup, headers={"Authorization": "Bearer invalid"}) == (
+            403,
+            None,
+        )
+        mandates.withdraw(mandate["mandate_id"], actor=mandate["owner_id"])
+        assert connector.post(STATUS, lookup) == (403, {"error": "intake_unavailable"})
+        assert connector.post(SUBMIT, request) == (403, {"error": "intake_unavailable"})
+
+    revoked = subprocess.run(command, input="", text=True, capture_output=True, timeout=10)
+    assert (revoked.returncode, revoked.stdout, revoked.stderr.strip()) == (
+        2,
+        "",
+        "private_intake_selection_unavailable",
+    )
+    assert counts(home) == (1, 0, 1)
+    assert list((home / "managed-outputs").glob("*/comparison.json")) == [comparison_path]
+    assert comparison_path.stat().st_mtime_ns == original_write_time
+    assert comparison_path.read_bytes() == original_comparison
+    comparison = json.loads(original_comparison)
+    assert comparison["decision"]["reason"] == "recorded_baseline_only"
+    assert comparison["protected_rows_evaluated"] == 16
+    with sqlite3.connect(home / "workflow-benchmarks.sqlite3") as db:
+        [(record,)] = db.execute("SELECT materialized FROM benchmarks").fetchall()
+        assert json.loads(record)["result_digest"] == digest(comparison)
+        assert db.execute("SELECT completed FROM benchmark_operations").fetchall() == [(1,)]
+        assert db.execute("SELECT run FROM benchmark_receipts").fetchall() == [(lookup["run_ref"],)]
+    with sqlite3.connect(home / "training.sqlite3") as db:
+        assert db.execute("SELECT count(*) FROM protected_comparisons").fetchone() == (1,)
+        assert db.execute("SELECT count(*) FROM jobs").fetchone() == (0,)
+    with sqlite3.connect(home / "learning-mandates.sqlite3") as db:
+        assert db.execute("SELECT count(*) FROM reservations").fetchone() == (0,)
 
 
 def live_cross_transport(connector):
@@ -496,6 +614,10 @@ if __name__ == "__main__":
     with tempfile.TemporaryDirectory() as work:
         test_packaged_starter_cross_transport_and_lost_reply(PackagedProcess(package, Path(work)))
     with tempfile.TemporaryDirectory() as work:
+        test_packaged_historical_pair_cross_transport_and_restart(
+            PackagedProcess(package, Path(work))
+        )
+    with tempfile.TemporaryDirectory() as work:
         live_cross_transport(PackagedProcess(package, Path(work)))
     print(
         json.dumps(
@@ -505,6 +627,10 @@ if __name__ == "__main__":
                 "starter_runs": 1,
                 "lost_reply_recovered": True,
                 "withdrawn_retry_denied": True,
+                "historical_admissions": 1,
+                "historical_baselines": 1,
+                "historical_restarts_verified": True,
+                "historical_revoked_retry_denied": True,
                 "live_admissions": 2,
                 "live_source_receipts": 2,
                 "verified_roots": 1,
