@@ -306,13 +306,20 @@ ILLEGAL_SLICE_NAMES = {
 }
 
 
+@pytest.mark.parametrize("position", [0, 1, 2], ids=["first", "middle", "last"])
 @pytest.mark.parametrize("key", ["critical_slices", "material_slices"])
 @pytest.mark.parametrize("name", ILLEGAL_SLICE_NAMES.values(), ids=ILLEGAL_SLICE_NAMES.keys())
-def test_illegal_agreed_slice_names_are_refused_when_the_plan_is_frozen(tmp_path, key, name):
-    """Every item in the slice lists is checked, not just the first, and the refusal is the
-    fixed identifier code (the offending value never appears in it)."""
+def test_illegal_agreed_slice_names_are_refused_when_the_plan_is_frozen(
+    tmp_path, key, name, position
+):
+    """Every item in the slice lists is checked: the illegal name is placed first, in the
+    middle and last among legal names, so a planner that validates only the first or only
+    the last item is caught. The refusal is the fixed identifier code (the offending value
+    never appears in it)."""
     store = LocalTrainingStore(tmp_path / "training.sqlite3", "generated")
-    terms = {"minimum_coverage_bps": 10000, "error_ceiling_bps": 0, key: ["critical", name]}
+    items = ["critical", "rare"]
+    items.insert(position, name)
+    terms = {"minimum_coverage_bps": 10000, "error_ceiling_bps": 0, key: items}
     with pytest.raises(RepairError) as caught:
         setup(enroll(store), terms=terms)
     assert str(caught.value) == "invalid_scope_or_identifier"
