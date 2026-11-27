@@ -305,6 +305,54 @@ def _validate_cases(cases: Sequence[DevelopmentCase]) -> None:
         _need(type(c.decided_at) is int and c.decided_at >= 0, "invalid_decision_time")
 
 
+def _recipe_inputs(recipes: Sequence[Recipe]) -> list[list[Any]]:
+    """Every catalog field the recorded selection can depend on, in a stable order."""
+    return sorted(
+        [
+            r.recipe_id,
+            r.version,
+            sorted(r.models),
+            sorted(r.tasks),
+            r.split,
+            r.metric,
+            r.direction,
+            list(r.allowed_params),
+            r.trial_limit,
+            r.step_limit,
+            r.stopping_rule,
+            r.est_seconds_per_trial,
+            r.paid_probe,
+        ]
+        for r in recipes
+    )
+
+
+def _authority_inputs(request: RoutingRequest) -> list[Any]:
+    """The caller-supplied inputs the receipt publishes a digest or a selection of.
+
+    Leaving these out makes the stored-evaluation conflict check fail open: a second
+    trigger on the same evaluation key carrying a different protected population, model
+    target or recipe catalog is answered with the first receipt, whose comparison plan
+    digest and frozen recipe cover the earlier inputs instead. Mandate counters stay out
+    on purpose; the mandate revision is already part of the evaluation key.
+    """
+    policy, model, scheduling = request.policy, request.model, request.scheduling
+    return [
+        [policy.policy_ref, policy.snapshot_ref, policy.terms_revision, policy.signature],
+        None if model is None else [model.model_ref, model.task, model.capability_receipt_ref],
+        _recipe_inputs(request.recipes),
+        None
+        if scheduling is None
+        else [
+            scheduling.intake_revision,
+            sorted(scheduling.protected_ids),
+            scheduling.incumbent_revision,
+            scheduling.audience,
+        ],
+        request.augmentation,
+    ]
+
+
 def _input_revision(request: RoutingRequest) -> str:
     return digest(
         [
@@ -329,6 +377,7 @@ def _input_revision(request: RoutingRequest) -> str:
                 ]
                 for c in request.cases
             ),
+            _authority_inputs(request),
         ]
     )
 

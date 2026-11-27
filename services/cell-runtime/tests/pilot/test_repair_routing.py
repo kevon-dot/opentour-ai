@@ -5,6 +5,8 @@ Local and simulated only: no provider, protected set, ledger reservation or fit 
 
 from __future__ import annotations
 
+import builtins
+import os
 import sqlite3
 import threading
 from dataclasses import replace
@@ -13,7 +15,8 @@ from typing import Any
 
 import pytest
 from opentour_cell.pilot import repair_routing as rr
-from opentour_cell.pilot.operating_point import digest
+from opentour_cell.pilot import source_intake
+from opentour_cell.pilot.operating_point import canonical, digest
 from opentour_cell.pilot.simple_repair import declared_rule
 
 AS_OF = 10_000
@@ -549,3 +552,107 @@ def test_same_entity_case_variants_with_agreeing_labels_are_not_a_contradiction(
     ]
     r = store.evaluate(request(cases))
     assert r["reason_code"] != "contradictory_labels"
+
+
+def scheduling(*protected: str) -> rr.ComparisonScheduling:
+    return rr.ComparisonScheduling(
+        digest("generated-intake"),
+        protected or ("generated-protected-1", "generated-protected-2"),
+        "generated-incumbent-1",
+        "generated-audience",
+    )
+
+
+def test_replay_with_a_different_protected_population_conflicts(
+    store: rr.RepairRoutingStore,
+) -> None:
+    # The receipt publishes a comparison plan digest over the population it was handed, so a
+    # second trigger carrying a different one must not be answered with the first receipt.
+    first = store.evaluate(request(data_fix(), scheduling=scheduling()))
+    assert first["comparison_scheduled"] is True
+    moved = scheduling("generated-protected-3", "generated-protected-4")
+    with pytest.raises(rr.RoutingError, match="EVALUATION_CONFLICT"):
+        store.evaluate(request(data_fix(), scheduling=moved))
+    assert store.count() == 1
+
+
+def test_replay_with_a_different_model_or_recipe_catalog_conflicts(
+    store: rr.RepairRoutingStore,
+) -> None:
+    first = store.evaluate(request(independent_residual()))
+    assert first["recipe_selection"]["selected"]["recipe"] == ["generated-recipe-sweep", 1]
+    other = rr.ModelTarget("simulated:model-a", "label_correction", "generated-capability-9")
+    drifted: list[dict[str, Any]] = [
+        {"model": other},
+        {"recipes": recipes()[:1]},
+        {"recipes": (replace(recipes()[1], est_seconds_per_trial=120),)},
+    ]
+    for kw in drifted:
+        with pytest.raises(rr.RoutingError, match="EVALUATION_CONFLICT"):
+            store.evaluate(request(independent_residual(), **kw))
+    assert store.count() == 1
+
+
+def test_replay_with_an_unchanged_authority_still_returns_one_evaluation(
+    store: rr.RepairRoutingStore,
+) -> None:
+    sched = scheduling()
+    first = store.evaluate(request(data_fix(), scheduling=sched))
+    again = store.evaluate(request(data_fix(), scheduling=sched))
+    assert (first["replayed"], again["replayed"]) == (False, True)
+    assert again["comparison_plan_revision"] == first["comparison_plan_revision"]
+    assert store.count() == 1
+
+
+class _Access:
+    """Record every file, database and protected-store access, then delegate to the real call."""
+
+    def __init__(self, patch: pytest.MonkeyPatch) -> None:
+        self.seen: list[tuple[str, str]] = []
+
+        def watch(kind: str, real: Any) -> Any:
+            def call(target: Any, *args: Any, **kw: Any) -> Any:
+                self.seen.append((kind, str(target)))
+                return real(target, *args, **kw)
+
+            return call
+
+        patch.setattr(builtins, "open", watch("open", builtins.open))
+        patch.setattr(os, "open", watch("os.open", os.open))
+        patch.setattr(sqlite3, "connect", watch("sqlite3.connect", sqlite3.connect))
+        for name in ("protected_inputs", "development_rows", "load_intake", "inspect_intake"):
+            reader = getattr(source_intake, name)
+            patch.setattr(source_intake, name, watch("source_intake." + name, reader))
+
+    @property
+    def kinds(self) -> set[str]:
+        return {kind for kind, _ in self.seen}
+
+    @property
+    def targets(self) -> set[str]:
+        return {target for _, target in self.seen}
+
+
+def test_routing_opens_nothing_and_reads_no_protected_rows(
+    store: rr.RepairRoutingStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Acceptance 7, observed rather than read back from the receipt's own zero: the decision
+    # performs no file, database or protected-store access at all, and the durable path
+    # touches exactly one file, the router's private evaluation journal.
+    sched = scheduling()
+    req = request(data_fix(), scheduling=sched)
+    with monkeypatch.context() as patch:
+        watched = _Access(patch)
+        receipt = rr.decide(req)
+    assert watched.seen == []
+    assert receipt["outcome"] == "simple_repair" and receipt["comparison_scheduled"] is True
+    assert receipt["protected_reads"] == len(watched.seen) == 0
+    body = canonical(receipt)
+    assert not any(protected in body for protected in sched.protected_ids)
+
+    with monkeypatch.context() as patch:
+        watched = _Access(patch)
+        stored = store.evaluate(req)
+    assert watched.kinds == {"os.open", "sqlite3.connect"}
+    assert watched.targets == {str(store.path)}
+    assert (stored["protected_reads"], stored["fit_starts"], stored["reservations"]) == (0, 0, 0)
