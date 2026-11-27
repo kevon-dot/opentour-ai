@@ -601,6 +601,73 @@ def test_hold_moves_the_base_out_even_when_old_held_copies_cannot_be_removed(sit
     rules_only_state_unchanged(site)
 
 
+def run_main(capsys, *argv):
+    code = stage_module["main"](list(argv))
+    return code, json.loads(capsys.readouterr().out)
+
+
+@pytest.mark.parametrize("via", ["module", "cli"])
+def test_a_failed_held_rename_reports_move_failed_and_leaves_the_base(
+    site, monkeypatch, capsys, via
+):
+    assert staged(site)["route"] == "ready"
+    tamper(site["model"] / "config.json")
+    real_rename = os.rename
+
+    def refusing_rename(src, dst, *, src_dir_fd=None, dst_dir_fd=None):
+        if dst.startswith("held-"):
+            raise OSError("generated rename refusal")
+        real_rename(src, dst, src_dir_fd=src_dir_fd, dst_dir_fd=dst_dir_fd)
+
+    monkeypatch.setattr(os, "rename", refusing_rename)
+    if via == "module":
+        result = verified(site)
+    elif OWNER == 0:
+        code, result = run_main(capsys, "verify", *cli_arguments(site))
+        assert code == 2
+    else:
+        pytest.skip("the CLI acts only as root; the module case covers non-root runners")
+    assert (result["route"], result["reason"]) == ("held", "staged_model_hash_mismatch")
+    assert (result["model_base"], result["cleanup"]) == ("move_failed", "not_run")
+    assert site["model"].is_dir() and copies(site["work"], "held") == []
+
+
+def test_an_io_error_while_hashing_the_base_holds_instead_of_raising(site, monkeypatch, capsys):
+    assert staged(site)["route"] == "ready"
+    model = str(site["model"])
+    real_digest = hashlib.file_digest
+
+    def failing_digest(file, digest):
+        path = os.readlink(f"/proc/self/fd/{file.fileno()}")
+        if path.startswith(model + "/") or "/held-" in path:
+            raise OSError(5, "generated read failure mid-hash")
+        return real_digest(file, digest)
+
+    monkeypatch.setattr(hashlib, "file_digest", failing_digest)
+    result = verified(site)
+    assert (result["route"], result["reason"]) == ("held", "verification_io_error")
+    assert result["model_base"] == "moved_to_held" and not site["model"].exists()
+    if OWNER == 0:  # the CLI reports the same held result, without a traceback
+        monkeypatch.setattr(hashlib, "file_digest", real_digest)
+        assert staged(site)["route"] == "ready"
+        monkeypatch.setattr(hashlib, "file_digest", failing_digest)
+        code, cli_result = run_main(capsys, "verify", *cli_arguments(site))
+        assert code == 2
+        assert (cli_result["route"], cli_result["reason"]) == ("held", "verification_io_error")
+
+
+def test_an_io_error_escaping_a_command_is_reported_as_unverified(site, monkeypatch, capsys):
+    def escaping(*args, **kwargs):
+        raise OSError(5, "generated failure outside the verify handlers")
+
+    monkeypatch.setattr(os, "geteuid", lambda: 0)
+    monkeypatch.setitem(stage_module, "verify", escaping)
+    code, result = run_main(capsys, "verify", *cli_arguments(site))
+    assert code == 2
+    assert (result["route"], result["reason"]) == ("unverified", "installer_io_error")
+    assert result["model_base"] == "unchanged"
+
+
 def test_hold_survives_entries_added_during_cleanup_and_staging_still_promotes(site, monkeypatch):
     assert staged(site)["route"] == "ready"
     stale = site["work"] / "held-stale"
