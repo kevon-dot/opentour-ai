@@ -57,6 +57,11 @@ permission. An approval with no outbox entry returns its recorded time
 and destination with delivery unset. An existing outbox entry returns
 only the durable stage, check time and independently confirmed receipt
 fields it holds. The reader performs no network or reconciliation call.
+The sender seals the verified recipient observation in the same
+transaction that records delivery. A restored delivery row with missing
+or changed evidence stays unconfirmed. An authorized reconciliation can
+recover the current signed receipt, and a claim against that restored row
+cannot send the package again.
 
 The hosted Zap still needs the authenticated fetch binding and versioned
 workflow. The separate, explicitly authorized test activation and its

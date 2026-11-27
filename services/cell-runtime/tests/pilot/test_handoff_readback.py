@@ -3,6 +3,7 @@
 from opentour_cell.pilot import handoff_readback
 from opentour_cell.pilot.local_handoff_permissions import handoff_outbox
 from opentour_cell.pilot.recipient_delivery import LocalRecipientDelivery, dispatch_local_release
+from opentour_cell.pilot.release_outbox import ReleaseOutbox
 from opentour_cell.pilot.training import LocalTrainingStore
 from test_local_handoff_permissions import KEY, signed_permission
 from test_recipient_delivery import approved_local_offer
@@ -78,14 +79,50 @@ def test_selected_readback_recovers_the_same_handoff_without_sending(tmp_path, m
     assert observed.approved_at == approved.approved_at
     assert len(effects) == 1
 
-    status = handoff_readback.ReleaseOutbox.status
+    with fresh_store._db(write=True) as db:
+        db.execute(
+            "UPDATE release_outbox SET receiver_receipt_ref='changed-by-restore' WHERE ref=?",
+            (observed.delivery.reference,),
+        )
+    altered = handoff_readback.read_handoff(fresh_store, **released)
+    assert altered.delivery.stage == "delivery_unconfirmed"
+    assert altered.delivery.receiver_receipt_ref is None
+    restored = handoff_outbox(fresh_store).reconcile(selection, "dispatcher", receiver)
+    assert restored.stage == "delivered" and restored.receiver_receipt_ref == effects[0]
+    assert len(effects) == 1
+
+    status = ReleaseOutbox.status
 
     def withdraw_after_status(*args, **kwargs):
         result = status(*args, **kwargs)
         grant_path.unlink()
         return result
 
-    monkeypatch.setattr(handoff_readback.ReleaseOutbox, "status", withdraw_after_status)
+    monkeypatch.setattr(ReleaseOutbox, "status", withdraw_after_status)
     assert handoff_readback.read_handoff(fresh_store, **released) is None
     assert handoff_readback.read_handoff(fresh_store, **released) is None
     assert len(effects) == 1
+
+
+def test_restored_delivery_fields_without_observed_receipt_remain_unconfirmed(tmp_path):
+    generated, receiver, _, selection = approved_local_offer(tmp_path)
+    store = generated.store
+    permit = generated.authority.permissions.current
+    directory = store.path.parent
+    write(directory / "handoff-permission-key.json", {"key": KEY.hex()})
+    signed_permission(directory, permit)
+    outbox = handoff_outbox(store)
+    reserved = outbox.reserve(selection, "dispatcher", "generated-saved-approval")
+    now = outbox.clock()
+    with store._db(write=True) as db:
+        db.execute(
+            "UPDATE release_outbox SET stage='delivered',claimed_at=?,last_checked_at=?,"
+            "received_at=?,receiver_receipt_ref='restored-invalid-receipt' WHERE ref=?",
+            (now, now, now, reserved.reference),
+        )
+    status = outbox.status(selection, "inspector")
+    assert status.stage == "delivery_unconfirmed"
+    assert status.receiver_receipt_ref is status.claimed_at is status.received_at is None
+    assert not outbox.claim(selection, "dispatcher", receiver).dispatch
+    assert outbox.reconcile(selection, "dispatcher", receiver) == status
+    assert not list(receiver.grant_file.parent.glob("custody/delivery-*/receipt.json"))

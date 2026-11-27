@@ -7,13 +7,14 @@ import os
 import re
 import time
 from collections.abc import Callable
+from dataclasses import asdict
 from pathlib import Path
 
 from opentour_cell.pilot.intake_mcp import require_ref
 from opentour_cell.pilot.onboarding_mcp import _read_private
 from opentour_cell.pilot.operating_point import canonical, digest
 from opentour_cell.pilot.release_authority import HandoffPermission, RecordedReleaseAuthority
-from opentour_cell.pilot.release_outbox import Action, ReleaseOutbox
+from opentour_cell.pilot.release_outbox import Action, ApprovedRelease, ReleaseOutbox, ReleaseStatus
 from opentour_cell.pilot.training import LocalTrainingStore
 
 SCHEMA = "opentour.pilot.handoff-permission.v1"
@@ -54,28 +55,33 @@ class LocalHandoffPermissions:
         self.tenant = require_ref(tenant)
         self.clock = clock
 
+    def _key(self) -> bytes:
+        key_doc = _read_private(self.directory / "handoff-permission-key.json", 4096)
+        key = key_doc.get("key")
+        if set(key_doc) != {"key"} or not isinstance(key, str) or not _HEX.fullmatch(key):
+            raise ValueError("release_destination_unavailable")
+        return bytes.fromhex(key)
+
+    def _seal_received(self, release: ApprovedRelease, status: ReleaseStatus) -> str:
+        body = ["opentour.pilot.receiver-observation.v1", release.reference, asdict(status)]
+        return hmac.digest(self._key(), canonical(body).encode(), "sha256").hex()
+
     def resolve(self, workflow_ref: str, actor: str, action: Action) -> HandoffPermission | None:
         try:
             scope = digest([self.tenant, require_ref(workflow_ref)])
             require_ref(actor)
-            key_doc = _read_private(self.directory / "handoff-permission-key.json", 4096)
             envelope = _read_private(self.directory / f"handoff-permission-{scope}.json", 32768)
-            if set(key_doc) != {"key"} or set(envelope) != {"grant", "seal_sha256"}:
+            if set(envelope) != {"grant", "seal_sha256"}:
                 return None
-            encoded_key = key_doc["key"]
             grant, seal = envelope["grant"], envelope["seal_sha256"]
             if (
-                not isinstance(encoded_key, str)
-                or not _HEX.fullmatch(encoded_key)
-                or not isinstance(seal, str)
+                not isinstance(seal, str)
                 or not _HEX.fullmatch(seal)
                 or not isinstance(grant, dict)
                 or set(grant) != _FIELDS
                 or not hmac.compare_digest(
                     seal,
-                    hmac.digest(
-                        bytes.fromhex(encoded_key), canonical(grant).encode(), "sha256"
-                    ).hex(),
+                    hmac.digest(self._key(), canonical(grant).encode(), "sha256").hex(),
                 )
             ):
                 return None
@@ -130,5 +136,8 @@ def handoff_outbox(store: LocalTrainingStore, clock: Callable[[], int] = _now) -
     directory = store.path.parent
     permissions = LocalHandoffPermissions(directory, store.organization, clock)
     return ReleaseOutbox(
-        store, RecordedReleaseAuthority(directory, store.organization, permissions), clock
+        store,
+        RecordedReleaseAuthority(directory, store.organization, permissions),
+        clock,
+        seal_received=permissions._seal_received,
     )

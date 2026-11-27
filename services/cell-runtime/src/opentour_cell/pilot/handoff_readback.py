@@ -5,9 +5,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from opentour_cell.pilot import release_gate
-from opentour_cell.pilot.local_handoff_permissions import LocalHandoffPermissions
-from opentour_cell.pilot.release_authority import RecordedReleaseAuthority, approval_ref
-from opentour_cell.pilot.release_outbox import ReleaseOutbox, ReleaseSelection, ReleaseStatus
+from opentour_cell.pilot.local_handoff_permissions import LocalHandoffPermissions, handoff_outbox
+from opentour_cell.pilot.release_authority import approval_ref
+from opentour_cell.pilot.release_outbox import ReleaseSelection, ReleaseStatus
 from opentour_cell.pilot.training import LocalTrainingStore
 
 
@@ -48,10 +48,7 @@ def read_handoff(
     if recorded is None or recorded["decision"] != "approved" or "decision_seal" not in recorded:
         return None
     selection = ReleaseSelection(workflow_ref, proposal_ref, approval_ref(recorded))
-    outbox = ReleaseOutbox(
-        store, RecordedReleaseAuthority(directory, store.organization, permissions)
-    )
-    delivery = outbox.status(selection, actor)
+    delivery = handoff_outbox(store).status(selection, actor)
     if permissions.resolve(workflow_ref, actor, "inspect") != permit:
         return None
     return HandoffReadback(selection, permit.destination_ref, recorded["recorded_at"], delivery)

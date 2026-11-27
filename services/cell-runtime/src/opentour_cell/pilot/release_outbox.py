@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hmac
 import os
 import re
 import secrets
@@ -140,10 +141,13 @@ class ReleaseOutbox:
         store: LocalTrainingStore,
         authority: ReleaseAuthority,
         clock: Callable[[], int] = _now,
+        *,
+        seal_received: Callable[[ApprovedRelease, ReleaseStatus], str] | None = None,
     ):
         self.store = store
         self.authority = authority
         self.clock = clock
+        self.seal_received = seal_received
 
     def _current(
         self,
@@ -249,8 +253,10 @@ class ReleaseOutbox:
                 "release_stage_integrity_unavailable",
             )
 
-    def _status(self, row: sqlite3.Row, grant: ApprovedRelease) -> ReleaseStatus:
-        return ReleaseStatus(
+    def _status(
+        self, db: sqlite3.Connection, row: sqlite3.Row, grant: ApprovedRelease
+    ) -> ReleaseStatus:
+        status = ReleaseStatus(
             grant.reference,
             grant.destination_ref,
             row["stage"],
@@ -258,6 +264,30 @@ class ReleaseOutbox:
             row["last_checked_at"],
             row["receiver_receipt_ref"],
             row["received_at"],
+        )
+        if status.stage != "delivered" or self.seal_received is None:
+            return status
+        table = db.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='release_receiver_seals'"
+        ).fetchone()
+        recorded = (
+            db.execute(
+                "SELECT seal FROM release_receiver_seals WHERE ref=?", (grant.reference,)
+            ).fetchone()
+            if table is not None
+            else None
+        )
+        try:
+            if (
+                recorded
+                and isinstance(recorded["seal"], str)
+                and hmac.compare_digest(recorded["seal"], self.seal_received(grant, status))
+            ):
+                return status
+        except (OSError, ValueError):
+            pass
+        return ReleaseStatus(
+            grant.reference, grant.destination_ref, "delivery_unconfirmed", None, None, None, None
         )
 
     def reserve(
@@ -310,15 +340,17 @@ class ReleaseOutbox:
                 (grant.engagement, actor, client, operation_key, grant.reference),
             )
             assert row is not None
+            status = self._status(db, row, grant)
             self._check_current(db, grant, actor, "reserve")
-            return self._status(row, grant)
+            return status
 
     def status(self, selection: ReleaseSelection, actor: str) -> ReleaseStatus | None:
         with self._read() as db:
             grant = self._current(db, selection, actor, "inspect")
             row = self._stage(db, grant)
+            status = None if row is None else self._status(db, row, grant)
             self._check_current(db, grant, actor, "inspect")
-            return None if row is None else self._status(row, grant)
+            return status
 
     def claim(self, selection: ReleaseSelection, actor: str, receiver: ReceiverLookup) -> Claim:
         return self._lookup(selection, actor, receiver, action="claim")
@@ -341,9 +373,12 @@ class ReleaseOutbox:
             row = self._stage(db, grant)
             _require(row is not None)
             assert row is not None
-            if row["stage"] == "delivered" or (action == "claim" and row["claimed_at"] is not None):
+            status = self._status(db, row, grant)
+            if status.stage == "delivered" or (
+                action == "claim" and (row["stage"] == "delivered" or row["claimed_at"] is not None)
+            ):
                 self._check_current(db, grant, actor, action)
-                return Claim(self._status(row, grant), False)
+                return Claim(status, False)
         requested_at = self.clock()
         lookup_ref = "lookup-" + secrets.token_hex(16)
         try:
@@ -363,8 +398,10 @@ class ReleaseOutbox:
             row = self._stage(db, grant)
             _require(row is not None)
             assert row is not None
-            if row["stage"] == "delivered":
-                return Claim(self._status(row, grant), False)
+            status = self._status(db, row, grant)
+            if status.stage == "delivered":
+                self._check_current(db, grant, actor, action)
+                return Claim(status, False)
             _require(
                 isinstance(observed, ReceiverObservation) and observed.lookup_ref == lookup_ref,
                 "receiver_observation_scope_mismatch",
@@ -391,10 +428,11 @@ class ReleaseOutbox:
             and grant.approved_at <= observed.observed_at <= now < grant.expires_at,
             "receiver_observation_scope_mismatch",
         )
+        previous = self._status(db, row, grant)
         if observed.observed_at < requested_at or (
-            row["last_checked_at"] is not None and observed.observed_at < row["last_checked_at"]
+            previous.last_checked_at is not None and observed.observed_at < previous.last_checked_at
         ):
-            return Claim(self._status(row, grant), False)
+            return Claim(previous, False)
         if observed.state == "delivered":
             _require(
                 observed.receipt_ref is not None
@@ -403,12 +441,34 @@ class ReleaseOutbox:
                 "receiver_receipt_unavailable",
             )
             assert observed.receipt_ref is not None
+            receipt = require_ref(observed.receipt_ref)
+            if self.seal_received is not None:
+                confirmed = ReleaseStatus(
+                    grant.reference,
+                    grant.destination_ref,
+                    "delivered",
+                    previous.claimed_at,
+                    observed.observed_at,
+                    receipt,
+                    observed.received_at,
+                )
+                seal = self.seal_received(grant, confirmed)
+                db.execute(
+                    "CREATE TABLE IF NOT EXISTS release_receiver_seals("
+                    "ref TEXT PRIMARY KEY, seal TEXT NOT NULL)"
+                )
+                db.execute(
+                    "INSERT INTO release_receiver_seals VALUES (?,?) "
+                    "ON CONFLICT(ref) DO UPDATE SET seal=excluded.seal",
+                    (grant.reference, seal),
+                )
             db.execute(
-                "UPDATE release_outbox SET stage='delivered',last_checked_at=?,"
+                "UPDATE release_outbox SET stage='delivered',claimed_at=?,last_checked_at=?,"
                 "receiver_receipt_ref=?,received_at=? WHERE ref=?",
                 (
+                    previous.claimed_at,
                     observed.observed_at,
-                    require_ref(observed.receipt_ref),
+                    receipt,
                     observed.received_at,
                     grant.reference,
                 ),
@@ -416,6 +476,9 @@ class ReleaseOutbox:
             dispatch = False
         else:
             _require(observed.receipt_ref is None and observed.received_at is None)
+            if row["stage"] == "delivered":
+                # Hold a restored unverified claim for independent confirmation.
+                return Claim(previous, False)
             dispatch = (
                 action == "claim" and row["claimed_at"] is None and observed.state == "absent"
             )
@@ -435,4 +498,4 @@ class ReleaseOutbox:
             )
         updated = self._stage(db, grant)
         assert updated is not None
-        return Claim(self._status(updated, grant), dispatch)
+        return Claim(self._status(db, updated, grant), dispatch)
