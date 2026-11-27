@@ -46,6 +46,7 @@ MODULES = (
     "opentour_cell/pilot/handoff_readback.py",
     "opentour_cell/pilot/local_handoff_permissions.py",
     "opentour_cell/pilot/recipient_delivery.py",
+    "opentour_cell/pilot/recipient_handoff_simulator.py",
     "opentour_cell/pilot/release_authority.py",
     "opentour_cell/pilot/release_outbox.py",
     "opentour_cell/pilot/repair_workflow.py",
@@ -113,6 +114,7 @@ ASSETS = {
     "README.md": f"{CELL}/docs/slack-workspace-kit.md",
     "operator-guide.md": f"{CELL}/docs/pilot-kit.md",
     "pilot-recipient-delivery.md": f"{CELL}/docs/pilot-recipient-delivery.md",
+    "pilot-recipient-handoff-simulator.md": f"{CELL}/docs/pilot-recipient-handoff-simulator.md",
     "pilot-release-outbox.md": f"{CELL}/docs/pilot-release-outbox.md",
     "pilot-learning-mandate.md": f"{CELL}/docs/pilot-learning-mandate.md",
     "templates/pilot-learning-mandate.template.json": (
@@ -128,6 +130,7 @@ ASSETS = {
             "approval-recipe-v1.json",
             "import-approval-recipe.cjs",
             "reconciliation-recipe-v1.json",
+            "handoff-recipe-v1.json",
         )
     },
     "pilot-cohort-lease.md": f"{CELL}/docs/pilot-cohort-lease.md",
@@ -204,6 +207,7 @@ COMMANDS = {
     "slack-launch-authorize": ("managed_launch", "main"),
     "zapier-approval": ("zapier_approval", "main"),
     "approval-reconciler": ("approval_reconciler", "main"),
+    "recipient-handoff-simulator": ("recipient_handoff_simulator", "main"),
     "owner-settings": ("owner_settings", "main"),
     "reviewer-assignment": ("reviewer_assignment", "main"),
     "repair": ("repair_workflow", "main"),
