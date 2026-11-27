@@ -154,18 +154,32 @@ def test_withdrawn_sender_cannot_stage_an_earlier_approved_offer(tmp_path, monke
     outbox, receiver, offered, selected = approved_local_offer(tmp_path)
     outbox.reserve(selected, "dispatcher", "before-withdrawal")
 
-    class WithdrawBeforeReceipt(LocalRecipientDelivery):
-        def _receive_claimed(self, *args, **kwargs):
+    resolve_grant = bundle._grant
+    read = bundle._read
+
+    def withdraw_during_recipient_check(path, *args, **kwargs):
+        grant = resolve_grant(path, *args, **kwargs)
+        if path == receiver.grant_file:
             outbox.authority.permissions.current = None
-            return super()._receive_claimed(*args, **kwargs)
+        return grant
+
+    def deny_offer_read(path, *args):
+        assert path != offered, "a stale approval reached the package body"
+        return read(path, *args)
 
     def unexpected_install(*args):
         pytest.fail("a stale approval reached recipient staging")
 
+    class WithdrawDuringReceiptCheck(LocalRecipientDelivery):
+        def _receive_claimed(self, *args, **kwargs):
+            monkeypatch.setattr(bundle, "_grant", withdraw_during_recipient_check)
+            return super()._receive_claimed(*args, **kwargs)
+
+    monkeypatch.setattr(bundle, "_read", deny_offer_read)
     monkeypatch.setattr(bundle, "_install", unexpected_install)
     with pytest.raises(ReleaseOutboxError):
         dispatch_local_release(
-            outbox, selected, "dispatcher", WithdrawBeforeReceipt(receiver.grant_file), offered
+            outbox, selected, "dispatcher", WithdrawDuringReceiptCheck(receiver.grant_file), offered
         )
     assert list((receiver.grant_file.parent / "custody").glob("delivery-*")) == []
 

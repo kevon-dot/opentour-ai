@@ -124,30 +124,32 @@ class LocalRecipientDelivery:
         release: ApprovedRelease,
         offered: Path,
         *,
-        sender_current: Callable[[], AbstractContextManager[None]],
+        sender_current: Callable[[], AbstractContextManager[Callable[[], None]]],
     ) -> str:
         """Install once after the actual signed bundle and live recipient grant verify."""
         bundle._require(offered.parent == self.grant_file.parent, "recipient_offer_scope_mismatch")
-        with sender_current():
-            grant = bundle._grant(self.grant_file)
+        grant = bundle._grant(self.grant_file)
         slot, claim = self._scope(release, grant)
-        offered_bytes = bundle._read(offered, bundle.MAX_ARCHIVE)
-        self._verify_package(offered_bytes, release, grant, claim)
-        with bundle._current(self.grant_file, grant):
+        with bundle._current(self.grant_file, grant), sender_current() as check_sender:
             bundle._require(self._scope(release, grant) == (slot, claim))
+            check_sender()
             if os.path.lexists(slot):
                 return str(self._receipt(slot, release, grant, claim)["receipt_ref"])
+            offered_bytes = bundle._read(offered, bundle.MAX_ARCHIVE)
+            self._verify_package(offered_bytes, release, grant, claim)
+            check_sender()
             with tempfile.TemporaryDirectory(dir=slot.parent) as staged:
                 staged_path = Path(staged)
                 bundle._install(staged_path / "artifact.zip", offered_bytes)
                 body = self._binding(release, claim) | {"received_at": self.clock()}
                 receipt = body | {"receipt_ref": "received-" + digest(body)[:48]}
                 bundle._install(staged_path / "receipt.json", bundle._bytes(receipt))
-                with bundle._directory_lock(staged_path), sender_current():
+                with bundle._directory_lock(staged_path):
                     bundle._require(
                         bundle._grant(self.grant_file) == grant
                         and self._scope(release, grant) == (slot, claim)
                     )
+                    check_sender()
                     os.rename(staged_path, slot)
             return str(receipt["receipt_ref"])
 
@@ -204,17 +206,20 @@ def dispatch_local_release(
             raise ReleaseOutboxError("release_intent_changed")
 
     @contextmanager
-    def sender_current() -> Iterator[None]:
+    def sender_current() -> Iterator[Callable[[], None]]:
         with outbox.store._db(write=True) as db:
-            outbox._check_current(db, release, actor, "claim")
-            row = outbox._stage(db, release)
-            if (
-                row is None
-                or row["stage"] != "delivery_unconfirmed"
-                or row["claimed_at"] != claim.status.claimed_at
-            ):
-                raise ReleaseOutboxError("release_claim_is_no_longer_current")
-            yield
+
+            def check_claim() -> None:
+                outbox._check_current(db, release, actor, "claim")
+                row = outbox._stage(db, release)
+                if (
+                    row is None
+                    or row["stage"] != "delivery_unconfirmed"
+                    or row["claimed_at"] != claim.status.claimed_at
+                ):
+                    raise ReleaseOutboxError("release_claim_is_no_longer_current")
+
+            yield check_claim
 
     try:
         receiver._receive_claimed(release, offered, sender_current=sender_current)
