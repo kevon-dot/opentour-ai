@@ -25,6 +25,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import unicodedata
 from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -206,6 +207,22 @@ class ReplayRequest:
         }
 
 
+# Visible-looking blanks outside the Z*/Cc/Cf categories (fillers and the blank braille cell).
+_BLANK_LETTERS = frozenset("\u115f\u1160\u3164\uffa0\u2800")
+
+
+def _carries_content(text: str) -> bool:
+    """False for text with nothing a reader could see: empty, whitespace (any Unicode space,
+    including non-breaking), control, or zero-width and other format characters only."""
+    return any(
+        not ch.isspace()
+        and ch not in _BLANK_LETTERS
+        and unicodedata.category(ch)[0] != "Z"
+        and unicodedata.category(ch) not in ("Cc", "Cf")
+        for ch in text
+    )
+
+
 _ROW_KEYS = frozenset({"case_id", "answer", "citations", "abstained"})
 
 
@@ -218,7 +235,7 @@ def _checked_arm_fields(
     returned, so an iterable that yields different content on a second pass cannot pass the
     check and then deliver something else. The other fields are plain values read once by the
     caller. Raises ``TypeError`` for a wrong type and ``ValueError`` for an empty ``case_id`` or
-    an empty ``answer`` (a genuine abstention is ``None``, never an empty string).
+    an ``answer`` with no visible content, empty or blank (a genuine abstention is ``None``).
     """
     if not isinstance(case_id, str):
         raise TypeError("ArmOutput.case_id must be a str")
@@ -226,8 +243,8 @@ def _checked_arm_fields(
         raise ValueError("ArmOutput.case_id must not be empty")
     if answer is not None and not isinstance(answer, str):
         raise TypeError("ArmOutput.answer must be a str or None")
-    if answer == "":
-        raise ValueError("ArmOutput.answer must not be empty; use None to abstain")
+    if answer is not None and not _carries_content(answer):
+        raise ValueError("ArmOutput.answer carries no content; use None to abstain")
     if not isinstance(citations, list | tuple):
         raise TypeError("ArmOutput.citations must be a list or tuple of str")
     try:

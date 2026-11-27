@@ -1266,6 +1266,15 @@ def test_candidate_valid_output_with_list_citations_still_scores_normally(env: E
 
 BAD_ARM_OUTPUTS = [
     pytest.param(dict(answer=""), ValueError, id="answer-empty"),
+    pytest.param(dict(answer="   "), ValueError, id="answer-spaces"),
+    pytest.param(dict(answer="\t"), ValueError, id="answer-tab"),
+    pytest.param(dict(answer="\n\r\n"), ValueError, id="answer-newline"),
+    pytest.param(dict(answer="\u00a0"), ValueError, id="answer-nbsp"),
+    pytest.param(dict(answer="\u2003\u3000"), ValueError, id="answer-unicode-spaces"),
+    pytest.param(dict(answer="\u200b"), ValueError, id="answer-zero-width-space"),
+    pytest.param(dict(answer="\u200d\u2060\ufeff"), ValueError, id="answer-zero-width-joiners"),
+    pytest.param(dict(answer=" \u200b\u00ad\t"), ValueError, id="answer-mixed-invisible"),
+    pytest.param(dict(answer="\u3164"), ValueError, id="answer-hangul-filler"),
     pytest.param(dict(case_id=1), TypeError, id="case-id-int"),
     pytest.param(dict(case_id=None), TypeError, id="case-id-none"),
     pytest.param(dict(case_id=""), ValueError, id="case-id-empty"),
@@ -1337,3 +1346,31 @@ def test_candidate_subclass_overriding_generate_cannot_skip_the_arm_output_check
     infer = Overriding(env.preflight, "training", job, candidate, env.reg)
     with pytest.raises(TypeError):
         env.replay(env.arm("candidate", infer.served_revision), infer)
+
+
+def test_absent_abstain_and_wrong_are_three_different_things(env: Env, monkeypatch) -> None:
+    """Absent (no content) is refused; None is an abstain; placeholder text is a wrong answer."""
+    for blank in ("", "  ", "\t", "\n", "\u00a0", "\u200b"):
+        env_b = Env(env.root / f"blank-{ord(blank[:1] or ' ')}-{len(blank)}")
+        infer_b = _serve(
+            env_b, monkeypatch, lambda rows, b=blank: ({**rows[0], "answer": b}, *rows[1:])
+        )
+        with refuses("output_shape_invalid"):
+            env_b.replay(env_b.arm("candidate", infer_b.served_revision), infer_b)
+
+    def first_row_verdict(name: str, edit: Any) -> tuple[rp.Verdict, bool]:
+        e = Env(env.root / name)
+        infer = _serve(e, monkeypatch, edit)
+        record = e.replay(e.arm("candidate", infer.served_revision), infer)
+        return record.rows[0].verdict, record.rows[0].answered
+
+    abstain = first_row_verdict(
+        "abstain",
+        lambda rows: ({**rows[0], "answer": None, "citations": [], "abstained": True}, *rows[1:]),
+    )
+    assert abstain == (rp.Verdict.INAPPROPRIATE_REFUSAL, False)
+    for n, placeholder in enumerate(("N/A", "none", "-", "unknown", "\u200bN/A")):
+        wrong = first_row_verdict(
+            f"wrong-{n}", lambda rows, p=placeholder: ({**rows[0], "answer": p}, *rows[1:])
+        )
+        assert wrong == (rp.Verdict.SERIOUS_ERROR, True)
