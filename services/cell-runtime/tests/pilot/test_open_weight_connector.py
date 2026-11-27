@@ -191,7 +191,8 @@ def test_interrupted_job_after_a_crash_is_failed_and_never_silently_re_run(
     pre = mc.Preflight(restarted, standard_grants(family.binding, intent))
     reconciled = pre.reconcile_fit(ACTOR, intent)
     assert reconciled.state is mc.JobState.FAILED
-    assert restarted.usage(reconciled) is not None
+    # Corrected by the OPE-507 hardening: a FAILED job's usage is unknown, never a settleable zero.
+    assert restarted.usage(reconciled) is None
     retry = pre.submit_reserved_fit(ACTOR, intent, toy.TRAIN, reservation_guard=CountingGuard())
     assert retry == reconciled
     assert len(list((state / "jobs").glob("*/journal.jsonl"))) == 1
@@ -259,9 +260,9 @@ def test_wall_clock_deadline_stops_the_worker_and_publishes_no_candidate(
     journal = next((state / "jobs").glob("*/journal.jsonl")).read_text()
     assert "DEADLINE_EXCEEDED" in journal
     assert not list((state / "jobs").glob("*/artifact"))
-    usage = connector.usage(receipt)
-    assert usage is not None and usage.source is UsageSource.MEASURED
-    assert usage.incurred_minor_units == 0 and usage.settleable
+    # Corrected by the OPE-507 hardening: the old assertion required a MEASURED (settleable) zero
+    # for a FAILED job, which contradicts the UsageReporting contract ("None means unknown").
+    assert connector.usage(receipt) is None
 
 
 def test_cancel_during_a_live_fit_publishes_nothing_and_blocks_collection(
@@ -662,3 +663,64 @@ def test_fence_never_reports_a_job_stopped_when_its_worker_still_holds_it(
         assert (connector.root / "FENCED").exists()
     finally:
         owner.release()
+
+
+# ---------------------------------------------------------------------------------------------
+# OPE-507 hardening: usage never reports a settleable zero for work whose usage is unknown.
+# ---------------------------------------------------------------------------------------------
+
+
+def test_usage_is_unknown_not_a_settleable_zero_for_failed_jobs(
+    family: toy.Family, tmp_path: Path
+) -> None:
+    state = tmp_path / "state"
+    ticks = iter(range(0, 10_000, 100))
+    connector = family.connector(state, slow=True)
+    connector.clock = lambda: float(next(ticks))
+    intent = family.intent("generated-failed-usage")
+    receipt = connector.submit(intent, connector.serialize_development(intent, toy.TRAIN))
+    assert receipt.state is mc.JobState.FAILED
+    assert connector.usage(receipt) is None
+
+
+def test_usage_is_unknown_not_a_settleable_zero_for_canceled_jobs(
+    family: toy.Family, tmp_path: Path
+) -> None:
+    state = tmp_path / "state"
+    connector = family.connector(state, slow=True)
+    intent = family.intent("generated-canceled-usage")
+    pre = mc.Preflight(connector, standard_grants(family.binding, intent))
+    thread = threading.Thread(
+        target=lambda: pre.submit_reserved_fit(
+            ACTOR, intent, toy.TRAIN, reservation_guard=CountingGuard()
+        )
+    )
+    thread.start()
+    live = None
+    deadline = time.monotonic() + 10
+    while live is None and time.monotonic() < deadline:
+        live = connector.lookup(intent)
+        time.sleep(0.02)
+    assert live is not None
+    canceled = connector.cancel(live)
+    thread.join(timeout=30)
+    assert canceled.state is mc.JobState.CANCELED
+    assert connector.usage(canceled) is None
+
+
+@pytest.mark.parametrize("field", ["seconds", "rows", "steps"])
+@pytest.mark.parametrize("bad", ["abc", None, -1, 1.5, True])
+def test_a_corrupt_completed_event_makes_usage_unknown_instead_of_raising(
+    family: toy.Family, tmp_path: Path, field: str, bad: object
+) -> None:
+    state = tmp_path / "state"
+    connector = family.connector(state)
+    _, _, receipt = dispatch(family, connector, "generated-corrupt-usage")
+    assert connector.usage(receipt) is not None
+    journal = next((state / "jobs").glob("*/journal.jsonl"))
+    events = [json.loads(line) for line in journal.read_text().splitlines()]
+    for event in events:
+        if event["event"] == "completed":
+            event[field] = bad
+    journal.write_text("".join(json.dumps(event) + "\n" for event in events))
+    assert connector.usage(receipt) is None
