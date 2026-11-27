@@ -50,7 +50,7 @@ the OPE-579 owner names one. This file does not satisfy that item.
 | tokenizers | 0.23.3 | |
 | huggingface-hub | 2.4.0 | Set to offline mode in the image. Network isolation is enforced by the operator. |
 | CUDA runtime wheels | `cuda-toolkit` 13.0.3.0, `nvidia-cuda-runtime` 13.0.96, `nvidia-cublas` 13.1.1.3, `nvidia-cudnn-cu13` 9.24.0.43, `nvidia-nccl-cu13` 2.30.7, `nvidia-nvjitlink` 13.0.88, `cuda-bindings` 13.0.3, `triton` 3.8.0 | Full set and hashes in `uv.lock` |
-| Base image | `nvidia/cuda:13.0.3-runtime-ubuntu24.04` linux/amd64 `sha256:1d66a0c2041af1dfff8a13072a2e8f0543bbdf7a44224c2c96fd9d6445fb7c9a` | Index `sha256:76f46f3e649824ebd3685d3d86c42b0ea62af04f59242f419f56cd5804a72efb`. Digests checked on 2026-11-27 against registry-1.docker.io and Docker Hub. Not verified: whether the image's CUDA libraries match the locked wheels. The independent review's registry read was rate-limited. Check this when the image is first built on OPE-565. |
+| Base image | `nvidia/cuda:13.0.3-base-ubuntu24.04` linux/amd64 `sha256:97d085a7423ee18ec483a2878b9be2c976dc4ba908aef96518beb00e1899dcc4` | Index `sha256:7c7413a56200486f71f181cad9310f6fd31b6bb21816ade15fc9c1e1e927a5c1`. Checked on 2026-11-27 against registry-1.docker.io: the index, manifest and config bytes re-hashed to their digests, and Docker Hub reports the same digests. Uses the `base` flavour, not `runtime`, so the image has no second cuBLAS or NCCL. Its config history adds only `cuda-cudart-13-0` 13.0.96 and `cuda-compat-13-0`. Which library copies actually load is unverified until qualification item 10 runs. |
 
 The lock uses `exclude-newer = 2026-11-16T00:00:00Z` so transitive pins re-resolve to the
 same set.
@@ -102,9 +102,14 @@ a recorded commit. Each run records:
    weights mounted read-only. The image cannot enforce this. Its offline variables only stop
    the Hub and package clients from trying to connect. The operator enforces
    `--network none`, and the record must show it.
-10. **Base image libraries.** Record the CUDA library versions in the built image (cudart,
-    cuBLAS, cuSPARSE, NVTX, NCCL) next to the locked wheel versions. Their match has not been
-    independently verified.
+10. **Loaded CUDA libraries.** During the fit and the replay, read `/proc/self/maps` in the
+    training process after the first CUDA operation. Record the resolved path and version of
+    each loaded `libcudart`, `libcublas` and `libnccl`. Each path must be under
+    `/opt/venv/lib/python3.12/site-packages/`, inside a locked `nvidia-*` wheel. A path under
+    `/usr/local/cuda` or `/usr/lib/x86_64-linux-gnu` fails qualification. Also record the
+    `libcuda` path the NVIDIA container toolkit injected and any `/usr/local/cuda/compat` path.
+    A compat path would mean CUDA forward compatibility was used, which this lock does not
+    support.
 
 ## Follow-ups for other owners
 

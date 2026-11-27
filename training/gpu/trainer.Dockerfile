@@ -17,21 +17,24 @@
 # OPE-565 host and is recorded separately. The OPE-558 trainer code is not in this image yet:
 # it lands after its exact-commit review (OPE-579 item 4).
 
-# NVIDIA CUDA 13.0.3 runtime, Ubuntu 24.04, linux/amd64 manifest. Verified 2026-11-27 against
-# registry-1.docker.io: tag 13.0.3-runtime-ubuntu24.04 -> index
-# sha256:76f46f3e649824ebd3685d3d86c42b0ea62af04f59242f419f56cd5804a72efb, whose linux/amd64
-# entry is the digest below. UNVERIFIED: that its CUDA user-mode library versions match the
-# locked cu13 wheels. One config read here suggested cudart/cublas/cusparse/nvtx match and its
-# NCCL (2.28.3) does not, but the independent review could not reproduce the read (registry rate
-# limit). Check it when the image is first built on the OPE-565 host. torch loads the wheel
-# libraries, not the base image's.
-ARG CUDA_RUNTIME_IMAGE=docker.io/nvidia/cuda:13.0.3-runtime-ubuntu24.04@sha256:1d66a0c2041af1dfff8a13072a2e8f0543bbdf7a44224c2c96fd9d6445fb7c9a
+# NVIDIA CUDA 13.0.3 *base*, Ubuntu 24.04, linux/amd64 manifest. Verified 2026-11-27 against
+# registry-1.docker.io: tag 13.0.3-base-ubuntu24.04 -> index
+# sha256:7c7413a56200486f71f181cad9310f6fd31b6bb21816ade15fc9c1e1e927a5c1 (sha256 of the bytes
+# served), whose linux/amd64 entry is the digest below (manifest bytes re-hashed to match).
+# The base flavour is used instead of runtime so that the image has no second CUDA stack: runtime
+# also installs cuda-libraries (cuBLAS, cuSPARSE, ...) and libnccl2 2.28.3 in a default linker
+# directory, which could shadow the locked wheels (NCCL 2.30.7) in a process that loads them
+# without torch. Per its config history, base adds only cuda-cudart-13-0 13.0.96 (the same
+# version as the locked nvidia-cuda-runtime wheel), cuda-compat-13-0, and an ld.so.conf entry
+# for /usr/local/cuda/lib64. Which copy of each library a process loads is recorded on the
+# OPE-565 host (README qualification item 10); it is not proven here.
+ARG CUDA_BASE_IMAGE=docker.io/nvidia/cuda:13.0.3-base-ubuntu24.04@sha256:97d085a7423ee18ec483a2878b9be2c976dc4ba908aef96518beb00e1899dcc4
 # Same uv build as tools/toolchain.json bootstrap_images.uv.
 ARG UV_IMAGE=ghcr.io/astral-sh/uv:0.13.8@sha256:5cc1805e2426484abca4ad46ea783bab281fdb225fd82d8ce6d66a81254bac85
 
 FROM ${UV_IMAGE} AS uv
 
-FROM ${CUDA_RUNTIME_IMAGE} AS build
+FROM ${CUDA_BASE_IMAGE} AS build
 COPY --from=uv /uv /usr/local/bin/uv
 # CPython 3.12.16 from tools/toolchain.json (python-build-standalone 20261110, Linux-x86_64).
 ADD --checksum=sha256:6a9e62dad033790aef722dbd370e0ce76ce17b73627ba3ae679f537049350b39 \
@@ -58,7 +61,7 @@ RUN uv export --locked --no-dev --no-emit-project --format requirements-txt \
  && uv pip check --python /opt/venv/bin/python \
  && rm /tmp/requirements.txt
 
-FROM ${CUDA_RUNTIME_IMAGE}
+FROM ${CUDA_BASE_IMAGE}
 COPY --from=build /opt/python /opt/python
 COPY --from=build /opt/venv /opt/venv
 RUN groupadd --gid 10001 trainer \
@@ -66,7 +69,11 @@ RUN groupadd --gid 10001 trainer \
       --shell /usr/sbin/nologin trainer
 # These variables only stop the Hub, package-index and telemetry clients from trying to connect.
 # They do not remove network access: the operator must enforce `--network none` at run time.
+# LD_LIBRARY_PATH keeps only the base image's /usr/local/nvidia/lib{,64} driver entries and drops
+# /usr/local/cuda/lib64, so the base cudart is not preferred over the wheels' through the
+# environment. (The ld.so.conf entry remains; item 10 records the path actually loaded.)
 ENV PATH="/opt/venv/bin:${PATH}" \
+    LD_LIBRARY_PATH=/usr/local/nvidia/lib:/usr/local/nvidia/lib64 \
     PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PYTHONNOUSERSITE=1 \
     HF_HOME=/home/trainer/.cache/huggingface \
     HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 HF_DATASETS_OFFLINE=1 \
