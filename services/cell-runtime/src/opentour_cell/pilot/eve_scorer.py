@@ -3,7 +3,9 @@
 ``eve_replay`` defines only the ``Scorer`` protocol and receives a scorer instance from its caller;
 it never imports this module, and ``tests/pilot/test_eve_import_boundary.py`` fails if it does.
 That boundary is structural only: whoever wires the run still hands this scorer and the answer key
-to the same process, so it is not a separate evaluator and produces no independent outcome.
+to the replay worker's process. This is therefore not the separate evaluator that OPE-528 defines
+(own identity, per-case predictions kept privately under its own custody); that scorer is a
+follow-up slice of OPE-573.
 
 ``DeterministicScorer`` is an exact-match stand-in for the evaluator, over generated sentinel data.
 Unverifiable claims never score as correct.

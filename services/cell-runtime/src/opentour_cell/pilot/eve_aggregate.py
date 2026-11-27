@@ -6,17 +6,17 @@ written separately from ``eve_replay``'s own aggregation. A result body edited a
 bug in ``eve_replay``'s aggregation all surface as named mismatches. It never trusts a total field:
 every total it compares is summed from rows.
 
-What it cannot do: check any verdict. Under the OPE-574 decision the evaluator retains no candidate
-outputs, and this module never sees an output or the answer key, so a verdict the scorer got wrong
-is summed exactly as faithfully as one it got right. Its output is labelled
-``aggregation re-derived from journaled verdicts`` and carries ``verdicts_rechecked: False``; no
-document, scorecard or Slack text built from it may word it as a re-score or as proof to anyone
-else.
+What it cannot do: check any verdict. It reads only the worker's redacted journal and never sees a
+candidate output or the answer key, so a verdict the scorer got wrong is summed exactly as
+faithfully as one it got right. Re-scoring is the separate evaluator's job (OPE-528), not this
+module's. Its output is labelled ``aggregation re-derived from journaled verdicts`` and carries
+``verdicts_rechecked: False``; no document, scorecard or Slack text built from it may word it as a
+re-score or as proof to anyone else.
 
 Readers reject, never accept, a row without scorer attribution, a row attributed to a scorer or
-rubric other than the one the manifest froze, and a row without a keyed commitment. The journal is
-unsigned until OPE-566 defines signing and key custody, so anyone able to rewrite the whole journal
-consistently can still pass this check.
+rubric other than the one the manifest froze, and a row without a keyed commitment. The worker
+journal is unsigned (no OPE-566 custody is applied to it here), so anyone able to rewrite the whole
+journal consistently can still pass this check.
 
 The replay worker never imports this module, and this module never imports the scorer
 (``tests/pilot/test_eve_import_boundary.py``).

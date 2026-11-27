@@ -12,19 +12,21 @@ scoring callback cannot change a settled scorecard. The versioned result carries
 onto the OPE-555 scorecard arm fields; a fix, a benchmark score and a release remain separate
 records.
 
-Retention (OPE-574, decided B + C): no candidate output is retained in cleartext. Each journaled
-verdict row instead carries the scorer and rubric that produced it and a keyed commitment over the
-exact output that was scored (HMAC-SHA256 under a per-run key, never a bare digest, because short
-answers are guessable by enumeration). Given an output presented later and the run key,
-``verify_output`` detects substitution. Nothing can re-score a verdict from the journal, so the
-honest claim for the scorecard is "aggregation re-derived from journaled verdicts" (see
-``eve_aggregate``), never independent recomputation. The scorer implementation lives in
-``eve_scorer`` and the aggregator in ``eve_aggregate``; this module imports neither.
+Worker journal (OPE-574, owner ruling A + C, following OPE-528): the replay journal stays
+redacted and holds no candidate output. Each journaled verdict row instead carries the scorer and
+rubric that produced it and a keyed commitment over the exact output that was scored (HMAC-SHA256
+under a per-run key, never a bare digest, because short answers are guessable by enumeration).
+Given an output presented later and the run key, ``verify_output`` detects substitution. Nothing in
+this module or in ``eve_aggregate`` re-scores a verdict; what they offer is "aggregation re-derived
+from journaled verdicts". Re-scoring belongs to the separate evaluator that OPE-528 defines, which
+replays under its own identity and keeps per-case predictions privately under its own custody; it
+is not built here. The scorer implementation lives in ``eve_scorer`` and the aggregator in
+``eve_aggregate``; this module imports neither.
 
 The run key lives in a ``CommitmentKeyStore`` file, never in the journal row it protects, and the
 worker refuses a key store in the journal's directory. This is the ``locally_keyed`` evidence rung:
 the same party holds the key and the record, so a commitment is tamper evidence for ourselves, not
-proof to a third party, and relocating the key does not change that (OPE-566 owns custody).
+proof to a third party, and relocating the key does not change that (custody is OPE-566's).
 
 Simulated: tests use generated sentinel cases and answers, a deterministic scorer, a deterministic
 inference double and an isolated trainer-transport double. Not proven: no real EVE inference, GPU,
@@ -613,8 +615,7 @@ class CommitmentKeyStore:
 
     Evidence rung ``locally_keyed``: the same party holds this file and the journal, so a
     commitment is tamper evidence for ourselves, not proof to a third party. Moving this file to
-    another disk or host does not change the rung; only the separated custody that OPE-566 is to
-    define would.
+    another disk or host does not change the rung; only separated custody under OPE-566 would.
     """
 
     def __init__(self, path: Path) -> None:
@@ -1075,8 +1076,8 @@ def build_result(
     The scorer self-check is run here, never accepted from the caller, and every arm must be the
     record the replay worker journaled for this manifest, so a hand-built arm cannot be scored.
     Every verdict row must be attributed to the scorer and rubric the manifest froze. Its
-    aggregation can be re-derived from the journal by ``eve_aggregate``; no verdict in it can be
-    re-scored, because no candidate output is retained.
+    aggregation can be re-derived from the journal by ``eve_aggregate``; nothing here re-scores a
+    verdict, because the worker journal holds no candidate output.
     """
     if not arms or any(k != r.spec.arm_id or k not in ARMS for k, r in arms.items()):
         raise EveRefusal("invalid_arm_spec")
