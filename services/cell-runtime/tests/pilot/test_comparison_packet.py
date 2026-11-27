@@ -12,6 +12,7 @@ they are not bound in the approved specification manifest.
 
 import copy
 import json
+import re
 import subprocess
 import sys
 import time
@@ -49,7 +50,7 @@ def rows(prefix, refs=("a", "a", "a", "a")):
     ]
 
 
-def enroll(store, development=None, protected=None):
+def enroll(store, development=None, protected=None, allowed_slices=None):
     dev = rows("dev") if development is None else development
     test = rows("protected") if protected is None else protected
     data = {
@@ -68,10 +69,10 @@ def enroll(store, development=None, protected=None):
         "training_expires_at": int(time.time()) + 7200,
         "expires_at": int(time.time()) + 7200,
         "allowed_features": ["category"],
-        "allowed_slices": ["critical", "rare"],
+        "allowed_slices": ["critical", "rare"] if allowed_slices is None else allowed_slices,
         "error_class": {"from_label": "b", "to_label": "a"},
         "split": {"method": "time", "after": 90},
-        "excluded_counts": {"late_feature": 1},
+        "excluded_counts": {"missing_outcome": 1},  # a real source_intake reason
         "development": dev,
         "protected": test,
     }
@@ -79,10 +80,21 @@ def enroll(store, development=None, protected=None):
 
 
 def compare(
-    root, *, protected=None, development=None, terms=None, mapping=None, model=None, measured=None
+    root,
+    *,
+    protected=None,
+    development=None,
+    terms=None,
+    mapping=None,
+    model=None,
+    measured=None,
+    incumbent=None,
+    allowed_slices=None,
 ):
     store = LocalTrainingStore(root / "training.sqlite3", "generated")
-    data = enroll(store, development=development, protected=protected)
+    data = enroll(
+        store, development=development, protected=protected, allowed_slices=allowed_slices
+    )
     terms = STRICT if terms is None else terms
     rule = declared_rule(
         feature="category", allowed_features=["category"], mapping=mapping or {"x": "a"}
@@ -100,7 +112,7 @@ def compare(
         audience="reviewer",
         intake_revision=data["intake_revision"],
         protected_ids=[r["case_id"] for r in data["protected"]],
-        incumbent_revision=digest("incumbent"),
+        incumbent_revision=digest("incumbent") if incumbent is None else incumbent,
         rule=rule,
         development_decision=dev,
         terms=terms,
@@ -1021,3 +1033,622 @@ def test_no_delivery_or_release_before_a_separately_authorized_human_decision(ru
     )
     assert out.packet["authority"]["release"] is False
     assert out.packet["next_action"] == "separate_human_decision_required"
+
+
+# ------------------------------------------- E7b: comparison free text (OPE-421 follow-up)
+
+# Generated sentinels only. Each stands in for a case, group, label or person reference that
+# must never reach a published packet or a refusal reason.
+SENTINELS = {
+    "reason": "case-77 sentinel-address-A1",
+    "fallback": "group-9",
+    "metric": "case-5",
+    "hold_reason": "case-123 label",
+}
+_PLAIN_HOLD = "insufficient"  # a hold: needs no receipt or verdict
+
+
+def tampered(comparison, field, value, *, arm="incumbent"):
+    """Reseal a copy of a comparison with one free-text field replaced."""
+    changed = copy.deepcopy(comparison)
+    if field in ("reason", "fallback"):
+        changed["decision"][field] = value
+    elif field == "metric":
+        changed["metric"] = value
+    else:
+        changed["arms"][arm]["hold_reason"] = value
+    return seal(changed)
+
+
+def live_bundle(comparison, tmp_path):
+    """A hold bundle on a LIVE store: the default flag off, as production constructs it."""
+    b = Bundle(comparison, tmp_path)
+    b.store = cp.PacketOutbox(tmp_path / "live.sqlite3")
+    assert b.store.allow_generated_fixture is False
+    b.receipt = b.verdict = None
+    return b
+
+
+def assert_no_leak(out, store):
+    assert out.status == "refused" and out.reason == "comparison_unverified", out
+    assert out.packet is None and out.event_id is None
+    assert empty(store), "a refusal must leave no packet, no event and no authority"
+    shown = json.dumps([out.reason, out.scoped_hold], sort_keys=True)
+    assert not any(s in shown for s in SENTINELS.values())
+
+
+@pytest.mark.parametrize("field", sorted(SENTINELS))
+def test_comparison_free_text_is_refused_on_the_live_hold_path(runs, tmp_path, field):
+    """E7b: a hold in a live store with the flag off needs no receipt; free text must not stage."""
+    base = runs[_PLAIN_HOLD]
+    assert base["decision"]["disposition"] == "hold"
+    b = live_bundle(tampered(base, field, SENTINELS[field]), tmp_path)
+    out = b.stage()
+    assert_no_leak(out, b.store)
+    assert b.dispatch() == [] and b.sink.calls == []
+
+
+@pytest.mark.parametrize("field", sorted(SENTINELS))
+def test_comparison_free_text_is_refused_on_the_staging_path(runs, tmp_path, field):
+    """E7b: with the fixture flag on, a resealed recommendation cannot carry free text either."""
+    b = Bundle(runs["winner"], tmp_path)
+    sealed = tampered(runs["winner"], field, SENTINELS[field])
+    out = b.stage(comparison=sealed, verdict=make_verdict(sealed, b.receipt, b.ctx))
+    assert_no_leak(out, b.store)
+
+
+def test_all_four_comparison_free_text_fields_together_are_refused_everywhere(runs, tmp_path):
+    """E7b: the reviewer's combined probe, on the live hold path and the fixture staging path."""
+    hold = runs[_PLAIN_HOLD]
+    for field in SENTINELS:
+        hold = tampered(hold, field, SENTINELS[field])
+    live = live_bundle(hold, tmp_path / "hold")
+    assert_no_leak(live.stage(), live.store)
+    rec = runs["winner"]
+    for field in SENTINELS:
+        rec = tampered(rec, field, SENTINELS[field])
+    b = Bundle(rec, tmp_path / "rec")
+    assert_no_leak(b.stage(verdict=make_verdict(rec, b.receipt, b.ctx)), b.store)
+
+
+def test_vocabulary_check_rejects_non_string_and_unhashable_values_without_raising(runs, tmp_path):
+    """E7b: the check must itself fail closed on any type, never raise."""
+    for value in (["case-1"], {"k": "case-1"}, 7, True, ""):
+        for field in SENTINELS:
+            b = live_bundle(tampered(runs[_PLAIN_HOLD], field, value), tmp_path / field)
+            out = b.stage()
+            assert out.status == "refused" and out.reason == "comparison_unverified"
+            assert empty(b.store)
+
+
+@pytest.mark.parametrize("name", ["missing_slice", "insufficient", "no_change", "zero_eligible"])
+def test_honest_holds_still_stage_in_a_live_store(runs, tmp_path, name):
+    """E7b: planner-emitted hold and no-change values stay inside the vocabulary (live store)."""
+    b = live_bundle(runs[name], tmp_path)
+    out = b.stage()
+    assert out.status == "staged", out
+    assert out.packet["kind"] == "hold"
+    assert b.dispatch() == [(out.event_id, "delivered")]
+    assert len(b.sink.effects) == 1
+
+
+@pytest.mark.parametrize("name", ["winner", "hand", "tie", "coverage_loss_model"])
+def test_honest_recommendations_still_stage_with_the_fixture_flag(runs, tmp_path, name):
+    """E7b: planner-emitted recommend values stay inside the vocabulary (fixture staging)."""
+    out = Bundle(runs[name], tmp_path).stage()
+    assert out.status == "staged" and out.packet["kind"] == "measured_improvement"
+
+
+def test_honest_recommendation_in_a_live_store_is_still_held_for_unverified_issuers(runs, tmp_path):
+    """E7b: unchanged behavior. Live improvement staging stays disabled; this change does not
+    re-enable it."""
+    b = Bundle(runs["winner"], tmp_path)
+    b.store = cp.PacketOutbox(tmp_path / "live.sqlite3")
+    refused(b, "audit_and_verdict_issuers_unverified")
+
+
+def test_every_value_the_planner_emitted_in_these_runs_is_inside_the_vocabularies(runs):
+    """E7b drift guard: a planner value missing from the closed sets would refuse honest work."""
+    for comparison in runs.values():
+        decision = comparison["decision"]
+        assert decision["reason"] in cp._DECISION_REASONS
+        assert decision["fallback"] in cp._FALLBACKS
+        assert comparison.get("metric") in cp._METRICS
+        for arm in comparison["arms"].values():
+            assert arm["hold_reason"] in cp._HOLD_REASONS
+
+
+# ---------- E8: the fixture flag is refused while PYTEST_CURRENT_TEST is unset (accident guard)
+
+
+def test_fixture_flag_works_in_fixture_context(runs, tmp_path):
+    """E8: under the test runner the flag is honored (every staging test relies on it)."""
+    assert cp._fixture_context() is True
+    assert Bundle(runs["winner"], tmp_path).stage().status == "staged"
+
+
+def test_live_store_refuses_the_fixture_flag_loudly(tmp_path, monkeypatch):
+    """E8: with PYTEST_CURRENT_TEST unset, a PacketOutbox cannot be built with the flag."""
+    monkeypatch.delenv("PYTEST_CURRENT_TEST")
+    assert cp._fixture_context() is False
+    path = tmp_path / "live.sqlite3"
+    with pytest.raises(cp.PacketStoreError) as caught:
+        cp.PacketOutbox(path, allow_generated_fixture=True)
+    assert str(caught.value) == "generated_fixture_not_permitted_in_live_context"
+    assert not path.exists(), "a refused construction must not create a store"
+
+
+def test_live_assemble_and_verify_refuse_the_fixture_flag(runs, tmp_path, monkeypatch):
+    """E8: the function kwarg is gated too, with a closed code and without raising."""
+    b = Bundle(runs["winner"], tmp_path)
+    packet = b.stage().packet
+    monkeypatch.delenv("PYTEST_CURRENT_TEST")
+    args = (b.comparison, b.receipt, b.verdict, b.ctx)
+    assert cp.assemble_packet(*args, allow_generated_fixture=True) == (
+        None,
+        "generated_fixture_not_permitted_in_live_context",
+    )
+    assert cp.verify_packet(packet, *args, allow_generated_fixture=True) is False
+
+
+def test_live_context_without_the_flag_is_unchanged(runs, tmp_path, monkeypatch):
+    """E8: live holds still stage; a live recommendation is still held for unverified issuers."""
+    monkeypatch.delenv("PYTEST_CURRENT_TEST")
+    store = cp.PacketOutbox(tmp_path / "live.sqlite3")
+    held = runs["insufficient"]
+    hctx = context(held)
+    out = store.stage(held, None, None, authority=Authority(hctx), run_ref=hctx.run_ref, now=NOW)
+    assert out.status == "staged" and out.packet["kind"] == "hold"
+    win = runs["winner"]
+    wctx = context(win)
+    receipt = make_receipt()
+    out = store.stage(
+        win,
+        receipt,
+        make_verdict(win, receipt, wctx),
+        authority=Authority(wctx),
+        run_ref=wctx.run_ref,
+        now=NOW,
+    )
+    assert out.status == "refused" and out.reason == "audit_and_verdict_issuers_unverified"
+
+
+# ------------- E9: receipt/verdict on holds, more closed fields, honest-output positives, drift
+
+RECEIPT_SENTINEL = "case-91 sentinel-receipt"
+VERDICT_SENTINEL = "group-31 sentinel-verdict"
+
+
+def _leaks(out, *needles):
+    shown = json.dumps([out.reason, out.scoped_hold, out.packet], sort_keys=True, default=str)
+    return [n for n in needles if n in shown]
+
+
+def _bad_receipt(field):
+    receipt = make_receipt()
+    if field == "verdict":
+        return make_receipt(verdict=RECEIPT_SENTINEL)
+    receipt[field] = RECEIPT_SENTINEL
+    return receipt
+
+
+@pytest.mark.parametrize("field", ["receipt_id", "receipt_digest", "verdict"])
+def test_hold_refuses_a_receipt_with_free_text_in_a_live_store(runs, tmp_path, field):
+    """E9: the hold path copies receipt fields into the packet, so it must validate them."""
+    b = live_bundle(runs[_PLAIN_HOLD], tmp_path)
+    out = b.stage(receipt=_bad_receipt(field), verdict=None)
+    assert out.status == "refused" and out.reason == "audit_receipt_unverified", out
+    assert out.packet is None and not _leaks(out, RECEIPT_SENTINEL)
+    assert empty(b.store) and b.dispatch() == []
+
+
+def test_hold_refuses_a_verdict_with_free_text_in_a_live_store(runs, tmp_path):
+    """E9: same, for the independent verdict digest."""
+    b = live_bundle(runs[_PLAIN_HOLD], tmp_path)
+    receipt = make_receipt()
+    verdict = make_verdict(b.comparison, receipt, b.ctx)
+    verdict["verdict_digest"] = VERDICT_SENTINEL
+    out = b.stage(receipt=receipt, verdict=verdict)
+    assert out.status == "refused" and out.reason == "independent_verdict_unverified", out
+    assert out.packet is None and not _leaks(out, VERDICT_SENTINEL)
+    assert empty(b.store) and b.dispatch() == []
+
+
+def test_hold_with_an_honest_receipt_and_verdict_still_stages_in_a_live_store(runs, tmp_path):
+    """E9 positive: validated documents are carried as pointers on a hold."""
+    base = runs[_PLAIN_HOLD]
+    b = live_bundle(base, tmp_path)
+    receipt = make_receipt()
+    verdict = make_verdict(base, receipt, b.ctx)
+    out = b.stage(receipt=receipt, verdict=verdict)
+    assert out.status == "staged" and out.packet["kind"] == "hold", out
+    assert out.packet["audit"]["receipt_digest"] == receipt["receipt_digest"]
+    assert out.packet["audit"]["independent_verdict_digest"] == verdict["verdict_digest"]
+
+
+SENT = "case-55 sentinel"
+
+
+def _set(path, value):
+    def apply(c):
+        node = c
+        for key in path[:-1]:
+            node = node[key]
+        node[path[-1]] = value
+
+    return apply
+
+
+def _slice_name(c):
+    c["arms"]["incumbent"]["critical_slices"][SENT] = {"status": "met"}
+
+
+def _exclusion_key(c):
+    c["exclusions"] = {SENT: 1}
+
+
+NEWLY_CLOSED = {
+    "cost_cap": _set(("arms", "incumbent", "metrics", "economics", "cost_cap"), SENT),
+    "latency_cap": _set(("arms", "incumbent", "metrics", "economics", "latency_cap"), SENT),
+    "combined": _set(("arms", "incumbent", "metrics", "operating_point", "combined"), SENT),
+    "cost_per_1000": _set(("arms", "incumbent", "metrics", "economics", "cost_per_1000"), SENT),
+    "uncertainty_lower": _set(("arms", "incumbent", "metrics", "uncertainty", "lower"), SENT),
+    "uncertainty_small_sample": _set(
+        ("arms", "incumbent", "metrics", "uncertainty", "small_sample"), SENT
+    ),
+    "coverage_numerator": _set(("arms", "incumbent", "metrics", "coverage", "numerator"), SENT),
+    "slice_name": _slice_name,
+    "exclusion_key": _exclusion_key,
+    "exclusion_count_string": _set(("exclusions",), {"missing_outcome": SENT}),
+    "exclusion_count_negative": _set(("exclusions",), {"missing_outcome": -1}),
+}
+
+
+def mutated(comparison, name):
+    changed = copy.deepcopy(comparison)
+    NEWLY_CLOSED[name](changed)
+    return seal(changed)
+
+
+@pytest.mark.parametrize("name", sorted(NEWLY_CLOSED))
+def test_newly_closed_fields_are_refused_on_the_live_hold_path(runs, tmp_path, name):
+    """E9: every further copied field is closed, and none raises or echoes its value."""
+    b = live_bundle(mutated(runs[_PLAIN_HOLD], name), tmp_path)
+    out = b.stage()  # must not raise, in particular on a string exclusion count
+    assert out.status == "refused" and out.reason == "comparison_unverified", out
+    assert not _leaks(out, SENT) and empty(b.store)
+
+
+@pytest.mark.parametrize("name", sorted(NEWLY_CLOSED))
+def test_newly_closed_fields_are_refused_on_the_staging_path(runs, tmp_path, name):
+    """E9: and on the fixture staging path."""
+    b = Bundle(runs["winner"], tmp_path)
+    sealed = mutated(runs["winner"], name)
+    out = b.stage(comparison=sealed, verdict=make_verdict(sealed, b.receipt, b.ctx))
+    assert out.status == "refused" and out.reason == "comparison_unverified", out
+    assert not _leaks(out, SENT) and empty(b.store)
+
+
+def test_string_exclusion_count_returns_a_code_instead_of_raising(runs, tmp_path):
+    """E9: the sum behind immature_outcome_data used to raise TypeError on a string count."""
+    sealed = mutated(runs[_PLAIN_HOLD], "exclusion_count_string")
+    ctx = context(sealed)
+    assert cp.assemble_packet(sealed, None, None, ctx) == (None, "comparison_unverified")
+
+
+def test_honest_abstain_heavy_run_still_stages(tmp_path):
+    """E9 positive: a model that abstains on half the cases yields a different_automatic_cases
+    pair (readout.py) and an honest recommend/simple must still stage."""
+    dev = rows("dev")
+    for r in dev:
+        r["features"]["category"] = "uncorrected"
+    hidden = rows("hidden")
+    for r in hidden[:2]:
+        r["features"]["category"] = "uncorrected"
+    predicted = {r["case_id"]: auto("a") for r in hidden}
+    for r in hidden[:2]:
+        predicted[r["case_id"]] = {"status": "review"}
+    comparison = compare(
+        tmp_path,
+        development=dev,
+        protected=hidden,
+        terms={"minimum_coverage_bps": 10000, "error_ceiling_bps": 5000},
+        mapping={"x": "a", "uncorrected": "b"},
+        model=predicted,
+    )[0]
+    observed = {p["observed_comparison"] for p in comparison["comparisons"].values()}
+    assert "different_automatic_cases" in observed, observed
+    assert comparison["decision"]["disposition"] == "recommend"
+    out = Bundle(comparison, tmp_path / "stage").stage()
+    assert out.status == "staged" and out.packet["kind"] == "measured_improvement", out
+
+
+@pytest.mark.parametrize("name", ["insufficient", "no_change"])
+def test_honest_hold_with_a_non_hex_incumbent_revision_still_stages(tmp_path, name):
+    """E9 positive: freeze_plan only requires an identifier for incumbent_revision."""
+    if name == "insufficient":
+        comparison = compare(
+            tmp_path,
+            terms={**STRICT, "minimum_verified_cases": 50},
+            incumbent="incumbent-v1",
+        )[0]
+    else:
+        neutral, neutral_dev = rows("protected"), rows("dev")
+        for r in neutral + neutral_dev:
+            r["incumbent"] = auto("a")
+        comparison = compare(
+            tmp_path, development=neutral_dev, protected=neutral, incumbent="incumbent-v1"
+        )[0]
+    assert comparison["arms"]["incumbent"]["revision"] == "incumbent-v1"
+    b = live_bundle(comparison, tmp_path / "live")
+    b.ctx = context(comparison, fallback_digest=digest("generated-fallback"))
+    b.authority = Authority(b.ctx)
+    out = b.stage()
+    assert out.status == "staged" and out.packet["kind"] == "hold", out
+
+
+# ---- drift guard: derive what the planner can emit from its source, not from the fixtures
+
+import ast  # noqa: E402
+from pathlib import Path  # noqa: E402
+
+_PILOT = Path(cp.__file__).parent
+
+
+def _tree(name):
+    return ast.parse((_PILOT / name).read_text())
+
+
+def _function(tree, name):
+    return next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == name)
+
+
+def _strings(node):
+    return {
+        n.value for n in ast.walk(node) if isinstance(n, ast.Constant) and isinstance(n.value, str)
+    }
+
+
+def _branches(node):
+    """String literals a value can evaluate to: a constant, or either arm of a conditional."""
+    if isinstance(node, ast.Constant):
+        return {node.value} if isinstance(node.value, str) else set()
+    if isinstance(node, ast.IfExp):
+        return _branches(node.body) | _branches(node.orelse)
+    return set()
+
+
+def _assigned(function, target):
+    found = set()
+    for node in ast.walk(function):
+        if isinstance(node, ast.Assign) and any(
+            isinstance(t, ast.Name) and t.id == target for t in node.targets
+        ):
+            found |= _branches(node.value)
+    return found
+
+
+def slice_names_validated(tree):
+    """True only if ``_terms`` calls ``identifier()`` inside the loop over critical_slices and
+    material_slices. A call elsewhere in ``_terms`` (for example on ``metric``) does not count."""
+    for loop in ast.walk(_function(tree, "_terms")):
+        if not isinstance(loop, ast.For) or not isinstance(loop.iter, (ast.Tuple, ast.List)):
+            continue
+        names = {e.value for e in loop.iter.elts if isinstance(e, ast.Constant)}
+        if {"critical_slices", "material_slices"} <= names:
+            return any(
+                isinstance(n, ast.Call)
+                and isinstance(n.func, ast.Name)
+                and n.func.id == "identifier"
+                for n in ast.walk(loop)
+            )
+    return False
+
+
+def planner_emitted():
+    """Every closed-vocabulary value the planner and readout can emit, read from source.
+
+    Known blind spots, recorded rather than fixed: only string LITERALS (and either arm of a
+    conditional) are seen, so values built from non-literal expressions are invisible. It does
+    not derive slice statuses, economics basis, uncertainty method, winners, dispositions or the
+    metric; those vocabularies are maintained by hand and covered only by the fixture runs.
+    Slice-name shape is derived from the planner's identifier rule below.
+
+    Do not delete ``test_drift_guard_fails_when_the_slice_shape_drifts_from_the_planner``: it is
+    the real protection for the slice shape, because it asserts ``slice_shape == {pattern}``.
+    If ``simple_repair.identifier`` stopped using ``fullmatch`` the derived shape set would be
+    empty, and the first guard test could pass vacuously (an empty set has no gap); the second
+    test fails by equality. The first test also asserts the set is non-empty, as a cheap
+    backstop, but the second remains the real protection.
+    """
+    readout = _function(_tree("readout.py"), "evaluate_manifest")
+    checks = _function(_tree("comparison_plan.py"), "_checks")
+    pick = _function(_tree("comparison_plan.py"), "_pick")
+    develop = _function(_tree("simple_repair.py"), "assess_development")
+    arm = _function(_tree("operating_point.py"), "_arm")
+    econ = _function(_tree("pilot_metrics.py"), "economics")
+    intake = _tree("source_intake.py")
+    reason = _function(intake, "_reason")
+    partition = _function(intake, "_partition")
+
+    holds = set()
+    for n in ast.walk(checks):
+        if isinstance(n, ast.Return) and n.value is not None:
+            holds |= _branches(n.value)
+    outcomes, appended = set(), set()
+    for n in ast.walk(pick):
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == "outcome":
+            outcomes |= _strings(n.args[2])
+        if (
+            isinstance(n, ast.Call)
+            and isinstance(n.func, ast.Attribute)
+            and n.func.attr == "append"
+            and n.args
+            and isinstance(n.args[0], ast.Constant)
+        ):
+            appended.add(n.args[0].value)
+    development_holds = set()
+    for n in ast.walk(develop):
+        if (
+            isinstance(n, ast.Assign)
+            and isinstance(n.targets[0], ast.Tuple)
+            and isinstance(n.value, ast.Tuple)
+            and len(n.value.elts) == 2
+            and all(isinstance(e, ast.Constant) for e in n.value.elts)
+            and n.value.elts[0].value == "hold"
+        ):
+            development_holds.add(n.value.elts[1].value)
+    exclusions = set()
+    for n in ast.walk(reason):
+        if isinstance(n, ast.Return) and n.value is not None:
+            exclusions |= _branches(n.value)
+    for n in ast.walk(intake):
+        if isinstance(n, ast.Assign) and any(
+            isinstance(t, ast.Name) and t.id == "reason" for t in n.targets
+        ):
+            exclusions |= _branches(n.value)
+    for n in ast.walk(partition):
+        if isinstance(n, ast.Assign) and isinstance(n.value, ast.Constant):
+            if isinstance(n.value.value, str):
+                exclusions.add(n.value.value)
+        if (
+            isinstance(n, ast.Call)
+            and isinstance(n.func, ast.Attribute)
+            and n.func.attr == "update"
+        ):
+            exclusions |= _strings(n) - {"case_id"}
+    exclusions.discard("")
+    identifier = _function(_tree("simple_repair.py"), "identifier")
+    shapes = {
+        n.args[0].value
+        for n in ast.walk(identifier)
+        if isinstance(n, ast.Call)
+        and isinstance(n.func, ast.Attribute)
+        and n.func.attr == "fullmatch"
+        and isinstance(n.args[0], ast.Constant)
+    }
+    validated = slice_names_validated(_tree("comparison_plan.py"))
+    return {
+        "slice_shape": shapes if validated else {"<planner no longer validates slice names>"},
+        "observed": _assigned(readout, "comparison") | {"improved"},
+        "hold_reasons": holds,
+        "decision_reasons": outcomes | appended | holds | development_holds,
+        "combined": _assigned(arm, "combined"),
+        "caps": _assigned(econ, "cost_cap") | _assigned(econ, "latency_cap"),
+        "exclusions": exclusions,
+    }
+
+
+def vocabulary_gaps(emitted):
+    """Values the planner can emit that a closed vocabulary would falsely refuse."""
+    observed_reasons = {o for o in emitted["observed"] if o not in ("improved", "equivalent")}
+    return {
+        "observed": set(emitted["observed"]) - set(cp._OBSERVED),
+        "hold_reasons": set(emitted["hold_reasons"]) - set(cp._HOLD_REASONS),
+        "decision_reasons": (set(emitted["decision_reasons"]) | observed_reasons)
+        - set(cp._DECISION_REASONS),
+        "combined": set(emitted["combined"]) - set(cp._COMBINED),
+        "caps": set(emitted["caps"]) - set(cp._CAPS),
+        "exclusions": set(emitted["exclusions"]) - set(cp._EXCLUSION_KEYS),
+        "slice_shape": set(emitted["slice_shape"]) - {cp._SLICE_NAME.pattern},
+    }
+
+
+def test_drift_guard_reads_the_planner_source_not_the_fixtures():
+    """E9: every planner-emitted value is inside the vocabularies, and the guard sees the
+    values that escaped before (readout.py's different_automatic_cases)."""
+    emitted = planner_emitted()
+    assert emitted["slice_shape"], "an empty slice shape would make the gap check vacuous"
+    assert "different_automatic_cases" in emitted["observed"]
+    assert "operating_point_missed_or_undetermined" in emitted["hold_reasons"]
+    assert "recurring_residual_requires_model_and_compute_rights" in emitted["decision_reasons"]
+    assert "group_crosses_split" in emitted["exclusions"]
+    assert vocabulary_gaps(emitted) == {k: set() for k in emitted}
+
+
+def test_drift_guard_fails_when_a_planner_value_is_absent_from_a_vocabulary(monkeypatch):
+    """E9: demonstrate the guard has teeth by removing values and watching it report them."""
+    emitted = planner_emitted()
+    short = tuple(v for v in cp._OBSERVED if v != "different_automatic_cases")
+    monkeypatch.setattr(cp, "_OBSERVED", short)
+    monkeypatch.setattr(
+        cp,
+        "_DECISION_REASONS",
+        tuple(v for v in cp._DECISION_REASONS if v != "different_automatic_cases"),
+    )
+    monkeypatch.setattr(
+        cp, "_EXCLUSION_KEYS", tuple(v for v in cp._EXCLUSION_KEYS if v != "reused_outcome")
+    )
+    gaps = vocabulary_gaps(emitted)
+    assert gaps["observed"] == {"different_automatic_cases"}
+    assert gaps["decision_reasons"] == {"different_automatic_cases"}
+    assert gaps["exclusions"] == {"reused_outcome"}
+
+
+def test_drift_guard_fails_when_the_slice_shape_drifts_from_the_planner(monkeypatch):
+    """E10: the guard that was missing. The old lowercase-only filter is reported as drift."""
+    emitted = planner_emitted()
+    assert emitted["slice_shape"] == {cp._SLICE_NAME.pattern}
+    monkeypatch.setattr(cp, "_SLICE_NAME", re.compile(r"[a-z]+(?:_[a-z]+)*"))
+    assert vocabulary_gaps(emitted)["slice_shape"] == emitted["slice_shape"]
+
+
+@pytest.mark.parametrize(
+    "name", ["slice1", "vip-accounts", "Tier1", "bucket:x", "enterprise.eu", "john_smith_9"]
+)
+def test_real_run_with_a_planner_legal_slice_name_still_stages(tmp_path, name):
+    """E10 positive: a real comparison_plan run whose critical slice is a legal identifier."""
+    dev, protected = rows("dev"), rows("protected")
+    for r in dev + protected:
+        r["slices"] = [name]
+    comparison = compare(
+        tmp_path,
+        development=dev,
+        protected=protected,
+        terms={**STRICT, "critical_slices": [name]},
+        allowed_slices=[name],
+    )[0]
+    assert comparison["decision"]["disposition"] == "recommend", comparison["decision"]
+    assert set(comparison["arms"]["simple"]["critical_slices"]) == {name}
+    out = Bundle(comparison, tmp_path / "stage").stage()
+    assert out.status == "staged" and out.packet["kind"] == "measured_improvement", out
+    assert set(out.packet["arms"]["simple"]["critical_slices"]) == {name}
+    # Not a disclosure control: the name is published as-is until OPE-571.
+
+
+def test_drift_guard_fails_when_only_the_slice_identifier_call_is_removed():
+    """E10: removing just the critical_slices identifier() call must be reported, even though
+    identifier() is still called on ``metric`` elsewhere in ``_terms``."""
+    source = (_PILOT / "comparison_plan.py").read_text()
+    assert slice_names_validated(ast.parse(source)) is True
+    needle = "len({identifier(v) for v in items}) != len(items)"
+    assert source.count(needle) == 1, "planner source changed; update this mutation"
+    mutated_source = source.replace(needle, "len({v for v in items}) != len(items)")
+    assert 'identifier(value["metric"])' in mutated_source  # the unrelated call survives
+    assert slice_names_validated(ast.parse(mutated_source)) is False
+
+
+def test_drift_guard_itself_reports_drift_when_only_the_slice_identifier_call_is_removed(
+    monkeypatch,
+):
+    """E10: the guard end to end, not only its helper. ``planner_emitted`` and
+    ``vocabulary_gaps`` run on a planner source with just the slice ``identifier()`` call
+    removed, so a guard that stopped using ``slice_names_validated`` (for example by going
+    back to "any ``identifier()`` anywhere in ``_terms``") is caught here."""
+    assert vocabulary_gaps(planner_emitted())["slice_shape"] == set()  # unmutated: no drift
+    source = (_PILOT / "comparison_plan.py").read_text()
+    needle = "len({identifier(v) for v in items}) != len(items)"
+    assert source.count(needle) == 1, "planner source changed; update this mutation"
+    mutated = ast.parse(source.replace(needle, "len({v for v in items}) != len(items)"))
+    real_tree = _tree
+    monkeypatch.setitem(
+        globals(),
+        "_tree",
+        lambda name: mutated if name == "comparison_plan.py" else real_tree(name),
+    )
+    emitted = planner_emitted()
+    gaps = vocabulary_gaps(emitted)
+    assert gaps["slice_shape"] == {"<planner no longer validates slice names>"}
+    assert {k: v for k, v in gaps.items() if k != "slice_shape"} == {
+        k: set() for k in gaps if k != "slice_shape"
+    }  # only the slice check drifted; the planner's other vocabularies are unchanged

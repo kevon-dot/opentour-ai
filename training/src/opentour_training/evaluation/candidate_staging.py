@@ -12,10 +12,11 @@ A candidate stages only when every gate holds affirmatively:
   BOTH controls, exceeds the preregistered threshold (``independent_family_interval``,
   family = sampling unit). A positive point estimate is never enough, a tie favors the simpler
   repair, and the numbers make no significance claim beyond "this preregistered rule cleared";
-* independent verdict: every arm has a current, authenticated, issued verdict from an authority
-  that is neither the candidate's producer nor its selector, bound to the frozen manifest,
-  the arm's result digest and its serving identity. Model text and a pending request grant
-  nothing.
+* independent verdict: every arm has a current, issued verdict from an issuer that is neither
+  the candidate's producer nor its selector, bound to the frozen manifest, the arm's result
+  digest and its serving identity, and attested by the injected ``VerdictAuthority`` (see
+  below). The ceiling is "authority-attested if the injected authority is real"; a packet's own
+  flag is never evidence. Model text and a pending request grant nothing.
 
 The trust root is NOT in the packet. Verdict and confirmation authenticity is decided by an
 injected ``VerdictAuthority`` (the OPE-528/OPE-421/OPE-418 boundary, none implemented yet): a
@@ -46,6 +47,7 @@ import hmac
 import json
 import math
 import os
+import re
 import tempfile
 import threading
 import unicodedata
@@ -247,6 +249,8 @@ def verdict_body(v: IndependentVerdict) -> dict[str, Any]:
         "status": v.status,
         "outcome": v.outcome,
         "issued_seq": v.issued_seq,
+        "issuer_authenticated": v.issuer_authenticated,
+        "superseded_by": v.superseded_by,
     }
 
 
@@ -269,13 +273,21 @@ class FreshConfirmation:
     selection_digest: str
     manifest_digest: str
     attestation: str = ""
+    # Binding to the exact candidate and arm confirmed; empty never matches a real candidate.
+    candidate_id: str = ""
+    identity_digest: str = ""
+    arm_id: str = ""
 
 
 def confirmation_body(c: FreshConfirmation) -> dict[str, Any]:
     return {
         "actor_id": c.actor_id,
+        "authenticated": c.authenticated,
         "selection_digest": c.selection_digest,
         "manifest_digest": c.manifest_digest,
+        "candidate_id": c.candidate_id,
+        "identity_digest": c.identity_digest,
+        "arm_id": c.arm_id,
     }
 
 
@@ -324,7 +336,22 @@ def identity_key(value: str) -> str:
     )
 
 
+# Ids in this system are generated machine identifiers (e.g. ``generated-verifier-tuned``,
+# ``simulated:verdict-1``). Anything outside this small ASCII allowlist is not a well-formed id,
+# and a denylist of invisible, blank, combining and look-alike code points cannot be complete.
+_ACTOR_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/@-]{0,127}")
+
+
 def _same_actor(actor: str, *others: str) -> bool:
+    """True when ``actor`` is, or cannot be told apart from, any of ``others``.
+
+    Fails closed: an id (the actor or any compared id) outside the printable-ASCII allowlist is
+    never trusted to be distinct, so it counts as the same actor. That can only cause a false
+    self-issue refusal, never admit a self-issued verdict. ``identity_key`` still collapses case,
+    whitespace and compatibility forms for ids that are well formed.
+    """
+    if not all(_ACTOR_ID_PATTERN.fullmatch(i) for i in (actor, *others)):
+        return True
     key = identity_key(actor)
     return not key or any(key == identity_key(other) for other in others)
 
@@ -625,6 +652,10 @@ def evaluate(packet: StagingPacket, authority: VerdictAuthority | None = None) -
             or not fresh.authenticated
             or fresh.selection_digest != cand.selection_digest
             or fresh.manifest_digest != bench.digest
+            or not cand.candidate_id
+            or fresh.candidate_id != cand.candidate_id
+            or fresh.identity_digest != cand.identity_digest
+            or fresh.arm_id != TUNED
             or _same_actor(fresh.actor_id, cand.producer_id, cand.selector_id)
             or authority is None
             or not authority.verify_confirmation(fresh)

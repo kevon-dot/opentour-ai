@@ -16,7 +16,7 @@ from opentour_cell.pilot.live_authority import SCHEMA, SELECTION_SCHEMA, Private
 from opentour_cell.pilot.live_evidence import LiveEvidence, _canonical
 from opentour_cell.pilot.starter_evaluation_worker import main as evaluate
 from test_intake_mcp import _write_private
-from test_live_authority import KEY
+from test_live_authority import KEY, enroll_ledger
 from test_live_evidence import DECISION, decision
 from test_live_identity_supersession import _calls, _read
 from test_live_reader import Export
@@ -95,8 +95,10 @@ def test_scored_starter_and_two_decision_revisions(publication, installed, monke
         expires_at=int(time.time()) + 600,
         state="current",
         actors={ACTOR: ["custodian", "inspect"], cap["reader"]: ["intake"]},
+        engagement_ledger_required=True,
     )
     _write_private(directory / "live-authority-key.json", {"key": KEY.hex()})
+    enroll_ledger(directory, tenant, cap["epoch"], (DECISION,))
     selection = directory / "decision-intake.json"
     _write_private(
         selection,
