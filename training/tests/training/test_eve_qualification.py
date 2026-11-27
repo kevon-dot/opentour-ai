@@ -4,14 +4,18 @@ The only "witness" below is a simulated verifier double and is never a real atte
 
 from __future__ import annotations
 
+import ast
 import dataclasses
 import hashlib
 import json
+import time
 from pathlib import Path
 
+import opentour_training.training.eve_qualification as eve
 import pytest
 from opentour_training.training.eve_qualification import (
     REQUIRED_CAPABILITIES,
+    ROUTES,
     AdmissionRefused,
     BackendDescriptor,
     CheckpointDescriptor,
@@ -22,12 +26,27 @@ from opentour_training.training.eve_qualification import (
     Witness,
     admit_fit,
     digest,
-    qualify,
     serialization_dry_run,
     verify_record,
 )
+from opentour_training.training.eve_qualification import qualify as _qualify
 
 TRUSTED = frozenset({"simulated:verifier"})
+
+
+# Time is injected, never read from the wall clock: every expiry below is relative to NOW.
+NOW = 100
+LIFETIME = 3600
+EXPIRES = NOW + LIFETIME
+
+
+def qualify(
+    req: QualificationRequest,
+    verifier: object = None,
+    *,
+    clock: object = lambda: NOW,
+) -> dict[str, object]:
+    return _qualify(req, verifier, clock=clock)  # type: ignore[arg-type,return-value]
 
 
 def dg(label: str) -> str:
@@ -37,13 +56,21 @@ def dg(label: str) -> str:
 class SimulatedVerifier:
     """Test double. A real verifier would be an external provider or customer attestation."""
 
-    def __init__(self, tier: str = "installed-provider", verifier_id: str = "simulated:verifier"):
+    def __init__(
+        self,
+        tier: str = "installed-provider",
+        verifier_id: str = "simulated:verifier",
+        *,
+        expires_at: int = EXPIRES,
+        witness_ref: str = "simulated:witness-ref",
+    ):
         self.tier, self.verifier_id = tier, verifier_id
+        self.expires_at, self.witness_ref = expires_at, witness_ref
 
     def verify(
         self, checkpoint_digest: str, backend_digest: str, scope: str
     ) -> Witness | None:
-        return Witness(self.verifier_id, "simulated:witness-ref", self.tier, 2_000_000_000, scope)
+        return Witness(self.verifier_id, self.witness_ref, self.tier, self.expires_at, scope)
 
 
 def checkpoint(**changes: object) -> CheckpointDescriptor:
@@ -494,7 +521,7 @@ def test_shared_connector_route_values(route: str) -> None:
 
 def test_readiness_requires_an_unexpired_current_witness(tmp_path: Path) -> None:
     reg, d = qualified(tmp_path)
-    assert refusal(reg, d, clock=lambda: 2_000_000_000) == "qualification_expired"
+    assert refusal(reg, d, clock=lambda: EXPIRES) == "qualification_expired"
     assert refusal(reg, d, verifier=None) == "witness_verifier_unavailable"
     assert refusal(reg, d, verifier=SimulatedVerifier(verifier_id="foreign")) == (
         "witness_not_current"
@@ -520,3 +547,125 @@ def test_public_witness_cannot_qualify_or_admit_customer_scope(tmp_path: Path) -
     assert qualify(request(), verifier)["body"]["state"] == "software_checked_unwitnessed"
     journal, d = qualified(tmp_path)
     assert refusal(journal, d, verifier=verifier) == "witness_not_current"
+
+
+# --- Follow-up to OPE-556: route drift, honest claims, degenerate witnesses, injected clock. ---
+
+_CANONICAL_CONNECTOR = (
+    Path(__file__).resolve().parents[3]
+    / "services/cell-runtime/src/opentour_cell/pilot/model_connector.py"
+)
+
+
+def _route_enum_values(source: str) -> set[str]:
+    """Read the string values of `class Route(StrEnum)` without importing cell-runtime."""
+    for node in ast.parse(source).body:
+        if isinstance(node, ast.ClassDef) and node.name == "Route":
+            values = {
+                stmt.value.value
+                for stmt in node.body
+                if isinstance(stmt, ast.Assign)
+                and isinstance(stmt.value, ast.Constant)
+                and isinstance(stmt.value.value, str)
+            }
+            assert values, "Route enum has no string members"
+            return values
+    raise AssertionError("Route enum not found in canonical connector source")
+
+
+def test_routes_match_canonical_connector_route_enum() -> None:
+    canonical = _route_enum_values(_CANONICAL_CONNECTOR.read_text())
+    assert len(ROUTES) == len(set(ROUTES))
+    assert set(ROUTES) == canonical
+
+
+def test_route_drift_check_detects_a_changed_canonical_value() -> None:
+    source = _CANONICAL_CONNECTOR.read_text()
+    drifted = source.replace('"customer_trainer"', '"customer_trainer_v2"')
+    assert drifted != source
+    assert set(ROUTES) != _route_enum_values(drifted)
+    added = source.replace(
+        'CUSTOM = "customer_trainer"', 'CUSTOM = "customer_trainer"\n    EXTRA = "extra_route"'
+    )
+    assert set(ROUTES) != _route_enum_values(added)
+
+
+@pytest.mark.parametrize("route", ROUTES)
+def test_every_canonical_route_qualifies_and_admits(tmp_path: Path, route: str) -> None:
+    reg, d = qualified(tmp_path, backend=backend(route=route))
+    assert admit(reg, d, backend=backend(route=route))["fit_authorized"] is False
+
+
+def test_docstrings_do_not_overclaim_a_trusted_verifier() -> None:
+    module_doc = " ".join((eve.__doc__ or "").split())
+    assert "with a trusted verifier" not in module_doc
+    assert "caller-supplied" in module_doc
+    assert "only an external provider or customer witness" in module_doc.replace("\n", " ") or (
+        "attests an external provider or customer witness" in module_doc
+    )
+    admit_doc = " ".join((admit_fit.__doc__ or "").split())
+    assert "caller-supplied" in admit_doc and "trusted_verifiers" in admit_doc
+
+
+def test_open_item_admission_is_only_as_good_as_the_supplied_clock(tmp_path: Path) -> None:
+    # Documents the known limit: expiry is judged by the caller's clock, so a caller who
+    # supplies a stale clock is admitted. No signing or key-custody contract exists to stop it.
+    reg, d = qualified(tmp_path)
+    assert refusal(reg, d, clock=lambda: EXPIRES) == "qualification_expired"
+    assert admit(reg, d, clock=lambda: 0)["fit_authorized"] is False
+
+
+def test_witness_lifetime_cap_is_a_named_bounded_constant() -> None:
+    cap = eve.MAX_WITNESS_LIFETIME_SECONDS  # type: ignore[attr-defined]
+    assert type(cap) is int and 0 < cap <= 366 * 24 * 3600
+
+
+def test_expiry_far_in_the_future_is_refused_at_qualify() -> None:
+    with pytest.raises(QualificationInputError, match="witness_lifetime_exceeds_cap"):
+        qualify(request(), SimulatedVerifier(expires_at=10**18))
+
+
+def test_expiry_at_the_cap_is_accepted_and_one_second_beyond_is_refused() -> None:
+    cap = eve.MAX_WITNESS_LIFETIME_SECONDS  # type: ignore[attr-defined]
+    ok = qualify(request(), SimulatedVerifier(expires_at=NOW + cap))
+    assert ok["body"]["state"] == "qualified"  # type: ignore[index]
+    with pytest.raises(QualificationInputError, match="witness_lifetime_exceeds_cap"):
+        qualify(request(), SimulatedVerifier(expires_at=NOW + cap + 1))
+
+
+@pytest.mark.parametrize("verifier_id", ["", " ", " padded "])
+def test_empty_or_blank_verifier_id_refused_at_qualify(verifier_id: str) -> None:
+    with pytest.raises(QualificationInputError, match="witness_verifier_id_invalid"):
+        qualify(request(), SimulatedVerifier(verifier_id=verifier_id))
+
+
+@pytest.mark.parametrize("witness_ref", ["", " ", " padded "])
+def test_empty_or_blank_witness_ref_refused_at_qualify(witness_ref: str) -> None:
+    with pytest.raises(QualificationInputError, match="witness_ref_invalid"):
+        qualify(request(), SimulatedVerifier(witness_ref=witness_ref))
+
+
+def test_normal_lifetime_witness_qualifies_with_relative_expiry() -> None:
+    body = qualify(request(), SimulatedVerifier())["body"]
+    assert body["state"] == "qualified"  # type: ignore[index]
+    assert body["witness"]["expires_at"] == NOW + LIFETIME  # type: ignore[index]
+
+
+def test_expiry_is_relative_to_the_injected_clock_not_the_wall_clock(tmp_path: Path) -> None:
+    reg, d = qualified(tmp_path)
+    assert admit(reg, d, clock=lambda: EXPIRES - 1)["fit_authorized"] is False
+    assert refusal(reg, d, clock=lambda: EXPIRES) == "qualification_expired"
+    # A witness that is already expired by the injected clock never qualifies.
+    stale = qualify(request(), SimulatedVerifier(), clock=lambda: EXPIRES)
+    assert stale["body"]["state"] == "software_checked_unwitnessed"  # type: ignore[index]
+
+
+def test_default_wall_clock_path_uses_expiry_relative_to_now(tmp_path: Path) -> None:
+    # No fixed calendar date: expiry is derived from the real clock at test time.
+    verifier = SimulatedVerifier(expires_at=int(time.time()) + LIFETIME)
+    record = _qualify(request(), verifier)
+    assert record["body"]["state"] == "qualified"
+    reg = registry(tmp_path)
+    reg.register(record)
+    result = admit(reg, record["record_digest"], verifier=verifier, clock=time.time)
+    assert result["fit_authorized"] is False

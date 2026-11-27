@@ -15,11 +15,16 @@ serving path was executed, no memory, time or cost figure was measured, and no P
 trainer, data, authority or person was involved. A record is "qualified" only when an injected
 `WitnessVerifier` attests an external provider or customer witness; the default verifier
 (`UnavailableWitnessVerifier`) never does, so by default nothing here can be qualified.
-Admission rechecks the current witness and its deadline with a trusted verifier. Tests prove
-software behaviour only and establish no provider or customer evidence. The record never
-authorizes a fit (`fit_authorized` is always false): authority, cap, rights and reservation
-belong to OPE-557 and the learning mandate. The public-checkpoint rehearsal scope (OPE-558)
-cannot admit a customer fit, and a mixture-of-experts checkpoint needs its own qualification.
+Admission re-asks a verifier and compares its answer with the recorded witness, and checks the
+recorded deadline against a clock. The verifier, the `trusted_verifiers` set and the clock are
+all supplied by the caller, and this module has no signing or key-custody contract: the
+strongest claim is that the record digest is self-consistent and a caller-supplied verifier
+agrees with it. It cannot prove that the verifier is itself trustworthy, nor that the clock is
+honest. Tests prove software behaviour only and establish no provider or customer evidence.
+The record never authorizes a fit (`fit_authorized` is always false): authority, cap, rights and
+reservation belong to OPE-557 and the learning mandate. The public-checkpoint rehearsal scope
+(OPE-558) cannot admit a customer fit, and a mixture-of-experts checkpoint needs its own
+qualification.
 """
 
 from __future__ import annotations
@@ -38,7 +43,9 @@ from typing import Any, Protocol
 SCHEMA = "opentour.eve-checkpoint-backend-qualification.v1"
 Json = dict[str, Any]
 
-# Wire values of the OPE-506 model connector Route. Training runs independently of cell runtime.
+# Wire values of the OPE-506 model connector Route. Training runs independently of cell runtime,
+# so these are a copy; `test_routes_match_canonical_connector_route_enum` fails if the canonical
+# `Route` enum in services/cell-runtime/.../pilot/model_connector.py drifts from this tuple.
 ROUTES = ("customer_trainer", "local_open_weight", "customer_managed")
 _LEGACY_ROUTES = ("open_weight", "managed")
 SCOPES = ("public_rehearsal", "customer")
@@ -67,6 +74,10 @@ AUTHORITY_FIELDS = (
 )
 FORBIDDEN_ROW_KEYS = frozenset({"expected_answer", "reference_answer", "answer_key", "label"})
 SIMULATED_PREFIXES = ("simulated:", "generated")
+# A witness may be valid for at most this long after `qualify` reads the clock: 90 days. It bounds
+# a verifier that returns an effectively unlimited expiry, and forces periodic re-attestation of
+# a host or account whose real state can change.
+MAX_WITNESS_LIFETIME_SECONDS = 90 * 24 * 3600
 STATES = ("benchmark_only_hold", "software_checked_unwitnessed", "qualified")
 _REVISION = re.compile(r"[0-9a-f]{40}")
 _DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
@@ -358,6 +369,12 @@ def qualify(
         or witness.expires_at <= clock()
     ):
         witness = None
+    if witness is not None:
+        # A degenerate witness is refused outright so no record is ever written mislabelled.
+        _text(witness.verifier_id, "witness_verifier_id_invalid")
+        _text(witness.witness_ref, "witness_ref_invalid")
+        if witness.expires_at - clock() > MAX_WITNESS_LIFETIME_SECONDS:
+            raise QualificationInputError("witness_lifetime_exceeds_cap")
     external_gates = list(request.external_gates)
     if witness is None:
         external_gates.append("real_gpu_provider_witness_unsatisfied")
@@ -579,6 +596,11 @@ def admit_fit(
     clock: Callable[[], float] = time.time,
 ) -> Json:
     """Refuse unless the presented pair is exactly the current qualified pair.
+
+    The verifier, `trusted_verifiers` and `clock` are caller-supplied and are not authenticated
+    here. Only the verifier's id string is checked against the caller's own set, and its answer
+    against the recorded witness; a caller that passes a permissive verifier, a set containing
+    its id or a stale clock is admitted. This is a consistency gate, not proof of trust.
 
     A simulated or generated verifier id is refused unless the caller passes
     `allow_simulated_verifiers=True`, which only software tests may do.
