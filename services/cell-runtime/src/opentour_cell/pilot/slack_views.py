@@ -1568,6 +1568,7 @@ def app_home_view(
     live_summary: Mapping[str, Any] | None = None,
     verify_outcome: str = "",
     decision_map_entry: str = "",
+    case_entry: str = "",
 ) -> Block:
     if not context:
         return {
@@ -1586,6 +1587,8 @@ def app_home_view(
         _button("Browse data", "ot_app_data", "ot_app_data"),
         _button("Ask OpenTour", "ot_app_prompt", "ot_app_prompt"),
     ]
+    if case_entry:
+        blocks.append(_actions(_button("Review starter cases", "ot_app_cases", case_entry)))
     if decision_map_entry:
         blocks.append(_actions(_button("Review decision map", "ot_app_map", decision_map_entry)))
     if pending:
@@ -2289,4 +2292,201 @@ def map_assertions(
             _map_text_input("reason", "Basis for this owner assertion", multiline=True),
         ],
         "Save assertion",
+    )
+
+
+def starter_case_entry(context: str, workflow: str, run: str, propose: bool) -> Block:
+    buttons = [_button("Open saved cases", "ot_case_review", "open")]
+    if propose:
+        buttons.append(_button("Generate guided cases", "ot_case_generate", "generate"))
+    return _modal(
+        "Starter cases",
+        "ot_case_entry",
+        context,
+        [
+            _section(f"Workflow {_ref(workflow)} · Run {_ref(run)}"),
+            _actions(*buttons),
+        ],
+    )
+
+
+def starter_case_detail(context: str, pack: Mapping[str, Any], index: int) -> Block:
+    case = pack["cases"][index]
+    authority = pack["authority"]
+    if pack["frozen"]:
+        frozen = pack["frozen"]
+        return _modal(
+            "Frozen starter benchmark",
+            "ot_case_frozen",
+            context,
+            [
+                _section(f"Frozen, unscored · {_ref(frozen['reference'])}"),
+                _section(
+                    f"Freeze revision {_ref(frozen['revision'])} · "
+                    f"Map {_ref(authority['map_confirmation_ref'])} · "
+                    f"Settings {_ref(authority['map_settings_ref'])}"
+                ),
+                _section(
+                    f"{frozen['proposed']} generated · {frozen['reviewed']} reviewed · "
+                    f"{frozen['resolved']} resolved · {frozen['unresolved']} unresolved"
+                ),
+                _section(
+                    f"Independent families · Development {frozen['development']} · "
+                    f"Reserved {frozen['reserved']} · Excluded {frozen['excluded']}"
+                ),
+                _section(
+                    "Reserved family coverage\n"
+                    + _display(
+                        ", ".join(
+                            f"{branch} / {action}: {count}"
+                            for branch, action, count in frozen["coverage"]
+                        ),
+                        2400,
+                    )
+                ),
+                _section(
+                    "Collect independent reserved families for uncovered critical branches."
+                    if frozen["uncovered_critical"]
+                    else "Scoring requires a separate evaluation."
+                ),
+                _section(
+                    "Critical gaps · "
+                    + _display(", ".join(frozen["uncovered_critical"]) or "None", 900)
+                ),
+            ],
+        )
+    inputs = ", ".join(
+        f"{field}={value if value is not None else 'missing'}"
+        for field, value in case["decision_inputs"]
+    )
+    blocks = [
+        _section(
+            f"{sum(c['status'] == 'proposed' for c in pack['cases'])} awaiting review · "
+            f"{sum(c['status'] == 'resolved' for c in pack['cases'])} resolved · "
+            f"{sum(c['status'] == 'unresolved' for c in pack['cases'])} unresolved · "
+            f"{len({c['family_id'] for c in pack['cases']})} independent families"
+        ),
+        _section(f"Generated case {index + 1} of {len(pack['cases'])} · {_ref(case['case_id'])}"),
+        _section(f"Family {_ref(case['family_id'])} · Branch {_ref(case['branch_id'])}"),
+        _section(f"Decision-time inputs · {_display(inputs, 1800)}"),
+        _section(
+            f"Suggested action · {_display(case['suggestion'])}\n"
+            f"Basis · {_display(case['rationale'], 1000)}\nCitation · {_ref(case['citation'])}"
+        ),
+        _section(
+            f"Owner decision · {_display(case['owner_adjudicated_target'] or case['status'])}"
+        ),
+    ]
+    if case["adjudicator"]:
+        blocks.append(
+            _section(
+                f"Reviewed by {_display(case['adjudicator'])} · "
+                f"{_display(case['adjudication_reason'], 1000)}"
+            )
+        )
+    buttons = []
+    if index:
+        buttons.append(_button("Previous case", "ot_case_page_previous", "previous"))
+    if index + 1 < len(pack["cases"]):
+        buttons.append(_button("Next case", "ot_case_page_next", "next"))
+    buttons.append(_button("Inspect policy clause", "ot_case_citation", "citation"))
+    if authority["can_adjudicate"]:
+        buttons.append(_button("Adjudicate case", "ot_case_edit", "edit"))
+    if authority["can_freeze"] and all(c["status"] != "proposed" for c in pack["cases"]):
+        buttons.append(_button("Assign family splits", "ot_case_splits", "splits"))
+    if buttons:
+        blocks.append(_actions(*buttons))
+    return _modal("Review starter cases", "ot_case_detail", context, blocks)
+
+
+def adjudicate_starter_case(context: str, case: Mapping[str, Any], choices: Sequence[str]) -> Block:
+    return _modal(
+        "Adjudicate case",
+        "ot_case_adjudicate",
+        context,
+        [
+            _section(f"Case {_ref(case['case_id'])} · Suggested {_display(case['suggestion'])}"),
+            _select(
+                "target",
+                "Owner decision",
+                [("Choose an outcome", "choose"), ("Leave unresolved", "unresolved")]
+                + [(action, str(i)) for i, action in enumerate(choices)],
+            ),
+            _map_text_input("reason", "Reason for your decision", multiline=True),
+        ],
+        "Save decision",
+    )
+
+
+def starter_family_splits(context: str, families: Sequence[str]) -> Block:
+    blocks = [
+        _section("Assign each whole family to development, reserved evaluation, or exclusion.")
+    ]
+    for index, family in enumerate(families):
+        blocks.append(
+            _select(
+                f"family_{index}",
+                family,
+                [
+                    ("Select split", "choose"),
+                    ("Development", "development"),
+                    ("Reserved evaluation", "reserved"),
+                    ("Excluded", "excluded"),
+                ],
+            )
+        )
+    return _modal("Assign family splits", "ot_case_freeze", context, blocks, "Review splits")
+
+
+def starter_freeze_preview(
+    context: str, pack: Mapping[str, Any], splits: Mapping[str, str]
+) -> Block:
+    rows = pack["cases"]
+    counts = [
+        f"{name.capitalize()} {sum(s == name for s in splits.values())}"
+        for name in ("development", "reserved", "excluded")
+    ]
+    coverage = []
+    for branch in pack["authority"]["branches"]:
+        for action in branch["coverage_actions"] or branch["allowed_actions"]:
+            count = len(
+                {
+                    r["family_id"]
+                    for r in rows
+                    if r["branch_id"] == branch["branch_id"]
+                    and r["owner_adjudicated_target"] == action
+                    and splits[r["family_id"]] == "reserved"
+                }
+            )
+            coverage.append(f"{branch['branch_id']} / {action} · {count} reserved")
+    return _modal(
+        "Review family splits",
+        "ot_case_freeze_preview",
+        context,
+        [
+            _section("Independent families · " + " · ".join(counts)),
+            _section(_display(", ".join(coverage), 2400)),
+            _actions(_button("Freeze benchmark", "ot_case_commit", "freeze")),
+        ],
+    )
+
+
+def starter_case_clause(context: str, passage: str, page: int) -> Block:
+    width = 1800
+    start = width * page
+    if page < 0 or start >= len(passage):
+        raise ValueError("Invalid source passage page")
+    buttons = [_button("Back to case", "ot_case_back", "back")]
+    if page:
+        buttons.append(_button("Previous passage", "ot_case_clause_page", "previous"))
+    if start + width < len(passage):
+        buttons.append(_button("Next passage", "ot_case_clause_page", "next"))
+    return _modal(
+        "Cited policy clause",
+        "ot_case_clause",
+        context,
+        [
+            _section(passage[start : start + width]),
+            _actions(*buttons),
+        ],
     )

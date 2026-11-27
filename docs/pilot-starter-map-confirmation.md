@@ -63,3 +63,13 @@ All five reviewed purchase-order families cover the three material branches;
 excluding both missing-PO families leaves only REVIEW uncovered. The core's
 optional coverage contract preserves the exact identities of earlier freezes
 that did not declare separate coverage cells.
+
+The private Slack Home offers **Review starter cases** to the current named
+owner with the signed case-review purpose. **Generate guided cases** uses the
+local guided authoring profile when proposal authority is present. The owner
+can inspect each source passage, adjudicate each suggestion with a reason, or
+leave it unresolved. After every case has a disposition, the owner assigns
+whole families to development, reserved evaluation, or exclusion, reviews
+reserved coverage and explicitly confirms the freeze. The frozen view shows
+the receipt and aggregate support. Separate worker authority governs benchmark
+publication and separate evaluation authority governs scoring.
