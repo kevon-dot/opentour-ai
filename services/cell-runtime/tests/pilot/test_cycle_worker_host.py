@@ -278,6 +278,15 @@ def rules_only_state_unchanged(site):
     assert (site["volume"] / "cycle.json").read_text() == '{"generated": true}'
 
 
+def copies(directory, prefix):
+    return sorted(p for p in directory.iterdir() if p.name.startswith(prefix + "-"))
+
+
+def one_held(site):
+    (held,) = copies(site["work"], "held")
+    return held
+
+
 def tamper(path, data=b"tampered"):
     """Change a staged file's bytes while keeping its owner and 0444 mode."""
     path.chmod(0o644)
@@ -292,6 +301,8 @@ def test_stage_accepts_a_correct_sentinel_set_and_promotes_read_only(site):
         "reason": "verified",
         "profile": "smollm2_135m_lora_v1",
         "checkpoint_revision": REVISION,
+        "model_base": "promoted",
+        "cleanup": "complete",
     }
     model = site["model"]
     assert sorted(p.name for p in model.iterdir()) == sorted(site["profile"]["files"])
@@ -341,7 +352,7 @@ def test_stage_cli_runs_isolated_as_root(site):
     )
     assert held.returncode == 2
     assert json.loads(held.stdout)["reason"] == "staged_model_hash_mismatch"
-    assert not site["model"].exists() and (site["work"] / "held").is_dir()
+    assert not site["model"].exists() and one_held(site).is_dir()
 
 
 @pytest.mark.parametrize("command", ["stage", "verify"])
@@ -364,8 +375,10 @@ def test_verify_holds_a_restored_base_whose_bytes_changed(site):
         "reason": "staged_model_hash_mismatch",
         "profile": "smollm2_135m_lora_v1",
         "checkpoint_revision": REVISION,
+        "model_base": "moved_to_held",
+        "cleanup": "complete",
     }
-    assert not site["model"].exists() and (site["work"] / "held").is_dir()
+    assert not site["model"].exists() and one_held(site).is_dir()
     rules_only_state_unchanged(site)
 
 
@@ -415,8 +428,8 @@ def test_stage_holds_the_model_route_on_any_mismatch(site, case, reason):
     result = staged(site, revision)
     assert (result["route"], result["reason"]) == ("held", reason)
     assert not site["model"].exists()
-    assert (site["work"] / "held").is_dir()
-    assert not (site["work"] / "staging").exists()
+    assert one_held(site).is_dir()
+    assert copies(site["work"], "staging") == [] and copies(site["work"], "previous") == []
     rules_only_state_unchanged(site)
 
 
@@ -427,7 +440,7 @@ def test_a_base_swapped_in_after_promotion_is_held(site, monkeypatch):
 
     def racing_rename(src, dst, *, src_dir_fd=None, dst_dir_fd=None):
         real_rename(src, dst, src_dir_fd=src_dir_fd, dst_dir_fd=dst_dir_fd)
-        if src == "staging" and dst == "model-base":
+        if src.startswith("staging-") and dst == "model-base":
             # Same filesystem, owner, modes and digests: only the inode identity can tell.
             shutil.copytree(site["model"], planted, copy_function=shutil.copy2)
             real_rename(site["model"], site["volume"] / "stolen")
@@ -438,7 +451,7 @@ def test_a_base_swapped_in_after_promotion_is_held(site, monkeypatch):
     monkeypatch.undo()
     assert (result["route"], result["reason"]) == ("held", "model_base_replaced")
     assert not site["model"].exists()
-    assert (site["work"] / "held").is_dir()
+    assert one_held(site).is_dir()
 
 
 @pytest.mark.parametrize("swap", ["renamed_away", "replaced", "replaced_by_link"])
@@ -447,8 +460,8 @@ def test_a_work_directory_renamed_or_swapped_mid_stage_holds(site, monkeypatch, 
     original = stage_module["_copy_verified"]
     moved = site["volume"] / "moved-staging"
 
-    def racing_copy(source_dir, areas, profile):
-        result = original(source_dir, areas, profile)
+    def racing_copy(source_dir, areas, profile, staging):
+        result = original(source_dir, areas, profile, staging)
         os.rename(site["work"], moved)
         if swap == "replaced":
             site["work"].mkdir(mode=0o700)
@@ -463,7 +476,7 @@ def test_a_work_directory_renamed_or_swapped_mid_stage_holds(site, monkeypatch, 
     assert not site["model"].exists()
     # The staging copy never left the original root-only directory, wherever its entry went.
     assert stat.S_IMODE(moved.lstat().st_mode) == 0o700
-    assert not (moved / "staging").exists()
+    assert copies(moved, "staging") == []
     rules_only_state_unchanged(site)
 
 
@@ -545,6 +558,79 @@ def test_staging_works_with_the_volume_on_a_separate_mount(site, tmp_path):
     assert not site["model"].exists()
 
 
+def plant_unremovable_held_tree(site, depth=40):
+    """A worker-owned held copy, deeper than removal allows, as a kept descriptor can grow."""
+    top = site["work"] / "held"  # the fixed name the earlier script removed first
+    node = top
+    for level in range(depth):
+        node = node / f"d{level}"
+    node.mkdir(parents=True)
+    (node / "leaf").write_text("generated")
+    if OWNER == 0:
+        for path in [top, *top.rglob("*")]:
+            os.chown(path, 54321, -1, follow_symlinks=False)
+    return top
+
+
+@pytest.mark.parametrize("via", ["module", "cli"])
+def test_hold_moves_the_base_out_even_when_old_held_copies_cannot_be_removed(site, via):
+    assert staged(site)["route"] == "ready"
+    grown = plant_unremovable_held_tree(site)
+    tamper(site["model"] / "config.json")
+    if via == "module":
+        result = verified(site)
+    elif OWNER == 0:
+        completed = subprocess.run(
+            [*ISOLATED, str(HOST / "stage_open_weight.py"), "verify", *cli_arguments(site)],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+            env={},
+        )
+        assert completed.returncode == 2 and completed.stderr == ""
+        result = json.loads(completed.stdout)
+    else:
+        pytest.skip("the CLI acts only as root; the module case covers non-root runners")
+    assert (result["route"], result["reason"]) == ("held", "staged_model_hash_mismatch")
+    assert (result["model_base"], result["cleanup"]) == ("moved_to_held", "incomplete")
+    assert not site["model"].exists()
+    assert grown.is_dir()
+    (new_held,) = [p for p in copies(site["work"], "held") if p != grown]
+    assert sorted(p.name for p in new_held.iterdir()) == sorted(site["profile"]["files"])
+    rules_only_state_unchanged(site)
+
+
+def test_hold_survives_entries_added_during_cleanup_and_staging_still_promotes(site, monkeypatch):
+    assert staged(site)["route"] == "ready"
+    stale = site["work"] / "held-stale"
+    stale.mkdir()
+    real_rmdir = os.rmdir
+
+    def growing_rmdir(path, *, dir_fd=None):
+        if path == "held-stale":
+            (stale / "added-during-removal").write_text("generated")
+        real_rmdir(path, dir_fd=dir_fd)
+
+    monkeypatch.setattr(os, "rmdir", growing_rmdir)
+    tamper(site["model"] / "tokenizer.json")
+    result = verified(site)
+    assert (result["route"], result["model_base"], result["cleanup"]) == (
+        "held",
+        "moved_to_held",
+        "incomplete",
+    )
+    assert not site["model"].exists() and stale.is_dir()
+    # A later promotion is not blocked by an unremovable earlier copy either.
+    ready = staged(site)
+    assert (ready["route"], ready["model_base"], ready["cleanup"]) == (
+        "ready",
+        "promoted",
+        "incomplete",
+    )
+    assert site["model"].is_dir()
+
+
 def test_verify_refuses_a_base_not_owned_by_the_installer_or_with_wrong_modes(site):
     assert staged(site)["route"] == "ready"
     # The worker identity cannot create root-owned files, so any other owner is refused.
@@ -574,7 +660,7 @@ def test_verify_refuses_a_base_not_owned_by_the_installer_or_with_wrong_modes(si
     assert verified(site)["reason"] == "unexpected_model_file"
     assert verified(site)["reason"] == "staged_model_file_required"
     assert staged(site)["route"] == "ready"
-    assert not (site["work"] / "held").exists()
+    assert copies(site["work"], "held") == []
 
 
 def test_verify_holds_a_linked_base_without_following_it(site):
@@ -583,7 +669,7 @@ def test_verify_holds_a_linked_base_without_following_it(site):
     os.rename(site["model"], outside)
     site["model"].symlink_to(outside)
     assert verified(site)["reason"] == "staged_model_file_required"
-    assert not site["model"].is_symlink() and (site["work"] / "held").is_symlink()
+    assert not site["model"].is_symlink() and one_held(site).is_symlink()
     assert (outside / "config.json").is_file()
 
 

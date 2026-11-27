@@ -283,22 +283,70 @@ class Areas:
         os.close(self.volume)
 
 
+def _unique(prefix):
+    return prefix + "-" + os.urandom(8).hex()
+
+
+def _cleanup(areas, keep=None):
+    """Best-effort removal of earlier staging, previous and held copies in the work area.
+
+    A held copy can be a worker-owned tree that the worker keeps growing through an open
+    descriptor, so removal may fail. That never blocks a hold or a promotion.
+    """
+    complete = True
+    try:
+        names = os.listdir(areas.work)
+    except OSError:
+        return "incomplete"
+    for name in names:
+        if name == keep or not name.startswith(("staging", "previous", "held")):
+            continue
+        try:
+            _remove_at(areas.work, name)
+        except OSError:
+            complete = False
+    try:
+        _sync(areas.work)
+    except OSError:
+        complete = False
+    return "complete" if complete else "incomplete"
+
+
 def hold(areas):
-    """Move whatever is at model-base into the root-only work directory's held slot."""
-    if _exists_at(areas.volume, MODEL_NAME):
-        _remove_at(areas.work, "held")
-        os.rename(MODEL_NAME, "held", src_dir_fd=areas.volume, dst_dir_fd=areas.work)
+    """Move model-base to a fresh held name in the work area before any cleanup.
+
+    Returns what happened to model-base and to the earlier copies. It never raises.
+    """
+    try:
+        present = _exists_at(areas.volume, MODEL_NAME)
+    except OSError:
+        return "move_failed", "not_run"
+    if not present:
+        return "absent", _cleanup(areas)
+    held = _unique("held")
+    try:
+        os.rename(MODEL_NAME, held, src_dir_fd=areas.volume, dst_dir_fd=areas.work)
         _sync(areas.volume, areas.work)
+    except OSError:
+        return "move_failed", "not_run"
+    return "moved_to_held", _cleanup(areas, keep=held)
 
 
-def _result(route, reason):
+def _result(route, reason, model_base="unchanged", cleanup="not_run"):
     return {
         "schema": SCHEMA,
         "route": route,
         "reason": reason,
         "profile": PROFILE,
         "checkpoint_revision": REVISION,
+        "model_base": model_base,
+        "cleanup": cleanup,
     }
+
+
+def _held(areas, reason):
+    model_base, cleanup = hold(areas)
+    return _result("held", reason, model_base, cleanup)
 
 
 def _checked_release(release, wheel_dir, python):
@@ -337,18 +385,18 @@ def verify(release, model_dir, wheel_dir, python, owner_uid=0):
             _verify_installed(areas, profile)
             areas.check()
         except Held as error:
-            hold(areas)
-            return _result("held", str(error))
-        return _result("ready", "verified")
+            return _held(areas, str(error))
+        except OSError:
+            return _held(areas, "verification_io_error")
+        return _result("ready", "verified", "verified")
     finally:
         areas.close()
 
 
-def _copy_verified(source_dir, areas, profile):
+def _copy_verified(source_dir, areas, profile, staging):
     """Copy into a fresh root-only staging directory, hashing the bytes actually written."""
-    _remove_at(areas.work, "staging")
-    os.mkdir("staging", 0o700, dir_fd=areas.work)
-    staging_fd = os.open("staging", _DIR_FLAGS, dir_fd=areas.work)
+    os.mkdir(staging, 0o700, dir_fd=areas.work)
+    staging_fd = os.open(staging, _DIR_FLAGS, dir_fd=areas.work)
     try:
         for name, digest in profile["files"].items():
             try:
@@ -390,36 +438,31 @@ def stage(release, source_dir, revision, model_dir, wheel_dir, python, owner_uid
         areas = Areas(model_dir, owner_uid)
     except Unverified as error:
         return _result("unverified", str(error))
+    staging, previous = _unique("staging"), _unique("previous")
     try:
         try:
             if revision != REVISION:
                 raise Held("checkpoint_revision_mismatch")
             profile = _checked_release(release, wheel_dir, python)
             areas.check()
-            staging_fd, identity = _copy_verified(source_dir, areas, profile)
+            staging_fd, identity = _copy_verified(source_dir, areas, profile, staging)
             try:
                 verify_model_tree(staging_fd, profile, owner_uid)
             finally:
                 os.close(staging_fd)
             areas.check()
-            _remove_at(areas.work, "previous")
             if _exists_at(areas.volume, MODEL_NAME):
-                os.rename(MODEL_NAME, "previous", src_dir_fd=areas.volume, dst_dir_fd=areas.work)
+                os.rename(MODEL_NAME, previous, src_dir_fd=areas.volume, dst_dir_fd=areas.work)
             areas.check()
-            os.rename("staging", MODEL_NAME, src_dir_fd=areas.work, dst_dir_fd=areas.volume)
+            os.rename(staging, MODEL_NAME, src_dir_fd=areas.work, dst_dir_fd=areas.volume)
             _sync(areas.volume, areas.work)
             # The volume is worker-writable: check that the promoted inode is still in place.
             areas.check()
             _verify_installed(areas, profile, identity)
             areas.check()
         except (Held, OSError) as error:
-            _remove_at(areas.work, "staging")
-            hold(areas)
-            return _result("held", str(error) if isinstance(error, Held) else "staging_failed")
-        _remove_at(areas.work, "previous")
-        _remove_at(areas.work, "held")
-        _sync(areas.work)
-        return _result("ready", "verified")
+            return _held(areas, str(error) if isinstance(error, Held) else "staging_failed")
+        return _result("ready", "verified", "promoted", _cleanup(areas))
     finally:
         areas.close()
 
@@ -442,14 +485,23 @@ def main(argv=None):
             parser.error("use absolute paths")
     if args.model_dir.name != MODEL_NAME:
         parser.error("the model directory must be the worker volume's model-base")
-    if os.geteuid() != 0:
-        result = _result("unverified", "installer_root_required")
-    elif args.command == "stage":
-        result = stage(
-            args.release, args.source, args.revision, args.model_dir, args.wheel_dir, args.python
-        )
-    else:
-        result = verify(args.release, args.model_dir, args.wheel_dir, args.python)
+    try:
+        if os.geteuid() != 0:
+            result = _result("unverified", "installer_root_required")
+        elif args.command == "stage":
+            result = stage(
+                args.release,
+                args.source,
+                args.revision,
+                args.model_dir,
+                args.wheel_dir,
+                args.python,
+            )
+        else:
+            result = verify(args.release, args.model_dir, args.wheel_dir, args.python)
+    except OSError:
+        # Never a traceback: report the safe outcome and leave the route to the worker's check.
+        result = _result("unverified", "installer_io_error")
     print(json.dumps(result, sort_keys=True))
     return 0 if result["route"] == "ready" else 2
 
