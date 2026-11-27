@@ -129,6 +129,13 @@ class _Publication:
 
     def public_key(self) -> bytes:
         public = _private_bytes(self.directory / "starter-completion-public.pem", 8192)
+        _require(
+            re.fullmatch(
+                rb"-----BEGIN PUBLIC KEY-----\r?\n(?:[A-Za-z0-9+/=]+\r?\n)+"
+                rb"-----END PUBLIC KEY-----\r?\n?",
+                public,
+            )
+        )
         _require(hashlib.sha256(public).hexdigest() == self.cap["public_key_sha256"])
         return public
 
@@ -196,10 +203,15 @@ class _Publication:
         _require(set(packet) == {"receipt", "signature"})
         body = packet["receipt"]
         _require(body == self.packet(body["result_ref"], body["result_digest"]))
+        encoded = packet["signature"]
+        _require(isinstance(encoded, str) and 0 < len(encoded) <= 5464)
+        signature = base64.b64decode(encoded, validate=True)
+        _require(0 < len(signature) <= 4096)
+        key = self.public_key()
         with tempfile.TemporaryDirectory() as temp:
             public, sig = Path(temp) / "public", Path(temp) / "signature"
-            _write_private(public, self.public_key())
-            _write_private(sig, base64.b64decode(packet["signature"], validate=True))
+            _write_private(public, key)
+            _write_private(sig, signature)
             _crypto(
                 ["dgst", "-sha256", "-verify", str(public), "-signature", str(sig)],
                 canonical(body).encode(),

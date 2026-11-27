@@ -235,3 +235,49 @@ def test_two_materializer_processes_share_one_completed_operation(publication):
         assert db.execute(
             "SELECT count(*),sum(completed) FROM benchmark_operations WHERE target='scored'"
         ).fetchone() == (1, 1)
+
+
+def test_worker_crypto_timeout_is_sanitized_on_both_paths(publication, monkeypatch, capsys):
+    d, invocation, worker, _, _, status = publication
+    assert evaluate(invocation) == 0
+    frozen = status()
+
+    def timeout(*args):
+        raise subprocess.TimeoutExpired(["openssl", "generated-private-arguments"], 30)
+
+    with monkeypatch.context() as fault:
+        fault.setattr(completion, "_crypto", timeout)
+        assert evaluate(invocation + ["--publish-completion"]) == 2
+        output = capsys.readouterr()
+        assert "generated-private-arguments" not in output.out + output.err
+        assert not output.err and json.loads(output.out.strip().splitlines()[-1])["state"] == "held"
+    assert not list(d.glob("starter-completion-*.json"))
+    assert evaluate(invocation + ["--publish-completion"]) == 0
+    capsys.readouterr()
+    monkeypatch.setattr(completion, "_crypto", timeout)
+    assert materialize(worker) == 2 and status() == frozen
+    output = capsys.readouterr()
+    assert (output.out, output.err) == ("", "starter_benchmark_unavailable\n")
+
+
+def test_private_key_or_malformed_signature_cannot_reach_verification(publication, monkeypatch):
+    d, inv, worker, cap, grant, status = publication
+    assert evaluate(inv) == 0 and evaluate(inv + ["--publish-completion"]) == 0
+    frozen = status()
+
+    def forbidden(*args):
+        pytest.fail("invalid signature or private key reached crypto staging")
+
+    monkeypatch.setattr(completion, "_write_private", forbidden)
+    receipt = next(d.glob("starter-completion-*.json"))
+    packet = json.loads(receipt.read_bytes())
+    for signature in (None, "", "***", "A" * 5464, "A" * 5468):
+        _write_private(receipt, packet | {"signature": signature})
+        assert materialize(worker) == 2 and status() == frozen
+    _write_private(receipt, packet)
+    secret = (d / "starter-completion-signing.pem").read_bytes()
+    (d / "starter-completion-public.pem").write_bytes(secret)
+    grant(cap | {"public_key_sha256": hashlib.sha256(secret).hexdigest()})
+    with pytest.raises(ValueError):
+        completion._Publication(d, cap["run_ref"]).public_key()
+    assert materialize(worker) == 2 and status() == frozen

@@ -2,6 +2,7 @@
 
 import json
 import sqlite3
+import subprocess
 import sys
 from collections.abc import Callable
 from pathlib import Path
@@ -74,7 +75,7 @@ def main(argv: list[str] | None = None) -> int:
         if len(args) != 2:
             raise IntakeError("starter_benchmark_unavailable")
         state = publish(Path(args[0]), args[1], completion=completion)
-    except (OSError, ValueError, TypeError, KeyError, sqlite3.Error):
+    except (OSError, ValueError, TypeError, KeyError, sqlite3.Error, subprocess.SubprocessError):
         print("starter_benchmark_unavailable", file=sys.stderr)
         return 2
     print(json.dumps({"run_ref": args[1], "benchmark_state": state}))
