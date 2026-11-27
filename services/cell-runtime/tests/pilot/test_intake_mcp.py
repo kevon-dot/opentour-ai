@@ -220,7 +220,7 @@ def _write_private(path: Path, value) -> None:
     path.chmod(0o600)
 
 
-def _sealed_starter(selection, **changes):
+def _sealed_starter(selection, *, signing_key=STARTER_FIXTURE_KEY, **changes):
     body = {
         **selection,
         "schema_version": STARTER_GRANT_VERSION,
@@ -233,17 +233,17 @@ def _sealed_starter(selection, **changes):
         "expires_at": int(time.time()) + 600,
         **changes,
     }
-    seal = hmac.digest(bytes.fromhex(STARTER_FIXTURE_KEY), canonical(body).encode(), "sha256")
+    seal = hmac.digest(bytes.fromhex(signing_key), canonical(body).encode(), "sha256")
     return {"grant": body, "seal_sha256": seal.hex()}
 
 
-def _starter_only(directory: Path):
+def _starter_only(directory: Path, *, tenant="org-a", signing_key=STARTER_FIXTURE_KEY):
     directory.mkdir(mode=0o700)
-    training = LocalTrainingStore(directory / "training.sqlite3", "org-a")
-    LearningMandates(directory, "org-a", training.engagement_id, owner="founder")
+    training = LocalTrainingStore(directory / "training.sqlite3", tenant)
+    LearningMandates(directory, tenant, training.engagement_id, owner="founder")
     selection = {
         "schema_version": STARTER_SELECTION_VERSION,
-        "tenant": "org-a",
+        "tenant": tenant,
         "actor": "worker",
         "owner_id": "founder",
         "engagement_epoch": training.engagement_id,
@@ -251,9 +251,10 @@ def _starter_only(directory: Path):
     }
     selection_path = directory / "selection.json"
     _write_private(selection_path, selection)
-    _write_private(directory / "starter-intake-key.json", {"key": STARTER_FIXTURE_KEY})
+    _write_private(directory / "starter-intake-key.json", {"key": signing_key})
     _write_private(
-        directory / "starter-intake-grant-registered-starter.json", _sealed_starter(selection)
+        directory / "starter-intake-grant-registered-starter.json",
+        _sealed_starter(selection, signing_key=signing_key),
     )
     return selection_path, selection
 
