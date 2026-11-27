@@ -15,7 +15,7 @@ serving path was executed, no memory, time or cost figure was measured, and no P
 trainer, data, authority or person was involved. A record is "qualified" only when an injected
 `WitnessVerifier` attests an external provider or customer witness; the default verifier
 (`UnavailableWitnessVerifier`) never does, so by default nothing here can be qualified.
-Admission additionally requires the caller to name the verifier ids it trusts. Tests prove
+Admission rechecks the current witness and its deadline with a trusted verifier. Tests prove
 software behaviour only and establish no provider or customer evidence. The record never
 authorizes a fit (`fit_authorized` is always false): authority, cap, rights and reservation
 belong to OPE-557 and the learning mandate. The public-checkpoint rehearsal scope (OPE-558)
@@ -29,7 +29,8 @@ import hashlib
 import json
 import os
 import re
-from collections.abc import Mapping, Sequence
+import time
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
@@ -37,7 +38,9 @@ from typing import Any, Protocol
 SCHEMA = "opentour.eve-checkpoint-backend-qualification.v1"
 Json = dict[str, Any]
 
-ROUTES = ("customer_trainer", "open_weight", "managed")
+# Wire values of the OPE-506 model connector Route. Training runs independently of cell runtime.
+ROUTES = ("customer_trainer", "local_open_weight", "customer_managed")
+_LEGACY_ROUTES = ("open_weight", "managed")
 SCOPES = ("public_rehearsal", "customer")
 # Tiers match the OPE-555 benchmark manifest vocabulary.
 WITNESS_TIERS = ("observed", "installed-provider")
@@ -226,6 +229,7 @@ class Witness:
     verifier_id: str
     witness_ref: str
     tier: str
+    expires_at: int
 
 
 class WitnessVerifier(Protocol):
@@ -293,7 +297,12 @@ def serialization_dry_run(
     }
 
 
-def qualify(request: QualificationRequest, verifier: WitnessVerifier | None = None) -> Json:
+def qualify(
+    request: QualificationRequest,
+    verifier: WitnessVerifier | None = None,
+    *,
+    clock: Callable[[], float] = time.time,
+) -> Json:
     """Run the software checks and return a digest-bound record. Deterministic; no I/O."""
     cp, be = request.checkpoint, request.backend
     cp.validate()
@@ -335,7 +344,11 @@ def qualify(request: QualificationRequest, verifier: WitnessVerifier | None = No
         check("serialization_dry_run", False, str(error))
 
     witness = None if holds else verifier.verify(cp.checkpoint_digest, be.backend_digest)
-    if witness is not None and witness.tier not in WITNESS_TIERS:
+    if witness is not None and (
+        witness.tier not in WITNESS_TIERS
+        or type(witness.expires_at) is not int
+        or witness.expires_at <= clock()
+    ):
         witness = None
     external_gates = list(request.external_gates)
     if witness is None:
@@ -372,9 +385,12 @@ def qualify(request: QualificationRequest, verifier: WitnessVerifier | None = No
         "state": state,
         "evidence_tier": witness.tier if witness else "generated",
         "witness": (
-            {"verifier_id": witness.verifier_id, "witness_ref": witness.witness_ref}
-            if witness
-            else None
+            {
+                "verifier_id": witness.verifier_id,
+                "witness_ref": witness.witness_ref,
+                "expires_at": witness.expires_at,
+            }
+            if witness else None
         ),
         "benchmark_manifest_digest": request.benchmark_manifest_digest,
         "external_gates": sorted(set(external_gates)),
@@ -426,7 +442,7 @@ def _check_consistency(body: Mapping[str, Any]) -> None:
         and body["backend_digest"] == digest(backend)
         and body["pair_key"] == pair
         and body["route"] == backend["route"]
-        and backend["route"] in ROUTES
+        and backend["route"] in (*ROUTES, *_LEGACY_ROUTES)
     )
     witness = body["witness"]
     if body["state"] == "qualified":
@@ -441,6 +457,8 @@ def _check_consistency(body: Mapping[str, Any]) -> None:
             and isinstance(witness, dict)
             and bool(witness["verifier_id"])
             and bool(witness["witness_ref"])
+            # Old records remain readable, but admission requires a current expiry.
+            and ("expires_at" not in witness or type(witness["expires_at"]) is int)
         )
     else:
         consistent = consistent and witness is None and body["evidence_tier"] == "generated"
@@ -547,6 +565,8 @@ def admit_fit(
     hard_cap_mandate: bool,
     trusted_verifiers: frozenset[str],
     allow_simulated_verifiers: bool = False,
+    verifier: WitnessVerifier | None = None,
+    clock: Callable[[], float] = time.time,
 ) -> Json:
     """Refuse unless the presented pair is exactly the current qualified pair.
 
@@ -560,6 +580,8 @@ def admit_fit(
     if presented is None:
         raise AdmissionRefused("pair_unqualified")
     body = verify_record(presented)
+    if backend.route not in ROUTES or body["route"] not in ROUTES:
+        raise AdmissionRefused("qualification_route_stale")
     key = pair_key(checkpoint, backend, scope)
     if body["pair_key"] != key:
         same_pair = body["pair_key"] == pair_key(checkpoint, backend, body["scope"])
@@ -589,6 +611,21 @@ def admit_fit(
         raise AdmissionRefused("enforceable_cap_unavailable")
     if backend.backend_digest != body["backend_digest"]:
         raise AdmissionRefused("backend_digest_drift")
+    expires_at = witness.get("expires_at")
+    if expires_at is None or expires_at <= clock():
+        raise AdmissionRefused("qualification_expired")
+    if verifier is None:
+        raise AdmissionRefused("witness_verifier_unavailable")
+    current_witness = verifier.verify(checkpoint.checkpoint_digest, backend.backend_digest)
+    if current_witness != Witness(
+        witness["verifier_id"], witness["witness_ref"], body["evidence_tier"], expires_at
+    ):
+        raise AdmissionRefused("witness_not_current")
+    active = registry.active(key)
+    if active is None or active["record_digest"] != record_digest:
+        raise AdmissionRefused("qualification_superseded")
+    if expires_at <= clock():
+        raise AdmissionRefused("qualification_expired")
     return {
         "admitted_for": "separately_authorized_fit",
         "record_digest": record_digest,

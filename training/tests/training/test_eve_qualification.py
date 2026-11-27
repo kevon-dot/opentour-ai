@@ -41,7 +41,7 @@ class SimulatedVerifier:
         self.tier, self.verifier_id = tier, verifier_id
 
     def verify(self, checkpoint_digest: str, backend_digest: str) -> Witness | None:
-        return Witness(self.verifier_id, "simulated:witness-ref", self.tier)
+        return Witness(self.verifier_id, "simulated:witness-ref", self.tier, 2_000_000_000)
 
 
 def checkpoint(**changes: object) -> CheckpointDescriptor:
@@ -118,6 +118,8 @@ def admit(reg: QualificationRegistry, d: str, **changes: object) -> dict[str, ob
         "scope": "customer",
         "hard_cap_mandate": True,
         "trusted_verifiers": TRUSTED,
+        "verifier": SimulatedVerifier(),
+        "clock": lambda: 100,
         "allow_simulated_verifiers": True,  # software tests only; production default is False
     }
     args.update(changes)
@@ -480,3 +482,28 @@ def test_review_stale_writer_appends_with_correct_supersedes_link(tmp_path: Path
     stale.register(qualify(request(estimate=ResourceEstimate(1, None, None, None))))
     # Replay verifies seq/supersedes; a stale-view append would have broken the chain.
     assert len(QualificationRegistry(tmp_path / "journal.jsonl")._entries) == 3
+
+
+@pytest.mark.parametrize("route", ["customer_trainer", "local_open_weight", "customer_managed"])
+def test_shared_connector_route_values(route: str) -> None:
+    record = qualify(request(backend=backend(route=route)))
+    assert verify_record(record)["route"] == route
+
+
+def test_readiness_requires_an_unexpired_current_witness(tmp_path: Path) -> None:
+    reg, d = qualified(tmp_path)
+    assert refusal(reg, d, clock=lambda: 2_000_000_000) == "qualification_expired"
+    assert refusal(reg, d, verifier=None) == "witness_verifier_unavailable"
+    assert refusal(reg, d, verifier=SimulatedVerifier(verifier_id="foreign")) == (
+        "witness_not_current"
+    )
+
+
+def test_digest_consistent_forged_witness_ref_is_not_admitted(tmp_path: Path) -> None:
+    record = qualify(request(), SimulatedVerifier())
+    record["body"]["witness"]["witness_ref"] = "simulated:forged"
+    forged = digest(record["body"])
+    record["record_digest"] = forged
+    reg = registry(tmp_path)
+    reg.register(record)
+    assert refusal(reg, forged) == "witness_not_current"
