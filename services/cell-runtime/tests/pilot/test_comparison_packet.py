@@ -1428,6 +1428,23 @@ def _assigned(function, target):
     return found
 
 
+def slice_names_validated(tree):
+    """True only if ``_terms`` calls ``identifier()`` inside the loop over critical_slices and
+    material_slices. A call elsewhere in ``_terms`` (for example on ``metric``) does not count."""
+    for loop in ast.walk(_function(tree, "_terms")):
+        if not isinstance(loop, ast.For) or not isinstance(loop.iter, (ast.Tuple, ast.List)):
+            continue
+        names = {e.value for e in loop.iter.elts if isinstance(e, ast.Constant)}
+        if {"critical_slices", "material_slices"} <= names:
+            return any(
+                isinstance(n, ast.Call)
+                and isinstance(n.func, ast.Name)
+                and n.func.id == "identifier"
+                for n in ast.walk(loop)
+            )
+    return False
+
+
 def planner_emitted():
     """Every closed-vocabulary value the planner and readout can emit, read from source.
 
@@ -1436,6 +1453,13 @@ def planner_emitted():
     not derive slice statuses, economics basis, uncertainty method, winners, dispositions or the
     metric; those vocabularies are maintained by hand and covered only by the fixture runs.
     Slice-name shape is derived from the planner's identifier rule below.
+
+    Do not delete ``test_drift_guard_fails_when_the_slice_shape_drifts_from_the_planner``: it is
+    the real protection for the slice shape, because it asserts ``slice_shape == {pattern}``.
+    If ``simple_repair.identifier`` stopped using ``fullmatch`` the derived shape set would be
+    empty, and the first guard test could pass vacuously (an empty set has no gap); the second
+    test fails by equality. The first test also asserts the set is non-empty, as a cheap
+    backstop, but the second remains the real protection.
     """
     readout = _function(_tree("readout.py"), "evaluate_manifest")
     checks = _function(_tree("comparison_plan.py"), "_checks")
@@ -1503,13 +1527,9 @@ def planner_emitted():
         and n.func.attr == "fullmatch"
         and isinstance(n.args[0], ast.Constant)
     }
-    terms = _function(_tree("comparison_plan.py"), "_terms")
-    uses_identifier = any(
-        isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == "identifier"
-        for n in ast.walk(terms)
-    )
+    validated = slice_names_validated(_tree("comparison_plan.py"))
     return {
-        "slice_shape": shapes if uses_identifier else {"<planner no longer uses identifier()>"},
+        "slice_shape": shapes if validated else {"<planner no longer validates slice names>"},
         "observed": _assigned(readout, "comparison") | {"improved"},
         "hold_reasons": holds,
         "decision_reasons": outcomes | appended | holds | development_holds,
@@ -1538,6 +1558,7 @@ def test_drift_guard_reads_the_planner_source_not_the_fixtures():
     """E9: every planner-emitted value is inside the vocabularies, and the guard sees the
     values that escaped before (readout.py's different_automatic_cases)."""
     emitted = planner_emitted()
+    assert emitted["slice_shape"], "an empty slice shape would make the gap check vacuous"
     assert "different_automatic_cases" in emitted["observed"]
     assert "operating_point_missed_or_undetermined" in emitted["hold_reasons"]
     assert "recurring_residual_requires_model_and_compute_rights" in emitted["decision_reasons"]
@@ -1593,3 +1614,15 @@ def test_real_run_with_a_planner_legal_slice_name_still_stages(tmp_path, name):
     assert out.status == "staged" and out.packet["kind"] == "measured_improvement", out
     assert set(out.packet["arms"]["simple"]["critical_slices"]) == {name}
     # Not a disclosure control: the name is published as-is until OPE-571.
+
+
+def test_drift_guard_fails_when_only_the_slice_identifier_call_is_removed():
+    """E10: removing just the critical_slices identifier() call must be reported, even though
+    identifier() is still called on ``metric`` elsewhere in ``_terms``."""
+    source = (_PILOT / "comparison_plan.py").read_text()
+    assert slice_names_validated(ast.parse(source)) is True
+    needle = "len({identifier(v) for v in items}) != len(items)"
+    assert source.count(needle) == 1, "planner source changed; update this mutation"
+    mutated_source = source.replace(needle, "len({v for v in items}) != len(items)")
+    assert 'identifier(value["metric"])' in mutated_source  # the unrelated call survives
+    assert slice_names_validated(ast.parse(mutated_source)) is False
