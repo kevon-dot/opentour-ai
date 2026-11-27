@@ -87,6 +87,13 @@ def _deny() -> None:
     raise IntakeError("workflow_index_unavailable")
 
 
+def _check_timestamp(value: object) -> None:
+    # Authority timestamps use positive integer Unix seconds, as in the durable
+    # grant stores. Floats (including NaN), booleans and strings are invalid.
+    if type(value) is not int or not 0 < value <= 2**63 - 1:
+        _deny()
+
+
 class WorkflowIndex:
     """No default authority, listing by filename, or action execution."""
 
@@ -103,6 +110,7 @@ class WorkflowIndex:
 
     def _rows(self, actor: IntakePrincipal, scope: IndexScope) -> tuple[tuple[IndexRow, ...], int]:
         now = self.clock()
+        _check_timestamp(scope.valid_until)
         if scope.actor != actor or now >= scope.valid_until:
             _deny()
         labels = {}
@@ -120,10 +128,19 @@ class WorkflowIndex:
         seen = set()
         for grant in scope.proposals:
             label = labels.get(grant.scope)
-            if label is None or grant.actor_ref != actor.actor or now >= grant.visible_until:
+            if label is None or grant.actor_ref != actor.actor:
+                continue
+            _check_timestamp(grant.visible_until)
+            if now >= grant.visible_until:
                 continue
             if not self.benchmarks.observed_workflow(grant.scope):
                 continue
+            _check_timestamp(grant.recorded_at)
+            if grant.action is not None and grant.action_until is None:
+                _deny()
+            for expiry in (grant.deadline, grant.action_until):
+                if expiry is not None:
+                    _check_timestamp(expiry)
             for expiry in (grant.visible_until, grant.deadline, grant.action_until):
                 if expiry is not None and now < expiry:
                     next_expiry = min(next_expiry, expiry)

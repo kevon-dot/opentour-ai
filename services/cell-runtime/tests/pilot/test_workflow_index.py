@@ -178,3 +178,20 @@ def test_clock_crossing_guard_exit_denies_old_projection(index, operation, deadl
             api.page(ACTOR)
         else:
             api.select(ACTOR, pin)
+
+
+@pytest.mark.parametrize("bad", [False, float("nan"), float("inf"), "150", 0, -1, 2**63])
+@pytest.mark.parametrize(
+    "field", ["valid_until", "visible_until", "deadline", "action_until", "recorded_at"]
+)
+def test_malformed_authority_timestamp_never_discloses(index, field, bad):
+    api, grants, _, rows = index
+    pin = api.page(ACTOR).rows[0].selection
+    if field == "valid_until":
+        grants.current = replace(grants.current, valid_until=bad)
+    else:
+        grants.current = replace(grants.current, proposals=(replace(rows[1], **{field: bad}),))
+    with pytest.raises(IntakeError):
+        api.page(ACTOR)
+    with pytest.raises(IntakeError):
+        api.select(ACTOR, pin)
