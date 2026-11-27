@@ -199,9 +199,10 @@ cutover/callback, revocation, interrupted invalidation, transient disk failure a
 starvation. Saved replacement tests use the actual signed settings producer and real local bridge,
 including CLI projection, unknown-status recovery, old signer retirement and legacy archive holds.
 The release writer checks the authenticated provider request deadline after taking
-the engagement writer and rechecking inspection. A callback that reached that
-boundary at or after expiry records no release decision. Authenticated historical
-readback can still account for the old request without importing a vote.
+the engagement writer and rechecking inspection. It checks again after the staged
+receipt is flushed, immediately before publishing it. A callback that expires before
+publication records no release decision. Authenticated historical readback can still
+account for the old request without importing a vote.
 The successor's positive path remains unobserved until the actual presentation and release consumers
 join this producer; generated settings edits alone cannot qualify that path.
 

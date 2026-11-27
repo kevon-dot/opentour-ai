@@ -231,8 +231,14 @@ def record_release(
                 "sealed_provider_deadline_required",
             )
             assert provider_request_expires_at is not None
-            _require(int(time.time()) < provider_request_expires_at, "request_expired")
-        _record(work / "release-decision.json", value)
+
+            def check_request_deadline() -> None:
+                _require(int(time.time()) < provider_request_expires_at, "request_expired")
+
+            check_request_deadline()
+            _record(work / "release-decision.json", value, before_publish=check_request_deadline)
+        else:
+            _record(work / "release-decision.json", value)
     return value
 
 

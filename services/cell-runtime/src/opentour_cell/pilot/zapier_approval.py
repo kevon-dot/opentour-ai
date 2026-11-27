@@ -2187,7 +2187,10 @@ class ApprovalBridge:
                         journal.transition(request_id, "held", str(error), event["status"])
                 raise
             if result["state"] == "pending":
-                require(int(time.time()) < request["expires_at"], "request_expired")
+                # Pending has no durable effect to preserve. Recheck the current
+                # policy, signer and request before advancing its status.
+                policy, key = self._policy()
+                request = self._request(result["request_id"], policy, key)
             # A terminal receipt admitted by the effect writer remains terminal if
             # the request clock expires before bookkeeping. Reuse its verified scope.
             journal.record(request, policy)
