@@ -31,6 +31,7 @@ from opentour_training.evaluation.candidate_staging import (
     StagingError,
     StagingPacket,
     SupersessionReceipt,
+    _same_actor,
     confirmation_body,
     identity_key,
     verdict_body,
@@ -749,3 +750,83 @@ def test_h7_concurrent_ledgers_on_one_file_stage_exactly_once(tmp_path: Path) ->
     )
     again = replace(p, candidate=replace(p.candidate, candidate_id="generated-candidate-9"))
     assert stale.stage(again).status == "not_staged"
+
+
+# ------------------------------------------------ I: OPE-545 follow-up (identity, supersession)
+
+# Variants of "generated-selector" that NFKC + casefold + strip(Z, C) did not collapse.
+_EXOTIC_ALIASES = {
+    "combining_grapheme_joiner": "generated-sel͏ector",
+    "variation_selector": "generated-selector️",
+    "combining_accent": "generated-seléctor",
+    "hangul_filler": "generated-selectorㅤ",
+    "halfwidth_hangul_filler": "generated-selectorﾠ",
+    "braille_blank": "generated-selector⠀",
+    "cyrillic_homoglyph": "generated-seleсtor",  # Cyrillic es, not Latin c
+}
+
+
+@pytest.mark.parametrize("alias", list(_EXOTIC_ALIASES.values()), ids=list(_EXOTIC_ALIASES))
+def test_i1_exotic_codepoint_aliases_are_treated_as_the_same_actor(alias: str) -> None:
+    assert _same_actor(alias, "generated-trainer", "generated-selector")
+    p = packet()
+    vs = tuple(attest(replace(v, issuer_id=alias)) for v in p.verdicts)
+    out = evaluate(replace(p, verdicts=vs))
+    assert out.outcome == "refused" and "verdict_self_issued" in out.reasons
+    changed = replace(p.candidate, selection_digest="sha256:" + "6" * 64)
+    conf = attest_confirmation(
+        FreshConfirmation(alias, True, changed.selection_digest, p.benchmark.digest)
+    )
+    assert "fresh_confirmation_required" in reasons(
+        replace(p, candidate=changed, fresh_confirmation=conf)
+    )
+
+
+@pytest.mark.parametrize(
+    "actor",
+    [
+        "generated-trainer",
+        "generated-selector",
+        "generated-verifier-tuned",
+        "generated-owner",
+        "simulated:verdict-1",
+        "generated-unregistered",
+        "svc_a.b:c/d@e-1",
+    ],
+)
+def test_i2_well_formed_ids_stay_distinct_from_other_actors(actor: str) -> None:
+    assert not _same_actor(actor, "generated-other-actor", "generated-another")
+    assert _same_actor(actor, actor)  # an actor is still itself
+    assert _same_actor(actor.upper(), actor)  # case remains a collapse (safe direction)
+
+
+def test_i2_real_format_ids_are_accepted_end_to_end() -> None:
+    p = packet()
+    assert evaluate(p).outcome == "eligible"
+    vs = tuple(attest(replace(v, issuer_id=f"generated-verifier-{v.arm_id}")) for v in p.verdicts)
+    assert evaluate(replace(p, verdicts=vs)).outcome == "eligible"
+
+
+def test_i3_clearing_superseded_by_after_attestation_fails_attestation() -> None:
+    p = packet()
+    base = p.verdicts[0]
+    marked = attest(replace(base, superseded_by="simulated:verdict-new"))
+    assert AUTH.verify_verdict(marked)
+    assert not AUTH.verify_verdict(replace(marked, superseded_by=None))  # cleared
+    assert not AUTH.verify_verdict(replace(base, superseded_by="simulated:verdict-new"))
+    assert verdict_body(marked) != verdict_body(base)
+    # end to end: a revoked tuned verdict with the marker cleared is not accepted
+    vs = tuple(
+        replace(attest(replace(v, superseded_by="simulated:verdict-new")), superseded_by=None)
+        if v.arm_id == TUNED
+        else v
+        for v in p.verdicts
+    )
+    out = evaluate(replace(p, verdicts=vs))
+    assert out.outcome == "refused" and "verdict_unattested" in out.reasons
+
+
+def test_i4_honest_round_trip_still_stages(tmp_path: Path) -> None:
+    p = packet()
+    assert evaluate(p).outcome == "eligible"
+    assert ledger(tmp_path).stage(p).status == "staged"
