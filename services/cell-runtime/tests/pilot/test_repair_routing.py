@@ -942,6 +942,22 @@ def test_grouped_cases_differing_in_features_or_agreeing_are_not_a_contradiction
     assert rr.decide(request(cases))["reason_code"] != "contradictory_labels"
 
 
+def test_grouped_cases_matching_only_the_rule_feature_are_not_a_contradiction() -> None:
+    # The key is the full feature map, not just the rule's feature: same bucket, a different
+    # second feature, conflicting references, one group -> not identical evidence.
+    cases = independent_residual() + [
+        replace(
+            case("ka", "x", "b", "a", entity="Entity-K1", family="Family-K"),
+            features={"bucket": "x", "channel": "generated-p"},
+        ),
+        replace(
+            case("kb", "x", "b", "b", entity="Entity-K2", family="family-k"),
+            features={"bucket": "x", "channel": "generated-q"},
+        ),
+    ]
+    assert rr.decide(request(cases))["reason_code"] != "contradictory_labels"
+
+
 def test_case_id_stays_a_case_sensitive_row_key() -> None:
     base = independent_residual()
     row = case("cs", "x", "b", "a", entity="generated-entity-cs", family="generated-family-cs")

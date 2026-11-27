@@ -526,6 +526,9 @@ def decide(request: RoutingRequest) -> Json:
         return hold("missing_decision_time_context", ["provide_decision_time_input"])
     # Grouped cases with identical features must agree (OPE-568): keyed on the independence
     # group, so a shared family or a transitive chain conflicts just as a shared entity does.
+    # A missing reference (None) counts as a disagreeing label here, so an unlabeled case that
+    # shares only a family with a labeled sibling of identical features now holds as
+    # contradictory_labels rather than unusable_labels. Both are holds; nothing is routed.
     by_group: defaultdict[str, set[str | None]] = defaultdict(set)
     for c in window:
         by_group[digest([groups[c.case_id], dict(c.features)])].add(c.reference)
