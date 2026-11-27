@@ -39,6 +39,7 @@ class ConfirmedBranch:
     citations: tuple[str, ...]
     scoring_rule: str
     critical: bool = False
+    coverage_actions: tuple[str, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -55,6 +56,15 @@ class ConfirmedStarterMap:
     settings_revision: str
     branches: tuple[ConfirmedBranch, ...]
     frozen_plan: FrozenPlan
+
+
+def _scope_record(scope: ConfirmedStarterMap) -> Json:
+    """Preserve pre-coverage-contract identities when the optional field is absent."""
+    record = asdict(scope)
+    for branch in record["branches"]:
+        if branch["coverage_actions"] is None:
+            del branch["coverage_actions"]
+    return record
 
 
 class StarterConfirmation(Protocol):
@@ -127,6 +137,17 @@ class StarterCases:
         _require(self.confirmation is not None, "confirmed_starter_map_unavailable")
         assert self.confirmation is not None
         with self.confirmation.guard(actor, work, purpose=purpose) as scope:
+            for branch in scope.branches:
+                _require(
+                    branch.coverage_actions is None
+                    or (
+                        isinstance(branch.coverage_actions, tuple)
+                        and bool(branch.coverage_actions)
+                        and len(set(branch.coverage_actions)) == len(branch.coverage_actions)
+                        and set(branch.coverage_actions) <= set(branch.allowed_actions)
+                    ),
+                    "invalid_starter_coverage_contract",
+                )
             _require(
                 scope.tenant == actor.tenant
                 and scope.work == work
@@ -201,13 +222,27 @@ class StarterCases:
 
     @staticmethod
     def _ref(scope: ConfirmedStarterMap) -> str:
-        return "starter-" + digest(asdict(scope))[:40]
+        return "starter-" + digest(_scope_record(scope))[:40]
 
     def _load(self, db: sqlite3.Connection, scope: ConfirmedStarterMap) -> Json:
         ref = self._ref(scope)
         row = db.execute("SELECT * FROM packs WHERE ref=?", (ref,)).fetchone()
-        _require(row is not None and row["scope"] == canonical(asdict(scope)))
+        _require(row is not None and row["scope"] == canonical(_scope_record(scope)))
         assert row is not None
+        return self._validated_pack(db, row)
+
+    @staticmethod
+    def _scope_key(scope: Json) -> tuple[str, str, str]:
+        return (
+            scope["tenant"],
+            scope["work"]["resource"]["engagement_epoch"],
+            scope["work"]["workflow_ref"],
+        )
+
+    def _validated_pack(self, db: sqlite3.Connection, row: sqlite3.Row) -> Json:
+        ref = row["ref"]
+        stored_scope = json.loads(row["scope"])
+        _require(ref == "starter-" + digest(stored_scope)[:40], "starter_receipt_invalid")
         body: Json = json.loads(row["body"])
         _require(row["seal"] == digest(body), "starter_receipt_invalid")
         seal = db.execute("SELECT seal FROM freezes WHERE ref=?", (ref,)).fetchone()
@@ -216,10 +251,53 @@ class StarterCases:
             or (body["frozen"] is not None and seal is not None and seal["seal"] == row["seal"]),
             "starter_receipt_invalid",
         )
-        assigned = dict(db.execute("SELECT family,split FROM families WHERE pack=?", (ref,)))
-        expected = self._assignments(body["cases"]) if body["frozen"] is not None else {}
+        assigned = {tuple(r) for r in db.execute("SELECT * FROM families WHERE pack=?", (ref,))}
+        expected = (
+            {
+                (*self._scope_key(stored_scope), token, ref, split)
+                for token, split in self._assignments(body["cases"]).items()
+            }
+            if body["frozen"] is not None
+            else set()
+        )
         _require(assigned == expected, "starter_reservation_invalid")
         return body
+
+    def _validate_prior_freezes(self, db: sqlite3.Connection, scope: ConfirmedStarterMap) -> None:
+        """A successor must reconcile earlier reservations even if their scope was restored.
+
+        Inspect only prior scope identities globally; protected case bodies are read
+        only for the same tenant/epoch/workflow. A changed scope cannot hide a pack
+        because its immutable reference is derived from that complete scope.
+        """
+        key = self._scope_key(_scope_record(scope))
+        known = set()
+        relevant = set()
+        for row in db.execute("SELECT ref,scope FROM packs"):
+            stored_scope = json.loads(row["scope"])
+            _require(
+                row["ref"] == "starter-" + digest(stored_scope)[:40], "starter_receipt_invalid"
+            )
+            known.add(row["ref"])
+            if self._scope_key(stored_scope) == key:
+                relevant.add(row["ref"])
+        _require(
+            all(r[0] in known for r in db.execute("SELECT ref FROM freezes")),
+            "starter_receipt_invalid",
+        )
+        for ref in relevant:
+            row = db.execute("SELECT * FROM packs WHERE ref=?", (ref,)).fetchone()
+            assert row is not None
+            self._validated_pack(db, row)
+        _require(
+            all(
+                r[0] in relevant
+                for r in db.execute(
+                    "SELECT pack FROM families WHERE tenant=? AND epoch=? AND workflow=?", key
+                )
+            ),
+            "starter_reservation_invalid",
+        )
 
     @staticmethod
     def _assignments(cases: list[Json]) -> dict[str, str]:
@@ -228,7 +306,7 @@ class StarterCases:
             split = case["split_ref"]
             if split == "excluded":
                 continue
-            fingerprint = digest([case["branch_id"], dict(case["decision_inputs"])])
+            fingerprint = digest(dict(case["decision_inputs"]))
             for identity in (
                 "family:" + case["family_id"],
                 "template:" + case["template_id"],
@@ -282,7 +360,7 @@ class StarterCases:
                 and fields.keys() <= set(branch.decision_fields),
                 "target_leakage",
             )
-            fingerprint = digest([case.branch_id, fields])
+            fingerprint = digest(fields)
             _require(
                 templates.setdefault(case.template_id, case.family_id) == case.family_id
                 and inputs.setdefault(fingerprint, case.family_id) == case.family_id,
@@ -316,7 +394,7 @@ class StarterCases:
                 body = dict(cases=rows, revision=0, operations={}, frozen=None)
                 db.execute(
                     "INSERT INTO packs VALUES(?,?,?,?,?)",
-                    (ref, canonical(asdict(scope)), proposal, canonical(body), digest(body)),
+                    (ref, canonical(_scope_record(scope)), proposal, canonical(body), digest(body)),
                 )
                 return ref
 
@@ -394,6 +472,7 @@ class StarterCases:
         with self._scope(actor, work, "freeze") as scope, self._db(write=True) as db:
             _require(scope.frozen_plan == plan, "starter_plan_changed")
             body = self._load(db, scope)
+            self._validate_prior_freezes(db, scope)
             intent = digest([splits, asdict(plan), expected_revision])
             if body["frozen"] is not None:
                 _require(body["freeze_intent"] == intent, "starter_successor_required")
@@ -406,12 +485,19 @@ class StarterCases:
                 and set(splits.values()) <= {"development", "reserved", "excluded"},
                 "invalid_family_split",
             )
+            targets: dict[str, str] = {}
             for case in cases:
                 _require(case["status"] != "proposed", "owner_adjudication_required")
                 _require(
                     case["status"] == "resolved" or splits[case["family_id"]] == "excluded",
                     "unresolved_family_must_be_excluded",
                 )
+                if case["status"] == "resolved":
+                    fingerprint = digest(dict(case["decision_inputs"]))
+                    target = case["owner_adjudicated_target"]
+                    _require(
+                        targets.setdefault(fingerprint, target) == target, "starter_truth_conflict"
+                    )
                 case["split_ref"] = splits[case["family_id"]]
             _require("reserved" in splits.values(), "reserved_families_required")
             ref = self._ref(scope)
@@ -442,7 +528,9 @@ class StarterCases:
                     ),
                 )
                 for b in scope.branches
-                for action in b.allowed_actions
+                for action in (
+                    b.allowed_actions if b.coverage_actions is None else b.coverage_actions
+                )
             )
             missing = tuple(
                 sorted(
@@ -454,7 +542,7 @@ class StarterCases:
                     }
                 )
             )
-            revision = digest([asdict(scope), cases, asdict(plan), splits])
+            revision = digest([_scope_record(scope), cases, asdict(plan), splits])
             result = FrozenStarter(
                 "starter-freeze-" + revision[:40],
                 revision,
