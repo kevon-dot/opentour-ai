@@ -736,4 +736,90 @@ def test_pdf_large_or_text_overlapping_image_goes_to_review(placement: bytes) ->
 
 def test_pdf_off_page_text_origin_is_flagged_even_one_point_outside() -> None:
     _flagged(b"BT /F1 11 Tf 72 793 Td (edge) Tj ET", "text_outside_page")
-    _eligible(b"BT /F1 11 Tf 72 792 Td (edge) Tj ET")
+    # The glyph box, not just the baseline, must be on the page: an 11 pt baseline at the top
+    # edge puts the whole line above it. (Before: y=792 was asserted ELIGIBLE.)
+    _flagged(b"BT /F1 11 Tf 72 792 Td (edge) Tj ET", "text_outside_page")
+    _flagged(b"BT /F1 11 Tf 72 790 Td (edge) Tj ET", "text_outside_page")
+    _flagged(b"BT /F1 72 Tf 72 760 Td (BIG) Tj ET", "text_outside_page")
+    _eligible(b"BT /F1 11 Tf 72 781 Td (edge) Tj ET")
+
+
+# ------------------------------------------------------------------ over-flagging and extents
+
+
+@pytest.mark.parametrize(
+    "paint",
+    [
+        b"1 0 0 0 k",  # process cyan heading
+        b"0.8 0 0 0 k",
+        b"0.5 0 0 0 k",
+        b"0 1 0 0 k",  # magenta
+        b"0 0 0 1 k",
+        b"0.4 0.2 0 0 k",
+        b"0 0.68 0.94 rg",  # the same cyan written as RGB
+    ],
+)
+def test_pdf_cmyk_cyan_and_other_print_colours_stay_eligible(paint: bytes) -> None:
+    _eligible(paint + b" " + _VISIBLE)
+
+
+@pytest.mark.parametrize("paint", [b"0 0 0 0.1 k", b"0 0 0 0.05 k", b"0.02 0 0 0.04 k"])
+def test_pdf_near_white_cmyk_still_goes_to_review(paint: bytes) -> None:
+    _flagged(paint + b" " + _VISIBLE, "text_color_invisible")
+
+
+@pytest.mark.parametrize(
+    "clip",
+    [
+        b"36 36 540 720 re W n",  # margin box
+        b"60 690 300 40 re W n",  # table cell wholly containing its text
+        b"0 0 612 792 re W n",
+    ],
+)
+def test_pdf_clip_that_contains_all_its_text_stays_eligible(clip: bytes) -> None:
+    _eligible(clip + b" " + _VISIBLE)
+    _eligible(b"q " + clip + b" " + _VISIBLE + b" Q")
+    _eligible(b"36 36 540 720 re W n " + clip + b" " + _VISIBLE)  # nested clips
+
+
+def test_pdf_clip_flags_only_the_text_it_can_exclude() -> None:
+    clip = b"q 60 690 300 40 re W n "
+    _flagged(clip + b"BT /F1 11 Tf 72 300 Td (Outside) Tj ET Q", "clip_region_present")
+    _flagged(clip + b"BT /F1 11 Tf 350 700 Td (Overhangs the clip) Tj ET Q", "clip_region_present")
+    # Text shown before the clip, or after it is restored, is not governed by it.
+    _eligible(b"BT /F1 11 Tf 72 300 Td (Before) Tj ET " + clip + b"Q " + _VISIBLE)
+    _flagged(b"q 72 700 m 300 700 l 72 720 l h W n " + _VISIBLE + b" Q", "clip_region_present")
+    # Nested clips intersect: the inner box excludes the text the outer box contains.
+    _flagged(b"0 0 612 792 re W n 0 0 10 10 re W n " + _VISIBLE, "clip_region_present")
+
+
+def test_pdf_text_running_off_the_right_edge_goes_to_review() -> None:
+    _flagged(b"BT /F1 11 Tf 612 700 Td (right) Tj ET", "text_outside_page")
+    _flagged(b"BT /F1 11 Tf 600 700 Td (a long string that runs off) Tj ET", "text_outside_page")
+    _eligible(b"BT /F1 11 Tf 72 700 Td (" + b"word " * 16 + b") Tj ET")  # a full prose line
+
+
+_BIG_IMAGE_NONE = b"q 20 0 0 20 %d 695 cm /Im1 Do Q"
+
+
+def test_pdf_image_over_uppercase_wide_or_spaced_text_goes_to_review() -> None:
+    flag = "image_text_overlay_unverified"
+    caps = b"BT /F1 12 Tf 72 700 Td (HEADING IN ALL CAPS) Tj ET "
+    _flagged(caps + _BIG_IMAGE_NONE % 215, flag, extra={8: _IMAGE}, resources=_IMAGE_RESOURCES)
+    spaced = b"BT /F1 11 Tf 10 Tc 72 700 Td (abcdefgh) Tj ET "
+    _flagged(spaced + _BIG_IMAGE_NONE % 195, flag, extra={8: _IMAGE}, resources=_IMAGE_RESOURCES)
+    twice = b"BT /F1 11 Tf 72 700 Td (AAAAAAAAAA) Tj (BBBBBBBBBB) Tj ET "
+    _flagged(twice + _BIG_IMAGE_NONE % 170, flag, extra={8: _IMAGE}, resources=_IMAGE_RESOURCES)
+    # Without those extents the same image is a clear logo to the right of short text.
+    _eligible(
+        b"BT /F1 11 Tf 72 700 Td (abcdefgh) Tj ET " + _BIG_IMAGE_NONE % 195,
+        extra={8: _IMAGE},
+        resources=_IMAGE_RESOURCES,
+    )
+
+
+def test_pdf_page_whose_only_contents_is_a_dangling_reference_has_its_own_reason() -> None:
+    result = read(_pdf_with_contents(b"99 0 R"), "x.pdf")[1]
+    assert result.state is ExtractionState.NEEDS_RENDITION
+    assert result.reason == "pdf_content_stream_unresolved"
+    assert result.reason != "image_only_pdf_needs_authorized_ocr_rendition"

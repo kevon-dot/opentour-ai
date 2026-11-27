@@ -8,6 +8,23 @@ files report LOCKED. Image-only pages report NEEDS_RENDITION. Nothing is execute
 Fail-closed review routing: an unresolved or non-standard font encoding, rotated or skewed
 text, invisible text and text inside Form XObjects each flag the page for review rather than
 emitting a guess. Objects are scanned directly (the cross-reference table is not consulted).
+
+This is not a renderer, and invisibility is flagged only where it can be seen in the content
+stream without painting. Covered: render mode, effective size (Tf, Tm, cm, Tz, Ts), near-white
+fill (g, rg, k, sc, scn), text origin or extent outside the page box, text outside a clip
+region, and page-sized or text-overlapping image XObjects. NOT covered, and therefore able to
+admit hidden text as ELIGIBLE:
+
+- inline images (`BI ... ID ... EI`) are not detected at all, so a page-sized inline image
+  over text is not flagged;
+- vector overpaint is not detected, e.g. `1 g ... re f` painted over text after it;
+- ExtGState transparency is not detected, e.g. `/GS gs` with zero alpha;
+- stroke-only text (`1 Tr`) is judged by its fill colour, not its stroke colour.
+
+Known cost, by design: white or reverse-out text on a dark band (banner and table headers) is
+flagged `text_color_invisible`, because no background is tracked and visibility cannot be
+established without it. Closing that needs painted-background tracking: the fill colour and
+extent of every filled rectangle and image, composited under each text fragment.
 """
 
 from __future__ import annotations
@@ -42,12 +59,18 @@ MAX_TEXT_RISE_EM = 2.0
 # 1.3 is roughly a grey level above 0.89 (about #E3E3E3) and is far below the 3:1 legibility
 # floor, so coloured headings (red, navy, mid grey, brand colours) are never flagged.
 MIN_TEXT_CONTRAST_AGAINST_WHITE = 1.3
+# Estimated advance of one character, in em. The generous value (uppercase W is 0.94 em, digits
+# 0.56 em, average lowercase 0.5 em) bounds where text may extend, for image overlap. The tight
+# value (narrow lowercase runs) is used where over-estimating would over-flag: the page edge
+# and clip containment.
+TEXT_WIDTH_EM_WIDE = 0.7
+TEXT_WIDTH_EM_TIGHT = 0.4
 # An image whose placed bounding box covers at least this fraction of the visible page can hide
 # a paragraph, so a page with such an image and text goes to review. Logos, stamps and
 # signatures are typically under 10% of a page; a quarter page is large enough to cover several
 # lines. Any image overlapping an extracted text fragment also flags, whatever its size, since
-# a small opaque image placed over text conceals it. Fragment extents are estimated (half an em
-# per character), the same heuristic the line merger uses, so overlap is approximate.
+# a small opaque image placed over text conceals it. Fragment extents are estimated from
+# TEXT_WIDTH_EM_WIDE, Tj advance and Tc, so overlap is approximate.
 IMAGE_REVIEW_PAGE_FRACTION = 0.25
 _OBJ = re.compile(rb"(?<![0-9])(\d{1,7})\s+(\d{1,5})\s+obj\b")
 _REF = rb"(\d+)\s+\d+\s+R"
@@ -269,6 +292,77 @@ def _relative_luminance(red: float, green: float, blue: float) -> float:
     return 0.2126 * linear(red) + 0.7152 * linear(green) + 0.0722 * linear(blue)
 
 
+def _cmyk_to_rgb(cyan: float, magenta: float, yellow: float, black: float) -> tuple[float, ...]:
+    """Approximate SWOP-like CMYK to sRGB (the polynomial fit pdf.js uses for DeviceCMYK).
+
+    The naive `(1 - c)(1 - k)` makes pure cyan #00FFFF (contrast about 1.25 against white),
+    while printed process cyan is about #00AEEF (contrast about 2.3), so print-origin cyan
+    headings would be wrongly flagged.
+    """
+    c, m, y, k = (min(max(v, 0.0), 1.0) for v in (cyan, magenta, yellow, black))
+    red = (
+        255
+        + c
+        * (
+            -4.387332384609988 * c
+            + 54.48615194189176 * m
+            + 18.82290502165302 * y
+            + 212.25662451639585 * k
+            - 285.2331026137004
+        )
+        + m
+        * (
+            1.7149763477362134 * m
+            - 5.6096736904047315 * y
+            - 17.873870861415444 * k
+            - 5.497006427196366
+        )
+        + y * (-2.5217340131683033 * y - 21.248923337353073 * k + 17.5119270841813)
+        + k * (-21.86122147463605 * k - 189.48180835922747)
+    )
+    green = (
+        255
+        + c
+        * (
+            8.841041422036149 * c
+            + 60.118027045597366 * m
+            + 6.871425592049007 * y
+            + 31.159100130055922 * k
+            - 79.2970844816548
+        )
+        + m
+        * (
+            -15.310361306967817 * m
+            + 17.575251261109482 * y
+            + 131.35250912493976 * k
+            - 190.9453302588951
+        )
+        + y * (4.444339102852739 * y + 9.8632861493405 * k - 24.86741582555878)
+        + k * (-20.737325471181034 * k - 187.80453709719578)
+    )
+    blue = (
+        255
+        + c
+        * (
+            0.8842522430003296 * c
+            + 8.078677503112928 * m
+            + 30.89978309703729 * y
+            - 0.23883238689178934 * k
+            - 14.183576799673286
+        )
+        + m
+        * (
+            10.49593273432072 * m
+            + 63.02378494754052 * y
+            + 50.606957656360734 * k
+            - 112.23884253719248
+        )
+        + y * (0.03296041114873217 * y + 115.60384449646641 * k - 193.58209356861505)
+        + k * (-22.33816807309886 * k - 180.12613974708367)
+    )
+    return tuple(min(max(v, 0.0), 255.0) / 255.0 for v in (red, green, blue))
+
+
 def _invisible_on_white(components: list[float]) -> bool | None:
     """True when a fill colour is near-invisible on white paper; None when not understood.
 
@@ -280,8 +374,7 @@ def _invisible_on_white(components: list[float]) -> bool | None:
     elif len(components) == 3:
         red, green, blue = components
     elif len(components) == 4:
-        cyan, magenta, yellow, black = (min(max(c, 0.0), 1.0) for c in components)
-        red, green, blue = ((1.0 - c) * (1.0 - black) for c in (cyan, magenta, yellow))
+        red, green, blue = _cmyk_to_rgb(*components)
     else:
         return None
     contrast = 1.05 / (_relative_luminance(red, green, blue) + 0.05)
@@ -300,6 +393,10 @@ class _Graphics:
     h_scale: float = 1.0
     rise: float = 0.0
     fill_invisible: bool = False
+    char_spacing: float = 0.0
+    # Device-space clip rectangle (intersection of every rectangular clip so far), or None.
+    clip: tuple[float, float, float, float] | None = None
+    clip_unknown: bool = False  # a clip whose region could not be determined
 
 
 _PAINT = frozenset({b"n", b"S", b"s", b"f", b"F", b"f*", b"B", b"B*", b"b", b"b*"})
@@ -354,8 +451,12 @@ def _fragments(
     path_other = False
     image_boxes: list[tuple[float, float, float, float]] = []
     text_boxes: list[tuple[float, float, float, float]] = []
+    # Anchor of the current positioning and the advance of the shows since it.
+    adv_anchor: tuple[object, ...] = ()
+    adv_wide = adv_tight = 0.0
 
     def emit(text: str) -> None:
+        nonlocal adv_anchor, adv_wide, adv_tight
         if not text.strip():
             return
         if gs.render_mode in (3.0, 7.0):
@@ -379,31 +480,69 @@ def _fragments(
         raised = y + gs.rise * text_matrix[3]
         rx = ctm[0] * x + ctm[2] * raised + ctm[4]
         ry = ctm[1] * x + ctm[3] * raised + ctm[5]
-        if page_box is None or any(
-            not (page_box[0] <= cx <= page_box[2] and page_box[1] <= cy <= page_box[3])
-            for cx, cy in ((px, py), (rx, ry))
+        glyph = size * scale_y
+        # Several shows after one positioning operator advance along the line.
+        anchor = (x, y, text_matrix, ctm)
+        if anchor != adv_anchor:
+            adv_anchor, adv_wide, adv_tight = anchor, 0.0, 0.0
+        step = scale_x * gs.h_scale
+
+        def run(em: float) -> float:
+            return len(text) * max(em * size + gs.char_spacing, 0.0) * step
+
+        wide_end = px + adv_wide + run(TEXT_WIDTH_EM_WIDE)
+        tight_end = px + adv_tight + run(TEXT_WIDTH_EM_TIGHT)
+        adv_wide += run(TEXT_WIDTH_EM_WIDE)
+        adv_tight += run(TEXT_WIDTH_EM_TIGHT)
+        # The baseline origin and the glyph box must lie inside the page: an origin at the top
+        # edge puts the whole glyph above it, and a long string can run off the right edge.
+        if (
+            page_box is None
+            or any(
+                not (
+                    page_box[0] <= cx
+                    and cx <= page_box[2]
+                    and page_box[1] <= cy
+                    and cy + glyph <= page_box[3]
+                )
+                for cx, cy in ((px, py), (rx, ry))
+            )
+            or tight_end > page_box[2]
         ):
             marks.add("text_outside_page")
-        eff_w = size * scale_x * gs.h_scale
-        text_boxes.append((px, py, px + len(text) * eff_w * 0.5, py + size * scale_y))
+        # A clip can only exclude text that falls outside it (or whose region is unknown).
+        if gs.clip_unknown or (
+            gs.clip is not None
+            and not (
+                gs.clip[0] <= px
+                and tight_end <= gs.clip[2]
+                and gs.clip[1] <= py
+                and py + 0.7 * glyph <= gs.clip[3]
+            )
+        ):
+            marks.add("clip_region_present")
+        text_boxes.append((px, py, wide_end, py + glyph))
         out.append(_Fragment(px, py, text, gs.size * abs(ctm[3] or 1.0), gs.font))
 
-    def clip_is_noop() -> bool:
-        """Only a single axis-aligned rectangle covering the whole page box is a no-op."""
-        if page_box is None or len(rects) != 1 or path_other:
-            return False
+    def clip_to_path() -> None:
+        """Intersect the clip with the current path when it is a single axis-aligned rect."""
+        nonlocal gs
         a, b, c, d, e, f = gs.ctm
-        if b != 0 or c != 0:
-            return False
+        if len(rects) != 1 or path_other or b != 0 or c != 0:
+            gs = replace(gs, clip_unknown=True)
+            return
         rx, ry, rw, rh = rects[0]
         xs = sorted((a * rx + e, a * (rx + rw) + e))
         ys = sorted((d * ry + f, d * (ry + rh) + f))
-        return (
-            xs[0] <= page_box[0] + 0.5
-            and xs[1] >= page_box[2] - 0.5
-            and ys[0] <= page_box[1] + 0.5
-            and ys[1] >= page_box[3] - 0.5
-        )
+        box = (xs[0], ys[0], xs[1], ys[1])
+        if gs.clip is not None:
+            box = (
+                max(box[0], gs.clip[0]),
+                max(box[1], gs.clip[1]),
+                min(box[2], gs.clip[2]),
+                min(box[3], gs.clip[3]),
+            )
+        gs = replace(gs, clip=box)
 
     for kind, value in _tokens(content):
         deadline.check()
@@ -455,6 +594,8 @@ def _fragments(
             gs = replace(gs, render_mode=nums[-1])
         elif op == b"Tz" and nums:
             gs = replace(gs, h_scale=nums[-1] / 100.0)
+        elif op == b"Tc" and nums:
+            gs = replace(gs, char_spacing=nums[-1])
         elif op == b"Ts" and nums:
             gs = replace(gs, rise=nums[-1])
         elif op in (b"g", b"rg", b"k") and nums:
@@ -472,8 +613,7 @@ def _fragments(
         elif op in _PATH_BUILD:
             path_other = True
         elif op in (b"W", b"W*"):
-            if not clip_is_noop():
-                late.add("clip_region_present")
+            clip_to_path()
         elif op in _PAINT:
             rects.clear()
             path_other = False
@@ -625,6 +765,7 @@ def read_pdf(data: bytes, limits: Limits, deadline: Deadline) -> ReadResult:
     walk(int(root[1]), b"", _Boxes(None, None), 0)
     spans: list[Span] = []
     image_pages: list[int] = []
+    unresolved_pages: list[int] = []
     reading_order = 0
     for page_number, (page, resources, page_box) in enumerate(pages, start=1):
         deadline.check()
@@ -648,6 +789,8 @@ def read_pdf(data: bytes, limits: Limits, deadline: Deadline) -> ReadResult:
             # A referenced content stream that cannot be resolved means the page was not read.
             marks.add("content_stream_unresolved")
         if not fragments:
+            if "content_stream_unresolved" in marks:
+                unresolved_pages.append(page_number)
             if images or marks:
                 image_pages.append(page_number)
             continue
@@ -684,7 +827,9 @@ def read_pdf(data: bytes, limits: Limits, deadline: Deadline) -> ReadResult:
             return ReadResult(
                 ExtractionState.NEEDS_RENDITION,
                 (),
-                "image_only_pdf_needs_authorized_ocr_rendition",
+                "pdf_content_stream_unresolved"
+                if unresolved_pages
+                else "image_only_pdf_needs_authorized_ocr_rendition",
                 NextActor.OWNER,
             )
         raise ReaderFailure(ExtractionState.CORRUPT, "no_extractable_text", NextActor.OWNER)
