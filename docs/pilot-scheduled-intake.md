@@ -1,9 +1,11 @@
 # Local scheduled admission component (OPE-439)
 
 This component admits permitted opaque revisions through the existing OPE-430
-`open_intake` factory and `DurableIntake` service. It does not read source pages,
-run a model, dispatch training, create a workflow or benchmark, or activate a Zap.
-It is a partial software handoff, not OPE-439 acceptance or installed evidence.
+`open_intake` factory and its durable admission service. It does not read source
+pages, run a model, dispatch training or activate a Zap. Live admission preserves
+the existing workflow and benchmark; historical admission retains the accepted
+factory's benchmark bookkeeping. This is a partial software handoff, not OPE-439
+acceptance or installed evidence.
 
 The current source base is protected OPE-514 integration commit
 `3888fcdc86e23f0c14b06b372fc172341be5d74f` (PR #140). The accepted intake factory
