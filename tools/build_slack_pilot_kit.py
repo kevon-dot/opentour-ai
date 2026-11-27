@@ -65,6 +65,9 @@ MODULES = (
     "opentour_cell/pilot/slack_views.py",
     "opentour_cell/pilot/status_questions.py",
     "opentour_cell/pilot/starter_setup.py",
+    "opentour_cell/pilot/starter_cases.py",
+    "opentour_cell/pilot/starter_case_authoring.py",
+    "opentour_cell/pilot/starter_map_confirmation.py",
     "opentour_cell/pilot/guided_policy.py",
     "opentour_cell/pilot/guided_decision_map.py",
     "opentour_cell/pilot/map_review.py",
@@ -79,6 +82,9 @@ MODULES = (
     "opentour_cell/pilot/training_data.py",
 )
 ASSETS = {
+    "pilot-starter-cases.md": "docs/pilot-starter-cases.md",
+    "pilot-guided-case-authoring.md": "docs/pilot-guided-case-authoring.md",
+    "pilot-starter-map-confirmation.md": "docs/pilot-starter-map-confirmation.md",
     "README.md": f"{CELL}/docs/slack-workspace-kit.md",
     "operator-guide.md": f"{CELL}/docs/pilot-kit.md",
     "pilot-learning-mandate.md": f"{CELL}/docs/pilot-learning-mandate.md",
