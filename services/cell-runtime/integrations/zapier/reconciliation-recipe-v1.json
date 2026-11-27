@@ -1,0 +1,23 @@
+{
+  "revision": "opentour.approval-reconciler.v1",
+  "enabled_by_default": false,
+  "worker_local": {
+    "module": "opentour_cell.pilot.approval_reconciler",
+    "operation": "tick",
+    "configuration_source": "owner_managed_worker",
+    "defaults": {
+      "poll_interval": 60,
+      "reminder_interval": 3600,
+      "page_size": 25,
+      "max_pages": 4,
+      "max_requests": 50,
+      "tick_seconds": 10
+    },
+    "effects": ["read_pending_summary", "reconcile_request", "queue_scoped_reminder"]
+  },
+  "hosted_mapping": {
+    "trigger": "Schedule by Zapier",
+    "state": "pending_approval_scoped_worker_connection",
+    "provider_history": "opaque_metadata_only"
+  }
+}

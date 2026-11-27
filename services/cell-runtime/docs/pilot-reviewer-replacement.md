@@ -43,6 +43,15 @@ inspection transfers to the new reviewer. An ineligible assignment is refused wi
 no-eligible-successor acceptance requires a durable hold and private owner action
 from the actual authority-loss reconciliation consumer; that integration is open.
 
+## Run from the portable kit
+
+Use `python -I -S -B opentour-slack.pyz reviewer-assignment --help` for the
+signed assignment commands and `python -I -S -B opentour-slack.pyz owner-settings --help`
+for the custodian preview and save. Work from the owner
+worker with the installed private authority file and the appropriate signed
+input for each role. Follow the [reconciliation guide](pilot-approval-reconciliation.md)
+for existing requests before any successor review is issued.
+
 ## Generated producer coverage
 
 | Selectors | Observation |
@@ -68,7 +77,7 @@ HMAC envelope. They do not run the Node signing action or contact a provider.
 Still required: positive fresh successor inspection/confirmation and downstream
 effects; generation-bound presentation metadata; OPE-414 verified multi-request
 projection and unknown-state recovery; durable no-eligible-successor hold/owner
-action; packaging, exact-head independent review, CI and protected integration.
+action and complete successor integration evidence.
 
 ## Consumer handoff
 

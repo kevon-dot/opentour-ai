@@ -201,6 +201,6 @@ including CLI projection, unknown-status recovery, old signer retirement and leg
 The successor's positive path remains unobserved until the actual presentation and release consumers
 join this producer; generated settings edits alone cannot qualify that path.
 
-The operator guide is a source artifact. The executable is already part of the existing portable
-`zapier_approval` module; including this guide, `owner_settings` and `reviewer_assignment` in the kit
-remains a serialized packaging change. Source CLI tests do not establish a packaged installation.
+The portable kit includes this guide and the `zapier-approval`, `owner-settings`,
+`reviewer-assignment` and `approval-reconciler` commands. The local kit drill uses
+the signed owner and custodian flows. Installed provider execution requires its own qualification.
