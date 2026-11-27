@@ -22,9 +22,11 @@ from .enrollment import (
     QUALIFIED_STS_HOSTS,
     InstalledCell,
     IssuedChallenge,
+    STSIdentityExchange,
     VerifiedEnrollmentIdentity,
     enrollment_proof_sha256,
     validate_enrollment_proof,
+    verify_enrollment_identity,
 )
 
 Mode = Literal["initial", "rotation", "recovery"]
@@ -58,7 +60,7 @@ class EnrollmentAuthorityStore(Protocol):
     ) -> EnrollmentAuthority | None:
         """Authorize the operation and lock its current qualified environment in this transaction.
 
-        The owner checks current environment.manage or proof admission, plus mode-specific
+        The owner checks current environments.manage or proof admission, plus mode-specific
         current runner/explicit recovery authority. It uses the supplied connection and
         performs no provider I/O. An unavailable or unauthorized source returns None.
         """
@@ -259,6 +261,29 @@ class PostgresEnrollmentStore:
             if claim.rowcount != 1:
                 raise EnrollmentStoreError("STALE_REVISION")
             return pending
+
+    def accept_proof(
+        self,
+        scope: EnrollmentScope,
+        challenge_id: str,
+        operation_id: str,
+        body: bytes,
+        *,
+        exchange: STSIdentityExchange,
+    ) -> EnrollmentReceipt:
+        """Accept a proof for an authenticated scope or return its committed receipt."""
+        prepared = self.prepare_proof(scope, challenge_id, operation_id, body)
+        if isinstance(prepared, EnrollmentReceipt):
+            return prepared
+        # The preparation transaction has closed before the external identity read.
+        verified = verify_enrollment_identity(
+            body,
+            installed=prepared.installed,
+            challenge=prepared,
+            exchange=exchange,
+            clock=self._now,
+        )
+        return self.consume(scope, operation_id, verified)
 
     @staticmethod
     def _assert_prepared(
