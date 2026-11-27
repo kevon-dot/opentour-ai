@@ -518,14 +518,19 @@ def _view(rows: list[sqlite3.Row], competing: set[tuple[str, int]]) -> dict[str,
                 "exact_replay": "unavailable",
             }
         )
-    disputed = sum(
-        revision in competing
-        or len({payload_ref for _, payload_ref in events}) > 1
-        or any(attempt in conflicting_commits for attempt, _ in events)
-        for revision, events in commits.items()
-    )
+    current: dict[str, int] = {}
+    for decision, revision in commits:
+        current[decision] = max(revision, current.get(decision, revision))
+    disputed = 0
+    for identity in current.items():
+        events = commits[identity]
+        disputed += (
+            identity in competing
+            or len({payload_ref for _, payload_ref in events}) > 1
+            or any(attempt in conflicting_commits for attempt, _ in events)
+        )
     return {
         "attempts": result,
-        "committed_decisions": len(commits) - disputed,
+        "committed_decisions": len(current) - disputed,
         "disputed_decisions": disputed,
     }

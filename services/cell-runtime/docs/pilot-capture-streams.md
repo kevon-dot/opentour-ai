@@ -19,9 +19,11 @@ revision are counted as disputed across operation IDs. The application
 provides an opaque reference for the canonical committed payload separately
 from the delivery event and commit receipt; repeated references with
 different receipts are redundant evidence. Distinct decisions can share a
-case and family. The inspection counts apply to one operation. Use the live
-reducer for deduplicated workflow totals. Inspection exposes the dispute
-count without returning the competing operation's metadata.
+case and family. Within an inspected operation, the highest observed commit
+revision of each decision determines its current count. Earlier attempts
+remain available as provenance. Use the live reducer for deduplicated
+workflow totals. Inspection exposes the dispute count without returning
+the competing operation's metadata.
 The current grant is checked again in the write transaction after
 projection. Consent, source or expiry changes roll back the new observation.
 

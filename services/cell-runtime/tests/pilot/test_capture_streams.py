@@ -294,3 +294,30 @@ def test_actor_source_policy_and_withdrawal_scope_normal_reads(tmp_path):
     Closeout(capture.store.path.parent, capture.store.organization).withdraw(**START)
     with pytest.raises(CaptureError):
         capture.inspect("owner", workflow, attempt.operation_ref)
+
+
+@pytest.mark.parametrize("disputed_revision", [1, 2])
+def test_current_counts_use_newest_revision_and_retain_prior_attempts(tmp_path, disputed_revision):
+    capture, authority = journal(tmp_path / "one")
+    authority.base = replace(authority.base, mode="metadata_only")
+    workflow = authority.base.workflow
+    first = CapturedAttempt("operation-a", "attempt-a", "case-a", "family-a", "decision-a", 1)
+    newer = replace(first, attempt_ref="attempt-b", decision_revision=2)
+    other = replace(first, attempt_ref="attempt-c", decision_ref="decision-b")
+    dispute = replace(first, attempt_ref="attempt-disputed", decision_revision=disputed_revision)
+    for attempt in (first, newer, other, dispute):
+        ref = attempt.attempt_ref
+        capture.committed(
+            "app",
+            workflow,
+            attempt,
+            row(COMMIT, ref),
+            "receipt-" + ref,
+            decision_payload_ref="payload-" + ref,
+        )
+    view = capture.inspect("owner", workflow, first.operation_ref)
+    expected = (2, 0) if disputed_revision == 1 else (1, 1)
+    assert (view["committed_decisions"], view["disputed_decisions"]) == expected
+    assert {item["attempt_ref"] for item in view["attempts"]} == {
+        attempt.attempt_ref for attempt in (first, newer, other, dispute)
+    }
