@@ -1477,38 +1477,59 @@ def chart_status(context: str, revision: str, figures: str, status: str) -> Bloc
     )
 
 
-def handoff_status(receipt: HandoffReadback, audit: Mapping[str, Any]) -> StatusAnswer:
+def _handoff_projection(
+    receipt: HandoffReadback, audit: Mapping[str, Any]
+) -> tuple[StatusAnswer, list[str]]:
     def when(timestamp: int) -> str:
         return datetime.fromtimestamp(timestamp, UTC).isoformat()
 
     delivery = receipt.delivery
-    basis = (
+    scope = (
         f"Workflow {_ref(receipt.selection.workflow_ref)} · Proposal {_ref(audit['job_id'])} "
         f"revision {_ref(audit['run_revision'])} · Artifact {_ref(audit['model_revision'])}\n"
-        f"Destination {_ref(receipt.destination_ref)} · Approved {when(receipt.approved_at)}."
+        f"Destination {_ref(receipt.destination_ref)}"
     )
+    approval = f"Approved {when(receipt.approved_at)}."
     if delivery and delivery.last_checked_at is not None:
-        basis += f" Last checked {when(delivery.last_checked_at)}."
+        checked = f"Last checked {when(delivery.last_checked_at)}."
     else:
-        basis += " No independent check time is recorded."
+        checked = "No independent check time is recorded."
+    basis = f"{scope} · {approval} {checked}"
+
+    receiver = None
     if delivery and delivery.stage == "delivered":
         assert delivery.received_at is not None and delivery.receiver_receipt_ref
-        return StatusAnswer(
-            "Delivered to the selected destination.",
-            f"{basis} Receiver receipt {_ref(delivery.receiver_receipt_ref)} "
-            f"at {when(delivery.received_at)}.",
-            "The recipient can independently replay the artifact.",
+        state = "Delivered to the selected destination."
+        receiver = (
+            f"Receiver receipt {_ref(delivery.receiver_receipt_ref)} at "
+            f"{when(delivery.received_at)}."
         )
-    finding = "Approval recorded. Delivery is unconfirmed."
-    if delivery and delivery.stage == "queued":
-        finding = "Approval recorded. Awaiting delivery."
-    return StatusAnswer(finding, basis, "The authorized handoff operator can reconcile delivery.")
+        next_action = "The recipient can independently replay the artifact."
+        answer = StatusAnswer(state, f"{basis} {receiver}", next_action)
+    else:
+        state = (
+            "Awaiting delivery."
+            if delivery and delivery.stage == "queued"
+            else "Delivery is unconfirmed."
+        )
+        next_action = "The authorized handoff operator can reconcile delivery."
+        answer = StatusAnswer(f"Approval recorded. {state}", basis, next_action)
+    rows = [scope, approval, f"{state}\n{checked}"]
+    if receiver:
+        rows.append(receiver)
+    rows.append(next_action)
+    return answer, rows
+
+
+def handoff_status(receipt: HandoffReadback, audit: Mapping[str, Any]) -> StatusAnswer:
+    answer, _ = _handoff_projection(receipt, audit)
+    return answer
 
 
 def handoff_modal(
     context: str, revision: str, receipt: HandoffReadback, audit: Mapping[str, Any]
 ) -> Block:
-    answer = handoff_status(receipt, audit)
+    _, rows = _handoff_projection(receipt, audit)
     controls = [_home()]
     if not receipt.delivery or receipt.delivery.stage != "delivered":
         controls.insert(0, _button("Check delivery status", "ot_delivery_status", revision))
@@ -1516,12 +1537,7 @@ def handoff_modal(
         "Handoff receipt",
         "ot_handoff_receipt",
         context,
-        [
-            _section(answer.finding),
-            _section(answer.basis),
-            _section(answer.next_action),
-            _actions(*controls),
-        ],
+        [_section(row) for row in rows] + [_actions(*controls)],
     )
 
 

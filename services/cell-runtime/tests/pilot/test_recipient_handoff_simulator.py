@@ -517,6 +517,16 @@ def test_freshly_inspected_successor_has_distinct_delivery_to_same_recipient(
         assert item.permit.destination_ref in receipt
         return view
 
+    def check_outbox_row(view: str, state: str) -> str:
+        rows = [
+            block["text"]["text"]
+            for block in screen(h, view)["blocks"]
+            if block["type"] == "section"
+        ]
+        assert rows[1].startswith("Approved ")
+        assert rows[2].splitlines()[0] == state
+        return text(h, view)
+
     stale_view = open_receipt(first)
     refresh = buttons(screen(h, stale_view))["ot_delivery_status"]
     invoke(first.configuration, first.release_ref, "--simulate-lost-ack", expected=LOST_ACK)
@@ -565,8 +575,7 @@ def test_freshly_inspected_successor_has_distinct_delivery_to_same_recipient(
     h.slack.screens[successor_view]["hash"] = "generated-successor-receipt-modal"
     h.action(successor_view, "ot_delivery_status", initial_refresh, actor)
     for view in (successor_view, open_receipt(successor)):
-        receipt = text(h, view)
-        assert "Approval recorded. Awaiting delivery." in receipt
+        receipt = check_outbox_row(view, "Awaiting delivery.")
         assert "No independent check time is recorded" in receipt
         assert "Receiver receipt " not in receipt
         assert first_receipt not in receipt
@@ -578,8 +587,7 @@ def test_freshly_inspected_successor_has_distinct_delivery_to_same_recipient(
     invoke(successor.configuration, first.release_ref, expected=2)
     invoke(successor.configuration, successor.release_ref, "--simulate-lost-ack", expected=LOST_ACK)
     before = counts(h), delivery_records()
-    pending = text(h, open_receipt(successor))
-    assert "Approval recorded. Delivery is unconfirmed." in pending
+    pending = check_outbox_row(open_receipt(successor), "Delivery is unconfirmed.")
     assert "Receiver receipt " not in pending and first_receipt not in pending
     assert (counts(h), delivery_records()) == before
     result = invoke(successor.configuration, successor.release_ref)
