@@ -5,15 +5,27 @@ one approved root:
 
 * a JSON partition manifest naming immutable Parquet partition files, each with an ID, a
   declared file SHA-256, byte size, row count and row-chain digest;
-* a companion NDJSON change manifest of revisioned upserts, reopens and tombstones.
+* a companion NDJSON change manifest of revisioned upserts, reopens and tombstones, carried
+  by a change feed whose stable identity the manifest declares (`change_feed`).
 
 Nothing a manifest says about itself is taken as proof. The reader computes every file's
-SHA-256 from its bytes and records it in a private `SourceLedger` the first time a partition
-ID is seen. The same ID with different bytes is a hard error (`partition_mutated`), even when
-the manifest declares the new digest consistently. A manifest revision rewritten in place is
-refused, and the change manifest is verified as append-only by a rolling digest over every
-committed line: a rewritten, removed or reordered earlier line is refused, never re-read. A
-malformed line refuses the read rather than being skipped.
+SHA-256 from its bytes and records it, the first time a partition ID is seen, in the source
+history that lives IN the extraction register (`bulk_extraction.SourceHistory`), scoped by
+tenant and source root. The engine binds that history into the source; the caller cannot
+supply, swap or reset it, and a source with no bound history reads nothing
+(`source_history_unbound`). The same ID with different bytes is a hard error
+(`partition_mutated`), even when the manifest declares the new digest consistently. A
+manifest revision rewritten in place is refused. The change manifest is verified as
+append-only by a rolling digest over every committed line, keyed by the declared feed
+identity and never by the log's path: renaming the log continues the same chain and must
+reproduce committed history exactly, and a new identity is refused unless the manifest
+declares it the explicit successor of the current one. A malformed line refuses the read
+rather than being skipped.
+
+Every file is opened by walking its path one component at a time from a descriptor on the
+approved root, with `O_NOFOLLOW` on every component, so no symlink is ever followed and there
+is no gap between checking a path and using it. The opened file must be a regular file with
+exactly one link on the root's device: a hard link to a file outside the root is refused.
 
 What is NOT built: the Parquet row decoder. No Parquet-capable library is a locked dependency
 of this workspace, and adding one needs the lockfile owner. `read_partition` therefore raises
@@ -29,21 +41,20 @@ import errno
 import hashlib
 import json
 import os
-import sqlite3
 import stat
-from collections.abc import Iterator
-from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import IO, Any, Protocol
 
 from opentour_cell.pilot.bulk_extraction import (
     ChangeEntry,
+    ChangeLogState,
     ChangePage,
     ExtractionError,
     PartitionPage,
     PartitionRef,
     SourceCapability,
+    SourceHistory,
     SourceManifest,
     SourceRow,
 )
@@ -55,6 +66,9 @@ CHANGE_OPS = ("upsert", "reopen", "tombstone")
 _CHUNK = 1 << 20
 _GENESIS = "0" * 64
 _HEX = frozenset("0123456789abcdef")
+_DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+_FILE_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK
+_LINK_ERRNOS = frozenset({errno.ELOOP, errno.ENOTDIR, errno.EMLINK})
 
 _PARTITION_KEYS = frozenset(
     {
@@ -77,6 +91,7 @@ _MANIFEST_KEYS = frozenset(
         "high_water",
         "partitions",
         "change_manifest",
+        "change_feed",
     }
 )
 _CAPABILITY_REQUIRED = frozenset({"change_log", "deletion_feed"})
@@ -146,119 +161,18 @@ def _safe_relative(value: object) -> PurePosixPath:
     return PurePosixPath(value)
 
 
-# ---- private ledger ------------------------------------------------------------------------
-
-
-def _private_file(path: Path) -> None:
-    directory = path.absolute().parent
-    info = directory.stat()
-    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
-        raise ExtractionError("private_store_required")
-    os.close(os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600))
-
-
-@dataclass(frozen=True)
-class ChangeLogState:
-    """How many committed lines of a change manifest were verified, and their rolling digest."""
-
-    lines: int
-    chain: str
-
-
-class SourceLedger:
-    """What the reader itself computed from bytes it read, kept across manifest revisions.
-
-    Only computed digests are stored; a digest a manifest declares is never recorded as fact.
-    """
-
-    def __init__(self, path: Path) -> None:
-        _private_file(path)
-        self._path = path
-        with self._txn() as db:
-            db.execute(
-                "CREATE TABLE IF NOT EXISTS partitions (partition_id TEXT PRIMARY KEY,"
-                " sha256 TEXT NOT NULL, byte_size INTEGER NOT NULL, first_revision TEXT NOT NULL)"
-            )
-            db.execute(
-                "CREATE TABLE IF NOT EXISTS manifests (revision TEXT PRIMARY KEY,"
-                " sha256 TEXT NOT NULL)"
-            )
-            db.execute(
-                "CREATE TABLE IF NOT EXISTS change_logs (log TEXT PRIMARY KEY,"
-                " lines INTEGER NOT NULL, chain TEXT NOT NULL)"
-            )
-
-    @contextmanager
-    def _txn(self) -> Iterator[sqlite3.Connection]:
-        db = sqlite3.connect(self._path, timeout=10, isolation_level=None)
-        try:
-            db.execute("BEGIN IMMEDIATE")
-            yield db
-            db.commit()
-        except BaseException:
-            db.rollback()
-            raise
-        finally:
-            db.close()
-
-    def partition(self, partition_id: str) -> tuple[str, int] | None:
-        with self._txn() as db:
-            row = db.execute(
-                "SELECT sha256, byte_size FROM partitions WHERE partition_id=?", (partition_id,)
-            ).fetchone()
-        return (row[0], row[1]) if row else None
-
-    def manifest(self, revision: str) -> str | None:
-        with self._txn() as db:
-            row = db.execute(
-                "SELECT sha256 FROM manifests WHERE revision=?", (revision,)
-            ).fetchone()
-        return row[0] if row else None
-
-    def record_manifest(
-        self, revision: str, digest: str, partitions: list[tuple[str, str, int]]
-    ) -> None:
-        """Record a verified manifest all at once, re-checking inside the commit scope."""
-        with self._txn() as db:
-            known = db.execute(
-                "SELECT sha256 FROM manifests WHERE revision=?", (revision,)
-            ).fetchone()
-            if known is not None and known[0] != digest:
-                raise ExtractionError("manifest_revision_rewritten")
-            for partition_id, sha, size in partitions:
-                row = db.execute(
-                    "SELECT sha256, byte_size FROM partitions WHERE partition_id=?",
-                    (partition_id,),
-                ).fetchone()
-                if row is not None and (row[0], row[1]) != (sha, size):
-                    raise ExtractionError("partition_mutated")
-                db.execute(
-                    "INSERT OR IGNORE INTO partitions VALUES (?,?,?,?)",
-                    (partition_id, sha, size, revision),
-                )
-            db.execute("INSERT OR IGNORE INTO manifests VALUES (?,?)", (revision, digest))
-
-    def change_log(self, log: str) -> ChangeLogState:
-        with self._txn() as db:
-            row = db.execute("SELECT lines, chain FROM change_logs WHERE log=?", (log,)).fetchone()
-        if row is None:
-            return ChangeLogState(0, _GENESIS)
-        return ChangeLogState(row[0], row[1])
-
-    def advance_change_log(self, log: str, seen: ChangeLogState, new: ChangeLogState) -> None:
-        """Compare-and-set: the ledger only moves forward from exactly the state verified."""
-        with self._txn() as db:
-            row = db.execute("SELECT lines, chain FROM change_logs WHERE log=?", (log,)).fetchone()
-            current = (row[0], row[1]) if row else (0, _GENESIS)
-            if current != (seen.lines, seen.chain):
-                raise ExtractionError("ledger_conflict")
-            if new.lines < seen.lines:
-                raise ExtractionError("change_manifest_truncated")
-            db.execute(
-                "INSERT INTO change_logs VALUES (?,?,?) ON CONFLICT(log) DO UPDATE SET"
-                " lines=excluded.lines, chain=excluded.chain",
-                (log, new.lines, new.chain),
-            )
+def _feed_declaration(value: Any) -> tuple[str, str | None] | None:
+    """`{"id": ...}` or `{"id": ..., "succeeds": <the current identity>}`; None if absent."""
+    if value is None:
+        return None
+    if type(value) is not dict or not {"id"} <= set(value) <= {"id", "succeeds"}:
+        raise ExtractionError("manifest_invalid")
+    feed_id, succeeds = value["id"], value.get("succeeds")
+    if not _is_text(feed_id) or not (succeeds is None or _is_text(succeeds)):
+        raise ExtractionError("manifest_invalid")
+    if succeeds == feed_id:
+        raise ExtractionError("manifest_invalid")
+    return feed_id, succeeds
 
 
 # ---- decoder port ------------------------------------------------------------------------
@@ -301,7 +215,6 @@ class ManifestSource:
         self,
         root: Path,
         manifest_path: str,
-        ledger: SourceLedger,
         *,
         decoder: PartitionDecoder | None = None,
         max_manifest_bytes: int = 16 << 20,
@@ -312,8 +225,10 @@ class ManifestSource:
         if not stat.S_ISDIR(info.st_mode):
             raise ExtractionError("source_root_invalid")
         self._root = Path(os.path.realpath(root))
+        approved = os.stat(self._root)
+        self._root_id = (approved.st_dev, approved.st_ino)
         self._manifest_path = _safe_relative(manifest_path)
-        self._ledger = ledger
+        self._history: SourceHistory | None = None
         self._decoder = decoder
         self._max_manifest = max_manifest_bytes
         self._max_changes = max_change_manifest_bytes
@@ -321,30 +236,72 @@ class ManifestSource:
         self._verified: dict[str, VerifiedPartition] = {}
         self._mapping = ""
         self._change_path: PurePosixPath | None = None
+        self._change_identity: tuple[int, int] | None = None
+        self._feed_id: str | None = None
         self._feeds: frozenset[str] = frozenset()
+
+    # ---- the history binding -------------------------------------------------------------
+
+    def history_scope(self) -> str:
+        """What the register scopes this source's history by: its approved root."""
+        return "manifest-root:" + str(self._root)
+
+    def bind_history(self, history: SourceHistory) -> None:
+        """Called by the engine with its own register's history; never re-bound elsewhere."""
+        if self._history is not None and self._history.binding != history.binding:
+            raise ExtractionError("source_history_conflict")
+        self._history = history
+
+    @property
+    def history(self) -> SourceHistory:
+        if self._history is None:
+            raise ExtractionError("source_history_unbound")
+        return self._history
 
     # ---- files ---------------------------------------------------------------------------
 
-    def _open(self, relative: PurePosixPath) -> tuple[IO[bytes], os.stat_result]:
-        full = self._root.joinpath(*relative.parts)
+    @staticmethod
+    def _open_at(name: str, flags: int, directory: int) -> int:
         try:
-            fd = os.open(full, os.O_RDONLY | os.O_NOFOLLOW)
+            return os.open(name, flags, dir_fd=directory)
         except FileNotFoundError:
             raise ExtractionError("source_file_missing") from None
         except OSError as error:
-            # ELOOP is the refused final-component symlink; NotADirectory a file used as a
-            # directory. Anything else is an I/O failure the engine may retry.
-            if error.errno in (errno.ELOOP, errno.ENOTDIR):
+            # ELOOP is a refused symlink (no component is ever followed); ENOTDIR a file used
+            # as a directory. Anything else is an I/O failure the engine may retry.
+            if error.errno in _LINK_ERRNOS:
                 raise ExtractionError("partition_path_invalid") from None
             raise ExtractionError("source_unavailable") from None
-        handle = os.fdopen(fd, "rb")
+
+    def _open(self, relative: PurePosixPath) -> tuple[IO[bytes], os.stat_result]:
+        """Open a file under the root by descriptor, one component at a time, no symlinks."""
         try:
-            info = os.fstat(handle.fileno())
-            resolved = Path(os.path.realpath(full))
-            if not stat.S_ISREG(info.st_mode) or not resolved.is_relative_to(self._root):
+            root = os.open(self._root, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+        except OSError:
+            raise ExtractionError("source_unavailable") from None
+        opened = [root]
+        try:
+            root_info = os.fstat(root)
+            if (root_info.st_dev, root_info.st_ino) != self._root_id:
+                raise ExtractionError("source_root_changed")
+            for part in relative.parts[:-1]:
+                opened.append(self._open_at(part, _DIR_FLAGS, opened[-1]))
+                if os.fstat(opened[-1]).st_dev != root_info.st_dev:
+                    raise ExtractionError("partition_path_invalid")
+            fd = self._open_at(relative.parts[-1], _FILE_FLAGS, opened[-1])
+        finally:
+            for directory in opened:
+                os.close(directory)
+        try:
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode) or info.st_dev != root_info.st_dev:
                 raise ExtractionError("partition_path_invalid")
+            if info.st_nlink != 1:
+                # Another name for the same inode may sit outside the root: refused outright.
+                raise ExtractionError("source_file_linked")
+            handle = os.fdopen(fd, "rb")
         except BaseException:
-            handle.close()
+            os.close(fd)
             raise
         return handle, info
 
@@ -361,6 +318,7 @@ class ManifestSource:
     # ---- manifest ------------------------------------------------------------------------
 
     def manifest(self) -> SourceManifest:
+        history = self.history
         handle, _ = self._open(self._manifest_path)
         with handle:
             raw = handle.read(self._max_manifest + 1)
@@ -370,9 +328,9 @@ class ManifestSource:
             body = _strict_json(raw)
         except ValueError:
             raise ExtractionError("manifest_invalid") from None
-        revision, mapping, capability, high_water, entries, change = self._shape(body)
+        revision, mapping, capability, high_water, entries, change, feed = self._shape(body)
         digest = hashlib.sha256(raw).hexdigest()
-        known = self._ledger.manifest(revision)
+        known = history.manifest(revision)
         if known is not None and known != digest:
             raise ExtractionError("manifest_revision_rewritten")
         shaped = [self._entry_shape(entry, high_water) for entry in entries]
@@ -380,14 +338,28 @@ class ManifestSource:
         paths = [path for _, path in shaped]
         if len(set(ids)) != len(ids) or len(set(paths)) != len(paths):
             raise ExtractionError("manifest_invalid")
-        verified = [self._verify(entry, path) for entry, path in shaped]
+        if change is not None and change in paths + [self._manifest_path]:
+            raise ExtractionError("manifest_invalid")
+        verified = [self._verify(entry, path, history) for entry, path in shaped]
+        change_identity = None
+        if change is not None:
+            # The change log gets the same opened-descriptor checks as a partition, and its
+            # identity is pinned so a replaced file is refused rather than re-read.
+            log, info = self._open(change)
+            log.close()
+            change_identity = (info.st_dev, info.st_ino)
         # Recorded only after every partition verified, and re-checked inside the commit.
-        self._ledger.record_manifest(
-            revision, digest, [(v.ref.partition_id, v.sha256, v.byte_size) for v in verified]
+        history.record_manifest(
+            revision,
+            digest,
+            [(v.ref.partition_id, v.sha256, v.byte_size) for v in verified],
+            feed,
         )
         self._verified = {v.ref.partition_id: v for v in verified}
         self._mapping = mapping
         self._change_path = change
+        self._change_identity = change_identity
+        self._feed_id = None if feed is None else feed[0]
         self._feeds = frozenset(high_water)
         return SourceManifest(
             revision,
@@ -407,6 +379,7 @@ class ManifestSource:
         dict[str, int],
         list[dict[str, Any]],
         PurePosixPath | None,
+        tuple[str, str | None] | None,
     ]:
         if type(body) is not dict or set(body) != _MANIFEST_KEYS:
             raise ExtractionError("manifest_invalid")
@@ -434,9 +407,11 @@ class ManifestSource:
         if type(entries) is not list or not entries:
             raise ExtractionError("manifest_invalid")
         change = body["change_manifest"]
+        feed = _feed_declaration(body["change_feed"])
         # A source without a change log is snapshot-only and must not name a change feed; a
-        # source that claims a change log must name the file that carries it.
-        if capability.change_log != (change is not None):
+        # source that claims a change log must name the file that carries it AND the stable
+        # identity of the feed, which the history keys its append-only chain by.
+        if capability.change_log != (change is not None) or (change is None) != (feed is None):
             raise ExtractionError("manifest_invalid")
         return (
             revision,
@@ -445,6 +420,7 @@ class ManifestSource:
             dict(high_water),
             entries,
             None if change is None else _safe_relative(change),
+            feed,
         )
 
     def _entry_shape(
@@ -465,7 +441,9 @@ class ManifestSource:
             raise ExtractionError("manifest_invalid")
         return entry, path
 
-    def _verify(self, entry: dict[str, Any], path: PurePosixPath) -> VerifiedPartition:
+    def _verify(
+        self, entry: dict[str, Any], path: PurePosixPath, history: SourceHistory
+    ) -> VerifiedPartition:
         handle, info = self._open(path)
         with handle:
             computed, size = self._digest(handle)
@@ -477,7 +455,7 @@ class ManifestSource:
                 magic = head + handle.read(4)
         # Immutability is judged on the digest computed here, against the digest computed
         # the first time this ID was read; what the manifest declares cannot excuse a change.
-        recorded = self._ledger.partition(entry["partition_id"])
+        recorded = history.partition(entry["partition_id"])
         if recorded is not None and recorded != (computed, size):
             raise ExtractionError("partition_mutated")
         if size != entry["byte_size"]:
@@ -492,6 +470,7 @@ class ManifestSource:
             entry["feed"],
             entry["row_digest"],
             entry["row_count"],
+            computed,
         )
         return VerifiedPartition(
             ref, path, computed, size, info.st_dev, info.st_ino, info.st_mtime_ns
@@ -531,15 +510,17 @@ class ManifestSource:
     def read_changes(self, feed: str, *, after: int, limit: int) -> ChangePage:
         if not self._feeds:
             raise ExtractionError("manifest_not_loaded")
-        if self._change_path is None:
+        if self._change_path is None or self._feed_id is None:
             raise ExtractionError("snapshot_only_source")
         if feed not in self._feeds:
             raise ExtractionError("feed_unknown")
         if not _is_int(after) or after < 0 or not _is_int(limit) or limit < 1:
             raise ExtractionError("invalid_limits")
-        log = str(self._change_path)
-        seen = self._ledger.change_log(log)
-        handle, _ = self._open(self._change_path)
+        seen = self.history.change_feed(self._feed_id)
+        handle, info = self._open(self._change_path)
+        if (info.st_dev, info.st_ino) != self._change_identity:
+            handle.close()
+            raise ExtractionError("change_manifest_replaced")
         chain, lines, total = _GENESIS, 0, 0
         heads: dict[str, int] = {}
         entries: list[ChangeEntry] = []
@@ -585,7 +566,7 @@ class ManifestSource:
         if lines < seen.lines:
             raise ExtractionError("change_manifest_truncated")
         if lines > seen.lines:
-            self._ledger.advance_change_log(log, seen, ChangeLogState(lines, chain))
+            self.history.advance_change_feed(self._feed_id, seen, ChangeLogState(lines, chain))
         through = head if more else max(after, heads.get(feed, 0))
         return ChangePage(feed, after, through, tuple(entries))
 

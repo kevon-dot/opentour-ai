@@ -39,7 +39,6 @@ from opentour_cell.pilot.bulk_manifest import (
     PARTITION_MANIFEST_FORMAT,
     DecodedPage,
     ManifestSource,
-    SourceLedger,
 )
 from test_bulk_extraction import TENANT, Grants, decision, outcome
 
@@ -80,6 +79,7 @@ class Export:
         self.capability: dict[str, bool] = {"change_log": True, "deletion_feed": True}
         self.high_water = {"decision": 10, "outcome": 10}
         self.change: str | None = "changes.ndjson"
+        self.feed: dict[str, str] = {"id": "generated-feed-1"}
         self.overrides: dict[str, dict[str, Any]] = {}
         self.top: dict[str, Any] = {}
         (root / "changes.ndjson").write_text(json.dumps({"format": CHANGE_MANIFEST_FORMAT}) + "\n")
@@ -111,6 +111,7 @@ class Export:
                 {**p, **self.overrides.get(k, {})} for k, p in sorted(self.parts.items())
             ],
             "change_manifest": self.change,
+            "change_feed": self.feed if self.change is not None else None,
             **self.top,
         }
 
@@ -162,11 +163,17 @@ def export(private: Path) -> Export:
     return Export(private / "export")
 
 
+def bind(private: Path, source: ManifestSource, name: str = "register.sqlite3") -> BulkExtraction:
+    """The engine binds its own register's history into the source; nothing else can."""
+    return BulkExtraction(private / "state" / name, source, Grants({RES_D, RES_O}), tenant=TENANT)
+
+
 def source_for(
     private: Path, export: Export, decoder: SentinelDecoder | None = None
 ) -> ManifestSource:
-    ledger = SourceLedger(private / "state" / "ledger.sqlite3")
-    return ManifestSource(export.root, "manifest.json", ledger, decoder=decoder)
+    source = ManifestSource(export.root, "manifest.json", decoder=decoder)
+    bind(private, source)
+    return source
 
 
 def code_of(call: Any) -> str:
@@ -262,10 +269,10 @@ def test_a_failed_manifest_records_nothing_in_the_ledger(private: Path, export: 
     standard(export)
     export.overrides["generated-outcomes-0"] = {"sha256": "0" * 64}
     export.write()
-    assert code_of(source_for(private, export).manifest) == "partition_digest_mismatch"
-    ledger = SourceLedger(private / "state" / "ledger.sqlite3")
-    assert ledger.partition("generated-decisions-0") is None
-    assert ledger.manifest("generated-manifest-1") is None
+    source = source_for(private, export)
+    assert code_of(source.manifest) == "partition_digest_mismatch"
+    assert source.history.partition("generated-decisions-0") is None
+    assert source.history.manifest("generated-manifest-1") is None
 
 
 # ---- M4 declared values checked against bytes ---------------------------------------------------
@@ -549,8 +556,7 @@ def test_a_malformed_line_refuses_the_read_and_never_advances_the_ledger(
     assert code_of(lambda: source.read_changes("decision", after=10, limit=9)) == (
         "change_manifest_malformed"
     )
-    ledger = SourceLedger(private / "state" / "ledger.sqlite3")
-    assert ledger.change_log("changes.ndjson").lines == 0
+    assert source.history.change_feed("generated-feed-1").lines == 0
     # Never verified, so correcting the unrecorded line is not a rewrite.
     lines = log.read_text().splitlines(keepends=True)
     lines[2] = json.dumps(change(12, 12, 1)) + "\n"
@@ -619,11 +625,22 @@ def test_bytes_changed_during_a_read_never_seal_the_partition(
 # ---- M13 private ledger --------------------------------------------------------------------------
 
 
-def test_the_ledger_must_live_in_a_private_directory(private: Path) -> None:
+def test_the_ledger_must_live_in_a_private_directory(private: Path, export: Export) -> None:
+    # The ledger is the extraction register itself, so its private-directory rule applies,
+    # and a source no register has bound reads nothing at all.
     open_dir = private / "open"
     open_dir.mkdir()
     open_dir.chmod(0o755)
-    assert code_of(lambda: SourceLedger(open_dir / "ledger.sqlite3")) == "private_store_required"
+    source = ManifestSource(export.root, "manifest.json")
+    assert (
+        code_of(
+            lambda: BulkExtraction(
+                open_dir / "ledger.sqlite3", source, Grants({RES_D}), tenant=TENANT
+            )
+        )
+        == "private_store_required"
+    )
+    assert code_of(source.manifest) == "source_history_unbound"
 
 
 # ---- M14 strict change entries -------------------------------------------------------------------
