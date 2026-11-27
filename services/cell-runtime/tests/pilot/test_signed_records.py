@@ -1,0 +1,1038 @@
+"""OPE-566 pilot signed-record verifier: trust chain, signer roles, customer anchors, time.
+
+Every key here is generated at test time. No private key material is committed, and the
+signing helpers below exist only in the test tree: the verifier module cannot sign.
+"""
+
+from __future__ import annotations
+
+import base64
+import hashlib
+import inspect
+import json
+import shutil
+import uuid
+from collections.abc import Callable
+from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
+from functools import partial
+from pathlib import Path
+from typing import Any
+
+import pytest
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import ec, utils
+from opentour_cell.pilot import signed_records as sr
+from opentour_journal.crypto import canonical, der_to_raw, transcript
+
+Json = dict[str, Any]
+ENGAGEMENT = "eng-sentinel-0001"
+REGISTRY_ID = "opentour-pilot-registry-sentinel"
+
+
+def stamp(seconds: float) -> str:
+    moment = datetime.now(UTC) + timedelta(seconds=seconds)
+    return moment.strftime("%Y-%m-%dT%H:%M:%S.") + f"{moment.microsecond // 1000:03d}Z"
+
+
+@dataclass
+class Signer:
+    """Test-only issuer. Stands in for a hardware token that signs a SHA-256 digest."""
+
+    role: str
+    purposes: list[str] = field(default_factory=list)
+    registry_revision: str = "rev-1"
+    curve: ec.EllipticCurve = field(default_factory=ec.SECP256R1)
+
+    def __post_init__(self) -> None:
+        self.private = ec.generate_private_key(self.curve)
+        self.key_id = f"{self.role.replace('_', '-')}-{uuid.uuid4().hex[:12]}"
+        self.der = self.private.public_key().public_bytes(
+            serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo
+        )
+
+    def public(self) -> Json:
+        return {
+            "key_id": self.key_id,
+            "public_key_der": base64.b64encode(self.der).decode("ascii"),
+            "public_key_sha256": hashlib.sha256(self.der).hexdigest(),
+        }
+
+    def entry(self, **changes: Any) -> Json:
+        value: Json = {
+            **self.public(),
+            "registry_revision": self.registry_revision,
+            "role": self.role,
+            "purposes": list(self.purposes),
+        }
+        value.update(changes)
+        return value
+
+    def signature(self, payload: Json, purpose: str, **changes: Any) -> Json:
+        digest = hashlib.sha256(transcript(purpose, payload)).digest()
+        der = self.private.sign(digest, ec.ECDSA(utils.Prehashed(hashes.SHA256())))
+        value: Json = {
+            "profile_version": "1.0",
+            "algorithm": "ES256",
+            "encoding": "base64url_unpadded_r_s_64",
+            "purpose": purpose,
+            "signer_role": self.role,
+            "key_id": self.key_id,
+            "key_registry_revision": self.registry_revision,
+            "payload_sha256": hashlib.sha256(canonical(payload)).hexdigest(),
+            "transcript_sha256": digest.hex(),
+            "signature": der_to_raw(der),
+        }
+        value.update(changes)
+        return value
+
+
+def envelope(payload: Json, purpose: str, *signers: Signer) -> Json:
+    return {"payload": payload, "signatures": [s.signature(payload, purpose) for s in signers]}
+
+
+def sign(payload: Json, purpose: str, *signers: Signer) -> bytes:
+    return bytes(canonical(envelope(payload, purpose, *signers)))
+
+
+def redigest(value: Json) -> bytes:
+    """An attacker can recompute the unsigned digest fields; only the signature binds."""
+    payload = value["payload"]
+    for signature in value["signatures"]:
+        signature["payload_sha256"] = hashlib.sha256(canonical(payload)).hexdigest()
+        signature["transcript_sha256"] = hashlib.sha256(
+            transcript(signature["purpose"], payload)
+        ).hexdigest()
+    return bytes(canonical(value))
+
+
+def consent(**changes: Any) -> Json:
+    value: Json = {
+        "engagement_id": ENGAGEMENT,
+        "organization_id": "org-sentinel-0001",
+        "engagement_epoch": 3,
+        "issued_at": stamp(-60),
+        "not_after": stamp(3600),
+    }
+    value.update(changes)
+    return value
+
+
+@dataclass
+class Kit:
+    tmp: Path
+    monkeypatch: pytest.MonkeyPatch
+    root: Signer
+    operator: Signer
+    evaluator: Signer
+    auditor: Signer
+    customer: Signer
+    worker: Path
+    state: Path
+    minimum: str = "1"
+
+    def pin(self, **changes: Any) -> bytes:
+        value: Json = {
+            "profile_version": "1.0",
+            "kind": "opentour.pilot.registry-root.v1",
+            "registry_id": REGISTRY_ID,
+            "minimum_registry_revision": self.minimum,
+            "root_keys": [self.root.entry()],
+        }
+        value.update(changes)
+        data = json.dumps(value, indent=2).encode()
+        path = self.tmp / "kit" / "trust" / "pilot-registry-root.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+        self.monkeypatch.setattr(sr, "ROOT_PIN_PATH", path)
+        self.monkeypatch.setattr(sr, "APPROVED_ROOT_PIN_SHA256", hashlib.sha256(data).hexdigest())
+        return data
+
+    def issuers(self) -> list[Json]:
+        return [self.operator.entry(), self.evaluator.entry(), self.auditor.entry()]
+
+    def registry_payload(
+        self, revision: str = "1", keys: list[Json] | None = None, **changes: Any
+    ) -> Json:
+        value: Json = {
+            "profile_version": "1.0",
+            "registry_id": REGISTRY_ID,
+            "revision": revision,
+            "issued_at": stamp(-60),
+            "not_after": stamp(86400),
+            "keys": self.issuers() if keys is None else keys,
+        }
+        value.update(changes)
+        return value
+
+    def registry(
+        self, revision: str = "1", keys: list[Json] | None = None, **changes: Any
+    ) -> bytes:
+        payload = self.registry_payload(revision, keys, **changes)
+        return sign(payload, sr.REGISTRY_PURPOSE, self.root)
+
+    def verifier(self, registry: bytes | None = None) -> sr.PilotVerifier:
+        return sr.PilotVerifier(self.registry() if registry is None else registry)
+
+    def enrolment_payload(self, customer: Signer | None = None, **changes: Any) -> Json:
+        payload: Json = {
+            "profile_version": "1.0",
+            "engagement_id": ENGAGEMENT,
+            "anchor_revision": "1",
+            "customer_key": (customer or self.customer).public(),
+            "issued_at": stamp(-60),
+            "not_after": stamp(3600),
+        }
+        payload.update(changes)
+        return payload
+
+    def enrolment(self, customer: Signer | None = None, **changes: Any) -> bytes:
+        payload = self.enrolment_payload(customer, **changes)
+        return sign(payload, sr.ENROLMENT_PURPOSE, customer or self.customer, self.operator)
+
+    def enrolled(self) -> sr.PilotVerifier:
+        verifier = self.verifier()
+        verifier.pin_customer_anchor(self.enrolment())
+        return verifier
+
+    def rotation(
+        self, previous: Signer, successor: Signer, *signers: Signer, **changes: Any
+    ) -> bytes:
+        payload: Json = {
+            "profile_version": "1.0",
+            "engagement_id": ENGAGEMENT,
+            "previous_key_id": previous.key_id,
+            "previous_anchor_revision": previous.registry_revision,
+            "anchor_revision": successor.registry_revision,
+            "customer_key": successor.public(),
+            "issued_at": stamp(-60),
+            "not_after": stamp(3600),
+        }
+        payload.update(changes)
+        return sign(payload, sr.ROTATION_PURPOSE, *(signers or (previous,)))
+
+
+@pytest.fixture
+def kit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Kit:
+    worker, state = tmp_path / "worker-volume", tmp_path / "trust-state"
+    worker.mkdir(mode=0o700)
+    state.mkdir(mode=0o700)
+    value = Kit(
+        tmp_path,
+        monkeypatch,
+        root=Signer(sr.OPERATOR_ROOT, [sr.REGISTRY_PURPOSE], registry_revision="root-1"),
+        operator=Signer(
+            sr.OPERATOR_CUSTODIAN,
+            [
+                sr.GRANT_PURPOSE,
+                sr.SPEND_MANDATE_PURPOSE,
+                sr.ROUTING_POLICY_PURPOSE,
+                sr.ENROLMENT_PURPOSE,
+            ],
+        ),
+        evaluator=Signer(sr.INDEPENDENT_EVALUATOR, [sr.VERDICT_PURPOSE]),
+        auditor=Signer(sr.BENCHMARK_AUDITOR, [sr.BENCHMARK_AUDIT_PURPOSE]),
+        customer=Signer(sr.CUSTOMER_OWNER, registry_revision="1"),
+        worker=worker,
+        state=state,
+    )
+    value.pin()
+    # The production location is pending OPE-577; tests use a temporary location.
+    monkeypatch.setattr(sr, "ANTI_ROLLBACK_DIRECTORY", state)
+    return value
+
+
+def refused(code: str, action: Callable[[], object]) -> None:
+    with pytest.raises(sr.PilotRecordRefused) as caught:
+        action()
+    assert caught.value.code == code
+
+
+# --- Acceptance and per-purpose signer policy ----------------------------------------
+
+
+def test_valid_records_accepted_with_their_required_signers(kit: Kit) -> None:
+    verifier = kit.enrolled()
+    for purpose in sorted(sr.CONSENT_PURPOSES):
+        payload = consent(kind=purpose)
+        record = sign(payload, purpose, kit.customer, kit.operator)
+        assert verifier.verify(record, purpose) == payload
+        swapped = sign(payload, purpose, kit.operator, kit.customer)
+        assert verifier.verify(swapped, purpose) == payload
+    for signer, purpose in (
+        (kit.evaluator, sr.VERDICT_PURPOSE),
+        (kit.auditor, sr.BENCHMARK_AUDIT_PURPOSE),
+    ):
+        payload = consent(kind=purpose)
+        assert verifier.verify(sign(payload, purpose, signer), purpose) == payload
+
+
+def test_policy_table_matches_the_owner_ruling() -> None:
+    both = frozenset({sr.CUSTOMER_OWNER, sr.OPERATOR_CUSTODIAN})
+    assert sr.REQUIRED_ROLES[sr.GRANT_PURPOSE] == both
+    assert sr.REQUIRED_ROLES[sr.SPEND_MANDATE_PURPOSE] == both
+    assert sr.REQUIRED_ROLES[sr.ROUTING_POLICY_PURPOSE] == both
+    assert sr.REQUIRED_ROLES[sr.VERDICT_PURPOSE] == {sr.INDEPENDENT_EVALUATOR}
+    assert sr.REQUIRED_ROLES[sr.BENCHMARK_AUDIT_PURPOSE] == {sr.BENCHMARK_AUDITOR}
+    assert sr.REQUIRED_ROLES[sr.REGISTRY_PURPOSE] == {sr.OPERATOR_ROOT}
+    assert sr.SPEND_MANDATE_PURPOSE == "opentour.pilot.spend-mandate.v1"
+
+
+@pytest.mark.parametrize("purpose", sorted(sr.CONSENT_PURPOSES))
+def test_consent_record_refused_with_either_signer_alone(kit: Kit, purpose: str) -> None:
+    verifier = kit.enrolled()
+    for signer in (kit.customer, kit.operator):
+        record = sign(consent(), purpose, signer)
+        refused("signature_role_missing", partial(verifier.verify, record, purpose))
+
+
+def test_one_key_cannot_sign_twice_to_fake_two_roles(kit: Kit) -> None:
+    verifier = kit.enrolled()
+    payload = consent()
+    # The operator key signs once as itself and once claiming the customer role.
+    as_customer = kit.operator.signature(payload, sr.GRANT_PURPOSE, signer_role=sr.CUSTOMER_OWNER)
+    doubled = {
+        "payload": payload,
+        "signatures": [kit.operator.signature(payload, sr.GRANT_PURPOSE), as_customer],
+    }
+    refused("signature_key_reused", partial(verifier.verify, canonical(doubled), sr.GRANT_PURPOSE))
+    # The same role twice, even by two distinct operator keys, is not two consents.
+    second = Signer(sr.OPERATOR_CUSTODIAN, [sr.GRANT_PURPOSE])
+    record = sign(payload, sr.GRANT_PURPOSE, kit.operator, second)
+    refused("signature_role_duplicate", partial(verifier.verify, record, sr.GRANT_PURPOSE))
+
+
+def test_one_public_key_under_two_registry_ids_refused(kit: Kit) -> None:
+    alias = kit.operator.entry(
+        key_id="evaluator-alias-0001",
+        role=sr.INDEPENDENT_EVALUATOR,
+        purposes=[sr.VERDICT_PURPOSE],
+    )
+    refused(
+        "trust_key_duplicate",
+        partial(kit.verifier, kit.registry(keys=[kit.operator.entry(), alias])),
+    )
+
+
+def test_evaluator_signature_on_a_grant_is_refused(kit: Kit) -> None:
+    verifier = kit.enrolled()
+    payload = consent()
+    # Cryptographically valid: the evaluator really signed this grant transcript.
+    claims_operator = kit.evaluator.signature(
+        payload, sr.GRANT_PURPOSE, signer_role=sr.OPERATOR_CUSTODIAN
+    )
+    record = {
+        "payload": payload,
+        "signatures": [kit.customer.signature(payload, sr.GRANT_PURPOSE), claims_operator],
+    }
+    refused("key_role_not_permitted", partial(verifier.verify, canonical(record), sr.GRANT_PURPOSE))
+    own_role = sign(payload, sr.GRANT_PURPOSE, kit.customer, kit.evaluator)
+    refused("signature_role_unexpected", partial(verifier.verify, own_role, sr.GRANT_PURPOSE))
+    claims_auditor = kit.auditor.signature(
+        payload, sr.VERDICT_PURPOSE, signer_role=sr.INDEPENDENT_EVALUATOR
+    )
+    verdict = {"payload": payload, "signatures": [claims_auditor]}
+    refused(
+        "key_role_not_permitted", partial(verifier.verify, canonical(verdict), sr.VERDICT_PURPOSE)
+    )
+
+
+def test_key_limited_to_fewer_purposes_than_its_role(kit: Kit) -> None:
+    narrow = Signer(sr.OPERATOR_CUSTODIAN, [sr.GRANT_PURPOSE])
+    verifier = kit.verifier(kit.registry(keys=[*kit.issuers(), narrow.entry()]))
+    verifier.pin_customer_anchor(kit.enrolment())
+    grant = sign(consent(), sr.GRANT_PURPOSE, kit.customer, narrow)
+    assert verifier.verify(grant, sr.GRANT_PURPOSE)
+    policy = sign(consent(), sr.ROUTING_POLICY_PURPOSE, kit.customer, narrow)
+    refused(
+        "key_purpose_not_permitted", partial(verifier.verify, policy, sr.ROUTING_POLICY_PURPOSE)
+    )
+
+
+def test_same_signatures_refused_under_a_different_purpose(kit: Kit) -> None:
+    verifier = kit.enrolled()
+    record = sign(consent(), sr.GRANT_PURPOSE, kit.customer, kit.operator)
+    # Both signers may sign spend mandates too, so only the transcript separates them.
+    refused("purpose_mismatch", partial(verifier.verify, record, sr.SPEND_MANDATE_PURPOSE))
+    relabelled = json.loads(record)
+    for signature in relabelled["signatures"]:
+        signature["purpose"] = sr.SPEND_MANDATE_PURPOSE
+    refused(
+        "transcript_digest_mismatch",
+        partial(verifier.verify, canonical(relabelled), sr.SPEND_MANDATE_PURPOSE),
+    )
+    refused(
+        "signature_invalid",
+        partial(verifier.verify, redigest(relabelled), sr.SPEND_MANDATE_PURPOSE),
+    )
+
+
+def test_unknown_purpose_refused(kit: Kit) -> None:
+    verifier = kit.enrolled()
+    record = sign(consent(), sr.GRANT_PURPOSE, kit.customer, kit.operator)
+    refused("purpose_unknown", partial(verifier.verify, record, "opentour.pilot.other.v1"))
+    for internal in (sr.REGISTRY_PURPOSE, sr.ENROLMENT_PURPOSE, sr.ROTATION_PURPOSE):
+        refused("purpose_unknown", partial(verifier.verify, kit.registry(), internal))
+
+
+def test_unknown_key_id_refused(kit: Kit) -> None:
+    verifier = kit.verifier()
+    stranger = Signer(sr.INDEPENDENT_EVALUATOR, [sr.VERDICT_PURPOSE])
+    record = sign(consent(), sr.VERDICT_PURPOSE, stranger)
+    refused("key_unknown", partial(verifier.verify, record, sr.VERDICT_PURPOSE))
+
+
+def test_unknown_registry_revision_refused(kit: Kit) -> None:
+    verifier = kit.verifier()
+    payload = consent()
+    stale = kit.evaluator.signature(payload, sr.VERDICT_PURPOSE, key_registry_revision="rev-2")
+    record = canonical({"payload": payload, "signatures": [stale]})
+    refused("key_revision_not_active", partial(verifier.verify, record, sr.VERDICT_PURPOSE))
+
+
+def test_record_by_key_absent_from_verified_registry_refused(kit: Kit) -> None:
+    # Revocation: a newer registry revision that drops the evaluator key.
+    record = sign(consent(), sr.VERDICT_PURPOSE, kit.evaluator)
+    assert kit.verifier().verify(record, sr.VERDICT_PURPOSE)
+    revoked = kit.registry("2", keys=[kit.operator.entry(), kit.auditor.entry()])
+    verifier = kit.verifier(revoked)
+    refused("key_unknown", partial(verifier.verify, record, sr.VERDICT_PURPOSE))
+
+
+def test_root_key_cannot_sign_records(kit: Kit) -> None:
+    verifier = kit.verifier()
+    payload = consent()
+    claims = kit.root.signature(payload, sr.VERDICT_PURPOSE, signer_role=sr.INDEPENDENT_EVALUATOR)
+    record = canonical({"payload": payload, "signatures": [claims]})
+    refused("key_unknown", partial(verifier.verify, record, sr.VERDICT_PURPOSE))
+
+
+# --- Customer anchors ----------------------------------------------------------------
+
+
+def test_consent_record_needs_a_pinned_anchor(kit: Kit) -> None:
+    verifier = kit.verifier()
+    record = sign(consent(), sr.GRANT_PURPOSE, kit.customer, kit.operator)
+    refused("customer_anchor_missing", partial(verifier.verify, record, sr.GRANT_PURPOSE))
+    no_engagement = consent()
+    del no_engagement["engagement_id"]
+    bare = sign(no_engagement, sr.GRANT_PURPOSE, kit.customer, kit.operator)
+    refused("record_schema_invalid", partial(verifier.verify, bare, sr.GRANT_PURPOSE))
+
+
+def test_enrolment_requires_customer_and_operator_signatures(kit: Kit) -> None:
+    verifier = kit.verifier()
+    payload = kit.enrolment_payload()
+    for signers in ((kit.customer,), (kit.operator,)):
+        record = sign(payload, sr.ENROLMENT_PURPOSE, *signers)
+        refused("signature_role_missing", partial(verifier.pin_customer_anchor, record))
+    assert not (kit.state / sr.ANCHORS_NAME).exists()
+
+
+def test_enrolment_proves_possession_and_pins_idempotently(kit: Kit) -> None:
+    verifier = kit.verifier()
+    # The enrolled key itself must sign: another key cannot enrol it on its behalf.
+    impostor = Signer(sr.CUSTOMER_OWNER, registry_revision="1")
+    unproven = sign(
+        kit.enrolment_payload(impostor), sr.ENROLMENT_PURPOSE, kit.customer, kit.operator
+    )
+    refused("enrolment_key_mismatch", partial(verifier.pin_customer_anchor, unproven))
+    enrolment = kit.enrolment()
+    anchor = verifier.pin_customer_anchor(enrolment)
+    assert (anchor.key_id, anchor.anchor_revision) == (kit.customer.key_id, 1)
+    assert verifier.pin_customer_anchor(enrolment) == anchor
+
+
+def test_operator_cannot_re_enrol_a_different_customer_key(kit: Kit) -> None:
+    verifier = kit.enrolled()
+    substitute = Signer(sr.CUSTOMER_OWNER, registry_revision="1")
+    refused(
+        "customer_anchor_already_pinned",
+        partial(verifier.pin_customer_anchor, kit.enrolment(substitute)),
+    )
+    forged = sign(consent(), sr.GRANT_PURPOSE, substitute, kit.operator)
+    refused("customer_key_not_anchored", partial(verifier.verify, forged, sr.GRANT_PURPOSE))
+
+
+def test_enrolled_key_must_be_distinct_from_operator_registry_keys(kit: Kit) -> None:
+    verifier = kit.verifier()
+    own = Signer(sr.CUSTOMER_OWNER, registry_revision="1")
+    own.private, own.der = kit.operator.private, kit.operator.der
+    refused("customer_key_not_distinct", partial(verifier.pin_customer_anchor, kit.enrolment(own)))
+    reused_id = Signer(sr.CUSTOMER_OWNER, registry_revision="1")
+    reused_id.key_id = kit.operator.key_id
+    refused(
+        "customer_key_not_distinct",
+        partial(verifier.pin_customer_anchor, kit.enrolment(reused_id)),
+    )
+    refused(
+        "customer_anchor_revision_invalid",
+        partial(verifier.pin_customer_anchor, kit.enrolment(anchor_revision="2")),
+    )
+
+
+def test_operator_signed_registry_revision_cannot_change_a_customer_anchor(kit: Kit) -> None:
+    """The point of the second-round ruling: the operator alone cannot replace the customer."""
+    verifier = kit.enrolled()
+    genuine = sign(consent(), sr.GRANT_PURPOSE, kit.customer, kit.operator)
+    assert verifier.verify(genuine, sr.GRANT_PURPOSE)
+    substitute = Signer(sr.CUSTOMER_OWNER, registry_revision="1")
+    # 1. A registry may not carry customer-owner keys at all, however validly root-signed.
+    for purposes in ([], [sr.GRANT_PURPOSE]):
+        with_customer = kit.registry(
+            "2", keys=[*kit.issuers(), substitute.entry(purposes=purposes)]
+        )
+        refused("trust_key_role_invalid", partial(kit.verifier, with_customer))
+    # 2. A valid newer registry that adds operator keys leaves the anchor exactly as it was.
+    extra = Signer(sr.OPERATOR_CUSTODIAN, [sr.GRANT_PURPOSE])
+    newer = kit.verifier(kit.registry("2", keys=[*kit.issuers(), extra.entry()]))
+    assert newer.registry_revision == 2
+    assert newer.verify(genuine, sr.GRANT_PURPOSE)
+    # 3. A registry key presented as the customer is not the anchored customer key.
+    payload = consent()
+    as_customer = extra.signature(payload, sr.GRANT_PURPOSE, signer_role=sr.CUSTOMER_OWNER)
+    minted = {
+        "payload": payload,
+        "signatures": [as_customer, kit.operator.signature(payload, sr.GRANT_PURPOSE)],
+    }
+    refused("customer_key_not_anchored", partial(newer.verify, canonical(minted), sr.GRANT_PURPOSE))
+    forged = sign(consent(), sr.GRANT_PURPOSE, substitute, kit.operator)
+    refused("customer_key_not_anchored", partial(newer.verify, forged, sr.GRANT_PURPOSE))
+    # 4. Nor can the operator re-enrol, or rotate without the previous customer key.
+    refused(
+        "customer_anchor_already_pinned",
+        partial(newer.pin_customer_anchor, kit.enrolment(substitute)),
+    )
+    successor = Signer(sr.CUSTOMER_OWNER, registry_revision="2")
+    operator_rotation = kit.rotation(kit.customer, successor, kit.operator)
+    refused("signature_role_unexpected", partial(newer.rotate_customer_key, operator_rotation))
+    assert newer.verify(genuine, sr.GRANT_PURPOSE)
+
+
+def test_rotation_signed_by_previous_key_replaces_the_anchor(kit: Kit) -> None:
+    verifier = kit.enrolled()
+    old_record = sign(consent(), sr.GRANT_PURPOSE, kit.customer, kit.operator)
+    successor = Signer(sr.CUSTOMER_OWNER, registry_revision="2")
+    anchor = verifier.rotate_customer_key(kit.rotation(kit.customer, successor))
+    assert (anchor.key_id, anchor.anchor_revision) == (successor.key_id, 2)
+    refused("customer_key_not_anchored", partial(verifier.verify, old_record, sr.GRANT_PURPOSE))
+    new_record = sign(consent(), sr.GRANT_PURPOSE, successor, kit.operator)
+    assert verifier.verify(new_record, sr.GRANT_PURPOSE)
+
+
+def test_rotation_not_signed_by_previous_key_refused(kit: Kit) -> None:
+    verifier = kit.enrolled()
+    successor = Signer(sr.CUSTOMER_OWNER, registry_revision="2")
+    payload = json.loads(kit.rotation(kit.customer, successor))["payload"]
+    # Signed only by the successor, presenting the current anchor revision.
+    by_successor = successor.signature(payload, sr.ROTATION_PURPOSE, key_registry_revision="1")
+    self_signed = canonical({"payload": payload, "signatures": [by_successor]})
+    refused("customer_key_not_anchored", partial(verifier.rotate_customer_key, self_signed))
+    # A registry key claiming the customer role.
+    claims = kit.operator.signature(payload, sr.ROTATION_PURPOSE, signer_role=sr.CUSTOMER_OWNER)
+    by_operator = canonical({"payload": payload, "signatures": [claims]})
+    refused("customer_key_not_anchored", partial(verifier.rotate_customer_key, by_operator))
+    genuine = sign(consent(), sr.GRANT_PURPOSE, kit.customer, kit.operator)
+    assert verifier.verify(genuine, sr.GRANT_PURPOSE)
+
+
+def test_rotation_must_be_the_exact_successor(kit: Kit) -> None:
+    verifier = kit.enrolled()
+    skip = Signer(sr.CUSTOMER_OWNER, registry_revision="3")
+    refused(
+        "customer_rotation_not_successor",
+        partial(verifier.rotate_customer_key, kit.rotation(kit.customer, skip)),
+    )
+    second = Signer(sr.CUSTOMER_OWNER, registry_revision="2")
+    first_rotation = kit.rotation(kit.customer, second)
+    verifier.rotate_customer_key(first_rotation)
+    third = Signer(sr.CUSTOMER_OWNER, registry_revision="3")
+    verifier.rotate_customer_key(kit.rotation(second, third))
+    # Replaying the first rotation cannot bring back the second key.
+    refused("customer_key_not_anchored", partial(verifier.rotate_customer_key, first_rotation))
+    same = Signer(sr.CUSTOMER_OWNER, registry_revision="4")
+    same.private, same.der = third.private, third.der
+    refused(
+        "customer_key_not_distinct",
+        partial(verifier.rotate_customer_key, kit.rotation(third, same)),
+    )
+
+
+# --- Anti-rollback trust-state store -------------------------------------------------
+
+
+def test_store_location_is_fixed_configuration_not_yet_set(
+    kit: Kit, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sr, "ANTI_ROLLBACK_DIRECTORY", None)
+    refused("anti_rollback_location_not_configured", kit.verifier)
+    refused("anti_rollback_location_not_configured", sr.TrustStateStore)
+    for location in (Path("relative/trust-state"), kit.tmp / "absent"):
+        monkeypatch.setattr(sr, "ANTI_ROLLBACK_DIRECTORY", location)
+        refused("anti_rollback_state_unavailable", kit.verifier)
+    link = kit.tmp / "linked-state"
+    link.symlink_to(kit.state, target_is_directory=True)
+    monkeypatch.setattr(sr, "ANTI_ROLLBACK_DIRECTORY", link)
+    refused("anti_rollback_state_unavailable", kit.verifier)
+
+
+def test_shipped_store_location_is_unset_pending_worker_host_layout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.undo()
+    assert sr.ANTI_ROLLBACK_DIRECTORY is None
+
+
+def test_store_state_format_is_strict_and_versioned(kit: Kit) -> None:
+    registry = kit.registry()
+    kit.verifier(registry).pin_customer_anchor(kit.enrolment())
+    floor = json.loads((kit.state / sr.FLOOR_NAME).read_bytes())
+    assert floor == {
+        "format": "opentour.pilot.trust-state.v1",
+        "registry_sha256": hashlib.sha256(registry).hexdigest(),
+        "revision": "1",
+    }
+    (anchor_file,) = (kit.state / sr.ANCHORS_NAME).iterdir()
+    anchor = json.loads(anchor_file.read_bytes())
+    assert set(anchor) == {
+        "format",
+        "engagement_id",
+        "anchor_revision",
+        "customer_key",
+        "record_sha256",
+    }
+    assert anchor["format"] == "opentour.pilot.trust-state.v1"
+    assert anchor["customer_key"] == kit.customer.public()
+    assert canonical(anchor) == anchor_file.read_bytes()
+
+
+def test_store_replace_requires_the_immediate_successor(kit: Kit) -> None:
+    kit.enrolled()
+    store = sr.TrustStateStore()
+    key = sr._CustomerKey.model_validate(Signer(sr.CUSTOMER_OWNER).public())
+    with store.locked():
+        for revision in (1, 3):
+            refused(
+                "customer_rotation_not_successor",
+                partial(store.replace_anchor, ENGAGEMENT, revision, key, "0" * 64),
+            )
+        refused(
+            "customer_anchor_missing",
+            partial(store.replace_anchor, "eng-other", 2, key, "0" * 64),
+        )
+        refused(
+            "customer_anchor_already_pinned",
+            partial(store.pin_anchor, ENGAGEMENT, key, "0" * 64),
+        )
+        refused(
+            "registry_revision_rolled_back",
+            partial(store.advance_registry_floor, 0, "0" * 64),
+        )
+    current = store.anchor(ENGAGEMENT)
+    assert current is not None and current.customer_key.key_id == kit.customer.key_id
+
+
+def test_store_state_is_independent_of_a_restored_data_directory(kit: Kit) -> None:
+    """Simulated: a data-directory copy and restore leaves the store untouched.
+
+    Restore exclusion end to end depends on the OPE-577 snapshot boundary and is not
+    demonstrated here.
+    """
+    (kit.worker / "managed-runs.sqlite3").write_bytes(b"sentinel-ledger-v1")
+    old_registry = kit.registry("1")
+    old_record = sign(consent(), sr.GRANT_PURPOSE, kit.customer, kit.operator)
+    kit.verifier(old_registry).pin_customer_anchor(kit.enrolment())
+    snapshot = kit.tmp / "snapshot"
+    shutil.copytree(kit.worker, snapshot)
+    successor = Signer(sr.CUSTOMER_OWNER, registry_revision="2")
+    newer_registry = kit.registry("2", keys=[kit.operator.entry(), kit.auditor.entry()])
+    kit.verifier(newer_registry).rotate_customer_key(kit.rotation(kit.customer, successor))
+    (kit.worker / "managed-runs.sqlite3").write_bytes(b"sentinel-ledger-v2")
+    shutil.rmtree(kit.worker)
+    shutil.copytree(snapshot, kit.worker)
+    assert (kit.worker / "managed-runs.sqlite3").read_bytes() == b"sentinel-ledger-v1"
+    refused("registry_revision_rolled_back", partial(kit.verifier, old_registry))
+    restored = kit.verifier(newer_registry)
+    refused("customer_key_not_anchored", partial(restored.verify, old_record, sr.GRANT_PURPOSE))
+    refused(
+        "customer_anchor_already_pinned",
+        partial(restored.pin_customer_anchor, kit.enrolment()),
+    )
+    current = sign(consent(), sr.GRANT_PURPOSE, successor, kit.operator)
+    assert restored.verify(current, sr.GRANT_PURPOSE)
+
+
+def test_older_registry_revision_cannot_resurrect_a_dropped_key(kit: Kit) -> None:
+    old = kit.registry("1")
+    record = sign(consent(), sr.VERDICT_PURPOSE, kit.evaluator)
+    assert kit.verifier(old).verify(record, sr.VERDICT_PURPOSE)
+    kit.verifier(kit.registry("2", keys=[kit.operator.entry(), kit.auditor.entry()]))
+    # The old registry is still validly signed and unexpired; the floor refuses it.
+    refused("registry_revision_rolled_back", partial(kit.verifier, old))
+    floor = json.loads((kit.state / sr.FLOOR_NAME).read_bytes())
+    assert floor["revision"] == "2"
+
+
+def test_same_revision_with_different_contents_is_equivocation(kit: Kit) -> None:
+    first = kit.registry("3")
+    kit.verifier(first)
+    assert kit.verifier(first).registry_revision == 3
+    other = kit.registry("3", keys=[kit.evaluator.entry()])
+    refused("registry_revision_equivocated", partial(kit.verifier, other))
+
+
+def test_registry_below_kit_minimum_refused_without_local_state(kit: Kit) -> None:
+    kit.minimum = "5"
+    kit.pin()
+    refused("registry_revision_below_kit_minimum", partial(kit.verifier, kit.registry("4")))
+    assert not (kit.state / sr.FLOOR_NAME).exists()
+    assert kit.verifier(kit.registry("5")).registry_revision == 5
+
+
+def test_unreadable_state_fails_closed(kit: Kit) -> None:
+    verifier = kit.enrolled()
+    anchors = list((kit.state / sr.ANCHORS_NAME).iterdir())
+    assert len(anchors) == 1
+    anchors[0].write_bytes(b'{"engagement_id":"eng-sentinel-0001"}')
+    record = sign(consent(), sr.GRANT_PURPOSE, kit.customer, kit.operator)
+    refused("customer_anchor_unreadable", partial(verifier.verify, record, sr.GRANT_PURPOSE))
+    for floor in (
+        b'{"revision":"0"}',
+        b'{"registry_sha256":"' + b"0" * 64 + b'","revision":"1"}',
+        b'{"format":"opentour.pilot.trust-state.v0","registry_sha256":"'
+        + b"0" * 64
+        + b'","revision":"1"}',
+    ):
+        (kit.state / sr.FLOOR_NAME).write_bytes(floor)
+        refused("registry_floor_unreadable", kit.verifier)
+
+
+def test_refused_registry_does_not_advance_floor(kit: Kit) -> None:
+    kit.verifier(kit.registry("1"))
+    bad = kit.registry("9", keys=[kit.operator.entry(purposes=[])])
+    refused("trust_key_purposes_invalid", partial(kit.verifier, bad))
+    assert json.loads((kit.state / sr.FLOOR_NAME).read_bytes())["revision"] == "1"
+
+
+# --- Encoding and canonical form -----------------------------------------------------
+
+
+def test_tampered_payload_byte_refused(kit: Kit) -> None:
+    verifier = kit.enrolled()
+    record = sign(consent(), sr.GRANT_PURPOSE, kit.customer, kit.operator)
+    tampered = record.replace(b"org-sentinel-0001", b"org-sentinel-0002")
+    assert tampered != record
+    refused("payload_digest_mismatch", partial(verifier.verify, tampered, sr.GRANT_PURPOSE))
+    refused(
+        "signature_invalid",
+        partial(verifier.verify, redigest(json.loads(tampered)), sr.GRANT_PURPOSE),
+    )
+
+
+def test_non_canonical_record_refused_even_with_valid_signatures(kit: Kit) -> None:
+    verifier = kit.enrolled()
+    value = envelope(consent(), sr.GRANT_PURPOSE, kit.customer, kit.operator)
+    for variant in (
+        json.dumps(value).encode(),
+        json.dumps(value, indent=1).encode(),
+        canonical(value) + b"\n",
+        json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(", ", ":")).encode(),
+    ):
+        refused("record_not_canonical", partial(verifier.verify, variant, sr.GRANT_PURPOSE))
+    assert verifier.verify(canonical(value), sr.GRANT_PURPOSE) == value["payload"]
+
+
+def test_non_json_profile_values_refused(kit: Kit) -> None:
+    verifier = kit.enrolled()
+    record = sign(consent(), sr.GRANT_PURPOSE, kit.customer, kit.operator)
+    duplicate = record.replace(b'{"payload":', b'{"payload":{},"payload":', 1)
+    refused("record_schema_invalid", partial(verifier.verify, duplicate, sr.GRANT_PURPOSE))
+    text: Any = record.decode()
+    refused("record_schema_invalid", partial(verifier.verify, text, sr.GRANT_PURPOSE))
+    floating = record.replace(b'"engagement_epoch":3', b'"engagement_epoch":3.5')
+    refused("record_schema_invalid", partial(verifier.verify, floating, sr.GRANT_PURPOSE))
+    empty = canonical({"payload": consent(), "signatures": []})
+    refused("record_schema_invalid", partial(verifier.verify, empty, sr.GRANT_PURPOSE))
+
+
+@pytest.mark.parametrize(
+    ("field_name", "value", "code"),
+    [
+        ("encoding", "der", "signature_encoding_invalid"),
+        ("signature", "A" * 85, "signature_encoding_invalid"),
+        ("signature", "A" * 86, "signature_encoding_invalid"),
+        ("algorithm", "ES384", "profile_unsupported"),
+        ("profile_version", "2.0", "profile_unsupported"),
+    ],
+)
+def test_bad_encoding_or_profile_refused(kit: Kit, field_name: str, value: str, code: str) -> None:
+    verifier = kit.verifier()
+    record = envelope(consent(), sr.VERDICT_PURPOSE, kit.evaluator)
+    record["signatures"][0][field_name] = value
+    refused(code, partial(verifier.verify, canonical(record), sr.VERDICT_PURPOSE))
+
+
+def test_fields_the_envelope_may_not_carry_are_refused(kit: Kit) -> None:
+    verifier = kit.verifier()
+    for where, name in (
+        (None, "not_after"),
+        (None, "signature"),
+        (None, "trusted_keys"),
+        (0, "public_key_der"),
+        (0, "not_after"),
+    ):
+        record = envelope(consent(), sr.VERDICT_PURPOSE, kit.evaluator)
+        target = record if where is None else record["signatures"][where]
+        target[name] = stamp(10**7)
+        refused(
+            "record_field_forbidden",
+            partial(verifier.verify, canonical(record), sr.VERDICT_PURPOSE),
+        )
+
+
+# --- Trust configuration -------------------------------------------------------------
+
+
+def test_root_pin_required_and_not_yet_approved_in_repository(
+    kit: Kit, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.undo()
+    assert sr.APPROVED_ROOT_PIN_SHA256 is None
+    assert sr.ROOT_PIN_PATH.parts[-2:] == ("trust", "pilot-registry-root.json")
+    kit.monkeypatch.setattr(sr, "ANTI_ROLLBACK_DIRECTORY", kit.state)
+    refused("root_pin_not_approved", partial(sr.PilotVerifier, b"{}"))
+
+
+def test_root_pin_digest_mismatch_refused(kit: Kit) -> None:
+    sr.ROOT_PIN_PATH.write_bytes(sr.ROOT_PIN_PATH.read_bytes() + b" ")
+    refused("root_pin_digest_mismatch", kit.verifier)
+
+
+def test_root_pin_missing_refused(kit: Kit) -> None:
+    sr.ROOT_PIN_PATH.unlink()
+    refused("root_pin_unavailable", kit.verifier)
+
+
+def test_trust_path_and_time_are_not_caller_arguments() -> None:
+    assert list(inspect.signature(sr.PilotVerifier).parameters) == ["registry_document"]
+    assert list(inspect.signature(sr.TrustStateStore).parameters) == []
+    assert list(inspect.signature(sr.PilotVerifier.verify).parameters) == [
+        "self",
+        "record",
+        "purpose",
+    ]
+    for method in (sr.PilotVerifier.pin_customer_anchor, sr.PilotVerifier.rotate_customer_key):
+        assert len(inspect.signature(method).parameters) == 2
+
+
+def test_registry_signed_by_non_root_key_refused(kit: Kit) -> None:
+    payload = kit.registry_payload()
+    other_root = Signer(sr.OPERATOR_ROOT, [sr.REGISTRY_PURPOSE], registry_revision="root-1")
+    refused("key_unknown", partial(kit.verifier, sign(payload, sr.REGISTRY_PURPOSE, other_root)))
+    claims = kit.operator.signature(payload, sr.REGISTRY_PURPOSE, signer_role=sr.OPERATOR_ROOT)
+    forged = canonical({"payload": payload, "signatures": [claims]})
+    refused("key_unknown", partial(kit.verifier, forged))
+    own_role = sign(payload, sr.REGISTRY_PURPOSE, kit.operator)
+    refused("signature_role_unexpected", partial(kit.verifier, own_role))
+
+
+def test_tampered_registry_refused(kit: Kit) -> None:
+    stranger = Signer(sr.INDEPENDENT_EVALUATOR, [sr.VERDICT_PURPOSE])
+    value = envelope(kit.registry_payload(), sr.REGISTRY_PURPOSE, kit.root)
+    value["payload"]["keys"].append(stranger.entry())
+    refused("payload_digest_mismatch", partial(kit.verifier, canonical(value)))
+    refused("signature_invalid", partial(kit.verifier, redigest(value)))
+    widened = envelope(kit.registry_payload(), sr.REGISTRY_PURPOSE, kit.root)
+    widened["payload"]["keys"][2]["purposes"] = [sr.VERDICT_PURPOSE]
+    refused("signature_invalid", partial(kit.verifier, redigest(widened)))
+
+
+def test_registry_must_be_signed_under_the_registry_purpose(kit: Kit) -> None:
+    record = sign(kit.registry_payload(), sr.GRANT_PURPOSE, kit.root)
+    refused("purpose_mismatch", partial(kit.verifier, record))
+
+
+def test_registry_binding_to_pinned_registry_id(kit: Kit) -> None:
+    refused("registry_binding_invalid", partial(kit.verifier, kit.registry(registry_id="other")))
+
+
+def test_trust_key_der_digest_mismatch_refused(kit: Kit) -> None:
+    entry = kit.operator.entry(public_key_sha256=hashlib.sha256(b"other").hexdigest())
+    refused("trust_key_digest_mismatch", partial(kit.verifier, kit.registry(keys=[entry])))
+    kit.pin(root_keys=[kit.root.entry(public_key_sha256="0" * 64)])
+    refused("trust_key_digest_mismatch", kit.verifier)
+
+
+def test_trust_key_wrong_curve_refused(kit: Kit) -> None:
+    p384 = Signer(sr.INDEPENDENT_EVALUATOR, [sr.VERDICT_PURPOSE], curve=ec.SECP384R1())
+    refused("trust_key_curve_invalid", partial(kit.verifier, kit.registry(keys=[p384.entry()])))
+    root384 = Signer(
+        sr.OPERATOR_ROOT, [sr.REGISTRY_PURPOSE], registry_revision="root-1", curve=ec.SECP384R1()
+    )
+    kit.pin(root_keys=[root384.entry()])
+    refused("trust_key_curve_invalid", kit.verifier)
+
+
+def test_customer_key_wrong_curve_refused(kit: Kit) -> None:
+    verifier = kit.verifier()
+    p384 = Signer(sr.CUSTOMER_OWNER, registry_revision="1", curve=ec.SECP384R1())
+    # The curve is checked before any signature, so the P-256 customer key signs here.
+    record = sign(kit.enrolment_payload(p384), sr.ENROLMENT_PURPOSE, kit.customer, kit.operator)
+    refused("trust_key_curve_invalid", partial(verifier.pin_customer_anchor, record))
+
+
+def test_trust_key_duplicate_identity_refused(kit: Kit) -> None:
+    clash = kit.evaluator.entry(key_id=kit.operator.key_id)
+    refused(
+        "trust_key_duplicate",
+        partial(kit.verifier, kit.registry(keys=[kit.operator.entry(), clash])),
+    )
+
+
+@pytest.mark.parametrize(
+    ("role", "purposes", "code"),
+    [
+        (sr.OPERATOR_CUSTODIAN, [], "trust_key_purposes_invalid"),
+        (sr.OPERATOR_CUSTODIAN, ["opentour.pilot.other.v1"], "trust_key_purposes_invalid"),
+        (sr.OPERATOR_CUSTODIAN, [sr.GRANT_PURPOSE] * 2, "trust_key_purposes_invalid"),
+        (
+            sr.OPERATOR_CUSTODIAN,
+            [sr.GRANT_PURPOSE, sr.VERDICT_PURPOSE],
+            "trust_key_purposes_invalid",
+        ),
+        (sr.BENCHMARK_AUDITOR, [sr.VERDICT_PURPOSE], "trust_key_purposes_invalid"),
+        (sr.OPERATOR_CUSTODIAN, [sr.REGISTRY_PURPOSE], "trust_key_purposes_invalid"),
+        (sr.OPERATOR_ROOT, [sr.REGISTRY_PURPOSE], "trust_key_role_invalid"),
+        (sr.CUSTOMER_OWNER, [sr.GRANT_PURPOSE], "trust_key_role_invalid"),
+        ("auditor", [sr.BENCHMARK_AUDIT_PURPOSE], "trust_key_role_invalid"),
+    ],
+)
+def test_registry_entry_roles_and_purposes_validated(
+    kit: Kit, role: str, purposes: list[str], code: str
+) -> None:
+    entry = kit.operator.entry(role=role, purposes=purposes)
+    refused(code, partial(kit.verifier, kit.registry(keys=[entry])))
+
+
+def test_root_key_may_only_sign_registries(kit: Kit) -> None:
+    kit.pin(root_keys=[kit.root.entry(purposes=[sr.REGISTRY_PURPOSE, sr.GRANT_PURPOSE])])
+    refused("trust_key_purposes_invalid", kit.verifier)
+    kit.pin(root_keys=[kit.root.entry(role=sr.OPERATOR_CUSTODIAN)])
+    refused("trust_key_role_invalid", kit.verifier)
+
+
+@pytest.mark.parametrize(
+    "key_id",
+    [
+        "arn:aws:kms:us-east-1:000000000000:key/00000000-0000-0000-0000-000000000000",
+        "Operator-Key",
+        "-operator",
+        "o",
+        "operator key",
+        "operator/key",
+    ],
+)
+def test_key_ids_are_strict_opaque_registry_identifiers(kit: Kit, key_id: str) -> None:
+    entry = kit.operator.entry(key_id=key_id)
+    refused("trust_key_id_invalid", partial(kit.verifier, kit.registry(keys=[entry])))
+
+
+# --- Trusted time --------------------------------------------------------------------
+
+
+def test_expired_record_refused(kit: Kit) -> None:
+    verifier = kit.verifier()
+    payload = consent(issued_at=stamp(-7200), not_after=stamp(-1))
+    record = sign(payload, sr.VERDICT_PURPOSE, kit.evaluator)
+    refused("record_expired", partial(verifier.verify, record, sr.VERDICT_PURPOSE))
+
+
+def test_not_yet_valid_beyond_skew_refused_within_skew_accepted(kit: Kit) -> None:
+    verifier = kit.verifier()
+    skew = sr.ISSUED_AT_SKEW.total_seconds()
+    early = sign(consent(issued_at=stamp(skew + 120)), sr.VERDICT_PURPOSE, kit.evaluator)
+    refused("record_not_yet_valid", partial(verifier.verify, early, sr.VERDICT_PURPOSE))
+    slight = sign(consent(issued_at=stamp(skew - 30)), sr.VERDICT_PURPOSE, kit.evaluator)
+    assert verifier.verify(slight, sr.VERDICT_PURPOSE)
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"issued_at": None},
+        {"not_after": "2030-01-01T00:00:00Z"},
+        {"not_after": 1893456000},
+        {"issued_at": stamp(60), "not_after": stamp(30)},
+    ],
+)
+def test_validity_window_must_be_issuer_signed_and_well_formed(
+    kit: Kit, changes: dict[str, object]
+) -> None:
+    verifier = kit.verifier()
+    payload = {k: v for k, v in consent(**changes).items() if v is not None}
+    record = sign(payload, sr.VERDICT_PURPOSE, kit.evaluator)
+    refused("record_validity_window_invalid", partial(verifier.verify, record, sr.VERDICT_PURPOSE))
+
+
+def test_caller_cannot_extend_validity(kit: Kit) -> None:
+    verifier = kit.verifier()
+    expired = consent(issued_at=stamp(-7200), not_after=stamp(-1))
+    record = sign(expired, sr.VERDICT_PURPOSE, kit.evaluator)
+    later = stamp(86400)
+    # No time or validity argument exists on the verification path.
+    for keyword in ("now", "not_after", "clock", "at"):
+        with pytest.raises(TypeError):
+            verifier.verify(record, sr.VERDICT_PURPOSE, **{keyword: later})
+    # An unsigned later not_after is a forbidden field, wherever it is placed.
+    value = json.loads(record)
+    value["not_after"] = later
+    refused(
+        "record_field_forbidden", partial(verifier.verify, canonical(value), sr.VERDICT_PURPOSE)
+    )
+    # Rewriting the signed not_after breaks the signature, even with recomputed digests.
+    value = json.loads(record)
+    value["payload"]["not_after"] = later
+    refused(
+        "payload_digest_mismatch", partial(verifier.verify, canonical(value), sr.VERDICT_PURPOSE)
+    )
+    refused("signature_invalid", partial(verifier.verify, redigest(value), sr.VERDICT_PURPOSE))
+    refused("record_expired", partial(verifier.verify, record, sr.VERDICT_PURPOSE))
+
+
+def test_record_validity_is_capped_by_the_registry_window(
+    kit: Kit, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    verifier = kit.verifier(kit.registry(not_after=stamp(600)))
+    record = sign(consent(not_after=stamp(86400)), sr.VERDICT_PURPOSE, kit.evaluator)
+    assert verifier.verify(record, sr.VERDICT_PURPOSE)
+    real_now = sr._utc_now
+    monkeypatch.setattr(sr, "_utc_now", lambda: real_now() + timedelta(seconds=1200))
+    refused("registry_expired", partial(verifier.verify, record, sr.VERDICT_PURPOSE))
+
+
+def test_expired_registry_and_enrolment_refused(kit: Kit) -> None:
+    stale = kit.registry(issued_at=stamp(-7200), not_after=stamp(-1))
+    refused("registry_expired", partial(kit.verifier, stale))
+    verifier = kit.verifier()
+    old = kit.enrolment(issued_at=stamp(-7200), not_after=stamp(-1))
+    refused("enrolment_expired", partial(verifier.pin_customer_anchor, old))
+    assert not (kit.state / sr.ANCHORS_NAME).exists()
+
+
+# --- Verify only ---------------------------------------------------------------------
+
+
+def test_verifier_module_holds_no_signing_capability() -> None:
+    source = inspect.getsource(sr)
+    for forbidden in (
+        "private_key",
+        "generate_private_key",
+        "load_pem_private_key",
+        "load_der_private_key",
+        "der_to_raw",
+        "create_signature",
+        ".sign(",
+        "PRIVATE KEY",
+    ):
+        assert forbidden not in source
+    assert not any(callable(getattr(sr, name, None)) for name in ("sign", "create_signature"))
