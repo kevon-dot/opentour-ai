@@ -10,6 +10,7 @@ import base64
 import hashlib
 import inspect
 import json
+import os
 import shutil
 import uuid
 from collections.abc import Callable
@@ -23,7 +24,7 @@ import pytest
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec, utils
 from opentour_cell.pilot import signed_records as sr
-from opentour_journal.crypto import canonical, der_to_raw, transcript
+from opentour_journal.crypto import P256_ORDER, canonical, der_to_raw, transcript
 
 Json = dict[str, Any]
 ENGAGEMENT = "eng-sentinel-0001"
@@ -336,8 +337,13 @@ def test_one_public_key_under_two_registry_ids_refused(kit: Kit) -> None:
         purposes=[sr.VERDICT_PURPOSE],
     )
     refused(
-        "trust_key_duplicate",
+        "trust_key_role_conflict",
         partial(kit.verifier, kit.registry(keys=[kit.operator.entry(), alias])),
+    )
+    same_role = kit.operator.entry(key_id="operator-alias-0001")
+    refused(
+        "trust_key_duplicate",
+        partial(kit.verifier, kit.registry(keys=[kit.operator.entry(), same_role])),
     )
 
 
@@ -646,6 +652,7 @@ def stored(kit: Kit, key: str) -> Json:
 
 
 ANCHOR_KEY = "customer_anchor:" + ENGAGEMENT
+REVISION_KEY = "customer_anchor_revision:" + ENGAGEMENT
 
 
 def accept_any(current: sr.MonotonicRecord | None, proposed: sr.MonotonicRecord) -> None:
@@ -670,29 +677,6 @@ def test_shipped_store_location_is_the_worker_host_antirollback_directory(
 ) -> None:
     monkeypatch.undo()
     assert sr.ANTI_ROLLBACK_DIRECTORY == Path("/var/lib/opentour-antirollback")
-
-
-def test_store_record_format_is_strict_and_versioned(kit: Kit) -> None:
-    registry = kit.registry()
-    enrolment = kit.enrolment()
-    kit.verifier(registry).pin_customer_anchor(enrolment)
-    assert stored(kit, "registry_revision") == {
-        "format": "opentour.pilot.trust-state.v1",
-        "key": "registry_revision",
-        "sequence": "1",
-        "value": {"registry_sha256": hashlib.sha256(registry).hexdigest()},
-    }
-    assert stored(kit, ANCHOR_KEY) == {
-        "format": "opentour.pilot.trust-state.v1",
-        "key": ANCHOR_KEY,
-        "sequence": "1",
-        "value": {
-            "customer_key": kit.customer.public(),
-            "record_sha256": hashlib.sha256(enrolment).hexdigest(),
-        },
-    }
-    for key in ("registry_revision", ANCHOR_KEY):
-        assert canonical(stored(kit, key)) == record_path(kit, key).read_bytes()
 
 
 def test_store_admits_new_namespaces_without_a_format_change(kit: Kit) -> None:
@@ -720,43 +704,6 @@ def test_store_admits_new_namespaces_without_a_format_change(kit: Kit) -> None:
     assert record == sr.MonotonicRecord(
         "withdrawn_mandate:org-sentinel-0001:mandate-0001", 1, {"withdrawn": True}
     )
-
-
-def test_store_anchor_rules_require_the_immediate_successor(kit: Kit) -> None:
-    kit.enrolled()
-    store = sr.TrustStateStore()
-    value = {"customer_key": Signer(sr.CUSTOMER_OWNER).public(), "record_sha256": "0" * 64}
-    with store.locked():
-        for sequence in (1, 3):
-            refused(
-                "customer_rotation_not_successor",
-                partial(
-                    store.advance,
-                    sr.MonotonicRecord(ANCHOR_KEY, sequence, value),
-                    sr._rotation_rule,
-                ),
-            )
-        refused(
-            "customer_anchor_missing",
-            partial(
-                store.advance,
-                sr.MonotonicRecord("customer_anchor:eng-other", 2, value),
-                sr._rotation_rule,
-            ),
-        )
-        refused(
-            "customer_anchor_already_pinned",
-            partial(store.advance, sr.MonotonicRecord(ANCHOR_KEY, 1, value), sr._pin_rule),
-        )
-        refused(
-            "registry_revision_rolled_back",
-            partial(
-                store.advance,
-                sr.MonotonicRecord("registry_revision", 0, {"registry_sha256": "0" * 64}),
-                sr._registry_rule,
-            ),
-        )
-    assert stored(kit, ANCHOR_KEY)["value"]["customer_key"] == kit.customer.public()
 
 
 def test_store_state_is_independent_of_a_restored_data_directory(kit: Kit) -> None:
@@ -840,6 +787,326 @@ def test_refused_registry_does_not_advance_floor(kit: Kit) -> None:
     bad = kit.registry("9", keys=[kit.operator.entry(purposes=[])])
     refused("trust_key_purposes_invalid", partial(kit.verifier, bad))
     assert stored(kit, "registry_revision")["sequence"] == "1"
+
+
+def test_store_record_format_is_strict_and_versioned(kit: Kit) -> None:
+    registry = kit.registry()
+    enrolment = kit.enrolment()
+    kit.verifier(registry).pin_customer_anchor(enrolment)
+    registry_payload = json.loads(registry)["payload"]
+    assert stored(kit, "registry_revision") == {
+        "format": "opentour.pilot.trust-state.v1",
+        "key": "registry_revision",
+        "sequence": "1",
+        "value": {
+            "registry_payload_sha256": hashlib.sha256(canonical(registry_payload)).hexdigest()
+        },
+    }
+    # The anchor is the signed evidence chain, never a bare key field.
+    assert stored(kit, ANCHOR_KEY) == {
+        "format": "opentour.pilot.trust-state.v1",
+        "key": ANCHOR_KEY,
+        "sequence": "1",
+        "value": {"chain": [json.loads(enrolment)]},
+    }
+    enrolment_payload = json.loads(enrolment)["payload"]
+    assert stored(kit, REVISION_KEY) == {
+        "format": "opentour.pilot.trust-state.v1",
+        "key": REVISION_KEY,
+        "sequence": "1",
+        "value": {"head_payload_sha256": hashlib.sha256(canonical(enrolment_payload)).hexdigest()},
+    }
+    for key in ("registry_revision", ANCHOR_KEY, REVISION_KEY):
+        assert canonical(stored(kit, key)) == record_path(kit, key).read_bytes()
+
+
+def test_store_anchor_rules_require_the_immediate_successor(kit: Kit) -> None:
+    kit.enrolled()
+    store = sr.TrustStateStore()
+    value = {"chain": [{"x": 1}]}
+    with store.locked():
+        for sequence in (3, 4):
+            refused(
+                "customer_rotation_not_successor",
+                partial(
+                    store.advance, sr.MonotonicRecord(ANCHOR_KEY, sequence, value), sr._chain_rule
+                ),
+            )
+        refused(
+            "customer_rotation_not_successor",
+            partial(
+                store.advance,
+                sr.MonotonicRecord("customer_anchor:eng-other", 2, value),
+                sr._chain_rule,
+            ),
+        )
+        refused(
+            "customer_anchor_rolled_back",
+            partial(
+                store.advance,
+                sr.MonotonicRecord(REVISION_KEY, 0, {"head_payload_sha256": "0" * 64}),
+                sr._forward_rule,
+            ),
+        )
+        refused(
+            "registry_revision_rolled_back",
+            partial(
+                store.advance,
+                sr.MonotonicRecord("registry_revision", 0, {"registry_payload_sha256": "0" * 64}),
+                sr._registry_rule,
+            ),
+        )
+    assert stored(kit, ANCHOR_KEY)["sequence"] == "1"
+
+
+# --- Review findings (PR #209) -------------------------------------------------------
+
+
+def test_f1_one_key_cannot_hold_two_roles_across_registry_revisions(kit: Kit) -> None:
+    # Reviewer's repro: the custodian key re-registered at another revision as evaluator.
+    as_evaluator = kit.operator.entry(
+        registry_revision="rev-2", role=sr.INDEPENDENT_EVALUATOR, purposes=[sr.VERDICT_PURPOSE]
+    )
+    keys = [kit.operator.entry(), as_evaluator, kit.auditor.entry()]
+    refused("trust_key_role_conflict", partial(kit.verifier, kit.registry(keys=keys)))
+    # The same key id under another role, even with a different public key.
+    by_id = kit.evaluator.entry(key_id=kit.operator.key_id, registry_revision="rev-2")
+    refused(
+        "trust_key_role_conflict",
+        partial(kit.verifier, kit.registry(keys=[kit.operator.entry(), by_id])),
+    )
+    # The same key and role at two registry revisions remains allowed (rotation overlap).
+    same_role = kit.operator.entry(registry_revision="rev-2")
+    verifier = kit.verifier(kit.registry(keys=[kit.operator.entry(), same_role]))
+    assert verifier.registry_revision == 1
+
+
+def test_f2_a_verifier_built_from_an_older_registry_sees_the_revocation(kit: Kit) -> None:
+    verdict = sign(consent(), sr.VERDICT_PURPOSE, kit.evaluator)
+    old = kit.verifier(kit.registry("1"))
+    assert old.verify(verdict, sr.VERDICT_PURPOSE)
+    kit.verifier(kit.registry("2", keys=[kit.operator.entry(), kit.auditor.entry()]))
+    refused("registry_superseded", partial(old.verify, verdict, sr.VERDICT_PURPOSE))
+    refused("registry_superseded", partial(old.pin_customer_anchor, kit.enrolment()))
+    successor = Signer(sr.CUSTOMER_OWNER, registry_revision="2")
+    refused(
+        "registry_superseded",
+        partial(old.rotate_customer_key, kit.rotation(kit.customer, successor)),
+    )
+
+
+def test_f2_a_missing_registry_floor_supersedes_every_verifier(kit: Kit) -> None:
+    verifier = kit.verifier()
+    verdict = sign(consent(), sr.VERDICT_PURPOSE, kit.evaluator)
+    record_path(kit, "registry_revision").unlink()
+    refused("registry_superseded", partial(verifier.verify, verdict, sr.VERDICT_PURPOSE))
+
+
+def test_f3_an_overwritten_anchor_is_refused(kit: Kit) -> None:
+    verifier = kit.enrolled()
+    grant = sign(consent(), sr.GRANT_PURPOSE, kit.customer, kit.operator)
+    anchor_file = record_path(kit, ANCHOR_KEY)
+    genuine = stored(kit, ANCHOR_KEY)
+    attacker = Signer(sr.CUSTOMER_OWNER, registry_revision="1")
+    forged_grant = sign(consent(), sr.GRANT_PURPOSE, attacker, kit.operator)
+    # 1. Any key with a zero digest, in the old bare-key shape.
+    bare = {**genuine, "value": {"customer_key": attacker.public(), "record_sha256": "0" * 64}}
+    anchor_file.write_bytes(canonical(bare))
+    refused("trust_state_unreadable", partial(verifier.verify, forged_grant, sr.GRANT_PURPOSE))
+    # 2. A chain whose enrolment lacks a registry custodian signature.
+    stranger = Signer(sr.OPERATOR_CUSTODIAN, [sr.ENROLMENT_PURPOSE])
+    fake = sign(kit.enrolment_payload(attacker), sr.ENROLMENT_PURPOSE, attacker, stranger)
+    anchor_file.write_bytes(canonical({**genuine, "value": {"chain": [json.loads(fake)]}}))
+    refused(
+        "customer_anchor_unverifiable", partial(verifier.verify, forged_grant, sr.GRANT_PURPOSE)
+    )
+    # 3. A genuine enrolment with its customer key field swapped after signing.
+    edited = json.loads(json.dumps(genuine))
+    edited["value"]["chain"][0]["payload"]["customer_key"] = attacker.public()
+    anchor_file.write_bytes(canonical(edited))
+    refused(
+        "customer_anchor_unverifiable", partial(verifier.verify, forged_grant, sr.GRANT_PURPOSE)
+    )
+    # 4. A validly co-signed but different enrolment, against the stored revision floor.
+    other = kit.enrolment(attacker)
+    anchor_file.write_bytes(canonical({**genuine, "value": {"chain": [json.loads(other)]}}))
+    refused(
+        "customer_anchor_inconsistent", partial(verifier.verify, forged_grant, sr.GRANT_PURPOSE)
+    )
+    anchor_file.write_bytes(canonical(genuine))
+    assert verifier.verify(grant, sr.GRANT_PURPOSE)
+
+
+def test_f3_deleting_the_anchor_does_not_allow_re_enrolment(kit: Kit) -> None:
+    verifier = kit.verifier()
+    enrolment = kit.enrolment()
+    verifier.pin_customer_anchor(enrolment)
+    record_path(kit, ANCHOR_KEY).unlink()
+    grant = sign(consent(), sr.GRANT_PURPOSE, kit.customer, kit.operator)
+    refused("customer_anchor_inconsistent", partial(verifier.verify, grant, sr.GRANT_PURPOSE))
+    held = Signer(sr.CUSTOMER_OWNER, registry_revision="1")
+    refused(
+        "customer_anchor_already_pinned", partial(verifier.pin_customer_anchor, kit.enrolment(held))
+    )
+    # Re-presenting the genuine enrolment restores the genuine anchor only.
+    verifier.pin_customer_anchor(enrolment)
+    assert verifier.verify(grant, sr.GRANT_PURPOSE)
+
+
+def test_f3_restoring_an_older_anchor_copy_after_rotation_is_refused(kit: Kit) -> None:
+    verifier = kit.enrolled()
+    old_copy = record_path(kit, ANCHOR_KEY).read_bytes()
+    successor = Signer(sr.CUSTOMER_OWNER, registry_revision="2")
+    verifier.rotate_customer_key(kit.rotation(kit.customer, successor))
+    record_path(kit, ANCHOR_KEY).write_bytes(old_copy)
+    old_grant = sign(consent(), sr.GRANT_PURPOSE, kit.customer, kit.operator)
+    refused("customer_anchor_rolled_back", partial(verifier.verify, old_grant, sr.GRANT_PURPOSE))
+    refused(
+        "customer_anchor_rolled_back",
+        partial(verifier.rotate_customer_key, kit.rotation(kit.customer, successor)),
+    )
+
+
+def test_f3_a_chain_ahead_of_its_floor_still_verifies(kit: Kit) -> None:
+    # An interrupted rotation: the signed chain was written, the floor was not.
+    verifier = kit.enrolled()
+    old_floor = record_path(kit, REVISION_KEY).read_bytes()
+    successor = Signer(sr.CUSTOMER_OWNER, registry_revision="2")
+    verifier.rotate_customer_key(kit.rotation(kit.customer, successor))
+    record_path(kit, REVISION_KEY).write_bytes(old_floor)
+    grant = sign(consent(), sr.GRANT_PURPOSE, successor, kit.operator)
+    assert verifier.verify(grant, sr.GRANT_PURPOSE)
+    old_grant = sign(consent(), sr.GRANT_PURPOSE, kit.customer, kit.operator)
+    refused("customer_key_not_anchored", partial(verifier.verify, old_grant, sr.GRANT_PURPOSE))
+
+
+def test_f3_documented_limit_custodian_key_holder_can_re_enrol_after_deleting_both(
+    kit: Kit,
+) -> None:
+    """Not a defence: stated in the module docstring. OPE-583 covers it out of band."""
+    verifier = kit.enrolled()
+    record_path(kit, ANCHOR_KEY).unlink()
+    record_path(kit, REVISION_KEY).unlink()
+    held = Signer(sr.CUSTOMER_OWNER, registry_revision="1")
+    assert verifier.pin_customer_anchor(kit.enrolment(held)).key_id == held.key_id
+
+
+def test_f4_a_re_signed_registry_is_the_same_registry(kit: Kit) -> None:
+    payload = kit.registry_payload("1")
+    resigned = sign(payload, sr.REGISTRY_PURPOSE, kit.root)  # randomized ECDSA nonce
+    genuine = sign(payload, sr.REGISTRY_PURPOSE, kit.root)
+    assert resigned != genuine
+    kit.verifier(resigned)
+    assert kit.verifier(genuine).registry_revision == 1
+    refused(
+        "registry_revision_equivocated",
+        partial(kit.verifier, kit.registry("1", keys=[kit.evaluator.entry()])),
+    )
+
+
+def test_f4_a_high_s_registry_copy_does_not_lock_out_the_genuine_one(kit: Kit) -> None:
+    genuine = kit.registry("1")
+    value = json.loads(genuine)
+    raw = base64.urlsafe_b64decode(value["signatures"][0]["signature"] + "==")
+    r, s = raw[:32], int.from_bytes(raw[32:], "big")
+    high_s = r + (P256_ORDER - s).to_bytes(32, "big")
+    value["signatures"][0]["signature"] = base64.urlsafe_b64encode(high_s).rstrip(b"=").decode()
+    flipped = canonical(value)
+    assert flipped != genuine
+    # Not normalised here (an OPE-217 decision): both encodings verify, as one registry.
+    kit.verifier(flipped)
+    assert kit.verifier(genuine).registry_revision == 1
+
+
+def test_f4_enrolment_idempotency_ignores_signature_order(kit: Kit) -> None:
+    verifier = kit.verifier()
+    payload = kit.enrolment_payload()
+    forward = sign(payload, sr.ENROLMENT_PURPOSE, kit.customer, kit.operator)
+    reversed_order = sign(payload, sr.ENROLMENT_PURPOSE, kit.operator, kit.customer)
+    first = verifier.pin_customer_anchor(reversed_order)
+    assert verifier.pin_customer_anchor(forward) == first
+
+
+def test_f5_the_root_key_is_never_a_registry_or_customer_key(kit: Kit) -> None:
+    as_custodian = kit.root.entry(
+        key_id="operator-custodian-root", role=sr.OPERATOR_CUSTODIAN, purposes=[sr.GRANT_PURPOSE]
+    )
+    refused("trust_key_role_conflict", partial(kit.verifier, kit.registry(keys=[as_custodian])))
+    same_id = kit.operator.entry(key_id=kit.root.key_id, registry_revision="rev-9")
+    refused("trust_key_role_conflict", partial(kit.verifier, kit.registry(keys=[same_id])))
+    verifier = kit.verifier()
+    root_as_customer = Signer(sr.CUSTOMER_OWNER, registry_revision="1")
+    root_as_customer.private, root_as_customer.der = kit.root.private, kit.root.der
+    refused(
+        "customer_key_not_distinct",
+        partial(verifier.pin_customer_anchor, kit.enrolment(root_as_customer)),
+    )
+    verifier.pin_customer_anchor(kit.enrolment())
+    root_successor = Signer(sr.CUSTOMER_OWNER, registry_revision="2")
+    root_successor.private, root_successor.der = kit.root.private, kit.root.der
+    refused(
+        "customer_key_not_distinct",
+        partial(verifier.rotate_customer_key, kit.rotation(kit.customer, root_successor)),
+    )
+
+
+def test_f6_validity_window_ceiling(kit: Kit) -> None:
+    verifier = kit.verifier()
+    long = consent(issued_at=stamp(-60), not_after=stamp(367 * 86400))
+    refused(
+        "record_validity_window_too_long",
+        partial(verifier.verify, sign(long, sr.VERDICT_PURPOSE, kit.evaluator), sr.VERDICT_PURPOSE),
+    )
+    within = consent(issued_at=stamp(-60), not_after=stamp(365 * 86400))
+    assert verifier.verify(sign(within, sr.VERDICT_PURPOSE, kit.evaluator), sr.VERDICT_PURPOSE)
+    refused(
+        "registry_validity_window_too_long",
+        partial(kit.verifier, kit.registry("2", not_after=stamp(400 * 86400))),
+    )
+
+
+def test_f6_store_writes_every_byte_on_short_writes(
+    kit: Kit, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = kit.tmp / "short-write"
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT, 0o600)
+    real_write = os.write
+    body = b"x" * 5000
+    with monkeypatch.context() as patch:
+        patch.setattr(os, "write", lambda f, data: real_write(f, bytes(data[:7])))
+        sr._write_all(fd, body)
+    os.close(fd)
+    assert path.read_bytes() == body
+
+
+def test_f6_store_refuses_symlinked_records_and_shared_directories(
+    kit: Kit, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    verifier = kit.enrolled()
+    grant = sign(consent(), sr.GRANT_PURPOSE, kit.customer, kit.operator)
+    anchor_file = record_path(kit, ANCHOR_KEY)
+    elsewhere = kit.tmp / "elsewhere.json"
+    elsewhere.write_bytes(anchor_file.read_bytes())
+    anchor_file.unlink()
+    anchor_file.symlink_to(elsewhere)
+    refused("trust_state_unreadable", partial(verifier.verify, grant, sr.GRANT_PURPOSE))
+    kit.state.chmod(0o770)
+    refused("anti_rollback_state_unavailable", kit.verifier)
+    kit.state.chmod(0o700)
+    (kit.state / sr.RECORDS_NAME).chmod(0o777)
+    refused("anti_rollback_state_unavailable", partial(kit.verifier, kit.registry("2")))
+    (kit.state / sr.RECORDS_NAME).chmod(0o700)
+    monkeypatch.setattr(os, "geteuid", lambda: os.getuid() + 1)
+    refused("anti_rollback_state_unavailable", kit.verifier)
+
+
+def test_f6_advance_requires_the_lock(kit: Kit) -> None:
+    store = sr.TrustStateStore()
+    record = sr.MonotonicRecord("revocation_epoch:org-sentinel-0001", 1, {})
+    refused("anti_rollback_lock_not_held", partial(store.advance, record, accept_any))
+    with store.locked():
+        assert store.advance(record, accept_any)
+    refused("anti_rollback_lock_not_held", partial(store.advance, record, accept_any))
 
 
 # --- Encoding and canonical form -----------------------------------------------------
