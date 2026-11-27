@@ -18,6 +18,7 @@ from typing import Any
 
 import pytest
 from opentour_cell.pilot import eve_replay as rp
+from opentour_cell.pilot import eve_scorer as sc
 from opentour_cell.pilot import eve_task as task
 from opentour_cell.pilot import model_connector as mc
 
@@ -82,8 +83,8 @@ def key() -> rp.AnswerKey:
     return rp.AnswerKey(entries)
 
 
-def scorer() -> rp.DeterministicScorer:
-    return rp.DeterministicScorer("generated-scorer-v1", "generated-rubric-r1")
+def scorer() -> sc.DeterministicScorer:
+    return sc.DeterministicScorer("generated-scorer-v1", "generated-rubric-r1")
 
 
 def output(n: int, kind: str) -> rp.ArmOutput:
@@ -241,8 +242,20 @@ class Env:
             preflight=self.preflight,
             credentials=self.credentials,
             journal=rp.ReplayJournal(self.root / name),
+            keys=rp.CommitmentKeyStore(self.root / "commitment-keys" / f"{name}.keys"),
             log=self.logs.append,
         )
+
+    def staging(
+        self, journal: rp.ReplayJournal | None = None, scorer_: rp.Scorer | None = None
+    ) -> dict[str, Any]:
+        """What ``stage_decision`` needs to derive the result itself (OPE-573)."""
+        return {
+            "manifest": self.manifest,
+            "journal": journal or rp.ReplayJournal(self.root / "journal.jsonl"),
+            "scorer": scorer_ or self.scorer,
+            "key": self.key,
+        }
 
     def arm(self, arm_id: str, served: str = BASE, **changes: str) -> rp.ArmSpec:
         spec = rp.ArmSpec(
@@ -519,18 +532,19 @@ def test_v1_version_drift_is_refused_not_coerced(env: Env) -> None:
     worker = rp.EveReplayWorker(
         registry=other, preflight=env.preflight, credentials=env.credentials,
         journal=rp.ReplayJournal(env.root / "j2.jsonl"),
+        keys=rp.CommitmentKeyStore(env.root / "commitment-keys" / "j2.keys"),
     )  # fmt: skip
     with refuses("model_version_drift"):
         env.replay(env.arm("baseline"), infer, worker=worker)
     with refuses("scorer_version_drift"):
         env.replay(
-            env.arm("baseline"), infer, scorer_=rp.DeterministicScorer("generated-scorer-v2", "r")
+            env.arm("baseline"), infer, scorer_=sc.DeterministicScorer("generated-scorer-v2", "r")
         )
     with refuses("scorer_version_drift"):
         env.replay(
             env.arm("baseline"),
             infer,
-            scorer_=rp.DeterministicScorer("generated-scorer-v1", "generated-rubric-r2"),
+            scorer_=sc.DeterministicScorer("generated-scorer-v1", "generated-rubric-r2"),
         )
     altered = dict(env.key._entries)  # noqa: SLF001
     altered["generated-p1"] = rp.ProtectedAnswer(
@@ -809,12 +823,20 @@ def test_v5_broken_scorer_cannot_stage(env: Env) -> None:
         worker=worker,
     )
     good = env.result(arms, journal=worker.journal)
-    assert rp.stage_decision(good, recomputed_digest=good["result_digest"]).stageable
+    assert rp.stage_decision(
+        good, recomputed_digest=good["result_digest"], **env.staging(worker.journal)
+    ).stageable
     broken = env.result(arms, journal=worker.journal, scorer_=AlwaysCorrect())
     assert broken["body"]["scorer"]["selfcheck_passed"] is False
-    decision = rp.stage_decision(broken, recomputed_digest=broken["result_digest"])
+    decision = rp.stage_decision(
+        broken,
+        recomputed_digest=broken["result_digest"],
+        **env.staging(worker.journal, AlwaysCorrect()),
+    )
     assert not decision.stageable and "scorer_selfcheck_failed" in decision.reasons
-    mismatch = rp.stage_decision(good, recomputed_digest="sha256:" + "3" * 64)
+    mismatch = rp.stage_decision(
+        good, recomputed_digest="sha256:" + "3" * 64, **env.staging(worker.journal)
+    )
     assert not mismatch.stageable and "recompute_mismatch" in mismatch.reasons
     forged_body = {
         **good["body"],
@@ -822,7 +844,9 @@ def test_v5_broken_scorer_cannot_stage(env: Env) -> None:
         "fit_authorized": True,
     }
     tampered = {"body": forged_body, "result_digest": good["result_digest"]}
-    assert not rp.stage_decision(tampered, recomputed_digest=good["result_digest"]).stageable
+    assert not rp.stage_decision(
+        tampered, recomputed_digest=good["result_digest"], **env.staging(worker.journal)
+    ).stageable
     assert good["body"]["fit_authorized"] is False and good["body"]["release_authorized"] is False
 
 
@@ -832,7 +856,7 @@ def test_v5_no_net_fixes_is_not_stageable(env: Env) -> None:
     arms["candidate"] = env.replay(env.arm("candidate", infer.served_revision), infer)
     result = env.result(arms)
     assert result["body"]["improvement_claim"] == "no_net_fixes"
-    decision = rp.stage_decision(result, recomputed_digest=result["result_digest"])
+    decision = rp.stage_decision(result, recomputed_digest=result["result_digest"], **env.staging())
     assert not decision.stageable and decision.reasons == ("improvement_no_net_fixes",)
 
 
@@ -920,7 +944,9 @@ def test_e1_registered_task_runs_eligible_arms_candidate_and_recomputable_scorec
     other.transport.jobs = env.transport.jobs
     recomputed = full_result(other, other.worker())
     assert recomputed["result_digest"] == result["result_digest"]
-    assert rp.stage_decision(result, recomputed_digest=recomputed["result_digest"]).stageable
+    assert rp.stage_decision(
+        result, recomputed_digest=recomputed["result_digest"], **other.staging()
+    ).stageable
     candidate_body = body["arms"]["candidate"]
     assert candidate_body["served_revision"] == "generated-adapter-digest-1"
     assert candidate_body["correct"] == 5 and body["arms"]["baseline"]["correct"] == 1
@@ -1083,12 +1109,14 @@ def test_x_selfcheck_is_computed_and_arms_must_be_journaled(env: Env) -> None:
     with refuses("arm_not_journaled"):
         env.result({"baseline": tampered})
     with refuses("scorer_version_drift"):
-        env.result(arms, scorer_=rp.DeterministicScorer("generated-scorer-v9", "r"))
+        env.result(arms, scorer_=sc.DeterministicScorer("generated-scorer-v9", "r"))
 
 
 def test_x_a_redigested_forged_body_is_not_stageable(env: Env) -> None:
     result = full_result(env)
-    assert rp.stage_decision(result, recomputed_digest=result["result_digest"]).stageable
+    assert rp.stage_decision(
+        result, recomputed_digest=result["result_digest"], **env.staging()
+    ).stageable
     for change in (
         {"evidence_tier": "customer_witnessed"},
         {"claim_scope": "release"},
@@ -1098,9 +1126,11 @@ def test_x_a_redigested_forged_body_is_not_stageable(env: Env) -> None:
     ):
         body = {**result["body"], **change}
         forged = {"body": body, "result_digest": task.digest(body)}
-        decision = rp.stage_decision(forged, recomputed_digest=forged["result_digest"])
+        decision = rp.stage_decision(
+            forged, recomputed_digest=forged["result_digest"], **env.staging()
+        )
         assert not decision.stageable, change
-    assert not rp.stage_decision({"body": {}}, recomputed_digest="x").stageable
+    assert not rp.stage_decision({"body": {}}, recomputed_digest="x", **env.staging()).stageable
 
 
 def test_x_credentials_are_checked_before_any_provider_observation(env: Env) -> None:
