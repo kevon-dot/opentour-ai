@@ -45,13 +45,21 @@ from opentour_cell.pilot.operating_point import canonical, digest
 
 PROPOSAL_VERSION = "opentour.pilot.authoring-proposal.v1"
 PROPOSER_PREFIX = "authoring-inference:"
-EVIDENCE_TIER = "generated"
+TIER_STAND_IN = "generated"
+TIER_UNATTESTED = "unattested"
+EXTERNAL_GATE = "real_inference_receipt_unsatisfied"
 SPAN_RESOURCE = "policy_span"
 FORBIDDEN_RESOURCES = frozenset(
     {"held_out_answer_key", "customer_credential", "trainer_access", "training_authority"}
 )
 _OPERATORS = frozenset({"<", "<=", ">", ">=", "missing", "present"})
 _COMPARISONS = frozenset({"<", "<=", ">", ">="})
+_COMPARISON_TEXT = re.compile(
+    r"([a-z][a-z0-9_]{0,63})\s*(<=|>=|<|>|below|at or above|at most|above)\s*"
+    r"(-?[0-9]{1,12}(?:\.[0-9]{1,8})?)"
+)
+_PRESENCE_TEXT = re.compile(r"([a-z][a-z0-9_]{0,63}) (?:is )?(missing|present)")
+_WORD_OPERATORS = {"below": "<", "at most": "<=", "at or above": ">=", "above": ">"}
 _FIELD = re.compile(r"[a-z][a-z0-9_]{0,63}\Z")
 _ACTION = re.compile(r"[A-Z][A-Z0-9_]{0,47}\Z")
 _NUMBER = re.compile(r"-?[0-9]{1,12}(?:\.[0-9]{1,8})?")
@@ -124,6 +132,7 @@ class AuthoringTools:
 class AuthoringProfile(Protocol):
     profile_id: str
     schema_id: str
+    stand_in: bool  # True for a generated deterministic stand-in; False for any real profile
 
     def infer(self, request: AuthoringRequest, tools: AuthoringTools) -> ProfileReply: ...
 
@@ -149,6 +158,8 @@ class AuthoringProposal:
     state: str
     applied: bool
     evidence_tier: str
+    stand_in: bool
+    external_gate: str
     attempts: int
     cost_micro: int
     branches: tuple[Branch, ...]
@@ -228,13 +239,18 @@ def _validate_branch(
             normalized = _number(threshold)
             if normalized is None:
                 return Issue("predicate_unsupported", citation)
-            stated = {_number(token) for token in re.findall(r"-?[0-9.]+", passage)}
-            if normalized not in stated:
-                return Issue("answer_unsupported", citation)
+            stated = {
+                (match[1], _WORD_OPERATORS.get(match[2], match[2]), _number(match[3]))
+                for match in _COMPARISON_TEXT.finditer(passage)
+            }
+            if (field, operator, normalized) not in stated:
+                return Issue("answer_unsupported", citation)  # field, direction and number
         elif threshold is not None:
             return Issue("predicate_unsupported", citation)
-        if not re.search(rf"\b{field}\b", passage):
-            return Issue("answer_unsupported", citation)
+        else:
+            stated_presence = {(m[1], m[2]) for m in _PRESENCE_TEXT.finditer(passage)}
+            if (field, operator) not in stated_presence:
+                return Issue("answer_unsupported", citation)
         conditions.append(Condition(field, operator, normalized))
     frozen = tuple(conditions)
     return Branch(_branch_ref(frozen, action), frozen, action, citation)
@@ -366,6 +382,14 @@ class AuthoringService:
     def propose(
         self, actor: IntakePrincipal, workflow_ref: str, idempotency_key: str
     ) -> AuthoringProposal:
+        try:
+            return self._propose(actor, workflow_ref, idempotency_key)
+        except sqlite3.Error:
+            raise AuthoringError("authoring_ledger_unavailable") from None
+
+    def _propose(
+        self, actor: IntakePrincipal, workflow_ref: str, idempotency_key: str
+    ) -> AuthoringProposal:
         grant = self._grant(actor, workflow_ref)  # before any policy text is read
         try:
             snapshot = self.source.read(actor, workflow_ref)
@@ -392,10 +416,6 @@ class AuthoringService:
         tools = AuthoringTools(snapshot)
         scope = (actor.tenant, grant.revision, workflow_ref, idempotency_key)
         with self._db() as db:
-            used_here = db.execute(
-                "SELECT count(*) FROM attempts WHERE tenant=? AND grant_revision=?",
-                scope[:2],
-            ).fetchone()[0]
             mine = db.execute(
                 "SELECT count(*), coalesce(sum(cost_micro),0) FROM attempts "
                 "WHERE tenant=? AND grant_revision=? AND workflow_ref=? AND key=?",
@@ -405,19 +425,15 @@ class AuthoringService:
         branches: tuple[Branch, ...] = ()
         issues: tuple[Issue, ...] = (Issue("attempts_exhausted"),)
         prior: tuple[str, ...] = ()
-        while attempts < self.limits.max_attempts_per_proposal:
-            if used_here >= grant.quota_attempts:
-                if attempts == 0:
+        while True:
+            self._require_current(actor, workflow_ref, grant)
+            reserved = self._reserve(scope, grant.quota_attempts)
+            if isinstance(reserved, str):
+                if reserved == "quota" and attempts == 0:
                     raise AuthoringError("authoring_quota_exhausted")
                 break
-            self._require_current(actor, workflow_ref, grant)
-            with self._db() as db:  # persist the attempt before dispatch
-                db.execute(
-                    "INSERT INTO attempts VALUES (?,?,?,?,?,?,?)",
-                    (*scope, attempts + 1, "reserved", 0),
-                )
-            attempts += 1
-            used_here += 1
+            attempts = reserved
+            self._finish(scope, attempts, "dispatched", 0)  # outcome unknown if we crash now
             request = AuthoringRequest(
                 grant.schema_id,
                 attempts,
@@ -457,7 +473,9 @@ class AuthoringService:
             actor.actor,
             "needs_owner_review",
             False,
-            EVIDENCE_TIER,
+            TIER_STAND_IN if self.profile.stand_in else TIER_UNATTESTED,
+            self.profile.stand_in,
+            EXTERNAL_GATE,  # a proposal alone never satisfies the real-inference gate
             attempts,
             cost,
             branches,
@@ -474,6 +492,43 @@ class AuthoringService:
                 (actor.tenant, workflow_ref, idempotency_key),
             ).fetchone()[0]
         return _proposal_from_json(stored)
+
+    def _reserve(self, scope: tuple[str, ...], quota: int) -> int | str:
+        """Atomically count and persist one attempt before dispatch.
+
+        Returns the attempt number, or "quota" / "bound" when no attempt may be dispatched.
+        """
+        try:
+            with self._db() as db:
+                db.execute("BEGIN IMMEDIATE")
+                try:
+                    used = db.execute(
+                        "SELECT count(*) FROM attempts WHERE tenant=? AND grant_revision=?",
+                        scope[:2],
+                    ).fetchone()[0]
+                    mine = db.execute(
+                        "SELECT count(*) FROM attempts WHERE tenant=? AND grant_revision=? "
+                        "AND workflow_ref=? AND key=?",
+                        scope,
+                    ).fetchone()[0]
+                    if mine >= self.limits.max_attempts_per_proposal:
+                        db.execute("ROLLBACK")
+                        return "bound"
+                    if used >= quota:
+                        db.execute("ROLLBACK")
+                        return "quota"
+                    db.execute(
+                        "INSERT INTO attempts VALUES (?,?,?,?,?,?,?)",
+                        (*scope, mine + 1, "reserved", 0),
+                    )
+                    db.execute("COMMIT")
+                    return int(mine) + 1
+                except BaseException:
+                    if db.in_transaction:
+                        db.execute("ROLLBACK")
+                    raise
+        except sqlite3.Error:
+            raise AuthoringError("authoring_ledger_unavailable") from None
 
     def _finish(self, scope: tuple[str, ...], n: int, outcome: str, cost: int) -> None:
         with self._db() as db:

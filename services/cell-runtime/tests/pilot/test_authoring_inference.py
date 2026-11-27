@@ -4,6 +4,7 @@ Proves software behavior only. No real inference, provider, grant issuer or cust
 """
 
 import sqlite3
+import threading
 from contextlib import closing
 from dataclasses import replace
 from decimal import Decimal
@@ -51,10 +52,11 @@ def reply(branches, schema=SCHEMA):
 class Stub:
     """Generated deterministic profile. It replays a script and records what it was given."""
 
-    profile_id = PROFILE
     schema_id = SCHEMA
 
-    def __init__(self, script, cost=7):
+    def __init__(self, script, cost=7, profile_id=PROFILE, stand_in=True):
+        self.profile_id = profile_id
+        self.stand_in = stand_in
         self.script = list(script)
         self.cost = cost
         self.requests = []
@@ -249,8 +251,9 @@ def test_no_grant_refuses_cleanly_with_zero_reads_calls_and_effects(starter, tmp
     assert profile.requests == [] and counts(ledger) == (0, 0)
 
 
-def test_foreign_tenant_is_indistinguishable_from_no_grant(starter, tmp_path):
-    service, _, actor, workflow, _, profile, ledger = make(starter, tmp_path, [reply(GOOD)])
+def test_foreign_tenant_is_indistinguishable_from_no_grant(starter, tmp_path, monkeypatch):
+    service, source, actor, workflow, _, profile, ledger = make(starter, tmp_path, [reply(GOOD)])
+    monkeypatch.setattr(type(source), "read", lambda *_: pytest.fail("policy was read"))
     _refused(service, replace(actor, tenant="generated-foreign"), workflow)
     assert profile.requests == [] and counts(ledger) == (0, 0)
 
@@ -381,15 +384,23 @@ def test_replay_after_revocation_discloses_nothing(starter, tmp_path):
     _refused(service, actor, workflow)
 
 
-def test_changed_policy_under_same_key_conflicts_instead_of_returning_old_proposal(
-    starter, tmp_path
-):
+def test_changed_policy_source_refuses_replay_instead_of_returning_old_proposal(starter, tmp_path):
     service, source, actor, workflow, _, _, _ = make(starter, tmp_path, [reply(GOOD)])
     service.propose(actor, workflow, "generated-key-1")
     source.path.write_bytes(b"# Generated successor\n")
     with pytest.raises(PolicyError, match="policy_source_revision_changed"):
         service.source.read(actor, workflow)
     _refused(service, actor, workflow)  # stale policy source also refuses cleanly
+
+
+def test_same_key_with_a_different_profile_intent_is_an_idempotency_conflict(starter, tmp_path):
+    service, source, actor, workflow, grants, _, ledger = make(starter, tmp_path, [reply(GOOD)])
+    service.propose(actor, workflow, "generated-key-1")
+    other = Stub([reply(GOOD)], profile_id="generated-authoring-profile-b")
+    grants.grant = replace(grants.grant, profile_id=other.profile_id)
+    changed = ai.AuthoringService(source, grants, other, FIELDS, ACTIONS, ledger)
+    _refused(changed, actor, workflow, "authoring_idempotency_conflict")
+    assert other.requests == [] and counts(ledger) == (1, 1)
 
 
 def test_crash_after_dispatch_counts_the_attempt_and_resumes_under_the_same_key(starter, tmp_path):
@@ -431,3 +442,98 @@ def test_guided_route_continues_with_the_authoring_profile_unavailable(starter, 
     )
     assert profile.requests == []
     assert FieldKind.NUMBER in FIELDS.values()
+
+
+def test_reversed_comparison_direction_is_not_grounded_and_retries(starter, tmp_path):
+    reversed_ = branch([{"field": "total", "operator": ">", "threshold": "250"}], "APPROVE", 4)
+    wrong_edge = branch([{"field": "total", "operator": "<=", "threshold": "250"}], "APPROVE", 4)
+    service, _, actor, workflow, _, profile, _ = make(
+        starter, tmp_path, [reply([reversed_]), reply([wrong_edge]), reply(GOOD)]
+    )
+    proposal = service.propose(actor, workflow, "generated-key-1")
+    assert profile.requests[1].prior_issue_codes == ("answer_unsupported",)
+    assert profile.requests[2].prior_issue_codes == ("answer_unsupported",)
+    assert proposal.attempts == 3 and len(proposal.branches) == 3 and proposal.issues == ()
+
+
+def test_reversed_presence_is_not_grounded_and_word_operators_are(starter, tmp_path):
+    raw = b"# Ordering\nIf po is missing, REVIEW.\nWhen total below 250, APPROVE.\n"
+    flipped = branch([{"field": "po", "operator": "present"}], "REVIEW", 2)
+    below = branch([BELOW], "APPROVE", 3)
+    service, _, actor, workflow, _, _, _ = make(
+        starter, tmp_path, [reply([flipped, below])] * 3, raw=raw
+    )
+    proposal = service.propose(actor, workflow, "generated-key-1")
+    assert [b.action for b in proposal.branches] == ["APPROVE"]
+    assert {i.code for i in proposal.issues} == {"answer_unsupported"}
+
+
+def test_reentrant_proposal_under_another_key_cannot_exceed_the_grant_quota(starter, tmp_path):
+    bad = reply([branch([BELOW], "APPROVE", 99)])
+    holder = {}
+
+    def nested(request, tools):
+        # A second proposal runs completely inside the first one's profile call.
+        holder["inner"] = holder["service"].propose(
+            holder["actor"], holder["workflow"], "generated-key-B"
+        )
+        return ai.ProfileReply(bad, 1)
+
+    service, _, actor, workflow, _, _, ledger = make(
+        starter, tmp_path, [nested, bad, bad, bad, bad], quota=2
+    )
+    holder.update(service=service, actor=actor, workflow=workflow)
+    proposal = service.propose(actor, workflow, "generated-key-A")
+    assert counts(ledger)[0] <= 2  # attempts never exceed the grant quota
+    assert holder["inner"].attempts == 1 and proposal.attempts == 1
+
+
+def test_concurrent_reservations_never_exceed_quota_or_per_key_bound(starter, tmp_path):
+    service, _, actor, workflow, _, _, ledger = make(starter, tmp_path, [], quota=3)
+    results, lock = [], threading.Lock()
+
+    def reserve(key):
+        scope = (actor.tenant, "grant-rev-1", workflow, key)
+        got = service._reserve(scope, 3)
+        with lock:
+            results.append(got)
+
+    threads = [
+        threading.Thread(target=reserve, args=(f"generated-key-{i % 4}",)) for i in range(12)
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert sum(isinstance(item, int) for item in results) == 3
+    assert counts(ledger)[0] == 3
+    assert {r for r in results if isinstance(r, str)} == {"quota"}
+
+
+def test_ledger_failure_maps_to_a_fixed_code_not_a_raw_sqlite_error(starter, tmp_path):
+    service, _, actor, workflow, _, profile, ledger = make(starter, tmp_path, [reply(GOOD)])
+    with closing(sqlite3.connect(ledger)) as db:
+        db.execute("DROP TABLE attempts")
+    _refused(service, actor, workflow, "authoring_ledger_unavailable")
+    assert profile.requests == []
+
+
+def test_crash_during_dispatch_is_recorded_as_outcome_unknown_not_reserved(starter, tmp_path):
+    service, _, actor, workflow, _, _, ledger = make(starter, tmp_path, [Crash()])
+    with pytest.raises(Crash):
+        service.propose(actor, workflow, "generated-key-1")
+    with closing(sqlite3.connect(ledger)) as db:
+        assert db.execute("SELECT outcome FROM attempts").fetchall() == [("dispatched",)]
+
+
+def test_evidence_marker_is_derived_from_the_profile_not_a_constant(starter, tmp_path):
+    service, source, actor, workflow, grants, _, ledger = make(starter, tmp_path, [reply(GOOD)])
+    stand_in = service.propose(actor, workflow, "generated-key-1")
+    assert (stand_in.stand_in, stand_in.evidence_tier) == (True, "generated")
+    assert stand_in.external_gate == "real_inference_receipt_unsatisfied"
+    real = Stub([reply(GOOD)], profile_id="generated-authoring-profile-c", stand_in=False)
+    grants.grant = replace(grants.grant, profile_id=real.profile_id)
+    other = ai.AuthoringService(source, grants, real, FIELDS, ACTIONS, ledger)
+    proposal = other.propose(actor, workflow, "generated-key-2")
+    assert (proposal.stand_in, proposal.evidence_tier) == (False, "unattested")
+    assert proposal.external_gate == "real_inference_receipt_unsatisfied"
