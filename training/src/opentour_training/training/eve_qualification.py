@@ -74,10 +74,12 @@ AUTHORITY_FIELDS = (
 )
 FORBIDDEN_ROW_KEYS = frozenset({"expected_answer", "reference_answer", "answer_key", "label"})
 SIMULATED_PREFIXES = ("simulated:", "generated")
-# A witness may be valid for at most this long after `qualify` reads the clock: 90 days. It bounds
-# a verifier that returns an effectively unlimited expiry, and forces periodic re-attestation of
-# a host or account whose real state can change.
-MAX_WITNESS_LIFETIME_SECONDS = 90 * 24 * 3600
+# A witness may be valid for at most this long after `qualify` reads the clock. The owner set 30
+# days for the pilot: an engagement runs weeks and a witness attests a host or account whose state
+# drifts, so a 30-day ceiling forces re-attestation at least once inside a pilot cycle and stops a
+# witness outliving the engagement it was taken for. This is an adjustable judgement value, not a
+# contract value; it can be relaxed later if it proves to chafe.
+MAX_WITNESS_LIFETIME_SECONDS = 30 * 24 * 3600
 STATES = ("benchmark_only_hold", "software_checked_unwitnessed", "qualified")
 _REVISION = re.compile(r"[0-9a-f]{40}")
 _DIGEST = re.compile(r"sha256:[0-9a-f]{64}")

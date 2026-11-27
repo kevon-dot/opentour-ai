@@ -617,7 +617,7 @@ def test_open_item_admission_is_only_as_good_as_the_supplied_clock(tmp_path: Pat
 
 def test_witness_lifetime_cap_is_a_named_bounded_constant() -> None:
     cap = eve.MAX_WITNESS_LIFETIME_SECONDS  # type: ignore[attr-defined]
-    assert type(cap) is int and 0 < cap <= 366 * 24 * 3600
+    assert type(cap) is int and cap == 30 * 24 * 3600  # owner-set pilot ceiling
 
 
 def test_expiry_far_in_the_future_is_refused_at_qualify() -> None:
