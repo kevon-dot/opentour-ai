@@ -18,12 +18,7 @@ from opentour_cell.pilot import live_reader, local_decision_context, model_conne
 from opentour_cell.pilot import text_classifier as cpu
 from opentour_cell.pilot.intake_local import open_intake
 from opentour_cell.pilot.intake_mcp import DISCOVER, GET_RUN, SUBMIT, IntakePrincipal, parse_intake
-from opentour_cell.pilot.live_authority import (
-    SCHEMA,
-    SELECTION_SCHEMA,
-    TEMPORARY_ENFORCEMENT_OPT_OUT,
-    PrivateLiveAuthority,
-)
+from opentour_cell.pilot.live_authority import SCHEMA, SELECTION_SCHEMA, PrivateLiveAuthority
 from opentour_cell.pilot.live_evidence import LiveEvidence, _canonical, _digest
 from opentour_cell.pilot.operating_point import canonical, digest
 from opentour_cell.pilot.readiness_selection import SCHEMA as READINESS_SCHEMA
@@ -39,6 +34,7 @@ from test_invoice_decision_emitter import (
     scope_file,
     sdk_actions,
 )
+from test_live_authority import enroll_ledger
 from test_live_evidence import DECISION, OUTCOME
 from test_live_readiness import Case
 from test_live_settings import KEY, form, open_live, sign
@@ -280,10 +276,11 @@ def test_p1_invoice_commit_then_independent_truth(
         state="current",
         actors={ACTOR: ["custodian", "inspect"], "worker": ["intake", "inspect"]},
         grants=[asdict(DECISION)],
-        # Fixture predates the enforcing default; it does not enroll an engagement ledger.
-        engagement_ledger_required=TEMPORARY_ENFORCEMENT_OPT_OUT,
+        engagement_ledger_required=True,
     )
     _write_private(directory / "live-authority-key.json", {"key": KEY.hex()})
+    # The test later adds the outcome grant, so enroll both resources up front.
+    enroll_ledger(directory, tenant, epoch, (DECISION, OUTCOME))
     sign(h, body)
     view = open_live(h, monkeypatch)
     h.form(view, form(h, view))

@@ -15,7 +15,7 @@ import sqlite3
 import time
 from collections.abc import Iterator, Mapping
 from contextlib import AbstractContextManager, contextmanager
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Literal, Protocol, runtime_checkable
 
@@ -92,31 +92,28 @@ class LiveAuthority(Protocol):
 @runtime_checkable
 class EngagementAuthority(Protocol):
     def engagement_gate(self, scope: LiveScope) -> EngagementGate | None:
-        """Return the gate to enforce, or None only when the grant does not require one."""
+        """Return the gate to enforce. `PrivateLiveAuthority` never returns None."""
 
 
 # Closed vocabulary recorded beside read receipts and archived snapshots (OPE-543 follow-up).
 # It states whether engagement-epoch enforcement was applied to the operation that wrote the
 # record, so an unenforced result can never be read as an enforced one.
 #   applied                      a gate was resolved and its checks ran for this operation
-#   temporary_opt_out            the grant carries the explicit, temporary one-release opt-out,
-#                                so the authority resolved no gate and nothing was enforced
-#   not_available_from_authority the authority offers no engagement gate at all
+#   not_available_from_authority the authority offers no engagement gate, so nothing was enforced
 #   not_evaluated                the writing operation does not evaluate epoch enforcement
-#   not_recorded                 (read side only) a row written before this marker existed
-EPOCH_ENFORCEMENT_STATES = frozenset(
-    {
-        "applied",
-        "temporary_opt_out",
-        "not_available_from_authority",
-        "not_evaluated",
-        "not_recorded",
-    }
-)
+# Read side only (never written by this code):
+#   not_recorded                 a row written before this marker existed
+#   not_required_by_grant        legacy value from an earlier revision of this follow-up, when a
+#                                grant without the flag ran unenforced. Grants without the flag
+#                                are now refused, so no new row can carry it. Kept readable so a
+#                                stored row is never rejected.
+EPOCH_ENFORCEMENT_STATES = frozenset({"applied", "not_available_from_authority", "not_evaluated"})
+_READABLE_ENFORCEMENT_STATES = EPOCH_ENFORCEMENT_STATES | {"not_recorded", "not_required_by_grant"}
 
 
-def _enforcement_marker(value: object) -> str:
-    _require(isinstance(value, str) and value in EPOCH_ENFORCEMENT_STATES)
+def _enforcement_marker(value: object, *, reading: bool = False) -> str:
+    allowed = _READABLE_ENFORCEMENT_STATES if reading else EPOCH_ENFORCEMENT_STATES
+    _require(isinstance(value, str) and value in allowed)
     assert isinstance(value, str)
     return value
 
@@ -167,6 +164,12 @@ class LiveSnapshot:
     quarantined: int
     unmatched_outcomes: int = 0
     last_ingested_at: int | None = None
+    # Whether epoch enforcement applied to the write that archived this view. A current view
+    # computed on read evaluates nothing, so it is `not_evaluated`; an archived view
+    # (`as_of_revision`) carries the validated stored marker.
+    # Provenance, not evidence: excluded from equality so an archived view still equals the
+    # current view of identical evidence.
+    epoch_enforcement: str = field(default="not_evaluated", compare=False)
 
 
 _COMMON = {"kind", "event_id", "event_revision", "decision_id", "decision_revision"}
@@ -252,11 +255,7 @@ class LiveEvidence:
 
     def _enforcement_state(self, gate: EngagementGate | None) -> str:
         """Name why `gate` is present or absent; never imply enforcement that did not run."""
-        if gate is not None:
-            return "applied"
-        if self.engagements is None and isinstance(self.authority, EngagementAuthority):
-            return "temporary_opt_out"
-        return "not_available_from_authority"
+        return "applied" if gate is not None else "not_available_from_authority"
 
     def _engagement_checkpoint(
         self, scope: LiveScope, grant: FeedGrant, gate: EngagementGate | None
@@ -781,7 +780,7 @@ class LiveEvidence:
                     ):
                         saved = json.loads(row[2])
                         saved["epoch_enforcement"] = _enforcement_marker(
-                            saved.get("epoch_enforcement", "not_recorded")
+                            saved.get("epoch_enforcement", "not_recorded"), reading=True
                         )
                         receipts.append({"binding_ref": row[0], "page_ref": row[1], **saved})
                 return tuple(receipts)
@@ -1040,5 +1039,8 @@ class LiveEvidence:
             # Historical evidence survives; historical role claims do not grant current actions.
             value["can_bind_verifier"] = scope.can_bind and any(
                 g.kind == "independent_outcome" for g in scope.grants
+            )
+            value["epoch_enforcement"] = _enforcement_marker(
+                saved.get("epoch_enforcement", "not_recorded"), reading=True
             )
             return LiveSnapshot(**value)

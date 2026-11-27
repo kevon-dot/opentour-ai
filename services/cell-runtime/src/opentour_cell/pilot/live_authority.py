@@ -54,12 +54,11 @@ _FIELDS = {
     "actors",
     "grants",
 }
-# TEMPORARY, one-release migration escape hatch. Remove it (and its marker state) in the release
-# after the one that introduced it. Epoch enforcement is the default: a grant that omits
-# `engagement_ledger_required`, or sets it to true, is enforced. Only this exact, deliberate
-# value disables enforcement; it is recorded as `temporary_opt_out` in live evidence. `false`
-# and any other value are refused.
-TEMPORARY_ENFORCEMENT_OPT_OUT = "temporary_opt_out_remove_next_release"
+LEDGER_REQUIRED_MISSING = "engagement_ledger_required_missing"
+# Shown to the authenticated caller. It names exactly what a grant must carry.
+LEDGER_REQUIRED_MISSING_MESSAGE = (
+    LEDGER_REQUIRED_MISSING + ': the grant body must carry "engagement_ledger_required": true'
+)
 _ROLES = {"inspect", "intake", "custodian", "verify", "workflow_owner"}
 
 
@@ -79,15 +78,17 @@ class PrivateLiveAuthority:
     grant body, keyed by the symmetric hex key in `live-authority-key.json`, which sits in
     the same private directory as the grant and the engagement ledger. It proves the grant
     is self-consistent with that key. It does not authenticate an issuer: anyone able to
-    write this directory can mint a grant, alter one, or strip a field such as
-    `engagement_ledger_required`. No key-custody or custodian-identity contract exists yet.
+    write this directory can mint or alter a grant. No key-custody or custodian-identity
+    contract exists yet.
 
-    Epoch enforcement is the default. A grant that omits `engagement_ledger_required`, or
-    sets it to `true`, is enforced against the engagement-epoch ledger (which must exist
-    and be enrolled, else the operation holds with `engagement_epoch_hold`). `false` is
-    refused. The only way to run unenforced is the explicit, TEMPORARY one-release
-    migration value `TEMPORARY_ENFORCEMENT_OPT_OUT`; that state is recorded in live
-    evidence as `epoch_enforcement: temporary_opt_out`, never as enforced.
+    Epoch enforcement is mandatory; there is no opt-out. A grant MUST carry
+    `"engagement_ledger_required": true` in its body (the sealed `grant` object, beside
+    `state` and `grants`). A grant without the field is refused with
+    `engagement_ledger_required_missing`; `false` and any other value are refused with
+    `live_evidence_unavailable`. With `true`, the engagement-epoch ledger must exist and be
+    enrolled, else the operation holds with `engagement_epoch_hold`. To migrate an older
+    grant, add that one field and re-seal it. An engagement that does not want epoch
+    enforcement must not use live evidence.
     """
 
     def __init__(self, directory: Path, tenant: str, workflow_ref: str):
@@ -109,14 +110,16 @@ class PrivateLiveAuthority:
             and _FIELDS <= body.keys()
             and body.keys() <= _FIELDS | {"slack_verifiers", "engagement_ledger_required"}
         )
-        required = body.get("engagement_ledger_required", True)  # absent means enforcing
-        _require(required is True or required == TEMPORARY_ENFORCEMENT_OPT_OUT)
+        _require(body.get("engagement_ledger_required", True) is True)
         _require(
             hmac.compare_digest(
                 signature,
                 hmac.digest(bytes.fromhex(key), _canonical(body).encode(), "sha256").hex(),
             )
         )
+        if "engagement_ledger_required" not in body:
+            # Checked after the seal so the guidance is only given for a self-consistent grant.
+            raise IntakeError(LEDGER_REQUIRED_MISSING_MESSAGE)
         _require(body["schema_version"] == SCHEMA and body["state"] == "current")
         _require(body["tenant"] == self.tenant and body["workflow_ref"] == self.workflow_ref)
         _require(type(body["expires_at"]) is int and int(time.time()) < body["expires_at"] < 2**63)
@@ -163,20 +166,17 @@ class PrivateLiveAuthority:
             )
         return dict(body)
 
-    def engagement_gate(self, scope: LiveScope) -> EngagementLedger | None:
-        """Open the engagement ledger unless the grant carries the temporary opt-out.
+    def engagement_gate(self, scope: LiveScope) -> EngagementLedger:
+        """Open the engagement ledger; always enforcing, never None.
 
-        Absent or `true` enforces; `_document` already refused `false` and unknown values.
-        Only `TEMPORARY_ENFORCEMENT_OPT_OUT` returns None, and the caller records that as
-        `temporary_opt_out`. The seal is a locally keyed HMAC with a co-located key; it
-        proves self-consistency only, so anyone with write access to the directory can add
-        the opt-out value or strip the field.
+        `_document` has already refused a grant whose `engagement_ledger_required` is absent
+        (`engagement_ledger_required_missing`) or anything other than true. The seal is a
+        locally keyed HMAC with a co-located key; it proves self-consistency only, so anyone
+        with write access to the directory can mint or alter a grant (though one without the
+        requirement is refused), and could also replace the ledger itself.
         """
         body = self._document()
         _require(_digest(body) == scope.authority_revision)
-        if body.get("engagement_ledger_required") == TEMPORARY_ENFORCEMENT_OPT_OUT:
-            # Deliberate, temporary: this grant explicitly opts out of epoch enforcement.
-            return None
         try:
             ledger = EngagementLedger(self.directory, existing_only=True)
             for grant in scope.grants:

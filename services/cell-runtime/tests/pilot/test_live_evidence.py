@@ -511,16 +511,15 @@ def test_resolve_reads_successor_after_entering_current_authority_guard(tmp_path
 def test_epoch_enforcement_marker_is_closed_vocabulary(tmp_path):
     from opentour_cell.pilot.live_evidence import EPOCH_ENFORCEMENT_STATES, _enforcement_marker
 
-    assert EPOCH_ENFORCEMENT_STATES == {
-        "applied",
-        "temporary_opt_out",
-        "not_available_from_authority",
-        "not_evaluated",
-        "not_recorded",
-    }
-    for value in ("enforced", "", None, 1, "Applied"):
+    assert EPOCH_ENFORCEMENT_STATES == {"applied", "not_available_from_authority", "not_evaluated"}
+    for value in ("enforced", "", None, 1, "Applied", "temporary_opt_out"):
         with pytest.raises(IntakeError):
             _enforcement_marker(value)
+    # Read-only legacy values are readable but can never be written.
+    for legacy in ("not_recorded", "not_required_by_grant"):
+        assert _enforcement_marker(legacy, reading=True) == legacy
+        with pytest.raises(IntakeError):
+            _enforcement_marker(legacy)
     case = Case(tmp_path / "owner")
     with case.store._db(write=True) as db, pytest.raises(IntakeError):
         case.store._archive(db, case.authority.scope, "enforced")
@@ -558,3 +557,11 @@ def test_authority_without_engagement_gate_is_marked_not_available(tmp_path):
     assert [r["epoch_enforcement"] for r in case.store.read_receipts(ACTOR, "workflow-a")] == [
         "not_recorded"
     ]
+    # The snapshot path surfaces the stored marker and refuses an invalid one.
+    archived = case.snapshot(as_of_revision=1)
+    assert archived.epoch_enforcement == "not_available_from_authority"
+    assert case.snapshot().epoch_enforcement == "not_evaluated"
+    with case.store._db(write=True) as db:
+        db.execute("UPDATE live_snapshots SET body=json_set(body,'$.epoch_enforcement','bogus')")
+    with pytest.raises(IntakeError):
+        case.snapshot(as_of_revision=1)

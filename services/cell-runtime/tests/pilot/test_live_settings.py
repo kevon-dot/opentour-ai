@@ -9,15 +9,11 @@ from dataclasses import asdict
 import pytest
 from opentour_cell.pilot.intake_admission import DurableIntake
 from opentour_cell.pilot.intake_mcp import IntakeError, IntakePrincipal, parse_intake
-from opentour_cell.pilot.live_authority import (
-    SCHEMA,
-    TEMPORARY_ENFORCEMENT_OPT_OUT,
-    LocalLiveIntake,
-    PrivateLiveAuthority,
-)
+from opentour_cell.pilot.live_authority import SCHEMA, LocalLiveIntake, PrivateLiveAuthority
 from opentour_cell.pilot.live_evidence import _canonical
 from test_app_home import click, publish
 from test_intake_mcp import _write_private
+from test_live_authority import enroll_ledger
 from test_live_evidence import DECISION, OUTCOME
 from test_reviewer_workflow import buttons, restart, screen, text
 from test_slack_adapter import ACTOR, OTHER, Harness
@@ -53,10 +49,10 @@ def connected_settings(founder: Harness, monkeypatch):
         "state": "current",
         "actors": {ACTOR: ["custodian", "inspect"], OTHER: ["inspect"]},
         "grants": [asdict(DECISION), asdict(OUTCOME)],
-        # Fixture predates the enforcing default; it does not enroll an engagement ledger.
-        "engagement_ledger_required": TEMPORARY_ENFORCEMENT_OPT_OUT,
+        "engagement_ledger_required": True,
     }
     _write_private(h.path.parent / "live-authority-key.json", {"key": KEY.hex()})
+    enroll_ledger(h.path.parent, h.store.organization, h.store.engagement_id, (DECISION, OUTCOME))
     sign(h, body)
     return h, body
 
