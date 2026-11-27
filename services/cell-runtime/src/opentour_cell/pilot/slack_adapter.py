@@ -37,6 +37,7 @@ from opentour_cell.pilot.status_questions import (
 )
 
 if TYPE_CHECKING:
+    from opentour_cell.pilot.map_review import MapReviewService
     from opentour_cell.pilot.verifier_form import VerifierForm
 
 Json = dict[str, Any]
@@ -58,9 +59,21 @@ CALLBACKS = {
     "ot_live_binding",
     "ot_verify_outcome",
     "ot_nomination",
+    "ot_map_branch_save",
+    "ot_map_assertions_save",
+    "ot_map_precedence_save",
 }
 ACTIONS = {
     "ot_workflow_starter",
+    "ot_map_open",
+    "ot_map_page",
+    "ot_map_citation",
+    "ot_map_priority",
+    "ot_map_clause_page",
+    "ot_map_edit",
+    "ot_map_assertions",
+    "ot_map_back",
+    "ot_map_precedence",
     "ot_starter_save",
     "ot_starter_benchmark",
     "ot_connect_live",
@@ -2593,6 +2606,268 @@ class Workbench:
                 principal, workflow, matches[0].resource, expected_revision=choice
             )
 
+    def _map_service(
+        self, actor: str, workflow: str | None = None
+    ) -> tuple[MapReviewService, IntakePrincipal]:
+        from opentour_cell.pilot.map_review import open_map_review
+
+        cfg = self.settings(check_engagement=False)
+        cfg.permission(actor, "inspect")
+        service = open_map_review(cfg.directory, cfg.organization, workflow)
+        return service, IntakePrincipal(cfg.organization, actor, "slack")
+
+    def _map_entry(self, actor: str, workflow: str | None = None) -> str:
+        try:
+            service, principal = self._map_service(actor, workflow)
+            revision = service.entry(principal)
+            if revision:
+                return self.journal.opaque("map", [actor, service.workflow_ref, revision])
+        except (ImportError, KeyError, OSError, TypeError, ValueError, sqlite3.Error):
+            pass
+        return ""
+
+    def _map_show(
+        self,
+        actor: str,
+        workflow: str,
+        revision: str,
+        view: str,
+        layout: Json,
+        *,
+        requires_editor: bool,
+    ) -> None:
+        def authorize() -> None:
+            service, principal = self._map_service(actor, workflow)
+            with service.disclosure(principal, expected_revision=revision) as current:
+                _check(not requires_editor or current.can_edit)
+
+        self._show(view, layout, authorize=authorize)
+
+    def _map_view(self, cfg: Settings, actor: str, view: str, workflow: str, page: int = 0) -> None:
+        service, principal = self._map_service(actor, workflow)
+        snap = service.preview(principal)
+        rows = []
+        for branch in snap.branches:
+            clauses = [
+                " ".join(str(v) for v in (c.field, c.operator, c.threshold) if v is not None)
+                for c in branch.conditions
+            ]
+            rows.append(
+                self.views.MapReviewRow(
+                    branch.branch_ref,
+                    snap.trigger,
+                    ", ".join(
+                        f"{field} ({snap.field_kinds[field]})"
+                        for field in dict.fromkeys(c.field for c in branch.conditions)
+                    )
+                    or "Not specified",
+                    " and ".join(clauses) or "Requires owner clarification",
+                    f"Priority {branch.precedence}"
+                    if branch.precedence is not None
+                    else "Order unresolved",
+                    branch.action or "Unresolved decision",
+                    branch.fallback,
+                    "Policy clause"
+                    if branch.source_support == "source"
+                    else (
+                        f"Owner assertion · {branch.editor_ref or branch.actor_ref} · "
+                        f"{branch.reason or ''}"
+                    ),
+                    ("Source changed · " if branch.branch_ref in snap.changed_branch_refs else "")
+                    + branch.disposition.replace("_", " "),
+                )
+            )
+        from opentour_cell.pilot.map_review import citation_ref
+
+        priority = citation_ref(snap.precedence_citation) if snap.precedence_citation else ""
+        allowed = [r.branch_ref for r in rows[page * 5 : (page + 1) * 5]]
+        state = _json(
+            {"rev": snap.review_revision, "page": page, "branches": allowed, "priority": priority}
+        )
+        token = self.journal.context(actor, cfg.channel, view, "map_review", workflow, state)
+        layout = self.views.decision_map(
+            token,
+            workflow,
+            snap.review_revision,
+            rows,
+            [snap.question] if snap.question else [],
+            page,
+            snap.can_edit,
+            snap.confirmed_ref or "",
+            snap.can_set_precedence,
+            version=snap.version,
+            source_revision=snap.source_revision,
+            draft_revision=snap.map_revision,
+            assertion_basis=(
+                f"Trigger and fallback assertion by {snap.settings_editor_ref} "
+                f"({snap.settings_actor_ref}) · {snap.settings_reason}"
+                if snap.settings_support == "owner_assertion"
+                else ""
+            ),
+            priority_citation=priority,
+            priority_assertion=(
+                f"Priority confirmed by {snap.precedence_actor_ref} · {snap.precedence_reason}"
+                if snap.precedence_actor_ref and snap.precedence_reason
+                else ""
+            ),
+        )
+        self._map_show(
+            actor, workflow, snap.review_revision, view, layout, requires_editor=snap.can_edit
+        )
+
+    def _map_action(
+        self, cfg: Settings, actor: str, view: str, ctx: Json, action: str, value: str
+    ) -> None:
+        workflow = ctx["job"]
+        state = json.loads(ctx["revision"])
+        service, principal = self._map_service(actor, workflow)
+        if action == "ot_map_back":
+            _check(value == "back")
+            self._map_view(cfg, actor, view, workflow)
+            return
+        snap = service.preview(principal)
+        _check(snap.review_revision == state["rev"])
+        page = state.get("page", 0)
+        if action == "ot_map_page":
+            _check(ctx["kind"] == "map_review" and value in ("next", "previous"))
+            self._map_view(cfg, actor, view, workflow, page + (1 if value == "next" else -1))
+            return
+        if action == "ot_map_assertions":
+            _check(ctx["kind"] == "map_review" and snap.can_edit and value == state["rev"])
+            token = self.journal.context(
+                actor,
+                cfg.channel,
+                view,
+                "map_assertions",
+                workflow,
+                _json(
+                    {
+                        "rev": snap.review_revision,
+                        "source": snap.source_revision,
+                        "grant": service.entry(principal),
+                        "actions": snap.actions,
+                    }
+                ),
+            )
+            layout = self.views.map_assertions(
+                token,
+                trigger=snap.settings_trigger,
+                fallback=snap.fallback_action,
+                permitted=snap.actions,
+            )
+        elif action == "ot_map_precedence":
+            _check(
+                ctx["kind"] == "map_review"
+                and snap.can_edit
+                and snap.can_set_precedence
+                and snap.question
+                and value == state["rev"]
+            )
+            ranked = [
+                r for r in snap.branches if r.action is not None and r.disposition != "out_of_scope"
+            ]
+            token = self.journal.context(
+                actor,
+                cfg.channel,
+                view,
+                "map_precedence",
+                workflow,
+                _json(
+                    {
+                        "rev": snap.review_revision,
+                        "grant": service.entry(principal),
+                        "source": snap.source_revision,
+                        "refs": [r.branch_ref for r in ranked],
+                    }
+                ),
+            )
+            layout = self.views.map_precedence(
+                token,
+                snap.question,
+                [(f"{r.action} · {r.branch_ref}", r.branch_ref) for r in ranked],
+            )
+        else:
+            if action == "ot_map_clause_page":
+                _check(ctx["kind"] == "map_clause" and value in ("next", "previous"))
+                ref = state["branch"]
+                page += 1 if value == "next" else -1
+            else:
+                _check(
+                    ctx["kind"] == "map_review"
+                    and (
+                        (action == "ot_map_priority" and value and value == state["priority"])
+                        or (
+                            action in {"ot_map_edit", "ot_map_citation"}
+                            and value in state["branches"]
+                        )
+                    )
+                )
+                ref, page = value, 0
+            branch = next((r for r in snap.branches if r.branch_ref == ref), None)
+            if action in {"ot_map_clause_page", "ot_map_citation", "ot_map_priority"}:
+                from opentour_cell.pilot.map_review import citation_ref
+
+                citation = branch.citation if branch else snap.precedence_citation
+                _check(
+                    citation is not None and (branch is not None or citation_ref(citation) == ref)
+                )
+                assert citation is not None
+                passage = service.citation(
+                    principal,
+                    expected_revision=snap.review_revision,
+                    citation_ref=citation_ref(citation),
+                )
+                token = self.journal.context(
+                    actor,
+                    cfg.channel,
+                    view,
+                    "map_clause",
+                    workflow,
+                    _json({"rev": snap.review_revision, "branch": ref, "page": page}),
+                )
+                layout = self.views.map_clause(
+                    token,
+                    citation.resource_ref,
+                    citation.source_revision,
+                    citation.section_ref,
+                    f"{citation.line_start}–{citation.line_end}",
+                    passage,
+                    page,
+                    (
+                        f"Owner assertion · {branch.editor_ref} · {branch.reason}"
+                        if branch is not None and branch.source_support == "owner_assertion"
+                        else ""
+                    ),
+                )
+            else:
+                _check(action == "ot_map_edit" and snap.can_edit and branch is not None)
+                assert branch is not None
+                token = self.journal.context(
+                    actor,
+                    cfg.channel,
+                    view,
+                    "map_edit",
+                    workflow,
+                    _json(
+                        {
+                            "rev": snap.review_revision,
+                            "branch": ref,
+                            "source": snap.source_revision,
+                            "grant": service.entry(principal),
+                        }
+                    ),
+                )
+                predicates = "\n".join(
+                    " ".join(str(v) for v in (c.field, c.operator, c.threshold) if v is not None)
+                    for c in branch.conditions
+                )
+                layout = self.views.map_branch_edit(
+                    token, ref, branch.action, predicates, snap.actions
+                )
+        self._map_show(
+            actor, workflow, snap.review_revision, view, layout, requires_editor=snap.can_edit
+        )
+
     def _starter_setup(self, actor: str) -> StarterSetup:
         # LocalStarterAuthority pins the engagement in its own transaction.
         return StarterSetup(lambda: self.settings(check_engagement=False), actor)
@@ -2605,13 +2880,23 @@ class Workbench:
             cfg.channel,
             view,
             "starter_saved" if preview.draft else "starter_preview",
+            job=str(preview.draft["workflow_ref"]) if preview.draft else "",
             revision=preview.revision,
         )
 
+        workflow = str(preview.draft["workflow_ref"]) if preview.draft else ""
+        map_entry = self._map_entry(actor, workflow) if workflow else ""
+
         def authorize() -> None:
             _check(self._starter_setup(actor).preview() == preview)
+            _check(not map_entry or self._map_entry(actor, workflow) == map_entry)
 
-        self._show(view, self.views.starter_charter(token, preview), old_hash, authorize=authorize)
+        self._show(
+            view,
+            self.views.starter_charter(token, preview, map_entry),
+            old_hash,
+            authorize=authorize,
+        )
 
     def _action(
         self,
@@ -2624,6 +2909,19 @@ class Workbench:
         old_hash: str,
     ) -> None:
         job = ctx["job"]
+        if ctx["kind"] in {"map_review", "map_clause", "map_conflict"} or (
+            action == "ot_map_back"
+            and ctx["kind"] in {"map_edit", "map_precedence", "map_assertions"}
+        ):
+            self._map_action(cfg, actor, view, ctx, action, value)
+            return
+        if ctx["kind"] == "starter_saved" and action == "ot_map_open":
+            workflow = ctx["job"]
+            _check(workflow)
+            entry = self._map_entry(actor, workflow)
+            _check(entry and value == entry)
+            self._map_view(cfg, actor, view, workflow)
+            return
         if ctx["kind"] == "workflow_settings":
             if action == "ot_nominate_verifier":
                 _check(value and self._nomination(actor, ctx["job"])[0] == value)
@@ -2972,6 +3270,222 @@ class Workbench:
         _check(isinstance(value, str) and len(value) <= 128)
         return str(value)
 
+    def _map_submit(
+        self, cfg: Settings, actor: str, view: str, ctx: Json, callback: str, values: Json
+    ) -> None:
+        from opentour_cell.pilot.guided_decision_map import Condition
+        from opentour_cell.pilot.map_review import BranchEdit, MapSettingsEdit, StaleMapError
+
+        workflow = ctx["job"]
+        state = json.loads(ctx["revision"])
+        service, principal = self._map_service(actor, workflow)
+        current_grant = service.entry(principal)
+        _check(current_grant and current_grant == state["grant"])
+        operation = self.journal.opaque("map-save", [ctx["id"], actor])
+        changes: tuple[BranchEdit, ...] = ()
+        order = None
+        order_reason = None
+        settings_edit = None
+        reason = values["reason"]["reason"].get("value")
+        _check(isinstance(reason, str) and 0 < len(reason.strip()) <= 1000)
+        if callback == "ot_map_assertions_save":
+            _check(
+                ctx["kind"] == "map_assertions" and set(values) == {"trigger", "fallback", "reason"}
+            )
+            trigger = values["trigger"]["trigger"].get("value")
+            _check(
+                trigger is None
+                or (
+                    isinstance(trigger, str)
+                    and len(trigger) <= 160
+                    and (not trigger or trigger.isprintable())
+                )
+            )
+            fallback = self._field(values, "fallback", select=True)
+            _check(fallback == "unresolved" or fallback in state["actions"])
+            settings_edit = MapSettingsEdit(
+                (trigger or "").strip() or None,
+                None if fallback == "unresolved" else fallback,
+                reason,
+            )
+        elif callback == "ot_map_precedence_save":
+            _check(ctx["kind"] == "map_precedence")
+            refs = state["refs"]
+            if len(refs) > 30:
+                _check(set(values) == {"reason", "order"})
+                raw_order = values["order"]["order"]["value"]
+                _check(isinstance(raw_order, str) and len(raw_order) <= 1200)
+                positions = [p.strip() for p in raw_order.split(",")]
+                _check(
+                    len(positions) == len(refs)
+                    and all(
+                        re.fullmatch("[1-9][0-9]{0,2}", p) and int(p) <= len(refs)
+                        for p in positions
+                    )
+                )
+                order = tuple(refs[int(p) - 1] for p in positions)
+            else:
+                _check(set(values) == {"reason", *(f"rank_{i}" for i in range(len(refs)))})
+                order = tuple(
+                    self._field(values, f"rank_{i}", select=True) for i in range(len(refs))
+                )
+            _check(set(order) == set(refs) and len(set(order)) == len(refs))
+            order_reason = reason
+        else:
+            _check(
+                ctx["kind"] == "map_edit"
+                and set(values) == {"reason", "action", "disposition", "conditions"}
+            )
+            branch = state["branch"]
+            disposition = self._field(values, "disposition", select=True)
+            _check(disposition in {"accepted", "corrected", "unresolved", "out_of_scope"})
+            selected_action = values["action"]["action"].get("selected_option")
+            action = self._field(values, "action", select=True) if selected_action else None
+            _check(disposition != "corrected" or action)
+            raw = values["conditions"]["conditions"].get("value") or ""
+            _check(isinstance(raw, str) and len(raw) <= 3000)
+            conditions = []
+            if disposition == "corrected":
+                for line in raw.splitlines():
+                    terms = line.split()
+                    _check(len(terms) in (2, 3))
+                    _check(
+                        (terms[1] in {"present", "missing"} and len(terms) == 2)
+                        or (terms[1] in {"<", "<=", ">", ">="} and len(terms) == 3)
+                    )
+                    conditions.append(
+                        Condition(terms[0], terms[1], terms[2] if len(terms) == 3 else None)
+                    )
+            changes = (
+                BranchEdit(
+                    branch,
+                    disposition,
+                    reason,
+                    action if disposition == "corrected" else None,
+                    tuple(conditions) if disposition == "corrected" else None,
+                ),
+            )
+        try:
+            service.save(
+                principal,
+                expected_revision=state["rev"],
+                operation_ref=operation,
+                changes=changes,
+                precedence=order,
+                precedence_reason=order_reason,
+                settings=settings_edit,
+            )
+        except StaleMapError as stale:
+            current = stale.current
+            _check(service.entry(principal) == current_grant)
+            reapply = current.can_edit and state.get("source") == current.source_revision
+            before = state["rev"]
+
+            diff: list[str] = []
+            previous = stale.previous
+            if previous is not None:
+                for label, old, new in (
+                    ("Trigger", previous.settings_trigger, current.settings_trigger),
+                    ("Fallback", previous.fallback_action, current.fallback_action),
+                    ("Assertion basis", previous.settings_reason, current.settings_reason),
+                    ("Assertion owner", previous.settings_editor_ref, current.settings_editor_ref),
+                    ("Priority basis", previous.precedence_reason, current.precedence_reason),
+                    ("Priority owner", previous.precedence_actor_ref, current.precedence_actor_ref),
+                ):
+                    if old != new:
+                        diff.append(f"{label} · {old or 'Unspecified'} → {new or 'Unspecified'}")
+            for change in stale.diff:
+                older, newer = change.before, change.after
+                if older is None or newer is None:
+                    status = "Current branch" if newer else "Absent from current map"
+                    diff.append(f"{change.branch_ref} · {status}")
+                    continue
+                old_predicate, new_predicate = (
+                    " and ".join(
+                        " ".join(
+                            str(v) for v in (c.field, c.operator, c.threshold) if v is not None
+                        )
+                        for c in row.conditions
+                    )
+                    for row in (older, newer)
+                )
+                branch_diff = []
+                for label, before_value, after_value in (
+                    ("Conditions", old_predicate, new_predicate),
+                    ("Decision", older.action, newer.action),
+                    ("Review", older.disposition, newer.disposition),
+                    ("Priority", older.precedence, newer.precedence),
+                    ("Support", older.source_support, newer.source_support),
+                    ("Owner", older.editor_ref, newer.editor_ref),
+                    ("Reason", older.reason, newer.reason),
+                    ("Source", older.citation_ref, newer.citation_ref),
+                ):
+                    if before_value != after_value:
+                        branch_diff.append(
+                            f"{label} · {before_value or 'Unspecified'} → "
+                            f"{after_value or 'Unspecified'}"
+                        )
+                if branch_diff:
+                    diff.append(f"{change.branch_ref} · " + " | ".join(branch_diff))
+            eligible = [
+                r
+                for r in current.branches
+                if r.action is not None and r.disposition != "out_of_scope"
+            ]
+            reapply_branch = (
+                reapply
+                and bool(changes)
+                and any(r.branch_ref == changes[0].branch_ref for r in current.branches)
+            )
+            reapply_order = (
+                reapply and order is not None and set(order) == {r.branch_ref for r in eligible}
+            )
+            reapply_settings = reapply and settings_edit is not None
+            if reapply_settings and settings_edit is not None:
+                diff.extend(
+                    [
+                        f"Current trigger · {current.trigger}",
+                        f"Current fallback · {current.fallback_action or 'Unresolved'}",
+                        f"Your trigger · {settings_edit.trigger or 'Unspecified'}",
+                        f"Your fallback · {settings_edit.fallback_action or 'Unresolved'}",
+                    ]
+                )
+            reapply = reapply_branch or reapply_order or reapply_settings
+            token = self.journal.context(
+                actor,
+                cfg.channel,
+                view,
+                ctx["kind"] if reapply else "map_conflict",
+                workflow,
+                _json({**state, "rev": current.review_revision}),
+            )
+            layout = self.views.map_conflict(token, before, current.review_revision, diff)
+            if reapply:
+                if reapply_settings and settings_edit is not None:
+                    form = self.views.map_assertions(
+                        token,
+                        trigger=settings_edit.trigger,
+                        fallback=settings_edit.fallback_action,
+                        permitted=current.actions,
+                    )
+                elif reapply_order:
+                    form = self.views.map_precedence(
+                        token,
+                        current.question
+                        or "Review the current order before reapplying your changes.",
+                        [(f"{r.action} · {r.branch_ref}", r.branch_ref) for r in eligible],
+                    )
+                else:
+                    form = self.views.map_branch_edit(
+                        token, state["branch"], action, raw, current.actions
+                    )
+                layout = self.views.map_reapply(layout, form, values)
+            self._map_show(
+                actor, workflow, current.review_revision, view, layout, requires_editor=reapply
+            )
+            return
+        self._map_view(cfg, actor, view, workflow)
+
     def _submission(
         self,
         cfg: Settings,
@@ -2982,7 +3496,9 @@ class Workbench:
         values: Json,
         token: str,
     ) -> None:
-        if callback == "ot_nomination":
+        if callback in {"ot_map_assertions_save", "ot_map_branch_save", "ot_map_precedence_save"}:
+            self._map_submit(cfg, actor, view, ctx, callback, values)
+        elif callback == "ot_nomination":
             _check(ctx["kind"] == "nomination" and set(values) == {"nominee"})
             self._nomination(
                 actor, ctx["job"], nominee=self._field(values, "nominee"), expected=ctx["revision"]
@@ -3325,6 +3841,7 @@ class Workbench:
                 pass
         live_summary = self._live_summary(actor) if workflow_settings else None
         readiness = self._readiness(actor) if workflow_settings else None
+        map_entry = self._map_entry(actor)
         verifier_entry = self._verifier_entry(actor) if cfg.live_workflow_ref else ""
         layout = self.views.app_home_view(
             token,
@@ -3339,6 +3856,7 @@ class Workbench:
             readiness=readiness,
             live_summary=live_summary,
             verify_outcome=verifier_entry,
+            decision_map_entry=map_entry,
         )
         navigation = (
             can_add_workflow
@@ -3352,12 +3870,18 @@ class Workbench:
                     "app_home",
                     authorize=(
                         lambda: _check(
-                            (not verifier_entry or self._verifier_entry(actor) == verifier_entry)
+                            (not map_entry or self._map_entry(actor) == map_entry)
+                            and (
+                                not verifier_entry or self._verifier_entry(actor) == verifier_entry
+                            )
                             and (readiness is None or self._readiness(actor) == readiness)
                             and (live_summary is None or self._live_summary(actor) == live_summary)
                         )
                     )
-                    if readiness is not None or live_summary is not None or verifier_entry
+                    if readiness is not None
+                    or live_summary is not None
+                    or verifier_entry
+                    or map_entry
                     else None,
                 )
         except Exception:
@@ -3386,6 +3910,16 @@ class Workbench:
             and len(body["actions"]) == 1
         )
         action = body["actions"][0]
+        if action.get("action_id") == "ot_app_map":
+            self.private_channel(cfg, actor)
+            service, _ = self._map_service(actor)
+            map_entry = self._map_entry(actor, service.workflow_ref)
+            _check(map_entry and map_entry == action.get("value"))
+            opened = self.web.views_open(
+                trigger_id=body["trigger_id"], view=self.views.notice_modal("checking")
+            )
+            self._map_view(cfg, actor, opened["view"]["id"], service.workflow_ref)
+            return
         if action.get("action_id") == "ot_app_verify_outcome":
             self.private_channel(cfg, actor)
             verifier_token = self._verifier_entry(actor)
