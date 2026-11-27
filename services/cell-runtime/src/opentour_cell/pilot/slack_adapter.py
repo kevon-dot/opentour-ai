@@ -66,6 +66,7 @@ CALLBACKS = {
 ACTIONS = {
     "ot_workflow_starter",
     "ot_map_open",
+    "ot_choose_map",
     "ot_map_page",
     "ot_map_citation",
     "ot_map_priority",
@@ -2598,23 +2599,88 @@ class Workbench:
                 principal, workflow, matches[0].resource, expected_revision=choice
             )
 
-    def _map_service(
-        self, actor: str, workflow: str | None = None
-    ) -> tuple[MapReviewService, IntakePrincipal]:
+    def _map_choices(self, actor: str) -> dict[str, tuple[MapReviewService, str]]:
         from opentour_cell.pilot.map_review import open_map_review
+        from opentour_cell.pilot.onboarding_mcp import _read_private
 
         cfg = self.settings(check_engagement=False)
         cfg.permission(actor, "inspect")
-        service = open_map_review(cfg.directory, cfg.organization, workflow)
-        return service, IntakePrincipal(cfg.organization, actor, "slack")
+        principal = IntakePrincipal(cfg.organization, actor, "slack")
+        try:
+            registry = _read_private(cfg.directory / "map-inspection-catalog.json", 8192)
+        except FileNotFoundError:
+            names = ["map-review-selection.json"]
+        else:
+            _check(
+                set(registry) == {"schema_version", "selections"}
+                and registry["schema_version"] == "opentour.pilot.map-inspection-catalog.v1"
+            )
+            names = registry["selections"]
+            _check(
+                isinstance(names, list)
+                and 0 < len(names) <= 12
+                and all(
+                    isinstance(n, str) and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,95}\.json", n)
+                    for n in names
+                )
+                and len(set(names)) == len(names)
+            )
+        choices = {}
+        for name in names:
+            try:
+                service = open_map_review(cfg.directory, cfg.organization, selection_file=name)
+                revision = service.entry(principal)
+            except (KeyError, OSError, TypeError, ValueError, sqlite3.Error):
+                continue
+            if revision:
+                _check(service.workflow_ref not in choices)
+                choices[service.workflow_ref] = (
+                    service,
+                    self.journal.opaque("map", [actor, service.workflow_ref, revision]),
+                )
+        return choices
+
+    def _map_service(
+        self, actor: str, workflow: str | None = None
+    ) -> tuple[MapReviewService, IntakePrincipal]:
+        choices = self._map_choices(actor)
+        if workflow is None:
+            _check(len(choices) == 1)
+            workflow = next(iter(choices))
+        _check(workflow in choices)
+        service = choices[workflow][0]
+        return service, IntakePrincipal(service.tenant, actor, "slack")
 
     def _map_entry(self, actor: str, workflow: str | None = None) -> str:
         try:
-            service, principal = self._map_service(actor, workflow)
-            revision = service.entry(principal)
-            if revision:
-                return self.journal.opaque("map", [actor, service.workflow_ref, revision])
+            choices = self._map_choices(actor)
+            if workflow is not None:
+                return choices[workflow][1]
+            if len(choices) == 1:
+                return next(iter(choices.values()))[1]
+            if choices:
+                return self.journal.opaque(
+                    "map-choices",
+                    [actor, sorted((wf, choice[1]) for wf, choice in choices.items())],
+                )
         except (ImportError, KeyError, OSError, TypeError, ValueError, sqlite3.Error):
+            pass
+        return ""
+
+    def _map_verifier_plan(self, actor: str, workflow: str) -> str:
+        try:
+            setup = self._starter_setup(actor)
+            service, _ = self._map_service(actor, workflow)
+            if service.authority.path != setup.path:
+                return ""
+            preview = setup.preview()
+            if preview.draft and preview.draft["workflow_ref"] == workflow:
+                charter = preview.charter
+                return (
+                    f"{charter.verification_plan} · {charter.verifier or 'Verifier unbound'} · "
+                    f"{charter.responsible_person} · next check {charter.next_check}"
+                )
+        except (KeyError, OSError, TypeError, ValueError, sqlite3.Error):
             pass
         return ""
 
@@ -2627,9 +2693,11 @@ class Workbench:
         layout: Json,
         *,
         requires_editor: bool,
+        verifier_plan: str = "",
     ) -> None:
         def authorize() -> None:
             service, principal = self._map_service(actor, workflow)
+            _check(not verifier_plan or self._map_verifier_plan(actor, workflow) == verifier_plan)
             with service.disclosure(principal, expected_revision=revision) as current:
                 _check(not requires_editor or current.can_edit)
 
@@ -2638,8 +2706,15 @@ class Workbench:
     def _map_view(self, cfg: Settings, actor: str, view: str, workflow: str, page: int = 0) -> None:
         service, principal = self._map_service(actor, workflow)
         snap = service.preview(principal)
+        from opentour_cell.pilot.map_inspection import branch_example
+
         rows = []
         for branch in snap.branches:
+            example = branch_example(snap, branch)
+            inputs = ", ".join(
+                f"{name}={value if value is not None else 'missing'}"
+                for name, value in example.inputs
+            )
             clauses = [
                 " ".join(str(v) for v in (c.field, c.operator, c.threshold) if v is not None)
                 for c in branch.conditions
@@ -2667,6 +2742,8 @@ class Workbench:
                     ),
                     ("Source changed · " if branch.branch_ref in snap.changed_branch_refs else "")
                     + branch.disposition.replace("_", " "),
+                    f"{inputs or 'Unavailable'} → {example.action or 'Unresolved'}"
+                    f" · {example.explanation}",
                 )
             )
         from opentour_cell.pilot.map_review import citation_ref
@@ -2677,6 +2754,7 @@ class Workbench:
             {"rev": snap.review_revision, "page": page, "branches": allowed, "priority": priority}
         )
         token = self.journal.context(actor, cfg.channel, view, "map_review", workflow, state)
+        verifier_plan = self._map_verifier_plan(actor, workflow)
         layout = self.views.decision_map(
             token,
             workflow,
@@ -2690,6 +2768,8 @@ class Workbench:
             version=snap.version,
             source_revision=snap.source_revision,
             draft_revision=snap.map_revision,
+            unit_of_work=snap.unit_of_work,
+            verifier_plan=verifier_plan,
             assertion_basis=(
                 f"Trigger and fallback assertion by {snap.settings_editor_ref} "
                 f"({snap.settings_actor_ref}) · {snap.settings_reason}"
@@ -2704,7 +2784,13 @@ class Workbench:
             ),
         )
         self._map_show(
-            actor, workflow, snap.review_revision, view, layout, requires_editor=snap.can_edit
+            actor,
+            workflow,
+            snap.review_revision,
+            view,
+            layout,
+            requires_editor=snap.can_edit,
+            verifier_plan=verifier_plan,
         )
 
     def _map_action(
@@ -2744,6 +2830,7 @@ class Workbench:
             layout = self.views.map_assertions(
                 token,
                 trigger=snap.settings_trigger,
+                unit_of_work=snap.unit_of_work,
                 fallback=snap.fallback_action,
                 permitted=snap.actions,
             )
@@ -2906,6 +2993,13 @@ class Workbench:
             and ctx["kind"] in {"map_edit", "map_precedence", "map_assertions"}
         ):
             self._map_action(cfg, actor, view, ctx, action, value)
+            return
+        if ctx["kind"] == "map_choices" and action == "ot_choose_map":
+            _check(self._map_entry(actor) == ctx["revision"])
+            choices = self._map_choices(actor)
+            matches = [wf for wf, choice in choices.items() if choice[1] == value]
+            _check(len(matches) == 1)
+            self._map_view(cfg, actor, view, matches[0])
             return
         if ctx["kind"] == "starter_saved" and action == "ot_map_open":
             workflow = ctx["job"]
@@ -3282,7 +3376,9 @@ class Workbench:
         _check(isinstance(reason, str) and 0 < len(reason.strip()) <= 1000)
         if callback == "ot_map_assertions_save":
             _check(
-                ctx["kind"] == "map_assertions" and set(values) == {"trigger", "fallback", "reason"}
+                ctx["kind"] == "map_assertions"
+                and set(values)
+                in ({"trigger", "fallback", "reason"}, {"trigger", "fallback", "reason", "unit"})
             )
             trigger = values["trigger"]["trigger"].get("value")
             _check(
@@ -3295,10 +3391,13 @@ class Workbench:
             )
             fallback = self._field(values, "fallback", select=True)
             _check(fallback == "unresolved" or fallback in state["actions"])
+            unit = values.get("unit", {}).get("unit", {}).get("value")
+            _check(unit is None or isinstance(unit, str))
             settings_edit = MapSettingsEdit(
                 (trigger or "").strip() or None,
                 None if fallback == "unresolved" else fallback,
                 reason,
+                (unit or "").strip() or None,
             )
         elif callback == "ot_map_precedence_save":
             _check(ctx["kind"] == "map_precedence")
@@ -3377,6 +3476,7 @@ class Workbench:
             previous = stale.previous
             if previous is not None:
                 for label, old, new in (
+                    ("Unit of work", previous.unit_of_work, current.unit_of_work),
                     ("Trigger", previous.settings_trigger, current.settings_trigger),
                     ("Fallback", previous.fallback_action, current.fallback_action),
                     ("Assertion basis", previous.settings_reason, current.settings_reason),
@@ -3457,6 +3557,7 @@ class Workbench:
                     form = self.views.map_assertions(
                         token,
                         trigger=settings_edit.trigger,
+                        unit_of_work=settings_edit.unit_of_work,
                         fallback=settings_edit.fallback_action,
                         permitted=current.actions,
                     )
@@ -3904,13 +4005,26 @@ class Workbench:
         action = body["actions"][0]
         if action.get("action_id") == "ot_app_map":
             self.private_channel(cfg, actor)
-            service, _ = self._map_service(actor)
-            map_entry = self._map_entry(actor, service.workflow_ref)
+            map_entry = self._map_entry(actor)
             _check(map_entry and map_entry == action.get("value"))
             opened = self.web.views_open(
                 trigger_id=body["trigger_id"], view=self.views.notice_modal("checking")
             )
-            self._map_view(cfg, actor, opened["view"]["id"], service.workflow_ref)
+            view_id = opened["view"]["id"]
+            choices = self._map_choices(actor)
+            _check(choices and self._map_entry(actor) == map_entry)
+            if len(choices) == 1:
+                self._map_view(cfg, actor, view_id, next(iter(choices)))
+            else:
+                token = self.journal.context(
+                    actor, cfg.channel, view_id, "map_choices", "", map_entry
+                )
+                layout = self.views.map_choices(
+                    token, [(wf, item[1]) for wf, item in choices.items()]
+                )
+                self._show(
+                    view_id, layout, authorize=lambda: _check(self._map_entry(actor) == map_entry)
+                )
             return
         if action.get("action_id") == "ot_app_verify_outcome":
             self.private_channel(cfg, actor)

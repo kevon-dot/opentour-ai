@@ -85,6 +85,7 @@ class MapSettingsEdit:
     trigger: str | None
     fallback_action: str | None
     reason: str
+    unit_of_work: str | None = None
 
 
 @dataclass(frozen=True)
@@ -133,6 +134,7 @@ class MapReviewSnapshot:
     settings_ref: str | None = None
     settings_support: str | None = None
     settings_trigger: str | None = None
+    unit_of_work: str | None = None
 
     def expected_action(
         self, fields: Mapping[str, str | Decimal | None]
@@ -192,7 +194,16 @@ class _Context:
 
 
 class MapReviewService:
-    def __init__(self, directory: Path, tenant: str, selection: Json):
+    def __init__(
+        self,
+        directory: Path,
+        tenant: str,
+        selection: Json,
+        *,
+        selection_file: str = "map-review-selection.json",
+    ):
+        _require(re.fullmatch(_FILE, selection_file) and selection_file.endswith(".json"))
+        self.selection_file = selection_file
         self.directory = directory.absolute()
         _require(self.directory.resolve(strict=True) == self.directory)
         self.tenant, self.selection = require_ref(tenant), selection
@@ -224,9 +235,7 @@ class MapReviewService:
 
     def _capability(self, actor: IntakePrincipal, starter: VerifiedStarterGrant) -> Json:
         _require(actor.tenant == self.tenant)
-        _require(
-            _read_private(self.directory / "map-review-selection.json", 8192) == self.selection
-        )
+        _require(_read_private(self.directory / self.selection_file, 8192) == self.selection)
         envelope = _read_private(self.directory / self.selection["grant_file"], 32768)
         _require(set(envelope) == {"grant", "seal_sha256"})
         cap, seal = envelope["grant"], envelope["seal_sha256"]
@@ -673,6 +682,7 @@ class MapReviewService:
             settings_ref="map-assertion-" + digest(settings)[:40] if settings else None,
             settings_support="owner_assertion" if settings else None,
             settings_trigger=settings["trigger"] if settings else None,
+            unit_of_work=settings.get("unit_of_work") if settings else None,
         )
 
     def _blocking_rules(self, row: MapBranch, rows: tuple[MapBranch, ...]) -> set[str]:
@@ -829,13 +839,17 @@ class MapReviewService:
             len(changes) <= 128 and len({c.branch_ref for c in changes}) == len(changes),
             "invalid_map_edit",
         )
+        assertion_input = asdict(settings) if settings is not None else None
+        if assertion_input is not None and assertion_input["unit_of_work"] is None:
+            # Keep operation identities from pre-unit saved forms replayable.
+            del assertion_input["unit_of_work"]
         intent = digest(
             [
                 expected_revision,
                 [asdict(c) for c in changes],
                 precedence,
                 precedence_reason,
-                asdict(settings) if settings is not None else None,
+                assertion_input,
             ]
         )
         with (
@@ -883,6 +897,13 @@ class MapReviewService:
                     and (
                         settings.fallback_action is None
                         or settings.fallback_action in ctx.capability["actions"]
+                    )
+                    and (
+                        settings.unit_of_work is None
+                        or isinstance(settings.unit_of_work, str)
+                        and 0 < len(settings.unit_of_work) <= 160
+                        and settings.unit_of_work == settings.unit_of_work.strip()
+                        and settings.unit_of_work.isprintable()
                     )
                     and isinstance(settings.reason, str)
                     and 0 < len(settings.reason) <= 1000
@@ -954,9 +975,14 @@ class MapReviewService:
 
 
 def open_map_review(
-    directory: Path, tenant: str, workflow_ref: str | None = None
+    directory: Path,
+    tenant: str,
+    workflow_ref: str | None = None,
+    *,
+    selection_file: str = "map-review-selection.json",
 ) -> MapReviewService:
-    selection = _read_private(directory / "map-review-selection.json", 8192)
-    service = MapReviewService(directory, tenant, selection)
+    _require(re.fullmatch(_FILE, selection_file) and selection_file.endswith(".json"))
+    selection = _read_private(directory / selection_file, 8192)
+    service = MapReviewService(directory, tenant, selection, selection_file=selection_file)
     _require(workflow_ref is None or service.workflow_ref == workflow_ref)
     return service

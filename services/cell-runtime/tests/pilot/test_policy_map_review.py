@@ -667,3 +667,120 @@ def test_stale_branch_edit_shows_actual_trigger_change(founder, monkeypatch):
     diff = screen(h, b)
     assert diff["submit"]["text"] == "Reapply my edit"
     assert "New purchase request trigger" in str(diff)
+
+
+def test_examples_plan_and_explicit_unit_are_inspected_without_confirming_cases(
+    founder, monkeypatch
+):
+    from test_reviewer_workflow import screen
+    from test_slack_adapter import ACTOR, OTHER
+    from test_starter_setup import effects
+
+    h = founder
+    workflow = prepare_map(h, monkeypatch)
+    service, principal = h.app._map_service(ACTOR, workflow)
+    before = service.preview(principal)
+    charter = h.app._starter_setup(ACTOR).preview().charter
+    view = enter_map(h, monkeypatch, ACTOR)
+    text = str(screen(h, view))
+    assert "po=missing, total=0 → REVIEW" in text
+    assert "po=example-reference, total=0 → APPROVE" in text
+    assert "po=example-reference, total=250 → MANUAL" in text
+    assert "Unit of work · Unspecified" in text and charter.verification_plan in text
+    assert service.preview(principal) == before
+    view = enter_map(h, monkeypatch, OTHER)
+    assert charter.verification_plan not in str(screen(h, view))
+    view = open_assertions(h, monkeypatch, ACTOR)
+    values = assertion_values(None, "unresolved")
+    values["unit"] = {"unit": {"type": "plain_text_input", "value": "One purchase request"}}
+    h.form(view, values)
+    assert service.preview(principal).unit_of_work == "One purchase request"
+    assert "One purchase request" in str(screen(h, view))
+    assert effects(h) == (0, 0, 0, 0, 0, 0, 0)
+
+
+def test_two_admitted_workflows_choose_privately_and_withdrawn_choice_denies(founder, monkeypatch):
+    import json
+    from hashlib import sha256
+
+    from opentour_cell.pilot.guided_policy import GuidedPolicySource
+    from opentour_cell.pilot.intake_admission import DurableIntake
+    from opentour_cell.pilot.intake_local import LocalStarterAuthority
+    from opentour_cell.pilot.intake_mcp import Starter
+    from test_app_home import click, publish
+    from test_intake_mcp import _sealed_starter, _write_private
+    from test_map_review import stage_map_review
+    from test_reviewer_workflow import screen
+    from test_slack_adapter import ACTOR, OTHER
+    from test_starter_setup import effects
+
+    h = founder
+    first = prepare_map(h, monkeypatch)
+    directory = h.path.parent
+    grant = directory / "map-review-grant.json"
+    selector = directory / "map-review-selection.json"
+    original = json.loads(selector.read_text())
+    _write_private(directory / "review-first.json", original | {"grant_file": "first-grant.json"})
+    grant.rename(directory / "first-grant.json")
+    selection = json.loads((directory / "selected.json").read_text()) | {
+        "grant_ref": "second-scope"
+    }
+    _write_private(directory / "second-selected.json", selection)
+    source = directory / "second-policy.md"
+    source.write_bytes(b"# Second\nIf total < 99, MANUAL.\n")
+    source.chmod(0o600)
+    signed = _sealed_starter(
+        selection,
+        creation_ref="second-creation",
+        source_revision=sha256(source.read_bytes()).hexdigest(),
+    )
+    _write_private(directory / "starter-intake-grant-second-scope.json", signed)
+    authority = LocalStarterAuthority(directory / "second-selected.json")
+    intake = DurableIntake(directory, authority)
+    fields = {
+        k: signed["grant"][k]
+        for k in ("policy_resource_ref", "creation_ref", "source_revision", "setup_policy_revision")
+    }
+    run = intake.submit_intake(
+        authority.principal, Starter(**fields, idempotency_key="second", workflow_ref=None)
+    )
+    second = intake.get_run(authority.principal, run.run_ref).workflow_ref
+    assert first != second
+    stage_map_review(
+        GuidedPolicySource(authority, source),
+        second,
+        editors={ACTOR: selection["owner_id"]},
+        readers=[],
+    )
+    selector.rename(directory / "review-second.json")
+    _write_private(
+        directory / "map-inspection-catalog.json",
+        {
+            "schema_version": "opentour.pilot.map-inspection-catalog.v1",
+            "selections": ["review-first.json", "review-second.json"],
+        },
+    )
+
+    def choose():
+        home = publish(h, monkeypatch, ACTOR)
+        click(h, home, "ot_app_map", ACTOR)
+        view = list(h.slack.screens)[-1]
+        layout = screen(h, view)
+        choices = {
+            b["elements"][0]["text"]["text"]: b["elements"][0]["value"] for b in layout["blocks"]
+        }
+        assert set(choices) == {first, second} and "total" not in str(layout)
+        return view, choices
+
+    view, choices = choose()
+    h.action(view, "ot_choose_map", choices[second], ACTOR)
+    selected = screen(h, view)
+    assert (
+        second in str(selected) and first not in str(selected) and "total &lt; 99" in str(selected)
+    )
+    assert "independent correction from the reviewer" not in str(selected)
+    assert set(h.app._map_choices(OTHER)) == {first}
+    view, choices = choose()
+    grant.unlink()
+    h.action(view, "ot_choose_map", choices[second], ACTOR)
+    assert "total &lt; 99" not in str(screen(h, view)) and effects(h) == (0,) * 7

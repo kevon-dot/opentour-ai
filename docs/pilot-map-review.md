@@ -75,3 +75,19 @@ It does not yet install the OPE-513 case-confirmation adapter or a frozen plan
 authority. A map editor is not automatically the case owner or an evaluator.
 Those connections, Slack integration and exact independent review are remaining
 gates; neither the generated fixture nor a charter grants those rights.
+
+An installation with several admitted workflows may provide the private
+`map-inspection-catalog.json` with schema version
+`opentour.pilot.map-inspection-catalog.v1` and a `selections` list of 1–12
+distinct private JSON basenames. Each names an ordinary map review selection.
+The catalog grants no access. Home resolves the current signed grants for the
+authenticated viewer before offering a workflow, and checks them again on
+selection and disclosure. A single-workflow installation can continue using
+`map-review-selection.json`.
+
+Each branch shows a generated decision-time example and its proposed action under
+the current predicates and priority. Unresolved conflicts and shadowed branches
+remain visible. Examples never enter a case pack or dispatch a decision.
+The unit of work is an optional attributed map assertion. The verification
+plan comes from the selected workflow's saved starter charter when the
+authenticated actor has the original starter owner binding.
