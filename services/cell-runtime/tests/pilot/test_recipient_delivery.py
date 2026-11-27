@@ -20,17 +20,17 @@ from test_approval_inbox import callback, opt_in, stage
 from test_recorded_release_authority import DestinationPermissions
 from test_repair_bundle import cli, read, transfer, write
 from test_reviewer_workflow import buttons, screen
-from test_slack_adapter import ACTOR
 
 
-def approved_local_offer(tmp_path):
-    h, plan, run, pointer, audit = stage(tmp_path / "worker")
+def approved_local_offer(tmp_path, *, slot=""):
+    h, plan, run, pointer, audit = stage(tmp_path / "worker", slot=slot)
     owner = h.path.parent
+    reviewer = h.config["reviewer"]
     opt_in(h)
     assert approval_inbox.flush_approvals(h.app) == 1
-    h.send("interactive", callback(h, pointer))
+    h.send("interactive", callback(h, pointer, actor=reviewer))
     view = list(h.slack.screens)[-1]
-    h.action(view, "ot_release_approve", buttons(screen(h, view))["ot_release_approve"], ACTOR)
+    h.action(view, "ot_release_approve", buttons(screen(h, view))["ot_release_approve"], reviewer)
     receipt = release_gate.authorize_release(
         owner, h.store.organization, run, audit["run_revision"], audit["candidate_digest"]
     )

@@ -131,3 +131,45 @@ def test_revocation_during_staging_fences_restored_permission(tmp_path, monkeypa
     assert not list(receiver.grant_file.parent.glob("custody/delivery-*/artifact.zip"))
     with pytest.raises(ReleaseOutboxError):
         handoff_outbox(generated.store).status(selection, "inspector")
+
+
+def test_two_approved_tenants_cannot_swap_destination_or_receipt(tmp_path):
+    def approved(slot):
+        generated, receiver, offered, selection = approved_local_offer(tmp_path / slot, slot=slot)
+        worker = generated.store.path.parent
+        permit = generated.authority.permissions.current
+        write(worker / "handoff-permission-key.json", {"key": KEY.hex()})
+        signed_permission(worker, permit)
+        outbox = handoff_outbox(generated.store)
+        queued = outbox.reserve(selection, "dispatcher", "generated-request")
+        with outbox.store._db() as db:
+            release = outbox.authority.resolve(db, selection, "dispatcher", "claim")
+        assert release is not None and release.reference == queued.reference
+        return outbox, receiver, offered, selection, release
+
+    first, first_receiver, first_offer, first_selection, first_release = approved("first")
+    second, second_receiver, second_offer, second_selection, second_release = approved("second")
+    assert first_release.tenant != second_release.tenant
+    assert first_release.destination_ref != second_release.destination_ref
+    with pytest.raises(repair_bundle.BundleError, match="recipient_release_scope_mismatch"):
+        dispatch_local_release(first, first_selection, "dispatcher", second_receiver, second_offer)
+    assert not list(second_receiver.grant_file.parent.glob("custody/delivery-*"))
+    assert first.status(first_selection, "inspector").stage == "delivery_unconfirmed"
+    assert first.reconcile(first_selection, "dispatcher", second_receiver).stage == (
+        "delivery_unconfirmed"
+    )
+    dispatch_local_release(second, second_selection, "dispatcher", second_receiver, second_offer)
+    assert second.reconcile(second_selection, "dispatcher", second_receiver).stage == "delivered"
+    assert second_receiver.lookup(first_release, "wrong-scope").state == "unknown"
+
+    (second_receipt,) = second_receiver.grant_file.parent.glob("custody/delivery-*/receipt.json")
+    first_slot, _ = first_receiver._scope(
+        first_release, repair_bundle._grant(first_receiver.grant_file)
+    )
+    first_slot.mkdir(mode=0o700)
+    write(first_slot / "artifact.zip", first_offer.read_bytes())
+    write(first_slot / "receipt.json", second_receipt.read_bytes())
+    assert first_receiver.lookup(first_release, "wrong-restored-receipt").state == "unknown"
+    assert first.reconcile(first_selection, "dispatcher", first_receiver).stage == (
+        "delivery_unconfirmed"
+    )
