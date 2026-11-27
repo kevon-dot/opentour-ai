@@ -835,6 +835,8 @@ class SpendLedger:
         for k, v in raw["reserved"].items():
             _need(isinstance(v, (list, tuple)) and len(v) == 2, "ledger_forged_reservation", k)
             _need(v[0] in {"fit", "generation"}, "ledger_forged_reservation", k)
+            parts = k.split("|") if isinstance(k, str) else []
+            _need(len(parts) == 3 and parts[2] == v[0], "ledger_forged_reservation", k)
             _count(v[1], "ledger_forged_reservation")
             reserved[k] = (v[0], v[1])
         settled: dict[str, int] = {}

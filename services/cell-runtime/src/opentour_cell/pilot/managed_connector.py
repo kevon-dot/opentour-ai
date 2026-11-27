@@ -23,6 +23,16 @@ Guarantees implemented here (software behavior only):
 * Protected answers are refused in training payloads and replay inputs; a tuned-model reference is
   handed off only to a permitted recipient; the training file's retention disposition is recorded.
 
+Trust boundary (stated assumption): the journal has NO integrity protection. Anyone who can write
+the journal directory can set ``cap_verified`` or ``maximum_minor_units`` directly, and ``usage``,
+``_verified`` and the callback path all trust those journaled values. Every guarantee above assumes
+the journal is trusted storage that only this connector can write. Closing that would need
+authenticated events (an HMAC or signature over each event, keyed outside the state directory).
+
+Over-cap usage: provider-reported usage above the journaled approved maximum is returned with its
+real figure, ``cap_status == "over_cap"`` and ``settleable is False``. No code in this repository
+reconciles it; the caller that owns the reservation must handle it (see ``ReportedUsage``).
+
 Simulated: tests drive this connector through a generated in-memory provider double (the transport
 port is the only boundary). Every receipt, evidence ref and tuned-model id is a ``simulated:*``
 sentinel.
@@ -231,6 +241,37 @@ def intent_digest(intent: mc.FitIntent) -> str:
     )
 
 
+CAP_WITHIN = "within_cap"
+CAP_OVER = "over_cap"
+CAP_UNKNOWN = "cap_unknown"
+
+
+@dataclass(frozen=True)
+class ReportedUsage(Usage):
+    """Provider-reported usage plus a closed-vocabulary comparison to the approved cap.
+
+    ``incurred_minor_units`` is always the provider's real figure and is never clamped, so genuine
+    overspend stays visible, with the provider's own currency. ``cap_status`` is ``within_cap``
+    (same currency, at or under the journaled approved maximum), ``over_cap`` (same currency,
+    above it) or ``cap_unknown`` (no valid journaled maximum, no journaled currency, or a
+    different currency; the match is exact and case-sensitive, so ``usd`` is not ``USD``).
+    Anything but ``within_cap`` is not ``settleable``: it must not flow to settlement as ordinary
+    actual spend. A consumer must gate on ``settleable`` or ``cap_status``, never on ``source`` or
+    ``incurred_minor_units``, which look ordinary on an over-cap job. Nothing in this repository
+    consumes ``settleable`` yet, so the guard is advisory until a reservation owner reads it. The
+    forward path for an over-cap job (hold the reservation, overspend incident, explicit operator
+    record) is tracked as OPE-570; this module offers no reconcile step.
+    """
+
+    cap_status: str = CAP_UNKNOWN
+    approved_maximum_minor_units: int | None = None
+    approved_currency: str | None = None
+
+    @property
+    def settleable(self) -> bool:
+        return self.cap_status == CAP_WITHIN and super().settleable
+
+
 def _usage_valid(usage: ProviderUsage) -> bool:
     """Provider-reported usage that is malformed is unknown (``None``), never settleable."""
     counts = (usage.minor_units, usage.seconds, usage.rows, usage.steps)
@@ -263,6 +304,7 @@ class _View:
     terminal: bool = False
     cap_verified: bool = False
     maximum_minor_units: int | None = None
+    currency: str | None = None
     tuned_model_id: str = ""
     usage: ProviderUsage | None = None
     cancel_requested: bool = False
@@ -375,6 +417,8 @@ class ManagedConnector:
                 raise ValueError("protected_field_in_payload")
             if set(row) != set(intent.fields):
                 raise ValueError("training_row_fields_outside_scope")
+            if not all(type(value) is str for value in row.values()):
+                raise ValueError("training_row_value_not_string")
         return serialize_rows(rows)
 
     # ------------------------------------------------------------------ journal
@@ -417,6 +461,7 @@ class ManagedConnector:
                 view.intent_sha = event["intent_sha256"]
                 view.binding = event["binding"]
                 view.maximum_minor_units = event.get("maximum_minor_units")
+                view.currency = event.get("currency")  # absent in older journals
             elif kind == "file":
                 view.file_id = event["file_id"]
             elif kind == "job":
@@ -570,6 +615,7 @@ class ManagedConnector:
                         "intent_sha256": digest,
                         "binding": _binding_document(intent.binding),
                         "maximum_minor_units": intent.bound.maximum_minor_units,
+                        "currency": intent.bound.currency,
                     },
                 )
             token = self._token(key)
@@ -603,6 +649,7 @@ class ManagedConnector:
                 not isinstance(row, dict)
                 or set(row) != set(intent.fields)
                 or set(row) & self.settings.protected_fields
+                or not all(type(value) is str for value in row.values())
                 for row in rows
             )
         ):
@@ -744,7 +791,20 @@ class ManagedConnector:
             return None
         reported = view.usage
         state = view.state
-        return Usage(
+        recorded = view.maximum_minor_units
+        approved = recorded if type(recorded) is int and recorded >= 0 else None
+        approved_currency = (
+            view.currency if isinstance(view.currency, str) and view.currency else None
+        )
+        if approved is None or approved_currency is None or reported.currency != approved_currency:
+            # Units differ or are unrecorded (exact, case-sensitive match): the numbers are not
+            # comparable, so fail closed.
+            status = CAP_UNKNOWN
+        elif reported.minor_units > approved:
+            status = CAP_OVER
+        else:
+            status = CAP_WITHIN
+        return ReportedUsage(
             self._job_ref(key),
             reported.currency,
             reported.minor_units,
@@ -754,6 +814,9 @@ class ManagedConnector:
             UsageSource.PROVIDER_REPORTED,
             irreversible=reported.minor_units > 0
             and (state is not mc.JobState.COMPLETED or view.cancel_requested),
+            cap_status=status,
+            approved_maximum_minor_units=approved,
+            approved_currency=approved_currency,
         )
 
     def dispose_training_file(self, job: mc.JobReceipt) -> str:
@@ -792,7 +855,19 @@ class ManagedConnector:
         tuned_model_id: str | None = None,
         usage: ProviderUsage | None = None,
     ) -> bool:
-        """Treat an event for a live job as a hint to get a credentialed observation."""
+        """Treat an event for a live job as a hint to get a credentialed observation.
+
+        Only ``job_id`` is used. ``state``, ``tuned_model_id`` and ``usage`` are accepted for call
+        compatibility and are IGNORED: the job is re-read from the provider with the credential and
+        only that observation can change journaled state. There is no production caller yet; do
+        not wire one without authentication and rate limiting.
+
+        PRECONDITION: do not wire this to an inbound route until (1) the callback is authenticated
+        and (2) calls are rate limited per source and per job. Today anyone who knows or guesses a
+        live job id can force a credentialed ``get_job`` under the per-key lock (quota and
+        latency cost), the boolean result is an oracle for whether a job exists and changed state,
+        and every call scans and parses all journals (O(n)); a job-id to key index is also needed.
+        """
         for path in sorted((self.root / "jobs").glob("*.jsonl")):
             key = path.stem
             with self._locked(key):
