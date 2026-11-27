@@ -12,6 +12,7 @@ they are not bound in the approved specification manifest.
 
 import copy
 import json
+import re
 import subprocess
 import sys
 import time
@@ -49,7 +50,7 @@ def rows(prefix, refs=("a", "a", "a", "a")):
     ]
 
 
-def enroll(store, development=None, protected=None):
+def enroll(store, development=None, protected=None, allowed_slices=None):
     dev = rows("dev") if development is None else development
     test = rows("protected") if protected is None else protected
     data = {
@@ -68,7 +69,7 @@ def enroll(store, development=None, protected=None):
         "training_expires_at": int(time.time()) + 7200,
         "expires_at": int(time.time()) + 7200,
         "allowed_features": ["category"],
-        "allowed_slices": ["critical", "rare"],
+        "allowed_slices": ["critical", "rare"] if allowed_slices is None else allowed_slices,
         "error_class": {"from_label": "b", "to_label": "a"},
         "split": {"method": "time", "after": 90},
         "excluded_counts": {"missing_outcome": 1},  # a real source_intake reason
@@ -88,9 +89,12 @@ def compare(
     model=None,
     measured=None,
     incumbent=None,
+    allowed_slices=None,
 ):
     store = LocalTrainingStore(root / "training.sqlite3", "generated")
-    data = enroll(store, development=development, protected=protected)
+    data = enroll(
+        store, development=development, protected=protected, allowed_slices=allowed_slices
+    )
     terms = STRICT if terms is None else terms
     rule = declared_rule(
         feature="category", allowed_features=["category"], mapping=mapping or {"x": "a"}
@@ -1425,7 +1429,14 @@ def _assigned(function, target):
 
 
 def planner_emitted():
-    """Every closed-vocabulary value the planner and readout can emit, read from source."""
+    """Every closed-vocabulary value the planner and readout can emit, read from source.
+
+    Known blind spots, recorded rather than fixed: only string LITERALS (and either arm of a
+    conditional) are seen, so values built from non-literal expressions are invisible. It does
+    not derive slice statuses, economics basis, uncertainty method, winners, dispositions or the
+    metric; those vocabularies are maintained by hand and covered only by the fixture runs.
+    Slice-name shape is derived from the planner's identifier rule below.
+    """
     readout = _function(_tree("readout.py"), "evaluate_manifest")
     checks = _function(_tree("comparison_plan.py"), "_checks")
     pick = _function(_tree("comparison_plan.py"), "_pick")
@@ -1483,7 +1494,22 @@ def planner_emitted():
         ):
             exclusions |= _strings(n) - {"case_id"}
     exclusions.discard("")
+    identifier = _function(_tree("simple_repair.py"), "identifier")
+    shapes = {
+        n.args[0].value
+        for n in ast.walk(identifier)
+        if isinstance(n, ast.Call)
+        and isinstance(n.func, ast.Attribute)
+        and n.func.attr == "fullmatch"
+        and isinstance(n.args[0], ast.Constant)
+    }
+    terms = _function(_tree("comparison_plan.py"), "_terms")
+    uses_identifier = any(
+        isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == "identifier"
+        for n in ast.walk(terms)
+    )
     return {
+        "slice_shape": shapes if uses_identifier else {"<planner no longer uses identifier()>"},
         "observed": _assigned(readout, "comparison") | {"improved"},
         "hold_reasons": holds,
         "decision_reasons": outcomes | appended | holds | development_holds,
@@ -1504,6 +1530,7 @@ def vocabulary_gaps(emitted):
         "combined": set(emitted["combined"]) - set(cp._COMBINED),
         "caps": set(emitted["caps"]) - set(cp._CAPS),
         "exclusions": set(emitted["exclusions"]) - set(cp._EXCLUSION_KEYS),
+        "slice_shape": set(emitted["slice_shape"]) - {cp._SLICE_NAME.pattern},
     }
 
 
@@ -1535,3 +1562,34 @@ def test_drift_guard_fails_when_a_planner_value_is_absent_from_a_vocabulary(monk
     assert gaps["observed"] == {"different_automatic_cases"}
     assert gaps["decision_reasons"] == {"different_automatic_cases"}
     assert gaps["exclusions"] == {"reused_outcome"}
+
+
+def test_drift_guard_fails_when_the_slice_shape_drifts_from_the_planner(monkeypatch):
+    """E10: the guard that was missing. The old lowercase-only filter is reported as drift."""
+    emitted = planner_emitted()
+    assert emitted["slice_shape"] == {cp._SLICE_NAME.pattern}
+    monkeypatch.setattr(cp, "_SLICE_NAME", re.compile(r"[a-z]+(?:_[a-z]+)*"))
+    assert vocabulary_gaps(emitted)["slice_shape"] == emitted["slice_shape"]
+
+
+@pytest.mark.parametrize(
+    "name", ["slice1", "vip-accounts", "Tier1", "bucket:x", "enterprise.eu", "john_smith_9"]
+)
+def test_real_run_with_a_planner_legal_slice_name_still_stages(tmp_path, name):
+    """E10 positive: a real comparison_plan run whose critical slice is a legal identifier."""
+    dev, protected = rows("dev"), rows("protected")
+    for r in dev + protected:
+        r["slices"] = [name]
+    comparison = compare(
+        tmp_path,
+        development=dev,
+        protected=protected,
+        terms={**STRICT, "critical_slices": [name]},
+        allowed_slices=[name],
+    )[0]
+    assert comparison["decision"]["disposition"] == "recommend", comparison["decision"]
+    assert set(comparison["arms"]["simple"]["critical_slices"]) == {name}
+    out = Bundle(comparison, tmp_path / "stage").stage()
+    assert out.status == "staged" and out.packet["kind"] == "measured_improvement", out
+    assert set(out.packet["arms"]["simple"]["critical_slices"]) == {name}
+    # Not a disclosure control: the name is published as-is until OPE-571.

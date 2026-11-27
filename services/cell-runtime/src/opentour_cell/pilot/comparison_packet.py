@@ -164,11 +164,13 @@ _EXCLUSION_KEYS = (
     "group_crosses_split",
     "development_label_after_split",
 )
-# Critical-slice names are customer-chosen, so no closed vocabulary exists. Until they ship as
-# digests (OPE-571) only a conservative lowercase-letters-and-underscores shape is accepted, so
-# digits, hyphens, spaces and punctuation (the shapes of case ids, group ids and addresses) are
-# refused. This is a shape filter, not a vocabulary: it is a known residual, not a full fix.
-_SLICE_NAME = re.compile(r"[a-z]+(?:_[a-z]+)*")
+# Critical-slice names are customer-chosen, so no closed vocabulary exists. This is a
+# WELL-FORMEDNESS check only, NOT a disclosure control: it is exactly the identifier shape the
+# planner enforces (``simple_repair.identifier``, used by ``comparison_plan._terms``), so every
+# planner-legal name passes, including names that carry customer identifiers. Keeping
+# customer-chosen names out of the published packet is owned by OPE-571 (publish slice names as
+# digests). A test pins this pattern to the planner's own.
+_SLICE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}")
 # Rendered decimal measurements (``pilot_metrics.rendered``): six fixed places, or absent.
 _DECIMAL = re.compile(r"[0-9]{1,40}\.[0-9]{6}")
 # The planner's own identifier shape (``simple_repair.identifier``). ``freeze_plan`` requires only
