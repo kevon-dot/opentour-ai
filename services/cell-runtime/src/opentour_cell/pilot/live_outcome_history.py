@@ -162,7 +162,7 @@ def compare_snapshots(
             _require(isinstance(archived["snapshot"], dict))
             _require(set(archived["snapshot"]) == set(LiveSnapshot.__dataclass_fields__))
             try:
-                authority._verify_snapshot_archive(archived, seal)
+                revalidate_archive = authority._verify_snapshot_archive(archived, seal)
             except (TypeError, ValueError, RecursionError) as exc:
                 raise IntakeError("outcome_history_unavailable") from exc
             _require(archived["slack_verifiers"] == dict(bound.slack_verifiers))
@@ -176,4 +176,5 @@ def compare_snapshots(
         )
         current = counts(live.snapshot(actor, scope.workflow_ref))
         _require(current.sequence >= historical.sequence)
-        return OutcomeHistory(scope, window, historical, current)
+    revalidate_archive()
+    return OutcomeHistory(scope, window, historical, current)

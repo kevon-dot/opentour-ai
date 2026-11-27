@@ -277,3 +277,43 @@ def test_malformed_archive_has_bounded_hold(named, broken):
         )
     with pytest.raises(IntakeError, match="outcome_history_unavailable"):
         query(old)
+
+
+@pytest.mark.parametrize("boundary", ["archive_mac", "current_snapshot"])
+def test_verification_key_current_through_disclosure(named, monkeypatch, boundary):
+    import test_live_settings
+    from opentour_cell.pilot.live_authority import PrivateLiveAuthority
+    from test_live_settings import _write_private
+
+    view = open_form(named)
+    named.h.form(view, submission(named, view), OTHER)
+    actor, _, query = setup_query(named)
+    old = named.worker.source.live.snapshot(actor, named.workflow)
+    assert query(old).historical.sequence == old.sequence
+
+    def rotate():
+        successor = bytes(v ^ 255 for v in test_live_settings.KEY)
+        _write_private(named.directory / "live-authority-key.json", {"key": successor.hex()})
+        monkeypatch.setattr(test_live_settings, "KEY", successor)
+        sign(named.h, named.grant)
+
+    if boundary == "archive_mac":
+        mac = PrivateLiveAuthority._archive_mac
+
+        def changed_mac(key, revision, body):
+            value = mac(key, revision, body)
+            rotate()
+            return value
+
+        monkeypatch.setattr(PrivateLiveAuthority, "_archive_mac", staticmethod(changed_mac))
+    else:
+        snapshot = LiveEvidence.snapshot
+
+        def changed_snapshot(*args, **kwargs):
+            value = snapshot(*args, **kwargs)
+            rotate()
+            return value
+
+        monkeypatch.setattr(LiveEvidence, "snapshot", changed_snapshot)
+    with pytest.raises(IntakeError):
+        query(old)

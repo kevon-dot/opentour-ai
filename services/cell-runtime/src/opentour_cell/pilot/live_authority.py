@@ -6,7 +6,7 @@ import hmac
 import os
 import re
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
@@ -89,7 +89,7 @@ class PrivateLiveAuthority:
             "mac": mac,
         }
 
-    def _verify_snapshot_archive(self, body: dict[str, Any], seal: Any) -> None:
+    def _verify_snapshot_archive(self, body: dict[str, Any], seal: Any) -> Callable[[], None]:
         _require(isinstance(seal, dict) and set(seal) == {"version", "authority_revision", "mac"})
         _require(
             seal["version"] == "v1"
@@ -98,12 +98,18 @@ class PrivateLiveAuthority:
                 for k in ("authority_revision", "mac")
             )
         )
-        _, key = self._authenticated_document()
+        document, key = self._authenticated_document()
         _require(
             hmac.compare_digest(
                 seal["mac"], self._archive_mac(key, seal["authority_revision"], body)
             )
         )
+
+        def revalidate() -> None:
+            _require(self._authenticated_document() == (document, key))
+
+        revalidate()
+        return revalidate
 
     def _authenticated_document(self) -> tuple[dict[str, Any], bytes]:
         keys = _read_private(self.directory / "live-authority-key.json", 4096)
