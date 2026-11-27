@@ -599,3 +599,53 @@ def test_restored_reservation_scope_denies_prior_read_and_successor_freeze(core,
             expected_revision=7,
         )
     assert service.readback(OWNER, newer, operation_ref="read") is None
+
+
+def test_material_coverage_is_separate_from_permitted_owner_corrections(core):
+    service, auth = core
+    branch = replace(auth.scope.branches[0], coverage_actions=("SOFTWARE",))
+    auth.scope = replace(auth.scope, branches=(branch,))
+    frozen, _ = freeze_seven(service)
+    assert frozen.coverage == (("route", "SOFTWARE", 1),)
+    assert frozen.uncovered_critical == ()
+    reviewed = service.review(OWNER, WORK)
+    freight = next(c for c in reviewed["cases"] if c["case_id"] == "freight")
+    assert freight["suggestion"] == "SOFTWARE"
+    assert freight["owner_adjudicated_target"] == "FREIGHT"
+    assert (
+        service.freeze(
+            OWNER,
+            WORK,
+            splits={
+                c.family_id: "excluded"
+                if c.case_id == "mixed"
+                else "development"
+                if c.case_id in {"utilities", "tax"}
+                else "reserved"
+                for c in seven()
+            },
+            plan=PLAN,
+            expected_revision=7,
+        )
+        == frozen
+    )
+
+
+@pytest.mark.parametrize("coverage", [(), ("INVALID",), ("SOFTWARE", "SOFTWARE")])
+def test_invalid_explicit_coverage_cannot_hide_a_critical_gap(core, coverage):
+    service, auth = core
+    auth.scope = replace(
+        auth.scope, branches=(replace(auth.scope.branches[0], coverage_actions=coverage),)
+    )
+    with pytest.raises(IntakeError, match="invalid_starter_coverage_contract"):
+        service.propose(OWNER, WORK, seven())
+    assert not service.path.exists()
+
+
+def test_default_coverage_does_not_change_existing_scope_serialization(core):
+    service, _ = core
+    service.propose(OWNER, WORK, seven())
+    with sqlite3.connect(service.path) as db:
+        stored = json.loads(db.execute("SELECT scope FROM packs").fetchone()[0])
+    assert all("coverage_actions" not in branch for branch in stored["branches"])
+    assert service.review(OWNER, WORK)["revision"] == 0
