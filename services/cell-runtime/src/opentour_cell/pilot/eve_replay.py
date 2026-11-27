@@ -206,6 +206,9 @@ class ReplayRequest:
         }
 
 
+_ROW_KEYS = frozenset({"case_id", "answer", "citations", "abstained"})
+
+
 def _checked_arm_fields(
     case_id: object, answer: object, citations: object, abstained: object
 ) -> tuple[str, str | None, tuple[str, ...], bool]:
@@ -214,7 +217,8 @@ def _checked_arm_fields(
     Citations are materialised exactly once and the materialised tuple is what is validated and
     returned, so an iterable that yields different content on a second pass cannot pass the
     check and then deliver something else. The other fields are plain values read once by the
-    caller. Raises ``TypeError`` for a wrong type and ``ValueError`` for an empty ``case_id``.
+    caller. Raises ``TypeError`` for a wrong type and ``ValueError`` for an empty ``case_id`` or
+    an empty ``answer`` (a genuine abstention is ``None``, never an empty string).
     """
     if not isinstance(case_id, str):
         raise TypeError("ArmOutput.case_id must be a str")
@@ -222,6 +226,8 @@ def _checked_arm_fields(
         raise ValueError("ArmOutput.case_id must not be empty")
     if answer is not None and not isinstance(answer, str):
         raise TypeError("ArmOutput.answer must be a str or None")
+    if answer == "":
+        raise ValueError("ArmOutput.answer must not be empty; use None to abstain")
     if not isinstance(citations, list | tuple):
         raise TypeError("ArmOutput.citations must be a list or tuple of str")
     try:
@@ -607,6 +613,8 @@ class CandidateInference:
         outputs = []
         for item in raw:
             if not isinstance(item, Mapping):
+                raise EveRefusal("output_shape_invalid")
+            if set(item) != _ROW_KEYS:
                 raise EveRefusal("output_shape_invalid")
             try:
                 case_id, answer = item["case_id"], item["answer"]

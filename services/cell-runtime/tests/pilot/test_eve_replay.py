@@ -1221,20 +1221,36 @@ def test_candidate_transport_rejects_malformed_rows_and_outer_results(env: Env, 
         env.replay(env.arm("candidate", infer.served_revision), infer)
 
 
-def test_candidate_transport_tolerates_extra_row_fields_and_drops_them(
+@pytest.mark.parametrize("key", ["protected_answer", "extra", "Answer"])
+def test_candidate_transport_refuses_unknown_row_keys(env: Env, monkeypatch, key) -> None:
+    """A row must carry exactly the four expected keys; a stray key, however named, is loud."""
+    extra = "generated-extra-field-sentinel"
+    infer = _serve(env, monkeypatch, lambda rows: ({**rows[0], key: extra}, *rows[1:]))
+    with refuses("output_shape_invalid"):
+        env.replay(env.arm("candidate", infer.served_revision), infer)
+
+
+def test_candidate_empty_answer_is_refused_but_none_is_still_an_abstention(
     env: Env, monkeypatch
 ) -> None:
-    """Documents current behaviour: unknown keys are ignored, never carried into ArmOutput."""
-    EXTRA = "generated-extra-field-sentinel"
-    infer = _serve(
-        env,
-        monkeypatch,
-        lambda rows: tuple({**r, "protected_answer": EXTRA, "extra": 1} for r in rows),
+    """Side by side: "" is malformed output; None is a genuine abstain and scores as before."""
+    infer = _serve(env, monkeypatch, lambda rows: ({**rows[0], "answer": ""}, *rows[1:]))
+    with refuses("output_shape_invalid"):
+        env.replay(env.arm("candidate", infer.served_revision), infer)
+
+    def abstain_first(rows):
+        return ({**rows[0], "answer": None, "citations": [], "abstained": True}, *rows[1:])
+
+    env2 = Env(env.root / "abstain")
+    infer2 = env2.candidate_inference()
+    predict = env2.transport.predict_for_replay
+    monkeypatch.setattr(
+        env2.transport, "predict_for_replay", lambda c, i: abstain_first(predict(c, i))
     )
-    outputs = infer.generate(env.arm("candidate", infer.served_revision), _requests())
-    assert len(outputs) == 5
-    assert EXTRA not in repr(outputs)
-    assert not hasattr(outputs[0], "protected_answer")
+    record = env2.replay(env2.arm("candidate", infer2.served_revision), infer2)
+    first = record.rows[0]
+    assert first.verdict is rp.Verdict.INAPPROPRIATE_REFUSAL
+    assert first.answered is False
 
 
 def test_candidate_valid_output_with_list_citations_still_scores_normally(env: Env) -> None:
@@ -1249,6 +1265,7 @@ def test_candidate_valid_output_with_list_citations_still_scores_normally(env: E
 
 
 BAD_ARM_OUTPUTS = [
+    pytest.param(dict(answer=""), ValueError, id="answer-empty"),
     pytest.param(dict(case_id=1), TypeError, id="case-id-int"),
     pytest.param(dict(case_id=None), TypeError, id="case-id-none"),
     pytest.param(dict(case_id=""), ValueError, id="case-id-empty"),
@@ -1294,7 +1311,6 @@ def test_arm_output_materialises_citations_once_and_stores_a_tuple() -> None:
         _arm_output(citations=FlippingCitations([[1], ["ok"]]))
     assert _arm_output(citations=["a", "b"]).citations == ("a", "b")
     assert _arm_output(answer=None, citations=(), abstained=True).answer is None
-    assert _arm_output(answer="").answer == ""  # accepted today; see the owner decision on scoring
 
 
 def test_non_candidate_arm_cannot_deliver_a_malformed_arm_output_to_the_scorer(env: Env) -> None:
