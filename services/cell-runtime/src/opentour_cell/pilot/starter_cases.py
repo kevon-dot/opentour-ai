@@ -8,6 +8,7 @@ No scoring, inference, prompt/training export, or live-evidence credit occurs he
 from __future__ import annotations
 
 import json
+import math
 import os
 import sqlite3
 from collections.abc import Iterator
@@ -29,6 +30,26 @@ Json = dict[str, Any]
 def _require(ok: object, reason: str = "starter_cases_unavailable") -> None:
     if not ok:
         raise IntakeError(reason)
+
+
+def _input_fields(value: object) -> Json:
+    _require(isinstance(value, (list, tuple)), "invalid_starter_inputs")
+    assert isinstance(value, (list, tuple))
+    result = {}
+    for item in value:
+        _require(isinstance(item, (list, tuple)) and len(item) == 2, "invalid_starter_inputs")
+        key, scalar = item
+        _require(isinstance(key, str) and key not in result, "invalid_starter_inputs")
+        _require(
+            scalar is None
+            or type(scalar) is bool
+            or (type(scalar) is int and -(2**63) < scalar < 2**63)
+            or (type(scalar) is float and math.isfinite(scalar))
+            or (type(scalar) is str and len(scalar) <= 8192),
+            "invalid_starter_inputs",
+        )
+        result[key] = scalar
+    return result
 
 
 @dataclass(frozen=True)
@@ -115,6 +136,27 @@ class FrozenStarter:
     state: str = "frozen_unscored"
 
 
+@dataclass(frozen=True)
+class EvaluationInput:
+    case_id: str
+    family_id: str
+    decision_inputs: tuple[tuple[str, str | int | float | bool | None], ...]
+    origin: str
+
+
+@dataclass(frozen=True)
+class FrozenEvaluationInputs:
+    """Input-only worker projection. Never contains owner targets or suggestions."""
+
+    freeze_ref: str
+    freeze_revision: str
+    source_digest: str
+    plan: FrozenPlan
+    cases: tuple[EvaluationInput, ...]
+    unresolved: int
+    excluded: int
+
+
 class StarterCases:
     def __init__(self, directory: Path, confirmation: StarterConfirmation | None = None):
         self.path = directory.absolute() / "starter-cases.sqlite3"
@@ -133,7 +175,11 @@ class StarterCases:
                 and work.mode == "starter"
                 and work.benchmark_current
                 and work.revisions == (scope.policy_revision, scope.settings_revision)
-                and (purpose == "materialize" or actor.actor == scope.owner_id),
+                and (
+                    purpose == "materialize"
+                    or (purpose == "evaluate" and actor.actor == scope.frozen_plan.evaluator_ref)
+                    or (purpose != "evaluate" and actor.actor == scope.owner_id)
+                ),
                 "starter_scope_changed",
             )
             for ref in (
@@ -224,6 +270,8 @@ class StarterCases:
         _require(ref == "starter-" + digest(stored_scope)[:40], "starter_receipt_invalid")
         body: Json = json.loads(row["body"])
         _require(row["seal"] == digest(body), "starter_receipt_invalid")
+        for case in body["cases"]:
+            _input_fields(case["decision_inputs"])
         seal = db.execute("SELECT seal FROM freezes WHERE ref=?", (ref,)).fetchone()
         _require(
             (body["frozen"] is None and seal is None)
@@ -333,7 +381,7 @@ class StarterCases:
                 and len(case.rationale) <= 2000,
                 "unsupported_starter_case",
             )
-            fields = dict(case.decision_inputs)
+            fields = _input_fields(case.decision_inputs)
             _require(
                 len(fields) == len(case.decision_inputs)
                 and fields.keys() <= set(branch.decision_fields),
@@ -548,6 +596,58 @@ class StarterCases:
     ) -> MaterializedBenchmark | None:
         """Adopt an actual owner freeze; never manufacture confirmation or execute a model."""
         return self.readback(actor, work, operation_ref=operation_ref)
+
+    def evaluation_inputs(self, actor: IntakePrincipal, work: IntakeWork) -> FrozenEvaluationInputs:
+        """Read only reserved inputs under a separate current evaluator capability.
+
+        The confirmation producer must explicitly support the evaluate purpose;
+        neither a model grant nor materialization rights grant this access.
+        """
+        with self._scope(actor, work, "evaluate") as scope, self._db() as db:
+            body = self._load(db, scope)
+            self._validate_prior_freezes(db, scope)
+            _require(body["frozen"] is not None, "starter_freeze_required")
+            frozen = self._frozen(body["frozen"])
+            return FrozenEvaluationInputs(
+                frozen.reference,
+                frozen.revision,
+                scope.source_digest,
+                scope.frozen_plan,
+                tuple(
+                    EvaluationInput(
+                        row["case_id"],
+                        row["family_id"],
+                        tuple(tuple(item) for item in row["decision_inputs"]),
+                        row["case_origin"],
+                    )
+                    for row in body["cases"]
+                    if row["split_ref"] == "reserved" and row["status"] == "resolved"
+                ),
+                frozen.unresolved,
+                frozen.excluded,
+            )
+
+    def evaluation_targets(
+        self, actor: IntakePrincipal, work: IntakeWork, *, freeze_revision: str
+    ) -> Json:
+        """Evaluator-only answer key; inference adapters must never receive this object."""
+        with self._scope(actor, work, "evaluate") as scope, self._db() as db:
+            body = self._load(db, scope)
+            self._validate_prior_freezes(db, scope)
+            _require(
+                body["frozen"] is not None and body["frozen"]["revision"] == freeze_revision,
+                "starter_freeze_changed",
+            )
+            return {
+                row["case_id"]: {
+                    "target": row["owner_adjudicated_target"],
+                    "adjudicator": row["adjudicator"],
+                    "adjudicated_at": row["adjudicated_at"],
+                    "evidence_ref": row["citation"],
+                }
+                for row in body["cases"]
+                if row["split_ref"] == "reserved" and row["status"] == "resolved"
+            }
 
     def readback(
         self, actor: IntakePrincipal, work: IntakeWork, *, operation_ref: str
