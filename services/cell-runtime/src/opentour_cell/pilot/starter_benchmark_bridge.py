@@ -38,7 +38,31 @@ def publish_starter_state(session: StarterCaseSession, run_ref: str) -> Material
                 ProposedCase(**{key: item[key] for key in ProposedCase.__dataclass_fields__})
                 for item in body["cases"]
             )
-            original = core._cases(pinned.scope, proposed)
+            validated = core._cases(pinned.scope, proposed)
+            original = []
+            last_append = 0
+            for stored, case, normalized in zip(body["cases"], proposed, validated, strict=True):
+                if (
+                    "counterexample_owner" not in stored
+                    and "counterexample_operation" not in stored
+                ):
+                    _require(last_append == 0)
+                    original.append(normalized)
+                    continue
+                _require(stored.get("counterexample_owner") == pinned.scope.owner_id)
+                _require(
+                    case.case_origin == "owner_counterexample" and case.authoring_identity is None
+                )
+                operation = require_ref(stored.get("counterexample_operation"))
+                evidence = body["operations"].get(operation)
+                _require(isinstance(evidence, dict))
+                revision = evidence.get("revision")
+                _require(type(revision) is int and last_append < revision <= body["revision"])
+                _require(
+                    evidence["intent"]
+                    == digest(["owner-counterexample", asdict(case), revision - 1])
+                )
+                last_append = revision
             _require(original and row is not None and digest(original) == row[0])
             proposal = MaterializedBenchmark("needs_owner_review", pack, row[0], work.revisions[0])
             receipt = None
