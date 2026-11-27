@@ -50,10 +50,11 @@ custody handoff consume the register through their separately owned adapters.
 custodian-issued destination permission resolved through the trusted actor and
 action boundary. It verifies the sealed presentation, permitted candidate
 digest, recipient, dataset's authorized workflow, and active engagement. The
-approval reference binds the exact durable decision. The approval recorder
-keeps the first local recording time, within its presentation window, on retry.
-An older unstamped receipt remains available through the approval-only path.
-Dispatch from such a receipt needs a current timed approval.
+approval reference binds the exact durable decision. The review journal key
+seals the recorded decision, scope and first recording time. Retries retain
+that time within the signed presentation window. An older unsealed receipt
+remains available through the approval-only path. Outbox admission requires a
+current sealed approval.
 
 During reservation, claim and reconciliation the worker checks current scope
 after staging changes, before transaction commit. The generated normal-entry

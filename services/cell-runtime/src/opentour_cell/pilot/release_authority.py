@@ -70,6 +70,7 @@ class RecordedReleaseAuthority:
             if (
                 approval is None
                 or approval["decision"] != "approved"
+                or not isinstance(approval.get("decision_seal"), str)
                 or approval["audience"] != permit.recipient
                 or approval_ref(approval) != selection.approval_ref
             ):
@@ -91,7 +92,10 @@ class RecordedReleaseAuthority:
             intake = source_intake.check_current_intake(
                 self.directory, self.tenant, permit.engagement, evidence["dataset_revision"]
             )
-            if intake["workflow"] != permit.workflow_ref:
+            if (
+                intake["workflow"] != permit.workflow_ref
+                or self.permissions.resolve(selection.workflow_ref, actor, action) != permit
+            ):
                 return None
             return ApprovedRelease(
                 self.tenant,

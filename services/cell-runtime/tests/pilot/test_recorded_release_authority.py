@@ -77,6 +77,7 @@ def test_actual_accepted_decision_retains_one_release_and_retry_time(tmp_path):
         tmp_path, "ot_release_approve"
     )
     assert type(original["recorded_at"]) is int and original["recorded_at"] <= time.time()
+    assert original["decision_seal"].startswith("release_")
     same = release_gate.record_release(
         *args[:2],
         **{
@@ -142,7 +143,10 @@ def test_actual_accepted_decision_retains_one_release_and_retry_time(tmp_path):
         outbox.reserve(selected, "dispatcher", "withdrawn")
 
 
-def test_destination_permission_lost_at_commit_leaves_no_reservation(tmp_path, monkeypatch):
+@pytest.mark.parametrize("during_source_read", [False, True])
+def test_destination_permission_lost_at_commit_leaves_no_reservation(
+    tmp_path, monkeypatch, during_source_read
+):
     h, _, approval, _, permissions, outbox = approve_fixture(tmp_path, "ot_release_approve")
     resolve = permissions.resolve
 
@@ -151,7 +155,17 @@ def test_destination_permission_lost_at_commit_leaves_no_reservation(tmp_path, m
         permissions.current = None
         return grant
 
-    monkeypatch.setattr(permissions, "resolve", withdraw_after_resolution)
+    source_read = source_intake.check_current_intake
+
+    def read_then_withdraw(*args, **kwargs):
+        evidence = source_read(*args, **kwargs)
+        permissions.current = None
+        return evidence
+
+    if during_source_read:
+        monkeypatch.setattr(source_intake, "check_current_intake", read_then_withdraw)
+    else:
+        monkeypatch.setattr(permissions, "resolve", withdraw_after_resolution)
     with pytest.raises(ReleaseOutboxError):
         outbox.reserve(approval, "dispatcher", "withdrawn-before-commit")
     with h.store._db() as db:
@@ -171,7 +185,9 @@ def test_declined_and_unstamped_legacy_receipts_never_reserve_dispatch(tmp_path)
     h, args, approved, original, _, outbox = approve_fixture(
         tmp_path / "legacy", "ot_release_approve"
     )
-    legacy = {key: value for key, value in original.items() if key != "recorded_at"}
+    legacy = {
+        key: value for key, value in original.items() if key not in {"recorded_at", "decision_seal"}
+    }
     path = h.path.parent / "managed-outputs" / approved.proposal_ref / "release-decision.json"
     path.write_text(json.dumps(original | {"recorded_at": 1}))
     with pytest.raises(ValueError, match="release_record_time_invalid"):
@@ -181,6 +197,24 @@ def test_declined_and_unstamped_legacy_receipts_never_reserve_dispatch(tmp_path)
     selected = replace(approved, approval_ref=approval_ref(legacy))
     with pytest.raises(ReleaseOutboxError):
         outbox.reserve(selected, "dispatcher", "missing-time")
+    with h.store._db() as db:
+        assert (
+            db.execute("SELECT 1 FROM sqlite_master WHERE name='release_outbox'").fetchone() is None
+        )
+
+
+@pytest.mark.parametrize("strip_evidence", [False, True])
+def test_changed_decline_cannot_stage_even_with_recomputed_reference(tmp_path, strip_evidence):
+    h, _, selected, recorded, _, outbox = approve_fixture(tmp_path, "ot_release_changes")
+    rebound = recorded | {"decision": "approved"}
+    if strip_evidence:
+        del rebound["recorded_at"], rebound["decision_seal"]
+    path = h.path.parent / "managed-outputs" / selected.proposal_ref / "release-decision.json"
+    path.write_text(json.dumps(rebound))
+    with pytest.raises(ReleaseOutboxError):
+        outbox.reserve(
+            replace(selected, approval_ref=approval_ref(rebound)), "dispatcher", "forged"
+        )
     with h.store._db() as db:
         assert (
             db.execute("SELECT 1 FROM sqlite_master WHERE name='release_outbox'").fetchone() is None
