@@ -11,8 +11,19 @@ sentinel double behind the three narrow ports below (`SnapshotSource`, `GrantPor
 store). The process-crash test kills a child Python process mid-transaction on a local
 SQLite file. Volume is synthesized at test time; nothing is committed or imported.
 
-What is NOT proven: no real Parquet reader, MCP provider, customer export, installed
-connector, provider rate limit, disk exhaustion or multi-host concurrency is exercised.
+Work partitioning: source partitions are read in source-then-partition order, because a
+customer partition is an immutable file whose rows span many cases. Every staged admission is
+then assigned to a work partition: its source (`resource_id`) and then a bucket from a stable
+SHA-256 hash of a length-prefixed (tenant, workflow, case) encoding (`work_partition_key`).
+The bucket never uses Python's per-process `hash()`, never uses the evidence-family identity,
+and is frozen into the run, so a resumed process always assigns identically. Stores written
+before this checkpoint format are refused explicitly (`checkpoint_format_unsupported`) and
+left byte-for-byte untouched; they are never migrated or silently re-read.
+
+What is NOT proven: no real Parquet row reader, MCP provider, customer export, installed
+connector, provider rate limit, disk exhaustion or multi-host concurrency is exercised. The
+manifest-file route and its immutability ledger live in `bulk_manifest`; its Parquet row
+decoder is not built (no Parquet library is a locked dependency).
 Mixed-document format readers belong to OPE-531 and the source-pair reader to OPE-434; this
 module defines only the narrow ports it needs and must be reconciled with their adapter
 interfaces. These tests prove software behavior only and establish no provider or customer
@@ -38,6 +49,12 @@ MAX_PAGE = 500
 PAIRED_FEEDS = ("decision", "outcome")
 KINDS = ("decision", "outcome", "document")
 _ZERO = "0" * 64
+# A store is opened only when it carries exactly this format; older stores lack the work
+# partition columns and the frozen partitioning scheme, so they are refused, never re-read.
+CHECKPOINT_FORMAT = "opentour.ope519.checkpoint.v2"
+WORK_PARTITION_SCHEME = "opentour.ope519.work-partition.sha256-lp.v1"
+DEFAULT_WORK_BUCKETS = 64
+MAX_WORK_BUCKETS = 65_536
 
 
 class ExtractionError(Exception):
@@ -69,6 +86,7 @@ class SourceRow:
     decision_key: str | None = None
     authority: str | None = None
     label: str | None = None
+    case_key: str | None = None
 
 
 def row_fingerprint(row: SourceRow) -> str:
@@ -86,6 +104,9 @@ def payload_digest(row: SourceRow) -> str:
             row.label,
             row.available_at,
             row.occurred_at,
+            # The case decides the work partition, so a different case at the same revision is
+            # a contradiction (disputed), never a silent move between work partitions.
+            row.case_key,
         ]
     )
 
@@ -104,6 +125,75 @@ def partition_digest(rows: Iterable[SourceRow]) -> str:
 def family_id(tenant: str, resource_id: str, native_id: str) -> str:
     """Stable evidence-family identity: tenant-scoped native ID, never a path or a label."""
     return "family-" + _sha([tenant, resource_id, native_id])[:32]
+
+
+def _text_ok(value: object) -> bool:
+    if type(value) is not str or not value:
+        return False
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
+def _length_prefixed(fields: tuple[str | None, ...]) -> bytes:
+    """Unambiguous encoding: a field count, then per field a presence tag and a byte length.
+
+    No separator character exists, so ("a|b", "c") and ("a", "b|c") encode differently, and an
+    absent field (None) can never equal any present string, including the text "None".
+    """
+    out = [len(fields).to_bytes(4, "big")]
+    for value in fields:
+        if value is None:
+            out.append(b"\x00")
+            continue
+        data = value.encode("utf-8")
+        out.append(b"\x01" + len(data).to_bytes(8, "big") + data)
+    return b"".join(out)
+
+
+def work_partition_key(tenant: str, workflow: str | None, case_kind: str, case: str) -> str:
+    """SHA-256 over the domain-separated, length-prefixed (tenant, workflow, case) encoding.
+
+    Deterministic across processes, machines and Python versions: no `hash()`, no JSON
+    formatting choices, no locale. Its inputs never include the evidence-family identity or
+    any split or benchmark-family assignment, so data partitioning cannot leak into them.
+    """
+    if not _text_ok(tenant) or not (workflow is None or _text_ok(workflow)):
+        raise ExtractionError("work_partition_key_invalid")
+    if case_kind not in ("case", "decision") or not _text_ok(case):
+        raise ExtractionError("work_partition_key_invalid")
+    encoded = _length_prefixed((WORK_PARTITION_SCHEME, tenant, workflow, case_kind, case))
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def work_bucket(tenant: str, workflow: str | None, case_kind: str, case: str, buckets: int) -> int:
+    if type(buckets) is not int or not 1 <= buckets <= MAX_WORK_BUCKETS:
+        raise ExtractionError("work_buckets_invalid")
+    return int(work_partition_key(tenant, workflow, case_kind, case), 16) % buckets
+
+
+def case_of(row: SourceRow) -> tuple[str, str] | None:
+    """The row's case: an explicit case key, else its decision key; None means unkeyed.
+
+    The kind is part of the hashed encoding, so a case key and a decision key with the same
+    text are different inputs. A row with neither is staged in its source's unkeyed work
+    partition rather than given an invented case.
+    """
+    if row.case_key is not None:
+        return ("case", row.case_key)
+    if row.decision_key:
+        return ("decision", row.decision_key)
+    return None
+
+
+def _case_fields_ok(row: SourceRow) -> bool:
+    if row.case_key is not None and not _text_ok(row.case_key):
+        return False
+    if row.decision_key is None or row.decision_key == "":
+        return True
+    return _text_ok(row.decision_key)
 
 
 @dataclass(frozen=True)
@@ -260,7 +350,8 @@ _SCHEMA = (
         input_bytes INTEGER NOT NULL DEFAULT 0, duplicate_deliveries INTEGER NOT NULL DEFAULT 0,
         pages INTEGER NOT NULL DEFAULT 0, retries INTEGER NOT NULL DEFAULT 0,
         discarded_pages INTEGER NOT NULL DEFAULT 0, elapsed REAL NOT NULL DEFAULT 0,
-        excluded_unauthorized INTEGER NOT NULL DEFAULT 0)""",
+        excluded_unauthorized INTEGER NOT NULL DEFAULT 0, work_scheme TEXT NOT NULL,
+        work_buckets INTEGER NOT NULL, workflow TEXT)""",
     """CREATE TABLE IF NOT EXISTS partitions (
         run_id TEXT NOT NULL, partition_id TEXT NOT NULL, resource_id TEXT NOT NULL,
         feed TEXT NOT NULL, declared_digest TEXT NOT NULL, declared_count INTEGER NOT NULL,
@@ -274,7 +365,10 @@ _SCHEMA = (
         native_id TEXT NOT NULL, path TEXT NOT NULL, content_digest TEXT NOT NULL,
         payload_digest TEXT NOT NULL, size_bytes INTEGER NOT NULL, available_at INTEGER,
         occurred_at INTEGER, decision_key TEXT, authority TEXT, label TEXT,
-        state TEXT NOT NULL, PRIMARY KEY(run_id, family_id, revision))""",
+        state TEXT NOT NULL, case_key TEXT, work_bucket INTEGER,
+        PRIMARY KEY(run_id, family_id, revision))""",
+    """CREATE INDEX IF NOT EXISTS admissions_work ON admissions(
+        run_id, resource_id, work_bucket, family_id, revision)""",
     """CREATE TABLE IF NOT EXISTS renames (
         run_id TEXT NOT NULL, family_id TEXT NOT NULL, revision INTEGER NOT NULL,
         resource_id TEXT NOT NULL, PRIMARY KEY(run_id, family_id, revision))""",
@@ -300,6 +394,7 @@ _SCHEMA = (
         seq INTEGER PRIMARY KEY AUTOINCREMENT, snapshot_id TEXT NOT NULL UNIQUE,
         run_id TEXT NOT NULL, manifest_digest TEXT NOT NULL, completeness TEXT NOT NULL,
         counts TEXT NOT NULL)""",
+    """CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)""",
 )
 
 
@@ -313,11 +408,17 @@ class BulkExtraction:
         grants: GrantPort,
         *,
         tenant: str,
+        workflow: str | None = None,
+        work_buckets: int = DEFAULT_WORK_BUCKETS,
         clock: Callable[[], float] = time.monotonic,
         fault: Callable[[str], None] | None = None,
     ) -> None:
         if not tenant:
             raise ExtractionError("tenant_required")
+        if not _text_ok(tenant) or not (workflow is None or _text_ok(workflow)):
+            raise ExtractionError("work_partition_key_invalid")
+        if type(work_buckets) is not int or not 1 <= work_buckets <= MAX_WORK_BUCKETS:
+            raise ExtractionError("work_buckets_invalid")
         directory = path.absolute().parent
         info = directory.stat()
         if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
@@ -327,12 +428,27 @@ class BulkExtraction:
         self._source = source
         self._grants = grants
         self._tenant = tenant
+        self._workflow = workflow
+        self._work_buckets = work_buckets
         self._clock = clock
         self._fault = fault or (lambda _point: None)
         self._step_started = clock()
         with self._txn() as db:
-            for statement in _SCHEMA:
-                db.execute(statement)
+            tables = {r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            if tables:
+                # Refuse anything that is not exactly this checkpoint format, before writing a
+                # byte: an older store has no work partition columns and must not be re-read.
+                found = None
+                if "meta" in tables:
+                    found = db.execute(
+                        "SELECT value FROM meta WHERE key='checkpoint_format'"
+                    ).fetchone()
+                if found is None or found[0] != CHECKPOINT_FORMAT:
+                    raise ExtractionError("checkpoint_format_unsupported")
+            else:
+                for statement in _SCHEMA:
+                    db.execute(statement)
+                db.execute("INSERT INTO meta VALUES ('checkpoint_format', ?)", (CHECKPOINT_FORMAT,))
 
     # ---- storage ---------------------------------------------------------------------
 
@@ -372,17 +488,23 @@ class BulkExtraction:
             raise ExtractionError("manifest_invalid")
         run_id = "run-" + _sha([self._tenant, manifest.revision, manifest.mapping_revision])[:24]
         with self._txn() as db:
-            if db.execute("SELECT 1 FROM runs WHERE run_id=?", (run_id,)).fetchone():
+            existing = db.execute("SELECT * FROM runs WHERE run_id=?", (run_id,)).fetchone()
+            if existing is not None:
+                self._check_scheme(existing)
                 return run_id
             db.execute(
                 "INSERT INTO runs(run_id, manifest_revision, mapping_revision, limits,"
-                " capability, state, reason) VALUES (?,?,?,?,?,'active','')",
+                " capability, state, reason, work_scheme, work_buckets, workflow)"
+                " VALUES (?,?,?,?,?,'active','',?,?,?)",
                 (
                     run_id,
                     manifest.revision,
                     manifest.mapping_revision,
                     _canon(asdict(limits)),
                     _canon(asdict(manifest.capability)),
+                    WORK_PARTITION_SCHEME,
+                    self._work_buckets,
+                    self._workflow,
                 ),
             )
             for ref in manifest.partitions:
@@ -413,6 +535,19 @@ class BulkExtraction:
             ),
         )
 
+    def _check_scheme(self, run: sqlite3.Row) -> None:
+        """A run's partitioning is frozen at start; a differently configured opener is refused."""
+        frozen = (run["work_scheme"], run["work_buckets"], run["workflow"])
+        if frozen != (WORK_PARTITION_SCHEME, self._work_buckets, self._workflow):
+            raise ExtractionError("work_partitioning_changed")
+
+    def _bucket(self, run: sqlite3.Row, row: SourceRow) -> int | None:
+        """The row's work bucket from the run's FROZEN scheme, never the opener's settings."""
+        case = case_of(row)
+        if case is None:
+            return None
+        return work_bucket(self._tenant, run["workflow"], case[0], case[1], run["work_buckets"])
+
     def _run(self, run_id: str) -> sqlite3.Row:
         row = self._one("SELECT * FROM runs WHERE run_id=?", run_id)
         if row is None:
@@ -430,7 +565,8 @@ class BulkExtraction:
         pages = peak = retries = 0
         stopped = ""
         for part in self._all(
-            "SELECT partition_id FROM partitions WHERE run_id=? ORDER BY partition_id", run_id
+            "SELECT partition_id FROM partitions WHERE run_id=? ORDER BY resource_id, partition_id",
+            run_id,
         ):
             while pages < max_pages:
                 outcome, rows = self._advance(run_id, part["partition_id"])
@@ -546,6 +682,7 @@ class BulkExtraction:
             ).fetchone()
             if run is None or part is None:
                 raise ExtractionError("run_unknown")
+            self._check_scheme(run)
             if (
                 part["state"] == "complete"
                 and run["state"] == "active"
@@ -610,7 +747,7 @@ class BulkExtraction:
             if input_bytes + max(row.size_bytes, 0) > limits.max_run_bytes:
                 limit = "run_limit_bytes"
                 break
-            result = self._admit_row(db, run_id, part, row, offset, limits, allow_new=True)
+            result = self._admit_row(db, run, part, row, offset, limits, allow_new=True)
             tally[result] += 1
             digest = chain(digest, row)
             cursor, count = offset + 1, count + 1
@@ -653,7 +790,7 @@ class BulkExtraction:
     def _admit_row(
         self,
         db: sqlite3.Connection,
-        run_id: str,
+        run: sqlite3.Row,
         part: sqlite3.Row,
         row: SourceRow,
         offset: int,
@@ -661,6 +798,7 @@ class BulkExtraction:
         *,
         allow_new: bool,
     ) -> str:
+        run_id = run["run_id"]
         resource = part["resource_id"]
         valid = (
             row.kind in KINDS
@@ -670,6 +808,7 @@ class BulkExtraction:
             and bool(row.content_digest)
             and type(row.size_bytes) is int
             and row.size_bytes >= 0
+            and _case_fields_ok(row)
         )
         if not valid:
             family = f"offset-{part['partition_id']}-{offset}"
@@ -679,7 +818,10 @@ class BulkExtraction:
         if row.size_bytes > limits.max_object_bytes:
             self._reject(db, run_id, family, row.revision, "object_over_limit", resource)
             return "rejected"
-        return self._admit(db, run_id, part["partition_id"], resource, family, row, allow_new)
+        bucket = self._bucket(run, row)
+        return self._admit(
+            db, run_id, part["partition_id"], resource, family, row, allow_new, bucket
+        )
 
     @staticmethod
     def _reject(
@@ -699,6 +841,7 @@ class BulkExtraction:
         family: str,
         row: SourceRow,
         allow_new: bool,
+        bucket: int | None,
     ) -> str:
         digest = payload_digest(row)
         existing = db.execute(
@@ -723,7 +866,7 @@ class BulkExtraction:
             (run_id, family, row.revision),
         ).fetchone()
         db.execute(
-            "INSERT INTO admissions VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'admitted')",
+            "INSERT INTO admissions VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'admitted',?,?)",
             (
                 run_id,
                 family,
@@ -741,6 +884,8 @@ class BulkExtraction:
                 row.decision_key,
                 row.authority,
                 row.label,
+                row.case_key,
+                bucket,
             ),
         )
         if previous is not None and previous["path"] != row.path:
@@ -781,6 +926,7 @@ class BulkExtraction:
             ).fetchone()
             if run is None or feed is None:
                 raise ExtractionError("run_unknown")
+            self._check_scheme(run)
             if run["state"] != "active":
                 return PageOutcome("not_pending")
             if not json.loads(run["capability"])["change_log"]:
@@ -810,7 +956,7 @@ class BulkExtraction:
                 if not replay and input_bytes + size > limits.max_run_bytes:
                     limit = "run_limit_bytes"
                     break
-                tally[self._apply_change(db, run_id, partitions, entry, replay, limits)] += 1
+                tally[self._apply_change(db, run, partitions, entry, replay, limits)] += 1
                 rows_seen += 0 if replay else 1
                 input_bytes += 0 if replay else size
             if not limit:
@@ -844,12 +990,13 @@ class BulkExtraction:
     def _apply_change(
         self,
         db: sqlite3.Connection,
-        run_id: str,
+        run: sqlite3.Row,
         partitions: Mapping[str, sqlite3.Row],
         entry: ChangeEntry,
         replay: bool,
         limits: RunLimits,
     ) -> str:
+        run_id = run["run_id"]
         part = partitions.get(entry.resource_id)
         family = family_id(self._tenant, entry.resource_id, entry.native_id)
         if part is None:
@@ -886,11 +1033,13 @@ class BulkExtraction:
             or row.native_id != entry.native_id
             or row.revision != entry.revision
             or row.size_bytes > limits.max_object_bytes
+            or not _case_fields_ok(row)
         ):
             self._reject(db, run_id, family, entry.revision, "malformed_change", entry.resource_id)
             return "rejected"
+        bucket = self._bucket(run, row)
         return self._admit(
-            db, run_id, part["partition_id"], entry.resource_id, family, row, not replay
+            db, run_id, part["partition_id"], entry.resource_id, family, row, not replay, bucket
         )
 
     # ---- deletion --------------------------------------------------------------------
@@ -969,6 +1118,7 @@ class BulkExtraction:
         body = {
             "manifest_revision": run["manifest_revision"],
             "mapping_revision": run["mapping_revision"],
+            "work_partitioning": [run["work_scheme"], run["work_buckets"], run["workflow"]],
             "partitions": [
                 [r["partition_id"], r["state"], r["cursor"], r["count"], r["digest"]]
                 for r in self._all(
@@ -976,7 +1126,14 @@ class BulkExtraction:
                 )
             ],
             "admissions": [
-                [r["family_id"], r["revision"], r["payload_digest"], r["state"]]
+                [
+                    r["family_id"],
+                    r["revision"],
+                    r["payload_digest"],
+                    r["state"],
+                    r["resource_id"],
+                    r["work_bucket"],
+                ]
                 for r in self._all(
                     "SELECT * FROM admissions WHERE run_id=? ORDER BY family_id, revision", run_id
                 )
@@ -1046,6 +1203,12 @@ class BulkExtraction:
             "excluded_unauthorized": run["excluded_unauthorized"],
             "completeness": self.completeness(run_id),
             "deletion_semantics": self.deletion_semantics(run_id),
+            "work_partitioning": {
+                "scheme": run["work_scheme"],
+                "buckets": run["work_buckets"],
+                "workflow_registered": run["workflow"] is not None,
+            },
+            "work_partitions": self.work_partitions(run_id),
             "partitions": [
                 {
                     "partition_id": p["partition_id"],
@@ -1068,6 +1231,52 @@ class BulkExtraction:
                 )
             ],
         }
+
+    # ---- work partitions ---------------------------------------------------------------
+
+    def work_partitions(self, run_id: str) -> list[dict[str, Any]]:
+        """Admission counts per work partition: by source, then by stable hash bucket.
+
+        A bucket of None is the source's unkeyed partition (rows with no case or decision
+        key). Counts only: no case key, native ID or path reaches this view.
+        """
+        return [
+            {"resource_id": r["resource_id"], "bucket": r["work_bucket"], "admissions": r["n"]}
+            for r in self._all(
+                "SELECT resource_id, work_bucket, COUNT(*) AS n FROM admissions WHERE run_id=?"
+                " GROUP BY resource_id, work_bucket"
+                " ORDER BY resource_id, work_bucket IS NOT NULL, work_bucket",
+                run_id,
+            )
+        ]
+
+    def work_partition_rows(
+        self,
+        run_id: str,
+        resource_id: str,
+        bucket: int | None,
+        *,
+        after: tuple[str, int] | None = None,
+        limit: int = 250,
+    ) -> list[dict[str, Any]]:
+        """One bounded page of a work partition's admissions, keyset-paged by family/revision."""
+        if type(limit) is not int or not 1 <= limit <= MAX_PAGE:
+            raise ExtractionError("invalid_limits")
+        family, revision = after if after is not None else ("", 0)
+        where = "work_bucket IS NULL" if bucket is None else "work_bucket=?"
+        scope: list[object] = [run_id, resource_id] + ([] if bucket is None else [bucket])
+        rows = self._all(
+            "SELECT family_id, revision, kind, payload_digest, state, work_bucket"
+            f" FROM admissions WHERE run_id=? AND resource_id=? AND {where}"
+            " AND (family_id > ? OR (family_id = ? AND revision > ?))"
+            " ORDER BY family_id, revision LIMIT ?",
+            *scope,
+            family,
+            family,
+            revision,
+            limit,
+        )
+        return [dict(r) for r in rows]
 
     # ---- publication -----------------------------------------------------------------
 
@@ -1136,6 +1345,7 @@ class BulkExtraction:
     def successor(self, run_id: str) -> str:
         """Resume over only still-authorized resources; withdrawn ones are excluded and counted."""
         prior = self._run(run_id)
+        self._check_scheme(prior)
         manifest = self._source.manifest()
         if manifest.revision != prior["manifest_revision"]:
             raise ExtractionError("manifest_changed")
@@ -1149,8 +1359,8 @@ class BulkExtraction:
             excluded = sum(1 for p in parts if p["resource_id"] not in keep)
             db.execute(
                 "INSERT INTO runs(run_id, manifest_revision, mapping_revision, limits,"
-                " capability, state, reason, predecessor, excluded_unauthorized)"
-                " VALUES (?,?,?,?,?,'active','',?,?)",
+                " capability, state, reason, predecessor, excluded_unauthorized, work_scheme,"
+                " work_buckets, workflow) VALUES (?,?,?,?,?,'active','',?,?,?,?,?)",
                 (
                     new_id,
                     prior["manifest_revision"],
@@ -1159,6 +1369,9 @@ class BulkExtraction:
                     prior["capability"],
                     run_id,
                     excluded,
+                    prior["work_scheme"],
+                    prior["work_buckets"],
+                    prior["workflow"],
                 ),
             )
             for p in parts:
