@@ -21,6 +21,7 @@ import json
 import os
 import re
 import tempfile
+import unicodedata
 from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
@@ -47,6 +48,11 @@ def canonical(value: Any) -> bytes:
 
 def digest(value: Any) -> str:
     return "sha256:" + hashlib.sha256(canonical(value)).hexdigest()
+
+
+def normalize_text(text: str) -> str:
+    """Case, width and whitespace insensitive form used to compare text against protected text."""
+    return " ".join(unicodedata.normalize("NFKC", text).casefold().split())
 
 
 class Capability(StrEnum):
@@ -335,12 +341,17 @@ def plan_fit(
     benchmark_revision: str,
     idempotency_key: str,
     bound: mc.FitBound,
+    bound_membership_digest: str,
 ) -> FitPlan:
     """Build one fit intent, or refuse so that no fit can start.
 
     Only a TRAINABLE capability observed for this exact binding and a registration that declares
-    the train capability can plan a fit. An inference-only target is a zero-fit outcome.
+    the train capability can plan a fit. An inference-only target is a zero-fit outcome. The
+    partition's protected membership must equal ``bound_membership_digest``, the membership frozen
+    with the replay set, so a caller cannot declare a smaller protected set than the one replayed.
     """
+    if partition.membership_digest != bound_membership_digest:
+        raise EveRefusal("protected_membership_mismatch")
     if (
         binding.model_ref != registration.model_ref
         or binding.immutable_revision != registration.base_revision

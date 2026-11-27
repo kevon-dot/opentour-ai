@@ -25,8 +25,8 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from collections.abc import Callable, Iterator, Mapping
+from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
 from typing import Any, Protocol
@@ -43,6 +43,8 @@ from opentour_cell.pilot.eve_task import (
     binding_for,
     canonical,
     digest,
+    normalize_text,
+    plan_fit,
 )
 
 VERSION = "opentour.pilot.eve-protected-replay.v1"
@@ -78,7 +80,7 @@ _CORRECT = {Verdict.CORRECT_ANSWER, Verdict.CORRECT_ABSTENTION}
 @dataclass(frozen=True)
 class ProtectedAnswer:
     expectation: Expectation
-    answer: str
+    answer: str = field(repr=False)
     required_citations: frozenset[str]
 
 
@@ -111,13 +113,41 @@ class AnswerKey:
             raise EveRefusal("replay_not_bound") from None
 
     def leaks(self, data: object) -> bool:
-        text = data if isinstance(data, str) else canonical(data).decode(errors="replace")
+        """Whether any string inside ``data`` carries a protected answer or its digest.
+
+        Strings are compared as they are and in a case, width and whitespace normalized form, and
+        every string leaf is read directly so JSON escaping cannot hide a quote, newline or
+        non-ASCII character. The scan is a best-effort floor: it cannot see a paraphrase.
+        """
+        raw = "\n".join(_strings(data))
+        folded = normalize_text(raw)
         for entry in self._entries.values():
-            if not entry.answer:
+            wanted = normalize_text(entry.answer)
+            if not wanted:
                 continue
-            if entry.answer in text or hashlib.sha256(entry.answer.encode()).hexdigest() in text:
+            hashes = (
+                hashlib.sha256(entry.answer.encode()).hexdigest(),
+                hashlib.sha256(wanted.encode()).hexdigest(),
+            )
+            if entry.answer in raw or wanted in folded or any(h in folded for h in hashes):
                 return True
         return False
+
+
+def _strings(data: object) -> Iterator[str]:
+    if isinstance(data, str):
+        yield data
+    elif isinstance(data, bytes | bytearray):
+        yield bytes(data).decode(errors="replace")
+    elif isinstance(data, Mapping):
+        for k, v in data.items():
+            yield from _strings(k)
+            yield from _strings(v)
+    elif isinstance(data, list | tuple | set | frozenset):
+        for item in data:
+            yield from _strings(item)
+    else:
+        yield str(data)
 
 
 def check_egress(key: AnswerKey, surface: str, data: object) -> None:
@@ -276,6 +306,7 @@ class ReplayManifest:
     scorer_version: str
     rubric_revision: str
     membership_digest: str
+    content_digest: str
     answer_key_digest: str
     eligible_case_ids: tuple[str, ...]
     excluded: tuple[tuple[str, str], ...]
@@ -290,6 +321,7 @@ class ReplayManifest:
                 self.scorer_version,
                 self.rubric_revision,
                 self.membership_digest,
+                self.content_digest,
                 self.answer_key_digest,
                 list(self.eligible_case_ids),
                 [list(e) for e in self.excluded],
@@ -303,6 +335,16 @@ def replay_membership(cases: tuple[EveCase, ...]) -> str:
             "cases": sorted(c.case_id for c in cases),
             "families": sorted({c.family_id for c in cases}),
         }
+    )
+
+
+def cases_content_digest(cases: tuple[EveCase, ...]) -> str:
+    """Bind the untouched question and approved context of every case, not only its id."""
+    return digest(
+        [
+            [c.case_id, c.family_id, c.question, [[p.passage_id, p.text] for p in c.context]]
+            for c in sorted(cases, key=lambda c: c.case_id)
+        ]
     )
 
 
@@ -332,6 +374,7 @@ def freeze(
         scorer.version,
         scorer.rubric_revision,
         replay_membership(cases),
+        cases_content_digest(cases),
         key.digest,
         tuple(eligible),
         tuple(excluded),
@@ -353,7 +396,10 @@ def verify_bound(
         manifest.rubric_revision,
     ):
         raise EveRefusal("scorer_version_drift")
-    if replay_membership(cases) != manifest.membership_digest:
+    if (
+        replay_membership(cases) != manifest.membership_digest
+        or cases_content_digest(cases) != manifest.content_digest
+    ):
         raise EveRefusal("replay_not_bound")
     if key.digest != manifest.answer_key_digest:
         raise EveRefusal("answer_key_drift")
@@ -461,11 +507,16 @@ class ReplayJournal:
 
 
 class CandidateInference:
-    """Replay a collected candidate through the connector after checking its exact lineage."""
+    """Replay a collected candidate after re-verifying its lineage with the connector.
+
+    A caller-built job and candidate that agree with each other are not enough: the connector must
+    still report the same recorded job and hand back the same candidate through ``Preflight``.
+    """
 
     def __init__(
         self,
-        connector: mc.Connector,
+        preflight: mc.Preflight,
+        actor: str,
         job: mc.JobReceipt,
         candidate: mc.Candidate,
         registration: EveTaskRegistration,
@@ -474,15 +525,24 @@ class CandidateInference:
             mc.verify_candidate(job, candidate)
         except mc.CapabilityError:
             raise EveRefusal("candidate_lineage_unverified") from None
+        binding = job.intent.binding
         if (
             candidate.parent_revision != registration.base_revision
-            or job.intent.binding.immutable_revision != registration.base_revision
-            or job.intent.binding.preprocessing_revision != registration.fingerprint
-            or job.intent.binding.model_ref != registration.model_ref
+            or binding.immutable_revision != registration.base_revision
+            or binding.preprocessing_revision != registration.fingerprint
+            or binding.model_ref != registration.model_ref
+            or binding.task != registration.task
         ):
             raise EveRefusal("candidate_lineage_unverified")
-        self.connector = connector
+        try:
+            recorded = preflight.collect_candidate(actor, job)
+        except mc.CapabilityError:
+            raise EveRefusal("candidate_lineage_unverified") from None
+        if recorded != candidate:
+            raise EveRefusal("candidate_lineage_unverified")
+        self.connector = preflight.connector
         self.candidate = candidate
+        self.benchmark_revision = job.intent.benchmark_revision
 
     @property
     def served_revision(self) -> str:
@@ -509,6 +569,10 @@ class CandidateInference:
             )
         except (KeyError, TypeError):
             raise EveRefusal("output_case_mismatch") from None
+
+
+def run_id_for(manifest: ReplayManifest, arm: ArmSpec) -> str:
+    return digest([manifest.digest, arm.digest])
 
 
 def _ref(manifest: ReplayManifest, case_id: str) -> str:
@@ -562,6 +626,8 @@ class EveReplayWorker:
         )
         if binding != expected:
             raise EveRefusal("registration_binding_mismatch")
+        if not self.credentials.is_available(binding.credential_ref):
+            raise EveRefusal("credential_unavailable")
         try:
             capability = self.preflight.discover(actor, binding, mc.Purpose.BASELINE)
         except mc.CapabilityError:
@@ -570,8 +636,6 @@ class EveReplayWorker:
             raise EveRefusal("model_not_qualified")
         if not capability.exact_model_attribution:
             raise EveRefusal("exact_model_revision_unverified")
-        if not self.credentials.is_available(binding.credential_ref):
-            raise EveRefusal("credential_unavailable")
         verify_bound(manifest, registration, scorer, cases, key)
         if arm.decoding_digest != registration.decoding.digest:
             raise EveRefusal("decoding_drift")
@@ -579,8 +643,15 @@ class EveReplayWorker:
             raise EveRefusal("served_revision_mismatch")
         if arm.arm_id != "candidate" and arm.served_revision != registration.base_revision:
             raise EveRefusal("served_revision_mismatch")
+        if arm.arm_id == "candidate":
+            if not isinstance(inference, CandidateInference):
+                raise EveRefusal("candidate_lineage_unverified")
+            if inference.benchmark_revision != manifest.benchmark_revision:
+                raise EveRefusal("candidate_benchmark_mismatch")
+            if arm.served_revision == registration.base_revision:
+                raise EveRefusal("served_revision_mismatch")
 
-        run_id = digest([manifest.digest, arm.digest])
+        run_id = run_id_for(manifest, arm)
         done = self.journal.arm(run_id)
         if done is not None:
             self._emit(key, f"arm_replay_reused arm={arm.arm_id} run={run_id[7:23]}")
@@ -713,12 +784,26 @@ def build_result(
     manifest: ReplayManifest,
     arms: Mapping[str, ArmRecord],
     *,
-    scorer_selfcheck_passed: bool,
-    key: AnswerKey | None = None,
+    scorer: Scorer,
+    journal: ReplayJournal,
+    key: AnswerKey,
 ) -> dict[str, Any]:
-    """Recomputable versioned result. Counts only; no per-case answer or question text."""
+    """Recomputable versioned result. Counts only; no per-case answer or question text.
+
+    The scorer self-check is run here, never accepted from the caller, and every arm must be the
+    record the replay worker journaled for this manifest, so a hand-built arm cannot be scored.
+    """
     if not arms or any(k != r.spec.arm_id or k not in ARMS for k, r in arms.items()):
         raise EveRefusal("invalid_arm_spec")
+    if (scorer.version, scorer.rubric_revision) != (
+        manifest.scorer_version,
+        manifest.rubric_revision,
+    ):
+        raise EveRefusal("scorer_version_drift")
+    for record in arms.values():
+        if journal.arm(run_id_for(manifest, record.spec)) != record:
+            raise EveRefusal("arm_not_journaled")
+    scorer_selfcheck_passed = scorer_selfcheck(scorer)
     treatment = arms.get("candidate") or arms.get("simple_repair")
     control = arms.get("simple_repair") if "candidate" in arms else arms.get("baseline")
     if "candidate" in arms and control is None:
@@ -762,8 +847,7 @@ def build_result(
         "fit_authorized": False,
         "release_authorized": False,
     }
-    if key is not None:
-        check_egress(key, "result", body)
+    check_egress(key, "result", body)
     return {"body": body, "result_digest": digest(body)}
 
 
@@ -774,15 +858,31 @@ class StageDecision:
 
 
 def stage_decision(result: Mapping[str, Any], *, recomputed_digest: str) -> StageDecision:
-    """Whether a result may be offered for Slack review. It is never a release authorization."""
-    body = result["body"]
-    reasons = []
-    if not body["scorer"]["selfcheck_passed"]:
-        reasons.append("scorer_selfcheck_failed")
-    if result["result_digest"] != digest(body) or recomputed_digest != result["result_digest"]:
-        reasons.append("recompute_mismatch")
-    if body["improvement_claim"] != "observed_net_fixes":
-        reasons.append(f"improvement_{body['improvement_claim']}")
+    """Whether a result may be offered for Slack review. It is never a release authorization.
+
+    ``recomputed_digest`` must come from rebuilding the result with a fresh journal and scorer;
+    a digest alone proves only that the body is self-consistent, so the body's tier, scope and
+    authorization flags are checked as well.
+    """
+    try:
+        body = result["body"]
+        reasons = []
+        if not body["scorer"]["selfcheck_passed"]:
+            reasons.append("scorer_selfcheck_failed")
+        if result["result_digest"] != digest(body) or recomputed_digest != result["result_digest"]:
+            reasons.append("recompute_mismatch")
+        if (
+            body["schema_version"] != VERSION
+            or body["evidence_tier"] != TIER
+            or body["claim_scope"] != "implementation_only"
+        ):
+            reasons.append("result_not_generated_implementation_only")
+        if body["fit_authorized"] is not False or body["release_authorized"] is not False:
+            reasons.append("authorization_flag_set")
+        if body["improvement_claim"] != "observed_net_fixes":
+            reasons.append(f"improvement_{body['improvement_claim']}")
+    except (KeyError, TypeError):
+        return StageDecision(False, ("result_malformed",))
     return StageDecision(not reasons, tuple(reasons))
 
 
@@ -790,3 +890,29 @@ def guard_fit_payload(key: AnswerKey, plan: FitPlan) -> None:
     """Refuse a fit plan whose rows or intent carry protected answer text."""
     check_egress(key, "fit_payload", [dict(r) for r in plan.rows])
     check_egress(key, "fit_payload", [plan.intent.development_digest, sorted(plan.intent.fields)])
+
+
+def plan_guarded_fit(
+    *,
+    key: AnswerKey,
+    manifest: ReplayManifest,
+    protected_cases: tuple[EveCase, ...],
+    **plan_arguments: Any,
+) -> FitPlan:
+    """The sanctioned way to plan a fit: bound to the frozen replay set and scanned for answers.
+
+    The protected cases must be exactly the ones the manifest froze, the partition must declare
+    that same protected membership, no development question may repeat a protected question under
+    a new id, and no protected answer may appear in a row.
+    """
+    if (
+        replay_membership(protected_cases) != manifest.membership_digest
+        or cases_content_digest(protected_cases) != manifest.content_digest
+    ):
+        raise EveRefusal("replay_not_bound")
+    plan = plan_fit(bound_membership_digest=manifest.membership_digest, **plan_arguments)
+    protected_questions = {normalize_text(c.question) for c in protected_cases}
+    if any(normalize_text(str(row["question"])) in protected_questions for row in plan.rows):
+        raise EveRefusal("protected_overlap")
+    guard_fit_payload(key, plan)
+    return plan

@@ -287,8 +287,26 @@ class Env:
             ),
         }
 
+    def result(
+        self,
+        arms: Mapping[str, rp.ArmRecord],
+        *,
+        journal: rp.ReplayJournal | None = None,
+        scorer_: rp.Scorer | None = None,
+    ) -> dict[str, Any]:
+        return rp.build_result(
+            self.manifest, arms, scorer=scorer_ or self.scorer,
+            journal=journal or rp.ReplayJournal(self.root / "journal.jsonl"), key=self.key,
+        )  # fmt: skip
+
+    def candidate_inference(self, tuned: Mapping[int, str] = TUNED) -> rp.CandidateInference:
+        self.transport.tuned = tuned
+        job, candidate = self.fit_and_collect()
+        return rp.CandidateInference(self.preflight, "training", job, candidate, self.reg)
+
     def fit_and_collect(self) -> tuple[mc.JobReceipt, mc.Candidate]:
-        plan = task.plan_fit(
+        plan = rp.plan_guarded_fit(
+            key=self.key, manifest=self.manifest, protected_cases=PROTECTED,
             registration=self.reg, binding=self.binding,
             capability=self.preflight.discover("training", self.binding, mc.Purpose.TRAINING),
             partition=partition(), grant_revision="grant-v1", benchmark_revision=BENCH,
@@ -331,13 +349,11 @@ def full_result(env: Env, worker: rp.EveReplayWorker | None = None) -> dict[str,
     worker = worker or env.worker()
     arms = env.baseline_and_simple(worker)
     job, candidate = env.fit_and_collect()
-    infer = rp.CandidateInference(env.transport, job, candidate, env.reg)
+    infer = rp.CandidateInference(env.preflight, "training", job, candidate, env.reg)
     arms["candidate"] = env.replay(
         env.arm("candidate", candidate.artifact_or_serving_revision), infer, worker=worker
     )
-    return rp.build_result(
-        env.manifest, arms, scorer_selfcheck_passed=rp.scorer_selfcheck(env.scorer), key=env.key
-    )
+    return env.result(arms, journal=worker.journal)
 
 
 # ---------------------------------------------------------------- A1 registration
@@ -393,6 +409,7 @@ def test_a2_inference_only_registration_can_baseline_but_never_fit(tmp_path: Pat
             registration=env.reg, binding=env.binding, capability=capability,
             partition=partition(), grant_revision="grant-v1", benchmark_revision=BENCH,
             idempotency_key="k", bound=BOUND,
+            bound_membership_digest=env.manifest.membership_digest,
         )  # fmt: skip
     assert env.transport.executions == 0
 
@@ -406,6 +423,7 @@ def test_a2_train_declared_but_target_not_trainable_is_zero_fit(tmp_path: Path) 
             registration=env.reg, binding=env.binding, capability=capability,
             partition=partition(), grant_revision="grant-v1", benchmark_revision=BENCH,
             idempotency_key="k", bound=BOUND,
+            bound_membership_digest=env.manifest.membership_digest,
         )  # fmt: skip
     assert env.transport.executions == 0
 
@@ -427,7 +445,7 @@ def test_a3_protected_case_or_family_overlap_is_refused() -> None:
 
 def test_a3_stale_or_wrong_lineage_candidate_is_not_replayable(env: Env) -> None:
     job, candidate = env.fit_and_collect()
-    rp.CandidateInference(env.transport, job, candidate, env.reg)
+    rp.CandidateInference(env.preflight, "training", job, candidate, env.reg)
     for bad in (
         replace(candidate, parent_revision="f" * 40),
         replace(candidate, job_ref="simulated:other-job"),
@@ -435,18 +453,18 @@ def test_a3_stale_or_wrong_lineage_candidate_is_not_replayable(env: Env) -> None
         replace(candidate, intent=replace(candidate.intent, idempotency_key="other")),
     ):
         with refuses("candidate_lineage_unverified"):
-            rp.CandidateInference(env.transport, job, bad, env.reg)
+            rp.CandidateInference(env.preflight, "training", job, bad, env.reg)
     other = replace(env.reg, tokenizer_digest="sha256:" + "9" * 64)
     with refuses("candidate_lineage_unverified"):
-        rp.CandidateInference(env.transport, job, candidate, other)
+        rp.CandidateInference(env.preflight, "training", job, candidate, other)
     wrong_state = replace(job, state=mc.JobState.RUNNING)
     with refuses("candidate_lineage_unverified"):
-        rp.CandidateInference(env.transport, wrong_state, candidate, env.reg)
+        rp.CandidateInference(env.preflight, "training", wrong_state, candidate, env.reg)
 
 
 def test_a3_candidate_serving_a_different_revision_than_its_arm_is_refused(env: Env) -> None:
     job, candidate = env.fit_and_collect()
-    infer = rp.CandidateInference(env.transport, job, candidate, env.reg)
+    infer = rp.CandidateInference(env.preflight, "training", job, candidate, env.reg)
     with refuses("served_revision_mismatch"):
         env.replay(env.arm("candidate", "generated-adapter-other"), infer)
     with refuses("served_revision_mismatch"):
@@ -460,6 +478,7 @@ def test_a4_fit_rows_are_masked_development_only_with_membership_fingerprint(env
         capability=env.preflight.discover("training", env.binding, mc.Purpose.TRAINING),
         partition=partition(), grant_revision="grant-v1", benchmark_revision=BENCH,
         idempotency_key="k", bound=BOUND,
+        bound_membership_digest=env.manifest.membership_digest,
     )  # fmt: skip
     assert len(plan.rows) == 3
     assert all(r["loss_mask"] == task.LOSS_MASK and set(r) == task.ROW_FIELDS for r in plan.rows)
@@ -543,10 +562,10 @@ def test_v2_protected_answers_never_cross_any_outbound_surface(env: Env) -> None
     job, candidate = env.fit_and_collect()
     arms["candidate"] = env.replay(
         env.arm("candidate", candidate.artifact_or_serving_revision),
-        rp.CandidateInference(env.transport, job, candidate, env.reg),
+        rp.CandidateInference(env.preflight, "training", job, candidate, env.reg),
         worker=worker,
     )
-    result = rp.build_result(env.manifest, arms, scorer_selfcheck_passed=True, key=env.key)
+    result = env.result(arms, journal=worker.journal)
     surfaces = {
         "request": b"".join(b for inf in infers.values() for b in inf.seen),
         "candidate_request": task.canonical([dict(i) for i in env.transport.seen]),
@@ -605,6 +624,7 @@ def test_v2_fit_payload_or_log_carrying_a_protected_answer_is_refused(env: Env) 
         capability=env.preflight.discover("training", env.binding, mc.Purpose.TRAINING),
         partition=leaky, grant_revision="grant-v1", benchmark_revision=BENCH,
         idempotency_key="k-leak", bound=BOUND,
+        bound_membership_digest=env.manifest.membership_digest,
     )  # fmt: skip
     with refuses("protected_answer_exposed_fit_payload"):
         rp.guard_fit_payload(env.key, plan)
@@ -615,10 +635,21 @@ def test_v2_fit_payload_or_log_carrying_a_protected_answer_is_refused(env: Env) 
 
 
 def test_v2_result_containing_a_protected_answer_is_refused(env: Env) -> None:
-    arms = env.baseline_and_simple()
-    poisoned = replace(env.manifest, benchmark_id=f"title {answer(1)}")
+    poisoned = rp.freeze(
+        benchmark_id=f"title {answer(1)}", benchmark_revision=BENCH, registration=env.reg,
+        scorer=env.scorer, key=env.key, cases=PROTECTED,
+    )  # fmt: skip
+    worker = env.worker("poison.jsonl")
+    arms = {
+        "baseline": env.replay(
+            env.arm("baseline"),
+            ScriptedInference(BASE, BASELINE),
+            worker=worker,
+            manifest=poisoned,
+        )
+    }
     with refuses("protected_answer_exposed_result"):
-        rp.build_result(poisoned, arms, scorer_selfcheck_passed=True, key=env.key)
+        rp.build_result(poisoned, arms, scorer=env.scorer, journal=worker.journal, key=env.key)
 
 
 # ---------------------------------------------------------------- V3 scoring rules
@@ -627,7 +658,7 @@ def test_v3_unverifiable_claims_never_count_as_correct(env: Env) -> None:
     base = arms["baseline"]
     verdicts = {r.ref: r.verdict for r in base.rows}
     assert rp.Verdict.UNVERIFIED in verdicts.values()
-    result = rp.build_result(env.manifest, arms, scorer_selfcheck_passed=True)
+    result = env.result(arms)
     body = result["body"]["arms"]["baseline"]
     # p1 correct; p2 wrong; p3 unverifiable; p4 should abstain but answered; p5 refused
     assert (body["eligible"], body["excluded_unscored"], body["answered"]) == (5, 1, 4)
@@ -645,36 +676,31 @@ def test_v3_unverifiable_claims_never_count_as_correct(env: Env) -> None:
 
 def test_v3_correct_abstention_and_unknown_denominators_stay_unknown(env: Env) -> None:
     arms = env.baseline_and_simple()
-    simple = rp.build_result(env.manifest, arms, scorer_selfcheck_passed=True)["body"]["arms"][
-        "simple_repair"
-    ]
+    simple = env.result(arms)["body"]["arms"]["simple_repair"]
     assert simple["correct_abstention"] == 1
     # an arm that answers nothing has no verified-answered population: unknown, not zero
     silent = env.replay(
         env.arm("baseline", source_snapshot_id="generated-snapshot-2"),
         ScriptedInference(BASE, dict.fromkeys(range(1, 7), "refuse")),
     )
-    body = rp.build_result(env.manifest, {"baseline": silent}, scorer_selfcheck_passed=True)["body"]
+    body = env.result({"baseline": silent})["body"]
     assert body["arms"]["baseline"]["serious_error_over_verified_answered"] == [0, None]
     assert body["improvement_claim"] == "none_baseline_only"
     assert body["excluded_redacted"][0][1] == "disputed"
 
 
 def test_v3_missing_output_stays_visible_and_blocks_changed_denominator(env: Env) -> None:
-    class Dropping(ScriptedInference):
-        def generate(self, arm: rp.ArmSpec, requests: tuple[rp.ReplayRequest, ...]) -> Any:
-            return super().generate(arm, requests)[:-1]
-
     arms = env.baseline_and_simple()
-    dropped = env.replay(env.arm("candidate", BASE), Dropping(BASE, TUNED))
+    infer = env.candidate_inference()
+    real = env.transport.predict_for_replay
+    setattr(env.transport, "predict_for_replay", lambda c, i: real(c, i)[:-1])  # noqa: B010
+    dropped = env.replay(env.arm("candidate", infer.served_revision), infer)
     assert sum(r.verdict is rp.Verdict.MISSING for r in dropped.rows) == 1
     arms["candidate"] = dropped
-    body = rp.build_result(env.manifest, arms, scorer_selfcheck_passed=True)["body"]
+    body = env.result(arms)["body"]
     assert body["arms"]["candidate"]["missing_output"] == 1
     assert body["improvement_claim"] == "blocked_changed_denominator"
-    only_two = rp.build_result(env.manifest, {"candidate": dropped}, scorer_selfcheck_passed=True)[
-        "body"
-    ]
+    only_two = env.result({"candidate": dropped})["body"]
     assert only_two["improvement_claim"] == "hold_missing_arm"
 
 
@@ -779,12 +805,13 @@ def test_v5_broken_scorer_cannot_stage(env: Env) -> None:
     job, candidate = env.fit_and_collect()
     arms["candidate"] = env.replay(
         env.arm("candidate", candidate.artifact_or_serving_revision),
-        rp.CandidateInference(env.transport, job, candidate, env.reg),
+        rp.CandidateInference(env.preflight, "training", job, candidate, env.reg),
         worker=worker,
     )
-    good = rp.build_result(env.manifest, arms, scorer_selfcheck_passed=True)
+    good = env.result(arms, journal=worker.journal)
     assert rp.stage_decision(good, recomputed_digest=good["result_digest"]).stageable
-    broken = rp.build_result(env.manifest, arms, scorer_selfcheck_passed=False)
+    broken = env.result(arms, journal=worker.journal, scorer_=AlwaysCorrect())
+    assert broken["body"]["scorer"]["selfcheck_passed"] is False
     decision = rp.stage_decision(broken, recomputed_digest=broken["result_digest"])
     assert not decision.stageable and "scorer_selfcheck_failed" in decision.reasons
     mismatch = rp.stage_decision(good, recomputed_digest="sha256:" + "3" * 64)
@@ -801,12 +828,9 @@ def test_v5_broken_scorer_cannot_stage(env: Env) -> None:
 
 def test_v5_no_net_fixes_is_not_stageable(env: Env) -> None:
     arms = env.baseline_and_simple()
-    result = rp.build_result(env.manifest, arms, scorer_selfcheck_passed=True)
-    assert result["body"]["improvement_claim"] in {"observed_net_fixes", "no_net_fixes"}
-    flat = env.replay(env.arm("candidate", BASE, source_snapshot_id="generated-snapshot-1"),
-                      ScriptedInference(BASE, SIMPLE))  # fmt: skip
-    arms["candidate"] = flat
-    result = rp.build_result(env.manifest, arms, scorer_selfcheck_passed=True)
+    infer = env.candidate_inference(SIMPLE)  # the tuned adapter behaves exactly like the repair
+    arms["candidate"] = env.replay(env.arm("candidate", infer.served_revision), infer)
+    result = env.result(arms)
     assert result["body"]["improvement_claim"] == "no_net_fixes"
     decision = rp.stage_decision(result, recomputed_digest=result["result_digest"])
     assert not decision.stageable and decision.reasons == ("improvement_no_net_fixes",)
@@ -819,14 +843,13 @@ def test_v6_changed_retrieval_is_disclosed_and_blocks_a_causal_claim(env: Env) -
             return case_.context[:1] if case_.case_id.endswith("1") else case_.context
 
     arms = env.baseline_and_simple()
+    infer = env.candidate_inference()
     arms["candidate"] = env.replay(
-        env.arm("candidate", BASE, retrieval_settings_id="generated-retrieval-2"),
-        ScriptedInference(BASE, TUNED),
+        env.arm("candidate", infer.served_revision, retrieval_settings_id="generated-retrieval-2"),
+        infer,
         retriever=Shifted(),
     )
-    causal = rp.build_result(env.manifest, arms, scorer_selfcheck_passed=True)["body"][
-        "causal_tuning_comparison"
-    ]
+    causal = env.result(arms)["body"]["causal_tuning_comparison"]
     assert causal["available"] is False
     assert causal["differing_settings"] == ["retrieval_settings_id"]
     assert causal["retrieval_changed_cases"] == 1
@@ -904,3 +927,192 @@ def test_e1_registered_task_runs_eligible_arms_candidate_and_recomputable_scorec
     # the lower-level model smoke and the real Slack-to-GPU run stay separate, open gates
     assert "real_eve_inference_capacity_unavailable" in body["unsatisfied_external_gates"]
     assert body["fit_authorized"] is False and body["release_authorized"] is False
+
+
+# ---------------------------------------------------------------- closer: false-trust probes
+HARD_ANSWER = 'Zurich "north" gate\nline two \u00e9\\end'
+
+
+def hard_key() -> rp.AnswerKey:
+    entries = dict(key()._entries)  # noqa: SLF001
+    entries["generated-p1"] = rp.ProtectedAnswer(
+        rp.Expectation.ANSWER, HARD_ANSWER, frozenset({"p1-a"})
+    )
+    return rp.AnswerKey(entries)
+
+
+@pytest.mark.parametrize(
+    "carrier",
+    [
+        lambda a: {"nested": [a]},
+        lambda a: a.upper(),
+        lambda a: " ".join(a.split()),
+        lambda a: f"prefix {a} suffix".encode(),
+        lambda a: {a: 1},
+    ],
+)
+def test_x_leak_scan_sees_escaped_reformatted_and_nested_answers(carrier: Any) -> None:
+    assert hard_key().leaks(carrier(HARD_ANSWER))
+    assert not hard_key().leaks({"harmless": ["generated unrelated text"]})
+
+
+def test_x_hard_answer_in_retrieval_is_refused_before_inference(env: Env) -> None:
+    k = hard_key()
+    manifest = rp.freeze(
+        benchmark_id="b", benchmark_revision=BENCH, registration=env.reg, scorer=env.scorer,
+        key=k, cases=PROTECTED,
+    )  # fmt: skip
+
+    class Leaky:
+        def retrieve(self, arm: rp.ArmSpec, case_: task.EveCase) -> tuple[task.Passage, ...]:
+            return (*case_.context, task.Passage("leak", HARD_ANSWER.upper()))
+
+    infer = ScriptedInference(BASE, BASELINE)
+    with refuses("protected_answer_exposed_retrieval"):
+        env.replay(env.arm("baseline"), infer, manifest=manifest, key_=k, retriever=Leaky())
+    assert infer.calls == 0
+
+
+def test_x_protected_answer_repr_does_not_show_the_answer() -> None:
+    entry = rp.ProtectedAnswer(rp.Expectation.ANSWER, HARD_ANSWER, frozenset())
+    assert "Zurich" not in repr(entry)
+
+
+def test_x_forged_candidate_the_connector_never_produced_is_refused(env: Env) -> None:
+    intent = mc.FitIntent(
+        env.binding, "grant-v1", BENCH, "a" * 64, "generated-forged-key", task.ROW_FIELDS, BOUND
+    )
+    job = mc.JobReceipt(intent, mc.JobState.COMPLETED, "simulated:forged", "simulated:ev")
+    forged = mc.Candidate(intent, "simulated:forged", BASE, "generated-adapter-forged", "ev")
+    with refuses("candidate_lineage_unverified"):
+        rp.CandidateInference(env.preflight, "training", job, forged, env.reg)
+    assert env.transport.executions == 0
+
+
+def test_x_candidate_arm_needs_lineage_checked_inference_for_this_benchmark(env: Env) -> None:
+    with refuses("candidate_lineage_unverified"):
+        env.replay(env.arm("candidate", BASE), ScriptedInference(BASE, TUNED))
+    # a real candidate fitted for a different benchmark revision is not this benchmark's candidate
+    env.grants[mc.Purpose.TRAINING] = replace(
+        env.grants[mc.Purpose.TRAINING], benchmark_revisions=frozenset({BENCH, "generated-other"})
+    )
+    plan = task.plan_fit(
+        registration=env.reg, binding=env.binding,
+        capability=env.preflight.discover("training", env.binding, mc.Purpose.TRAINING),
+        partition=partition(), grant_revision="grant-v1", benchmark_revision="generated-other",
+        idempotency_key="generated-other-fit", bound=BOUND,
+        bound_membership_digest=env.manifest.membership_digest,
+    )  # fmt: skip
+    job = env.preflight.submit_reserved_fit(
+        "training", plan.intent, plan.rows, reservation_guard=nullcontext
+    )
+    other = rp.CandidateInference(
+        env.preflight, "training", job, env.preflight.collect_candidate("training", job), env.reg
+    )
+    with refuses("candidate_benchmark_mismatch"):
+        env.replay(env.arm("candidate", other.served_revision), other)
+    own = env.candidate_inference()
+    with refuses("served_revision_mismatch"):
+        env.replay(env.arm("candidate", BASE), own)
+
+
+def test_x_fit_cannot_declare_a_smaller_protected_set_than_the_replay_froze(env: Env) -> None:
+    sneaky = task.Partition(
+        (
+            task.DevelopmentExample(
+                task.EveCase("generated-sneak", "generated-sneakfam", "dev q?", ()), "dev a"
+            ),
+            task.DevelopmentExample(PROTECTED[0], "dev a2"),
+        ),
+        frozenset(),
+        frozenset(),
+    )
+    common: dict[str, Any] = {
+        "key": env.key, "manifest": env.manifest, "protected_cases": PROTECTED,
+        "registration": env.reg, "binding": env.binding,
+        "capability": env.preflight.discover("training", env.binding, mc.Purpose.TRAINING),
+        "grant_revision": "grant-v1", "benchmark_revision": BENCH,
+        "idempotency_key": "generated-sneaky", "bound": BOUND,
+    }  # fmt: skip
+    with refuses("protected_membership_mismatch"):
+        rp.plan_guarded_fit(partition=sneaky, **common)
+    # the same protected question under a new case and family id is still protected overlap
+    renamed = task.Partition(
+        (
+            task.DevelopmentExample(
+                task.EveCase(
+                    "generated-new-id", "generated-new-fam", PROTECTED[0].question.upper(), ()
+                ),
+                "dev a",
+            ),
+        ),
+        partition().protected_case_ids,
+        partition().protected_family_ids,
+    )
+    with refuses("protected_overlap"):
+        rp.plan_guarded_fit(partition=renamed, **common)
+    with refuses("replay_not_bound"):
+        rp.plan_guarded_fit(partition=partition(), **{**common, "protected_cases": PROTECTED[:3]})
+    assert env.transport.executions == 0
+
+
+def test_x_replay_with_altered_question_or_context_is_refused(env: Env) -> None:
+    infer = ScriptedInference(BASE, BASELINE)
+    reworded = (replace(PROTECTED[0], question="a different question?"), *PROTECTED[1:])
+    with refuses("replay_not_bound"):
+        env.replay(env.arm("baseline"), infer, cases=reworded)
+    swapped = replace(PROTECTED[0], context=(task.Passage("p1-a", "swapped"),))
+    recontexted = (swapped, *PROTECTED[1:])
+    with refuses("replay_not_bound"):
+        env.replay(env.arm("baseline"), infer, cases=recontexted)
+    assert infer.calls == 0
+
+
+def test_x_selfcheck_is_computed_and_arms_must_be_journaled(env: Env) -> None:
+    arms = env.baseline_and_simple()
+    handbuilt = rp.ArmRecord(
+        env.arm("candidate", "generated-claimed"),
+        tuple(replace(r, verdict=rp.Verdict.CORRECT_ANSWER) for r in arms["baseline"].rows),
+    )
+    with refuses("arm_not_journaled"):
+        env.result({**arms, "candidate": handbuilt})
+    tampered = rp.ArmRecord(
+        arms["baseline"].spec,
+        tuple(replace(r, verdict=rp.Verdict.CORRECT_ANSWER) for r in arms["baseline"].rows),
+    )
+    with refuses("arm_not_journaled"):
+        env.result({"baseline": tampered})
+    with refuses("scorer_version_drift"):
+        env.result(arms, scorer_=rp.DeterministicScorer("generated-scorer-v9", "r"))
+
+
+def test_x_a_redigested_forged_body_is_not_stageable(env: Env) -> None:
+    result = full_result(env)
+    assert rp.stage_decision(result, recomputed_digest=result["result_digest"]).stageable
+    for change in (
+        {"evidence_tier": "customer_witnessed"},
+        {"claim_scope": "release"},
+        {"release_authorized": True},
+        {"fit_authorized": True},
+        {"schema_version": "other"},
+    ):
+        body = {**result["body"], **change}
+        forged = {"body": body, "result_digest": task.digest(body)}
+        decision = rp.stage_decision(forged, recomputed_digest=forged["result_digest"])
+        assert not decision.stageable, change
+    assert not rp.stage_decision({"body": {}}, recomputed_digest="x").stageable
+
+
+def test_x_credentials_are_checked_before_any_provider_observation(env: Env) -> None:
+    env.credentials.available = False
+    seen: list[str] = []
+    real = env.transport.observe
+
+    def spy(binding: mc.ModelBinding, purpose: mc.Purpose) -> mc.Observation:
+        seen.append(purpose.value)
+        return real(binding, purpose)
+
+    setattr(env.transport, "observe", spy)  # noqa: B010
+    with refuses("credential_unavailable"):
+        env.replay(env.arm("baseline"), ScriptedInference(BASE, BASELINE))
+    assert seen == []
