@@ -65,10 +65,23 @@ and pair names, comparison verdicts, slice statuses, economics basis, uncertaint
 checked against a closed vocabulary derived from what ``comparison_plan`` can emit, on every
 path including holds. A value outside its vocabulary refuses the comparison with the fixed code
 ``comparison_unverified``, which never echoes the offending value.
+
+Critical-slice names (OPE-571, decision D2): slice names are customer-chosen and can carry
+customer or personal information, so the packet never carries them. Each name is published as
+a KEYED digest, HMAC-SHA-256 under a per-engagement key that stays on the customer worker
+(the keyed-commitment pattern decided on OPE-574/OPE-563). A plain SHA-256 is not used because
+short names are guessable. Names resolve only in the customer's private view
+(``private_slice_view``), which needs the same key and is never stored or sent. No key, no
+packet: a missing or malformed engagement key refuses with ``slice_digest_key_unavailable`` and
+never falls back to plain hashing. Until a signing and key-custody contract lands (OPE-566) the
+key is engagement-local and caller-injected (``SliceKeyView``), and the packet states that the
+digest is not issuer-authenticated. Because the key never leaves the worker, only the key holder
+can re-derive the slice digests; a consumer without it can check self-consistency and pointers.
 """
 
 from __future__ import annotations
 
+import hmac
 import json
 import os
 import re
@@ -87,6 +100,7 @@ PACKET = "opentour.pilot.comparison-packet.v1"
 EVENT = "opentour.pilot.comparison-completed-event.v1"
 VERDICT = "opentour.pilot.independent-verdict.v1"
 RECEIPT = "opentour.benchmark-audit-receipt.v1"
+SLICE_DIGEST = "opentour.pilot.critical-slice-digest.v1"
 EVENT_REVISION = 1
 _FIXTURE_REFUSAL = "generated_fixture_not_permitted_in_live_context"
 _ID = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9_.:@/-]{0,127}")
@@ -171,9 +185,8 @@ _EXCLUSION_KEYS = (
 # Critical-slice names are customer-chosen, so no closed vocabulary exists. This is a
 # WELL-FORMEDNESS check only, NOT a disclosure control: it is exactly the identifier shape the
 # planner enforces (``simple_repair.identifier``, used by ``comparison_plan._terms``), so every
-# planner-legal name passes, including names that carry customer identifiers. Keeping
-# customer-chosen names out of the published packet is owned by OPE-571 (publish slice names as
-# digests). A test pins this pattern to the planner's own.
+# planner-legal name passes. The disclosure control is ``slice_digest`` (OPE-571): the packet
+# carries only keyed digests of these names. A test pins this pattern to the planner's own.
 _SLICE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}")
 # Rendered decimal measurements (``pilot_metrics.rendered``): six fixed places, or absent.
 _DECIMAL = re.compile(r"[0-9]{1,40}\.[0-9]{6}")
@@ -271,6 +284,17 @@ class AuthorityView(Protocol):
     def current(self, run_ref: str) -> PacketContext | None: ...
 
 
+class SliceKeyView(Protocol):
+    """Injected boundary: the engagement-local slice-digest key on the customer worker.
+
+    Returns the 32-byte key for ``(tenant, engagement)``, or ``None`` when it is unavailable.
+    The key never enters a packet, event, refusal or the outbox. Its custody and rotation are
+    owned by OPE-566; until then it is engagement-local and not issuer-authenticated.
+    """
+
+    def slice_key(self, tenant: str, engagement: str) -> bytes | None: ...
+
+
 class EventSink(Protocol):
     """Injected boundary: the consumer. It must deduplicate on the event's idempotency key."""
 
@@ -329,6 +353,27 @@ def _fraction_ok(value: Any) -> bool:
         and _count(value.get("numerator"))
         and _count(value.get("denominator"))
     )
+
+
+def _key_ok(key: Any) -> bool:
+    return isinstance(key, bytes) and len(key) == 32
+
+
+def slice_digest(name: str, key: bytes) -> str:
+    """Keyed digest of one critical-slice name: HMAC-SHA-256 under a key scoped to this purpose.
+
+    Same two-step shape as the repository's other keyed seals (``starter_reconnect``): derive a
+    purpose-scoped key from the engagement key, then MAC the value. Never a plain hash.
+    """
+    scoped = hmac.digest(key, SLICE_DIGEST.encode(), "sha256")
+    return hmac.digest(scoped, name.encode(), "sha256").hex()
+
+
+def _engagement_key(keys: SliceKeyView | None, tenant: str, comparison: Any) -> bytes | None:
+    engagement = comparison.get("engagement") if isinstance(comparison, dict) else None
+    if keys is None or not (isinstance(engagement, str) and _IDENTIFIER.fullmatch(engagement)):
+        return None
+    return keys.slice_key(tenant, engagement)
 
 
 def _arm_vocab_ok(name: str, arm: Any) -> bool:
@@ -467,7 +512,7 @@ def _denominator_ok(comparison: Json) -> bool:
     )
 
 
-def _arm_aggregate(arm: Json) -> Json:
+def _arm_aggregate(arm: Json, slice_key: bytes) -> Json:
     metrics = arm["metrics"]
     economics = metrics["economics"]
     return {
@@ -483,7 +528,11 @@ def _arm_aggregate(arm: Json) -> Json:
             k: metrics["uncertainty"].get(k) for k in ("method", "lower", "upper", "small_sample")
         },
         "operating_point": metrics["operating_point"]["combined"],
-        "critical_slices": {k: v["status"] for k, v in arm["critical_slices"].items()},
+        "critical_slices": dict(
+            sorted(
+                (slice_digest(k, slice_key), v["status"]) for k, v in arm["critical_slices"].items()
+            )
+        ),
         "hold_reason": arm["hold_reason"],
         "economics": {k: economics[k] for k in _ECON_FIELDS},
     }
@@ -504,6 +553,7 @@ def _assemble(
     verdict: Json | None,
     ctx: PacketContext,
     *,
+    slice_key: bytes,
     allow_generated_fixture: bool,
 ) -> tuple[Json | None, str | None]:
     """Pure and deterministic: identical inputs reproduce the identical packet digest."""
@@ -526,7 +576,9 @@ def _assemble(
             return None, "audit_receipt_unverified"
         if verdict is not None and not _verdict_ok(verdict):
             return None, "independent_verdict_unverified"
-    arms = {name: _arm_aggregate(arm) for name, arm in sorted(comparison["arms"].items())}
+    arms = {
+        name: _arm_aggregate(arm, slice_key) for name, arm in sorted(comparison["arms"].items())
+    }
     pairs = {
         name: {**pair["paired"], "observed_comparison": pair["observed_comparison"]}
         for name, pair in sorted(comparison["comparisons"].items())
@@ -548,6 +600,15 @@ def _assemble(
             "excluded_counts": dict(sorted(comparison.get("exclusions", {}).items())),
         },
         "arms": arms,
+        "critical_slice_names": {
+            "form": "keyed_digest",
+            "algorithm": "hmac_sha256",
+            "key_scope": "engagement",
+            "key_custody": "customer_worker_local",
+            "names_disclosed": False,
+            # Engagement-local key, no custody or signing contract yet (OPE-566 unlanded).
+            "issuer_authenticated": False,
+        },
         "paired": pairs,
         "decision": {
             "disposition": decision["disposition"],
@@ -661,9 +722,14 @@ def assemble_packet(
     verdict: Json | None,
     ctx: PacketContext,
     *,
+    slice_key: bytes | None,
     allow_generated_fixture: bool = False,
 ) -> tuple[Json | None, str | None]:
-    """Return ``(packet, None)`` or ``(None, reason)``. Never raises on a governance failure."""
+    """Return ``(packet, None)`` or ``(None, reason)``. Never raises on a governance failure.
+
+    ``slice_key`` is the engagement key for ``comparison["engagement"]``. Without a valid one
+    there is no packet: slice names are never published plainly or under a plain hash.
+    """
     if allow_generated_fixture and not _fixture_context():
         return None, _FIXTURE_REFUSAL
     if not ctx.valid():
@@ -672,8 +738,16 @@ def assemble_packet(
         return None, "comparison_unverified"
     if comparison.get("organization") != ctx.tenant:
         return None, "comparison_scope_mismatch"
+    if not _key_ok(slice_key):
+        return None, "slice_digest_key_unavailable"
+    assert slice_key is not None
     return _assemble(
-        comparison, receipt, verdict, ctx, allow_generated_fixture=allow_generated_fixture
+        comparison,
+        receipt,
+        verdict,
+        ctx,
+        slice_key=slice_key,
+        allow_generated_fixture=allow_generated_fixture,
     )
 
 
@@ -684,13 +758,51 @@ def verify_packet(
     verdict: Json | None,
     ctx: PacketContext,
     *,
+    slice_key: bytes | None,
     allow_generated_fixture: bool = False,
 ) -> bool:
-    """Independent consumer replay: re-derive the packet from its sources and compare digests."""
+    """Replay: re-derive the packet from its sources and compare digests.
+
+    Re-deriving the slice digests needs the engagement key, so only its holder (the customer
+    worker) can run a full replay. A consumer without the key checks ``packet_digest`` and the
+    evidence pointers only.
+    """
     rebuilt, reason = assemble_packet(
-        comparison, receipt, verdict, ctx, allow_generated_fixture=allow_generated_fixture
+        comparison,
+        receipt,
+        verdict,
+        ctx,
+        slice_key=slice_key,
+        allow_generated_fixture=allow_generated_fixture,
     )
     return reason is None and rebuilt == packet and _sealed(packet, "packet_digest")
+
+
+def private_slice_view(packet: Any, comparison: Any, slice_key: bytes | None) -> Json | None:
+    """The customer's private view: each arm's slice statuses under their readable names.
+
+    Resolved locally from the customer's own comparison and engagement key. The result is for
+    the customer's display only: it is never stored in the outbox, put in an event or sent.
+    Returns ``None`` unless every published digest resolves to one of the comparison's names.
+    """
+    if not (_key_ok(slice_key) and _comparison_ok(comparison)) or not isinstance(packet, dict):
+        return None
+    assert slice_key is not None
+    arms = packet.get("arms")
+    if not _sealed(packet, "packet_digest") or not isinstance(arms, dict):
+        return None
+    names = {
+        slice_digest(name, slice_key): name
+        for arm in comparison["arms"].values()
+        for name in arm["critical_slices"]
+    }
+    view: Json = {}
+    for arm_name, arm in sorted(arms.items()):
+        slices = arm.get("critical_slices") if isinstance(arm, dict) else None
+        if not isinstance(slices, dict) or not all(d in names for d in slices):
+            return None
+        view[arm_name] = {names[d]: status for d, status in sorted(slices.items())}
+    return view
 
 
 def event_for(packet: Json) -> Json:
@@ -737,10 +849,19 @@ _TABLES = ("packets", "outbox", "superseded_receipts", "reconciliations")
 class PacketOutbox:
     """File-backed transactional store. Reopening the file is the restart path."""
 
-    def __init__(self, path: Path | str, *, allow_generated_fixture: bool = False):
+    def __init__(
+        self,
+        path: Path | str,
+        *,
+        slice_keys: SliceKeyView | None = None,
+        allow_generated_fixture: bool = False,
+    ):
         if allow_generated_fixture and not _fixture_context():
             raise PacketStoreError(_FIXTURE_REFUSAL)
         self.path = Path(path)
+        # Engagement-local slice-digest keys on this worker. ``None``: every stage refuses with
+        # ``slice_digest_key_unavailable``; there is no plain-hash fallback.
+        self.slice_keys = slice_keys
         self.allow_generated_fixture = allow_generated_fixture
         with closing(sqlite3.connect(self.path, timeout=5)) as db:
             db.executescript(_SCHEMA)
@@ -793,7 +914,12 @@ class PacketOutbox:
         if ctx is None or ctx.run_ref != run_ref:
             return _refuse("authority_unavailable")
         packet, reason = assemble_packet(
-            comparison, receipt, verdict, ctx, allow_generated_fixture=self.allow_generated_fixture
+            comparison,
+            receipt,
+            verdict,
+            ctx,
+            slice_key=_engagement_key(self.slice_keys, ctx.tenant, comparison),
+            allow_generated_fixture=self.allow_generated_fixture,
         )
         if packet is None:
             return _refuse(reason or "comparison_unverified")
