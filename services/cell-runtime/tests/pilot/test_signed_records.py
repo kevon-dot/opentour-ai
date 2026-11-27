@@ -106,6 +106,13 @@ def redigest(value: Json) -> bytes:
     return bytes(canonical(value))
 
 
+def as_successor(signer: Signer, payload: Json, **changes: Any) -> Json:
+    """A rotation signature in the role of the key being installed."""
+    return signer.signature(
+        payload, sr.ROTATION_PURPOSE, signer_role=sr.CUSTOMER_OWNER_SUCCESSOR, **changes
+    )
+
+
 def consent(**changes: Any) -> Json:
     value: Json = {
         "engagement_id": ENGAGEMENT,
@@ -195,9 +202,7 @@ class Kit:
         verifier.pin_customer_anchor(self.enrolment())
         return verifier
 
-    def rotation(
-        self, previous: Signer, successor: Signer, *signers: Signer, **changes: Any
-    ) -> bytes:
+    def rotation_payload(self, previous: Signer, successor: Signer, **changes: Any) -> Json:
         payload: Json = {
             "profile_version": "1.0",
             "engagement_id": ENGAGEMENT,
@@ -209,7 +214,24 @@ class Kit:
             "not_after": stamp(3600),
         }
         payload.update(changes)
-        return sign(payload, sr.ROTATION_PURPOSE, *(signers or (previous,)))
+        return payload
+
+    def rotation(
+        self, previous: Signer, successor: Signer, *signers: Signer, **changes: Any
+    ) -> bytes:
+        """Signed by the previous key and by the new key (proof of possession) by default."""
+        payload = self.rotation_payload(previous, successor, **changes)
+        if signers:
+            return sign(payload, sr.ROTATION_PURPOSE, *signers)
+        return canonical(
+            {
+                "payload": payload,
+                "signatures": [
+                    previous.signature(payload, sr.ROTATION_PURPOSE),
+                    as_successor(successor, payload),
+                ],
+            }
+        )
 
 
 @pytest.fixture
@@ -275,6 +297,11 @@ def test_policy_table_matches_the_owner_ruling() -> None:
     assert sr.REQUIRED_ROLES[sr.VERDICT_PURPOSE] == {sr.INDEPENDENT_EVALUATOR}
     assert sr.REQUIRED_ROLES[sr.BENCHMARK_AUDIT_PURPOSE] == {sr.BENCHMARK_AUDITOR}
     assert sr.REQUIRED_ROLES[sr.REGISTRY_PURPOSE] == {sr.OPERATOR_ROOT}
+    # A rotation needs the previous and the new customer key; the operator does not co-sign.
+    assert sr.REQUIRED_ROLES[sr.ROTATION_PURPOSE] == {
+        sr.CUSTOMER_OWNER,
+        sr.CUSTOMER_OWNER_SUCCESSOR,
+    }
     assert sr.SPEND_MANDATE_PURPOSE == "opentour.pilot.spend-mandate.v1"
 
 
@@ -509,7 +536,7 @@ def test_operator_signed_registry_revision_cannot_change_a_customer_anchor(kit: 
     assert newer.verify(genuine, sr.GRANT_PURPOSE)
 
 
-def test_rotation_signed_by_previous_key_replaces_the_anchor(kit: Kit) -> None:
+def test_rotation_signed_by_previous_and_new_key_replaces_the_anchor(kit: Kit) -> None:
     verifier = kit.enrolled()
     old_record = sign(consent(), sr.GRANT_PURPOSE, kit.customer, kit.operator)
     successor = Signer(sr.CUSTOMER_OWNER, registry_revision="2")
@@ -520,18 +547,58 @@ def test_rotation_signed_by_previous_key_replaces_the_anchor(kit: Kit) -> None:
     assert verifier.verify(new_record, sr.GRANT_PURPOSE)
 
 
+def test_rotation_signed_only_by_the_previous_key_is_refused(kit: Kit) -> None:
+    verifier = kit.enrolled()
+    successor = Signer(sr.CUSTOMER_OWNER, registry_revision="2")
+    previous_only = kit.rotation(kit.customer, successor, kit.customer)
+    refused("signature_role_missing", partial(verifier.rotate_customer_key, previous_only))
+    genuine = sign(consent(), sr.GRANT_PURPOSE, kit.customer, kit.operator)
+    assert verifier.verify(genuine, sr.GRANT_PURPOSE)
+
+
+def test_rotation_new_key_signature_must_be_by_the_installed_key(kit: Kit) -> None:
+    verifier = kit.enrolled()
+    successor = Signer(sr.CUSTOMER_OWNER, registry_revision="2")
+    third = Signer(sr.CUSTOMER_OWNER, registry_revision="2")
+    payload = kit.rotation_payload(kit.customer, successor)
+    previous = kit.customer.signature(payload, sr.ROTATION_PURPOSE)
+    # A third key signs as the new key: it is not the key being installed.
+    by_third = canonical(
+        {"payload": payload, "signatures": [previous, as_successor(third, payload)]}
+    )
+    refused("rotation_successor_key_mismatch", partial(verifier.rotate_customer_key, by_third))
+    # A third key presenting the installed key's id still cannot produce its signature.
+    impersonated = as_successor(third, payload, key_id=successor.key_id)
+    forged = canonical({"payload": payload, "signatures": [previous, impersonated]})
+    refused("signature_invalid", partial(verifier.rotate_customer_key, forged))
+    # The new key's signature at the wrong anchor revision is not the installed key either.
+    stale = as_successor(successor, payload, key_registry_revision="1")
+    wrong_revision = canonical({"payload": payload, "signatures": [previous, stale]})
+    refused(
+        "rotation_successor_key_mismatch",
+        partial(verifier.rotate_customer_key, wrong_revision),
+    )
+    genuine = sign(consent(), sr.GRANT_PURPOSE, kit.customer, kit.operator)
+    assert verifier.verify(genuine, sr.GRANT_PURPOSE)
+    assert verifier.rotate_customer_key(kit.rotation(kit.customer, successor)).anchor_revision == 2
+
+
 def test_rotation_not_signed_by_previous_key_refused(kit: Kit) -> None:
     verifier = kit.enrolled()
     successor = Signer(sr.CUSTOMER_OWNER, registry_revision="2")
-    payload = json.loads(kit.rotation(kit.customer, successor))["payload"]
-    # Signed only by the successor, presenting the current anchor revision.
-    by_successor = successor.signature(payload, sr.ROTATION_PURPOSE, key_registry_revision="1")
-    self_signed = canonical({"payload": payload, "signatures": [by_successor]})
-    refused("customer_key_not_anchored", partial(verifier.rotate_customer_key, self_signed))
-    # A registry key claiming the customer role.
-    claims = kit.operator.signature(payload, sr.ROTATION_PURPOSE, signer_role=sr.CUSTOMER_OWNER)
-    by_operator = canonical({"payload": payload, "signatures": [claims]})
-    refused("customer_key_not_anchored", partial(verifier.rotate_customer_key, by_operator))
+    payload = kit.rotation_payload(kit.customer, successor)
+    new_key = as_successor(successor, payload)
+    # Signed only by the new key.
+    alone = canonical({"payload": payload, "signatures": [new_key]})
+    refused("signature_role_missing", partial(verifier.rotate_customer_key, alone))
+    # A third key, or a registry key, standing in for the previous customer key.
+    third = Signer(sr.CUSTOMER_OWNER, registry_revision="1")
+    for stand_in in (third, kit.operator):
+        claims = stand_in.signature(
+            payload, sr.ROTATION_PURPOSE, signer_role=sr.CUSTOMER_OWNER, key_registry_revision="1"
+        )
+        record = canonical({"payload": payload, "signatures": [claims, new_key]})
+        refused("customer_key_not_anchored", partial(verifier.rotate_customer_key, record))
     genuine = sign(consent(), sr.GRANT_PURPOSE, kit.customer, kit.operator)
     assert verifier.verify(genuine, sr.GRANT_PURPOSE)
 
@@ -550,11 +617,19 @@ def test_rotation_must_be_the_exact_successor(kit: Kit) -> None:
     verifier.rotate_customer_key(kit.rotation(second, third))
     # Replaying the first rotation cannot bring back the second key.
     refused("customer_key_not_anchored", partial(verifier.rotate_customer_key, first_rotation))
+    # Rotating onto the same key under a new id: one key cannot sign as both.
     same = Signer(sr.CUSTOMER_OWNER, registry_revision="4")
     same.private, same.der = third.private, third.der
     refused(
-        "customer_key_not_distinct",
+        "signature_key_reused",
         partial(verifier.rotate_customer_key, kit.rotation(third, same)),
+    )
+    # Rotating onto an operator registry key, even with possession of it, is refused.
+    operator_key = Signer(sr.CUSTOMER_OWNER, registry_revision="4")
+    operator_key.private, operator_key.der = kit.operator.private, kit.operator.der
+    refused(
+        "customer_key_not_distinct",
+        partial(verifier.rotate_customer_key, kit.rotation(third, operator_key)),
     )
 
 

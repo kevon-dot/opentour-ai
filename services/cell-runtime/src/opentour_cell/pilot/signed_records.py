@@ -24,13 +24,15 @@ Trust chain:
 3. Customer-owner keys never come from the registry. Each engagement's customer key is
    anchored by an enrolment record signed by that customer key and co-signed by the
    operator custodian, pinned once at engagement start. Only a rotation record signed by the
-   currently anchored (previous) customer key can replace it. No registry revision, however
+   currently anchored (previous) customer key and by the new key it installs (proof of
+   possession) can replace it; the operator does not co-sign. No registry revision, however
    validly signed, can change an anchor or introduce a customer-owner key.
 
 Required signer roles per purpose (``REQUIRED_ROLES``): customer consent records
 (engagement grant, spend mandate, routing policy) need the customer owner and the operator
 custodian; a verdict needs the independent evaluator; an audit receipt needs the benchmark
-auditor; a registry needs the operator root. A missing, duplicated or unexpected role, one
+auditor; a registry needs the operator root; a customer key rotation needs the previous
+customer key and the new key. A missing, duplicated or unexpected role, one
 key signing under two roles, or a key signing outside its own role or purposes is refused.
 
 Anti-rollback state: ``TrustStateStore`` keeps named monotonic records in a strict,
@@ -60,7 +62,7 @@ import os
 import re
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Annotated, Any, Final, Literal
@@ -90,6 +92,8 @@ ENROLMENT_PURPOSE: Final = "opentour.pilot.customer-enrolment.v1"
 ROTATION_PURPOSE: Final = "opentour.pilot.customer-key-rotation.v1"
 
 CUSTOMER_OWNER: Final = "customer_owner"
+# The key a rotation installs, proving possession by signing the same rotation transcript.
+CUSTOMER_OWNER_SUCCESSOR: Final = "customer_owner_successor"
 OPERATOR_CUSTODIAN: Final = "operator_custodian"
 INDEPENDENT_EVALUATOR: Final = "independent_evaluator"
 BENCHMARK_AUDITOR: Final = "benchmark_auditor"
@@ -105,7 +109,8 @@ REQUIRED_ROLES: Final[Mapping[str, frozenset[str]]] = {
     BENCHMARK_AUDIT_PURPOSE: frozenset({BENCHMARK_AUDITOR}),
     REGISTRY_PURPOSE: frozenset({OPERATOR_ROOT}),
     ENROLMENT_PURPOSE: frozenset({CUSTOMER_OWNER, OPERATOR_CUSTODIAN}),
-    ROTATION_PURPOSE: frozenset({CUSTOMER_OWNER}),
+    # Previous key and new key both sign; the operator does not co-sign a rotation.
+    ROTATION_PURPOSE: frozenset({CUSTOMER_OWNER, CUSTOMER_OWNER_SUCCESSOR}),
 }
 # Purposes each registry role may be granted. Customer-owner keys are never registry keys,
 # and the root role only exists in the kit-pinned root configuration.
@@ -755,7 +760,12 @@ class PilotVerifier:
         return CustomerAnchor(body.engagement_id, customer.key_id, 1, customer.public_key_sha256)
 
     def rotate_customer_key(self, rotation: bytes) -> CustomerAnchor:
-        """Replace an anchor only on a rotation signed by the currently anchored key."""
+        """Replace an anchor only on a rotation signed by the anchored key and the new key.
+
+        The currently anchored (previous) customer key authorizes the change; the key being
+        installed proves possession by signing the same transcript, so a customer cannot be
+        rotated onto a key nobody holds or onto someone else's key.
+        """
         self._registry_current()
         payload, signatures = _open(rotation, "rotation")
         try:
@@ -763,6 +773,10 @@ class PilotVerifier:
         except ValidationError:
             raise PilotRecordRefused("rotation_schema_invalid") from None
         revision = int(body.anchor_revision)
+        installing = replace(
+            _customer_key(body.customer_key, revision, frozenset({ROTATION_PURPOSE})),
+            role=CUSTOMER_OWNER_SUCCESSOR,
+        )
         with self._store.locked():
             previous = self._anchor(body.engagement_id, ROTATION_PURPOSE)
             if previous is None:
@@ -771,7 +785,12 @@ class PilotVerifier:
                 payload,
                 signatures,
                 ROTATION_PURPOSE,
-                {CUSTOMER_OWNER: _fixed_resolver(previous)},
+                {
+                    CUSTOMER_OWNER: _fixed_resolver(previous),
+                    CUSTOMER_OWNER_SUCCESSOR: _fixed_resolver(
+                        installing, "rotation_successor_key_mismatch"
+                    ),
+                },
                 "rotation",
             )
             if (
