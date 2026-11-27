@@ -290,6 +290,23 @@ class QualificationRecord:
     tier: EvidenceTier
     external_gates: tuple[str, ...]
     details: tuple[tuple[str, str], ...] = ()
+    witness_ref: str = ""
+
+    def __post_init__(self) -> None:
+        """Refuse a tier the record's own evidence cannot support (fail closed)."""
+        if not isinstance(self.tier, EvidenceTier):
+            raise FamilyError("INVALID_EVIDENCE_TIER")
+        if self.tier is EvidenceTier.FIXTURE:
+            return
+        witnessed = self.tier in (EvidenceTier.PROVIDER_WITNESSED, EvidenceTier.CUSTOMER_WITNESSED)
+        if (
+            self.fixture_kind is not FixtureKind.INSTALLED_MODEL
+            or self.family_id.startswith("generated-")
+            or self.revision is None
+            or any(gate.startswith("profile_pin_missing:") for gate in self.external_gates)
+            or (witnessed and not self.witness_ref)
+        ):
+            raise FamilyError("EVIDENCE_TIER_UNSUPPORTED")
 
     @property
     def passed(self) -> bool:
@@ -323,7 +340,11 @@ def build_record(
     if fixture_kind is FixtureKind.GENERATED:
         gates.append("installed_model_and_gpu_or_cpu_run_not_performed")
     gates.extend(f"profile_pin_missing:{gap}" for gap in profile.pin_gaps)
-    installed = fixture_kind is FixtureKind.INSTALLED_MODEL and profile.pinned
+    if profile.is_fixture:
+        gates.append("generated_family_is_never_a_qualified_model")
+    installed = (
+        fixture_kind is FixtureKind.INSTALLED_MODEL and profile.pinned and not profile.is_fixture
+    )
     tier = EvidenceTier.SOFTWARE_QUALIFIED if installed else EvidenceTier.FIXTURE
     return QualificationRecord(
         family_id=profile.family_id,
