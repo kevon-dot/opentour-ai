@@ -3681,7 +3681,7 @@ class Workbench:
                     _check(len(terms) in (2, 3))
                     _check(
                         (terms[1] in {"present", "missing"} and len(terms) == 2)
-                        or (terms[1] in {"<", "<=", ">", ">="} and len(terms) == 3)
+                        or (terms[1] in {"<", "<=", ">", ">=", "=="} and len(terms) == 3)
                     )
                     conditions.append(
                         Condition(terms[0], terms[1], terms[2] if len(terms) == 3 else None)

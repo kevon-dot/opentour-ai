@@ -106,3 +106,9 @@ When a policy includes a recognized effective date, the review shows its date
 and links to the operative source passage. Each generated branch example uses
 the effective date as its explicitly labeled decision date. A caller inspecting
 a dated policy without a date, or with an earlier date, receives no proposed action.
+
+Reference examples preserve the exact category token and its capitalization from
+the current rule. The owner can propose a correction using `field == Token` for
+a field in the current signed decision-time schema. The review retains the cited
+source clause and records the editor and reason for the correction. Overlapping
+actions remain unresolved until the owner resolves priority.
