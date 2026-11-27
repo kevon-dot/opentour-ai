@@ -1672,6 +1672,8 @@ class Workbench:
                 actor == cfg.reviewer
                 and cfg.permission(actor, "review", target.dataset)["aggregate"]
             )
+            if not cfg.explicit_recipient:
+                return read_status(topic, target.audit, destination_configured=False)
             if target.audit.get("release_provider") == "zapier_slack":
                 from opentour_cell.pilot.zapier_approval import ApprovalBridge
 
@@ -1698,11 +1700,17 @@ class Workbench:
                     target.audit["model_revision"],
                 )
                 if recorded:
-                    approval = ApprovalEvidence(recorded["decision"], recorded["presentation_id"])
+                    stage = (
+                        "release_changes_requested"
+                        if recorded["decision"] == "changes_requested"
+                        else recorded["decision"]
+                    )
+                    approval = ApprovalEvidence(stage, recorded["presentation_id"])
             else:
                 state, receipt = self._recorded_decision(target.revision)
                 if state in {"approved", "changes_requested"}:
-                    approval = ApprovalEvidence(state, receipt["receipt"], receipt["decided"])
+                    stage = "readout_changes_requested" if state == "changes_requested" else state
+                    approval = ApprovalEvidence(stage, receipt["receipt"], receipt["decided"])
         answer = read_status(
             topic,
             target.audit,

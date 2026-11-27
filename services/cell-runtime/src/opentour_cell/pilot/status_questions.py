@@ -214,6 +214,7 @@ def read_status(
     *,
     managed_outcome: str = "",
     approval: ApprovalEvidence | None = None,
+    destination_configured: bool = True,
 ) -> StatusAnswer:
     mode = audit["mode"]
     if mode not in {"evaluation_only", "training", "managed_model", "managed_rule"}:
@@ -270,6 +271,12 @@ def read_status(
         )
     if topic != StatusTopic.DELIVERY:
         raise ValueError("Unsupported status topic.")
+    if not destination_configured:
+        return StatusAnswer(
+            "No release is authorized by the current configuration.",
+            "This result has no configured handoff destination. Earlier delivery is unconfirmed.",
+            "The workflow owner can check the current handoff settings.",
+        )
     if approval is None:
         return StatusAnswer(
             "Handoff delivery is unconfirmed.",
@@ -281,6 +288,14 @@ def read_status(
         if approval.recorded_at is not None
         else ""
     )
+    if approval.stage in {"release_changes_requested", "readout_changes_requested"}:
+        subject = "Release" if approval.stage == "release_changes_requested" else "Readout"
+        return StatusAnswer(
+            f"{subject} is held pending changes.",
+            f"Changes requested{time}. Intended recipient {audit['recipient']}. "
+            f"Approval evidence {approval.reference}. Earlier delivery is unconfirmed.",
+            "The workflow owner can open the selected evidence and address the review decision.",
+        )
     stage = {
         "approved": "Approval recorded",
         "changes_requested": "Changes requested",
