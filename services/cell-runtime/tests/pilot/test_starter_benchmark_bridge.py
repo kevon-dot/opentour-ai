@@ -69,3 +69,65 @@ def test_worker_catches_up_on_both_observed_transitions(joined):
         assert db.execute(
             "SELECT target,completed FROM benchmark_operations ORDER BY rowid"
         ).fetchall() == [("needs_owner_review", 1), ("frozen_unscored", 1)]
+
+
+@pytest.mark.parametrize("damage", [None, "owner", "intent", "order", "missing_operation"])
+def test_owner_append_keeps_original_proposal_and_requires_current_provenance(joined, damage):
+    import json
+
+    from opentour_cell.pilot.operating_point import canonical, digest
+    from opentour_cell.pilot.starter_cases import ProposedCase
+
+    h, owner, cap, _, setup = joined
+    owner.propose(FiveFamilies())
+    worker = StarterCaseSession(owner.settings, setup.principal)
+    original = publish_starter_state(worker, cap["run_ref"])
+    first = owner.review()["cases"][0]
+    example = ProposedCase(
+        "owner-extra",
+        "family-0",
+        "template-0",
+        first["branch_id"],
+        (("po", None), ("total", 12)),
+        "REVIEW",
+        "Boundary at a different amount",
+        first["citation"],
+    )
+    owner.add_counterexample(case=example, expected_revision=0, operation_ref="append-one")
+    if damage:
+        with sqlite3.connect(owner.core.path) as db:
+            body = json.loads(db.execute("SELECT body FROM packs").fetchone()[0])
+            row = body["cases"][-1]
+            if damage == "owner":
+                row["counterexample_owner"] = "another-owner"
+            elif damage == "intent":
+                body["operations"]["append-one"]["intent"] = "0" * 64
+            elif damage == "order":
+                body["cases"].insert(0, body["cases"].pop())
+            else:
+                del row["counterexample_operation"]
+            db.execute("UPDATE packs SET body=?,seal=?", (canonical(body), digest(body)))
+        with pytest.raises(IntakeError):
+            publish_starter_state(worker, cap["run_ref"])
+        return
+    assert publish_starter_state(worker, cap["run_ref"]) == original
+    rows = owner.review()["cases"]
+    for revision, row in enumerate(rows, 1):
+        owner.adjudicate(
+            case_id=row["case_id"],
+            target=row["suggestion"],
+            reason="Owner reviewed",
+            expected_revision=revision,
+            operation_ref="review-" + row["case_id"],
+        )
+    freeze = owner.freeze(splits={r["family_id"]: "reserved" for r in rows}, expected_revision=7)
+    assert freeze.proposed == 6
+    receipt = publish_starter_state(worker, cap["run_ref"])
+    assert (receipt.definition_ref, receipt.definition_digest) == (
+        freeze.reference,
+        freeze.revision,
+    )
+    assert (
+        publish_starter_state(StarterCaseSession(owner.settings, setup.principal), cap["run_ref"])
+        == receipt
+    )
