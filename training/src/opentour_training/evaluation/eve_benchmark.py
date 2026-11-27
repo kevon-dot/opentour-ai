@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import tempfile
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -19,6 +20,7 @@ from typing import Any, Literal
 from opentour_training.evaluation.statistics_kernel import (
     binomial_lower_bound,
     binomial_upper_bound,
+    independent_family_interval,
     paired_binary_interval,
 )
 
@@ -40,7 +42,8 @@ ImprovementClaim = Literal[
     "none_baseline_only",
     "hold_missing_arm",
     "blocked_changed_denominator",
-    "observed_net_fixes",
+    "directional_only_interval_includes_zero",
+    "improvement_supported_by_interval",
     "no_net_fixes",
 ]
 Disposition = Literal[
@@ -49,6 +52,16 @@ Disposition = Literal[
 DISPOSITIONS: frozenset[str] = frozenset(
     {"benchmark_only", "adopt_test_simple_fix", "consider_tuning", "gather_more_evidence"}
 )
+EXCLUSION_REASON_CODES: frozenset[str] = frozenset(
+    {
+        "context_not_authorized",
+        "reference_unavailable",
+        "duplicate_or_overlap",
+        "out_of_scope",
+        "other",
+    }
+)
+DIGEST_SHAPE = re.compile(r"^sha256:[0-9a-f]{64}$")
 BASELINE_ARM = "baseline"
 REPAIR_ARM = "simple_repair"
 UNSATISFIED_EXTERNAL_GATES_GENERATED: tuple[str, ...] = (
@@ -144,6 +157,8 @@ class ArmRun:
 
 @dataclass(frozen=True)
 class ExclusionRecord:
+    """``reason`` is a closed code (see EXCLUSION_REASON_CODES), never free text."""
+
     case_id: str
     reason: str
 
@@ -179,14 +194,20 @@ def reference_key_digest(key: Sequence[ReferenceJudgment]) -> str:
     )
 
 
+def case_content_digest(cases: Sequence[EveCase]) -> str:
+    """Digest of the full authorized case text, so a changed question changes the freeze."""
+    return digest(sorted([c.case_id, c.family_id, c.question, list(c.context_ids)] for c in cases))
+
+
 def freeze_manifest(
     *,
     benchmark_id: str,
-    evidence_tier: EvidenceTier,
+    evidence_tier: str,
     development_cases: Sequence[EveCase],
     heldout_cases: Sequence[EveCase],
     heldout_exclusions: Sequence[ExclusionRecord],
     heldout_key: Sequence[ReferenceJudgment],
+    development_key: Sequence[ReferenceJudgment],
     arms: Sequence[ArmConfig],
     rubric_version: str,
     rubric_text: str,
@@ -198,6 +219,17 @@ def freeze_manifest(
 ) -> FrozenManifest:
     """Freeze cases, families, rubric, scorer, arms and thresholds BEFORE any output exists."""
     _text(benchmark_id, "benchmark_id_invalid")
+    # This module cannot verify a provider or customer receipt, so it only ever freezes
+    # generated-tier evidence. Higher tiers need a verifier owned by the provider gate.
+    _need(evidence_tier == "generated", "evidence_tier_unverifiable_here", str(evidence_tier))
+    _need(
+        ground_truth_audit_receipt_ref is None
+        or (
+            type(ground_truth_audit_receipt_ref) is str
+            and DIGEST_SHAPE.match(ground_truth_audit_receipt_ref) is not None
+        ),
+        "audit_receipt_ref_shape_invalid",
+    )
     _need(0 < alpha < 1, "alpha_invalid")
     _need(materiality_min_errors >= 1 and min_recurring_families >= 1, "thresholds_invalid")
     _need(bool(development_cases) and bool(heldout_cases), "empty_split")
@@ -211,7 +243,9 @@ def freeze_manifest(
     _need(not dev_fams & held_fams, "split_family_overlap")
     excl = {e.case_id: e.reason for e in heldout_exclusions}
     _need(set(excl) <= set(held_ids), "exclusion_unknown_case")
-    _need(all(excl.values()), "exclusion_reason_missing")
+    _need(all(v in EXCLUSION_REASON_CODES for v in excl.values()), "exclusion_reason_invalid")
+    dev_key_ids = [k.case_id for k in development_key]
+    _need(sorted(dev_key_ids) == sorted(dev_ids), "development_key_not_aligned")
     eligible = [i for i in held_ids if i not in excl]
     _need(bool(eligible), "no_eligible_heldout_cases")
     key_ids = [k.case_id for k in heldout_key]
@@ -243,11 +277,13 @@ def freeze_manifest(
         "development": {
             "case_ids": sorted(dev_ids),
             "family_ids": sorted(dev_fams),
-            "case_digest": digest(sorted([c.case_id, c.family_id] for c in development_cases)),
+            "content_digest": case_content_digest(development_cases),
+            "key_digest": reference_key_digest(development_key),
         },
         "heldout": {
             "case_ids": sorted(held_ids),
             "family_ids": sorted(held_fams),
+            "content_digest": case_content_digest(heldout_cases),
             "eligible_case_ids": sorted(eligible),
             "excluded": sorted([[k, v] for k, v in excl.items()]),
             "answer_key_digest": reference_key_digest(heldout_key),
@@ -301,6 +337,8 @@ class IsolationReceipt:
     manifest_digest: str
     checked_fit_rows: int
     checked_prompts: int
+    fit_rows_digest: str
+    prompts_digest: str
     violations: tuple[str, ...]
 
     @property
@@ -324,7 +362,8 @@ def verify_isolation(
     }
     violations: list[str] = []
     n_fit = n_prompt = 0
-    for row in fit_rows:
+    rows, prompts = tuple(fit_rows), tuple(prompt_texts)
+    for row in rows:
         n_fit += 1
         if row.case_id in held_cases:
             violations.append(f"fit_row_heldout_case:{row.case_id}")
@@ -332,11 +371,18 @@ def verify_isolation(
             violations.append(f"fit_row_heldout_family:{row.family_id}")
         if any(s in row.text for s in secrets):
             violations.append(f"fit_row_protected_answer:{row.case_id}")
-    for text in prompt_texts:
+    for text in prompts:
         n_prompt += 1
         if any(s in text for s in secrets):
             violations.append(f"prompt_protected_answer:{n_prompt}")
-    return IsolationReceipt(manifest.manifest_digest, n_fit, n_prompt, tuple(sorted(violations)))
+    return IsolationReceipt(
+        manifest.manifest_digest,
+        n_fit,
+        n_prompt,
+        digest(sorted([r.case_id, r.family_id, r.text] for r in rows)),
+        digest(list(prompts)),
+        tuple(sorted(violations)),
+    )
 
 
 # ---------------------------------------------------------------- grading
@@ -482,6 +528,14 @@ def assess_development(
     verify_manifest(manifest)
     ids = [c.case_id for c in development_cases]
     _need(sorted(ids) == manifest.body["development"]["case_ids"], "development_cases_not_frozen")
+    _need(
+        case_content_digest(development_cases) == manifest.body["development"]["content_digest"],
+        "development_content_not_the_frozen_content",
+    )
+    _need(
+        reference_key_digest(development_key) == manifest.body["development"]["key_digest"],
+        "development_key_not_the_frozen_key",
+    )
     fam = {c.case_id: c.family_id for c in development_cases}
     key = {k.case_id: k for k in development_key}
     _need(set(key) == set(ids), "development_key_misaligned")
@@ -530,14 +584,26 @@ def _redact(manifest_digest: str, case_id: str) -> str:
 def score_heldout(
     manifest: FrozenManifest,
     *,
+    heldout_cases: Sequence[EveCase],
     heldout_key: Sequence[ReferenceJudgment],
+    fit_rows: Sequence[FitRow],
+    prompt_texts: Sequence[str],
     isolation: IsolationReceipt,
     runs: Sequence[ArmRun],
 ) -> Scorecard:
     """Score the frozen held-out cases. Refuses unless freeze, key seal and isolation hold."""
     verify_manifest(manifest)
     _need(isolation.manifest_digest == manifest.manifest_digest, "isolation_not_bound_to_manifest")
+    # The receipt is re-derived from the actual inputs; a hand-built receipt cannot pass.
+    recomputed = verify_isolation(
+        manifest, fit_rows=fit_rows, prompt_texts=prompt_texts, heldout_key=heldout_key
+    )
+    _need(recomputed == isolation, "isolation_receipt_not_from_these_inputs")
     _need(isolation.clean, "isolation_violation", ",".join(isolation.violations))
+    _need(
+        case_content_digest(heldout_cases) == manifest.body["heldout"]["content_digest"],
+        "heldout_content_not_the_frozen_content",
+    )
     _need(
         reference_key_digest(heldout_key) == manifest.body["heldout"]["answer_key_digest"],
         "answer_key_not_the_frozen_key",
@@ -574,6 +640,17 @@ def score_heldout(
         iv = paired_binary_interval(
             len(fixes), len(regs), both_ok, both_bad, float(manifest.body["alpha"]), 2
         )
+        fam_of = {c.case_id: c.family_id for c in heldout_cases}
+        by_family: dict[str, list[int]] = {}
+        for c in scor:
+            by_family.setdefault(fam_of[c], []).append(
+                int(_is_correct(r[c])) - int(_is_correct(b[c]))
+            )
+        fiv = independent_family_interval(
+            [(f, sum(v) / len(v)) for f, v in sorted(by_family.items())],
+            float(manifest.body["alpha"]),
+            2,
+        )
         paired = {
             "paired_gradeable": len(scor),
             "fixes": len(fixes),
@@ -587,15 +664,33 @@ def score_heldout(
                 "upper": iv.upper,
                 "undefined_reason": iv.undefined_reason,
                 "alpha_two_sided": float(manifest.body["alpha"]),
-                "note": "descriptive uncertainty only; no significance claim is made",
+                "note": "case-level interval assumes cases are independent; "
+                "descriptive uncertainty only, no significance claim is made",
+                "case_independence_assumed": True,
+            },
+            "family_interval": {
+                "method": fiv.method,
+                "unit": "family",
+                "units": len(by_family),
+                "mean_family_effect": fiv.value,
+                "lower": fiv.lower,
+                "upper": fiv.upper,
+                "undefined_reason": fiv.undefined_reason,
+                "alpha_two_sided": float(manifest.body["alpha"]),
+                "note": "families are the independent units; no case independence assumed",
             },
             "fix_case_refs": [_redact(manifest.manifest_digest, c) for c in fixes],
             "regression_case_refs": [_redact(manifest.manifest_digest, c) for c in regs],
         }
-        claim = "observed_net_fixes" if len(fixes) > len(regs) else "no_net_fixes"
+        if len(fixes) <= len(regs):
+            claim = "no_net_fixes"
+        elif all(x is not None and x > 0 for x in (iv.lower, fiv.lower)):
+            claim = "improvement_supported_by_interval"
+        else:
+            claim = "directional_only_interval_includes_zero"
     tier = manifest.body["evidence_tier"]
     audit = manifest.body["ground_truth_audit_receipt_ref"]
-    gates = list(UNSATISFIED_EXTERNAL_GATES_GENERATED) if tier == "generated" else []
+    gates = list(UNSATISFIED_EXTERNAL_GATES_GENERATED)
     if manifest.body["heldout"]["adjudicator_kind"] != "pi_school_domain_reviewer":
         gates.append("independent_domain_reviewer_not_pi_school")
     if audit is None:
@@ -609,7 +704,16 @@ def score_heldout(
         "rubric": manifest.body["rubric"],
         "heldout": {
             "eligible": len(eligible),
-            "excluded": manifest.body["heldout"]["excluded"],
+            "excluded": sorted(
+                [_redact(manifest.manifest_digest, k), v]
+                for k, v in manifest.body["heldout"]["excluded"]
+            ),
+            "isolation": {
+                "fit_rows_digest": isolation.fit_rows_digest,
+                "prompts_digest": isolation.prompts_digest,
+                "checked_fit_rows": isolation.checked_fit_rows,
+                "checked_prompts": isolation.checked_prompts,
+            },
             "unresolved": arms_out[BASELINE_ARM]["unresolved"],
             "abstained_correct_by_arm": {
                 a: s["correct_abstention"] for a, s in sorted(arms_out.items())
@@ -624,7 +728,7 @@ def score_heldout(
             a: {_redact(manifest.manifest_digest, c): o for c, o in sorted(oc.items())}
             for a, oc in sorted(outcomes.items())
         },
-        "accuracy_claim_eligible": bool(audit) and not gates,
+        "accuracy_claim_eligible": False,
         "unsatisfied_external_gates": gates,
         "claim_scope": "implementation_only" if tier == "generated" else tier,
     }
@@ -648,7 +752,11 @@ def record_disposition(
     _text(recorded_at, "recorded_at_missing")
     claim = scorecard.body["improvement_claim"]
     if disposition == "adopt_test_simple_fix":
-        _need(claim == "observed_net_fixes", "adopt_requires_observed_net_fixes", claim)
+        _need(
+            claim == "improvement_supported_by_interval",
+            "adopt_requires_interval_supported_improvement",
+            claim,
+        )
     if disposition == "consider_tuning":
         _need(finding is not None, "tuning_requires_development_finding")
         assert finding is not None

@@ -29,6 +29,7 @@ def _setup(include_repair: bool = True) -> Any:
         heldout_cases=f.heldout_cases,
         heldout_exclusions=f.exclusions,
         heldout_key=f.heldout_key,
+        development_key=f.development_key,
         arms=fx.ARM_CONFIGS,
         rubric_version="generated-rubric-1",
         rubric_text=fx.RUBRIC_TEXT,
@@ -43,14 +44,39 @@ def _setup(include_repair: bool = True) -> Any:
     if include_repair:
         runs.append(fx.simulate_arm(cfg[eb.REPAIR_ARM], elig, m))
     iso = eb.verify_isolation(
-        m, fit_rows=[], prompt_texts=[c.question for c in elig], heldout_key=f.heldout_key
+        m, fit_rows=[], prompt_texts=_prompts(f, m), heldout_key=f.heldout_key
     )
     return f, m, cfg, elig, runs, iso
 
 
+def _prompts(f: Any, m: eb.FrozenManifest) -> list[str]:
+    return [c.question for c in f.heldout_cases if c.case_id in m.heldout_eligible]
+
+
+def _score_with(
+    m: eb.FrozenManifest,
+    f: Any,
+    *,
+    heldout_key: Any,
+    isolation: eb.IsolationReceipt,
+    runs: Any,
+    fit_rows: Any = (),
+    heldout_cases: Any = None,
+) -> eb.Scorecard:
+    return eb.score_heldout(
+        m,
+        heldout_cases=f.heldout_cases if heldout_cases is None else heldout_cases,
+        heldout_key=heldout_key,
+        fit_rows=list(fit_rows),
+        prompt_texts=_prompts(f, m),
+        isolation=isolation,
+        runs=runs,
+    )
+
+
 def _score(include_repair: bool = True) -> eb.Scorecard:
     f, m, _, _, runs, iso = _setup(include_repair)
-    return eb.score_heldout(m, heldout_key=f.heldout_key, isolation=iso, runs=runs)
+    return _score_with(m, f, heldout_key=f.heldout_key, isolation=iso, runs=runs)
 
 
 def _code(fn: Callable[[], object]) -> str:
@@ -72,7 +98,7 @@ def test_freeze_records_disjoint_splits_exclusions_and_seals_key() -> None:
     f, m, *_ = _setup()
     h = m.body["heldout"]
     assert not set(m.body["development"]["family_ids"]) & set(h["family_ids"])
-    assert h["excluded"] == [["HOLD-011", "generated: context not authorized"]]
+    assert h["excluded"] == [["HOLD-011", "context_not_authorized"]]
     assert len(h["eligible_case_ids"]) == len(h["case_ids"]) - 1
     assert h["answer_key_digest"] == eb.reference_key_digest(f.heldout_key)
     assert m.body["state"] == "frozen_before_candidate_output"
@@ -82,7 +108,7 @@ def test_scoring_before_freeze_is_refused() -> None:
     f, m, _, _, runs, iso = _setup()
     thawed = eb.FrozenManifest(body={**m.body, "state": "draft"}, manifest_digest=m.manifest_digest)
     code = _code(
-        lambda: eb.score_heldout(thawed, heldout_key=f.heldout_key, isolation=iso, runs=runs)
+        lambda: _score_with(thawed, f, heldout_key=f.heldout_key, isolation=iso, runs=runs)
     )
     assert code == "manifest_not_frozen_or_tampered"
 
@@ -91,7 +117,7 @@ def test_outputs_not_bound_to_frozen_manifest_are_refused() -> None:
     f, m, _, _, runs, iso = _setup()
     stray = dataclasses.replace(runs[0], manifest_digest="sha256:" + "0" * 64)
     code = _code(
-        lambda: eb.score_heldout(m, heldout_key=f.heldout_key, isolation=iso, runs=[stray, runs[1]])
+        lambda: _score_with(m, f, heldout_key=f.heldout_key, isolation=iso, runs=[stray, runs[1]])
     )
     assert code == "run_not_bound_to_frozen_manifest"
 
@@ -110,6 +136,7 @@ def test_freeze_rejects_split_overlap_and_misaligned_key() -> None:
         "adjudicator_kind": "generated_fixture",
         "development_cases": f.development_cases,
         "heldout_exclusions": (),
+        "development_key": f.development_key,
     }
     clash = dataclasses.replace(f.heldout_cases[0], family_id=f.development_cases[0].family_id)
     held = (clash, *f.heldout_cases[1:])
@@ -130,7 +157,7 @@ def test_freeze_rejects_split_overlap_and_misaligned_key() -> None:
 def test_changed_key_after_freeze_is_refused() -> None:
     f, m, _, _, runs, iso = _setup()
     bad = (dataclasses.replace(f.heldout_key[0], answer="ANS-GEN-CHANGED"), *f.heldout_key[1:])
-    code = _code(lambda: eb.score_heldout(m, heldout_key=bad, isolation=iso, runs=runs))
+    code = _code(lambda: _score_with(m, f, heldout_key=bad, isolation=iso, runs=runs))
     assert code == "answer_key_not_the_frozen_key"
 
 
@@ -140,9 +167,15 @@ def test_changed_key_after_freeze_is_refused() -> None:
 def test_heldout_case_in_fit_set_invalidates_scoring() -> None:
     f, m, _, _, runs, _ = _setup()
     row = eb.FitRow(f.heldout_cases[3].case_id, "GEN-FAM-OTHER", "generated row")
-    iso = eb.verify_isolation(m, fit_rows=[row], prompt_texts=[], heldout_key=f.heldout_key)
+    iso = eb.verify_isolation(
+        m, fit_rows=[row], prompt_texts=_prompts(f, m), heldout_key=f.heldout_key
+    )
     assert not iso.clean
-    code = _code(lambda: eb.score_heldout(m, heldout_key=f.heldout_key, isolation=iso, runs=runs))
+    code = _code(
+        lambda: _score_with(
+            m, f, heldout_key=f.heldout_key, isolation=iso, runs=runs, fit_rows=[row]
+        )
+    )
     assert code == "isolation_violation"
 
 
@@ -174,7 +207,7 @@ def test_clean_isolation_counts_checked_rows() -> None:
 def test_isolation_receipt_from_another_manifest_is_refused() -> None:
     f, m, _, _, runs, iso = _setup()
     other = dataclasses.replace(iso, manifest_digest="sha256:" + "1" * 64)
-    code = _code(lambda: eb.score_heldout(m, heldout_key=f.heldout_key, isolation=other, runs=runs))
+    code = _code(lambda: _score_with(m, f, heldout_key=f.heldout_key, isolation=other, runs=runs))
     assert code == "isolation_not_bound_to_manifest"
 
 
@@ -214,7 +247,7 @@ def test_serious_error_rules_and_unresolved_visible_outside_denominator() -> Non
 def test_missing_output_counts_as_no_match_and_is_shown_separately() -> None:
     f, m, _, _, runs, iso = _setup()
     short = dataclasses.replace(runs[0], outputs=runs[0].outputs[1:])
-    card = eb.score_heldout(m, heldout_key=f.heldout_key, isolation=iso, runs=[short, runs[1]])
+    card = _score_with(m, f, heldout_key=f.heldout_key, isolation=iso, runs=[short, runs[1]])
     assert card.body["arms"]["baseline"]["missing_output"] == 1
     assert card.body["arms"]["baseline"]["eligible"] == 29
 
@@ -234,7 +267,7 @@ def test_changed_denominator_blocks_improvement_claim() -> None:
         declared_case_ids=runs[1].declared_case_ids[:-1],
         outputs=runs[1].outputs[:-1],
     )
-    card = eb.score_heldout(m, heldout_key=f.heldout_key, isolation=iso, runs=[runs[0], narrowed])
+    card = _score_with(m, f, heldout_key=f.heldout_key, isolation=iso, runs=[runs[0], narrowed])
     assert card.body["improvement_claim"] == "blocked_changed_denominator"
     assert card.body["paired_comparison"] is None
     assert card.body["denominators_identical_across_arms"] is False
@@ -245,7 +278,7 @@ def test_arm_attribution_change_is_refused() -> None:
     o = dataclasses.replace(runs[1].outputs[0], served_revision="gen-rev-2")
     moved = dataclasses.replace(runs[1], outputs=(o, *runs[1].outputs[1:]))
     code = _code(
-        lambda: eb.score_heldout(m, heldout_key=f.heldout_key, isolation=iso, runs=[runs[0], moved])
+        lambda: _score_with(m, f, heldout_key=f.heldout_key, isolation=iso, runs=[runs[0], moved])
     )
     assert code == "arm_attribution_mismatch"
 
@@ -262,6 +295,7 @@ def test_baseline_only_run_has_no_improvement_claim() -> None:
         heldout_cases=f.heldout_cases,
         heldout_exclusions=f.exclusions,
         heldout_key=f.heldout_key,
+        development_key=f.development_key,
         arms=fx.ARM_CONFIGS[:1],
         rubric_version="r",
         rubric_text="t",
@@ -272,8 +306,10 @@ def test_baseline_only_run_has_no_improvement_claim() -> None:
     )
     elig = tuple(c for c in f.heldout_cases if c.case_id in m.heldout_eligible)
     run = fx.simulate_arm(fx.ARM_CONFIGS[0], elig, m)
-    iso = eb.verify_isolation(m, fit_rows=[], prompt_texts=[], heldout_key=f.heldout_key)
-    card = eb.score_heldout(m, heldout_key=f.heldout_key, isolation=iso, runs=[run])
+    iso = eb.verify_isolation(
+        m, fit_rows=[], prompt_texts=_prompts(f, m), heldout_key=f.heldout_key
+    )
+    card = _score_with(m, f, heldout_key=f.heldout_key, isolation=iso, runs=[run])
     assert card.body["improvement_claim"] == "none_baseline_only"
     assert card.body["paired_comparison"] is None
 
@@ -287,7 +323,7 @@ def test_missing_frozen_arm_holds_rather_than_reporting_a_win() -> None:
 def test_baseline_run_is_required() -> None:
     f, m, _, _, runs, iso = _setup()
     code = _code(
-        lambda: eb.score_heldout(m, heldout_key=f.heldout_key, isolation=iso, runs=[runs[1]])
+        lambda: _score_with(m, f, heldout_key=f.heldout_key, isolation=iso, runs=[runs[1]])
     )
     assert code == "baseline_missing"
 
@@ -305,7 +341,8 @@ def test_redacted_scorecard_has_no_case_text_or_reference_answers() -> None:
     blob = json.dumps(_score().body)
     assert "generated question" not in blob
     assert "ANS-GEN" not in blob
-    assert "HOLD-00" not in blob and "HOLD-01" not in blob.replace("HOLD-011", "")
+    assert "HOLD-" not in blob and "DEV-" not in blob  # every case id, excluded ones too
+    assert "context_not_authorized" in blob  # closed reason code only, no free text
 
 
 def test_generated_tier_lists_every_unsatisfied_external_gate() -> None:
@@ -378,7 +415,7 @@ def test_disposition_rules() -> None:
     assert _code(lambda: _dispose(r.scorecard, r.finding, "ship_it")) == "disposition_unknown"
     base = _score(include_repair=False)
     assert _code(lambda: _dispose(base, None, "adopt_test_simple_fix")) == (
-        "adopt_requires_observed_net_fixes"
+        "adopt_requires_interval_supported_improvement"
     )
     assert _code(lambda: _dispose(base, None, "consider_tuning")) == (
         "tuning_requires_development_finding"
@@ -415,4 +452,249 @@ def test_cli_exit_codes_and_refusal(tmp_path: Path) -> None:
         env=ENV,
         check=False,
     )
-    assert bad.returncode == 2 and "adopt_requires_observed_net_fixes" in bad.stderr
+    assert bad.returncode == 2 and "adopt_requires_interval_supported_improvement" in bad.stderr
+
+
+# ---- review findings: F1 content freeze
+
+
+def _freeze_with(f: Any, **over: Any) -> eb.FrozenManifest:
+    args: dict[str, Any] = {
+        "benchmark_id": "generated-eve-test",
+        "evidence_tier": "generated",
+        "development_cases": f.development_cases,
+        "heldout_cases": f.heldout_cases,
+        "heldout_exclusions": f.exclusions,
+        "heldout_key": f.heldout_key,
+        "development_key": f.development_key,
+        "arms": fx.ARM_CONFIGS,
+        "rubric_version": "generated-rubric-1",
+        "rubric_text": fx.RUBRIC_TEXT,
+        "alpha": 0.1,
+        "materiality_min_errors": 2,
+        "min_recurring_families": 2,
+        "adjudicator_kind": "generated_fixture",
+    }
+    args.update(over)
+    return eb.freeze_manifest(**args)
+
+
+def test_case_text_and_development_key_are_part_of_the_freeze() -> None:
+    f = fx.build_fixture_set()
+    base = _freeze_with(f).manifest_digest
+    changed_held = tuple(dataclasses.replace(c, question="CHANGED") for c in f.heldout_cases)
+    assert _freeze_with(f, heldout_cases=changed_held).manifest_digest != base
+    changed_dev = tuple(dataclasses.replace(c, question="CHANGED") for c in f.development_cases)
+    assert _freeze_with(f, development_cases=changed_dev).manifest_digest != base
+    other_ctx = tuple(dataclasses.replace(c, context_ids=("EV-X",)) for c in f.heldout_cases)
+    assert _freeze_with(f, heldout_cases=other_ctx).manifest_digest != base
+    bad_key = (dataclasses.replace(f.development_key[0], answer="ANS-X"), *f.development_key[1:])
+    assert _freeze_with(f, development_key=bad_key).manifest_digest != base
+    assert _freeze_with(f).manifest_digest == base  # unchanged inputs stay stable
+
+
+def test_scoring_refuses_heldout_text_changed_after_freeze() -> None:
+    f, m, _, _, runs, iso = _setup()
+    swapped = tuple(dataclasses.replace(c, question="CHANGED") for c in f.heldout_cases)
+    code = _code(
+        lambda: _score_with(
+            m, f, heldout_key=f.heldout_key, isolation=iso, runs=runs, heldout_cases=swapped
+        )
+    )
+    assert code == "heldout_content_not_the_frozen_content"
+
+
+def test_development_assessment_refuses_changed_cases_or_key() -> None:
+    f, m, cfg, _, _, _ = _setup()
+    base = fx.simulate_arm(cfg[eb.BASELINE_ARM], f.development_cases, m)
+    rep = fx.simulate_arm(cfg[eb.REPAIR_ARM], f.development_cases, m)
+    changed = (
+        dataclasses.replace(f.development_cases[0], question="CHANGED"),
+        *f.development_cases[1:],
+    )
+    bad = (dataclasses.replace(f.development_key[0], answer="ANS-X"), *f.development_key[1:])
+
+    def assess(cases: Any, key: Any) -> object:
+        return eb.assess_development(
+            m, development_cases=cases, development_key=key, baseline=base, repair=rep
+        )
+
+    assert _code(lambda: assess(changed, f.development_key)) == (
+        "development_content_not_the_frozen_content"
+    )
+    assert _code(lambda: assess(f.development_cases, bad)) == "development_key_not_the_frozen_key"
+
+
+# ---- review findings: F2 claim follows uncertainty
+
+
+def test_net_fixes_with_interval_including_zero_is_only_directional() -> None:
+    card = _score()
+    p = card.body["paired_comparison"]
+    assert p["fixes"] > p["regressions"] and p["interval"]["lower"] < 0
+    assert card.body["improvement_claim"] == "directional_only_interval_includes_zero"
+    assert _code(lambda: _dispose(card, None, "adopt_test_simple_fix")) == (
+        "adopt_requires_interval_supported_improvement"
+    )
+
+
+def test_single_fix_without_regression_is_not_an_improvement_claim() -> None:
+    f, m, cfg, _, runs, iso = _setup()
+    repair_settings = cfg[eb.REPAIR_ARM].retrieval_settings_id
+    fixed = {o.case_id: o for o in runs[1].outputs}
+    outs = tuple(
+        dataclasses.replace(
+            fixed[o.case_id] if o.case_id == "HOLD-001" else o,
+            retrieval_settings_id=repair_settings,
+        )
+        for o in runs[0].outputs
+    )  # repair equals baseline everywhere except one case
+    one = dataclasses.replace(runs[1], outputs=outs)
+    card = _score_with(m, f, heldout_key=f.heldout_key, isolation=iso, runs=[runs[0], one])
+    p = card.body["paired_comparison"]
+    assert (p["fixes"], p["regressions"]) == (1, 0)
+    assert card.body["improvement_claim"] == "directional_only_interval_includes_zero"
+
+
+def test_large_sample_with_both_intervals_above_zero_supports_improvement() -> None:
+    r = fx.run_fixture_benchmark(heldout_cases=400)
+    p = r.scorecard.body["paired_comparison"]
+    assert p["interval"]["lower"] > 0 and p["family_interval"]["lower"] > 0
+    assert r.scorecard.body["improvement_claim"] == "improvement_supported_by_interval"
+    rec = _dispose(r.scorecard, r.finding, "adopt_test_simple_fix")
+    assert rec["disposition"] == "adopt_test_simple_fix" and rec["fit_authorized"] is False
+
+
+def test_family_interval_uses_families_as_units_and_states_case_independence() -> None:
+    p = _score().body["paired_comparison"]
+    assert p["interval"]["case_independence_assumed"] is True
+    fam = p["family_interval"]
+    assert fam["unit"] == "family" and fam["units"] == 15 and fam["units"] < p["paired_gradeable"]
+    assert fam["method"] == "bounded_independent_family_hoeffding_v1"
+    assert fam["lower"] < p["interval"]["lower"] < p["interval"]["upper"] < fam["upper"]
+
+
+def test_cli_line_carries_the_interval_caveat_beside_the_claim(tmp_path: Path) -> None:
+    out = subprocess.run(
+        [*CLI, "--out", str(tmp_path)], capture_output=True, text=True, env=ENV, check=False
+    ).stdout
+    assert "claim=directional_only_interval_includes_zero" in out
+    assert "assumes case independence" in out and "descriptive-only" in out
+
+
+# ---- review findings: F3 gates cannot be asserted by the caller
+
+
+@pytest.mark.parametrize("tier", ["installed-provider", "observed", "owner-reviewed"])
+def test_higher_evidence_tier_is_refused_without_a_verifier(tier: str) -> None:
+    f = fx.build_fixture_set()
+    assert _code(lambda: _freeze_with(f, evidence_tier=tier)) == "evidence_tier_unverifiable_here"
+
+
+def test_audit_ref_shape_is_validated_and_never_clears_the_gates() -> None:
+    f = fx.build_fixture_set()
+    assert _code(lambda: _freeze_with(f, ground_truth_audit_receipt_ref="x")) == (
+        "audit_receipt_ref_shape_invalid"
+    )
+    ref = "sha256:" + "a" * 64
+    m = _freeze_with(
+        f, ground_truth_audit_receipt_ref=ref, adjudicator_kind="pi_school_domain_reviewer"
+    )
+    elig = tuple(c for c in f.heldout_cases if c.case_id in m.heldout_eligible)
+    run = fx.simulate_arm(fx.ARM_CONFIGS[0], elig, m)
+    iso = eb.verify_isolation(
+        m, fit_rows=[], prompt_texts=_prompts(f, m), heldout_key=f.heldout_key
+    )
+    body = _score_with(m, f, heldout_key=f.heldout_key, isolation=iso, runs=[run]).body
+    assert body["accuracy_claim_eligible"] is False
+    assert body["claim_scope"] == "implementation_only"
+    assert set(eb.UNSATISFIED_EXTERNAL_GATES_GENERATED) <= set(body["unsatisfied_external_gates"])
+
+
+def test_forged_isolation_receipt_is_refused() -> None:
+    f, m, _, _, runs, _ = _setup()
+    forged = eb.IsolationReceipt(m.manifest_digest, 0, 0, "d", "d", ())
+    code = _code(lambda: _score_with(m, f, heldout_key=f.heldout_key, isolation=forged, runs=runs))
+    assert code == "isolation_receipt_not_from_these_inputs"
+
+
+def test_isolation_receipt_for_other_inputs_is_refused() -> None:
+    f, m, _, _, runs, iso = _setup()
+    extra = [eb.FitRow("DEV-000", "GEN-FAM-DEV-00", "benign")]
+    code = _code(
+        lambda: _score_with(
+            m, f, heldout_key=f.heldout_key, isolation=iso, runs=runs, fit_rows=extra
+        )
+    )
+    assert code == "isolation_receipt_not_from_these_inputs"
+    other = eb.verify_isolation(
+        m, fit_rows=extra, prompt_texts=_prompts(f, m), heldout_key=f.heldout_key
+    )
+    assert iso.fit_rows_digest != other.fit_rows_digest
+
+
+# ---- review findings: F4/F5 adapter fails closed on type; F6 exclusions redacted
+
+
+def _export_row(**over: Any) -> dict[str, Any]:
+    row: dict[str, Any] = {
+        "case_id": "HOLD-000",
+        "answer": "a",
+        "citations": ["c"],
+        "abstained": False,
+        "served_revision": "r",
+        "source_snapshot_id": "s",
+        "retrieval_settings_id": "t",
+    }
+    row.update(over)
+    return row
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        {"abstained": "false"},
+        {"abstained": 0},
+        {"citations": "EV-HOLD-000"},
+        {"citations": ["ok", 3]},
+        {"citations": None},
+        {"answer": 7},
+        {"answer": ["a"]},
+        {"case_id": ""},
+        {"served_revision": None},
+    ],
+)
+def test_prepared_export_adapter_refuses_malformed_types(
+    tmp_path: Path, bad: dict[str, Any]
+) -> None:
+    path = tmp_path / "bad.jsonl"
+    path.write_text(json.dumps(_export_row(**bad)) + "\n")
+    assert _code(lambda: fx.load_prepared_export(path, "baseline", "sha256:x")) == (
+        "export_row_type_invalid"
+    )
+
+
+@pytest.mark.parametrize("text", ["{not json", "[1, 2]"])
+def test_prepared_export_adapter_refuses_non_json_and_non_object(tmp_path: Path, text: str) -> None:
+    path = tmp_path / "x.jsonl"
+    path.write_text(text + "\n")
+    assert _code(lambda: fx.load_prepared_export(path, "baseline", "sha256:x")) in (
+        "export_row_not_json",
+        "export_row_shape_invalid",
+    )
+
+
+def test_prepared_export_adapter_accepts_null_answer_and_abstention(tmp_path: Path) -> None:
+    path = tmp_path / "ok.jsonl"
+    path.write_text(json.dumps(_export_row(answer=None, citations=[], abstained=True)) + "\n")
+    out = fx.load_prepared_export(path, "baseline", "sha256:x").outputs[0]
+    assert out.abstained is True and out.answer is None and out.citations == ()
+
+
+def test_exclusion_reason_must_be_a_closed_code_and_ids_are_hashed_in_scorecard() -> None:
+    f = fx.build_fixture_set()
+    free = (eb.ExclusionRecord("HOLD-011", "free text with detail"),)
+    assert _code(lambda: _freeze_with(f, heldout_exclusions=free)) == "exclusion_reason_invalid"
+    excluded = _score().body["heldout"]["excluded"]
+    assert len(excluded) == 1 and excluded[0][0].startswith("case:")
+    assert excluded[0][1] == "context_not_authorized"

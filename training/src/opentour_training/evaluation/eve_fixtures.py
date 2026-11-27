@@ -24,6 +24,7 @@ from opentour_training.evaluation.eve_benchmark import (
     BenchmarkResult,
     EveCase,
     ExclusionRecord,
+    FitRow,
     FrozenManifest,
     ReferenceJudgment,
     assess_development,
@@ -80,7 +81,7 @@ def build_fixture_set(*, dev_cases: int = 20, heldout_cases: int = 30) -> Fixtur
         tuple(r for _, r, _ in dev),
         tuple(c for c, _, _ in held),
         tuple(held_refs),
-        (ExclusionRecord("HOLD-011", "generated: context not authorized"),),
+        (ExclusionRecord("HOLD-011", "context_not_authorized"),),
     )
 
 
@@ -119,8 +120,10 @@ def simulate_arm(cfg: ArmConfig, cases: Sequence[EveCase], manifest: FrozenManif
     )
 
 
-def run_fixture_benchmark(*, include_repair: bool = True) -> BenchmarkResult:
-    fx = build_fixture_set()
+def run_fixture_benchmark(
+    *, include_repair: bool = True, heldout_cases: int = 30
+) -> BenchmarkResult:
+    fx = build_fixture_set(heldout_cases=heldout_cases)
     manifest = freeze_manifest(
         benchmark_id="generated-eve-benchmark-1",
         evidence_tier="generated",
@@ -128,6 +131,7 @@ def run_fixture_benchmark(*, include_repair: bool = True) -> BenchmarkResult:
         heldout_cases=fx.heldout_cases,
         heldout_exclusions=fx.exclusions,
         heldout_key=fx.heldout_key,
+        development_key=fx.development_key,
         arms=ARM_CONFIGS,
         rubric_version="generated-rubric-1",
         rubric_text=RUBRIC_TEXT,
@@ -146,17 +150,24 @@ def run_fixture_benchmark(*, include_repair: bool = True) -> BenchmarkResult:
         baseline=dev_base,
         repair=dev_rep,
     )
+    fit_rows: list[FitRow] = []  # baseline arm is not fitted; simple repair is a retrieval switch
+    prompts = [c.question for c in fx.heldout_cases]
     iso = verify_isolation(
-        manifest,
-        fit_rows=[],  # baseline arm is not fitted; simple repair is a retrieval switch
-        prompt_texts=[c.question for c in fx.heldout_cases],
-        heldout_key=fx.heldout_key,
+        manifest, fit_rows=fit_rows, prompt_texts=prompts, heldout_key=fx.heldout_key
     )
     eligible = tuple(c for c in fx.heldout_cases if c.case_id in manifest.heldout_eligible)
     runs = [simulate_arm(cfgs[BASELINE_ARM], eligible, manifest)]
     if include_repair:
         runs.append(simulate_arm(cfgs[REPAIR_ARM], eligible, manifest))
-    card = score_heldout(manifest, heldout_key=fx.heldout_key, isolation=iso, runs=runs)
+    card = score_heldout(
+        manifest,
+        heldout_cases=fx.heldout_cases,
+        heldout_key=fx.heldout_key,
+        fit_rows=fit_rows,
+        prompt_texts=prompts,
+        isolation=iso,
+        runs=runs,
+    )
     return BenchmarkResult(manifest, finding, card)
 
 
@@ -178,14 +189,34 @@ def load_prepared_export(path: Path, arm_id: str, manifest_digest: str) -> ArmRu
     for n, line in enumerate(path.read_text().splitlines(), 1):
         if not line.strip():
             continue
-        row: dict[str, Any] = json.loads(line)
-        if set(row) != allowed:
+        try:
+            row: dict[str, Any] = json.loads(line)
+        except ValueError:
+            raise BenchmarkError("export_row_not_json", f"line {n}") from None
+        if type(row) is not dict or set(row) != allowed:
             raise BenchmarkError("export_row_shape_invalid", f"line {n}")
+        cites = row["citations"]
+        ok = (
+            type(row["abstained"]) is bool
+            and (row["answer"] is None or type(row["answer"]) is str)
+            and type(cites) is list
+            and all(type(c) is str for c in cites)
+            and all(
+                type(row[k]) is str and bool(row[k])
+                for k in (
+                    "case_id",
+                    "served_revision",
+                    "source_snapshot_id",
+                    "retrieval_settings_id",
+                )
+            )
+        )
+        if not ok:
+            raise BenchmarkError("export_row_type_invalid", f"line {n}")
         outs.append(
             ArmOutput(
-                str(row["case_id"]), row["answer"], tuple(row["citations"]),
-                bool(row["abstained"]), str(row["served_revision"]),
-                str(row["source_snapshot_id"]), str(row["retrieval_settings_id"]),
+                row["case_id"], row["answer"], tuple(cites), row["abstained"],
+                row["served_revision"], row["source_snapshot_id"], row["retrieval_settings_id"],
             )
         )  # fmt: skip
     return ArmRun(arm_id, manifest_digest, tuple(o.case_id for o in outs), tuple(outs))
@@ -218,9 +249,19 @@ def main(argv: Sequence[str] | None = None) -> int:
     except BenchmarkError as exc:
         print(f"REFUSED {exc.code}: {exc}", file=sys.stderr)
         return 2
+    body = result.scorecard.body
+    paired = body["paired_comparison"]
+    caveat = ""
+    if paired is not None:
+        ci, fi = paired["interval"], paired["family_interval"]
+        caveat = (
+            f" case_interval=[{ci['lower']:.3f},{ci['upper']:.3f}](assumes case independence)"
+            f" family_interval=[{fi['lower']:.3f},{fi['upper']:.3f}]({fi['units']} families)"
+            " descriptive-only"
+        )
     print(
-        f"scorecard {result.scorecard.scorecard_digest} claim="
-        f"{result.scorecard.body['improvement_claim']} tier=generated"
+        f"scorecard {result.scorecard.scorecard_digest} claim={body['improvement_claim']}"
+        f"{caveat} tier=generated"
     )
     return 0
 
