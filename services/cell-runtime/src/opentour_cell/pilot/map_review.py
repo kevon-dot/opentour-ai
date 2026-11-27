@@ -11,12 +11,14 @@ import time
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager, nullcontext
 from dataclasses import asdict, dataclass, replace
+from datetime import date
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
 from opentour_cell.pilot.guided_decision_map import (
     Condition,
+    EffectiveFrom,
     FieldKind,
     GuidedMap,
     guided_draft,
@@ -85,6 +87,7 @@ class MapSettingsEdit:
     trigger: str | None
     fallback_action: str | None
     reason: str
+    unit_of_work: str | None = None
 
 
 @dataclass(frozen=True)
@@ -133,10 +136,14 @@ class MapReviewSnapshot:
     settings_ref: str | None = None
     settings_support: str | None = None
     settings_trigger: str | None = None
+    unit_of_work: str | None = None
+    effective_from: EffectiveFrom | None = None
 
     def expected_action(
-        self, fields: Mapping[str, str | Decimal | None]
+        self, fields: Mapping[str, str | Decimal | None], *, decision_date: date | None = None
     ) -> tuple[str | None, tuple[str, ...]]:
+        if self.effective_from and not self.effective_from.applies(decision_date):
+            return None, (citation_ref(self.effective_from.citation),)
         unknown = [r for r in self.branches if r.action is None and r.disposition != "out_of_scope"]
         if unknown:
             return None, tuple(r.citation_ref for r in unknown)
@@ -192,7 +199,16 @@ class _Context:
 
 
 class MapReviewService:
-    def __init__(self, directory: Path, tenant: str, selection: Json):
+    def __init__(
+        self,
+        directory: Path,
+        tenant: str,
+        selection: Json,
+        *,
+        selection_file: str = "map-review-selection.json",
+    ):
+        _require(re.fullmatch(_FILE, selection_file) and selection_file.endswith(".json"))
+        self.selection_file = selection_file
         self.directory = directory.absolute()
         _require(self.directory.resolve(strict=True) == self.directory)
         self.tenant, self.selection = require_ref(tenant), selection
@@ -224,9 +240,7 @@ class MapReviewService:
 
     def _capability(self, actor: IntakePrincipal, starter: VerifiedStarterGrant) -> Json:
         _require(actor.tenant == self.tenant)
-        _require(
-            _read_private(self.directory / "map-review-selection.json", 8192) == self.selection
-        )
+        _require(_read_private(self.directory / self.selection_file, 8192) == self.selection)
         envelope = _read_private(self.directory / self.selection["grant_file"], 32768)
         _require(set(envelope) == {"grant", "seal_sha256"})
         cap, seal = envelope["grant"], envelope["seal_sha256"]
@@ -474,11 +488,15 @@ class MapReviewService:
 
     @staticmethod
     def _same_source(record: Json, ctx: _Context) -> bool:
+        assert ctx.draft is not None
+        effective_date = ctx.draft.effective_from
         return bool(
             record["source_revision"] == ctx.capability["source_revision"]
             and record["starter_grant_revision"] == ctx.capability["starter_grant_revision"]
             and record["schema_digest"]
             == digest([ctx.capability["field_kinds"], ctx.capability["actions"]])
+            and record.get("effective_date")
+            == (effective_date.iso_date if effective_date else None)
         )
 
     @staticmethod
@@ -587,6 +605,11 @@ class MapReviewService:
                 )
             prior_by_ref = {r.branch_ref: r for r in prior_rows}
             affected = set(changed)
+            effective_date = ctx.draft.effective_from
+            if record.get("effective_date") != (
+                effective_date.iso_date if effective_date else None
+            ):
+                affected.update(r.branch_ref for r in rows)
             for row in rows:
                 before = prior_by_ref.get(row.branch_ref)
                 if before is not None and self._blocking_rules(
@@ -673,6 +696,8 @@ class MapReviewService:
             settings_ref="map-assertion-" + digest(settings)[:40] if settings else None,
             settings_support="owner_assertion" if settings else None,
             settings_trigger=settings["trigger"] if settings else None,
+            unit_of_work=settings.get("unit_of_work") if settings else None,
+            effective_from=ctx.draft.effective_from,
         )
 
     def _blocking_rules(self, row: MapBranch, rows: tuple[MapBranch, ...]) -> set[str]:
@@ -729,6 +754,10 @@ class MapReviewService:
             spans = [r.citation for r in current.branches if r.citation_ref == citation_ref]
             if ctx.draft and ctx.draft.first_match_clause:
                 span = ctx.draft.first_match_clause
+                if globals()["citation_ref"](span) == citation_ref:
+                    spans.append(span)
+            if current.effective_from:
+                span = current.effective_from.citation
                 if globals()["citation_ref"](span) == citation_ref:
                     spans.append(span)
             _require(bool(spans), "map_citation_unavailable")
@@ -829,13 +858,17 @@ class MapReviewService:
             len(changes) <= 128 and len({c.branch_ref for c in changes}) == len(changes),
             "invalid_map_edit",
         )
+        assertion_input = asdict(settings) if settings is not None else None
+        if assertion_input is not None and assertion_input["unit_of_work"] is None:
+            # Keep operation identities from pre-unit saved forms replayable.
+            del assertion_input["unit_of_work"]
         intent = digest(
             [
                 expected_revision,
                 [asdict(c) for c in changes],
                 precedence,
                 precedence_reason,
-                asdict(settings) if settings is not None else None,
+                assertion_input,
             ]
         )
         with (
@@ -884,6 +917,13 @@ class MapReviewService:
                         settings.fallback_action is None
                         or settings.fallback_action in ctx.capability["actions"]
                     )
+                    and (
+                        settings.unit_of_work is None
+                        or isinstance(settings.unit_of_work, str)
+                        and 0 < len(settings.unit_of_work) <= 160
+                        and settings.unit_of_work == settings.unit_of_work.strip()
+                        and settings.unit_of_work.isprintable()
+                    )
                     and isinstance(settings.reason, str)
                     and 0 < len(settings.reason) <= 1000
                     and settings.reason == settings.reason.strip()
@@ -929,6 +969,8 @@ class MapReviewService:
                 precedence_actor_ref=order_actor,
                 settings=assertion,
             )
+            if ctx.draft.effective_from:
+                body["effective_date"] = ctx.draft.effective_from.iso_date
             seal = digest(body)
             ref = "map-review-" + seal[:40]
             # Revalidate before durable effects, while the authority guard is held.
@@ -954,9 +996,14 @@ class MapReviewService:
 
 
 def open_map_review(
-    directory: Path, tenant: str, workflow_ref: str | None = None
+    directory: Path,
+    tenant: str,
+    workflow_ref: str | None = None,
+    *,
+    selection_file: str = "map-review-selection.json",
 ) -> MapReviewService:
-    selection = _read_private(directory / "map-review-selection.json", 8192)
-    service = MapReviewService(directory, tenant, selection)
+    _require(re.fullmatch(_FILE, selection_file) and selection_file.endswith(".json"))
+    selection = _read_private(directory / selection_file, 8192)
+    service = MapReviewService(directory, tenant, selection, selection_file=selection_file)
     _require(workflow_ref is None or service.workflow_ref == workflow_ref)
     return service
