@@ -51,6 +51,16 @@ and current baseline grant. It rechecks evaluator authority and the actual froze
 input projection before each bounded prediction and receipt commit. A REVIEW
 label remains an abstention, including when selected by model parameters.
 
+The separately registered `starter-structured-fields-v1` input schema accepts
+the complete authorized scalar field map when `input_field=None`. It applies
+canonical JSON serialization before the unchanged CPU feature extractor; field
+names, missing values, and decision-time values remain explicit. Every field
+must be in the current execution and model grants. The existing one-text-field
+schema keeps its original encoding. Both profiles retain the 48-token and
+128-case bounds. This encoding does not add targets, suggestions, case identities,
+or a policy classifier. Its tests prove byte fidelity and receipt reuse using
+generated parameters, not the native seven-family end-to-end benchmark scores.
+
 The adapter stores authenticated receipts in `starter-local-predictions.sqlite3`.
 The custodian supplies a separate private 32-byte receipt key; the worker does not
 create or distribute that key. Changed inputs, model bytes, scope or operation
