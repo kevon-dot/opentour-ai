@@ -15,6 +15,7 @@ from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from xml.etree import ElementTree
+from xml.parsers import expat
 
 from opentour_cell.pilot.mixed_intake import pdf
 from opentour_cell.pilot.mixed_intake.flags import value_flags
@@ -325,22 +326,49 @@ class Package:
 
 def parse_xml(payload: bytes, limits: Limits) -> ElementTree.Element:
     """Parse XML with entity/DTD declarations refused and nesting bounded."""
-    head = payload[:4096].lower()
-    if b"<!doctype" in head or b"<!entity" in payload.lower():
+    lowered = payload.lower()
+    if b"<!doctype" in lowered or b"<!entity" in lowered:
         raise ReaderFailure(ExtractionState.CORRUPT, "xml_dtd_refused", NextActor.OWNER)
-    try:
-        root = ElementTree.fromstring(payload)
-    except (ElementTree.ParseError, RecursionError) as error:
-        raise ReaderFailure(ExtractionState.CORRUPT, "bad_xml", NextActor.OWNER) from error
-    stack = [(root, 1)]
-    while stack:
-        node, depth = stack.pop()
+
+    def refuse(*_args: object) -> None:
+        raise ReaderFailure(ExtractionState.CORRUPT, "xml_dtd_refused", NextActor.OWNER)
+
+    # The byte scan above only sees ASCII-compatible encodings (a UTF-16 payload would slip
+    # past it), so the expat parser itself also refuses any DTD or entity declaration, whatever
+    # the encoding. Depth is bounded while parsing, before a deep tree can be built.
+    builder = ElementTree.TreeBuilder()
+    depth = 0
+
+    def qname(name: str) -> str:
+        uri, _, local = name.rpartition(" ")
+        return f"{{{uri}}}{local}" if uri else name
+
+    def start(name: str, attrs: dict[str, str]) -> None:
+        nonlocal depth
+        depth += 1
         if depth > limits.max_xml_depth:
             raise ReaderFailure(
                 ExtractionState.OVER_DEPTH, "xml_depth", NextActor.OWNER, limit="max_xml_depth"
             )
-        stack.extend((child, depth + 1) for child in node)
-    return root
+        builder.start(qname(name), {qname(k): v for k, v in attrs.items()})
+
+    def end(name: str) -> None:
+        nonlocal depth
+        depth -= 1
+        builder.end(qname(name))
+
+    parser = expat.ParserCreate(namespace_separator=" ")
+    parser.buffer_text = True
+    parser.StartElementHandler = start
+    parser.EndElementHandler = end
+    parser.CharacterDataHandler = builder.data
+    parser.StartDoctypeDeclHandler = refuse
+    parser.EntityDeclHandler = refuse
+    try:
+        parser.Parse(payload, True)
+        return builder.close()
+    except (expat.ExpatError, RecursionError) as error:
+        raise ReaderFailure(ExtractionState.CORRUPT, "bad_xml", NextActor.OWNER) from error
 
 
 def _is_encrypted_container(data: bytes) -> bool:
@@ -599,6 +627,12 @@ def read_object(
         return kind, read_jsonl(data, limits, deadline)
     except ReaderFailure as error:
         return kind, failure_result(error)
+    except Exception:  # noqa: BLE001
+        # Attacker-shaped content must never abort a scan: any parser surprise (bad index,
+        # non-numeric cell, overflow, unexpected structure) is one recoverable CORRUPT object.
+        return kind, failure_result(
+            ReaderFailure(ExtractionState.CORRUPT, "malformed_content", NextActor.OWNER)
+        )
 
 
 def _read_ooxml(

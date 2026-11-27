@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import io
 import zipfile
+import zlib
 from dataclasses import replace
 
 import mixed_intake_fixture as fx
@@ -270,3 +271,182 @@ def test_readers_need_no_model_or_ocr_credentials(monkeypatch: pytest.MonkeyPatc
         ):
             result = read(data, name)[1]
             assert result.state in (ExtractionState.ELIGIBLE, ExtractionState.NEEDS_RENDITION)
+
+
+# ------------------------------------------------------------------ closer regression tests
+# Added by the independent reviewer: crafted objects that previously crashed a scan or were
+# silently emitted as eligible text.
+
+
+def _xlsx_variant(old: bytes, new: bytes) -> bytes:
+    source = zipfile.ZipFile(io.BytesIO(fx.build_xlsx()))
+    parts = {name: source.read(name) for name in source.namelist()}
+    sheet = parts["xl/worksheets/sheet1.xml"]
+    assert old in sheet
+    parts["xl/worksheets/sheet1.xml"] = sheet.replace(old, new)
+    return _archive(parts)
+
+
+@pytest.mark.parametrize(
+    ("old", "new"),
+    [
+        (b"<v>4</v>", b"<v>99</v>"),  # shared string index out of range
+        (b"<v>4</v>", b"<v>zz</v>"),  # non-numeric shared string index
+        (b"<v>46037</v>", b"<v>abc</v>"),  # non-numeric date serial
+        (b"<v>46037</v>", b"<v>1e300</v>"),  # overflowing date serial
+        (b"<v>46037</v>", b"<v>nan</v>"),
+        (b's="1"', b's="x"'),  # non-numeric style index
+        (b'r="B2"', b'r=""'),  # empty cell reference
+        (b'r="B2"', b'r="12"'),  # cell reference without a column
+    ],
+)
+def test_malformed_xlsx_cell_is_one_corrupt_object_not_a_crashed_scan(
+    old: bytes, new: bytes
+) -> None:
+    _fmt, result = read(_xlsx_variant(old, new), "x.xlsx")
+    assert result.state is ExtractionState.CORRUPT and not result.spans
+    assert result.reason == "malformed_content" and result.next_actor.value == "owner"
+
+
+def test_utf16_entity_declaration_cannot_slip_past_the_byte_scan() -> None:
+    evil = (
+        '<?xml version="1.0" encoding="UTF-16"?><!DOCTYPE a [<!ENTITY x "boom">]><a>&x;</a>'
+    ).encode("utf-16")
+    result = read(_archive({"word/document.xml": evil}), "x.docx")[1]
+    assert result.state is ExtractionState.CORRUPT and result.reason == "xml_dtd_refused"
+    late = b'<?xml version="1.0"?><!--' + b"x" * 5000 + b'--><!DOCTYPE a [<!ENTITY x "b">]><a/>'
+    result = read(_archive({"word/document.xml": late}), "x.docx")[1]
+    assert result.reason == "xml_dtd_refused"
+
+
+def _pdf(
+    content: bytes,
+    font: bytes | None = None,
+    extra: dict[int, bytes] | None = None,
+    resources: bytes = b"/Font << /F1 7 0 R >>",
+) -> bytes:
+    objects = {
+        1: b"<< /Type /Catalog /Pages 2 0 R >>",
+        2: b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        3: b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 5 0 R "
+        b"/Resources << " + resources + b" >> >>",
+        4: b"<< >>",
+        5: fx._stream(content),
+        6: b"<< >>",
+        7: font
+        or b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>",
+        **(extra or {}),
+    }
+    return fx._assemble(objects)
+
+
+TWO_LINES = b"BT /F1 11 Tf 1 0 0 1 72 700 Tm (First line) Tj 1 0 0 1 72 600 Tm (Second) Tj ET"
+
+
+def test_pdf_with_a_standard_font_stays_eligible() -> None:
+    result = read(_pdf(TWO_LINES), "x.pdf")[1]
+    assert result.state is ExtractionState.ELIGIBLE
+    assert [s.text for s in result.spans] == ["First line", "Second"]
+
+
+@pytest.mark.parametrize(
+    ("label", "kwargs", "flag"),
+    [
+        (
+            "indirect encoding dictionary with Differences",
+            {
+                "font": b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding 8 0 R >>",
+                "extra": {8: b"<< /Type /Encoding /Differences [65 /Z /Y] >>"},
+            },
+            "font_encoding_unverified",
+        ),
+        (
+            "embedded subset TrueType without an encoding",
+            {
+                "font": b"<< /Type /Font /Subtype /TrueType /BaseFont /ABCDEF+X "
+                b"/FontDescriptor 8 0 R >>",
+                "extra": {8: b"<< /Type /FontDescriptor /FontFile2 9 0 R >>", 9: fx._stream(b"x")},
+            },
+            "font_encoding_unverified",
+        ),
+        (
+            "font resource that cannot be resolved",
+            {"content": b"BT /F9 11 Tf 72 700 Td (Hello) Tj ET"},
+            "font_encoding_unverified",
+        ),
+        (
+            "invisible text render mode",
+            {"content": b"BT /F1 11 Tf 3 Tr 72 700 Td (hidden) Tj ET"},
+            "hidden_text_present",
+        ),
+        (
+            "rotated text matrix",
+            {"content": b"BT /F1 11 Tf 0 1 -1 0 72 700 Tm (Rotated) Tj ET"},
+            "layout_transform_unverified",
+        ),
+        (
+            "rotated current transformation matrix",
+            {"content": b"q 0 1 -1 0 0 0 cm BT /F1 11 Tf 72 700 Td (Turned) Tj ET Q"},
+            "layout_transform_unverified",
+        ),
+        (
+            "text inside a Form XObject is not read",
+            {
+                "content": b"BT /F1 11 Tf 72 700 Td (Direct) Tj ET /Fm1 Do",
+                "resources": b"/Font << /F1 7 0 R >> /XObject << /Fm1 8 0 R >>",
+                "extra": {
+                    8: b"<< /Type /XObject /Subtype /Form /BBox [0 0 9 9] /Length 36 >>\n"
+                    b"stream\nBT /F1 11 Tf (Hidden) Tj ET\nendstream"
+                },
+            },
+            "form_xobject_text_unread",
+        ),
+    ],
+)
+def test_pdf_text_this_reader_cannot_place_or_decode_goes_to_review(
+    label: str, kwargs: dict, flag: str
+) -> None:
+    content = kwargs.pop("content", TWO_LINES)
+    result = read(_pdf(content, **kwargs), "x.pdf")[1]
+    assert result.state is ExtractionState.NEEDS_REVIEW, label
+    assert flag in result.reason, label
+    assert result.next_actor.value == "owner"
+
+
+def test_pdf_translation_in_the_transformation_matrix_is_honoured_for_reading_order() -> None:
+    content = (
+        b"q 1 0 0 1 0 0 cm BT /F1 11 Tf 72 700 Td (Lower block) Tj ET Q "
+        b"q 1 0 0 1 0 200 cm BT /F1 11 Tf 72 600 Td (Raised block) Tj ET Q"
+    )
+    result = read(_pdf(content), "x.pdf")[1]
+    assert result.state is ExtractionState.ELIGIBLE
+    assert [s.text for s in result.spans] == ["Raised block", "Lower block"]  # 800 above 700
+
+
+def test_pdf_malformed_tokens_and_predictors_fail_closed_without_crashing() -> None:
+    for content in (b"BT /F1 11 Tf <41 Tj ET", b"BT /F1 11 Tf <zz> Tj ET"):
+        result = read(_pdf(content), "x.pdf")[1]
+        assert result.state is ExtractionState.CORRUPT and result.reason == "bad_hex_string"
+    payload = zlib.compress(TWO_LINES)
+    predicted = (
+        f"<< /Length {len(payload)} /Filter /FlateDecode /DecodeParms << /Predictor 12 "
+        f"/Columns 4 >> >>\nstream\n".encode()
+        + payload
+        + b"\nendstream"
+    )
+    pdf = fx._assemble(
+        {
+            1: b"<< /Type /Catalog /Pages 2 0 R >>",
+            2: b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+            3: b"<< /Type /Page /Parent 2 0 R /Contents 4 0 R /Resources << >> >>",
+            4: predicted,
+        }
+    )
+    result = read(pdf, "x.pdf")[1]
+    assert result.state is ExtractionState.UNSUPPORTED and result.reason == "pdf_stream_predictor"
+
+
+def test_pdf_with_very_many_small_objects_is_not_quadratic() -> None:
+    many = b"%PDF-1.4\n" + b"".join(b"%d 0 obj\n<<>>\nendobj\n" % i for i in range(1, 70000))
+    result = read(many, "x.pdf")[1]
+    assert result.state is ExtractionState.CORRUPT and result.reason == "no_catalog"

@@ -4,6 +4,10 @@ Scope is deliberately narrow and honest. It reads classic cross-reference PDFs w
 (single-byte) fonts and Flate or unfiltered content streams. Anything else is reported with a
 specific state (object streams, composite fonts, other filters) instead of guessed. Encrypted
 files report LOCKED. Image-only pages report NEEDS_RENDITION. Nothing is executed or fetched.
+
+Fail-closed review routing: an unresolved or non-standard font encoding, rotated or skewed
+text, invisible text and text inside Form XObjects each flag the page for review rather than
+emitting a guess. Objects are scanned directly (the cross-reference table is not consulted).
 """
 
 from __future__ import annotations
@@ -27,6 +31,7 @@ from opentour_cell.pilot.mixed_intake.model import (
 PDF_REVISION = "opentour.reader.pdf-text@1.0.0"
 _OBJ = re.compile(rb"(?<![0-9])(\d{1,7})\s+(\d{1,5})\s+obj\b")
 _REF = rb"(\d+)\s+\d+\s+R"
+_NUMBER = re.compile(rb"[+-]?(\d+\.?\d*|\.\d+)")
 _WS = b" \t\r\n\x0c\x00"
 _DELIM = b"()<>[]/%"
 _STD_ENCODINGS = {b"WinAnsiEncoding", b"MacRomanEncoding", b"StandardEncoding"}
@@ -76,10 +81,11 @@ def _objects(data: bytes, deadline: Deadline) -> dict[int, _Object]:
     while match := _OBJ.search(data, position):
         deadline.check()
         number, body_start = int(match[1]), match.end()
-        stream_at = data.find(b"stream", body_start)
         end_at = data.find(b"endobj", body_start)
         if end_at < 0:
             raise ReaderFailure(ExtractionState.CORRUPT, "unterminated_object", NextActor.OWNER)
+        # Bounded to this object so many small objects cannot make the scan quadratic.
+        stream_at = data.find(b"stream", body_start, end_at)
         stream: bytes | None = None
         head_end = end_at
         if 0 <= stream_at < end_at:
@@ -114,8 +120,11 @@ def _decode(obj: _Object, limits: Limits) -> bytes:
     filters = re.findall(rb"/(\w+Decode|DCTDecode|JPXDecode|CCITTFaxDecode)", obj.head)
     if not filters:
         return raw
-    if filters != [b"FlateDecode"]:
+    if filters != [b"FlateDecode"] or b"/Crypt" in obj.head:
         raise ReaderFailure(ExtractionState.UNSUPPORTED, "pdf_stream_filter", NextActor.OWNER)
+    if b"/Predictor" in obj.head:
+        # PNG/TIFF predictors would need un-predicting; reading without it would emit garbage.
+        raise ReaderFailure(ExtractionState.UNSUPPORTED, "pdf_stream_predictor", NextActor.OWNER)
     inflater = zlib.decompressobj()
     try:
         out = inflater.decompress(raw, limits.max_object_bytes)
@@ -180,10 +189,12 @@ def _tokens(data: bytes):  # type: ignore[no-untyped-def]
             yield ("str", bytes(out))
         elif c == b"<" and data[i + 1 : i + 2] != b"<":
             end = data.find(b">", i)
-            hexed = re.sub(rb"\s", b"", data[i + 1 : end])
+            hexed = re.sub(rb"\s", b"", data[i + 1 : end]) if end >= 0 else b"?"
+            if not re.fullmatch(rb"[0-9A-Fa-f]*", hexed):
+                raise ReaderFailure(ExtractionState.CORRUPT, "bad_hex_string", NextActor.OWNER)
             if len(hexed) % 2:
                 hexed += b"0"
-            yield ("str", bytes.fromhex(hexed.decode("ascii", "ignore")) if hexed else b"")
+            yield ("str", bytes.fromhex(hexed.decode("ascii")))
             i = end + 1
         elif c in (b"[", b"]"):
             yield (c.decode(), None)
@@ -205,9 +216,9 @@ def _tokens(data: bytes):  # type: ignore[no-untyped-def]
                 i += 1
                 continue
             word = data[i:j]
-            try:
+            if _NUMBER.fullmatch(word):
                 yield ("num", float(word))
-            except ValueError:
+            else:
                 yield ("op", word)
             i = j
 
@@ -216,16 +227,53 @@ def _show(raw: bytes) -> str:
     return raw.decode("cp1252", "replace")
 
 
-def _fragments(content: bytes, deadline: Deadline) -> list[_Fragment]:
+_IDENTITY = (1.0, 0.0, 0.0, 1.0, 0.0, 0.0)
+
+
+def _concat(m: tuple[float, ...], n: tuple[float, ...]) -> tuple[float, ...]:
+    """PDF matrix product m x n (row-vector convention)."""
+    return (
+        m[0] * n[0] + m[1] * n[2],
+        m[0] * n[1] + m[1] * n[3],
+        m[2] * n[0] + m[3] * n[2],
+        m[2] * n[1] + m[3] * n[3],
+        m[4] * n[0] + m[5] * n[2] + n[4],
+        m[4] * n[1] + m[5] * n[3] + n[5],
+    )
+
+
+def _fragments(
+    content: bytes, deadline: Deadline, forms: frozenset[bytes] = frozenset()
+) -> tuple[list[_Fragment], set[str]]:
+    """Return positioned fragments and the review flags the content stream earned.
+
+    Positions are mapped through the current transformation matrix (translation and scale are
+    honoured). Rotation or skew, invisible text and text living in Form XObjects cannot be put
+    in reading order by this reader, so they are flagged for review instead of guessed.
+    """
     out: list[_Fragment] = []
+    marks: set[str] = set()
     stack: list[object] = []
     lx = ly = x = y = leading = size = 0.0
     font = b""
     array: list[object] | None = None
+    ctm: tuple[float, ...] = _IDENTITY
+    ctm_stack: list[tuple[float, ...]] = []
+    render_mode = 0.0
 
     def emit(text: str) -> None:
         if text.strip():
-            out.append(_Fragment(x, y, text, size, font))
+            if render_mode in (3.0, 7.0):
+                marks.add("hidden_text_present")
+            out.append(
+                _Fragment(
+                    ctm[0] * x + ctm[2] * y + ctm[4],
+                    ctm[1] * x + ctm[3] * y + ctm[5],
+                    text,
+                    size * abs(ctm[3] or 1.0),
+                    font,
+                )
+            )
 
     for kind, value in _tokens(content):
         deadline.check()
@@ -257,8 +305,22 @@ def _fragments(content: bytes, deadline: Deadline) -> list[_Fragment]:
             if op == b"TD":
                 leading = -nums[-1]
         elif op == b"Tm" and len(nums) >= 6:
+            if nums[-5] != 0 or nums[-4] != 0 or nums[-6] <= 0 or nums[-3] <= 0:
+                marks.add("layout_transform_unverified")
             lx, ly = nums[-2], nums[-1]
             x, y = lx, ly
+        elif op == b"cm" and len(nums) >= 6:
+            ctm = _concat(tuple(nums[-6:]), ctm)
+            if ctm[1] != 0 or ctm[2] != 0 or ctm[0] <= 0 or ctm[3] <= 0:
+                marks.add("layout_transform_unverified")
+        elif op == b"q":
+            ctm_stack.append(ctm)
+        elif op == b"Q":
+            ctm = ctm_stack.pop() if ctm_stack else _IDENTITY
+        elif op == b"Tr" and nums:
+            render_mode = nums[-1]
+        elif op == b"Do" and stack and isinstance(stack[-1], bytes) and stack[-1] in forms:
+            marks.add("form_xobject_text_unread")
         elif op == b"TL" and nums:
             leading = nums[-1]
         elif op == b"T*":
@@ -279,22 +341,32 @@ def _fragments(content: bytes, deadline: Deadline) -> list[_Fragment]:
                     parts.append(" ")
             emit("".join(parts))
         stack.clear()
-    return out
+    return out, marks
 
 
 def _font_ok(fonts: dict[bytes, _Object], name: bytes) -> bool:
+    """Only a font whose byte-to-character mapping is provably standard is trusted."""
     obj = fonts.get(name)
     if obj is None:
-        return True
+        return False  # unresolved font resource: the encoding cannot be known
     head = obj.head
-    if re.search(rb"/Subtype\s*/Type0", head):
-        return False
-    encoding = re.search(rb"/Encoding\s*/(\w+)", head)
+    if re.search(rb"/Subtype\s*/Type1\b", head) is None and not re.search(
+        rb"/Subtype\s*/(TrueType|MMType1)\b", head
+    ):
+        return False  # Type0, Type3 and anything unrecognised
     if re.search(rb"/Differences", head) or re.search(rb"/ToUnicode", head):
         return False
-    if encoding and encoding[1] not in _STD_ENCODINGS:
-        return False
-    return True
+    if re.search(rb"/Encoding\s*(?:<<|\d+\s+\d+\s+R)", head):
+        return False  # inline or indirect encoding dictionary
+    encoding = re.search(rb"/Encoding\s*/(\w+)", head)
+    if encoding:
+        return encoding[1] in _STD_ENCODINGS
+    # No encoding at all: only an un-embedded, non-symbolic standard Type1 font is safe.
+    return (
+        re.search(rb"/Subtype\s*/Type1\b", head) is not None
+        and b"/FontDescriptor" not in head
+        and re.search(rb"/BaseFont\s*/(Symbol|ZapfDingbats)", head) is None
+    )
 
 
 def _lines(fragments: list[_Fragment]) -> list[list[_Fragment]]:
@@ -381,9 +453,14 @@ def read_pdf(data: bytes, limits: Limits, deadline: Deadline) -> ReadResult:
         contents = re.search(rb"/Contents\s*(\[(.*?)\]|" + _REF + rb")", page.head, re.S)
         refs = re.findall(_REF, contents[0]) if contents else []
         stream = b"\n".join(_decode(objects[int(r)], limits) for r in refs if int(r) in objects)
-        fragments = _fragments(stream, deadline)
+        forms = frozenset(
+            name
+            for name, obj in _named_refs(resources, b"XObject", objects).items()
+            if re.search(rb"/Subtype\s*/Form", obj.head)
+        )
+        fragments, marks = _fragments(stream, deadline, forms)
         if not fragments:
-            if images:
+            if images or marks:
                 image_pages.append(page_number)
             continue
         flagged_font = any(not _font_ok(fonts, f.font) for f in fragments)
@@ -392,7 +469,7 @@ def read_pdf(data: bytes, limits: Limits, deadline: Deadline) -> ReadResult:
             reading_order += 1
             cells = [[c.text for c in line] for line in lines]
             table = len(cells) >= 2 and all(len(row) >= 2 for row in cells)
-            flags: list[str] = []
+            flags: list[str] = sorted(marks)
             if flagged_font:
                 flags.append("font_encoding_unverified")
             if table and len({len(row) for row in cells}) != 1:

@@ -163,6 +163,9 @@ REVIEW_FLAGS = frozenset(
         "tracked_changes",
         "ocr_text_requires_review",
         "pages_need_rendition",
+        "layout_transform_unverified",
+        "hidden_text_present",
+        "form_xobject_text_unread",
     }
 )
 
