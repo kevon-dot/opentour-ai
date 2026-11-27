@@ -707,3 +707,124 @@ def test_unconfirmed_or_unresolved_branch_prevents_fallback_truth(starter):
         changes=(BranchEdit(current.branches[0].branch_ref, "unresolved", "Unclear rule"),),
     )
     assert unresolved.expected_action({"total": Decimal("300")})[0] is None
+
+
+def test_cited_categorical_invoice_policy_seven_families(starter):
+    categories = {
+        "annual_software_subscription": "SOFTWARE",
+        "carrier_freight": "FREIGHT",
+        "office_supplies": "SUPPLIES",
+        "utility_service": "UTILITIES",
+        "tax_remittance": "TAX",
+    }
+    rules = [
+        f'If category equals "{token}" and po is present, {action}.'
+        for token, action in categories.items()
+    ]
+    rules.append("If po is missing, REVIEW.")
+    source, workflow, _, _ = starter(("# Invoice coding\n" + "\n".join(rules)).encode())
+    service, _ = stage_map_review(
+        source,
+        workflow,
+        field_kinds={"category": "reference", "po": "reference"},
+        actions=sorted({*categories.values(), "REVIEW"}),
+    )
+    saved = accept_all(service)
+    assert saved.confirmed_ref and not saved.unresolved
+    policy = source.read(source.authority.principal, workflow)
+    assert [policy.passage(r.citation).rstrip("\n") for r in saved.branches] == rules
+    reopened = service.preview(OWNER_A)
+    for token, action in categories.items():
+        assert reopened.expected_action({"category": token, "po": "generated-po"})[0] == action
+    assert (
+        reopened.expected_action({"category": "annual_software_subscription", "po": None})[0]
+        == "REVIEW"
+    )
+    assert reopened.expected_action({"category": "mixed", "po": "generated-po"})[0] is None
+    assert (
+        reopened.expected_action({"category": "CARRIER_FREIGHT", "po": "generated-po"})[0] is None
+    )
+    assert reopened.expected_action({"posted_code": "FREIGHT", "po": "generated-po"})[0] is None
+
+
+@pytest.mark.parametrize(
+    "clause",
+    [
+        'total equals "10"',
+        'private_code equals "secret"',
+        'po equals "free text"',
+        'po equals "A" or po equals "B"',
+        'po equals "A" and po equals "B"',
+        'po equals "A" and po is missing',
+        'po equals "A" unless tax is due',
+    ],
+)
+def test_unsupported_categorical_clause_remains_unresolved(starter, clause):
+    source, workflow, *_ = starter(f"# Policy\nIf {clause}, APPROVE.\n".encode())
+    service, _ = stage_map_review(
+        source, workflow, field_kinds={"po": "reference", "total": "number"}
+    )
+    snapshot = service.preview(OWNER_A)
+    assert snapshot.unresolved and snapshot.confirmed_ref is None
+
+
+def test_owner_categorical_correction_conflict_and_schema(starter):
+    source, workflow, *_ = starter(
+        b'# Policy\nIf po equals "Alpha", APPROVE.\nIf po equals "beta", REVIEW.\n'
+    )
+    service, _ = stage_map_review(
+        source, workflow, field_kinds={"po": "reference", "total": "number"}
+    )
+    saved = accept_all(service)
+    assert saved.confirmed_ref and saved.expected_action({"po": "Alpha"})[0] == "APPROVE"
+    row = saved.branches[1]
+    for predicate in (
+        Condition("total", "==", "Alpha"),
+        Condition("posted_code", "==", "Alpha"),
+        Condition("po", "==", "Alpha or beta"),
+    ):
+        with pytest.raises(IntakeError):
+            service.save(
+                OWNER_A,
+                expected_revision=saved.review_revision,
+                operation_ref="invalid",
+                changes=(
+                    BranchEdit(
+                        row.branch_ref, "corrected", "Owner correction", conditions=(predicate,)
+                    ),
+                ),
+            )
+    changed = service.save(
+        OWNER_A,
+        expected_revision=saved.review_revision,
+        operation_ref="correct",
+        changes=(
+            BranchEdit(
+                row.branch_ref,
+                "corrected",
+                "Owner correction",
+                conditions=(Condition("po", "==", "Alpha"),),
+            ),
+        ),
+    )
+    assert changed.question == "Which matching branch takes precedence?"
+    assert changed.confirmed_ref is None and changed.expected_action({"po": "Alpha"})[0] is None
+    assert changed.branches[1].source_support == "owner_assertion"
+
+
+def test_pre_category_numeric_and_presence_map_identity_is_unchanged():
+    from opentour_cell.pilot.guided_decision_map import guided_draft
+    from opentour_cell.pilot.guided_policy import PolicySnapshot
+
+    revision = hashlib.sha256(PURCHASE_POLICY).hexdigest()
+    policy = PolicySnapshot(
+        "generated-resource",
+        revision,
+        "generated-grant",
+        revision,
+        tuple(PURCHASE_POLICY.decode().splitlines(keepends=True)),
+    )
+    # Recorded from the numeric/presence implementation before categorical support.
+    assert guided_draft(policy, FIELDS, ACTIONS).revision == (
+        "1df2120705067f35bf67b18a2672b8a35ececdee3d5a485f123ad89a5b3363e7"
+    )
