@@ -46,10 +46,26 @@ versioned format (``opentour.pilot.trust-state.v1``). This module uses three nam
   Every verification re-reads it, so a verifier built from an older registry refuses once a
   newer one has been verified (``registry_superseded``).
 * ``customer_anchor:<engagement>``: the anchor's evidence chain, the signed enrolment and
-  every signed rotation. The current customer key is derived by re-verifying the whole
-  chain on every read; no stored key field is ever trusted.
-* ``customer_anchor_revision:<engagement>``: the highest anchor revision seen, with the
-  payload digest at that revision. A chain shorter than it (an older copy) is refused.
+  every signed rotation, with a write generation as its sequence. The current customer key
+  is derived by re-verifying the chain on every read; no stored key field is ever trusted.
+* ``customer_anchor_revision:<engagement>``: the highest anchor revision this worker has
+  accepted, with the payload digest at that revision. A chain shorter than it is refused.
+
+Chain entries up to the anchor revision floor were accepted by this worker and are
+re-verified for signatures and engagement binding only. Entries beyond the floor are
+*pending* (for example a rotation whose floor write was interrupted): they count only while
+they also pass the time check now, the ``MAX_VALIDITY`` ceiling included. Otherwise the
+anchor is derived at the floor and the whole pending tail is ignored, so an interrupted
+rotation that later expires reverts rather than bricking the engagement.
+
+The enrolment co-signature is re-verified against the operator custodian key named by key
+id, whether it is current (any registry revision, any purposes) or listed in the registry's
+verify-only ``former_custodian_keys``. A key id maps to one public key and one role across
+the registry, so the key id fixes the pinned public-key digest. A former custodian key
+verifies existing enrolments only: never a new pin, never any other purpose, and never as a
+current key. Dropping a key from that list deliberately invalidates every anchor it
+co-signed; that is the intended response to a compromised custodian key, and those
+engagements need a supervised re-enrolment (see Recovery).
 
 Further namespaces, such as revocation epochs or withdrawn mandate ids, use the same format
 with their own forward-only rule. The location is fixed worker-host layout configuration
@@ -60,20 +76,34 @@ directory.
 Limits, stated plainly. This is local state. A party who can rewrite the anti-rollback
 location can reset the registry floor; registry replay is then still bounded by the
 kit-pinned ``minimum_registry_revision`` and by the registry's signed ``not_after``. Those
-bounds apply to the registry only, not to anchors. Without the operator custodian key, no
+bounds apply to the registry only, not to anchors. The same local-state limit applies to
+anchors: an older copy of the chain alone is refused, but restoring older copies of both
+the chain and its revision floor undoes a rotation. Without the operator custodian key, no
 writer can forge or substitute an anchor: the chain is re-verified on every read. But on a
 host the operator controls, an operator holding the custodian key can delete both anchor
 records for an engagement and enrol a customer key it holds. No worker-side code can
 prevent that. The defence is the customer's own record of what they signed, plus the
-out-of-band key fingerprint confirmation (OPE-583). Re-verifying a chain also uses the
-current registry's operator custodian key, so retiring every custodian key that co-signed
-an enrolment makes that anchor unverifiable until the engagement is enrolled again.
+out-of-band key fingerprint confirmation (OPE-583). A concurrent pin can briefly cause a
+false refusal on a lock-free read; that fails closed and is accepted.
+
+Recovery:
+
+* A missing registry floor recovers when a verifier is next constructed from a valid
+  registry. That re-admits an older registry that is still within its signed window and at
+  or above the kit minimum, so treat a missing floor as an incident.
+* A corrupted (unreadable) registry floor fails closed; the only recovery is for the
+  operator to delete the file, which then behaves as a missing floor.
+* A deleted anchor revision floor after a rotation fails closed with
+  ``customer_anchor_inconsistent``, and so does an anchor whose custodian key was dropped.
+  Recovery is a supervised re-enrolment: delete both anchor records and pin a new
+  enrolment, with the customer confirming the key fingerprint out of band per OPE-583.
 
 Time: every signed document carries issuer-signed ``issued_at`` and ``not_after``. The local
 clock only shortens validity: refuse after ``not_after`` or more than ``ISSUED_AT_SKEW``
 before ``issued_at``. A window longer than ``MAX_VALIDITY`` is refused. No argument supplies
-time, and the registry's own window is re-checked on every verification. Anchor chains are
-re-verified for signatures only: each record's time was checked when it was accepted.
+time, and the registry's own window is re-checked on every verification. Accepted chain
+entries are re-verified for signatures only, because their time was checked when they were
+accepted; pending entries are time-checked on every read.
 """
 
 from __future__ import annotations
@@ -159,6 +189,7 @@ MAX_SIGNATURES: Final = 4
 MAX_CONFIG_BYTES: Final = 65536
 MAX_STATE_BYTES: Final = 1048576
 MAX_ANCHOR_CHAIN: Final = 64
+MAX_FORMER_KEYS: Final = 64
 TRUST_STATE_FORMAT: Final = "opentour.pilot.trust-state.v1"
 RECORDS_NAME: Final = "records"
 LOCK_NAME: Final = "pilot-trust-state.lock"
@@ -221,6 +252,12 @@ class _RootPin(WireModel):
     root_keys: Annotated[list[_KeyEntry], Field(min_length=1)]
 
 
+class _CustomerKey(WireModel):
+    key_id: Id
+    public_key_der: _Der
+    public_key_sha256: Sha256
+
+
 class _RegistryPayload(WireModel):
     profile_version: Literal["1.0"]
     registry_id: Id
@@ -228,12 +265,10 @@ class _RegistryPayload(WireModel):
     issued_at: Timestamp
     not_after: Timestamp
     keys: Annotated[list[_KeyEntry], Field(min_length=1)]
-
-
-class _CustomerKey(WireModel):
-    key_id: Id
-    public_key_der: _Der
-    public_key_sha256: Sha256
+    # Verify-only: re-verify the co-signature of existing enrolments, nothing else.
+    former_custodian_keys: Annotated[
+        list[_CustomerKey], Field(default_factory=list, max_length=MAX_FORMER_KEYS)
+    ]
 
 
 class _EnrolmentPayload(WireModel):
@@ -297,6 +332,7 @@ class _Registry:
     not_after: datetime
     keys: Mapping[tuple[str, str], PilotTrustedKey]
     root_digests: frozenset[str]
+    former: Mapping[str, PilotTrustedKey]
 
 
 Resolver = Callable[[_Signature], PilotTrustedKey]
@@ -338,9 +374,11 @@ def _trust_set(
     """
     keys: dict[tuple[str, str], PilotTrustedKey] = {}
     role_by_id: dict[str, str] = {}
+    digest_by_id: dict[str, str] = {}
     by_digest: dict[str, tuple[str, str]] = {}
     for pinned in (reserved or {}).values():
         role_by_id[pinned.key_id] = pinned.role
+        digest_by_id[pinned.key_id] = pinned.public_key_sha256
         by_digest[pinned.public_key_sha256] = (pinned.key_id, pinned.role)
     for entry in entries:
         identity = (entry.key_id, entry.registry_revision)
@@ -359,12 +397,16 @@ def _trust_set(
         # One key, one role, one id, across every registry revision in the set.
         if role_by_id.get(entry.key_id, entry.role) != entry.role:
             raise PilotRecordRefused("trust_key_role_conflict")
+        # A key id names one public key, so key id and pinned digest identify a key together.
+        if digest_by_id.get(entry.key_id, entry.public_key_sha256) != entry.public_key_sha256:
+            raise PilotRecordRefused("trust_key_duplicate")
         seen = by_digest.get(entry.public_key_sha256)
         if seen is not None and seen != (entry.key_id, entry.role):
             raise PilotRecordRefused(
                 "trust_key_role_conflict" if seen[1] != entry.role else "trust_key_duplicate"
             )
         role_by_id[entry.key_id] = entry.role
+        digest_by_id[entry.key_id] = entry.public_key_sha256
         by_digest[entry.public_key_sha256] = (entry.key_id, entry.role)
         keys[identity] = PilotTrustedKey(
             entry.key_id,
@@ -375,6 +417,33 @@ def _trust_set(
             key,
         )
     return keys
+
+
+def _former_custodians(
+    entries: list[_CustomerKey], taken: list[PilotTrustedKey]
+) -> dict[str, PilotTrustedKey]:
+    """Verify-only former custodian keys: distinct from every current and root key."""
+    former: dict[str, PilotTrustedKey] = {}
+    taken_ids = {key.key_id for key in taken}
+    taken_digests = {key.public_key_sha256 for key in taken}
+    for entry in entries:
+        if entry.key_id in former or any(
+            key.public_key_sha256 == entry.public_key_sha256 for key in former.values()
+        ):
+            raise PilotRecordRefused("trust_key_duplicate")
+        # No role reuse: a former custodian key is never also a current key of any role.
+        if entry.key_id in taken_ids or entry.public_key_sha256 in taken_digests:
+            raise PilotRecordRefused("trust_key_role_conflict")
+        public_key = _public_key(entry.key_id, entry.public_key_der, entry.public_key_sha256)
+        former[entry.key_id] = PilotTrustedKey(
+            entry.key_id,
+            "former",
+            OPERATOR_CUSTODIAN,
+            entry.public_key_sha256,
+            frozenset({ENROLMENT_PURPOSE}),
+            public_key,
+        )
+    return former
 
 
 def _load_root_pin() -> tuple[_RootPin, dict[tuple[str, str], PilotTrustedKey]]:
@@ -741,7 +810,8 @@ def _forward_rule(current: MonotonicRecord | None, proposed: MonotonicRecord) ->
 
 
 def _chain_rule(current: MonotonicRecord | None, proposed: MonotonicRecord) -> None:
-    # Anchor chain: starts at 1 and grows by exactly one record; equality is the generic rule's.
+    # Anchor chain: its sequence is a write generation that starts at 1 and advances by one
+    # per write; equality is the generic rule's.
     if current is not None and proposed.sequence == current.sequence:
         return
     if proposed.sequence != (1 if current is None else current.sequence + 1):
@@ -785,6 +855,9 @@ class PilotVerifier:
         if revision < int(pin.minimum_registry_revision):
             raise PilotRecordRefused("registry_revision_below_kit_minimum")
         keys = _trust_set(registry.keys, REGISTRY_ROLES, reserved=roots)
+        former = _former_custodians(
+            registry.former_custodian_keys, [*keys.values(), *roots.values()]
+        )
         # Keyed on the payload digest: a re-signed or high-S copy is the same registry.
         payload_sha256 = _payload_sha256(payload)
         floor = MonotonicRecord(
@@ -799,6 +872,7 @@ class PilotVerifier:
             datetime.fromisoformat(registry.not_after),
             keys,
             frozenset(key.public_key_sha256 for key in roots.values()),
+            former,
         )
         self._root_ids = frozenset(key.key_id for key in roots.values())
 
@@ -833,20 +907,20 @@ class PilotVerifier:
         restores a deleted chain or a missing revision floor at revision 1.
         """
         self._registry_current()
-        body, customer, digest = self._check_enrolment(enrolment, check_time=True)
+        body, customer, digest = self._check_enrolment(enrolment, replay=False)
         engagement = body.engagement_id
         anchor = CustomerAnchor(engagement, customer.key_id, 1, customer.public_key_sha256)
         chain_value = {"chain": [strict_json(enrolment)]}
         floor_value = {"head_payload_sha256": digest}
         with self._store.locked():
             floor = self._store.read(_anchor_revision_key(engagement))
-            chain = self._store.read(_anchor_key(engagement))
+            record = self._store.read(_anchor_key(engagement))
             if floor is not None and (floor.sequence != 1 or dict(floor.value) != floor_value):
                 raise PilotRecordRefused("customer_anchor_already_pinned")
-            if chain is not None:
+            if record is not None:
                 # Keyed on the payload digest, so a re-signed enrolment is the same one.
-                _, digests, _ = self._replay(engagement, chain)
-                if chain.sequence != 1 or digests[0] != digest:
+                _, digests, chain = self._replay(engagement, record, 1)
+                if digests[0] != digest or len(chain) != 1:
                     raise PilotRecordRefused(
                         "customer_anchor_already_pinned"
                         if floor is not None
@@ -875,19 +949,22 @@ class PilotVerifier:
         except ValidationError:
             raise PilotRecordRefused("rotation_schema_invalid") from None
         with self._store.locked():
+            record = self._store.read(_anchor_key(engagement))
             current = self._current_customer(engagement, frozenset({ROTATION_PURPOSE}))
-            if current is None:
+            if current is None or record is None:
                 raise PilotRecordRefused("customer_anchor_missing")
             previous, chain = current
             body, successor, digest = self._check_rotation(rotation, previous, check_time=True)
             revision = int(body.anchor_revision)
             if len(chain) >= MAX_ANCHOR_CHAIN:
                 raise PilotRecordRefused("customer_rotation_limit")
+            # The chain's sequence is its write generation; an ignored pending tail is
+            # replaced. The signed chain is written first: a chain ahead of its floor still
+            # verifies while pending, a floor ahead of its chain reads as a rollback.
             chain_value = {"chain": [*chain, strict_json(rotation)]}
-            # The signed chain is written first: a chain ahead of its floor still verifies,
-            # while a floor ahead of its chain reads as a rollback.
             self._store.advance(
-                MonotonicRecord(_anchor_key(engagement), revision, chain_value), _chain_rule
+                MonotonicRecord(_anchor_key(engagement), record.sequence + 1, chain_value),
+                _chain_rule,
             )
             self._store.advance(
                 MonotonicRecord(
@@ -901,6 +978,32 @@ class PilotVerifier:
         resolve = _registry_resolver(self._registry.keys)
         return {role: resolve for role in REGISTRY_ROLES}
 
+    def _replay_custodian(self) -> Resolver:
+        """Resolve an existing enrolment's co-signer by key id (which fixes its public key).
+
+        Current custodian keys count at any registry revision and with any purposes; former
+        custodian keys count here and nowhere else.
+        """
+
+        def resolve(signature: _Signature) -> PilotTrustedKey:
+            key = next(
+                (
+                    key
+                    for key in self._registry.keys.values()
+                    if key.key_id == signature.key_id and key.role == OPERATOR_CUSTODIAN
+                ),
+                self._registry.former.get(signature.key_id),
+            )
+            if key is None:
+                raise PilotRecordRefused("key_unknown")
+            return replace(
+                key,
+                registry_revision=signature.key_registry_revision,
+                purposes=frozenset({ENROLMENT_PURPOSE}),
+            )
+
+        return resolve
+
     def _registry_current(self) -> None:
         _check_window(self._registry.issued_at, self._registry.not_after, "registry")
         # A newer verified registry (for example one that drops a key) supersedes this one.
@@ -912,19 +1015,20 @@ class PilotVerifier:
             raise PilotRecordRefused("registry_superseded")
 
     def _require_distinct(self, customer: PilotTrustedKey) -> None:
-        # The operator must not enrol one of its registry or root keys as a customer key.
+        # The operator must not enrol one of its registry, former or root keys as a customer.
+        operator_keys = [*self._registry.keys.values(), *self._registry.former.values()]
         if (
             customer.public_key_sha256 in self._registry.root_digests
             or customer.key_id in self._root_ids
             or any(
                 key.key_id == customer.key_id or key.public_key_sha256 == customer.public_key_sha256
-                for key in self._registry.keys.values()
+                for key in operator_keys
             )
         ):
             raise PilotRecordRefused("customer_key_not_distinct")
 
     def _check_enrolment(
-        self, record: bytes, *, check_time: bool
+        self, record: bytes, *, replay: bool
     ) -> tuple[_EnrolmentPayload, PilotTrustedKey, str]:
         payload, signatures = _open(record, "enrolment")
         try:
@@ -935,11 +1039,15 @@ class PilotVerifier:
             raise PilotRecordRefused("customer_anchor_revision_invalid")
         customer = _customer_key(body.customer_key, 1, CONSENT_PURPOSES | {ENROLMENT_PURPOSE})
         self._require_distinct(customer)
+        # A new pin needs a current custodian key permitted for enrolment, at its exact
+        # revision; replaying an accepted enrolment also admits former custodian keys.
         resolvers = self._issuer_resolvers()
+        if replay:
+            resolvers[OPERATOR_CUSTODIAN] = self._replay_custodian()
         # Proof of possession: the enrolled key itself must sign its enrolment.
         resolvers[CUSTOMER_OWNER] = _fixed_resolver(customer, "enrolment_key_mismatch")
         _authenticate(
-            payload, signatures, ENROLMENT_PURPOSE, resolvers, "enrolment", check_time=check_time
+            payload, signatures, ENROLMENT_PURPOSE, resolvers, "enrolment", check_time=not replay
         )
         return body, customer, _payload_sha256(payload)
 
@@ -984,28 +1092,47 @@ class PilotVerifier:
         return body, successor, _payload_sha256(payload)
 
     def _replay(
-        self, engagement_id: str, record: MonotonicRecord
+        self, engagement_id: str, record: MonotonicRecord, accepted: int
     ) -> tuple[PilotTrustedKey, list[str], list[dict[str, Any]]]:
-        """Re-verify a stored chain from its enrolment; never trust a stored key field."""
+        """Re-verify a stored chain from its enrolment; never trust a stored key field.
+
+        The first ``accepted`` entries were accepted by this worker: any failure there makes
+        the anchor unverifiable. Later entries are pending and count only while they also
+        pass the time check now; otherwise the whole pending tail is ignored. Returns the
+        current key, the payload digests and the entries it was derived from.
+        """
         try:
             chain = _ChainValue.model_validate(dict(record.value)).chain
         except ValidationError:
             raise PilotRecordRefused("trust_state_unreadable") from None
-        if len(chain) != record.sequence:
-            raise PilotRecordRefused("customer_anchor_unverifiable")
+        if len(chain) < accepted:
+            # An older copy of the chain is shorter than the revision this worker has seen.
+            raise PilotRecordRefused("customer_anchor_rolled_back")
         try:
-            body, key, digest = self._check_enrolment(canonical(chain[0]), check_time=False)
+            body, key, digest = self._check_enrolment(canonical(chain[0]), replay=True)
             if body.engagement_id != engagement_id:
                 raise PilotRecordRefused("customer_anchor_unverifiable")
             digests = [digest]
-            for item in chain[1:]:
+            for item in chain[1:accepted]:
                 rotated, key, digest = self._check_rotation(canonical(item), key, check_time=False)
                 if rotated.engagement_id != engagement_id:
                     raise PilotRecordRefused("customer_anchor_unverifiable")
                 digests.append(digest)
         except (PilotRecordRefused, JournalError):
             raise PilotRecordRefused("customer_anchor_unverifiable") from None
-        return key, digests, chain
+        pending_key, pending = key, []
+        try:
+            for item in chain[accepted:]:
+                rotated, pending_key, digest = self._check_rotation(
+                    canonical(item), pending_key, check_time=True
+                )
+                if rotated.engagement_id != engagement_id:
+                    raise PilotRecordRefused("customer_anchor_unverifiable")
+                pending.append(digest)
+        except (PilotRecordRefused, JournalError):
+            # Not accepted here, and not acceptable now: derive the anchor at the floor.
+            return key, digests, chain[:accepted]
+        return pending_key, digests + pending, chain
 
     def _current_customer(
         self, engagement_id: str, purposes: frozenset[str]
@@ -1016,10 +1143,7 @@ class PilotVerifier:
             return None
         if floor is None or record is None:
             raise PilotRecordRefused("customer_anchor_inconsistent")
-        key, digests, chain = self._replay(engagement_id, record)
-        # An older copy of the chain is shorter than the revision this worker has seen.
-        if len(digests) < floor.sequence:
-            raise PilotRecordRefused("customer_anchor_rolled_back")
+        key, digests, chain = self._replay(engagement_id, record, floor.sequence)
         if {"head_payload_sha256": digests[floor.sequence - 1]} != dict(floor.value):
             raise PilotRecordRefused("customer_anchor_inconsistent")
         return replace(key, purposes=purposes), chain

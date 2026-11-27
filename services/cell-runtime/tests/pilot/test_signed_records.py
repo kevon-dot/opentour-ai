@@ -1109,6 +1109,199 @@ def test_f6_advance_requires_the_lock(kit: Kit) -> None:
     refused("anti_rollback_lock_not_held", partial(store.advance, record, accept_any))
 
 
+def write_record(kit: Kit, key: str, sequence: int, value: Json) -> None:
+    """What a writer of the anti-rollback directory can do without any signing key."""
+    state = {"format": sr.TRUST_STATE_FORMAT, "key": key, "sequence": str(sequence), "value": value}
+    path = record_path(kit, key)
+    path.parent.mkdir(mode=0o700, exist_ok=True)
+    path.write_bytes(canonical(state))
+
+
+def payload_digest(record: bytes) -> str:
+    return hashlib.sha256(canonical(json.loads(record)["payload"])).hexdigest()
+
+
+def test_n1_a_pending_rotation_outside_its_window_is_ignored(kit: Kit) -> None:
+    verifier = kit.enrolled()
+    genuine = record_path(kit, ANCHOR_KEY).read_bytes()
+    enrolment = stored(kit, ANCHOR_KEY)["value"]["chain"][0]
+    successor = Signer(sr.CUSTOMER_OWNER, registry_revision="2")
+    old_grant = sign(consent(), sr.GRANT_PURPOSE, kit.customer, kit.operator)
+    new_grant = sign(consent(), sr.GRANT_PURPOSE, successor, kit.operator)
+    for changes, code in (
+        ({"issued_at": stamp(-7200), "not_after": stamp(-1)}, "rotation_expired"),
+        (
+            {"issued_at": stamp(-60), "not_after": stamp(400 * 86400)},
+            "rotation_validity_window_too_long",
+        ),
+        ({"issued_at": stamp(86400), "not_after": stamp(2 * 86400)}, "rotation_not_yet_valid"),
+    ):
+        rotation = kit.rotation(kit.customer, successor, **changes)
+        refused(code, partial(verifier.rotate_customer_key, rotation))
+        # A store writer installs the refused rotation ahead of the floor.
+        write_record(kit, ANCHOR_KEY, 2, {"chain": [enrolment, json.loads(rotation)]})
+        refused("customer_key_not_anchored", partial(verifier.verify, new_grant, sr.GRANT_PURPOSE))
+        assert verifier.verify(old_grant, sr.GRANT_PURPOSE)
+        record_path(kit, ANCHOR_KEY).write_bytes(genuine)
+
+
+def test_n1_an_interrupted_rotation_counts_while_valid_then_reverts(
+    kit: Kit, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    verifier = kit.enrolled()
+    old_floor = record_path(kit, REVISION_KEY).read_bytes()
+    successor = Signer(sr.CUSTOMER_OWNER, registry_revision="2")
+    verifier.rotate_customer_key(kit.rotation(kit.customer, successor))
+    record_path(kit, REVISION_KEY).write_bytes(old_floor)  # the floor write was lost
+    old_grant = sign(consent(not_after=stamp(80000)), sr.GRANT_PURPOSE, kit.customer, kit.operator)
+    new_grant = sign(consent(not_after=stamp(80000)), sr.GRANT_PURPOSE, successor, kit.operator)
+    # Inside the rotation's window the pending rotation counts.
+    assert verifier.verify(new_grant, sr.GRANT_PURPOSE)
+    refused("customer_key_not_anchored", partial(verifier.verify, old_grant, sr.GRANT_PURPOSE))
+    # After it expires, the anchor reverts to the floor instead of bricking.
+    real_now = sr._utc_now
+    monkeypatch.setattr(sr, "_utc_now", lambda: real_now() + timedelta(seconds=7200))
+    refused("customer_key_not_anchored", partial(verifier.verify, new_grant, sr.GRANT_PURPOSE))
+    assert verifier.verify(old_grant, sr.GRANT_PURPOSE)
+    # A fresh rotation from the floor replaces the ignored pending tail.
+    other = Signer(sr.CUSTOMER_OWNER, registry_revision="2")
+    later = kit.rotation(kit.customer, other, issued_at=stamp(7000), not_after=stamp(20000))
+    assert verifier.rotate_customer_key(later).anchor_revision == 2
+    assert stored(kit, ANCHOR_KEY)["sequence"] == "3"
+    other_grant = sign(consent(not_after=stamp(80000)), sr.GRANT_PURPOSE, other, kit.operator)
+    assert verifier.verify(other_grant, sr.GRANT_PURPOSE)
+
+
+def former_registry(kit: Kit, revision: str, keys: list[Json], former: list[Json]) -> bytes:
+    return kit.registry(revision, keys=keys, former_custodian_keys=former)
+
+
+def test_n2_custodian_rotation_keeps_old_anchors_through_the_verify_only_list(kit: Kit) -> None:
+    kit.enrolled()
+    custodian2 = Signer(sr.OPERATOR_CUSTODIAN, list(sr.REGISTRY_ROLES[sr.OPERATOR_CUSTODIAN]))
+    current = [custodian2.entry(), kit.evaluator.entry(), kit.auditor.entry()]
+    verifier = kit.verifier(former_registry(kit, "2", current, [kit.operator.public()]))
+    grant = sign(consent(), sr.GRANT_PURPOSE, kit.customer, custodian2)
+    assert verifier.verify(grant, sr.GRANT_PURPOSE)
+    # The former key verifies existing enrolments only: never a grant, never a new pin.
+    by_former = sign(consent(), sr.GRANT_PURPOSE, kit.customer, kit.operator)
+    refused("key_unknown", partial(verifier.verify, by_former, sr.GRANT_PURPOSE))
+    other = Signer(sr.CUSTOMER_OWNER, registry_revision="1")
+    payload = kit.enrolment_payload(other, engagement_id="eng-sentinel-0002")
+    new_pin = sign(payload, sr.ENROLMENT_PURPOSE, other, kit.operator)
+    refused("key_unknown", partial(verifier.pin_customer_anchor, new_pin))
+    current_pin = sign(payload, sr.ENROLMENT_PURPOSE, other, custodian2)
+    assert verifier.pin_customer_anchor(current_pin).key_id == other.key_id
+    # Dropping the former key deliberately invalidates the anchors it co-signed.
+    dropped = kit.verifier(former_registry(kit, "3", current, []))
+    refused("customer_anchor_unverifiable", partial(dropped.verify, grant, sr.GRANT_PURPOSE))
+
+
+def test_n2_former_custodian_keys_never_reuse_another_role(kit: Kit) -> None:
+    current = kit.issuers()
+    for former, code in (
+        ([kit.evaluator.public()], "trust_key_role_conflict"),
+        ([kit.operator.public()], "trust_key_role_conflict"),
+        ([kit.root.public()], "trust_key_role_conflict"),
+        ([{**kit.auditor.public(), "key_id": "former-custodian-0001"}], "trust_key_role_conflict"),
+    ):
+        refused(code, partial(kit.verifier, former_registry(kit, "1", current, former)))
+    retired = Signer(sr.OPERATOR_CUSTODIAN)
+    twice = [retired.public(), {**retired.public(), "key_id": "former-custodian-0002"}]
+    refused("trust_key_duplicate", partial(kit.verifier, former_registry(kit, "1", current, twice)))
+    # A customer key may not be a former custodian key either.
+    verifier = kit.verifier(former_registry(kit, "1", current, [retired.public()]))
+    as_customer = Signer(sr.CUSTOMER_OWNER, registry_revision="1")
+    as_customer.private, as_customer.der = retired.private, retired.der
+    refused(
+        "customer_key_not_distinct",
+        partial(verifier.pin_customer_anchor, kit.enrolment(as_customer)),
+    )
+
+
+def test_n2_relisting_the_custodian_key_at_a_new_revision_keeps_anchors(kit: Kit) -> None:
+    kit.enrolled()
+    relisted = [kit.operator.entry(registry_revision="rev-2"), kit.evaluator.entry()]
+    verifier = kit.verifier(kit.registry("2", keys=relisted))
+    payload = consent()
+    grant = canonical(
+        {
+            "payload": payload,
+            "signatures": [
+                kit.customer.signature(payload, sr.GRANT_PURPOSE),
+                kit.operator.signature(payload, sr.GRANT_PURPOSE, key_registry_revision="rev-2"),
+            ],
+        }
+    )
+    assert verifier.verify(grant, sr.GRANT_PURPOSE)
+
+
+def test_n2_removing_enrolment_purpose_keeps_anchors_but_refuses_new_pins(kit: Kit) -> None:
+    kit.enrolled()
+    narrowed = kit.operator.entry(purposes=[sr.GRANT_PURPOSE, sr.ROUTING_POLICY_PURPOSE])
+    verifier = kit.verifier(kit.registry("2", keys=[narrowed, kit.evaluator.entry()]))
+    assert verifier.verify(
+        sign(consent(), sr.GRANT_PURPOSE, kit.customer, kit.operator), sr.GRANT_PURPOSE
+    )
+    other = Signer(sr.CUSTOMER_OWNER, registry_revision="1")
+    new_pin = sign(
+        kit.enrolment_payload(other, engagement_id="eng-sentinel-0002"),
+        sr.ENROLMENT_PURPOSE,
+        other,
+        kit.operator,
+    )
+    refused("key_purpose_not_permitted", partial(verifier.pin_customer_anchor, new_pin))
+
+
+def test_n2_a_key_id_names_one_public_key(kit: Kit) -> None:
+    other_key = kit.evaluator.entry(
+        key_id=kit.operator.key_id,
+        role=sr.OPERATOR_CUSTODIAN,
+        purposes=[sr.GRANT_PURPOSE],
+        registry_revision="rev-2",
+    )
+    refused(
+        "trust_key_duplicate",
+        partial(kit.verifier, kit.registry(keys=[kit.operator.entry(), other_key])),
+    )
+
+
+OTHER = "eng-sentinel-0002"
+
+
+def test_binding_another_engagements_chain_is_refused(kit: Kit) -> None:
+    verifier = kit.verifier()
+    other_customer = Signer(sr.CUSTOMER_OWNER, registry_revision="1")
+    payload = kit.enrolment_payload(other_customer, engagement_id=OTHER)
+    verifier.pin_customer_anchor(sign(payload, sr.ENROLMENT_PURPOSE, other_customer, kit.operator))
+    # Copy engagement Y's chain and floor onto engagement X, rewriting the record keys.
+    for source, target in (
+        ("customer_anchor:" + OTHER, ANCHOR_KEY),
+        ("customer_anchor_revision:" + OTHER, REVISION_KEY),
+    ):
+        copied = stored(kit, source)
+        write_record(kit, target, int(copied["sequence"]), copied["value"])
+    grant = sign(consent(), sr.GRANT_PURPOSE, other_customer, kit.operator)
+    refused("customer_anchor_unverifiable", partial(verifier.verify, grant, sr.GRANT_PURPOSE))
+
+
+def test_binding_a_rotation_for_another_engagement_is_refused(kit: Kit) -> None:
+    verifier = kit.enrolled()
+    # The same customer key is enrolled for engagement Y too.
+    payload = kit.enrolment_payload(engagement_id=OTHER)
+    verifier.pin_customer_anchor(sign(payload, sr.ENROLMENT_PURPOSE, kit.customer, kit.operator))
+    successor = Signer(sr.CUSTOMER_OWNER, registry_revision="2")
+    rotation_y = kit.rotation(kit.customer, successor, engagement_id=OTHER)
+    enrolment_x = stored(kit, ANCHOR_KEY)["value"]["chain"][0]
+    write_record(kit, ANCHOR_KEY, 2, {"chain": [enrolment_x, json.loads(rotation_y)]})
+    grant = sign(consent(), sr.GRANT_PURPOSE, successor, kit.operator)
+    # Pending (floor still at 1): the foreign rotation is ignored.
+    refused("customer_key_not_anchored", partial(verifier.verify, grant, sr.GRANT_PURPOSE))
+    # Accepted (floor advanced to cover it): the chain is unverifiable.
+    write_record(kit, REVISION_KEY, 2, {"head_payload_sha256": payload_digest(rotation_y)})
+    refused("customer_anchor_unverifiable", partial(verifier.verify, grant, sr.GRANT_PURPOSE))
+
+
 # --- Encoding and canonical form -----------------------------------------------------
 
 
