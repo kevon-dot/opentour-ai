@@ -241,6 +241,92 @@ def test_competing_saves_and_explicit_prior_preview_atomicity(tmp_path):
         assert db.execute("SELECT count(*) FROM owner_settings_revisions").fetchone()[0] == 2
 
 
+@pytest.mark.parametrize(
+    ("change", "reason"),
+    [
+        ("unknown_term", "invalid_protected_terms"),
+        ("invalid_coverage", "invalid_operating_limits"),
+        ("malformed_terms", "invalid_protected_terms"),
+        ("duplicate_slices", "invalid_agreed_slice"),
+    ],
+)
+def test_invalid_operating_terms_cannot_replace_saved_policy(tmp_path, change, reason):
+    s = Setup(tmp_path)
+    first = s.apply()
+    policy = deepcopy(s.policy)
+    policy["mandate"]["mandate_id"] = "settings-invalid-terms"
+    # A real valid preview supplies the exact existing source/role bindings. The
+    # custodian signs the malformed candidate directly to exercise save as well.
+    claim = s.preview(policy)["claim"]
+    if change == "unknown_term":
+        policy["agreement"]["terms"]["unknown_term"] = "generated"
+    elif change == "invalid_coverage":
+        policy["agreement"]["terms"]["minimum_coverage_bps"] = 10001
+    elif change == "malformed_terms":
+        policy["agreement"]["terms"] = []
+    else:
+        policy["agreement"]["terms"]["critical_slices"] = ["generated", "generated"]
+    policy["mandate"]["agreement_revision"] = digest(policy["agreement"])
+    claim["policy"] = policy
+    packet = s.sign(claim)
+    before = s.protocol()
+
+    def counts():
+        with sqlite3.connect(s.customer.ledger.path) as db:
+            return tuple(
+                db.execute("SELECT count(*) FROM " + table).fetchone()[0]
+                for table in ("mandates", "renewals", "owner_settings_revisions", "reservations")
+            )
+
+    prior_counts = counts()
+    with pytest.raises(ValueError, match=reason):
+        s.preview(policy)
+    with pytest.raises(ValueError, match=reason):
+        s.service.save(packet, actor=s.owner)
+    assert s.protocol() == before
+    assert counts() == prior_counts
+    assert s.service.inspect(actor=s.owner)["current"] == first
+    assert not s.customer.ledger.inspect(first["mandate_id"])["withdrawn"]
+
+
+def test_valid_changed_operating_terms_reach_normal_worker(tmp_path):
+    s = Setup(tmp_path)
+    first = s.apply()
+    policy = deepcopy(s.policy)
+    policy["mandate"]["mandate_id"] = "settings-new-terms"
+    policy["agreement"]["terms"].update(
+        minimum_coverage_bps=0, error_ceiling_bps=10000, minimum_verified_cases=1
+    )
+    policy["mandate"]["agreement_revision"] = digest(policy["agreement"])
+    preview = s.preview(policy)
+    assert preview["prior"] == first
+    assert preview["claim"]["prior_revision"] == first["revision"]
+    second = s.service.save(s.sign(preview["claim"]), actor=s.owner)
+    assert second["policy"]["agreement"]["terms"] == policy["agreement"]["terms"]
+    assert s.customer.ledger.inspect(first["mandate_id"])["withdrawn"]
+    config = s.service.worker_config(second, actor=s.operator)
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "opentour_cell.pilot.cycle_worker",
+            "--directory",
+            str(s.customer.owner),
+            "--organization",
+            s.customer.org,
+            "--config",
+            config["config_file"],
+            "--once",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert proc.returncode == 0, proc.stderr + proc.stdout
+    assert json.loads(proc.stdout)["state"] == "pending_slack_review"
+    assert any(p["method"] == "resources/read" for p in s.protocol())
+
+
 @pytest.mark.parametrize("action", ["pause", "revoke"])
 def test_pause_revoke_old_worker_and_stale_receipt_zero_reads(tmp_path, action):
     s = Setup(tmp_path)
