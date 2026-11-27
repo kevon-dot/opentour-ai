@@ -6,7 +6,9 @@ artifact revision, current approval grant, workflow and engagement. The link
 between a caller's operation key and the canonical release is committed in the
 same transaction as its release row. Retrying that intent under a second key
 reuses the original release reference. A changed intent under the same key
-conflicts, and a changed recipient requires a new approval.
+within one authenticated client conflicts. Clients can use the same local key
+independently, and a changed recipient requires a new approval. The worker
+adapter supplies the authenticated connection identity for each remote client.
 
 ## Worker contracts
 
@@ -23,6 +25,9 @@ freshly observed during the lookup can admit the first worker claim. A committed
 claim stays delivery-unconfirmed until current independently verified readback.
 A missing or ambiguous lookup keeps the claim held. Status inspection reads the
 persisted register and has no receiver I/O.
+Inspection requires an intact existing database, current engagement, and a
+structurally valid stage. A closed WAL or incomplete restored delivery is held
+for operator recovery.
 
 The recipient worker uses the release reference as its deduplication key and
 checks current dispatch authority immediately before its effect. Reconciliation

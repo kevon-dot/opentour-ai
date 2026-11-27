@@ -16,7 +16,8 @@ from opentour_cell.pilot.release_outbox import (
     ReleaseOutboxError,
     ReleaseSelection,
 )
-from opentour_cell.pilot.training import LocalTrainingStore, TrainingError
+from opentour_cell.pilot.text_classifier import TrainingError
+from opentour_cell.pilot.training import LocalTrainingStore
 from test_pilot_custody import START
 
 
@@ -315,3 +316,54 @@ def test_neighbor_and_wrong_digest_readback_cannot_confirm(tmp_path):
             second.reconcile(right.selection, "operator", SuppliedReceipt(observation))
     assert second.status(right.selection, "inspector").stage == "delivery_unconfirmed"
     assert first.reconcile(left.selection, "operator", receiver).stage == "delivered"
+
+
+def test_closed_wal_inspection_does_not_create_sidecars(tmp_path, monkeypatch):
+    queue, grant, authority, _ = create(tmp_path)
+    queue.reserve(grant.selection, "operator", "initial")
+    with closing(sqlite3.connect(queue.store.path)) as db:
+        assert db.execute("pragma journal_mode=wal").fetchone() == ("wal",)
+    effects = [Path(str(queue.store.path) + ext) for ext in ("-wal", "-shm", "-journal")]
+    assert not any(path.exists() for path in effects)
+
+    def unexpected(*args):
+        pytest.fail("A closed WAL must hold before invoking the authority port.")
+
+    monkeypatch.setattr(authority, "resolve", unexpected)
+    with pytest.raises(ReleaseOutboxError, match="release_outbox_unavailable"):
+        queue.status(grant.selection, "inspector")
+    assert not any(path.exists() for path in effects)
+
+
+def test_incomplete_restored_delivery_fails_before_disclosure_or_lookup(tmp_path):
+    queue, grant, _, receiver = create(tmp_path)
+    queue.reserve(grant.selection, "operator", "initial")
+    with queue.store._db(write=True) as db:
+        db.execute("UPDATE release_outbox SET stage='delivered'")
+    for check in (
+        lambda: queue.status(grant.selection, "inspector"),
+        lambda: queue.claim(grant.selection, "operator", receiver),
+        lambda: queue.reconcile(grant.selection, "operator", receiver),
+    ):
+        with pytest.raises(ReleaseOutboxError, match="release_stage_integrity_unavailable"):
+            check()
+    assert receiver.calls == []
+
+
+def test_authenticated_clients_share_canonical_release_and_isolate_operation_keys(tmp_path):
+    queue, grant, authority, _ = create(tmp_path)
+    successor = replace(
+        grant,
+        selection=replace(grant.selection, approval_ref="approval-b", proposal_ref="proposal-b"),
+    )
+    authority.current[successor.selection] = successor
+    a = queue.reserve(grant.selection, "operator", "request-1", authenticated_client="install-a")
+    b = queue.reserve(
+        successor.selection, "operator", "request-1", authenticated_client="install-b"
+    )
+    retry = queue.reserve(
+        grant.selection, "operator", "request-2", authenticated_client="install-b"
+    )
+    assert a != b and retry == a
+    with pytest.raises(ReleaseOutboxError, match="release_idempotency_conflict"):
+        queue.reserve(grant.selection, "operator", "request-1", authenticated_client="install-b")

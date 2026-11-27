@@ -2,16 +2,21 @@
 
 from __future__ import annotations
 
+import os
 import re
 import secrets
 import sqlite3
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from typing import Literal, Protocol
 
 from opentour_cell.pilot.intake_mcp import require_ref
 from opentour_cell.pilot.operating_point import canonical, digest
+from opentour_cell.pilot.receipt_recovery import _open_db
+from opentour_cell.pilot.slack_adapter import Refused
+from opentour_cell.pilot.text_classifier import TrainingError
 from opentour_cell.pilot.training import LocalTrainingStore
 
 Action = Literal["reserve", "inspect", "claim", "reconcile"]
@@ -159,6 +164,27 @@ class ReleaseOutbox:
         assert grant is not None
         return grant
 
+    @contextmanager
+    def _read(self) -> Iterator[sqlite3.Connection]:
+        custody = self.store.path.with_name("custody.sqlite3")
+        try:
+            with _open_db(custody) as closed, _open_db(self.store.path) as db:
+                if closed is not None:
+                    raise TrainingError("engagement_withdrawn")
+                _require(db is not None)
+                assert db is not None
+                self.store._check_owner(db)
+                engagement = db.execute(
+                    "SELECT withdrawn_at FROM engagement WHERE singleton=1"
+                ).fetchone()
+                if engagement is None or engagement[0] is not None:
+                    raise TrainingError("engagement_withdrawn")
+                yield db
+            if os.path.lexists(custody):
+                raise TrainingError("engagement_withdrawn")
+        except (OSError, sqlite3.Error, Refused):
+            raise ReleaseOutboxError("release_outbox_unavailable") from None
+
     def _stage(self, db: sqlite3.Connection, grant: ApprovedRelease) -> sqlite3.Row | None:
         if (
             db.execute(
@@ -176,7 +202,43 @@ class ReleaseOutbox:
             or (row["ref"] == grant.reference and row["binding"] == canonical(asdict(grant))),
             "release_intent_changed",
         )
+        if row is not None:
+            self._validate_stage(row, grant)
         return row
+
+    @staticmethod
+    def _validate_stage(row: sqlite3.Row, grant: ApprovedRelease) -> None:
+        stage, claimed, checked, receipt, received = (
+            row["stage"],
+            row["claimed_at"],
+            row["last_checked_at"],
+            row["receiver_receipt_ref"],
+            row["received_at"],
+        )
+        _require(
+            stage in {"queued", "delivery_unconfirmed", "delivered"}
+            and all(
+                date is None or (type(date) is int and grant.approved_at <= date < grant.expires_at)
+                for date in (claimed, checked, received)
+            ),
+            "release_stage_integrity_unavailable",
+        )
+        if stage == "delivered":
+            _require(
+                checked is not None
+                and received is not None
+                and received <= checked
+                and isinstance(receipt, str),
+                "release_stage_integrity_unavailable",
+            )
+            require_ref(receipt)
+        else:
+            _require(
+                receipt is None
+                and received is None
+                and (checked is not None if stage == "delivery_unconfirmed" else claimed is None),
+                "release_stage_integrity_unavailable",
+            )
 
     def _status(self, row: sqlite3.Row, grant: ApprovedRelease) -> ReleaseStatus:
         return ReleaseStatus(
@@ -189,8 +251,17 @@ class ReleaseOutbox:
             row["received_at"],
         )
 
-    def reserve(self, selection: ReleaseSelection, actor: str, operation_key: str) -> ReleaseStatus:
+    def reserve(
+        self,
+        selection: ReleaseSelection,
+        actor: str,
+        operation_key: str,
+        *,
+        authenticated_client: str | None = None,
+    ) -> ReleaseStatus:
         require_ref(operation_key)
+        actor = require_ref(actor)
+        client = actor if authenticated_client is None else require_ref(authenticated_client)
         with self.store._db(write=True) as db:
             grant = self._current(db, selection, actor, "reserve")
             db.execute(
@@ -202,12 +273,14 @@ class ReleaseOutbox:
             )
             db.execute(
                 "CREATE TABLE IF NOT EXISTS release_operation_keys("
-                "engagement TEXT NOT NULL, operation_key TEXT NOT NULL, ref TEXT NOT NULL,"
-                "PRIMARY KEY(engagement,operation_key))"
+                "engagement TEXT NOT NULL, actor TEXT NOT NULL, client TEXT NOT NULL,"
+                "operation_key TEXT NOT NULL, ref TEXT NOT NULL,"
+                "PRIMARY KEY(engagement,actor,client,operation_key))"
             )
             alias = db.execute(
-                "SELECT ref FROM release_operation_keys WHERE engagement=? AND operation_key=?",
-                (grant.engagement, operation_key),
+                "SELECT ref FROM release_operation_keys "
+                "WHERE engagement=? AND actor=? AND client=? AND operation_key=?",
+                (grant.engagement, actor, client, operation_key),
             ).fetchone()
             _require(alias is None or alias[0] == grant.reference, "release_idempotency_conflict")
             row = self._stage(db, grant)
@@ -224,14 +297,14 @@ class ReleaseOutbox:
                 )
                 row = self._stage(db, grant)
             db.execute(
-                "INSERT OR IGNORE INTO release_operation_keys VALUES(?,?,?)",
-                (grant.engagement, operation_key, grant.reference),
+                "INSERT OR IGNORE INTO release_operation_keys VALUES(?,?,?,?,?)",
+                (grant.engagement, actor, client, operation_key, grant.reference),
             )
             assert row is not None
             return self._status(row, grant)
 
     def status(self, selection: ReleaseSelection, actor: str) -> ReleaseStatus | None:
-        with self.store._db() as db:
+        with self._read() as db:
             grant = self._current(db, selection, actor, "inspect")
             row = self._stage(db, grant)
             return None if row is None else self._status(row, grant)
@@ -252,7 +325,7 @@ class ReleaseOutbox:
         *,
         action: Literal["claim", "reconcile"],
     ) -> Claim:
-        with self.store._db() as db:
+        with self._read() as db:
             grant = self._current(db, selection, actor, action)
             row = self._stage(db, grant)
             _require(row is not None)
@@ -297,8 +370,7 @@ class ReleaseOutbox:
     ) -> Claim:
         now = self.clock()
         _require(
-            isinstance(observed, ReceiverObservation)
-            and (observed.release_ref, observed.destination_ref, observed.artifact_sha256)
+            (observed.release_ref, observed.destination_ref, observed.artifact_sha256)
             == (grant.reference, grant.destination_ref, grant.artifact_sha256)
             and observed.state in {"absent", "unknown", "delivered"}
             and type(observed.observed_at) is int
