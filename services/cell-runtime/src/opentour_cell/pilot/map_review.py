@@ -11,12 +11,14 @@ import time
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager, nullcontext
 from dataclasses import asdict, dataclass, replace
+from datetime import date
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
 from opentour_cell.pilot.guided_decision_map import (
     Condition,
+    EffectiveFrom,
     FieldKind,
     GuidedMap,
     guided_draft,
@@ -135,10 +137,13 @@ class MapReviewSnapshot:
     settings_support: str | None = None
     settings_trigger: str | None = None
     unit_of_work: str | None = None
+    effective_from: EffectiveFrom | None = None
 
     def expected_action(
-        self, fields: Mapping[str, str | Decimal | None]
+        self, fields: Mapping[str, str | Decimal | None], *, decision_date: date | None = None
     ) -> tuple[str | None, tuple[str, ...]]:
+        if self.effective_from and not self.effective_from.applies(decision_date):
+            return None, (citation_ref(self.effective_from.citation),)
         unknown = [r for r in self.branches if r.action is None and r.disposition != "out_of_scope"]
         if unknown:
             return None, tuple(r.citation_ref for r in unknown)
@@ -483,11 +488,15 @@ class MapReviewService:
 
     @staticmethod
     def _same_source(record: Json, ctx: _Context) -> bool:
+        assert ctx.draft is not None
+        effective_date = ctx.draft.effective_from
         return bool(
             record["source_revision"] == ctx.capability["source_revision"]
             and record["starter_grant_revision"] == ctx.capability["starter_grant_revision"]
             and record["schema_digest"]
             == digest([ctx.capability["field_kinds"], ctx.capability["actions"]])
+            and record.get("effective_date")
+            == (effective_date.iso_date if effective_date else None)
         )
 
     @staticmethod
@@ -596,6 +605,11 @@ class MapReviewService:
                 )
             prior_by_ref = {r.branch_ref: r for r in prior_rows}
             affected = set(changed)
+            effective_date = ctx.draft.effective_from
+            if record.get("effective_date") != (
+                effective_date.iso_date if effective_date else None
+            ):
+                affected.update(r.branch_ref for r in rows)
             for row in rows:
                 before = prior_by_ref.get(row.branch_ref)
                 if before is not None and self._blocking_rules(
@@ -683,6 +697,7 @@ class MapReviewService:
             settings_support="owner_assertion" if settings else None,
             settings_trigger=settings["trigger"] if settings else None,
             unit_of_work=settings.get("unit_of_work") if settings else None,
+            effective_from=ctx.draft.effective_from,
         )
 
     def _blocking_rules(self, row: MapBranch, rows: tuple[MapBranch, ...]) -> set[str]:
@@ -739,6 +754,10 @@ class MapReviewService:
             spans = [r.citation for r in current.branches if r.citation_ref == citation_ref]
             if ctx.draft and ctx.draft.first_match_clause:
                 span = ctx.draft.first_match_clause
+                if globals()["citation_ref"](span) == citation_ref:
+                    spans.append(span)
+            if current.effective_from:
+                span = current.effective_from.citation
                 if globals()["citation_ref"](span) == citation_ref:
                     spans.append(span)
             _require(bool(spans), "map_citation_unavailable")
@@ -950,6 +969,8 @@ class MapReviewService:
                 precedence_actor_ref=order_actor,
                 settings=assertion,
             )
+            if ctx.draft.effective_from:
+                body["effective_date"] = ctx.draft.effective_from.iso_date
             seal = digest(body)
             ref = "map-review-" + seal[:40]
             # Revalidate before durable effects, while the authority guard is held.

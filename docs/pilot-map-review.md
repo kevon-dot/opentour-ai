@@ -91,3 +91,13 @@ remain visible. Examples never enter a case pack or dispatch a decision.
 The unit of work is an optional attributed map assertion. The verification
 plan comes from the selected workflow's saved starter charter when the
 authenticated actor has the original starter owner binding.
+
+## Policy effective dates
+
+A guided policy may declare one operative `Effective from YYYY-MM-DD.`
+line. The map binds the exact source span and accepts a decision date when
+evaluating that selected revision. A missing date or a date earlier than the
+declaration holds the result. Invalid or competing date clauses stay
+unresolved. An authorized source edit with a retroactive date requires a
+new review. The prior receipt and proof keep their original source and
+interpretation.
