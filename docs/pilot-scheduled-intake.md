@@ -1,14 +1,19 @@
-# Local scheduled admission component (OPE-439)
+# Local scheduled admission and retained reader handoff (OPE-439)
 
 This component admits permitted opaque revisions through the existing OPE-430
-`open_intake` factory and its durable admission service. It does not read source
-pages, run a model, dispatch training or activate a Zap. Live admission preserves
+`open_intake` factory, durably retains their reader handoff and reconciles status
+through its existing `get_run` service. It does not read source pages, run a model,
+dispatch training or activate a Zap. Live admission preserves
 the existing workflow and benchmark; historical admission retains the accepted
 factory's benchmark bookkeeping. This is a partial software handoff, not OPE-439
 acceptance or installed evidence.
 
-The current source base is protected OPE-514 integration commit
-`3888fcdc86e23f0c14b06b372fc172341be5d74f` (PR #140). The accepted intake factory
+This successor combines protected main
+`943b6a3acdad24c38e375ddd68c85f119386bd7b`, including the accepted PR #147
+reader entry (`19833fd926c2ffc2e729dc2ecc7677fbfc3a1473`), with unchanged reviewed
+scheduled-admission source `7c4ca4acc3b4d10b568a7852b64d91dbefd5403d`.
+The latter's 107-test compatibility evidence remains bound to protected #140
+base `3888fcdc86e23f0c14b06b372fc172341be5d74f`. The accepted intake factory
 returns `BenchmarkIntake`, which composes the existing `DurableIntake`. The
 scheduler uses its unchanged discovery and admission methods. A complete current
 signed export can now be queued; a missing reader/export still holds pending.
@@ -29,7 +34,7 @@ The current [OPE-439 issue](https://linear.app/opentourai/issue/OPE-439),
 [OPE-402](https://linear.app/opentourai/issue/OPE-402), and
 [OPE-519](https://linear.app/opentourai/issue/OPE-519) govern this handoff.
 Full current issues and the mandatory PRD were inspected before implementation.
-OPE-439's current native update was 2026-11-26T23:29:28.179Z; the shared contract
+OPE-439's current native update was 2026-11-27T00:18:25.286Z; the shared contract
 update was 2026-11-26T21:07:32.515Z. Later changes require renewed mapping.
 
 | Native clause / fixture | This component and generated test | Gate still open |
@@ -57,23 +62,73 @@ explicit reader invocation after a scheduler admission can therefore process the
 same run without another admission. This is separate from an automatic tick.
 
 There is no page allowance, deadline or continuation-result parameter on that
-reader entry. It processes the selected catalog's complete page list, bounded by
+reader entry, including protected PR #147. It processes the selected catalog's complete page list, bounded by
 32 pages, and completes the operation only after that work returns. The scheduler's
 `pages_per_tick` currently bounds opaque discovery calls, not source pages.
 Calling the whole reader once per admission would not enforce the configured
 source-work limits. The missing join needs a reader-owned bounded invocation and
 recoverable completion/continuation receipt, with source authority rechecked before
-each read and commit, plus durable scheduler dispatch for acknowledged run refs.
+each read and commit. The retained handoff below supplies durable acknowledged run
+references and real status readback, but not source-reader dispatch.
 It must distinguish admission from source completion and preserve already committed
 pages on pause, outage or exhaustion. No replacement reader protocol is invented
 by this admission-only component.
 
 The builder owner must register `opentour_cell/pilot/scheduled_intake.py` and map
 `scheduled-intake` to `("scheduled_intake", "main")`. That only packages the existing
-admission CLI; it does not supply the missing reader join, signed custodian schedule
+admission/status CLI; it does not supply the missing reader join, signed custodian schedule
 approval from OPE-426, OPE-519 bulk manifest route, optional OPE-531 mixed-source
 route, hosted invocation or installed OPE-435 evidence. Protected #140 fixed the
 earlier missing `live_authority` archive import; it does not package this module.
+
+## Durable handoff and bounded status reconciliation
+
+Each actual admission now inserts one `schedule_work` row, containing the exact
+immutable submitted envelope and returned run reference, in the same transaction
+that removes the pending admission. A crash before that transaction replays the
+original intent through the actual intake API. A crash after it, including loss
+of the final tick receipt, leaves the handoff recoverable. Repeated admission
+retains the original record. It never creates a source-completion claim.
+
+The separate `reconcile` command polls those retained references with the actual
+tenant-scoped `BenchmarkIntake.get_run`. It starts at most `operations_per_tick`
+status calls, charges each attempt against the same monthly allowance and shares
+the tick lease, cadence, local controls and cooperative deadline. Least-checked
+runs come first; an unavailable run does not discard or permanently block another
+current run. A call already started can return after the deadline. No source page
+is dispatched by either command. Hosting or alternating the commands remains an
+operator setup step, not an installed scheduled Zap.
+
+The private record separates `admitted_state`, last successful `observed_state`
+and `observed_at`, latest readback `availability` and `checked_at`, and attempt
+count `checks`. An unavailable readback keeps the previous observation unchanged;
+it is unknown, not materialized, revoked or a new source revision. A materialized
+observation is historical evidence from the actual API. It leaves the polling
+queue, but is neither current authority to read again nor a completeness claim
+about the population, source coverage, training or a benchmark. Future effects
+must revalidate current source authority through their own accepted API.
+
+`reconciled` means every retained run has been observed as materialized; `pending`
+means at least one retained run still needs reader work or another status poll.
+Neither state permits a caller to assert completion. No raw source rows, benchmark
+contents or error text are stored or emitted by this handoff. A status error emits
+only `unavailable` and an opaque receipt when possible. Local pause/revoke/expiry
+opens no factory. Source denial retains the run without starting any source read.
+
+The journal addition preserves old configuration and usage. An old journal's
+previous tick references are not retrospectively interpreted as exact reader
+handoffs. A later authorized discovery/admission sweep records the current exact
+requests using their existing run identities; unavailable old intents stay in
+their original historical ledgers. Do not clear usage or change installation
+identity to migrate. Downgrading while paused preserves the additional table,
+but an older executable does not maintain it or provide this reconciliation.
+
+Generated integration tests invoke the real reader separately, interrupt after a
+committed page, resume with the first page removed, and then reconcile completion.
+They add an independently bound truth feed later and observe 2 decisions, 1 verified,
+1 pending, with the original benchmark unchanged. This proves the retained
+handoff/status join. The automatic bounded source-reader continuation port and
+full scheduled D1/D2/reopen acceptance remain open.
 
 ## Local configuration and invocation
 
@@ -107,6 +162,7 @@ not an authorized quota-reset or migration strategy.
 
 ```sh
 python -m opentour_cell.pilot.scheduled_intake --configuration /owner/private/schedule.json tick
+python -m opentour_cell.pilot.scheduled_intake --configuration /owner/private/schedule.json reconcile
 python -m opentour_cell.pilot.scheduled_intake --configuration /owner/private/schedule.json pause
 python -m opentour_cell.pilot.scheduled_intake --configuration /owner/private/schedule.json resume
 python -m opentour_cell.pilot.scheduled_intake --configuration /owner/private/schedule.json revoke
@@ -124,7 +180,7 @@ only `state=unavailable` when no safe receipt can be recorded). Pending live
 admission is never labeled materialized. The private journal contains opaque
 admission metadata, not payload rows, and must remain inside the worker boundary.
 The allowed state set is `enabled`, `paused`, `revoked`, `expired`, `cadence_held`,
-`timeout`, `quota_held`, `held`, `page_limit`, `pending`, `admitted`, `idle`, and
+`timeout`, `quota_held`, `held`, `page_limit`, `pending`, `admitted`, `reconciled`, `idle`, and
 `unavailable`. Local operation counts are not provider billing measurements.
 
 For rollback, pause locally and confirm its receipt before disabling the external

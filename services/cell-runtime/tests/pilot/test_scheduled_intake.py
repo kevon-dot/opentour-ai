@@ -14,6 +14,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from opentour_cell.pilot import live_reader
 from opentour_cell.pilot import scheduled_intake as scheduled
 from opentour_cell.pilot.intake_local import SELECTION_VERSION, open_intake
 from opentour_cell.pilot.intake_mcp import IntakeError, parse_intake
@@ -23,6 +24,8 @@ from opentour_cell.pilot.training import LocalTrainingStore
 from opentour_cell.pilot.workflow_benchmarks import BenchmarkIntake
 from test_intake_mcp import _mandate, _write_private
 from test_live_authority import SignedCase
+from test_live_evidence import DECISION, OUTCOME, decision, outcome
+from test_live_reader import Export
 
 
 class Clock:
@@ -136,7 +139,7 @@ def test_crash_after_admission_before_cursor_commit_reuses_actual_run(tmp_path, 
     worker = case.worker()
     original = worker._ack
 
-    def crash(_pending):
+    def crash(_pending, _result):
         raise RuntimeError("generated crash after durable admission")
 
     monkeypatch.setattr(worker, "_ack", crash)
@@ -625,4 +628,292 @@ def test_fresh_wrong_actor_does_not_seal_installation_before_validation(tmp_path
     case.body["actor"] = "worker"
     _write_private(case.configuration, case.body)
     assert case.worker().tick()["state"] == "pending"
+
+
+def retained(worker):
+    with worker._db() as db:
+        return [
+            dict(row)
+            for row in db.execute(
+                "SELECT * FROM schedule_work WHERE identity=? ORDER BY run_ref", (worker.identity,)
+            )
+        ]
+
+
+def export_schedule(tmp_path, **changes):
+    export = Export(tmp_path / "export")
+    template = Case(tmp_path / "template")
+    configuration = export.directory / "schedule.json"
+    _write_private(
+        configuration,
+        {
+            **template.body,
+            "selection_file": export.selection.name,
+            "selection_sha256": scheduled._digest(json.loads(export.selection.read_text())),
+            "pages_per_tick": 4,
+            **changes,
+        },
+    )
+    return export, configuration
+
+
+def test_ack_handoff_survives_lost_tick_receipt_and_duplicate_admission(
+    tmp_path, clock, monkeypatch
+):
+    case = Case(tmp_path / "worker")
+    case.signed.connect()
+    worker = case.worker()
+    monkeypatch.setattr(
+        worker, "_finish", lambda *_args: (_ for _ in ()).throw(RuntimeError("crash"))
+    )
+    with pytest.raises(RuntimeError, match="crash"):
+        worker.tick()
+    rows = retained(case.worker())
+    assert len(rows) == 1 and rows[0]["run_ref"] == case.live_runs()[0][0]
+    assert rows[0]["admitted_state"] == rows[0]["observed_state"] == "pending"
+    assert json.loads(worker._head()["pending"]) == []
+    assert rows[0]["request"] == scheduled._canonical(json.loads(rows[0]["request"]))
+    clock.advance()
+    case.worker().tick()
+    assert retained(case.worker()) == rows and len(case.live_runs()) == 1
+    case.no_reader_effects()
+
+
+def test_handoff_insert_and_pending_removal_are_one_transaction(tmp_path, clock):
+    case = Case(tmp_path / "worker", operations_per_tick=1)
+    case.signed.connect()
+    worker = case.worker()
+    assert worker.tick()["state"] == "quota_held"
+    with worker._db() as db:
+        db.execute("""CREATE TRIGGER fail_ack BEFORE UPDATE OF pending ON schedule_heads
+            WHEN NEW.pending='[]' BEGIN SELECT RAISE(ABORT, 'generated ACK crash'); END""")
+    clock.advance()
+    with pytest.raises(sqlite3.IntegrityError, match="generated ACK crash"):
+        worker.tick()
+    assert retained(worker) == [] and len(json.loads(worker._head()["pending"])) == 1
+    assert len(case.live_runs()) == 1  # Actual admission committed in its own ledger.
+    with worker._db() as db:
+        db.execute("DROP TRIGGER fail_ack")
+    clock.advance()
+    assert case.worker().tick()["state"] == "pending"
+    assert len(retained(worker)) == len(case.live_runs()) == 1
+
+
+def test_reconcile_actual_reader_partial_page_restart_and_later_truth(tmp_path, clock):
+    export, config = export_schedule(tmp_path)
+    pages = export.install(
+        DECISION,
+        [[export.row(decision(), 11)], [export.row(decision("D2"), 12)]],
+    )
+    export.case.connect()
+    worker = scheduled.ScheduledIntake(config)
+    benchmark = export.directory / "workflow-benchmarks.sqlite3"
+    original_benchmark = benchmark.read_bytes()
+    assert worker.tick()["state"] == "admitted"
+    run = retained(worker)[0]["run_ref"]
+    assert retained(worker)[0]["observed_state"] == "queued"
+    second = export.directory / pages[1]["pin"]["file"]
+    content = second.read_bytes()
+    second.unlink()
+    with pytest.raises(IntakeError, match="live_export_unavailable"):
+        live_reader.materialize_live(export.selection, run)
+    assert (export.snapshot().decisions, export.snapshot().pending) == (1, 1)
+    clock.advance()
+    assert scheduled.ScheduledIntake(config).reconcile()["state"] == "pending"
+    assert retained(worker)[0]["observed_state"] == "queued"
+    # Actual committed-page continuation skips the missing first page on restart.
+    (export.directory / pages[0]["pin"]["file"]).unlink()
+    second.write_bytes(content)
+    second.chmod(0o600)
+    assert live_reader.materialize_live(export.selection, run)
+    clock.advance()
+    assert scheduled.ScheduledIntake(config).reconcile()["state"] == "reconciled"
+    assert retained(worker)[0]["observed_state"] == "materialized"
+    assert (export.snapshot().decisions, export.snapshot().pending) == (2, 2)
+    export.install(OUTCOME, [[export.row(outcome(), 21)]])
+    export.case.connect("truth")
+    clock.advance()
+    assert scheduled.ScheduledIntake(config).tick()["state"] == "admitted"
+    truth = next(row for row in retained(worker) if row["run_ref"] != run)["run_ref"]
+    assert live_reader.materialize_live(export.selection, truth)
+    clock.advance()
+    assert scheduled.ScheduledIntake(config).reconcile()["state"] == "reconciled"
+    assert (export.snapshot().decisions, export.snapshot().verified, export.snapshot().pending) == (
+        2,
+        1,
+        1,
+    )
+    assert len(export.receipts()) == 3 and benchmark.read_bytes() == original_benchmark
+    assert all(row["observed_state"] == "materialized" for row in retained(worker))
+    before = retained(worker)
+    clock.advance()
+    assert scheduled.ScheduledIntake(config).reconcile()["state"] == "idle"
+    assert retained(worker) == before
+
+
+@pytest.mark.parametrize("failure", [IntakeError, sqlite3.OperationalError, OSError])
+def test_reconcile_unknown_does_not_erase_or_starve_other_current_run(
+    tmp_path, clock, monkeypatch, failure
+):
+    case = Case(tmp_path / "worker", pages_per_tick=4)
+    case.signed.connect()
+    case.signed.connect("truth")
+    worker = case.worker()
+    worker.tick()
+    before = retained(worker)
+    actor, intake = open_intake(case.selected)
+    get_run = intake.get_run
+
+    def unavailable(actor, reference):
+        if reference == before[0]["run_ref"]:
+            raise failure("GENERATED_PRIVATE_SENTINEL")
+        return get_run(actor, reference)
+
+    monkeypatch.setattr(intake, "get_run", unavailable)
+    monkeypatch.setattr(scheduled, "open_intake", lambda _path: (actor, intake))
+    clock.advance()
+    result = case.worker().reconcile()
+    assert result["state"] == "unavailable" and set(result) == {"state", "receipt_ref"}
+    after = retained(worker)
+    assert [row["checks"] for row in after] == [1, 1]
+    assert [row["availability"] for row in after] == ["unavailable", "available"]
+    assert after[0]["observed_at"] == before[0]["observed_at"]
+    assert after[0]["checked_at"] > before[0]["checked_at"]
+    assert after[0]["observed_state"] == before[0]["observed_state"] == "pending"
+    assert "GENERATED_PRIVATE_SENTINEL" not in worker.path.read_bytes().decode(errors="ignore")
+    case.no_reader_effects()
+
+
+def test_reconcile_monthly_quota_retains_run_without_status_call(tmp_path, clock, monkeypatch):
+    case = Case(tmp_path / "worker", monthly_operations=2)
+    case.signed.connect()
+    assert case.worker().tick()["state"] == "pending"
+    actor, intake = open_intake(case.selected)
+    monkeypatch.setattr(intake, "get_run", lambda *_args: pytest.fail("quota exhausted"))
+    monkeypatch.setattr(scheduled, "open_intake", lambda _path: (actor, intake))
+    before = retained(case.worker())
+    clock.advance()
+    assert case.worker().reconcile()["state"] == "quota_held"
+    assert retained(case.worker()) == before
+
+
+def test_reconcile_quota_fairness_and_shared_cadence(tmp_path, clock):
+    case = Case(tmp_path / "worker", pages_per_tick=4, operations_per_tick=1)
+    case.signed.connect()
+    case.signed.connect("truth")
+    for _ in range(4):
+        case.worker().tick()
+        clock.advance()
+    worker = case.worker()
+    assert len(retained(worker)) == 2
+    assert worker.reconcile()["state"] == "pending"
+    assert sorted(row["checks"] for row in retained(worker)) == [0, 1]
+    assert worker.tick()["state"] == worker.reconcile()["state"] == "cadence_held"
+    clock.advance()
+    assert worker.reconcile()["state"] == "pending"
+    assert [row["checks"] for row in retained(worker)] == [1, 1]
+    with worker._db() as db:
+        assert db.execute("SELECT operations FROM schedule_usage").fetchone()[0] == 6
+
+
+@pytest.mark.parametrize("control", ["paused", "revoked", "expired"])
+def test_reconcile_local_control_opens_no_factory(tmp_path, clock, monkeypatch, control):
+    case = Case(tmp_path / "worker")
+    case.signed.connect()
+    case.worker().tick()
+    before = retained(case.worker())
+    if control == "expired":
+        clock.advance(4000)
+    else:
+        case.worker().control(control)
+        clock.advance()
+    monkeypatch.setattr(scheduled, "open_intake", lambda _path: pytest.fail("controlled"))
+    assert case.worker().reconcile()["state"] == control
+    assert retained(case.worker()) == before
+
+
+def test_reconcile_revoked_source_retains_handoff_and_commits_no_read(tmp_path, clock):
+    case = Case(tmp_path / "worker")
+    case.signed.connect()
+    case.worker().tick()
+    before = retained(case.worker())
+    case.signed.body["state"] = "revoked"
+    case.signed.write()
+    clock.advance()
+    assert case.worker().reconcile()["state"] == "unavailable"
+    after = retained(case.worker())
+    assert after[0]["run_ref"] == before[0]["run_ref"]
+    assert after[0]["observed_at"] == before[0]["observed_at"]
+    assert after[0]["observed_state"] == "pending"
+    case.no_reader_effects()
+
+
+def test_reconcile_deadline_retains_unchecked_run(tmp_path, clock, monkeypatch):
+    case = Case(tmp_path / "worker", pages_per_tick=4)
+    case.signed.connect()
+    case.signed.connect("truth")
+    case.worker().tick()
+    actor, intake = open_intake(case.selected)
+    get_run = intake.get_run
+
+    def slow(*args):
+        result = get_run(*args)
+        clock.advance(11)
+        return result
+
+    monkeypatch.setattr(intake, "get_run", slow)
+    monkeypatch.setattr(scheduled, "open_intake", lambda _path: (actor, intake))
+    clock.advance()
+    assert case.worker().reconcile()["state"] == "timeout"
+    assert sorted(row["checks"] for row in retained(case.worker())) == [0, 1]
+    case.no_reader_effects()
+
+
+def test_old_journal_adds_handoff_without_reinterpreting_historical_receipts(tmp_path, clock):
+    case = Case(tmp_path / "worker")
+    case.signed.connect()
+    case.worker().tick()
+    with case.worker()._db() as db:
+        db.execute("DROP TABLE schedule_work")  # Previous additive journal schema.
+        usage = db.execute("SELECT operations FROM schedule_usage").fetchone()[0]
+    clock.advance()
+    assert case.worker().reconcile()["state"] == "idle"
+    assert retained(case.worker()) == []  # Old tick references aren't fabricated source receipts.
+    clock.advance()
+    assert case.worker().tick()["state"] == "pending"
+    assert len(retained(case.worker())) == len(case.live_runs()) == 1
+    with case.worker()._db() as db:
+        assert db.execute("SELECT operations FROM schedule_usage").fetchone()[0] == usage + 2
+
+
+def test_actual_reconcile_cli_returns_only_state_and_receipt(tmp_path):
+    case = Case(tmp_path / "worker")
+    case.signed.connect()
+    worker = case.worker()
+    worker.tick()
+    with worker._db() as db:
+        db.execute("UPDATE schedule_heads SET last_start=0")
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-B",
+            "-m",
+            "opentour_cell.pilot.scheduled_intake",
+            "--configuration",
+            str(case.configuration),
+            "reconcile",
+        ],
+        env=dict(os.environ),
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=True,
+    )
+    assert set(json.loads(result.stdout)) == {"state", "receipt_ref"}
+    assert json.loads(result.stdout)["state"] == "pending" and result.stderr == ""
+    assert all(
+        value not in result.stdout for value in ("org-a", "feed-", "source-v1", str(tmp_path))
+    )
+    assert retained(worker)[0]["checks"] == 1
+    case.no_reader_effects()
     assert len(case.live_runs()) == 1

@@ -1,4 +1,4 @@
-"""Bounded owner-local admission ticks; no source reader or hosted Zap activation."""
+"""Bounded local admission and status reconciliation; no source reader dispatch."""
 
 from __future__ import annotations
 
@@ -209,6 +209,12 @@ class ScheduledIntake:
             db.execute("""CREATE TABLE IF NOT EXISTS schedule_restarts (
                 identity TEXT NOT NULL, cursor TEXT NOT NULL, attempts INTEGER NOT NULL,
                 PRIMARY KEY(identity,cursor))""")
+            db.execute("""CREATE TABLE IF NOT EXISTS schedule_work (
+                identity TEXT NOT NULL, run_ref TEXT NOT NULL, request TEXT NOT NULL,
+                admitted_state TEXT NOT NULL, observed_state TEXT NOT NULL,
+                observed_at REAL NOT NULL, availability TEXT NOT NULL,
+                checked_at REAL NOT NULL, checks INTEGER NOT NULL,
+                PRIMARY KEY(identity,run_ref))""")
             row: sqlite3.Row | None = db.execute(
                 "SELECT revision FROM schedule_heads WHERE identity=?", (self.identity,)
             ).fetchone()
@@ -331,8 +337,29 @@ class ScheduledIntake:
             ),
         }
 
-    def _ack(self, pending: list[dict[str, str]]) -> None:
+    def _ack(self, pending: list[dict[str, str]], result: AdmissionReceipt) -> None:
         with self._db() as db:
+            request = _canonical(pending[0])
+            prior = db.execute(
+                "SELECT request FROM schedule_work WHERE identity=? AND run_ref=?",
+                (self.identity, result.run_ref),
+            ).fetchone()
+            _need(prior is None or prior["request"] == request)
+            db.execute(
+                "INSERT OR IGNORE INTO schedule_work VALUES (?,?,?,?,?,?,?,?,0)",
+                (
+                    self.identity,
+                    result.run_ref,
+                    request,
+                    result.state,
+                    result.state,
+                    time.time(),
+                    "available",
+                    time.time(),
+                ),
+            )
+            # Handoff and admission ACK commit together. A lost tick receipt must
+            # never lose the acknowledged run or imply that a reader completed it.
             db.execute(
                 "UPDATE schedule_heads SET pending=? WHERE identity=?",
                 (_canonical(pending[1:]), self.identity),
@@ -418,9 +445,7 @@ class ScheduledIntake:
                         )
                         runs.append(require_ref(result.run_ref))
                         states.append(result.state)
-                        self._ack(
-                            pending
-                        )  # Crash before here intentionally replays the same intent.
+                        self._ack(pending, result)  # A pre-commit crash replays the same intent.
                         continue
                     if head["page_loaded"]:
                         with self._db() as db:
@@ -475,17 +500,112 @@ class ScheduledIntake:
                 # No pending envelope or cursor is discarded on scoped denial.
                 return self._finish("unavailable", used, pages, runs)
 
+    def reconcile(self) -> dict[str, str]:
+        """Observe retained admissions through the existing authorized status API.
+
+        This neither starts a reader nor accepts a caller's completion claim.
+        Last successful observations remain historical on an unavailable readback.
+        """
+        with self._lease():
+            self._initialize()
+            head = self._head()
+            if head["state"] != "enabled":
+                return self._finish(str(head["state"]), 0, 0, [])
+            if time.time() >= self.config["expires_at"]:
+                return self._finish("expired", 0, 0, [])
+            if time.time() < head["last_start"] + self.config["frequency_seconds"]:
+                return self._finish("cadence_held", 0, 0, [])
+            deadline = time.monotonic() + self.config["tick_seconds"]
+            with self._db() as db:
+                db.execute(
+                    "UPDATE schedule_heads SET last_start=? WHERE identity=?",
+                    (time.time(), self.identity),
+                )
+                work = db.execute(
+                    "SELECT run_ref FROM schedule_work WHERE identity=? "
+                    "AND observed_state!='materialized' ORDER BY checks,run_ref LIMIT ?",
+                    (self.identity, self.config["operations_per_tick"]),
+                ).fetchall()
+            if not work:
+                return self._finish("idle", 0, 0, [])
+            used = 0
+            runs: list[str] = []
+            unavailable = False
+            try:
+                actor, admission = self._factory()
+                for row in work:
+                    held = self._reserve(used, deadline)
+                    if held:
+                        return self._finish(held, used, 0, runs)
+                    used += 1
+                    held = self._operation_gate(deadline)
+                    if held:
+                        return self._finish(held, used, 0, runs)
+                    run_ref = str(row["run_ref"])
+                    try:
+                        status = admission.get_run(actor, run_ref)
+                        _need(
+                            status.run_ref == run_ref
+                            and status.state in {"pending", "queued", "materialized"}
+                        )
+                    except (
+                        IntakeError,
+                        OSError,
+                        RuntimeError,
+                        sqlite3.Error,
+                        ManifestError,
+                        TrainingError,
+                        KeyError,
+                        ValueError,
+                    ):
+                        # Unknown is not completion or revocation. Retain the
+                        # previous observation and give other current work a turn.
+                        with self._db() as db:
+                            db.execute(
+                                "UPDATE schedule_work SET availability='unavailable',"
+                                "checked_at=?,checks=checks+1 WHERE identity=? AND run_ref=?",
+                                (time.time(), self.identity, run_ref),
+                            )
+                        unavailable = True
+                        continue
+                    with self._db() as db:
+                        db.execute(
+                            "UPDATE schedule_work SET observed_state=?,observed_at=?,"
+                            "availability='available',checked_at=?,checks=checks+1 "
+                            "WHERE identity=? AND run_ref=?",
+                            (status.state, time.time(), time.time(), self.identity, run_ref),
+                        )
+                    runs.append(run_ref)
+                with self._db() as db:
+                    remaining = db.execute(
+                        "SELECT 1 FROM schedule_work WHERE identity=? "
+                        "AND observed_state!='materialized' LIMIT 1",
+                        (self.identity,),
+                    ).fetchone()
+                held = self._operation_gate(deadline)
+                return self._finish(
+                    held
+                    or ("unavailable" if unavailable else "pending" if remaining else "reconciled"),
+                    used,
+                    0,
+                    runs,
+                )
+            except IntakeError:
+                return self._finish("unavailable", used, 0, runs)
+
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--configuration", type=Path, required=True)
-    parser.add_argument("action", choices=("tick", "pause", "resume", "revoke"))
+    parser.add_argument("action", choices=("tick", "reconcile", "pause", "resume", "revoke"))
     args = parser.parse_args()
     try:
         schedule = ScheduledIntake(args.configuration)
         result = (
             schedule.tick()
             if args.action == "tick"
+            else schedule.reconcile()
+            if args.action == "reconcile"
             else schedule.control(
                 {"pause": "paused", "resume": "enabled", "revoke": "revoked"}[args.action]
             )
