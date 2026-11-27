@@ -215,9 +215,16 @@ class _Parser(argparse.ArgumentParser):
 def main(argv: Sequence[str] | None = None) -> int:
     parser = _Parser(description=__doc__)
     parser.add_argument("--invocation", type=Path, required=True)
+    parser.add_argument("--publish-completion", action="store_true")
     try:
         args = parser.parse_args(argv)
-        result = execute(args.invocation)
+        if args.publish_completion:
+            from opentour_cell.pilot.starter_completion import attest
+
+            attest(args.invocation)
+            result = dict(schema_version=RESULT, state="scored", reason_code="completion_published")
+        else:
+            result = execute(args.invocation)
     except (ValueError, TypeError, KeyError, OSError, RuntimeError, sqlite3.Error):
         result = dict(
             schema_version=RESULT,
