@@ -1520,3 +1520,24 @@ def test_g4_probe4_gap_errors_offset_by_deferrals_are_not_called_coverage_expans
     assert pair["newly_automated"] == {"wrong": 2, "total": 40}
     assert pair["comparator_gap_candidate_wrong"] == 5
     assert not any("coverage_expansion_within_ceiling" in r for r in doc["reasons"])
+
+
+def test_g5_residual_total_wrong_gate_boundary(tmp_path):
+    """Mutant: ``excess > newly_wrong + 1`` must fail here (fires at newly_wrong + 1, not at it)."""
+    pol = policy(max_missing=2, **LOOSE)
+    # excess = 3 - 1 = 2 = newly_wrong + 1: one gap error is left unexplained.
+    over = Scenario([("RR", 150), ("DW", 1), ("DR", 39), ("MW", 2), ("WD", 1)])
+    doc = held(
+        run(tmp_path / "over", over, pol=pol), "regression", "total_wrong_automatic_increased"
+    )
+    pair = doc["comparisons"]["incumbent"]
+    assert pair["total_wrong_automatic"] == {"candidate": 3, "comparator": 1}
+    assert pair["newly_automated"] == {"wrong": 1, "total": 40}
+    # excess = 3 - 2 = 1 = newly_wrong: the residual gate must not fire.
+    tie = Scenario([("RR", 150), ("DW", 1), ("DR", 39), ("MW", 2), ("WD", 2)])
+    doc = held(run(tmp_path / "tie", tie, pol=pol), "inconclusive", "comparator_gap_errors_offset")
+    assert doc["comparisons"]["incumbent"]["total_wrong_automatic"] == {
+        "candidate": 3,
+        "comparator": 2,
+    }
+    assert not any("total_wrong_automatic_increased" in r for r in doc["reasons"])
