@@ -56,6 +56,7 @@ MODULES = (
     "opentour_cell/pilot/verifier_form.py",
     "opentour_cell/pilot/live_reader.py",
     "opentour_cell/pilot/live_readiness.py",
+    "opentour_cell/pilot/local_decision_context.py",
     "opentour_cell/pilot/training_readiness.py",
     "opentour_cell/pilot/readiness_selection.py",
     "opentour_cell/pilot/slack_views.py",
