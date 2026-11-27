@@ -20,12 +20,15 @@ from opentour_cell.pilot.recipient_delivery import LocalRecipientDelivery
 from opentour_cell.pilot.recipient_handoff_simulator import LOST_ACK, RECIPE_SHA256, SCHEMA
 from opentour_cell.pilot.release_authority import HandoffPermission, approval_ref
 from opentour_cell.pilot.release_outbox import ReleaseOutbox, ReleaseOutboxError, ReleaseSelection
+from test_app_home import click as click_home
+from test_app_home import publish as publish_home
 from test_approval_inbox import callback, opt_in, stage
 from test_local_handoff_permissions import signed_permission
 from test_recorded_release_authority import approve_fixture
 from test_repair_bundle import cli, read, transfer, write
-from test_reviewer_workflow import buttons, screen
+from test_reviewer_workflow import buttons, restart, screen, text
 from test_slack_adapter import Harness
+from test_status_questions import counts
 
 MODULE = "opentour_cell.pilot.recipient_handoff_simulator"
 RECIPE = Path(__file__).resolve().parents[2] / "integrations/zapier/handoff-recipe-v1.json"
@@ -64,16 +67,20 @@ def configure(
     return path
 
 
-def authorize(outbox: ReleaseOutbox, permit: HandoffPermission, key: bytes, **changes) -> Path:
+def authorize(
+    outbox: ReleaseOutbox,
+    permit: HandoffPermission,
+    key: bytes,
+    *,
+    reviewer: str = "",
+    **changes,
+) -> Path:
     worker = outbox.store.path.parent
     write(worker / "handoff-permission-key.json", {"key": key.hex()})
-    return signed_permission(
-        worker,
-        permit,
-        key,
-        actors={"dispatcher": ["reserve", "inspect", "claim", "reconcile"]},
-        **changes,
-    )
+    actors = {"dispatcher": ["reserve", "inspect", "claim", "reconcile"]}
+    if reviewer:
+        actors[reviewer] = ["inspect"]
+    return signed_permission(worker, permit, key, actors=actors, **changes)
 
 
 def record_three_votes(h: Harness, proposal: str, audit: dict, pointer: str) -> dict:
@@ -144,7 +151,7 @@ def bind_release(
     )
     selection = ReleaseSelection(intake["workflow"], approval["run_id"], approval_ref(approval))
     outbox = handoff_outbox(h.store)
-    authorize(outbox, permit, key)
+    authorize(outbox, permit, key, reviewer=h.config["reviewer"])
     configuration = configure(outbox, selection, receiver.grant_file.parent, permit)
     reservations = [
         outbox.reserve(selection, "dispatcher", f"{selection.approval_ref}-{i}") for i in range(3)
@@ -479,15 +486,53 @@ def superseding_offer(
 
 
 def test_freshly_inspected_successor_has_distinct_delivery_to_same_recipient(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    first, h, prior, operator = initial_release(tmp_path.resolve(), "successor")
+    first, h, prior, operator = initial_release(tmp_path.resolve(), "")
+    actor = h.config["reviewer"]
+    h.config["live_workflow_ref"] = first.permit.workflow_ref
+    h.save()
+
+    def open_receipt(item: Enrollment) -> str:
+        click_home(h, publish_home(h, monkeypatch, actor), "ot_app_prompt", actor)
+        view = list(h.slack.screens)[-1]
+        assert screen(h, view).get("callback_id") == "ot_prompt_enter", screen(h, view)
+        h.form(view, {"command": {"command": {"value": "Did it ship?"}}}, actor)
+        (handoff,) = [
+            button
+            for block in screen(h, view)["blocks"]
+            for button in block.get("elements", [])
+            if button.get("action_id") == "ot_result_open"
+            and button["text"]["text"] == "Use this handoff"
+        ]
+        h.action(view, "ot_result_open", handoff["value"], actor)
+        h.slack.screens[view]["hash"] = "generated-result-modal"
+        h.action(view, "ot_release_receipt", buttons(screen(h, view))["ot_release_receipt"], actor)
+        assert screen(h, view)["callback_id"] == "ot_handoff_receipt"
+        receipt = text(h, view)
+        assert item.permit.workflow_ref in receipt
+        assert item.permit.proposal_ref in receipt
+        assert item.permit.proposal_revision in receipt
+        assert item.permit.artifact_sha256 in receipt
+        assert item.permit.destination_ref in receipt
+        return view
+
+    stale_view = open_receipt(first)
+    refresh = buttons(screen(h, stale_view))["ot_delivery_status"]
     invoke(first.configuration, first.release_ref, "--simulate-lost-ack", expected=LOST_ACK)
     first_result = invoke(first.configuration, first.release_ref)
     (baseline,) = first.slots
+    independently_check(
+        first, first_result, baseline, hashlib.sha256(first.offer.read_bytes()).hexdigest()
+    )
+    first_view = open_receipt(first)
+    first_receipt = first_result["receiver_receipt_ref"]
+    assert "Delivered to the selected destination" in text(h, first_view)
+    assert first_receipt in text(h, first_view)
     preserved = {file: file.read_bytes() for file in baseline.iterdir()}
     plan, run, reviewed = fresh_proposal(h, prior)
     assert reviewed["run_id"] != first.selection.proposal_ref
+    assert reviewed["run_revision"] != first.permit.proposal_revision
     assert reviewed["artifact_sha"] != first.permit.artifact_sha256
     prepared = repair_workflow.prepare_handoff(operator.parent, h.store.organization, plan, run)
     superseding_offer(first, prepared, plan, operator)
@@ -495,14 +540,54 @@ def test_freshly_inspected_successor_has_distinct_delivery_to_same_recipient(
     assert successor.permit.destination_ref == first.permit.destination_ref
     assert successor.permit.workflow_ref == first.permit.workflow_ref
     assert successor.release_ref != first.release_ref
+
+    def delivery_records() -> tuple:
+        with successor.outbox.store._db() as db:
+            return tuple(
+                tuple(map(tuple, db.execute(query)))
+                for query in (
+                    "SELECT * FROM release_outbox ORDER BY ref",
+                    "SELECT * FROM release_operation_keys ORDER BY operation_key",
+                    "SELECT * FROM release_receiver_seals ORDER BY ref",
+                )
+            )
+
+    before = counts(h), delivery_records()
+    restart(h)
+    h.slack.screens[stale_view]["hash"] = "generated-stale-receipt-modal"
+    h.action(stale_view, "ot_delivery_status", refresh, actor)
+    assert "Access unavailable" in text(h, stale_view)
+    assert first_receipt not in text(h, stale_view)
+    assert successor.permit.destination_ref not in text(h, stale_view)
+
+    successor_view = open_receipt(successor)
+    initial_refresh = buttons(screen(h, successor_view))["ot_delivery_status"]
+    h.slack.screens[successor_view]["hash"] = "generated-successor-receipt-modal"
+    h.action(successor_view, "ot_delivery_status", initial_refresh, actor)
+    for view in (successor_view, open_receipt(successor)):
+        receipt = text(h, view)
+        assert "Approval recorded. Awaiting delivery." in receipt
+        assert "No independent check time is recorded" in receipt
+        assert "Receiver receipt " not in receipt
+        assert first_receipt not in receipt
+        assert first.permit.artifact_sha256 not in receipt
+    assert (counts(h), delivery_records()) == before
+    assert successor.slots == [baseline]
+
     offered_sha256 = hashlib.sha256(successor.offer.read_bytes()).hexdigest()
     invoke(successor.configuration, first.release_ref, expected=2)
     invoke(successor.configuration, successor.release_ref, "--simulate-lost-ack", expected=LOST_ACK)
+    before = counts(h), delivery_records()
+    pending = text(h, open_receipt(successor))
+    assert "Approval recorded. Delivery is unconfirmed." in pending
+    assert "Receiver receipt " not in pending and first_receipt not in pending
+    assert (counts(h), delivery_records()) == before
     result = invoke(successor.configuration, successor.release_ref)
-    assert (
-        result["state"] == "delivered"
-        and result["receiver_receipt_ref"] != first_result["receiver_receipt_ref"]
-    )
+    assert result["state"] == "delivered" and result["receiver_receipt_ref"] != first_receipt
+    delivered_view = open_receipt(successor)
+    assert "Delivered to the selected destination" in text(h, delivered_view)
+    assert result["receiver_receipt_ref"] in text(h, delivered_view)
+    assert first_receipt not in text(h, delivered_view)
     assert len(successor.slots) == 2 and set(successor.slots) - {baseline}
     for file, contents in preserved.items():
         assert file.read_bytes() == contents
