@@ -132,23 +132,28 @@ class SeedRoot:
 
 @dataclass(frozen=True)
 class SplitSeal:
-    """Family-level split sealed before any seed is selected. Carries no labels or answers."""
+    """Case/family/split map sealed before any seed is selected. Carries no labels or answers."""
 
     assignments: Mapping[str, tuple[str, ...]]  # family_id -> splits observed for that family
+    cases: Mapping[str, tuple[str, ...]]  # case_ref -> families it was sealed under
     digest: str
 
     @staticmethod
     def from_rows(rows: Iterable[tuple[str, str, str]]) -> SplitSeal:
-        """Rows are (case_ref, family_id, split). Only family and split are retained."""
+        """Rows are (case_ref, family_id, split). No label or answer is retained."""
         seen: dict[str, set[str]] = {}
+        case_families: dict[str, set[str]] = {}
         for case_ref, family_id, split in rows:
             identifier(case_ref)
             identifier(family_id)
             if split not in {"training", "development", "protected"}:
                 raise TrainingError("invalid_split")
             seen.setdefault(family_id, set()).add(split)
+            case_families.setdefault(case_ref, set()).add(family_id)
         assignments = {fam: tuple(sorted(s)) for fam, s in sorted(seen.items())}
-        return SplitSeal(assignments, digest(["opentour.variants.split-seal.v1", assignments]))
+        cases = {c: tuple(sorted(f)) for c, f in sorted(case_families.items())}
+        sealed = digest(["opentour.variants.split-seal.v2", assignments, cases])
+        return SplitSeal(assignments, cases, sealed)
 
 
 @dataclass(frozen=True)
@@ -276,6 +281,29 @@ def render_with_spans(policy: Policy, fields: Mapping[str, str]) -> tuple[str, l
     return "\n".join(parts), spans
 
 
+def _pin(plan: GenerationPlan) -> str:
+    """Digest of everything about a root that must never change after first registration."""
+    root, policy = plan.root, plan.policy
+    return digest(
+        [
+            "opentour.variants.root-pin.v1",
+            root.root_ref,
+            root.case_ref,
+            root.label_ref,
+            root.family_id,
+            root.source_revision,
+            root.prediction,
+            root.target,
+            sorted(root.fields.items()),
+            policy.revision,
+            list(policy.decision_fields),
+            list(policy.required_inputs),
+            sorted(policy.clauses.items()),
+            sorted(plan.approved_validators),
+        ]
+    )
+
+
 def _seed_reason(
     seed: SeedRoot, policy: Policy, grant: Grant, seal: SplitSeal, now: int
 ) -> tuple[str, Json | None] | None:
@@ -286,6 +314,8 @@ def _seed_reason(
     splits = seal.assignments.get(seed.family_id, ())
     if len(splits) != 1 or splits[0] != seed.split:
         return "cross_split_family", None
+    if seal.cases.get(seed.case_ref) != (seed.family_id,):
+        return "case_family_mismatch", None
     if not (seed.target_verified and seed.target_verifier_ref and seed.verifier_independent):
         return "unverified_target", None
     if seed.policy_revision != policy.revision:
@@ -312,7 +342,15 @@ _SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS roots (
     root_ref TEXT PRIMARY KEY, family_id TEXT NOT NULL, state TEXT NOT NULL,
     reason TEXT NOT NULL, policy_revision TEXT NOT NULL, seal_digest TEXT NOT NULL,
-    cap_root INTEGER NOT NULL, cap_family INTEGER NOT NULL
+    cap_root INTEGER NOT NULL, cap_family INTEGER NOT NULL,
+    case_ref TEXT NOT NULL, label_ref TEXT NOT NULL, pin_digest TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS families (
+    family_id TEXT PRIMARY KEY, cap_family INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS root_scopes (
+    root_ref TEXT NOT NULL, mode TEXT NOT NULL, grant_ref TEXT NOT NULL,
+    PRIMARY KEY (root_ref, mode, grant_ref)
 );
 CREATE TABLE IF NOT EXISTS children (
     seq INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -424,7 +462,8 @@ class VariantLedger:
         with self._tx() as db:
             root = plan.root
             row = db.execute(
-                "SELECT state, family_id FROM roots WHERE root_ref=?", (root.root_ref,)
+                "SELECT state, family_id, pin_digest FROM roots WHERE root_ref=?",
+                (root.root_ref,),
             ).fetchone()
             invalid_root = row is not None and row[0] != "live"
             seed_block: tuple[str, Json | None] | None = None
@@ -432,14 +471,20 @@ class VariantLedger:
                 pass
             elif row is not None and row[1] != root.family_id:
                 seed_block = ("root_identity_conflict", None)
+            elif row is not None and row[2] != _pin(plan):
+                # Target, fields, case, policy and validators are fixed at first registration.
+                seed_block = ("root_pin_mismatch", None)
             else:
-                seed_block = self._lineage_block(db, root) or _seed_reason(
-                    root, plan.policy, plan.grant, plan.seal, now
+                seed_block = (
+                    self._lineage_block(db, root)
+                    or _seed_reason(root, plan.policy, plan.grant, plan.seal, now)
+                    or (self._duplicate_case(db, root) if row is None else None)
                 )
             if row is None and seed_block is None:
                 db.execute(
                     "INSERT INTO roots (root_ref, family_id, state, reason, policy_revision,"
-                    " seal_digest, cap_root, cap_family) VALUES (?,?,'live','',?,?,?,?)",
+                    " seal_digest, cap_root, cap_family, case_ref, label_ref, pin_digest)"
+                    " VALUES (?,?,'live','',?,?,?,?,?,?,?)",
                     (
                         root.root_ref,
                         root.family_id,
@@ -447,7 +492,19 @@ class VariantLedger:
                         plan.seal.digest,
                         plan.max_children_per_root,
                         plan.max_children_per_family,
+                        root.case_ref,
+                        root.label_ref,
+                        _pin(plan),
                     ),
+                )
+                db.execute(
+                    "INSERT OR IGNORE INTO families (family_id, cap_family) VALUES (?,?)",
+                    (root.family_id, plan.max_children_per_family),
+                )
+            if not invalid_root and seed_block is None:
+                db.execute(
+                    "INSERT OR IGNORE INTO root_scopes (root_ref, mode, grant_ref) VALUES (?,?,?)",
+                    (root.root_ref, plan.mode, plan.grant.grant_ref),
                 )
             for index, proposal in enumerate(plan.proposals):
                 if stopped:
@@ -496,12 +553,14 @@ class VariantLedger:
                         }
                         db.execute(
                             "UPDATE children SET disposition=?, reason=?, cost=?, plan_ref=?,"
-                            " record=? WHERE child_id=?",
+                            " grant_ref=?, mode=?, record=? WHERE child_id=?",
                             (
                                 disposition,
                                 reason,
                                 cost,
                                 plan.plan_ref,
+                                plan.grant.grant_ref,
+                                plan.mode,
                                 json.dumps(record, sort_keys=True),
                                 cid,
                             ),
@@ -509,6 +568,15 @@ class VariantLedger:
                         created += 1
                 ids.append(cid)
         return SubmitResult(tuple(ids), created, replayed, stopped, not_attempted)
+
+    @staticmethod
+    def _duplicate_case(db: sqlite3.Connection, root: SeedRoot) -> tuple[str, Json | None] | None:
+        """One real case or label is one root: re-registering it never adds a mistake."""
+        found = db.execute(
+            "SELECT 1 FROM roots WHERE root_ref<>? AND (case_ref=? OR label_ref=?) LIMIT 1",
+            (root.root_ref, root.case_ref, root.label_ref),
+        ).fetchone()
+        return ("duplicate_case", None) if found else None
 
     @staticmethod
     def _lineage_block(db: sqlite3.Connection, root: SeedRoot) -> tuple[str, Json | None] | None:
@@ -683,10 +751,13 @@ class VariantLedger:
             if _normal(json.loads(rec_json).get("fields", {})) == _normal(child):
                 return "near_duplicate", None, base
         caps = db.execute(
-            "SELECT cap_root, cap_family FROM roots WHERE root_ref=?", (root.root_ref,)
+            "SELECT cap_root FROM roots WHERE root_ref=?", (root.root_ref,)
+        ).fetchone()
+        fam = db.execute(
+            "SELECT cap_family FROM families WHERE family_id=?", (root.family_id,)
         ).fetchone()
         cap_root = min(plan.max_children_per_root, caps[0])
-        cap_family = min(plan.max_children_per_family, caps[1])
+        cap_family = min(plan.max_children_per_family, fam[0])
         live_root = db.execute(
             "SELECT COUNT(*) FROM children WHERE root_ref=? AND mode=?"
             f" AND disposition IN ({marks})",
@@ -798,9 +869,15 @@ class VariantLedger:
         identifier(family_id)
         identifier(reason)
         with self._tx() as db:
+            stored = db.execute(
+                "SELECT family_id FROM roots WHERE root_ref=?", (root_ref,)
+            ).fetchone()
+            if stored is not None and stored[0] != family_id:
+                raise TrainingError("root_identity_conflict")
             db.execute(
                 "INSERT INTO roots (root_ref, family_id, state, reason, policy_revision,"
-                " seal_digest, cap_root, cap_family) VALUES (?,?,'retracted',?,'','',0,0)"
+                " seal_digest, cap_root, cap_family, case_ref, label_ref, pin_digest)"
+                " VALUES (?,?,'retracted',?,'','',0,0,'','','')"
                 " ON CONFLICT(root_ref) DO UPDATE SET state='retracted', reason=excluded.reason",
                 (root_ref, family_id, reason),
             )
@@ -858,9 +935,10 @@ class VariantLedger:
         ]
         with self._tx() as db:
             roots = db.execute(
-                "SELECT root_ref, family_id FROM roots WHERE state='live' AND policy_revision=?"
-                " AND seal_digest=?",
-                (policy_revision, seal.digest),
+                "SELECT r.root_ref, r.family_id FROM roots r JOIN root_scopes s"
+                " ON s.root_ref=r.root_ref WHERE r.state='live' AND r.policy_revision=?"
+                " AND r.seal_digest=? AND s.mode=? AND s.grant_ref=?",
+                (policy_revision, seal.digest, mode, grant_ref),
             ).fetchall()
         live_roots = [
             (str(a), str(b)) for a, b in roots if seal.assignments.get(b) == ("training",)

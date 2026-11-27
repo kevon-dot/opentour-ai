@@ -61,6 +61,7 @@ SEAL = SplitSeal.from_rows(
         ("generated-case-d", "generated-fam-dev", "development"),
         ("generated-case-x1", "generated-fam-cross", "training"),
         ("generated-case-x2", "generated-fam-cross", "protected"),
+        ("generated-case-6", "generated-fam-1", "training"),
     ]
 )
 GRANT = Grant("generated-grant-1", True, True, True, budget=100, expires_at=1000)
@@ -784,3 +785,140 @@ def test_lock_contention_is_reported_as_such_not_as_a_rollback_error(tmp_path: P
     finally:
         blocker.execute("ROLLBACK")
         blocker.close()
+
+
+# ------------------------------------------------------- independent re-review regressions (N1-N6)
+
+
+def test_root_content_and_policy_are_pinned_at_first_registration() -> None:
+    """N1: a later plan cannot rewrite the target, fields, case, policy or validators."""
+    ledger = VariantLedger()
+    ledger.run(plan((PARAPHRASE,)), VALIDATOR, now=NOW)
+
+    def layout(tag: str) -> ProposedChild:
+        return ProposedChild("layout-v1", {"layout": f"stacked-{tag}"}, "FREIGHT")
+
+    retarget = ProposedChild("layout-v1", {"layout": "stacked"}, "SUPPLIES")
+    forged_policy = dataclasses.replace(POLICY, clauses={"purchase_order": "PAYMENT"})
+    pay = ProposedChild("no-po-v1", {"purchase_order": None}, "PAYMENT")
+    attacks = (
+        plan((retarget,), root(target="SUPPLIES"), plan_ref="generated-plan-a1"),
+        plan((pay,), policy=forged_policy, plan_ref="generated-plan-a2"),
+        plan((layout("a3"),), root(case_ref="generated-case-2"), plan_ref="generated-plan-a3"),
+        plan(
+            (LAYOUT,),
+            root(fields={**root().fields, "amount": "generated-amt-999"}),
+            plan_ref="generated-plan-a4",
+        ),
+        plan(
+            (layout("a5"),),
+            approved_validators=frozenset({GEN.ref}),
+            plan_ref="generated-plan-a5",
+        ),
+    )
+    for attack in attacks:
+        ledger.run(attack, PolicyValidator("generated-independent-validator"), now=NOW)
+    assert [c["reason"] for c in ledger.children()[1:]] == ["root_pin_mismatch"] * 5
+    m = manifest(ledger)
+    assert m["admitted_count"] == 1 and m["observed_mistake_count"] == 1
+
+
+def test_one_real_case_registered_under_many_roots_counts_once() -> None:
+    """N2: a 3-group coverage gate cannot be filled from one mistake."""
+    ledger = VariantLedger()
+    for n in (1, 2, 3):
+        # Same real case and label under a new root_ref; only the first can register.
+        clone = root(
+            root_ref=f"generated-root-clone-{n}",
+            case_ref="generated-case-1",
+            label_ref="generated-label-1",
+            family_id="generated-fam-1",
+        )
+        ledger.run(plan((PARAPHRASE,), clone, plan_ref=f"generated-plan-c{n}"), VALIDATOR, now=NOW)
+    reasons = [c["reason"] for c in ledger.children()]
+    assert reasons[0] != "duplicate_case" and reasons[1:] == ["duplicate_case"] * 2
+    m = manifest(ledger, coverage_required_groups=3)
+    assert m["observed_mistake_count"] == 1 and m["independent_family_count"] == 1
+    assert m["coverage"]["filled"] is False
+
+
+def test_a_case_must_be_sealed_under_the_family_it_claims() -> None:
+    """N2: the seal binds case to family, so a case cannot be re-homed into another family."""
+    ledger = VariantLedger()
+    for n, fam in enumerate(("generated-fam-2", "generated-fam-3")):
+        moved = root(
+            root_ref=f"generated-root-moved-{n}",
+            family_id=fam,
+            case_ref="generated-case-1",
+            label_ref=f"generated-label-moved-{n}",
+        )
+        ledger.run(plan((PARAPHRASE,), moved, plan_ref=f"generated-plan-m{n}"), VALIDATOR, now=NOW)
+    assert [c["reason"] for c in ledger.children()] == ["case_family_mismatch"] * 2
+    assert manifest(ledger)["independent_family_count"] == 0
+    assert SEAL.cases["generated-case-1"] == ("generated-fam-1",)
+
+
+def test_family_cap_is_per_family_not_per_root_registration() -> None:
+    """N3: a second root cannot reopen the family's cap by passing a larger one."""
+    ledger = VariantLedger()
+    ledger.run(plan((PARAPHRASE, NO_PO)), VALIDATOR, now=NOW)
+    sibling = root(6, family_id="generated-fam-1")
+    roomy = plan(
+        (LAYOUT,),
+        sibling,
+        plan_ref="generated-plan-roomy",
+        max_children_per_root=50,
+        max_children_per_family=50,
+    )
+    ledger.run(roomy, VALIDATOR, now=NOW)
+    assert ledger.children()[-1]["reason"] == "family_cap_exceeded"
+    assert manifest(ledger)["family_sibling_counts"] == {"generated-fam-1": 2}
+
+
+def test_replay_under_a_different_grant_is_charged_to_that_grant() -> None:
+    """N4: an in-place re-evaluation moves the row, its cost and its budget check together."""
+    ledger = VariantLedger()
+    blocked = dataclasses.replace(GRANT, execution_location_approved=False)
+    ledger.run(plan((PARAPHRASE,), grant=blocked), VALIDATOR, now=NOW)
+    assert ledger.children()[0]["reason"] == "execution_location_unapproved"
+    grant_b = dataclasses.replace(GRANT, grant_ref="generated-grant-b", budget=1)
+    ledger.run(plan((PARAPHRASE,), grant=grant_b), VALIDATOR, now=NOW)
+    assert ledger.children()[0]["disposition"] == ADMITTED
+    assert ledger.spent("generated-grant-b") == 1
+    assert ledger.spent(GRANT.grant_ref) == 0
+    # Grant B is now exhausted: a further child under it must stop, not overspend.
+    ledger.run(plan((NO_PO,), grant=grant_b, plan_ref="generated-plan-b2"), VALIDATOR, now=NOW)
+    assert ledger.children()[-1]["reason"] == "authorization_exhausted"
+    assert ledger.spent("generated-grant-b") == 1
+
+
+def test_a_preview_only_root_is_not_counted_in_a_training_manifest() -> None:
+    """N6: root counts follow the (mode, grant) scope the root was actually registered in."""
+    ledger = VariantLedger()
+    ledger.run(plan((PARAPHRASE,), mode="preview", fit_gate=None), VALIDATOR, now=NOW)
+    assert manifest(ledger)["independent_family_count"] == 0
+    preview = ledger.manifest(
+        seal=SEAL, policy_revision=POLICY.revision, grant_ref=GRANT.grant_ref, mode="preview"
+    )
+    assert preview["independent_family_count"] == 1
+    ledger.run(plan((LAYOUT,)), VALIDATOR, now=NOW)
+    assert manifest(ledger)["independent_family_count"] == 1
+
+
+def test_retract_cannot_reassign_a_registered_root_to_another_family() -> None:
+    """N6: retraction uses the stored family and refuses a conflicting one."""
+    ledger = VariantLedger()
+    ledger.run(plan((PARAPHRASE,)), VALIDATOR, now=NOW)
+    with pytest.raises(TrainingError, match="root_identity_conflict"):
+        ledger.retract_root("generated-root-1", "generated-fam-2", "reopened")
+    assert ledger.children()[0]["disposition"] == ADMITTED
+    assert ledger.retract_root("generated-root-1", "generated-fam-1", "reopened")
+
+
+def test_records_are_json_serializable_but_domain_objects_are_not_asdict_safe() -> None:
+    """N5: consumers serialize the ledger's JSON records, never the frozen domain objects."""
+    ledger = VariantLedger()
+    ledger.run(plan((PARAPHRASE,)), VALIDATOR, now=NOW)
+    json.dumps(ledger.children())
+    with pytest.raises(TypeError):
+        dataclasses.asdict(POLICY)
