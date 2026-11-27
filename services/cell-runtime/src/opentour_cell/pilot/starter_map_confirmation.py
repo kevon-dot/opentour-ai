@@ -17,7 +17,11 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 from opentour_cell.pilot.guided_policy import GuidedPolicySource
 from opentour_cell.pilot.intake_admission import DurableIntake, IntakeWork
-from opentour_cell.pilot.intake_local import StarterSelection, VerifiedStarterGrant
+from opentour_cell.pilot.intake_local import (
+    LocalStarterAuthority,
+    StarterSelection,
+    VerifiedStarterGrant,
+)
 from opentour_cell.pilot.intake_mcp import IntakeError, IntakePrincipal, require_ref
 from opentour_cell.pilot.map_review import MapReviewService, MapReviewSnapshot, open_map_review
 from opentour_cell.pilot.onboarding_mcp import _read_private
@@ -115,6 +119,83 @@ class _ReadOnlySetup(StarterSetup):
     def guard(self, actor: IntakePrincipal) -> Iterator[None]:
         with self.setup_grant(actor, read_only=True):
             yield
+
+
+class _ExistingSetup(_ReadOnlySetup):
+    """Original source binding for independently authorized metadata readers, without DDL."""
+
+    def __init__(self, settings: Callable[[], Settings], owner_actor: str):
+        self.settings, self.slack_actor = settings, owner_actor
+        cfg = settings()
+        binding = cfg.starter_setup
+        _require(binding is not None and binding.slack_owner == owner_actor)
+        assert binding is not None
+        self.binding, self.installation = binding, cfg.binding
+        cfg.permission(owner_actor, "inspect")
+        LocalStarterAuthority.__init__(self, cfg.directory / binding.selection_file, read_only=True)
+        self._current_owner()
+
+
+@dataclass(frozen=True)
+class CaseAuthorityMetadata:
+    capability: Json
+    envelope: Json
+    binding: Json
+    setup: StarterSetup
+    record: Json
+
+
+def case_authority_metadata(
+    settings: Callable[[], Settings],
+    actor: IntakePrincipal,
+    authority_ref: str,
+    *,
+    authorize: Callable[[], None],
+) -> CaseAuthorityMetadata:
+    """Read an existing owner receipt after a separate trusted worker authorization.
+
+    This does not resolve the caller as an owner or permit any owner action.
+    The caller supplies its independently sealed evaluator/inspection boundary.
+    Existing owner APIs and the frozen authority identity remain unchanged.
+    """
+    authorize()
+    _require(re.fullmatch(r"starter-case-authority-[0-9a-f]{40}", authority_ref))
+    session = StarterCaseSession(settings, actor)
+    cap, envelope = session._grant()
+    with (
+        _open_db(session.directory / "training.sqlite3"),
+        _open_db(session.directory / "learning-mandates.sqlite3"),
+    ):
+        setup = _ExistingSetup(settings, cap["owner_actor"])
+    cfg, grant = settings(), setup._read_grant()
+    _require(
+        setup.selected.owner_id == cap["owner_ref"]
+        and setup.selected.engagement_epoch == cap["engagement_epoch"]
+        and grant.revision == cap["starter_grant_revision"]
+        and grant.source_revision == cap["source_revision"]
+        and grant.setup_policy_revision == cap["settings_revision"]
+        and grant.custodian_id == cap["custodian_ref"]
+        and cfg.starter_setup is not None
+    )
+    assert cfg.starter_setup is not None
+    binding = {
+        "installation": cfg.binding,
+        "binding": asdict(cfg.starter_setup),
+        "authenticated_owner": cap["owner_actor"],
+        "registered_owner": cap["owner_ref"],
+    }
+    record = {
+        "schema_version": "opentour.pilot.starter-case-authority.v1",
+        "envelope": envelope,
+        "owner_binding": binding,
+        "map_confirmation_ref": cap["map_confirmation_ref"],
+        "map_settings_ref": cap["map_settings_ref"],
+        "source_digest": cap["source_digest"],
+    }
+    _require(authority_ref == "starter-case-authority-" + digest(record)[:40])
+    _require(_read_private(cfg.directory / (authority_ref + ".json"), 65536) == record)
+    authorize()
+    return CaseAuthorityMetadata(cap, envelope, binding, setup, record)
 
 
 @dataclass(frozen=True)
