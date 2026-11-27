@@ -512,3 +512,40 @@ def test_current_eligibility_rejects_foreign_mandate_and_lost_training_right(
     got = store.current_eligibility(r["evaluation_id"], snapshot=docs, mandate=mandate())
     assert got["reason_code"] == "evidence_revision_changed"
     assert got["reservations"] == 0 and got["automatic_promotion"] is False
+
+
+def test_contradiction_check_uses_the_grouping_identity_for_entity_case(
+    store: rr.RepairRoutingStore,
+) -> None:
+    # Same entity by the grouping rule (differs only in case), same features, conflicting labels.
+    cases = independent_residual() + [
+        case("ca", "x", "b", "a", entity="Entity-A"),
+        case("cb", "x", "b", "b", entity="entity-a"),
+    ]
+    r = store.evaluate(request(cases))
+    assert (r["outcome"], r["reason_code"]) == ("request_evidence", "contradictory_labels")
+    assert r["next_evidence"] and r["residual_roots"] == []
+
+
+def test_distinct_entities_with_conflicting_labels_are_not_a_contradiction(
+    store: rr.RepairRoutingStore,
+) -> None:
+    # Normalization must not merge genuinely different ids: these differ by more than case.
+    cases = independent_residual() + [
+        case("da", "x", "b", "a", entity="Entity-A"),
+        case("db", "x", "b", "b", entity="Entity-B"),
+        case("dc", "x", "b", "b", entity="entity-a1"),
+    ]
+    r = store.evaluate(request(cases))
+    assert r["reason_code"] != "contradictory_labels"
+
+
+def test_same_entity_case_variants_with_agreeing_labels_are_not_a_contradiction(
+    store: rr.RepairRoutingStore,
+) -> None:
+    cases = independent_residual() + [
+        case("ea", "x", "b", "a", entity="Entity-A"),
+        case("eb", "x", "b", "a", entity="entity-a"),
+    ]
+    r = store.evaluate(request(cases))
+    assert r["reason_code"] != "contradictory_labels"
