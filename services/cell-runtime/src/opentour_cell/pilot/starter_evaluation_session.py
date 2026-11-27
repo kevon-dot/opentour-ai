@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hmac
+import os
 import re
 import sqlite3
 import time
@@ -127,7 +128,13 @@ class StarterEvaluationSession:
         result = StarterScoring._held(permission, reason)
         authority.revalidate(self.actor, work, permission)
         try:
-            with _open_db(self.directory / "starter-evaluations.sqlite3") as db:
+            path = self.directory / "starter-evaluations.sqlite3"
+            _require(
+                not any(
+                    os.path.lexists(str(path) + suffix) for suffix in ("-wal", "-shm", "-journal")
+                )
+            )
+            with _open_db(path) as db:
                 if db is not None:
                     tables = {
                         row[0]
@@ -247,6 +254,18 @@ class StarterEvaluationSession:
         registry = ModelRegistry(self.directory / "model-registration.json", self.actor.tenant)
         with authority.guard(self.actor, work, execution_ref) as permission:
             try:
+                path = self.directory / "starter-evaluations.sqlite3"
+                _require(
+                    not any(
+                        os.path.lexists(str(path) + suffix)
+                        for suffix in ("-wal", "-shm", "-journal")
+                    )
+                )
+                with _open_db(path) as db:
+                    _require(
+                        db is None
+                        or (_has_table(db, "evaluations") and _has_table(db, "predictions"))
+                    )
                 baseline, comparator = self._ports(authority, work, permission, registry)
             except (ValueError, OSError, sqlite3.Error, KeyError, TypeError):
                 return self._hold(authority, work, permission, "starter_runtime_unavailable")

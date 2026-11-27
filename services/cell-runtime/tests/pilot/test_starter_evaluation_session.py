@@ -2,7 +2,9 @@
 
 import hashlib
 import json
+import os
 import sqlite3
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, replace
 
 import pytest
@@ -349,6 +351,62 @@ def test_corrupt_existing_execution_state_is_held_not_fresh(installed, empty):
     result = worker.run(p.execution_ref)
     assert result["state"] == "held" and result["reason_code"] == "execution_state_unavailable"
     assert files(directory) == before
+
+
+@pytest.mark.parametrize("suffix", ["-wal", "-shm", "-journal"])
+@pytest.mark.parametrize("link", [False, True])
+def test_missing_execution_journal_with_orphan_state_never_dispatches(
+    installed, monkeypatch, suffix, link
+):
+    directory, worker, _, p, *_ = installed
+    journal = directory / "starter-evaluations.sqlite3"
+    sidecar = directory / (journal.name + suffix)
+    if link:
+        sidecar.symlink_to(directory / "missing-backup")
+    else:
+        sidecar.write_bytes(b"generated interrupted execution restore")
+        sidecar.chmod(0o600)
+    monkeypatch.setattr(cpu, "predict", lambda *a: pytest.fail("Uncertain work dispatched"))
+    result = worker.run(p.execution_ref)
+    assert result["state"] == "held" and result["reason_code"] == "execution_state_unavailable"
+    assert not journal.exists() and os.path.lexists(sidecar)
+    assert not (directory / "starter-local-predictions.sqlite3").exists()
+
+
+def test_orphan_arriving_after_factory_preflight_is_rejected_by_writer(installed, monkeypatch):
+    directory, worker, _, p, *_ = installed
+    original = worker._ports
+
+    def interrupt(*args):
+        ports = original(*args)
+        _write_private(directory / "starter-evaluations.sqlite3-journal", {"generated": "restore"})
+        return ports
+
+    monkeypatch.setattr(worker, "_ports", interrupt)
+    monkeypatch.setattr(cpu, "predict", lambda *a: pytest.fail("Late uncertain work dispatched"))
+    assert worker.run(p.execution_ref)["state"] == "held"
+    assert not (directory / "starter-evaluations.sqlite3").exists()
+
+
+def test_concurrent_normal_workers_share_one_prediction_and_result(installed, monkeypatch):
+    _, worker, _, p, *_ = installed
+    calls = []
+    original = cpu.predict
+
+    def predict(fitted, text):
+        calls.append(text)
+        return original(fitted, text)
+
+    monkeypatch.setattr(cpu, "predict", predict)
+
+    def execute(_):
+        return StarterEvaluationSession(worker.settings, worker.actor).run(p.execution_ref)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(execute, range(2)))
+    final = worker.run(p.execution_ref)
+    assert final["state"] == "scored" and len(calls) == 5
+    assert all(result == final or result["state"] == "held" for result in results)
 
 
 @pytest.mark.parametrize("grant", ["evaluation-a", "inspection-a"])
