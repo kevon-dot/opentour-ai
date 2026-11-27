@@ -73,10 +73,14 @@ a KEYED digest, HMAC-SHA-256 under a per-engagement key that stays on the custom
 short names are guessable. Names resolve only in the customer's private view
 (``private_slice_view``), which needs the same key and is never stored or sent. No key, no
 packet: a missing or malformed engagement key refuses with ``slice_digest_key_unavailable`` and
-never falls back to plain hashing. Until a signing and key-custody contract lands (OPE-566) the
-key is engagement-local and caller-injected (``SliceKeyView``), and the packet states that the
-digest is not issuer-authenticated. Because the key never leaves the worker, only the key holder
-can re-derive the slice digests; a consumer without it can check self-consistency and pointers.
+never falls back to plain hashing; a keyring that raises refuses with
+``slice_digest_key_lookup_failed``. Comparison refusals always precede the key lookup. The digest
+key is derived from the supplied key, the purpose label, the tenant and the engagement, so even a
+shared master key gives unlinkable digests across engagements. Until a signing and key-custody
+contract lands (OPE-566) the key is engagement-local and caller-injected (``SliceKeyView``),
+and the packet states that the digest is not issuer-authenticated. Because the key never leaves
+the worker, only the key holder can re-derive the slice digests; a consumer without it can check
+self-consistency and pointers.
 
 The operating-point digest follows the same rule. It is a plain canonical SHA-256 over the
 terms with every critical- and material-slice name first replaced by its keyed digest
@@ -370,25 +374,39 @@ def _key_ok(key: Any) -> bool:
     return isinstance(key, bytes) and len(key) == 32
 
 
-def slice_digest(name: str, key: bytes) -> str:
-    """Keyed digest of one critical-slice name: HMAC-SHA-256 under a key scoped to this purpose.
+def _scoped_key(key: bytes, tenant: str, engagement: str) -> bytes:
+    """Derive the slice-digest key for one purpose, tenant and engagement.
 
     Same two-step shape as the repository's other keyed seals (``starter_reconnect``): derive a
-    purpose-scoped key from the engagement key, then MAC the value. Never a plain hash.
+    scoped key from the supplied key, then MAC the value. Binding tenant and engagement into the
+    derivation keeps digests unlinkable across engagements even if one master key is shared.
     """
-    scoped = hmac.digest(key, SLICE_DIGEST.encode(), "sha256")
+    label = canonical([SLICE_DIGEST, tenant, engagement]).encode()
+    return hmac.digest(key, label, "sha256")
+
+
+def _mac(name: str, scoped: bytes) -> str:
     return hmac.digest(scoped, name.encode(), "sha256").hex()
 
 
-def slice_substituted_terms(terms: Json, key: bytes) -> Json:
+def _substitute(terms: Json, scoped: bytes) -> Json:
+    return {k: [_mac(n, scoped) for n in v] if k in _SLICE_TERMS else v for k, v in terms.items()}
+
+
+def slice_digest(name: str, key: bytes, *, tenant: str, engagement: str) -> str:
+    """Keyed digest of one slice name: HMAC-SHA-256 under the tenant/engagement-scoped key.
+
+    Never a plain hash.
+    """
+    return _mac(name, _scoped_key(key, tenant, engagement))
+
+
+def slice_substituted_terms(terms: Json, key: bytes, *, tenant: str, engagement: str) -> Json:
     """``terms`` with every critical- and material-slice name replaced by its keyed digest.
 
     Order and every other term are kept, so the canonical form differs only in the names.
     """
-    return {
-        k: [slice_digest(name, key) for name in v] if k in _SLICE_TERMS else v
-        for k, v in terms.items()
-    }
+    return _substitute(terms, _scoped_key(key, tenant, engagement))
 
 
 def operating_point_digest(substituted_terms: Json) -> str:
@@ -410,11 +428,8 @@ def _terms_ok(terms: Any) -> bool:
     )
 
 
-def _engagement_key(keys: SliceKeyView | None, tenant: str, comparison: Any) -> bytes | None:
-    engagement = comparison.get("engagement") if isinstance(comparison, dict) else None
-    if keys is None or not (isinstance(engagement, str) and _IDENTIFIER.fullmatch(engagement)):
-        return None
-    return keys.slice_key(tenant, engagement)
+def _comparison_scope(comparison: Json) -> tuple[str, str]:
+    return comparison["organization"], comparison["engagement"]
 
 
 def _arm_vocab_ok(name: str, arm: Any) -> bool:
@@ -512,6 +527,8 @@ def _comparison_ok(comparison: Any) -> bool:
         and isinstance(comparison.get("comparisons"), dict)
         and _comparison_vocab_ok(comparison)
         and _terms_ok(comparison.get("terms", {}))
+        and isinstance(comparison.get("engagement"), str)
+        and bool(_IDENTIFIER.fullmatch(comparison["engagement"]))
     )
 
 
@@ -571,9 +588,7 @@ def _arm_aggregate(arm: Json, slice_key: bytes) -> Json:
         },
         "operating_point": metrics["operating_point"]["combined"],
         "critical_slices": dict(
-            sorted(
-                (slice_digest(k, slice_key), v["status"]) for k, v in arm["critical_slices"].items()
-            )
+            sorted((_mac(k, slice_key), v["status"]) for k, v in arm["critical_slices"].items())
         ),
         "hold_reason": arm["hold_reason"],
         "economics": {k: economics[k] for k in _ECON_FIELDS},
@@ -598,7 +613,11 @@ def _assemble(
     slice_key: bytes,
     allow_generated_fixture: bool,
 ) -> tuple[Json | None, str | None]:
-    """Pure and deterministic: identical inputs reproduce the identical packet digest."""
+    """Pure and deterministic: identical inputs reproduce the identical packet digest.
+
+    ``slice_key`` here (and in the helpers it calls) is the already-scoped key from
+    ``_scoped_key``, never the supplied engagement key.
+    """
     decision = comparison["decision"]
     winner = decision.get("winner")
     improvement = decision.get("disposition") == "recommend"
@@ -635,7 +654,7 @@ def _assemble(
             "plan_revision": comparison["plan_revision"],
             "protected_membership_digest": comparison["protected_membership_digest"],
             "operating_point_digest": operating_point_digest(
-                slice_substituted_terms(comparison.get("terms", {}), slice_key)
+                _substitute(comparison.get("terms", {}), slice_key)
             ),
             "metric": comparison.get("metric"),
         },
@@ -744,7 +763,7 @@ def _improvement_checks(
     ):
         return "decision_inconsistent_with_evidence"
     terms = comparison.get("terms", {})
-    point = operating_point_digest(slice_substituted_terms(terms, slice_key))
+    point = operating_point_digest(_substitute(terms, slice_key))
     claimed = verdict.get("operating_point_digest")
     if claimed != point and claimed == digest(terms):
         # Bound to the pre-change digest over raw slice names: refused, never re-digested.
@@ -781,14 +800,9 @@ def assemble_packet(
     ``slice_key`` is the engagement key for ``comparison["engagement"]``. Without a valid one
     there is no packet: slice names are never published plainly or under a plain hash.
     """
-    if allow_generated_fixture and not _fixture_context():
-        return None, _FIXTURE_REFUSAL
-    if not ctx.valid():
-        return None, "invalid_packet_context"
-    if not _comparison_ok(comparison):
-        return None, "comparison_unverified"
-    if comparison.get("organization") != ctx.tenant:
-        return None, "comparison_scope_mismatch"
+    failure = _preflight(comparison, ctx, allow_generated_fixture)
+    if failure:
+        return None, failure
     if not _key_ok(slice_key):
         return None, "slice_digest_key_unavailable"
     assert slice_key is not None
@@ -797,9 +811,22 @@ def assemble_packet(
         receipt,
         verdict,
         ctx,
-        slice_key=slice_key,
+        slice_key=_scoped_key(slice_key, *_comparison_scope(comparison)),
         allow_generated_fixture=allow_generated_fixture,
     )
+
+
+def _preflight(comparison: Any, ctx: PacketContext, allow_generated_fixture: bool) -> str | None:
+    """Refusals that never need the slice key. They always precede any key lookup."""
+    if allow_generated_fixture and not _fixture_context():
+        return _FIXTURE_REFUSAL
+    if not ctx.valid():
+        return "invalid_packet_context"
+    if not _comparison_ok(comparison):
+        return "comparison_unverified"
+    if comparison.get("organization") != ctx.tenant:
+        return "comparison_scope_mismatch"
+    return None
 
 
 def verify_packet(
@@ -842,8 +869,9 @@ def private_slice_view(packet: Any, comparison: Any, slice_key: bytes | None) ->
     arms = packet.get("arms")
     if not _sealed(packet, "packet_digest") or not isinstance(arms, dict):
         return None
+    scoped = _scoped_key(slice_key, *_comparison_scope(comparison))
     names = {
-        slice_digest(name, slice_key): name
+        _mac(name, scoped): name
         for arm in comparison["arms"].values()
         for name in arm["critical_slices"]
     }
@@ -964,12 +992,22 @@ class PacketOutbox:
         ctx = authority.current(run_ref) if _ID.fullmatch(run_ref or "") else None
         if ctx is None or ctx.run_ref != run_ref:
             return _refuse("authority_unavailable")
+        failure = _preflight(comparison, ctx, self.allow_generated_fixture)
+        if failure:
+            return _refuse(failure)  # before any key lookup
+        if self.slice_keys is None:
+            return _refuse("slice_digest_key_unavailable")
+        try:
+            key = self.slice_keys.slice_key(*_comparison_scope(comparison))
+        except Exception:
+            # An unknown keyring result is never success and never raises out of staging.
+            return _refuse("slice_digest_key_lookup_failed")
         packet, reason = assemble_packet(
             comparison,
             receipt,
             verdict,
             ctx,
-            slice_key=_engagement_key(self.slice_keys, ctx.tenant, comparison),
+            slice_key=key,
             allow_generated_fixture=self.allow_generated_fixture,
         )
         if packet is None:

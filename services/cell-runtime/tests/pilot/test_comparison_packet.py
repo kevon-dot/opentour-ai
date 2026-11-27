@@ -282,7 +282,9 @@ def make_verdict(comparison, receipt, ctx, **over):
         "candidate_digest": arms["simple"]["revision"],
         "comparator_digest": arms["incumbent"]["revision"],
         "operating_point_digest": cp.operating_point_digest(
-            cp.slice_substituted_terms(comparison["terms"], key_for(comparison))
+            cp.slice_substituted_terms(
+                comparison["terms"], key_for(comparison), **scope(comparison)
+            )
         ),
         "benchmark_digest": ctx.benchmark_digest,
         "denominator": {
@@ -324,6 +326,10 @@ KEYS = Keyring()
 
 def key_for(comparison):
     return KEYS.slice_key(comparison["organization"], comparison["engagement"])
+
+
+def scope(comparison):
+    return {"tenant": comparison["organization"], "engagement": comparison["engagement"]}
 
 
 class Sink:
@@ -1658,7 +1664,7 @@ def test_real_run_with_a_planner_legal_slice_name_still_stages(tmp_path, name):
     out = Bundle(comparison, tmp_path / "stage").stage()
     assert out.status == "staged" and out.packet["kind"] == "measured_improvement", out
     assert set(out.packet["arms"]["simple"]["critical_slices"]) == {
-        cp.slice_digest(name, key_for(comparison))
+        cp.slice_digest(name, key_for(comparison), **scope(comparison))
     }  # OPE-571: the packet carries the keyed digest, never the name
 
 
@@ -1754,7 +1760,7 @@ def test_packet_carries_keyed_slice_digests_not_names(tmp_path):
     key = key_for(comparison)
     for arm, aggregate in out.packet["arms"].items():
         expected = {
-            cp.slice_digest(name, key): v["status"]
+            cp.slice_digest(name, key, **scope(comparison)): v["status"]
             for name, v in comparison["arms"][arm]["critical_slices"].items()
         }
         assert aggregate["critical_slices"] == expected
@@ -1919,7 +1925,9 @@ def test_outbox_without_a_keyring_refuses_and_invalid_engagement_is_not_looked_u
     odd = seal({**copy.deepcopy(runs[_PLAIN_HOLD]), "engagement": "case-9 sentinel"})
     b.store = cp.PacketOutbox(tmp_path / "spy.sqlite3", slice_keys=Spy())
     out = b.stage(comparison=odd)
-    assert out.reason == "slice_digest_key_unavailable" and seen == [] and empty(b.store)
+    # The engagement is bound into the key derivation, so a non-identifier one is unverified.
+    assert out.reason == "comparison_unverified" and seen == [] and empty(b.store)
+    assert not _leaks(out, "case-9 sentinel")
 
 
 def test_comparison_refusals_still_precede_the_key_check(runs, tmp_path):
@@ -1991,7 +1999,7 @@ def test_operating_point_digest_cannot_confirm_a_guessed_slice_name(tmp_path):
     guesses = [
         digest(terms),  # the pre-change digest over raw names
         digest({**terms, "critical_slices": ["acme_corp"], "material_slices": ["jane_doe"]}),
-        cp.operating_point_digest(cp.slice_substituted_terms(terms, wrong)),
+        cp.operating_point_digest(cp.slice_substituted_terms(terms, wrong, **scope(comparison))),
         cp.operating_point_digest(
             {
                 **terms,
@@ -2002,7 +2010,9 @@ def test_operating_point_digest_cannot_confirm_a_guessed_slice_name(tmp_path):
     ]
     assert published not in guesses
     key = key_for(comparison)
-    assert published == cp.operating_point_digest(cp.slice_substituted_terms(terms, key))
+    assert published == cp.operating_point_digest(
+        cp.slice_substituted_terms(terms, key, **scope(comparison))
+    )
 
 
 def test_operating_point_digest_is_verifiable_from_substituted_terms_without_the_key(tmp_path):
@@ -2011,7 +2021,9 @@ def test_operating_point_digest_is_verifiable_from_substituted_terms_without_the
     comparison = named_material_run(tmp_path)
     b = Bundle(comparison, tmp_path / "stage")
     out = b.stage()
-    substituted = cp.slice_substituted_terms(comparison["terms"], key_for(comparison))
+    substituted = cp.slice_substituted_terms(
+        comparison["terms"], key_for(comparison), **scope(comparison)
+    )
     for name in SLICE_NAMES:
         assert mentions(substituted, name) == [], name
     assert {k: v for k, v in substituted.items() if not k.endswith("_slices")} == {
@@ -2060,7 +2072,9 @@ def test_terms_without_slice_names_keep_their_digest(runs, tmp_path):
     terms = comparison["terms"]
     assert not terms.get("critical_slices") and not terms.get("material_slices")
     key = key_for(comparison)
-    assert cp.operating_point_digest(cp.slice_substituted_terms(terms, key)) == digest(terms)
+    assert cp.operating_point_digest(
+        cp.slice_substituted_terms(terms, key, **scope(comparison))
+    ) == digest(terms)
     b = Bundle(comparison, tmp_path)
     plain = make_verdict(comparison, b.receipt, b.ctx, operating_point_digest=digest(terms))
     assert b.stage(verdict=plain).status == "staged"
@@ -2078,3 +2092,194 @@ def test_malformed_slice_terms_refuse_without_raising(runs, tmp_path, terms_slic
     b = live_bundle(runs[_PLAIN_HOLD], tmp_path)  # the helper's verdict needs valid terms
     out = b.stage(comparison=seal(changed))
     assert out.reason == "comparison_unverified" and empty(b.store), out
+
+
+# ------------------- R: independent-review findings on b63b4ea (OPE-571 follow-up)
+
+KAT_KEY = bytes(range(32))
+KAT_SCOPE = {"tenant": "generated-tenant", "engagement": "generated-engagement-a"}
+KAT_DIGEST = "ff7b8bd6cbcdb4e48bcfd641fb2377a4f3d1615758117a7cf9e561cfa7b6b887"
+
+
+def test_slice_digest_known_answer_pins_the_derivation():
+    """R2: a literal known answer, also rebuilt step by step with the standard library:
+    scoped = HMAC(key, canonical([purpose, tenant, engagement])); digest = HMAC(scoped, name)."""
+    import hashlib
+    import hmac
+
+    assert cp.slice_digest("jane_doe", KAT_KEY, **KAT_SCOPE) == KAT_DIGEST
+    label = json.dumps(
+        [cp.SLICE_DIGEST, KAT_SCOPE["tenant"], KAT_SCOPE["engagement"]], separators=(",", ":")
+    ).encode()
+    scoped = hmac.new(KAT_KEY, label, hashlib.sha256).digest()
+    assert hmac.new(scoped, b"jane_doe", hashlib.sha256).hexdigest() == KAT_DIGEST
+    # The derivations a mutation could fall back to must all differ from the pinned answer.
+    unscoped = hmac.new(KAT_KEY, b"jane_doe", hashlib.sha256).hexdigest()
+    purpose_only = hmac.new(
+        hmac.new(KAT_KEY, cp.SLICE_DIGEST.encode(), hashlib.sha256).digest(),
+        b"jane_doe",
+        hashlib.sha256,
+    ).hexdigest()
+    assert KAT_DIGEST not in (unscoped, purpose_only, hashlib.sha256(b"jane_doe").hexdigest())
+
+
+@pytest.mark.parametrize(
+    "other",
+    [
+        {"tenant": "generated-tenant-2", "engagement": "generated-engagement-a"},
+        {"tenant": "generated-tenant", "engagement": "generated-engagement-b"},
+    ],
+    ids=["tenant", "engagement"],
+)
+def test_one_shared_master_key_still_gives_unlinkable_digests(other):
+    """R2: tenant and engagement are bound into the derivation, not only the purpose label."""
+    assert cp.slice_digest("jane_doe", KAT_KEY, **other) != KAT_DIGEST
+    terms = {**STRICT, "critical_slices": ["jane_doe"], "material_slices": ["acme_corp"]}
+    a = cp.slice_substituted_terms(terms, KAT_KEY, **KAT_SCOPE)
+    b = cp.slice_substituted_terms(terms, KAT_KEY, **other)
+    assert set(a["critical_slices"] + a["material_slices"]).isdisjoint(
+        b["critical_slices"] + b["material_slices"]
+    )
+
+
+def test_shared_master_key_across_engagements_in_a_staged_packet(tmp_path):
+    """R2: the same keyring key for two engagements still yields disjoint published digests."""
+
+    class Shared:
+        def slice_key(self, tenant, engagement):
+            return KAT_KEY
+
+    first = named_slice_run(tmp_path)
+    second = in_another_engagement(first)
+    out = []
+    for i, comparison in enumerate((first, second)):
+        b = Bundle(comparison, tmp_path / f"s{i}")
+        b.store = cp.PacketOutbox(
+            tmp_path / f"s{i}" / "shared.sqlite3", slice_keys=Shared(), allow_generated_fixture=True
+        )
+        b.verdict = make_verdict(
+            comparison,
+            b.receipt,
+            b.ctx,
+            operating_point_digest=cp.operating_point_digest(
+                cp.slice_substituted_terms(comparison["terms"], KAT_KEY, **scope(comparison))
+            ),
+        )
+        out.append(b.stage())
+    assert [o.status for o in out] == ["staged", "staged"], out
+    for arm in out[0].packet["arms"]:
+        assert set(out[0].packet["arms"][arm]["critical_slices"]).isdisjoint(
+            out[1].packet["arms"][arm]["critical_slices"]
+        )
+    ops = [o.packet["comparison"]["operating_point_digest"] for o in out]
+    assert ops[0] != ops[1]
+
+
+CANDIDATE_NAMES = ("jane_doe", "acme_corp", "john_smith", "critical", "rare", "vip", "Tier1")
+
+
+def _candidate_terms():
+    """Every one- and two-name guess, both orders, on top of the exactly known STRICT terms."""
+    import itertools
+
+    for size in (1, 2):
+        for names in itertools.permutations(CANDIDATE_NAMES, size):
+            yield {**STRICT, "critical_slices": list(names)}
+
+
+def test_brute_force_over_candidate_names_cannot_reproduce_any_published_digest(tmp_path):
+    """R1/R4: the reviewer's probe. With STRICT known and the true names among the candidates,
+    no plain or unkeyed-substituted reconstruction reproduces the packet's operating-point
+    digest, the verdict binding, or any other 64-hex value the packet publishes."""
+    import hashlib
+
+    comparison = named_slice_run(tmp_path)
+    b = Bundle(comparison, tmp_path / "stage")
+    out = b.stage()
+    assert out.status == "staged", out
+    assert comparison["terms"] == {**STRICT, "critical_slices": list(SLICE_NAMES)}
+    published = {t for t in every_text(out.packet) if re.fullmatch("[0-9a-f]{64}", t)}
+    assert out.packet["comparison"]["operating_point_digest"] in published
+    assert b.verdict["operating_point_digest"] == out.packet["comparison"]["operating_point_digest"]
+    tried = 0
+    for terms in _candidate_terms():
+        names = terms["critical_slices"]
+        for guess in (
+            terms,
+            {**terms, "critical_slices": [hashlib.sha256(n.encode()).hexdigest() for n in names]},
+            {**terms, "critical_slices": [digest(n) for n in names]},
+        ):
+            tried += 1
+            assert digest(guess) not in published, names
+    assert tried == 3 * (len(CANDIDATE_NAMES) + len(CANDIDATE_NAMES) * (len(CANDIDATE_NAMES) - 1))
+    # Positive control: the guess that matches only the TRUE names under the real key.
+    key = key_for(comparison)
+    true = cp.slice_substituted_terms(comparison["terms"], key, **scope(comparison))
+    assert digest(true) == out.packet["comparison"]["operating_point_digest"]
+
+
+def test_names_disclosed_false_holds_for_every_published_value(tmp_path):
+    """R4: the packet's ``names_disclosed: False`` is true. No name in clear, no guessable
+    digest of one, and the documents whose plain digests do include the names (plan and
+    comparison revisions) also bind an intake revision that is never published."""
+    comparison = named_slice_run(tmp_path)
+    b = Bundle(comparison, tmp_path / "stage")
+    out = b.stage()
+    b.dispatch()
+    assert out.packet["critical_slice_names"]["names_disclosed"] is False
+    surfaces = [out.packet, next(iter(b.sink.effects.values())), b.store.snapshot()]
+    for name in SLICE_NAMES:
+        assert mentions(surfaces, name) == [], name
+    assert mentions(surfaces, comparison["intake_revision"]) == []
+    assert mentions(surfaces, comparison["intake_revision"][:16]) == []
+
+
+def test_a_raising_keyring_refuses_instead_of_raising(runs, tmp_path):
+    """R3: an exception from the keyring is an unknown result: refused, never raised, nothing
+    staged, and the exception text never reaches the refusal."""
+
+    class Broken:
+        def slice_key(self, tenant, engagement):
+            raise RuntimeError("case-12 sentinel-keyring-detail")
+
+    for name in ("winner", _PLAIN_HOLD):
+        b = Bundle(runs[name], tmp_path / name)
+        if name == _PLAIN_HOLD:
+            b.receipt = b.verdict = None
+        b.store = cp.PacketOutbox(
+            tmp_path / name / "broken.sqlite3", slice_keys=Broken(), allow_generated_fixture=True
+        )
+        out = b.stage()
+        assert out.status == "refused" and out.reason == "slice_digest_key_lookup_failed", out
+        assert out.packet is None and empty(b.store) and b.dispatch() == []
+        assert not _leaks(out, "sentinel-keyring-detail")
+
+
+@pytest.mark.parametrize("problem", ["unverified", "scope", "context"])
+def test_stage_refuses_comparison_problems_before_any_key_lookup(runs, tmp_path, problem):
+    """R3: comparison and context refusals precede the key lookup in ``stage`` itself."""
+    seen = []
+
+    class Spy:
+        def slice_key(self, tenant, engagement):
+            seen.append((tenant, engagement))
+            return KEYS.slice_key(tenant, engagement)
+
+    b = live_bundle(runs[_PLAIN_HOLD], tmp_path)
+    b.store = cp.PacketOutbox(tmp_path / "spy.sqlite3", slice_keys=Spy())
+    expected = {
+        "unverified": "comparison_unverified",
+        "scope": "comparison_scope_mismatch",
+        "context": "invalid_packet_context",
+    }[problem]
+    if problem == "unverified":
+        out = b.stage(comparison=mutated(runs[_PLAIN_HOLD], "slice_name"))
+    else:
+        over = {"tenant": "generated-other-tenant"} if problem == "scope" else {"expires_at": "x"}
+        b.ctx = context(runs[_PLAIN_HOLD], **over)
+        b.authority = Authority(b.ctx)
+        out = b.stage()
+    assert out.reason == expected and seen == [] and empty(b.store), out
+    b.ctx = context(runs[_PLAIN_HOLD])
+    b.authority = Authority(b.ctx)
+    assert b.stage().status == "staged" and len(seen) == 1  # positive control: one lookup
