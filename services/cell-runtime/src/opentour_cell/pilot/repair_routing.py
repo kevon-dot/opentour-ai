@@ -545,6 +545,8 @@ def decide(request: RoutingRequest) -> Json:
             [],
         )
     if route == "simple":
+        # A disqualified critical slice is a statement about the repair itself, so it keeps
+        # precedence over an incomplete request.
         failed = _slice_failure(rule, terms, window)
         if failed:
             return _body(
@@ -556,6 +558,20 @@ def decide(request: RoutingRequest) -> Json:
                 groups,
                 ctx,
                 ["supply_independent_evidence"],
+            )
+        if request.scheduling is None:
+            # A sufficient repair freezes the simple arm and schedules the comparison. With no
+            # protected population to schedule against there is nothing to freeze, so this is a
+            # held evidence request; the requirement cannot depend on the caller passing a field.
+            return _body(
+                request,
+                "request_evidence",
+                "comparison_scheduling_required",
+                rule,
+                window,
+                groups,
+                ctx,
+                ["provide_comparison_scheduling"],
             )
         return _body(
             request,
@@ -648,8 +664,12 @@ def _body(
     s, m, terms = request.snapshot, request.mandate, request.terms
     residual = ctx["residual"] if ctx else []
     plan: str | None = None
-    if outcome == "simple_repair" and ctx is not None and request.scheduling is not None:
+    if outcome == "simple_repair":
+        # decide() refuses this outcome without scheduling, so a frozen plan is an invariant of
+        # the outcome rather than something a caller can opt out of by omitting a field.
         sch = request.scheduling
+        _need(sch is not None and ctx is not None, "comparison_scheduling_required")
+        assert sch is not None and ctx is not None
         plan = comparison_plan.freeze_plan(
             organization=s.organization,
             engagement=s.workflow_ref,

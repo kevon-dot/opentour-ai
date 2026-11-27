@@ -121,6 +121,15 @@ def recipes() -> tuple[rr.Recipe, ...]:
     )
 
 
+def scheduling(*protected: str) -> rr.ComparisonScheduling:
+    return rr.ComparisonScheduling(
+        digest("generated-intake"),
+        protected or ("generated-protected-1", "generated-protected-2"),
+        "generated-incumbent-1",
+        "generated-audience",
+    )
+
+
 def request(
     cases: list[rr.DevelopmentCase],
     *,
@@ -180,7 +189,9 @@ def same_entity_residual() -> list[rr.DevelopmentCase]:
 
 
 def test_only_independent_residual_reaches_train_eligibility(store: rr.RepairRoutingStore) -> None:
-    fix = store.evaluate(request(data_fix(), run="generated-run-a"))
+    # Migrated for OPE-417 Decision 4: the data-access-only fix now carries a valid
+    # ComparisonScheduling, because a sufficient simple repair with none is refused.
+    fix = store.evaluate(request(data_fix(), run="generated-run-a", scheduling=scheduling()))
     res = store.evaluate(request(independent_residual(), run="generated-run-b"))
     dup = store.evaluate(request(same_entity_residual(), run="generated-run-c"))
     assert (fix["outcome"], fix["reason_code"]) == (
@@ -193,7 +204,7 @@ def test_only_independent_residual_reaches_train_eligibility(store: rr.RepairRou
         assert (r["fit_starts"], r["reservations"], r["protected_reads"]) == (0, 0, 0)
         assert r["augmentation_state"] == "not_enabled"
     assert fix["residual_roots"] == [] and fix["independent_residual_groups"] == 0
-    assert fix["frozen_arm"] == fix["rule_revision"]
+    assert fix["frozen_arm"] == fix["rule_revision"] and fix["comparison_scheduled"] is True
     assert res["independent_residual_groups"] == 3 and dup["independent_residual_groups"] == 1
     assert res["train_eligible_policy_ref"] == "generated-policy-1"
     assert fix["train_eligible_policy_ref"] is None and dup["train_eligible_policy_ref"] is None
@@ -399,13 +410,26 @@ def test_budget_and_paid_probe_reject_recipes() -> None:
 
 
 def test_critical_slice_failure_demotes_simple_repair(store: rr.RepairRoutingStore) -> None:
+    # Migrated for OPE-417 Decision 4: both cases now carry a valid ComparisonScheduling, so the
+    # demotion is attributable to the critical slice rather than to a missing field.
+    sched = scheduling()
     ok = store.evaluate(
-        request(data_fix(), t=terms(critical_slices=("bucket:x",)), run="generated-run-1")
+        request(
+            data_fix(),
+            t=terms(critical_slices=("bucket:x",)),
+            run="generated-run-1",
+            scheduling=sched,
+        )
     )
     bad = store.evaluate(
-        request(data_fix(), t=terms(critical_slices=("bucket:q",)), run="generated-run-2")
+        request(
+            data_fix(),
+            t=terms(critical_slices=("bucket:q",)),
+            run="generated-run-2",
+            scheduling=sched,
+        )
     )
-    assert ok["outcome"] == "simple_repair"
+    assert ok["outcome"] == "simple_repair" and ok["comparison_scheduled"] is True
     assert (bad["outcome"], bad["reason_code"]) == ("request_evidence", "critical_slice_unobserved")
 
 
@@ -554,13 +578,30 @@ def test_same_entity_case_variants_with_agreeing_labels_are_not_a_contradiction(
     assert r["reason_code"] != "contradictory_labels"
 
 
-def scheduling(*protected: str) -> rr.ComparisonScheduling:
-    return rr.ComparisonScheduling(
-        digest("generated-intake"),
-        protected or ("generated-protected-1", "generated-protected-2"),
-        "generated-incumbent-1",
-        "generated-audience",
+def test_sufficient_simple_repair_without_scheduling_is_refused(
+    store: rr.RepairRoutingStore,
+) -> None:
+    # OPE-417 Decision 4: "A sufficient repair freezes the simple arm and schedules comparison
+    # with zero fits." Whether that holds must not depend on the caller passing a field.
+    held = store.evaluate(request(data_fix(), run="generated-run-a"))
+    assert (held["outcome"], held["reason_code"]) == (
+        "request_evidence",
+        "comparison_scheduling_required",
     )
+    assert held["next_evidence"] == ["provide_comparison_scheduling"]
+    assert held["frozen_arm"] is None and held["comparison_scheduled"] is False
+    assert held["comparison_plan_revision"] is None
+    assert (held["fit_starts"], held["reservations"], held["protected_reads"]) == (0, 0, 0)
+    # The same evidence with a protected population to compare against is the repair.
+    scheduled = store.evaluate(request(data_fix(), run="generated-run-b", scheduling=scheduling()))
+    assert (scheduled["outcome"], scheduled["reason_code"]) == (
+        "simple_repair",
+        "simple_repair_meets_development_limits",
+    )
+    assert scheduled["comparison_scheduled"] is True
+    assert scheduled["frozen_arm"] == scheduled["rule_revision"]
+    assert len(scheduled["comparison_plan_revision"]) == 64
+    assert scheduled["fit_starts"] == 0
 
 
 def test_replay_with_a_different_protected_population_conflicts(
