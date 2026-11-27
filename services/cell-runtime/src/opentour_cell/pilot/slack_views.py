@@ -1547,7 +1547,8 @@ def _live_counts(summary: Mapping[str, Any], readiness: Mapping[str, Any] | None
     unit = "decision" if decisions == 1 else "decisions"
     return (
         f"Live evidence · {decisions} {unit}\n"
-        f"Verified {summary['verified']} · Pending {summary['pending']} · Disputed {summary['disputed']}\n"
+        f"Verified {summary['verified']} · Pending "
+        f"{summary['pending']} · Disputed {summary['disputed']}\n"
         f"Incumbent wrong / verified automatic decisions · {rate}"
     )
 
@@ -2570,7 +2571,8 @@ def starter_score_readout(
             f"Freeze {_ref(summary['freeze_ref'])}\nRevision {_ref(summary['freeze_revision'])}"
         ),
         _section(
-            f"Reserved cases {summary['reserved']} · Unresolved {summary['unresolved']} · Excluded {summary['excluded']}"
+            f"Reserved cases {summary['reserved']} "
+            f"· Unresolved {summary['unresolved']} · Excluded {summary['excluded']}"
         ),
     ]
     blocks.extend(
@@ -2580,7 +2582,8 @@ def starter_score_readout(
                 f"Revision {_ref(summary['model_revision'])}"
             ),
             _section(
-                f"Policy comparator {_ref(summary['comparator_ref'])} · Revision {_ref(summary['comparator_revision'])}"
+                f"Policy comparator {_ref(summary['comparator_ref'])} "
+                f"· Revision {_ref(summary['comparator_revision'])}"
             ),
         ]
     )
@@ -2596,7 +2599,8 @@ def starter_score_readout(
     elif summary["state"] == "held":
         blocks.append(
             _section(
-                "Evaluation outcome unknown. Ask the evaluation operator to reconcile this execution."
+                "Evaluation outcome unknown. Ask the evaluation "
+                "operator to reconcile this execution."
             )
         )
     elif summary["state"] == "scored":
