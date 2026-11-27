@@ -557,18 +557,29 @@ class CandidateInference:
             raise EveRefusal("inference_unavailable") from None
         except (ValueError, LookupError):
             raise EveRefusal("candidate_lineage_unverified") from None
-        try:
-            return tuple(
-                ArmOutput(
-                    str(item["case_id"]),
-                    None if item["answer"] is None else str(item["answer"]),
-                    tuple(str(c) for c in item["citations"]),  # type: ignore[attr-defined]
-                    bool(item["abstained"]),
-                )
-                for item in raw
-            )
-        except (KeyError, TypeError):
-            raise EveRefusal("output_case_mismatch") from None
+        if not isinstance(raw, tuple):
+            raise EveRefusal("output_shape_invalid")
+        outputs = []
+        for item in raw:
+            if not isinstance(item, Mapping):
+                raise EveRefusal("output_shape_invalid")
+            try:
+                case_id, answer = item["case_id"], item["answer"]
+                citations, abstained = item["citations"], item["abstained"]
+            except KeyError:
+                raise EveRefusal("output_shape_invalid") from None
+            if (
+                not isinstance(case_id, str)
+                or not case_id
+                or (answer is not None and not isinstance(answer, str))
+                or not isinstance(citations, list | tuple)
+                or not all(isinstance(citation, str) for citation in citations)
+                or type(abstained) is not bool
+            ):
+                raise EveRefusal("output_shape_invalid")
+            outputs.append(ArmOutput(case_id, answer, tuple(citations), abstained))
+        return tuple(outputs)
+
 
 
 def run_id_for(manifest: ReplayManifest, arm: ArmSpec) -> str:

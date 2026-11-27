@@ -1116,3 +1116,26 @@ def test_x_credentials_are_checked_before_any_provider_observation(env: Env) -> 
     with refuses("credential_unavailable"):
         env.replay(env.arm("baseline"), ScriptedInference(BASE, BASELINE))
     assert seen == []
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("case_id", 1),
+        ("answer", {"answer": "generated unexpected object"}),
+        ("citations", "x"),
+        ("citations", [1]),
+        ("abstained", "false"),
+    ],
+)
+def test_candidate_transport_rejects_malformed_typed_output(env: Env, monkeypatch, field, value):
+    infer = env.candidate_inference()
+    predict = env.transport.predict_for_replay
+
+    def malformed(candidate, inputs):
+        rows = predict(candidate, inputs)
+        return ({**rows[0], field: value}, *rows[1:])
+
+    monkeypatch.setattr(env.transport, "predict_for_replay", malformed)
+    with refuses("output_shape_invalid"):
+        env.replay(env.arm("candidate", infer.served_revision), infer)
