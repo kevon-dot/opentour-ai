@@ -47,7 +47,7 @@ from opentour_cell.pilot.mixed_intake.model import (
     finish,
 )
 
-PDF_REVISION = "opentour.reader.pdf-text@1.0.4"
+PDF_REVISION = "opentour.reader.pdf-text@1.0.5"
 # The three thresholds below are adjustable judgement values, not contract values: they trade
 # review volume against missed concealment and may be retuned without a format change.
 # Effective text size, in points, below which text is treated as not human-readable. Real
@@ -294,14 +294,22 @@ def _concat(m: tuple[float, ...], n: tuple[float, ...]) -> tuple[float, ...]:
 #    trusted: the font takes source 2 or 3, with no glyph below the array's largest number.
 #    Large entries are used as given, since they can only widen the extent.
 # 2. No /Widths, no FontDescriptor and a name that is exactly a standard face: Helvetica and
-#    Arial (regular, bold, oblique/italic, MT), Times-Roman, Courier and Courier New in their
-#    styles. That face's Adobe core-14 AFM widths, which are what a viewer uses for it.
-# 3. Anything else: another name (Arial-Black, Helvetica-Light, CourierPrime), Times bold or
-#    italic, a standard name with a FontDescriptor of its own, an unresolved font. Those take
+#    Arial (regular, bold, oblique/italic, MT), Times-Roman, -Bold, -Italic and -BoldItalic and
+#    Times New Roman in the same styles, Courier and Courier New in their styles. That face's
+#    Adobe core-14 AFM widths. These are ground truth, not an estimate: a standard-14 face with
+#    no font program of its own is drawn by the viewer from exactly these metrics, so a table
+#    narrower than the fallback is not an under-estimate. This holds only for an exact name
+#    with no FontDescriptor; everything else is source 3 or goes to review.
+# 3. Anything else: another name (Arial-Black, Helvetica-Light, CourierPrime), a standard name
+#    with a FontDescriptor of its own, an unresolved, Type0 or Type3 font. Those take
 #    _PROPORTIONAL_MAX, the per-glyph maximum of Helvetica, Helvetica-Bold, Times-Roman,
 #    Times-Bold, Times-Italic and Times-BoldItalic (the obliques share their upright widths),
-#    and never less than the named face's own widths. A name starting "courier" keeps at least
-#    Courier's 600.
+#    never less than the named face's own widths. A name starting "courier" keeps at least
+#    Courier's 600. No such bound is below where it was at opentour.reader.pdf-text@1.0.3.
+#    A simple (Type1, TrueType, MMType1) font in this group with no valid /Widths also goes to
+#    review as font_widths_unavailable (see _widths_unavailable): the PDF format requires
+#    /Widths for it, and a viewer may draw it from its embedded program, so no assumed bound
+#    is safe. Unresolved, Type0 and Type3 fonts already go to review as font_encoding_unverified.
 #
 # Outside printable ASCII, a letter with an accent takes the source-3 width of its unaccented
 # letter, which is at least the accented glyph's AFM width in all six faces (the only accented
@@ -311,11 +319,9 @@ def _concat(m: tuple[float, ...], n: tuple[float, ...]) -> tuple[float, ...]:
 # data covers; it has no Euro, no-break space or soft hyphen).
 #
 # Residuals, measured against this table, not closed here:
-# - A non-standard font with no valid /Widths. The PDF format requires /Widths for every simple
-#   font but the standard 14, so this is a malformed file, but a viewer may then draw it from
-#   the embedded program. Of 75 TrueType/OpenType faces measured, 41 are wider than
-#   _PROPORTIONAL_MAX on an English pangram (up to 1.21 times, the monospaced faces) and every
-#   one has at least one glyph wider than it.
+# - A non-standard simple font with no valid /Widths is routed to review, not measured: of 75
+#   TrueType/OpenType faces measured, 41 are wider than _PROPORTIONAL_MAX on an English pangram
+#   (up to 1.21 times, the monospaced faces) and every one has at least one glyph wider.
 # - Courier New without /Widths is measured at Courier's 600; its TrueType advance is
 #   1229/2048 = 600.1 (measured on the metric-compatible Liberation Mono).
 # - Extents are advance boxes: ink overhanging its advance (italic overhang, a glyph drawn wider
@@ -351,6 +357,30 @@ _TIMES_ROMAN = (
     444, 500, 444, 500, 444, 333, 500, 500, 278, 278, 500, 278, 778, 500, 500, 500, 500,
     333, 389, 278, 500, 500, 722, 500, 500, 444, 480, 200, 480, 541,
 )  # fmt: skip
+_TIMES_BOLD = (
+    250, 333, 555, 500, 500, 1000, 833, 278, 333, 333, 500, 570, 250, 333, 250, 278,
+    500, 500, 500, 500, 500, 500, 500, 500, 500, 500, 333, 333, 570, 570, 570, 500, 930,
+    722, 667, 722, 722, 667, 611, 778, 778, 389, 500, 778, 667, 944, 722, 778, 611, 778,
+    722, 556, 667, 722, 722, 1000, 722, 722, 667, 333, 278, 333, 581, 500, 333,
+    500, 556, 444, 556, 444, 333, 500, 556, 278, 333, 556, 278, 833, 556, 500, 556, 556,
+    444, 389, 333, 556, 500, 722, 500, 500, 444, 394, 220, 394, 520,
+)  # fmt: skip
+_TIMES_ITALIC = (
+    250, 333, 420, 500, 500, 833, 778, 214, 333, 333, 500, 675, 250, 333, 250, 278,
+    500, 500, 500, 500, 500, 500, 500, 500, 500, 500, 333, 333, 675, 675, 675, 500, 920,
+    611, 611, 667, 722, 611, 611, 722, 722, 333, 444, 667, 556, 833, 667, 722, 611, 722,
+    611, 500, 556, 722, 611, 833, 611, 556, 556, 389, 278, 389, 422, 500, 333,
+    500, 500, 444, 500, 444, 278, 500, 500, 278, 278, 444, 278, 722, 500, 500, 500, 500,
+    389, 389, 278, 500, 444, 667, 444, 444, 389, 400, 275, 400, 541,
+)  # fmt: skip
+_TIMES_BOLD_ITALIC = (
+    250, 389, 555, 500, 500, 833, 778, 278, 333, 333, 500, 570, 250, 333, 250, 278,
+    500, 500, 500, 500, 500, 500, 500, 500, 500, 500, 333, 333, 570, 570, 570, 500, 832,
+    667, 667, 667, 722, 667, 667, 722, 778, 389, 500, 667, 611, 889, 722, 722, 611, 722,
+    667, 556, 611, 722, 667, 889, 667, 611, 611, 333, 278, 333, 570, 500, 333,
+    500, 500, 444, 500, 444, 333, 500, 556, 278, 278, 500, 278, 778, 556, 500, 500, 500,
+    389, 389, 278, 556, 444, 667, 500, 444, 389, 348, 220, 348, 570,
+)  # fmt: skip
 _PROPORTIONAL_MAX = (
     278, 389, 555, 556, 556, 1000, 833, 278, 333, 333, 500, 675, 278, 333, 278, 278,
     556, 556, 556, 556, 556, 556, 556, 556, 556, 556, 333, 333, 675, 675, 675, 611, 1015,
@@ -363,6 +393,9 @@ _GLYPH_WIDTHS: dict[str | None, dict[str, int]] = {
     "helvetica": dict(zip(_ASCII, _HELVETICA, strict=True)),
     "helvetica-bold": dict(zip(_ASCII, _HELVETICA_BOLD, strict=True)),
     "times": dict(zip(_ASCII, _TIMES_ROMAN, strict=True)),
+    "times-bold": dict(zip(_ASCII, _TIMES_BOLD, strict=True)),
+    "times-italic": dict(zip(_ASCII, _TIMES_ITALIC, strict=True)),
+    "times-bolditalic": dict(zip(_ASCII, _TIMES_BOLD_ITALIC, strict=True)),
     "courier": {},  # monospaced: every glyph, whatever its code, advances 600
     None: dict(zip(_ASCII, _PROPORTIONAL_MAX, strict=True)),
 }
@@ -412,8 +445,11 @@ def _width_table_for(font: _Object | None) -> str | None:
         return "courier"
     if re.fullmatch(r"(helvetica|arial)-?(bold)?(oblique|italic)?(mt)?", name):
         return "helvetica-bold" if "bold" in name else "helvetica"
-    if name in {"times-roman", "timesnewroman", "timesnewromanpsmt"}:
-        return "times"
+    if re.fullmatch(r"times-(roman|bold|italic|bolditalic)", name) or re.fullmatch(
+        r"timesnewroman(ps)?(-bold|-italic|-bolditalic)?(mt)?", name
+    ):
+        style = ("bold" if "bold" in name else "") + ("italic" if "italic" in name else "")
+        return f"times-{style}" if style else "times"
     return None
 
 
@@ -487,6 +523,20 @@ def _font_advances(font: _Object | None, objects: dict[int, _Object]) -> tuple[f
         else max(named[code], generous[code], fill)
         for code in range(256)
     )
+
+
+def _widths_unavailable(font: _Object | None, objects: dict[int, _Object]) -> bool:
+    """A simple font whose advances only a guess can supply: it goes to review.
+
+    Outside an exact standard name with no font program of its own, the PDF format requires a
+    valid /Widths, and a viewer may otherwise draw from the embedded program, whose glyphs can
+    be wider than any bound this reader assumes.
+    """
+    if font is None or not re.search(_SIMPLE_FONT, font.head):
+        return False  # unresolved, Type0 and Type3 fonts already flag font_encoding_unverified
+    if _width_table_for(font) is not None and b"/FontDescriptor" not in font.head:
+        return False
+    return not isinstance(_declared_widths(font.head, objects), tuple)
 
 
 def _extent_units(
@@ -1038,6 +1088,8 @@ def read_pdf(data: bytes, limits: Limits, deadline: Deadline) -> ReadResult:
                 image_pages.append(page_number)
             continue
         flagged_font = any(not _font_ok(fonts, f.font, f.text) for f in fragments)
+        if any(_widths_unavailable(fonts.get(f.font), objects) for f in fragments):
+            marks.add("font_widths_unavailable")
         passages = _passages(_lines(fragments))
         for index, lines in enumerate(passages, start=1):
             reading_order += 1

@@ -172,6 +172,7 @@ REVIEW_FLAGS = frozenset(
         "clip_region_present",
         "image_text_overlay_unverified",
         "content_stream_unresolved",
+        "font_widths_unavailable",
     }
 )
 

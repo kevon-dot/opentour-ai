@@ -923,7 +923,13 @@ def test_pdf_long_run_of_wide_glyphs_in_a_known_font_runs_off_the_page() -> None
         (b"Helvetica-Light", None),
         (b"Helvetica-Condensed", None),
         (b"Helvetica-Rounded-Bold", None),
-        (b"Times-Bold", None),
+        (b"Times-Bold", "times-bold"),  # was None: the exact core-14 AFM table is now used
+        (b"Times-Italic", "times-italic"),
+        (b"Times-BoldItalic", "times-bolditalic"),
+        (b"TimesNewRomanPS-BoldItalicMT", "times-bolditalic"),
+        (b"TimesNewRoman,Italic", "times-italic"),
+        (b"Times-Light", None),
+        (b"TimesNewRoman-Condensed", None),
         (b"Courier", "courier"),
         (b"Courier-BoldOblique", "courier"),
         (b"CourierNewPS-BoldMT", "courier"),
@@ -1022,23 +1028,23 @@ def test_pdf_widths_array_keeps_a_narrow_face_from_flagging_falsely() -> None:
     _flagged(show + _logo_at(130), _OVERLAP, font=_font(b"Foo"), **_IMG)
 
 
-@pytest.mark.parametrize(
-    "widths",
-    [
-        b" /FirstChar 32 /LastChar 126 /Widths [" + b"100 " * 94 + b"]",  # one short
-        b" /FirstChar 32 /LastChar 126 /Widths [" + b"100 " * 96 + b"]",  # one long
-        b" /FirstChar 32 /LastChar 126 /Widths [" + b"100 " * 94 + b"/x]",  # not a number
-        b" /FirstChar 32 /LastChar 126 /Widths [" + b"100 " * 94 + b"-100]",  # negative
-        b" /FirstChar 32 /LastChar 126 /Widths [" + b"100 " * 94 + b"9 0 R]",  # a reference
-        b" /LastChar 126 /Widths [" + b"100 " * 95 + b"]",  # no FirstChar
-        b" /FirstChar 32 /Widths [" + b"100 " * 95 + b"]",  # no LastChar
-        b" /FirstChar 126 /LastChar 32 /Widths [" + b"100 " * 95 + b"]",  # reversed range
-        b" /FirstChar 32.5 /LastChar 126 /Widths [" + b"100 " * 95 + b"]",  # not an integer
-        b" /FirstChar 32 /LastChar 300 /Widths [" + b"100 " * 269 + b"]",  # past one byte
-        b" /FirstChar 32 /LastChar 126 /Widths 99 0 R",  # unresolved reference
-        b" /FirstChar 32 /LastChar 126 /Widths (100)",  # not an array
-    ],
-)
+_MALFORMED_WIDTHS = [
+    b" /FirstChar 32 /LastChar 126 /Widths [" + b"100 " * 94 + b"]",  # one short
+    b" /FirstChar 32 /LastChar 126 /Widths [" + b"100 " * 96 + b"]",  # one long
+    b" /FirstChar 32 /LastChar 126 /Widths [" + b"100 " * 94 + b"/x]",  # not a number
+    b" /FirstChar 32 /LastChar 126 /Widths [" + b"100 " * 94 + b"-100]",  # negative
+    b" /FirstChar 32 /LastChar 126 /Widths [" + b"100 " * 94 + b"9 0 R]",  # a reference
+    b" /LastChar 126 /Widths [" + b"100 " * 95 + b"]",  # no FirstChar
+    b" /FirstChar 32 /Widths [" + b"100 " * 95 + b"]",  # no LastChar
+    b" /FirstChar 126 /LastChar 32 /Widths [" + b"100 " * 95 + b"]",  # reversed range
+    b" /FirstChar 32.5 /LastChar 126 /Widths [" + b"100 " * 95 + b"]",  # not an integer
+    b" /FirstChar 32 /LastChar 300 /Widths [" + b"100 " * 269 + b"]",  # past one byte
+    b" /FirstChar 32 /LastChar 126 /Widths 99 0 R",  # unresolved reference
+    b" /FirstChar 32 /LastChar 126 /Widths (100)",  # not an array
+]
+
+
+@pytest.mark.parametrize("widths", _MALFORMED_WIDTHS)
 def test_pdf_malformed_widths_array_is_never_trusted(widths: bytes) -> None:
     # Trusted, these 100-unit widths would put eight W at 12 pt ending at 81.6, clear of x=130.
     show = b"BT /F1 12 Tf 72 700 Td (WWWWWWWW) Tj ET"
@@ -1116,3 +1122,69 @@ def test_pdf_courier_like_face_without_an_exact_name_is_never_measured_below_cou
     # Wider than Courier where the generous fallback is: 25 W at 1000 units end at 347.
     content = b"q 0 0 300 792 re W n BT /F1 11 Tf 72 700 Td (" + b"W" * 25 + b") Tj ET Q"
     _flagged(content, "clip_region_present", font=_font(face))
+
+
+# ---------------------------------------------------- exact Times faces, missing /Widths
+
+
+@pytest.mark.parametrize(
+    ("face", "text", "size", "start", "true_end", "clear_x"),
+    [
+        (b"Times-Italic", b"The quick brown fox jumps over the lazy dog.", 11, 72, 272.1, 310),
+        (b"Times-Bold", b"The quick brown fox jumps over the lazy dog.", 11, 72, 287.4, 310),
+        (b"Times-BoldItalic", b"ACME Corp", 14, 400, 472.7, 480),
+        (b"Times-Bold", b"ACME Corp", 14, 400, 477.4, 480),
+    ],
+)
+def test_pdf_unembedded_times_faces_are_measured_by_their_own_metrics(
+    face: bytes, text: bytes, size: int, start: int, true_end: float, clear_x: int
+) -> None:
+    # A standard-14 face with no program of its own is drawn from these AFM metrics, so its
+    # true end is exact; the six-face maximum would put each of these past the logo.
+    advances = pdf._font_advances(pdf._Object(7, _font(face), None), {})
+    _left, right, _pen = pdf._extent_units([text], advances, size)
+    assert start + right == pytest.approx(true_end, abs=0.05)
+    generous = pdf._extent_units([text], pdf._ADVANCES[None], size)[1]
+    assert start + generous > clear_x
+    show = b"BT /F1 %d Tf %d 700 Td (%s) Tj ET" % (size, start, text)
+    _eligible(show + _logo_at(clear_x), font=_font(face), **_IMG)
+
+
+_WIDTHS_FLAG = "font_widths_unavailable"
+_SHORT = b"BT /F1 11 Tf 72 700 Td (Short line) Tj ET"
+
+
+@pytest.mark.parametrize(
+    "font",
+    [
+        _font(b"Foo"),  # a non-standard name with no /Widths
+        _font(b"Arial-Black"),
+        _font(b"CourierPrime"),
+        _font(b"Helvetica", b" /FontDescriptor 8 0 R"),  # a standard name over its own program
+        b"<< /Type /Font /Subtype /TrueType /BaseFont /Garamond /Encoding /WinAnsiEncoding >>",
+    ],
+)
+def test_pdf_non_standard_font_without_widths_goes_to_review(font: bytes) -> None:
+    # Nothing on the page is near an edge, clip or image: the font alone sends it to review.
+    descriptor = {8: b"<< /Type /FontDescriptor /FontName /Helvetica /Flags 32 >>"}
+    _flagged(_SHORT, _WIDTHS_FLAG, font=font, extra=descriptor)
+
+
+@pytest.mark.parametrize("widths", _MALFORMED_WIDTHS)
+def test_pdf_non_standard_font_with_malformed_widths_goes_to_review(widths: bytes) -> None:
+    _flagged(_SHORT, _WIDTHS_FLAG, font=_font(b"Foo", widths))
+
+
+@pytest.mark.parametrize(
+    "font",
+    [
+        _font(b"Foo", _widths(32, [500] * 95)),  # valid /Widths
+        _font(b"Arial-Black", _widths(32, [700] * 95)),
+        _font(b"Helvetica"),  # exact standard names without a descriptor
+        _font(b"Times-BoldItalic"),
+        _font(b"Courier-Bold"),
+        _font(b"ArialMT"),
+    ],
+)
+def test_pdf_font_with_known_widths_stays_eligible(font: bytes) -> None:
+    _eligible(_SHORT, font=font)
