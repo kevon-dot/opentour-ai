@@ -140,6 +140,7 @@ class Scenario:
         slice_of=None,
         prefix="",
         family_prefix=None,
+        family_of=None,
     ):
         family_prefix = prefix if family_prefix is None else family_prefix
         cases, labels = [], {}
@@ -156,7 +157,8 @@ class Scenario:
                 cases.append(
                     iv.DecisionCase(
                         case_id,
-                        f"{family_prefix}family-{index // family_size:04d}",
+                        f"{family_prefix}family-"
+                        + (family_of(index) if family_of else f"{index // family_size:04d}"),
                         {"case_ref": case_id, "text": f"generated-input-{index}"},
                         tuple(slices),
                     )
@@ -1462,3 +1464,59 @@ def test_m5_candidate_deferrals_cannot_hide_a_critical_slice_veto(tmp_path):
         "status": "veto",
     }
     assert "coverage_expansion_within_ceiling" not in json.dumps(doc["reasons"])
+
+
+# ----------------------------------------------------------------- G: final delta-review tests
+
+
+def test_g1_unoffset_candidate_errors_on_comparator_gaps_are_a_regression(tmp_path):
+    """Mutant: turning the total-wrong regression into inconclusive must fail here."""
+    s = Scenario([("RR", 150), ("MW", 5)])
+    pol = policy(max_missing=5, **LOOSE)
+    doc = held(run(tmp_path, s, pol=pol), "regression", "total_wrong_automatic_increased")
+    pair = doc["comparisons"]["incumbent"]
+    assert pair["comparator_gaps"] == 5 and pair["comparator_gap_candidate_wrong"] == 5
+    assert pair["total_wrong_automatic"] == {"candidate": 5, "comparator": 0}
+    assert (pair["paired"]["fixes"], pair["paired"]["new_errors"]) == (0, 0)
+
+
+def test_g2_only_the_interval_gate_catches_errors_spread_across_families(tmp_path):
+    """Mutant: removing the upper-bound-below-zero gate must fail here.
+
+    Fixes and new errors tie at 50, so the shared-case and total-wrong gates do not fire, but
+    the 50 fixes sit in one family and the 50 new errors in 50 families: the family mean is
+    (1 - 50) / 51 and its whole interval lies below zero.
+    """
+    s = Scenario(
+        [("WR", 50), ("RW", 50)],
+        family_of=lambda i: "big" if i < 50 else f"{i:04d}",
+    )
+    doc = held(run(tmp_path, s), "regression", "upper_bound_below_zero")
+    pair = doc["comparisons"]["incumbent"]
+    assert (pair["paired"]["fixes"], pair["paired"]["new_errors"]) == (50, 50)
+    assert pair["total_wrong_automatic"] == {"candidate": 50, "comparator": 50}
+    assert pair["uncertainty"]["families"] == 51
+    assert pair["uncertainty"]["upper"].startswith("-")
+
+
+def test_g3_shared_case_gate_boundary(tmp_path):
+    """Mutant: ``new_errors > fixes + 1`` must fail here (fires at fixes + 1, not at fixes)."""
+    over = Scenario([("WR", 10), ("RW", 11), ("RR", 179)])
+    doc = held(run(tmp_path / "over", over), "regression", "shared_case_errors_increased")
+    assert doc["comparisons"]["incumbent"]["paired"]["fixes"] == 10
+    assert doc["comparisons"]["incumbent"]["paired"]["new_errors"] == 11
+    tie = Scenario([("WR", 10), ("RW", 10), ("RR", 180)])
+    doc = held(run(tmp_path / "tie", tie), "inconclusive", "interval_spans_threshold")
+    assert not any("shared_case_errors_increased" in r for r in doc["reasons"])
+
+
+def test_g4_probe4_gap_errors_offset_by_deferrals_are_not_called_coverage_expansion(tmp_path):
+    """Probe4 g_gap_offset_by_deferral: RR150, MW5, WD5, DR38, DW2 with max_missing 5."""
+    s = Scenario([("RR", 150), ("MW", 5), ("WD", 5), ("DR", 38), ("DW", 2)])
+    pol = policy(max_missing=5, **LOOSE)
+    doc = held(run(tmp_path, s, pol=pol), "inconclusive", "comparator_gap_errors_offset")
+    pair = doc["comparisons"]["incumbent"]
+    assert pair["total_wrong_automatic"] == {"candidate": 7, "comparator": 5}
+    assert pair["newly_automated"] == {"wrong": 2, "total": 40}
+    assert pair["comparator_gap_candidate_wrong"] == 5
+    assert not any("coverage_expansion_within_ceiling" in r for r in doc["reasons"])

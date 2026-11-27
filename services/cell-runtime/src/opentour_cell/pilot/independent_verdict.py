@@ -580,10 +580,11 @@ def _pair(comp: Sequence[str], cand: Sequence[str]) -> Json:
     """
     out: Json = {f: 0 for f in _PAIR_FIELDS}
     excluded: dict[str, int] = {}
-    newly, newly_wrong, comp_gaps = 0, 0, 0
+    newly, newly_wrong, comp_gaps, gap_wrong = 0, 0, 0, 0
     for c, t in zip(comp, cand, strict=True):
         if c in ("missing_output", "malformed_output"):
             comp_gaps += 1
+            gap_wrong += t == "wrong_automatic"
         if c == "deferred" and _is_auto(t):
             newly += 1
             newly_wrong += t == "wrong_automatic"
@@ -605,6 +606,7 @@ def _pair(comp: Sequence[str], cand: Sequence[str]) -> Json:
     out["excluded"] = dict(sorted(excluded.items()))
     out["newly_automated"] = [newly_wrong, newly]
     out["comparator_gaps"] = comp_gaps
+    out["comparator_gap_candidate_wrong"] = gap_wrong
     return out
 
 
@@ -1312,6 +1314,7 @@ class IndependentEvaluator:
         checks = {
             "candidate_missing": cand_arm["missing"] + cand_arm["malformed"],
             "comparator_missing": pair["comparator_gaps"],
+            "comparator_gap_candidate_wrong": pair["comparator_gap_candidate_wrong"],
             "candidate_coverage": Fraction(*cand_arm["coverage"]),
             "comparator_coverage": Fraction(*comp_arm["coverage"]),
             "candidate_total_wrong": cand_arm["wrong_automatic"],
@@ -1342,6 +1345,7 @@ class IndependentEvaluator:
                 "total": pair["newly_automated"][1],
             },
             "comparator_gaps": pair["comparator_gaps"],
+            "comparator_gap_candidate_wrong": pair["comparator_gap_candidate_wrong"],
             "improvement": {
                 "fraction": [improvement.numerator, improvement.denominator]
                 if pair["comparable"]
@@ -1408,12 +1412,20 @@ class IndependentEvaluator:
         if newly and type(ceiling) is not int:
             return "inconclusive", "newly_automated_without_error_ceiling"
         # ---- residual total-wrong check, safe only after the shared-case gate above
-        if checks["candidate_total_wrong"] > checks["comparator_total_wrong"]:
-            if checks["candidate_total_wrong"] - newly_wrong <= checks["comparator_total_wrong"]:
-                # The excess is all newly automated, within the ceiling, with no shared-case,
-                # slice or interval regression: more automation, not a gain. Never alerts.
-                return "inconclusive", "coverage_expansion_within_ceiling"
-            return "regression", "total_wrong_automatic_increased"
+        excess = checks["candidate_total_wrong"] - checks["comparator_total_wrong"]
+        if excess > 0:
+            if excess > newly_wrong:
+                # More extra errors than newly automated ones explain (e.g. candidate errors on
+                # comparator-gap cases with nothing offsetting them).
+                return "regression", "total_wrong_automatic_increased"
+            if checks["comparator_gap_candidate_wrong"]:
+                # The candidate erred on comparator-gap cases, and those errors are balanced
+                # elsewhere (the candidate deferring comparator errors, or shared fixes); they
+                # are not newly automated, so they are not labelled coverage expansion.
+                return "inconclusive", "comparator_gap_errors_offset"
+            # The excess is all newly automated, within the ceiling, with no shared-case,
+            # slice or interval regression: more automation, not a gain. Never alerts.
+            return "inconclusive", "coverage_expansion_within_ceiling"
         # ---- support and the interval decision
         if any(v["status"] == "unsupported" for v in slices.values()):
             return "inconclusive", "critical_slice_unsupported"
