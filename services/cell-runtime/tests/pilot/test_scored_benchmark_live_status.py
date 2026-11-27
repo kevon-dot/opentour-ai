@@ -12,7 +12,12 @@ from types import SimpleNamespace
 
 from opentour_cell.pilot import starter_benchmark_worker as worker
 from opentour_cell.pilot.intake_mcp import GET_RUN, SUBMIT, IntakePrincipal
-from opentour_cell.pilot.live_authority import SCHEMA, SELECTION_SCHEMA, PrivateLiveAuthority
+from opentour_cell.pilot.live_authority import (
+    SCHEMA,
+    SELECTION_SCHEMA,
+    TEMPORARY_ENFORCEMENT_OPT_OUT,
+    PrivateLiveAuthority,
+)
 from opentour_cell.pilot.live_evidence import LiveEvidence, _canonical
 from opentour_cell.pilot.starter_evaluation_worker import main as evaluate
 from test_intake_mcp import _write_private
@@ -95,6 +100,8 @@ def test_scored_starter_and_two_decision_revisions(publication, installed, monke
         expires_at=int(time.time()) + 600,
         state="current",
         actors={ACTOR: ["custodian", "inspect"], cap["reader"]: ["intake"]},
+        # Fixture predates the enforcing default; it does not enroll an engagement ledger.
+        engagement_ledger_required=TEMPORARY_ENFORCEMENT_OPT_OUT,
     )
     _write_private(directory / "live-authority-key.json", {"key": KEY.hex()})
     selection = directory / "decision-intake.json"

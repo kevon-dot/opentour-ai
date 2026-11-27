@@ -54,6 +54,12 @@ _FIELDS = {
     "actors",
     "grants",
 }
+# TEMPORARY, one-release migration escape hatch. Remove it (and its marker state) in the release
+# after the one that introduced it. Epoch enforcement is the default: a grant that omits
+# `engagement_ledger_required`, or sets it to true, is enforced. Only this exact, deliberate
+# value disables enforcement; it is recorded as `temporary_opt_out` in live evidence. `false`
+# and any other value are refused.
+TEMPORARY_ENFORCEMENT_OPT_OUT = "temporary_opt_out_remove_next_release"
 _ROLES = {"inspect", "intake", "custodian", "verify", "workflow_owner"}
 
 
@@ -76,11 +82,12 @@ class PrivateLiveAuthority:
     write this directory can mint a grant, alter one, or strip a field such as
     `engagement_ledger_required`. No key-custody or custodian-identity contract exists yet.
 
-    Epoch enforcement is opt-in per grant. A grant must carry
-    `engagement_ledger_required: true` for the engagement-epoch ledger to be enforced.
-    A grant without the field (the field is not required) runs UNENFORCED: no ledger is
-    opened and no epoch hold applies. That state is recorded in live evidence as
-    `epoch_enforcement: not_required_by_grant`, never as enforced.
+    Epoch enforcement is the default. A grant that omits `engagement_ledger_required`, or
+    sets it to `true`, is enforced against the engagement-epoch ledger (which must exist
+    and be enrolled, else the operation holds with `engagement_epoch_hold`). `false` is
+    refused. The only way to run unenforced is the explicit, TEMPORARY one-release
+    migration value `TEMPORARY_ENFORCEMENT_OPT_OUT`; that state is recorded in live
+    evidence as `epoch_enforcement: temporary_opt_out`, never as enforced.
     """
 
     def __init__(self, directory: Path, tenant: str, workflow_ref: str):
@@ -102,7 +109,8 @@ class PrivateLiveAuthority:
             and _FIELDS <= body.keys()
             and body.keys() <= _FIELDS | {"slack_verifiers", "engagement_ledger_required"}
         )
-        _require(body.get("engagement_ledger_required", True) is True)
+        required = body.get("engagement_ledger_required", True)  # absent means enforcing
+        _require(required is True or required == TEMPORARY_ENFORCEMENT_OPT_OUT)
         _require(
             hmac.compare_digest(
                 signature,
@@ -156,20 +164,19 @@ class PrivateLiveAuthority:
         return dict(body)
 
     def engagement_gate(self, scope: LiveScope) -> EngagementLedger | None:
-        """Open the engagement ledger only if the sealed grant explicitly requires it.
+        """Open the engagement ledger unless the grant carries the temporary opt-out.
 
-        The grant must carry `engagement_ledger_required: true`. When the field is absent
-        this returns None, a deliberate unenforced state (`_document` already rejects any
-        value other than true), and the caller records it as `not_required_by_grant`.
-        The seal is a locally keyed HMAC with a co-located key; it proves self-consistency
-        only, so this requirement is as strong as write access to the directory.
+        Absent or `true` enforces; `_document` already refused `false` and unknown values.
+        Only `TEMPORARY_ENFORCEMENT_OPT_OUT` returns None, and the caller records that as
+        `temporary_opt_out`. The seal is a locally keyed HMAC with a co-located key; it
+        proves self-consistency only, so anyone with write access to the directory can add
+        the opt-out value or strip the field.
         """
         body = self._document()
         _require(_digest(body) == scope.authority_revision)
-        if "engagement_ledger_required" not in body:
-            # Deliberate: this grant opts out of epoch enforcement. Not a fall-through.
+        if body.get("engagement_ledger_required") == TEMPORARY_ENFORCEMENT_OPT_OUT:
+            # Deliberate, temporary: this grant explicitly opts out of epoch enforcement.
             return None
-        _require(body["engagement_ledger_required"] is True)
         try:
             ledger = EngagementLedger(self.directory, existing_only=True)
             for grant in scope.grants:
@@ -235,8 +242,7 @@ class PrivateLiveAuthority:
                 "verify" in roles and actor.role == "slack",
                 "workflow_owner" in roles and actor.role == "slack",
             )
-            if "engagement_ledger_required" in body:
-                self.engagement_gate(scope)
+            self.engagement_gate(scope)
             yield scope
             _require(self._document() == body)
 

@@ -17,6 +17,7 @@ from opentour_cell.pilot.learning_mandate import LearningMandates
 from opentour_cell.pilot.live_authority import (
     SCHEMA,
     SELECTION_SCHEMA,
+    TEMPORARY_ENFORCEMENT_OPT_OUT,
     LocalLiveIntake,
     PrivateLiveAuthority,
 )
@@ -124,6 +125,9 @@ class SignedCase:
                 "owner": ["inspect"],
             },
             "grants": [asdict(DECISION), asdict(OUTCOME)],
+            # Fixture predates the enforcing default and enrolls no ledger. Tests of the
+            # default itself remove this field (see the enforcement tests at the end).
+            "engagement_ledger_required": TEMPORARY_ENFORCEMENT_OPT_OUT,
         }
         _write_private(path / "live-authority-key.json", {"key": KEY.hex()})
         self.write()
@@ -546,27 +550,57 @@ def _archived_markers(case):
     return [json.loads(r[0]).get("epoch_enforcement") for r in rows]
 
 
-def test_grant_without_flag_records_epoch_enforcement_not_required(tmp_path: Path):
+def test_temporary_opt_out_disables_enforcement_and_is_recorded(tmp_path: Path):
     case = SignedCase(tmp_path / "worker")
-    assert "engagement_ledger_required" not in case.body
+    assert case.body["engagement_ledger_required"] == TEMPORARY_ENFORCEMENT_OPT_OUT
     reference = case.connect()
-    # Absent flag: the authority resolves no gate, so no ledger is opened or created.
+    # Explicit opt-out: the authority resolves no gate, so no ledger is opened or created.
     with case.authority.guard(case.actor, case.workflow) as scope:
         assert case.authority.engagement_gate(scope) is None
     _ingest_authority_page(case, reference, "page-a", [31])
     assert not (case.directory / "engagement-epochs.sqlite3").exists()
     reads = case.live.read_receipts(case.custodian, case.workflow)
-    assert [r["epoch_enforcement"] for r in reads] == ["not_required_by_grant"]
-    assert _archived_markers(case) == ["not_required_by_grant"]
+    assert [r["epoch_enforcement"] for r in reads] == ["temporary_opt_out"]
+    assert _archived_markers(case) == ["temporary_opt_out"]
     with case.live._db() as db:
         recorded = " ".join(str(r[0]) for r in db.execute("SELECT body FROM live_reads"))
         recorded += " ".join(str(r[0]) for r in db.execute("SELECT body FROM live_snapshots"))
-    assert "applied" not in recorded.replace("not_required_by_grant", "")
+    assert "applied" not in recorded.replace("temporary_opt_out", "")
 
 
-def test_grant_with_flag_records_epoch_enforcement_applied(tmp_path: Path):
+def test_grant_without_field_is_enforced_and_holds_without_ledger(tmp_path: Path):
     case = SignedCase(tmp_path / "worker")
-    case.body["engagement_ledger_required"] = True
+    del case.body["engagement_ledger_required"]
+    case.write()
+    # Absent means enforcing: no ledger exists, so bind holds and nothing is created.
+    with pytest.raises(IntakeError, match="engagement_epoch_hold"):
+        case.connect()
+    assert not (case.directory / "engagement-epochs.sqlite3").exists()
+    assert not case.live.path.exists()
+    # The same absent field is also refused at guard entry for read paths.
+    with pytest.raises(IntakeError, match="engagement_epoch_hold"):
+        with case.authority.guard(case.actor, case.workflow):
+            pass
+
+
+@pytest.mark.parametrize("value", [False, 0, 1, "true", None, "temporary_opt_out", ""])
+def test_unrecognised_or_false_flag_values_are_refused(tmp_path: Path, value):
+    case = SignedCase(tmp_path / "worker")
+    case.body["engagement_ledger_required"] = value
+    case.write()
+    with pytest.raises(IntakeError, match="live_evidence_unavailable"):
+        case.authority._document()
+    with pytest.raises(IntakeError):
+        case.connect()
+
+
+@pytest.mark.parametrize("flag", ["absent", True])
+def test_grant_with_enforcing_flag_records_epoch_enforcement_applied(tmp_path: Path, flag):
+    case = SignedCase(tmp_path / "worker")
+    if flag == "absent":
+        del case.body["engagement_ledger_required"]
+    else:
+        case.body["engagement_ledger_required"] = flag
     case.write()
     epoch = case.body["engagement_epoch"]
     ledger = EngagementLedger(case.directory)
@@ -593,3 +627,24 @@ def test_grant_with_flag_records_epoch_enforcement_applied(tmp_path: Path):
     ledger.withdraw("org-a", epoch, revocation_epoch=1)
     with pytest.raises(IntakeError, match="engagement_epoch_hold"):
         _ingest_authority_page(case, reference, "page-b", [40])
+
+
+def test_every_production_live_evidence_site_takes_the_authority_default():
+    """No site passes its own `engagements`, so each one inherits PrivateLiveAuthority's gate."""
+    import ast
+
+    root = Path(__file__).resolve().parents[2] / "src" / "opentour_cell"
+    sites = []
+    for source in root.rglob("*.py"):
+        for node in ast.walk(ast.parse(source.read_text())):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id == "LiveEvidence"
+            ):
+                sites.append((source.name, node))
+    assert len(sites) == 5, [name for name, _ in sites]
+    for name, node in sites:
+        assert len(node.args) == 2 and not node.keywords, name
+        authority = ast.unparse(node.args[1])
+        assert authority in {"authority", "self.authority"}, (name, authority)

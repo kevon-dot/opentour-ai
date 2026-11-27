@@ -18,7 +18,12 @@ from opentour_cell.pilot import live_reader, local_decision_context, model_conne
 from opentour_cell.pilot import text_classifier as cpu
 from opentour_cell.pilot.intake_local import open_intake
 from opentour_cell.pilot.intake_mcp import DISCOVER, GET_RUN, SUBMIT, IntakePrincipal, parse_intake
-from opentour_cell.pilot.live_authority import SCHEMA, SELECTION_SCHEMA, PrivateLiveAuthority
+from opentour_cell.pilot.live_authority import (
+    SCHEMA,
+    SELECTION_SCHEMA,
+    TEMPORARY_ENFORCEMENT_OPT_OUT,
+    PrivateLiveAuthority,
+)
 from opentour_cell.pilot.live_evidence import LiveEvidence, _canonical, _digest
 from opentour_cell.pilot.operating_point import canonical, digest
 from opentour_cell.pilot.readiness_selection import SCHEMA as READINESS_SCHEMA
@@ -275,6 +280,8 @@ def test_p1_invoice_commit_then_independent_truth(
         state="current",
         actors={ACTOR: ["custodian", "inspect"], "worker": ["intake", "inspect"]},
         grants=[asdict(DECISION)],
+        # Fixture predates the enforcing default; it does not enroll an engagement ledger.
+        engagement_ledger_required=TEMPORARY_ENFORCEMENT_OPT_OUT,
     )
     _write_private(directory / "live-authority-key.json", {"key": KEY.hex()})
     sign(h, body)

@@ -513,7 +513,7 @@ def test_epoch_enforcement_marker_is_closed_vocabulary(tmp_path):
 
     assert EPOCH_ENFORCEMENT_STATES == {
         "applied",
-        "not_required_by_grant",
+        "temporary_opt_out",
         "not_available_from_authority",
         "not_evaluated",
         "not_recorded",

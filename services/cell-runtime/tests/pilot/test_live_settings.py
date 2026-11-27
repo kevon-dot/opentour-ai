@@ -9,7 +9,12 @@ from dataclasses import asdict
 import pytest
 from opentour_cell.pilot.intake_admission import DurableIntake
 from opentour_cell.pilot.intake_mcp import IntakeError, IntakePrincipal, parse_intake
-from opentour_cell.pilot.live_authority import SCHEMA, LocalLiveIntake, PrivateLiveAuthority
+from opentour_cell.pilot.live_authority import (
+    SCHEMA,
+    TEMPORARY_ENFORCEMENT_OPT_OUT,
+    LocalLiveIntake,
+    PrivateLiveAuthority,
+)
 from opentour_cell.pilot.live_evidence import _canonical
 from test_app_home import click, publish
 from test_intake_mcp import _write_private
@@ -48,6 +53,8 @@ def connected_settings(founder: Harness, monkeypatch):
         "state": "current",
         "actors": {ACTOR: ["custodian", "inspect"], OTHER: ["inspect"]},
         "grants": [asdict(DECISION), asdict(OUTCOME)],
+        # Fixture predates the enforcing default; it does not enroll an engagement ledger.
+        "engagement_ledger_required": TEMPORARY_ENFORCEMENT_OPT_OUT,
     }
     _write_private(h.path.parent / "live-authority-key.json", {"key": KEY.hex()})
     sign(h, body)

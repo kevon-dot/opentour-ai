@@ -99,15 +99,15 @@ class EngagementAuthority(Protocol):
 # It states whether engagement-epoch enforcement was applied to the operation that wrote the
 # record, so an unenforced result can never be read as an enforced one.
 #   applied                      a gate was resolved and its checks ran for this operation
-#   not_required_by_grant        the authority resolved no gate: the grant does not carry
-#                                `engagement_ledger_required: true`, so nothing was enforced
+#   temporary_opt_out            the grant carries the explicit, temporary one-release opt-out,
+#                                so the authority resolved no gate and nothing was enforced
 #   not_available_from_authority the authority offers no engagement gate at all
 #   not_evaluated                the writing operation does not evaluate epoch enforcement
 #   not_recorded                 (read side only) a row written before this marker existed
 EPOCH_ENFORCEMENT_STATES = frozenset(
     {
         "applied",
-        "not_required_by_grant",
+        "temporary_opt_out",
         "not_available_from_authority",
         "not_evaluated",
         "not_recorded",
@@ -255,7 +255,7 @@ class LiveEvidence:
         if gate is not None:
             return "applied"
         if self.engagements is None and isinstance(self.authority, EngagementAuthority):
-            return "not_required_by_grant"
+            return "temporary_opt_out"
         return "not_available_from_authority"
 
     def _engagement_checkpoint(
