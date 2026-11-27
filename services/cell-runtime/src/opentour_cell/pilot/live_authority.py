@@ -5,12 +5,14 @@ from __future__ import annotations
 import hmac
 import os
 import re
+import sqlite3
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
+from opentour_cell.pilot.engagement_epochs import EngagementLedger
 from opentour_cell.pilot.intake_admission import DurableIntake
 from opentour_cell.pilot.intake_mcp import (
     CatalogFeed,
@@ -79,7 +81,12 @@ class PrivateLiveAuthority:
         key, body, signature = keys["key"], envelope["grant"], envelope["seal_sha256"]
         _require(isinstance(key, str) and re.fullmatch(r"[0-9a-f]{64}", key))
         _require(isinstance(signature, str) and re.fullmatch(r"[0-9a-f]{64}", signature))
-        _require(isinstance(body, dict) and set(body) in (_FIELDS, _FIELDS | {"slack_verifiers"}))
+        _require(
+            isinstance(body, dict)
+            and _FIELDS <= body.keys()
+            and body.keys() <= _FIELDS | {"slack_verifiers", "engagement_ledger_required"}
+        )
+        _require(body.get("engagement_ledger_required", True) is True)
         _require(
             hmac.compare_digest(
                 signature,
@@ -131,6 +138,24 @@ class PrivateLiveAuthority:
                 )
             )
         return dict(body)
+
+    def engagement_gate(self, scope: LiveScope) -> EngagementLedger | None:
+        """Open only a ledger explicitly required by the custodian-signed grant."""
+        body = self._document()
+        _require(_digest(body) == scope.authority_revision)
+        if body.get("engagement_ledger_required") is not True:
+            return None
+        try:
+            ledger = EngagementLedger(self.directory, existing_only=True)
+            for grant in scope.grants:
+                checkpoint = ledger.live_gate(
+                    scope.tenant, scope.engagement_epoch, grant.resource, grant.lease_ref
+                )
+                if grant.checkpoint < checkpoint:
+                    raise ValueError("source_checkpoint_mismatch")
+        except (ValueError, sqlite3.Error):
+            raise IntakeError("engagement_epoch_hold") from None
+        return ledger
 
     @contextmanager
     def guard(self, actor: IntakePrincipal, workflow_ref: str) -> Iterator[LiveScope]:
@@ -185,6 +210,8 @@ class PrivateLiveAuthority:
                 "verify" in roles and actor.role == "slack",
                 "workflow_owner" in roles and actor.role == "slack",
             )
+            if body.get("engagement_ledger_required") is True:
+                self.engagement_gate(scope)
             yield scope
             _require(self._document() == body)
 
