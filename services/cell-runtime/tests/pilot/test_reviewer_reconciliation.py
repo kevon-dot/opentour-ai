@@ -190,7 +190,7 @@ def test_crash_after_projection_before_ack_repeats_without_new_outbox(tmp_path):
         "acknowledge_reconciliation",
         side_effect=OSError("generated stop before ACK"),
     ):
-        with pytest.raises(ValueError, match="original_request_signer_required"):
+        with pytest.raises(OSError):
             project(s, case)
     assert s.assignments.pending_reconciliations(actor=s.operator)["pending_count"] == 1
     assert case.bridge.pending_summary()["counts"] == {"superseded": 1}
@@ -386,6 +386,84 @@ def test_completed_receipt_survives_replacement_without_provider_status_inferenc
     assert len(list(s.customer.owner.glob("managed-outputs/*/release-decision.json"))) == 1
 
 
+def test_adoption_preserves_completed_reissue_after_original_mandate_withdrawal(tmp_path):
+    s = AssignmentSetup(tmp_path)
+    case, old, envelope = inspected_case(s, tmp_path)
+    case.bridge.consume(resign(case, envelope, {"status": "Pending"}))
+    case.bridge.prepare_cutover()
+    case.policy["zap_version"] = "generated-v2"
+    save(case.bridge.config, case.policy)
+    case.bridge.complete_cutover()
+    case.view = case.h.launch()
+    case.h.action(case.view, "ot_evidence", case.revision)
+    fresh = case.bridge.issue(**case.binding)
+    assert fresh["request_id"] != old["request_id"]
+    deliver(case, fresh)
+    case.bridge.consume(case.signed(fresh))
+    journal = zapier_approval.ReconciliationJournal(case.directory, s.customer.org)
+    with journal.db() as db:
+        db.execute(
+            "UPDATE requests SET provider_status='unknown' WHERE id=?", (fresh["request_id"],)
+        )
+    packet, _ = packet_for(s)
+    receipt = s.service.save(packet, actor=s.owner)
+    assert project(s, case)["records"] == []
+    case.bridge.prepare_cutover()
+    case.policy["reviewer"] = s.successor
+    save(case.bridge.config, case.policy)
+    adopted = case.bridge.complete_reviewer_replacement(authority=s.authority, actor=s.operator)
+    assert adopted["generation"] == receipt["revision"]
+    assert case.bridge.pending_summary()["counts"] == {"approved": 1, "superseded": 1}
+    # The actual final receipt belongs only to the newly inspected request.
+    policy, key = case.bridge._policy()
+    old_request, _, _, _ = case.bridge._archived_request(journal, old["request_id"], key)
+    assert case.bridge._completed_decision(old_request) is None
+    assert len(list(s.customer.owner.glob("managed-outputs/*/release-decision.json"))) == 1
+
+
+def test_new_installation_epoch_requires_a_distinct_actual_presentation(tmp_path):
+    case = make_case(tmp_path)
+    old = case.inspect()
+    deliver(case, old)
+    case.bridge.consume(case.signed(old, status="Pending"))
+    case.bridge.prepare_cutover()
+    case.policy["zap_version"] = "generated-v2"
+    save(case.bridge.config, case.policy)
+    case.bridge.complete_cutover()
+    with pytest.raises(ValueError, match="fresh_epoch_presentation_required"):
+        case.bridge.issue(**case.binding)
+    assert len(list(case.directory.glob("zapier-approval-*-request.json"))) == 1
+    case.view = case.h.launch()
+    case.h.action(case.view, "ot_evidence", case.revision)
+    fresh = case.bridge.issue(**case.binding)
+    assert fresh["request_id"] != old["request_id"]
+    assert case.bridge.issue(**case.binding) == fresh
+
+
+def test_legacy_ambiguous_presentation_cannot_attribute_a_completed_receipt(tmp_path):
+    case = make_case(tmp_path)
+    wire = case.inspect()
+    deliver(case, wire)
+    case.bridge.consume(case.signed(wire))
+    policy, key = case.bridge._policy()
+    req = case.bridge._request(wire["request_id"], policy, key)
+    assert case.bridge._completed_decision(req) == "approved"
+    # Generated legacy ambiguity: two valid sealed nonces once shared a presentation.
+    other = req | {"request_id": "za-" + secrets.token_hex(16), "nonce": secrets.token_hex(32)}
+    save(
+        case.bridge._path(other["request_id"], "request"),
+        {"request": other, "seal": zapier_approval._sig(key, zapier_approval.REQUEST, other)},
+    )
+    journal = zapier_approval.ReconciliationJournal(case.directory, case.h.store.organization)
+    journal.record(other, policy)
+    assert case.bridge._completed_decision(req) is None
+    assert case.bridge._completed_decision(other) is None
+    # Neither absence nor presence of a callback reservation proves final ownership.
+    save(case.bridge._path(other["request_id"], "event"), {"event_identity": "generated-reserved"})
+    assert case.bridge._completed_decision(other) is None
+    assert len(list(case.directory.glob("managed-outputs/*/release-decision.json"))) == 1
+
+
 @pytest.mark.parametrize("retired_key", [False, True])
 def test_legacy_archive_gap_holds_only_old_lane_until_original_material_is_restored(
     tmp_path, retired_key
@@ -421,7 +499,7 @@ def test_legacy_archive_gap_holds_only_old_lane_until_original_material_is_resto
     assert case.bridge.consume(case.signed(current, status="Pending"))["state"] == "pending"
     case.bridge.reconcile(request_id=current["request_id"], poll_interval=1)
     if retired_key:
-        with pytest.raises(OSError):
+        with pytest.raises(ValueError, match="original_request_signer_required"):
             case.bridge.recover_request_authority(
                 old["request_id"], original_policy=original_policy
             )

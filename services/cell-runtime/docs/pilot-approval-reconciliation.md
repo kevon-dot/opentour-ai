@@ -75,7 +75,8 @@ this implementation never invents a replacement owner, reviewer or destination.
    completion. The same reviewer must remain bound: reviewer changes use the saved-authority
    sequence below. Direct version, grant or signer drift outside this sequence cannot
    issue or dispatch requests under the old active installation epoch.
-5. Open and inspect the exact current evidence again, then explicitly issue the new request. It has a
+5. Open and inspect the exact current evidence again, then explicitly issue the new request. Reusing
+   a prior epoch's presentation is refused even while its old time window remains open. It has a
    new nonce and installation epoch. Replay the old signed callback: it produces no new release. Two
    identical current callbacks recover one release receipt; contradictory callbacks are quarantined
    with their event digest and do not rewrite the earlier completed decision.
@@ -135,6 +136,10 @@ an explicit `original_request_policy_required` or `original_request_signer_requi
 current requests remain usable. This compatibility hold grants no event authority, and cutover,
 adoption or reissue of the affected proposal cannot bypass it. Tampered requests and mismatched
 signer fingerprints fail validation.
+Historical release recognition uses the exact preserved actor, artifact and presentation without
+reopening a withdrawn source mandate. If multiple legacy nonces shared that exact presentation,
+the old receipt cannot establish which request completed; an event reservation alone is insufficient.
+The ambiguous request receives no completion credit and any remote uncertainty remains held.
 
 Restore the original approved policy and its original private signer, then use
 `recover-request-authority --request-id <ref> --original-policy /private/tenant/original-policy.json`.

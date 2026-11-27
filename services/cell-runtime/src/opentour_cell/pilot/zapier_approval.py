@@ -636,6 +636,16 @@ class ApprovalBridge:
                 )
             )
             pending = service.pending_reconciliations(actor=actor, limit=limit)
+            with service.settings.ledger._db(write=False) as db:
+                current = service._current(db, service._operator(actor, db))
+            if (
+                isinstance(current.get("reviewer_replacement"), dict)
+                and journal.installation().get("generation") != current["revision"]
+            ):
+                # A saved replacement can have no outstanding proposal because
+                # all prior effects completed. Its installation still adopts once.
+                with journal.db() as db:
+                    db.execute("UPDATE installation SET value='true' WHERE key='paused'")
             projected = []
             for item in pending["records"]:
                 document = item["document"]
@@ -888,6 +898,13 @@ class ApprovalBridge:
                             "SELECT 1 FROM request_recovery WHERE id=?", (row["id"],)
                         ).fetchone()
                     require(recovery is None, "original_request_authority_recovery_required")
+                    if row["state"] in {
+                        "approved",
+                        "changes_requested",
+                        "superseded",
+                        "expired",
+                    } and not self._unknown_outcome(row["id"], row["provider_status"]):
+                        continue
                     if self._completed_decision(json.loads(row["request"])) is not None:
                         continue
                     require(
@@ -1362,35 +1379,36 @@ class ApprovalBridge:
         return {**scope, "state": receipt["decision"], "receipt_sha256": digest(receipt)}
 
     def _completed_decision(self, req: Json) -> str | None:
-        """A scope-checked local final receipt does not imply a provider observation."""
+        """Match archived identity only; never reopen evidence or grant current authority."""
         path = self.directory / "managed-outputs" / req["run_id"] / "release-decision.json"
         if not os.path.lexists(path):
             return None
-        _, frozen = release_gate._binding(
-            self.directory,
-            self.organization,
-            req["run_id"],
-            req["run_revision"],
-            req["artifact_sha"],
-        )
-        seen = release_gate._inspection(
-            self.directory,
-            self.organization,
-            req["run_id"],
-            req["run_revision"],
-            req["artifact_sha"],
-            frozen,
-            req["inspection_ref"],
-            fresh=False,
-        )
         receipt = _read_private(path, 16_384)
-        require(
-            seen["engagement"] == req["engagement"]
-            and all(receipt.get(k) == req[k] for k in BIND)
+        # _serialized has already authenticated the original request wrapper (or
+        # its exact previously verified closure). A different presentation for
+        # the same run is not evidence for this request.
+        if not (
+            all(receipt.get(k) == req[k] for k in BIND + ("run_id",))
+            and receipt.get("organization") == self.organization
+            and receipt.get("presentation_id") == req["inspection_ref"]
             and receipt.get("provider") == "zapier_slack"
-            and receipt.get("decision") in {"approved", "changes_requested"},
-            "receipt_scope_mismatch",
-        )
+            and receipt.get("decision") in {"approved", "changes_requested"}
+            and {k: receipt[k] for k in REVIEW_AUTHORITY if k in receipt}
+            == {k: req[k] for k in REVIEW_AUTHORITY if k in req}
+        ):
+            return None
+        journal = ReconciliationJournal(self.directory, self.organization)
+        with journal.db() as db:
+            prior = db.execute(
+                "SELECT request FROM requests WHERE id!=?", (req["request_id"],)
+            ).fetchall()
+        for row in prior:
+            other = json.loads(row[0])
+            if all(other.get(k) == req.get(k) for k in BIND + REVIEW_AUTHORITY):
+                # Older versions allowed two nonces to share one presentation.
+                # The legacy release schema cannot attribute that receipt to one
+                # of them, even if a failed callback reserved an event stamp.
+                return None
         return str(receipt["decision"])
 
     def _path(self, request_id: str, kind: str) -> Path:
@@ -1561,6 +1579,22 @@ class ApprovalBridge:
             inspection = self._inspect(binding, preparing=True)
             binding["inspection_ref"] = inspection["presentation_id"]
             binding.update({k: inspection[k] for k in REVIEW_AUTHORITY if k in inspection})
+            journal = ReconciliationJournal(self.directory, self.organization)
+            with journal.db() as db:
+                epoch = db.execute("SELECT value FROM installation WHERE key='epoch'").fetchone()[0]
+                previous = db.execute(
+                    "SELECT request FROM requests WHERE epoch!=?", (epoch,)
+                ).fetchall()
+            require(
+                not any(
+                    all(
+                        json.loads(row[0]).get(k) == binding[k]
+                        for k in ("run_id", "run_revision", "artifact_sha", "inspection_ref")
+                    )
+                    for row in previous
+                ),
+                "fresh_epoch_presentation_required",
+            )
             scope = {k: v for k, v in binding.items() if k != "inspection_ref"}
             prefix = "za-" + _sig(key, REQUEST + "/scope", scope)[:16]
             now = int(time.time())
@@ -1657,6 +1691,11 @@ class ApprovalBridge:
                         self._path(request_id, "not-sent"),
                         {"request_id": request_id, "reason": "request_expired_before_submission"},
                     )
+                    directory_fd = os.open(self.directory, os.O_RDONLY | os.O_DIRECTORY)
+                    try:
+                        os.fsync(directory_fd)
+                    finally:
+                        os.close(directory_fd)
                     raise ApprovalError("request_expired")
                 try:
                     status = post(hook, self._wire(req, key, p))
