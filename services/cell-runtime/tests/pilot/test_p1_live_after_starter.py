@@ -34,6 +34,7 @@ from test_invoice_decision_emitter import (
     scope_file,
     sdk_actions,
 )
+from test_live_authority import enroll_ledger
 from test_live_evidence import DECISION, OUTCOME
 from test_live_readiness import Case
 from test_live_settings import KEY, form, open_live, sign
@@ -275,8 +276,11 @@ def test_p1_invoice_commit_then_independent_truth(
         state="current",
         actors={ACTOR: ["custodian", "inspect"], "worker": ["intake", "inspect"]},
         grants=[asdict(DECISION)],
+        engagement_ledger_required=True,
     )
     _write_private(directory / "live-authority-key.json", {"key": KEY.hex()})
+    # The test later adds the outcome grant, so enroll both resources up front.
+    enroll_ledger(directory, tenant, epoch, (DECISION, OUTCOME))
     sign(h, body)
     view = open_live(h, monkeypatch)
     h.form(view, form(h, view))

@@ -264,6 +264,11 @@ def _root(case_id: str) -> str:
     return "root-" + digest(["case", case_id])[:40]
 
 
+def _identity(identifier: str) -> str:
+    """The one definition of "same entity/family": identifiers are ASCII, compared case-blind."""
+    return identifier.casefold()
+
+
 def _components(cases: Sequence[DevelopmentCase]) -> dict[str, str]:
     """Cases sharing an entity or a family are one independent group (union-find)."""
     parent: dict[str, str] = {}
@@ -278,11 +283,11 @@ def _components(cases: Sequence[DevelopmentCase]) -> dict[str, str]:
         return x
 
     for case in cases:
-        a = find("e:" + case.entity_id.casefold())
-        b = find("f:" + case.family_id.casefold())
+        a = find("e:" + _identity(case.entity_id))
+        b = find("f:" + _identity(case.family_id))
         if a != b:
             parent[max(a, b)] = min(a, b)
-    return {c.case_id: "grp-" + digest(find("e:" + c.entity_id.casefold()))[:24] for c in cases}
+    return {c.case_id: "grp-" + digest(find("e:" + _identity(c.entity_id)))[:24] for c in cases}
 
 
 def _validate_cases(cases: Sequence[DevelopmentCase]) -> None:
@@ -443,7 +448,7 @@ def decide(request: RoutingRequest) -> Json:
         return hold("missing_decision_time_context", ["provide_decision_time_input"])
     by_entity: defaultdict[str, set[str | None]] = defaultdict(set)
     for c in window:
-        by_entity[digest([c.entity_id, dict(c.features)])].add(c.reference)
+        by_entity[digest([_identity(c.entity_id), dict(c.features)])].add(c.reference)
     if any(len(v) > 1 for v in by_entity.values()):
         return hold("contradictory_labels", ["resolve_contradictory_labels"])
     if any(c.reference is None for c in window):

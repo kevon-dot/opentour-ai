@@ -502,7 +502,13 @@ class OpenWeightConnector:
             time.sleep(0.02)
 
     def fence(self, scope: str) -> FenceReceipt:
-        """Durably block new work, stop live jobs and block collection and replay."""
+        """Durably block new work, stop live jobs and block collection and replay.
+
+        Known limitation (documented, not changed): live jobs are visited in sorted order. If one
+        cannot be confirmed stopped, ``FENCE_JOB_NOT_STOPPED`` is raised and later live jobs get no
+        ``CANCEL`` marker in this call. They stay protected by the ``FENCED`` marker and a retry of
+        ``fence`` continues.
+        """
         _marker(self.root / "FENCED", {"scope": scope})
         canceled = []
         for job_dir in sorted((self.root / "jobs").iterdir()):
@@ -644,23 +650,32 @@ class OpenWeightConnector:
 
     # ------------------------------------------------------------------ usage
     def usage(self, job: mc.JobReceipt) -> Usage | None:
+        """Measured usage of a COMPLETED job; ``None`` (unknown, never zero) for anything else.
+
+        The journal records wall time, rows and steps only on completion. A FAILED or CANCELED job
+        therefore has no measurement, and reporting a zero as ``MEASURED`` (settleable) would let a
+        caller settle a job whose real cost is unknown. A corrupt journal is also unknown.
+        """
         try:
             current = self.status(job)
+            if current.state is not mc.JobState.COMPLETED:
+                return None
             events = _events(self._job_dir(self._key_from_ref(job.job_ref)) / "journal.jsonl")
-        except (OSError, ValueError, LookupError):
+            done = next((e for e in events if e["event"] == "completed"), None)
+            if done is None:
+                return None
+            counts = (done["seconds"], done["rows"], done["steps"])
+            if any(type(count) is not int or count < 0 for count in counts):
+                return None
+            return Usage(
+                job.job_ref,
+                job.intent.bound.currency,
+                0,
+                *counts,
+                UsageSource.MEASURED,
+            )
+        except (OSError, ValueError, LookupError, KeyError, TypeError):
             return None
-        if current.state not in (mc.JobState.COMPLETED, mc.JobState.FAILED, mc.JobState.CANCELED):
-            return None
-        done = next((e for e in events if e["event"] == "completed"), None)
-        return Usage(
-            job.job_ref,
-            job.intent.bound.currency,
-            0,
-            int(done["seconds"]) if done else 0,
-            int(done["rows"]) if done else 0,
-            int(done["steps"]) if done else 0,
-            UsageSource.MEASURED,
-        )
 
 
 class _SubmitLock:
