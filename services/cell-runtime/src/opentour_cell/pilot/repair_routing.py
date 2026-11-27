@@ -524,10 +524,12 @@ def decide(request: RoutingRequest) -> Json:
     feature = rule["feature"]
     if any(c.context_state != "observed" or c.features.get(feature) is None for c in window):
         return hold("missing_decision_time_context", ["provide_decision_time_input"])
-    by_entity: defaultdict[str, set[str | None]] = defaultdict(set)
+    # Grouped cases with identical features must agree (OPE-568): keyed on the independence
+    # group, so a shared family or a transitive chain conflicts just as a shared entity does.
+    by_group: defaultdict[str, set[str | None]] = defaultdict(set)
     for c in window:
-        by_entity[digest([_identity(c.entity_id), dict(c.features)])].add(c.reference)
-    if any(len(v) > 1 for v in by_entity.values()):
+        by_group[digest([groups[c.case_id], dict(c.features)])].add(c.reference)
+    if any(len(v) > 1 for v in by_group.values()):
         return hold("contradictory_labels", ["resolve_contradictory_labels"])
     if any(c.reference is None for c in window):
         return hold("unusable_labels", ["supply_verified_labels"])

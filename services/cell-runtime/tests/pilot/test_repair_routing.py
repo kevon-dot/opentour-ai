@@ -878,3 +878,81 @@ def test_the_protected_read_monitor_catches_every_read_route(
         rr.decide(req)
     assert read["rows"]
     assert ("open", str(sentinel)) in watched.seen
+
+
+# OPE-568: grouped repair cases with identical features must agree. "Grouped" is the
+# independence grouping (entity OR family, transitive, case-blind); case_id stays a
+# case-sensitive row key.
+
+
+@pytest.mark.parametrize("family_b", ["Family-G", "family-g"])
+def test_grouped_cases_sharing_only_a_family_must_agree(
+    store: rr.RepairRoutingStore, family_b: str
+) -> None:
+    # Different entities, one family (also by case variant), identical features, conflicting
+    # references: one group, so a conflict the customer must resolve before routing.
+    cases = independent_residual() + [
+        case("ga", "x", "b", "a", entity="Entity-G1", family="Family-G"),
+        case("gb", "x", "b", "b", entity="Entity-G2", family=family_b),
+    ]
+    r = store.evaluate(request(cases))
+    assert (r["outcome"], r["reason_code"]) == ("request_evidence", "contradictory_labels")
+    assert r["next_evidence"] == ["resolve_contradictory_labels"]
+    assert r["residual_roots"] == [] and r["recipe_selection"] is None
+
+
+def test_transitively_grouped_cases_with_identical_features_must_agree(
+    store: rr.RepairRoutingStore,
+) -> None:
+    # t1 and t3 share neither entity nor family; t2 joins them into one group.
+    cases = independent_residual() + [
+        case("t1", "x", "b", "a", entity="generated-te1", family="generated-tf1"),
+        case("t2", "w", "b", "a", entity="generated-te2", family="generated-tf1"),
+        case("t3", "x", "b", "b", entity="generated-te2", family="generated-tf2"),
+    ]
+    r = store.evaluate(request(cases))
+    assert (r["outcome"], r["reason_code"]) == ("request_evidence", "contradictory_labels")
+
+
+def test_ungrouped_cases_with_identical_features_are_not_merged() -> None:
+    # Distinct entity and distinct family: independent evidence, not a contradiction.
+    base = independent_residual()
+    extra = [
+        case("ua", "x", "b", "a", entity="generated-ue1", family="generated-uf1"),
+        case("ub", "x", "b", "b", entity="generated-ue2", family="generated-uf2"),
+    ]
+    before = rr.decide(request(base))
+    r = rr.decide(request(base + extra))
+    assert r["reason_code"] != "contradictory_labels"
+    assert r["independent_groups"] == before["independent_groups"] + 2
+
+
+@pytest.mark.parametrize(
+    ("bucket_b", "ref_b"),
+    [("w", "b"), ("x", "a")],
+    ids=["different_features", "agreeing_labels"],
+)
+def test_grouped_cases_differing_in_features_or_agreeing_are_not_a_contradiction(
+    bucket_b: str, ref_b: str
+) -> None:
+    cases = independent_residual() + [
+        case("ha", "x", "b", "a", entity="Entity-H1", family="Family-H"),
+        case("hb", bucket_b, "b", ref_b, entity="Entity-H2", family="family-h"),
+    ]
+    assert rr.decide(request(cases))["reason_code"] != "contradictory_labels"
+
+
+def test_case_id_stays_a_case_sensitive_row_key() -> None:
+    base = independent_residual()
+    row = case("cs", "x", "b", "a", entity="generated-entity-cs", family="generated-family-cs")
+    upper, lower = replace(row, case_id="Case-1"), replace(row, case_id="case-1")
+    before = rr.decide(request(base))
+    r = rr.decide(request(base + [upper, lower]))
+    # Two rows, not deduplicated, and in one group with each other.
+    assert r["development_cases"] == before["development_cases"] + 2
+    assert r["independent_groups"] == before["independent_groups"] + 1
+    assert r["reason_code"] != "contradictory_labels"
+    with pytest.raises(rr.RoutingError, match="DUPLICATE_CASE"):
+        rr.decide(request(base + [upper, replace(row, case_id="Case-1")]))
+    conflicting = rr.decide(request(base + [upper, replace(lower, reference="b")]))
+    assert conflicting["reason_code"] == "contradictory_labels"
