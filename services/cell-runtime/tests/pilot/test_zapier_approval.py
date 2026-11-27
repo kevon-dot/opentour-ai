@@ -487,6 +487,8 @@ def test_repeat_inspection_coalesces_and_expiry_needs_a_new_sealed_exposure(
 
     now = int(time.time())
     monkeypatch.setattr(time, "time", lambda: now)
+    # The real Node signer and Python verifier must share this generated clock.
+    monkeypatch.setattr(__name__ + ".NODE", f"Date.now = () => {now} * 1000;\n" + NODE)
     with patch.object(zapier_approval.ApprovalBridge, "issue", return_value={}):
         case.h.action(case.view, "ot_evidence", case.revision)
     first = case.bridge.issue(**case.binding, ttl_seconds=2)
