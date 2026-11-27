@@ -40,3 +40,7 @@ own explicit family provenance. No generated count enters live recurrence.
 This slice supplies a normal no-inference provider and its actual case-session
 integration. Private UI generation controls, categorical interpretation and the
 complete clean-install oracle remain separate integration gates.
+
+For exact reference predicates the guided provider enumerates the authorized rule literals, an absent value and a distinct present value. The existing candidate limit applies to the full product of field choices. It asks the confirmed map for every answer and retains one family per material branch. An uncovered input holds generic proposal generation because a cited answer is unavailable.
+
+The separate P1 deterministic test provider uses invoice category and purchase order as decision-time facts. The owner corrects the freight draft and defers the mixed invoice, whose cited single-category rule has no answer for that input. Owner review and freeze yield seven proposed families, six resolved, one unresolved, two development and four reserved. This is generated case-session evidence. Private Slack authoring and the scored Home readout require their own integration runs.

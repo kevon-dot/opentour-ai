@@ -1,4 +1,4 @@
-"""Bounded, deterministic suggestions from confirmed presence/numeric predicates."""
+"""Bounded, deterministic suggestions from confirmed typed predicates."""
 
 from __future__ import annotations
 
@@ -6,6 +6,7 @@ import itertools
 import math
 from decimal import Decimal
 
+from opentour_cell.pilot.guided_decision_map import CATEGORY_TOKEN
 from opentour_cell.pilot.intake_mcp import IntakeError
 from opentour_cell.pilot.map_review import MapReviewSnapshot
 from opentour_cell.pilot.operating_point import digest
@@ -59,10 +60,26 @@ class GuidedCaseAuthoring:
             _require(kind in {"reference", "number"}, "guided_authoring_schema_unavailable")
             if kind == "reference":
                 _require(
-                    all(c.operator in {"missing", "present"} for c in conditions),
+                    all(
+                        c.operator in {"missing", "present"}
+                        or (
+                            c.operator == "=="
+                            and isinstance(c.threshold, str)
+                            and CATEGORY_TOKEN.fullmatch(c.threshold)
+                        )
+                        for c in conditions
+                    ),
                     "guided_authoring_predicate_unsupported",
                 )
-                values.append((None, "generated-present"))
+                tokens = sorted({c.threshold for c in conditions if c.threshold is not None})
+                alternate = "generated-present"
+                if alternate in tokens:
+                    alternate = next(
+                        f"generated-present-{i}"
+                        for i in range(len(tokens) + 1)
+                        if f"generated-present-{i}" not in tokens
+                    )
+                values.append((None, *tokens, alternate))
                 continue
             thresholds = {Decimal(c.threshold) for c in conditions if c.threshold is not None}
             _require(all(t.is_finite() for t in thresholds), "guided_authoring_number_unavailable")
