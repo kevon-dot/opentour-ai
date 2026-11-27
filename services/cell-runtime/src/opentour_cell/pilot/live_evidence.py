@@ -17,7 +17,7 @@ from collections.abc import Iterator, Mapping
 from contextlib import AbstractContextManager, contextmanager
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Literal, Protocol
+from typing import Any, Literal, Protocol, runtime_checkable
 
 from opentour_cell.pilot.intake_mcp import IntakeError, IntakePrincipal, LiveBinding, require_ref
 from opentour_cell.pilot.training import _check_file
@@ -69,9 +69,29 @@ class LiveScope:
     can_nominate: bool = False
 
 
+class EngagementGate(Protocol):
+    """Worker-owned engagement-epoch ledger port (OPE-543); see `engagement_epochs`.
+
+    Declared here so this module's import closure is unchanged. Its errors are `ValueError`.
+    """
+
+    def pin(self) -> AbstractContextManager[None]: ...
+
+    def live_gate(self, org: str, epoch: str, resource: str, lease_ref: str) -> int: ...
+
+    def known_prior_epoch(self, org: str, epoch: str) -> bool: ...
+
+    def observe_positions(self, org: str, epoch: str, high: int) -> None: ...
+
+
 class LiveAuthority(Protocol):
     def guard(self, actor: IntakePrincipal, workflow_ref: str) -> AbstractContextManager[LiveScope]:
         """Pin current custody, resource grants and actor rights until operation returns."""
+
+
+@runtime_checkable
+class EngagementAuthority(Protocol):
+    def engagement_gate(self, scope: LiveScope) -> EngagementGate | None: ...
 
 
 def grant_digest(grant: FeedGrant) -> str:
@@ -184,9 +204,38 @@ def _event(value: Mapping[str, Any], grant: FeedGrant) -> dict[str, Any]:
 class LiveEvidence:
     """Explicit initialization writes; resolution and snapshots never create or migrate state."""
 
-    def __init__(self, directory: Path, authority: LiveAuthority):
+    def __init__(
+        self,
+        directory: Path,
+        authority: LiveAuthority,
+        engagements: EngagementGate | None = None,
+    ):
         self.path = directory / "live-evidence.sqlite3"
         self.authority = authority
+        # When configured (OPE-543), no binding or source page is admitted unless the epoch's
+        # trusted high-water checkpoint and lease were durably recorded and the epoch is live.
+        self.engagements = engagements
+
+    def _engagement_gate(self, scope: LiveScope) -> EngagementGate | None:
+        if self.engagements is not None:
+            return self.engagements
+        if isinstance(self.authority, EngagementAuthority):
+            return self.authority.engagement_gate(scope)
+        return None
+
+    def _engagement_checkpoint(
+        self, scope: LiveScope, grant: FeedGrant, gate: EngagementGate | None
+    ) -> int | None:
+        if gate is None:
+            return None
+        try:
+            recorded = gate.live_gate(
+                scope.tenant, scope.engagement_epoch, grant.resource, grant.lease_ref
+            )
+        except (ValueError, sqlite3.Error):
+            raise IntakeError("engagement_epoch_hold") from None
+        _require(grant.checkpoint >= recorded, "engagement_epoch_hold")
+        return recorded
 
     def initialize(self) -> None:
         parent = self.path.parent
@@ -257,11 +306,20 @@ class LiveEvidence:
             db.close()
 
     @contextmanager
-    def _scope(self, actor: IntakePrincipal, workflow: str) -> Iterator[LiveScope]:
+    def _scope(
+        self, actor: IntakePrincipal, workflow: str, *, pin_epoch: bool = False
+    ) -> Iterator[LiveScope]:
         with self.authority.guard(actor, workflow) as scope:
             _require(scope.tenant == actor.tenant and scope.workflow_ref == workflow)
             _require(scope.expires_at > int(time.time()))
-            yield scope
+            gate = self._engagement_gate(scope) if pin_epoch else None
+            if gate is None:
+                yield scope
+            else:
+                with gate.pin():
+                    for grant in scope.grants:
+                        self._engagement_checkpoint(scope, grant, gate)
+                    yield scope
             _require(scope.expires_at > int(time.time()))
 
     @staticmethod
@@ -306,7 +364,7 @@ class LiveEvidence:
         expected_revision: str | None = None,
     ) -> str:
         with (
-            self._scope(actor, workflow) as selected,
+            self._scope(actor, workflow, pin_epoch=True) as selected,
             self._db(write=True) as db,
             self._scope(actor, workflow) as scope,
         ):
@@ -322,6 +380,7 @@ class LiveEvidence:
             )
             _require(type(grant.checkpoint) is int and grant.checkpoint >= 0)
             require_ref(grant.lease_ref)
+            self._engagement_checkpoint(scope, grant, self._engagement_gate(scope))
             body = {
                 "tenant": scope.tenant,
                 "workflow_ref": workflow,
@@ -481,7 +540,10 @@ class LiveEvidence:
                 require_ref(read_metadata["next_cursor"])
         with self._db() as db:
             body, _ = self._binding(db, reference)
-        with self._scope(actor, body["workflow_ref"]) as scope, self._db(write=True) as db:
+        with (
+            self._scope(actor, body["workflow_ref"], pin_epoch=True) as scope,
+            self._db(write=True) as db,
+        ):
             _require(scope.expires_at > int(time.time()))
             _require(scope.can_ingest and scope.engagement_epoch == body["engagement_epoch"])
             fresh, successor = self._binding(db, reference)
@@ -489,6 +551,17 @@ class LiveEvidence:
             grant = FeedGrant(**fresh["grant"])
             _require(successor is None and grant in scope.grants)
             _require(source_revision == grant.source_revision)
+            gate = self._engagement_gate(scope)
+            recorded = self._engagement_checkpoint(scope, grant, gate)
+            if gate is not None:
+                # A late callback or replay from a withdrawn epoch is denied before any write,
+                # even at a later source position than the new epoch's checkpoint.
+                for event_epoch in event_epochs:
+                    _require(
+                        event_epoch == scope.engagement_epoch
+                        or not gate.known_prior_epoch(scope.tenant, event_epoch),
+                        "engagement_epoch_fenced",
+                    )
             _require(type(checkpoint) is int and checkpoint >= grant.checkpoint)
             _require(all(type(p) is int and p <= checkpoint for p in source_positions))
             page_identity: list[Any] = [
@@ -508,10 +581,12 @@ class LiveEvidence:
             if old:
                 _require(old[0] == fingerprint, "source_page_conflict")
                 return str(old[1])
+            highest_admitted: int | None = None
             for event, position, epoch in zip(events, source_positions, event_epochs, strict=True):
                 try:
                     _require(
-                        epoch == scope.engagement_epoch and position > grant.checkpoint,
+                        epoch == scope.engagement_epoch
+                        and position > max(grant.checkpoint, recorded or 0),
                         "source_epoch_mismatch",
                     )
                     parsed = _event(event, grant)
@@ -530,6 +605,7 @@ class LiveEvidence:
                     )
                     continue
                 self._record_event(db, scope, grant, reference, parsed)
+                highest_admitted = max(highest_admitted or 0, position)
             receipt = "live-" + _digest([reference, page_ref, fingerprint])[:32]
             db.execute(
                 "INSERT INTO live_pages VALUES (?,?,?,?,?)",
@@ -559,6 +635,8 @@ class LiveEvidence:
                 )
             self._archive(db, scope)
             _require(scope.expires_at > int(time.time()))
+            if gate is not None and highest_admitted is not None:
+                gate.observe_positions(scope.tenant, scope.engagement_epoch, highest_admitted)
             return receipt
 
     def _record_event(
