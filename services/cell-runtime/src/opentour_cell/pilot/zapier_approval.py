@@ -1442,10 +1442,22 @@ class ApprovalBridge:
         return {k: req[k] for k in ("run_revision", "artifact_sha", "audience", "expires_at")}
 
     def existing_status(
-        self, *, run_id: str, run_revision: str, artifact_sha: str, team: str, actor: str
+        self,
+        *,
+        run_id: str,
+        run_revision: str,
+        artifact_sha: str,
+        team: str,
+        actor: str,
+        handoff_destination: tuple[str, str] | None = None,
     ) -> Json | None:
         policy, key = self._policy()
         require(team == policy["team"] and actor == policy["reviewer"], "reviewer_required")
+        if handoff_destination is not None:
+            require(
+                handoff_destination == (policy["channel"], policy["audience"]),
+                "request_scope_mismatch",
+            )
         scope = {
             "run_id": run_id,
             "run_revision": run_revision,
@@ -1455,13 +1467,192 @@ class ApprovalBridge:
         }
         scope.update(self._review_scope(scope))
         prefix = "za-" + _sig(key, REQUEST + "/scope", scope)[:16]
+        active = []
+        past = []
+        now = int(time.time())
         for path in self.directory.glob(f"zapier-approval-{prefix}*-request.json"):
             rid = path.name.removeprefix("zapier-approval-").removesuffix("-request.json")
             req = self._request(rid, policy, key, fresh=False)
             require(all(req[k] == v for k, v in scope.items()), "request_scope_mismatch")
-            if req["expires_at"] > int(time.time()) or self._path(rid, "event").exists():
-                return self.decision_status(rid, team=team, actor=actor)
-        return None
+            if handoff_destination is None:
+                if req["expires_at"] > int(time.time()) or self._path(rid, "event").exists():
+                    return self.decision_status(rid, team=team, actor=actor)
+            elif req["expires_at"] > now and not self._path(rid, "reconciled").exists():
+                active.append(req)
+            else:
+                past.append(req)
+        if active:
+            # A superseded nonce or interrupted old callback cannot hide a current request.
+            if len(active) != 1:
+                return None
+            return self._handoff_request_status(active[0], policy, key)
+        if not past:
+            return None
+        past.sort(key=lambda req: req["issued_at"], reverse=True)
+        if len(past) > 1 and past[0]["issued_at"] == past[1]["issued_at"]:
+            return None
+        return self._handoff_request_status(past[0], policy, key)
+
+    def _handoff_request_status(self, req: Json, policy: Json, key: bytes) -> Json | None:
+        """Project the selected request without initializing a reconciliation ledger."""
+        from opentour_cell.pilot.receipt_recovery import _open_db
+
+        reference = req["request_id"]
+        with _open_db(self.directory / "zapier-reconciliation.sqlite3") as db:
+            if db is None:
+                return self._legacy_handoff_status(req, policy)
+            installation = dict(db.execute("SELECT key,value FROM installation"))
+            if (
+                installation.get("organization") != self.organization
+                or installation.get("policy_revision") != digest(policy)
+                or installation.get("signer_fingerprint") != hashlib.sha256(key).hexdigest()
+            ):
+                return None
+            row = db.execute(
+                "SELECT request,epoch,state,reason,provider_status,observed_at FROM requests "
+                "WHERE id=? AND NOT EXISTS "
+                "(SELECT 1 FROM reviewer_projected_requests WHERE request_id=?)",
+                (reference, reference),
+            ).fetchone()
+            if (
+                row is None
+                or row["epoch"] != installation.get("epoch")
+                or row["state"] == "superseded"
+            ):
+                return None
+            require(row["request"] == canonical(req), "reconciliation_identity_conflict")
+            pending = {
+                "request_id": reference,
+                "state": "approval_unresolved",
+                "recorded_at": row["observed_at"],
+            }
+            try:
+                status = self.decision_status(
+                    reference, team=policy["team"], actor=policy["reviewer"]
+                )
+            except ApprovalError as error:
+                if str(error) == "receipt_scope_mismatch":
+                    return pending
+                raise
+            decision = status["state"]
+            if decision in {"approved", "changes_requested"}:
+                return status if self._owns_handoff_decision(db, req, row, decision) else pending
+
+        return self._unresolved_or_expired_status(reference, status, row, pending)
+
+    def _legacy_handoff_status(self, req: Json, policy: Json) -> Json | None:
+        """Verify pre-journal approvals using the existing sealed request and receipt."""
+        reference = req["request_id"]
+        if self._path(reference, "reconciled").exists():
+            return None
+        pending = {"request_id": reference, "state": "approval_unresolved"}
+        try:
+            status = self.decision_status(reference, team=policy["team"], actor=policy["reviewer"])
+        except ApprovalError as error:
+            if str(error) == "receipt_scope_mismatch":
+                return pending
+            raise
+        if status["state"] == "expired":
+            return None
+        if status["state"] not in {"approved", "changes_requested"}:
+            return status
+        if not self._has_decision_event(reference):
+            return pending
+        for path in self.directory.glob("zapier-approval-za-*-request.json"):
+            if path == self._path(reference, "request"):
+                continue
+            other = _read_private(path, 16_384).get("request")
+            if not isinstance(other, dict) or self._same_presentation(req, other):
+                # An archived legacy matching request is evidence of ambiguity only.
+                return pending
+        return status
+
+    @staticmethod
+    def _same_presentation(req: Json, other: Json) -> bool:
+        return all(other.get(k) == req.get(k) for k in BIND + REVIEW_AUTHORITY)
+
+    def _owns_handoff_decision(
+        self, db: sqlite3.Connection, req: Json, row: sqlite3.Row, decision: str
+    ) -> bool:
+        provider = "Approved" if decision == "approved" else "Declined"
+        reference = req["request_id"]
+        # Restart may recover a completed decision after the callback stopped
+        # before writing its terminal provider polarity to the journal.
+        if row["state"] != decision or row["provider_status"] not in {
+            "unknown",
+            "Pending",
+            provider,
+        }:
+            return False
+        if self._path(reference, "reconciled").exists() or not self._has_decision_event(reference):
+            return False
+        for (archived,) in db.execute(
+            "SELECT request FROM requests WHERE id!=? AND json_extract(request,'$.run_id')=?",
+            (reference, req["run_id"]),
+        ):
+            previous = json.loads(archived)
+            if self._same_presentation(req, previous):
+                # A legacy run-level decision cannot identify which nonce accepted it.
+                return False
+        return True
+
+    def _has_decision_event(self, reference: str) -> bool:
+        path = self._path(reference, "event")
+        if not path.exists():
+            return False
+        stamp = _read_private(path, 1024)
+        return (
+            set(stamp) == {"event_identity", "first_event_sha256", "request_id"}
+            and stamp["request_id"] == reference
+            and all(
+                isinstance(stamp[k], str) and HEX.fullmatch(stamp[k])
+                for k in ("event_identity", "first_event_sha256")
+            )
+        )
+
+    def _unresolved_or_expired_status(
+        self, reference: str, status: Json, row: sqlite3.Row, pending: Json
+    ) -> Json | None:
+        state, reason, provider = row["state"], row["reason"], row["provider_status"]
+        if (
+            state == "held" and reason in {"remote_outcome_unknown", "conflicting_provider_event"}
+        ) or any(self.directory.glob(f"zapier-approval-{reference}-status-conflict-*.json")):
+            return pending
+        marker = self._path(reference, "reconciled")
+        if status["state"] != "expired":
+            return status if state == "pending" and not marker.exists() else None
+        if state != "expired" or reason != "request_expired":
+            return None
+        require(
+            _read_private(marker, 1024) == {"request_id": reference, "reason": reason},
+            "invalid_reconciliation_marker",
+        )
+        if self._unknown_outcome(reference, provider):
+            return pending
+        if (
+            self._path(reference, "admitted").exists()
+            and not self._path(reference, "not-sent").exists()
+        ):
+            if not self._has_expiry_observation(reference, provider):
+                return pending
+        return {**status, "recorded_at": status["expires_at"]}
+
+    def _has_expiry_observation(self, request_id: str, provider: str) -> bool:
+        if provider not in {"Pending", "Approved", "Declined"}:
+            return False
+        prefix = "fenced-observation-"
+        for path in self.directory.glob(f"zapier-approval-{request_id}-{prefix}*.json"):
+            observation = _read_private(path, 1024)
+            reference = observation.get("event_sha256")
+            if (
+                set(observation) == {"event_sha256", "status"}
+                and observation["status"] == provider
+                and isinstance(reference, str)
+                and HEX.fullmatch(reference)
+                and path == self._path(request_id, prefix + reference[:16])
+            ):
+                return True
+        return False
 
     def decision_status(self, request_id: str, *, team: str, actor: str) -> Json:
         policy, key = self._policy()

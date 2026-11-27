@@ -1701,9 +1701,12 @@ class Workbench:
                     artifact_sha=target.audit["model_revision"],
                     team=cfg.team,
                     actor=actor,
+                    handoff_destination=(cfg.channel, cfg.recipient),
                 )
                 if seen:
-                    approval = ApprovalEvidence(seen["state"], seen["request_id"])
+                    approval = ApprovalEvidence(
+                        seen["state"], seen["request_id"], seen.get("recorded_at")
+                    )
             elif target.audit.get("release_provider") == "slack":
                 from opentour_cell.pilot.release_gate import inspect_recorded_release
 
