@@ -11,17 +11,19 @@ Software behavior only: no real trainer, GPU, provider or customer evidence.
 import hashlib
 import json
 import threading
+import time
 from contextlib import nullcontext
 from dataclasses import replace
 
 import pytest
+from opentour_cell.pilot import connector_conformance as cc
 from opentour_cell.pilot import model_connector as mc
 from opentour_cell.pilot import trainer_conformance as tc
+from opentour_cell.pilot.connector_ext import EvidenceTier, Usage
 from opentour_cell.pilot.custom_trainer_connector import (
     ADAPTER_VERSION,
     Credential,
     CustomTrainerConnector,
-    EvidenceTier,
     TrainerJobRequest,
     TrainerRegistration,
     TrainerUsage,
@@ -416,6 +418,38 @@ def test_conformance_suite_passes_for_reference_trainer(tmp_path):
     results = tc.run_trainer_conformance(_harness(tmp_path), tmp_path)
     assert len(results) == 9
     assert tc.all_passed(results), [r for r in results if r.outcome is not tc.Outcome.PASSED]
+
+
+def test_shared_connector_conformance_for_custom_trainer(tmp_path):
+    class ImmediateTrainer(Proxy):
+        def start(self, credential, request):
+            receipt = self.inner.start(credential, request)
+            self.inner.run_pending()
+            return self.inner.poll(credential, receipt.job_id)
+
+    def connector(root, wrap=None):
+        environment = Env(root, wrap=wrap)
+        environment.clock_value = int(time.time())
+        return environment.connector
+
+    selected = binding()
+    template = Env(tmp_path / "intent").intent
+    harness = cc.ConnectorHarness(
+        make_connector=lambda root: connector(root, ImmediateTrainer),
+        binding=selected,
+        mismatched_binding=binding(immutable_revision="generated-stale-revision"),
+        make_intent=lambda key: replace(template, idempotency_key=key),
+        rows=ROWS,
+        executions=lambda root: sum(
+            json.loads(job.read_text())["state"] == "completed"
+            for job in (root / "trainer" / "jobs").glob("*.json")
+        ),
+        make_slow_connector=connector,
+        fence_scope=selected.tenant,
+    )
+    results = cc.run_conformance(harness, tmp_path / "shared")
+    assert len(results) == 10
+    assert cc.all_passed(results), [r for r in results if r.outcome is not cc.Outcome.PASSED]
 
 
 def test_conformance_suite_fails_a_nonidempotent_trainer(tmp_path):
@@ -824,7 +858,7 @@ def test_fence_with_unreachable_trainer_still_blocks_collect(env):
             raise OSError("simulated:trainer-down")
 
     connector = env.make_connector(Down(env.trainer))
-    with pytest.raises(ValueError, match="fence_job_not_stopped"):
+    with pytest.raises(ValueError, match="FENCE_JOB_NOT_STOPPED"):
         connector.fence("generated-tenant")
     env.trainer.run_pending()
     with pytest.raises(ValueError, match="connector_fenced"):
@@ -1131,14 +1165,12 @@ def test_usage_report_rejects_malformed_values(env, bad):
             view = self.inner.poll(credential, job_id)
             return replace(view, usage=TrainerUsage("USD", bad, 1, 1, 1))
 
-    with pytest.raises(ValueError, match="invalid_usage"):
+    with pytest.raises(ValueError, match="INVALID_USAGE"):
         env.make_connector(Garbage(env.trainer)).usage(receipt)
 
 
 def test_usage_is_never_estimated_or_settleable_by_string(env):
-    from opentour_cell.pilot.custom_trainer_connector import Usage
-
-    with pytest.raises(ValueError, match="invalid_usage"):
+    with pytest.raises(ValueError, match="INVALID_USAGE"):
         Usage("job", "USD", 1, 1, 1, 1, "bogus")  # type: ignore[arg-type]
     estimated = Usage("job", "USD", 1, 1, 1, 1, "estimated")  # type: ignore[arg-type]
     assert estimated.source.value == "estimated" and not estimated.settleable
@@ -1262,7 +1294,7 @@ def test_fence_that_cannot_stop_a_live_job_does_not_claim_it_stopped(env):
             raise OSError("simulated:trainer-down")
 
     connector = env.make_connector(Down(env.trainer))
-    with pytest.raises(ValueError, match="fence_job_not_stopped"):
+    with pytest.raises(ValueError, match="FENCE_JOB_NOT_STOPPED"):
         connector.fence("generated-tenant")
     with pytest.raises(ValueError, match="connector_fenced"):  # the marker is still durable
         env.make_connector().collect(receipt)
@@ -1276,7 +1308,7 @@ def test_fence_does_not_trust_a_stop_confirmation_for_another_job(env):
         def request_cancel(self, credential, job_id):
             return TrainerView("generated-job-other", "0" * 64, "canceled")
 
-    with pytest.raises(ValueError, match="fence_job_not_stopped"):
+    with pytest.raises(ValueError, match="FENCE_JOB_NOT_STOPPED"):
         env.make_connector(Liar(env.trainer)).fence("generated-tenant")
     assert env.trainer.poll(Credential(SECRET), receipt.job_ref).state == "queued"
 
@@ -1294,7 +1326,7 @@ def test_fence_reaches_a_job_whose_acknowledgement_was_lost(tmp_path):
 def test_fence_with_an_unconfirmable_dispatch_is_not_reported_stopped(tmp_path):
     env = Env(tmp_path, wrap=NeverArrives)
     env.dispatch()  # UNKNOWN: nothing is known about the trainer's side
-    with pytest.raises(ValueError, match="fence_job_not_stopped"):
+    with pytest.raises(ValueError, match="FENCE_JOB_NOT_STOPPED"):
         env.connector.fence("generated-tenant")
 
 

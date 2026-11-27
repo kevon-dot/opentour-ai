@@ -66,6 +66,7 @@ class ConnectorHarness:
     rows: tuple[Mapping[str, object], ...]
     executions: Callable[[Path], int]
     make_slow_connector: Callable[[Path], mc.Connector] | None = None
+    fence_scope: str = "generated-scope"
 
 
 def standard_grants(
@@ -305,7 +306,7 @@ def run_conformance(harness: ConnectorHarness, work_dir: Path) -> tuple[Conforma
         if not isinstance(connector, Fenceable):
             return None
         done, _ = _dispatch(_preflight(connector, harness, intent), harness, intent)
-        connector.fence("generated-scope")
+        connector.fence(harness.fence_scope)
         later = replace(intent, idempotency_key="generated-after-fence")
         restarted = _preflight(harness.make_connector(state), harness, later)
         return (

@@ -118,9 +118,9 @@ class ReferenceTrainer:
         self._authorize(credential)
         return replace(
             bound,
-            maximum_minor_units=min(bound.maximum_minor_units, 10),
-            maximum_seconds=min(bound.maximum_seconds, 5),
-            maximum_steps=min(bound.maximum_steps, 3),
+            maximum_minor_units=10,
+            maximum_seconds=5,
+            maximum_steps=3,
         )
 
     def start(self, credential: Credential, request: TrainerJobRequest) -> TrainerView:

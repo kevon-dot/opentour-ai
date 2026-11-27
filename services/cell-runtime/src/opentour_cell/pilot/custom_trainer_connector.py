@@ -42,70 +42,12 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from opentour_cell.pilot import model_connector as mc
+from opentour_cell.pilot.connector_ext import EvidenceTier, FenceReceipt, Usage, UsageSource
 
 VERSION = "opentour.pilot.custom-trainer-connector.v1"
 ADAPTER_VERSION = "opentour.pilot.trainer-adapter.v1"
 _TERMINAL = frozenset({"completed", "failed", "canceled"})
 _REPLAY_MODES = frozenset({"deterministic", "tolerance"})
-
-
-class EvidenceTier(StrEnum):
-    """Mirror of the OPE-507 ``connector_ext.EvidenceTier`` (replace by import once it lands)."""
-
-    FIXTURE = "fixture"
-    SOFTWARE_QUALIFIED = "software_qualified"
-    PROVIDER_WITNESSED = "provider_witnessed"
-    CUSTOMER_WITNESSED = "customer_witnessed"
-
-
-class UsageSource(StrEnum):
-    MEASURED = "measured"
-    PROVIDER_REPORTED = "provider_reported"
-    ESTIMATED = "estimated"
-
-
-@dataclass(frozen=True)
-class Usage:
-    """Mirror of OPE-507 ``connector_ext.Usage``. ``estimated`` can never settle as actual spend."""
-
-    job_ref: str
-    currency: str
-    incurred_minor_units: int
-    seconds: int
-    rows: int
-    steps: int
-    source: UsageSource
-    irreversible: bool = False
-
-    def __post_init__(self) -> None:
-        # A plain string such as "estimated" must not slip past the identity check in settleable.
-        try:
-            object.__setattr__(self, "source", UsageSource(self.source))
-        except ValueError:
-            raise ValueError("invalid_usage") from None
-        counts = (self.incurred_minor_units, self.seconds, self.rows, self.steps)
-        if (
-            not isinstance(self.job_ref, str)
-            or not self.job_ref
-            or not isinstance(self.currency, str)
-            or not self.currency
-            or any(type(count) is not int or count < 0 for count in counts)
-            or type(self.irreversible) is not bool
-        ):
-            raise ValueError("invalid_usage")
-
-    @property
-    def settleable(self) -> bool:
-        return self.source is not UsageSource.ESTIMATED
-
-
-@dataclass(frozen=True)
-class FenceReceipt:
-    """Mirror of OPE-507 ``connector_ext.FenceReceipt``."""
-
-    scope: str
-    canceled_job_refs: tuple[str, ...]
-    evidence_ref: str
 
 
 class Credential:
@@ -618,7 +560,10 @@ class CustomTrainerConnector:
         self._check_payload(intent, registration, development)
         token, digest = _token(intent), _intent_digest(intent)
 
+        created = False
+
         def plan(fold: _Fold) -> list[dict[str, Any]]:
+            nonlocal created
             entry = fold.jobs.get(token)
             if entry is not None and entry.intent_digest != digest:
                 raise ValueError("idempotency_conflict")
@@ -626,6 +571,7 @@ class CustomTrainerConnector:
                 return []
             if binding.tenant in fold.fenced:  # decided under the same lock as the fence marker
                 raise ValueError("connector_fenced")
+            created = True
             return [
                 {
                     "t": "intent",
@@ -636,9 +582,8 @@ class CustomTrainerConnector:
                 }
             ]
 
-        existed = token in self.journal.read().jobs
         entry = self.journal.transact(plan).jobs[token]
-        if existed:
+        if not created:
             # Duplicate dispatch: never start a second execution.
             return self._duplicate(intent, token, entry, credential)
         view = self.transport.start(  # OSError here leaves intent-only: reconciled, never resent
@@ -876,7 +821,7 @@ class CustomTrainerConnector:
             raise ValueError("replay_nondeterministic")
         return first
 
-    # ---- optional capabilities (shape mirrors OPE-507 UsageReporting / Fenceable) ----
+    # ---- shared usage and fencing capabilities ----
 
     def usage(self, job: mc.JobReceipt) -> Usage | None:
         """Trainer-reported usage. ``None`` means unknown, never zero."""
@@ -886,7 +831,7 @@ class CustomTrainerConnector:
         if view.usage is None or view.job_id != entry.job_id or view.client_token != _token(intent):
             return None
         reported = view.usage
-        return Usage(  # raises ValueError("invalid_usage") on malformed trainer values
+        return Usage(  # raises ValueError("INVALID_USAGE") on malformed trainer values
             entry.job_id,
             reported.currency,
             reported.minor_units,
@@ -901,7 +846,7 @@ class CustomTrainerConnector:
 
         ``canceled_job_refs`` lists only jobs the trainer itself confirmed stopped (a reply for
         that exact job). If any live job, including one whose dispatch was never acknowledged,
-        cannot be confirmed stopped, the durable marker stays and ``fence_job_not_stopped`` is
+        cannot be confirmed stopped, the durable marker stays and ``FENCE_JOB_NOT_STOPPED`` is
         raised instead of returning a receipt that would over-report.
         """
         fold = self.journal.append({"t": "fence", "scope": scope})
@@ -932,7 +877,7 @@ class CustomTrainerConnector:
             else:
                 unresolved += 1
         if unresolved:
-            raise ValueError("fence_job_not_stopped")
+            raise ValueError("FENCE_JOB_NOT_STOPPED")
         evidence = hashlib.sha256(_canon([scope, sorted(canceled)]).encode()).hexdigest()[:32]
         return FenceReceipt(scope, tuple(sorted(canceled)), f"fence-receipt:{evidence}")
 
