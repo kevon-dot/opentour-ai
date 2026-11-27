@@ -2650,7 +2650,9 @@ def starter_score_readout(
         elif summary["state"] == "frozen_unscored":
             blocks.append(
                 _section(
-                    "Ask the model custodian to check the selected model and its inference permission."
+                    "Review setup for the selected model revision."
+                    if reconnect
+                    else "Ask the model custodian to check the selected model and its inference permission."
                 )
             )
         else:
@@ -2660,6 +2662,10 @@ def starter_score_readout(
     elif page == 2 and reconnect is not None:
         blocks = [
             _section("Selected model setup required"),
+            _section(
+                f"Benchmark {_ref(reconnect['benchmark_ref'])} · Version {reconnect['benchmark_version']}\n"
+                f"Model custodian {_ref(reconnect['custodian_ref'])}"
+            ),
             _section(
                 f"Workflow {_ref(reconnect['workflow_ref'])} · Run {_ref(reconnect['run_ref'])} · Evaluation {_ref(reconnect['execution_ref'])}"
             ),

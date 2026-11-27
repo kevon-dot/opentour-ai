@@ -9,7 +9,7 @@ from test_reviewer_workflow import screen, text
 from test_slack_adapter import ACTOR, OTHER
 from test_starter_setup import effects
 
-pytest_plugins = ("test_starter_evaluation_authority",)
+pytest_plugins = ("test_starter_evaluation_session",)
 
 
 def open_summary(h, monkeypatch):
@@ -168,3 +168,80 @@ def test_benchmark_navigation_rejects_wrong_endpoint_and_withdrawn_inspection(
             h, view
         ) and "Selected model setup required" not in text(h, view)
     assert effects(h) == (0,) * 7
+
+
+def navigate(h, view, action, value):
+    h.slack.screens[view]["hash"] = "generated-current-view"
+    h.action(view, action, value)
+
+
+def test_selected_model_setup_requires_current_separate_custodian(installed, monkeypatch):
+    from test_starter_reconnect import configure
+
+    directory, _, _, _, _, _, authorized = installed
+    h = authorized[0]
+    cap, write, _ = configure(installed)
+    view = open_summary(h, monkeypatch)
+    navigate(h, view, "ot_score_next", "next")
+    assert "Ask the model custodian" in text(h, view)
+    assert ("ot_score_reconnect", "setup") not in actions(screen(h, view))
+    navigate(h, view, "ot_score_reconnect", "setup")
+    assert "Selected model setup required" not in text(h, view)
+
+    write(cap)
+    view = open_summary(h, monkeypatch)
+    navigate(h, view, "ot_score_next", "next")
+    assert ("ot_score_reconnect", "setup") in actions(screen(h, view))
+    navigate(h, view, "ot_score_reconnect", "setup")
+    visible = text(h, view)
+    assert "Selected model setup required" in visible
+    for key in (
+        "workflow_ref",
+        "execution_ref",
+        "run_ref",
+        "freeze_ref",
+        "freeze_revision",
+        "benchmark_ref",
+        "model_ref",
+        "model_revision",
+        "model_custodian",
+    ):
+        assert cap[key] in visible
+    assert f"Version {cap['benchmark_version']}" in visible
+    assert actions(screen(h, view)) == [("ot_score_previous", "previous")]
+    navigate(h, view, "ot_score_previous", "previous")
+    assert "evaluation details" in text(h, view)
+
+    original = h.app.views.starter_score_readout
+
+    def withdraw_before_publication(*args, **kwargs):
+        view = original(*args, **kwargs)
+        if kwargs["page"] == 2:
+            (directory / "starter-reconnect-withdrawn-generated-reconnect.json").touch(mode=0o600)
+        return view
+
+    monkeypatch.setattr(h.app.views, "starter_score_readout", withdraw_before_publication)
+    navigate(h, view, "ot_score_reconnect", "setup")
+    assert "Selected model setup required" not in text(h, view)
+    assert not (directory / "starter-evaluations.sqlite3").exists()
+    assert effects(h) == (0,) * 7
+
+
+def test_held_execution_keeps_reconciliation_action_for_model_custodian(installed, monkeypatch):
+    from test_starter_evaluation_session import LocalStarterBaseline
+    from test_starter_reconnect import configure
+
+    directory, worker, _, permission, _, _, authorized = installed
+    h = authorized[0]
+    cap, write, _ = configure(installed)
+    write(cap)
+    monkeypatch.setattr(LocalStarterBaseline, "execute", lambda *args: None)
+    assert worker.run(permission.execution_ref)["state"] == "held"
+    journal = directory / "starter-evaluations.sqlite3"
+    before = journal.read_bytes()
+    view = open_summary(h, monkeypatch)
+    assert "Evaluation outcome unknown" in text(h, view)
+    navigate(h, view, "ot_score_next", "next")
+    assert "reconcile the unknown execution" in text(h, view)
+    assert ("ot_score_reconnect", "setup") not in actions(screen(h, view))
+    assert journal.read_bytes() == before and effects(h) == (0,) * 7
