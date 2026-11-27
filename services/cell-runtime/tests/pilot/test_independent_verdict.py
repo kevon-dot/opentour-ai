@@ -132,8 +132,16 @@ class Scenario:
     """A generated population with per-arm transitions against one or more comparators."""
 
     def __init__(
-        self, plan, *, comparators=("incumbent",), family_size=1, slice_of=None, prefix=""
+        self,
+        plan,
+        *,
+        comparators=("incumbent",),
+        family_size=1,
+        slice_of=None,
+        prefix="",
+        family_prefix=None,
     ):
+        family_prefix = prefix if family_prefix is None else family_prefix
         cases, labels = [], {}
         self.preds = {"candidate": {}, **{c: {} for c in comparators}}
         index = 0
@@ -148,7 +156,7 @@ class Scenario:
                 cases.append(
                     iv.DecisionCase(
                         case_id,
-                        f"{prefix}family-{index // family_size:04d}",
+                        f"{family_prefix}family-{index // family_size:04d}",
                         {"case_ref": case_id, "text": f"generated-input-{index}"},
                         tuple(slices),
                     )
@@ -1074,7 +1082,7 @@ def test_r2_p2_newly_automated_errors_count_against_the_candidate(tmp_path):
     """Probe P2: WRx120 + DWx130. Comparator deferred 130; candidate automated them wrong."""
     s = Scenario([("WR", 120), ("DW", 130)])
     loose = policy(max_coverage_loss_bps=10000, coverage_floor_bps=0)
-    doc = held(run(tmp_path, s, pol=loose), "regression", "total_wrong_automatic_increased")
+    doc = held(run(tmp_path, s, pol=loose), "regression", "newly_automated_errors_exceed_ceiling")
     pair = doc["comparisons"]["incumbent"]
     assert pair["newly_automated"] == {"wrong": 130, "total": 130}
     assert pair["total_wrong_automatic"] == {"candidate": 130, "comparator": 120}
@@ -1313,3 +1321,96 @@ def test_r11_attributed_rows_carry_scorer_version(tmp_path):
     assert {r["scorer_version"] for r in rows} == {iv.SCORER_VERSION}
     assert {r["verdict"] for r in rows} <= set(iv.CASE_VERDICTS)
     assert v.document["scorer"]["scorer_version"] == iv.SCORER_VERSION
+
+
+# ----------------------------------------------------------------- Q: re-review findings
+
+
+def test_q1_expired_verdict_reevaluates_past_its_own_cohort_marker_only(tmp_path, monkeypatch):
+    """Re-review 1: an expired verdict must not be held by the marker it recorded itself."""
+    ev = evaluator(tmp_path)
+    s = Scenario(CLEAN_WIN, prefix="q1-")
+    first = run(tmp_path, s, ev=ev, selection_basis="after_protected_readout")
+    assert first.outcome == "verified_gain"
+    now = int(iv.time.time())
+    monkeypatch.setattr(iv.time, "time", lambda: now + 8 * 86_400)
+    again = run(tmp_path, s, ev=ev, selection_basis="after_protected_readout")
+    assert not again.replayed and again.verdict_key == first.verdict_key
+    assert again.outcome == "verified_gain"
+    # Any other claim over the same cohort is still refused.
+    held(
+        run(
+            tmp_path,
+            s,
+            ev=ev,
+            result_revision=sha("q1-other"),
+            selection_basis="after_protected_readout",
+        ),
+        "inconclusive",
+        "fresh_confirmation_cohort_required",
+    )
+
+
+def test_q2_newly_automated_without_an_error_ceiling_is_inconclusive_not_an_error(tmp_path):
+    """Mutant: dropping the no-ceiling guard would multiply None and raise TypeError."""
+    t = {k: v for k, v in terms_for().items() if k != "error_ceiling_bps"}
+    p = policy(operating_point_terms=t, operating_point_digest=digest(t))
+    s = Scenario([("WR", 120), ("RR", 60), ("DR", 20)])
+    held(run(tmp_path, s, pol=p), "inconclusive", "newly_automated_without_error_ceiling")
+
+
+def test_q3_family_only_overlap_refuses_a_post_readout_cohort(tmp_path):
+    """Mutant: checking case ids only would accept disjoint cases from the same families."""
+    ev = evaluator(tmp_path)
+    assert run(tmp_path, Scenario(CLEAN_WIN), ev=ev).outcome == "verified_gain"
+    siblings = Scenario(CLEAN_WIN, prefix="sibling-", family_prefix="")
+    assert not {c.case_id for c in siblings.population.cases} & {
+        c.case_id for c in Scenario(CLEAN_WIN).population.cases
+    }
+    held(
+        run(
+            tmp_path,
+            siblings,
+            ev=ev,
+            result_revision=sha("q3-sibling"),
+            selection_basis="after_protected_readout",
+        ),
+        "inconclusive",
+        "fresh_confirmation_cohort_required",
+    )
+
+
+def test_q4_a_signed_verdict_reloads_intact_and_a_dropped_signature_is_detected(tmp_path):
+    """Mutant: sealing with ``signature: None`` would let a signature be dropped or swapped."""
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from opentour_journal.crypto import der_to_raw
+
+    test_key = ec.generate_private_key(ec.SECP256R1())  # ephemeral, test only
+
+    def sign(data: bytes) -> str:
+        return der_to_raw(test_key.sign(data, ec.ECDSA(hashes.SHA256())))
+
+    signer = iv.EvaluatorSigner("generated-test-evaluator-key", "generated-registry-r1", sign)
+    ev = evaluator(tmp_path, signer=signer)
+    s = Scenario(CLEAN_WIN)
+    v = run(tmp_path, s, ev=ev)
+    assert v.signature is not None
+    reloaded = run(tmp_path, s, ev=ev)
+    assert reloaded.replayed and reloaded.signature == v.signature
+    path = tmp_path / "evaluator-custody" / "verdicts" / (v.verdict_key + ".json")
+    stored = json.loads(path.read_bytes())
+    stored["signature"] = None
+    path.write_text(json.dumps(stored))
+    with pytest.raises(iv.CustodyError, match="stored_verdict_tampered"):
+        run(tmp_path, s, ev=ev)
+
+
+def test_q5_coverage_expansion_within_the_ceiling_is_not_called_a_regression(tmp_path):
+    """Re-review 3: 1 newly automated error in 30 (333 bps <= 500) is expansion, not regression."""
+    s = Scenario([("RR", 170), ("DR", 29), ("DW", 1)])
+    doc = held(run(tmp_path, s), "inconclusive", "coverage_expansion_within_ceiling")
+    pair = doc["comparisons"]["incumbent"]
+    assert pair["newly_automated"] == {"wrong": 1, "total": 30}
+    assert pair["total_wrong_automatic"] == {"candidate": 1, "comparator": 0}
+    assert doc["outcome"] != "regression"

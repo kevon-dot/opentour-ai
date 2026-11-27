@@ -27,10 +27,13 @@ The operating point is supplied in its OPE-571 form, the frozen terms with every
 already replaced by its keyed digest plus the plain SHA-256 over them, and is checked by
 ``operating_point_binding`` alone. The evaluator never holds the slice key or plain slice names.
 
-Comparator gaps never hide candidate errors: cases the comparator left missing or malformed
-hold the comparison as incompatible, the candidate's total wrong automatic decisions may not
-exceed the comparator's, and cases the comparator deferred but the candidate automated count
-against the candidate when wrong (in the family effects, the slice veto and an error ceiling).
+Comparator gaps never hide candidate errors: more comparator missing or malformed outputs than
+the policy's ``max_missing`` hold the comparison as incompatible; the candidate's total wrong
+automatic decisions may not exceed the comparator's; and cases the comparator deferred but the
+candidate automated count against the candidate when wrong (in the family effects, the slice
+veto and an error ceiling). Comparator gaps within ``max_missing`` stay outside the paired
+counts and the family effects, so the policy bound is what limits them; any wrong automatic
+decision the candidate made on those cases is still counted in its total wrong decisions.
 
 One idempotent verdict exists per verdict key (the digest of the whole claim, including its
 claimed counts, kind, job manifest, selection basis and producer, plus the full policy digest,
@@ -980,7 +983,7 @@ class IndependentEvaluator:
                 record = self._private_record(population, arms, rows)
                 comparisons = self._compare_all(claim, policy, population, arms, rows, reasons)
                 self._check_reproduction(claim, comparisons, reasons)
-                self._check_selection(claim, population, reasons)
+                self._check_selection(key, claim, population, reasons)
                 gate = {
                     "status": reasons.outcome(),
                     "reason": ",".join(reasons.reasons()) or "all_registered_gates_cleared",
@@ -1375,14 +1378,18 @@ class IndependentEvaluator:
             (comp_cov - cand_cov) * 10_000 > policy.max_coverage_loss_bps
         ):
             return "inconclusive", "coverage_incompatible"
-        if checks["candidate_total_wrong"] > checks["comparator_total_wrong"]:
-            return "regression", "total_wrong_automatic_increased"
         newly_wrong, newly = checks["newly_automated"]
         ceiling = policy.operating_point_terms.get("error_ceiling_bps")
         if newly and type(ceiling) is not int:
             return "inconclusive", "newly_automated_without_error_ceiling"
         if newly and newly_wrong * 10_000 > ceiling * newly:
             return "regression", "newly_automated_errors_exceed_ceiling"
+        if checks["candidate_total_wrong"] > checks["comparator_total_wrong"]:
+            if checks["candidate_total_wrong"] - newly_wrong <= checks["comparator_total_wrong"]:
+                # The extra errors all come from newly automated cases, within the ceiling:
+                # more automation, not a worse decision on shared cases. Still no gain claim.
+                return "inconclusive", "coverage_expansion_within_ceiling"
+            return "regression", "total_wrong_automatic_increased"
         if any(v["status"] == "veto" for v in slices.values()):
             return "regression", "critical_slice_veto"
         if any(v["status"] == "unsupported" for v in slices.values()):
@@ -1409,14 +1416,21 @@ class IndependentEvaluator:
                 reasons.add("integrity_failure", "claimed_counts_not_reproduced_" + name)
 
     def _check_selection(
-        self, claim: ClaimedResult, population: SealedPopulation, reasons: _Reasons
+        self, key: str, claim: ClaimedResult, population: SealedPopulation, reasons: _Reasons
     ) -> None:
-        """A post-readout selection needs cases and families no scored verdict here has seen."""
+        """A post-readout selection needs cases and families no scored verdict here has seen.
+
+        The one marker skipped is the one recorded under this claim's own verdict key: an expired
+        verdict being re-evaluated must not count its own earlier scoring as a prior readout.
+        Every other claim's cohort still refuses on any case or family overlap.
+        """
         if claim.selection_basis != "after_protected_readout":
             return
         cases = {c.case_id for c in population.cases}
         families = {c.family_id for c in population.cases}
         for path in sorted((self._root / "cohorts").glob("*.json")):
+            if path.name == key + ".json":
+                continue
             try:
                 seen = json.loads(path.read_bytes())
                 overlap = cases & set(seen["cases"]) or families & set(seen["families"])
