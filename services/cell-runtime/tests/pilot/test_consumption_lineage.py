@@ -5,6 +5,7 @@ or customer-evidence gate.
 """
 
 import copy
+import hashlib
 import json
 from pathlib import Path
 from typing import Any
@@ -152,7 +153,14 @@ def oracle(manifests: list[dict[str, Any]], change: Change) -> tuple[set[str], s
             dirty |= below(seeds)
         if doubt:
             unknown |= below(seeds)
-        unknown |= {r for r, p in parents.items() if not p and r not in seeds}
+        # Grounded = a seed, or has parents and every parent is grounded (least fixpoint).
+        grounded = set(seeds)
+        while True:
+            more = {r for r, p in parents.items() if r not in grounded and p and set(p) <= grounded}
+            if not more:
+                break
+            grounded |= more
+        unknown |= set(parents) - grounded
     unknown -= dirty
     return dirty, universe - dirty - unknown, unknown
 
@@ -179,7 +187,7 @@ def test_manifest_with_post_decision_input_is_rejected_not_repaired(tmp_path: Pa
     late = manifest("r1", consumed=[field("settlement-s1", "state", at="2026-01-01T10:15:00Z")])
     with pytest.raises(LineageError, match="input_after_decision"):
         store.put(late)
-    assert store.all() == []
+    assert store.all(TENANT) == []
 
 
 def test_resolution_returns_all_named_links(tmp_path: Path) -> None:
@@ -396,7 +404,8 @@ def test_two_reader_roles_see_different_detail(tmp_path: Path) -> None:
     assert reviewer.inputs and [i.path for i in owner.inputs] == [i.path for i in reviewer.inputs]
     for actor in (OWNER_ACTOR, REVIEWER_ACTOR):
         prot = resolved(reader.resolve_claim(request(actor), "claim-p"))
-        assert prot.status == "protected" and prot.inputs == () and prot.input_count == 2
+        assert prot.status == "protected" and prot.inputs == () and prot.input_count == 0
+        assert prot.to_json()["manifest_ref"] is None and prot.result_ref is None
         got = impact(reader.impact(request(actor), Change("refund-request", "amount", 9)))
         assert got.protected_counts == {"dirty": 5, "unknown": 0, "unaffected": 0}
         assert not any("-p" in r for r, _ in got.dirty) and not any(
@@ -434,16 +443,154 @@ def test_manifest_is_immutable_and_conflicting_rewrite_is_refused(tmp_path: Path
     changed = manifest("a", policy_revision="pol-8")
     with pytest.raises(LineageError, match="manifest_conflict"):
         store.put(changed)
-    assert store.all()[0]["policy_revision"] == "pol-7"
+    assert store.all(TENANT)[0]["policy_revision"] == "pol-7"
 
 
-def test_tampered_manifest_file_is_detected_on_read(tmp_path: Path) -> None:
+def folder_of(tmp_path: Path, tenant: str = TENANT) -> Path:
+    return tmp_path / "m" / tenant
+
+
+def test_edited_manifest_with_stale_pin_is_detected_and_fails_closed(tmp_path: Path) -> None:
+    """F3: an edit of the manifest alone is caught by the sidecar pin (tamper-evidence only)."""
+    _, _, reader = build(tmp_path, manifest("a"))
+    path = folder_of(tmp_path) / "manifest-a.json"
+    doc = json.loads(path.read_text())
+    doc["policy_revision"] = "pol-evil"
+    doc["consumed"] = doc["consumed"][:1]
+    path.write_text(json.dumps(doc, sort_keys=True, separators=(",", ":")))
+    with pytest.raises(LineageError, match="manifest_tampered"):
+        ManifestStore(tmp_path / "m").all(TENANT)
+    out = reader.resolve_claim(request(), "claim-a")
+    assert isinstance(out, Denial) and out.reason == "manifest_tampered"
+    assert "pol-evil" not in json.dumps(out.receipt)
+    got = reader.impact(request(), Change("refund-request", "amount", 9))
+    assert isinstance(got, Denial) and got.reason == "manifest_tampered"
+
+
+def test_missing_pin_and_renamed_manifest_are_tampered(tmp_path: Path) -> None:
     store = ManifestStore(tmp_path)
     store.put(manifest("a"))
-    path = next(tmp_path.glob("manifest-a.json"))
-    path.rename(tmp_path / "manifest-zzz.json")
+    folder = tmp_path / TENANT
+    (folder / "manifest-a.sha256").unlink()
     with pytest.raises(LineageError, match="manifest_tampered"):
-        store.all()
+        store.all(TENANT)
+    store.put(manifest("a"))  # retry heals the missing pin identically
+    (folder / "manifest-a.json").rename(folder / "manifest-zzz.json")
+    (folder / "manifest-a.sha256").rename(folder / "manifest-zzz.sha256")
+    with pytest.raises(LineageError, match="manifest_tampered"):
+        store.all(TENANT)
+
+
+def test_corrupt_file_in_one_tenant_does_not_break_another_tenant(tmp_path: Path) -> None:
+    """F4: storage is tenant-scoped and read errors are typed, fail-closed LineageErrors."""
+    store, grants, reader = build(tmp_path, manifest("a"))
+    grants.set(OTHER)
+    store.put(manifest("b", tenant=OTHER, claim_refs=["claim-b"]))
+    (folder_of(tmp_path, OTHER) / "manifest-b.json").write_text("{not json")
+    other = Request(Actor(OTHER, "owner-1", OWNER), WF, 3, NOW)
+    out = reader.resolve_claim(other, "claim-b")
+    assert isinstance(out, Denial) and out.reason == "manifest_tampered"  # pin no longer matches
+    assert resolved(reader.resolve_claim(request(), "claim-a")).status == "resolved"
+    pinned = folder_of(tmp_path, OTHER) / "manifest-b.sha256"
+    pinned.write_text(hashlib.sha256(b"{not json").hexdigest())
+    with pytest.raises(LineageError, match="manifest_unreadable"):
+        store.all(OTHER)
+    unreadable = reader.impact(other, Change("x", "y", 1))
+    assert isinstance(unreadable, Denial) and unreadable.reason == "manifest_unreadable"
+    assert resolved(reader.resolve_claim(request(), "claim-a")).status == "resolved"
+
+
+def test_other_tenant_writing_same_manifest_ref_neither_collides_nor_probes(
+    tmp_path: Path,
+) -> None:
+    store = ManifestStore(tmp_path)
+    store.put(manifest("a"))
+    store.put(manifest("a", tenant=OTHER, policy_revision="pol-other"))  # no manifest_conflict
+    assert store.all(TENANT)[0]["policy_revision"] == "pol-7"
+    assert store.all(OTHER)[0]["policy_revision"] == "pol-other"
+
+
+def test_malformed_request_and_grant_times_are_denials_not_exceptions(tmp_path: Path) -> None:
+    """F5"""
+    _, grants, reader = build(tmp_path, manifest("a"))
+    for bad in ("yesterday", "2026-01-01Z", "", "2026-01-01T12:00:00"):
+        out = reader.resolve_claim(Request(OWNER_ACTOR, WF, 3, bad), "claim-a")
+        assert isinstance(out, Denial) and out.reason == "invalid_time"
+    grants.set(TENANT, expires_at="never")
+    out2 = reader.impact(request(), Change("refund-request", "amount", 9))
+    assert isinstance(out2, Denial) and out2.reason == "invalid_time"
+
+
+def test_timestamps_must_be_full_and_later_relationships_must_be_later(tmp_path: Path) -> None:
+    """F6: date-only times are refused; a 'later' relationship cannot predate the decision."""
+    store = ManifestStore(tmp_path)
+    with pytest.raises(LineageError, match="manifest_decision_time"):
+        store.put(manifest("a", decision_time="2026-01-01Z"))
+    early = {"kind": "settlement", "ref": "s", "available_at": "2026-01-01T09:00:00Z"}
+    with pytest.raises(LineageError, match="manifest_later_relationship"):
+        store.put(manifest("a", later_relationships=[{**early, "relationship_version": 1}]))
+    assert store.all(TENANT) == []
+
+
+def test_descendant_of_an_orphan_is_unknown_not_unaffected(tmp_path: Path) -> None:
+    """F1: doubt must flow down from a node with no recorded parent."""
+    nodes = [
+        {"ref": "orph", "kind": "dataset", "derived_from": []},
+        {"ref": "child", "kind": "model", "derived_from": ["orph"]},
+        {"ref": "grand", "kind": "proposal", "derived_from": ["child"]},
+        {"ref": "mixed", "kind": "comparator", "derived_from": ["ex-a", "orph"]},
+    ]
+    _, _, reader = build(tmp_path, manifest("a", descendants=nodes))
+    got = impact(reader.impact(request(), Change("unrelated-doc", "x", 9)))
+    assert set(got.unknown) == {"orph", "child", "grand", "mixed"}
+    assert set(got.unaffected) == {"result-a", "cand-a", "ex-a"}
+    assert got.dirty == ()
+
+
+def test_unreachable_cycle_is_unknown_not_unaffected(tmp_path: Path) -> None:
+    """F1: a disconnected derived_from cycle is accepted by the validator but never trusted."""
+    cycle = [
+        {"ref": "x", "kind": "dataset", "derived_from": ["y"]},
+        {"ref": "y", "kind": "model", "derived_from": ["x"]},
+        {"ref": "z", "kind": "proposal", "derived_from": ["y"]},
+    ]
+    _, _, reader = build(tmp_path, manifest("a", descendants=cycle))
+    got = impact(reader.impact(request(), Change("unrelated-doc", "x", 9)))
+    assert set(got.unknown) == {"x", "y", "z"} and "x" not in got.unaffected
+    dirty = impact(reader.impact(request(), Change("refund-request", "amount", 9)))
+    assert {"x", "y", "z"} <= set(dirty.unknown) and not {"x", "y", "z"} & {
+        r for r, _ in dirty.dirty
+    }
+
+
+def test_protected_claim_exposes_aggregate_status_only_even_with_unknown_dependency(
+    tmp_path: Path,
+) -> None:
+    """F2: protected confinement is checked before the hold branch and leaks nothing per case."""
+    for extra in ({}, {"unknown_dependencies": ["ledger"]}):
+        _, _, reader = build(
+            tmp_path / str(len(extra)), manifest("p", partition="protected", **extra)
+        )
+        for actor in (OWNER_ACTOR, REVIEWER_ACTOR):
+            r = resolved(reader.resolve_claim(request(actor), "claim-p"))
+            flat = json.dumps(r.to_json())
+            assert (r.status, r.reason) == ("protected", "aggregate_only")
+            for secret in (
+                "result-p",
+                "cand-p",
+                "ex-p",
+                "manifest_p",
+                "pol-7",
+                "ledger",
+                "2026-01-01T10:00",
+                "refund-request",
+                "amount",
+            ):
+                assert secret not in flat, secret
+            assert r.manifest_ref is None and r.manifest_digest is None
+            assert r.correction_version is None and r.policy_revision is None
+            assert r.decision_time is None and r.input_count == 0
+            assert r.unknown_dependencies == () and r.inputs == ()
 
 
 @pytest.mark.parametrize(

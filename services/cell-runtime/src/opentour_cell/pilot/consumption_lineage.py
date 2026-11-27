@@ -22,6 +22,7 @@ show that OPE-416's real writer produces this shape.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -63,8 +64,12 @@ def _need(condition: object, reason: str) -> None:
         raise LineageError(reason)
 
 
+_TIMESTAMP = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,6})?Z$")
+
+
 def _time(value: object, reason: str) -> datetime:
-    _need(isinstance(value, str) and value.endswith("Z"), reason)
+    # Full UTC timestamps only: a date-only value such as "2026-01-01Z" is not a point in time.
+    _need(isinstance(value, str) and _TIMESTAMP.fullmatch(value), reason)
     try:
         parsed = datetime.fromisoformat(str(value)[:-1] + "+00:00")
     except ValueError as exc:
@@ -191,7 +196,11 @@ def validate_manifest(raw: Mapping[str, Any]) -> dict[str, Any]:
             "manifest_later_relationship",
         )
         _ref(rel["ref"], "manifest_later_relationship")
-        _time(rel["available_at"], "manifest_later_relationship")
+        # A "later" relationship must really be later than the decision it attaches to.
+        _need(
+            _time(rel["available_at"], "manifest_later_relationship") > decision,
+            "manifest_later_relationship",
+        )
         _need(
             isinstance(rel["kind"], str) and isinstance(rel["relationship_version"], int),
             "manifest_later_relationship",
@@ -205,43 +214,86 @@ def manifest_digest(manifest: Mapping[str, Any]) -> str:
     return digest(manifest)
 
 
+def _body(manifest: Mapping[str, Any]) -> str:
+    return json.dumps(manifest, sort_keys=True, separators=(",", ":"))
+
+
+def _pin(body: str) -> str:
+    return hashlib.sha256(body.encode()).hexdigest()
+
+
 class ManifestStore:
-    """Immutable write-once manifest directory; survives restart by re-reading files."""
+    """Write-once, tenant-scoped manifest directory; survives restart by re-reading files.
+
+    Each manifest is stored under its tenant's own folder with a sidecar pin (sha256 of the
+    exact bytes) written first. Reads verify the pin, so an edit to the manifest file alone is
+    detected. This is tamper-EVIDENCE against edits of one file, not tamper-proofing: anyone
+    who can rewrite both the manifest and its pin can forge a manifest. Tenants never share
+    files, so one tenant's refs, corruption or writes cannot affect or probe another's.
+    """
 
     def __init__(self, directory: Path) -> None:
         self.directory = Path(directory)
         self.directory.mkdir(parents=True, exist_ok=True)
 
-    def _file(self, ref: str) -> Path:
-        return self.directory / f"manifest-{ref}.json"
+    def _folder(self, tenant: str) -> Path:
+        return self.directory / _ref(tenant, "manifest_tenant")
 
-    def put(self, raw: Mapping[str, Any]) -> str:
-        """Write once. Identical replay is idempotent; different bytes for a ref conflict."""
-        manifest = validate_manifest(raw)
-        path = self._file(manifest["manifest_ref"])
-        body = json.dumps(manifest, sort_keys=True, separators=(",", ":"))
-        if path.exists():
-            _need(path.read_text() == body, "manifest_conflict")
-            return manifest_digest(manifest)
-        handle, temporary = tempfile.mkstemp(dir=self.directory, prefix=".tmp-")
+    @staticmethod
+    def _slurp(path: Path) -> str:
+        try:
+            return path.read_text()
+        except (OSError, UnicodeDecodeError) as exc:
+            raise LineageError("manifest_unreadable") from exc
+
+    @staticmethod
+    def _create(folder: Path, name: str, body: str) -> None:
+        """Atomically create ``name`` unless it exists; an existing file must be identical."""
+        target = folder / name
+        handle, temporary = tempfile.mkstemp(dir=folder, prefix=".tmp-")
         try:
             with os.fdopen(handle, "w") as stream:
                 stream.write(body)
                 stream.flush()
                 os.fsync(stream.fileno())
             try:
-                os.link(temporary, path)  # atomic create-if-absent
+                os.link(temporary, target)  # atomic create-if-absent
             except FileExistsError:
-                _need(path.read_text() == body, "manifest_conflict")
+                _need(ManifestStore._slurp(target) == body, "manifest_conflict")
         finally:
             os.unlink(temporary)
+
+    def put(self, raw: Mapping[str, Any]) -> str:
+        """Write once. Identical replay is idempotent; different bytes for a ref conflict."""
+        manifest = validate_manifest(raw)
+        folder = self._folder(manifest["tenant"])
+        folder.mkdir(parents=True, exist_ok=True)
+        name = f"manifest-{manifest['manifest_ref']}"
+        body = _body(manifest)
+        # Pin first: a crash leaves only an orphan pin, which a retry accepts as identical.
+        self._create(folder, f"{name}.sha256", _pin(body))
+        self._create(folder, f"{name}.json", body)
         return manifest_digest(manifest)
 
-    def all(self) -> list[dict[str, Any]]:
+    def all(self, tenant: str) -> list[dict[str, Any]]:
+        """Every verified manifest of one tenant; any defect raises a typed LineageError."""
+        folder = self._folder(tenant)
         found = []
-        for path in sorted(self.directory.glob("manifest-*.json")):
-            manifest = validate_manifest(json.loads(path.read_text()))
-            _need(path.name == f"manifest-{manifest['manifest_ref']}.json", "manifest_tampered")
+        for path in sorted(folder.glob("manifest-*.json")) if folder.is_dir() else []:
+            body = self._slurp(path)
+            pin = path.with_suffix(".sha256")
+            _need(pin.is_file() and self._slurp(pin) == _pin(body), "manifest_tampered")
+            try:
+                loaded = json.loads(body)
+            except ValueError as exc:
+                raise LineageError("manifest_unreadable") from exc
+            manifest = validate_manifest(loaded)
+            _need(
+                path.name == f"manifest-{manifest['manifest_ref']}.json"
+                and manifest["tenant"] == tenant
+                and _body(manifest) == body,
+                "manifest_tampered",
+            )
             found.append(manifest)
         return found
 
@@ -407,7 +459,11 @@ class ConsumptionReader:
             return _denial(request, "unavailable", what)
         if grant.revoked:
             return _denial(request, "grant_revoked", what)
-        if _time(request.now, "request_time") >= _time(grant.expires_at, "grant_time"):
+        try:
+            expired = _time(request.now, "request_time") >= _time(grant.expires_at, "grant_time")
+        except LineageError:
+            return _denial(request, "invalid_time", what)
+        if expired:
             return _denial(request, "grant_expired", what)
         if grant.grant_epoch != request.grant_epoch:
             return _denial(request, "grant_stale", what)
@@ -415,28 +471,34 @@ class ConsumptionReader:
 
     def _scoped(self, grant: GrantState) -> list[dict[str, Any]]:
         return [
-            m for m in self.store.all()
-            if m["tenant"] == grant.tenant
-            and m["workflow_ref"] == grant.workflow_ref
-            and m["grant_epoch"] <= grant.grant_epoch
-        ]  # fmt: skip
+            m
+            for m in self.store.all(grant.tenant)
+            if m["workflow_ref"] == grant.workflow_ref and m["grant_epoch"] <= grant.grant_epoch
+        ]
 
     def resolve_claim(self, request: Request, claim_ref: str) -> Resolution | Denial:
         granted = self._authorize(request, claim_ref)
         if isinstance(granted, Denial):
             return granted
-        matches = [m for m in self._scoped(granted) if claim_ref in m["claim_refs"]]
+        try:
+            scoped = self._scoped(granted)
+        except LineageError as exc:
+            return _denial(request, exc.reason, claim_ref)  # fail closed, no content
+        matches = [m for m in scoped if claim_ref in m["claim_refs"]]
         if not matches:
             return _finish(Resolution("unknown", "linkage_missing", claim_ref=claim_ref))
         if len(matches) > 1:
             # Two sealed manifests claim the same claim: never pick a winner by order.
             return _finish(Resolution("hold", "ambiguous_linkage", claim_ref=claim_ref))
         m = matches[0]
-        sealed = manifest_digest(m)
+        if m["partition"] == "protected":
+            # Protected roots expose authorized aggregate status only: no refs, digests,
+            # versions, times, counts or dependency names, whatever else is true of them.
+            return _finish(Resolution("protected", "aggregate_only", claim_ref=claim_ref))
         base = {
             "claim_ref": claim_ref,
             "manifest_ref": m["manifest_ref"],
-            "manifest_digest": sealed,
+            "manifest_digest": manifest_digest(m),
             "result_ref": m["result_ref"],
             "candidate_ref": m["candidate_ref"],
             "example_ref": m["example_ref"],
@@ -448,10 +510,6 @@ class ConsumptionReader:
         if m["unknown_dependencies"]:
             # A claim needing an unrecorded link is held, never completed from guesses.
             return _finish(Resolution("hold", "unknown_dependency", **base))
-        if m["partition"] == "protected":
-            return _finish(
-                Resolution("protected", "aggregate_only", input_count=len(m["consumed"]), **base)
-            )
         links = tuple(
             FieldLink(
                 e["source_ref"], e["path"], e["source_revision"], e["available_at"],
@@ -477,11 +535,15 @@ class ConsumptionReader:
         granted = self._authorize(request, [change.source_ref, change.path, change.new_revision])
         if isinstance(granted, Denial):
             return granted
+        try:
+            scoped = self._scoped(granted)
+        except LineageError as exc:
+            return _denial(request, exc.reason, [change.source_ref, change.path])
         dirty: dict[str, str] = {}
         unknown: set[str] = set()
         every: set[str] = set()
         protected: dict[str, set[str]] = {"dirty": set(), "unknown": set(), "unaffected": set()}
-        for m in self._scoped(granted):
+        for m in scoped:
             nodes = _consumers(m)
             reasons, doubts = _classify(m, nodes, change)
             for ref in nodes:
@@ -554,6 +616,15 @@ def _classify(
             dirty[ref] = direct if ref in roots else "descendant_of_changed_field"
     if doubt:
         unknown.update(reach)
-    # An artifact with no recorded parents has no linkage at all: unknown, never unaffected.
-    unknown.update(node["ref"] for node in manifest["descendants"] if not node["derived_from"])
+    # Any artifact the recorded edges do not ground in a root (no parent, only unrecorded
+    # ancestry, or an unreachable cycle) has no usable linkage: unknown, never unaffected. That
+    # doubt flows down to everything derived from it, even from a grounded second parent.
+    unknown.update(set(nodes) - reach)
+    frontier = list(unknown)
+    while frontier:
+        current = frontier.pop()
+        for ref, parents in nodes.items():
+            if current in parents and ref not in unknown:
+                unknown.add(ref)
+                frontier.append(ref)
     return dirty, unknown - set(dirty)
