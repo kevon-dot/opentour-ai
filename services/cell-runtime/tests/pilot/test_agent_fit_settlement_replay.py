@@ -90,9 +90,9 @@ def test_cycle_recovers_committed_fit_after_lost_settlement_reply(tmp_path, monk
     assert not (results or pointers or releases)
     model_bytes = models[0].read_bytes()
     fit_id, state, reserved_seconds, settlement = fit_rows[0]
+    assert state == "settled" and settlement is not None
     model = json.loads(model_bytes)
     stored = json.loads(settlement)
-    assert state == "settled"
     assert reserved_seconds == stored["reserved_seconds_charged"] == 120
     assert stored["reservation_id"] == fit_id
     assert stored["elapsed_seconds"] == 2
