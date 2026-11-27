@@ -296,6 +296,22 @@ def read_status(
             f"Approval evidence {approval.reference}. Earlier delivery is unconfirmed.",
             "The workflow owner can open the selected evidence and address the review decision.",
         )
+    if approval.stage in {"expired", "approval_unresolved"}:
+        expiry = approval.stage == "expired"
+        finding = (
+            "Approval request expired." if expiry else "Approval outcome awaits reconciliation."
+        )
+        next_action = (
+            "The release owner can inspect the current handoff evidence."
+            if expiry
+            else "The release owner can reconcile the approval request against provider history."
+        )
+        return StatusAnswer(
+            finding,
+            f"Approval evidence {approval.reference}{time}. "
+            f"Intended recipient {audit['recipient']}. Delivery remains unconfirmed.",
+            next_action,
+        )
     stage = {
         "approved": "Approval recorded",
         "changes_requested": "Changes requested",
@@ -303,7 +319,6 @@ def read_status(
         "accepted": "Approval request transport acknowledged",
         "failed": "Approval request transport failed",
         "uncertain": "Approval request transport unconfirmed",
-        "expired": "Approval request expired",
     }[approval.stage]
     return StatusAnswer(
         "Handoff delivery is unconfirmed.",
