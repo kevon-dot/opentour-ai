@@ -350,6 +350,7 @@ class Closeout:
                     "plugin-decisions",
                     "destination",
                     (self.directory / "zapier-decisions").exists()
+                    or (self.directory / "zapier-reconciliation.sqlite3").exists()
                     or any(self.directory.glob("zapier-approval-za-*.json")),
                     "Reconcile signed decision returns, admitted challenges, "
                     "uncertain Zap runs and approved recipient copies.",
