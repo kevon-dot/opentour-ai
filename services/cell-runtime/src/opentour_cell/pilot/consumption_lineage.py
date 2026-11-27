@@ -8,6 +8,16 @@ manifest directory.
 
 The producer record shape (``opentour.pilot.consumed-field-manifest.v1``) is a reader-side
 proposal until OPE-416 publishes its writer; see ``validate_manifest`` for the exact fields.
+
+Status vocabulary (this module's reading of a spec that permits "unknown or hold"; a contract
+gap for the coordinator, not a settled product decision): ``unknown`` means no recorded edge
+links the claim or consumer; ``hold`` means an edge exists but is unusable (an unrecorded
+dependency, or two manifests claiming the same claim). Neither is ever completed by a guess.
+
+Simulated and NOT proven: everything here is a reader over generated sentinel manifests in a
+local directory with an in-test grant lookup. It proves software behavior only. It establishes
+no provider, installed-witness, staged-packet (OPE-529) or customer evidence, and it does not
+show that OPE-416's real writer produces this shape.
 """
 
 from __future__ import annotations
