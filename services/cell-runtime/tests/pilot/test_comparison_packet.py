@@ -255,6 +255,7 @@ def context(comparison, **over):
     arms = comparison["arms"]
     values = {
         "tenant": comparison["organization"],
+        "engagement": comparison["engagement"],
         "recipient": "generated-recipient",
         "mandate_revision": "generated-mandate-r1",
         "run_ref": "generated-run-1",
@@ -281,6 +282,7 @@ def make_verdict(comparison, receipt, ctx, **over):
         "comparison_evidence_revision": comparison["evidence_revision"],
         "candidate_digest": arms["simple"]["revision"],
         "comparator_digest": arms["incumbent"]["revision"],
+        "operating_point_digest_form": cp.OPERATING_POINT_DIGEST_FORM,
         "operating_point_digest": cp.operating_point_digest(
             cp.slice_substituted_terms(
                 comparison["terms"], key_for(comparison), **scope(comparison)
@@ -310,7 +312,10 @@ class Authority:
 
 
 class Keyring:
-    """Engagement-local slice-key double: one generated 32-byte key per (tenant, engagement)."""
+    """Engagement-local slice-key double: one generated 32-byte key per (tenant, engagement).
+
+    TEST DOUBLE ONLY. It derives keys from public inputs, which a real ``SliceKeyView`` must
+    never do (OPE-566: keys come from a CSPRNG or a hardware token)."""
 
     def __init__(self, missing=()):
         self.missing = set(missing)
@@ -1820,11 +1825,13 @@ def test_no_slice_name_or_key_appears_anywhere_in_packet_event_or_outbox(tmp_pat
 
 def test_packet_states_the_slice_digest_is_not_issuer_authenticated(tmp_path):
     """S5: until OPE-566 the key is engagement-local; the packet says so explicitly."""
-    out = Bundle(named_slice_run(tmp_path), tmp_path / "stage").stage()
+    comparison = named_slice_run(tmp_path)
+    out = Bundle(comparison, tmp_path / "stage").stage()
     assert out.packet["critical_slice_names"] == {
         "form": "keyed_digest",
         "algorithm": "hmac_sha256",
         "key_scope": "engagement",
+        "keyed_engagement": comparison["engagement"],
         "key_custody": "customer_worker_local",
         "names_disclosed": False,
         "issuer_authenticated": False,
@@ -1884,8 +1891,30 @@ def test_missing_engagement_key_holds_instead_of_falling_back_to_plain_hashing(
 
 @pytest.mark.parametrize(
     "key",
-    [None, b"", b"\x00" * 16, b"\x00" * 33, "00" * 32, bytearray(32), 0],
-    ids=["none", "empty", "short", "long", "hex-string", "bytearray", "int"],
+    [
+        None,
+        b"",
+        b"\x01\x02" * 8,
+        b"\x01\x02" * 16 + b"\x03",
+        "00" * 32,
+        bytearray(range(32)),
+        0,
+        type("BytesSub", (bytes,), {})(range(32)),
+        bytes(32),
+        b"a" * 32,
+    ],
+    ids=[
+        "none",
+        "empty",
+        "short",
+        "long",
+        "hex-string",
+        "bytearray",
+        "int",
+        "bytes-subclass",
+        "all-zero",
+        "one-repeated-value",
+    ],
 )
 def test_malformed_engagement_key_refuses_every_entry_point(runs, tmp_path, key):
     """S7 adverse: the store, assemble, verify and private view all refuse a malformed key."""
@@ -2047,22 +2076,20 @@ def test_operating_point_digest_is_verifiable_from_substituted_terms_without_the
     assert proc.stdout.strip() == published == b.verdict["operating_point_digest"]
 
 
-def test_verdict_bound_to_the_pre_change_digest_is_refused_with_a_distinct_code(tmp_path):
-    """P3 adverse: a stored verdict carrying the old raw-terms digest is refused with its own
-    code, distinct from a generic mismatch, and is never silently re-digested."""
+def test_verdict_without_the_digest_form_predates_slice_digests(tmp_path):
+    """P3/F1: a verdict that does not declare the substituted form is refused by the field's
+    absence alone, whatever digest it carries, and is never re-digested."""
     comparison = named_material_run(tmp_path)
     b = Bundle(comparison, tmp_path / "stage")
-    legacy = make_verdict(
-        comparison, b.receipt, b.ctx, operating_point_digest=digest(comparison["terms"])
-    )
-    out = b.stage(verdict=legacy)
-    assert out.status == "refused", out
-    assert out.reason == "operating_point_digest_predates_slice_digests"
-    assert out.packet is None and empty(b.store)
-    assert legacy["operating_point_digest"] == digest(comparison["terms"])  # untouched
-    other = make_verdict(comparison, b.receipt, b.ctx, operating_point_digest=digest("other"))
-    assert b.stage(verdict=other).reason == "verdict_binding_mismatch"
-    assert b.stage().status == "staged"  # the substituted binding still stages
+    for claimed in (digest(comparison["terms"]), b.verdict["operating_point_digest"]):
+        body = {k: v for k, v in b.verdict.items() if k not in ("verdict_digest",)}
+        body.pop("operating_point_digest_form")
+        legacy = reseal_verdict({**body, "operating_point_digest": claimed})
+        out = b.stage(verdict=legacy)
+        assert out.reason == "operating_point_digest_predates_slice_digests", out
+        assert out.packet is None and empty(b.store)
+        assert legacy["operating_point_digest"] == claimed  # untouched
+    assert b.stage().status == "staged"  # the declared, substituted binding still stages
 
 
 def test_terms_without_slice_names_keep_their_digest(runs, tmp_path):
@@ -2283,3 +2310,298 @@ def test_stage_refuses_comparison_problems_before_any_key_lookup(runs, tmp_path,
     b.ctx = context(runs[_PLAIN_HOLD])
     b.authority = Authority(b.ctx)
     assert b.stage().status == "staged" and len(seen) == 1  # positive control: one lookup
+
+
+# ---------- F: lane-owner review of d7520b0 (key-free oracle, engagement, weak keys, holds)
+
+
+def named_hold(root):
+    """A real named-slice run that the planner holds (the reviewer's probe-4 shape)."""
+    dev, protected = rows("dev"), rows("protected")
+    for r in dev + protected:
+        r["slices"] = list(SLICE_NAMES)
+    comparison = compare(
+        root,
+        development=dev,
+        protected=protected,
+        terms={**STRICT, "critical_slices": list(SLICE_NAMES), "minimum_verified_cases": 1000},
+        allowed_slices=list(SLICE_NAMES),
+    )[0]
+    assert comparison["decision"]["disposition"] == "hold", comparison["decision"]
+    return comparison
+
+
+def raw_digest_with(comparison, names):
+    """An attacker's or a legacy worker's digest: plain SHA-256 over raw terms with ``names``."""
+    return digest({**comparison["terms"], "critical_slices": list(names)})
+
+
+def verdict_with(b, comparison, *, claimed, declared=True):
+    body = {k: v for k, v in make_verdict(comparison, b.receipt, b.ctx).items()}
+    body.pop("verdict_digest")
+    if not declared:
+        body.pop("operating_point_digest_form")
+    return reseal_verdict({**body, "operating_point_digest": claimed})
+
+
+def path_bundle(path, tmp_path):
+    """('improvement', fixture store), ('improvement-live', live store), ('hold', live store)."""
+    if path == "hold":
+        comparison = named_hold(tmp_path)
+        b = live_bundle(comparison, tmp_path / "b")
+        b.receipt = make_receipt()
+        b.verdict = make_verdict(comparison, b.receipt, b.ctx)  # a hold publishes its digest
+        return comparison, b
+    comparison = named_slice_run(tmp_path)
+    b = Bundle(comparison, tmp_path / "b")
+    if path == "improvement-live":
+        b.store = cp.PacketOutbox(tmp_path / "b" / "live.sqlite3", slice_keys=KEYS)
+    return comparison, b
+
+
+PATHS = ["improvement", "improvement-live", "hold"]
+
+
+@pytest.mark.parametrize("path", PATHS)
+def test_correct_and_wrong_raw_name_guesses_get_the_identical_reason(tmp_path, path):
+    """F1 (blocker): no reason code separates a correct raw-name guess from a wrong one.
+
+    Declared form: a raw-terms digest with the TRUE names, with wrong names, and a random
+    digest all get ``verdict_binding_mismatch``. Undeclared form: all three get
+    ``operating_point_digest_predates_slice_digests``. Nothing is staged in any case."""
+    comparison, b = path_bundle(path, tmp_path)
+    claims = {
+        "true_raw_guess": raw_digest_with(comparison, SLICE_NAMES),
+        "wrong_raw_guess": raw_digest_with(comparison, ("john_smith", "vip")),
+        "random": digest("generated-random-point"),
+    }
+    for declared, expected in (
+        (True, "verdict_binding_mismatch"),
+        (False, "operating_point_digest_predates_slice_digests"),
+    ):
+        reasons = {
+            label: b.stage(verdict=verdict_with(b, comparison, claimed=claimed, declared=declared))
+            for label, claimed in claims.items()
+        }
+        assert {label: o.reason for label, o in reasons.items()} == dict.fromkeys(
+            claims, expected
+        ), (declared, reasons)
+        assert all(o.packet is None for o in reasons.values()) and empty(b.store)
+    honest = b.stage()
+    assert honest.reason in (None, "audit_and_verdict_issuers_unverified"), honest
+
+
+@pytest.mark.parametrize("path", PATHS)
+def test_unknown_declared_form_is_a_binding_mismatch(tmp_path, path):
+    """F1: a declared but different form is not the legacy case and compares nothing raw."""
+    comparison, b = path_bundle(path, tmp_path)
+    good = make_verdict(comparison, b.receipt, b.ctx)
+    body = {k: v for k, v in good.items() if k != "verdict_digest"}
+    out = b.stage(verdict=reseal_verdict({**body, "operating_point_digest_form": "raw_terms.v0"}))
+    assert out.reason == "verdict_binding_mismatch" and empty(b.store), out
+
+
+def test_no_code_path_hashes_unsubstituted_terms(tmp_path, monkeypatch):
+    """F1: spy on ``digest``, ``canonical`` (both the packet module's and the one ``digest``
+    uses) and ``operating_point_digest`` across staging, holds, refusals, replay, dispatch and
+    the private view. No raw sentinel name may reach them, with exactly one recorded
+    exception: verifying the comparison's own ``evidence_revision`` seal, which by definition
+    hashes the whole comparison (see F4 in the module docstring). Raw ``terms`` never reach
+    them on their own, and ``operating_point_digest`` never sees a raw name at all."""
+    from opentour_cell.pilot import operating_point as op_mod
+
+    for sub in ("w", "h"):
+        (tmp_path / sub).mkdir(mode=0o700)
+    win = named_slice_run(tmp_path / "w")
+    hold = named_hold(tmp_path / "h")
+    seals = [{k: v for k, v in c.items() if k != "evidence_revision"} for c in (win, hold)]
+    wb = Bundle(win, tmp_path / "wb")
+    hb = live_bundle(hold, tmp_path / "hb")
+    hb.receipt = make_receipt()
+    hb.verdict = make_verdict(hold, hb.receipt, hb.ctx)
+    verdicts = {
+        name: (b, c, verdict_with(b, c, claimed=raw_digest_with(c, SLICE_NAMES), declared=d))
+        for name, b, c, d in (
+            ("win-raw-declared", wb, win, True),
+            ("win-raw-undeclared", wb, win, False),
+            ("hold-raw-declared", hb, hold, True),
+            ("hold-raw-undeclared", hb, hold, False),
+        )
+    }
+    calls = []
+
+    def spy(name, real):
+        def wrapped(value, *args, **kwargs):
+            if any(mentions(value, n) for n in SLICE_NAMES):
+                calls.append((name, value))
+            return real(value, *args, **kwargs)
+
+        return wrapped
+
+    monkeypatch.setattr(cp, "digest", spy("cp.digest", cp.digest))
+    monkeypatch.setattr(cp, "canonical", spy("cp.canonical", cp.canonical))
+    monkeypatch.setattr(op_mod, "canonical", spy("operating_point.canonical", op_mod.canonical))
+    monkeypatch.setattr(
+        cp, "operating_point_digest", spy("operating_point_digest", cp.operating_point_digest)
+    )
+    for _, (b, _c, verdict) in verdicts.items():
+        assert b.stage(verdict=verdict).status == "refused"
+    staged = [wb.stage(), hb.stage()]
+    assert [o.status for o in staged] == ["staged", "staged"], staged
+    wb.dispatch()
+    hb.dispatch()
+    key = key_for(win)
+    assert cp.verify_packet(
+        staged[0].packet,
+        win,
+        wb.receipt,
+        wb.verdict,
+        wb.ctx,
+        slice_key=key,
+        allow_generated_fixture=True,
+    )
+    assert cp.private_slice_view(staged[0].packet, win, key) is not None
+    monkeypatch.undo()
+    offenders = [(name, value) for name, value in calls if value not in seals]
+    assert offenders == [], [name for name, _ in offenders]
+    assert all(name != "operating_point_digest" for name, _ in calls)
+    assert all(value != c["terms"] for _, value in calls for c in (win, hold))
+    assert calls, "the spy must have seen the evidence seal, or it is not wired in"
+
+
+def test_relabelled_and_resealed_comparison_is_refused_before_key_lookup(runs, tmp_path):
+    """F2: the engagement comes from the worker's context, not from the comparison's author."""
+    seen = []
+
+    class Spy:
+        def slice_key(self, tenant, engagement):
+            seen.append(engagement)
+            return KEYS.slice_key(tenant, engagement)
+
+    base = runs[_PLAIN_HOLD]
+    relabelled = seal({**copy.deepcopy(base), "engagement": "generated-engagement-b"})
+    b = live_bundle(base, tmp_path)  # context resolved for the real engagement
+    b.store = cp.PacketOutbox(tmp_path / "spy.sqlite3", slice_keys=Spy())
+    out = b.stage(comparison=relabelled)
+    assert out.status == "refused" and out.reason == "comparison_engagement_mismatch", out
+    assert seen == [] and empty(b.store) and not _leaks(out, "generated-engagement-b")
+    honest = b.stage()
+    assert honest.status == "staged" and seen == [base["engagement"]]
+    assert honest.packet["critical_slice_names"]["keyed_engagement"] == base["engagement"]
+    assert honest.packet["binding"]["engagement"] == base["engagement"]
+
+
+def test_context_engagement_must_be_an_identifier(runs, tmp_path):
+    """F2: the context's engagement is validated with every other context identifier."""
+    b = live_bundle(runs[_PLAIN_HOLD], tmp_path)
+    b.ctx = context(runs[_PLAIN_HOLD], engagement="case-9 sentinel")
+    b.authority = Authority(b.ctx)
+    out = b.stage()
+    assert out.reason == "invalid_packet_context" and empty(b.store), out
+
+
+def test_probe4_hold_with_a_legacy_verdict_publishes_nothing(tmp_path):
+    """F5 regression (reviewer probe 4): a named-slice hold given a verdict bound to the old
+    raw-terms digest used to stage and publish ``independent_verdict_digest``, from which the
+    names were brute-forced. Now it is refused on the hold path, declared form or not."""
+    comparison = named_hold(tmp_path)
+    b = live_bundle(comparison, tmp_path / "h")
+    b.receipt = make_receipt()
+    raw = digest(comparison["terms"])
+    for declared, reason in (
+        (False, "operating_point_digest_predates_slice_digests"),
+        (True, "verdict_binding_mismatch"),
+    ):
+        out = b.stage(verdict=verdict_with(b, comparison, claimed=raw, declared=declared))
+        assert out.status == "refused" and out.reason == reason, out
+        assert out.packet is None and empty(b.store) and b.dispatch() == []
+    assert b.stage(verdict=make_verdict(comparison, b.receipt, b.ctx)).status == "staged"
+
+
+HEX_RUN = re.compile(r"[0-9a-f]{16,}")
+
+
+def published_hex_runs(*surfaces):
+    """Every hex run of 16+ characters anywhere in the surfaces, found generically: dict keys,
+    string leaves, tuples from outbox rows, and JSON text stored in those rows (parsed and
+    walked again). Truncated digests such as ``evt-``/``pkt-`` ids are included. No field list
+    is hand-picked, so a published digest field added later is covered automatically."""
+    found = set()
+
+    def walk(value):
+        for text in every_text(value):
+            found.update(HEX_RUN.findall(text))
+            if text[:1] in "{[":
+                try:
+                    walk(json.loads(text))
+                except ValueError:
+                    pass
+
+    walk(list(surfaces))
+    return found
+
+
+def candidate_reconstructions(comparison, verdict):
+    """Everything a brute-forcer can build per guessed name pair from public knowledge: the raw
+    operating-point digest, a verdict re-sealed around it (form declared or not), and plain
+    hashes of the names themselves."""
+    import hashlib
+    import itertools
+
+    body = {k: v for k, v in verdict.items() if k != "verdict_digest"} if verdict else None
+    for size in (1, 2):
+        for names in itertools.permutations(CANDIDATE_NAMES, size):
+            raw = raw_digest_with(comparison, names)
+            yield names, raw
+            for name in names:
+                yield names, hashlib.sha256(name.encode()).hexdigest()
+                yield names, digest(name)
+            if body is not None:
+                for declared in (True, False):
+                    forged = {**body, "operating_point_digest": raw}
+                    if not declared:
+                        forged.pop("operating_point_digest_form", None)
+                    yield names, digest(forged)
+
+
+@pytest.mark.parametrize("path", ["improvement", "hold"])
+def test_brute_force_recovers_nothing_from_any_published_digest(tmp_path, path):
+    """F5: on both paths, every hex run published in the packet, the event and the outbox rows
+    is compared (as a prefix, so truncated ids count) against every candidate reconstruction.
+    Nothing matches. Legacy verdicts a stale worker could send (raw-terms digest, form declared
+    or not) are offered first, each to its own fresh store, and whatever they publish is
+    scanned too. A positive control shows the comparison would catch a real hit."""
+    comparison, b = path_bundle(path, tmp_path)
+    runs_ = set()
+    for i, declared in enumerate((True, False)):
+        attempt = cp.PacketOutbox(
+            tmp_path / f"legacy{i}.sqlite3",
+            slice_keys=KEYS,
+            allow_generated_fixture=b.store.allow_generated_fixture,
+        )
+        legacy = verdict_with(b, comparison, claimed=digest(comparison["terms"]), declared=declared)
+        tried = attempt.stage(
+            comparison, b.receipt, legacy, authority=b.authority, run_ref=b.ctx.run_ref, now=NOW
+        )
+        attempt.dispatch(b.sink, b.authority, now=NOW)
+        runs_ |= published_hex_runs(tried.packet, attempt.snapshot())
+    out = b.stage()
+    assert out.status == "staged", out
+    b.dispatch()
+    runs_ |= published_hex_runs(out.packet, list(b.sink.effects.values()), b.store.snapshot())
+    assert out.packet["audit"]["independent_verdict_digest"] in runs_
+    assert out.packet["comparison"]["operating_point_digest"] in runs_
+    assert out.packet["packet_digest"][:32] in runs_  # the truncated event id is collected
+    hits = [
+        names
+        for names, guess in candidate_reconstructions(comparison, b.verdict)
+        if any(guess.startswith(run) for run in runs_)
+    ]
+    assert hits == []
+    # Positive control: plant one raw-terms digest into a copy and the scan finds it.
+    planted = {**out.packet, "extra": {"nested": [raw_digest_with(comparison, SLICE_NAMES)]}}
+    assert any(
+        names == SLICE_NAMES
+        for names, guess in candidate_reconstructions(comparison, None)
+        if any(guess.startswith(run) for run in published_hex_runs(planted))
+    )

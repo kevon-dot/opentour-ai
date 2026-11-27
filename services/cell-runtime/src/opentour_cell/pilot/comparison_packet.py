@@ -86,8 +86,13 @@ The operating-point digest follows the same rule. It is a plain canonical SHA-25
 terms with every critical- and material-slice name first replaced by its keyed digest
 (``slice_substituted_terms``), so a guessed name cannot be confirmed against it, while a
 verifier (including OPE-528's evaluator) can still check the binding from the substituted terms
-without the key. A verdict bound to the earlier digest over raw terms is refused with
-``operating_point_digest_predates_slice_digests`` and is never re-digested.
+without the key. Raw terms are never hashed anywhere in this module. A verdict must declare
+``operating_point_digest_form: "slice_substituted.v1"``: a verdict without that field refuses
+with ``operating_point_digest_predates_slice_digests`` WITHOUT any digest comparison, and a
+declared form with any other digest (including one computed over raw terms) refuses with the
+same ``verdict_binding_mismatch`` as a random wrong digest, so no reason code distinguishes a
+correct name guess from a wrong one. The rule applies on the hold path as well as the
+improvement path, because a hold publishes the verdict's digest too.
 
 Threat model for the caller-injected engagement key. Until OPE-566 defines key custody, the
 key is caller-supplied authority, so this module makes the narrow claim below and no more.
@@ -96,8 +101,10 @@ key is caller-supplied authority, so this module makes the narrow claim below an
   A consumer without the key cannot. Whoever controls ``SliceKeyView`` holds the key, so that
   caller can confirm guesses, and can choose a key that is weak or known to others, which lets
   those others confirm guesses too. Nothing here detects a known or reused key: ``_key_ok``
-  checks only that it is 32 bytes. Name privacy is therefore exactly as strong as the caller's
-  key handling.
+  checks only that it is exactly ``bytes``, 32 long and not one repeated byte value; there is
+  no entropy estimation. Key strength is ``SliceKeyView``'s responsibility under OPE-566: keys
+  come from a CSPRNG or a hardware token and are never derived from public inputs. Name
+  privacy is therefore exactly as strong as the caller's key handling.
 * Key control does not let anyone forge a comparison, audit receipt or verdict. Assembly still
   requires the comparison, the receipt and the independent verdict to agree on exact digests,
   denominator and expiry. A different key changes the substituted operating-point digest, so a
@@ -108,6 +115,15 @@ key is caller-supplied authority, so this module makes the narrow claim below an
   keyring. Every such case refuses closed.
 * The digests are not issuer-authenticated. They are at most ``locally_keyed``, and the packet
   says so.
+
+Published digests that still cover raw names (recorded, not fixed here). ``comparison
+.evidence_revision`` and ``plan_revision`` are plain SHA-256 over the whole comparison and
+plan, and both contain the raw slice names in ``terms`` and in each arm's ``critical_slices``.
+They are not practically guessable, because they also cover values the packet never
+publishes (timestamps, case ids, references, the intake revision). But a verdict binds
+``comparison_evidence_revision``, so an evaluator checking that binding currently needs the
+raw comparison. The follow-up, under OPE-528, is to bind a slice-substituted evidence revision
+instead.
 """
 
 from __future__ import annotations
@@ -133,8 +149,9 @@ VERDICT = "opentour.pilot.independent-verdict.v1"
 RECEIPT = "opentour.benchmark-audit-receipt.v1"
 SLICE_DIGEST = "opentour.pilot.critical-slice-digest.v1"
 _SLICE_TERMS = ("critical_slices", "material_slices")
-# A verdict bound to the pre-OPE-571 operating-point digest (plain SHA-256 over raw terms that
-# carry slice names). Refused with its own code and never re-digested on the caller's behalf.
+# The only operating-point digest form a verdict may bind. A verdict that does not declare it
+# predates OPE-571 and is refused by the field's absence alone, never by comparing a digest.
+OPERATING_POINT_DIGEST_FORM = "slice_substituted.v1"
 _LEGACY_POINT = "operating_point_digest_predates_slice_digests"
 EVENT_REVISION = 1
 _FIXTURE_REFUSAL = "generated_fixture_not_permitted_in_live_context"
@@ -265,6 +282,7 @@ class PacketContext:
     """Bindings the worker resolves from its current connection and mandate, never the caller."""
 
     tenant: str
+    engagement: str
     recipient: str
     mandate_revision: str
     run_ref: str
@@ -279,6 +297,7 @@ class PacketContext:
     def valid(self) -> bool:
         ids = (
             self.tenant,
+            self.engagement,
             self.recipient,
             self.mandate_revision,
             self.run_ref,
@@ -301,6 +320,7 @@ class PacketContext:
     def as_json(self) -> Json:
         return {
             "tenant": self.tenant,
+            "engagement": self.engagement,
             "recipient": self.recipient,
             "mandate_revision": self.mandate_revision,
             "run_ref": self.run_ref,
@@ -324,7 +344,9 @@ class SliceKeyView(Protocol):
 
     Returns the 32-byte key for ``(tenant, engagement)``, or ``None`` when it is unavailable.
     The key never enters a packet, event, refusal or the outbox. Its custody and rotation are
-    owned by OPE-566; until then it is engagement-local and not issuer-authenticated.
+    owned by OPE-566; until then it is engagement-local and not issuer-authenticated. Key
+    STRENGTH is this boundary's responsibility: keys come from a CSPRNG or a hardware token and
+    are never derived from public inputs. This module only refuses obviously unusable keys.
     """
 
     def slice_key(self, tenant: str, engagement: str) -> bytes | None: ...
@@ -391,7 +413,8 @@ def _fraction_ok(value: Any) -> bool:
 
 
 def _key_ok(key: Any) -> bool:
-    return isinstance(key, bytes) and len(key) == 32
+    """Exactly ``bytes`` (no subclass), 32 long, and not a single repeated byte value."""
+    return type(key) is bytes and len(key) == 32 and len(set(key)) > 1
 
 
 def _scoped_key(key: bytes, tenant: str, engagement: str) -> bytes:
@@ -450,6 +473,24 @@ def _terms_ok(terms: Any) -> bool:
 
 def _comparison_scope(comparison: Json) -> tuple[str, str]:
     return comparison["organization"], comparison["engagement"]
+
+
+def _point_binding(verdict: Json, comparison: Json, slice_key: bytes) -> str | None:
+    """The verdict's operating-point binding, on the hold and the improvement path alike.
+
+    Key-free and oracle-free: the legacy case is decided by the form field's ABSENCE, with no
+    digest comparison, and every wrong digest (a raw-terms digest, correct names or not, or a
+    random one) gets the same ``verdict_binding_mismatch``. Raw terms are never hashed.
+    """
+    if "operating_point_digest_form" not in verdict:
+        return _LEGACY_POINT
+    point = operating_point_digest(_substitute(comparison.get("terms", {}), slice_key))
+    if (
+        verdict["operating_point_digest_form"] != OPERATING_POINT_DIGEST_FORM
+        or verdict.get("operating_point_digest") != point
+    ):
+        return "verdict_binding_mismatch"
+    return None
 
 
 def _arm_vocab_ok(name: str, arm: Any) -> bool:
@@ -657,6 +698,11 @@ def _assemble(
             return None, "audit_receipt_unverified"
         if verdict is not None and not _verdict_ok(verdict):
             return None, "independent_verdict_unverified"
+        # A hold publishes the verdict's digest, so the verdict must bind the substituted
+        # operating point exactly as on the improvement path (F5).
+        point_failure = _point_binding(verdict, comparison, slice_key) if verdict else None
+        if point_failure:
+            return None, point_failure
     arms = {
         name: _arm_aggregate(arm, slice_key) for name, arm in sorted(comparison["arms"].items())
     }
@@ -687,6 +733,7 @@ def _assemble(
             "form": "keyed_digest",
             "algorithm": "hmac_sha256",
             "key_scope": "engagement",
+            "keyed_engagement": ctx.engagement,
             "key_custody": "customer_worker_local",
             "names_disclosed": False,
             # Engagement-local key, no custody or signing contract yet (OPE-566 unlanded).
@@ -782,12 +829,10 @@ def _improvement_checks(
         or coverage["numerator"] * 10_000 < floor * coverage["denominator"]
     ):
         return "decision_inconsistent_with_evidence"
-    terms = comparison.get("terms", {})
-    point = operating_point_digest(_substitute(terms, slice_key))
-    claimed = verdict.get("operating_point_digest")
-    if claimed != point and claimed == digest(terms):
-        # Bound to the pre-change digest over raw slice names: refused, never re-digested.
-        return _LEGACY_POINT
+    point_failure = _point_binding(verdict, comparison, slice_key)
+    if point_failure:
+        return point_failure
+    point = operating_point_digest(_substitute(comparison.get("terms", {}), slice_key))
     bound = {
         "audit_receipt_digest": receipt["receipt_digest"],
         "comparison_evidence_revision": comparison["evidence_revision"],
@@ -831,7 +876,7 @@ def assemble_packet(
         receipt,
         verdict,
         ctx,
-        slice_key=_scoped_key(slice_key, *_comparison_scope(comparison)),
+        slice_key=_scoped_key(slice_key, ctx.tenant, ctx.engagement),
         allow_generated_fixture=allow_generated_fixture,
     )
 
@@ -846,6 +891,9 @@ def _preflight(comparison: Any, ctx: PacketContext, allow_generated_fixture: boo
         return "comparison_unverified"
     if comparison.get("organization") != ctx.tenant:
         return "comparison_scope_mismatch"
+    if comparison.get("engagement") != ctx.engagement:
+        # The engagement is resolved by the worker, never chosen by the comparison's author.
+        return "comparison_engagement_mismatch"
     return None
 
 
@@ -1018,7 +1066,7 @@ class PacketOutbox:
         if self.slice_keys is None:
             return _refuse("slice_digest_key_unavailable")
         try:
-            key = self.slice_keys.slice_key(*_comparison_scope(comparison))
+            key = self.slice_keys.slice_key(ctx.tenant, ctx.engagement)
         except Exception:
             # An unknown keyring result is never success and never raises out of staging.
             return _refuse("slice_digest_key_lookup_failed")
