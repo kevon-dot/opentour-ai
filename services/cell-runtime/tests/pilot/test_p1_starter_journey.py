@@ -2,8 +2,11 @@
 
 import json
 import sqlite3
+import subprocess
+import sys
 import time
 from dataclasses import asdict, replace
+from pathlib import Path
 
 import pytest
 from opentour_cell.pilot import (
@@ -12,7 +15,7 @@ from opentour_cell.pilot import (
     starter_case_authoring,
     text_classifier,
 )
-from opentour_cell.pilot.intake_mcp import IntakeError, IntakePrincipal
+from opentour_cell.pilot.intake_mcp import IntakePrincipal
 from opentour_cell.pilot.operating_point import digest
 from opentour_cell.pilot.starter_cases import FrozenPlan
 from opentour_cell.pilot.starter_map_confirmation import GRANT, SELECTION, StarterCaseSession
@@ -394,40 +397,71 @@ def _authorize_p1_evaluation(h, owner, draft, confirmed, pack):
     return permission, registration
 
 
+def _invoke_worker(selector):
+    from opentour_cell.pilot import starter_evaluation_worker
+
+    kit = next(
+        (
+            path
+            for path in Path(starter_evaluation_worker.__file__).parents
+            if path.suffix == ".pyz"
+        ),
+        None,
+    )
+    command = (
+        [str(kit), "starter-evaluation-worker"]
+        if kit is not None
+        else ["-m", "opentour_cell.pilot.starter_evaluation_worker"]
+    )
+    result = subprocess.run(
+        [sys.executable, *command, "--invocation", str(selector)],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    assert not result.stderr
+    output = json.loads(result.stdout)
+    assert output["schema_version"] == starter_evaluation_worker.RESULT
+    assert set(output).isdisjoint({"rows", "metrics", "predictions", "inputs", "targets"})
+    return result.returncode, output
+
+
+def _stored_score(directory, execution):
+    journal = directory / "starter-evaluations.sqlite3"
+    with sqlite3.connect(journal.as_uri() + "?mode=ro", uri=True) as db:
+        row = db.execute("SELECT result FROM evaluations WHERE ref=?", (execution,)).fetchone()
+    assert row and row[0]
+    return json.loads(row[0])
+
+
 def test_generated_p1_worker_scores_same_frozen_families_and_private_home(
     p1_frozen_from_home,
     monkeypatch,
 ):
     from opentour_cell.pilot.starter_evaluation_session import StarterEvaluationSession
+    from test_starter_evaluation_worker import provision_invocation
 
     h, owner, draft, _maps, confirmed, pack = p1_frozen_from_home
     directory = h.path.parent
     permission, registration = _authorize_p1_evaluation(h, owner, draft, confirmed, pack)
-    worker = IntakePrincipal(permission.tenant, permission.evaluator, "fixture-worker")
-    executor = StarterEvaluationSession(owner.settings, worker)
     viewer = StarterEvaluationSession(owner.settings, owner.actor)
-    calls = []
-    predict = text_classifier.predict
-
-    def observe_prediction(parameters, body):
-        calls.append(json.loads(body))
-        return predict(parameters, body)
-
-    def forbidden(*_args, **_kwargs):
-        pytest.fail("The generated starter scoring journey attempted to fit a model.")
-
-    monkeypatch.setattr(text_classifier, "predict", observe_prediction)
-    monkeypatch.setattr(text_classifier, "fit", forbidden)
-    with pytest.raises(IntakeError):
-        viewer.run(permission.execution_ref)
-    with pytest.raises(IntakeError):
-        executor.run("unapproved-evaluation")
+    selector, *_ = provision_invocation(
+        h.path,
+        permission,
+        invocation_ref="generated-p1-worker",
+        grant_file="generated-p1-evaluation.json",
+    )
     assert viewer.summary(permission.execution_ref)["state"] == "frozen_unscored"
-    assert executor.run(permission.execution_ref)["state"] == "frozen_unscored"
-    assert not calls
+    code, unscored = _invoke_worker(selector)
+    assert code == 2 and unscored["state"] == "frozen_unscored", unscored
     assert not (directory / "starter-evaluations.sqlite3").exists()
     _write_private(directory / "model-registration.json", registration)
-    result = executor.run(permission.execution_ref)
+    code, completed = _invoke_worker(selector)
+    assert code == 0 and completed["state"] == "scored", completed
+    assert completed["workflow_ref"] == draft["workflow_ref"]
+    assert completed["run_ref"] == draft["run_ref"]
+    result = _stored_score(directory, permission.execution_ref)
     assert result["state"] == "scored", result
     assert result["freeze_revision"] == pack["frozen"]["revision"]
     rows = {row["case_id"]: row for row in result["rows"]}
@@ -467,25 +501,47 @@ def test_generated_p1_worker_scores_same_frozen_families_and_private_home(
     assert result["result_digest"] == digest(
         {key: value for key, value in result.items() if key not in {"result_digest", "result_ref"}}
     )
-    expected_inputs = [
-        dict(row["decision_inputs"]) for row in pack["cases"] if row["split_ref"] == "reserved"
-    ]
-    assert sorted(calls, key=repr) == sorted(expected_inputs, key=repr)
-    assert (
-        len({receipt["request"]["input_digest"] for receipt in result["predictions"].values()}) == 1
-    )
+    expected_inputs = {
+        "starter-case-" + digest([permission.freeze_revision, row["case_id"]])[:40]: dict(
+            row["decision_inputs"]
+        )
+        for row in pack["cases"]
+        if row["split_ref"] == "reserved"
+    }
+    assert {receipt["request"]["input_digest"] for receipt in result["predictions"].values()} == {
+        digest(expected_inputs)
+    }
     restart(h)
-    assert StarterEvaluationSession(owner.settings, worker).run(permission.execution_ref) == result
-    assert len(calls) == 4
-    rerun = executor.run("generated-p1-rerun")
+    assert _invoke_worker(selector) == (code, completed)
+    assert _stored_score(directory, permission.execution_ref) == result
+    next_permission = replace(
+        permission,
+        execution_ref="generated-p1-rerun",
+        revision="generated-p1-rerun-grant",
+    )
+    next_selector, *_ = provision_invocation(
+        h.path,
+        next_permission,
+        invocation_ref="generated-p1-worker-rerun",
+        grant_file="generated-p1-rerun.json",
+    )
+    next_code, next_completed = _invoke_worker(next_selector)
+    assert next_code == 0 and next_completed["state"] == "scored", next_completed
+    rerun = _stored_score(directory, next_permission.execution_ref)
     assert rerun["execution_ref"] != result["execution_ref"]
     assert rerun["freeze_revision"] == result["freeze_revision"]
     assert rerun["metrics"] == result["metrics"]
-    assert executor.run("generated-p1-rerun") == rerun
-    assert len(calls) == 8
+    assert _invoke_worker(next_selector) == (next_code, next_completed)
     with sqlite3.connect(directory / "starter-evaluations.sqlite3") as db:
         assert db.execute("SELECT count(*) FROM evaluations").fetchone() == (2,)
         assert db.execute("SELECT count(*) FROM predictions").fetchone() == (4,)
+    for filename in ("starter-local-predictions.sqlite3", "starter-comparator-receipts.sqlite3"):
+        with sqlite3.connect(directory / filename) as db:
+            assert db.execute("SELECT count(*) FROM receipts").fetchone() == (2,)
+
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("An owner inspection attempted to execute an evaluation.")
+
     with monkeypatch.context() as view_check:
         view_check.setattr(StarterEvaluationSession, "run", forbidden)
         home = publish(h, monkeypatch)
@@ -499,6 +555,6 @@ def test_generated_p1_worker_scores_same_frozen_families_and_private_home(
             assert fragment in document
         assert "carrier_freight" not in document and "po-b" not in document
         assert "ot_app_starter_score" not in buttons(publish(h, monkeypatch, OTHER))
-    assert len(calls) == 8
+    assert _stored_score(directory, permission.execution_ref) == result
     assert owner.review() == pack
     assert effects(h) == (0,) * 7
