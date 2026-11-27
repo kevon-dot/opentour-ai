@@ -85,4 +85,14 @@ python -I -S -B "$KIT" bundle --grant "$RECIPIENT" witness --archive "$INSTALLED
 
 The named recipient issues the witness after personally repeating the work. Its date, actor, revision, package hash and replay digests remain private. For explicitly permitted materialization also set `materialize_learning:true` on the recipient grant and run `learning --archive "$INSTALLED" --output "$RECIPIENT_DIR/learning.json"`. Empty permission yields an explicit exclusion with zero learning records. Generated exercises do not establish customer acceptance or an authorized rollout.
 
+If the acknowledgement of a recipient replay is lost, ask the recipient to read the existing witness in its private directory. Supply the installed archive and the original attestation reference. The command checks the current recipient grant, repeats the offline benchmark and compares the saved witness with the exact archive digest and readout. Concurrent witness retries under the same grant return the first recorded UTC timestamp.
+
+```sh
+python -I -S -B "$KIT" bundle --grant "$RECIPIENT" read-witness \
+  --archive "$INSTALLED" --attestation "$PRIVATE_WITNESS_REFERENCE" \
+  --receipt "$RECIPIENT_DIR/witness.json"
+```
+
+A missing, conflicting or inaccessible witness leaves replay unconfirmed. The recipient and handoff owner reconcile it before retrying delivery. Readback leaves the receipt and installed archive untouched. The receipt attests to recipient replay. Delivery reconciliation against the approved release outbox and authorization for a production change each require their own evidence.
+
 On withdrawal, remove/disable same-machine grants and use the engagement custody closeout. Notify every prior offline recipient through its agreed route. At each registered machine run `bundle --grant "$RECIPIENT" withdraw-recipient`, retain the local ledger, and account for all files and materialized copies under the retention terms. The ledger disables the whole received engagement/audience scope across restarts. A disconnected machine cannot learn of a remote withdrawal until notified or its signed authority expires. Production releases, traffic changes and paid work require their separate owner records.

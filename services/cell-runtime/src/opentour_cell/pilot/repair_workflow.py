@@ -61,8 +61,8 @@ def _private_json(path: Path) -> Json:
     return dict(result)
 
 
-def _record(path: Path, value: Json) -> None:
-    """Publish a complete private record once, or accept the identical earlier publication."""
+def _record(path: Path, value: Json, *, before_publish: Callable[[], None] | None = None) -> None:
+    """Publish once after staging, or accept the identical earlier publication."""
     _check_directory(path)
     blob = (canonical(value) + "\n").encode()
     with tempfile.NamedTemporaryFile(dir=path.parent, delete=False) as tmp:
@@ -71,6 +71,8 @@ def _record(path: Path, value: Json) -> None:
         os.fsync(tmp.fileno())
         temporary = Path(tmp.name)
     try:
+        if before_publish is not None:
+            before_publish()
         try:
             os.link(temporary, path)
         except FileExistsError:

@@ -348,32 +348,67 @@ class LearningMandates:
     def reauthorize(self, previous: str, spec: Mapping[str, Any], *, actor: str) -> Json:
         """Record fresh owner authority without clearing previous use or resurrecting old runs."""
         with self._authorized_db() as db:
-            prior, old = self._mandate(db, previous)
+            return self._reauthorize(db, previous, spec, actor)
+
+    def _reauthorize(
+        self, db: sqlite3.Connection, previous: str, spec: Mapping[str, Any], actor: str
+    ) -> Json:
+        prior, old = self._mandate(db, previous)
+        require(actor == self._owner(db) == old["owner_id"], "registered_owner_approval_required")
+        require(
+            prior["withdrawn"] is not None or time.time() >= old["expires_at"],
+            "prior_mandate_still_active",
+        )
+        successor = _id(spec.get("mandate_id"))
+        require(successor != previous, "fresh_mandate_identifier_required")
+        related = db.execute(
+            "SELECT prior,successor FROM renewals WHERE scope=? AND (prior=? OR successor=?)",
+            (self.scope, previous, successor),
+        ).fetchone()
+        if related:
+            require(tuple(related) == (previous, successor), "reauthorization_conflict")
+        else:
             require(
-                actor == self._owner(db) == old["owner_id"], "registered_owner_approval_required"
+                not db.execute(
+                    "SELECT 1 FROM mandates WHERE scope=? AND id=?", (self.scope, successor)
+                ).fetchone(),
+                "fresh_mandate_identifier_required",
             )
-            require(
-                prior["withdrawn"] is not None or time.time() >= old["expires_at"],
-                "prior_mandate_still_active",
-            )
-            successor = _id(spec.get("mandate_id"))
-            require(successor != previous, "fresh_mandate_identifier_required")
-            related = db.execute(
-                "SELECT prior,successor FROM renewals WHERE scope=? AND (prior=? OR successor=?)",
-                (self.scope, previous, successor),
-            ).fetchone()
-            if related:
-                require(tuple(related) == (previous, successor), "reauthorization_conflict")
-            else:
-                require(
-                    not db.execute(
-                        "SELECT 1 FROM mandates WHERE scope=? AND id=?", (self.scope, successor)
-                    ).fetchone(),
-                    "fresh_mandate_identifier_required",
-                )
-                db.execute("INSERT INTO renewals VALUES(?,?,?)", (self.scope, previous, successor))
-            receipt = self._enroll(db, spec, actor)
-            return dict(receipt, supersedes=previous, prior_revision=prior["revision"])
+            db.execute("INSERT INTO renewals VALUES(?,?,?)", (self.scope, previous, successor))
+        receipt = self._enroll(db, spec, actor)
+        return dict(receipt, supersedes=previous, prior_revision=prior["revision"])
+
+    def _usage(self, db: sqlite3.Connection, mandate_id: str) -> Json:
+        """Charge the whole renewal lineage, including failed/withdrawn reservations.
+
+        No counter copies or synthetic reservations: SQLite reads the original immutable
+        usage rows while the same writer transaction holds admission/renewal ordering.
+        """
+        lineage = """
+            WITH RECURSIVE lineage(id) AS (
+              VALUES (?)
+              UNION SELECT r.prior FROM renewals r JOIN lineage l ON r.successor=l.id
+                    WHERE r.scope=?
+              UNION SELECT r.successor FROM renewals r JOIN lineage l ON r.prior=l.id
+                    WHERE r.scope=?)
+        """
+        args = (mandate_id, self.scope, self.scope, self.scope)
+        runs = db.execute(
+            lineage + "SELECT count(*),coalesce(sum(rows),0) FROM runs "
+            "WHERE scope=? AND mandate IN (SELECT id FROM lineage)",
+            args,
+        ).fetchone()
+        fits = db.execute(
+            lineage + "SELECT count(*),coalesce(sum(seconds),0) FROM reservations "
+            "WHERE scope=? AND mandate IN (SELECT id FROM lineage)",
+            args,
+        ).fetchone()
+        return {
+            "cumulative_runs": runs[0],
+            "cumulative_rows": runs[1],
+            "cumulative_reserved_fits": fits[0],
+            "cumulative_reserved_seconds": fits[1],
+        }
 
     def inspect(self, mandate_id: str, *, actor: str | None = None) -> Json:
         with self._db(write=False) as db:
@@ -399,6 +434,7 @@ class LearningMandates:
                 "rows": runs[1],
                 "reserved_fits": fits[0],
                 "reserved_seconds": fits[1],
+                **self._usage(db, mandate_id),
             }
 
     @contextmanager
@@ -482,12 +518,10 @@ class LearningMandates:
             if existing is not None:
                 require(existing["request"] == canonical(req), "source_change_conflict")
                 return self._source_receipt(existing, row, spec)
-            usage = db.execute(
-                "SELECT count(*),coalesce(sum(rows),0) FROM runs WHERE scope=? AND mandate=?",
-                (self.scope, mandate_id),
-            ).fetchone()
+            usage = self._usage(db, mandate_id)
             require(
-                usage[0] < spec["max_runs"] and usage[1] + req["rows"] <= spec["max_total_rows"],
+                usage["cumulative_runs"] < spec["max_runs"]
+                and usage["cumulative_rows"] + req["rows"] <= spec["max_total_rows"],
                 "standing_source_budget_exhausted",
             )
             rid = "learning-" + digest([self.scope, row["revision"], req])[:40]
@@ -567,7 +601,15 @@ class LearningMandates:
                 db.execute("INSERT INTO classes VALUES(?,?,?)", (self.scope, run_id, encoded))
             return document
 
-    def reserve(self, mandate_id: str, request: Mapping[str, Any], *, actor: str) -> Json:
+    def reserve(
+        self,
+        mandate_id: str,
+        request: Mapping[str, Any],
+        *,
+        actor: str,
+        operation_key: str | None = None,
+        authenticated_client: str | None = None,
+    ) -> Json:
         require(
             isinstance(request, Mapping) and request.keys() == RESERVE_KEYS,
             "invalid_fit_reservation",
@@ -578,6 +620,20 @@ class LearningMandates:
                 _hex(req[key]) for key in ("plan_revision", "intake_revision", "residual_revision")
             ),
             "immutable_fit_revisions_required",
+        )
+        require(
+            operation_key is not None or authenticated_client is None,
+            "fit_operation_key_required",
+        )
+        alias_key = (
+            (
+                self.scope,
+                actor,
+                _id(actor if authenticated_client is None else authenticated_client),
+                _id(operation_key),
+            )
+            if operation_key is not None
+            else None
         )
         with self._authorized_db() as db:
             row, spec = self._mandate(db, mandate_id)
@@ -603,18 +659,67 @@ class LearningMandates:
                 _count(req["max_seconds"], 1, spec["max_seconds_per_fit"]),
                 "per_fit_budget_exceeded",
             )
-            existing = db.execute(
+            same_run = db.execute(
                 "SELECT * FROM reservations WHERE scope=? AND run=?", (self.scope, run["id"])
             ).fetchone()
-            if existing is None:
-                usage = db.execute(
-                    "SELECT count(*),coalesce(sum(seconds),0) FROM reservations "
-                    "WHERE scope=? AND mandate=?",
-                    (self.scope, mandate_id),
+            require(
+                same_run is None or same_run["request"] == canonical(req),
+                "fit_reservation_conflict",
+            )
+            binding = {key: value for key, value in req.items() if key != "run_id"}
+            intent = digest(
+                [
+                    "standing-local-fit-v1",
+                    row["revision"],
+                    open_weight.BASE_SHA256,
+                    open_weight.PROFILE_SHA256,
+                    binding,
+                ]
+            )
+            alias = None
+            if alias_key is not None:
+                db.execute(
+                    "CREATE TABLE IF NOT EXISTS fit_operation_aliases("
+                    "scope TEXT NOT NULL,actor TEXT NOT NULL,client TEXT NOT NULL,"
+                    "operation_key TEXT NOT NULL,intent TEXT NOT NULL,reservation TEXT NOT NULL,"
+                    "PRIMARY KEY(scope,actor,client,operation_key))"
+                )
+                alias = db.execute(
+                    "SELECT intent,reservation FROM fit_operation_aliases "
+                    "WHERE (scope,actor,client,operation_key)=(?,?,?,?)",
+                    alias_key,
                 ).fetchone()
+                require(alias is None or alias["intent"] == intent, "fit_operation_key_conflict")
+            try:
+                candidates = db.execute(
+                    "SELECT * FROM reservations WHERE scope=? AND mandate=? "
+                    "AND json_extract(request,'$.plan_revision')=? "
+                    "AND json_extract(request,'$.intake_revision')=? LIMIT 2",
+                    (self.scope, mandate_id, req["plan_revision"], req["intake_revision"]),
+                ).fetchall()
+            except sqlite3.DatabaseError:
+                raise MandateError("fit_reservation_integrity_unavailable") from None
+            require(len(candidates) <= 1, "fit_intent_requires_reconciliation")
+            existing = candidates[0] if candidates else None
+            if existing is not None:
+                prior = json.loads(existing["request"])
                 require(
-                    usage[0] < spec["max_fits"]
-                    and usage[1] + req["max_seconds"] <= spec["max_total_seconds"],
+                    isinstance(prior, dict)
+                    and prior.pop("run_id", None) == existing["run"]
+                    and prior == binding,
+                    "fit_reservation_conflict",
+                )
+            if alias is not None:
+                require(
+                    existing is not None and existing["id"] == alias["reservation"],
+                    "fit_intent_requires_reconciliation",
+                )
+            if existing is None:
+                usage = self._usage(db, mandate_id)
+                require(
+                    usage["cumulative_reserved_fits"] < spec["max_fits"]
+                    and usage["cumulative_reserved_seconds"] + req["max_seconds"]
+                    <= spec["max_total_seconds"],
                     "standing_fit_budget_exhausted",
                 )
                 rid = "fit-" + digest([row["revision"], req])[:40]
@@ -623,10 +728,14 @@ class LearningMandates:
                     (self.scope, mandate_id, rid, run["id"], canonical(req), req["max_seconds"]),
                 )
                 existing = self._reservation(db, rid)
-            require(existing["request"] == canonical(req), "fit_reservation_conflict")
+            if alias_key is not None and alias is None:
+                db.execute(
+                    "INSERT INTO fit_operation_aliases VALUES(?,?,?,?,?,?)",
+                    (*alias_key, intent, existing["id"]),
+                )
             return {
                 "reservation_id": existing["id"],
-                "run_id": run["id"],
+                "run_id": existing["run"],
                 "status": existing["state"],
                 "reserved_seconds": existing["seconds"],
                 "authority_kind": KIND,

@@ -8,9 +8,11 @@ import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from opentour_cell.pilot.readout import INPUT_VERSION, MAX_CASES, OUTPUT_VERSION, evaluate_manifest
+from opentour_cell.pilot.starter_setup import StarterPreview
+from opentour_cell.pilot.status_questions import StatusAnswer
 from opentour_cell.pilot.text_classifier import (
     CPU_LIMIT_SECONDS,
     EPOCH_CHOICES,
@@ -18,6 +20,10 @@ from opentour_cell.pilot.text_classifier import (
     MAX_TRAIN_ROWS,
     PROFILE,
 )
+
+if TYPE_CHECKING:
+    from opentour_cell.pilot.handoff_readback import HandoffReadback
+
 from opentour_cell.pilot.training_data import EVALUATION_FIELDS, FIELD_NAMES
 
 Block = dict[str, Any]
@@ -459,7 +465,7 @@ def managed_operating_point(point: Mapping[str, Any], ceiling: int) -> Block:
     return selected
 
 
-def _managed_outcome(audit: Mapping[str, Any] | None) -> str:
+def managed_outcome(audit: Mapping[str, Any] | None) -> str:
     if not audit or audit.get("mode") not in ("managed_rule", "managed_model"):
         return ""
     outcome = MANAGED_OUTCOMES[audit["handoff_disposition"]]
@@ -602,18 +608,63 @@ def result_chooser(
 
 
 def regression_picker(
-    context: str, rows: Sequence[tuple[str, str, str]], *, previous: bool, more: bool
+    context: str,
+    rows: Sequence[tuple[str, str, str]],
+    *,
+    previous: bool,
+    more: bool,
+    topic: str = "changes",
+    current_workflow: tuple[str, str] | None = None,
+    delivery_workflows: Mapping[str, str] | None = None,
 ) -> Block:
     blocks = [
         _section(
-            "Choose an inspected frozen comparison to see which decisions became wrong."
+            (
+                "Choose an inspected frozen comparison to see which decisions became wrong."
+                if topic == "changes"
+                else "Choose the inspected result for your status question."
+            )
             if rows
             else "No currently inspected comparison is available. Open a result and inspect "
-            "its evidence before asking which decisions became wrong."
+            "its evidence to ask about it."
         )
     ]
+    if current_workflow:
+        workflow, token = current_workflow
+        weekly = topic == "live_errors"
+        blocks = [
+            _section(
+                "Which scope should the weekly answer use?"
+                if weekly
+                else "Which scope should the training answer use?"
+            ),
+            _section(f"Current workflow · {_ref(workflow)}"),
+            _actions(
+                _button(
+                    "Use current workflow",
+                    "ot_current_week" if weekly else "ot_current_training",
+                    token,
+                )
+            ),
+        ]
+        if rows:
+            blocks.append(_section("Or choose an inspected frozen comparison."))
     for dataset, source, revision in rows:
-        blocks.append(_section(f"Workflow {_ref(dataset)} · {_display(source)} · {_ref(revision)}"))
+        if delivery_workflows and revision in delivery_workflows:
+            blocks.append(
+                _section(
+                    f"Workflow {_ref(delivery_workflows[revision])} · Dataset {_ref(dataset)} · "
+                    f"{_display(source)} · {_ref(revision)}"
+                )
+            )
+            blocks.append(_actions(_button("Use this handoff", "ot_result_open", revision)))
+            continue
+        label = (
+            "Dataset"
+            if topic in {"delivery", "independent_workplace_cases", "synthetic_benefit"}
+            else "Workflow"
+        )
+        blocks.append(_section(f"{label} {_ref(dataset)} · {_display(source)} · {_ref(revision)}"))
         blocks.append(_actions(_button("Use this comparison", "ot_result_open", revision)))
     navigation = []
     if previous:
@@ -622,7 +673,135 @@ def regression_picker(
         navigation.append(_button("Next", "ot_result_next", "next"))
     navigation.append(_button("Browse results", "ot_readouts", "home"))
     blocks.append(_actions(*navigation))
-    return _modal("Choose comparison", "ot_regression_picker", context, blocks)
+    return _modal(
+        "Choose status scope" if current_workflow else "Choose comparison",
+        "ot_regression_picker",
+        context,
+        blocks,
+    )
+
+
+def weekly_question(context: str, workflow: str, facts: Mapping[str, Any], pin: str) -> Block:
+    blocks = [_section(f"Current workflow · {_ref(workflow)}")]
+    summary, receipt = facts["summary"], facts["readiness"]
+    if summary is None:
+        blocks.append(
+            _section("Live decision, verification and source-read evidence is unavailable.")
+        )
+    else:
+        blocks.append(
+            _section(
+                f"Current totals across all observed dates · {summary['decisions']} committed, "
+                f"{summary['verified']} verified, {summary['pending']} pending, "
+                f"{summary['disputed']} disputed."
+            )
+        )
+        blocks.append(_section(_live_summary_text(summary)))
+        page = summary["last_page"]
+        if page and page["interval_end"] is not None and page["interval_end"] < facts["week_start"]:
+            blocks.append(
+                _section("The latest recorded source interval ends before this UTC week.")
+            )
+        elif page and page["complete"] and page["row_count"] == 0:
+            blocks.append(_section("The completed source page returned no rows."))
+    blocks.append(
+        _section(
+            "Weekly error count and verified denominator are unavailable. A linked decision and "
+            "outcome coverage receipt for the requested week is required."
+        )
+    )
+    nav = [_button("Back to scopes", "ot_week_scopes", "scopes")]
+    if receipt and receipt["reason_code"] in {"no_verifier_bound", "awaiting_outcome"}:
+        answer = readiness_answer(receipt)
+        blocks.extend(
+            [
+                _section(answer.finding),
+                _section(answer.next_action),
+                _section(f"Readiness receipt · {_ref(receipt['readiness_ref'])}"),
+            ]
+        )
+        if receipt["next_action"] == "bind_verifier":
+            nav.insert(0, _button("Bind verifier", "ot_week_bind", pin))
+    else:
+        blocks.append(
+            _section("Ask the data custodian to check decision and outcome source coverage.")
+        )
+    blocks.append(_actions(*nav))
+    return _modal("Weekly verification", "ot_current_week_status", context, blocks)
+
+
+def current_training_question(
+    context: str, workflow: str, receipt: Mapping[str, Any] | None, *, pin: str, proof: bool
+) -> Block:
+    blocks = [_section(f"Current workflow · {_ref(workflow)}")]
+    if receipt is None:
+        blocks.append(
+            _section(
+                "Current training readiness is unavailable. "
+                "Ask the workflow owner to check for a current worker readiness receipt."
+            )
+        )
+    else:
+        answer = readiness_answer(receipt)
+        families = receipt["independent_family_count"]
+        unit = "family" if families == 1 else "families"
+        blocks.extend(
+            [
+                _section(answer.finding),
+                _section(f"{families} independent {unit}. {answer.basis}"),
+                _section(answer.next_action),
+            ]
+        )
+    nav = [_button("Back to scopes", "ot_training_scopes", "scopes")]
+    if receipt is not None:
+        if proof:
+            blocks.append(
+                _section(
+                    f"Worker receipt {_ref(receipt['readiness_ref'])} · "
+                    f"version {receipt['version']}. "
+                    f"Evidence revision {_ref(receipt['evidence_revision'])}."
+                )
+            )
+            if receipt.get("assessment_ref"):
+                blocks.append(
+                    _section(f"Simple-repair assessment · {_ref(receipt['assessment_ref'])}")
+                )
+            if receipt.get("mandate_ref"):
+                blocks.append(
+                    _section(
+                        f"Training mandate · {_ref(receipt['mandate_ref'])} · "
+                        f"revision {_ref(receipt['mandate_revision'])}"
+                    )
+                )
+        else:
+            nav.insert(0, _button("View readiness receipt", "ot_readiness_proof", pin))
+    blocks.append(_actions(*nav))
+    return _modal(
+        "Readiness receipt" if proof else "Training readiness",
+        "ot_current_training_proof" if proof else "ot_current_training_status",
+        context,
+        blocks,
+    )
+
+
+def status_question_modal(
+    context: str, revision: str, dataset: str, answer: StatusAnswer, *, receipt_pin: str = ""
+) -> Block:
+    controls = [_button("View evidence", "ot_evidence", revision), _home()]
+    if receipt_pin:
+        controls.insert(0, _button("View receipt", "ot_release_receipt", receipt_pin))
+    return _modal(
+        "Result status",
+        "ot_status_question",
+        context,
+        [
+            _section(f"Dataset {_ref(dataset)} · readout {_ref(revision)}"),
+            _section(answer.finding),
+            _section(answer.basis),
+            _section(answer.next_action),
+            _actions(*controls),
+        ],
+    )
 
 
 def question_modal(
@@ -648,9 +827,9 @@ def question_modal(
             f"Approval of this candidate permits handoff to {_display(audit['recipient'])}. "
             "The customer separately decides whether to deploy it."
         )
-    managed_outcome = _managed_outcome(audit)
-    if managed_outcome:
-        answers["changes"] = managed_outcome + "\n" + answers["changes"]
+    outcome = managed_outcome(audit)
+    if outcome:
+        answers["changes"] = outcome + "\n" + answers["changes"]
     blocks = [_section(f"Readout revision {_ref(revision)}")]
     if topic:
         blocks.append(_section(answers[topic]))
@@ -726,7 +905,7 @@ def workbench_message(
         scope += f"Requested action · present this revision to {audience or 'unassigned'} only."
         blocks.extend([_section(scope), _section(state_text)])
         fallback += " " + scope
-        result = _managed_outcome(audit)
+        result = managed_outcome(audit)
         if result:
             blocks.append(_section(result))
             fallback += " " + result
@@ -1185,7 +1364,7 @@ def evidence_modal(
         if audit:
             blocks.extend(_audit_blocks(audit))
             blocks.append(_section(_operating_terms(audit)))
-            result = _managed_outcome(audit)
+            result = managed_outcome(audit)
             if result:
                 blocks.append(_section(result))
                 for key, label in (("rule", "Simple repair"), ("model", "Open-weight model")):
@@ -1298,7 +1477,73 @@ def chart_status(context: str, revision: str, figures: str, status: str) -> Bloc
     )
 
 
-def release_recorded(context: str, decision: str, artifact: str, audience: str) -> Block:
+def _handoff_projection(
+    receipt: HandoffReadback, audit: Mapping[str, Any]
+) -> tuple[StatusAnswer, list[str]]:
+    def when(timestamp: int) -> str:
+        return datetime.fromtimestamp(timestamp, UTC).isoformat()
+
+    delivery = receipt.delivery
+    scope = (
+        f"Workflow {_ref(receipt.selection.workflow_ref)} · Proposal {_ref(audit['job_id'])} "
+        f"revision {_ref(audit['run_revision'])} · Artifact {_ref(audit['model_revision'])}\n"
+        f"Destination {_ref(receipt.destination_ref)}"
+    )
+    approval = f"Approved {when(receipt.approved_at)}."
+    if delivery and delivery.last_checked_at is not None:
+        checked = f"Last checked {when(delivery.last_checked_at)}."
+    else:
+        checked = "No independent check time is recorded."
+    basis = f"{scope} · {approval} {checked}"
+
+    receiver = None
+    if delivery and delivery.stage == "delivered":
+        assert delivery.received_at is not None and delivery.receiver_receipt_ref
+        state = "Delivered to the selected destination."
+        receiver = (
+            f"Receiver receipt {_ref(delivery.receiver_receipt_ref)} at "
+            f"{when(delivery.received_at)}."
+        )
+        next_action = "The recipient can independently replay the artifact."
+        answer = StatusAnswer(state, f"{basis} {receiver}", next_action)
+    else:
+        state = (
+            "Awaiting delivery."
+            if delivery and delivery.stage == "queued"
+            else "Delivery is unconfirmed."
+        )
+        next_action = "The authorized handoff operator can reconcile delivery."
+        answer = StatusAnswer(f"Approval recorded. {state}", basis, next_action)
+    rows = [scope, approval, f"{state}\n{checked}"]
+    if receiver:
+        rows.append(receiver)
+    rows.append(next_action)
+    return answer, rows
+
+
+def handoff_status(receipt: HandoffReadback, audit: Mapping[str, Any]) -> StatusAnswer:
+    answer, _ = _handoff_projection(receipt, audit)
+    return answer
+
+
+def handoff_modal(
+    context: str, revision: str, receipt: HandoffReadback, audit: Mapping[str, Any]
+) -> Block:
+    _, rows = _handoff_projection(receipt, audit)
+    controls = [_home()]
+    if not receipt.delivery or receipt.delivery.stage != "delivered":
+        controls.insert(0, _button("Check delivery status", "ot_delivery_status", revision))
+    return _modal(
+        "Handoff receipt",
+        "ot_handoff_receipt",
+        context,
+        [_section(row) for row in rows] + [_actions(*controls)],
+    )
+
+
+def release_recorded(
+    context: str, decision: str, artifact: str, audience: str, *, revision: str = ""
+) -> Block:
     state = "Approved for handoff" if decision == "approved" else "Changes requested. Handoff held"
     return _modal(
         "Handoff decision",
@@ -1306,8 +1551,127 @@ def release_recorded(context: str, decision: str, artifact: str, audience: str) 
         context,
         [
             _section(f"{state}. Candidate {_ref(artifact)} · audience {_display(audience)}."),
-            _actions(_home()),
+            _actions(_button("View receipt", "ot_release_receipt", revision), _home())
+            if revision
+            else _actions(_home()),
         ],
+    )
+
+
+def readiness_answer(receipt: Mapping[str, Any]) -> StatusAnswer:
+    reason = receipt["reason_code"]
+    pending = receipt["pending_count"]
+    if reason == "no_live_decisions":
+        finding = "No live decisions yet."
+    elif reason in {"no_verifier_bound", "awaiting_outcome"}:
+        suffix = "No verifier bound" if reason == "no_verifier_bound" else "Awaiting outcome"
+        finding = (
+            f"{pending} decision{'s' if pending != 1 else ''} awaiting verification · {suffix}"
+        )
+    else:
+        finding = {
+            "too_early_to_train": "Too early to train.",
+            "simpler_route_sufficient": "The simpler repair is sufficient.",
+            "disputed_outcomes": "Independent outcomes are disputed.",
+            "fit_eligible": "The worker recorded fit eligibility.",
+            "committed_action_classification_required": "Missing observed action classification.",
+            "decision_time_input_required": "The original decision input is missing.",
+            "training_mandate_required": "Training needs a current mandate.",
+            "training_rights_required": "Training rights are missing.",
+            "training_budget_required": "Training budget is unavailable.",
+            "untouched_holdout_required": "An independent holdout is missing.",
+            "qualified_model_required": "The selected model needs qualification.",
+            "development_evidence_required": "More independent development evidence is needed.",
+            "repair_assessment_required": "A simple-repair assessment is needed.",
+        }[reason]
+    roots = receipt["verified_root_count"]
+    residuals, threshold = receipt["residual_group_count"], receipt["minimum_residual_groups"]
+    basis = f"{roots} verified root{'s' if roots != 1 else ''}."
+    if residuals is not None and threshold is not None:
+        unit = "group" if residuals == 1 else "groups"
+        basis += f" {residuals} residual {unit} after simple repair · threshold {threshold}."
+    elif roots:
+        basis += " Independent residual groups are unmeasured."
+    basis += f" Augmentation is not enabled. Readiness receipt {_ref(receipt['readiness_ref'])}."
+    next_action = {
+        "bind_verifier": "Choose the authorized independent outcome feed to bind.",
+        "ask_data_custodian_to_bind_verifier": "Ask the data custodian to bind a verifier.",
+        "verify_outcome": "Record an independent outcome.",
+        "observe_committed_decisions": "Record the first committed decision.",
+        "request_authorized_fit_admission": "Request separate fit admission.",
+        "inspect_simple_repair": "Inspect the simpler repair.",
+        "supply_independent_evidence": "Supply independent evidence.",
+        "provide_observed_action_classification": "Supply the observed action classification.",
+        "provide_decision_time_input": "Provide permitted decision-time input.",
+        "authorize_training_scope": "Authorize a training mandate.",
+        "authorize_training_rights": "Review the requested training rights.",
+        "review_training_budget": "Review the training budget.",
+        "supply_independent_holdout": "Supply an independent holdout.",
+        "qualify_selected_model": "Qualify the selected model.",
+        "assess_simple_repair": "Assess the simpler repair.",
+    }[receipt["next_action"]]
+    return StatusAnswer(
+        finding, basis, f"{next_action} Responsible · {_display(receipt['next_owner'])}."
+    )
+
+
+def _live_counts(summary: Mapping[str, Any], readiness: Mapping[str, Any] | None) -> str:
+    rate = "Unavailable"
+    if (
+        readiness
+        and summary.get("workflow")
+        and summary.get("revision")
+        and summary["workflow"] == readiness.get("workflow_ref")
+        and summary["revision"] == readiness.get("evidence_revision")
+        and summary.get("dataset") == readiness.get("dataset_ref")
+    ):
+        counts = readiness.get("incumbent_automatic")
+        if isinstance(counts, Mapping):
+            wrong, verified = counts.get("wrong"), counts.get("verified")
+            if (
+                type(wrong) is int
+                and type(verified) is int
+                and 0 <= wrong <= verified <= summary["verified"]
+                and verified
+            ):
+                rate = f"{wrong}/{verified}"
+    decisions = summary["decisions"]
+    unit = "decision" if decisions == 1 else "decisions"
+    return (
+        f"Live evidence · {decisions} {unit}\n"
+        f"Verified {summary['verified']} · Pending "
+        f"{summary['pending']} · Disputed {summary['disputed']}\n"
+        f"Incumbent wrong / verified automatic decisions · {rate}"
+    )
+
+
+def _live_summary_text(summary: Mapping[str, Any]) -> str:
+    def utc(value: int | None) -> str:
+        if value is None:
+            return "unavailable"
+        try:
+            return datetime.fromtimestamp(value, UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
+        except (ValueError, OverflowError, OSError):
+            return f"{value} Unix seconds"
+
+    text = (
+        f"Unmatched outcomes · {summary['unmatched_outcomes']}. "
+        f"Last event ingested · {utc(summary['last_ingested_at'])}."
+    )
+    page = summary["last_page"]
+    if page is None:
+        return text + " No source-read receipt is available."
+    completion = "complete" if page["complete"] else "partial"
+    unit = "row" if page["row_count"] == 1 else "rows"
+    interval = (
+        "Queried interval unavailable"
+        if page["interval_start"] is None
+        else f"Queried {utc(page['interval_start'])} to {utc(page['interval_end'])}"
+    )
+    return (
+        f"{text} Latest acknowledged source page · {page['row_count']} {unit}, {completion}. "
+        f"Polled {utc(page['polled_at'])}. {interval}. "
+        f"Coverage through {utc(page['coverage_through'])}. Receipt {_ref(page['receipt_ref'])}."
     )
 
 
@@ -1321,6 +1685,13 @@ def app_home_view(
     named_reviewer: bool = False,
     pending: str = "",
     can_add_workflow: bool = False,
+    workflow_settings: bool = False,
+    readiness: Mapping[str, Any] | None = None,
+    live_summary: Mapping[str, Any] | None = None,
+    verify_outcome: str = "",
+    decision_map_entry: str = "",
+    case_entry: str = "",
+    starter_score_entry: str = "",
 ) -> Block:
     if not context:
         return {
@@ -1339,6 +1710,14 @@ def app_home_view(
         _button("Browse data", "ot_app_data", "ot_app_data"),
         _button("Ask OpenTour", "ot_app_prompt", "ot_app_prompt"),
     ]
+    if starter_score_entry:
+        blocks.append(
+            _actions(_button("Open starter benchmark", "ot_app_starter_score", starter_score_entry))
+        )
+    if case_entry:
+        blocks.append(_actions(_button("Review starter cases", "ot_app_cases", case_entry)))
+    if decision_map_entry:
+        blocks.append(_actions(_button("Review decision map", "ot_app_map", decision_map_entry)))
     if pending:
         blocks.append(_section("A repair is ready for your review."))
         first = _button("Review pending repair", "ot_app_pending", pending)
@@ -1355,6 +1734,24 @@ def app_home_view(
                 "block_id": "ot_workflow_entry",
             }
         )
+    if live_summary is not None:
+        blocks.append(_section(_live_counts(live_summary, readiness)))
+        blocks.append(_section(_live_summary_text(live_summary)))
+    if readiness is not None:
+        answer = readiness_answer(readiness)
+        blocks.extend(
+            [_section(answer.finding), _section(answer.basis), _section(answer.next_action)]
+        )
+        if readiness["next_action"] == "bind_verifier":
+            blocks.append(
+                _actions(_button("Bind verifier", "ot_app_bind_verifier", readiness["revision"]))
+            )
+    if verify_outcome:
+        blocks.append(
+            _actions(_button("Verify an outcome", "ot_app_verify_outcome", verify_outcome))
+        )
+    if workflow_settings:
+        blocks.append(_actions(_button("Workflow settings", "ot_app_settings", "ot_app_settings")))
     if can_tune:
         nav.append(_button("Preview a repair", "ot_app_repair", "ot_app_repair"))
     blocks.extend(
@@ -1382,6 +1779,191 @@ def workflow_chooser(context: str) -> Block:
         "ot_workflow_chooser",
         context,
         [_section("Choose how to set up this workflow privately."), choices],
+    )
+
+
+def starter_charter(context: str, preview: StarterPreview, map_entry: str = "") -> Block:
+    charter = preview.charter
+    blocks = [
+        _section(f"Policy {_ref(preview.policy)} · revision {_ref(preview.policy_revision)}"),
+        _section(
+            f"Workflow owner {_display(preview.owner)} · "
+            f"data custodian {_display(preview.custodian)}"
+        ),
+        _section("Intended decision · " + _display(charter.intended_decision, 160)),
+        _section("Local evaluation purpose · " + _display(charter.local_purpose, 160)),
+        _section("Future verification · " + _display(charter.verification_plan, 160)),
+        _section(
+            f"Responsible person {_display(charter.responsible_person, 160)} · "
+            f"next check {_ref(charter.next_check)} · verifier "
+            + (_display(charter.verifier, 160) if charter.verifier else "pending")
+        ),
+    ]
+    if preview.draft:
+        draft = preview.draft
+        blocks.insert(
+            0,
+            _section(
+                f"Saved draft {_ref(draft['draft_ref'])} · workflow {_ref(draft['workflow_ref'])}"
+            ),
+        )
+        blocks.append(
+            _section(
+                f"Admission {_ref(draft['run_ref'])} · settings {_ref(draft['settings_revision'])}"
+            )
+        )
+        if preview.benchmark:
+            benchmark = preview.benchmark
+            blocks.append(
+                _section(
+                    f"Benchmark {_ref(benchmark.benchmark_ref)} · version {benchmark.version} "
+                    f"· {_ref(benchmark.benchmark_state)}"
+                )
+            )
+            if benchmark.benchmark_state == "draft":
+                blocks.append(
+                    _section(
+                        "The owner can adjudicate starter cases before freezing this benchmark."
+                    )
+                )
+        else:
+            blocks.append(_section("This starter has no current benchmark receipt."))
+            blocks.append(
+                _actions(
+                    _button("Create benchmark draft", "ot_starter_benchmark", preview.revision)
+                )
+            )
+        if map_entry:
+            blocks.append(_actions(_button("Review decision map", "ot_map_open", map_entry)))
+        return _modal("Saved starter draft", "ot_starter_saved", context, blocks)
+    blocks += [
+        _section("Save this policy-only mandate for local workflow drafting."),
+        _actions(_button("Save starter draft", "ot_starter_save", preview.revision)),
+    ]
+    return _modal("Review starter charter", "ot_starter_preview", context, blocks)
+
+
+def workflow_settings(
+    context: str, workflow: str, nomination: str = "", nominee: str = ""
+) -> Block:
+    blocks = [
+        _section(f"Workflow {_ref(workflow)}"),
+        _actions(_button("Connect live decisions", "ot_connect_live", "ot_connect_live")),
+    ]
+    if nominee:
+        blocks.append(_section(f"Verifier nominated for custodian review · {_ref(nominee)}"))
+    if nomination:
+        blocks.append(_actions(_button("Nominate verifier", "ot_nominate_verifier", nomination)))
+    return _modal("Workflow settings", "ot_workflow_settings", context, blocks)
+
+
+def nominate_verifier(context: str, workflow: str) -> Block:
+    return _modal(
+        "Nominate a verifier",
+        "ot_nomination",
+        context,
+        [
+            _section(
+                f"Workflow {_ref(workflow)}. Ask the data custodian to authorize a named verifier."
+            ),
+            {
+                "type": "input",
+                "block_id": "nominee",
+                "label": _text("Verifier's Slack member ID"),
+                "element": {"type": "plain_text_input", "action_id": "nominee", "max_length": 32},
+            },
+        ],
+        "Save nomination",
+    )
+
+
+def live_connections(
+    context: str,
+    workflow: str,
+    current: Sequence[tuple[str, str]],
+    choices: Sequence[tuple[str, str]],
+    saved: str = "",
+) -> Block:
+    blocks = [_section(f"Workflow {_ref(workflow)}")]
+    if saved:
+        blocks.append(_section(f"Saved binding {_ref(saved)}"))
+    for kind, binding in current:
+        label = "Committed decisions" if kind == "decision" else "Independently verified outcomes"
+        blocks.append(_section(f"{label} · {_ref(binding)}"))
+    if not current:
+        blocks.append(_section("No current live binding."))
+    if choices:
+        select = _select("live_resource", "Authorized feed to connect", choices)
+        del select["element"]["initial_option"]
+        select["element"]["placeholder"] = _text("Choose a permitted feed")
+        blocks.append(select)
+    else:
+        blocks.append(_section("Ask the data custodian to connect a decision or outcome feed."))
+    return _modal(
+        "Connect live decisions",
+        "ot_live_binding",
+        context,
+        blocks,
+        "Save binding" if choices else None,
+    )
+
+
+def verify_outcome(
+    context: str, workflow: str, choices: Sequence[tuple[str, str]], *, more: bool, previous: bool
+) -> Block:
+    blocks = [
+        _section(
+            f"Workflow {_ref(workflow)}. Record an independent outcome for a decision revision."
+        )
+    ]
+    nav = []
+    if previous:
+        nav.append(_button("Previous decisions", "ot_verify_page", "previous"))
+    if more:
+        nav.append(_button("More decisions", "ot_verify_page", "next"))
+    if nav:
+        blocks.append(_actions(*nav))
+    if not choices:
+        blocks.append(_section("No eligible decision revision is available."))
+        return _modal("Verify an outcome", "ot_verify_outcome", context, blocks)
+    short_choices = [
+        (name if len(name) <= 75 else f"{token[:12]} · {name[:56]}", token)
+        for name, token in choices
+    ]
+    detailed = [f"{token[:12]} · {name}" for name, token in choices if len(name) > 75]
+    for start in range(0, len(detailed), 6):
+        blocks.append(_section("\n".join(detailed[start : start + 6])))
+    selector = _select("target", "Decision and revision", short_choices)
+    del selector["element"]["initial_option"]
+    blocks.extend(
+        [
+            selector,
+            _select("finality", "Outcome state", [("Final", "final"), ("Reopened", "reopened")]),
+        ]
+    )
+    for key, label in (
+        ("action", "Verified action reference (final only)"),
+        ("basis", "Evidence basis reference"),
+        ("effective", "Effective time in UTC Unix seconds"),
+    ):
+        blocks.append(
+            {
+                "type": "input",
+                "block_id": key,
+                "label": _text(label),
+                "optional": key == "action",
+                "element": {"type": "plain_text_input", "action_id": key, "max_length": 128},
+            }
+        )
+    return _modal("Verify an outcome", "ot_verify_outcome", context, blocks, "Record outcome")
+
+
+def verification_saved(context: str, receipt: str) -> Block:
+    return _modal(
+        "Outcome recorded",
+        "ot_verified_outcome",
+        context,
+        [_section(f"Recorded outcome receipt · {_ref(receipt)}")],
     )
 
 
@@ -1458,7 +2040,7 @@ def managed_review_status(context: str, audit: Mapping[str, Any]) -> Block:
         "ot_evidence_view",
         context,
         [
-            _section(_managed_outcome(audit)),
+            _section(managed_outcome(audit)),
             _actions(_home()),
         ],
     )
@@ -1523,3 +2105,715 @@ def plugin_held_modal(modal: Block) -> Block:
             modal["blocks"][-1],
         ],
     }
+
+
+def map_clause(
+    context: str,
+    resource: str,
+    revision: str,
+    section: str,
+    lines: str,
+    passage: str,
+    page: int,
+    owner_assertion: str = "",
+) -> Block:
+    """Render complete source text in bounded pages, preserving line and list boundaries."""
+    width = 1800
+    start = page * width
+    if page < 0 or (start and start >= len(passage)):
+        raise ValueError("invalid citation page")
+    buttons = [_button("Back to map", "ot_map_back", "back")]
+    if page:
+        buttons.append(_button("Previous passage", "ot_map_clause_page", "previous"))
+    if start + width < len(passage):
+        buttons.append(_button("Next passage", "ot_map_clause_page", "next"))
+    return _modal(
+        "Policy clause",
+        "ot_map_clause",
+        context,
+        [
+            _section(f"{_ref(resource)} · {_ref(section)} · lines {_display(lines)}"),
+            _section(f"Source revision {_ref(revision)}"),
+            {"type": "section", "text": _text(passage[start : start + width])},
+            *([_section(_display(owner_assertion, 1800))] if owner_assertion else []),
+            _actions(*buttons),
+        ],
+    )
+
+
+def map_conflict(context: str, prior: str, current: str, changes: Sequence[str]) -> Block:
+    blocks = [
+        _section(f"The map changed while you were editing. Your version · {_ref(prior)}"),
+        _section(f"Current version · {_ref(current)}"),
+    ]
+    summary: list[str] = []
+    for change in changes:
+        line = _display(change, 850)
+        if sum(len(item) + 1 for item in summary) + len(line) > 2900:
+            blocks.append(_section("\n".join(summary)))
+            summary = []
+        summary.append(line)
+    if summary:
+        blocks.append(_section("\n".join(summary)))
+    actions = [_button("Review current map", "ot_map_back", "back")]
+    blocks.append(_actions(*actions))
+    return _modal("Review map changes", "ot_map_conflict", context, blocks)
+
+
+@dataclass(frozen=True)
+class MapReviewRow:
+    branch_ref: str
+    trigger: str
+    inputs: str
+    predicate: str
+    precedence: str
+    action: str
+    fallback: str
+    support: str
+    disposition: str
+    example: str = ""
+
+
+def map_choices(context: str, choices: Sequence[tuple[str, str]]) -> Block:
+    return _modal(
+        "Choose workflow",
+        "ot_map_choices",
+        context,
+        [_actions(_button(workflow, "ot_choose_map", token)) for workflow, token in choices],
+    )
+
+
+def decision_map(
+    context: str,
+    workflow: str,
+    revision: str,
+    rows: Sequence[MapReviewRow],
+    questions: Sequence[str],
+    page: int,
+    editable: bool,
+    confirmed_ref: str = "",
+    can_set_precedence: bool = False,
+    *,
+    version: int,
+    source_revision: str,
+    draft_revision: str,
+    priority_citation: str = "",
+    effective_date: str = "",
+    effective_citation: str = "",
+    priority_assertion: str = "",
+    assertion_basis: str = "",
+    unit_of_work: str | None = None,
+    verifier_plan: str = "",
+) -> Block:
+    per_page = 5
+    if page < 0 or (page and page * per_page >= len(rows)):
+        raise ValueError("invalid map page")
+    blocks = [
+        _section(f"Workflow {_ref(workflow)} · saved review version {version}"),
+        _section(f"Unit of work · {_display(unit_of_work or 'Unspecified')}"),
+        _section(
+            f"Verifier plan · {_display(verifier_plan or 'Unavailable for this workflow', 800)}"
+        ),
+        _section(f"Policy revision {_ref(source_revision)}\nGuided draft {_ref(draft_revision)}"),
+    ]
+    if assertion_basis:
+        blocks.append(_section(_display(assertion_basis, 1800)))
+    if editable:
+        blocks.append(_actions(_button("Edit trigger and fallback", "ot_map_assertions", revision)))
+    if effective_date and effective_citation:
+        blocks.extend(
+            [
+                _section(f"Policy effective from {_display(effective_date)}"),
+                _actions(
+                    _button(
+                        "Inspect effective date clause", "ot_map_date_clause", effective_citation
+                    )
+                ),
+            ]
+        )
+    if priority_citation:
+        blocks.append(
+            _actions(_button("Inspect precedence clause", "ot_map_priority", priority_citation))
+        )
+    if priority_assertion:
+        blocks.append(_section(_display(priority_assertion, 1500)))
+    if confirmed_ref:
+        blocks.append(_section("Confirmed map · " + _ref(confirmed_ref)))
+    for question in questions[:5]:
+        blocks.append(_section(_display(question, 600)))
+    if can_set_precedence and editable and len(rows) >= 2:
+        blocks.append(_actions(_button("Resolve precedence", "ot_map_precedence", revision)))
+    if not rows:
+        blocks.append(_section("No decision branch is ready for review."))
+    for row in rows[page * per_page : (page + 1) * per_page]:
+        blocks.extend(
+            [
+                _section(
+                    f"{_display(row.action)} · {_display(row.disposition)}\n"
+                    f"Trigger · {_display(row.trigger)}\n"
+                    f"Inputs at decision time · {_display(row.inputs, 300)}\n"
+                    f"Predicate · {_display(row.predicate, 500)}\n"
+                    f"Precedence · {_display(row.precedence, 250)}\n"
+                    f"Fallback · {_display(row.fallback, 250)}\n"
+                    f"Support · {_display(row.support, 250)}\n"
+                    f"Proposed example · {_display(row.example, 500)}"
+                ),
+                _actions(
+                    _button("Inspect clause", "ot_map_citation", row.branch_ref),
+                    *(
+                        [_button("Review branch", "ot_map_edit", row.branch_ref)]
+                        if editable
+                        else []
+                    ),
+                ),
+            ]
+        )
+    nav = []
+    if page:
+        nav.append(_button("Previous branches", "ot_map_page", "previous"))
+    if (page + 1) * per_page < len(rows):
+        nav.append(_button("Next branches", "ot_map_page", "next"))
+    if nav:
+        blocks.append(_actions(*nav))
+    return _modal("Review decision map", "ot_map_review", context, blocks)
+
+
+def _map_text_input(
+    key: str, label: str, *, initial: str = "", multiline: bool = False, optional: bool = False
+) -> Block:
+    element: Block = {
+        "type": "plain_text_input",
+        "action_id": key,
+        "multiline": multiline,
+        "max_length": 1000 if key == "reason" else 3000 if multiline else 160,
+    }
+    if initial:
+        element["initial_value"] = initial
+    return {
+        "type": "input",
+        "block_id": key,
+        "label": _text(label),
+        "optional": optional,
+        "element": element,
+    }
+
+
+def map_branch_edit(
+    context: str,
+    branch: str,
+    action: str | None,
+    predicates: str,
+    available_actions: Sequence[str],
+) -> Block:
+    disposition = _select(
+        "disposition",
+        "Your decision",
+        [
+            ("Confirm the cited branch", "accepted"),
+            ("Correct this branch", "corrected"),
+            ("Leave unresolved", "unresolved"),
+            ("Mark out of scope", "out_of_scope"),
+        ],
+    )
+    del disposition["element"]["initial_option"]
+    disposition["element"]["placeholder"] = _text("Choose a disposition")
+    decision = _select(
+        "action",
+        "Decision if corrected",
+        [(v, v) for v in available_actions],
+        list(available_actions).index(action) if action is not None else 0,
+    )
+    if action is None:
+        decision["optional"] = True
+        del decision["element"]["initial_option"]
+        decision["element"]["placeholder"] = _text("Choose a supported decision")
+        disposition["element"]["options"] = [
+            opt for opt in disposition["element"]["options"] if opt["value"] != "accepted"
+        ]
+    return _modal(
+        "Review branch",
+        "ot_map_branch_save",
+        context,
+        [
+            _section(
+                f"Branch {_ref(branch)}. Confirm the proposal as written, or choose a correction."
+            ),
+            disposition,
+            decision,
+            _section(
+                "For a correction, enter one condition per line. Use field == Token for an exact, "
+                "case-sensitive reference value, field missing or present for presence, "
+                "or a numeric comparison such as total < 250."
+            ),
+            _map_text_input(
+                "conditions",
+                "Conditions at decision time",
+                initial=predicates,
+                multiline=True,
+                optional=True,
+            ),
+            _map_text_input("reason", "Reason or owner assertion", multiline=True),
+        ],
+        "Save decision",
+    )
+
+
+def map_precedence(context: str, question: str, options: Sequence[tuple[str, str]]) -> Block:
+    if not 2 <= len(options) <= 128:
+        raise ValueError("precedence choices unavailable")
+    blocks = [_section(_display(question, 450))]
+    if len(options) > 30:
+        for start in range(0, len(options), 15):
+            blocks.append(
+                _section(
+                    "\n".join(
+                        f"{i + 1}. {_display(options[i][0])}"
+                        for i in range(start, min(start + 15, len(options)))
+                    )
+                )
+            )
+        blocks.append(
+            _map_text_input(
+                "order", "Branch numbers in priority order, separated by commas", multiline=True
+            )
+        )
+    for index in range(len(options) if len(options) <= 30 else 0):
+        position = _select(f"rank_{index}", f"Priority {index + 1}", options)
+        del position["element"]["initial_option"]
+        position["element"]["placeholder"] = _text("Choose branch")
+        blocks.append(position)
+    blocks.append(_map_text_input("reason", "Why this order applies", multiline=True))
+    return _modal("Resolve precedence", "ot_map_precedence_save", context, blocks, "Save order")
+
+
+def map_reapply(layout: Block, form: Block, values: Mapping[str, Any]) -> Block:
+    # Restore only the fields the user submitted, into current allowed options.
+    # The second save is explicit. No proposal text is kept in the journal.
+    for block in form["blocks"]:
+        key = block.get("block_id")
+        if not key or key not in values:
+            continue
+        element = block["element"]
+        submitted = values[key][key]
+        if element["type"] == "static_select" and submitted.get("selected_option"):
+            selected = submitted["selected_option"]["value"]
+            element["initial_option"] = next(
+                o for o in element["options"] if o["value"] == selected
+            )
+        elif element["type"] == "plain_text_input" and submitted.get("value"):
+            element["initial_value"] = submitted["value"]
+    form["blocks"] = layout["blocks"] + form["blocks"]
+    form["title"] = layout["title"]
+    form["submit"]["text"] = "Reapply my edit"
+    return form
+
+
+def map_assertions(
+    context: str,
+    *,
+    trigger: str | None,
+    fallback: str | None,
+    permitted: Sequence[str],
+    unit_of_work: str | None = None,
+) -> Block:
+    choices = [("Leave unresolved", "unresolved")] + [(action, action) for action in permitted]
+    selected = next((i for i, (_, value) in enumerate(choices) if value == fallback), 0)
+    trigger_input = _map_text_input(
+        "trigger", "Workflow trigger", initial=trigger or "", optional=True
+    )
+    return _modal(
+        "Trigger and fallback",
+        "ot_map_assertions_save",
+        context,
+        [
+            _section(
+                "Describe when the workflow starts and the fallback when no reviewed rule matches."
+            ),
+            trigger_input,
+            _map_text_input("unit", "Unit of work", initial=unit_of_work or "", optional=True),
+            _select("fallback", "Intended fallback", choices, selected),
+            _map_text_input("reason", "Basis for this owner assertion", multiline=True),
+        ],
+        "Save assertion",
+    )
+
+
+def starter_case_entry(context: str, workflow: str, run: str, propose: bool) -> Block:
+    buttons = [_button("Open saved cases", "ot_case_review", "open")]
+    if propose:
+        buttons.append(_button("Generate guided cases", "ot_case_generate", "generate"))
+    return _modal(
+        "Starter cases",
+        "ot_case_entry",
+        context,
+        [
+            _section(f"Workflow {_ref(workflow)} · Run {_ref(run)}"),
+            _actions(*buttons),
+        ],
+    )
+
+
+def starter_case_detail(context: str, pack: Mapping[str, Any], index: int) -> Block:
+    case = pack["cases"][index]
+    authority = pack["authority"]
+    if pack["frozen"]:
+        frozen = pack["frozen"]
+        excluded_families = {
+            row["family_id"] for row in pack["cases"] if row["split_ref"] == "excluded"
+        }
+        return _modal(
+            "Frozen starter benchmark",
+            "ot_case_frozen",
+            context,
+            [
+                _section(f"Frozen, unscored · {_ref(frozen['reference'])}"),
+                _section(
+                    f"Freeze revision {_ref(frozen['revision'])} · "
+                    f"Map {_ref(authority['map_confirmation_ref'])} · "
+                    f"Settings {_ref(authority['map_settings_ref'])}"
+                ),
+                _section(
+                    f"{frozen['proposed']} generated · {frozen['reviewed']} reviewed · "
+                    f"{frozen['resolved']} resolved · {frozen['unresolved']} unresolved · "
+                    f"{frozen['excluded']} excluded cases"
+                ),
+                _section(
+                    f"Independent families · Development {frozen['development']} · "
+                    f"Reserved {frozen['reserved']} · Excluded {len(excluded_families)}"
+                ),
+                _section(
+                    "Reserved family coverage\n"
+                    + _display(
+                        ", ".join(
+                            f"{branch} / {action}: {count}"
+                            for branch, action, count in frozen["coverage"]
+                        ),
+                        2400,
+                    )
+                ),
+                _section(
+                    "Collect independent reserved families for uncovered critical branches."
+                    if frozen["uncovered_critical"]
+                    else "Scoring requires a separate evaluation."
+                ),
+                _section(
+                    "Critical gaps · "
+                    + _display(", ".join(frozen["uncovered_critical"]) or "None", 900)
+                ),
+            ],
+        )
+    inputs = ", ".join(
+        f"{field}={value if value is not None else 'missing'}"
+        for field, value in case["decision_inputs"]
+    )
+    origin = {
+        "generated_starter": "Generated case",
+        "owner_counterexample": "Owner counterexample",
+    }[case["case_origin"]]
+    blocks = [
+        _section(
+            f"{sum(c['status'] == 'proposed' for c in pack['cases'])} awaiting review · "
+            f"{sum(c['status'] == 'resolved' for c in pack['cases'])} resolved · "
+            f"{sum(c['status'] == 'unresolved' for c in pack['cases'])} unresolved · "
+            f"{len({c['family_id'] for c in pack['cases']})} independent families"
+        ),
+        _section(f"{origin} {index + 1} of {len(pack['cases'])} · {_ref(case['case_id'])}"),
+        _section(f"Family {_ref(case['family_id'])} · Branch {_ref(case['branch_id'])}"),
+        _section(f"Decision-time inputs · {_display(inputs, 1800)}"),
+        _section(
+            f"Suggested action · {_display(case['suggestion'])}\n"
+            f"Basis · {_display(case['rationale'], 1000)}\nCitation · {_ref(case['citation'])}"
+        ),
+        _section(
+            f"Owner decision · {_display(case['owner_adjudicated_target'] or case['status'])}"
+        ),
+    ]
+    if case["adjudicator"]:
+        blocks.append(
+            _section(
+                f"Reviewed by {_display(case['adjudicator'])} · "
+                f"{_display(case['adjudication_reason'], 1000)}"
+            )
+        )
+    buttons = []
+    if index:
+        buttons.append(_button("Previous case", "ot_case_page_previous", "previous"))
+    if index + 1 < len(pack["cases"]):
+        buttons.append(_button("Next case", "ot_case_page_next", "next"))
+    buttons.append(_button("Inspect policy clause", "ot_case_citation", "citation"))
+    if authority["can_adjudicate"]:
+        buttons.append(_button("Adjudicate case", "ot_case_edit", "edit"))
+    if authority["can_freeze"] and all(c["status"] != "proposed" for c in pack["cases"]):
+        buttons.append(_button("Assign family splits", "ot_case_splits", "splits"))
+    if buttons:
+        blocks.append(_actions(*buttons))
+    return _modal("Review starter cases", "ot_case_detail", context, blocks)
+
+
+def adjudicate_starter_case(context: str, case: Mapping[str, Any], choices: Sequence[str]) -> Block:
+    return _modal(
+        "Adjudicate case",
+        "ot_case_adjudicate",
+        context,
+        [
+            _section(f"Case {_ref(case['case_id'])} · Suggested {_display(case['suggestion'])}"),
+            _select(
+                "target",
+                "Owner decision",
+                [("Choose an outcome", "choose"), ("Leave unresolved", "unresolved")]
+                + [(action, str(i)) for i, action in enumerate(choices)],
+            ),
+            _map_text_input("reason", "Reason for your decision", multiline=True),
+        ],
+        "Save decision",
+    )
+
+
+def starter_family_splits(context: str, families: Sequence[str]) -> Block:
+    blocks = [
+        _section("Assign each whole family to development, reserved evaluation, or exclusion.")
+    ]
+    for index, family in enumerate(families):
+        blocks.append(
+            _select(
+                f"family_{index}",
+                family,
+                [
+                    ("Select split", "choose"),
+                    ("Development", "development"),
+                    ("Reserved evaluation", "reserved"),
+                    ("Excluded", "excluded"),
+                ],
+            )
+        )
+    return _modal("Assign family splits", "ot_case_freeze", context, blocks, "Review splits")
+
+
+def starter_freeze_preview(
+    context: str, pack: Mapping[str, Any], splits: Mapping[str, str]
+) -> Block:
+    rows = pack["cases"]
+    counts = [
+        f"{name.capitalize()} {sum(s == name for s in splits.values())}"
+        for name in ("development", "reserved", "excluded")
+    ]
+    coverage = []
+    for branch in pack["authority"]["branches"]:
+        for action in branch["coverage_actions"] or branch["allowed_actions"]:
+            count = len(
+                {
+                    r["family_id"]
+                    for r in rows
+                    if r["branch_id"] == branch["branch_id"]
+                    and r["owner_adjudicated_target"] == action
+                    and splits[r["family_id"]] == "reserved"
+                }
+            )
+            coverage.append(f"{branch['branch_id']} / {action} · {count} reserved")
+    return _modal(
+        "Review family splits",
+        "ot_case_freeze_preview",
+        context,
+        [
+            _section("Independent families · " + " · ".join(counts)),
+            _section(_display(", ".join(coverage), 2400)),
+            _actions(_button("Freeze benchmark", "ot_case_commit", "freeze")),
+        ],
+    )
+
+
+def starter_case_clause(context: str, passage: str, page: int) -> Block:
+    width = 1800
+    start = width * page
+    if page < 0 or start >= len(passage):
+        raise ValueError("Invalid source passage page")
+    buttons = [_button("Back to case", "ot_case_back", "back")]
+    if page:
+        buttons.append(_button("Previous passage", "ot_case_clause_page", "previous"))
+    if start + width < len(passage):
+        buttons.append(_button("Next passage", "ot_case_clause_page", "next"))
+    return _modal(
+        "Cited policy clause",
+        "ot_case_clause",
+        context,
+        [
+            _section(passage[start : start + width]),
+            _actions(*buttons),
+        ],
+    )
+
+
+def starter_score_readout(
+    context: str,
+    entry: Mapping[str, Any],
+    summary: Mapping[str, Any],
+    *,
+    page: int = 0,
+    reconnect: Mapping[str, Any] | None = None,
+) -> Block:
+    if summary["evidence_origin"] != "expert_reviewed_generated_starter":
+        raise ValueError("Unexpected starter benchmark origin")
+    if (summary["workflow_ref"], summary["execution_ref"]) != (
+        entry["workflow_ref"],
+        entry["execution_ref"],
+    ):
+        raise ValueError("Starter evaluation scope changed")
+    blocks = [
+        _section("Expert-reviewed starter benchmark · generated examples"),
+        _section(
+            f"Workflow {_ref(entry['workflow_ref'])} · Evaluation {_ref(entry['execution_ref'])}"
+        ),
+        _section(
+            f"Freeze {_ref(summary['freeze_ref'])}\nRevision {_ref(summary['freeze_revision'])}"
+        ),
+        _section(
+            f"Reserved cases {summary['reserved']} "
+            f"· Unresolved {summary['unresolved']} · Excluded {summary['excluded']}"
+        ),
+    ]
+    blocks.extend(
+        [
+            _section(
+                f"Selected model {_ref(summary['model_ref'])} · "
+                f"Revision {_ref(summary['model_revision'])}"
+            ),
+            _section(
+                f"Policy comparator {_ref(summary['comparator_ref'])} "
+                f"· Revision {_ref(summary['comparator_revision'])}"
+            ),
+        ]
+    )
+    if summary["state"] == "frozen_unscored":
+        blocks.append(
+            _section(
+                "Frozen, unscored. Open evaluation details to inspect the selected model setup."
+                if reconnect
+                else "Frozen, unscored. Ask the model custodian to check the selected model and "
+                "its inference permission."
+            )
+        )
+    elif summary["state"] == "held":
+        blocks.append(
+            _section(
+                "Evaluation outcome unknown. Ask the evaluation "
+                "operator to reconcile this execution."
+            )
+        )
+    elif summary["state"] == "scored":
+        metrics = summary["metrics"]
+        for arm, title in (("model", "Selected model"), ("comparator", "Simple policy comparator")):
+            result = metrics[arm]
+            details = [title]
+            for key, label in (
+                ("exact_action", "Exact action agreement"),
+                ("coverage", "Automatic coverage"),
+                ("wrong_automatic", "Wrong automatic decisions"),
+            ):
+                rate = result[key]
+                n, d = rate["numerator"], rate["denominator"]
+                value = f"{n}/{d}" if d else f"Unavailable ({n}/{d})"
+                details.append(f"{label} · {value}")
+            details.append(f"Missing predictions · {result['missing']}")
+            blocks.append(_section("\n".join(details)))
+        paired = metrics["paired"]
+        blocks.append(
+            _section(
+                f"Comparator versus model · {paired['denominator']} paired cases\n"
+                f"Fixed {paired['fixed']} · Regressed {paired['regressed']} · "
+                f"Excluded for missing predictions {paired['excluded_missing']}"
+            )
+        )
+    else:
+        raise ValueError("Unexpected evaluation state")
+    if page == 1:
+        blocks = [
+            _section("Starter benchmark · evaluation details"),
+            _section(
+                f"Workflow {_ref(entry['workflow_ref'])} · "
+                f"Evaluation {_ref(entry['execution_ref'])}"
+            ),
+            _section(
+                f"Frozen benchmark {_ref(summary['freeze_ref'])} · Revision "
+                f"{_ref(summary['freeze_revision'])}"
+            ),
+            _section(
+                f"Selected model {_ref(summary['model_ref'])} · "
+                f"Revision {_ref(summary['model_revision'])}"
+            ),
+            _section(
+                f"Comparator {_ref(summary['comparator_ref'])} · Revision "
+                f"{_ref(summary['comparator_revision'])}"
+            ),
+        ]
+        if summary["state"] == "scored":
+            blocks.append(
+                _section(
+                    "Exact action agreement includes correct review decisions. Automatic "
+                    "coverage uses reserved cases as its denominator. Wrong automatic decisions "
+                    "uses only automatic decisions."
+                )
+            )
+        elif summary["state"] == "frozen_unscored":
+            blocks.append(
+                _section(
+                    "Review setup for the selected model revision."
+                    if reconnect
+                    else "Ask the model custodian to check the selected model and its inference "
+                    "permission."
+                )
+            )
+        else:
+            blocks.append(
+                _section("Ask the evaluation operator to reconcile the unknown execution.")
+            )
+    elif page == 2 and reconnect is not None:
+        blocks = [
+            _section("Selected model setup required"),
+            _section(
+                f"Benchmark {_ref(reconnect['benchmark_ref'])} · Version "
+                f"{reconnect['benchmark_version']}\n"
+                f"Model custodian {_ref(reconnect['custodian_ref'])}"
+            ),
+            _section(
+                f"Workflow {_ref(reconnect['workflow_ref'])} · Run {_ref(reconnect['run_ref'])} "
+                f"· Evaluation {_ref(reconnect['execution_ref'])}"
+            ),
+            _section(
+                f"Frozen benchmark {_ref(reconnect['freeze_ref'])} · Revision "
+                f"{_ref(reconnect['freeze_revision'])}"
+            ),
+            _section(
+                f"Model {_ref(reconnect['model_ref'])} · Revision "
+                f"{_ref(reconnect['model_revision'])}"
+            ),
+            _section(
+                "The model custodian must configure this exact model revision and its inference "
+                "permission in the installation. This view only shows the required setup."
+            ),
+        ]
+    elif page != 0:
+        raise ValueError("Invalid starter benchmark page")
+    if page == 0:
+        nav = _button("Next →", "ot_score_next", "next")
+        nav["accessibility_label"] = "Next: evaluation details"
+    else:
+        nav = _button("← Previous", "ot_score_previous", "previous")
+        nav["accessibility_label"] = (
+            "Previous: benchmark results" if page == 1 else "Previous: evaluation details"
+        )
+    controls = [nav]
+    if reconnect is not None and page == 1:
+        controls.append(_button("Reconnect selected model", "ot_score_reconnect", "setup"))
+    blocks.append(_actions(*controls))
+    return _modal("Starter benchmark", "ot_starter_score", context, blocks)
+
+
+def starter_score_choices(context: str, entries: Sequence[tuple[Mapping[str, Any], str]]) -> Block:
+    blocks = []
+    for entry, token in entries:
+        block = _section(
+            f"Workflow {_ref(entry['workflow_ref'])} · Evaluation {_ref(entry['execution_ref'])}"
+        )
+        block["accessory"] = _button("Open result", "ot_starter_score_choice", token)
+        blocks.append(block)
+    return _modal("Choose evaluation", "ot_starter_scores", context, blocks)

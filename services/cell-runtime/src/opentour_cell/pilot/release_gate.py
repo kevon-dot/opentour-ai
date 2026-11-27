@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
+import hmac
 import json
 import re
-import sqlite3
 import time
-from contextlib import closing
 from pathlib import Path
 from typing import Any
 
@@ -16,7 +15,7 @@ from opentour_cell.pilot.repair_workflow import (
     _require,
     managed_review_evidence,
 )
-from opentour_cell.pilot.training import LocalTrainingStore, _check_file
+from opentour_cell.pilot.training import LocalTrainingStore
 
 Json = dict[str, Any]
 
@@ -78,7 +77,7 @@ def check_release_inspection(
         ),
         "release_reviewer_mismatch",
     )
-    return _inspection(
+    checked = _inspection(
         directory,
         organization,
         run_id,
@@ -88,6 +87,8 @@ def check_release_inspection(
         inspection_ref,
         fresh=True,
     )
+    del checked["presented_at"]
+    return checked
 
 
 def _inspection(
@@ -100,23 +101,25 @@ def _inspection(
     inspection_ref: str,
     *,
     fresh: bool,
+    decision_body: Json | None = None,
 ) -> Json:
-    from opentour_cell.pilot.slack_adapter import Journal, Settings
+    from opentour_cell.pilot.receipt_recovery import _JournalSnapshot, _open_db
+    from opentour_cell.pilot.slack_adapter import Settings
 
     ledger = directory / "slack-pilot.sqlite3"
-    _check_file(ledger)
-    with closing(sqlite3.connect(ledger.absolute().as_uri() + "?mode=ro", uri=True)) as conn:
-        binding = conn.execute("SELECT binding FROM identity WHERE id=1").fetchone()
-    _require(binding, "review_journal_unavailable")
-    assert binding is not None
-    journal = Journal(ledger, binding[0])
     reviewer, team, channel, audience = (
         policy[k] for k in ("reviewer", "team", "channel", "audience")
     )
-    with journal.db() as db:
+    with _open_db(ledger) as db:
+        _require(db is not None, "review_journal_unavailable")
+        assert db is not None
+        binding = db.execute("SELECT binding FROM identity WHERE id=1").fetchone()
+        _require(binding, "review_journal_unavailable")
+        assert binding is not None
+        journal = _JournalSnapshot(db, ledger, binding[0])
         journal.active(db)
         row = db.execute(
-            "SELECT p.id,p.snapshot,p.expires,p.policy FROM presentations p "
+            "SELECT p.id,p.snapshot,p.expires,p.policy,p.presented FROM presentations p "
             "JOIN exposures e ON e.id=p.id "
             "WHERE p.actor=? AND (p.id=? OR p.revision=?) AND "
             "e.status='presented' ORDER BY p.presented DESC,p.rowid DESC LIMIT 1",
@@ -158,12 +161,53 @@ def _inspection(
             == row[3],
             "release_review_permission_changed",
         )
-        return {
+        result: Json = {
             "engagement": seen["engagement"],
             "expires_at": row[2],
+            "presented_at": row[4],
             "provider": cfg.approval_provider,
             "presentation_id": row[0],
         }
+        if decision_body is not None:
+            result["decision_seal"] = journal.opaque(
+                "release",
+                [
+                    "opentour.pilot.release-decision.v1",
+                    journal.binding,
+                    seen["engagement"],
+                    decision_body,
+                ],
+            )
+        return result
+
+
+def _check_recorded_at(receipt: Json, presentation: Json) -> None:
+    if "recorded_at" in receipt:
+        recorded = receipt["recorded_at"]
+        _require(
+            type(recorded) is int
+            and presentation["presented_at"] <= recorded < presentation["expires_at"]
+            and recorded <= int(time.time()),
+            "release_record_time_invalid",
+        )
+
+
+def _decision_body(receipt: Json) -> Json | None:
+    if "recorded_at" not in receipt and "decision_seal" not in receipt:
+        return None
+    return {key: value for key, value in receipt.items() if key != "decision_seal"}
+
+
+def _check_decision_seal(receipt: Json, presentation: Json) -> None:
+    if "decision_seal" in presentation:
+        supplied = receipt.get("decision_seal")
+        _require(
+            "recorded_at" in receipt
+            and isinstance(supplied, str)
+            and supplied.isascii()
+            and hmac.compare_digest(supplied, presentation["decision_seal"]),
+            "release_decision_integrity_unavailable",
+        )
 
 
 def record_release(
@@ -180,7 +224,9 @@ def record_release(
     decision: str,
     inspection_ref: str,
     provider: str,
+    provider_request_expires_at: int | None = None,
 ) -> Json:
+    """Record a named decision. The bridge supplies the authenticated request deadline."""
     _require(
         decision in {"approved", "changes_requested"} and provider in {"slack", "zapier_slack"},
         "release_reviewer_mismatch",
@@ -213,7 +259,20 @@ def record_release(
     store = LocalTrainingStore(directory / "training.sqlite3", organization, existing_only=True)
     with store.engagement_guard(engagement_id=seen["engagement"]):
         _binding(directory, organization, run_id, run_revision, artifact_sha)
-        _inspection(
+        path = work / "release-decision.json"
+        try:
+            saved = _private_json(path)
+        except FileNotFoundError:
+            create = True
+            saved = value | {"recorded_at": int(time.time())}
+        else:
+            create = False
+            _require(
+                {k: v for k, v in saved.items() if k not in {"recorded_at", "decision_seal"}}
+                == value,
+                "existing_result_conflict",
+            )
+        presentation = _inspection(
             directory,
             organization,
             run_id,
@@ -222,9 +281,66 @@ def record_release(
             policy,
             seen["presentation_id"],
             fresh=True,
+            decision_body=_decision_body(saved),
         )
-        _record(work / "release-decision.json", value)
-    return value
+        _check_recorded_at(saved, presentation)
+        if create:
+            saved["decision_seal"] = presentation["decision_seal"]
+            if provider == "zapier_slack":
+                _require(
+                    type(provider_request_expires_at) is int
+                    and 0 < provider_request_expires_at <= presentation["expires_at"],
+                    "sealed_provider_deadline_required",
+                )
+                assert provider_request_expires_at is not None
+
+                def check_request_deadline() -> None:
+                    _require(int(time.time()) < provider_request_expires_at, "request_expired")
+
+                check_request_deadline()
+                _record(path, saved, before_publish=check_request_deadline)
+            else:
+                _record(path, saved)
+        else:
+            # A retry must preserve the time of the first durable decision. Old
+            # receipts remain usable for their existing approval-only pathways.
+            _check_decision_seal(saved, presentation)
+        return saved
+
+
+def inspect_recorded_release(
+    directory: Path, organization: str, run_id: str, run_revision: str, artifact_sha: str
+) -> Json | None:
+    """Read a scoped decision. A missing decision does not attest to delivery state."""
+    work, policy = _binding(directory, organization, run_id, run_revision, artifact_sha)
+    try:
+        receipt = _private_json(work / "release-decision.json")
+    except FileNotFoundError:
+        return None
+    _require(
+        all(receipt.get(k) == v for k, v in policy.items())
+        and receipt.get("decision") in {"approved", "changes_requested"}
+        and receipt.get("provider") == policy.get("provider", "slack")
+        and receipt.get("organization") == organization
+        and receipt.get("run_id") == run_id
+        and receipt.get("run_revision") == run_revision
+        and receipt.get("artifact_sha") == artifact_sha,
+        "human_release_approval_required",
+    )
+    presentation = _inspection(
+        directory,
+        organization,
+        run_id,
+        run_revision,
+        artifact_sha,
+        policy,
+        receipt["presentation_id"],
+        fresh=False,
+        decision_body=_decision_body(receipt),
+    )
+    _check_recorded_at(receipt, presentation)
+    _check_decision_seal(receipt, presentation)
+    return receipt
 
 
 def authorize_release(
@@ -232,26 +348,12 @@ def authorize_release(
 ) -> Json:
     store = LocalTrainingStore(directory / "training.sqlite3", organization, existing_only=True)
     with store.engagement_guard():
-        work, policy = _binding(directory, organization, run_id, run_revision, artifact_sha)
-        receipt = _private_json(work / "release-decision.json")
+        receipt = inspect_recorded_release(
+            directory, organization, run_id, run_revision, artifact_sha
+        )
         _require(
-            all(receipt.get(k) == v for k, v in policy.items())
-            and receipt["decision"] == "approved"
-            and receipt.get("provider") == policy.get("provider", "slack")
-            and receipt["organization"] == organization
-            and receipt["run_id"] == run_id
-            and receipt["run_revision"] == run_revision
-            and receipt["artifact_sha"] == artifact_sha,
+            receipt is not None and receipt["decision"] == "approved",
             "human_release_approval_required",
         )
-        _inspection(
-            directory,
-            organization,
-            run_id,
-            run_revision,
-            artifact_sha,
-            policy,
-            receipt["presentation_id"],
-            fresh=False,
-        )
-    return receipt
+        assert receipt is not None
+        return receipt

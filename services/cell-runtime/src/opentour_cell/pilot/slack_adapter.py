@@ -20,9 +20,29 @@ from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing, contextmanager
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
+
+from opentour_cell.pilot.intake_mcp import REF_PATTERN, IntakePrincipal
+from opentour_cell.pilot.live_evidence import LiveEvidence, LiveScope, binding_candidate
+from opentour_cell.pilot.scoped_query_plan import ReadoutQuestion, plan_query
+from opentour_cell.pilot.starter_setup import StarterBinding, StarterPreview, StarterSetup
+from opentour_cell.pilot.status_questions import (
+    ApprovalEvidence,
+    StatusAnswer,
+    StatusTopic,
+    read_status,
+    resolve_status,
+)
+
+if TYPE_CHECKING:
+    from opentour_cell.pilot.handoff_readback import HandoffReadback
+    from opentour_cell.pilot.map_review import MapReviewService
+    from opentour_cell.pilot.starter_evaluation_session import StarterEvaluationSession
+    from opentour_cell.pilot.starter_map_confirmation import StarterCaseEntry, StarterCaseSession
+    from opentour_cell.pilot.verifier_form import VerifierForm
 
 Json = dict[str, Any]
 SESSION_SECONDS = 900
@@ -34,10 +54,52 @@ REGRESSION_QUESTION = re.compile(
     r"(?:what (?:got|became) worse|(?:which|what) (?:cases|decisions|answers) "
     r"(?:(?:got|became) (?:worse|wrong|incorrect)|regressed))\??"
 )
+WORKPLACE_QUESTIONS = {ReadoutQuestion.WORKPLACE_SUPPORT, ReadoutQuestion.SYNTHETIC_BENEFIT}
 ROLES = {"inspect", "tune", "review"}
-CALLBACKS = {"ot_dataset_search", "ot_tune_preview", "ot_tune_start", "ot_prompt_enter"}
+CALLBACKS = {
+    "ot_dataset_search",
+    "ot_tune_preview",
+    "ot_tune_start",
+    "ot_prompt_enter",
+    "ot_live_binding",
+    "ot_verify_outcome",
+    "ot_nomination",
+    "ot_map_branch_save",
+    "ot_case_adjudicate",
+    "ot_case_freeze",
+    "ot_map_assertions_save",
+    "ot_map_precedence_save",
+}
 ACTIONS = {
     "ot_workflow_starter",
+    "ot_map_open",
+    "ot_case_review",
+    "ot_case_generate",
+    "ot_case_page_previous",
+    "ot_case_page_next",
+    "ot_case_edit",
+    "ot_case_splits",
+    "ot_case_citation",
+    "ot_case_back",
+    "ot_starter_score_choice",
+    "ot_score_next",
+    "ot_score_previous",
+    "ot_score_reconnect",
+    "ot_case_clause_page",
+    "ot_case_commit",
+    "ot_choose_map",
+    "ot_map_page",
+    "ot_map_citation",
+    "ot_map_priority",
+    "ot_map_date_clause",
+    "ot_map_clause_page",
+    "ot_map_edit",
+    "ot_map_assertions",
+    "ot_map_back",
+    "ot_map_precedence",
+    "ot_starter_save",
+    "ot_starter_benchmark",
+    "ot_connect_live",
     "ot_workflow_historical",
     "ot_home",
     "ot_browse",
@@ -58,11 +120,21 @@ ACTIONS = {
     "ot_tune_dataset",
     "ot_readouts",
     "ot_result_open",
+    "ot_current_week",
+    "ot_verify_page",
+    "ot_nominate_verifier",
+    "ot_week_bind",
+    "ot_week_scopes",
+    "ot_current_training",
+    "ot_readiness_proof",
+    "ot_training_scopes",
     "ot_result_prev",
     "ot_result_next",
     "ot_repair_confirm",
     "ot_repair_refresh",
     "ot_release_approve",
+    "ot_release_receipt",
+    "ot_delivery_status",
     "ot_release_changes",
     "ot_help",
     "ot_question",
@@ -110,6 +182,8 @@ class Settings:
     workflow_label: str = ""
     config_path: Path | None = None
     explicit_recipient: bool = True
+    live_workflow_ref: str = ""
+    starter_setup: StarterBinding | None = None
 
     @property
     def binding(self) -> str:
@@ -155,6 +229,8 @@ class Settings:
             "approval_provider",
             "workspace_title",
             "workflow_label",
+            "starter_setup",
+            "live_workflow_ref",
         }
         _check(isinstance(doc, dict) and required <= doc.keys() <= required | optional)
         _check(isinstance(doc["organization"], str) and LOCAL_ID.fullmatch(doc["organization"]))
@@ -194,6 +270,9 @@ class Settings:
                     and label.isprintable()
                     and not any(c in label for c in "<>@#&")
                 )
+        live_workflow = doc.get("live_workflow_ref", "")
+        if "live_workflow_ref" in doc:
+            _check(isinstance(live_workflow, str) and re.fullmatch(REF_PATTERN, live_workflow))
         destination = doc.get("zapier_destination_sha256", "")
         _check(
             isinstance(destination, str)
@@ -218,6 +297,10 @@ class Settings:
             doc.get("workflow_label", ""),
             path,
             explicit_recipient=explicit_recipient,
+            live_workflow_ref=live_workflow,
+            starter_setup=StarterBinding.parse(doc["starter_setup"])
+            if "starter_setup" in doc
+            else None,
         )
 
     def permission(self, actor: str, role: str, dataset: str | None = None) -> Json:
@@ -1499,43 +1582,331 @@ class Workbench:
             return
         self._browse(cfg, actor, view, source, search=query, old_hash=old_hash)
 
+    def _current_question(self, actor: str, topic: str) -> tuple[str, str, Json | None] | None:
+        """Pin one currently inspected live workflow, separately from any frozen readout."""
+        try:
+            cfg = self.settings(check_engagement=False)
+            workflow = self._live_workflow(cfg, actor)
+            with self._live_scope(actor, workflow) as (_, _, scope):
+                entry = cfg.permission(actor, "inspect", scope.dataset_ref)
+                _check(scope.can_inspect and entry["aggregate"])
+                receipt = self._readiness(actor)
+                if receipt is not None:
+                    _check(
+                        receipt["workflow_ref"] == workflow
+                        and receipt["engagement"] == scope.engagement_epoch
+                        and receipt["dataset_ref"] == scope.dataset_ref
+                        and receipt["dataset_revision"] == scope.dataset_revision
+                    )
+                facts = receipt
+                if topic == StatusTopic.LIVE_ERRORS:
+                    summary = self._live_summary(actor)
+                    if summary is not None:
+                        _check(
+                            summary["workflow"] == workflow
+                            and summary["dataset"] == scope.dataset_ref
+                        )
+                        if receipt:
+                            _check(summary["revision"] == receipt["evidence_revision"])
+                    today = datetime.now(UTC).date()
+                    facts = {
+                        "readiness": receipt,
+                        "summary": summary,
+                        "week_start": int(
+                            datetime.combine(
+                                today - timedelta(days=today.weekday()), datetime.min.time(), UTC
+                            ).timestamp()
+                        ),
+                    }
+                pin = self.journal.opaque(
+                    "workflow",
+                    [
+                        self._policy(cfg, actor),
+                        actor,
+                        workflow,
+                        scope.authority_revision,
+                        scope.engagement_epoch,
+                        scope.dataset_ref,
+                        scope.dataset_revision,
+                        topic,
+                        facts,
+                    ],
+                )
+                return workflow, pin, facts
+        except Exception:
+            return None
+
     def _regression_picker(
-        self, cfg: Settings, actor: str, view: str, old_hash: str = "", page: int = 0
+        self,
+        cfg: Settings,
+        actor: str,
+        view: str,
+        old_hash: str = "",
+        page: int = 0,
+        topic: str = "changes",
     ) -> None:
         policy = self._policy(cfg, actor)
+        workflow_scoped = topic in WORKPLACE_QUESTIONS or topic == StatusTopic.DELIVERY
         eligible = []
         if cfg.permission(actor, "inspect")["aggregate"]:
             for dataset, source in self._result_sources(cfg, actor):
                 target = self._readout(cfg, actor, source)
                 if target and self.journal.inspected(actor, target.revision, policy):
+                    if workflow_scoped and not self._workplace_scope(cfg, target):
+                        continue
                     eligible.append((dataset, source, target.revision))
         page = max(0, min(page, (len(eligible) - 1) // RESULT_PAGE_SIZE))
         start = page * RESULT_PAGE_SIZE
         rows = eligible[start : start + RESULT_PAGE_SIZE]
-        listing = {"page": page, "items": {revision: source for _, source, revision in rows}}
+        current = (
+            self._current_question(actor, topic)
+            if topic in {StatusTopic.TRAINING, StatusTopic.LIVE_ERRORS}
+            else None
+        )
+
+        def delivery_choices(settings: Settings) -> dict[str, tuple[str, str]]:
+            choices = {}
+            if topic == StatusTopic.DELIVERY and settings.live_workflow_ref:
+                for _, source, revision in rows:
+                    target = self._readout(settings, actor, source)
+                    if target and target.revision == revision:
+                        receipt = self._handoff_receipt(settings, actor, target)
+                        if receipt:
+                            choices[revision] = (
+                                receipt.selection.workflow_ref,
+                                self._receipt_pin(actor, revision, receipt),
+                            )
+            return choices
+
+        deliveries = delivery_choices(cfg)
+        listing = {
+            "page": page,
+            "workplace_scope": cfg.live_workflow_ref if topic in WORKPLACE_QUESTIONS else None,
+            "delivery_scope": cfg.live_workflow_ref if topic == StatusTopic.DELIVERY else None,
+            "deliveries": {revision: pin for revision, (_, pin) in deliveries.items()},
+            "items": {revision: source for _, source, revision in rows},
+            "topic": topic,
+            "current": current[1] if current else None,
+        }
         ctx = self.journal.context(actor, cfg.channel, view, "regressions", revision=_json(listing))
+
+        def authorize() -> None:
+            latest = self._authorize_question_rows(
+                cfg, actor, rows, workflow_scoped=workflow_scoped
+            )
+            if deliveries:
+                _check(delivery_choices(latest) == deliveries)
+            if current is not None:
+                _check(self._current_question(actor, topic) == current)
+
         self._show(
             view,
             self.views.regression_picker(
-                ctx, rows, previous=bool(page), more=start + len(rows) < len(eligible)
+                ctx,
+                rows,
+                previous=bool(page),
+                more=start + len(rows) < len(eligible),
+                topic=topic,
+                **({"current_workflow": current[:2]} if current else {}),
+                **(
+                    {"delivery_workflows": {k: v[0] for k, v in deliveries.items()}}
+                    if deliveries
+                    else {}
+                ),
             ),
             old_hash,
-            authorize=lambda: self._authorize_question_rows(cfg, actor, rows),
+            authorize=authorize,
         )
 
     def _authorize_question_rows(
-        self, cfg: Settings, actor: str, rows: list[tuple[str, str, str]]
-    ) -> None:
+        self,
+        cfg: Settings,
+        actor: str,
+        rows: list[tuple[str, str, str]],
+        *,
+        workflow_scoped: bool = False,
+    ) -> Settings:
         # Both the withdrawal guard and the exposure transaction are held at admission.
         current = self.settings()
         current.permission(actor, "inspect")
         policy = self._policy(current, actor)
         _check(policy == self._policy(cfg, actor))
+        if workflow_scoped:
+            _check(current.live_workflow_ref == cfg.live_workflow_ref)
         for dataset, source, revision in rows:
             _check(current.permission(actor, "inspect", dataset)["aggregate"])
             target = self._readout(current, actor, source)
             _check(target and target.dataset == dataset and target.revision == revision)
+            if workflow_scoped:
+                _check(target and self._workplace_scope(current, target))
             _check(self.journal.inspected(actor, revision, policy))
+        return current
+
+    def _handoff_receipt(self, cfg: Settings, actor: str, target: Target) -> HandoffReadback | None:
+        from opentour_cell.pilot.handoff_readback import read_handoff
+
+        if not (
+            cfg.live_workflow_ref
+            and cfg.explicit_recipient
+            and cfg.approval_provider == target.audit.get("release_provider") == "slack"
+            and actor == cfg.reviewer == target.audit.get("release_reviewer")
+            and cfg.permission(actor, "review", target.dataset)["aggregate"]
+        ):
+            return None
+        # The selector locates a workflow. The independently signed inspection
+        # grant and current source intake bind that workflow to this frozen run.
+        return read_handoff(
+            self.store,
+            actor=actor,
+            workflow_ref=cfg.live_workflow_ref,
+            proposal_ref=target.audit["job_id"],
+            proposal_revision=target.audit["run_revision"],
+            artifact_sha256=target.audit["model_revision"],
+        )
+
+    def _receipt_pin(self, actor: str, revision: str, receipt: HandoffReadback) -> str:
+        return self.journal.opaque(
+            "release-receipt",
+            [
+                actor,
+                revision,
+                receipt.selection.workflow_ref,
+                receipt.selection.proposal_ref,
+                receipt.selection.approval_ref,
+                receipt.destination_ref,
+            ],
+        )
+
+    @staticmethod
+    def _workplace_scope(cfg: Settings, target: Target) -> bool:
+        if not cfg.live_workflow_ref:
+            return True
+        if target.audit["mode"] not in {"managed_rule", "managed_model"}:
+            return False
+        from opentour_cell.pilot.source_intake import check_current_intake
+
+        intake = check_current_intake(
+            cfg.directory, cfg.organization, target.audit["engagement"], target.dataset_revision
+        )
+        return bool(
+            intake["workflow"] == cfg.live_workflow_ref and intake["dataset_id"] == target.dataset
+        )
+
+    def _workplace_answer(self, cfg: Settings, target: Target, topic: str) -> StatusAnswer:
+        _check(self._workplace_scope(cfg, target))
+        scope = f"Workflow {cfg.live_workflow_ref}. " if cfg.live_workflow_ref else ""
+        mode = target.audit["mode"]
+        basis = {
+            "evaluation_only": "This result scored supplied outputs.",
+            "training": "This result records a completed CPU fit.",
+            "managed_rule": "This result evaluates a simple rule.",
+            "managed_model": "This result includes a model comparison.",
+        }[mode]
+        if topic == ReadoutQuestion.WORKPLACE_SUPPORT:
+            return StatusAnswer(
+                "Independent workplace support is unavailable for this result.",
+                f"{scope}{basis} The frozen cohort contains {target.audit['population']} cases. "
+                "No receipt links them to independently verified workplace families.",
+                "The data custodian can provide verified case lineage for this frozen result.",
+            )
+        return StatusAnswer(
+            "Augmentation benefit is unproven for this result.",
+            f"{scope}{basis} The result has no matched real-only and augmented arms "
+            "scored on the same untouched real cases. Incremental cost is unavailable.",
+            "The evaluation operator can provide a matched comparison and its cost receipt.",
+        )
+
+    def _status_answer(
+        self,
+        cfg: Settings,
+        actor: str,
+        target: Target,
+        topic: StatusTopic,
+        receipt: HandoffReadback | None = None,
+    ) -> StatusAnswer:
+        approval = None
+        if topic == StatusTopic.DELIVERY:
+            _check(
+                actor == cfg.reviewer
+                and cfg.permission(actor, "review", target.dataset)["aggregate"]
+            )
+            if not cfg.explicit_recipient:
+                return read_status(topic, target.audit, destination_configured=False)
+            if target.audit.get("release_provider") == "zapier_slack":
+                from opentour_cell.pilot.zapier_approval import ApprovalBridge
+
+                bridge = ApprovalBridge(
+                    cfg.directory, cfg.organization, cfg.directory / "zapier-approval.json"
+                )
+                seen = bridge.existing_status(
+                    run_id=target.audit["job_id"],
+                    run_revision=target.audit["run_revision"],
+                    artifact_sha=target.audit["model_revision"],
+                    team=cfg.team,
+                    actor=actor,
+                    handoff_destination=(cfg.channel, cfg.recipient),
+                )
+                if seen:
+                    approval = ApprovalEvidence(
+                        seen["state"], seen["request_id"], seen.get("recorded_at")
+                    )
+            elif target.audit.get("release_provider") == "slack":
+                from opentour_cell.pilot.release_gate import inspect_recorded_release
+
+                recorded = inspect_recorded_release(
+                    cfg.directory,
+                    cfg.organization,
+                    target.audit["job_id"],
+                    target.audit["run_revision"],
+                    target.audit["model_revision"],
+                )
+                if recorded and recorded["decision"] == "approved" and receipt:
+                    from opentour_cell.pilot.slack_views import handoff_status
+
+                    return handoff_status(receipt, target.audit)
+                if recorded:
+                    stage = (
+                        "release_changes_requested"
+                        if recorded["decision"] == "changes_requested"
+                        else recorded["decision"]
+                    )
+                    approval = ApprovalEvidence(
+                        stage, recorded["presentation_id"], recorded.get("recorded_at")
+                    )
+            else:
+                state, decision_receipt = self._recorded_decision(target.revision)
+                if state in {"approved", "changes_requested"}:
+                    stage = "readout_changes_requested" if state == "changes_requested" else state
+                    approval = ApprovalEvidence(
+                        stage, decision_receipt["receipt"], decision_receipt["decided"]
+                    )
+        answer = read_status(
+            topic,
+            target.audit,
+            managed_outcome=self.views.managed_outcome(target.audit),
+            approval=approval,
+        )
+
+        # A dataset revision may be shared by several workflows. Only a workflow
+        # identity supplied by the verified frozen readout can link its status.
+        frozen_workflow = target.audit.get("workflow_ref")
+        if topic == StatusTopic.TRAINING and isinstance(frozen_workflow, str) and frozen_workflow:
+            readiness = self._readiness(actor)
+            if readiness and (
+                readiness["dataset_ref"] == target.dataset
+                and readiness["dataset_revision"] == target.dataset_revision
+                and readiness["engagement"] == target.audit.get("engagement")
+                and readiness["organization"] == target.audit.get("organization")
+                and frozen_workflow == readiness["workflow_ref"]
+            ):
+                current = self.views.readiness_answer(readiness)
+                return StatusAnswer(
+                    answer.finding,
+                    f"{answer.basis} Current workflow {readiness['workflow_ref']} · "
+                    f"{current.finding} {current.basis}",
+                    current.next_action,
+                )
+        return answer
 
     def _questions(
         self,
@@ -1546,6 +1917,7 @@ class Workbench:
         revision: str,
         topic: str,
         old_hash: str = "",
+        expected_receipt_pin: str | None = None,
     ) -> None:
         target = self._readout(cfg, actor, source)
         _check(target and target.revision == revision)
@@ -1554,21 +1926,66 @@ class Workbench:
         _check(
             entry["aggregate"] and self.journal.inspected(actor, revision, self._policy(cfg, actor))
         )
-        _check(not topic or topic in self.views.QUESTION_LABELS)
+        status_topic = StatusTopic(topic) if topic in StatusTopic else None
+        _check(
+            not topic
+            or status_topic
+            or topic in WORKPLACE_QUESTIONS
+            or topic in self.views.QUESTION_LABELS
+        )
         current = self.settings()
         _check(self._policy(cfg, actor) == self._policy(current, actor))
         current.permission(actor, "inspect", target.dataset)
-        token = self.journal.context(actor, cfg.channel, view, "questions", source, revision)
+        delivery_scoped = status_topic == StatusTopic.DELIVERY and expected_receipt_pin is not None
+        if delivery_scoped:
+            _check(
+                current.live_workflow_ref == cfg.live_workflow_ref
+                and self._workplace_scope(current, target)
+            )
+        receipt = (
+            self._handoff_receipt(current, actor, target)
+            if status_topic == StatusTopic.DELIVERY and expected_receipt_pin
+            else None
+        )
+        answer = (
+            self._status_answer(current, actor, target, status_topic, receipt)
+            if status_topic
+            else self._workplace_answer(current, target, topic)
+            if topic in WORKPLACE_QUESTIONS
+            else None
+        )
+        pin = self._receipt_pin(actor, revision, receipt) if receipt else ""
+        if expected_receipt_pin is not None:
+            _check(pin == expected_receipt_pin)
+        kind = "handoff_question" if pin else "questions"
+        token = self.journal.context(actor, cfg.channel, view, kind, source, revision)
+
+        def authorize() -> None:
+            latest = self._authorize_question_rows(
+                cfg, actor, [(target.dataset, source, revision)], workflow_scoped=delivery_scoped
+            )
+            if topic in WORKPLACE_QUESTIONS:
+                _check(self._workplace_answer(self.settings(), target, topic) == answer)
+            if receipt:
+                _check(self._handoff_receipt(latest, actor, target) == receipt)
+            if status_topic:
+                settings = latest if delivery_scoped else self.settings()
+                _check(
+                    self._status_answer(settings, actor, target, status_topic, receipt) == answer
+                )
+
         self._show(
             view,
-            self.views.question_modal(token, revision, target.report, target.audit, topic),
+            self.views.status_question_modal(
+                token, revision, target.dataset, answer, receipt_pin=pin
+            )
+            if answer
+            else self.views.question_modal(token, revision, target.report, target.audit, topic),
             old_hash,
             dataset=target.dataset,
             dataset_revision=target.dataset_revision,
             audit=target.audit,
-            authorize=lambda: self._authorize_question_rows(
-                cfg, actor, [(target.dataset, source, revision)]
-            ),
+            authorize=authorize,
         )
 
     def _unbound_recipient(self) -> bool:
@@ -2001,6 +2418,49 @@ class Workbench:
             audit=target.audit,
         )
 
+    def _open_handoff(
+        self,
+        cfg: Settings,
+        actor: str,
+        view: str,
+        ctx: Json,
+        action: str,
+        value: str,
+        old_hash: str,
+    ) -> None:
+        job = ctx["job"]
+        _check(bool(old_hash))
+        kinds = (
+            {"release_recorded", "handoff_question"}
+            if action == "ot_release_receipt"
+            else {"handoff"}
+        )
+        _check(ctx["kind"] in kinds)
+        target = self._readout(cfg, actor, job)
+        _check(target and target.revision == ctx["revision"])
+        assert target is not None
+        rows = [(target.dataset, job, target.revision)]
+        self._authorize_question_rows(cfg, actor, rows)
+        receipt = self._handoff_receipt(cfg, actor, target)
+        _check(receipt)
+        assert receipt is not None
+        _check(self._receipt_pin(actor, target.revision, receipt) == value)
+        token = self.journal.context(actor, cfg.channel, view, "handoff", job, target.revision)
+
+        def authorize_receipt() -> None:
+            self._authorize_question_rows(cfg, actor, rows)
+            _check(self._handoff_receipt(self.settings(), actor, target) == receipt)
+
+        self._show(
+            view,
+            self.views.handoff_modal(token, value, receipt, target.audit),
+            old_hash,
+            dataset=target.dataset,
+            dataset_revision=target.dataset_revision,
+            audit=target.audit,
+            authorize=authorize_receipt,
+        )
+
     def _release(
         self, cfg: Settings, actor: str, view: str, ctx: Json, action: str, old_hash: str
     ) -> None:
@@ -2035,18 +2495,36 @@ class Workbench:
             inspection_ref=target.revision,
             provider="slack",
         )
+        receipt = (
+            self._handoff_receipt(current, actor, target)
+            if saved["decision"] == "approved"
+            else None
+        )
+
+        def authorize() -> None:
+            self._authorize_question_rows(
+                current, actor, [(target.dataset, ctx["job"], target.revision)]
+            )
+            if receipt:
+                _check(self._handoff_receipt(self.settings(), actor, target) == receipt)
+
         token = self.journal.context(
             actor, current.channel, view, "release_recorded", ctx["job"], target.revision
         )
         self._show(
             view,
             self.views.release_recorded(
-                token, saved["decision"], target.audit["model_revision"], current.recipient
+                token,
+                saved["decision"],
+                target.audit["model_revision"],
+                current.recipient,
+                revision=self._receipt_pin(actor, target.revision, receipt) if receipt else "",
             ),
             old_hash,
             dataset=target.dataset,
             dataset_revision=target.dataset_revision,
             audit=target.audit,
+            authorize=authorize,
         )
 
     def _decide(
@@ -2078,6 +2556,992 @@ class Workbench:
             self.on_decision()
         self._home(cfg, actor, view, ctx["job"], old_hash)
 
+    def _live_summary(self, actor: str) -> Json | None:
+        cfg = self.settings(check_engagement=False)
+        try:
+            workflow = self._live_workflow(cfg, actor)
+            with self._live_scope(actor, workflow) as (principal, live, scope):
+                _check(
+                    scope.can_inspect
+                    and cfg.permission(actor, "inspect", scope.dataset_ref)["aggregate"]
+                )
+                snapshot = live.snapshot(principal, workflow)
+                receipts = live.read_receipts(principal, workflow)
+                last = receipts[-1] if receipts else None
+                return {
+                    "workflow": workflow,
+                    "dataset": scope.dataset_ref,
+                    "revision": snapshot.evidence_revision,
+                    "decisions": snapshot.decisions,
+                    "verified": snapshot.verified,
+                    "pending": snapshot.pending,
+                    "disputed": snapshot.disputed,
+                    "unmatched_outcomes": snapshot.unmatched_outcomes,
+                    "last_ingested_at": snapshot.last_ingested_at,
+                    "last_page": {
+                        key: last[key]
+                        for key in (
+                            "receipt_ref",
+                            "polled_at",
+                            "interval_start",
+                            "interval_end",
+                            "coverage_through",
+                            "complete",
+                            "row_count",
+                        )
+                    }
+                    if last
+                    else None,
+                }
+        except Exception:
+            return None
+
+    def _readiness(self, actor: str) -> Json | None:
+        from opentour_cell.pilot.readiness_selection import open_readiness
+
+        cfg = self.settings(check_engagement=False)
+        try:
+            workflow = self._live_workflow(cfg, actor)
+            with self._live_scope(actor, workflow) as (principal, _, scope):
+                _check(
+                    scope.can_inspect
+                    and cfg.permission(actor, "inspect", scope.dataset_ref)["aggregate"]
+                )
+                components = open_readiness(cfg.directory, cfg.organization, workflow)
+                receipt = components.readiness.read(workflow, actor=principal)
+                if receipt is None:
+                    return None
+                _check(
+                    receipt["dataset_ref"] == scope.dataset_ref
+                    and receipt["dataset_revision"] == scope.dataset_revision
+                )
+                if receipt["next_action"] == "bind_verifier" and not (
+                    scope.can_bind and any(g.kind == "independent_outcome" for g in scope.grants)
+                ):
+                    return {**receipt, "next_action": "ask_data_custodian_to_bind_verifier"}
+                return receipt
+        except Exception:
+            # Optional worker evidence may be unavailable or no longer authorized.
+            return None
+
+    def _live_workflow(self, cfg: Settings, actor: str) -> str:
+        cfg.permission(actor, "inspect")
+        if cfg.live_workflow_ref:
+            return cfg.live_workflow_ref
+        preview = self._starter_setup(actor).preview()
+        _check(preview.draft)
+        assert preview.draft
+        return str(preview.draft["workflow_ref"])
+
+    @contextmanager
+    def _live_scope(
+        self, actor: str, workflow: str
+    ) -> Iterator[tuple[IntakePrincipal, LiveEvidence, LiveScope]]:
+        cfg = self.settings(check_engagement=False)
+        _check(workflow == self._live_workflow(cfg, actor))
+        principal = IntakePrincipal(cfg.organization, actor, "slack")
+        from opentour_cell.pilot.live_authority import PrivateLiveAuthority
+
+        authority = PrivateLiveAuthority(cfg.directory, cfg.organization, workflow)
+        with authority.guard(principal, workflow) as scope:
+            _check(scope.can_inspect or scope.can_bind or scope.can_nominate)
+            yield principal, LiveEvidence(cfg.directory, authority), scope
+
+    def _verifier_form(self, actor: str) -> VerifierForm:
+        from opentour_cell.pilot.live_authority import PrivateLiveAuthority
+        from opentour_cell.pilot.verifier_form import VerifierForm
+
+        cfg = self.settings(check_engagement=False)
+        workflow = self._live_workflow(cfg, actor)
+        authority = PrivateLiveAuthority(cfg.directory, cfg.organization, workflow)
+        return VerifierForm(
+            LiveEvidence(cfg.directory, authority),
+            IntakePrincipal(cfg.organization, actor, "slack"),
+            workflow,
+        )
+
+    def _verifier_entry(self, actor: str) -> str:
+        try:
+            form = self._verifier_form(actor)
+            choices = form.choices()
+            return (
+                self.journal.opaque("verify", [actor, form.workflow, [c.token for c in choices]])
+                if choices
+                else ""
+            )
+        except Exception:
+            return ""
+
+    def _verify_view(self, cfg: Settings, actor: str, view: str, page: int = 0) -> None:
+        form = self._verifier_form(actor)
+        choices = form.choices()
+        page = max(0, min(page, (len(choices) - 1) // 50))
+        selected = choices[page * 50 : page * 50 + 50]
+        revision = _json({"page": page, "tokens": [c.token for c in selected]})
+        ctx = self.journal.context(
+            actor, cfg.channel, view, "verify_outcome", form.workflow, revision
+        )
+
+        def authorize() -> None:
+            current = self._verifier_form(actor)
+            _check(current.workflow == form.workflow and current.choices() == choices)
+
+        self._show(
+            view,
+            self.views.verify_outcome(
+                ctx,
+                form.workflow,
+                [(f"{c.decision} · rev {c.revision} · {c.namespace}", c.token) for c in selected],
+                more=(page + 1) * 50 < len(choices),
+                previous=page > 0,
+            ),
+            authorize=authorize,
+        )
+
+    def _nomination(
+        self, actor: str, workflow: str, *, nominee: str = "", expected: str = ""
+    ) -> tuple[str, str]:
+        with self.journal.db() as db:
+            if nominee:
+                db.execute("BEGIN IMMEDIATE")
+            with self._live_scope(actor, workflow) as (_, _, scope):
+                if not (scope.can_nominate or scope.can_bind):
+                    return "", ""
+                key = self.journal.opaque(
+                    "nomination",
+                    [
+                        scope.tenant,
+                        workflow,
+                        scope.engagement_epoch,
+                        scope.dataset_ref,
+                        scope.dataset_revision,
+                        scope.authority_revision,
+                    ],
+                )
+                prior = ""
+                if db.execute(
+                    "SELECT 1 FROM sqlite_master WHERE name='verifier_nominations'"
+                ).fetchone():
+                    row = db.execute(
+                        "SELECT nominee FROM verifier_nominations WHERE scope=?", (key,)
+                    ).fetchone()
+                    if row:
+                        prior = str(row[0])
+                token = (
+                    self.journal.opaque("nominate", [key, actor, prior])
+                    if scope.can_nominate
+                    else ""
+                )
+                if nominee:
+                    _check(scope.can_nominate and _slack_id(nominee, "UW") and expected == token)
+                    db.execute(
+                        "CREATE TABLE IF NOT EXISTS verifier_nominations("
+                        "scope TEXT PRIMARY KEY, owner TEXT NOT NULL, nominee TEXT NOT NULL)"
+                    )
+                    db.execute(
+                        "INSERT OR REPLACE INTO verifier_nominations VALUES(?,?,?)",
+                        (key, actor, nominee),
+                    )
+                    prior = nominee
+                return token, prior
+
+    def _workflow_settings_view(self, cfg: Settings, actor: str, workflow: str, view: str) -> None:
+        nomination = self._nomination(actor, workflow)
+        token = self.journal.context(actor, cfg.channel, view, "workflow_settings", workflow)
+        self._show(
+            view,
+            self.views.workflow_settings(token, workflow, *nomination),
+            authorize=lambda: _check(self._nomination(actor, workflow) == nomination),
+        )
+
+    def _live_model(
+        self, actor: str, workflow: str, verifier_only: bool = False
+    ) -> tuple[str, list[tuple[str, str]], list[tuple[str, str]]]:
+        with self._live_scope(actor, workflow) as (principal, live, scope):
+            current: list[tuple[str, str]] = [
+                (binding.feed_kind, ref)
+                for ref, binding in live.current_bindings(principal, workflow)
+            ]
+            options = []
+            if scope.can_bind:
+                for grant in scope.grants:
+                    if verifier_only and grant.kind != "independent_outcome":
+                        continue
+                    revision = binding_candidate(principal, scope, grant)
+                    label = "Decisions" if grant.kind == "decision" else "Independent outcomes"
+                    if grant.resource in dict(scope.slack_verifiers):
+                        label = f"Named verifier {grant.verifier}"
+                    options.append((f"{label} · {grant.resource[:36]} · {revision[:8]}", revision))
+            readiness_revision = ""
+            if verifier_only:
+                receipt = self._readiness(actor)
+                _check(
+                    receipt
+                    and receipt["workflow_ref"] == workflow
+                    and receipt["next_action"] == "bind_verifier"
+                )
+                assert receipt
+                readiness_revision = receipt["revision"]
+            revision = self.journal.opaque(
+                "scope",
+                [
+                    workflow,
+                    scope.engagement_epoch,
+                    scope.dataset_ref,
+                    scope.dataset_revision,
+                    scope.custodian,
+                    readiness_revision,
+                    options,
+                    current,
+                ],
+            )
+            return revision, current, options
+
+    def _live_view(
+        self,
+        cfg: Settings,
+        actor: str,
+        view: str,
+        workflow: str,
+        old_hash: str = "",
+        saved: str = "",
+        verifier_only: bool = False,
+    ) -> None:
+        model = self._live_model(actor, workflow, verifier_only)
+        revision, current, choices = model
+        _check(not saved or any(ref == saved for _, ref in current))
+        token = self.journal.context(
+            actor,
+            cfg.channel,
+            view,
+            "verifier_binding" if verifier_only else "live_binding",
+            workflow,
+            revision,
+        )
+        self._show(
+            view,
+            self.views.live_connections(token, workflow, current, choices, saved),
+            old_hash,
+            authorize=lambda: _check(self._live_model(actor, workflow, verifier_only) == model),
+        )
+
+    def _live_save(self, actor: str, ctx: Json, values: Json) -> str:
+        workflow = ctx["job"]
+        _check(
+            ctx["kind"] in {"live_binding", "verifier_binding"} and set(values) == {"live_resource"}
+        )
+        field = values["live_resource"]
+        _check(
+            set(field) == {"live_resource"}
+            and set(field["live_resource"]) == {"type", "selected_option"}
+        )
+        selected = field["live_resource"]
+        _check(
+            selected["type"] == "static_select"
+            and set(selected["selected_option"]) == {"text", "value"}
+        )
+        choice = selected["selected_option"]["value"]
+        with self._live_scope(actor, workflow) as (principal, live, scope):
+            _check(
+                scope.can_bind
+                and self._live_model(actor, workflow, ctx["kind"] == "verifier_binding")[0]
+                == ctx["revision"]
+            )
+            matches = [
+                grant
+                for grant in scope.grants
+                if binding_candidate(principal, scope, grant) == choice
+            ]
+            _check(
+                len(matches) == 1
+                and (ctx["kind"] != "verifier_binding" or matches[0].kind == "independent_outcome")
+            )
+            live.initialize()
+            return live.save_binding(
+                principal, workflow, matches[0].resource, expected_revision=choice
+            )
+
+    def _starter_score_session(self, actor: str) -> StarterEvaluationSession:
+        from opentour_cell.pilot.starter_evaluation_session import StarterEvaluationSession
+
+        cfg = self.settings(check_engagement=False)
+        cfg.permission(actor, "inspect")
+        return StarterEvaluationSession(
+            lambda: self.settings(check_engagement=False),
+            IntakePrincipal(cfg.organization, actor, "slack"),
+        )
+
+    def _starter_scores(self, actor: str) -> tuple[str, list[tuple[Json, str]]]:
+        try:
+            session = self._starter_score_session(actor)
+            entries = sorted(session.entries(), key=lambda e: e["execution_ref"])
+            items = [
+                (entry, self.journal.opaque("starter-result", [actor, entry])) for entry in entries
+            ]
+            return (
+                (
+                    self.journal.opaque("starter-results", [actor, [token for _, token in items]]),
+                    items,
+                )
+                if items
+                else ("", [])
+            )
+        except (ImportError, OSError, KeyError, TypeError, ValueError, sqlite3.Error):
+            return "", []
+
+    def _open_starter_score(
+        self,
+        cfg: Settings,
+        actor: str,
+        view: str,
+        entry: Json,
+        *,
+        page: int = 0,
+        previous: Json | None = None,
+        old_hash: str = "",
+    ) -> None:
+        execution = entry["execution_ref"]
+        session = self._starter_score_session(actor)
+        _check(session.entry(execution) == entry)
+        summary = session.summary(execution, expected_revision=entry["revision"])
+
+        def permission() -> Json | None:
+            if summary["state"] != "frozen_unscored":
+                return None
+            try:
+                from opentour_cell.pilot.starter_reconnect import StarterReconnect
+
+                return StarterReconnect(session).entry(
+                    execution, expected_revision=entry["revision"]
+                )
+            except (ImportError, OSError, ValueError, KeyError, TypeError, sqlite3.Error):
+                return None
+
+        reconnect = permission()
+        pin = self.journal.opaque("starter-page", [actor, entry, summary])
+        if previous is not None:
+            _check(previous["pin"] == pin)
+        if page == 2:
+            _check(
+                previous
+                and reconnect
+                and reconnect["state"] == "setup_required"
+                and previous["reconnect"] == reconnect["revision"]
+            )
+        state = dict(
+            entry=entry, pin=pin, page=page, reconnect=reconnect["revision"] if reconnect else None
+        )
+        token = self.journal.context(
+            actor, cfg.channel, view, "starter_score", execution, _json(state)
+        )
+
+        def authorize() -> None:
+            current = self._starter_score_session(actor)
+            _check(
+                current.entry(execution) == entry
+                and current.summary(execution, expected_revision=entry["revision"]) == summary
+                and (reconnect is None or permission() == reconnect)
+            )
+
+        self._show(
+            view,
+            self.views.starter_score_readout(token, entry, summary, page=page, reconnect=reconnect),
+            old_hash,
+            authorize=authorize,
+        )
+
+    def _case_session(self, actor: str) -> tuple[StarterCaseSession, StarterCaseEntry]:
+        from opentour_cell.pilot.starter_map_confirmation import StarterCaseSession
+
+        cfg = self.settings(check_engagement=False)
+        cfg.permission(actor, "inspect")
+        session = StarterCaseSession(
+            lambda: self.settings(check_engagement=False),
+            IntakePrincipal(cfg.organization, actor, "slack"),
+        )
+        entry = session.entry()
+        _check(entry is not None)
+        assert entry is not None
+        return session, entry
+
+    def _case_entry(self, actor: str) -> str:
+        try:
+            return self._case_session(actor)[1].revision
+        except (ImportError, OSError, KeyError, TypeError, ValueError, sqlite3.Error):
+            return ""
+
+    def _check_case_state(self, entry: StarterCaseEntry, pack: Json, state: Json) -> None:
+        _check(
+            entry.revision == state["entry"]
+            and pack["revision"] == state["revision"]
+            and pack["authority"]["map_confirmation_ref"] == state["map"]
+            and pack["authority"]["run_ref"] == entry.run_ref
+            and bool(pack["frozen"]) == state["frozen"]
+            and 0 <= state["index"] < len(pack["cases"])
+            and pack["cases"][state["index"]]["case_id"] == state["case_id"]
+        )
+
+    def _current_case_state(self, actor: str, state: Json) -> None:
+        session, entry = self._case_session(actor)
+        self._check_case_state(entry, session.review(), state)
+
+    def _case_view(self, cfg: Settings, actor: str, view: str, index: int) -> None:
+        session, entry = self._case_session(actor)
+        pack = session.review()
+        _check(0 <= index < len(pack["cases"]))
+        state = dict(
+            entry=entry.revision,
+            revision=pack["revision"],
+            map=pack["authority"]["map_confirmation_ref"],
+            frozen=bool(pack["frozen"]),
+            index=index,
+            case_id=pack["cases"][index]["case_id"],
+        )
+        token = self.journal.context(
+            actor, cfg.channel, view, "case_detail", entry.run_ref, _json(state)
+        )
+        self._show(
+            view,
+            self.views.starter_case_detail(token, pack, index),
+            authorize=lambda: self._current_case_state(actor, state),
+        )
+
+    def _case_action(
+        self, cfg: Settings, actor: str, view: str, ctx: Json, action: str, value: str
+    ) -> None:
+        if ctx["kind"] == "case_clause":
+            state = json.loads(ctx["revision"])
+            self._current_case_state(actor, state)
+            if action == "ot_case_back":
+                _check(value == "back")
+                self._case_view(cfg, actor, view, state["index"])
+            else:
+                _check(action == "ot_case_clause_page" and value in {"previous", "next"})
+                self._case_clause(
+                    cfg, actor, view, state, state["clause_page"] + (1 if value == "next" else -1)
+                )
+            return
+        if ctx["kind"] in {"case_entry", "case_detail", "case_preview"}:
+            session, entry = self._case_session(actor)
+            _check(entry.run_ref == ctx["job"])
+            if ctx["kind"] == "case_entry":
+                _check(entry.revision == ctx["revision"])
+                if action == "ot_case_generate":
+                    from opentour_cell.pilot.starter_case_authoring import guided_case_provider
+
+                    _check(value == "generate" and entry.can_propose)
+                    session.propose(guided_case_provider())
+                else:
+                    _check(action == "ot_case_review" and value == "open")
+                self._case_view(cfg, actor, view, 0)
+            else:
+                state = json.loads(ctx["revision"])
+                pack = session.review()
+                self._check_case_state(entry, pack, state)
+                index = state["index"]
+                if ctx["kind"] == "case_preview":
+                    _check(action == "ot_case_commit" and value == "freeze" and entry.can_freeze)
+                    session.freeze(splits=state["splits"], expected_revision=state["revision"])
+                    self._case_view(cfg, actor, view, index)
+                    return
+                if action == "ot_case_citation":
+                    _check(value == "citation" and not pack["frozen"])
+                    self._case_clause(cfg, actor, view, state, 0)
+                    return
+                if action in {"ot_case_page_previous", "ot_case_page_next"}:
+                    _check(action == f"ot_case_page_{value}")
+                    _check(value in {"previous", "next"})
+                    self._case_view(cfg, actor, view, index + (1 if value == "next" else -1))
+                else:
+                    if action == "ot_case_edit":
+                        _check(value == "edit" and entry.can_adjudicate and not pack["frozen"])
+                        form = self.views.adjudicate_starter_case
+                        args = (pack["cases"][index], pack["authority"]["allowed_actions"])
+                        kind = "case_edit"
+                    else:
+                        _check(
+                            action == "ot_case_splits"
+                            and value == "splits"
+                            and entry.can_freeze
+                            and not pack["frozen"]
+                            and all(c["status"] != "proposed" for c in pack["cases"])
+                        )
+                        self._case_splits(cfg, actor, view, entry, pack, state, {})
+                        return
+                    token = self.journal.context(
+                        actor, cfg.channel, view, kind, entry.run_ref, ctx["revision"]
+                    )
+                    self._show(
+                        view,
+                        form(token, *args),
+                        authorize=lambda: self._current_case_state(actor, state),
+                    )
+            return
+
+    def _case_clause(self, cfg: Settings, actor: str, view: str, state: Json, page: int) -> None:
+        session, entry = self._case_session(actor)
+        pack = session.review()
+        self._check_case_state(entry, pack, state)
+        service, principal = self._map_service(actor, entry.workflow_ref)
+        ref = pack["cases"][state["index"]]["citation"]
+        revision = pack["authority"]["map_review_revision"]
+        passage = service.citation(principal, expected_revision=revision, citation_ref=ref)
+        tok = self.journal.context(
+            actor,
+            cfg.channel,
+            view,
+            "case_clause",
+            entry.run_ref,
+            _json(state | {"clause_page": page}),
+        )
+
+        def authorize() -> None:
+            self._current_case_state(actor, state)
+            current, p = self._map_service(actor, entry.workflow_ref)
+            _check(current.citation(p, expected_revision=revision, citation_ref=ref) == passage)
+
+        self._show(view, self.views.starter_case_clause(tok, passage, page), authorize=authorize)
+
+    def _case_splits(
+        self,
+        cfg: Settings,
+        actor: str,
+        view: str,
+        entry: StarterCaseEntry,
+        pack: Json,
+        state: Json,
+        splits: dict[str, str],
+    ) -> None:
+        pending = sorted({c["family_id"] for c in pack["cases"]} - splits.keys())
+        page = pending[:20]
+        if not page:
+            _check(
+                "reserved" in splits.values()
+                and all(
+                    c["status"] == "resolved" or splits[c["family_id"]] == "excluded"
+                    for c in pack["cases"]
+                )
+            )
+        token = self.journal.context(
+            actor,
+            cfg.channel,
+            view,
+            "case_splits" if page else "case_preview",
+            entry.run_ref,
+            _json(state | {"splits": splits, "page": page}),
+        )
+        layout = (
+            self.views.starter_family_splits(token, page)
+            if page
+            else self.views.starter_freeze_preview(token, pack, splits)
+        )
+        self._show(view, layout, authorize=lambda: self._current_case_state(actor, state))
+
+    def _map_choices(self, actor: str) -> dict[str, tuple[MapReviewService, str]]:
+        from opentour_cell.pilot.map_review import open_map_review
+        from opentour_cell.pilot.onboarding_mcp import _read_private
+
+        cfg = self.settings(check_engagement=False)
+        cfg.permission(actor, "inspect")
+        principal = IntakePrincipal(cfg.organization, actor, "slack")
+        try:
+            registry = _read_private(cfg.directory / "map-inspection-catalog.json", 8192)
+        except FileNotFoundError:
+            names = ["map-review-selection.json"]
+        else:
+            _check(
+                set(registry) == {"schema_version", "selections"}
+                and registry["schema_version"] == "opentour.pilot.map-inspection-catalog.v1"
+            )
+            names = registry["selections"]
+            _check(
+                isinstance(names, list)
+                and 0 < len(names) <= 12
+                and all(
+                    isinstance(n, str) and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,95}\.json", n)
+                    for n in names
+                )
+                and len(set(names)) == len(names)
+            )
+        choices = {}
+        for name in names:
+            try:
+                service = open_map_review(cfg.directory, cfg.organization, selection_file=name)
+                revision = service.entry(principal)
+            except (KeyError, OSError, TypeError, ValueError, sqlite3.Error):
+                continue
+            if revision:
+                _check(service.workflow_ref not in choices)
+                choices[service.workflow_ref] = (
+                    service,
+                    self.journal.opaque("map", [actor, service.workflow_ref, revision]),
+                )
+        return choices
+
+    def _map_service(
+        self, actor: str, workflow: str | None = None
+    ) -> tuple[MapReviewService, IntakePrincipal]:
+        choices = self._map_choices(actor)
+        if workflow is None:
+            _check(len(choices) == 1)
+            workflow = next(iter(choices))
+        _check(workflow in choices)
+        service = choices[workflow][0]
+        return service, IntakePrincipal(service.tenant, actor, "slack")
+
+    def _map_entry(self, actor: str, workflow: str | None = None) -> str:
+        try:
+            choices = self._map_choices(actor)
+            if workflow is not None:
+                return choices[workflow][1]
+            if len(choices) == 1:
+                return next(iter(choices.values()))[1]
+            if choices:
+                return self.journal.opaque(
+                    "map-choices",
+                    [actor, sorted((wf, choice[1]) for wf, choice in choices.items())],
+                )
+        except (ImportError, KeyError, OSError, TypeError, ValueError, sqlite3.Error):
+            pass
+        return ""
+
+    def _map_verifier_plan(self, actor: str, workflow: str) -> str:
+        try:
+            setup = self._starter_setup(actor)
+            service, _ = self._map_service(actor, workflow)
+            if service.authority.path != setup.path:
+                return ""
+            preview = setup.preview()
+            if preview.draft and preview.draft["workflow_ref"] == workflow:
+                charter = preview.charter
+                return (
+                    f"{charter.verification_plan} · {charter.verifier or 'Verifier unbound'} · "
+                    f"{charter.responsible_person} · next check {charter.next_check}"
+                )
+        except (KeyError, OSError, TypeError, ValueError, sqlite3.Error):
+            pass
+        return ""
+
+    def _map_show(
+        self,
+        actor: str,
+        workflow: str,
+        revision: str,
+        view: str,
+        layout: Json,
+        *,
+        requires_editor: bool,
+        verifier_plan: str = "",
+    ) -> None:
+        def authorize() -> None:
+            service, principal = self._map_service(actor, workflow)
+            _check(not verifier_plan or self._map_verifier_plan(actor, workflow) == verifier_plan)
+            with service.disclosure(principal, expected_revision=revision) as current:
+                _check(not requires_editor or current.can_edit)
+
+        self._show(view, layout, authorize=authorize)
+
+    def _map_view(self, cfg: Settings, actor: str, view: str, workflow: str, page: int = 0) -> None:
+        service, principal = self._map_service(actor, workflow)
+        snap = service.preview(principal)
+        from datetime import date
+
+        from opentour_cell.pilot.map_inspection import branch_example
+
+        example_date = (
+            date.fromisoformat(snap.effective_from.iso_date) if snap.effective_from else None
+        )
+        rows = []
+        for branch in snap.branches:
+            example = branch_example(snap, branch, decision_date=example_date)
+            inputs = ", ".join(
+                f"{name}={value if value is not None else 'missing'}"
+                for name, value in example.inputs
+            )
+            clauses = [
+                " ".join(str(v) for v in (c.field, c.operator, c.threshold) if v is not None)
+                for c in branch.conditions
+            ]
+            rows.append(
+                self.views.MapReviewRow(
+                    branch.branch_ref,
+                    snap.trigger,
+                    ", ".join(
+                        f"{field} ({snap.field_kinds[field]})"
+                        for field in dict.fromkeys(c.field for c in branch.conditions)
+                    )
+                    or "Not specified",
+                    " and ".join(clauses) or "Requires owner clarification",
+                    f"Priority {branch.precedence}"
+                    if branch.precedence is not None
+                    else "Order unresolved",
+                    branch.action or "Unresolved decision",
+                    branch.fallback,
+                    "Policy clause"
+                    if branch.source_support == "source"
+                    else (
+                        f"Owner assertion · {branch.editor_ref or branch.actor_ref} · "
+                        f"{branch.reason or ''}"
+                    ),
+                    ("Source changed · " if branch.branch_ref in snap.changed_branch_refs else "")
+                    + branch.disposition.replace("_", " "),
+                    (f"Decision date {example_date.isoformat()} · " if example_date else "")
+                    + f"{inputs or 'Unavailable'} → {example.action or 'Unresolved'}"
+                    f" · {example.explanation}",
+                )
+            )
+        from opentour_cell.pilot.map_review import citation_ref
+
+        priority = citation_ref(snap.precedence_citation) if snap.precedence_citation else ""
+        date_ref = citation_ref(snap.effective_from.citation) if snap.effective_from else ""
+        allowed = [r.branch_ref for r in rows[page * 5 : (page + 1) * 5]]
+        state = _json(
+            {
+                "rev": snap.review_revision,
+                "page": page,
+                "branches": allowed,
+                "priority": priority,
+                "date_ref": date_ref,
+            }
+        )
+        token = self.journal.context(actor, cfg.channel, view, "map_review", workflow, state)
+        verifier_plan = self._map_verifier_plan(actor, workflow)
+        layout = self.views.decision_map(
+            token,
+            workflow,
+            snap.review_revision,
+            rows,
+            [snap.question] if snap.question else [],
+            page,
+            snap.can_edit,
+            snap.confirmed_ref or "",
+            snap.can_set_precedence,
+            version=snap.version,
+            source_revision=snap.source_revision,
+            draft_revision=snap.map_revision,
+            unit_of_work=snap.unit_of_work,
+            verifier_plan=verifier_plan,
+            assertion_basis=(
+                f"Trigger and fallback assertion by {snap.settings_editor_ref} "
+                f"({snap.settings_actor_ref}) · {snap.settings_reason}"
+                if snap.settings_support == "owner_assertion"
+                else ""
+            ),
+            priority_citation=priority,
+            effective_date=snap.effective_from.iso_date if snap.effective_from else "",
+            effective_citation=date_ref,
+            priority_assertion=(
+                f"Priority confirmed by {snap.precedence_actor_ref} · {snap.precedence_reason}"
+                if snap.precedence_actor_ref and snap.precedence_reason
+                else ""
+            ),
+        )
+        self._map_show(
+            actor,
+            workflow,
+            snap.review_revision,
+            view,
+            layout,
+            requires_editor=snap.can_edit,
+            verifier_plan=verifier_plan,
+        )
+
+    def _map_action(
+        self, cfg: Settings, actor: str, view: str, ctx: Json, action: str, value: str
+    ) -> None:
+        workflow = ctx["job"]
+        state = json.loads(ctx["revision"])
+        service, principal = self._map_service(actor, workflow)
+        if action == "ot_map_back":
+            _check(value == "back")
+            self._map_view(cfg, actor, view, workflow)
+            return
+        snap = service.preview(principal)
+        _check(snap.review_revision == state["rev"])
+        page = state.get("page", 0)
+        if action == "ot_map_page":
+            _check(ctx["kind"] == "map_review" and value in ("next", "previous"))
+            self._map_view(cfg, actor, view, workflow, page + (1 if value == "next" else -1))
+            return
+        if action == "ot_map_assertions":
+            _check(ctx["kind"] == "map_review" and snap.can_edit and value == state["rev"])
+            token = self.journal.context(
+                actor,
+                cfg.channel,
+                view,
+                "map_assertions",
+                workflow,
+                _json(
+                    {
+                        "rev": snap.review_revision,
+                        "source": snap.source_revision,
+                        "grant": service.entry(principal),
+                        "actions": snap.actions,
+                    }
+                ),
+            )
+            layout = self.views.map_assertions(
+                token,
+                trigger=snap.settings_trigger,
+                unit_of_work=snap.unit_of_work,
+                fallback=snap.fallback_action,
+                permitted=snap.actions,
+            )
+        elif action == "ot_map_precedence":
+            _check(
+                ctx["kind"] == "map_review"
+                and snap.can_edit
+                and snap.can_set_precedence
+                and snap.question
+                and value == state["rev"]
+            )
+            ranked = [
+                r for r in snap.branches if r.action is not None and r.disposition != "out_of_scope"
+            ]
+            token = self.journal.context(
+                actor,
+                cfg.channel,
+                view,
+                "map_precedence",
+                workflow,
+                _json(
+                    {
+                        "rev": snap.review_revision,
+                        "grant": service.entry(principal),
+                        "source": snap.source_revision,
+                        "refs": [r.branch_ref for r in ranked],
+                    }
+                ),
+            )
+            layout = self.views.map_precedence(
+                token,
+                snap.question,
+                [(f"{r.action} · {r.branch_ref}", r.branch_ref) for r in ranked],
+            )
+        else:
+            if action == "ot_map_clause_page":
+                _check(ctx["kind"] == "map_clause" and value in ("next", "previous"))
+                ref = state["branch"]
+                page += 1 if value == "next" else -1
+            else:
+                _check(
+                    ctx["kind"] == "map_review"
+                    and (
+                        (action == "ot_map_priority" and value and value == state["priority"])
+                        or (
+                            action == "ot_map_date_clause"
+                            and value
+                            and value == state.get("date_ref")
+                        )
+                        or (
+                            action in {"ot_map_edit", "ot_map_citation"}
+                            and value in state["branches"]
+                        )
+                    )
+                )
+                ref, page = value, 0
+            branch = next((r for r in snap.branches if r.branch_ref == ref), None)
+            if action in {
+                "ot_map_clause_page",
+                "ot_map_citation",
+                "ot_map_priority",
+                "ot_map_date_clause",
+            }:
+                from opentour_cell.pilot.map_review import citation_ref
+
+                citation = branch.citation if branch else snap.precedence_citation
+                if snap.effective_from and citation_ref(snap.effective_from.citation) == ref:
+                    citation = snap.effective_from.citation
+                _check(
+                    citation is not None and (branch is not None or citation_ref(citation) == ref)
+                )
+                assert citation is not None
+                passage = service.citation(
+                    principal,
+                    expected_revision=snap.review_revision,
+                    citation_ref=citation_ref(citation),
+                )
+                token = self.journal.context(
+                    actor,
+                    cfg.channel,
+                    view,
+                    "map_clause",
+                    workflow,
+                    _json({"rev": snap.review_revision, "branch": ref, "page": page}),
+                )
+                layout = self.views.map_clause(
+                    token,
+                    citation.resource_ref,
+                    citation.source_revision,
+                    citation.section_ref,
+                    f"{citation.line_start}–{citation.line_end}",
+                    passage,
+                    page,
+                    (
+                        f"Owner assertion · {branch.editor_ref} · {branch.reason}"
+                        if branch is not None and branch.source_support == "owner_assertion"
+                        else ""
+                    ),
+                )
+            else:
+                _check(action == "ot_map_edit" and snap.can_edit and branch is not None)
+                assert branch is not None
+                token = self.journal.context(
+                    actor,
+                    cfg.channel,
+                    view,
+                    "map_edit",
+                    workflow,
+                    _json(
+                        {
+                            "rev": snap.review_revision,
+                            "branch": ref,
+                            "source": snap.source_revision,
+                            "grant": service.entry(principal),
+                        }
+                    ),
+                )
+                predicates = "\n".join(
+                    " ".join(str(v) for v in (c.field, c.operator, c.threshold) if v is not None)
+                    for c in branch.conditions
+                )
+                layout = self.views.map_branch_edit(
+                    token, ref, branch.action, predicates, snap.actions
+                )
+        self._map_show(
+            actor, workflow, snap.review_revision, view, layout, requires_editor=snap.can_edit
+        )
+
+    def _starter_setup(self, actor: str) -> StarterSetup:
+        # LocalStarterAuthority pins the engagement in its own transaction.
+        return StarterSetup(lambda: self.settings(check_engagement=False), actor)
+
+    def _starter_view(
+        self, cfg: Settings, actor: str, view: str, preview: StarterPreview, old_hash: str
+    ) -> None:
+        token = self.journal.context(
+            actor,
+            cfg.channel,
+            view,
+            "starter_saved" if preview.draft else "starter_preview",
+            job=str(preview.draft["workflow_ref"]) if preview.draft else "",
+            revision=preview.revision,
+        )
+
+        workflow = str(preview.draft["workflow_ref"]) if preview.draft else ""
+        map_entry = self._map_entry(actor, workflow) if workflow else ""
+
+        def authorize() -> None:
+            _check(self._starter_setup(actor).preview() == preview)
+            _check(not map_entry or self._map_entry(actor, workflow) == map_entry)
+
+        self._show(
+            view,
+            self.views.starter_charter(token, preview, map_entry),
+            old_hash,
+            authorize=authorize,
+        )
+
     def _action(
         self,
         cfg: Settings,
@@ -2089,10 +3553,88 @@ class Workbench:
         old_hash: str,
     ) -> None:
         job = ctx["job"]
-        if ctx["kind"] == "workflow_chooser":
+        if ctx["kind"] == "starter_score":
+            _check(isinstance(old_hash, str) and bool(old_hash))
+            state = json.loads(ctx["revision"])
+            page = state["page"]
+            if action == "ot_score_next":
+                _check(value == "next" and page == 0)
+                page_target = 1
+            elif action == "ot_score_previous":
+                _check(value == "previous" and page in (1, 2))
+                page_target = page - 1
+            else:
+                _check(
+                    action == "ot_score_reconnect"
+                    and value == "setup"
+                    and page == 1
+                    and state["reconnect"]
+                )
+                page_target = 2
+            _check(state["entry"]["execution_ref"] == ctx["job"])
+            self._open_starter_score(
+                cfg,
+                actor,
+                view,
+                state["entry"],
+                page=page_target,
+                previous=state,
+                old_hash=old_hash,
+            )
+            return
+        if ctx["kind"] == "starter_scores":
+            version, items = self._starter_scores(actor)
+            _check(action == "ot_starter_score_choice" and version and version == ctx["revision"])
+            selected = [item for item, token in items if value == token]
+            _check(len(selected) == 1)
+            self._open_starter_score(cfg, actor, view, selected[0], old_hash=old_hash)
+            return
+        if ctx["kind"] in {"case_entry", "case_detail", "case_clause", "case_preview"}:
+            self._case_action(cfg, actor, view, ctx, action, value)
+            return
+        if ctx["kind"] in {"map_review", "map_clause", "map_conflict"} or (
+            action == "ot_map_back"
+            and ctx["kind"] in {"map_edit", "map_precedence", "map_assertions"}
+        ):
+            self._map_action(cfg, actor, view, ctx, action, value)
+            return
+        if ctx["kind"] == "map_choices" and action == "ot_choose_map":
+            _check(self._map_entry(actor) == ctx["revision"])
+            choices = self._map_choices(actor)
+            matches = [wf for wf, choice in choices.items() if choice[1] == value]
+            _check(len(matches) == 1)
+            self._map_view(cfg, actor, view, matches[0])
+            return
+        if ctx["kind"] == "starter_saved" and action == "ot_map_open":
+            workflow = ctx["job"]
+            _check(workflow)
+            entry = self._map_entry(actor, workflow)
+            _check(entry and value == entry)
+            self._map_view(cfg, actor, view, workflow)
+            return
+        if ctx["kind"] == "workflow_settings":
+            if action == "ot_nominate_verifier":
+                _check(value and self._nomination(actor, ctx["job"])[0] == value)
+                token = self.journal.context(
+                    actor, cfg.channel, view, "nomination", ctx["job"], value
+                )
+                self._show(
+                    view,
+                    self.views.nominate_verifier(token, ctx["job"]),
+                    old_hash,
+                    authorize=lambda: _check(self._nomination(actor, ctx["job"])[0] == value),
+                )
+                return
+            _check(action == value == "ot_connect_live")
+            self._live_view(cfg, actor, view, ctx["job"], old_hash)
+        elif ctx["kind"] == "workflow_chooser":
             _check(action in {"ot_workflow_starter", "ot_workflow_historical"})
             current = self.settings()
             _check(action == "ot_workflow_" + value and self._can_add_workflow(current, actor))
+            if value == "starter" and current.starter_setup is not None:
+                starter = self._starter_setup(actor).preview()
+                self._starter_view(current, actor, view, starter, old_hash)
+                return
             token = self.journal.context(actor, cfg.channel, view, "workflow_instructions")
             self._show(
                 view,
@@ -2102,8 +3644,90 @@ class Workbench:
                 if cfg.explicit_recipient or current.explicit_recipient
                 else token,
             )
+        elif ctx["kind"] in {"starter_preview", "starter_saved"}:
+            _check(
+                (ctx["kind"], action)
+                in {
+                    ("starter_preview", "ot_starter_save"),
+                    ("starter_saved", "ot_starter_benchmark"),
+                }
+                and value == ctx["revision"]
+            )
+            saved = self._starter_setup(actor).save(value, self.journal.opaque("save", ctx["id"]))
+            self._starter_view(self.settings(), actor, view, saved, old_hash)
         elif ctx["kind"] == "workflow_instructions":
             raise Refused("This setup screen has no actions.")
+        elif action == "ot_verify_page":
+            _check(ctx["kind"] == "verify_outcome" and value in {"previous", "next"})
+            self._verify_view(
+                cfg,
+                actor,
+                view,
+                json.loads(ctx["revision"])["page"] + (1 if value == "next" else -1),
+            )
+        elif action in {"ot_current_week", "ot_week_bind"}:
+            open_verifier = action == "ot_week_bind"
+            if open_verifier:
+                _check(ctx["kind"] == "current_week" and value == ctx["revision"])
+            else:
+                _check(ctx["kind"] == "regressions")
+                listing = json.loads(ctx["revision"])
+                _check(
+                    listing["topic"] == StatusTopic.LIVE_ERRORS and value == listing.get("current")
+                )
+            weekly = self._current_question(actor, StatusTopic.LIVE_ERRORS)
+            _check(weekly and weekly[1] == value)
+            assert weekly is not None and weekly[2] is not None
+            workflow, pin, weekly_facts = weekly
+            assert weekly_facts is not None
+            if open_verifier:
+                _check(
+                    weekly_facts["readiness"]
+                    and weekly_facts["readiness"]["next_action"] == "bind_verifier"
+                )
+                self._live_view(cfg, actor, view, workflow, old_hash, verifier_only=True)
+                return
+            token = self.journal.context(actor, cfg.channel, view, "current_week", revision=pin)
+            self._show(
+                view,
+                self.views.weekly_question(token, workflow, weekly_facts, pin),
+                old_hash,
+                authorize=lambda: _check(
+                    self._current_question(actor, StatusTopic.LIVE_ERRORS) == weekly
+                ),
+            )
+        elif action == "ot_week_scopes":
+            _check(ctx["kind"] == "current_week" and value == "scopes")
+            self._regression_picker(cfg, actor, view, old_hash, topic=StatusTopic.LIVE_ERRORS.value)
+        elif action in {"ot_current_training", "ot_readiness_proof"}:
+            proof = action == "ot_readiness_proof"
+            if proof:
+                _check(ctx["kind"] == "current_training" and value == ctx["revision"])
+            else:
+                _check(ctx["kind"] == "regressions")
+                listing = json.loads(ctx["revision"])
+                _check(listing["topic"] == StatusTopic.TRAINING and value == listing.get("current"))
+            selected_training = self._current_question(actor, StatusTopic.TRAINING)
+            _check(selected_training and selected_training[1] == value)
+            assert selected_training is not None
+            workflow, _, receipt = selected_training
+            _check(not proof or receipt is not None)
+            token = self.journal.context(
+                actor, cfg.channel, view, "current_training", revision=value
+            )
+            self._show(
+                view,
+                self.views.current_training_question(
+                    token, workflow, receipt, pin=value, proof=proof
+                ),
+                old_hash,
+                authorize=lambda: _check(
+                    self._current_question(actor, StatusTopic.TRAINING) == selected_training
+                ),
+            )
+        elif action == "ot_training_scopes":
+            _check(ctx["kind"] == "current_training" and value == "scopes")
+            self._regression_picker(cfg, actor, view, old_hash, topic=StatusTopic.TRAINING.value)
         elif action == "ot_help":
             self._help(cfg, actor, view, old_hash=old_hash)
         elif action == "ot_readouts":
@@ -2111,11 +3735,24 @@ class Workbench:
         elif action in {"ot_result_prev", "ot_result_next", "ot_result_open"}:
             if ctx["kind"] == "regressions":
                 listing = json.loads(ctx["revision"])
+                if listing.get("topic") in WORKPLACE_QUESTIONS:
+                    _check(listing.get("workplace_scope") == cfg.live_workflow_ref)
+                if listing.get("topic") == StatusTopic.DELIVERY:
+                    _check(listing.get("delivery_scope") == cfg.live_workflow_ref)
                 if action == "ot_result_open":
                     _check(value in listing["items"])
                     source = listing["items"][value]
                     _check(source in {s for _, s in self._result_sources(cfg, actor)})
-                    self._questions(cfg, actor, view, source, value, "changes", old_hash)
+                    self._questions(
+                        cfg,
+                        actor,
+                        view,
+                        source,
+                        value,
+                        listing.get("topic", "changes"),
+                        old_hash,
+                        expected_receipt_pin=listing.get("deliveries", {}).get(value, ""),
+                    )
                 else:
                     self._regression_picker(
                         cfg,
@@ -2123,6 +3760,7 @@ class Workbench:
                         view,
                         old_hash,
                         listing["page"] + (1 if action == "ot_result_next" else -1),
+                        topic=listing.get("topic", "changes"),
                     )
                 return
             _check(ctx["kind"] == "results")
@@ -2309,7 +3947,8 @@ class Workbench:
             )
         elif action == "ot_evidence":
             _check(
-                ctx["kind"] in {"home", "evidence", "status", "eval_detail", "questions"}
+                ctx["kind"]
+                in {"home", "evidence", "status", "eval_detail", "questions", "handoff_question"}
                 and value == ctx["revision"]
             )
             self._evidence(cfg, actor, view, ctx, old_hash)
@@ -2317,6 +3956,8 @@ class Workbench:
             _check(ctx["kind"] in {"evidence", "questions"} and value == ctx["revision"])
             topic = "" if action == "ot_question" else action.removeprefix("ot_question_")
             self._questions(cfg, actor, view, job, ctx["revision"], topic, old_hash)
+        elif action in {"ot_release_receipt", "ot_delivery_status"}:
+            self._open_handoff(cfg, actor, view, ctx, action, value, old_hash)
         elif action in {"ot_release_approve", "ot_release_changes"}:
             _check(ctx["kind"] == "evidence" and value == ctx["revision"])
             self._release(cfg, actor, view, ctx, action, old_hash)
@@ -2333,6 +3974,229 @@ class Workbench:
         _check(isinstance(value, str) and len(value) <= 128)
         return str(value)
 
+    def _map_submit(
+        self, cfg: Settings, actor: str, view: str, ctx: Json, callback: str, values: Json
+    ) -> None:
+        from opentour_cell.pilot.guided_decision_map import Condition
+        from opentour_cell.pilot.map_review import BranchEdit, MapSettingsEdit, StaleMapError
+
+        workflow = ctx["job"]
+        state = json.loads(ctx["revision"])
+        service, principal = self._map_service(actor, workflow)
+        current_grant = service.entry(principal)
+        _check(current_grant and current_grant == state["grant"])
+        operation = self.journal.opaque("map-save", [ctx["id"], actor])
+        changes: tuple[BranchEdit, ...] = ()
+        order = None
+        order_reason = None
+        settings_edit = None
+        reason = values["reason"]["reason"].get("value")
+        _check(isinstance(reason, str) and 0 < len(reason.strip()) <= 1000)
+        if callback == "ot_map_assertions_save":
+            _check(
+                ctx["kind"] == "map_assertions"
+                and set(values)
+                in ({"trigger", "fallback", "reason"}, {"trigger", "fallback", "reason", "unit"})
+            )
+            trigger = values["trigger"]["trigger"].get("value")
+            _check(
+                trigger is None
+                or (
+                    isinstance(trigger, str)
+                    and len(trigger) <= 160
+                    and (not trigger or trigger.isprintable())
+                )
+            )
+            fallback = self._field(values, "fallback", select=True)
+            _check(fallback == "unresolved" or fallback in state["actions"])
+            unit = values.get("unit", {}).get("unit", {}).get("value")
+            _check(unit is None or isinstance(unit, str))
+            settings_edit = MapSettingsEdit(
+                (trigger or "").strip() or None,
+                None if fallback == "unresolved" else fallback,
+                reason,
+                (unit or "").strip() or None,
+            )
+        elif callback == "ot_map_precedence_save":
+            _check(ctx["kind"] == "map_precedence")
+            refs = state["refs"]
+            if len(refs) > 30:
+                _check(set(values) == {"reason", "order"})
+                raw_order = values["order"]["order"]["value"]
+                _check(isinstance(raw_order, str) and len(raw_order) <= 1200)
+                positions = [p.strip() for p in raw_order.split(",")]
+                _check(
+                    len(positions) == len(refs)
+                    and all(
+                        re.fullmatch("[1-9][0-9]{0,2}", p) and int(p) <= len(refs)
+                        for p in positions
+                    )
+                )
+                order = tuple(refs[int(p) - 1] for p in positions)
+            else:
+                _check(set(values) == {"reason", *(f"rank_{i}" for i in range(len(refs)))})
+                order = tuple(
+                    self._field(values, f"rank_{i}", select=True) for i in range(len(refs))
+                )
+            _check(set(order) == set(refs) and len(set(order)) == len(refs))
+            order_reason = reason
+        else:
+            _check(
+                ctx["kind"] == "map_edit"
+                and set(values) == {"reason", "action", "disposition", "conditions"}
+            )
+            branch = state["branch"]
+            disposition = self._field(values, "disposition", select=True)
+            _check(disposition in {"accepted", "corrected", "unresolved", "out_of_scope"})
+            selected_action = values["action"]["action"].get("selected_option")
+            action = self._field(values, "action", select=True) if selected_action else None
+            _check(disposition != "corrected" or action)
+            raw = values["conditions"]["conditions"].get("value") or ""
+            _check(isinstance(raw, str) and len(raw) <= 3000)
+            conditions = []
+            if disposition == "corrected":
+                for line in raw.splitlines():
+                    terms = line.split()
+                    _check(len(terms) in (2, 3))
+                    _check(
+                        (terms[1] in {"present", "missing"} and len(terms) == 2)
+                        or (terms[1] in {"<", "<=", ">", ">=", "=="} and len(terms) == 3)
+                    )
+                    conditions.append(
+                        Condition(terms[0], terms[1], terms[2] if len(terms) == 3 else None)
+                    )
+            changes = (
+                BranchEdit(
+                    branch,
+                    disposition,
+                    reason,
+                    action if disposition == "corrected" else None,
+                    tuple(conditions) if disposition == "corrected" else None,
+                ),
+            )
+        try:
+            service.save(
+                principal,
+                expected_revision=state["rev"],
+                operation_ref=operation,
+                changes=changes,
+                precedence=order,
+                precedence_reason=order_reason,
+                settings=settings_edit,
+            )
+        except StaleMapError as stale:
+            current = stale.current
+            _check(service.entry(principal) == current_grant)
+            reapply = current.can_edit and state.get("source") == current.source_revision
+            before = state["rev"]
+
+            diff: list[str] = []
+            previous = stale.previous
+            if previous is not None:
+                for label, old, new in (
+                    ("Unit of work", previous.unit_of_work, current.unit_of_work),
+                    ("Trigger", previous.settings_trigger, current.settings_trigger),
+                    ("Fallback", previous.fallback_action, current.fallback_action),
+                    ("Assertion basis", previous.settings_reason, current.settings_reason),
+                    ("Assertion owner", previous.settings_editor_ref, current.settings_editor_ref),
+                    ("Priority basis", previous.precedence_reason, current.precedence_reason),
+                    ("Priority owner", previous.precedence_actor_ref, current.precedence_actor_ref),
+                ):
+                    if old != new:
+                        diff.append(f"{label} · {old or 'Unspecified'} → {new or 'Unspecified'}")
+            for change in stale.diff:
+                older, newer = change.before, change.after
+                if older is None or newer is None:
+                    status = "Current branch" if newer else "Absent from current map"
+                    diff.append(f"{change.branch_ref} · {status}")
+                    continue
+                old_predicate, new_predicate = (
+                    " and ".join(
+                        " ".join(
+                            str(v) for v in (c.field, c.operator, c.threshold) if v is not None
+                        )
+                        for c in row.conditions
+                    )
+                    for row in (older, newer)
+                )
+                branch_diff = []
+                for label, before_value, after_value in (
+                    ("Conditions", old_predicate, new_predicate),
+                    ("Decision", older.action, newer.action),
+                    ("Review", older.disposition, newer.disposition),
+                    ("Priority", older.precedence, newer.precedence),
+                    ("Support", older.source_support, newer.source_support),
+                    ("Owner", older.editor_ref, newer.editor_ref),
+                    ("Reason", older.reason, newer.reason),
+                    ("Source", older.citation_ref, newer.citation_ref),
+                ):
+                    if before_value != after_value:
+                        branch_diff.append(
+                            f"{label} · {before_value or 'Unspecified'} → "
+                            f"{after_value or 'Unspecified'}"
+                        )
+                if branch_diff:
+                    diff.append(f"{change.branch_ref} · " + " | ".join(branch_diff))
+            eligible = [
+                r
+                for r in current.branches
+                if r.action is not None and r.disposition != "out_of_scope"
+            ]
+            reapply_branch = (
+                reapply
+                and bool(changes)
+                and any(r.branch_ref == changes[0].branch_ref for r in current.branches)
+            )
+            reapply_order = (
+                reapply and order is not None and set(order) == {r.branch_ref for r in eligible}
+            )
+            reapply_settings = reapply and settings_edit is not None
+            if reapply_settings and settings_edit is not None:
+                diff.extend(
+                    [
+                        f"Current trigger · {current.trigger}",
+                        f"Current fallback · {current.fallback_action or 'Unresolved'}",
+                        f"Your trigger · {settings_edit.trigger or 'Unspecified'}",
+                        f"Your fallback · {settings_edit.fallback_action or 'Unresolved'}",
+                    ]
+                )
+            reapply = reapply_branch or reapply_order or reapply_settings
+            token = self.journal.context(
+                actor,
+                cfg.channel,
+                view,
+                ctx["kind"] if reapply else "map_conflict",
+                workflow,
+                _json({**state, "rev": current.review_revision}),
+            )
+            layout = self.views.map_conflict(token, before, current.review_revision, diff)
+            if reapply:
+                if reapply_settings and settings_edit is not None:
+                    form = self.views.map_assertions(
+                        token,
+                        trigger=settings_edit.trigger,
+                        unit_of_work=settings_edit.unit_of_work,
+                        fallback=settings_edit.fallback_action,
+                        permitted=current.actions,
+                    )
+                elif reapply_order:
+                    form = self.views.map_precedence(
+                        token,
+                        current.question
+                        or "Review the current order before reapplying your changes.",
+                        [(f"{r.action} · {r.branch_ref}", r.branch_ref) for r in eligible],
+                    )
+                else:
+                    form = self.views.map_branch_edit(
+                        token, state["branch"], action, raw, current.actions
+                    )
+                layout = self.views.map_reapply(layout, form, values)
+            self._map_show(
+                actor, workflow, current.review_revision, view, layout, requires_editor=reapply
+            )
+            return
+        self._map_view(cfg, actor, view, workflow)
+
     def _submission(
         self,
         cfg: Settings,
@@ -2343,7 +4207,82 @@ class Workbench:
         values: Json,
         token: str,
     ) -> None:
-        if callback == "ot_prompt_enter":
+        if callback in {"ot_case_adjudicate", "ot_case_freeze"}:
+            state = json.loads(ctx["revision"])
+            session, entry = self._case_session(actor)
+            _check(entry.run_ref == ctx["job"])
+            pack = session.review()
+            self._check_case_state(entry, pack, state)
+            if callback == "ot_case_adjudicate":
+                _check(
+                    ctx["kind"] == "case_edit"
+                    and entry.can_adjudicate
+                    and set(values) == {"target", "reason"}
+                )
+                choice = self._field(values, "target", select=True)
+                options = pack["authority"]["allowed_actions"]
+                _check(choice == "unresolved" or choice in {str(i) for i in range(len(options))})
+                reason = self._field(values, "reason").strip()
+                session.adjudicate(
+                    case_id=state["case_id"],
+                    target=None if choice == "unresolved" else options[int(choice)],
+                    reason=reason,
+                    expected_revision=state["revision"],
+                    operation_ref=self.journal.opaque("case-save", [ctx["id"], actor]),
+                )
+            else:
+                _check(ctx["kind"] == "case_splits" and entry.can_freeze)
+                families = state["page"]
+                _check(set(values) == {f"family_{i}" for i in range(len(families))})
+                splits = {
+                    family: self._field(values, f"family_{i}", select=True)
+                    for i, family in enumerate(families)
+                }
+                _check(set(splits.values()) <= {"development", "reserved", "excluded"})
+                self._case_splits(
+                    cfg, actor, view, entry, pack, state, state.get("splits", {}) | splits
+                )
+                return
+            self._case_view(cfg, actor, view, state["index"])
+        elif callback in {"ot_map_assertions_save", "ot_map_branch_save", "ot_map_precedence_save"}:
+            self._map_submit(cfg, actor, view, ctx, callback, values)
+        elif callback == "ot_nomination":
+            _check(ctx["kind"] == "nomination" and set(values) == {"nominee"})
+            self._nomination(
+                actor, ctx["job"], nominee=self._field(values, "nominee"), expected=ctx["revision"]
+            )
+            self._workflow_settings_view(cfg, actor, ctx["job"], view)
+        elif callback == "ot_verify_outcome":
+            _check(
+                ctx["kind"] == "verify_outcome"
+                and set(values) == {"target", "finality", "basis", "effective", "action"}
+            )
+            form = self._verifier_form(actor)
+            target = self._field(values, "target", select=True)
+            _check(form.workflow == ctx["job"] and target in json.loads(ctx["revision"])["tokens"])
+            action = values["action"]["action"].get("value")
+            _check(action is None or isinstance(action, str))
+            stamp = self._field(values, "effective")
+            _check(stamp.isascii() and stamp.isdecimal() and len(stamp) <= 19)
+            receipt = form.submit(
+                target,
+                self._field(values, "finality", select=True),
+                action or "",
+                self._field(values, "basis"),
+                int(stamp),
+            )
+            token = self.journal.context(
+                actor, cfg.channel, view, "verified_outcome", form.workflow
+            )
+            self._show(
+                view,
+                self.views.verification_saved(token, receipt),
+                authorize=lambda: _check(self._verifier_form(actor).permits_receipt(receipt)),
+            )
+        elif callback == "ot_live_binding":
+            saved = self._live_save(actor, ctx, values)
+            self._live_view(cfg, actor, view, ctx["job"], saved=saved)
+        elif callback == "ot_prompt_enter":
             _check(ctx["kind"] == "prompt")
             raw = values["command"]["command"]["value"]
             _check(isinstance(raw, str) and len(raw) <= 160 and raw.isprintable())
@@ -2512,6 +4451,14 @@ class Workbench:
         if command in {"", "status", "review"} and not argument:
             self._results(cfg, actor, view)
             return
+        status_topic = resolve_status(prompt)
+        if status_topic:
+            self._regression_picker(cfg, actor, view, topic=status_topic.value)
+            return
+        plan = plan_query(prompt)
+        if isinstance(plan, ReadoutQuestion) and plan in WORKPLACE_QUESTIONS:
+            self._regression_picker(cfg, actor, view, topic=plan.value)
+            return
         if REGRESSION_QUESTION.fullmatch(" ".join(prompt.casefold().split())):
             self._regression_picker(cfg, actor, view)
             return
@@ -2609,8 +4556,10 @@ class Workbench:
     def _can_add_workflow(self, cfg: Settings, actor: str) -> bool:
         entry = cfg.permission(actor, "inspect")
         return (
-            actor == cfg.reviewer
-            and "review" in entry["roles"]
+            (
+                (actor == cfg.reviewer and "review" in entry["roles"])
+                or (cfg.starter_setup is not None and cfg.starter_setup.slack_owner == actor)
+            )
             and not cfg.workflow_label
             and not entry["datasets"]
         )
@@ -2633,6 +4582,21 @@ class Workbench:
             return
         token = self.journal.opaque("home", [actor, cfg.team, cfg.app, cfg.channel])
         pending = self._pending_release(cfg, actor)
+        workflow_settings = False
+        if cfg.live_workflow_ref or (cfg.starter_setup and cfg.starter_setup.slack_owner == actor):
+            try:
+                workflow = self._live_workflow(cfg, actor)
+                with self._live_scope(actor, workflow):
+                    workflow_settings = True
+            except Exception:
+                # The existing Home remains usable without current live authority.
+                pass
+        live_summary = self._live_summary(actor) if workflow_settings else None
+        readiness = self._readiness(actor) if workflow_settings else None
+        map_entry = self._map_entry(actor)
+        case_entry = self._case_entry(actor)
+        score_entry, _ = self._starter_scores(actor)
+        verifier_entry = self._verifier_entry(actor) if cfg.live_workflow_ref else ""
         layout = self.views.app_home_view(
             token,
             cfg.workspace_title,
@@ -2642,6 +4606,13 @@ class Workbench:
             named_reviewer=cfg.reviewer == actor and "review" in entry["roles"],
             pending=pending.revision if pending else "",
             can_add_workflow=can_add_workflow,
+            workflow_settings=workflow_settings,
+            readiness=readiness,
+            live_summary=live_summary,
+            verify_outcome=verifier_entry,
+            decision_map_entry=map_entry,
+            case_entry=case_entry,
+            starter_score_entry=score_entry,
         )
         navigation = (
             can_add_workflow
@@ -2649,8 +4620,33 @@ class Workbench:
             and _static_setup_navigation(layout, token)
             and self._unbound_recipient()
         )
-        with self.store.engagement_guard(engagement_id=self.store.engagement_id):
-            exposure = self.journal.admit_view("app_home")
+        try:
+            with self.store.engagement_guard(engagement_id=self.store.engagement_id):
+                exposure = self.journal.admit_view(
+                    "app_home",
+                    authorize=(
+                        lambda: _check(
+                            (not score_entry or self._starter_scores(actor)[0] == score_entry)
+                            and (not case_entry or self._case_entry(actor) == case_entry)
+                            and (not map_entry or self._map_entry(actor) == map_entry)
+                            and (
+                                not verifier_entry or self._verifier_entry(actor) == verifier_entry
+                            )
+                            and (readiness is None or self._readiness(actor) == readiness)
+                            and (live_summary is None or self._live_summary(actor) == live_summary)
+                        )
+                    )
+                    if readiness is not None
+                    or live_summary is not None
+                    or verifier_entry
+                    or map_entry
+                    or case_entry
+                    or score_entry
+                    else None,
+                )
+        except Exception:
+            self.web.views_publish(user_id=actor, view=self.views.app_home_view())
+            return
         try:
             result = self.web.views_publish(user_id=actor, view=layout)
             _check(result is not None and result.get("ok") is True)
@@ -2674,6 +4670,101 @@ class Workbench:
             and len(body["actions"]) == 1
         )
         action = body["actions"][0]
+        if action.get("action_id") == "ot_app_starter_score":
+            self.private_channel(cfg, actor)
+            version, items = self._starter_scores(actor)
+            _check(version and action.get("value") == version)
+            opened = self.web.views_open(
+                trigger_id=body["trigger_id"], view=self.views.notice_modal("checking")
+            )
+            view_id = opened["view"]["id"]
+            if len(items) == 1:
+                self._open_starter_score(cfg, actor, view_id, items[0][0])
+            else:
+                token = self.journal.context(
+                    actor, cfg.channel, view_id, "starter_scores", "", version
+                )
+                self._show(
+                    view_id,
+                    self.views.starter_score_choices(token, items),
+                    authorize=lambda: _check(self._starter_scores(actor)[0] == version),
+                )
+            return
+        if action.get("action_id") == "ot_app_cases":
+            self.private_channel(cfg, actor)
+            _, case_entry = self._case_session(actor)
+            _check(case_entry.revision == action.get("value"))
+            view = self.web.views_open(
+                trigger_id=body["trigger_id"], view=self.views.notice_modal("checking")
+            )["view"]["id"]
+            token = self.journal.context(
+                actor, cfg.channel, view, "case_entry", case_entry.run_ref, case_entry.revision
+            )
+            layout = self.views.starter_case_entry(
+                token, case_entry.workflow_ref, case_entry.run_ref, case_entry.can_propose
+            )
+            self._show(
+                view,
+                layout,
+                authorize=lambda: _check(self._case_entry(actor) == case_entry.revision),
+            )
+            return
+        if action.get("action_id") == "ot_app_map":
+            self.private_channel(cfg, actor)
+            map_entry = self._map_entry(actor)
+            _check(map_entry and map_entry == action.get("value"))
+            opened = self.web.views_open(
+                trigger_id=body["trigger_id"], view=self.views.notice_modal("checking")
+            )
+            view_id = opened["view"]["id"]
+            choices = self._map_choices(actor)
+            _check(choices and self._map_entry(actor) == map_entry)
+            if len(choices) == 1:
+                self._map_view(cfg, actor, view_id, next(iter(choices)))
+            else:
+                token = self.journal.context(
+                    actor, cfg.channel, view_id, "map_choices", "", map_entry
+                )
+                layout = self.views.map_choices(
+                    token, [(wf, item[1]) for wf, item in choices.items()]
+                )
+                self._show(
+                    view_id, layout, authorize=lambda: _check(self._map_entry(actor) == map_entry)
+                )
+            return
+        if action.get("action_id") == "ot_app_verify_outcome":
+            self.private_channel(cfg, actor)
+            verifier_token = self._verifier_entry(actor)
+            _check(verifier_token and action.get("value") == verifier_token)
+            opened = self.web.views_open(
+                trigger_id=body["trigger_id"], view=self.views.notice_modal("checking")
+            )
+            self._verify_view(cfg, actor, opened["view"]["id"])
+            return
+        if action.get("action_id") in {"ot_app_settings", "ot_app_bind_verifier"}:
+            bind = action["action_id"] == "ot_app_bind_verifier"
+            _check(bind or action.get("value") == "ot_app_settings")
+            opened = self.web.views_open(
+                trigger_id=body["trigger_id"], view=self.views.notice_modal("checking")
+            )
+            view_id = opened["view"]["id"]
+            try:
+                self.private_channel(cfg, actor)
+                workflow = self._live_workflow(self.settings(), actor)
+                if bind:
+                    receipt = self._readiness(actor)
+                    _check(
+                        receipt
+                        and receipt["revision"] == action.get("value")
+                        and receipt["next_action"] == "bind_verifier"
+                    )
+                    self._live_view(cfg, actor, view_id, workflow, verifier_only=True)
+                    return
+
+                self._workflow_settings_view(cfg, actor, workflow, view_id)
+            except Exception:
+                self._safe_notice(view_id)
+            return
         if action.get("action_id") == "ot_app_add_workflow":
             _check(action.get("value") == "ot_app_add_workflow")
             opened = self.web.views_open(
@@ -2881,6 +4972,27 @@ class Workbench:
                     _check(body["type"] == "block_actions" and len(body["actions"]) == 1)
                     action = body["actions"][0]
                     _check(action["action_id"] in ACTIONS)
+                    if action["action_id"] in {"ot_starter_save", "ot_starter_benchmark"}:
+                        _check(
+                            (action["action_id"], obj.get("callback_id"))
+                            in {
+                                ("ot_starter_save", "ot_starter_preview"),
+                                ("ot_starter_benchmark", "ot_starter_saved"),
+                            }
+                            and not obj.get("state", {}).get("values")
+                            and not (
+                                set(action)
+                                - {
+                                    "action_id",
+                                    "value",
+                                    "block_id",
+                                    "text",
+                                    "type",
+                                    "action_ts",
+                                    "style",
+                                }
+                            )
+                        )
                     self._action(
                         cfg,
                         actor,
