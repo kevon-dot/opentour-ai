@@ -36,10 +36,23 @@ Authenticity: digests alone cannot authenticate an auditor or independent verifi
 Improvement staging holds until this boundary can verify both issuers. An explicit fixture
 option exercises the staging mechanics with generated evidence only.
 
-Current behavior, stated plainly: no signing or key-custody contract exists in this project, so
-no issuer can ever be verified here and ``issuer_authenticated`` is always ``False``. Live
-(non-fixture) measured-improvement staging is therefore disabled, deliberately, until such a
-contract lands. Hold and no-change packets are not gated by it and are delivered.
+DELIBERATE DECISION, NOT AN UNFINISHED FEATURE. No signing or key-custody contract exists in
+this project, so no auditor or independent-verifier issuer can be verified here, and
+``issuer_authenticated`` is hard-coded ``False``. Live (non-fixture) measured-improvement
+staging therefore always holds with ``audit_and_verdict_issuers_unverified``. There is no
+re-enable path short of a code change, and that is intended. It stands until a signing contract
+lands. Lifting it requires, together: (1) a landed contract defining issuer keys, custody and
+rotation for the OPE-526 audit receipt and the OPE-528 verdict; (2) signature verification of
+both documents against pinned issuer keys inside this module, replacing the hard-coded
+``False``; (3) tests that a forged, unsigned, wrong-key or replayed document is refused; and
+(4) independent review of that change. Do not "fix" the hold by loosening the gate, widening
+``allow_generated_fixture`` or trusting a self-asserted ``evidence_origin``. Hold and no-change
+packets are not gated by this and are delivered.
+
+Fixture flag: ``allow_generated_fixture`` exercises staging mechanics with generated evidence
+only. It is honored solely in a test context (``PYTEST_CURRENT_TEST`` is set, as pytest does).
+Outside one, ``PacketOutbox`` refuses to construct and ``assemble_packet`` refuses, with the
+closed code ``generated_fixture_not_permitted_in_live_context``, so a misconfiguration is loud.
 
 Free text: a sealed comparison proves only that its bytes are self-consistent, not that its
 strings are safe. Every string that this module copies from a comparison into a packet (the
@@ -53,6 +66,7 @@ path including holds. A value outside its vocabulary refuses the comparison with
 from __future__ import annotations
 
 import json
+import os
 import re
 import sqlite3
 from collections.abc import Callable, Iterator, Mapping
@@ -70,6 +84,7 @@ EVENT = "opentour.pilot.comparison-completed-event.v1"
 VERDICT = "opentour.pilot.independent-verdict.v1"
 RECEIPT = "opentour.benchmark-audit-receipt.v1"
 EVENT_REVISION = 1
+_FIXTURE_REFUSAL = "generated_fixture_not_permitted_in_live_context"
 _ID = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9_.:@/-]{0,127}")
 _SHA = re.compile(r"[0-9a-f]{64}")
 _REPRODUCED = "reproduced"
@@ -137,6 +152,11 @@ _ECON_FIELDS = (
     "cost_cap",
     "latency_cap",
 )
+
+
+def _fixture_context() -> bool:
+    """True only under a test runner. The repository has no other live/fixture switch."""
+    return "PYTEST_CURRENT_TEST" in os.environ
 
 
 class PacketStoreError(RuntimeError):
@@ -538,6 +558,8 @@ def assemble_packet(
     allow_generated_fixture: bool = False,
 ) -> tuple[Json | None, str | None]:
     """Return ``(packet, None)`` or ``(None, reason)``. Never raises on a governance failure."""
+    if allow_generated_fixture and not _fixture_context():
+        return None, _FIXTURE_REFUSAL
     if not ctx.valid():
         return None, "invalid_packet_context"
     if not _comparison_ok(comparison):
@@ -610,6 +632,8 @@ class PacketOutbox:
     """File-backed transactional store. Reopening the file is the restart path."""
 
     def __init__(self, path: Path | str, *, allow_generated_fixture: bool = False):
+        if allow_generated_fixture and not _fixture_context():
+            raise PacketStoreError(_FIXTURE_REFUSAL)
         self.path = Path(path)
         self.allow_generated_fixture = allow_generated_fixture
         with closing(sqlite3.connect(self.path, timeout=5)) as db:

@@ -1144,3 +1144,58 @@ def test_every_value_the_planner_emitted_in_these_runs_is_inside_the_vocabularie
         assert comparison.get("metric") in cp._METRICS
         for arm in comparison["arms"].values():
             assert arm["hold_reason"] in cp._HOLD_REASONS
+
+
+# ------------------------------- E8: the fixture flag cannot be enabled in a live context
+
+
+def test_fixture_flag_works_in_fixture_context(runs, tmp_path):
+    """E8: under the test runner the flag is honored (every staging test relies on it)."""
+    assert cp._fixture_context() is True
+    assert Bundle(runs["winner"], tmp_path).stage().status == "staged"
+
+
+def test_live_store_refuses_the_fixture_flag_loudly(tmp_path, monkeypatch):
+    """E8: a live PacketOutbox cannot be built with the flag, whatever the caller passes."""
+    monkeypatch.delenv("PYTEST_CURRENT_TEST")
+    assert cp._fixture_context() is False
+    path = tmp_path / "live.sqlite3"
+    with pytest.raises(cp.PacketStoreError) as caught:
+        cp.PacketOutbox(path, allow_generated_fixture=True)
+    assert str(caught.value) == "generated_fixture_not_permitted_in_live_context"
+    assert not path.exists(), "a refused construction must not create a store"
+
+
+def test_live_assemble_and_verify_refuse_the_fixture_flag(runs, tmp_path, monkeypatch):
+    """E8: the function kwarg is gated too, with a closed code and without raising."""
+    b = Bundle(runs["winner"], tmp_path)
+    packet = b.stage().packet
+    monkeypatch.delenv("PYTEST_CURRENT_TEST")
+    args = (b.comparison, b.receipt, b.verdict, b.ctx)
+    assert cp.assemble_packet(*args, allow_generated_fixture=True) == (
+        None,
+        "generated_fixture_not_permitted_in_live_context",
+    )
+    assert cp.verify_packet(packet, *args, allow_generated_fixture=True) is False
+
+
+def test_live_context_without_the_flag_is_unchanged(runs, tmp_path, monkeypatch):
+    """E8: live holds still stage; a live recommendation is still held for unverified issuers."""
+    monkeypatch.delenv("PYTEST_CURRENT_TEST")
+    store = cp.PacketOutbox(tmp_path / "live.sqlite3")
+    held = runs["insufficient"]
+    hctx = context(held)
+    out = store.stage(held, None, None, authority=Authority(hctx), run_ref=hctx.run_ref, now=NOW)
+    assert out.status == "staged" and out.packet["kind"] == "hold"
+    win = runs["winner"]
+    wctx = context(win)
+    receipt = make_receipt()
+    out = store.stage(
+        win,
+        receipt,
+        make_verdict(win, receipt, wctx),
+        authority=Authority(wctx),
+        run_ref=wctx.run_ref,
+        now=NOW,
+    )
+    assert out.status == "refused" and out.reason == "audit_and_verdict_issuers_unverified"
