@@ -61,13 +61,16 @@ def test_guided_case_owner_adjudicates_then_freezes_whole_families(joined, monke
     h.form(
         view,
         {
-            f"family_{i}": {f"family_{i}": select("development" if i == 0 else "reserved")}
+            f"family_{i}": {f"family_{i}": select(("development", "reserved", "excluded")[i])}
             for i, _ in enumerate(families)
         },
     )
     assert session.review()["frozen"] is None
     choose(h, view, "ot_case_commit")
     assert session.review()["frozen"]["state"] == "frozen_unscored"
+    assert session.review()["frozen"]["excluded"] == 2
+    assert "2 excluded cases" in text(h, view)
+    assert "Independent families · Development 1 · Reserved 1 · Excluded 1" in text(h, view)
     assert "Frozen, unscored" in text(h, view)
     assert effects(h) == (0,) * 7
 
