@@ -249,6 +249,7 @@ def verdict_body(v: IndependentVerdict) -> dict[str, Any]:
         "status": v.status,
         "outcome": v.outcome,
         "issued_seq": v.issued_seq,
+        "issuer_authenticated": v.issuer_authenticated,
         "superseded_by": v.superseded_by,
     }
 
@@ -277,6 +278,7 @@ class FreshConfirmation:
 def confirmation_body(c: FreshConfirmation) -> dict[str, Any]:
     return {
         "actor_id": c.actor_id,
+        "authenticated": c.authenticated,
         "selection_digest": c.selection_digest,
         "manifest_digest": c.manifest_digest,
     }

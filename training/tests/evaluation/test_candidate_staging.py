@@ -830,3 +830,24 @@ def test_i4_honest_round_trip_still_stages(tmp_path: Path) -> None:
     p = packet()
     assert evaluate(p).outcome == "eligible"
     assert ledger(tmp_path).stage(p).status == "staged"
+
+
+def test_i3_self_asserted_flags_are_inside_the_attested_bodies() -> None:
+    """Family with i3: no self-asserted field may sit outside what the authority attests."""
+    base = packet().verdicts[0]
+    for start, flipped in ((False, True), (True, False)):
+        att = attest(replace(base, issuer_authenticated=start))
+        assert AUTH.verify_verdict(att)
+        assert not AUTH.verify_verdict(replace(att, issuer_authenticated=flipped))  # flipped after
+        other = attest(replace(base, issuer_authenticated=flipped))
+        assert not AUTH.verify_verdict(replace(att, attestation=other.attestation))  # cross-value
+    assert verdict_body(replace(base, issuer_authenticated=False))["issuer_authenticated"] is False
+
+    conf = FreshConfirmation("generated-owner", False, SELECTION, packet().benchmark.digest)
+    for start, flipped in ((False, True), (True, False)):
+        att_c = attest_confirmation(replace(conf, authenticated=start))
+        assert AUTH.verify_confirmation(att_c)
+        assert not AUTH.verify_confirmation(replace(att_c, authenticated=flipped))
+        other_c = attest_confirmation(replace(conf, authenticated=flipped))
+        assert not AUTH.verify_confirmation(replace(att_c, attestation=other_c.attestation))
+    assert confirmation_body(conf)["authenticated"] is False
