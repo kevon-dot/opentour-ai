@@ -37,7 +37,23 @@ def branch_example(
     options: list[list[str | Decimal | None]] = []
     for field in fields:
         if snapshot.field_kinds.get(field) == "reference":
-            values: list[str | Decimal | None] = ["example-reference", None]
+            tokens = sorted(
+                {
+                    condition.threshold
+                    for row in rows
+                    for condition in row.conditions
+                    if condition.field == field
+                    and condition.operator == "=="
+                    and condition.threshold is not None
+                }
+            )
+            # A generic present reference must not accidentally activate an exact-token rule.
+            other = "example-reference"
+            if other in tokens:
+                other = next(
+                    f"example-{i}" for i in range(len(tokens) + 1) if f"example-{i}" not in tokens
+                )
+            values: list[str | Decimal | None] = [other, None, *tokens]
         elif snapshot.field_kinds.get(field) == "number":
             boundaries = sorted(
                 {

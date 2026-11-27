@@ -69,7 +69,9 @@ class Slack:
 
 
 class Harness:
-    def __init__(self, path: Path, organization: str = "pilot") -> None:
+    def __init__(
+        self, path: Path, organization: str = "pilot", *, seed_generated_dataset: bool = True
+    ) -> None:
         directory = path / "store"
         directory.mkdir(parents=True, mode=0o700)
         self.path = directory / "config.json"
@@ -96,7 +98,8 @@ class Harness:
         }
         self.save()
         self.store = LocalTrainingStore(directory / "training.sqlite3", organization)
-        self.store.register(generated_dataset(organization, ACTOR))
+        if seed_generated_dataset:
+            self.store.register(generated_dataset(organization, ACTOR))
         self.slack = Slack()
         self.app = slack_adapter.Workbench(
             lambda: slack_adapter.Settings.load(self.path),
