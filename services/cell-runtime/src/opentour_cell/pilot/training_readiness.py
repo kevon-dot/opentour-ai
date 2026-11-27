@@ -12,7 +12,7 @@ import sqlite3
 import time
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -57,6 +57,12 @@ class ReadinessSource(Protocol):
 
 
 @dataclass(frozen=True)
+class AutomaticCounts:
+    wrong: int
+    verified: int
+
+
+@dataclass(frozen=True)
 class ReadinessAssessment:
     organization: str
     workflow_ref: str
@@ -71,6 +77,7 @@ class ReadinessAssessment:
     residual_roots: tuple[str, ...]
     missing_gates: tuple[str, ...]
     route: str
+    incumbent_automatic: AutomaticCounts | None = None
 
 
 class AssessmentSource(Protocol):
@@ -157,6 +164,14 @@ def _verdict(snapshot: ReadinessSnapshot, assessment: ReadinessAssessment | None
         _require(len(set(assessment.residual_roots)) == len(assessment.residual_roots))
         _require(set(assessment.missing_gates) <= _GATE_ACTIONS.keys())
         _require(assessment.route in {"simple", "no_change", "hold", "model"})
+        automatic = assessment.incumbent_automatic
+        if automatic is not None:
+            _require(
+                type(automatic.wrong) is int
+                and type(automatic.verified) is int
+                and 0 <= automatic.wrong <= automatic.verified <= snapshot.verified
+            )
+            body["incumbent_automatic"] = asdict(automatic)
         residuals = len({roots[key] for key in assessment.residual_roots})
         body.update(
             residual_group_count=residuals,

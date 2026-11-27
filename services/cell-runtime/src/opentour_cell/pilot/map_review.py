@@ -17,10 +17,12 @@ from pathlib import Path
 from typing import Any
 
 from opentour_cell.pilot.guided_decision_map import (
+    CATEGORY_TOKEN,
     Condition,
     EffectiveFrom,
     FieldKind,
     GuidedMap,
+    compatible_categories,
     guided_draft,
 )
 from opentour_cell.pilot.guided_policy import (
@@ -501,6 +503,8 @@ class MapReviewService:
 
     @staticmethod
     def _overlap(left: MapBranch, right: MapBranch) -> bool:
+        if not compatible_categories((*left.conditions, *right.conditions)):
+            return False
         by_field: dict[str, list[Condition]] = {}
         for condition in (*left.conditions, *right.conditions):
             by_field.setdefault(condition.field, []).append(condition)
@@ -812,14 +816,22 @@ class MapReviewService:
                 action in ctx.capability["actions"] and 0 < len(conditions) <= 32,
                 "unsupported_map_rule",
             )
+        _require(compatible_categories(conditions), "unsupported_map_predicate")
         for c in conditions:
             _require(c.field in ctx.capability["field_kinds"], "unsupported_map_field")
             _require(
-                c.operator in {"missing", "present", "<", "<=", ">", ">="},
+                c.operator in {"missing", "present", "==", "<", "<=", ">", ">="},
                 "unsupported_map_predicate",
             )
             if c.operator in {"missing", "present"}:
                 _require(c.threshold is None, "unsupported_map_predicate")
+            elif c.operator == "==":
+                _require(
+                    ctx.capability["field_kinds"][c.field] == "reference"
+                    and isinstance(c.threshold, str)
+                    and CATEGORY_TOKEN.fullmatch(c.threshold),
+                    "unsupported_map_predicate",
+                )
             else:
                 _require(
                     ctx.capability["field_kinds"][c.field] == "number"

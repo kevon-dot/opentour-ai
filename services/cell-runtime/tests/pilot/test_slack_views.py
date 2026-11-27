@@ -654,3 +654,38 @@ class TestScopedNativeEvaluation(unittest.TestCase):
             self.assertNotIn("untrusted-input-canary", words(notice))
         self.assertIn("dataset grant", words(views.notice_modal("denied")))
         self.assertIn("Checking", words(views.notice_modal("checking")))
+
+
+def test_live_counts_require_matching_current_classification():
+    from opentour_cell.pilot.slack_views import _live_counts
+
+    live = dict(
+        workflow="invoice",
+        revision="live-v1",
+        dataset="d",
+        decisions=1,
+        verified=1,
+        pending=0,
+        disputed=0,
+    )
+    current = dict(
+        workflow_ref="invoice",
+        evidence_revision="live-v1",
+        dataset_ref="d",
+        incumbent_automatic={"wrong": 1, "verified": 1},
+    )
+    assert _live_counts(live, current).endswith("1/1")
+    assert _live_counts(
+        live, current | {"incumbent_automatic": {"wrong": 0, "verified": 1}}
+    ).endswith("0/1")
+    for unavailable in (
+        None,
+        current | {"workflow_ref": "other"},
+        current | {"dataset_ref": "other"},
+        current | {"evidence_revision": "reopened"},
+        current | {"incumbent_automatic": {"wrong": 0, "verified": 0}},
+        current | {"incumbent_automatic": {"wrong": 1, "verified": 2}},
+    ):
+        assert _live_counts(live, unavailable).endswith("Unavailable")
+    zero = _live_counts(live | {"decisions": 0, "verified": 0}, None)
+    assert "Live evidence · 0 decisions" in zero and zero.endswith("Unavailable")

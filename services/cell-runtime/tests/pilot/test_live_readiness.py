@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import time
 from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
 
 import pytest
+from opentour_cell.pilot import open_weight
 from opentour_cell.pilot.intake_mcp import IntakeError, IntakePrincipal
+from opentour_cell.pilot.learning_mandate import LearningMandates
 from opentour_cell.pilot.live_evidence import FeedGrant, LiveEvidence, LiveScope
 from opentour_cell.pilot.live_readiness import (
     POLICY,
@@ -17,6 +20,7 @@ from opentour_cell.pilot.live_readiness import (
     LocalRepairAssessments,
     ObservedDecision,
 )
+from opentour_cell.pilot.operating_point import digest
 from opentour_cell.pilot.text_classifier import TrainingError
 from opentour_cell.pilot.training import LocalTrainingStore
 from opentour_cell.pilot.training_readiness import TrainingReadiness
@@ -269,9 +273,56 @@ def test_reopen_correction_denies_previous_eligibility_after_restart(tmp_path: P
     assert len(reopened.history("workflow", actor=ACTOR)) == 2
 
 
-def test_three_independent_residuals_do_not_admit_training(tmp_path: Path):
+@pytest.mark.parametrize("limited_train", [False, True], ids=["no-mandate", "limited-train"])
+def test_three_independent_residuals_do_not_admit_training(tmp_path: Path, limited_train: bool):
     case = Case(tmp_path / "private")
     case.policy["rule_mapping"] = {"carrier": "supplies"}
+    mandate = None
+    if limited_train:
+        owner = "generated-rights-owner"
+        mandate = LearningMandates(
+            case.directory, ACTOR.tenant, case.training.engagement_id, owner=owner
+        )
+        agreement = digest("generated-limited-repair-agreement")
+        enrolled = mandate.enroll(
+            dict(
+                mandate_id="generated-limited-repair",
+                owner_id=owner,
+                delegate=ACTOR.actor,
+                mode="manual",
+                workflow="workflow",
+                connectors=["generated-reader"],
+                trace_source="decisions",
+                correction_source="truth",
+                field="description",
+                fields=["description"],
+                labels=["supplies", "freight"],
+                profile=open_weight.PROFILE,
+                uses=["inspect", "evaluate", "train"],
+                permitted_error_pairs=[["supplies", "freight"]],
+                agreement_revision=agreement,
+                trainer=ACTOR.actor,
+                payer="generated-zero-cost-cpu",
+                reviewer="generated-independent-reviewer",
+                audience="generated-private-review",
+                destination="generated-local",
+                expires_at=int(time.time()) + 600,
+                max_runs=2,
+                max_fits=1,
+                max_total_seconds=5,
+                max_seconds_per_fit=5,
+                max_rows_per_run=5,
+                max_total_rows=5,
+                max_cost_cents=0,
+            ),
+            actor=owner,
+        )
+        case.policy.update(
+            mandate_ref="generated-limited-repair",
+            mandate_revision=enrolled["mandate_revision"],
+            agreement_revision=agreement,
+            owner_ref=owner,
+        )
     case.save_policy()
     case.bind_verifier()
     for index in range(1, 4):
@@ -281,9 +332,27 @@ def test_three_independent_residuals_do_not_admit_training(tmp_path: Path):
         assert result["residual_group_count"] == index
         assert result["verdict"] == "held"
         assert result["reason_code"] == (
-            "too_early_to_train" if index < 3 else "training_mandate_required"
+            "too_early_to_train"
+            if index < 3
+            else "untouched_holdout_required"
+            if limited_train
+            else "training_mandate_required"
         )
-    assert not (case.directory / "learning-mandates.sqlite3").exists()
+        if index == 1:
+            case.ingest(decision("same-supplier", "supplier-1"))
+            case.ingest(outcome("same-supplier"), truth=True)
+            repeated = case.refresh()
+            assert repeated["verified_root_count"] == 2
+            assert repeated["residual_group_count"] == 1
+            assert repeated["reason_code"] == "too_early_to_train"
+    with sqlite3.connect(case.training.path) as db:
+        assert db.execute("SELECT count(*) FROM jobs").fetchone() == (0,)
+    if mandate is None:
+        assert not (case.directory / "learning-mandates.sqlite3").exists()
+    else:
+        current = mandate.inspect("generated-limited-repair", actor=ACTOR.actor)
+        assert current["reserved_fits"] == current["reserved_seconds"] == 0
+        assert "qualified_model_required" in result["missing_gates"]
 
 
 def test_missing_inputs_are_unknown_and_protected_context_is_never_read(tmp_path: Path):

@@ -165,6 +165,17 @@ class PrivateDecisionContext:
     def revision(self, snapshot: LiveSnapshot) -> str:
         return digest(self._grant(snapshot))
 
+    def seal_aggregate(self, snapshot: LiveSnapshot, summary: dict[str, Any]) -> str:
+        """Authenticate worker-produced counts under the same current context grant."""
+        grant = self._grant(snapshot)
+        key = _read_private(self.authority.directory / "live-authority-key.json", 4096)["key"]
+        body = canonical([digest(grant), snapshot.evidence_revision, summary]).encode()
+        seal = hmac.digest(
+            bytes.fromhex(key), b"opentour.live-incumbent-aggregate.v1\0" + body, "sha256"
+        ).hex()
+        _require(self._grant(snapshot) == grant)
+        return seal
+
     def _has_origin(self, root: VerifiedRoot, grant: dict[str, Any]) -> bool:
         """Only normalized commit metadata is read here, before any raw input."""
         live = LiveEvidence(self.authority.directory, self.authority)

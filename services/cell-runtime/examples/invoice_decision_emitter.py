@@ -3,25 +3,37 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 import os
+import re
 import sqlite3
+import subprocess
+import tempfile
+import time
 from collections.abc import Iterator
 from contextlib import closing, contextmanager
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Never
 
+from opentour_cell.pilot import repair_bundle as bundle
 from opentour_cell.pilot.intake_mcp import IntakeError, require_ref
 from opentour_cell.pilot.live_evidence import _canonical, _digest
 from opentour_cell.pilot.live_reader import PAGE
 from opentour_cell.pilot.onboarding_mcp import _private_parent, _read_private
+from opentour_cell.pilot.readout import parse_manifest
 from opentour_cell.pilot.repair_workflow import _record
 from opentour_cell.pilot.training import _check_file
 
 SCHEMA = "opentour.example.invoice-decision-emitter.v1"
-INVOICE_ACTIONS = ("freight", "review", "defer", "ask")
+OBSERVATION = "opentour.example.invoice-observation.v1"
+OBSERVATION_SELECTION = "opentour.example.invoice-observation-selection.v1"
+INVOICE_ACTIONS = ("freight", "review", "defer", "ask", "supplies")
 Json = dict[str, Any]
+_BASENAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,95}")
+_HASH = re.compile(r"[0-9a-f]{64}")
+_OBSERVED_SCOPE = ("tenant", "workflow", "engagement_epoch", "namespace", "policy_ref")
 
 
 def require(condition: object, reason: str) -> None:
@@ -59,6 +71,155 @@ class Scope:
         )
         value.pop("schema_version")
         return cls(**value)
+
+
+class _Observation:
+    """Verify an independently signed observation; no raw inputs or private keys."""
+
+    def __init__(self, directory: Path, filename: str, scope: Scope, commit: Json):
+        require(
+            isinstance(filename, str)
+            and _BASENAME.fullmatch(filename)
+            and filename.endswith(".json"),
+            "invalid_observation_file",
+        )
+        self.directory, self.scope, self.commit = directory, scope, commit
+        self.selection_path = directory / "invoice-observation-selection.json"
+        self.selection_bytes = bundle._read(self.selection_path, 8192)
+        self.selection = parse_manifest(self.selection_bytes)
+        fields = {
+            "schema_version",
+            "grant_ref",
+            *_OBSERVED_SCOPE,
+            "producer_ref",
+            "model_ref",
+            "model_revision",
+            "public_key_file",
+            "public_key_sha256",
+            "expires_at",
+        }
+        require(
+            set(self.selection) == fields
+            and self.selection["schema_version"] == OBSERVATION_SELECTION,
+            "invalid_observation_selection",
+        )
+        for name, value in self.selection.items():
+            if name == "expires_at":
+                require(type(value) is int and 0 < value < 2**63, "invalid_observation_expiry")
+            else:
+                require_ref(value)
+        key_file = self.selection["public_key_file"]
+        require(_BASENAME.fullmatch(key_file), "invalid_observation_key_file")
+        require(_HASH.fullmatch(self.selection["public_key_sha256"]), "invalid_observation_key")
+        self.key_path = directory / key_file
+        self.key = bundle._read(self.key_path, 16384)
+        require(b"PRIVATE KEY" not in self.key and b"PUBLIC KEY" in self.key, "public_key_required")
+        self._permission()
+        self.receipt_path = directory / filename
+        self.receipt_bytes = bundle._read(self.receipt_path, 16384)
+        self.receipt = parse_manifest(self.receipt_bytes)
+        require(set(self.receipt) == {"claim", "signature"}, "invalid_observation_receipt")
+        claim = self.receipt["claim"]
+        require(isinstance(claim, dict), "invalid_observation_receipt")
+        self.claim: Json = claim
+        self.revalidate()
+
+    def _permission(self) -> None:
+        selected = self.selection
+        require(
+            bundle._read(self.selection_path, 8192) == self.selection_bytes,
+            "observation_selection_changed",
+        )
+        require(bundle._read(self.key_path, 16384) == self.key, "observation_key_changed")
+        require(bundle._sha(self.key) == selected["public_key_sha256"], "observation_key_mismatch")
+        require(time.time() < selected["expires_at"], "observation_permission_expired")
+        require(
+            not os.path.lexists(
+                self.directory / f"invoice-observation-withdrawn-{selected['grant_ref']}.json"
+            ),
+            "observation_permission_withdrawn",
+        )
+        require(
+            all(selected[name] == getattr(self.scope, name) for name in _OBSERVED_SCOPE),
+            "observation_scope_mismatch",
+        )
+
+    def revalidate(self) -> None:
+        selected, claim = self.selection, self.claim
+        self._permission()
+        require(
+            bundle._read(self.receipt_path, 16384) == self.receipt_bytes,
+            "observation_receipt_changed",
+        )
+        fields = {
+            "schema_version",
+            "grant_ref",
+            "producer_ref",
+            *_OBSERVED_SCOPE,
+            *self.commit,
+            "model_ref",
+            "model_revision",
+            "input_ref",
+            "receipt_ref",
+        }
+        require(
+            set(claim) == fields and claim["schema_version"] == OBSERVATION,
+            "invalid_observation_claim",
+        )
+        for name, value in claim.items():
+            if name == "decision_at":
+                require(type(value) is int and 0 <= value < 2**63, "invalid_decision_time")
+            else:
+                require_ref(value)
+        require(
+            all(claim[name] == value for name, value in self.commit.items()),
+            "observation_commit_mismatch",
+        )
+        require(
+            all(
+                claim[name] == selected[name]
+                for name in (
+                    *_OBSERVED_SCOPE,
+                    "grant_ref",
+                    "producer_ref",
+                    "model_ref",
+                    "model_revision",
+                )
+            ),
+            "observation_producer_mismatch",
+        )
+        encoded = self.receipt["signature"]
+        require(isinstance(encoded, str) and len(encoded) <= 8192, "invalid_observation_signature")
+        signature = base64.b64decode(encoded, validate=True)
+        require(0 < len(signature) <= 4096, "invalid_observation_signature")
+        with tempfile.TemporaryDirectory() as temp:
+            key, sig = Path(temp) / "public", Path(temp) / "signature"
+            bundle._write_private(key, self.key)
+            bundle._write_private(sig, signature)
+            bundle._crypto(
+                ["dgst", "-sha256", "-verify", str(key), "-signature", str(sig)],
+                bundle._bytes(claim),
+                "invalid_observation_signature",
+            )
+        # Signature verification is an independent process boundary. Check the
+        # current authority and pinned files again before returning to a writer.
+        self._permission()
+        require(
+            bundle._read(self.receipt_path, 16384) == self.receipt_bytes,
+            "observation_receipt_changed",
+        )
+
+    def metadata(self) -> Json:
+        return dict(
+            input_ref=self.claim["input_ref"],
+            input_fidelity="observed",
+            actor_ref=self.claim["producer_ref"],
+            model_ref=self.claim["model_ref"],
+            # The immutable receipt includes its opaque ref and exact model revision.
+            # A later re-signed/rebound receipt cannot reinterpret a prior commit.
+            source_provenance="invoice-observed-"
+            + _digest([self.selection, bundle._sha(self.receipt_bytes)])[:40],
+        )
 
 
 class InvoiceJournal:
@@ -137,12 +298,31 @@ class InvoiceJournal:
         family: str,
         action: str,
         decision_at: int,
+        observation: str | None = None,
     ) -> Json:
         """This sample commits the effective invoice action and outbox event atomically."""
         for reference in (operation, attempt, decision, case, family):
             require_ref(reference)
         require(action in INVOICE_ACTIONS, "invalid_invoice_action")
         require(type(decision_at) is int and 0 <= decision_at < 2**63, "invalid_decision_time")
+        observed = (
+            None
+            if observation is None
+            else _Observation(
+                self.path.parent,
+                observation,
+                self.scope,
+                dict(
+                    operation=operation,
+                    attempt=attempt,
+                    decision=decision,
+                    case=case,
+                    family=family,
+                    action=action,
+                    decision_at=decision_at,
+                ),
+            )
+        )
         effect = _digest([self.identity, operation, decision])
         event = {
             "kind": "DecisionRecorded",
@@ -161,9 +341,13 @@ class InvoiceJournal:
             "actor_ref": None,
             "model_ref": None,
         }
+        if observed is not None:
+            event.update(observed.metadata())
         encoded = _canonical(event)
         with self._connection(write=True) as db:
             self._require_scope(db)
+            if observed is not None:
+                observed.revalidate()
             require(
                 db.execute("SELECT operation FROM attempts WHERE attempt=?", (attempt,)).fetchone()
                 == (operation,),
@@ -188,6 +372,8 @@ class InvoiceJournal:
                     "INSERT INTO commits VALUES (?, ?, ?, ?)",
                     (position, operation, decision, encoded),
                 )
+            if observed is not None:
+                observed.revalidate()
         return {"event_ref": event["event_id"], "checkpoint": position}
 
     def export_page(self, page_ref: str, after: int, through: int, limit: int = 100) -> Json:
@@ -251,6 +437,7 @@ def main() -> int:
         commit.add_argument(f"--{field}", required=True)
     commit.add_argument("--action", choices=INVOICE_ACTIONS, required=True)
     commit.add_argument("--decision-at", type=int, required=True)
+    commit.add_argument("--observation", help="Basename of an independently signed private receipt")
     page = commands.add_parser("export")
     page.add_argument("--page-ref", required=True)
     page.add_argument("--after", type=int, required=True)
@@ -274,11 +461,12 @@ def main() -> int:
                 family=parsed.family,
                 action=parsed.action,
                 decision_at=parsed.decision_at,
+                observation=parsed.observation,
             )
         else:
             result = emitter.export_page(parsed.page_ref, parsed.after, parsed.through)
         print(json.dumps(result, sort_keys=True))
-    except (OSError, ValueError, sqlite3.Error, TypeError):
+    except (OSError, ValueError, sqlite3.Error, TypeError, subprocess.SubprocessError):
         cli.exit(2, "invoice_decision_emitter_unavailable\n")
     return 0
 
