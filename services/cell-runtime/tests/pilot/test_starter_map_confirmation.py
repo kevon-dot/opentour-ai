@@ -171,6 +171,7 @@ def test_actual_owner_map_to_frozen_unscored_and_worker_readback(joined):
     frozen = session.freeze(splits=splits, expected_revision=5)
     assert frozen.state == "frozen_unscored"
     assert (frozen.proposed, frozen.resolved, frozen.development, frozen.reserved) == (5, 5, 2, 3)
+    assert frozen.uncovered_critical == ()
     reopened = StarterCaseSession(session.settings, session.actor)
     assert reopened.freeze(splits=splits, expected_revision=5) == frozen
     records = list(h.path.parent.glob("starter-case-authority-*.json"))
@@ -343,3 +344,22 @@ def test_missing_frozen_plan_term_denies_before_authoring(joined, field):
     with pytest.raises(ValueError):
         session.propose(provider)
     assert provider.calls == 0 and not session.core.path.exists()
+
+
+@pytest.mark.parametrize("omit_review", [False, True])
+def test_material_coverage_is_separate_from_permitted_owner_corrections(joined, omit_review):
+    _, session, _, _, _ = joined
+    session.propose(FiveFamilies())
+    adjudicate(session)
+    split = {
+        f"family-{i}": "excluded" if omit_review and i in (0, 1) else "reserved" for i in range(5)
+    }
+    frozen = session.freeze(splits=split, expected_revision=5)
+    review_branch = session.review()["cases"][0]["branch_id"]
+    assert frozen.uncovered_critical == ((review_branch,) if omit_review else ())
+    assert len(frozen.coverage) == 3
+    assert {action: count for _, action, count in frozen.coverage} == {
+        "REVIEW": 0 if omit_review else 2,
+        "APPROVE": 1,
+        "MANUAL": 2,
+    }
