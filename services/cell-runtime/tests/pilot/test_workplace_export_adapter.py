@@ -14,6 +14,7 @@ from test_workplace_context import WorkplaceFixture, direct, put
 
 EXAMPLE = Path(__file__).resolve().parents[2] / "examples/workplace_export_adapter.py"
 MANIFEST = "workplace-export-adapter.json"
+VERSION_KEY = "workplace-export-version-key"
 PROVIDER = "opentour-structured-export"
 SCHEMA = "opentour.example.workplace-export-adapter.v1"
 SENTINEL = "GENERATED_PRIVATE_OUTSIDE_FIELD"
@@ -32,6 +33,10 @@ def configure(f: WorkplaceFixture, *, horizons=(300, 300)):
     }
     f.cfg["watermark_mode"] = "provider_verified"
     put(f.connection, f.cfg)
+    key = f.directory / VERSION_KEY
+    if not key.exists():
+        key.write_text(bytes(range(32)).hex())
+        key.chmod(0o600)
     manifest = {"schema_version": SCHEMA, "expires_at": f.grant["expires_at"], "resources": {}}
     for role, horizon in zip(workplace.ROLES, horizons, strict=True):
         uri = f.cfg["roles"][role]["namespace"] + "chosen"
@@ -184,6 +189,30 @@ def test_active_session_rechecks_manifest_before_read(tmp_path):
         assert child.stderr.read() == ""
 
 
+def repin_changed_trace(f, manifest):
+    pin = manifest["resources"]["trace"]
+    path = f.directory / pin["file"]
+    body = json.loads(path.read_bytes())
+    body["rows"][0]["at_decision_description"] += " regenerated"
+    put(path, body)
+    pin["sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
+    put(f.directory / MANIFEST, manifest)
+
+
+def test_republished_content_changes_catalog_revision_even_if_issuer_reuses_version(tmp_path):
+    f = WorkplaceFixture.small(tmp_path)
+    manifest = configure(f)
+    request = ("resources/list", {})
+    _, original = wire(f.directory, request)
+    repin_changed_trace(f, manifest)
+    _, updated = wire(f.directory, request)
+    old_meta = original[1]["result"]["resources"][0]["_meta"][workplace.META]
+    new_meta = updated[1]["result"]["resources"][0]["_meta"][workplace.META]
+    assert old_meta["version"] != new_meta["version"]
+    assert old_meta | {"version": new_meta["version"]} == new_meta
+    assert manifest["resources"]["trace"]["sha256"] not in json.dumps(updated)
+
+
 def exact_descriptor_probe(directory: Path):
     """Run the existing worker CLI and a separate descriptor-backed process on Linux."""
     f = WorkplaceFixture.small(directory)
@@ -217,9 +246,14 @@ def exact_descriptor_probe(directory: Path):
         "trace": 320,
         "correction": 310,
     }
-    assert receipt["wire_sha256"] == {
-        role: pin["sha256"] for role, pin in manifest["resources"].items()
-    }
+    for role in workplace.ROLES:
+        pin = manifest["resources"][role]
+        _, rows = wire(f.directory, ("resources/read", {"uri": pin["uri"]}))
+        projected = rows[1]["result"]["contents"][0]["text"]
+        assert receipt["wire_sha256"][role] == hashlib.sha256(projected.encode()).hexdigest()
+        assert (
+            json.loads(projected)["projection"]["version"] == admission["sources"][role]["version"]
+        )
     assert json.loads(Path(snapshot["grant_path"]).read_bytes())["as_of"] == 310
     assert json.loads(direct(f, "acquire", *expected).stdout) == snapshot
 
@@ -232,6 +266,19 @@ def exact_descriptor_probe(directory: Path):
     parked[1].rename(body_paths[1])
     restarted = direct(f, "acquire", *expected)
     assert restarted.returncode == 0 and json.loads(restarted.stdout) == snapshot
+
+    original_body = body_paths[0].read_bytes()
+    original_manifest = (f.directory / MANIFEST).read_bytes()
+    repin_changed_trace(f, manifest)
+    # Both bodies can be unavailable. The old pair is refused from catalog metadata alone.
+    body_paths[0].rename(parked[0])
+    reissued = direct(f, "acquire", *expected)
+    assert reissued.returncode == 1 and not reissued.stdout
+    assert reissued.stderr.strip() == "workplace_selected_pair_changed"
+    assert receipt_path.read_bytes() == before
+    parked[0].rename(body_paths[0])
+    body_paths[0].write_bytes(original_body)
+    (f.directory / MANIFEST).write_bytes(original_manifest)
 
     f.versions["correction"] = "source-v2"
     configure(f, horizons=(320, 320))
@@ -253,4 +300,5 @@ def exact_descriptor_probe(directory: Path):
         "total_catalog_rows": admission["counts"],
         "interrupted_exit": partial.returncode,
         "stale_exit": stale.returncode,
+        "repinned_issuer_version_exit": reissued.returncode,
     }

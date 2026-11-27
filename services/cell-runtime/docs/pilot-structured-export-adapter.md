@@ -21,6 +21,13 @@ chmod 700 "$adapter"
 sha256sum "$adapter"
 ```
 
+On first setup create a mode-0600 per-installation version key and retain it
+with the other private installation material.
+
+```sh
+(umask 077; set -C; openssl rand -hex 32 > "$PILOT_DIR/workplace-export-version-key")
+```
+
 Set the workplace connection's reader provider to `opentour-structured-export`,
 its executable to the absolute launcher path, its SHA-256 to the value above,
 and its `env_names` to an empty array. Keep the signed/admitted business scope and
@@ -49,6 +56,12 @@ issuer for each role. Use file names such as
 tenant, workflow, field, policy version and schema version. The projection
 uses provider `opentour-structured-export` and a distinct source version
 for each change to that resource's contents or cutoff.
+
+The adapter derives the catalog's opaque version from the private key, the
+issuer projection and the exact file pin. It returns that same version in the
+MCP projection after validating the original bytes. A new body pinned under
+the same issuer version still changes the catalog version. Keep the version
+key stable so exact retries resolve the same pair.
 
 Each resource file contains that exact `projection` plus its `rows`. The
 projection's sorted `columns` and `row_count` describe the file. For example,

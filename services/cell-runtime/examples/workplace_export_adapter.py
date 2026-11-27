@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import os
 import re
@@ -13,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 MANIFEST = "workplace-export-adapter.json"
+VERSION_KEY = "workplace-export-version-key"
 SCHEMA = "opentour.example.workplace-export-adapter.v1"
 PROJECTION = "opentour.pilot.workplace-projection.v1"
 META = "ai.opentour/workplace"
@@ -21,7 +23,7 @@ PROVIDER = "opentour-structured-export"
 ROLES = ("trace", "correction")
 SCOPE = {"organization", "workflow", "field", "policy_version", "source_schema_version"}
 BASENAME = re.compile(r"workplace-export-(trace|correction)-[A-Za-z0-9_-]{1,64}\.json")
-TOKEN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}")
+TOKEN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")
 URI = re.compile(r"(workplace|https)://[a-z0-9][a-z0-9.-]*/[A-Za-z0-9_-]+(/[A-Za-z0-9_-]+)+")
 Json = dict[str, Any]
 
@@ -49,6 +51,10 @@ def decode(raw: bytes) -> Json:
     return dict(value)
 
 
+def encode(value: Json) -> str:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False)
+
+
 def private_read(path: Path, limit: int) -> bytes:
     descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     with os.fdopen(descriptor, "rb") as stream:
@@ -74,6 +80,9 @@ class ExportAdapter:
         info = root.stat()
         require(info.st_uid == os.getuid() and not info.st_mode & 0o077)
         self.root = root
+        self.key_file = private_read(root / VERSION_KEY, 65)
+        require(re.fullmatch(rb"[a-f0-9]{64}\n?", self.key_file))
+        key = bytes.fromhex(self.key_file.decode())
         self.manifest = read_manifest(root)
         selected = decode(self.manifest)
         require(
@@ -120,11 +129,13 @@ class ExportAdapter:
                 and all(TOKEN.fullmatch(name) for name in columns)
                 and columns == sorted(set(columns))
             )
+            # Bind discovery to exact privately pinned bytes without publishing their digest.
+            version = "projection-" + hmac.digest(key, encode(pin).encode(), "sha256").hex()[:48]
             self.catalog[pin["uri"]] = {
                 "uri": pin["uri"],
                 "name": role,
                 "mimeType": "application/json",
-                "_meta": {META: projection},
+                "_meta": {META: projection | {"version": version}},
             }
         trace, correction = (self.resources[role]["projection"] for role in ROLES)
         require(
@@ -136,7 +147,11 @@ class ExportAdapter:
         self.check_current()
 
     def check_current(self) -> None:
-        require(self.expires_at > time.time() and read_manifest(self.root) == self.manifest)
+        require(
+            self.expires_at > time.time()
+            and read_manifest(self.root) == self.manifest
+            and private_read(self.root / VERSION_KEY, 65) == self.key_file
+        )
 
     def list(self, params: Json) -> Json:
         self.check_current()
@@ -164,7 +179,8 @@ class ExportAdapter:
             and all(isinstance(row, dict) and set(row) == columns for row in body["rows"])
         )
         self.check_current()
-        return {"contents": [{"uri": uri, "mimeType": "application/json", "text": raw.decode()}]}
+        body["projection"] = self.catalog[uri]["_meta"][META]
+        return {"contents": [{"uri": uri, "mimeType": "application/json", "text": encode(body)}]}
 
 
 def serve(adapter: ExportAdapter) -> None:
