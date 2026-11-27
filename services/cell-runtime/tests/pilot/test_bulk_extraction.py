@@ -801,7 +801,10 @@ def test_contradictory_payload_at_the_same_revision_is_disputed(private: Path) -
         if f["family_id"] == family_id(TENANT, res, "generated-decision-1")
     )
     assert entry["state"] == "disputed"
-    assert engine.reconcile_outcomes(run).decisions == 11  # the disputed decision is excluded
+    # The disputed decision stays one of the input decisions and is reported disputed.
+    result = engine.reconcile_outcomes(run)
+    assert (result.decisions, result.disputed) == (12, 1)
+    assert result.verified + result.pending + result.disputed == result.decisions
 
 
 def test_schema_drift_pauses_only_the_affected_partition(private: Path) -> None:
@@ -1016,3 +1019,120 @@ def test_large_generated_history_streams_in_bounded_pages_and_resumes(private: P
     assert len(engine.semantic_manifest(run)["admissions"]) == total
     assert max(s for _, s in source.reads) % 500 == 0  # every read began on a sealed cursor
     assert len(source.reads) == len({(p, s) for p, s in source.reads})  # no page read twice
+
+
+# ---- independent-review regressions (closer) ------------------------------------------------
+
+RD, RO = "generated-resource-decisions", "generated-resource-outcomes"
+
+
+def test_changes_skipped_during_withdrawal_are_re_read_by_the_successor(private: Path) -> None:
+    source = GeneratedSource(history())
+    engine, grants = make(private, source)
+    run = engine.start(RunLimits(page_size=3))
+    engine.step(run)
+    source.push("decision", change(11, RD, 88, 1))
+    source.push("decision", change(12, RD, 89, 1))
+    grants.revoke(RD)
+    engine.consume_changes(run, "decision")
+    ghost = family_id(TENANT, RD, "generated-decision-88")
+    assert ghost not in {f["family_id"] for f in engine.families(run)}
+    grants.book[RD] = "generated-grant-2"  # authority returns under a new grant revision
+    successor = engine.successor(run)
+    engine.step(successor)
+    engine.consume_changes(successor, "decision")
+    live = {f["family_id"] for f in engine.families(successor) if f["state"] == "live"}
+    assert {ghost, family_id(TENANT, RD, "generated-decision-89")} <= live
+    assert engine.status(successor)["feeds"][0]["cursor"] == 12
+
+
+def test_change_feed_counts_bytes_and_stops_at_the_run_byte_limit(private: Path) -> None:
+    source = GeneratedSource(history())
+    engine, _ = make(private, source)
+    run = engine.start(RunLimits(page_size=3))
+    engine.step(run)
+    base = engine.status(run)["input_bytes"]
+    source.push("decision", change(11, RD, 88, 1))  # 200 bytes each
+    source.push("decision", change(12, RD, 89, 1))
+    engine.consume_changes(run, "decision")
+    assert engine.status(run)["input_bytes"] == base + 400
+
+    tight = GeneratedSource(history())
+    engine2, _ = make(private, tight, name="tight.sqlite3")
+    run2 = engine2.start(RunLimits(page_size=3))
+    engine2.step(run2)
+    cap = engine2.status(run2)["input_bytes"] + 200
+    engine3, _ = make(private, tight, name="cap.sqlite3")
+    run3 = engine3.start(RunLimits(page_size=3, max_run_bytes=cap))
+    engine3.step(run3)
+    tight.push("decision", change(11, RD, 88, 1))
+    tight.push("decision", change(12, RD, 89, 1))
+    engine3.consume_changes(run3, "decision")
+    status = engine3.status(run3)
+    assert (status["state"], status["reason"]) == ("incomplete", "run_limit_bytes")
+    assert status["input_bytes"] <= cap
+    assert status["feeds"][0]["cursor"] == 10  # the unapplied entries were not skipped past
+
+
+def test_run_stopped_by_a_change_feed_limit_is_never_reported_complete(private: Path) -> None:
+    probe = GeneratedSource(history())
+    engine, _ = make(private, probe, name="probe.sqlite3")
+    seen = engine.start(RunLimits(page_size=3))
+    engine.step(seen)
+    rows = engine.status(seen)["rows_seen"]
+    source = GeneratedSource(history())
+    engine2, _ = make(private, source)
+    run = engine2.start(RunLimits(page_size=3, max_run_rows=rows))
+    engine2.step(run)
+    source.push("decision", change(11, RD, 88, 1))
+    engine2.consume_changes(run, "decision")
+    status = engine2.status(run)
+    assert status["state"] == "incomplete"
+    assert status["snapshot_state"] == "incomplete" and not status["fit_usable"]
+    assert not engine2.publish(run).published
+
+
+def test_an_empty_terminal_page_completes_a_partition_that_ended_on_a_page_boundary(
+    private: Path,
+) -> None:
+    class TrailingEmpty(GeneratedSource):
+        def read_partition(self, partition_id: str, *, start: int, limit: int) -> PartitionPage:
+            rows = self.partitions[partition_id][2]
+            chunk = tuple(rows[start : start + limit])
+            return PartitionPage(partition_id, start, chunk, self.mapping, not chunk)
+
+    source = TrailingEmpty(
+        {
+            "generated-decisions-0": (RD, "decision", [decision(i) for i in range(6)]),
+            "generated-outcomes-0": (RO, "outcome", []),
+        }
+    )
+    engine, _ = make(private, source)
+    run = engine.start(RunLimits(page_size=3))
+    engine.step(run)
+    assert {p["state"] for p in engine.status(run)["partitions"]} == {"complete"}
+    assert engine.publish(run).published
+
+
+def test_a_grant_withdrawn_inside_the_publish_commit_publishes_nothing(private: Path) -> None:
+    class FlipsAfter(Grants):
+        def __init__(self, resources: Iterable[str]) -> None:
+            super().__init__(resources)
+            self.armed = False
+            self.calls = 0
+
+        def current(self, resource_id: str) -> str | None:
+            if self.armed:
+                self.calls += 1
+                if self.calls > 4:  # four pre-commit checks pass; the commit re-read fails
+                    return None
+            return super().current(resource_id)
+
+    source = GeneratedSource(history())
+    grants = FlipsAfter({RD, RO})
+    engine, _ = make(private, source, grants)
+    run = engine.start(RunLimits(page_size=3))
+    engine.step(run)
+    grants.armed = True
+    result = engine.publish(run)
+    assert not result.published and engine.fit_snapshot() is None

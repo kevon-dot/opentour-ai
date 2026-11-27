@@ -293,6 +293,9 @@ _SCHEMA = (
         run_id TEXT NOT NULL, feed TEXT NOT NULL, after_cursor INTEGER NOT NULL,
         through INTEGER NOT NULL, entries INTEGER NOT NULL,
         PRIMARY KEY(run_id, feed, after_cursor, through))""",
+    """CREATE TABLE IF NOT EXISTS change_holds (
+        run_id TEXT NOT NULL, feed TEXT NOT NULL, resource_id TEXT NOT NULL,
+        feed_revision INTEGER NOT NULL, PRIMARY KEY(run_id, feed, resource_id))""",
     """CREATE TABLE IF NOT EXISTS snapshots (
         seq INTEGER PRIMARY KEY AUTOINCREMENT, snapshot_id TEXT NOT NULL UNIQUE,
         run_id TEXT NOT NULL, manifest_digest TEXT NOT NULL, completeness TEXT NOT NULL,
@@ -566,7 +569,8 @@ class BulkExtraction:
             end = page.start + len(page.rows)
             if page.start > cursor:
                 return PageOutcome("cursor_gap")
-            if end <= cursor and not (page.exhausted and cursor == 0 and not page.rows):
+            terminal_empty = page.exhausted and not page.rows and page.start == cursor
+            if end <= cursor and not terminal_empty:
                 db.execute(
                     "UPDATE runs SET duplicate_deliveries=duplicate_deliveries+? WHERE run_id=?",
                     (len(page.rows), run_id),
@@ -789,7 +793,7 @@ class BulkExtraction:
                 raise ExtractionError("change_page_invalid")
             limits = self.limits_of(run)
             tally: Counter[str] = Counter()
-            rows_seen = run["rows_seen"]
+            rows_seen, input_bytes = run["rows_seen"], run["input_bytes"]
             partitions = {
                 r["resource_id"]: r
                 for r in db.execute(
@@ -802,8 +806,13 @@ class BulkExtraction:
                     limit = "run_limit_rows"
                     break
                 replay = entry.feed_revision <= cursor
+                size = max(entry.row.size_bytes, 0) if entry.row is not None else 0
+                if not replay and input_bytes + size > limits.max_run_bytes:
+                    limit = "run_limit_bytes"
+                    break
                 tally[self._apply_change(db, run_id, partitions, entry, replay, limits)] += 1
                 rows_seen += 0 if replay else 1
+                input_bytes += 0 if replay else size
             if not limit:
                 db.execute(
                     "UPDATE feeds SET cursor=MAX(cursor, ?) WHERE run_id=? AND feed=?",
@@ -814,9 +823,9 @@ class BulkExtraction:
                     (run_id, page.feed, page.after, page.through, len(page.entries)),
                 )
             db.execute(
-                "UPDATE runs SET rows_seen=?, duplicate_deliveries=duplicate_deliveries+?"
-                " WHERE run_id=?",
-                (rows_seen, tally["duplicate"], run_id),
+                "UPDATE runs SET rows_seen=?, input_bytes=?,"
+                " duplicate_deliveries=duplicate_deliveries+? WHERE run_id=?",
+                (rows_seen, input_bytes, tally["duplicate"], run_id),
             )
             if limit:
                 db.execute(
@@ -852,6 +861,15 @@ class BulkExtraction:
                 " WHERE run_id=? AND resource_id=? AND state IN ('pending','complete')",
                 (run_id, entry.resource_id),
             )
+            if not replay:
+                # The shared feed cursor still advances for other resources, so remember the
+                # earliest entry that was NOT applied: a successor must re-read from there.
+                db.execute(
+                    "INSERT INTO change_holds VALUES (?,?,?,?) ON CONFLICT(run_id, feed,"
+                    " resource_id) DO UPDATE SET feed_revision=MIN(feed_revision,"
+                    " excluded.feed_revision)",
+                    (run_id, entry.feed, entry.resource_id, entry.feed_revision),
+                )
             return "withdrawn"
         if entry.op == "tombstone":
             if replay:
@@ -1010,7 +1028,7 @@ class BulkExtraction:
         rejected = Counter(
             r["reason"] for r in self._all("SELECT reason FROM rejections WHERE run_id=?", run_id)
         )
-        complete = all(p["state"] == "complete" for p in parts)
+        complete = run["state"] == "active" and all(p["state"] == "complete" for p in parts)
         latest = self.fit_snapshot()
         return {
             "run_id": run_id,
@@ -1084,6 +1102,11 @@ class BulkExtraction:
         snapshot_id = "snapshot-" + manifest["digest"][:32]
         completeness = self.completeness(run_id)
         with self._txn() as db:
+            # Authority is re-read inside the commit scope, as for pages: a grant withdrawn
+            # after the checks above publishes nothing.
+            for p in parts:
+                if self._grants.current(p["resource_id"]) != p["grant_revision"]:
+                    return PublishResult(False, (f"partition_withdrawn:{p['partition_id']}",))
             db.execute(
                 "INSERT OR IGNORE INTO snapshots(snapshot_id, run_id, manifest_digest,"
                 " completeness, counts) VALUES (?,?,?,?,?)",
@@ -1166,8 +1189,21 @@ class BulkExtraction:
                         values = [new_id, *tuple(r)[1:]]
                         marks = ",".join("?" * len(values))
                         db.execute(f"INSERT OR IGNORE INTO {table} VALUES ({marks})", values)
+            holds = {
+                (h["feed"], h["resource_id"]): h["feed_revision"]
+                for h in db.execute("SELECT * FROM change_holds WHERE run_id=?", (run_id,))
+            }
             for f in db.execute("SELECT * FROM feeds WHERE run_id=?", (run_id,)).fetchall():
-                db.execute("INSERT INTO feeds VALUES (?,?,?,?)", (new_id, *tuple(f)[1:]))
+                # Re-read from just before the earliest unapplied entry of any resource that
+                # is authorized again; re-applying the rest is idempotent, never a skip.
+                owed = [
+                    rev for (feed, res), rev in holds.items() if feed == f["feed"] and res in keep
+                ]
+                cursor = min([f["cursor"], *(rev - 1 for rev in owed)])
+                db.execute(
+                    "INSERT INTO feeds VALUES (?,?,?,?)",
+                    (new_id, f["feed"], f["cut"], max(cursor, f["cut"])),
+                )
         return new_id
 
     # ---- as-of features and outcome reconciliation ------------------------------------
@@ -1208,10 +1244,11 @@ class BulkExtraction:
 
     def reconcile_outcomes(self, run_id: str) -> Reconciliation:
         """Distinct decisions into pending/disputed/verified; unmatched outcomes separately."""
-        live = [f for f in self.families(run_id) if f["state"] == "live"]
+        live = [f for f in self.families(run_id) if f["state"] in ("live", "disputed")]
         ids = {f["family_id"] for f in live}
         rows = self._all(
-            "SELECT a.* FROM admissions a WHERE a.run_id=? AND a.state='admitted' AND"
+            "SELECT a.* FROM admissions a WHERE a.run_id=? AND a.state IN ('admitted','disputed')"
+            " AND"
             " a.revision=(SELECT MAX(revision) FROM admissions b WHERE b.run_id=a.run_id"
             " AND b.family_id=a.family_id)",
             run_id,
@@ -1221,9 +1258,12 @@ class BulkExtraction:
             r["decision_key"] for r in rows if r["kind"] == "decision" and r["decision_key"]
         }
         finals: dict[str, set[str]] = {}
+        # A contradictory row never leaves the count: its decision stays an input decision and
+        # is reported disputed, because nothing about it can be trusted as verified.
+        contested = {r["decision_key"] for r in rows if r["state"] == "disputed"} & decisions
         unmatched = non_authoritative = 0
         for r in rows:
-            if r["kind"] != "outcome":
+            if r["kind"] != "outcome" or r["state"] == "disputed":
                 continue
             if r["decision_key"] not in decisions:
                 unmatched += 1
@@ -1231,8 +1271,11 @@ class BulkExtraction:
                 non_authoritative += 1
             else:
                 finals.setdefault(r["decision_key"], set()).add(r["label"])
-        disputed = sum(1 for labels in finals.values() if len(labels) > 1)
-        verified = sum(1 for labels in finals.values() if len(labels) == 1)
+        conflicting = {key for key, labels in finals.items() if len(labels) > 1} | contested
+        disputed = len(conflicting)
+        verified = sum(1 for key, labels in finals.items() if len(labels) == 1) - len(
+            {key for key, labels in finals.items() if len(labels) == 1} & contested
+        )
         return Reconciliation(
             len(decisions),
             verified,
