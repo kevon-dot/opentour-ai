@@ -1,0 +1,29 @@
+{
+  "architecture": "llama-decoder-rmsnorm-swiglu-gqa-tied-embeddings",
+  "benchmark_contract": "linear-doc:4e23522a139f/benchmark-contract",
+  "files": {
+    "config.json": "8eb740e8bbe4cff95ea7b4588d17a2432deb16e8075bc5828ff7ba9be94d982a",
+    "model.safetensors": "5af571cbf074e6d21a03528d2330792e532ca608f24ac70a143f6b369968ab8c",
+    "tokenizer.json": "9ca9acddb6525a194ec8ac7a87f24fbba7232a9a15ffa1af0c1224fcd888e47c",
+    "tokenizer_config.json": "4ec77d44f62efeb38d7e044a1db318f6a939438425312dfa333b8382dbad98df"
+  },
+  "family_id": "smollm2_135m_lora_v1",
+  "formatter": "smollm2-chatml-decision-v1",
+  "layer_targets": ["tied-lm-head-output-rows-for-decision-codes-A-H"],
+  "license": "Apache-2.0",
+  "publisher_ref": "HuggingFaceTB/SmolLM2-135M-Instruct",
+  "resource": {
+    "incremental_cost_minor_units": 0,
+    "max_address_space_bytes": 3221225472,
+    "max_rows": 32,
+    "max_seconds": 300,
+    "max_steps": 64
+  },
+  "revision": "12fd25f77366fa6b3b4b768ec3050bf629380bac",
+  "role": "reference",
+  "schema_version": "opentour.pilot.model-family.v1",
+  "scorer": "exact-action-match-v1",
+  "task": "supervised finite-label text decision",
+  "tokenizer_file": "tokenizer.json",
+  "tuning_method": "output-lora-rank4-alpha4-adam-64-steps"
+}
