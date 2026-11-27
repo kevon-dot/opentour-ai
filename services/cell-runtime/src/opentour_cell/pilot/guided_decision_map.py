@@ -28,6 +28,10 @@ _COMPARISON = re.compile(
     r"([a-z][a-z0-9_]{0,63})\s*(<=|>=|<|>|below|at or above|at most|above)\s*"
     r"(-?[0-9]{1,12}(?:\.[0-9]{1,8})?)"
 )
+CATEGORY_TOKEN = re.compile(r"[A-Za-z][A-Za-z0-9_-]{0,63}", re.ASCII)
+_EQUALITY = re.compile(
+    rf'([a-z][a-z0-9_]{{0,63}}) (?:equals|==) "({CATEGORY_TOKEN.pattern})"', re.I | re.ASCII
+)
 _OPERATORS = {"below": "<", "at most": "<=", "at or above": ">=", "above": ">"}
 _FIRST_MATCH = re.compile(r"apply the first matching rule\.?", re.I)
 _EFFECTIVE_FROM = re.compile(r"effective from ([0-9]{4}-[0-9]{2}-[0-9]{2})\.?", re.I)
@@ -55,6 +59,8 @@ class Condition:
             return value is None
         if self.operator == "present":
             return value is not None
+        if self.operator == "==":
+            return isinstance(value, str) and value == self.threshold
         if not isinstance(value, Decimal) or not value.is_finite() or self.threshold is None:
             return False
         threshold = Decimal(self.threshold)
@@ -64,6 +70,16 @@ class Condition:
             ">": value > threshold,
             ">=": value >= threshold,
         }[self.operator]
+
+
+def compatible_categories(conditions: tuple[Condition, ...]) -> bool:
+    """An exact reference value cannot also be absent or equal a different token."""
+    values = {c.field: c.threshold for c in conditions if c.operator == "=="}
+    return all(
+        c.field not in values
+        or (c.operator != "missing" and (c.operator != "==" or values[c.field] == c.threshold))
+        for c in conditions
+    )
 
 
 @dataclass(frozen=True)
@@ -112,6 +128,10 @@ class GuidedMap:
 
 
 def _condition(clause: str, field_kinds: Mapping[str, FieldKind]) -> Condition | None:
+    equality = _EQUALITY.fullmatch(clause)
+    if equality and field_kinds.get(equality[1].lower()) is FieldKind.REFERENCE:
+        return Condition(equality[1].lower(), "==", equality[2])
+    clause = clause.lower()
     presence = _PRESENCE.fullmatch(clause)
     if presence and presence[1] in field_kinds:
         return Condition(presence[1], presence[2])
@@ -169,13 +189,16 @@ def guided_draft(
             unresolved.append(citation)
             continue
         predicates = []
-        for condition_text in rule[1].lower().split(" and "):
+        for condition_text in re.split(" and ", rule[1], flags=re.I):
             predicate = _condition(condition_text.strip(), field_kinds)
             if predicate is None:
                 unresolved.append(citation)
                 break
             predicates.append(predicate)
         else:
+            if not compatible_categories(tuple(predicates)):
+                unresolved.append(citation)
+                continue
             action = rule[2].upper()
             reference = "branch-" + digest([[asdict(item) for item in predicates], action])[:32]
             branches.append(Branch(reference, tuple(predicates), action, citation))
