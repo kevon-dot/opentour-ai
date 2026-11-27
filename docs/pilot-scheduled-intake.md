@@ -115,8 +115,10 @@ must revalidate current source authority through their own accepted API.
 means at least one retained run still needs reader work or another status poll.
 Neither state permits a caller to assert completion. No raw source rows, benchmark
 contents or error text are stored or emitted by this handoff. A status error emits
-only `unavailable` and an opaque receipt when possible. Local pause/revoke/expiry
-opens no factory. Source denial retains the run without starting any source read.
+only `unavailable` and an opaque receipt when possible. Reconciling an already
+paused/revoked or expired installation opens no factory. A first-ever control on
+an unexpired enabled configuration still validates its identity with the factory.
+Source denial retains the run without starting any source read.
 
 The journal addition preserves old configuration and usage. An old journal's
 previous tick references are not retrospectively interpreted as exact reader
