@@ -433,11 +433,11 @@ def test_pdf_text_this_reader_cannot_place_or_decode_goes_to_review(
 def test_pdf_translation_in_the_transformation_matrix_is_honoured_for_reading_order() -> None:
     content = (
         b"q 1 0 0 1 0 0 cm BT /F1 11 Tf 72 700 Td (Lower block) Tj ET Q "
-        b"q 1 0 0 1 0 200 cm BT /F1 11 Tf 72 600 Td (Raised block) Tj ET Q"
+        b"q 1 0 0 1 0 150 cm BT /F1 11 Tf 72 600 Td (Raised block) Tj ET Q"
     )
     result = read(_pdf(content), "x.pdf")[1]
     assert result.state is ExtractionState.ELIGIBLE
-    assert [s.text for s in result.spans] == ["Raised block", "Lower block"]  # 800 above 700
+    assert [s.text for s in result.spans] == ["Raised block", "Lower block"]  # 750 above 700
 
 
 def test_pdf_malformed_tokens_and_predictors_fail_closed_without_crashing() -> None:
@@ -705,3 +705,35 @@ def test_pdf_content_stream_that_cannot_be_resolved_goes_to_review(
     assert result.state is ExtractionState.NEEDS_REVIEW
     assert "content_stream_unresolved" in result.reason
     assert result.next_actor.value == "owner"
+
+
+# ------------------------------------------------------------------ image area and overlap
+
+
+def _with_image(placement: bytes, text: bytes = _VISIBLE) -> bytes:
+    return placement + b" " + text
+
+
+def test_pdf_small_clear_image_beside_text_stays_eligible() -> None:
+    logo = b"q 60 0 0 40 500 720 cm /Im1 Do Q"  # about 0.5% of the page, away from the text
+    for content in (_with_image(logo), _VISIBLE + b" " + logo):
+        _eligible(content, extra={8: _IMAGE}, resources=_IMAGE_RESOURCES)
+
+
+@pytest.mark.parametrize(
+    "placement",
+    [
+        b"q 612 0 0 400 0 0 cm /Im1 Do Q",  # large, away from the text
+        b"q 100 0 0 20 70 695 cm /Im1 Do Q",  # small but covers the text
+        b"q 10 0 0 10 80 700 cm /Im1 Do Q",  # tiny but covers the text
+    ],
+)
+def test_pdf_large_or_text_overlapping_image_goes_to_review(placement: bytes) -> None:
+    flag = "image_text_overlay_unverified"
+    for content in (_with_image(placement), _VISIBLE + b" " + placement):
+        _flagged(content, flag, extra={8: _IMAGE}, resources=_IMAGE_RESOURCES)
+
+
+def test_pdf_off_page_text_origin_is_flagged_even_one_point_outside() -> None:
+    _flagged(b"BT /F1 11 Tf 72 793 Td (edge) Tj ET", "text_outside_page")
+    _eligible(b"BT /F1 11 Tf 72 792 Td (edge) Tj ET")

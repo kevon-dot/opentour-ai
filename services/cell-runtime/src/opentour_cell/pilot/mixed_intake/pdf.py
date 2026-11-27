@@ -30,6 +30,8 @@ from opentour_cell.pilot.mixed_intake.model import (
 )
 
 PDF_REVISION = "opentour.reader.pdf-text@1.0.3"
+# The three thresholds below are adjustable judgement values, not contract values: they trade
+# review volume against missed concealment and may be retuned without a format change.
 # Effective text size, in points, below which text is treated as not human-readable. Real
 # fine print is 4 pt or more; below 2 pt (about 0.7 mm) glyphs are specks at any reading size.
 # Applied to the effective em height (Tf x Tm x cm) and em width (also x Tz).
@@ -40,6 +42,13 @@ MAX_TEXT_RISE_EM = 2.0
 # 1.3 is roughly a grey level above 0.89 (about #E3E3E3) and is far below the 3:1 legibility
 # floor, so coloured headings (red, navy, mid grey, brand colours) are never flagged.
 MIN_TEXT_CONTRAST_AGAINST_WHITE = 1.3
+# An image whose placed bounding box covers at least this fraction of the visible page can hide
+# a paragraph, so a page with such an image and text goes to review. Logos, stamps and
+# signatures are typically under 10% of a page; a quarter page is large enough to cover several
+# lines. Any image overlapping an extracted text fragment also flags, whatever its size, since
+# a small opaque image placed over text conceals it. Fragment extents are estimated (half an em
+# per character), the same heuristic the line merger uses, so overlap is approximate.
+IMAGE_REVIEW_PAGE_FRACTION = 0.25
 _OBJ = re.compile(rb"(?<![0-9])(\d{1,7})\s+(\d{1,5})\s+obj\b")
 _REF = rb"(\d+)\s+\d+\s+R"
 _NUMBER = re.compile(rb"[+-]?(\d+\.?\d*|\.\d+)")
@@ -297,6 +306,26 @@ _PAINT = frozenset({b"n", b"S", b"s", b"f", b"F", b"f*", b"B", b"B*", b"b", b"b*
 _PATH_BUILD = frozenset({b"m", b"l", b"c", b"v", b"y"})
 
 
+def _image_may_conceal(
+    image: tuple[float, float, float, float],
+    page_box: tuple[float, float, float, float] | None,
+    texts: list[tuple[float, float, float, float]],
+) -> bool:
+    """Large images, and images over extracted text, may hide it; small clear ones may not."""
+    if page_box is None:
+        return True  # nothing to measure against: fail closed
+    page_area = (page_box[2] - page_box[0]) * (page_box[3] - page_box[1])
+    left, bottom = max(image[0], page_box[0]), max(image[1], page_box[1])
+    right, top = min(image[2], page_box[2]), min(image[3], page_box[3])
+    covered = max(right - left, 0.0) * max(top - bottom, 0.0)
+    if page_area <= 0 or covered / page_area >= IMAGE_REVIEW_PAGE_FRACTION:
+        return True
+    return any(
+        text[0] < image[2] and text[2] > image[0] and text[1] < image[3] and text[3] > image[1]
+        for text in texts
+    )
+
+
 def _fragments(
     content: bytes,
     deadline: Deadline,
@@ -323,7 +352,8 @@ def _fragments(
     text_matrix: tuple[float, ...] = _IDENTITY
     rects: list[tuple[float, float, float, float]] = []
     path_other = False
-    image_drawn = False
+    image_boxes: list[tuple[float, float, float, float]] = []
+    text_boxes: list[tuple[float, float, float, float]] = []
 
     def emit(text: str) -> None:
         if not text.strip():
@@ -349,16 +379,13 @@ def _fragments(
         raised = y + gs.rise * text_matrix[3]
         rx = ctm[0] * x + ctm[2] * raised + ctm[4]
         ry = ctm[1] * x + ctm[3] * raised + ctm[5]
-        # One em of slack: a baseline a hair outside the edge can still show an overhanging glyph.
-        slack = size * scale_y
         if page_box is None or any(
-            not (
-                page_box[0] - slack <= cx <= page_box[2] + slack
-                and page_box[1] - slack <= cy <= page_box[3] + slack
-            )
+            not (page_box[0] <= cx <= page_box[2] and page_box[1] <= cy <= page_box[3])
             for cx, cy in ((px, py), (rx, ry))
         ):
             marks.add("text_outside_page")
+        eff_w = size * scale_x * gs.h_scale
+        text_boxes.append((px, py, px + len(text) * eff_w * 0.5, py + size * scale_y))
         out.append(_Fragment(px, py, text, gs.size * abs(ctm[3] or 1.0), gs.font))
 
     def clip_is_noop() -> bool:
@@ -454,7 +481,10 @@ def _fragments(
             if stack[-1] in forms:
                 marks.add("form_xobject_text_unread")
             elif stack[-1] in images:
-                image_drawn = True
+                a, b, c, d, e, f = gs.ctm
+                xs = (e, e + a, e + c, e + a + c)  # corners of the unit square under the CTM
+                ys = (f, f + b, f + d, f + b + d)
+                image_boxes.append((min(xs), min(ys), max(xs), max(ys)))
         elif op == b"TL" and nums:
             gs = replace(gs, leading=nums[-1])
         elif op == b"T*":
@@ -476,7 +506,7 @@ def _fragments(
             emit("".join(parts))
         stack.clear()
     if out:
-        if image_drawn:
+        if any(_image_may_conceal(box, page_box, text_boxes) for box in image_boxes):
             late.add("image_text_overlay_unverified")
         marks |= late
     return out, marks
