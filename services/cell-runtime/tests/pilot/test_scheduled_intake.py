@@ -931,6 +931,7 @@ def test_actual_reconcile_cli_returns_only_state_and_receipt(tmp_path):
         value not in result.stdout for value in ("org-a", "feed-", "source-v1", str(tmp_path))
     )
     assert retained(worker)[0]["checks"] == 1
+    assert len(case.live_runs()) == 1
     case.no_reader_effects()
 
 
