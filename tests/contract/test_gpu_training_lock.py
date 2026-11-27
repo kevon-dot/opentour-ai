@@ -209,14 +209,20 @@ def image_hazards(text: str) -> list[str]:
     uv_python = any(f"UV_PYTHON={PINNED_PYTHON}" in s for s in steps if s.startswith("ENV "))
     if f"--python {PINNED_PYTHON}" not in export and not uv_python:
         hazards.append("export_without_pinned_python")
-    library_paths = [
-        path
+    # Both `LD_LIBRARY_PATH=value` and legacy `ENV LD_LIBRARY_PATH value`; quotes stripped.
+    values = [
+        value.strip("\"'")
         for s in steps
         if s.startswith("ENV ")
         for value in re.findall(r"(?:^ENV |\s)LD_LIBRARY_PATH=(\S+)", s)
-        for path in value.split(":")
+        + re.findall(r"^ENV LD_LIBRARY_PATH\s+(\S+)", s)
     ]
-    if not library_paths or any(path.startswith("/usr/local/cuda") for path in library_paths):
+    # `$` would inherit the base image's value, which includes /usr/local/cuda/lib64.
+    if (
+        not values
+        or any("$" in value for value in values)
+        or any(p.startswith("/usr/local/cuda") for value in values for p in value.split(":"))
+    ):
         hazards.append("system_cuda_on_library_path")
     return hazards
 
@@ -271,6 +277,21 @@ def test_trainer_image_has_no_shell_download_apt_secret_or_unpinned_interpreter(
         (
             "LD_LIBRARY_PATH=/usr/local/nvidia/lib:/usr/local/nvidia/lib64",
             "LD_LIBRARY_PATH=/usr/local/nvidia/lib:/usr/local/nvidia/lib64:/usr/local/cuda/lib64",
+            "system_cuda_on_library_path",
+        ),
+        (
+            "LD_LIBRARY_PATH=/usr/local/nvidia/lib:/usr/local/nvidia/lib64",
+            "LD_LIBRARY_PATH=/usr/local/nvidia/lib:${LD_LIBRARY_PATH}",
+            "system_cuda_on_library_path",
+        ),
+        (
+            "LD_LIBRARY_PATH=/usr/local/nvidia/lib:/usr/local/nvidia/lib64",
+            'LD_LIBRARY_PATH="/usr/local/cuda/lib64"',
+            "system_cuda_on_library_path",
+        ),
+        (
+            "WORKDIR /home/trainer",
+            "ENV LD_LIBRARY_PATH /usr/local/cuda/lib64\nWORKDIR /home/trainer",
             "system_cuda_on_library_path",
         ),
         ("UV_LINK_MODE=copy", "UV_LINK_MODE=copy API_KEY=generated", "secret_like_build_variable"),

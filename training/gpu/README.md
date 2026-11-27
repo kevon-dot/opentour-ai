@@ -109,7 +109,10 @@ a recorded commit. Each run records:
     `/usr/local/cuda` or `/usr/lib/x86_64-linux-gnu` fails qualification. Also record the
     `libcuda` path the NVIDIA container toolkit injected and any `/usr/local/cuda/compat` path.
     A compat path would mean CUDA forward compatibility was used, which this lock does not
-    support.
+    support. Recent NVIDIA container toolkits can select the base image's `cuda-compat-13-0`
+    automatically when the host driver is older than it. So record which `libcuda` the process
+    actually loaded, from `/proc/self/maps`. Qualification does not support use of the compat
+    `libcuda`.
 
 ## Follow-ups for other owners
 
