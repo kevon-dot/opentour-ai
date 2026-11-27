@@ -186,10 +186,8 @@ def test_old_confirm_commits_before_replacement_preserves_original_actor(tmp_pat
 
 def test_two_actual_sealed_requests_preserve_unknown_remote_hold(tmp_path):
     s = AssignmentSetup(tmp_path)
-    case, first, _ = inspected_case(s, tmp_path)
-    # The baseline permits a new installed version. OPE-414 separately fences
-    # version cutover; this fixture inventories two genuinely sealed old requests.
-    save(case.bridge.config, dict(case.policy, zap_version="generated-version-two"))
+    case, first, envelope = inspected_case(s, tmp_path)
+    prepare_next_zap_revision(case, envelope)
     second = case.bridge.issue(**case.binding)
     assert first["request_id"] != second["request_id"]
     deliveries = []
@@ -214,6 +212,26 @@ def test_two_actual_sealed_requests_preserve_unknown_remote_hold(tmp_path):
     with pytest.raises(ValueError):
         case.bridge.flush(second["request_id"], HOOK, lost_ack)
     assert deliveries == [second["request_id"]]
+
+
+def prepare_next_zap_revision(case, envelope, *, inspect=True):
+    # A signed pending readback settles the first dispatch without approving it.
+    # The normal cutover fences that request before a fresh sealed inspection.
+    assert (
+        case.bridge.consume(resign(case, envelope, {"status": "Pending", "actor_id": None}))[
+            "state"
+        ]
+        == "pending"
+    )
+    assert case.bridge.prepare_cutover()["counts"] == {"superseded": 1}
+    case.policy["zap_version"] = "generated-version-two"
+    save(case.bridge.config, case.policy)
+    assert case.bridge.complete_cutover()["state"] == "ready"
+    case.view = case.h.launch()
+    case.revision = buttons(screen(case.h, case.view))["ot_evidence"]
+    case.binding["inspection_ref"] = case.revision
+    if inspect:
+        case.h.action(case.view, "ot_evidence", case.revision)
 
 
 def test_completed_history_under_changed_source_does_not_block_current_assignment(tmp_path):
@@ -260,25 +278,21 @@ def test_completed_history_under_changed_source_does_not_block_current_assignmen
 
 def test_v2_ordinary_renew_waits_for_serialized_actual_issue(tmp_path):
     s = AssignmentSetup(tmp_path)
-    case, first, _ = inspected_case(s, tmp_path)
-    save(case.bridge.config, dict(case.policy, zap_version="generated-version-two"))
+    case, first, envelope = inspected_case(s, tmp_path)
+    prepare_next_zap_revision(case, envelope, inspect=False)
     policy = deepcopy(s.current["policy"])
     policy["mandate"].update(mandate_id="ordinary-renew-after-issue", max_runs=3)
     packet = s.sign(s.preview(policy, action="renew")["claim"])
     entered, release, attempted = Event(), Event(), Event()
     original = zapier_approval._record
+    sealed = []
 
     def record(path, value):
         if path.name.endswith("-request.json"):
+            sealed.append(value["request"])
             entered.set()
             assert release.wait(10)
         return original(path, value)
-
-    def issue():
-        # OPE-414 owns the normal-entry wrapper. Exercise its exact shared lock
-        # around actual baseline issuance, without mocking inspection or sealing.
-        with s.assignments.serialized():
-            return case.bridge.issue(**case.binding)
 
     def renew():
         attempted.set()
@@ -288,14 +302,22 @@ def test_v2_ordinary_renew_waits_for_serialized_actual_issue(tmp_path):
         patch.object(zapier_approval, "_record", record),
         ThreadPoolExecutor(max_workers=2) as pool,
     ):
-        issuing = pool.submit(issue)
-        assert entered.wait(10)
+        # Fresh evidence UI invokes the real issue entry, which already holds
+        # the shared approval lock. Do not issue once before installing the
+        # barrier or acquire a second, non-reentrant outer flock.
+        issuing = pool.submit(case.h.action, case.view, "ot_evidence", case.revision)
+        if not entered.wait(10):
+            issuing.result(timeout=1)
+            pytest.fail("issue did not reach the durable request boundary")
         saving = pool.submit(renew)
         assert attempted.wait(1)
         assert not saving.done()
         release.set()
-        second = issuing.result()
+        issuing.result()
         renewed = saving.result()
+    assert len(sealed) == 1
+    second = sealed[0]
     assert first["request_id"] != second["request_id"]
     assert renewed["action"] == "renew"
     assert len(list(s.customer.owner.glob("zapier-approval-za-*-request.json"))) == 2
+    assert read(case.bridge._path(second["request_id"], "request"))["request"] == second
