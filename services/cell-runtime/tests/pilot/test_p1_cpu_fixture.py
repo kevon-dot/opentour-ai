@@ -27,7 +27,13 @@ def write_p1_cpu_fixture(path: Path) -> str:
             (feature,) = [i for i, _ in cpu.feature_signature(token) if i]
             assert feature not in used
             used.add(feature)
-            row[feature] = 16 if label == "REVIEW" else 2
+            row[feature] = 24 if label == "REVIEW" else 2
+        if label == "REVIEW":
+            # JSON contains the PO field name once. A PO-prefixed identifier adds
+            # another occurrence; the generated token "b" hashes like "null".
+            (po_feature,) = [i for i, _ in cpu.feature_signature("po") if i]
+            assert po_feature not in used
+            row[po_feature] = -12
         weights.append(row)
     write(
         path,
@@ -42,7 +48,7 @@ def write_p1_cpu_fixture(path: Path) -> str:
     return "sha256-" + hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-@pytest.mark.parametrize("po", ["po-a", "another-891", "invoice-ref-307"])
+@pytest.mark.parametrize("po", ["po-a", "po-b", "po-c", "another-891", "invoice-ref-307"])
 def test_preexisting_invoice_parameters(tmp_path, monkeypatch, po):
     def forbid(*args, **kwargs):
         pytest.fail("fixture attempted fitting")
