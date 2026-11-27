@@ -14,9 +14,11 @@ distinction between an invocation, its terminal marker, and the committed
 decision. A missing or conflicting chunk leaves raw replay unavailable. A
 terminal marker for indices 0 through 2 with only 0 and 2 present leaves a
 gap at 1. An identical delivery fills that gap when it arrives. Competing app
-commits for the same case and decision revision are counted as disputed
-across operation IDs. Inspection exposes the dispute count for the
-requested operation without returning the competing operation's metadata.
+commit references for the same source-authoritative decision ID and
+revision are counted as disputed across operation IDs. A repeated commit
+reference has one identity. Distinct decisions can share a case and family.
+Inspection exposes the dispute count for the requested operation without
+returning the competing operation's metadata.
 The current grant is checked again in the write transaction after
 projection. Consent, source or expiry changes roll back the new observation.
 

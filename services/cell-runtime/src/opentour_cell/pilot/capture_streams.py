@@ -87,10 +87,17 @@ class CapturedAttempt:
     attempt_ref: str
     case_ref: str
     family_ref: str
+    decision_ref: str
     decision_revision: int
 
     def __post_init__(self) -> None:
-        for value in (self.operation_ref, self.attempt_ref, self.case_ref, self.family_ref):
+        for value in (
+            self.operation_ref,
+            self.attempt_ref,
+            self.case_ref,
+            self.family_ref,
+            self.decision_ref,
+        ):
             require_ref(value)
         _require(type(self.decision_revision) is int and 0 < self.decision_revision < 2**31)
 
@@ -169,7 +176,7 @@ class CaptureStreams:
                 "tenant TEXT NOT NULL,epoch TEXT NOT NULL,workflow TEXT NOT NULL,"
                 "grant_revision TEXT NOT NULL,policy_revision TEXT NOT NULL,"
                 "operation_ref TEXT NOT NULL,attempt TEXT NOT NULL,"
-                "case_ref TEXT NOT NULL,decision_revision INTEGER NOT NULL,"
+                "decision_ref TEXT NOT NULL,decision_revision INTEGER NOT NULL,"
                 "source_ref TEXT NOT NULL,event_ref TEXT NOT NULL,event_revision INTEGER NOT NULL,"
                 "observed_at INTEGER NOT NULL,kind TEXT NOT NULL,payload TEXT NOT NULL,"
                 "PRIMARY KEY(tenant,epoch,workflow,grant_revision,policy_revision,"
@@ -180,7 +187,7 @@ class CaptureStreams:
                 "CREATE INDEX IF NOT EXISTS capture_business_commit "
                 "ON decision_capture_streams("
                 "tenant,epoch,workflow,grant_revision,policy_revision,source_ref,"
-                "case_ref,decision_revision,operation_ref) WHERE kind='commit'"
+                "decision_ref,decision_revision,operation_ref) WHERE kind='commit'"
             )
             scope = (
                 grant.tenant,
@@ -209,7 +216,7 @@ class CaptureStreams:
                     *scope,
                     attempt.operation_ref,
                     identity,
-                    attempt.case_ref,
+                    attempt.decision_ref,
                     attempt.decision_revision,
                     event.source_ref,
                     event.event_ref,
@@ -357,7 +364,7 @@ class CaptureStreams:
                     filters = ",".join("(?,?)" for _ in permitted)
                     rows = db.execute(
                         "SELECT attempt,source_ref,event_ref,event_revision,"
-                        "observed_at,kind,payload,case_ref,decision_revision "
+                        "observed_at,kind,payload,decision_ref,decision_revision "
                         "FROM decision_capture_streams WHERE "
                         "(tenant,epoch,workflow,grant_revision,policy_revision,operation_ref)"
                         f"=(?,?,?,?,?,?) AND (kind,source_ref) IN (VALUES {filters}) LIMIT ?",
@@ -397,18 +404,19 @@ def _competing_revisions(
     # The caller has permission to inspect only the requested operation. Return
     # a dispute flag for its revisions without returning competing references.
     rows = db.execute(
-        "SELECT DISTINCT current.case_ref,current.decision_revision "
+        "SELECT DISTINCT current.decision_ref,current.decision_revision "
         "FROM decision_capture_streams AS current "
         "WHERE (current.tenant,current.epoch,current.workflow,current.grant_revision,"
         "current.policy_revision,current.operation_ref,current.source_ref)=(?,?,?,?,?,?,?) "
         "AND current.kind='commit' AND EXISTS ("
         "SELECT 1 FROM decision_capture_streams AS competing "
         "WHERE (competing.tenant,competing.epoch,competing.workflow,competing.grant_revision,"
-        "competing.policy_revision,competing.source_ref,competing.case_ref,"
+        "competing.policy_revision,competing.source_ref,competing.decision_ref,"
         "competing.decision_revision)=(current.tenant,current.epoch,current.workflow,"
-        "current.grant_revision,current.policy_revision,current.source_ref,current.case_ref,"
+        "current.grant_revision,current.policy_revision,current.source_ref,current.decision_ref,"
         "current.decision_revision) "
-        "AND competing.kind='commit' AND competing.operation_ref<>current.operation_ref)",
+        "AND competing.kind='commit' AND competing.operation_ref<>current.operation_ref "
+        "AND competing.payload<>current.payload)",
         (
             grant.tenant,
             grant.epoch,
@@ -419,7 +427,7 @@ def _competing_revisions(
             source,
         ),
     )
-    return {(case, revision) for case, revision in rows}
+    return {(decision, revision) for decision, revision in rows}
 
 
 def _view(rows: list[sqlite3.Row], competing: set[tuple[str, int]]) -> dict[str, Any]:
@@ -427,16 +435,17 @@ def _view(rows: list[sqlite3.Row], competing: set[tuple[str, int]]) -> dict[str,
     identities: dict[str, set[str]] = {}
     deliveries: dict[tuple[str, str, int], set[tuple[str, str, str, int]]] = {}
     commits: dict[tuple[str, int], set[tuple[str, str]]] = {}
-    for attempt, source, event, revision, when, kind, body, case_ref, decision_revision in rows:
+    for attempt, source, event, revision, when, kind, body, decision_ref, decision_revision in rows:
         deliveries.setdefault((source, event, revision), set()).add((attempt, kind, body, when))
         attempts.setdefault(attempt, []).append((kind, body))
         identity = json.loads(attempt)
         _require(
-            (identity["case_ref"], identity["decision_revision"]) == (case_ref, decision_revision)
+            (identity["decision_ref"], identity["decision_revision"])
+            == (decision_ref, decision_revision)
         )
         identities.setdefault(identity["attempt_ref"], set()).add(attempt)
         if kind == "commit":
-            commits.setdefault((case_ref, decision_revision), set()).add(
+            commits.setdefault((decision_ref, decision_revision), set()).add(
                 (attempt, json.loads(body)["commit_ref"])
             )
     conflicting = {
@@ -505,7 +514,7 @@ def _view(rows: list[sqlite3.Row], competing: set[tuple[str, int]]) -> dict[str,
         )
     disputed = sum(
         revision in competing
-        or len(events) > 1
+        or len({commit_ref for _, commit_ref in events}) > 1
         or any(attempt in conflicting_commits for attempt, _ in events)
         for revision, events in commits.items()
     )

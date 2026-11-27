@@ -62,7 +62,7 @@ def journal(path: Path, tenant="org-a"):
 def test_metadata_capture_waits_for_opt_in_and_stores_no_plaintext(tmp_path):
     capture, authority = journal(tmp_path / "one")
     workflow = authority.base.workflow
-    attempt = CapturedAttempt("operation-a", "attempt-a", "case-a", "family-a", 1)
+    attempt = CapturedAttempt("operation-a", "attempt-a", "case-a", "family-a", "decision-a", 1)
     with pytest.raises(CaptureError, match="decision_capture_disabled"):
         capture.observed_chunk("app", workflow, attempt, row(RESPONSE, "first"), 0, SENTINEL)
     with capture.store._db() as db:
@@ -87,7 +87,7 @@ def test_terminal_gap_survives_restart_and_app_retries_commit_once(tmp_path):
     capture, authority = journal(tmp_path / "one")
     authority.base = replace(authority.base, mode="metadata_only")
     workflow = authority.base.workflow
-    first = CapturedAttempt("operation-a", "a1", "case-a", "family-a", 1)
+    first = CapturedAttempt("operation-a", "a1", "case-a", "family-a", "decision-a", 1)
     second = replace(first, attempt_ref="a2")
     capture.started("app", workflow, first, row(REQUEST, "start-1"))
     capture.observed_chunk("app", workflow, first, row(RESPONSE, "partial"), 0, b"sup")
@@ -133,7 +133,7 @@ def test_conflicting_chunk_and_competing_app_commit_remain_distinct(tmp_path):
     capture, authority = journal(tmp_path / "one")
     authority.base = replace(authority.base, mode="metadata_only")
     workflow = authority.base.workflow
-    a1 = CapturedAttempt("operation-a", "a1", "case-a", "family-a", 1)
+    a1 = CapturedAttempt("operation-a", "a1", "case-a", "family-a", "decision-a", 1)
     a2 = replace(a1, attempt_ref="a2")
     capture.started("app", workflow, a2, row(REQUEST, "start"))
     capture.terminal("app", workflow, a2, row(RESPONSE, "finish"), "finished", 1)
@@ -153,7 +153,7 @@ def test_current_record_grant_is_rechecked_after_chunk_projection(tmp_path, monk
     capture, authority = journal(tmp_path / "one")
     current = replace(authority.base, mode="metadata_only")
     authority.base = current
-    attempt = CapturedAttempt("operation-a", "a1", "case-a", "family-a", 1)
+    attempt = CapturedAttempt("operation-a", "a1", "case-a", "family-a", "decision-a", 1)
     capture.started("app", current.workflow, attempt, row(REQUEST, "start"))
     original = capture_streams.hmac.digest
     changes = {
@@ -184,18 +184,26 @@ def test_competing_business_revision_is_disputed_across_operations(tmp_path):
     capture, authority = journal(tmp_path / "one")
     authority.base = replace(authority.base, mode="metadata_only")
     workflow = authority.base.workflow
-    first = CapturedAttempt("operation-a", "a1", "case-a", "family-a", 1)
+    first = CapturedAttempt("operation-a", "a1", "case-a", "family-a", "decision-a", 1)
     second = replace(first, operation_ref="operation-b", attempt_ref="a2")
     successor = replace(first, operation_ref="operation-c", decision_revision=2)
-    another_case = replace(first, operation_ref="operation-d", case_ref="case-b")
-    for attempt in (first, successor, another_case, second):
+    another_decision = replace(first, operation_ref="operation-d", decision_ref="decision-b")
+    redundant_delivery = replace(first, operation_ref="operation-e")
+    for attempt in (first, successor, another_decision):
         ref = attempt.operation_ref
         capture.committed("app", workflow, attempt, row(COMMIT, ref), "commit-" + ref)
+    capture.committed(
+        "app", workflow, redundant_delivery, row(COMMIT, "redelivery"), "commit-operation-a"
+    )
+    for attempt in (first, redundant_delivery, another_decision):
+        view = capture.inspect("owner", workflow, attempt.operation_ref)
+        assert (view["committed_decisions"], view["disputed_decisions"]) == (1, 0)
+    capture.committed("app", workflow, second, row(COMMIT, "operation-b"), "competing-commit")
     for attempt in (first, second):
         view = capture.inspect("owner", workflow, attempt.operation_ref)
         assert (view["committed_decisions"], view["disputed_decisions"]) == (0, 1)
         assert [item["attempt_ref"] for item in view["attempts"]] == [attempt.attempt_ref]
-    for attempt in (successor, another_case):
+    for attempt in (successor, another_decision):
         view = capture.inspect("owner", workflow, attempt.operation_ref)
         assert (view["committed_decisions"], view["disputed_decisions"]) == (1, 0)
     scoped = capture.inspect("response-inspector", workflow, first.operation_ref)
@@ -208,7 +216,7 @@ def test_actor_source_policy_and_withdrawal_scope_normal_reads(tmp_path):
     authority.base = replace(authority.base, mode="metadata_only")
     other.base = replace(other.base, mode="metadata_only")
     workflow = authority.base.workflow
-    attempt = CapturedAttempt("operation-a", "a1", "case-a", "family-a", 1)
+    attempt = CapturedAttempt("operation-a", "a1", "case-a", "family-a", "decision-a", 1)
     with pytest.raises(CaptureError):
         capture.committed("app", workflow, attempt, row(RESPONSE, "forged"), "commit")
     capture.started("app", workflow, attempt, row(REQUEST, "start"))
