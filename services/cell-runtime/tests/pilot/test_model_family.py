@@ -211,3 +211,158 @@ def test_adding_a_compatible_profile_needs_only_a_declarative_document(tmp_path:
     assert registry.resolve(family.binding) is reloaded
     with pytest.raises(fam.FamilyError, match="INVALID_FAMILY_PROFILE"):
         fam.load_profile(tmp_path / "missing.family.json")
+
+
+# ---------------------------------------------------------------------------------------------
+# OPE-507 qualification hardening: evidence coverage, identity normalization, field shapes.
+# ---------------------------------------------------------------------------------------------
+
+_REAL = {
+    "fixture_kind": fam.FixtureKind.INSTALLED_MODEL,
+    "family_id": "structural-pinned-profile",
+    "external_gates": (),
+    "revision": "a" * 40,
+}
+_QUALIFIED_TIERS = (
+    EvidenceTier.SOFTWARE_QUALIFIED,
+    EvidenceTier.PROVIDER_WITNESSED,
+    EvidenceTier.CUSTOMER_WITNESSED,
+)
+_WITNESSED_TIERS = (EvidenceTier.PROVIDER_WITNESSED, EvidenceTier.CUSTOMER_WITNESSED)
+
+
+def _claim(
+    tmp_path: Path, tier: EvidenceTier, role: str = "reference", **changes: object
+) -> fam.QualificationRecord:
+    family = toy.Family(tmp_path, "generated-toy-linear", role=role)
+    results = {check: True for check in fam.required_checks(family.profile)}
+    base = fam.build_record(family.profile, fam.FixtureKind.GENERATED, results)
+    fields: dict[str, object] = {**_REAL, "tier": tier}
+    if tier in _WITNESSED_TIERS:
+        fields["witness_ref"] = "witness:generated-0001"
+    fields.update(changes)
+    return replace(base, **fields)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("tier", _QUALIFIED_TIERS)
+def test_a_qualified_tier_with_no_recorded_checks_is_refused(
+    tmp_path: Path, tier: EvidenceTier
+) -> None:
+    with pytest.raises(fam.FamilyError, match="EVIDENCE_TIER_UNSUPPORTED"):
+        _claim(tmp_path, tier, results=())
+
+
+@pytest.mark.parametrize("tier", _QUALIFIED_TIERS)
+def test_a_qualified_tier_covering_only_some_required_checks_is_refused(
+    tmp_path: Path, tier: EvidenceTier
+) -> None:
+    full = _claim(tmp_path, tier).results
+    partial = full[:-1]
+    assert partial and len(partial) == len(full) - 1
+    for results in (
+        partial,
+        full + (full[0],),  # duplicated check name
+        partial + (("nope", True),),  # unknown check standing in for a required one
+        partial + ((full[-1][0], "yes"),),  # non-bool outcome
+    ):
+        with pytest.raises(fam.FamilyError, match="EVIDENCE_TIER_UNSUPPORTED"):
+            _claim(tmp_path, tier, results=results)  # type: ignore[arg-type]
+
+
+def test_a_candidate_role_record_is_not_forced_to_carry_the_reference_check(
+    tmp_path: Path,
+) -> None:
+    record = _claim(tmp_path, EvidenceTier.SOFTWARE_QUALIFIED, role=fam.Role.CANDIDATE.value)
+    assert fam.Check.REFERENCE_REPRODUCED.value not in dict(record.results)
+    assert record.qualified
+
+
+def test_qualified_is_false_without_coverage_even_if_a_record_was_forced(tmp_path: Path) -> None:
+    record = _claim(tmp_path, EvidenceTier.SOFTWARE_QUALIFIED)
+    assert record.qualified
+    # Defence in depth for the vacuous ``all(())``: bypass __post_init__ the way only a
+    # deliberate caller can; the properties must still not report qualified.
+    object.__setattr__(record, "results", ())
+    assert not record.passed
+    assert not record.qualified
+
+
+GENERATED_VARIANTS = [
+    "Generated-x",
+    " generated-x",
+    "generated_x",
+    "GENERATED-X",
+    "generated-x ",
+    "\tgenerated-x",
+    "generated x",
+    "Generated_X",
+    "generated​-x",  # zero-width space inside the prefix
+    "​generated-x",
+    "ｇｅｎｅｒａｔｅｄ-x",  # fullwidth letters fold under NFKC
+]
+
+
+@pytest.mark.parametrize("variant", GENERATED_VARIANTS)
+@pytest.mark.parametrize("tier", _QUALIFIED_TIERS)
+def test_no_spelling_of_a_generated_family_id_reaches_a_qualified_tier(
+    tmp_path: Path, variant: str, tier: EvidenceTier
+) -> None:
+    with pytest.raises(fam.FamilyError, match="EVIDENCE_TIER_UNSUPPORTED"):
+        _claim(tmp_path, tier, family_id=variant)
+
+
+@pytest.mark.parametrize("variant", GENERATED_VARIANTS)
+def test_profile_is_fixture_and_build_record_agree_for_every_spelling(
+    tmp_path: Path, variant: str
+) -> None:
+    family = toy.Family(tmp_path, "generated-toy-linear")
+    profile = replace(family.profile, family_id=variant)
+    assert profile.is_fixture
+    results = {check: True for check in fam.required_checks(profile)}
+    record = fam.build_record(profile, fam.FixtureKind.INSTALLED_MODEL, results)
+    assert record.tier is EvidenceTier.FIXTURE and not record.qualified
+    assert "generated_family_is_never_a_qualified_model" in record.external_gates
+
+
+@pytest.mark.parametrize(
+    "family_id",
+    ["generatedx", "degenerated-x", "regenerated-x", "my-generated-x", "structural-pinned-profile"],
+)
+def test_a_legitimately_distinct_family_id_is_not_collapsed_into_generated(
+    tmp_path: Path, family_id: str
+) -> None:
+    family = toy.Family(tmp_path, "generated-toy-linear")
+    assert not replace(family.profile, family_id=family_id).is_fixture
+    assert _claim(tmp_path, EvidenceTier.SOFTWARE_QUALIFIED, family_id=family_id).qualified
+
+
+@pytest.mark.parametrize("tier", _WITNESSED_TIERS)
+@pytest.mark.parametrize("bad", [" ", "", None, 5, "has space", "a" * 300, b"witness-1", "x\ny"])
+def test_a_malformed_witness_ref_is_refused_at_both_witnessed_tiers(
+    tmp_path: Path, tier: EvidenceTier, bad: object
+) -> None:
+    with pytest.raises(fam.FamilyError, match="EVIDENCE_TIER_UNSUPPORTED"):
+        _claim(tmp_path, tier, witness_ref=bad)
+
+
+@pytest.mark.parametrize("tier", _WITNESSED_TIERS)
+@pytest.mark.parametrize("good", ["generated-witness", "witness:generated-0001", "ref/2026#7"])
+def test_a_well_formed_witness_ref_is_accepted(
+    tmp_path: Path, tier: EvidenceTier, good: str
+) -> None:
+    record = _claim(tmp_path, tier, witness_ref=good)
+    assert record.qualified and record.witness_ref == good
+
+
+@pytest.mark.parametrize("bad", ["junk", "A" * 40, "a" * 39, "a" * 41, " " + "a" * 39, "g" * 40, 5])
+@pytest.mark.parametrize("tier", _QUALIFIED_TIERS)
+def test_a_non_40_hex_revision_is_refused_on_the_record(
+    tmp_path: Path, bad: object, tier: EvidenceTier
+) -> None:
+    with pytest.raises(fam.FamilyError, match="EVIDENCE_TIER_UNSUPPORTED"):
+        _claim(tmp_path, tier, revision=bad)
+
+
+def test_a_valid_40_hex_revision_is_accepted_on_the_record(tmp_path: Path) -> None:
+    revision = "0123456789abcdef" * 2 + "01234567"
+    assert _claim(tmp_path, EvidenceTier.SOFTWARE_QUALIFIED, revision=revision).qualified
