@@ -19,12 +19,12 @@ def test_private_status_refresh_reads_only_current_independent_receiver(tmp_path
 
     def capture(*args, **kwargs):
         result = stage(*args, **kwargs)
-        captured.append(result[0])
+        captured.append(result)
         return result
 
     monkeypatch.setattr(fixture, "stage", capture)
     generated, receiver, offered, selection = fixture.approved_local_offer(tmp_path)
-    h = captured[0]
+    h, _, _, _, audit = captured[0]
     permit = generated.authority.permissions.current
     actor = h.config["reviewer"]
     directory = h.store.path.parent
@@ -52,6 +52,7 @@ def test_private_status_refresh_reads_only_current_independent_receiver(tmp_path
     scope = (
         f"Workflow {permit.workflow_ref} · Proposal {permit.proposal_ref} "
         f"revision {permit.proposal_revision} · Artifact {permit.artifact_sha256}\n"
+        f"Benchmark cohort revision {audit['cohort_revision']}\n"
         f"Destination {permit.destination_ref}"
     )
     no_check = "No independent check time is recorded."

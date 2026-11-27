@@ -1977,7 +1977,12 @@ class Workbench:
         self._show(
             view,
             self.views.status_question_modal(
-                token, revision, target.dataset, answer, receipt_pin=pin
+                token,
+                revision,
+                target.dataset,
+                answer,
+                receipt_pin=pin,
+                workflow_ref=current.live_workflow_ref if delivery_scoped else None,
             )
             if answer
             else self.views.question_modal(token, revision, target.report, target.audit, topic),

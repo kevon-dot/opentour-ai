@@ -785,17 +785,24 @@ def current_training_question(
 
 
 def status_question_modal(
-    context: str, revision: str, dataset: str, answer: StatusAnswer, *, receipt_pin: str = ""
+    context: str,
+    revision: str,
+    dataset: str,
+    answer: StatusAnswer,
+    *,
+    receipt_pin: str = "",
+    workflow_ref: str | None = None,
 ) -> Block:
     controls = [_button("View evidence", "ot_evidence", revision), _home()]
     if receipt_pin:
         controls.insert(0, _button("View receipt", "ot_release_receipt", receipt_pin))
+    scope = f"Workflow {_ref(workflow_ref)} · " if workflow_ref else ""
     return _modal(
         "Result status",
         "ot_status_question",
         context,
         [
-            _section(f"Dataset {_ref(dataset)} · readout {_ref(revision)}"),
+            _section(f"{scope}Dataset {_ref(dataset)} · readout {_ref(revision)}"),
             _section(answer.finding),
             _section(answer.basis),
             _section(answer.next_action),
@@ -1487,6 +1494,7 @@ def _handoff_projection(
     scope = (
         f"Workflow {_ref(receipt.selection.workflow_ref)} · Proposal {_ref(audit['job_id'])} "
         f"revision {_ref(audit['run_revision'])} · Artifact {_ref(audit['model_revision'])}\n"
+        f"Benchmark cohort revision {_ref(audit['cohort_revision'])}\n"
         f"Destination {_ref(receipt.destination_ref)}"
     )
     approval = f"Approved {when(receipt.approved_at)}."
