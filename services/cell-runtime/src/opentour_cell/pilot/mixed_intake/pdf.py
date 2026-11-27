@@ -7,7 +7,9 @@ files report LOCKED. Image-only pages report NEEDS_RENDITION. Nothing is execute
 
 Fail-closed review routing: an unresolved or non-standard font encoding, rotated or skewed
 text, invisible text and text inside Form XObjects each flag the page for review rather than
-emitting a guess. Objects are scanned directly (the cross-reference table is not consulted).
+emitting a guess. Objects are scanned directly (the cross-reference table is not consulted; a
+repeated object number keeps its last definition). Every dictionary the reader relies on is
+parsed, not searched, and one that repeats a key or cannot be read goes to review.
 
 This is not a renderer, and invisibility is flagged only where it can be seen in the content
 stream without painting. Covered: render mode, effective size (Tf, Tm, cm, Tz, Ts), near-white
@@ -47,7 +49,7 @@ from opentour_cell.pilot.mixed_intake.model import (
     finish,
 )
 
-PDF_REVISION = "opentour.reader.pdf-text@1.0.5"
+PDF_REVISION = "opentour.reader.pdf-text@1.0.6"
 # The three thresholds below are adjustable judgement values, not contract values: they trade
 # review volume against missed concealment and may be retuned without a format change.
 # Effective text size, in points, below which text is treated as not human-readable. Real
@@ -68,7 +70,6 @@ MIN_TEXT_CONTRAST_AGAINST_WHITE = 1.3
 # widths, Tc, Tw and TJ adjustments (see the width sources below), bounded wide, never narrow.
 IMAGE_REVIEW_PAGE_FRACTION = 0.25
 _OBJ = re.compile(rb"(?<![0-9])(\d{1,7})\s+(\d{1,5})\s+obj\b")
-_REF = rb"(\d+)\s+\d+\s+R"
 _NUMBER = re.compile(rb"[+-]?(\d+\.?\d*|\.\d+)")
 _WS = b" \t\r\n\x0c\x00"
 _DELIM = b"()<>[]/%"
@@ -89,27 +90,6 @@ class _Object:
     number: int
     head: bytes
     stream: bytes | None
-
-
-def _balanced(text: bytes, start: int) -> bytes:
-    """Return the `<< ... >>` dictionary text beginning at or after `start`."""
-    begin = text.find(b"<<", start)
-    if begin < 0:
-        return b""
-    depth, i = 0, begin
-    while i < len(text) - 1:
-        pair = text[i : i + 2]
-        if pair == b"<<":
-            depth += 1
-            i += 2
-        elif pair == b">>":
-            depth -= 1
-            i += 2
-            if depth == 0:
-                return text[begin:i]
-        else:
-            i += 1
-    return text[begin:]
 
 
 def _objects(data: bytes, deadline: Deadline) -> dict[int, _Object]:
@@ -152,14 +132,259 @@ def _objects(data: bytes, deadline: Deadline) -> dict[int, _Object]:
     return found
 
 
-def _decode(obj: _Object, limits: Limits) -> bytes:
+# ------------------------------------------------------------------ object syntax
+# Every dictionary the reader relies on (catalog, page tree, resources, fonts, font
+# descriptors, /Widths, XObject and content-stream dictionaries) is parsed, never searched: a
+# key inside a string, a comment or a nested dictionary is not that dictionary's key, and a
+# `#xx`-escaped name is its decoded name. A dictionary that repeats a key is ambiguous (a viewer
+# may take either value), so it is never read: the page goes to review as pdf_object_ambiguous.
+# So does a head that is malformed, nested deeper than _MAX_OBJECT_DEPTH, longer than
+# _MAX_HEAD_BYTES or holding a number that is not finite.
+_MAX_OBJECT_DEPTH = 32
+_MAX_HEAD_BYTES = 262_144
+_REGULAR = re.compile(rb"[^\x00\t\n\x0c\r ()<>\[\]{}/%]*")
+_HEX_PAIR = re.compile(rb"#([0-9A-Fa-f]{2})")
+
+
+class _Name(str):
+    """A PDF name with its `#xx` escapes decoded (latin-1 text)."""
+
+    __slots__ = ()
+
+
+@dataclass(frozen=True)
+class _Ref:
+    number: int
+    generation: int
+
+
+_NO_STREAM = _Object(0, b"", None)
+
+
+class _Unreadable(Exception):
+    """An object head that cannot be read unambiguously."""
+
+
+def _number(word: bytes) -> int | float:
+    if not _NUMBER.fullmatch(word):
+        raise _Unreadable("not a value")
+    if b"." not in word and len(word) <= 16:
+        return int(word)
+    try:
+        value = float(word)
+    except OverflowError as error:  # pragma: no cover - float() returns inf instead
+        raise _Unreadable("number out of range") from error
+    if not math.isfinite(value):
+        raise _Unreadable("number out of range")
+    return value
+
+
+class _HeadParser:
+    def __init__(self, data: bytes) -> None:
+        self.data, self.at = data, 0
+
+    def skip(self) -> None:
+        data, n = self.data, len(self.data)
+        while self.at < n:
+            byte = data[self.at]
+            if byte in _WS:
+                self.at += 1
+            elif byte == 0x25:  # % comment, to the end of the line
+                while self.at < n and data[self.at] not in (10, 13):
+                    self.at += 1
+            else:
+                return
+
+    def word(self) -> bytes:
+        match = _REGULAR.match(self.data, self.at)
+        assert match is not None
+        self.at = match.end()
+        return match[0]
+
+    def value(self, depth: int) -> object:
+        if depth > _MAX_OBJECT_DEPTH:
+            raise _Unreadable("nested too deep")
+        self.skip()
+        data = self.data
+        if self.at >= len(data):
+            raise _Unreadable("missing value")
+        byte = data[self.at]
+        if data.startswith(b"<<", self.at):
+            return self.dictionary(depth)
+        if byte == 0x5B:  # [
+            self.at += 1
+            items: list[object] = []
+            while True:
+                self.skip()
+                if data.startswith(b"]", self.at):
+                    self.at += 1
+                    return items
+                items.append(self.value(depth + 1))
+        if byte == 0x28:  # (
+            return self.literal()
+        if byte == 0x3C:  # <
+            end = data.find(b">", self.at)
+            digits = (
+                re.sub(rb"[\x00\t\n\x0c\r ]", b"", data[self.at + 1 : end]) if end > 0 else b"?"
+            )
+            if not re.fullmatch(rb"[0-9A-Fa-f]*", digits):
+                raise _Unreadable("bad hex string")
+            self.at = end + 1
+            return bytes.fromhex((digits + b"0" * (len(digits) % 2)).decode("ascii"))
+        if byte == 0x2F:  # /
+            return self.name()
+        word = self.word()
+        if word in (b"true", b"false"):
+            return word == b"true"
+        if word == b"null":
+            return None
+        number = _number(word)
+        if isinstance(number, int) and number >= 0 and not word.startswith((b"+", b"-")):
+            mark = self.at
+            self.skip()
+            generation = self.word()
+            if generation.isdigit():
+                self.skip()
+                if self.word() == b"R":
+                    return _Ref(number, int(generation))
+            self.at = mark
+        return number
+
+    def dictionary(self, depth: int) -> dict[str, object]:
+        self.at += 2
+        out: dict[str, object] = {}
+        while True:
+            self.skip()
+            if self.data.startswith(b">>", self.at):
+                self.at += 2
+                return out
+            if not self.data.startswith(b"/", self.at):
+                raise _Unreadable("dictionary key is not a name")
+            key = self.name()
+            value = self.value(depth + 1)
+            if key in out:
+                raise _Unreadable("duplicate dictionary key")
+            out[key] = value
+
+    def name(self) -> _Name:
+        self.at += 1
+        raw = self.word()
+        if raw.count(b"#") != len(_HEX_PAIR.findall(raw)):
+            raise _Unreadable("bad name escape")
+        decoded = _HEX_PAIR.sub(lambda m: bytes([int(m[1], 16)]), raw)
+        return _Name(decoded.decode("latin-1"))
+
+    def literal(self) -> bytes:
+        data, n = self.data, len(self.data)
+        depth, at, out = 1, self.at + 1, bytearray()
+        while at < n:
+            byte = data[at]
+            if byte == 0x5C and at + 1 < n:  # backslash escape
+                nxt = data[at + 1]
+                if 0x30 <= nxt <= 0x37:
+                    end = at + 1
+                    while end < n and end < at + 4 and 0x30 <= data[end] <= 0x37:
+                        end += 1
+                    out.append(int(data[at + 1 : end], 8) & 0xFF)
+                    at = end
+                    continue
+                if nxt in (10, 13):
+                    at += 3 if data[at + 1 : at + 3] == b"\r\n" else 2
+                    continue
+                out.append(_ESCAPES.get(nxt, nxt))
+                at += 2
+                continue
+            if byte == 0x28:
+                depth += 1
+            elif byte == 0x29:
+                depth -= 1
+                if depth == 0:
+                    self.at = at + 1
+                    return bytes(out)
+            out.append(byte)
+            at += 1
+        raise _Unreadable("unterminated string")
+
+
+def _parse_head(head: bytes) -> object:
+    """The single value an object head holds; raises _Unreadable rather than guess."""
+    if len(head) > _MAX_HEAD_BYTES:
+        raise _Unreadable("object head too long")
+    parser = _HeadParser(head)
+    value = parser.value(0)
+    parser.skip()
+    if parser.at != len(head):
+        raise _Unreadable("trailing content")
+    return value
+
+
+class _Doc:
+    """Parsed object heads, read on demand; remembers which could not be read unambiguously."""
+
+    def __init__(self, objects: dict[int, _Object], deadline: Deadline) -> None:
+        self.objects, self.deadline = objects, deadline
+        self.values: dict[int, object] = {}
+        self.bad: set[int] = set()
+        self.touched: set[int] = set()
+
+    def value(self, number: int) -> object:
+        self.touched.add(number)
+        if number not in self.values:
+            self.deadline.check()
+            obj = self.objects.get(number)
+            try:
+                self.values[number] = None if obj is None else _parse_head(obj.head)
+            except _Unreadable:
+                self.bad.add(number)
+                self.values[number] = None
+        return self.values[number]
+
+    def resolve(self, value: object) -> object:
+        seen: set[int] = set()
+        while isinstance(value, _Ref):
+            if value.number in seen or len(seen) >= 8:
+                return None  # a reference cycle or chain resolves to nothing
+            seen.add(value.number)
+            value = self.value(value.number)
+        return value
+
+    def dict(self, value: object) -> dict[str, object] | None:
+        resolved = self.resolve(value)
+        return resolved if isinstance(resolved, dict) else None
+
+    def ambiguous(self) -> bool:
+        """Whether anything read since `touched` was last cleared was unreadable."""
+        return bool(self.touched & self.bad)
+
+
+def _is_number(value: object) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _parse_dict(head: bytes) -> dict[str, object] | None:
+    """A standalone dictionary head (no references resolved), or None when unreadable."""
+    try:
+        value = _parse_head(head)
+    except _Unreadable:
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def _decode(obj: _Object, head: dict[str, object] | None, doc: _Doc, limits: Limits) -> bytes:
     raw = obj.stream or b""
-    filters = re.findall(rb"/(\w+Decode|DCTDecode|JPXDecode|CCITTFaxDecode)", obj.head)
-    if not filters:
-        return raw
-    if filters != [b"FlateDecode"] or b"/Crypt" in obj.head:
+    if head is None:
         raise ReaderFailure(ExtractionState.UNSUPPORTED, "pdf_stream_filter", NextActor.OWNER)
-    if b"/Predictor" in obj.head:
+    filters = doc.resolve(head.get("Filter"))
+    names = filters if isinstance(filters, list) else [] if filters is None else [filters]
+    if not names:
+        return raw
+    if [str(name) if isinstance(name, _Name) else None for name in names] != ["FlateDecode"]:
+        raise ReaderFailure(ExtractionState.UNSUPPORTED, "pdf_stream_filter", NextActor.OWNER)
+    params = doc.resolve(head.get("DecodeParms"))
+    params = params[0] if isinstance(params, list) and params else params
+    params = doc.dict(params) if params is not None else {}
+    predictor = doc.resolve((params or {}).get("Predictor"))
+    if params is None or (predictor is not None and predictor != 1):
         # PNG/TIFF predictors would need un-predicting; reading without it would emit garbage.
         raise ReaderFailure(ExtractionState.UNSUPPORTED, "pdf_stream_predictor", NextActor.OWNER)
     inflater = zlib.decompressobj()
@@ -243,7 +468,8 @@ def _tokens(data: bytes):  # type: ignore[no-untyped-def]
             j = i + 1
             while j < n and data[j] not in _WS and data[j] not in _DELIM:
                 j += 1
-            yield ("name", data[i + 1 : j])
+            # Names match resource keys after #xx decoding, as the dictionaries are read.
+            yield ("name", _HEX_PAIR.sub(lambda m: bytes([int(m[1], 16)]), data[i + 1 : j]))
             i = j
         else:
             j = i
@@ -279,11 +505,15 @@ def _concat(m: tuple[float, ...], n: tuple[float, ...]) -> tuple[float, ...]:
     )
 
 
-# Text extents come from per-glyph advance widths (1000 units per em). Every extent check (page
-# edge, clip, image overlap) asks whether a show's advance boxes reach past a boundary, so all
-# of them use one bound per font, the widest advance that font can have: too wide only sends a
-# page to review, too narrow can admit text drawn off the page, outside a clip or under an
-# image. The pen moves as a viewer moves it (Tc, Tw, Tz and TJ adjustments, leftward included).
+# Text extents come from per-glyph widths (1000 units per em). Every extent check (page edge,
+# clip, image overlap) asks whether a show's glyph boxes reach past a boundary, so all of them
+# use one bound per font: too wide only sends a page to review, too narrow can admit text drawn
+# off the page, outside a clip or under an image. The pen moves as a viewer moves it, by the
+# declared advance plus Tc, Tw, Tz and TJ adjustments, leftward included. A viewer still draws
+# each glyph at its natural size wherever the pen puts it, so each glyph's box is
+# [pen, pen + max(declared, natural)], natural being the AFM width for an exact standard name
+# and the source-3 bound otherwise (_Metrics.ink). Declared widths far below the drawn glyph
+# also pile glyphs up even away from any edge: see glyph_overprint_suspected in _extent_units.
 # Width sources, most authoritative first:
 #
 # 1. A simple font's own /FirstChar, /LastChar and /Widths, parsed and checked here. A viewer
@@ -314,9 +544,11 @@ def _concat(m: tuple[float, ...], n: tuple[float, ...]) -> tuple[float, ...]:
 # Outside printable ASCII, a letter with an accent takes the source-3 width of its unaccented
 # letter, which is at least the accented glyph's AFM width in all six faces (the only accented
 # glyphs wider than their base letter, Helvetica's i-grave/acute/circumflex/dieresis at 278
-# against 222, are within it). Anything else (dashes, ellipsis, symbols, unmapped codes) takes
-# _WIDEST_GLYPH, the widest WinAnsi upper-half glyph in those six faces (of the glyphs the AFM
-# data covers; it has no Euro, no-break space or soft hyphen).
+# against 222, are within it). In the source-3 bound that width is never below
+# _NON_ASCII_FLOOR, the 556 that 1.0.3 measured every such code at. Anything else (dashes,
+# ellipsis, symbols, unmapped codes) takes _WIDEST_GLYPH, the widest WinAnsi upper-half glyph in
+# those six faces (of the glyphs the AFM data covers; it has no Euro, no-break space or soft
+# hyphen).
 #
 # Residuals, measured against this table, not closed here:
 # - A non-standard simple font with no valid /Widths is routed to review, not measured: of 75
@@ -324,11 +556,15 @@ def _concat(m: tuple[float, ...], n: tuple[float, ...]) -> tuple[float, ...]:
 #   (up to 1.21 times, the monospaced faces) and every one has at least one glyph wider.
 # - Courier New without /Widths is measured at Courier's 600; its TrueType advance is
 #   1229/2048 = 600.1 (measured on the metric-compatible Liberation Mono).
-# - Extents are advance boxes: ink overhanging its advance (italic overhang, a glyph drawn wider
-#   than its /Widths entry) is not modelled.
+# - Glyph boxes run from the pen to the larger of the declared and natural advance. True ink
+#   outside that box is not modelled: italic overhang past the advance, and outlines wider than
+#   their AFM width or than _PROPORTIONAL_MAX.
+# - Overprint is checked within one show and the shows that follow it from the same position.
+#   Shows placed onto each other by separate positioning operators are not compared.
 # - Type3 widths (glyph space) and Type0 widths (/W) are not read. Such text already goes to
 #   review as font_encoding_unverified.
 _WIDEST_GLYPH = 1000
+_NON_ASCII_FLOOR = 556  # what 1.0.3 measured any code outside printable ASCII at
 _ASCII = (
     " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ"
     "[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~"
@@ -407,9 +643,11 @@ def _char_width(table: str | None, char: str) -> int:
     if char in _GLYPH_WIDTHS[table]:
         return _GLYPH_WIDTHS[table][char]
     base = unicodedata.normalize("NFD", char)[:1]
-    if base != char and base in _GLYPH_WIDTHS[None]:
-        return _GLYPH_WIDTHS[None][base]
-    return _WIDEST_GLYPH
+    width = _GLYPH_WIDTHS[None][base] if base != char and base in _GLYPH_WIDTHS[None] else None
+    if width is None:
+        return _WIDEST_GLYPH
+    # The generous bound keeps the 1.0.3 floor: 556 for every code outside printable ASCII.
+    return max(width, _NON_ASCII_FLOOR) if table is None else width
 
 
 # Advance width of every one-byte code, decoded as this reader decodes it (cp1252).
@@ -419,22 +657,49 @@ _ADVANCES: dict[str | None, tuple[float, ...]] = {
     )
     for table in _GLYPH_WIDTHS
 }
-_SIMPLE_FONT = rb"/Subtype\s*/(Type1|TrueType|MMType1)\b"
-_INTEGER_KEY = rb"\s+(\d+)(?=[\s/>\]]|$)(?!\s+\d+\s+R)"
-_PDF_NUMBER = re.compile(rb"[+-]?(\d+\.?\d*|\.\d+)")
+# Printable, non-space glyphs: the ones whose piling up hides what the extracted text says.
+_PRINTABLE = tuple(
+    (char := bytes([code]).decode("cp1252", "replace")).isprintable()
+    and not char.isspace()
+    and char != "\ufffd"
+    for code in range(256)
+)
+_SIMPLE_SUBTYPES = frozenset({"Type1", "TrueType", "MMType1"})
+# Overprint thresholds (see glyph_overprint_suspected in _extent_units), in 1/1000 em.
+OVERPRINT_ADVANCE_UNITS = 100.0
+OVERPRINT_STANDARD_RATIO = 0.5
+OVERPRINT_RUN = 3
 
 
-def _base_name(font: _Object | None) -> str:
+@dataclass(frozen=True)
+class _Metrics:
+    """Per-code widths (1000 units per em) of one font, as this reader bounds them."""
+
+    advance: tuple[float, ...]  # how far the pen moves: the declared width, or the bound
+    ink: tuple[float, ...]  # the advance box drawn: never narrower than the natural glyph
+    natural: tuple[float, ...]  # the glyph's own width: AFM for an exact name, else the bound
+    exact: bool  # an exact standard name with no font program of its own
+    declared: bool  # advances come from a valid /Widths
+
+
+def _uniform(advances: tuple[float, ...], exact: bool) -> _Metrics:
+    return _Metrics(advances, advances, advances, exact, False)
+
+
+_FALLBACK_METRICS = _uniform(_ADVANCES[None], False)
+
+
+def _base_name(font: dict[str, object] | None) -> str:
     """The simple font's /BaseFont, lower-cased, without a subset tag ("" when there is none)."""
-    if font is None or not re.search(_SIMPLE_FONT, font.head):
+    if not font or font.get("Subtype") not in _SIMPLE_SUBTYPES:
         return ""
-    base = re.search(rb"/BaseFont\s*/([^\s/<>\[\]()]+)", font.head)
-    if base is None:
+    base = font.get("BaseFont")
+    if not isinstance(base, _Name):
         return ""
-    return re.sub(r"^[A-Z]{6}\+", "", base[1].decode("latin-1")).lower().replace(",", "-")
+    return re.sub(r"^[A-Z]{6}\+", "", str(base)).lower().replace(",", "-")
 
 
-def _width_table_for(font: _Object | None) -> str | None:
+def _width_table_for(font: dict[str, object] | None) -> str | None:
     """Name the width table of a simple standard-metric font, or None when there is none."""
     name = _base_name(font)
     # Exact family names only: CourierPrime, Arial-Black (wider), ArialNarrow, Helvetica-Light,
@@ -453,116 +718,136 @@ def _width_table_for(font: _Object | None) -> str | None:
     return None
 
 
-def _resolved(head: bytes, key: bytes, objects: dict[int, _Object]) -> bytes | None:
-    """The value text of `key` (an inline `[...]`/`<<...>>` or one indirect object), or None."""
-    match = re.search(rb"/" + key + rb"\s*(\[|<<|(\d+)\s+\d+\s+R)", head)
-    if match is None:
-        return None
-    if match[2] is not None:
-        target = objects.get(int(match[2]))
-        return target.head.strip() if target is not None and target.stream is None else b""
-    if match[1] == b"<<":
-        return _balanced(head, match.start(1))
-    end = head.find(b"]", match.end())
-    return head[match.start(1) : end + 1] if end >= 0 else b""
-
-
-def _declared_widths(
-    head: bytes, objects: dict[int, _Object]
-) -> tuple[int, list[float]] | float | None:
+def _declared_widths(font: dict[str, object], doc: _Doc) -> tuple[int, list[float]] | float | None:
     """(FirstChar, widths) when well formed; the largest number seen when not; None if absent."""
-    if not any(
-        re.search(rb"/" + key + rb"\b", head) for key in (b"FirstChar", b"LastChar", b"Widths")
-    ):
+    if not any(key in font for key in ("FirstChar", "LastChar", "Widths")):
         return None
-    array = _resolved(head, b"Widths", objects) or b""
-    numbers = [float(n[0]) for n in _PDF_NUMBER.finditer(array)]
-    floor = max([n for n in numbers if math.isfinite(n)] + [0.0])
-    first = re.search(rb"/FirstChar" + _INTEGER_KEY, head)
-    last = re.search(rb"/LastChar" + _INTEGER_KEY, head)
-    if first is None or last is None or not (array.startswith(b"[") and array.endswith(b"]")):
+    array = doc.resolve(font.get("Widths"))
+    numbers = [float(v) for v in array if _is_number(v)] if isinstance(array, list) else []
+    floor = max([0.0, *numbers])
+    first, last = doc.resolve(font.get("FirstChar")), doc.resolve(font.get("LastChar"))
+    if not isinstance(array, list) or not all(_is_number(v) for v in array):
         return floor
-    tokens = array[1:-1].split()
-    if not all(_PDF_NUMBER.fullmatch(token) for token in tokens):
+    if type(first) is not int or type(last) is not int:
         return floor
-    widths = [float(token) for token in tokens]
-    start, stop = int(first[1]), int(last[1])
-    if not (0 <= start <= stop <= 255 and len(widths) == stop - start + 1):
+    widths = [float(v) for v in array]
+    if not (0 <= first <= last <= 255 and len(widths) == last - first + 1):
         return floor
-    if any(not math.isfinite(width) or width < 0 for width in widths):
+    if any(width < 0 for width in widths):
         return floor
-    return start, widths
+    return first, widths
 
 
-def _font_advances(font: _Object | None, objects: dict[int, _Object]) -> tuple[float, ...]:
-    """Per-code advance widths (1000 units per em) bounding where a viewer places each glyph."""
-    generous = _ADVANCES[None]
-    if font is None or not re.search(_SIMPLE_FONT, font.head):
-        return generous
+def _exact(font: dict[str, object] | None) -> str | None:
+    """The AFM table of an exact standard name with no font program of its own, or None."""
     table = _width_table_for(font)
-    if table is not None and b"/FontDescriptor" not in font.head:
-        named = _ADVANCES[table]
+    return (
+        table if font is not None and table is not None and "FontDescriptor" not in font else None
+    )
+
+
+def _font_metrics(font: dict[str, object] | None, doc: _Doc | None) -> _Metrics:
+    """How far each code moves the pen, and how far its drawn glyph can reach."""
+    doc = doc if doc is not None else _Doc({}, Deadline(60.0))
+    generous = _ADVANCES[None]
+    if not font or font.get("Subtype") not in _SIMPLE_SUBTYPES:
+        return _uniform(generous, False)
+    exact = _exact(font)
+    if exact is not None:
+        natural = _ADVANCES[exact]
     else:  # no standard name, or a standard name over a font program of its own
+        table = _width_table_for(font)
         # A Courier-like name (CourierPrime, Courier-Condensed) keeps at least Courier's 600.
         family = table or ("courier" if _base_name(font).startswith("courier") else None)
-        named = tuple(map(max, _ADVANCES[family], generous))
-    declared = _declared_widths(font.head, objects)
+        natural = tuple(map(max, _ADVANCES[family], generous))
+    declared = _declared_widths(font, doc)
     if declared is None:
-        return named
+        return _uniform(natural, exact is not None)
     if isinstance(declared, float):  # malformed: never trusted, and never below its entries
-        return tuple(max(width, declared) for width in named)
+        return _uniform(tuple(max(width, declared) for width in natural), exact is not None)
     start, widths = declared
-    descriptor = _resolved(font.head, b"FontDescriptor", objects) or b""
-    missing = re.search(
-        rb"/MissingWidth\s+(" + _PDF_NUMBER.pattern + rb")(?!\s+\d+\s+R)", descriptor
-    )
-    fill = max(float(missing[1]), 0.0) if missing else 0.0
-    return tuple(
+    descriptor = doc.dict(font.get("FontDescriptor")) or {}
+    missing = doc.resolve(descriptor.get("MissingWidth"))
+    fill = max(float(missing), 0.0) if _is_number(missing) else 0.0  # type: ignore[arg-type]
+    advance = tuple(
         widths[code - start]
         if start <= code < start + len(widths)
-        else max(named[code], generous[code], fill)
+        else max(natural[code], generous[code], fill)
         for code in range(256)
     )
+    ink = tuple(map(max, advance, natural))
+    return _Metrics(advance, ink, natural, exact is not None, True)
 
 
-def _widths_unavailable(font: _Object | None, objects: dict[int, _Object]) -> bool:
+def _widths_unavailable(font: dict[str, object] | None, doc: _Doc) -> bool:
     """A simple font whose advances only a guess can supply: it goes to review.
 
     Outside an exact standard name with no font program of its own, the PDF format requires a
     valid /Widths, and a viewer may otherwise draw from the embedded program, whose glyphs can
     be wider than any bound this reader assumes.
     """
-    if font is None or not re.search(_SIMPLE_FONT, font.head):
+    if not font or font.get("Subtype") not in _SIMPLE_SUBTYPES:
         return False  # unresolved, Type0 and Type3 fonts already flag font_encoding_unverified
-    if _width_table_for(font) is not None and b"/FontDescriptor" not in font.head:
+    if _exact(font) is not None:
         return False
-    return not isinstance(_declared_widths(font.head, objects), tuple)
+    return not isinstance(_declared_widths(font, doc), tuple)
 
 
 def _extent_units(
     pieces: list[bytes | float],
-    advances: tuple[float, ...],
+    metrics: _Metrics,
     size: float,
     char_spacing: float = 0.0,
     word_spacing: float = 0.0,
-) -> tuple[float, float, float]:
-    """(leftmost, rightmost, final pen) of a show's advance boxes, in unscaled text space.
+) -> tuple[float, float, float, bool]:
+    """(leftmost, rightmost, final pen, overprint) of a show's glyph boxes, in text space.
 
     `pieces` are the shown strings and, for TJ, the numeric adjustments between them. The pen
-    moves exactly as a viewer moves it (PDF 9.4.4), so leftward kerning, negative spacing and
-    rightward TJ gaps are all accounted for rather than ignored.
+    moves exactly as a viewer moves it (PDF 9.4.4): by the declared advance, Tc, Tw and TJ
+    adjustments, leftward included. Each glyph's box spans [pen, pen + max(declared, natural)],
+    because a viewer draws the glyph at its natural size wherever /Widths puts the pen.
+
+    Overprint (glyph_overprint_suspected) is a pile of printable glyphs a human sees as a blob
+    while the extracted text reads cleanly: (i) any printable non-space glyph declared under
+    OVERPRINT_ADVANCE_UNITS; (ii) for an exact standard name only, OVERPRINT_RUN consecutive
+    printable glyphs declared under OVERPRINT_STANDARD_RATIO of their AFM width (a
+    non-standard face has no natural width to compare with, and condensed faces are real);
+    (iii) OVERPRINT_RUN consecutive printable glyphs each starting less than
+    OVERPRINT_ADVANCE_UNITS after the previous one, whatever moved them (Tc, Tw, TJ).
     """
     pen = left = right = 0.0
+    overprint = False
+    squeezed = stacked = 0
+    previous: float | None = None  # where the last printable glyph started, when it was the last
+    em = size / 1000.0
     for piece in pieces:
-        if isinstance(piece, bytes):
-            for code in piece:
-                width = advances[code] / 1000.0 * size
-                left, right = min(left, pen), max(right, pen + width)
-                pen += width + char_spacing + (word_spacing if code == 32 else 0.0)
-        else:
-            pen -= piece / 1000.0 * size
+        if not isinstance(piece, bytes):
+            pen -= piece * em
+            left, right = min(left, pen), max(right, pen)
+            continue
+        for code in piece:
+            advance = metrics.advance[code]
+            printable = _PRINTABLE[code]
+            if printable:
+                if metrics.declared and advance < OVERPRINT_ADVANCE_UNITS:
+                    overprint = True
+                low = metrics.exact and advance < OVERPRINT_STANDARD_RATIO * metrics.natural[code]
+                squeezed = squeezed + 1 if metrics.declared and low else 0
+                close = (
+                    previous is not None
+                    and size > 0
+                    and pen - previous < OVERPRINT_ADVANCE_UNITS * em
+                )
+                stacked = stacked + 1 if close else 1
+                if squeezed >= OVERPRINT_RUN or stacked >= OVERPRINT_RUN:
+                    overprint = True
+                previous = pen
+            else:
+                squeezed, stacked, previous = 0, 0, None
+            left, right = min(left, pen), max(right, pen + metrics.ink[code] * em)
+            pen += advance * em + char_spacing + (word_spacing if code == 32 else 0.0)
         left, right = min(left, pen), max(right, pen)
-    return left, right, pen
+    return left, right, pen, overprint
 
 
 def _relative_luminance(red: float, green: float, blue: float) -> float:
@@ -711,7 +996,7 @@ def _fragments(
     forms: frozenset[bytes] = frozenset(),
     images: frozenset[bytes] = frozenset(),
     page_box: tuple[float, float, float, float] | None = None,
-    font_advances: dict[bytes, tuple[float, ...]] | None = None,
+    font_metrics: dict[bytes, _Metrics] | None = None,
 ) -> tuple[list[_Fragment], set[str]]:
     """Return positioned fragments and the review flags the content stream earned.
 
@@ -752,13 +1037,17 @@ def _fragments(
         if anchor != adv_anchor:
             adv_anchor, adv_pen = anchor, 0.0
         step = scale_x * gs.h_scale
-        advances = (font_advances or {}).get(gs.font, _ADVANCES[None])
-        left, right, pen = _extent_units(pieces, advances, size, gs.char_spacing, gs.word_spacing)
+        metrics = (font_metrics or {}).get(gs.font, _FALLBACK_METRICS)
+        left, right, pen, overprint = _extent_units(
+            pieces, metrics, size, gs.char_spacing, gs.word_spacing
+        )
         left_end = px + (adv_pen + left) * step
         right_end = px + (adv_pen + right) * step
         adv_pen += pen
         if not text.strip():
             return
+        if overprint:
+            marks.add("glyph_overprint_suspected")
         if gs.render_mode in (3.0, 7.0):
             marks.add("hidden_text_present")
         if (
@@ -836,6 +1125,9 @@ def _fragments(
                 stack.append(array)
             array = None
             continue
+        if kind == "num" and not math.isfinite(value):
+            marks.add("content_operand_non_finite")  # a viewer cannot place it; neither can we
+            value = 0.0
         if array is not None:
             array.append(value)
             continue
@@ -942,40 +1234,41 @@ def _fragments(
     return out, marks
 
 
-def _font_ok(fonts: dict[bytes, _Object], name: bytes, text: str) -> bool:
+_STANDARD_TEXT_FONTS = frozenset(
+    {
+        "Courier", "Courier-Bold", "Courier-BoldOblique", "Courier-Oblique",
+        "Helvetica", "Helvetica-Bold", "Helvetica-BoldOblique", "Helvetica-Oblique",
+        "Times-Roman", "Times-Bold", "Times-BoldItalic", "Times-Italic",
+    }
+)  # fmt: skip
+
+
+def _font_ok(fonts: dict[bytes, dict[str, object]], name: bytes, text: str) -> bool:
     """Only a font whose byte-to-character mapping is provably standard is trusted."""
-    obj = fonts.get(name)
-    if obj is None:
-        return False  # unresolved font resource: the encoding cannot be known
-    head = obj.head
-    if re.search(rb"/Subtype\s*/Type1\b", head) is None and not re.search(
-        rb"/Subtype\s*/(TrueType|MMType1)\b", head
-    ):
+    font = fonts.get(name)
+    if font is None:
+        return False  # unresolved or unreadable font resource: the encoding cannot be known
+    subtype = font.get("Subtype")
+    if subtype not in _SIMPLE_SUBTYPES:
         return False  # Type0, Type3 and anything unrecognised
-    if re.search(rb"/Differences", head) or re.search(rb"/ToUnicode", head):
+    if "Differences" in font or "ToUnicode" in font:
         return False
-    if re.search(rb"/Encoding\s*(?:<<|\d+\s+\d+\s+R)", head):
-        return False  # inline or indirect encoding dictionary
-    encoding = re.search(rb"/Encoding\s*/(\w+)", head)
-    if encoding and encoding[1] == b"WinAnsiEncoding":
-        return all(ord(char) >= 32 and char not in "\x7f\ufffd" for char in text)
+    encoding = font.get("Encoding")
+    if encoding is not None and not isinstance(encoding, _Name):
+        return False  # inline or indirect encoding dictionary, or a value of the wrong type
+    if encoding == "WinAnsiEncoding":
+        return all(ord(char) >= 32 and char not in "\x7f�" for char in text)
     standard_subset = all(32 <= ord(char) <= 126 and char not in "'`" for char in text)
-    if encoding:
+    if encoding is not None:
         # This reader decodes with WinAnsi. Only shared ASCII glyphs may be trusted
         # when a different supported font encoding is declared.
-        return encoding[1] in {b"MacRomanEncoding", b"StandardEncoding"} and standard_subset
+        return encoding in {"MacRomanEncoding", "StandardEncoding"} and standard_subset
     # Default font encodings are only known for the unembedded standard text fonts.
     return (
         standard_subset
-        and re.search(rb"/Subtype\s*/Type1\b", head) is not None
-        and b"/FontDescriptor" not in head
-        and re.search(
-            rb"/BaseFont\s*/(?:Courier(?:-Bold(?:Oblique)?|-Oblique)?"
-            rb"|Helvetica(?:-Bold(?:Oblique)?|-Oblique)?|Times-(?:Roman|Bold(?:Italic)?|Italic))"
-            rb"(?=[\x00\x09\x0a\x0c\x0d ()<>\[\]{}/%]|$)",
-            head,
-        )
-        is not None
+        and subtype == "Type1"
+        and "FontDescriptor" not in font
+        and font.get("BaseFont") in _STANDARD_TEXT_FONTS
     )
 
 
@@ -1015,19 +1308,31 @@ def read_pdf(data: bytes, limits: Limits, deadline: Deadline) -> ReadResult:
         re.search(rb"/Encrypt\b", o.head) for o in objects.values()
     ):
         raise ReaderFailure(ExtractionState.LOCKED, "encrypted_pdf", NextActor.OWNER)
-    catalog = next((o for o in objects.values() if re.search(rb"/Type\s*/Catalog", o.head)), None)
+    doc = _Doc(objects, deadline)
+    catalog: dict[str, object] | None = None
+    for candidate in (o for o in objects.values() if re.search(rb"/Type\s*/Catalog", o.head)):
+        value = doc.value(candidate.number)
+        if candidate.number in doc.bad:
+            raise ReaderFailure(ExtractionState.CORRUPT, "ambiguous_page_tree", NextActor.OWNER)
+        if isinstance(value, dict) and value.get("Type") == "Catalog":
+            catalog = value
+            break
     if catalog is None:
         reason = "pdf_object_streams" if b"/ObjStm" in data else "no_catalog"
         state = ExtractionState.UNSUPPORTED if b"/ObjStm" in data else ExtractionState.CORRUPT
         raise ReaderFailure(state, reason, NextActor.OWNER)
-    root = re.search(rb"/Pages\s+" + _REF, catalog.head)
-    if root is None:
+    root = catalog.get("Pages")
+    if not isinstance(root, _Ref):
         raise ReaderFailure(ExtractionState.CORRUPT, "no_page_tree", NextActor.OWNER)
 
-    pages: list[tuple[_Object, bytes, tuple[float, float, float, float] | None]] = []
+    pages: list[
+        tuple[dict[str, object], dict[str, object], tuple[float, float, float, float] | None, bool]
+    ] = []
     seen: set[int] = set()
 
-    def walk(number: int, inherited: bytes, inherited_boxes: _Boxes, depth: int) -> None:
+    def walk(
+        number: int, inherited: dict[str, object], boxes: _Boxes, bad: bool, depth: int
+    ) -> None:
         if number in seen or number not in objects:
             raise ReaderFailure(ExtractionState.CORRUPT, "bad_page_tree", NextActor.OWNER)
         if depth > limits.max_xml_depth:
@@ -1035,49 +1340,71 @@ def read_pdf(data: bytes, limits: Limits, deadline: Deadline) -> ReadResult:
                 ExtractionState.OVER_DEPTH, "page_tree_depth", NextActor.OWNER, limit="max_depth"
             )
         seen.add(number)
-        obj = objects[number]
-        resources = _resources(obj.head, objects) or inherited
+        doc.touched = set()
+        node = doc.value(number)
+        if number in doc.bad or not isinstance(node, dict):
+            raise ReaderFailure(ExtractionState.CORRUPT, "ambiguous_page_tree", NextActor.OWNER)
+        resources = (doc.dict(node["Resources"]) or {}) if "Resources" in node else inherited
         boxes = _Boxes(
-            _box(obj.head, b"MediaBox", objects) or inherited_boxes.media,
-            _box(obj.head, b"CropBox", objects) or inherited_boxes.crop,
+            _box(node.get("MediaBox"), doc) or boxes.media,
+            _box(node.get("CropBox"), doc) or boxes.crop,
         )
-        if re.search(rb"/Type\s*/Pages\b", obj.head):
-            kids = re.search(rb"/Kids\s*\[(.*?)\]", obj.head, re.S)
-            for kid in re.findall(_REF, kids[1] if kids else b""):
-                walk(int(kid), resources, boxes, depth + 1)
+        bad = bad or doc.ambiguous()
+        if node.get("Type") == "Pages":
+            kids = doc.resolve(node.get("Kids"))
+            for kid in kids if isinstance(kids, list) else []:
+                if not isinstance(kid, _Ref):
+                    raise ReaderFailure(ExtractionState.CORRUPT, "bad_page_tree", NextActor.OWNER)
+                walk(kid.number, resources, boxes, bad, depth + 1)
         else:
-            pages.append((obj, resources, boxes.visible()))
+            pages.append((node, resources, boxes.visible(), bad))
             if len(pages) > limits.max_pages:
                 raise ReaderFailure(
                     ExtractionState.OVERSIZED, "page_limit", NextActor.OWNER, limit="pages"
                 )
 
-    walk(int(root[1]), b"", _Boxes(None, None), 0)
+    walk(root.number, {}, _Boxes(None, None), False, 0)
     spans: list[Span] = []
     image_pages: list[int] = []
     unresolved_pages: list[int] = []
     reading_order = 0
-    for page_number, (page, resources, page_box) in enumerate(pages, start=1):
+    for page_number, (page, resources, page_box, page_bad) in enumerate(pages, start=1):
         deadline.check()
-        fonts = _named_refs(resources, b"Font", objects)
-        images = [
-            name
-            for name, obj in _named_refs(resources, b"XObject", objects).items()
-            if re.search(rb"/Subtype\s*/Image", obj.head)
-        ]
-        contents = re.search(rb"/Contents\s*(\[(.*?)\]|" + _REF + rb")", page.head, re.S)
-        refs = re.findall(_REF, contents[0]) if contents else []
-        readable = [r for r in refs if int(r) in objects and objects[int(r)].stream is not None]
-        stream = b"\n".join(_decode(objects[int(r)], limits) for r in readable)
+        doc.touched = set()
+        fonts = _named(resources, "Font", doc)
+        xobjects = {
+            name: doc.value(ref.number)
+            for name, ref in (doc.dict(resources.get("XObject")) or {}).items()
+            if isinstance(ref, _Ref)
+        }
+        images = frozenset(
+            name.encode("latin-1")
+            for name, head in xobjects.items()
+            if isinstance(head, dict) and head.get("Subtype") == "Image"
+        )
         forms = frozenset(
-            name
-            for name, obj in _named_refs(resources, b"XObject", objects).items()
-            if re.search(rb"/Subtype\s*/Form", obj.head)
+            name.encode("latin-1")
+            for name, head in xobjects.items()
+            if isinstance(head, dict) and head.get("Subtype") == "Form"
         )
-        advances = {name: _font_advances(obj, objects) for name, obj in fonts.items()}
-        fragments, marks = _fragments(
-            stream, deadline, forms, frozenset(images), page_box, advances
+        contents = page.get("Contents")
+        if isinstance(contents, _Ref) and objects.get(contents.number, _NO_STREAM).stream is None:
+            target = doc.value(contents.number)  # an indirect array of content streams
+            contents = target if isinstance(target, list) else contents
+        refs = contents if isinstance(contents, list) else [] if contents is None else [contents]
+        readable = [
+            ref
+            for ref in refs
+            if isinstance(ref, _Ref)
+            and ref.number in objects
+            and objects[ref.number].stream is not None
+            and isinstance(doc.value(ref.number), dict)
+        ]
+        stream = b"\n".join(
+            _decode(objects[ref.number], doc.dict(ref), doc, limits) for ref in readable
         )
+        metrics = {name: _font_metrics(font, doc) for name, font in fonts.items()}
+        fragments, marks = _fragments(stream, deadline, forms, images, page_box, metrics)
         if len(readable) != len(refs):
             # A referenced content stream that cannot be resolved means the page was not read.
             marks.add("content_stream_unresolved")
@@ -1088,8 +1415,10 @@ def read_pdf(data: bytes, limits: Limits, deadline: Deadline) -> ReadResult:
                 image_pages.append(page_number)
             continue
         flagged_font = any(not _font_ok(fonts, f.font, f.text) for f in fragments)
-        if any(_widths_unavailable(fonts.get(f.font), objects) for f in fragments):
+        if any(_widths_unavailable(fonts.get(f.font), doc) for f in fragments):
             marks.add("font_widths_unavailable")
+        if page_bad or doc.ambiguous():
+            marks.add("pdf_object_ambiguous")
         passages = _passages(_lines(fragments))
         for index, lines in enumerate(passages, start=1):
             reading_order += 1
@@ -1175,42 +1504,20 @@ class _Boxes:
         )
 
 
-def _box(
-    head: bytes, key: bytes, objects: dict[int, _Object]
-) -> tuple[float, float, float, float] | None:
-    """Parse an inline or singly-indirect rectangle such as `/MediaBox [0 0 612 792]`."""
-    match = re.search(rb"/" + key + rb"\s*(\[[^\]]*\]|" + _REF + rb")", head)
-    if match is None:
+def _box(value: object, doc: _Doc) -> tuple[float, float, float, float] | None:
+    """A rectangle such as `/MediaBox [0 0 612 792]`, inline or indirect; None if malformed."""
+    box = doc.resolve(value)
+    if not isinstance(box, list) or len(box) != 4 or not all(_is_number(v) for v in box):
         return None
-    body = match[1]
-    if not body.startswith(b"["):
-        target = objects.get(int(match[2]))
-        body = target.head if target is not None else b""
-    numbers = re.findall(rb"[+-]?(?:\d+\.?\d*|\.\d+)", body)
-    if len(numbers) != 4 or not body.strip().startswith(b"["):
-        return None
-    x0, y0, x1, y1 = (float(n) for n in numbers)
+    x0, y0, x1, y1 = (float(v) for v in box)
     return (min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1))
 
 
-def _resources(head: bytes, objects: dict[int, _Object]) -> bytes:
-    ref = re.search(rb"/Resources\s+" + _REF, head)
-    if ref and int(ref[1]) in objects:
-        return objects[int(ref[1])].head
-    at = head.find(b"/Resources")
-    return _balanced(head, at) if at >= 0 else b""
-
-
-def _named_refs(resources: bytes, key: bytes, objects: dict[int, _Object]) -> dict[bytes, _Object]:
-    at = resources.find(b"/" + key)
-    if at < 0:
-        return {}
-    ref = re.match(rb"/" + key + rb"\s+" + _REF, resources[at:])
-    table = (
-        objects[int(ref[1])].head if ref and int(ref[1]) in objects else _balanced(resources, at)
-    )
-    return {
-        name: objects[int(num)]
-        for name, num in re.findall(rb"/([\w.+-]+)\s+" + _REF, table)
-        if int(num) in objects
-    }
+def _named(resources: dict[str, object], key: str, doc: _Doc) -> dict[bytes, dict[str, object]]:
+    """A resource category (/Font) as name -> dictionary; unreadable entries are left out."""
+    out: dict[bytes, dict[str, object]] = {}
+    for name, value in (doc.dict(resources.get(key)) or {}).items():
+        entry = doc.dict(value)
+        if entry is not None:
+            out[name.encode("latin-1")] = entry
+    return out
