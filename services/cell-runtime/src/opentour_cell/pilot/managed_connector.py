@@ -262,6 +262,7 @@ class _View:
     state: mc.JobState = mc.JobState.UNKNOWN
     terminal: bool = False
     cap_verified: bool = False
+    maximum_minor_units: int | None = None
     tuned_model_id: str = ""
     usage: ProviderUsage | None = None
     cancel_requested: bool = False
@@ -415,6 +416,7 @@ class ManagedConnector:
             if kind == "dispatching":
                 view.intent_sha = event["intent_sha256"]
                 view.binding = event["binding"]
+                view.maximum_minor_units = event.get("maximum_minor_units")
             elif kind == "file":
                 view.file_id = event["file_id"]
             elif kind == "job":
@@ -567,6 +569,7 @@ class ManagedConnector:
                         "event": "dispatching",
                         "intent_sha256": digest,
                         "binding": _binding_document(intent.binding),
+                        "maximum_minor_units": intent.bound.maximum_minor_units,
                     },
                 )
             token = self._token(key)
@@ -800,12 +803,14 @@ class ManagedConnector:
                     view.terminal
                     or view.cancel_requested
                     or not view.cap_verified
+                    or view.maximum_minor_units is None
                     or self._fenced()
                 ):
                     return False
                 try:
                     observed = self.transport.get_job(self._binding_of(view), job_id)
-                    self._absorb(key, view, observed)
+                    if self._confirm_cap(key, view, observed, view.maximum_minor_units):
+                        self._absorb(key, view, observed)
                 except (OSError, LookupError, ValueError):
                     return False
                 refreshed = self._view(key)

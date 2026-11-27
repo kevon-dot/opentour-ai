@@ -825,3 +825,23 @@ def test_lost_create_ack_does_not_bypass_required_provider_cap(stack):
     with pytest.raises(mc.CapabilityError, match="candidate_lineage_unverified"):
         pre.collect_candidate(ACTOR, receipt)
     assert connector.lookup(intent).state is mc.JobState.CANCELED
+
+
+def test_callback_rechecks_provider_cap_before_adopting_candidate(tmp_path):
+    provider = FakeProvider(autocomplete=False)
+    connector = managed.ManagedConnector(provider, SETTINGS, tmp_path / "state")
+    intent = make_intent()
+    pre = mc.Preflight(connector, conformance.standard_grants(BINDING, intent))
+    receipt = dispatch(pre, intent, Reservations())
+    token = f"opentour-{connector._key(intent)}"
+    provider.jobs[token] = replace(
+        provider.jobs[token],
+        state="succeeded",
+        tuned_model_id="simulated:unbounded-candidate",
+        cap_minor_units=intent.bound.maximum_minor_units + 1,
+    )
+    assert connector.ingest_provider_event(provider.jobs[token].job_id, "succeeded")
+    assert provider.cancel_calls == 1
+    assert connector.status(receipt).state is mc.JobState.CANCELED
+    with pytest.raises(mc.CapabilityError, match="candidate_lineage_unverified"):
+        pre.collect_candidate(ACTOR, receipt)
