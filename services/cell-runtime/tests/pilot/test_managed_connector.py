@@ -481,8 +481,14 @@ def test_m12b_callback_applies_to_live_job_but_not_after_cancel(tmp_path):
     pre = mc.Preflight(connector, conformance.standard_grants(BINDING, intent))
     reservations = Reservations()
     job = dispatch(pre, intent, reservations)
-    job_id = provider.jobs[f"opentour-{connector._key(intent)}"].job_id
-    assert connector.ingest_provider_event(job_id, "succeeded", "simulated:tuned-model-2") is True
+    token = f"opentour-{connector._key(intent)}"
+    job_id = provider.jobs[token].job_id
+    assert not connector.ingest_provider_event(job_id, "succeeded", "simulated:forged-model")
+    assert connector.status(job).state is mc.JobState.RUNNING
+    provider.jobs[token] = replace(
+        provider.jobs[token], state="succeeded", tuned_model_id="simulated:tuned-model-2"
+    )
+    assert connector.ingest_provider_event(job_id, "running")
     assert connector.status(job).state is mc.JobState.COMPLETED
     other = make_intent("generated-other")
     pre2 = mc.Preflight(connector, conformance.standard_grants(BINDING, other))
@@ -714,7 +720,7 @@ def test_r1_cancel_the_provider_did_not_honor_is_not_reported_canceled(tmp_path)
 def test_r2_fence_never_lists_a_job_the_provider_did_not_stop(tmp_path):
     provider = StubbornProvider(autocomplete=False)
     connector, pre, _, _ = _live(tmp_path, provider)
-    with pytest.raises(ValueError, match="fence_job_not_stopped"):
+    with pytest.raises(ValueError, match="FENCE_JOB_NOT_STOPPED"):
         connector.fence("generated-scope")
     later = make_intent("generated-after-fence")  # the fence itself is durable anyway
     with pytest.raises(mc.CapabilityError):
@@ -768,6 +774,10 @@ def test_r5_direct_submit_rechecks_the_bytes_that_leave(stack):
     oversize = replace(intent, development_digest=managed.development_digest(many))
     with pytest.raises(ValueError, match="training_payload_invalid"):
         connector.submit(oversize, managed.serialize_rows(many))
+    outer = b'{"fields":{"label":"billing","text":"generated"},"answer_key":"generated-secret"}\n'
+    outer_intent = replace(intent, development_digest=managed._sha(outer))
+    with pytest.raises(ValueError, match="training_payload_invalid"):
+        connector.submit(outer_intent, outer)
     assert provider.uploaded == [] and provider.executions == 0
     assert journal_text(connector) == ""
 

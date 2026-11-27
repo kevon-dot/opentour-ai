@@ -461,6 +461,13 @@ class ManagedConnector:
         """Fold one provider observation into the journal. A terminal state is final."""
         if view.terminal:
             return
+        if (
+            job.job_id != view.job_id
+            or job.client_token != self._token(key)
+            or job.intent_sha256 != view.intent_sha
+            or (view.file_id and view.file_id != job.file_id)
+        ):
+            raise ValueError("provider_job_identity_mismatched")
         state = _STATES.get(job.state, mc.JobState.UNKNOWN)
         if state is mc.JobState.COMPLETED and not job.tuned_model_id:
             state = mc.JobState.UNKNOWN  # success without a usable tuned-model id is not success
@@ -482,7 +489,13 @@ class ManagedConnector:
 
     def _adopt(self, key: str, view: _View, job: ProviderJob) -> None:
         """Record a provider job found by client token, refusing a different intent's job."""
-        if job.intent_sha256 != view.intent_sha or job.client_token != self._token(key):
+        if (
+            not job.job_id
+            or job.intent_sha256 != view.intent_sha
+            or job.client_token != self._token(key)
+            or (view.job_id and view.job_id != job.job_id)
+            or (view.file_id and view.file_id != job.file_id)
+        ):
             raise ValueError("idempotency_conflict")
         if not view.job_id:
             _append(self._journal(key), {"event": "job", "job_id": job.job_id})
@@ -554,7 +567,7 @@ class ManagedConnector:
                 intent.bound.maximum_minor_units,
                 self.settings.epochs,
             )
-            _append(self._journal(key), {"event": "job", "job_id": job.job_id})
+            self._adopt(key, self._view(key), job)
             view = self._view(key)
             if (
                 job.cap_minor_units is None
@@ -581,6 +594,12 @@ class ManagedConnector:
                 for row in rows
             )
         ):
+            raise ValueError("training_payload_invalid")
+        try:
+            canonical_payload = serialize_rows(tuple(rows))
+        except (ValueError, TypeError):
+            raise ValueError("training_payload_invalid") from None
+        if development != canonical_payload:
             raise ValueError("training_payload_invalid")
 
     def _cancel_unbounded(self, key: str, view: _View, binding: mc.ModelBinding) -> None:
@@ -690,7 +709,9 @@ class ManagedConnector:
         """Provider-reported usage once the job is terminal; ``None`` is unknown, never zero."""
         key = self._key_from_ref(job.job_ref)
         view = self._view(key)
-        if not view.terminal or view.usage is None:
+        if view.intent_sha != intent_digest(job.intent):
+            raise ValueError("job_receipt_mismatched")
+        if not view.terminal or view.usage is None or not _usage_valid(view.usage):
             return None
         reported = view.usage
         state = view.state
@@ -711,7 +732,9 @@ class ManagedConnector:
         key = self._key_from_ref(job.job_ref)
         with self._locked(key):
             view = self._view(key)
-            if not view.terminal and not view.cancel_requested:
+            if view.intent_sha != intent_digest(job.intent):
+                raise ValueError("job_receipt_mismatched")
+            if not view.terminal:
                 raise ValueError("job_not_terminal")
             if view.disposition:
                 return view.disposition
@@ -727,7 +750,10 @@ class ManagedConnector:
             return value
 
     def retention_disposition(self, job: mc.JobReceipt) -> str:
-        return self._view(self._key_from_ref(job.job_ref)).disposition or "unrecorded"
+        view = self._view(self._key_from_ref(job.job_ref))
+        if view.intent_sha != intent_digest(job.intent):
+            raise ValueError("job_receipt_mismatched")
+        return view.disposition or "unrecorded"
 
     # ------------------------------------------------------------------ events, fencing
     def ingest_provider_event(
@@ -737,7 +763,7 @@ class ManagedConnector:
         tuned_model_id: str | None = None,
         usage: ProviderUsage | None = None,
     ) -> bool:
-        """Apply a late provider callback only to a live job. Settled work changes nothing."""
+        """Treat an event for a live job as a hint to get a credentialed observation."""
         for path in sorted((self.root / "jobs").glob("*.jsonl")):
             key = path.stem
             with self._locked(key):
@@ -746,21 +772,13 @@ class ManagedConnector:
                     continue
                 if view.terminal or view.cancel_requested or self._fenced():
                     return False
-                self._absorb(
-                    key,
-                    view,
-                    ProviderJob(
-                        job_id,
-                        state,
-                        "",
-                        view.intent_sha,
-                        view.file_id,
-                        None,
-                        tuned_model_id,
-                        usage,
-                    ),
-                )
-                return True
+                try:
+                    observed = self.transport.get_job(self._binding_of(view), job_id)
+                    self._absorb(key, view, observed)
+                except (OSError, LookupError, ValueError):
+                    return False
+                refreshed = self._view(key)
+                return refreshed.state != view.state or refreshed.terminal != view.terminal
         return False
 
     def fence(self, scope: str) -> FenceReceipt:
@@ -789,7 +807,7 @@ class ManagedConnector:
                     unstopped.append(self._job_ref(key))
         if unstopped:
             # The fence itself is durable; never report a job stopped that the provider has not.
-            raise ValueError("fence_job_not_stopped")
+            raise ValueError("FENCE_JOB_NOT_STOPPED")
         return FenceReceipt(
             scope, tuple(canceled), f"simulated:managed-fence:{_sha(scope.encode())[:16]}"
         )
