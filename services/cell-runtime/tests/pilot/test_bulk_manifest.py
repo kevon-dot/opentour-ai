@@ -616,10 +616,18 @@ def test_bytes_changed_during_a_read_never_seal_the_partition(
                 target.write_bytes(bytes(data) + b"\n")
 
     decoder.before_decode = tamper
-    assert code_of(lambda: engine.step(run)) == "partition_mutated"
-    states = {p["partition_id"]: p["state"] for p in engine.status(run)["partitions"]}
-    assert states["generated-decisions-0"] == "pending"
-    assert not engine.publish(run).published
+    # Corrected (F4): this once asserted step() raised and the partition stayed "pending",
+    # which wedged every other partition. A mutated file fails only itself, with its reason;
+    # step() returns, the others complete, its staged rows are quarantined, nothing seals.
+    engine.step(run)
+    parts = {p["partition_id"]: p for p in engine.status(run)["partitions"]}
+    mutated = parts.pop("generated-decisions-0")
+    assert (mutated["state"], mutated["reason"]) == ("failed", "partition_mutated")
+    assert {p["state"] for p in parts.values()} == {"complete"}
+    assert engine.status(run)["quarantined_rows"] == 2
+    result = engine.publish(run)
+    assert not result.published
+    assert "partition_failed:generated-decisions-0" in result.reasons
 
 
 # ---- M13 private ledger --------------------------------------------------------------------------

@@ -451,9 +451,12 @@ def test_a_partition_replaced_by_identical_bytes_mid_read_is_refused(
 
     decoder.before_decode = replace_with_same_bytes
     # Only the inode/size/mtime check sees this: the bytes and their digest are unchanged.
-    assert code_of(lambda: engine.step(run)) == "partition_mutated"
+    engine.step(run)
     parts = {p["partition_id"]: p for p in engine.status(run)["partitions"]}
-    assert parts["generated-decisions-0"]["reason"] == "partition_mutated"
+    assert (parts["generated-decisions-0"]["state"], parts["generated-decisions-0"]["reason"]) == (
+        "failed",
+        "partition_mutated",
+    )
     assert not engine.publish(run).published
 
 
@@ -476,12 +479,9 @@ def test_a_transient_mutation_restored_before_the_last_page_is_still_caught(
             os.utime(target, ns=(info.st_atime_ns, info.st_mtime_ns))
 
     decoder.before_decode = mutate_then_restore
-    assert code_of(lambda: engine.step(run)) == "partition_mutated"
-    parts = {p["partition_id"]: p for p in engine.status(run)["partitions"]}
-    assert (parts["generated-decisions-0"]["reason"], parts["generated-decisions-0"]["cursor"]) == (
-        "partition_mutated",
-        2,
-    )
+    engine.step(run)
+    part = {p["partition_id"]: p for p in engine.status(run)["partitions"]}["generated-decisions-0"]
+    assert (part["state"], part["reason"], part["cursor"]) == ("failed", "partition_mutated", 2)
     assert engine.status(run)["quarantined_rows"] == 2
     cited = engine.feature_citation(
         run, resource_id=RES_D, native_id="generated-decision-1", decision_time=10_000

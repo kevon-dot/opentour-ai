@@ -17,9 +17,8 @@ many cases and re-reading it per bucket would multiply I/O. Every unit of work A
 keyed by a work unit, (source, bucket): normalization, outcome joins, checkpoints and cursors,
 failure isolation and scheduling. A bucket comes from a stable SHA-256 hash of a
 length-prefixed (tenant, workflow, case) encoding (`work_partition_key`), where the case is
-the ONE case field the mapping declares for the run (`case_field`), with no per-row fallback.
-Known gap: an UNDECLARED case field still falls back per row (case key, else decision key)
-because existing tests pin that default; see `case_of`.
+the ONE case field the mapping declares for the run (`case_field`, by default the decision
+key), with no per-row fallback between fields.
 Each work unit has its own cursor, count, digest and failure boundary (`normalize`), so a
 failure in one unit never stops another, and outcome joins run per bucket. The bucket never
 uses Python's per-process `hash()`, never uses the evidence-family identity, and is frozen
@@ -28,11 +27,10 @@ written before this checkpoint format are refused explicitly (`checkpoint_format
 and left byte-for-byte untouched; they are never migrated or silently re-read.
 
 Failure isolation for files: when a partition's bytes change, vanish or are replaced by a
-link while it is being read, the reason is recorded on it, every row already staged from it is
-quarantined (never cited, joined, normalized or published), and every other partition keeps
-advancing within the same `step`. It refuses publication until a successor re-reads it from
-its first row. Known gap: it stays `pending` and `step` still raises after the others have
-advanced, instead of being marked `failed`, because an existing test pins both behaviours.
+link while it is being read, it is marked `failed` with that reason, every row already staged
+from it is quarantined (never cited, joined, normalized or published), and every other
+partition keeps advancing; `step` returns normally. A failed partition refuses publication
+until a successor re-reads it from its first row.
 
 Source history: the store of record for what a manifest source has shown before, the
 first-seen file digest of every partition ID, the digest of every manifest revision and the
@@ -82,9 +80,7 @@ DEFAULT_WORK_BUCKETS = 64
 MAX_WORK_BUCKETS = 65_536
 # The one field per run that names a row's case, and the kind tag it carries in the hash.
 CASE_FIELDS = {"decision_key": "decision", "case_key": "case"}
-# None = undeclared: the earlier per-row fallback (case key, else decision key). It stays the
-# default only because existing tests pin it; see `case_of`. A mapping should declare one.
-DEFAULT_CASE_FIELD: str | None = None
+DEFAULT_CASE_FIELD = "decision_key"
 UNKEYED = -1  # the work-unit key of a source's unkeyed rows (no value in the case field)
 # Per-file integrity failures: they fail that partition and quarantine its staged rows, while
 # every other partition continues. Anything else a source raises still stops the step.
@@ -218,25 +214,14 @@ def work_bucket(tenant: str, workflow: str | None, case_kind: str, case: str, bu
     return int(work_partition_key(tenant, workflow, case_kind, case), 16) % buckets
 
 
-def case_of(row: SourceRow, field: str | None = DEFAULT_CASE_FIELD) -> tuple[str, str] | None:
+def case_of(row: SourceRow, field: str = DEFAULT_CASE_FIELD) -> tuple[str, str] | None:
     """The row's case from the ONE case field the mapping declares for the run; None = unkeyed.
 
-    With a declared field there is no per-row fallback: a decision row and its outcome row
-    must both carry the declared field to land in the same bucket, and a row lacking it goes
-    to its source's unkeyed work partition. The kind is part of the hashed encoding, so the
-    same text under the two fields hashes differently.
-
-    KNOWN DEFECT, kept only while existing tests pin it: an undeclared field (None) falls back
-    per row, case key else decision key, so one case can land in two buckets when its rows
-    carry different fields. Declaring the field removes this; making a declaration mandatory
-    needs the owner to approve changing the tests that pin the fallback.
+    There is no per-row fallback between fields: a decision row and its outcome row must both
+    carry the declared field to land in the same bucket, and a row lacking it goes to its
+    source's unkeyed work partition. The kind is part of the hashed encoding, so the same text
+    under the two fields hashes differently.
     """
-    if field is None:
-        if row.case_key is not None:
-            return ("case", row.case_key)
-        if row.decision_key:
-            return ("decision", row.decision_key)
-        return None
     if field not in CASE_FIELDS:
         raise ExtractionError("case_field_invalid")
     value = getattr(row, field)
@@ -442,7 +427,7 @@ _SCHEMA = (
         pages INTEGER NOT NULL DEFAULT 0, retries INTEGER NOT NULL DEFAULT 0,
         discarded_pages INTEGER NOT NULL DEFAULT 0, elapsed REAL NOT NULL DEFAULT 0,
         excluded_unauthorized INTEGER NOT NULL DEFAULT 0, work_scheme TEXT NOT NULL,
-        work_buckets INTEGER NOT NULL, workflow TEXT, case_field TEXT,
+        work_buckets INTEGER NOT NULL, workflow TEXT, case_field TEXT NOT NULL,
         tenant TEXT NOT NULL, source_scope TEXT)""",
     """CREATE TABLE IF NOT EXISTS partitions (
         run_id TEXT NOT NULL, partition_id TEXT NOT NULL, resource_id TEXT NOT NULL,
@@ -755,7 +740,7 @@ class BulkExtraction:
         tenant: str,
         workflow: str | None = None,
         work_buckets: int = DEFAULT_WORK_BUCKETS,
-        case_field: str | None = DEFAULT_CASE_FIELD,
+        case_field: str = DEFAULT_CASE_FIELD,
         normalizer: Callable[[StagedEvent], str] | None = None,
         clock: Callable[[], float] = time.monotonic,
         fault: Callable[[str], None] | None = None,
@@ -766,7 +751,7 @@ class BulkExtraction:
             raise ExtractionError("work_partition_key_invalid")
         if type(work_buckets) is not int or not 1 <= work_buckets <= MAX_WORK_BUCKETS:
             raise ExtractionError("work_buckets_invalid")
-        if case_field is not None and case_field not in CASE_FIELDS:
+        if case_field not in CASE_FIELDS:
             raise ExtractionError("case_field_invalid")
         directory = path.absolute().parent
         info = directory.stat()
@@ -945,21 +930,12 @@ class BulkExtraction:
         self._run(run_id)
         pages = peak = retries = 0
         stopped = ""
-        integrity: ExtractionError | None = None
         for part in self._all(
             "SELECT partition_id FROM partitions WHERE run_id=? ORDER BY resource_id, partition_id",
             run_id,
         ):
             while pages < max_pages:
-                try:
-                    outcome, rows = self._advance(run_id, part["partition_id"])
-                except ExtractionError as error:
-                    if error.code not in INTEGRITY_FAILURES:
-                        raise
-                    # This file changed under the read. What it staged is already quarantined;
-                    # every other partition still advances in this step before it is reported.
-                    integrity = integrity or error
-                    break
+                outcome, rows = self._advance(run_id, part["partition_id"])
                 if outcome == "page":
                     pages += 1
                     peak = max(peak, rows)
@@ -978,8 +954,6 @@ class BulkExtraction:
             db.execute(
                 "UPDATE runs SET elapsed=elapsed+? WHERE run_id=?", (max(spent, 0.0), run_id)
             )
-        if integrity is not None:
-            raise integrity
         return StepResult(pages, peak, retries, stopped)
 
     def _set_partition(self, run_id: str, partition_id: str, state: str, reason: str) -> None:
@@ -1025,10 +999,10 @@ class BulkExtraction:
             )
         except ExtractionError as error:
             if error.code in INTEGRITY_FAILURES:
-                # This file's bytes or identity changed under it: quarantine what it already
-                # staged and record why, then let `step` carry on with the other partitions.
+                # This file's bytes or identity changed under it: fail it, quarantine what it
+                # already staged, and let `step` carry on with the other partitions.
                 self._quarantine_partition(run_id, partition_id, error.code)
-                raise
+                return "blocked", 0
             if error.code != "source_unavailable":
                 raise
             return self._record_failure(run_id, partition_id, limits), 0
@@ -1043,20 +1017,15 @@ class BulkExtraction:
         return "blocked", 0
 
     def _quarantine_partition(self, run_id: str, partition_id: str, reason: str) -> None:
-        """Record why a partition's file failed and quarantine every row it staged, at once.
+        """Fail one partition with its reason and quarantine every row it staged, at once.
 
         Quarantined rows stay visible to the store (and counted in status) but are excluded
         from citation, normalization, joins and publication; a successor re-reads the file
         from its first row instead of trusting anything staged before the failure.
-
-        KNOWN GAP, kept only while an existing test pins it: the partition stays `pending`
-        (with the reason recorded) and `step` still raises once the other partitions have
-        advanced, rather than marking it `failed` and returning normally. A pending partition
-        refuses publication just as a failed one does.
         """
         with self._txn() as db:
             db.execute(
-                "UPDATE partitions SET reason=? WHERE run_id=? AND partition_id=?"
+                "UPDATE partitions SET state='failed', reason=? WHERE run_id=? AND partition_id=?"
                 " AND state='pending'",
                 (reason, run_id, partition_id),
             )

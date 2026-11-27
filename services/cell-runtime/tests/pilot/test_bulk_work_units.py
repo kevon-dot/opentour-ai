@@ -52,7 +52,7 @@ def engine_for(
     source: GeneratedSource,
     *,
     name: str = "register.sqlite3",
-    case_field: str | None = "decision_key",
+    case_field: str = "decision_key",
     buckets: int = 4,
     **kwargs: object,
 ) -> BulkExtraction:
@@ -112,10 +112,10 @@ def test_rows_staged_before_a_mutation_is_detected_are_quarantined_and_others_co
     export = Export(private / "export")
     engine, run, decoder = manifest_engine(private, export)
     bad = mutate_row_zero_while_decoding(export, decoder)
-    assert code_of(lambda: engine.step(run)) == "partition_mutated"
+    engine.step(run)  # returns: the mutation fails one partition, it does not stop the step
     parts = {p["partition_id"]: p for p in engine.status(run)["partitions"]}
     mutated = parts.pop("generated-decisions-0")
-    assert mutated["reason"] == "partition_mutated"
+    assert (mutated["state"], mutated["reason"]) == ("failed", "partition_mutated")
     # Every other partition advanced to completion in the same step: nothing is wedged.
     assert {p["state"] for p in parts.values()} == {"complete"}
     assert engine.status(run)["quarantined_rows"] == 2
@@ -138,9 +138,12 @@ def test_rows_staged_before_a_mutation_is_detected_are_quarantined_and_others_co
     assert staged[family_id(TENANT, RES_D, "generated-decision-0")] == "quarantined"
     result = engine.publish(run)
     assert not result.published
-    assert "partition_pending:generated-decisions-0" in result.reasons
-    # A later step cannot quietly seal it either.
-    assert code_of(lambda: engine.step(run)) == "partition_mutated"
+    assert "partition_failed:generated-decisions-0" in result.reasons
+    # A later step neither re-reads nor seals it: a failed partition stays failed.
+    reads = engine.step(run)
+    assert reads.pages == 0
+    state = {p["partition_id"]: p["state"] for p in engine.status(run)["partitions"]}
+    assert state["generated-decisions-0"] == "failed"
     assert not engine.publish(run).published
 
 
@@ -152,8 +155,7 @@ def test_a_successor_rereads_a_quarantined_partition_from_its_first_row(private:
     engine, run, decoder = manifest_engine(private, export)
     original = (export.root / "parts/generated-decisions-0.parquet").read_bytes()
     mutate_row_zero_while_decoding(export, decoder)
-    with pytest.raises(ExtractionError):
-        engine.step(run)
+    engine.step(run)
     decoder.before_decode = None
     (export.root / "parts/generated-decisions-0.parquet").write_bytes(original)  # restored
     successor = engine.successor(run)
@@ -413,7 +415,7 @@ def test_resuming_with_a_different_declared_case_field_is_refused(private: Path)
     first = engine_for(private, source)
     run = first.start(RunLimits(page_size=2))
     first.step(run, max_pages=2)
-    for field in ("case_key", None):
+    for field in ("case_key",):
         changed = engine_for(private, source, case_field=field)
         for attempt in (
             lambda e=changed: e.start(RunLimits(page_size=2)),
@@ -422,8 +424,9 @@ def test_resuming_with_a_different_declared_case_field_is_refused(private: Path)
             lambda e=changed: e.successor(run),
         ):
             assert code_of(attempt) == "work_partitioning_changed"
-    assert code_of(lambda: engine_for(private, source, case_field="label")) == (
-        "case_field_invalid"
-    )
+    for bad in ("label", None):
+        assert code_of(lambda b=bad: engine_for(private, source, case_field=b)) == (  # type: ignore[misc]
+            "case_field_invalid"
+        )
     same = engine_for(private, source)
     assert same.start(RunLimits(page_size=2)) == run

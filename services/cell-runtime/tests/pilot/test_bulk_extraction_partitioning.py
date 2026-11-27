@@ -65,8 +65,14 @@ def engine_for(
     name: str = "register.sqlite3",
     workflow: str | None = WORKFLOW,
     buckets: int = 8,
+    case_field: str = "decision_key",
 ) -> BulkExtraction:
-    kwargs: dict[str, object] = {"tenant": TENANT, "workflow": workflow, "work_buckets": buckets}
+    kwargs: dict[str, object] = {
+        "tenant": TENANT,
+        "workflow": workflow,
+        "work_buckets": buckets,
+        "case_field": case_field,
+    }
     return BulkExtraction(private / name, source, Grants({RES_D, RES_O}), **kwargs)  # type: ignore[arg-type]
 
 
@@ -208,7 +214,10 @@ def test_an_explicit_case_key_wins_and_rows_with_no_case_are_kept_unkeyed(privat
         "generated-decisions-0": (RES_D, "decision", [cased, loose, blank]),
         "generated-outcomes-0": (RES_O, "outcome", []),
     }
-    engine = engine_for(private, GeneratedSource(parts))
+    # Corrected (F6): this once relied on a per-row fallback (case key, else decision key)
+    # under default settings, which could split one case across two buckets. The case key
+    # wins only because the mapping declares it the run's one case field.
+    engine = engine_for(private, GeneratedSource(parts), case_field="case_key")
     run = engine.start()
     engine.step(run)
     stamped = {a[0]: a[5] for a in engine.semantic_manifest(run)["admissions"]}
@@ -264,17 +273,20 @@ def test_the_bucket_follows_the_case_never_the_evidence_family(private: Path) ->
         digest_of("decision-1-2"),
         200,
         available_at=100,
-        decision_key="generated-case-1",
-        case_key="generated-case-elsewhere",
+        decision_key="generated-case-moved",
     )
     source.push("decision", ChangeEntry("decision", 11, "upsert", RES_D, moved.native_id, 2, moved))
     engine.consume_changes(run, "decision")
     fam = family_id(TENANT, RES_D, "generated-decision-1")
     by_revision = {a[1]: a[5] for a in engine.semantic_manifest(run)["admissions"] if a[0] == fam}
+    # Corrected (F6): revision 2 once moved by a case key that the declared field ignores, so
+    # this passed only because two different hashes both land in bucket 0 of 8. It now moves
+    # by the declared field, to a case whose bucket genuinely differs.
     assert by_revision == {
         1: bx.work_bucket(TENANT, WORKFLOW, "decision", "generated-case-1", 8),
-        2: bx.work_bucket(TENANT, WORKFLOW, "case", "generated-case-elsewhere", 8),
+        2: bx.work_bucket(TENANT, WORKFLOW, "decision", "generated-case-moved", 8),
     }
+    assert by_revision[1] != by_revision[2]
     # Family identity ignores the workflow registration; the work bucket does not.
     other = engine_for(private, GeneratedSource(history(40)), name="o.sqlite3", workflow="w-2")
     base = engine_for(private, GeneratedSource(history(40)), name="b.sqlite3")
