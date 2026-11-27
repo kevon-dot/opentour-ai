@@ -475,6 +475,106 @@ class TestLearningMandate(unittest.TestCase):
                     },
                 )
 
+    def test_equivalent_fit_operations_bind_one_reservation_and_settlement(self) -> None:
+        original, other = (self.admit(i)["run_id"] for i in (1, 2))
+        self.confirm(original)
+        self.confirm(other)
+        request = self.reservation(original)
+        first = self.ledger.reserve(
+            "standing-one",
+            request,
+            actor="local-worker",
+            operation_key="lost-response",
+            authenticated_client="worker-session",
+        )
+        restarted = lm.LearningMandates(self.directory, "example-org", self.engagement)
+        repeated = restarted.reserve(
+            "standing-one",
+            request | {"run_id": other},
+            actor="local-worker",
+            operation_key="new-operation",
+            authenticated_client="worker-session",
+        )
+        self.assertEqual(repeated, first)
+        reservation = first["reservation_id"]
+        target = self.directory / "output" / "model"
+        restarted.claim_fit(reservation, actor="local-worker", bundle=target)
+        with self.assertRaisesRegex(lm.MandateError, "fit_claim_already_used"):
+            restarted.claim_fit(repeated["reservation_id"], actor="local-worker", bundle=target)
+        emitted = restarted.settle(reservation, actor="local-worker", elapsed_seconds=3)
+        another = lm.LearningMandates(self.directory, "example-org", self.engagement)
+        self.assertEqual(
+            another.settle(reservation, actor="local-worker", elapsed_seconds=3), emitted
+        )
+        self.assertEqual(another.inspect("standing-one")["reserved_fits"], 1)
+        with another._db(write=False) as db:
+            aliases = db.execute(
+                "SELECT reservation FROM fit_operation_aliases ORDER BY operation_key"
+            ).fetchall()
+            self.assertEqual([row["reservation"] for row in aliases], [reservation, reservation])
+            self.assertEqual(db.execute("SELECT count(*) FROM reservations").fetchone()[0], 1)
+
+    def test_fit_retry_keys_are_scoped_to_the_authenticated_client(self) -> None:
+        original, other = (self.admit(i)["run_id"] for i in (1, 2))
+        self.confirm(original)
+        self.confirm(other)
+        first = self.ledger.reserve(
+            "standing-one",
+            self.reservation(original),
+            actor="local-worker",
+            operation_key="request-one",
+            authenticated_client="connection-a",
+        )
+        with self.assertRaisesRegex(lm.MandateError, "fit_operation_key_conflict"):
+            self.ledger.reserve(
+                "standing-one",
+                self.reservation(other),
+                actor="local-worker",
+                operation_key="request-one",
+                authenticated_client="connection-a",
+            )
+        self.assertEqual(self.ledger.inspect("standing-one")["reserved_fits"], 1)
+        second = self.ledger.reserve(
+            "standing-one",
+            self.reservation(other),
+            actor="local-worker",
+            operation_key="request-one",
+            authenticated_client="connection-b",
+        )
+        self.assertNotEqual(first["reservation_id"], second["reservation_id"])
+        self.assertEqual(self.ledger.inspect("standing-one")["reserved_fits"], 2)
+
+    def test_restored_competing_fit_intents_hold_without_reserving_again(self) -> None:
+        original, other = (self.admit(i)["run_id"] for i in (1, 2))
+        self.confirm(original)
+        self.confirm(other)
+        initial = self.reservation(original)
+        self.ledger.reserve("standing-one", initial, actor="local-worker")
+        with self.ledger._db() as db:
+            db.execute(
+                "INSERT INTO reservations VALUES(?,?,?,?,?,?,'reserved',NULL,NULL)",
+                (
+                    self.ledger.scope,
+                    "standing-one",
+                    "restored-existing-fit",
+                    other,
+                    lm.canonical(initial | {"run_id": other}),
+                    initial["max_seconds"],
+                ),
+            )
+        restarted = lm.LearningMandates(self.directory, "example-org", self.engagement)
+        with self.assertRaisesRegex(lm.MandateError, "fit_intent_requires_reconciliation"):
+            restarted.reserve(
+                "standing-one", initial, actor="local-worker", operation_key="restore-operation"
+            )
+        self.assertEqual(restarted.inspect("standing-one")["reserved_fits"], 2)
+        with restarted._db(write=False) as db:
+            self.assertIsNone(
+                db.execute(
+                    "SELECT 1 FROM sqlite_master WHERE name='fit_operation_aliases'"
+                ).fetchone()
+            )
+
     def test_concurrent_model_budget_charges_uncertain_reservations(self) -> None:
         keys = [self.admit(i)["run_id"] for i in range(5)]
         for key in keys:
