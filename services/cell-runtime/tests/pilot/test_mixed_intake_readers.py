@@ -842,7 +842,7 @@ def _logo_at(x: int) -> bytes:
     [
         (b"iiiiiiiiii", 11, 72, 96.4, 110),  # narrow text: an estimate of 0.7 em/char said 149
         (b"The quick brown fox jumps over the lazy dog.", 11, 72, 292.7, 310),  # lowercase prose
-        (b"left column line of ordinary body text", 11, 72, 281.0, 330),  # two columns
+        (b"left column line of ordinary body text", 11, 72, 248.1, 330),  # two columns
         (b"ACME Corp", 14, 400, 474.7, 480),  # letterhead name, logo to its right
     ],
 )
@@ -893,3 +893,32 @@ def test_pdf_extents_follow_the_font_in_use() -> None:
 
 def test_pdf_long_run_of_wide_glyphs_in_a_known_font_runs_off_the_page() -> None:
     _flagged(b"BT /F1 11 Tf 72 700 Td (" + b"W" * 70 + b") Tj ET", "text_outside_page")
+
+
+@pytest.mark.parametrize(
+    ("base_font", "table"),
+    [
+        (b"Helvetica", "helvetica"),
+        (b"Helvetica-BoldOblique", "helvetica-bold"),
+        (b"ABCDEF+Helvetica-Bold", "helvetica-bold"),
+        (b"ArialMT", "helvetica"),
+        (b"Arial-BoldMT", "helvetica-bold"),
+        (b"Arial-ItalicMT", "helvetica"),
+        (b"Times-Roman", "times"),
+        (b"CourierNew", "courier"),
+        (b"Arial-Black", None),  # wider than Helvetica: its table would under-estimate
+        (b"ArialNarrow", None),
+        (b"ArialNarrow-Bold", None),
+        (b"Helvetica-Light", None),
+        (b"Helvetica-Condensed", None),
+        (b"Helvetica-Rounded-Bold", None),
+        (b"Times-Bold", None),
+    ],
+)
+def test_pdf_width_table_is_chosen_by_exact_family_name(
+    base_font: bytes, table: str | None
+) -> None:
+    from opentour_cell.pilot.mixed_intake import pdf
+
+    head = b"<< /Type /Font /Subtype /Type1 /BaseFont /" + base_font + b" >>"
+    assert pdf._width_table_for(pdf._Object(1, head, None)) == table

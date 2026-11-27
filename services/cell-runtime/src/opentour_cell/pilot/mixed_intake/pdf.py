@@ -287,6 +287,12 @@ def _concat(m: tuple[float, ...], n: tuple[float, ...]) -> tuple[float, ...]:
 # (Helvetica-Bold, wider than most body faces, so side-by-side layouts in such fonts may flag
 # falsely) and to UNKNOWN_FONT_TIGHT_FACTOR x Helvetica for the page-edge and clip checks
 # (so a long run of very wide glyphs in such a font can still escape those two checks).
+# Known bounded gaps: Times-Bold "W" is 1000 units against Helvetica-Bold's 944, so an image over
+# the tail of an all-wide-glyph run in Times-Bold can pass the fallback; characters outside
+# printable ASCII use a per-table default (556 Helvetica, 500 Times, 600 Courier), which slightly
+# under-estimates an em dash or ellipsis (1000 units); TJ kerning and Tw are ignored. Family
+# names are matched exactly so wider or narrower faces (Arial-Black, ArialNarrow) never borrow
+# the Helvetica table.
 UNKNOWN_FONT_TIGHT_FACTOR = 0.8
 _ASCII = (
     " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ"
@@ -335,7 +341,9 @@ def _width_table_for(font: _Object | None) -> str | None:
     styled = any(word in name for word in ("bold", "italic", "oblique"))
     if name.startswith("courier"):
         return "courier"
-    if name.startswith(("helvetica", "arial")):
+    # Exact family names only: Arial-Black (wider), ArialNarrow, Helvetica-Light, -Condensed and
+    # the like have different metrics and must take the generous fallback, never this table.
+    if re.fullmatch(r"(helvetica|arial)-?(bold)?(oblique|italic)?(mt)?", name):
         return "helvetica-bold" if "bold" in name else "helvetica"
     if name in {"times-roman", "timesnewroman", "timesnewromanpsmt"} and not styled:
         return "times"
