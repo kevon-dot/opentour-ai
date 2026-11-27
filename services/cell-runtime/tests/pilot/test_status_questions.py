@@ -112,12 +112,64 @@ def test_provider_approval_and_transport_never_attest_artifact_handoff(tmp_path:
     assert len(sent) == 1 and counts(case.h) == before
 
 
+def test_removed_destination_is_a_current_hold_and_redacts_prior_status(tmp_path: Path) -> None:
+    case = make_case(tmp_path, audience=ACTOR)
+    first = case.inspect()
+    sent = deliver(case, first)
+    assert case.bridge.consume(case.signed(first))["state"] == "approved"
+    work = case.directory / "managed-outputs" / case.binding["run_id"]
+    receipt = work / "release-decision.json"
+    original_receipt = receipt.read_bytes()
+    view = case.h.launch(prompt="Did it ship?")
+    assert buttons(screen(case.h, view))["ot_result_open"] == case.revision
+
+    del case.h.config["recipient"]
+    case.h.save()
+    before = counts(case.h)
+    case.h.action(view, "ot_result_open", case.revision)
+    assert screen(case.h, view).get("callback_id") != "ot_status_question"
+    assert first["request_id"] not in text(case.h, view)
+    assert counts(case.h) == before
+
+    restart(case.h)
+    _, revision = inspect(case.h)
+    before = counts(case.h)
+    for _ in range(2):
+        current = answer(case.h, "Did it ship?", revision)
+        assert "No release is authorized by the current configuration." in current
+        assert "Earlier delivery is unconfirmed." in current
+        assert first["request_id"] not in current and "Intended recipient" not in current
+    assert len(sent) == 1 and counts(case.h) == before
+    assert receipt.read_bytes() == original_receipt and not (work / "handoff").exists()
+
+
+def test_declined_local_readout_holds_readout_only(tmp_path: Path) -> None:
+    h = Harness(tmp_path)
+    h.config["users"][ACTOR]["datasets"] = [supplied(h, qualified=True)]
+    h.save()
+    view, revision = inspect(h)
+    h.action(view, "ot_home", "home")
+    h.action(view, "ot_changes", revision)
+    receipt = h.app.journal.decision(revision)["receipt"]
+    restart(h)
+    before = counts(h)
+    for _ in range(2):
+        current = answer(h, "Did it ship?", revision)
+        assert receipt in current and "Changes requested" in current
+        assert "Readout is held pending changes." in current
+        assert "Earlier delivery is unconfirmed." in current
+    assert counts(h) == before
+
+
 @pytest.mark.parametrize(
-    ("action", "expected"),
-    [("ot_release_approve", "Approval recorded"), ("ot_release_changes", "Changes requested")],
+    ("action", "expected", "finding"),
+    [
+        ("ot_release_approve", "Approval recorded", "Handoff delivery is unconfirmed."),
+        ("ot_release_changes", "Changes requested", "Release is held pending changes."),
+    ],
 )
 def test_native_release_status_observes_independent_decision(
-    tmp_path: Path, action: str, expected: str
+    tmp_path: Path, action: str, expected: str, finding: str
 ) -> None:
     h, _, _, _ = setup_workflow(tmp_path, "rule", release=True)
     inspected, revision = inspect(h)
@@ -126,9 +178,11 @@ def test_native_release_status_observes_independent_decision(
     assert "No verified approval receipt" in missing
     assert counts(h) == before
     h.action(inspected, action, buttons(screen(h, inspected))[action])
+    restart(h)
     before = counts(h)
-    current = answer(h, "Did it ship?", revision)
-    assert expected in current and "unconfirmed" in current
+    for _ in range(2):
+        current = answer(h, "Did it ship?", revision)
+        assert expected in current and finding in current and "unconfirmed" in current
     assert counts(h) == before
 
 
