@@ -433,3 +433,18 @@ def test_private_store_and_reference_validation(tmp_path):
     with pytest.raises(EngagementError, match="unknown_binding_kind"):
         enroll(ledger, E1)
         ledger.bind(ORG, E1, "mystery", "x")
+
+
+def test_torn_fence_journal_tail_holds_instead_of_lifting_the_fence(tmp_path):
+    root = private(tmp_path / "owner")
+    ledger = EngagementLedger(root)
+    enroll(ledger, E1)
+    ledger.activate(ORG, E1)
+    retire(ledger, E1, 1)
+    journal = root / "engagement-fences.jsonl"
+    original = journal.read_text()
+    journal.write_text(original[:-20])  # crash mid-append: a partial final line
+    with pytest.raises(EngagementHold, match="fence_journal_broken"):
+        EngagementLedger(root)
+    journal.write_text(original)
+    assert EngagementLedger(root).get(ORG, E1).state == "terminal"
