@@ -159,11 +159,11 @@ def test_old_confirm_commits_before_replacement_preserves_original_actor(tmp_pat
     entered, release, attempted = Event(), Event(), Event()
     original = release_gate._record
 
-    def record(path, value):
+    def record(path, value, **kwargs):
         if path.name == "release-decision.json":
             entered.set()
             assert release.wait(5)
-        return original(path, value)
+        return original(path, value, **kwargs)
 
     def replacing():
         attempted.set()
