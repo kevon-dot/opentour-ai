@@ -80,3 +80,31 @@ acknowledged source page, its poll time, row count, queried interval, coverage
 through time, and completion state. These values describe the single acknowledged
 page. A zero-row poll can advance coverage without adding an event. An unavailable
 interval or watermark stays unavailable.
+
+## Private human verification
+
+A signed live authority may include `slack_verifiers`, mapping an authorized
+outcome resource to an exact Slack member ID. The resource must be an
+independent-outcome grant whose verifier matches that ID, and the signed actor
+must have the `verify` role. Use the existing private Slack workflow selection.
+The data custodian selects **Named verifier** in **Connect live decisions** and
+saves the binding. Repeating Save reuses the same binding. Ordinary source-feed
+ingestion cannot write to this named form binding.
+
+An actor with the separately signed `workflow_owner` role may use **Nominate
+verifier** in Workflow settings. The custodian sees the proposed member ID.
+Nomination records a request. A current signed grant and explicit binding Save
+are still required.
+
+The assigned verifier opens **Verify an outcome** on private Home. Select the
+exact committed decision, its revision and deciding namespace. Supply finality,
+an opaque local evidence-basis reference and the effective time in UTC Unix
+seconds. A final outcome also requires the verified action reference. A reopened
+outcome clears current verification. The worker records authenticated receipt
+time independently. A successful form returns its opaque verification receipt.
+
+The source store retains the basis reference, event ID, exact outcome revision
+and receipt together. Form intake writes normalized outcome evidence through the
+same reducer as an authorized independent feed. The form has its own ingress
+receipt and does not advance an external source checkpoint. Closing the form
+leaves the decision untouched.

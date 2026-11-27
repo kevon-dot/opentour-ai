@@ -537,3 +537,120 @@ def test_current_training_proof_revocation_at_disclosure_hides_receipt(ready, mo
     h.action(view, "ot_readiness_proof", pin)
     assert receipt["readiness_ref"] not in json.dumps(screen(h, view))
     assert effects(h) == (0,) * 7
+
+
+def weekly_scope(ready, *, home=False, actor=ACTOR):
+    h = ready.h
+    question = "No errors this week?"
+    if home:
+        click(h, ready.home(actor), "ot_app_prompt", actor)
+        view = list(h.slack.screens)[-1]
+        h.form(view, {"command": {"command": {"value": question}}}, actor)
+    else:
+        view = h.launch(actor, prompt=question)
+    selection = buttons(screen(h, view))["ot_current_week"]
+    h.action(view, "ot_current_week", selection, actor)
+    assert screen(h, view)["callback_id"] == "ot_current_week_status"
+    return view, json.dumps(screen(h, view), ensure_ascii=False)
+
+
+@pytest.mark.parametrize("home", [True, False])
+def test_weekly_question_rechecks_roles_and_opens_explicit_verifier_save(ready, home):
+    h = ready.h
+    ready.ingest(decision())
+    unbound = ready.worker.refresh()
+    before = {
+        p: p.read_bytes()
+        for p in (
+            ready.worker.source.live.path,
+            ready.worker.readiness.path,
+            ready.directory / "workflow-benchmarks.sqlite3",
+        )
+    }
+    v, owner = weekly_scope(ready, home=home, actor=OTHER)
+    assert "Ask the data custodian" in owner and "ot_week_bind" not in buttons(screen(h, v))
+    h.action(v, "ot_week_bind", "foreign-pin", OTHER)
+    assert screen(h, v).get("callback_id") != "ot_live_binding"
+    view, pending = weekly_scope(ready, home=home)
+    assert "1 committed, 0 verified, 1 pending" in pending and "No verifier bound" in pending
+    assert (
+        unbound["readiness_ref"] in pending
+        and "Weekly error count and verified denominator are unavailable" in pending
+    )
+    h.action(view, "ot_week_bind", buttons(screen(h, view))["ot_week_bind"])
+    assert screen(h, view)["callback_id"] == "ot_live_binding"
+    assert all(p.read_bytes() == b for p, b in before.items()) and effects(h) == (0,) * 7
+    h.form(view, form(h, view))
+    bound = ready.worker.refresh()
+    view, awaiting = weekly_scope(ready, home=home)
+    assert bound["readiness_ref"] in awaiting and "Awaiting outcome" in awaiting
+    assert "independent-verifier" in awaiting and "ot_week_bind" not in buttons(screen(h, view))
+    h.action(view, "ot_week_scopes", "scopes")
+    assert "ot_current_week" in buttons(screen(h, view)) and effects(h) == (0,) * 7
+
+
+def test_weekly_scope_distinguishes_missing_partial_old_and_complete_empty_receipts(ready):
+    import time
+
+    h = ready.h
+    live = ready.worker.source.live
+    with sqlite3.connect(live.path) as db:
+        (ref,) = db.execute("SELECT ref FROM live_bindings WHERE kind='decision'").fetchone()
+    _, missing = weekly_scope(ready)
+    assert "No source-read receipt" in missing
+
+    def poll(name, start, end, through, complete):
+        return live.ingest_page(
+            ready.worker.worker,
+            ref,
+            page_ref=name,
+            source_revision="source-v1",
+            events=(),
+            source_positions=(),
+            event_epochs=(),
+            checkpoint=100,
+            read_metadata={
+                "interval_start": start,
+                "interval_end": end,
+                "coverage_through": through,
+                "complete": complete,
+                "next_cursor": None if complete else "next",
+            },
+        )
+
+    now = int(time.time())
+    partial = poll("partial", now - 10, now, None, False)
+    _, value = weekly_scope(ready)
+    assert (
+        partial in value and "0 rows, partial" in value and "Coverage through unavailable" in value
+    )
+    old = poll("old", 10, 20, 20, True)
+    _, historic = weekly_scope(ready)
+    assert old in historic and "before this UTC week" in historic
+    current = poll("empty", now - 10, now, now, True)
+    _, quiet = weekly_scope(ready)
+    assert current in quiet and "completed source page returned no rows" in quiet
+    assert (
+        "Weekly error count and verified denominator are unavailable" in quiet
+        and "100%" not in quiet
+    )
+    assert effects(h) == (0,) * 7
+
+
+def test_changed_weekly_receipt_before_render_suppresses_scope(ready, monkeypatch):
+    h = ready.h
+    initial = ready.worker.refresh()
+    view = h.launch(prompt="No errors this week?")
+    token = buttons(screen(h, view))["ot_current_week"]
+    original = h.app.views.weekly_question
+
+    def reopen(*args, **kwargs):
+        modal = original(*args, **kwargs)
+        ready.ingest(decision())
+        return modal
+
+    monkeypatch.setattr(h.app.views, "weekly_question", reopen)
+    h.action(view, "ot_current_week", token)
+    denied = json.dumps(screen(h, view))
+    assert initial["readiness_ref"] not in denied and "Current totals" not in denied
+    assert effects(h) == (0,) * 7

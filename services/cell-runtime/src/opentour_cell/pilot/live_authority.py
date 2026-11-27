@@ -49,7 +49,7 @@ _FIELDS = {
     "actors",
     "grants",
 }
-_ROLES = {"inspect", "intake", "custodian"}
+_ROLES = {"inspect", "intake", "custodian", "verify", "workflow_owner"}
 
 
 def _require(value: object) -> None:
@@ -79,7 +79,7 @@ class PrivateLiveAuthority:
         key, body, signature = keys["key"], envelope["grant"], envelope["seal_sha256"]
         _require(isinstance(key, str) and re.fullmatch(r"[0-9a-f]{64}", key))
         _require(isinstance(signature, str) and re.fullmatch(r"[0-9a-f]{64}", signature))
-        _require(isinstance(body, dict) and set(body) == _FIELDS)
+        _require(isinstance(body, dict) and set(body) in (_FIELDS, _FIELDS | {"slack_verifiers"}))
         _require(
             hmac.compare_digest(
                 signature,
@@ -117,6 +117,19 @@ class PrivateLiveAuthority:
                 require_ref(raw["verifier"])
             else:
                 _require(raw["verifier"] is None)
+        assignments = body.get("slack_verifiers", {})
+        _require(isinstance(assignments, dict) and len(assignments) <= 50)
+        for resource, subject in assignments.items():
+            _require(isinstance(subject, str) and re.fullmatch(r"[UW][A-Z0-9]{2,31}", subject))
+            _require("verify" in body["actors"].get(subject, []))
+            _require(
+                any(
+                    g["resource"] == resource
+                    and g["kind"] == "independent_outcome"
+                    and g["verifier"] == subject
+                    for g in body["grants"]
+                )
+            )
         return dict(body)
 
     @contextmanager
@@ -168,6 +181,9 @@ class PrivateLiveAuthority:
                 body["custodian"],
                 body["expires_at"],
                 _digest(body),
+                tuple(sorted(body.get("slack_verifiers", {}).items())),
+                "verify" in roles and actor.role == "slack",
+                "workflow_owner" in roles and actor.role == "slack",
             )
             yield scope
             _require(self._document() == body)

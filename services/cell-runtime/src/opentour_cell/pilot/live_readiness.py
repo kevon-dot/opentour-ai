@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Protocol
@@ -131,6 +131,7 @@ class LocalRepairAssessments:
         policy_path: Path,
         *,
         contexts: DecisionContext | None = None,
+        context_revision: Callable[[LiveSnapshot], str] | None = None,
     ):
         self.directory = directory.absolute()
         self.path = self.directory / "live-repair-assessments.sqlite3"
@@ -140,6 +141,22 @@ class LocalRepairAssessments:
             policy_path,
             contexts,
         )
+        self.context_revision = context_revision
+
+    def _key(
+        self, snapshot: ReadinessSnapshot, policy: Json, authority: Json, context: str | None
+    ) -> str:
+        parts: list[Any] = [
+            snapshot.organization,
+            snapshot.engagement,
+            snapshot.workflow_ref,
+            snapshot.evidence_revision,
+            digest(policy),
+            authority,
+        ]
+        if self.context_revision is not None:
+            parts.append(context)
+        return digest(parts)
 
     def _policy(self, snapshot: ReadinessSnapshot) -> Json:
         value = _read_private(self.policy_path, 262144)
@@ -247,6 +264,7 @@ class LocalRepairAssessments:
     def refresh(self, snapshot: ReadinessSnapshot) -> ReadinessAssessment:
         with self.live.authority.guard(self.worker, snapshot.workflow_ref):
             actual = self._selection(snapshot)
+            context = self.context_revision(actual) if self.context_revision else None
             policy = self._policy(snapshot)
             authority = self._authority(snapshot, policy)
             rule = simple_repair.declared_rule(
@@ -326,7 +344,10 @@ class LocalRepairAssessments:
                 snapshot.workflow_ref,
                 snapshot.engagement,
                 snapshot.evidence_revision,
-                "assessment-" + decision["revision"][:40],
+                "assessment-"
+                + (digest([decision["revision"], context]) if context else decision["revision"])[
+                    :40
+                ],
                 policy["target_ref"],
                 authority["mandate_ref"],
                 authority["mandate_revision"],
@@ -336,7 +357,7 @@ class LocalRepairAssessments:
                 tuple(dict.fromkeys(missing)),
                 decision["route"],
             )
-            body = {
+            body: Json = {
                 "assessment": asdict(receipt),
                 "authority": authority,
                 "decision": decision,
@@ -346,10 +367,14 @@ class LocalRepairAssessments:
                 "context_receipts": sorted(context_receipts),
                 "nonautomatic_roots": sorted(deferred_roots),
             }
+            if self.context_revision:
+                body["context_permission_revision"] = context
             self._selection(snapshot)
             _require(
                 self._policy(snapshot) == policy and self._authority(snapshot, policy) == authority
             )
+            if self.context_revision:
+                _require(self.context_revision(actual) == context)
             try:
                 fd = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o600)
             except FileExistsError:
@@ -358,40 +383,33 @@ class LocalRepairAssessments:
                 os.close(fd)
             _check_file(self.path)
             with sqlite3.connect(self.path) as db:
+                db.execute("BEGIN IMMEDIATE")
+                if self.context_revision:
+                    _require(self.context_revision(actual) == context)
                 db.execute(
                     "CREATE TABLE IF NOT EXISTS assessments (key TEXT PRIMARY KEY, body TEXT)"
                 )
-                key = digest(
-                    [
-                        snapshot.organization,
-                        snapshot.engagement,
-                        snapshot.workflow_ref,
-                        snapshot.evidence_revision,
-                        digest(policy),
-                        authority,
-                    ]
-                )
+                key = self._key(snapshot, policy, authority, context)
                 old = db.execute("SELECT body FROM assessments WHERE key=?", (key,)).fetchone()
                 _require(old is None or old[0] == canonical(body))
                 db.execute("INSERT OR IGNORE INTO assessments VALUES(?,?)", (key, canonical(body)))
+                self._selection(snapshot)
+                _require(
+                    self._policy(snapshot) == policy
+                    and self._authority(snapshot, policy) == authority
+                )
+                if self.context_revision:
+                    _require(self.context_revision(actual) == context)
             return receipt
 
     def assessment(self, snapshot: ReadinessSnapshot) -> ReadinessAssessment | None:
         try:
-            self._selection(snapshot)
+            actual = self._selection(snapshot)
+            context = self.context_revision(actual) if self.context_revision else None
             policy = self._policy(snapshot)
             authority = self._authority(snapshot, policy)
             _check_file(self.path)
-            key = digest(
-                [
-                    snapshot.organization,
-                    snapshot.engagement,
-                    snapshot.workflow_ref,
-                    snapshot.evidence_revision,
-                    digest(policy),
-                    authority,
-                ]
-            )
+            key = self._key(snapshot, policy, authority, context)
             from opentour_cell.pilot.receipt_recovery import _open_db
 
             with _open_db(self.path) as db:
@@ -401,6 +419,8 @@ class LocalRepairAssessments:
             if row is None:
                 return None
             body = json.loads(row[0])
+            if self.context_revision:
+                _require(body.get("context_permission_revision") == context)
             value = body["assessment"]
             value["residual_roots"] = tuple(value["residual_roots"])
             value["missing_gates"] = tuple(value["missing_gates"])
