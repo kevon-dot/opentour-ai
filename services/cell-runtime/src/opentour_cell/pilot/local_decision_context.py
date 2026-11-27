@@ -174,7 +174,8 @@ class PrivateDecisionContext:
             _require(db is not None)
             assert db is not None
             rows = db.execute(
-                "SELECT seq,binding_ref,payload FROM live_events WHERE tenant=? AND workflow=? "
+                "SELECT seq,binding_ref,event_id,event_revision,payload FROM live_events "
+                "WHERE tenant=? AND workflow=? "
                 "AND epoch=? AND dataset_ref=? AND dataset_revision=? AND resource=?",
                 (
                     scope.tenant,
@@ -185,22 +186,8 @@ class PrivateDecisionContext:
                     grant["resource"],
                 ),
             ).fetchall()
+            deliveries: dict[str, list[Any]] = {}
             for row in rows:
-                event = json.loads(row["payload"])
-                if event.get("kind") != "DecisionRecorded" or any(
-                    event.get(key) != getattr(root, key)
-                    for key in (
-                        "decision_id",
-                        "decision_revision",
-                        "case_id",
-                        "family_id",
-                        "input_ref",
-                        "action_ref",
-                        "policy_ref",
-                        "input_fidelity",
-                    )
-                ):
-                    continue
                 references = {row["binding_ref"]}
                 if _has_table(db, "live_event_origins"):
                     references.update(
@@ -212,7 +199,30 @@ class PrivateDecisionContext:
                 for reference in references:
                     body, _ = live._binding(db, reference)
                     if live._same_scope(body, scope) and body["grant"] == asdict(expected):
-                        return True
+                        deliveries.setdefault(row["event_id"], []).append(row)
+                        break
+            # Match the reducer's current delivery envelope. A superseded or
+            # conflicting source delivery cannot authorize the current root.
+            for versions in deliveries.values():
+                latest = max(row["event_revision"] for row in versions)
+                current = [row for row in versions if row["event_revision"] == latest]
+                if len(current) != 1:
+                    continue
+                event = json.loads(current[0]["payload"])
+                if event.get("kind") == "DecisionRecorded" and all(
+                    event.get(key) == getattr(root, key)
+                    for key in (
+                        "decision_id",
+                        "decision_revision",
+                        "case_id",
+                        "family_id",
+                        "input_ref",
+                        "action_ref",
+                        "policy_ref",
+                        "input_fidelity",
+                    )
+                ):
+                    return True
         return False
 
     def read(

@@ -291,6 +291,52 @@ def test_context_permission_requires_actual_decision_resource_before_raw_read(
         assert code == 1 and not reads and receipt is None
 
 
+@pytest.mark.parametrize("state", ["current", "superseded", "conflicting"])
+def test_context_origin_requires_current_nonconflicting_delivery(tmp_path, monkeypatch, state):
+    export, _, _, _, run = prepared(tmp_path, extra_decision_resource=True)
+    live = export.case.live
+    recorded = decision(
+        input_ref="observed-input-1", input_fidelity="observed", action_ref="supplies"
+    )
+
+    def add(resource, source, events):
+        binding = live.save_binding(export.case.custodian, export.case.workflow, resource)
+        live.ingest_page(
+            export.case.actor,
+            binding,
+            page_ref="current-delivery",
+            source_revision=source,
+            events=events,
+            source_positions=tuple(range(18, 18 + len(events))),
+            event_epochs=(export.case.body["engagement_epoch"],) * len(events),
+            checkpoint=17 + len(events),
+        )
+
+    add("other-decisions", "other-revision", ({**recorded, "event_id": "other-delivery"},))
+    newest = {**recorded, "event_revision": 2}
+    if state != "current":
+        newest["decision_id"] = "D2"
+    events = (newest,)
+    if state == "conflicting":
+        events += ({**newest, "decision_id": "D3"},)
+    add(DECISION.resource, DECISION.source_revision, events)
+    reads = []
+    read = local_decision_context._read_private
+
+    def observed(path, *args):
+        if path.name == "decision-context-body.json":
+            reads.append(path.name)
+        return read(path, *args)
+
+    monkeypatch.setattr(local_decision_context, "_read_private", observed)
+    code = live_reader.main([str(export.selection), run])
+    _, receipt = current(export)
+    if state == "current":
+        assert code == 0 and reads and receipt["reason_code"] == "too_early_to_train"
+    else:
+        assert code == 1 and not reads and receipt is None
+
+
 def context_home_witness(tmp_path, monkeypatch, command=None):
     from opentour_cell.pilot.training import LocalTrainingStore
     from test_app_home import publish
