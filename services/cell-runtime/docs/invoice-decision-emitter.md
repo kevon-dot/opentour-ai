@@ -41,7 +41,9 @@ python "$example" --scope "$scope" export --page-ref page-a --after 10 --through
 
 The export receipt has an opaque file name, canonical page digest, committed row
 count and last source position. Only decision metadata is in the private page. The
-initial profile accepts the actions `freight`, `review`, `defer` and `ask`.
+example accepts committed actions `freight`, `review`, `defer`, `ask` and
+`supplies`. The last action lets the generated P1 journey capture the
+application's original supplies decision before a verifier corrects it to freight.
 The example does not accept invoice content or a provider response.
 
 ## Check the connection
