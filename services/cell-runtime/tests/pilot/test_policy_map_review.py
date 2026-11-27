@@ -874,7 +874,11 @@ def test_reference_example_can_avoid_an_exact_token_matching_the_default_referen
     from test_reviewer_workflow import text
     from test_slack_adapter import ACTOR
 
-    policy = b'# Routing\nApply the first matching rule.\nIf po equals "example-reference", MANUAL.\nIf po is present, REVIEW.\n'
+    policy = (
+        b"# Routing\nApply the first matching rule.\n"
+        b'If po equals "example-reference", MANUAL.\n'
+        b"If po is present, REVIEW.\n"
+    )
     prepare_map(founder, monkeypatch, policy)
     view = enter_map(founder, monkeypatch, ACTOR)
     visible = text(founder, view)
