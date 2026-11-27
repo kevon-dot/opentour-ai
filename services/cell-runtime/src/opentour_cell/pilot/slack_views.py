@@ -2335,6 +2335,9 @@ def starter_case_detail(context: str, pack: Mapping[str, Any], index: int) -> Bl
     authority = pack["authority"]
     if pack["frozen"]:
         frozen = pack["frozen"]
+        excluded_families = {
+            row["family_id"] for row in pack["cases"] if row["split_ref"] == "excluded"
+        }
         return _modal(
             "Frozen starter benchmark",
             "ot_case_frozen",
@@ -2348,11 +2351,12 @@ def starter_case_detail(context: str, pack: Mapping[str, Any], index: int) -> Bl
                 ),
                 _section(
                     f"{frozen['proposed']} generated · {frozen['reviewed']} reviewed · "
-                    f"{frozen['resolved']} resolved · {frozen['unresolved']} unresolved"
+                    f"{frozen['resolved']} resolved · {frozen['unresolved']} unresolved · "
+                    f"{frozen['excluded']} excluded cases"
                 ),
                 _section(
                     f"Independent families · Development {frozen['development']} · "
-                    f"Reserved {frozen['reserved']} · Excluded {frozen['excluded']}"
+                    f"Reserved {frozen['reserved']} · Excluded {len(excluded_families)}"
                 ),
                 _section(
                     "Reserved family coverage\n"
