@@ -98,10 +98,17 @@ _VERDICTS = (
     "invalid",
     "stale",
 )
-# Closed vocabularies for strings copied from a comparison into a packet. Derived from what
-# ``comparison_plan`` (``_pick``, ``_checks``, ``development_hold``, ``_score``) and
-# ``simple_repair.assess_development`` can emit. Tuples, not sets: membership must never raise
-# on an unhashable value.
+# Closed vocabularies for strings copied from a comparison into a packet. Sources, per value:
+#   * hold reasons: ``comparison_plan._checks`` return values.
+#   * observed comparison: ``readout.evaluate_manifest`` (``comparison = ...`` assignments).
+#   * decision reasons: ``comparison_plan._pick`` (``outcome(...)`` literals, the literals
+#     appended to ``reasons``, every arm hold reason, and every observed comparison other than
+#     ``improved``), plus the development-hold reasons from
+#     ``simple_repair.assess_development`` carried by ``comparison_plan.development_hold``.
+#   * caps: ``pilot_metrics.economics``; basis: ``pilot_metrics.economics`` and ``_unavailable``.
+#   * operating-point and slice statuses: ``operating_point._arm`` and ``comparison_plan``.
+#   * exclusion keys: ``source_intake`` (``_reason``, ``_partition`` and its caller).
+# Tuples, not sets: membership must never raise on an unhashable value.
 _HOLD_REASONS = (
     None,
     "insufficient_protected_support",
@@ -111,7 +118,13 @@ _HOLD_REASONS = (
     "cost_limit_failed_or_unverified",
     "latency_limit_failed_or_unverified",
 )
-_OBSERVED = ("improved", "regressed", "equivalent", "insufficient_evidence")
+_OBSERVED = (
+    "improved",
+    "regressed",
+    "equivalent",
+    "insufficient_evidence",
+    "different_automatic_cases",
+)
 _DECISION_REASONS = (
     "protected_improvement_at_agreed_limits",
     "adequate_simple_repair_at_lower_observed_cost",
@@ -132,6 +145,35 @@ _WINNERS = (None, "incumbent", "simple", "model")
 _ARM_NAMES = ("incumbent", "simple", "model")
 _PAIR_NAMES = ("incumbent_vs_simple", "incumbent_vs_model", "simple_vs_model")
 _SLICE_STATUSES = ("met", "missed", "undetermined")
+_COMBINED = ("met", "missed", "undetermined")
+_CAPS = ("met", "missed", "unavailable")
+_EXCLUSION_KEYS = (
+    "changed_policy_or_schema",
+    "fields_outside_grant",
+    "future_decision_features",
+    "missing_outcome",
+    "contradictory_outcomes",
+    "ambiguous_outcomes",
+    "reused_outcome",
+    "unapproved_adjudicator",
+    "outcome_unavailable",
+    "facts_unavailable_at_decision",
+    "inconsistent_outcome_time",
+    "verification_after_cutoff",
+    "ambiguous_trace",
+    "group_crosses_split",
+    "development_label_after_split",
+)
+# Critical-slice names are customer-chosen, so no closed vocabulary exists. Until they ship as
+# digests (OPE-571) only a conservative lowercase-letters-and-underscores shape is accepted, so
+# digits, hyphens, spaces and punctuation (the shapes of case ids, group ids and addresses) are
+# refused. This is a shape filter, not a vocabulary: it is a known residual, not a full fix.
+_SLICE_NAME = re.compile(r"[a-z]+(?:_[a-z]+)*")
+# Rendered decimal measurements (``pilot_metrics.rendered``): six fixed places, or absent.
+_DECIMAL = re.compile(r"[0-9]{1,40}\.[0-9]{6}")
+# The planner's own identifier shape (``simple_repair.identifier``). ``freeze_plan`` requires only
+# this of ``incumbent_revision``, so the incumbent revision cannot be required to be a digest.
+_IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}")
 _ECON_BASES = ("unavailable", "observed", "modeled", "generated")
 _UNCERTAINTY = ("wilson_95_independent_verified_cases", "unavailable")
 _PAIRED_FIELDS = (
@@ -264,7 +306,25 @@ def _digest_ok(value: Any) -> bool:
     return isinstance(value, str) and bool(_SHA.fullmatch(value))
 
 
-def _arm_vocab_ok(arm: Any) -> bool:
+def _decimal_ok(value: Any) -> bool:
+    return value is None or (isinstance(value, str) and bool(_DECIMAL.fullmatch(value)))
+
+
+def _bound_ok(value: Any) -> bool:
+    return value is None or (
+        isinstance(value, float) and not isinstance(value, bool) and 0.0 <= value <= 1.0
+    )
+
+
+def _fraction_ok(value: Any) -> bool:
+    return (
+        isinstance(value, dict)
+        and _count(value.get("numerator"))
+        and _count(value.get("denominator"))
+    )
+
+
+def _arm_vocab_ok(name: str, arm: Any) -> bool:
     """Closed-vocabulary and type checks for everything ``_arm_aggregate`` copies."""
     if not isinstance(arm, dict) or not isinstance(arm.get("metrics"), dict):
         return False
@@ -272,17 +332,47 @@ def _arm_vocab_ok(arm: Any) -> bool:
     slices = arm.get("critical_slices")
     economics = metrics.get("economics")
     uncertainty = metrics.get("uncertainty")
+    operating = metrics.get("operating_point")
+    revision = arm.get("revision")
+    revision_ok = (
+        isinstance(revision, str) and bool(_IDENTIFIER.fullmatch(revision))
+        if name == "incumbent"
+        else _digest_ok(revision)
+    )
     return (
         arm.get("hold_reason") in _HOLD_REASONS
-        and _digest_ok(arm.get("revision"))
+        and revision_ok
         and _digest_ok(arm.get("prediction_digest"))
         and all(_count(metrics.get(k)) for k in _ARM_FIELDS)
+        and _fraction_ok(metrics.get("coverage"))
+        and _fraction_ok(metrics.get("observed_error_rate"))
+        and isinstance(operating, dict)
+        and operating.get("combined") in _COMBINED
         and isinstance(slices, dict)
-        and all(isinstance(v, dict) and v.get("status") in _SLICE_STATUSES for v in slices.values())
+        and all(
+            isinstance(key, str)
+            and bool(_SLICE_NAME.fullmatch(key))
+            and isinstance(v, dict)
+            and v.get("status") in _SLICE_STATUSES
+            for key, v in slices.items()
+        )
         and isinstance(economics, dict)
         and economics.get("basis") in _ECON_BASES
+        and economics.get("cost_cap") in _CAPS
+        and economics.get("latency_cap") in _CAPS
+        and all(_decimal_ok(economics.get(k)) for k in _ECON_FIELDS[1:5])
         and isinstance(uncertainty, dict)
         and uncertainty.get("method") in _UNCERTAINTY
+        and _bound_ok(uncertainty.get("lower"))
+        and _bound_ok(uncertainty.get("upper"))
+        and (uncertainty.get("small_sample") is None or type(uncertainty["small_sample"]) is bool)
+    )
+
+
+def _exclusions_ok(exclusions: Any) -> bool:
+    """Keys are intake exclusion reasons, values non-negative counts; anything else refuses."""
+    return isinstance(exclusions, dict) and all(
+        key in _EXCLUSION_KEYS and _count(value) and value >= 0 for key, value in exclusions.items()
     )
 
 
@@ -301,7 +391,9 @@ def _comparison_vocab_ok(comparison: Json) -> bool:
         and decision.get("winner") in _WINNERS
         and comparison.get("metric") in _METRICS
         and all(name in _ARM_NAMES for name in arms)
-        and all(_arm_vocab_ok(arm) for arm in arms.values())
+        and all(_arm_vocab_ok(name, arm) for name, arm in arms.items())
+        and ("exclusions" not in comparison or _exclusions_ok(comparison["exclusions"]))
+        and _count(comparison.get("protected_rows_evaluated"))
         and all(name in _PAIR_NAMES for name in pairs)
         and all(
             isinstance(pair, dict)
@@ -420,6 +512,13 @@ def _assemble(
         assert receipt is not None
         if not (allow_generated_fixture and receipt.get("evidence_origin") == "generated"):
             return None, "audit_and_verdict_issuers_unverified"
+    else:
+        # A hold needs neither document, but whatever is supplied is copied into the packet
+        # (ids, digests, verdict), so it is validated here exactly as on the improvement path.
+        if receipt is not None and not _receipt_ok(receipt):
+            return None, "audit_receipt_unverified"
+        if verdict is not None and not _verdict_ok(verdict):
+            return None, "independent_verdict_unverified"
     arms = {name: _arm_aggregate(arm) for name, arm in sorted(comparison["arms"].items())}
     pairs = {
         name: {**pair["paired"], "observed_comparison": pair["observed_comparison"]}

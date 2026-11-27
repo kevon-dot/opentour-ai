@@ -71,7 +71,7 @@ def enroll(store, development=None, protected=None):
         "allowed_slices": ["critical", "rare"],
         "error_class": {"from_label": "b", "to_label": "a"},
         "split": {"method": "time", "after": 90},
-        "excluded_counts": {"late_feature": 1},
+        "excluded_counts": {"missing_outcome": 1},  # a real source_intake reason
         "development": dev,
         "protected": test,
     }
@@ -79,7 +79,15 @@ def enroll(store, development=None, protected=None):
 
 
 def compare(
-    root, *, protected=None, development=None, terms=None, mapping=None, model=None, measured=None
+    root,
+    *,
+    protected=None,
+    development=None,
+    terms=None,
+    mapping=None,
+    model=None,
+    measured=None,
+    incumbent=None,
 ):
     store = LocalTrainingStore(root / "training.sqlite3", "generated")
     data = enroll(store, development=development, protected=protected)
@@ -100,7 +108,7 @@ def compare(
         audience="reviewer",
         intake_revision=data["intake_revision"],
         protected_ids=[r["case_id"] for r in data["protected"]],
-        incumbent_revision=digest("incumbent"),
+        incumbent_revision=digest("incumbent") if incumbent is None else incumbent,
         rule=rule,
         development_decision=dev,
         terms=terms,
@@ -1199,3 +1207,331 @@ def test_live_context_without_the_flag_is_unchanged(runs, tmp_path, monkeypatch)
         now=NOW,
     )
     assert out.status == "refused" and out.reason == "audit_and_verdict_issuers_unverified"
+
+
+# ------------- E9: receipt/verdict on holds, more closed fields, honest-output positives, drift
+
+RECEIPT_SENTINEL = "case-91 sentinel-receipt"
+VERDICT_SENTINEL = "group-31 sentinel-verdict"
+
+
+def _leaks(out, *needles):
+    shown = json.dumps([out.reason, out.scoped_hold, out.packet], sort_keys=True, default=str)
+    return [n for n in needles if n in shown]
+
+
+def _bad_receipt(field):
+    receipt = make_receipt()
+    if field == "verdict":
+        return make_receipt(verdict=RECEIPT_SENTINEL)
+    receipt[field] = RECEIPT_SENTINEL
+    return receipt
+
+
+@pytest.mark.parametrize("field", ["receipt_id", "receipt_digest", "verdict"])
+def test_hold_refuses_a_receipt_with_free_text_in_a_live_store(runs, tmp_path, field):
+    """E9: the hold path copies receipt fields into the packet, so it must validate them."""
+    b = live_bundle(runs[_PLAIN_HOLD], tmp_path)
+    out = b.stage(receipt=_bad_receipt(field), verdict=None)
+    assert out.status == "refused" and out.reason == "audit_receipt_unverified", out
+    assert out.packet is None and not _leaks(out, RECEIPT_SENTINEL)
+    assert empty(b.store) and b.dispatch() == []
+
+
+def test_hold_refuses_a_verdict_with_free_text_in_a_live_store(runs, tmp_path):
+    """E9: same, for the independent verdict digest."""
+    b = live_bundle(runs[_PLAIN_HOLD], tmp_path)
+    receipt = make_receipt()
+    verdict = make_verdict(b.comparison, receipt, b.ctx)
+    verdict["verdict_digest"] = VERDICT_SENTINEL
+    out = b.stage(receipt=receipt, verdict=verdict)
+    assert out.status == "refused" and out.reason == "independent_verdict_unverified", out
+    assert out.packet is None and not _leaks(out, VERDICT_SENTINEL)
+    assert empty(b.store) and b.dispatch() == []
+
+
+def test_hold_with_an_honest_receipt_and_verdict_still_stages_in_a_live_store(runs, tmp_path):
+    """E9 positive: validated documents are carried as pointers on a hold."""
+    base = runs[_PLAIN_HOLD]
+    b = live_bundle(base, tmp_path)
+    receipt = make_receipt()
+    verdict = make_verdict(base, receipt, b.ctx)
+    out = b.stage(receipt=receipt, verdict=verdict)
+    assert out.status == "staged" and out.packet["kind"] == "hold", out
+    assert out.packet["audit"]["receipt_digest"] == receipt["receipt_digest"]
+    assert out.packet["audit"]["independent_verdict_digest"] == verdict["verdict_digest"]
+
+
+SENT = "case-55 sentinel"
+
+
+def _set(path, value):
+    def apply(c):
+        node = c
+        for key in path[:-1]:
+            node = node[key]
+        node[path[-1]] = value
+
+    return apply
+
+
+def _slice_name(c):
+    c["arms"]["incumbent"]["critical_slices"][SENT] = {"status": "met"}
+
+
+def _exclusion_key(c):
+    c["exclusions"] = {SENT: 1}
+
+
+NEWLY_CLOSED = {
+    "cost_cap": _set(("arms", "incumbent", "metrics", "economics", "cost_cap"), SENT),
+    "latency_cap": _set(("arms", "incumbent", "metrics", "economics", "latency_cap"), SENT),
+    "combined": _set(("arms", "incumbent", "metrics", "operating_point", "combined"), SENT),
+    "cost_per_1000": _set(("arms", "incumbent", "metrics", "economics", "cost_per_1000"), SENT),
+    "uncertainty_lower": _set(("arms", "incumbent", "metrics", "uncertainty", "lower"), SENT),
+    "uncertainty_small_sample": _set(
+        ("arms", "incumbent", "metrics", "uncertainty", "small_sample"), SENT
+    ),
+    "coverage_numerator": _set(("arms", "incumbent", "metrics", "coverage", "numerator"), SENT),
+    "slice_name": _slice_name,
+    "exclusion_key": _exclusion_key,
+    "exclusion_count_string": _set(("exclusions",), {"missing_outcome": SENT}),
+    "exclusion_count_negative": _set(("exclusions",), {"missing_outcome": -1}),
+}
+
+
+def mutated(comparison, name):
+    changed = copy.deepcopy(comparison)
+    NEWLY_CLOSED[name](changed)
+    return seal(changed)
+
+
+@pytest.mark.parametrize("name", sorted(NEWLY_CLOSED))
+def test_newly_closed_fields_are_refused_on_the_live_hold_path(runs, tmp_path, name):
+    """E9: every further copied field is closed, and none raises or echoes its value."""
+    b = live_bundle(mutated(runs[_PLAIN_HOLD], name), tmp_path)
+    out = b.stage()  # must not raise, in particular on a string exclusion count
+    assert out.status == "refused" and out.reason == "comparison_unverified", out
+    assert not _leaks(out, SENT) and empty(b.store)
+
+
+@pytest.mark.parametrize("name", sorted(NEWLY_CLOSED))
+def test_newly_closed_fields_are_refused_on_the_staging_path(runs, tmp_path, name):
+    """E9: and on the fixture staging path."""
+    b = Bundle(runs["winner"], tmp_path)
+    sealed = mutated(runs["winner"], name)
+    out = b.stage(comparison=sealed, verdict=make_verdict(sealed, b.receipt, b.ctx))
+    assert out.status == "refused" and out.reason == "comparison_unverified", out
+    assert not _leaks(out, SENT) and empty(b.store)
+
+
+def test_string_exclusion_count_returns_a_code_instead_of_raising(runs, tmp_path):
+    """E9: the sum behind immature_outcome_data used to raise TypeError on a string count."""
+    sealed = mutated(runs[_PLAIN_HOLD], "exclusion_count_string")
+    ctx = context(sealed)
+    assert cp.assemble_packet(sealed, None, None, ctx) == (None, "comparison_unverified")
+
+
+def test_honest_abstain_heavy_run_still_stages(tmp_path):
+    """E9 positive: a model that abstains on half the cases yields a different_automatic_cases
+    pair (readout.py) and an honest recommend/simple must still stage."""
+    dev = rows("dev")
+    for r in dev:
+        r["features"]["category"] = "uncorrected"
+    hidden = rows("hidden")
+    for r in hidden[:2]:
+        r["features"]["category"] = "uncorrected"
+    predicted = {r["case_id"]: auto("a") for r in hidden}
+    for r in hidden[:2]:
+        predicted[r["case_id"]] = {"status": "review"}
+    comparison = compare(
+        tmp_path,
+        development=dev,
+        protected=hidden,
+        terms={"minimum_coverage_bps": 10000, "error_ceiling_bps": 5000},
+        mapping={"x": "a", "uncorrected": "b"},
+        model=predicted,
+    )[0]
+    observed = {p["observed_comparison"] for p in comparison["comparisons"].values()}
+    assert "different_automatic_cases" in observed, observed
+    assert comparison["decision"]["disposition"] == "recommend"
+    out = Bundle(comparison, tmp_path / "stage").stage()
+    assert out.status == "staged" and out.packet["kind"] == "measured_improvement", out
+
+
+@pytest.mark.parametrize("name", ["insufficient", "no_change"])
+def test_honest_hold_with_a_non_hex_incumbent_revision_still_stages(tmp_path, name):
+    """E9 positive: freeze_plan only requires an identifier for incumbent_revision."""
+    if name == "insufficient":
+        comparison = compare(
+            tmp_path,
+            terms={**STRICT, "minimum_verified_cases": 50},
+            incumbent="incumbent-v1",
+        )[0]
+    else:
+        neutral, neutral_dev = rows("protected"), rows("dev")
+        for r in neutral + neutral_dev:
+            r["incumbent"] = auto("a")
+        comparison = compare(
+            tmp_path, development=neutral_dev, protected=neutral, incumbent="incumbent-v1"
+        )[0]
+    assert comparison["arms"]["incumbent"]["revision"] == "incumbent-v1"
+    b = live_bundle(comparison, tmp_path / "live")
+    b.ctx = context(comparison, fallback_digest=digest("generated-fallback"))
+    b.authority = Authority(b.ctx)
+    out = b.stage()
+    assert out.status == "staged" and out.packet["kind"] == "hold", out
+
+
+# ---- drift guard: derive what the planner can emit from its source, not from the fixtures
+
+import ast  # noqa: E402
+from pathlib import Path  # noqa: E402
+
+_PILOT = Path(cp.__file__).parent
+
+
+def _tree(name):
+    return ast.parse((_PILOT / name).read_text())
+
+
+def _function(tree, name):
+    return next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == name)
+
+
+def _strings(node):
+    return {
+        n.value for n in ast.walk(node) if isinstance(n, ast.Constant) and isinstance(n.value, str)
+    }
+
+
+def _branches(node):
+    """String literals a value can evaluate to: a constant, or either arm of a conditional."""
+    if isinstance(node, ast.Constant):
+        return {node.value} if isinstance(node.value, str) else set()
+    if isinstance(node, ast.IfExp):
+        return _branches(node.body) | _branches(node.orelse)
+    return set()
+
+
+def _assigned(function, target):
+    found = set()
+    for node in ast.walk(function):
+        if isinstance(node, ast.Assign) and any(
+            isinstance(t, ast.Name) and t.id == target for t in node.targets
+        ):
+            found |= _branches(node.value)
+    return found
+
+
+def planner_emitted():
+    """Every closed-vocabulary value the planner and readout can emit, read from source."""
+    readout = _function(_tree("readout.py"), "evaluate_manifest")
+    checks = _function(_tree("comparison_plan.py"), "_checks")
+    pick = _function(_tree("comparison_plan.py"), "_pick")
+    develop = _function(_tree("simple_repair.py"), "assess_development")
+    arm = _function(_tree("operating_point.py"), "_arm")
+    econ = _function(_tree("pilot_metrics.py"), "economics")
+    intake = _tree("source_intake.py")
+    reason = _function(intake, "_reason")
+    partition = _function(intake, "_partition")
+
+    holds = set()
+    for n in ast.walk(checks):
+        if isinstance(n, ast.Return) and n.value is not None:
+            holds |= _branches(n.value)
+    outcomes, appended = set(), set()
+    for n in ast.walk(pick):
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == "outcome":
+            outcomes |= _strings(n.args[2])
+        if (
+            isinstance(n, ast.Call)
+            and isinstance(n.func, ast.Attribute)
+            and n.func.attr == "append"
+            and n.args
+            and isinstance(n.args[0], ast.Constant)
+        ):
+            appended.add(n.args[0].value)
+    development_holds = set()
+    for n in ast.walk(develop):
+        if (
+            isinstance(n, ast.Assign)
+            and isinstance(n.targets[0], ast.Tuple)
+            and isinstance(n.value, ast.Tuple)
+            and len(n.value.elts) == 2
+            and all(isinstance(e, ast.Constant) for e in n.value.elts)
+            and n.value.elts[0].value == "hold"
+        ):
+            development_holds.add(n.value.elts[1].value)
+    exclusions = set()
+    for n in ast.walk(reason):
+        if isinstance(n, ast.Return) and n.value is not None:
+            exclusions |= _branches(n.value)
+    for n in ast.walk(intake):
+        if isinstance(n, ast.Assign) and any(
+            isinstance(t, ast.Name) and t.id == "reason" for t in n.targets
+        ):
+            exclusions |= _branches(n.value)
+    for n in ast.walk(partition):
+        if isinstance(n, ast.Assign) and isinstance(n.value, ast.Constant):
+            if isinstance(n.value.value, str):
+                exclusions.add(n.value.value)
+        if (
+            isinstance(n, ast.Call)
+            and isinstance(n.func, ast.Attribute)
+            and n.func.attr == "update"
+        ):
+            exclusions |= _strings(n) - {"case_id"}
+    exclusions.discard("")
+    return {
+        "observed": _assigned(readout, "comparison") | {"improved"},
+        "hold_reasons": holds,
+        "decision_reasons": outcomes | appended | holds | development_holds,
+        "combined": _assigned(arm, "combined"),
+        "caps": _assigned(econ, "cost_cap") | _assigned(econ, "latency_cap"),
+        "exclusions": exclusions,
+    }
+
+
+def vocabulary_gaps(emitted):
+    """Values the planner can emit that a closed vocabulary would falsely refuse."""
+    observed_reasons = {o for o in emitted["observed"] if o not in ("improved", "equivalent")}
+    return {
+        "observed": set(emitted["observed"]) - set(cp._OBSERVED),
+        "hold_reasons": set(emitted["hold_reasons"]) - set(cp._HOLD_REASONS),
+        "decision_reasons": (set(emitted["decision_reasons"]) | observed_reasons)
+        - set(cp._DECISION_REASONS),
+        "combined": set(emitted["combined"]) - set(cp._COMBINED),
+        "caps": set(emitted["caps"]) - set(cp._CAPS),
+        "exclusions": set(emitted["exclusions"]) - set(cp._EXCLUSION_KEYS),
+    }
+
+
+def test_drift_guard_reads_the_planner_source_not_the_fixtures():
+    """E9: every planner-emitted value is inside the vocabularies, and the guard sees the
+    values that escaped before (readout.py's different_automatic_cases)."""
+    emitted = planner_emitted()
+    assert "different_automatic_cases" in emitted["observed"]
+    assert "operating_point_missed_or_undetermined" in emitted["hold_reasons"]
+    assert "recurring_residual_requires_model_and_compute_rights" in emitted["decision_reasons"]
+    assert "group_crosses_split" in emitted["exclusions"]
+    assert vocabulary_gaps(emitted) == {k: set() for k in emitted}
+
+
+def test_drift_guard_fails_when_a_planner_value_is_absent_from_a_vocabulary(monkeypatch):
+    """E9: demonstrate the guard has teeth by removing values and watching it report them."""
+    emitted = planner_emitted()
+    short = tuple(v for v in cp._OBSERVED if v != "different_automatic_cases")
+    monkeypatch.setattr(cp, "_OBSERVED", short)
+    monkeypatch.setattr(
+        cp,
+        "_DECISION_REASONS",
+        tuple(v for v in cp._DECISION_REASONS if v != "different_automatic_cases"),
+    )
+    monkeypatch.setattr(
+        cp, "_EXCLUSION_KEYS", tuple(v for v in cp._EXCLUSION_KEYS if v != "reused_outcome")
+    )
+    gaps = vocabulary_gaps(emitted)
+    assert gaps["observed"] == {"different_automatic_cases"}
+    assert gaps["decision_reasons"] == {"different_automatic_cases"}
+    assert gaps["exclusions"] == {"reused_outcome"}
