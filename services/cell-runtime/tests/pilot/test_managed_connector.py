@@ -923,3 +923,57 @@ def test_v2_ordinary_string_values_are_still_accepted(stack):
     )
     assert receipt.state is mc.JobState.COMPLETED
     assert provider.uploaded == [managed.serialize_rows(rows)]
+
+
+# ---------------------------------------------------- follow-up: currency must match the cap
+@pytest.mark.parametrize(
+    "currency, units, status, settleable",
+    [
+        ("USD", 400, "within_cap", True),
+        ("USD", 501, "over_cap", False),
+        ("JPY", 400, "cap_unknown", False),
+        ("EUR", 400, "cap_unknown", False),
+        ("usd", 400, "cap_unknown", False),  # exact match only: a lower-case code is not USD
+        ("XXX", 400, "cap_unknown", False),
+        ("JPY", 10**9, "cap_unknown", False),
+    ],
+)
+def test_c1_currency_must_match_the_approved_currency(stack, currency, units, status, settleable):
+    provider, connector, pre, intent, reservations = stack
+    provider._usage = lambda: managed.ProviderUsage(currency, units, 25, 4, 12)
+    usage = connector.usage(dispatch(pre, intent, reservations))
+    assert usage.currency == currency and usage.incurred_minor_units == units  # real, unclamped
+    assert usage.cap_status == status and usage.settleable is settleable
+    assert usage.approved_currency == "USD"
+
+
+def test_c2_older_journal_without_currency_reads_as_cap_unknown(stack):
+    provider, connector, pre, intent, reservations = stack
+    receipt = dispatch(pre, intent, reservations)
+    path = connector._journal(connector._key(intent))
+    lines = []
+    for line in path.read_text().splitlines():
+        event = json.loads(line)
+        event.pop("currency", None)
+        lines.append(json.dumps(event))
+    path.write_text("\n".join(lines) + "\n")
+    usage = connector.usage(receipt)  # reads, does not raise
+    assert usage.incurred_minor_units == 80 and usage.currency == "USD"
+    assert usage.cap_status == "cap_unknown" and usage.settleable is False
+    assert usage.approved_currency is None
+
+
+def test_c3_negative_journaled_maximum_reports_no_approved_maximum(stack):
+    provider, connector, pre, intent, reservations = stack
+    receipt = dispatch(pre, intent, reservations)
+    path = connector._journal(connector._key(intent))
+    lines = []
+    for line in path.read_text().splitlines():
+        event = json.loads(line)
+        if "maximum_minor_units" in event:
+            event["maximum_minor_units"] = -1
+        lines.append(json.dumps(event))
+    path.write_text("\n".join(lines) + "\n")
+    usage = connector.usage(receipt)
+    assert usage.cap_status == "cap_unknown" and usage.settleable is False
+    assert usage.approved_maximum_minor_units is None

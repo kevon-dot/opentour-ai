@@ -251,17 +251,21 @@ class ReportedUsage(Usage):
     """Provider-reported usage plus a closed-vocabulary comparison to the approved cap.
 
     ``incurred_minor_units`` is always the provider's real figure and is never clamped, so genuine
-    overspend stays visible. ``cap_status`` is ``within_cap`` (at or under the journaled approved
-    maximum), ``over_cap`` (above it) or ``cap_unknown`` (no journaled maximum to compare to).
+    overspend stays visible, with the provider's own currency. ``cap_status`` is ``within_cap``
+    (same currency, at or under the journaled approved maximum), ``over_cap`` (same currency,
+    above it) or ``cap_unknown`` (no valid journaled maximum, no journaled currency, or a
+    different currency; the match is exact and case-sensitive, so ``usd`` is not ``USD``).
     Anything but ``within_cap`` is not ``settleable``: it must not flow to settlement as ordinary
-    actual spend. Forward path: the reservation owner (OPE-418, outside this module) must treat
-    the job as an overspend incident, keep the reservation held, and record the real figure through
-    an explicit operator decision. This module offers no reconcile step and none exists elsewhere
-    in this repository today.
+    actual spend. A consumer must gate on ``settleable`` or ``cap_status``, never on ``source`` or
+    ``incurred_minor_units``, which look ordinary on an over-cap job. Nothing in this repository
+    consumes ``settleable`` yet, so the guard is advisory until a reservation owner reads it. The
+    forward path for an over-cap job (hold the reservation, overspend incident, explicit operator
+    record) is tracked as OPE-570; this module offers no reconcile step.
     """
 
     cap_status: str = CAP_UNKNOWN
     approved_maximum_minor_units: int | None = None
+    approved_currency: str | None = None
 
     @property
     def settleable(self) -> bool:
@@ -300,6 +304,7 @@ class _View:
     terminal: bool = False
     cap_verified: bool = False
     maximum_minor_units: int | None = None
+    currency: str | None = None
     tuned_model_id: str = ""
     usage: ProviderUsage | None = None
     cancel_requested: bool = False
@@ -456,6 +461,7 @@ class ManagedConnector:
                 view.intent_sha = event["intent_sha256"]
                 view.binding = event["binding"]
                 view.maximum_minor_units = event.get("maximum_minor_units")
+                view.currency = event.get("currency")  # absent in older journals
             elif kind == "file":
                 view.file_id = event["file_id"]
             elif kind == "job":
@@ -609,6 +615,7 @@ class ManagedConnector:
                         "intent_sha256": digest,
                         "binding": _binding_document(intent.binding),
                         "maximum_minor_units": intent.bound.maximum_minor_units,
+                        "currency": intent.bound.currency,
                     },
                 )
             token = self._token(key)
@@ -784,8 +791,14 @@ class ManagedConnector:
             return None
         reported = view.usage
         state = view.state
-        approved = view.maximum_minor_units
-        if type(approved) is not int or approved < 0:
+        recorded = view.maximum_minor_units
+        approved = recorded if type(recorded) is int and recorded >= 0 else None
+        approved_currency = (
+            view.currency if isinstance(view.currency, str) and view.currency else None
+        )
+        if approved is None or approved_currency is None or reported.currency != approved_currency:
+            # Units differ or are unrecorded (exact, case-sensitive match): the numbers are not
+            # comparable, so fail closed.
             status = CAP_UNKNOWN
         elif reported.minor_units > approved:
             status = CAP_OVER
@@ -802,7 +815,8 @@ class ManagedConnector:
             irreversible=reported.minor_units > 0
             and (state is not mc.JobState.COMPLETED or view.cancel_requested),
             cap_status=status,
-            approved_maximum_minor_units=approved if type(approved) is int else None,
+            approved_maximum_minor_units=approved,
+            approved_currency=approved_currency,
         )
 
     def dispose_training_file(self, job: mc.JobReceipt) -> str:
