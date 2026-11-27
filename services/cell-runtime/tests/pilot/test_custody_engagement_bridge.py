@@ -559,3 +559,53 @@ def test_live_grant_requires_the_ledger_and_this_engagements_row(tmp_path: Path)
         Closeout(directory, ORG).withdraw(**START)
     assert Closeout(directory, ORG).status()["reconciled"] is False
     assert raw_row(directory, ORG, "unrelated-epoch") == ("active", None, 0)
+
+
+def closeout_ledger_state(directory: Path) -> str | None:
+    with closing(sqlite3.connect(directory / "custody.sqlite3")) as db:
+        return db.execute("SELECT engagement_ledger FROM closeout").fetchone()[0]
+
+
+def test_older_ledger_backup_without_the_seen_row_holds_the_closeout(tmp_path: Path) -> None:
+    directory = private(tmp_path / ORG)
+    epoch = LocalTrainingStore(directory / "training.sqlite3", ORG).engagement_id
+    ledger = EngagementLedger(directory)
+    older = tmp_path / "older.sqlite3"
+    ledger.backup(older)  # taken before this epoch existed
+    enroll(ledger, ORG, epoch, "lease-a", 10)
+    ledger.activate(ORG, epoch)
+    ledger.observe_positions(ORG, epoch, 31)
+    crash_withdrawal(directory, "before_fence")  # the closeout opened and saw the row
+    assert closeout_ledger_state(directory) == "row_seen"
+
+    EngagementLedger(directory).restore_backup(older)
+    assert fences(directory) == []
+    with pytest.raises(CustodyError, match="engagement_ledger_unavailable"):
+        Closeout(directory, ORG).reconcile()
+    with pytest.raises(CustodyError, match="engagement_ledger_unavailable"):
+        Closeout(directory, ORG).withdraw(**START)
+    held = Closeout(directory, ORG)
+    assert held.status()["reconciled"] is False
+    with pytest.raises(CustodyError, match="reconcile_before_purge"):
+        held.purge_local(
+            engagement=epoch, agreement="terms-a", custodian="custodian-a", evidence="generated"
+        )
+    assert closeout_ledger_state(directory) == "row_seen"  # never weakened
+
+
+def test_row_absent_when_the_closeout_opened_keeps_existing_behaviour(tmp_path: Path) -> None:
+    directory = private(tmp_path / ORG)
+    epoch = LocalTrainingStore(directory / "training.sqlite3", ORG).engagement_id
+    ledger = EngagementLedger(directory)
+    enroll(ledger, ORG, "unrelated-epoch", "lease-u", 10)
+    ledger.activate(ORG, "unrelated-epoch")
+    before = (directory / "engagement-epochs.sqlite3").read_bytes()
+
+    report = Closeout(directory, ORG).withdraw(**START)
+    assert report["engagement"] == epoch and report["reconciled"] is True
+    assert closeout_ledger_state(directory) == "present"
+    assert ledger.get(ORG, epoch) is None  # the open-time lookup created nothing
+    assert raw_row(directory, ORG, "unrelated-epoch") == ("active", None, 0)
+    assert fences(directory) == []
+    assert (directory / "engagement-epochs.sqlite3").read_bytes() == before
+    assert Closeout(directory, ORG).reconcile()["reconciled"] is True
