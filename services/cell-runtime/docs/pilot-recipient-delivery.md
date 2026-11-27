@@ -10,8 +10,9 @@ The sender claims the durable outbox entry before offering the package. The
 receiver verifies the existing signed handoff, stages the bytes and receipt,
 and checks both the recipient grant and sender claim at publication. The
 recipient stores one complete directory per signed specification and
-destination. Each lookup checks the exact stored bytes and returns the
-opaque receipt, destination and observed time. Unknown or corrupt state is
+destination. Each lookup checks the stored bytes and signed proposal and
+artifact identity before returning the opaque receipt, destination and
+observed time. Unknown or corrupt state is
 held. The sender's status reads only inspect the outbox.
 
 The generated qualification uses a real managed comparison, private Slack

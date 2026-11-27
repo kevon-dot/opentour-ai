@@ -80,7 +80,29 @@ class LocalRecipientDelivery:
             "package_sha256": claim["package_sha256"],
         }
 
-    def _receipt(self, slot: Path, release: ApprovedRelease, claim: bundle.Json) -> bundle.Json:
+    @staticmethod
+    def _verify_package(
+        data: bytes, release: ApprovedRelease, grant: bundle.Json, claim: bundle.Json
+    ) -> None:
+        bundle._require(
+            bundle._sha(data) == claim["package_sha256"],
+            "package_not_in_owner_entitlement",
+        )
+        spec, _ = bundle._unpack(data, grant)
+        bundle._require(
+            spec.get("release_required") is True
+            and spec.get("release")
+            == {
+                "run_id": release.selection.proposal_ref,
+                "run_revision": release.proposal_revision,
+                "artifact_sha": release.artifact_sha256,
+            },
+            "recipient_release_scope_mismatch",
+        )
+
+    def _receipt(
+        self, slot: Path, release: ApprovedRelease, grant: bundle.Json, claim: bundle.Json
+    ) -> bundle.Json:
         bundle._private_directory(slot)
         receipt = parse_manifest(bundle._read(slot / "receipt.json"))
         body = self._binding(release, claim)
@@ -92,9 +114,8 @@ class LocalRecipientDelivery:
         body["received_at"] = when
         expected = body | {"receipt_ref": "received-" + digest(body)[:48]}
         bundle._require(receipt == expected, "recipient_delivery_receipt_mismatch")
-        installed = bundle._read(slot / "artifact.zip", bundle.MAX_ARCHIVE)
-        bundle._require(
-            bundle._sha(installed) == claim["package_sha256"], "recipient_delivery_receipt_mismatch"
+        self._verify_package(
+            bundle._read(slot / "artifact.zip", bundle.MAX_ARCHIVE), release, grant, claim
         )
         return receipt
 
@@ -110,25 +131,11 @@ class LocalRecipientDelivery:
         grant = bundle._grant(self.grant_file)
         slot, claim = self._scope(release, grant)
         offered_bytes = bundle._read(offered, bundle.MAX_ARCHIVE)
-        bundle._require(
-            bundle._sha(offered_bytes) == claim["package_sha256"],
-            "package_not_in_owner_entitlement",
-        )
-        spec, _ = bundle._unpack(offered_bytes, grant)
-        bundle._require(
-            spec.get("release_required") is True
-            and spec.get("release")
-            == {
-                "run_id": release.selection.proposal_ref,
-                "run_revision": release.proposal_revision,
-                "artifact_sha": release.artifact_sha256,
-            },
-            "recipient_release_scope_mismatch",
-        )
+        self._verify_package(offered_bytes, release, grant, claim)
         with bundle._current(self.grant_file, grant):
             bundle._require(self._scope(release, grant) == (slot, claim))
             if os.path.lexists(slot):
-                return str(self._receipt(slot, release, claim)["receipt_ref"])
+                return str(self._receipt(slot, release, grant, claim)["receipt_ref"])
             with tempfile.TemporaryDirectory(dir=slot.parent) as staged:
                 staged_path = Path(staged)
                 bundle._install(staged_path / "artifact.zip", offered_bytes)
@@ -149,7 +156,9 @@ class LocalRecipientDelivery:
             grant = bundle._grant(self.grant_file)
             with bundle._current(self.grant_file, grant):
                 slot, claim = self._scope(release, grant)
-                receipt = self._receipt(slot, release, claim) if os.path.lexists(slot) else None
+                receipt = (
+                    self._receipt(slot, release, grant, claim) if os.path.lexists(slot) else None
+                )
                 bundle._require(
                     bundle._grant(self.grant_file) == grant
                     and self._scope(release, grant) == (slot, claim)

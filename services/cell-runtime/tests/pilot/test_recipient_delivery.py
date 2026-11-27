@@ -7,6 +7,7 @@ from dataclasses import replace
 import pytest
 from opentour_cell.pilot import approval_inbox, release_gate, repair_workflow, source_intake
 from opentour_cell.pilot import repair_bundle as bundle
+from opentour_cell.pilot.operating_point import digest
 from opentour_cell.pilot.recipient_delivery import LocalRecipientDelivery, dispatch_local_release
 from opentour_cell.pilot.release_authority import (
     HandoffPermission,
@@ -17,7 +18,7 @@ from opentour_cell.pilot.release_outbox import ReleaseOutbox, ReleaseOutboxError
 from opentour_cell.pilot.training import LocalTrainingStore
 from test_approval_inbox import callback, opt_in, stage
 from test_recorded_release_authority import DestinationPermissions
-from test_repair_bundle import cli, transfer, write
+from test_repair_bundle import cli, read, transfer, write
 from test_reviewer_workflow import buttons, screen
 from test_slack_adapter import ACTOR
 
@@ -137,6 +138,14 @@ def test_lost_ack_reconciles_exact_signed_artifact_without_a_second_install(tmp_
         replay["fallback_rehearsed"]
         and replay["package_sha256"] == hashlib.sha256(offered.read_bytes()).hexdigest()
     )
+    receipt_path = installed.with_name("receipt.json")
+    genuine = read(receipt_path)
+    changed = replace(release, artifact_sha256="5" * 64)
+    rebound = {key: value for key, value in genuine.items() if key != "receipt_ref"}
+    rebound.update(release_ref=changed.reference, artifact_sha256=changed.artifact_sha256)
+    write(receipt_path, rebound | {"receipt_ref": "received-" + digest(rebound)[:48]})
+    assert fresh_receiver.lookup(changed, "rebound-receipt").state == "unknown"
+    write(receipt_path, genuine)
     installed.write_bytes(b"GENERATED_MUTATED_OFFER")
     assert fresh_receiver.lookup(release, "tampered-readback").state == "unknown"
     cli(receiver.grant_file, "withdraw-recipient")
