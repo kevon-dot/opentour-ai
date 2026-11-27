@@ -1,0 +1,138 @@
+"""Generated private Home and slash journeys for result-scoped workplace questions."""
+
+import pytest
+from opentour_cell.pilot.source_intake import check_current_intake
+from test_app_home import click, publish
+from test_managed_slack import setup_workflow
+from test_reviewer_workflow import buttons, screen, supplied, text
+from test_slack_adapter import ACTOR, Harness
+from test_status_questions import counts, inspect
+
+
+@pytest.mark.parametrize("surface", ["home", "slash"])
+@pytest.mark.parametrize("support", [True, False])
+@pytest.mark.parametrize("managed", [True, False])
+def test_workplace_questions_inspect_current_frozen_scope(
+    tmp_path, monkeypatch, surface, support, managed
+):
+    if managed:
+        h, plan, *_ = setup_workflow(tmp_path, "rule")
+        intake = check_current_intake(
+            h.path.parent, h.store.organization, h.store.engagement_id, plan["intake_revision"]
+        )
+        h.config["live_workflow_ref"] = intake["workflow"]
+    else:
+        h = Harness(tmp_path)
+        h.config["users"][ACTOR]["datasets"] = [supplied(h)]
+    h.save()
+    _, revision = inspect(h)
+    before = counts(h)
+    question = (
+        "How many independent workplace cases support this?"
+        if support
+        else "Did synthetic data help?"
+    )
+    if surface == "slash":
+        view = h.launch(prompt=question)
+    else:
+        click(h, publish(h, monkeypatch, ACTOR), "ot_app_prompt", ACTOR)
+        view = list(h.slack.screens)[-1]
+        h.form(view, {"command": {"command": {"value": question}}})
+    assert "Dataset " in text(h, view)
+    assert buttons(screen(h, view))["ot_result_open"] == revision
+    h.action(view, "ot_result_open", revision)
+    rendered = text(h, view)
+    assert screen(h, view)["callback_id"] == "ot_status_question" and revision in rendered
+    if managed:
+        assert (
+            f"Workflow {intake['workflow']}" in rendered and "evaluates a simple rule" in rendered
+        )
+    else:
+        assert "scored supplied outputs" in rendered
+    if support:
+        assert "Independent workplace support is unavailable" in rendered
+        assert "frozen cohort contains" in rendered and "data custodian" in rendered
+    else:
+        assert "Augmentation benefit is unproven" in rendered
+        assert "Incremental cost is unavailable" in rendered and "evaluation operator" in rendered
+    h.action(view, "ot_evidence", buttons(screen(h, view))["ot_evidence"])
+    assert counts(h) == before
+
+
+def test_rebound_workflow_and_late_revocation_withhold_workplace_status(tmp_path, monkeypatch):
+    h, plan, *_ = setup_workflow(tmp_path, "rule")
+    workflow = check_current_intake(
+        h.path.parent, h.store.organization, h.store.engagement_id, plan["intake_revision"]
+    )["workflow"]
+    h.config["live_workflow_ref"] = workflow
+    h.save()
+    _, revision = inspect(h)
+    view = h.launch(prompt="Did synthetic data help?")
+    assert buttons(screen(h, view))["ot_result_open"] == revision
+    h.config["live_workflow_ref"] = "different-workflow"
+    h.save()
+    h.action(view, "ot_result_open", revision)
+    assert "Augmentation benefit" not in text(h, view)
+    view = h.launch(prompt="Did synthetic data help?")
+    assert "ot_result_open" not in buttons(screen(h, view))
+    h.config["live_workflow_ref"] = workflow
+    h.save()
+    view = h.launch(prompt="How many independent workplace cases support this?")
+    original = h.app.views.status_question_modal
+
+    def withdraw(*args, **kwargs):
+        layout = original(*args, **kwargs)
+        h.config["users"][ACTOR]["datasets"] = []
+        h.save()
+        return layout
+
+    monkeypatch.setattr(h.app.views, "status_question_modal", withdraw)
+    h.action(view, "ot_result_open", revision)
+    assert workflow not in text(h, view) and "Independent workplace support" not in text(h, view)
+
+
+def test_old_workplace_page_does_not_rebind_to_another_workflow(tmp_path, monkeypatch):
+    from opentour_cell.pilot import slack_adapter
+    from test_reviewer_workflow import generated_evaluation_dataset
+
+    h, plan, *_ = setup_workflow(tmp_path, "rule")
+    monkeypatch.setattr(slack_adapter, "RESULT_PAGE_SIZE", 1)
+    intake = check_current_intake(
+        h.path.parent, h.store.organization, h.store.engagement_id, plan["intake_revision"]
+    )
+    managed = intake["dataset_id"]
+    data = generated_evaluation_dataset(h.store.organization)
+    h.store.register(data)
+    history = data["dataset_id"]
+    h.config["users"][ACTOR]["datasets"] = [managed, history]
+    h.save()
+    for dataset in (managed, history):
+        view = h.launch()
+        for _ in range(3):
+            choices = screen(h, view)["blocks"]
+            option = next(
+                (
+                    r["accessory"]["value"]
+                    for r in choices
+                    if "accessory" in r and r["text"]["text"].startswith(dataset + " · ")
+                ),
+                None,
+            )
+            if option:
+                break
+            next_button = buttons(screen(h, view))["ot_result_next"]
+            h.action(view, "ot_result_next", next_button)
+        assert option is not None
+        h.action(view, "ot_result_open", option)
+        revision = buttons(screen(h, view))["ot_evidence"]
+        h.action(view, "ot_evidence", revision)
+    picker = h.launch(prompt="Did synthetic data help?")
+    initial = screen(h, picker)
+    assert "ot_result_next" in buttons(initial)
+    before = counts(h)
+    h.config["live_workflow_ref"] = intake["workflow"]
+    h.save()
+    h.action(picker, "ot_result_next", buttons(initial)["ot_result_next"])
+    after = screen(h, picker)
+    assert after == initial or "ot_result_open" not in buttons(after)
+    assert counts(h) == before

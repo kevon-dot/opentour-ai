@@ -27,6 +27,7 @@ from urllib.parse import urlsplit
 
 from opentour_cell.pilot.intake_mcp import REF_PATTERN, IntakePrincipal
 from opentour_cell.pilot.live_evidence import LiveEvidence, LiveScope, binding_candidate
+from opentour_cell.pilot.scoped_query_plan import ReadoutQuestion, plan_query
 from opentour_cell.pilot.starter_setup import StarterBinding, StarterPreview, StarterSetup
 from opentour_cell.pilot.status_questions import (
     ApprovalEvidence,
@@ -53,6 +54,7 @@ REGRESSION_QUESTION = re.compile(
     r"(?:what (?:got|became) worse|(?:which|what) (?:cases|decisions|answers) "
     r"(?:(?:got|became) (?:worse|wrong|incorrect)|regressed))\??"
 )
+WORKPLACE_QUESTIONS = {ReadoutQuestion.WORKPLACE_SUPPORT, ReadoutQuestion.SYNTHETIC_BENEFIT}
 ROLES = {"inspect", "tune", "review"}
 CALLBACKS = {
     "ot_dataset_search",
@@ -1649,6 +1651,8 @@ class Workbench:
             for dataset, source in self._result_sources(cfg, actor):
                 target = self._readout(cfg, actor, source)
                 if target and self.journal.inspected(actor, target.revision, policy):
+                    if topic in WORKPLACE_QUESTIONS and not self._workplace_scope(cfg, target):
+                        continue
                     eligible.append((dataset, source, target.revision))
         page = max(0, min(page, (len(eligible) - 1) // RESULT_PAGE_SIZE))
         start = page * RESULT_PAGE_SIZE
@@ -1676,6 +1680,7 @@ class Workbench:
         deliveries = delivery_choices(cfg)
         listing = {
             "page": page,
+            "workplace_scope": cfg.live_workflow_ref if topic in WORKPLACE_QUESTIONS else None,
             "deliveries": {revision: pin for revision, (_, pin) in deliveries.items()},
             "items": {revision: source for _, source, revision in rows},
             "topic": topic,
@@ -1684,7 +1689,7 @@ class Workbench:
         ctx = self.journal.context(actor, cfg.channel, view, "regressions", revision=_json(listing))
 
         def authorize() -> None:
-            self._authorize_question_rows(cfg, actor, rows)
+            self._authorize_question_rows(cfg, actor, rows, workplace=topic in WORKPLACE_QUESTIONS)
             if deliveries:
                 _check(delivery_choices(self.settings()) == deliveries)
             if current is not None:
@@ -1710,17 +1715,26 @@ class Workbench:
         )
 
     def _authorize_question_rows(
-        self, cfg: Settings, actor: str, rows: list[tuple[str, str, str]]
+        self,
+        cfg: Settings,
+        actor: str,
+        rows: list[tuple[str, str, str]],
+        *,
+        workplace: bool = False,
     ) -> None:
         # Both the withdrawal guard and the exposure transaction are held at admission.
         current = self.settings()
         current.permission(actor, "inspect")
         policy = self._policy(current, actor)
         _check(policy == self._policy(cfg, actor))
+        if workplace:
+            _check(current.live_workflow_ref == cfg.live_workflow_ref)
         for dataset, source, revision in rows:
             _check(current.permission(actor, "inspect", dataset)["aggregate"])
             target = self._readout(current, actor, source)
             _check(target and target.dataset == dataset and target.revision == revision)
+            if workplace:
+                _check(target and self._workplace_scope(current, target))
             _check(self.journal.inspected(actor, revision, policy))
 
     def _handoff_receipt(self, cfg: Settings, actor: str, target: Target) -> HandoffReadback | None:
@@ -1756,6 +1770,45 @@ class Workbench:
                 receipt.selection.approval_ref,
                 receipt.destination_ref,
             ],
+        )
+
+    @staticmethod
+    def _workplace_scope(cfg: Settings, target: Target) -> bool:
+        if not cfg.live_workflow_ref:
+            return True
+        if target.audit["mode"] not in {"managed_rule", "managed_model"}:
+            return False
+        from opentour_cell.pilot.source_intake import check_current_intake
+
+        intake = check_current_intake(
+            cfg.directory, cfg.organization, target.audit["engagement"], target.dataset_revision
+        )
+        return bool(
+            intake["workflow"] == cfg.live_workflow_ref and intake["dataset_id"] == target.dataset
+        )
+
+    def _workplace_answer(self, cfg: Settings, target: Target, topic: str) -> StatusAnswer:
+        _check(self._workplace_scope(cfg, target))
+        scope = f"Workflow {cfg.live_workflow_ref}. " if cfg.live_workflow_ref else ""
+        mode = target.audit["mode"]
+        basis = {
+            "evaluation_only": "This result scored supplied outputs.",
+            "training": "This result records a completed CPU fit.",
+            "managed_rule": "This result evaluates a simple rule.",
+            "managed_model": "This result includes a model comparison.",
+        }[mode]
+        if topic == ReadoutQuestion.WORKPLACE_SUPPORT:
+            return StatusAnswer(
+                "Independent workplace support is unavailable for this result.",
+                f"{scope}{basis} The frozen cohort contains {target.audit['population']} cases. "
+                "No receipt links them to independently verified workplace families.",
+                "The data custodian can provide verified case lineage for this frozen result.",
+            )
+        return StatusAnswer(
+            "Augmentation benefit is unproven for this result.",
+            f"{scope}{basis} The result has no matched real-only and augmented arms "
+            "scored on the same untouched real cases. Incremental cost is unavailable.",
+            "The evaluation operator can provide a matched comparison and its cost receipt.",
         )
 
     def _status_answer(
@@ -1867,7 +1920,12 @@ class Workbench:
             entry["aggregate"] and self.journal.inspected(actor, revision, self._policy(cfg, actor))
         )
         status_topic = StatusTopic(topic) if topic in StatusTopic else None
-        _check(not topic or status_topic or topic in self.views.QUESTION_LABELS)
+        _check(
+            not topic
+            or status_topic
+            or topic in WORKPLACE_QUESTIONS
+            or topic in self.views.QUESTION_LABELS
+        )
         current = self.settings()
         _check(self._policy(cfg, actor) == self._policy(current, actor))
         current.permission(actor, "inspect", target.dataset)
@@ -1879,6 +1937,8 @@ class Workbench:
         answer = (
             self._status_answer(current, actor, target, status_topic, receipt)
             if status_topic
+            else self._workplace_answer(current, target, topic)
+            if topic in WORKPLACE_QUESTIONS
             else None
         )
         pin = self._receipt_pin(actor, revision, receipt) if receipt else ""
@@ -1889,6 +1949,8 @@ class Workbench:
 
         def authorize() -> None:
             self._authorize_question_rows(cfg, actor, [(target.dataset, source, revision)])
+            if topic in WORKPLACE_QUESTIONS:
+                _check(self._workplace_answer(self.settings(), target, topic) == answer)
             if receipt:
                 _check(self._handoff_receipt(self.settings(), actor, target) == receipt)
             if status_topic:
@@ -3658,6 +3720,8 @@ class Workbench:
         elif action in {"ot_result_prev", "ot_result_next", "ot_result_open"}:
             if ctx["kind"] == "regressions":
                 listing = json.loads(ctx["revision"])
+                if listing.get("topic") in WORKPLACE_QUESTIONS:
+                    _check(listing.get("workplace_scope") == cfg.live_workflow_ref)
                 if action == "ot_result_open":
                     _check(value in listing["items"])
                     source = listing["items"][value]
@@ -4373,6 +4437,10 @@ class Workbench:
         status_topic = resolve_status(prompt)
         if status_topic:
             self._regression_picker(cfg, actor, view, topic=status_topic.value)
+            return
+        plan = plan_query(prompt)
+        if isinstance(plan, ReadoutQuestion) and plan in WORKPLACE_QUESTIONS:
+            self._regression_picker(cfg, actor, view, topic=plan.value)
             return
         if REGRESSION_QUESTION.fullmatch(" ".join(prompt.casefold().split())):
             self._regression_picker(cfg, actor, view)

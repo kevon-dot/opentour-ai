@@ -212,6 +212,55 @@ class _Pinned:
     purpose: str
 
 
+def _coverage_evidence(pinned: _Pinned, frozen: Json | None) -> list[Json]:
+    """Project only map provenance and reserved-family counts for the named owner."""
+    counts = (
+        {(branch, action): count for branch, action, count in frozen["coverage"]}
+        if frozen is not None
+        else {}
+    )
+    critical_branches = {branch.branch_id for branch in pinned.scope.branches if branch.critical}
+    rows: list[Json] = []
+    for branch in pinned.snapshot.branches:
+        action = branch.action if branch.confirmed else None
+        count = counts.get((branch.branch_ref, action)) if action is not None else None
+        next_evidence = None
+        if action is None:
+            state = branch.disposition
+            if state == "unresolved":
+                next_evidence = "resolve_policy_clause"
+        elif frozen is None:
+            state = "awaiting_freeze"
+        elif count is None:
+            state = "unavailable"
+        else:
+            _require(type(count) is int and count >= 0, "starter_coverage_unavailable")
+            state = "covered" if count else "uncovered"
+            if not count:
+                next_evidence = "collect_independent_reserved_family"
+        _require(
+            branch.source_support in {"source", "owner_assertion"}, "starter_coverage_unavailable"
+        )
+        source_kind, source_ref = (
+            ("owner_assertion", pinned.snapshot.confirmed_ref)
+            if branch.source_support == "owner_assertion"
+            else ("policy_citation", branch.citation_ref)
+        )
+        rows.append(
+            {
+                "branch_ref": branch.branch_ref,
+                "action": action,
+                "citation_ref": branch.citation_ref,
+                "evidence_source": {"kind": source_kind, "reference": source_ref},
+                "critical": branch.branch_ref in critical_branches,
+                "state": state,
+                "reserved_families": count,
+                "next_evidence": next_evidence,
+            }
+        )
+    return rows
+
+
 class _Confirmation:
     def __init__(self, session: StarterCaseSession):
         self.session = session
@@ -552,7 +601,10 @@ class StarterCaseSession:
                 "can_adjudicate": "adjudicate" in pinned.cap["owner_purposes"],
                 "can_freeze": "freeze" in pinned.cap["owner_purposes"],
             }
-            return body | {"authority": authority}
+            return body | {
+                "authority": authority,
+                "coverage_evidence": _coverage_evidence(pinned, body["frozen"]),
+            }
 
     def adjudicate(
         self,
