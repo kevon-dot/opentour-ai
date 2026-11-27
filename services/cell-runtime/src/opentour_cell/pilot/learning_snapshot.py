@@ -10,9 +10,15 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Never
 
+from opentour_cell.pilot import source_intake
 from opentour_cell.pilot.intake_admission import DurableIntake
-from opentour_cell.pilot.intake_local import LocalHistoricalAuthority, _selected_json
+from opentour_cell.pilot.intake_local import (
+    HistoricalSelection,
+    LocalHistoricalAuthority,
+    _selected_json,
+)
 from opentour_cell.pilot.intake_mcp import IntakeError, require_ref
+from opentour_cell.pilot.learning_mandate import KIND
 from opentour_cell.pilot.live_authority import (
     SELECTION_SCHEMA,
     LocalLiveIntake,
@@ -27,6 +33,27 @@ SCHEMA = "opentour.pilot.live-learning-snapshot.v1"
 def _require(condition: object, reason: str = "live_snapshot_unavailable") -> None:
     if not condition:
         raise IntakeError(reason)
+
+
+def _historical_grant_revision(historical: LocalHistoricalAuthority) -> str:
+    """Recheck the selected source under the existing historical admission guard."""
+    selection = historical.selected
+    _require(HistoricalSelection.read(historical.path) == selection, "live_snapshot_changed")
+    bound = source_intake._BoundEngagement(
+        historical.store.path, selection.tenant, selection.engagement_epoch
+    )
+    # _scope revalidates both the mandate and the possibly shorter source expiry.
+    # Its delegation check opens a read transaction, not another mandate writer.
+    grant = source_intake._scope(
+        bound,
+        historical.path.parent / f"cycle-source-{selection.source_run_id}.json",
+        expected_delegation={
+            "authority_kind": KIND,
+            "run_id": selection.source_run_id,
+            "delegate": selection.actor,
+        },
+    )
+    return digest(grant)
 
 
 def _capture(
@@ -55,8 +82,8 @@ def _capture(
     # The historical grant guard reserves its mandate transaction even for a read.
     # Do not nest get_run (which would try to acquire the same guard again).
     with (
-        intake.admitted_work(actor, live_run) as incoming,
         source.admitted_work(actor, benchmark_run) as benchmark,
+        intake.admitted_work(actor, live_run) as incoming,
         authority.guard(actor, incoming.workflow_ref) as scope,
     ):
         _require(
@@ -69,6 +96,7 @@ def _capture(
             == scope.engagement_epoch
             and scope.can_inspect
         )
+        historical_grant_revision = _historical_grant_revision(historical)
         registered = ledger.for_run(actor.tenant, benchmark)
         _require(registered is not None and registered.benchmark_state == "scored")
         assert registered is not None
@@ -87,11 +115,16 @@ def _capture(
         _require(snapshot.sequence > 0)
         archived = live.live.snapshot(actor, scope.workflow_ref, as_of_revision=snapshot.sequence)
         _require(archived == snapshot, "live_snapshot_changed")
+        _require(
+            _historical_grant_revision(historical) == historical_grant_revision,
+            "live_snapshot_changed",
+        )
         return {
             "schema_version": SCHEMA,
             "origin": "observed_live",
             "scope": [actor.tenant, scope.workflow_ref, scope.engagement_epoch],
             "live_authority_revision": scope.authority_revision,
+            "historical_grant_revision": historical_grant_revision,
             "live_admission": asdict(incoming),
             "benchmark_admission": asdict(benchmark),
             "benchmark_definition": definition,

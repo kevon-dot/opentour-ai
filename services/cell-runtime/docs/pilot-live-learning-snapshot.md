@@ -19,12 +19,14 @@ python -m opentour_cell.pilot.learning_snapshot \
 ```
 
 The observation has version `opentour.pilot.live-learning-snapshot.v1`. Its digest
-covers the tenant and engagement, both admitted run bindings, historical
-benchmark and policy revisions, current live authority and the current archived
+covers the tenant and engagement, both admitted run bindings, historical source
+grant, benchmark and policy revisions, current live authority and the current archived
 reducer evidence. The reducer has its own archive and current eligibility. This
 reader does not create a second database, alter old snapshots, run a fit or open
 protected answers. It observes the workflow's current committed reducer after
-checking a completed live intake. The live intake receipt does not identify the
+checking a completed live intake. The historical mandate and source grant must
+still be valid after the final reducer read. When their deadlines differ, the
+shorter window controls. The live intake receipt does not identify the
 archive sequence produced by an entire source pull.
 
 Recheck a previously observed digest by adding `--expected-digest SHA256`. The

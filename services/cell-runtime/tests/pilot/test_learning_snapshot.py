@@ -329,3 +329,89 @@ def test_live_binding_revocation_never_serves_old_digest(tmp_path, monkeypatch):
     )
     assert run_receipt(export, truth, producer, admitted.run_ref)[0] == 2
     assert state(export.directory) == before
+
+
+@pytest.mark.parametrize("authority", ["mandate", "source"])
+@pytest.mark.parametrize("seconds_before_expiry", [1, 0])
+def test_historical_authority_at_final_reducer_read(
+    tmp_path, monkeypatch, capsys, authority, seconds_before_expiry
+):
+    export, admitted, producer, config, _, mandate = joined(tmp_path, monkeypatch, scored=False)
+    deadline = mandate["expires_at"]
+    if authority == "source":
+        deadline -= 60
+        selected = producer.authority.selected
+        path = producer.directory / f"cycle-source-{selected.source_run_id}.json"
+        grant = json.loads(path.read_bytes())
+        _write_private(path, {**grant, "expires_at": deadline})
+    assert historical_worker.execute(config, admitted.run_ref)["status"] == "completed"
+    run = start(export)
+    argv = [
+        "--live-selection",
+        str(export.selection),
+        "--live-run",
+        run,
+        "--historical-selection",
+        str(producer.authority.path),
+        "--benchmark-run",
+        admitted.run_ref,
+    ]
+    assert learning_snapshot.main(argv) == 0
+    accepted = json.loads(capsys.readouterr().out)
+    before = state(export.directory)
+    clock = deadline - 2
+    monkeypatch.setattr(time, "time", lambda: clock)
+    snapshot = LiveEvidence.snapshot
+    reads = 0
+
+    def advance_on_final_archive(store, *args, **kwargs):
+        nonlocal reads, clock
+        value = snapshot(store, *args, **kwargs)
+        if kwargs.get("as_of_revision") is not None:
+            reads += 1
+            if reads == 2:
+                clock = deadline - seconds_before_expiry
+        return value
+
+    monkeypatch.setattr(LiveEvidence, "snapshot", advance_on_final_archive)
+    code = learning_snapshot.main(argv + ["--expected-digest", accepted["snapshot_digest"]])
+    observed = json.loads(capsys.readouterr().out)
+    assert reads == 2
+    if seconds_before_expiry:
+        assert (code, observed) == (0, accepted)
+    else:
+        assert (code, observed) == (
+            2,
+            {
+                "schema_version": learning_snapshot.SCHEMA,
+                "state": "held",
+                "reason": "live_snapshot_unavailable",
+            },
+        )
+    assert state(export.directory) == before
+
+
+def test_valid_source_revision_changes_during_final_reducer_read(tmp_path, monkeypatch):
+    export, admitted, producer, _, _, _ = joined(tmp_path, monkeypatch)
+    run = start(export)
+    selected = producer.authority.selected
+    path = producer.directory / f"cycle-source-{selected.source_run_id}.json"
+    original = json.loads(path.read_bytes())
+    snapshot = LiveEvidence.snapshot
+    reads = 0
+
+    def revise_during_final_archive(store, *args, **kwargs):
+        nonlocal reads
+        value = snapshot(store, *args, **kwargs)
+        if kwargs.get("as_of_revision") is not None:
+            reads += 1
+            if reads == 2:
+                _write_private(path, {**original, "expires_at": original["expires_at"] - 60})
+        return value
+
+    monkeypatch.setattr(LiveEvidence, "snapshot", revise_during_final_archive)
+    with pytest.raises(ValueError, match="live_snapshot_changed"):
+        learning_snapshot.read_live_receipt(
+            export.selection, run, producer.authority.path, admitted.run_ref
+        )
+    assert reads == 2
