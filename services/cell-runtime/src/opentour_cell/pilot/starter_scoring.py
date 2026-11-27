@@ -255,6 +255,13 @@ class StarterScoring:
         self._permission(actor, work, permission, frozen)
         if inference:
             self._model(permission)
+            # Model observation is an outward adapter call. Finish with only
+            # current local authority/source checks before an effect can start.
+            self.authority.revalidate(actor, work, permission)
+            _require(
+                self.cases.evaluation_inputs(actor, work) == frozen, "starter_freeze_changed"
+            )
+            self._permission(actor, work, permission, frozen)
 
     @staticmethod
     def _held(permission: EvaluationPermission, reason: str) -> Json:
@@ -388,7 +395,7 @@ class StarterScoring:
                 outputs[arm] = body
         with self.authority.guard(actor, work, execution_ref) as now:
             _require(now == permission and self.cases.evaluation_inputs(actor, work) == frozen)
-            self._model(now)
+            self._current(actor, work, now, frozen)
             targets = self.cases.evaluation_targets(
                 actor, work, freeze_revision=frozen.freeze_revision
             )

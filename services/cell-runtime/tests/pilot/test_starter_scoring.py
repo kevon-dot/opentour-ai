@@ -451,3 +451,26 @@ def test_lookup_withdraws_evaluator_capability_before_any_inference(scored_setup
     with pytest.raises(IntakeError, match="evaluation_permission_changed"):
         run(scored_setup)
     assert not scorer.baseline.calls and not scorer.comparator.calls
+
+
+def test_observation_callback_cannot_bypass_current_evaluator_permission(scored_setup, monkeypatch):
+    scorer, authority, *_ = scored_setup
+    lookup, observe = scorer.baseline.lookup, scorer.baseline.observe
+    ready = False
+
+    def found(request):
+        nonlocal ready
+        ready = True
+        return lookup(request)
+
+    def withdrawn(*args):
+        observation = observe(*args)
+        if ready:
+            authority.allowed = False
+        return observation
+
+    monkeypatch.setattr(scorer.baseline, "lookup", found)
+    monkeypatch.setattr(scorer.baseline, "observe", withdrawn)
+    with pytest.raises(IntakeError, match="evaluation_permission_changed"):
+        run(scored_setup)
+    assert not scorer.baseline.calls and not scorer.comparator.calls
