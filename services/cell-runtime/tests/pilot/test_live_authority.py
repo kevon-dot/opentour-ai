@@ -514,3 +514,82 @@ def test_signed_engagement_gate_holds_without_ledger_and_after_withdrawal(tmp_pa
 
     with pytest.raises(IntakeError, match="engagement_epoch_hold"):
         case.connect()
+
+
+def _ingest_authority_page(case, reference, page_ref, positions):
+    from test_live_evidence import decision
+
+    metadata = dict(
+        interval_start=None,
+        interval_end=None,
+        coverage_through=None,
+        complete=True,
+        next_cursor=None,
+    )
+    events = tuple(decision(f"{page_ref}-{p}") for p in positions)
+    return case.live.ingest_page(
+        case.actor,
+        reference,
+        page_ref=page_ref,
+        source_revision=DECISION.source_revision,
+        events=events,
+        source_positions=tuple(positions),
+        event_epochs=tuple(case.body["engagement_epoch"] for _ in positions),
+        checkpoint=max(positions),
+        read_metadata=metadata,
+    )
+
+
+def _archived_markers(case):
+    with case.live._db() as db:
+        rows = db.execute("SELECT body FROM live_snapshots ORDER BY sequence").fetchall()
+    return [json.loads(r[0]).get("epoch_enforcement") for r in rows]
+
+
+def test_grant_without_flag_records_epoch_enforcement_not_required(tmp_path: Path):
+    case = SignedCase(tmp_path / "worker")
+    assert "engagement_ledger_required" not in case.body
+    reference = case.connect()
+    # Absent flag: the authority resolves no gate, so no ledger is opened or created.
+    with case.authority.guard(case.actor, case.workflow) as scope:
+        assert case.authority.engagement_gate(scope) is None
+    _ingest_authority_page(case, reference, "page-a", [31])
+    assert not (case.directory / "engagement-epochs.sqlite3").exists()
+    reads = case.live.read_receipts(case.custodian, case.workflow)
+    assert [r["epoch_enforcement"] for r in reads] == ["not_required_by_grant"]
+    assert _archived_markers(case) == ["not_required_by_grant"]
+    with case.live._db() as db:
+        recorded = " ".join(str(r[0]) for r in db.execute("SELECT body FROM live_reads"))
+        recorded += " ".join(str(r[0]) for r in db.execute("SELECT body FROM live_snapshots"))
+    assert "applied" not in recorded.replace("not_required_by_grant", "")
+
+
+def test_grant_with_flag_records_epoch_enforcement_applied(tmp_path: Path):
+    case = SignedCase(tmp_path / "worker")
+    case.body["engagement_ledger_required"] = True
+    case.write()
+    epoch = case.body["engagement_epoch"]
+    ledger = EngagementLedger(case.directory)
+    ledger.record_engagement(
+        "org-a",
+        epoch,
+        lease_ref=DECISION.lease_ref,
+        authority_digest="a" * 64,
+        resources=(DECISION.resource, OUTCOME.resource),
+        lineage_ref="generated-trusted-cut",
+        checkpoint=DECISION.checkpoint,
+        budget_limit=100,
+    )
+    ledger.activate("org-a", epoch)
+    reference = case.connect()
+    _ingest_authority_page(case, reference, "page-a", [31, 5])
+    reads = case.live.read_receipts(case.custodian, case.workflow)
+    assert [r["epoch_enforcement"] for r in reads] == ["applied"]
+    assert _archived_markers(case) == ["applied"]
+    # Existing enforcement is unchanged: the at-or-before-checkpoint row was quarantined and
+    # the ledger recorded only the admitted position.
+    assert case.live.snapshot(case.custodian, case.workflow).quarantined == 1
+    assert ledger.get("org-a", epoch).observed_high == 31
+    ledger.withdraw("org-a", epoch, revocation_epoch=1)
+    with pytest.raises(IntakeError, match="engagement_epoch_hold"):
+        _ingest_authority_page(case, reference, "page-b", [40])

@@ -91,7 +91,34 @@ class LiveAuthority(Protocol):
 
 @runtime_checkable
 class EngagementAuthority(Protocol):
-    def engagement_gate(self, scope: LiveScope) -> EngagementGate | None: ...
+    def engagement_gate(self, scope: LiveScope) -> EngagementGate | None:
+        """Return the gate to enforce, or None only when the grant does not require one."""
+
+
+# Closed vocabulary recorded beside read receipts and archived snapshots (OPE-543 follow-up).
+# It states whether engagement-epoch enforcement was applied to the operation that wrote the
+# record, so an unenforced result can never be read as an enforced one.
+#   applied                      a gate was resolved and its checks ran for this operation
+#   not_required_by_grant        the authority resolved no gate: the grant does not carry
+#                                `engagement_ledger_required: true`, so nothing was enforced
+#   not_available_from_authority the authority offers no engagement gate at all
+#   not_evaluated                the writing operation does not evaluate epoch enforcement
+#   not_recorded                 (read side only) a row written before this marker existed
+EPOCH_ENFORCEMENT_STATES = frozenset(
+    {
+        "applied",
+        "not_required_by_grant",
+        "not_available_from_authority",
+        "not_evaluated",
+        "not_recorded",
+    }
+)
+
+
+def _enforcement_marker(value: object) -> str:
+    _require(isinstance(value, str) and value in EPOCH_ENFORCEMENT_STATES)
+    assert isinstance(value, str)
+    return value
 
 
 def grant_digest(grant: FeedGrant) -> str:
@@ -222,6 +249,14 @@ class LiveEvidence:
         if isinstance(self.authority, EngagementAuthority):
             return self.authority.engagement_gate(scope)
         return None
+
+    def _enforcement_state(self, gate: EngagementGate | None) -> str:
+        """Name why `gate` is present or absent; never imply enforcement that did not run."""
+        if gate is not None:
+            return "applied"
+        if self.engagements is None and isinstance(self.authority, EngagementAuthority):
+            return "not_required_by_grant"
+        return "not_available_from_authority"
 
     def _engagement_checkpoint(
         self, scope: LiveScope, grant: FeedGrant, gate: EngagementGate | None
@@ -629,11 +664,12 @@ class LiveEvidence:
                                 "checkpoint": checkpoint,
                                 "row_count": len(events),
                                 "polled_at": int(time.time()),
+                                "epoch_enforcement": self._enforcement_state(gate),
                             }
                         ),
                     ),
                 )
-            self._archive(db, scope)
+            self._archive(db, scope, self._enforcement_state(gate))
             _require(scope.expires_at > int(time.time()))
             if gate is not None and highest_admitted is not None:
                 gate.observe_positions(scope.tenant, scope.engagement_epoch, highest_admitted)
@@ -691,7 +727,10 @@ class LiveEvidence:
         )
         db.execute("INSERT OR IGNORE INTO live_event_origins VALUES (?,?)", (row[0], reference))
 
-    def _archive(self, db: sqlite3.Connection, scope: LiveScope) -> None:
+    def _archive(
+        self, db: sqlite3.Connection, scope: LiveScope, enforcement: str = "not_evaluated"
+    ) -> None:
+        enforcement = _enforcement_marker(enforcement)
         sequence = db.execute(
             "SELECT coalesce(max(sequence), 0) + 1 FROM live_snapshots "
             "WHERE tenant=? AND workflow=? AND epoch=?",
@@ -710,6 +749,7 @@ class LiveEvidence:
                         "snapshot": asdict(snapshot),
                         "grants": [asdict(g) for g in scope.grants],
                         "slack_verifiers": dict(scope.slack_verifiers),
+                        "epoch_enforcement": enforcement,
                     }
                 ),
             ),
@@ -739,9 +779,11 @@ class LiveEvidence:
                         and self._same_scope(body, scope)
                         and FeedGrant(**body["grant"]) in scope.grants
                     ):
-                        receipts.append(
-                            {"binding_ref": row[0], "page_ref": row[1], **json.loads(row[2])}
+                        saved = json.loads(row[2])
+                        saved["epoch_enforcement"] = _enforcement_marker(
+                            saved.get("epoch_enforcement", "not_recorded")
                         )
+                        receipts.append({"binding_ref": row[0], "page_ref": row[1], **saved})
                 return tuple(receipts)
 
     def _snapshot(

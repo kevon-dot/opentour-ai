@@ -506,3 +506,55 @@ def test_resolve_reads_successor_after_entering_current_authority_guard(tmp_path
     case.authority.guard = changed_before_guard
     binding = case.store.resolve(case.decisions, ACTOR)
     assert binding.state == "superseded" and binding.successor_ref == successor
+
+
+def test_epoch_enforcement_marker_is_closed_vocabulary(tmp_path):
+    from opentour_cell.pilot.live_evidence import EPOCH_ENFORCEMENT_STATES, _enforcement_marker
+
+    assert EPOCH_ENFORCEMENT_STATES == {
+        "applied",
+        "not_required_by_grant",
+        "not_available_from_authority",
+        "not_evaluated",
+        "not_recorded",
+    }
+    for value in ("enforced", "", None, 1, "Applied"):
+        with pytest.raises(IntakeError):
+            _enforcement_marker(value)
+    case = Case(tmp_path / "owner")
+    with case.store._db(write=True) as db, pytest.raises(IntakeError):
+        case.store._archive(db, case.authority.scope, "enforced")
+
+
+def test_authority_without_engagement_gate_is_marked_not_available(tmp_path):
+    case = Case(tmp_path / "owner")
+    metadata = dict(
+        interval_start=None,
+        interval_end=None,
+        coverage_through=None,
+        complete=True,
+        next_cursor=None,
+    )
+    case.store.ingest_page(
+        ACTOR,
+        case.decisions,
+        page_ref="p",
+        source_revision="source-v1",
+        events=(),
+        source_positions=(),
+        event_epochs=(),
+        checkpoint=10,
+        read_metadata=metadata,
+    )
+    assert [r["epoch_enforcement"] for r in case.store.read_receipts(ACTOR, "workflow-a")] == [
+        "not_available_from_authority"
+    ]
+    with case.store._db(write=True) as db:
+        db.execute("UPDATE live_reads SET body=json_set(body,'$.epoch_enforcement','bogus')")
+    with pytest.raises(IntakeError):
+        case.store.read_receipts(ACTOR, "workflow-a")
+    with case.store._db(write=True) as db:
+        db.execute("UPDATE live_reads SET body=json_remove(body,'$.epoch_enforcement')")
+    assert [r["epoch_enforcement"] for r in case.store.read_receipts(ACTOR, "workflow-a")] == [
+        "not_recorded"
+    ]
