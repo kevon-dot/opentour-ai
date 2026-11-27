@@ -246,6 +246,92 @@ def test_packaged_starter_cross_transport_and_lost_reply(connector):
         assert connector.post(STATUS, args) == (403, {"error": "intake_unavailable"})
 
 
+def starter_profile_isolation(package, root, connector_type=Connector):
+    profiles = []
+    signing_keys = [secrets.token_hex(32) for _ in range(10)]
+    assert len(set(signing_keys)) == 10
+    for index, key in enumerate(signing_keys):
+        tenant = f"generated-tenant-{index}"
+        work = root / tenant
+        work.mkdir(mode=0o700)
+        connector = connector_type(package, work)
+        connector.config.update(intake_tenant=tenant, audience=f"generated-audience-{index}")
+        connector.manifest.write_text(json.dumps(connector.config))
+        home = work / "owner"
+        selection, _ = vectors._starter_only(home, tenant=tenant, signing_key=key)
+        command = [*PYTHON, package / "opentour-slack.pyz", "mcp-intake", selection]
+        with connector.listen(selection):
+            catalog = stdio(command, DISCOVER, {})
+            assert catalog["sources"] == [
+                {
+                    "source_kind": "policy",
+                    "source_ref": vectors.STARTER["policy_resource_ref"],
+                    "source_revision": vectors.STARTER["source_revision"],
+                }
+            ]
+            assert connector.post(DISCOVER, {}) == (200, catalog)
+            assert counts(home) == (0, 0, 0)
+            code, admitted = connector.post(SUBMIT, vectors.STARTER)
+            assert code == 200 and admitted["state"] == "queued"
+            lookup = {"run_ref": admitted["run_ref"]}
+            status = stdio(command, STATUS, lookup)
+            assert status["state"] == "queued"
+            assert connector.post(STATUS, lookup) == (200, status)
+            assert counts(home) == (1, 1, 0)
+        profiles.append((tenant, connector, selection, command, admitted, status))
+
+    assert len({connector.token for _, connector, *_ in profiles}) == 10
+    assert len({admitted["run_ref"] for *_, admitted, status in profiles}) == 10
+    assert len({status["workflow_ref"] for *_, status in profiles}) == 10
+    replay = vectors.STARTER | {"idempotency_key": "restarted"}
+    denied = {"error": "intake_unavailable"}
+    for index, (tenant, connector, selection, command, admitted, status) in enumerate(profiles):
+        home = selection.parent
+        lookup = {"run_ref": admitted["run_ref"]}
+        with connector.listen(selection):
+            assert connector.post(STATUS, lookup) == (200, status)
+            assert stdio(command, STATUS, lookup) == status
+            assert connector.post(STATUS, {"run_ref": "missing-generated-run"}) == (403, denied)
+            # Probe both directions around the ring. Keep the target audience
+            # when changing the bearer to isolate credential validation.
+            for offset in (-1, 1):
+                _, other, _, _, other_run, other_status = profiles[(index + offset) % len(profiles)]
+                foreign_auth = {"Authorization": "Bearer " + other.token}
+                assert connector.post(STATUS, lookup, headers=foreign_auth) == (403, None)
+                assert connector.post(SUBMIT, replay, headers=foreign_auth) == (403, None)
+                foreign_audience = {"X-OpenTour-Audience": other.config["audience"]}
+                assert connector.post(STATUS, lookup, headers=foreign_audience) == (403, None)
+                foreign_run = {"run_ref": other_run["run_ref"]}
+                assert connector.post(STATUS, foreign_run) == (403, denied)
+                assert stdio(command, STATUS, foreign_run) == denied
+                foreign_workflow = replay | {"workflow_ref": other_status["workflow_ref"]}
+                del foreign_workflow["creation_ref"]
+                assert connector.post(SUBMIT, foreign_workflow) == (403, denied)
+                assert stdio(command, SUBMIT, foreign_workflow) == denied
+            with sqlite3.connect(home / "intake.sqlite3") as db:
+                assert db.execute("SELECT count(*) FROM intake_keys").fetchone() == (1,)
+            assert connector.post(SUBMIT, replay) == (200, admitted)
+            assert stdio(command, SUBMIT, replay) == admitted
+            assert counts(home) == (1, 1, 0)
+        with sqlite3.connect(home / "intake.sqlite3") as db:
+            assert db.execute("SELECT tenant,run_ref,workflow_ref FROM intake_runs").fetchall() == [
+                (tenant, admitted["run_ref"], status["workflow_ref"])
+            ]
+            assert db.execute("SELECT tenant,creation_ref FROM intake_workflows").fetchall() == [
+                (tenant, vectors.STARTER["creation_ref"])
+            ]
+            assert db.execute("SELECT count(*) FROM intake_keys").fetchone() == (2,)
+        with sqlite3.connect(home / "learning-mandates.sqlite3") as db:
+            assert db.execute("SELECT count(*) FROM reservations").fetchone() == (0,)
+        with sqlite3.connect(home / "training.sqlite3") as db:
+            assert db.execute("SELECT count(*) FROM jobs").fetchone() == (0,)
+    return len(profiles)
+
+
+def test_ten_packaged_starter_profiles_are_isolated(kit, tmp_path):  # noqa: F811
+    assert starter_profile_isolation(kit, tmp_path) == 10
+
+
 def test_tls_limits_before_admission(connector):
     selection, _ = vectors._starter_only(connector.work / "limits")
     with connector.listen(selection):
@@ -619,12 +705,18 @@ if __name__ == "__main__":
         )
     with tempfile.TemporaryDirectory() as work:
         live_cross_transport(PackagedProcess(package, Path(work)))
+    with tempfile.TemporaryDirectory() as work:
+        profile_count = starter_profile_isolation(package, Path(work), PackagedProcess)
     print(
         json.dumps(
             {
                 "fixture": "generated",
                 "tls_cli_restarts": 1,
                 "starter_runs": 1,
+                "isolated_starter_profiles": profile_count,
+                "isolated_starter_profile_admissions": profile_count,
+                "isolated_starter_profile_restarts_verified": True,
+                "isolated_starter_profile_neighbor_probes_denied": True,
                 "lost_reply_recovered": True,
                 "withdrawn_retry_denied": True,
                 "historical_admissions": 1,
