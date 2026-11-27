@@ -315,6 +315,7 @@ def make_plan(
     cursor: int,
     max_fanout: int | None = None,
     lookup: IndexLookup | None = None,
+    registry_changed: bool = False,
 ) -> Plan:
     find = lookup or registry.lookup
     reasons: dict[str, set[str]] = defaultdict(set)
@@ -326,6 +327,8 @@ def make_plan(
         for child in registry.descendants([root]) - {root}:
             reasons[child].add("ancestor_dirty")
     for fam_id, result in prior.items():  # live grant recheck on every reuse
+        if fam_id not in registry.families:
+            continue  # family left the registry; its prior result is dropped at publish
         purpose = registry.families[fam_id].purpose
         if state.grants.get((result.tenant, purpose)) != result.grant_epoch:
             reasons[fam_id].add("grant_epoch_changed")
@@ -333,7 +336,11 @@ def make_plan(
         if fam_id not in prior:
             reasons[fam_id].add("no_prior_result")
     mode = "incremental"
-    if max_fanout is not None and len(reasons) > max_fanout:
+    if registry_changed:  # family set, revision or consumption moved: no prior result is safe
+        mode = "bounded_full_rebuild"
+        for fam_id in registry.families:
+            reasons[fam_id].add("registry_changed")
+    elif max_fanout is not None and len(reasons) > max_fanout:
         mode = "bounded_full_rebuild"  # excessive fan-out: rebuild the full authorized scope
         for fam_id in registry.families:
             reasons[fam_id].add("fanout_fallback")
@@ -419,6 +426,17 @@ class _Tx:
             self.lock.release()
 
 
+def registry_fingerprint(registry: Registry) -> str:
+    """Digest of every family field that feeds a result (revision, split, lineage, consumption)."""
+    return digest([
+        [
+            f.family_id, f.tenant, f.purpose, f.split, f.parent_id, f.lineage_complete,
+            f.revision, [ref.key() for ref in f.consumes],
+        ]
+        for f in (registry.families[k] for k in sorted(registry.families))
+    ])  # fmt: skip
+
+
 class RecomputeService:
     """Durable change cursor + dirty queue with fenced, compare-and-set publication."""
 
@@ -446,6 +464,16 @@ class RecomputeService:
         self.db.execute(
             "insert or replace into meta values('state',?)", (canonical(state.to_json()),)
         )
+
+    def _put_registry(self) -> None:
+        self.db.execute(
+            "insert or replace into meta values('registry',?)",
+            (registry_fingerprint(self.registry),),
+        )
+
+    def _registry_changed(self) -> bool:
+        row = self.db.execute("select v from meta where k='registry'").fetchone()
+        return row is None or row[0] != registry_fingerprint(self.registry)
 
     def revision(self) -> int:
         return int(self.db.execute("select max(revision) from snapshots").fetchone()[0] or 0)
@@ -494,6 +522,7 @@ class RecomputeService:
             manifest = Manifest(1, None, None, results)
             self._save_snapshot(manifest)
             self._put_state(state)
+            self._put_registry()
             return manifest
 
     def submit(self, events: Iterable[ChangeEvent]) -> dict[str, int]:
@@ -612,9 +641,10 @@ class RecomputeService:
         if snap is None:
             raise RecomputeError("NOT_BOOTSTRAPPED")
         state, cursor = self.source_state(), self.cursor()
+        changed = self._registry_changed()
         plan = make_plan(
             self.registry, snap.results, snap.revision, self.pending_events(), state, cursor,
-            self.max_fanout, lookup,
+            self.max_fanout, lookup, changed,
         )  # fmt: skip
         built: dict[str, FamilyResult] = {}
         started = hits = 0
@@ -640,17 +670,20 @@ class RecomputeService:
                 raise SimulatedCrash
         if before_publish:
             before_publish()
-        self._check_lease(token)
-        return RunReport(plan, started, hits, self._publish(plan, snap, built))
+        return RunReport(plan, started, hits, self._publish(plan, snap, built, token, changed))
 
-    def _publish(self, plan: Plan, parent: Manifest, built: Mapping[str, FamilyResult]) -> Manifest:
+    def _publish(
+        self, plan: Plan, parent: Manifest, built: Mapping[str, FamilyResult], token: int,
+        registry_changed: bool,
+    ) -> Manifest:
         with self._tx():
+            self._check_lease(token)  # inside the publish transaction: no check-then-act window
             state = self.source_state()
             if self.revision() != plan.parent_revision:
                 raise PublishConflict("PARENT_MOVED")
             if self.cursor() != plan.cursor:
                 raise PublishConflict("LATE_CHANGE")  # change after the checkpoint: replan
-            results = dict(parent.results)
+            results = {} if registry_changed else dict(parent.results)
             results.update(built)
             for fam_id, res in results.items():  # authority recheck at the publish point
                 fam = self.registry.families[fam_id]
@@ -661,6 +694,7 @@ class RecomputeService:
                     raise PublishConflict("AUTHORITY_MOVED")
             manifest = Manifest(parent.revision + 1, parent.revision, parent.semantic, results)
             self._save_snapshot(manifest)
+            self._put_registry()
             self.db.execute(
                 "update events set state='done' where state='pending' and cursor<=?", (plan.cursor,)
             )

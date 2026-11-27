@@ -319,3 +319,76 @@ def test_sparse_one_percent_fixture_parity_and_set_sizes(tmp_path: Path) -> None
     assert len(report.plan.dirty) == 10 and len(report.plan.reusable) == 990
     assert report.jobs_started == 10
     parity(service)
+
+
+def test_registry_change_across_restart_forces_full_rebuild_with_parity(tmp_path: Path) -> None:
+    path = str(tmp_path / "reg.db")
+    first = RecomputeService(path, Registry(fams()))
+    first.bootstrap(base_state())
+    first.close()
+    revised = [
+        f
+        if f.family_id != "C"
+        else Family("C", TENANT, PURPOSE, DEVELOPMENT, (DATE,), revision="family-r2")
+        for f in fams()
+        if f.family_id != "E"  # a removed family must not linger in the successor
+    ] + [Family("N", TENANT, PURPOSE, DEVELOPMENT, (MEMO,))]
+    restarted = RecomputeService(path, Registry(revised))
+    report = restarted.run("w", now=0)
+    assert report.plan.mode == "bounded_full_rebuild"
+    assert "registry_changed" in report.plan.reasons["C"]
+    assert "E" not in report.manifest.results and "N" in report.manifest.results
+    parity(restarted)
+    assert restarted.run("w", now=1).plan.dirty == ()  # fingerprint stored: incremental again
+
+
+def test_randomized_event_sequences_match_a_clean_rebuild(tmp_path: Path) -> None:
+    """Seeded property check over random graphs and events; catches real under-invalidation."""
+    import random
+
+    fields = [FieldRef("simulated:prop", f"f{i}") for i in range(4)]
+    kinds = ("upsert", "withdrawal", "family_withdrawal", "merge", "grant", "policy")
+    for seed in range(60):
+        rng = random.Random(seed)
+        count = rng.randint(3, 12)
+        family_list = [
+            Family(
+                f"F{i}",
+                rng.choice(("a", "b")),
+                "p",
+                rng.choice((DEVELOPMENT, PROTECTED)),
+                tuple(rng.sample(fields, rng.randint(0, 2))),
+                parent_id=f"F{rng.randrange(i)}" if i and rng.random() < 0.4 else None,
+                lineage_complete=rng.random() > 0.15,
+            )
+            for i in range(count)
+        ]
+        state = SourceState(
+            {f.key(): (1, rng.randint(0, 9)) for f in fields}, grants={("a", "p"): 1, ("b", "p"): 1}
+        )
+        service = RecomputeService(str(tmp_path / f"prop{seed}.db"), Registry(family_list), 3)
+        service.bootstrap(state)
+        revision = 1
+        for step in range(5):
+            events = []
+            for _ in range(rng.randint(1, 3)):
+                revision += 1
+                ref = rng.choice(fields)
+                events.append(
+                    ChangeEvent(
+                        f"e{seed}-{revision}",
+                        revision,
+                        rng.choice(kinds),
+                        ref.source_ref,
+                        ref.field_path,
+                        rng.randint(0, 9),
+                        tuple(rng.sample([f.family_id for f in family_list], 2)),
+                        rng.choice(("a", "b")),
+                        "p",
+                        rng.choice((None, 1, 2)),
+                    )
+                )
+            service.submit(events)
+            service.run("w", now=step * 1000)
+            parity(service)
+        service.close()
