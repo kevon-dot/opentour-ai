@@ -6,6 +6,13 @@ optional capability protocols only: ``model_connector.Connector`` and ``Prefligh
 
 Not proven here: nothing in this module contacts a provider, trainer or model. A value of
 ``EvidenceTier.FIXTURE`` never satisfies a provider or customer evidence gate.
+
+Trust boundary: an ``EvidenceTier`` is a label a caller asserts. Qualification built on it (see
+``model_family.QualificationRecord``) is caller-asserted and self-consistent only, with no signing
+contract, no key custody and no authority that confirms it. ``Usage`` is likewise a plain value:
+``settleable`` is a guard for a consumer to apply, and no code in this package consumes it yet.
+The frozen dataclasses here cannot be made tamper-proof in Python (``object.__setattr__``
+bypasses ``frozen``), so neither type is a proof of anything on its own.
 """
 
 from __future__ import annotations
