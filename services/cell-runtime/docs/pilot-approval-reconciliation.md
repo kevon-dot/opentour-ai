@@ -76,7 +76,9 @@ this implementation never invents a replacement owner, reviewer or destination.
    sequence below. Direct version, grant or signer drift outside this sequence cannot
    issue or dispatch requests under the old active installation epoch.
 5. Open and inspect the exact current evidence again, then explicitly issue the new request. Reusing
-   a prior epoch's presentation is refused even while its old time window remains open. It has a
+   a prior epoch's journaled request-presentation ID is refused even while its old time window remains
+   open. Proving freshness for every presentation, including ones never journaled as a request,
+   still needs the presentation metadata integration described below. The request has a
    new nonce and installation epoch. Replay the old signed callback: it produces no new release. Two
    identical current callbacks recover one release receipt; contradictory callbacks are quarantined
    with their event digest and do not rewrite the earlier completed decision.
@@ -123,8 +125,9 @@ transfer a vote, fabricate an inspection, or qualify the remote provider's outco
    If expiry is observed during admission-file synchronization before any submission, a durable
    local never-sent receipt permits expiry recovery. A crash without that receipt remains unknown.
 
-The release-gate/Slack integration must preserve both generation fields in the actual sealed
-presentation and recheck the request deadline under the final release writer. These consumers and
+The release-gate/Slack integration must preserve both generation fields and a trustworthy
+installation-epoch or presentation-sequence boundary in the actual sealed presentation, and recheck
+the request deadline under the final release writer. These consumers and
 their end-to-end successor tests remain required before local OPE-414 completion. No placeholder
 inspection, local projection ACK or signed provider status substitutes for them.
 
