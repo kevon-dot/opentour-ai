@@ -264,3 +264,88 @@ def test_ambiguous_missing_journal_is_held_without_new_prediction(local_setup, m
         baseline.execute(request, inputs)
     assert calls == []
     assert {p.name: p.read_bytes() for p in baseline.path.parent.iterdir()} == before
+
+
+@pytest.fixture
+def structured_setup(tmp_path, monkeypatch):
+    original = scoring_tests.seven
+    facts = {
+        "software": "annual_subscription",
+        "freight": "carrier_freight",
+        "supplies": "office_supply",
+        "utilities": "utility_service",
+        "tax": "tax_remittance",
+        "review": "annual_subscription",
+        "mixed": "mixed_invoice",
+    }
+
+    def proposed():
+        return tuple(
+            replace(
+                item,
+                decision_inputs=(
+                    ("category", facts[item.case_id]),
+                    ("po", None if item.case_id == "review" else "generated-reference"),
+                ),
+            )
+            for item in original()
+        )
+
+    monkeypatch.setattr(scoring_tests, "seven", proposed)
+    setup = scoring_tests.scored_setup.__wrapped__(tmp_path)
+    _, baseline = local_setup.__wrapped__(setup)
+    scorer, authority, _, document, path = setup
+    authority.permission = replace(authority.permission, input_fields=("category", "po"))
+    baseline.permission = authority.permission
+    baseline.input_field = None
+    document["models"][0]["input_schema"] = "starter-structured-fields-v1"
+    document["grants"][0]["permitted_fields"] = ["category", "po"]
+    write(path, document)
+    return setup, baseline
+
+
+def test_structured_profile_receives_exact_frozen_facts_and_replays(structured_setup, monkeypatch):
+    setup, baseline = structured_setup
+    request, inputs = request_inputs(setup)
+    calls = []
+    original = cpu.predict
+
+    def observe(fitted, text):
+        calls.append(text)
+        return original(fitted, text)
+
+    monkeypatch.setattr(cpu, "predict", observe)
+    receipt = baseline.execute(request, inputs)
+    assert sorted(calls) == sorted(canonical(fields) for fields in inputs.values())
+    assert {row["category"] for row in inputs.values()} == {
+        "annual_subscription", "carrier_freight", "office_supply"
+    }
+    assert sum(row["po"] is None for row in inputs.values()) == 1
+    assert not any(token in " ".join(calls) for token in ("target", "suggestion", "REVIEW"))
+    assert len(calls) == 4 and set(receipt.outputs) == set(inputs)
+    assert baseline.lookup(request) == baseline.execute(request, inputs) == receipt
+    assert len(calls) == 4
+
+
+@pytest.mark.parametrize("denial", ["field_grant", "schema", "substitution", "scope"])
+def test_structured_profile_requires_full_current_schema_and_field_grants(
+    structured_setup, monkeypatch, denial
+):
+    setup, baseline = structured_setup
+    _, _, _, document, path = setup
+    request, inputs = request_inputs(setup)
+    if denial == "field_grant":
+        document["grants"][0]["permitted_fields"] = ["category"]
+        write(path, document)
+    elif denial == "schema":
+        document["models"][0]["input_schema"] = "starter-text-category-v1"
+        write(path, document)
+    elif denial == "substitution":
+        inputs[next(iter(inputs))]["po"] = "substituted-reference"
+    else:
+        baseline.permission = replace(baseline.permission, input_fields=("category",))
+    calls = []
+    monkeypatch.setattr(cpu, "predict", lambda *args: calls.append(args))
+    with pytest.raises(IntakeError):
+        baseline.execute(request, inputs)
+    assert calls == [] and not baseline.path.exists()

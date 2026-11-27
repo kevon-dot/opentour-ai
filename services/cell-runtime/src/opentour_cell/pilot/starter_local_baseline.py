@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import math
 import os
 import sqlite3
 import stat
@@ -90,13 +91,37 @@ class LocalStarterBaseline:
         cases: StarterCases,
         artifact: Path,
         receipt_key: Path,
-        input_field: str,
+        input_field: str | None,
     ):
         self.path = directory.absolute() / "starter-local-predictions.sqlite3"
         self.actor, self.work, self.permission = actor, work, permission
         self.authority, self.registry, self.cases = authority, registry, cases
         self.artifact, self.receipt_key, self.input_field = artifact, receipt_key, input_field
         self.reference, self.revision = permission.model_ref, permission.model_revision
+
+    def _text(self, fields: Mapping[str, object]) -> str:
+        """Apply only the registered input encoding, before CPU feature extraction."""
+        _require(set(fields) == set(self.permission.input_fields))
+        if self.input_field is not None:
+            _require(set(fields) == {self.input_field})
+            value = fields[self.input_field]
+            _require(isinstance(value, str))
+            assert isinstance(value, str)
+            text = value
+        else:
+            _require(
+                all(
+                    value is None
+                    or type(value) is bool
+                    or (type(value) is int and abs(value) <= 2**53)
+                    or (type(value) is float and math.isfinite(value))
+                    or (isinstance(value, str) and len(value) <= 8192)
+                    for value in fields.values()
+                )
+            )
+            text = canonical(dict(fields))
+        cpu.words(text)
+        return text
 
     def _identity(self) -> tuple[model.ModelBinding, Json, bytes]:
         p = self.permission
@@ -111,7 +136,9 @@ class LocalStarterBaseline:
                 self.work.run_ref,
             )
             and p.expires_at > time.time()
-            and p.input_fields == (self.input_field,)
+            and 0 < len(p.input_fields) <= 32
+            and len(set(p.input_fields)) == len(p.input_fields)
+            and (self.input_field is None or p.input_fields == (self.input_field,))
             and type(p.maximum_cases) is int
             and 0 < p.maximum_cases <= cpu.MAX_HELDOUT_ROWS
         )
@@ -121,7 +148,12 @@ class LocalStarterBaseline:
             and binding.immutable_revision == self.revision
             and binding.route is model.Route.LOCAL
             and binding.task == "classification"
-            and binding.input_schema == "starter-text-" + self.input_field + "-v1"
+            and binding.input_schema
+            == (
+                "starter-structured-fields-v1"
+                if self.input_field is None
+                else "starter-text-" + self.input_field + "-v1"
+            )
             and binding.output_schema == "action-output-v1"
             and binding.preprocessing_revision == cpu.PROFILE
         )
@@ -130,7 +162,7 @@ class LocalStarterBaseline:
             grant is not None
             and grant.revision == p.baseline_grant_revision
             and grant.valid_until > time.time()
-            and self.input_field in grant.permitted_fields
+            and set(p.input_fields) <= set(grant.permitted_fields)
         )
         raw = _private_bytes(self.artifact, 262144)
         _require(self.revision == "sha256-" + hashlib.sha256(raw).hexdigest())
@@ -227,12 +259,7 @@ class LocalStarterBaseline:
             )
         )
         for fields in inputs.values():
-            _require(
-                set(fields) == {self.input_field} and isinstance(fields[self.input_field], str)
-            )
-            text = fields[self.input_field]
-            assert isinstance(text, str)
-            cpu.words(text)
+            self._text(fields)
         self.authority.revalidate(self.actor, self.work, p)
         _require(p.expires_at > time.time())
         _require(self._identity() == (binding, fitted, key))
@@ -336,7 +363,7 @@ class LocalStarterBaseline:
             outputs = {}
             for handle, fields in expected.items():
                 _require(self._current(request) == (fitted, key, expected))
-                label = cpu.predict(fitted, fields[self.input_field])
+                label = cpu.predict(fitted, self._text(fields))
                 outputs[handle] = (
                     {"status": "review"}
                     if label == "REVIEW"
