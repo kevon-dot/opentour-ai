@@ -2067,6 +2067,8 @@ def decision_map(
     source_revision: str,
     draft_revision: str,
     priority_citation: str = "",
+    effective_date: str = "",
+    effective_citation: str = "",
     priority_assertion: str = "",
     assertion_basis: str = "",
     unit_of_work: str | None = None,
@@ -2087,6 +2089,17 @@ def decision_map(
         blocks.append(_section(_display(assertion_basis, 1800)))
     if editable:
         blocks.append(_actions(_button("Edit trigger and fallback", "ot_map_assertions", revision)))
+    if effective_date and effective_citation:
+        blocks.extend(
+            [
+                _section(f"Policy effective from {_display(effective_date)}"),
+                _actions(
+                    _button(
+                        "Inspect effective date clause", "ot_map_date_clause", effective_citation
+                    )
+                ),
+            ]
+        )
     if priority_citation:
         blocks.append(
             _actions(_button("Inspect precedence clause", "ot_map_priority", priority_citation))

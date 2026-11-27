@@ -70,6 +70,7 @@ ACTIONS = {
     "ot_map_page",
     "ot_map_citation",
     "ot_map_priority",
+    "ot_map_date_clause",
     "ot_map_clause_page",
     "ot_map_edit",
     "ot_map_assertions",
@@ -2706,11 +2707,16 @@ class Workbench:
     def _map_view(self, cfg: Settings, actor: str, view: str, workflow: str, page: int = 0) -> None:
         service, principal = self._map_service(actor, workflow)
         snap = service.preview(principal)
+        from datetime import date
+
         from opentour_cell.pilot.map_inspection import branch_example
 
+        example_date = (
+            date.fromisoformat(snap.effective_from.iso_date) if snap.effective_from else None
+        )
         rows = []
         for branch in snap.branches:
-            example = branch_example(snap, branch)
+            example = branch_example(snap, branch, decision_date=example_date)
             inputs = ", ".join(
                 f"{name}={value if value is not None else 'missing'}"
                 for name, value in example.inputs
@@ -2742,16 +2748,24 @@ class Workbench:
                     ),
                     ("Source changed · " if branch.branch_ref in snap.changed_branch_refs else "")
                     + branch.disposition.replace("_", " "),
-                    f"{inputs or 'Unavailable'} → {example.action or 'Unresolved'}"
+                    (f"Decision date {example_date.isoformat()} · " if example_date else "")
+                    + f"{inputs or 'Unavailable'} → {example.action or 'Unresolved'}"
                     f" · {example.explanation}",
                 )
             )
         from opentour_cell.pilot.map_review import citation_ref
 
         priority = citation_ref(snap.precedence_citation) if snap.precedence_citation else ""
+        date_ref = citation_ref(snap.effective_from.citation) if snap.effective_from else ""
         allowed = [r.branch_ref for r in rows[page * 5 : (page + 1) * 5]]
         state = _json(
-            {"rev": snap.review_revision, "page": page, "branches": allowed, "priority": priority}
+            {
+                "rev": snap.review_revision,
+                "page": page,
+                "branches": allowed,
+                "priority": priority,
+                "date_ref": date_ref,
+            }
         )
         token = self.journal.context(actor, cfg.channel, view, "map_review", workflow, state)
         verifier_plan = self._map_verifier_plan(actor, workflow)
@@ -2777,6 +2791,8 @@ class Workbench:
                 else ""
             ),
             priority_citation=priority,
+            effective_date=snap.effective_from.iso_date if snap.effective_from else "",
+            effective_citation=date_ref,
             priority_assertion=(
                 f"Priority confirmed by {snap.precedence_actor_ref} · {snap.precedence_reason}"
                 if snap.precedence_actor_ref and snap.precedence_reason
@@ -2876,6 +2892,11 @@ class Workbench:
                     and (
                         (action == "ot_map_priority" and value and value == state["priority"])
                         or (
+                            action == "ot_map_date_clause"
+                            and value
+                            and value == state.get("date_ref")
+                        )
+                        or (
                             action in {"ot_map_edit", "ot_map_citation"}
                             and value in state["branches"]
                         )
@@ -2883,10 +2904,17 @@ class Workbench:
                 )
                 ref, page = value, 0
             branch = next((r for r in snap.branches if r.branch_ref == ref), None)
-            if action in {"ot_map_clause_page", "ot_map_citation", "ot_map_priority"}:
+            if action in {
+                "ot_map_clause_page",
+                "ot_map_citation",
+                "ot_map_priority",
+                "ot_map_date_clause",
+            }:
                 from opentour_cell.pilot.map_review import citation_ref
 
                 citation = branch.citation if branch else snap.precedence_citation
+                if snap.effective_from and citation_ref(snap.effective_from.citation) == ref:
+                    citation = snap.effective_from.citation
                 _check(
                     citation is not None and (branch is not None or citation_ref(citation) == ref)
                 )

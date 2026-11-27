@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import date
 from decimal import Decimal
 from itertools import islice, pairwise, product
 
-from opentour_cell.pilot.map_review import MapBranch, MapReviewSnapshot
+from opentour_cell.pilot.map_review import MapBranch, MapReviewSnapshot, citation_ref
 
 
 @dataclass(frozen=True)
@@ -17,7 +18,16 @@ class ProposedExample:
     explanation: str
 
 
-def branch_example(snapshot: MapReviewSnapshot, branch: MapBranch) -> ProposedExample:
+def branch_example(
+    snapshot: MapReviewSnapshot, branch: MapBranch, *, decision_date: date | None = None
+) -> ProposedExample:
+    if snapshot.effective_from and not snapshot.effective_from.applies(decision_date):
+        return ProposedExample(
+            (),
+            None,
+            (citation_ref(snapshot.effective_from.citation),),
+            f"Decision date must be on or after {snapshot.effective_from.iso_date}",
+        )
     rows = tuple(row for row in snapshot.branches if row.disposition != "out_of_scope")
     if branch not in rows or branch.action is None or not branch.conditions:
         return ProposedExample(
