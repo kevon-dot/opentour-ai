@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import math
 import re
+import unicodedata
 import zlib
 from dataclasses import dataclass, replace
 
@@ -46,7 +47,7 @@ from opentour_cell.pilot.mixed_intake.model import (
     finish,
 )
 
-PDF_REVISION = "opentour.reader.pdf-text@1.0.3"
+PDF_REVISION = "opentour.reader.pdf-text@1.0.4"
 # The three thresholds below are adjustable judgement values, not contract values: they trade
 # review volume against missed concealment and may be retuned without a format change.
 # Effective text size, in points, below which text is treated as not human-readable. Real
@@ -63,8 +64,8 @@ MIN_TEXT_CONTRAST_AGAINST_WHITE = 1.3
 # a paragraph, so a page with such an image and text goes to review. Logos, stamps and
 # signatures are typically under 10% of a page; a quarter page is large enough to cover several
 # lines. Any image overlapping an extracted text fragment also flags, whatever its size, since
-# a small opaque image placed over text conceals it. Fragment extents come from glyph widths,
-# Tj advance and Tc (see UNKNOWN_FONT_TIGHT_FACTOR below), so overlap is approximate.
+# a small opaque image placed over text conceals it. Fragment extents come from glyph advance
+# widths, Tc, Tw and TJ adjustments (see the width sources below), bounded wide, never narrow.
 IMAGE_REVIEW_PAGE_FRACTION = 0.25
 _OBJ = re.compile(rb"(?<![0-9])(\d{1,7})\s+(\d{1,5})\s+obj\b")
 _REF = rb"(\d+)\s+\d+\s+R"
@@ -278,22 +279,50 @@ def _concat(m: tuple[float, ...], n: tuple[float, ...]) -> tuple[float, ...]:
     )
 
 
-# Text extents are estimated from per-glyph advance widths (1000 units per em) of the standard
-# fonts, which are published data (Adobe core-14 AFM). An over-wide estimate makes text and an
-# image placed side by side (letterheads, two-column layouts) look overlapping and flags them
-# falsely; an under-wide one lets an image over the tail of wide glyphs through. Real advances
-# keep both errors small. A font with no table here (embedded or non-standard fonts, Times
-# bold and italic, composite fonts) falls back to GENEROUS widths for image overlap
-# (Helvetica-Bold, wider than most body faces, so side-by-side layouts in such fonts may flag
-# falsely) and to UNKNOWN_FONT_TIGHT_FACTOR x Helvetica for the page-edge and clip checks
-# (so a long run of very wide glyphs in such a font can still escape those two checks).
-# Known bounded gaps: Times-Bold "W" is 1000 units against Helvetica-Bold's 944, so an image over
-# the tail of an all-wide-glyph run in Times-Bold can pass the fallback; characters outside
-# printable ASCII use a per-table default (556 Helvetica, 500 Times, 600 Courier), which slightly
-# under-estimates an em dash or ellipsis (1000 units); TJ kerning and Tw are ignored. Family
-# names are matched exactly so wider or narrower faces (Arial-Black, ArialNarrow) never borrow
-# the Helvetica table.
-UNKNOWN_FONT_TIGHT_FACTOR = 0.8
+# Text extents come from per-glyph advance widths (1000 units per em). Every extent check (page
+# edge, clip, image overlap) asks whether a show's advance boxes reach past a boundary, so all
+# of them use one bound per font, the widest advance that font can have: too wide only sends a
+# page to review, too narrow can admit text drawn off the page, outside a clip or under an
+# image. The pen moves as a viewer moves it (Tc, Tw, Tz and TJ adjustments, leftward included).
+# Width sources, most authoritative first:
+#
+# 1. A simple font's own /FirstChar, /LastChar and /Widths, parsed and checked here. A viewer
+#    positions glyphs from it whatever /BaseFont says, so a font that embeds a wide program and
+#    names it /Helvetica is measured by its real widths. Codes outside the range take the
+#    largest of /MissingWidth and sources 2 and 3. An array that is incomplete, mis-sized, past
+#    the one-byte range, or holds a non-number, a reference or a negative width is never
+#    trusted: the font takes source 2 or 3, with no glyph below the array's largest number.
+#    Large entries are used as given, since they can only widen the extent.
+# 2. No /Widths, no FontDescriptor and a name that is exactly a standard face: Helvetica and
+#    Arial (regular, bold, oblique/italic, MT), Times-Roman, Courier and Courier New in their
+#    styles. That face's Adobe core-14 AFM widths, which are what a viewer uses for it.
+# 3. Anything else: another name (Arial-Black, Helvetica-Light, CourierPrime), Times bold or
+#    italic, a standard name with a FontDescriptor of its own, an unresolved font. Those take
+#    _PROPORTIONAL_MAX, the per-glyph maximum of Helvetica, Helvetica-Bold, Times-Roman,
+#    Times-Bold, Times-Italic and Times-BoldItalic (the obliques share their upright widths),
+#    and never less than the named face's own widths. A name starting "courier" keeps at least
+#    Courier's 600.
+#
+# Outside printable ASCII, a letter with an accent takes the source-3 width of its unaccented
+# letter, which is at least the accented glyph's AFM width in all six faces (the only accented
+# glyphs wider than their base letter, Helvetica's i-grave/acute/circumflex/dieresis at 278
+# against 222, are within it). Anything else (dashes, ellipsis, symbols, unmapped codes) takes
+# _WIDEST_GLYPH, the widest WinAnsi upper-half glyph in those six faces (of the glyphs the AFM
+# data covers; it has no Euro, no-break space or soft hyphen).
+#
+# Residuals, measured against this table, not closed here:
+# - A non-standard font with no valid /Widths. The PDF format requires /Widths for every simple
+#   font but the standard 14, so this is a malformed file, but a viewer may then draw it from
+#   the embedded program. Of 75 TrueType/OpenType faces measured, 41 are wider than
+#   _PROPORTIONAL_MAX on an English pangram (up to 1.21 times, the monospaced faces) and every
+#   one has at least one glyph wider than it.
+# - Courier New without /Widths is measured at Courier's 600; its TrueType advance is
+#   1229/2048 = 600.1 (measured on the metric-compatible Liberation Mono).
+# - Extents are advance boxes: ink overhanging its advance (italic overhang, a glyph drawn wider
+#   than its /Widths entry) is not modelled.
+# - Type3 widths (glyph space) and Type0 widths (/W) are not read. Such text already goes to
+#   review as font_encoding_unverified.
+_WIDEST_GLYPH = 1000
 _ASCII = (
     " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ"
     "[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~"
@@ -322,45 +351,168 @@ _TIMES_ROMAN = (
     444, 500, 444, 500, 444, 333, 500, 500, 278, 278, 500, 278, 778, 500, 500, 500, 500,
     333, 389, 278, 500, 500, 722, 500, 500, 444, 480, 200, 480, 541,
 )  # fmt: skip
-_GLYPH_WIDTHS: dict[str, tuple[dict[str, int], int]] = {
-    "helvetica": (dict(zip(_ASCII, _HELVETICA, strict=True)), 556),
-    "helvetica-bold": (dict(zip(_ASCII, _HELVETICA_BOLD, strict=True)), 556),
-    "times": (dict(zip(_ASCII, _TIMES_ROMAN, strict=True)), 500),
-    "courier": ({}, 600),  # monospaced: every glyph, whatever its code, advances 600
+_PROPORTIONAL_MAX = (
+    278, 389, 555, 556, 556, 1000, 833, 278, 333, 333, 500, 675, 278, 333, 278, 278,
+    556, 556, 556, 556, 556, 556, 556, 556, 556, 556, 333, 333, 675, 675, 675, 611, 1015,
+    722, 722, 722, 722, 667, 667, 778, 778, 389, 556, 778, 667, 944, 722, 778, 667, 778,
+    722, 667, 667, 722, 722, 1000, 722, 722, 667, 389, 278, 389, 584, 556, 333,
+    556, 611, 556, 611, 556, 333, 611, 611, 278, 333, 556, 278, 889, 611, 611, 611, 611,
+    444, 556, 333, 611, 556, 778, 556, 556, 500, 480, 280, 480, 584,
+)  # fmt: skip
+_GLYPH_WIDTHS: dict[str | None, dict[str, int]] = {
+    "helvetica": dict(zip(_ASCII, _HELVETICA, strict=True)),
+    "helvetica-bold": dict(zip(_ASCII, _HELVETICA_BOLD, strict=True)),
+    "times": dict(zip(_ASCII, _TIMES_ROMAN, strict=True)),
+    "courier": {},  # monospaced: every glyph, whatever its code, advances 600
+    None: dict(zip(_ASCII, _PROPORTIONAL_MAX, strict=True)),
 }
+
+
+def _char_width(table: str | None, char: str) -> int:
+    if table == "courier":
+        return 600
+    if char in _GLYPH_WIDTHS[table]:
+        return _GLYPH_WIDTHS[table][char]
+    base = unicodedata.normalize("NFD", char)[:1]
+    if base != char and base in _GLYPH_WIDTHS[None]:
+        return _GLYPH_WIDTHS[None][base]
+    return _WIDEST_GLYPH
+
+
+# Advance width of every one-byte code, decoded as this reader decodes it (cp1252).
+_ADVANCES: dict[str | None, tuple[float, ...]] = {
+    table: tuple(
+        float(_char_width(table, bytes([code]).decode("cp1252", "replace"))) for code in range(256)
+    )
+    for table in _GLYPH_WIDTHS
+}
+_SIMPLE_FONT = rb"/Subtype\s*/(Type1|TrueType|MMType1)\b"
+_INTEGER_KEY = rb"\s+(\d+)(?=[\s/>\]]|$)(?!\s+\d+\s+R)"
+_PDF_NUMBER = re.compile(rb"[+-]?(\d+\.?\d*|\.\d+)")
+
+
+def _base_name(font: _Object | None) -> str:
+    """The simple font's /BaseFont, lower-cased, without a subset tag ("" when there is none)."""
+    if font is None or not re.search(_SIMPLE_FONT, font.head):
+        return ""
+    base = re.search(rb"/BaseFont\s*/([^\s/<>\[\]()]+)", font.head)
+    if base is None:
+        return ""
+    return re.sub(r"^[A-Z]{6}\+", "", base[1].decode("latin-1")).lower().replace(",", "-")
 
 
 def _width_table_for(font: _Object | None) -> str | None:
     """Name the width table of a simple standard-metric font, or None when there is none."""
-    if font is None or not re.search(rb"/Subtype\s*/(Type1|TrueType|MMType1)\b", font.head):
-        return None
-    base = re.search(rb"/BaseFont\s*/([^\s/<>\[\]()]+)", font.head)
-    if base is None:
-        return None
-    name = re.sub(r"^[A-Z]{6}\+", "", base[1].decode("latin-1")).lower().replace(",", "-")
-    styled = any(word in name for word in ("bold", "italic", "oblique"))
-    if name.startswith("courier"):
+    name = _base_name(font)
+    # Exact family names only: CourierPrime, Arial-Black (wider), ArialNarrow, Helvetica-Light,
+    # -Condensed and the like have different metrics and must never borrow these tables.
+    if re.fullmatch(r"courier(-bold|-oblique|-boldoblique)?", name) or re.fullmatch(
+        r"couriernew(ps)?(-bold|-italic|-bolditalic)?(mt)?", name
+    ):
         return "courier"
-    # Exact family names only: Arial-Black (wider), ArialNarrow, Helvetica-Light, -Condensed and
-    # the like have different metrics and must take the generous fallback, never this table.
     if re.fullmatch(r"(helvetica|arial)-?(bold)?(oblique|italic)?(mt)?", name):
         return "helvetica-bold" if "bold" in name else "helvetica"
-    if name in {"times-roman", "timesnewroman", "timesnewromanpsmt"} and not styled:
+    if name in {"times-roman", "timesnewroman", "timesnewromanpsmt"}:
         return "times"
     return None
 
 
-def _extent_units(text: str, table: str | None) -> tuple[float, float]:
-    """(generous, tight) advance of `text` in 1/1000 em, from the real glyph widths."""
+def _resolved(head: bytes, key: bytes, objects: dict[int, _Object]) -> bytes | None:
+    """The value text of `key` (an inline `[...]`/`<<...>>` or one indirect object), or None."""
+    match = re.search(rb"/" + key + rb"\s*(\[|<<|(\d+)\s+\d+\s+R)", head)
+    if match is None:
+        return None
+    if match[2] is not None:
+        target = objects.get(int(match[2]))
+        return target.head.strip() if target is not None and target.stream is None else b""
+    if match[1] == b"<<":
+        return _balanced(head, match.start(1))
+    end = head.find(b"]", match.end())
+    return head[match.start(1) : end + 1] if end >= 0 else b""
 
-    def total(name: str) -> int:
-        glyphs, default = _GLYPH_WIDTHS[name]
-        return sum(glyphs.get(char, default) for char in text)
 
-    if table is not None:
-        known = float(total(table))
-        return known, known
-    return float(total("helvetica-bold")), UNKNOWN_FONT_TIGHT_FACTOR * total("helvetica")
+def _declared_widths(
+    head: bytes, objects: dict[int, _Object]
+) -> tuple[int, list[float]] | float | None:
+    """(FirstChar, widths) when well formed; the largest number seen when not; None if absent."""
+    if not any(
+        re.search(rb"/" + key + rb"\b", head) for key in (b"FirstChar", b"LastChar", b"Widths")
+    ):
+        return None
+    array = _resolved(head, b"Widths", objects) or b""
+    numbers = [float(n[0]) for n in _PDF_NUMBER.finditer(array)]
+    floor = max([n for n in numbers if math.isfinite(n)] + [0.0])
+    first = re.search(rb"/FirstChar" + _INTEGER_KEY, head)
+    last = re.search(rb"/LastChar" + _INTEGER_KEY, head)
+    if first is None or last is None or not (array.startswith(b"[") and array.endswith(b"]")):
+        return floor
+    tokens = array[1:-1].split()
+    if not all(_PDF_NUMBER.fullmatch(token) for token in tokens):
+        return floor
+    widths = [float(token) for token in tokens]
+    start, stop = int(first[1]), int(last[1])
+    if not (0 <= start <= stop <= 255 and len(widths) == stop - start + 1):
+        return floor
+    if any(not math.isfinite(width) or width < 0 for width in widths):
+        return floor
+    return start, widths
+
+
+def _font_advances(font: _Object | None, objects: dict[int, _Object]) -> tuple[float, ...]:
+    """Per-code advance widths (1000 units per em) bounding where a viewer places each glyph."""
+    generous = _ADVANCES[None]
+    if font is None or not re.search(_SIMPLE_FONT, font.head):
+        return generous
+    table = _width_table_for(font)
+    if table is not None and b"/FontDescriptor" not in font.head:
+        named = _ADVANCES[table]
+    else:  # no standard name, or a standard name over a font program of its own
+        # A Courier-like name (CourierPrime, Courier-Condensed) keeps at least Courier's 600.
+        family = table or ("courier" if _base_name(font).startswith("courier") else None)
+        named = tuple(map(max, _ADVANCES[family], generous))
+    declared = _declared_widths(font.head, objects)
+    if declared is None:
+        return named
+    if isinstance(declared, float):  # malformed: never trusted, and never below its entries
+        return tuple(max(width, declared) for width in named)
+    start, widths = declared
+    descriptor = _resolved(font.head, b"FontDescriptor", objects) or b""
+    missing = re.search(
+        rb"/MissingWidth\s+(" + _PDF_NUMBER.pattern + rb")(?!\s+\d+\s+R)", descriptor
+    )
+    fill = max(float(missing[1]), 0.0) if missing else 0.0
+    return tuple(
+        widths[code - start]
+        if start <= code < start + len(widths)
+        else max(named[code], generous[code], fill)
+        for code in range(256)
+    )
+
+
+def _extent_units(
+    pieces: list[bytes | float],
+    advances: tuple[float, ...],
+    size: float,
+    char_spacing: float = 0.0,
+    word_spacing: float = 0.0,
+) -> tuple[float, float, float]:
+    """(leftmost, rightmost, final pen) of a show's advance boxes, in unscaled text space.
+
+    `pieces` are the shown strings and, for TJ, the numeric adjustments between them. The pen
+    moves exactly as a viewer moves it (PDF 9.4.4), so leftward kerning, negative spacing and
+    rightward TJ gaps are all accounted for rather than ignored.
+    """
+    pen = left = right = 0.0
+    for piece in pieces:
+        if isinstance(piece, bytes):
+            for code in piece:
+                width = advances[code] / 1000.0 * size
+                left, right = min(left, pen), max(right, pen + width)
+                pen += width + char_spacing + (word_spacing if code == 32 else 0.0)
+        else:
+            pen -= piece / 1000.0 * size
+        left, right = min(left, pen), max(right, pen)
+    return left, right, pen
 
 
 def _relative_luminance(red: float, green: float, blue: float) -> float:
@@ -473,6 +625,7 @@ class _Graphics:
     rise: float = 0.0
     fill_invisible: bool = False
     char_spacing: float = 0.0
+    word_spacing: float = 0.0
     # Device-space clip rectangle (intersection of every rectangular clip so far), or None.
     clip: tuple[float, float, float, float] | None = None
     clip_unknown: bool = False  # a clip whose region could not be determined
@@ -508,7 +661,7 @@ def _fragments(
     forms: frozenset[bytes] = frozenset(),
     images: frozenset[bytes] = frozenset(),
     page_box: tuple[float, float, float, float] | None = None,
-    font_tables: dict[bytes, str | None] | None = None,
+    font_advances: dict[bytes, tuple[float, ...]] | None = None,
 ) -> tuple[list[_Fragment], set[str]]:
     """Return positioned fragments and the review flags the content stream earned.
 
@@ -531,19 +684,33 @@ def _fragments(
     path_other = False
     image_boxes: list[tuple[float, float, float, float]] = []
     text_boxes: list[tuple[float, float, float, float]] = []
-    # Anchor of the current positioning and the advance of the shows since it.
+    # Anchor of the current positioning and the pen advance of the shows since it.
     adv_anchor: tuple[object, ...] = ()
-    adv_wide = adv_tight = 0.0
+    adv_pen = 0.0
 
-    def emit(text: str) -> None:
-        nonlocal adv_anchor, adv_wide, adv_tight
+    def emit(text: str, pieces: list[bytes | float]) -> None:
+        nonlocal adv_anchor, adv_pen
+        m = _concat(text_matrix, gs.ctm)
+        scale_x, scale_y = math.hypot(m[0], m[1]), math.hypot(m[2], m[3])
+        size = abs(gs.size)
+        ctm = gs.ctm
+        px = ctm[0] * x + ctm[2] * y + ctm[4]
+        py = ctm[1] * x + ctm[3] * y + ctm[5]
+        # Several shows after one positioning operator advance along the line, whitespace-only
+        # shows included.
+        anchor = (x, y, text_matrix, ctm)
+        if anchor != adv_anchor:
+            adv_anchor, adv_pen = anchor, 0.0
+        step = scale_x * gs.h_scale
+        advances = (font_advances or {}).get(gs.font, _ADVANCES[None])
+        left, right, pen = _extent_units(pieces, advances, size, gs.char_spacing, gs.word_spacing)
+        left_end = px + (adv_pen + left) * step
+        right_end = px + (adv_pen + right) * step
+        adv_pen += pen
         if not text.strip():
             return
         if gs.render_mode in (3.0, 7.0):
             marks.add("hidden_text_present")
-        m = _concat(text_matrix, gs.ctm)
-        scale_x, scale_y = math.hypot(m[0], m[1]), math.hypot(m[2], m[3])
-        size = abs(gs.size)
         if (
             gs.size <= 0
             or gs.h_scale <= 0
@@ -554,30 +721,12 @@ def _fragments(
             marks.add("text_size_invisible")
         if gs.fill_invisible:
             marks.add("text_color_invisible")
-        ctm = gs.ctm
-        px = ctm[0] * x + ctm[2] * y + ctm[4]
-        py = ctm[1] * x + ctm[3] * y + ctm[5]
         raised = y + gs.rise * text_matrix[3]
         rx = ctm[0] * x + ctm[2] * raised + ctm[4]
         ry = ctm[1] * x + ctm[3] * raised + ctm[5]
         glyph = size * scale_y
-        # Several shows after one positioning operator advance along the line.
-        anchor = (x, y, text_matrix, ctm)
-        if anchor != adv_anchor:
-            adv_anchor, adv_wide, adv_tight = anchor, 0.0, 0.0
-        step = scale_x * gs.h_scale
-
-        units_wide, units_tight = _extent_units(text, (font_tables or {}).get(gs.font))
-
-        def run(units: float) -> float:
-            return max(units / 1000.0 * size + len(text) * gs.char_spacing, 0.0) * step
-
-        wide_end = px + adv_wide + run(units_wide)
-        tight_end = px + adv_tight + run(units_tight)
-        adv_wide += run(units_wide)
-        adv_tight += run(units_tight)
         # The baseline origin and the glyph box must lie inside the page: an origin at the top
-        # edge puts the whole glyph above it, and a long string can run off the right edge.
+        # edge puts the whole glyph above it, and a long string can run off either side.
         if (
             page_box is None
             or any(
@@ -589,21 +738,22 @@ def _fragments(
                 )
                 for cx, cy in ((px, py), (rx, ry))
             )
-            or tight_end > page_box[2]
+            or left_end < page_box[0]
+            or right_end > page_box[2]
         ):
             marks.add("text_outside_page")
         # A clip can only exclude text that falls outside it (or whose region is unknown).
         if gs.clip_unknown or (
             gs.clip is not None
             and not (
-                gs.clip[0] <= px
-                and tight_end <= gs.clip[2]
+                gs.clip[0] <= left_end
+                and right_end <= gs.clip[2]
                 and gs.clip[1] <= py
                 and py + 0.7 * glyph <= gs.clip[3]
             )
         ):
             marks.add("clip_region_present")
-        text_boxes.append((px, py, wide_end, py + glyph))
+        text_boxes.append((left_end, py, right_end, py + glyph))
         out.append(_Fragment(px, py, text, gs.size * abs(ctm[3] or 1.0), gs.font))
 
     def clip_to_path() -> None:
@@ -678,6 +828,8 @@ def _fragments(
             gs = replace(gs, h_scale=nums[-1] / 100.0)
         elif op == b"Tc" and nums:
             gs = replace(gs, char_spacing=nums[-1])
+        elif op == b"Tw" and nums:
+            gs = replace(gs, word_spacing=nums[-1])
         elif op == b"Ts" and nums:
             gs = replace(gs, rise=nums[-1])
         elif op in (b"g", b"rg", b"k") and nums:
@@ -713,19 +865,25 @@ def _fragments(
             ly -= gs.leading
             x, y = lx, ly
         elif op == b"Tj" and stack and isinstance(stack[-1], bytes):
-            emit(_show(stack[-1]))
+            emit(_show(stack[-1]), [stack[-1]])
         elif op in (b"'", b'"') and stack and isinstance(stack[-1], bytes):
+            if op == b'"' and len(nums) >= 2:  # aw ac string ": word, then character spacing
+                gs = replace(gs, word_spacing=nums[-2], char_spacing=nums[-1])
             ly -= gs.leading
             x, y = lx, ly
-            emit(_show(stack[-1]))
+            emit(_show(stack[-1]), [stack[-1]])
         elif op == b"TJ" and stack and isinstance(stack[-1], list):
             parts = []
+            pieces: list[bytes | float] = []
             for item in stack[-1]:
                 if isinstance(item, bytes):
                     parts.append(_show(item))
-                elif isinstance(item, float) and item < -200:
-                    parts.append(" ")
-            emit("".join(parts))
+                    pieces.append(item)
+                elif isinstance(item, float):
+                    pieces.append(item)
+                    if item < -200:
+                        parts.append(" ")
+            emit("".join(parts), pieces)
         stack.clear()
     if out:
         if any(_image_may_conceal(box, page_box, text_boxes) for box in image_boxes):
@@ -866,8 +1024,10 @@ def read_pdf(data: bytes, limits: Limits, deadline: Deadline) -> ReadResult:
             for name, obj in _named_refs(resources, b"XObject", objects).items()
             if re.search(rb"/Subtype\s*/Form", obj.head)
         )
-        tables = {name: _width_table_for(obj) for name, obj in fonts.items()}
-        fragments, marks = _fragments(stream, deadline, forms, frozenset(images), page_box, tables)
+        advances = {name: _font_advances(obj, objects) for name, obj in fonts.items()}
+        fragments, marks = _fragments(
+            stream, deadline, forms, frozenset(images), page_box, advances
+        )
         if len(readable) != len(refs):
             # A referenced content stream that cannot be resolved means the page was not read.
             marks.add("content_stream_unresolved")

@@ -10,7 +10,7 @@ from dataclasses import replace
 
 import mixed_intake_fixture as fx
 import pytest
-from opentour_cell.pilot.mixed_intake import readers
+from opentour_cell.pilot.mixed_intake import pdf, readers
 from opentour_cell.pilot.mixed_intake.model import Deadline, ExtractionState, Limits
 
 LIMITS = Limits()
@@ -837,6 +837,14 @@ def _logo_at(x: int) -> bytes:
     return b" q 20 0 0 20 %d 695 cm /Im1 Do Q" % x
 
 
+def _reader_end(text: bytes, size: int, start: int) -> float:
+    """Where the reader itself puts the end of `text` in the default (Helvetica) font."""
+    head = b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>"
+    font = pdf._Object(7, head, None)  # the font _pdf uses by default
+    _left, right, _pen = pdf._extent_units([text], pdf._font_advances(font, {}), size)
+    return start + right
+
+
 @pytest.mark.parametrize(
     ("text", "size", "start", "true_end", "clear_x"),
     [
@@ -849,6 +857,7 @@ def _logo_at(x: int) -> bytes:
 def test_pdf_image_clearly_beside_text_stays_eligible(
     text: bytes, size: int, start: int, true_end: float, clear_x: int
 ) -> None:
+    assert true_end == pytest.approx(_reader_end(text, size, start), abs=0.05)
     assert true_end < clear_x
     show = b"BT /F1 %d Tf %d 700 Td (%s) Tj ET" % (size, start, text)
     _eligible(show + _logo_at(clear_x), **_IMG)
@@ -873,6 +882,7 @@ def test_pdf_two_column_layout_with_a_normal_gutter_stays_eligible() -> None:
 def test_pdf_image_over_the_true_tail_of_text_goes_to_review(
     text: bytes, size: int, start: int, true_end: float, over_x: int
 ) -> None:
+    assert true_end == pytest.approx(_reader_end(text, size, start), abs=0.05)
     assert over_x < true_end < over_x + 20  # the 20 pt image covers the tail
     show = b"BT /F1 %d Tf %d 700 Td (%s) Tj ET" % (size, start, text)
     _flagged(show + _logo_at(over_x), _OVERLAP, **_IMG)
@@ -884,8 +894,9 @@ def test_pdf_extents_follow_the_font_in_use() -> None:
     show = b"BT /F1 11 Tf 72 700 Td (iiiiiiiiii) Tj ET"  # 10 x 600 units: ends at 138
     _flagged(show + _logo_at(130), _OVERLAP, font=courier, **_IMG)
     _eligible(show + _logo_at(145), font=courier, **_IMG)
-    # A font with no width table falls back to generous widths, so it can flag a bit early
-    # but never misses wide glyphs.
+    # A font with neither /Widths nor an exact standard name is measured by the per-glyph
+    # maximum of six core-14 faces, so it can flag early. A face whose glyphs are wider still
+    # than that maximum is not caught (see the width sources in pdf.py).
     unknown = b"<< /Type /Font /Subtype /Type1 /BaseFont /Foo /Encoding /WinAnsiEncoding >>"
     wide = b"BT /F1 12 Tf 72 700 Td (WWWWWWWW) Tj ET"
     _flagged(wide + _logo_at(150), _OVERLAP, font=unknown, **_IMG)
@@ -913,6 +924,13 @@ def test_pdf_long_run_of_wide_glyphs_in_a_known_font_runs_off_the_page() -> None
         (b"Helvetica-Condensed", None),
         (b"Helvetica-Rounded-Bold", None),
         (b"Times-Bold", None),
+        (b"Courier", "courier"),
+        (b"Courier-BoldOblique", "courier"),
+        (b"CourierNewPS-BoldMT", "courier"),
+        (b"CourierNew,Italic", "courier"),
+        (b"CourierWide", None),  # wider than Courier: a prefix match would under-estimate it
+        (b"Courier-Condensed", None),
+        (b"CourierPrime", None),
     ],
 )
 def test_pdf_width_table_is_chosen_by_exact_family_name(
@@ -922,3 +940,179 @@ def test_pdf_width_table_is_chosen_by_exact_family_name(
 
     head = b"<< /Type /Font /Subtype /Type1 /BaseFont /" + base_font + b" >>"
     assert pdf._width_table_for(pdf._Object(1, head, None)) == table
+
+
+# ------------------------------------------------------------------ fallback bounds (OPE-531)
+# Every extent check uses the bound that errs toward review. A face with no width table of its
+# own must never be measured narrower than the text a viewer would draw.
+
+
+def _font(base_font: bytes, extra: bytes = b"") -> bytes:
+    return (
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /"
+        + base_font
+        + b" /Encoding /WinAnsiEncoding"
+        + extra
+        + b" >>"
+    )
+
+
+_UNMATCHED_FACES = [b"Arial-Black", b"Helvetica-Light", b"Helvetica-Rounded-Bold"]
+
+
+@pytest.mark.parametrize("face", _UNMATCHED_FACES)
+def test_pdf_unmatched_face_running_off_the_right_edge_goes_to_review(face: bytes) -> None:
+    # 60 W at 11 pt from x=72 ends at 695.0 in Helvetica (W = 944), past the 612 pt edge.
+    _flagged(
+        b"BT /F1 11 Tf 72 700 Td (" + b"W" * 60 + b") Tj ET", "text_outside_page", font=_font(face)
+    )
+
+
+@pytest.mark.parametrize("face", _UNMATCHED_FACES)
+def test_pdf_unmatched_face_overrunning_a_clip_goes_to_review(face: bytes) -> None:
+    # 25 W at 11 pt from x=72 ends at 331.6 in Helvetica, past the clip's right edge at 300.
+    content = b"q 0 0 300 792 re W n BT /F1 11 Tf 72 700 Td (" + b"W" * 25 + b") Tj ET Q"
+    _flagged(content, "clip_region_present", font=_font(face))
+
+
+# Times-Bold advance widths (Adobe core-14 AFM, 1000 units per em) of the glyphs used below.
+_TIMES_BOLD = {"M": 944, "I": 389, "X": 722, "T": 667, "L": 667, "Y": 722, " ": 250}
+_TIMES_BOLD |= {"H": 778, "K": 778, "Z": 667, "V": 722}
+
+
+def test_pdf_image_over_the_tail_of_times_bold_capitals_goes_to_review() -> None:
+    text = "MIXTLY HMKZ VIZ"  # H, M, I, K, L, T, V, X, Y, Z are all wider than Helvetica-Bold
+    true_end = 72 + sum(_TIMES_BOLD[c] for c in text) * 24 / 1000
+    assert true_end == pytest.approx(301.3, abs=0.05)
+    over_x = 282  # where Helvetica-Bold widths put the end (280.0) plus 2 pt
+    assert over_x < true_end < over_x + 20
+    show = b"BT /F1 24 Tf 72 700 Td (" + text.encode() + b") Tj ET"
+    _flagged(show + _logo_at(over_x), _OVERLAP, font=_font(b"Times-Bold"), **_IMG)
+    _flagged(_logo_at(over_x) + b" " + show, _OVERLAP, font=_font(b"Times-Bold"), **_IMG)
+
+
+def _widths(first: int, values: list[int]) -> bytes:
+    last = first + len(values) - 1
+    body = b" ".join(b"%d" % v for v in values)
+    return b" /FirstChar %d /LastChar %d /Widths [%s]" % (first, last, body)
+
+
+def test_pdf_widths_array_is_authoritative_when_wider_than_the_named_face() -> None:
+    # A font may embed any program and call it /Helvetica: the viewer places glyphs from
+    # /Widths. Ten 'i' at 1000 units and 11 pt end at 182, not at the Helvetica 96.4.
+    show = b"BT /F1 11 Tf 72 700 Td (iiiiiiiiii) Tj ET"
+    wide = _font(b"Helvetica", _widths(32, [1000] * 95))
+    _flagged(show + _logo_at(150), _OVERLAP, font=wide, **_IMG)
+    _eligible(show + _logo_at(150), **_IMG)  # the same text measured by the Helvetica table
+    indirect = _font(b"Helvetica", b" /FirstChar 32 /LastChar 126 /Widths 9 0 R")
+    array = b"[" + b" ".join([b"1000"] * 95) + b"]"
+    _flagged(
+        show + _logo_at(150),
+        _OVERLAP,
+        font=indirect,
+        extra={8: _IMAGE, 9: array},
+        resources=_IMAGE_RESOURCES,
+    )
+
+
+def test_pdf_widths_array_keeps_a_narrow_face_from_flagging_falsely() -> None:
+    # Eight W at 500 units and 12 pt end at 120; the generous fallback would say 168.
+    show = b"BT /F1 12 Tf 72 700 Td (WWWWWWWW) Tj ET"
+    _eligible(show + _logo_at(130), font=_font(b"Foo", _widths(32, [500] * 95)), **_IMG)
+    _flagged(show + _logo_at(130), _OVERLAP, font=_font(b"Foo"), **_IMG)
+
+
+@pytest.mark.parametrize(
+    "widths",
+    [
+        b" /FirstChar 32 /LastChar 126 /Widths [" + b"100 " * 94 + b"]",  # one short
+        b" /FirstChar 32 /LastChar 126 /Widths [" + b"100 " * 96 + b"]",  # one long
+        b" /FirstChar 32 /LastChar 126 /Widths [" + b"100 " * 94 + b"/x]",  # not a number
+        b" /FirstChar 32 /LastChar 126 /Widths [" + b"100 " * 94 + b"-100]",  # negative
+        b" /FirstChar 32 /LastChar 126 /Widths [" + b"100 " * 94 + b"9 0 R]",  # a reference
+        b" /LastChar 126 /Widths [" + b"100 " * 95 + b"]",  # no FirstChar
+        b" /FirstChar 32 /Widths [" + b"100 " * 95 + b"]",  # no LastChar
+        b" /FirstChar 126 /LastChar 32 /Widths [" + b"100 " * 95 + b"]",  # reversed range
+        b" /FirstChar 32.5 /LastChar 126 /Widths [" + b"100 " * 95 + b"]",  # not an integer
+        b" /FirstChar 32 /LastChar 300 /Widths [" + b"100 " * 269 + b"]",  # past one byte
+        b" /FirstChar 32 /LastChar 126 /Widths 99 0 R",  # unresolved reference
+        b" /FirstChar 32 /LastChar 126 /Widths (100)",  # not an array
+    ],
+)
+def test_pdf_malformed_widths_array_is_never_trusted(widths: bytes) -> None:
+    # Trusted, these 100-unit widths would put eight W at 12 pt ending at 81.6, clear of x=130.
+    show = b"BT /F1 12 Tf 72 700 Td (WWWWWWWW) Tj ET"
+    _flagged(show + _logo_at(130), _OVERLAP, font=_font(b"Foo", widths), **_IMG)
+
+
+def test_pdf_large_widths_widen_the_extent_rather_than_being_discarded() -> None:
+    # Twelve 'a' at 5000 units and 11 pt end at 732, past the page edge; discarding the array
+    # for a 556-unit guess would put the end at 145.
+    values = [5000 if code == ord("a") else 500 for code in range(32, 127)]
+    content = b"BT /F1 11 Tf 72 700 Td (aaaaaaaaaaaa) Tj ET"
+    _flagged(content, "text_outside_page", font=_font(b"Foo", _widths(32, values)))
+
+
+def test_pdf_codes_outside_the_widths_range_use_the_generous_fallback() -> None:
+    # Only 'A' has a width; the W after it are measured generously, never as zero.
+    content = b"BT /F1 11 Tf 72 700 Td (A" + b"W" * 60 + b") Tj ET"
+    _flagged(content, "text_outside_page", font=_font(b"Foo", _widths(65, [100])))
+
+
+def test_pdf_standard_name_with_an_embedded_descriptor_and_no_widths_is_measured_generously() -> (
+    None
+):
+    # Ten 'i' at 11 pt end at 96.4 by the Helvetica table. A font carrying its own descriptor
+    # under that name, without /Widths, may draw any widths, so the generous bound applies.
+    show = b"BT /F1 11 Tf 72 700 Td (iiiiiiiiii) Tj ET"
+    _eligible(show + _logo_at(100), font=_font(b"Helvetica"), **_IMG)
+    described = _font(b"Helvetica", b" /FontDescriptor 9 0 R")
+    descriptor = b"<< /Type /FontDescriptor /FontName /Helvetica /Flags 32 >>"
+    _flagged(
+        show + _logo_at(100),
+        _OVERLAP,
+        font=described,
+        extra={8: _IMAGE, 9: descriptor},
+        resources=_IMAGE_RESOURCES,
+    )
+
+
+def test_pdf_tj_spacing_that_pushes_text_right_is_counted() -> None:
+    # 50 W at 11 pt with a 150-unit gap after each end at 673.7: past the page edge. Without the
+    # gaps the run ends at 591.2.
+    content = b"BT /F1 11 Tf 72 700 Td [" + b"(W) -150 " * 50 + b"] TJ ET"
+    _flagged(content, "text_outside_page")
+    _eligible(b"BT /F1 11 Tf 72 700 Td [" + b"(W) 0 " * 50 + b"] TJ ET")
+
+
+def test_pdf_text_moved_left_of_its_origin_is_checked_against_the_left_edges() -> None:
+    # A 5000-unit TJ adjustment moves "hidden" 55 pt left of where A ends: off the page at x<0.
+    _flagged(b"BT /F1 11 Tf 20 700 Td [(A) 5000 (hidden)] TJ ET", "text_outside_page")
+    clip = b"q 100 0 300 792 re W n BT /F1 11 Tf 110 700 Td [(A) 3000 (left)] TJ ET Q"
+    _flagged(clip, "clip_region_present")  # drawn from x=84, left of the clip at 100
+    _flagged(b"BT /F1 11 Tf -12 Tc 20 700 Td (backwards) Tj ET", "text_outside_page")
+    # Ordinary kerning pulls glyphs together without leaving the line's start.
+    _eligible(b"BT /F1 11 Tf 72 700 Td [(A) 120 (V) 80 (Wa) -40 (ter)] TJ ET")
+    _eligible(b"q 60 690 300 40 re W n BT /F1 11 Tf 72 700 Td [(A) 120 (V)] TJ ET Q")
+
+
+def test_pdf_word_spacing_is_counted() -> None:
+    # Sixteen "word " at 11 pt end at 502.3; 10 pt of word spacing per space adds 160.
+    line = b"(" + b"word " * 16 + b")"
+    _eligible(b"BT /F1 11 Tf 72 700 Td " + line + b" Tj ET")
+    _flagged(b"BT /F1 11 Tf 10 Tw 72 700 Td " + line + b" Tj ET", "text_outside_page")
+    _flagged(b"BT /F1 11 Tf 72 700 Td 12 TL 10 0 " + line + b' " ET', "text_outside_page")
+    # A whitespace-only show still moves the pen: "tail" starts at 675.1, past the edge.
+    _flagged(b"BT /F1 11 Tf 600 Tw 72 700 Td ( ) Tj (tail) Tj ET", "text_outside_page")
+    _eligible(b"BT /F1 11 Tf 72 700 Td ( ) Tj (tail) Tj ET")
+
+
+@pytest.mark.parametrize("face", [b"CourierPrime", b"Courier-Condensed", b"CourierWide"])
+def test_pdf_courier_like_face_without_an_exact_name_is_never_measured_below_courier(
+    face: bytes,
+) -> None:
+    show = b"BT /F1 11 Tf 72 700 Td (iiiiiiiiii) Tj ET"  # 10 x 600 units at 11 pt: ends at 138
+    _flagged(show + _logo_at(130), _OVERLAP, font=_font(face), **_IMG)
+    # Wider than Courier where the generous fallback is: 25 W at 1000 units end at 347.
+    content = b"q 0 0 300 792 re W n BT /F1 11 Tf 72 700 Td (" + b"W" * 25 + b") Tj ET Q"
+    _flagged(content, "clip_region_present", font=_font(face))
