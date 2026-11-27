@@ -1145,9 +1145,10 @@ def test_n1_a_pending_rotation_outside_its_window_is_ignored(kit: Kit) -> None:
         record_path(kit, ANCHOR_KEY).write_bytes(genuine)
 
 
-def test_n1_an_interrupted_rotation_counts_while_valid_then_reverts(
+def test_n1_an_untouched_interrupted_rotation_counts_while_valid_then_reverts(
     kit: Kit, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """The residual risk named under Recovery: nothing took the lock before expiry."""
     verifier = kit.enrolled()
     old_floor = record_path(kit, REVISION_KEY).read_bytes()
     successor = Signer(sr.CUSTOMER_OWNER, registry_revision="2")
@@ -1158,7 +1159,7 @@ def test_n1_an_interrupted_rotation_counts_while_valid_then_reverts(
     # Inside the rotation's window the pending rotation counts.
     assert verifier.verify(new_grant, sr.GRANT_PURPOSE)
     refused("customer_key_not_anchored", partial(verifier.verify, old_grant, sr.GRANT_PURPOSE))
-    # After it expires, the anchor reverts to the floor instead of bricking.
+    # Untouched until it expires, the anchor reverts to the floor instead of bricking.
     real_now = sr._utc_now
     monkeypatch.setattr(sr, "_utc_now", lambda: real_now() + timedelta(seconds=7200))
     refused("customer_key_not_anchored", partial(verifier.verify, new_grant, sr.GRANT_PURPOSE))
@@ -1170,6 +1171,42 @@ def test_n1_an_interrupted_rotation_counts_while_valid_then_reverts(
     assert stored(kit, ANCHOR_KEY)["sequence"] == "3"
     other_grant = sign(consent(not_after=stamp(80000)), sr.GRANT_PURPOSE, other, kit.operator)
     assert verifier.verify(other_grant, sr.GRANT_PURPOSE)
+
+
+def test_q4_a_locked_operation_in_window_rolls_the_floor_forward(
+    kit: Kit, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    verifier = kit.verifier()
+    enrolment = kit.enrolment()
+    verifier.pin_customer_anchor(enrolment)
+    old_floor = record_path(kit, REVISION_KEY).read_bytes()
+    successor = Signer(sr.CUSTOMER_OWNER, registry_revision="2")
+    verifier.rotate_customer_key(kit.rotation(kit.customer, successor))
+    record_path(kit, REVISION_KEY).write_bytes(old_floor)  # the floor write was lost
+    assert stored(kit, REVISION_KEY)["sequence"] == "1"
+    # Any locked operation on the engagement settles the pending rotation, even one that
+    # is itself refused.
+    refused("customer_anchor_already_pinned", partial(verifier.pin_customer_anchor, enrolment))
+    assert stored(kit, REVISION_KEY)["sequence"] == "2"
+    old_grant = sign(consent(not_after=stamp(80000)), sr.GRANT_PURPOSE, kit.customer, kit.operator)
+    new_grant = sign(consent(not_after=stamp(80000)), sr.GRANT_PURPOSE, successor, kit.operator)
+    real_now = sr._utc_now
+    monkeypatch.setattr(sr, "_utc_now", lambda: real_now() + timedelta(seconds=7200))
+    # Past the rotation's window it no longer reverts: the old key stays rotated away.
+    assert verifier.verify(new_grant, sr.GRANT_PURPOSE)
+    refused("customer_key_not_anchored", partial(verifier.verify, old_grant, sr.GRANT_PURPOSE))
+
+
+def test_q4_a_rotation_settles_a_pending_tail_before_extending_it(kit: Kit) -> None:
+    verifier = kit.enrolled()
+    old_floor = record_path(kit, REVISION_KEY).read_bytes()
+    second = Signer(sr.CUSTOMER_OWNER, registry_revision="2")
+    verifier.rotate_customer_key(kit.rotation(kit.customer, second))
+    record_path(kit, REVISION_KEY).write_bytes(old_floor)
+    third = Signer(sr.CUSTOMER_OWNER, registry_revision="3")
+    assert verifier.rotate_customer_key(kit.rotation(second, third)).anchor_revision == 3
+    assert stored(kit, REVISION_KEY)["sequence"] == "3"
+    assert len(stored(kit, ANCHOR_KEY)["value"]["chain"]) == 3
 
 
 def former_registry(kit: Kit, revision: str, keys: list[Json], former: list[Json]) -> bytes:
@@ -1201,8 +1238,14 @@ def test_n2_former_custodian_keys_never_reuse_another_role(kit: Kit) -> None:
     current = kit.issuers()
     for former, code in (
         ([kit.evaluator.public()], "trust_key_role_conflict"),
-        ([kit.operator.public()], "trust_key_role_conflict"),
         ([kit.root.public()], "trust_key_role_conflict"),
+        # A different public key under a current custodian key id.
+        (
+            [{**Signer(sr.OPERATOR_CUSTODIAN).public(), "key_id": kit.operator.key_id}],
+            "trust_key_role_conflict",
+        ),
+        # A current custodian's public key under another id.
+        ([{**kit.operator.public(), "key_id": "former-custodian-0003"}], "trust_key_role_conflict"),
         ([{**kit.auditor.public(), "key_id": "former-custodian-0001"}], "trust_key_role_conflict"),
     ):
         refused(code, partial(kit.verifier, former_registry(kit, "1", current, former)))
@@ -1239,7 +1282,9 @@ def test_n2_relisting_the_custodian_key_at_a_new_revision_keeps_anchors(kit: Kit
 def test_n2_removing_enrolment_purpose_keeps_anchors_but_refuses_new_pins(kit: Kit) -> None:
     kit.enrolled()
     narrowed = kit.operator.entry(purposes=[sr.GRANT_PURPOSE, sr.ROUTING_POLICY_PURPOSE])
-    verifier = kit.verifier(kit.registry("2", keys=[narrowed, kit.evaluator.entry()]))
+    # The single permitted overlap: the same still-current key listed as verify-only.
+    registry = former_registry(kit, "2", [narrowed, kit.evaluator.entry()], [kit.operator.public()])
+    verifier = kit.verifier(registry)
     assert verifier.verify(
         sign(consent(), sr.GRANT_PURPOSE, kit.customer, kit.operator), sr.GRANT_PURPOSE
     )
@@ -1251,6 +1296,42 @@ def test_n2_removing_enrolment_purpose_keeps_anchors_but_refuses_new_pins(kit: K
         kit.operator,
     )
     refused("key_purpose_not_permitted", partial(verifier.pin_customer_anchor, new_pin))
+
+
+def test_q1_removing_enrolment_purpose_without_listing_makes_anchors_unverifiable(
+    kit: Kit,
+) -> None:
+    kit.enrolled()
+    narrowed = kit.operator.entry(purposes=[sr.GRANT_PURPOSE, sr.ROUTING_POLICY_PURPOSE])
+    verifier = kit.verifier(kit.registry("2", keys=[narrowed, kit.evaluator.entry()]))
+    grant = sign(consent(), sr.GRANT_PURPOSE, kit.customer, kit.operator)
+    refused("customer_anchor_unverifiable", partial(verifier.verify, grant, sr.GRANT_PURPOSE))
+
+
+def test_q1_a_custodian_key_without_enrolment_purpose_cannot_validate_a_stored_enrolment(
+    kit: Kit,
+) -> None:
+    # Reviewer's repro: G is a current custodian key whose only purpose is grants.
+    grantor = Signer(sr.OPERATOR_CUSTODIAN, [sr.GRANT_PURPOSE])
+    verifier = kit.verifier(kit.registry(keys=[*kit.issuers(), grantor.entry()]))
+    verifier.pin_customer_anchor(kit.enrolment())
+    writer = Signer(sr.CUSTOMER_OWNER, registry_revision="1")
+    forged = sign(kit.enrolment_payload(writer), sr.ENROLMENT_PURPOSE, writer, grantor)
+    # The API refuses the forged enrolment ...
+    other = sign(
+        kit.enrolment_payload(writer, engagement_id="eng-sentinel-0002"),
+        sr.ENROLMENT_PURPOSE,
+        writer,
+        grantor,
+    )
+    refused("key_purpose_not_permitted", partial(verifier.pin_customer_anchor, other))
+    # ... and so does replay, after a store writer installs it with a matching floor.
+    write_record(kit, ANCHOR_KEY, 2, {"chain": [json.loads(forged)]})
+    write_record(kit, REVISION_KEY, 1, {"head_payload_sha256": payload_digest(forged)})
+    minted = sign(consent(), sr.GRANT_PURPOSE, writer, grantor)
+    refused("customer_anchor_unverifiable", partial(verifier.verify, minted, sr.GRANT_PURPOSE))
+    genuine = sign(consent(), sr.GRANT_PURPOSE, kit.customer, kit.operator)
+    refused("customer_anchor_unverifiable", partial(verifier.verify, genuine, sr.GRANT_PURPOSE))
 
 
 def test_n2_a_key_id_names_one_public_key(kit: Kit) -> None:

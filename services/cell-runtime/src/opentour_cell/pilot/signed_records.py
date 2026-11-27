@@ -55,17 +55,27 @@ Chain entries up to the anchor revision floor were accepted by this worker and a
 re-verified for signatures and engagement binding only. Entries beyond the floor are
 *pending* (for example a rotation whose floor write was interrupted): they count only while
 they also pass the time check now, the ``MAX_VALIDITY`` ceiling included. Otherwise the
-anchor is derived at the floor and the whole pending tail is ignored, so an interrupted
-rotation that later expires reverts rather than bricking the engagement.
+anchor is derived at the floor and the whole pending tail is ignored. Any locked operation
+on the engagement (a pin or a rotation) that finds a pending tail still inside its window
+first rolls the floor forward over it, after which it is accepted and no longer expires.
 
 The enrolment co-signature is re-verified against the operator custodian key named by key
-id, whether it is current (any registry revision, any purposes) or listed in the registry's
-verify-only ``former_custodian_keys``. A key id maps to one public key and one role across
-the registry, so the key id fixes the pinned public-key digest. A former custodian key
-verifies existing enrolments only: never a new pin, never any other purpose, and never as a
-current key. Dropping a key from that list deliberately invalidates every anchor it
-co-signed; that is the intended response to a compromised custodian key, and those
-engagements need a supervised re-enrolment (see Recovery).
+id, accepted only if a current registry entry for that id carries the enrolment purpose (at
+any registry revision) or the id is listed in the registry's verify-only
+``former_custodian_keys``. A key id maps to one public key and one role across the
+registry, so the key id fixes the pinned public-key digest. A former custodian key verifies
+existing enrolments only: never a new pin, never any other purpose. The one permitted
+overlap is a still-current custodian key listed there with the same id and public key, so
+its enrolment purpose can be removed without bricking its anchors. Dropping a key from that
+list (and from the enrolment purpose) deliberately invalidates every anchor it co-signed;
+that is the intended response to a compromised custodian key, and those engagements need a
+supervised re-enrolment (see Recovery).
+
+Custody of retired custodian keys: anyone holding a former custodian key plus write access
+to the anti-rollback location can substitute an anchor, by writing a chain whose enrolment
+that key co-signed. Minting a consent record still needs a current custodian key permitted
+for its purpose. Retired custodian tokens must therefore be destroyed, or kept as tightly as
+current ones; the OPE-582 key ceremony covers this.
 
 Further namespaces, such as revocation epochs or withdrawn mandate ids, use the same format
 with their own forward-only rule. The location is fixed worker-host layout configuration
@@ -97,6 +107,11 @@ Recovery:
   ``customer_anchor_inconsistent``, and so does an anchor whose custodian key was dropped.
   Recovery is a supervised re-enrolment: delete both anchor records and pin a new
   enrolment, with the customer confirming the key fingerprint out of band per OPE-583.
+* An interrupted rotation (chain written, floor write lost) counts while inside its window,
+  and the next locked operation on that engagement rolls the floor forward. Remaining risk:
+  if nothing touches the engagement's anchor under the lock before the rotation expires, the
+  anchor reverts to the key the customer rotated away from. Re-run the rotation with a fresh
+  record signed by both keys.
 
 Time: every signed document carries issuer-signed ``issued_at`` and ``not_after``. The local
 clock only shortens validity: refuse after ``not_after`` or more than ``ISSUED_AT_SKEW``
@@ -422,17 +437,27 @@ def _trust_set(
 def _former_custodians(
     entries: list[_CustomerKey], taken: list[PilotTrustedKey]
 ) -> dict[str, PilotTrustedKey]:
-    """Verify-only former custodian keys: distinct from every current and root key."""
+    """Verify-only former custodian keys, distinct from every current and root key.
+
+    The single permitted overlap: a still-current custodian key listed with the same key id
+    and public key, so its enrolment purpose can be removed without bricking its anchors.
+    """
     former: dict[str, PilotTrustedKey] = {}
     taken_ids = {key.key_id for key in taken}
     taken_digests = {key.public_key_sha256 for key in taken}
+    narrowed = {
+        (key.key_id, key.public_key_sha256) for key in taken if key.role == OPERATOR_CUSTODIAN
+    }
     for entry in entries:
         if entry.key_id in former or any(
             key.public_key_sha256 == entry.public_key_sha256 for key in former.values()
         ):
             raise PilotRecordRefused("trust_key_duplicate")
-        # No role reuse: a former custodian key is never also a current key of any role.
-        if entry.key_id in taken_ids or entry.public_key_sha256 in taken_digests:
+        # No role reuse: a former custodian key is never also a current key of another role,
+        # a root key, or a different public key under a current key id.
+        if (entry.key_id, entry.public_key_sha256) not in narrowed and (
+            entry.key_id in taken_ids or entry.public_key_sha256 in taken_digests
+        ):
             raise PilotRecordRefused("trust_key_role_conflict")
         public_key = _public_key(entry.key_id, entry.public_key_der, entry.public_key_sha256)
         former[entry.key_id] = PilotTrustedKey(
@@ -913,6 +938,7 @@ class PilotVerifier:
         chain_value = {"chain": [strict_json(enrolment)]}
         floor_value = {"head_payload_sha256": digest}
         with self._store.locked():
+            self._settle_pending(engagement)
             floor = self._store.read(_anchor_revision_key(engagement))
             record = self._store.read(_anchor_key(engagement))
             if floor is not None and (floor.sequence != 1 or dict(floor.value) != floor_value):
@@ -949,6 +975,7 @@ class PilotVerifier:
         except ValidationError:
             raise PilotRecordRefused("rotation_schema_invalid") from None
         with self._store.locked():
+            self._settle_pending(engagement)
             record = self._store.read(_anchor_key(engagement))
             current = self._current_customer(engagement, frozenset({ROTATION_PURPOSE}))
             if current is None or record is None:
@@ -981,21 +1008,21 @@ class PilotVerifier:
     def _replay_custodian(self) -> Resolver:
         """Resolve an existing enrolment's co-signer by key id (which fixes its public key).
 
-        Current custodian keys count at any registry revision and with any purposes; former
-        custodian keys count here and nowhere else.
+        Accepted only if a current registry entry for that key id carries the enrolment
+        purpose (at any revision), or the key id is listed in ``former_custodian_keys``. A
+        custodian key that never held the enrolment purpose validates no enrolment.
         """
 
         def resolve(signature: _Signature) -> PilotTrustedKey:
-            key = next(
-                (
-                    key
-                    for key in self._registry.keys.values()
-                    if key.key_id == signature.key_id and key.role == OPERATOR_CUSTODIAN
-                ),
-                self._registry.former.get(signature.key_id),
-            )
+            current = [
+                key
+                for key in self._registry.keys.values()
+                if key.key_id == signature.key_id and key.role == OPERATOR_CUSTODIAN
+            ]
+            enrolling = [key for key in current if ENROLMENT_PURPOSE in key.purposes]
+            key = enrolling[0] if enrolling else self._registry.former.get(signature.key_id)
             if key is None:
-                raise PilotRecordRefused("key_unknown")
+                raise PilotRecordRefused("key_purpose_not_permitted" if current else "key_unknown")
             return replace(
                 key,
                 registry_revision=signature.key_registry_revision,
@@ -1133,6 +1160,32 @@ class PilotVerifier:
             # Not accepted here, and not acceptable now: derive the anchor at the floor.
             return key, digests, chain[:accepted]
         return pending_key, digests + pending, chain
+
+    def _settle_pending(self, engagement_id: str) -> None:
+        """Under the lock: roll the anchor floor forward over a pending tail still in window.
+
+        After this, the pending rotation is accepted and no longer reverts when it expires.
+        Any inconsistency is left for the caller's own read to refuse.
+        """
+        floor = self._store.read(_anchor_revision_key(engagement_id))
+        record = self._store.read(_anchor_key(engagement_id))
+        if floor is None or record is None:
+            return
+        try:
+            _, digests, _ = self._replay(engagement_id, record, floor.sequence)
+        except PilotRecordRefused:
+            return
+        if len(digests) > floor.sequence and {
+            "head_payload_sha256": digests[floor.sequence - 1]
+        } == dict(floor.value):
+            self._store.advance(
+                MonotonicRecord(
+                    _anchor_revision_key(engagement_id),
+                    len(digests),
+                    {"head_payload_sha256": digests[-1]},
+                ),
+                _forward_rule,
+            )
 
     def _current_customer(
         self, engagement_id: str, purposes: frozenset[str]
