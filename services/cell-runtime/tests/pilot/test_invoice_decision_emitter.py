@@ -154,6 +154,25 @@ def test_example_distinguishes_attempts_and_commits_through_restart(tmp_path):
         assert db.execute("SELECT count(*) FROM commits").fetchone() == (2,)
 
 
+def test_p1_committed_supplies_survives_retry_without_reclassifying(tmp_path):
+    scope = scope_file(tmp_path.resolve() / "application")
+    emit(scope, "initialize")
+    attempt(scope, "operation-D1", "attempt-1")
+    commit(scope, "D1", "unknown-attempt", action="supplies", success=False)
+    commit(scope, "D1", "attempt-1", action="unrecognized-action", success=False)
+    assert export_page(scope, "before-commit", 10, 10)[1]["rows"] == []
+    saved = commit(scope, "D1", "attempt-1", action="supplies")
+    attempt(scope, "operation-D1", "attempt-2")
+    assert commit(scope, "D1", "attempt-2", action="supplies") == saved
+    commit(scope, "D1", "attempt-2", action="freight", success=False)
+    [row] = export_page(scope, "after-commit", 10, 11)[1]["rows"]
+    assert (row["event"]["decision_id"], row["event"]["action_ref"]) == ("D1", "supplies")
+    assert row["event"]["event_id"] == saved["event_ref"]
+    assert row["event"]["input_ref"] is None and row["event"]["model_ref"] is None
+    with closing(sqlite3.connect(scope.parent / "invoice-decisions.sqlite3")) as db:
+        assert db.execute("SELECT count(*) FROM commits").fetchone() == (1,)
+
+
 def sdk_actions(selection, actions):
     """Use a new official SDK session for each observation of worker durability."""
     from mcp import ClientSession, StdioServerParameters
