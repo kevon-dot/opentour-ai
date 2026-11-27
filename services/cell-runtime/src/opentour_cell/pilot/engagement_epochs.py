@@ -125,20 +125,21 @@ class Admission:
 class EngagementLedger:
     """SQLite ledger plus an out-of-database withdrawal-fence journal."""
 
-    def __init__(self, directory: Path):
+    def __init__(self, directory: Path, *, existing_only: bool = False):
         if not directory.is_absolute():
             raise EngagementError("absolute_private_directory_required")
         self.path = directory / "engagement-epochs.sqlite3"
         self.journal = directory / "engagement-fences.jsonl"
         try:
             _check_directory(self.path)
-            if not self.path.exists():
+            if not existing_only and not self.path.exists():
                 os.close(os.open(self.path, os.O_CREAT | os.O_WRONLY | os.O_NOFOLLOW, 0o600))
             _check_file(self.path)
         except (TrainingError, OSError):
             raise EngagementError("private_store_required") from None
-        self._create_schema()
-        self.reconcile_fences()
+        if not existing_only:
+            self._create_schema()
+            self.reconcile_fences()
 
     # -- storage ---------------------------------------------------------------------
 
@@ -577,6 +578,8 @@ class EngagementLedger:
                 raise EngagementHold("engagement_not_recorded")
             if self._fenced(db, org, epoch) or row["state"] == "terminal":
                 raise EngagementHold("epoch_terminal")
+            if self._journal_fenced(org, epoch):
+                raise EngagementHold("epoch_terminal")
             if row["state"] != "active":
                 raise EngagementHold("engagement_not_active")
             if resource not in json.loads(row["resource"]) or row["lease_ref"] != lease_ref:
@@ -589,7 +592,16 @@ class EngagementLedger:
             row = db.execute(
                 "SELECT state FROM engagement WHERE org=? AND epoch=?", (org, epoch)
             ).fetchone()
-            return self._fenced(db, org, epoch) or (row is not None and row[0] == "terminal")
+            return (
+                self._fenced(db, org, epoch)
+                or (row is not None and row[0] == "terminal")
+                or self._journal_fenced(org, epoch)
+            )
+
+    def _journal_fenced(self, org: str, epoch: str) -> bool:
+        return any(
+            (entry["org"], entry["epoch"]) == (org, epoch) for entry in self._journal_entries()
+        )
 
     def admit_row(
         self, org: str, epoch: str, *, resource: str, lease_ref: str, row_epoch: str, position: int

@@ -9,6 +9,7 @@ from dataclasses import asdict
 from pathlib import Path
 
 import pytest
+from opentour_cell.pilot.engagement_epochs import EngagementLedger
 from opentour_cell.pilot.intake_admission import DurableIntake
 from opentour_cell.pilot.intake_local import SELECTION_VERSION, open_intake
 from opentour_cell.pilot.intake_mcp import IntakeError, IntakePrincipal, parse_intake, serve_intake
@@ -483,3 +484,33 @@ if __name__ == "__main__":
     import asyncio
 
     print(json.dumps(asyncio.run(qualified_sdk()), sort_keys=True))
+
+
+def test_signed_engagement_gate_holds_without_ledger_and_after_withdrawal(tmp_path: Path):
+    case = SignedCase(tmp_path / "worker")
+    case.body["engagement_ledger_required"] = True
+    case.write()
+    epoch = case.body["engagement_epoch"]
+
+    with pytest.raises(IntakeError, match="engagement_epoch_hold"):
+        case.connect()
+    assert not (case.directory / "engagement-epochs.sqlite3").exists()
+    assert not case.live.path.exists()
+
+    ledger = EngagementLedger(case.directory)
+    ledger.record_engagement(
+        "org-a",
+        epoch,
+        lease_ref=DECISION.lease_ref,
+        authority_digest="a" * 64,
+        resources=(DECISION.resource, OUTCOME.resource),
+        lineage_ref="generated-trusted-cut",
+        checkpoint=DECISION.checkpoint,
+        budget_limit=100,
+    )
+    ledger.activate("org-a", epoch)
+    assert case.connect()
+    ledger.withdraw("org-a", epoch, revocation_epoch=1)
+
+    with pytest.raises(IntakeError, match="engagement_epoch_hold"):
+        case.connect()

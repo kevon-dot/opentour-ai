@@ -17,7 +17,7 @@ from collections.abc import Iterator, Mapping
 from contextlib import AbstractContextManager, contextmanager
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Literal, Protocol
+from typing import Any, Literal, Protocol, runtime_checkable
 
 from opentour_cell.pilot.intake_mcp import IntakeError, IntakePrincipal, LiveBinding, require_ref
 from opentour_cell.pilot.training import _check_file
@@ -85,6 +85,11 @@ class EngagementGate(Protocol):
 class LiveAuthority(Protocol):
     def guard(self, actor: IntakePrincipal, workflow_ref: str) -> AbstractContextManager[LiveScope]:
         """Pin current custody, resource grants and actor rights until operation returns."""
+
+
+@runtime_checkable
+class EngagementAuthority(Protocol):
+    def engagement_gate(self, scope: LiveScope) -> EngagementGate | None: ...
 
 
 def grant_digest(grant: FeedGrant) -> str:
@@ -209,14 +214,23 @@ class LiveEvidence:
         # trusted high-water checkpoint and lease were durably recorded and the epoch is live.
         self.engagements = engagements
 
-    def _engagement_checkpoint(self, scope: LiveScope, grant: FeedGrant) -> int | None:
-        if self.engagements is None:
+    def _engagement_gate(self, scope: LiveScope) -> EngagementGate | None:
+        if self.engagements is not None:
+            return self.engagements
+        if isinstance(self.authority, EngagementAuthority):
+            return self.authority.engagement_gate(scope)
+        return None
+
+    def _engagement_checkpoint(
+        self, scope: LiveScope, grant: FeedGrant, gate: EngagementGate | None
+    ) -> int | None:
+        if gate is None:
             return None
         try:
-            recorded = self.engagements.live_gate(
+            recorded = gate.live_gate(
                 scope.tenant, scope.engagement_epoch, grant.resource, grant.lease_ref
             )
-        except ValueError:
+        except (ValueError, sqlite3.Error):
             raise IntakeError("engagement_epoch_hold") from None
         _require(grant.checkpoint >= recorded, "engagement_epoch_hold")
         return recorded
@@ -355,7 +369,7 @@ class LiveEvidence:
             )
             _require(type(grant.checkpoint) is int and grant.checkpoint >= 0)
             require_ref(grant.lease_ref)
-            self._engagement_checkpoint(scope, grant)
+            self._engagement_checkpoint(scope, grant, self._engagement_gate(scope))
             body = {
                 "tenant": scope.tenant,
                 "workflow_ref": workflow,
@@ -523,14 +537,15 @@ class LiveEvidence:
             grant = FeedGrant(**fresh["grant"])
             _require(successor is None and grant in scope.grants)
             _require(source_revision == grant.source_revision)
-            recorded = self._engagement_checkpoint(scope, grant)
-            if self.engagements is not None:
+            gate = self._engagement_gate(scope)
+            recorded = self._engagement_checkpoint(scope, grant, gate)
+            if gate is not None:
                 # A late callback or replay from a withdrawn epoch is denied before any write,
                 # even at a later source position than the new epoch's checkpoint.
                 for event_epoch in event_epochs:
                     _require(
                         event_epoch == scope.engagement_epoch
-                        or not self.engagements.known_prior_epoch(scope.tenant, event_epoch),
+                        or not gate.known_prior_epoch(scope.tenant, event_epoch),
                         "engagement_epoch_fenced",
                     )
             _require(type(checkpoint) is int and checkpoint >= grant.checkpoint)
@@ -552,6 +567,7 @@ class LiveEvidence:
             if old:
                 _require(old[0] == fingerprint, "source_page_conflict")
                 return str(old[1])
+            highest_admitted: int | None = None
             for event, position, epoch in zip(events, source_positions, event_epochs, strict=True):
                 try:
                     _require(
@@ -575,6 +591,7 @@ class LiveEvidence:
                     )
                     continue
                 self._record_event(db, scope, grant, reference, parsed)
+                highest_admitted = max(highest_admitted or 0, position)
             receipt = "live-" + _digest([reference, page_ref, fingerprint])[:32]
             db.execute(
                 "INSERT INTO live_pages VALUES (?,?,?,?,?)",
@@ -604,10 +621,8 @@ class LiveEvidence:
                 )
             self._archive(db, scope)
             _require(scope.expires_at > int(time.time()))
-            if self.engagements is not None and source_positions:
-                self.engagements.observe_positions(
-                    scope.tenant, scope.engagement_epoch, max(source_positions)
-                )
+            if gate is not None and highest_admitted is not None:
+                gate.observe_positions(scope.tenant, scope.engagement_epoch, highest_admitted)
             return receipt
 
     def _record_event(

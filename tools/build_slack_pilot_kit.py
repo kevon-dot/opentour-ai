@@ -54,6 +54,7 @@ MODULES = (
     "opentour_cell/pilot/operating_point.py",
     "opentour_cell/pilot/receipt_recovery.py",
     "opentour_cell/pilot/slack_adapter.py",
+    "opentour_cell/pilot/engagement_epochs.py",
     "opentour_cell/pilot/live_authority.py",
     "opentour_cell/pilot/live_evidence.py",
     "opentour_cell/pilot/verifier_form.py",
