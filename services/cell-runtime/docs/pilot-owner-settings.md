@@ -27,14 +27,20 @@ The stable receipt records old-artifact retention and required running-fit cance
 `worker_config(receipt, actor=...)` accepts only the current active receipt and a custodian/operator. It checks current mandate/grant authority and writes immutable private agreement/config files. Its returned `config_file` is consumed directly by the existing entry:
 
 ```sh
-python -m opentour_cell.pilot.cycle_worker \
+python -I -S -B opentour-slack.pyz cycle-worker \
   --directory "$PRIVATE_DIRECTORY" --organization "$ORGANIZATION" \
   --config "$CONFIG_FILE_FROM_RECEIPT" --once
 ```
 
 No mutable worker pointer is installed automatically. After saving, reconcile the old mandate, export the current config and configure the existing worker service to use that path. Old configs fail closed. To roll back policy values, preview and sign a new successor using the desired old values and a fresh mandate identifier; never rewind the settings database or restore an old grant to revive authority.
 
-The CLI exposes `preview`, `save`, `status`, `worker`, and `reconcile` through `python -m opentour_cell.pilot.owner_settings`. It requires `--directory`, `--organization`, `--engagement`, `--authority`, and `--actor`; private JSON input uses `--input`, and preview takes `--action`. Output contains private scope/identities and belongs in the owner-local artifact directory, not public logs or Linear.
+From the extracted kit, use `python -I -S -B opentour-slack.pyz owner-settings`
+with `preview`, `save`, `status`, `worker` or `reconcile`. In a source checkout,
+use `python -m opentour_cell.pilot.owner_settings` with the same arguments.
+The CLI requires `--directory`, `--organization`, `--engagement`, `--authority`
+and `--actor`. Use `--input` for private JSON, and select the preview action
+with `--action`. Keep output in the private owner directory because it includes
+actor identities and scope.
 
 ## Acceptance and limits
 
@@ -52,6 +58,6 @@ The CLI exposes `preview`, `save`, `status`, `worker`, and `reconcile` through `
 
 Run the focused owner-settings, learning-mandate, autonomous-cycle and workplace-context tests under Python 3.12.16 on Linux. The workplace reader's verified descriptor launch is not currently macOS-qualified (existing issue #94); do not replace it with an unsafe pathname launch to make a local test green. Local Linux aarch64 generated fixtures are distinct from the required Linux x86-64 protected CI and from installed Slack/Zapier/customer qualification.
 
-Remaining closure gates: independently reviewed exact published commit, protected integration/CI, and the software session's authenticated private-page binding and end-to-end UI evidence. The protected kit builder has an explicit module list: its owner must add `opentour_cell/pilot/owner_settings.py` before claiming a distributable settings CLI; this change does not edit the shared builder. OPE-548 owns reviewer replacement integration; OPE-367/OPE-435 retain actual account/install/provider qualification. Generated local receipts earn no installed/customer acceptance.
+Remaining closure gates: independently reviewed exact published commit, protected integration/CI, and the software session's authenticated private-page binding and end-to-end UI evidence. The versioned kit includes the owner settings CLI for local operation. OPE-548 owns reviewer replacement integration; OPE-367/OPE-435 retain actual account/install/provider qualification. Generated local receipts earn no installed/customer acceptance.
 
 Positive monetary-spend renewal and lowered monetary-cap behavior remain **unimplemented and unqualified**. The reused ledger rejects every nonzero `max_cost_cents`; these tests prove cumulative runs, rows, reserved fits and reserved seconds only. UI/kit integration must not be counted as general monetary-budget conformance. A future cost/model-connector handoff must define canonical reserved/actual charge receipts, currency and units, and atomic consumption across the same mandate lineage, followed by positive-charge carryover, lowered-cap and no-refund fixtures. This change introduces no substitute cost store and does not modify the coordinator's cost/model connector.

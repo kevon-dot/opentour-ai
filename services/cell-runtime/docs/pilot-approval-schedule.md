@@ -11,13 +11,16 @@ the bridge has pinned the installation. A scheduler must use that specific epoch
 An epoch change requires an intentional schedule update after the cutover drill.
 
 ```sh
-python -m opentour_cell.pilot.approval_reconciler \
+python -I -S -B opentour-slack.pyz approval-reconciler \
   --directory "$WORKER_DIRECTORY" --organization "$WORKER_ORGANIZATION" \
   --config "$APPROVAL_POLICY" --installation-epoch "$INSTALLATION_EPOCH" \
   --enabled --poll-interval 60 --reminder-interval 3600
 ```
 
-Invoke at the owner-selected polling interval while the schedule is enabled.
+Run the command from the extracted kit, or give the full path to the zipapp.
+In a source checkout, use `python -m opentour_cell.pilot.approval_reconciler`
+with the same arguments. Invoke at the owner-selected polling interval while
+the schedule is enabled.
 The worker saves the exact opaque references and next cursor for one page before
 starting work. It acknowledges a reference after a valid local reconciliation
 response. A lost response and a throttle keep the reference for a later attempt.
