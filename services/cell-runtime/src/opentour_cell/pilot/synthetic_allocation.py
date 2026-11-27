@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import hashlib
 import sqlite3
+import unicodedata
 from collections.abc import Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -221,13 +222,28 @@ class AllocationPlan:
         }
 
 
+def _norm(value: str) -> str:
+    """Identity key for independence checks: case, width, whitespace and invisibles removed.
+
+    Two spellings of one root, case or digest must never count as two independent units.
+    """
+    text = unicodedata.normalize("NFKC", value)
+    text = "".join(ch for ch in text if unicodedata.category(ch) != "Cf")
+    return "".join(text.casefold().split())
+
+
 def _hash(*parts: str) -> str:
     return hashlib.sha256("\x1f".join(parts).encode()).hexdigest()
 
 
 def family_from_record(record: Mapping[str, Any]) -> FamilyInput:
     """Build a family from a plain record, refusing any protected answer or score key."""
-    root_records = list(record.get("roots", ()))
+    raw_roots = record.get("roots", ())
+    if not isinstance(raw_roots, list | tuple) or not all(
+        isinstance(r, Mapping) for r in raw_roots
+    ):
+        raise AllocationError("roots_invalid")
+    root_records = list(raw_roots)
     leaked = sorted(set(record) & PROTECTED_KEYS)
     for root in root_records:
         leaked += sorted(set(root) & PROTECTED_KEYS)
@@ -248,9 +264,14 @@ def family_from_record(record: Mapping[str, Any]) -> FamilyInput:
         )
         for r in root_records
     )
-    cell = tuple(str(x) for x in record["cell"])
-    if len(cell) != 2:
+    raw_cell = record["cell"]
+    if (
+        not isinstance(raw_cell, list | tuple)
+        or len(raw_cell) != 2
+        or not all(isinstance(x, str) for x in raw_cell)
+    ):
         raise AllocationError("cell_invalid")
+    cell = (raw_cell[0], raw_cell[1])
     return FamilyInput(
         family_id=str(record["family_id"]),
         cell=(cell[0], cell[1]),
@@ -288,18 +309,26 @@ def _classify(families: list[FamilyInput]) -> tuple[dict[str, str], list[FamilyI
     if len(set(ids)) != len(ids) or any(not i for i in ids):
         raise AllocationError("duplicate_family_id")
     ordered = sorted(families, key=lambda f: f.family_id)
+    for fam in ordered:
+        for root in fam.roots:
+            if (
+                isinstance(root.admitted_children, bool)
+                or not isinstance(root.admitted_children, int)
+                or root.admitted_children < 0
+            ):
+                raise AllocationError("input_invalid", f"{fam.family_id}: admitted_children")
     owner: dict[str, str] = {}
     conflicted: set[str] = set()
     for fam in ordered:
         for root in fam.roots:
-            other = owner.setdefault(root.root_ref, fam.family_id)
+            other = owner.setdefault(_norm(root.root_ref), fam.family_id)
             if other != fam.family_id:
                 conflicted.update((other, fam.family_id))
     case_owner: dict[str, str] = {}
     for fam in ordered:
         for root in fam.roots:
-            if root.case_ref:
-                other = case_owner.setdefault(root.case_ref, fam.family_id)
+            if _norm(root.case_ref):
+                other = case_owner.setdefault(_norm(root.case_ref), fam.family_id)
                 if other != fam.family_id:
                     conflicted.update((other, fam.family_id))
     reasons: dict[str, str] = {}
@@ -310,8 +339,10 @@ def _classify(families: list[FamilyInput]) -> tuple[dict[str, str], list[FamilyI
             reason = "family_identity_conflict"
         elif not fam.roots:
             reason = "no_roots"
-        elif any(not r.case_ref for r in fam.roots):
+        elif any(not _norm(r.case_ref) for r in fam.roots):
             reason = "case_ref_missing"
+        elif len({_norm(r.root_ref) for r in fam.roots}) != len(fam.roots):
+            reason = "duplicate_root"
         elif fam.protected_derived:
             reason = "protected_derived"
         elif fam.split == "protected":
@@ -319,7 +350,8 @@ def _classify(families: list[FamilyInput]) -> tuple[dict[str, str], list[FamilyI
         elif fam.split != TRAINING:
             reason = "not_training_split"
         elif any(
-            r.root_ref.startswith(SYNTHETIC_PREFIX) or r.content_digest.startswith(SYNTHETIC_PREFIX)
+            _norm(r.root_ref).startswith(SYNTHETIC_PREFIX)
+            or _norm(r.content_digest).startswith(SYNTHETIC_PREFIX)
             for r in fam.roots
         ):
             reason = "child_derived"
@@ -334,7 +366,7 @@ def _classify(families: list[FamilyInput]) -> tuple[dict[str, str], list[FamilyI
         elif fam.policy_conflict:
             reason = "policy_conflict"
         if not reason:
-            digests = {r.content_digest for r in fam.roots}
+            digests = {_norm(r.content_digest) for r in fam.roots}
             if digests & seen_digest:
                 reason = "duplicate_family"
             else:
@@ -676,6 +708,12 @@ class AllocationLedger:
             raise AllocationError("allocation_held", plan.hold_reason)
         if plan.control:
             raise AllocationError("control_not_reservable")
+        keys = {(x.root_ref, x.recipe_id) for x in plan.lines}
+        if len(keys) != len(plan.lines) or any(
+            isinstance(x.cost, bool) or not isinstance(x.cost, int) or x.cost < 1
+            for x in plan.lines
+        ):
+            raise AllocationError("plan_invalid", "lines must be unique with positive cost")
         with self._tx() as db:
             cap = db.execute(
                 "SELECT cap_units, cap_spend FROM budget WHERE budget_ref=?", (budget_ref,)

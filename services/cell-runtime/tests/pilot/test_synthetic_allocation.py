@@ -587,3 +587,81 @@ def test_retraction_is_global_across_budgets() -> None:
     led.retract_family("generated-budget", "p0", "generated-retraction")
     with pytest.raises(AllocationError, match="family_retracted"):
         led.reserve("generated-budget-b", plan_of("p", 1))
+
+
+# R1-R6: closer review regressions (independent reviewer). Each failed before the fix.
+def _one(fid: str, root: str, digest: str, case: str) -> FamilyInput:
+    return family(fid, roots=(RootInput(root, digest, (R1,), 0, case),))
+
+
+@pytest.mark.parametrize(
+    "other",
+    ["Generated-Case-x", " generated-case-x ", "generated-case-x​", "generated-case－x"],
+)
+def test_case_ref_spelling_variants_are_one_case(other: str) -> None:
+    fams = [_one("f1", "generated-root-1", "generated-d1", "generated-case-x")]
+    fams.append(_one("f2", "generated-root-2", "generated-d2", other))
+    plan = allocate(fams, policy())
+    assert {d.reason for d in plan.decisions} == {"family_identity_conflict"}
+    assert plan.status == "hold" and plan.units == 0
+
+
+def test_root_and_digest_spelling_variants_do_not_count_twice() -> None:
+    shared_root = [
+        _one("f1", "generated-root-A", "generated-d1", "generated-c1"),
+        _one("f2", " GENERATED-ROOT-a", "generated-d2", "generated-c2"),
+    ]
+    assert {d.reason for d in allocate(shared_root, policy()).decisions} == {
+        "family_identity_conflict"
+    }
+    dup_digest = [
+        _one("f1", "generated-root-1", "generated-DIGEST", "generated-c1"),
+        _one("f2", "generated-root-2", "generated-digest ", "generated-c2"),
+    ]
+    reasons = {d.family_id: d.reason for d in allocate(dup_digest, policy()).decisions}
+    assert reasons == {"f1": "eligible", "f2": "duplicate_family"}
+    child = [_one("f1", "VAR-generated", "generated-d1", "generated-c1")]
+    assert allocate(child, policy()).decisions[0].reason == "child_derived"
+
+
+def test_repeated_root_within_family_is_excluded_not_double_allocated() -> None:
+    fam = family(
+        "f1",
+        roots=(
+            RootInput("generated-root", "generated-d1", (R1,), 0, "generated-c1"),
+            RootInput("generated-root", "generated-d2", (R1,), 0, "generated-c1"),
+        ),
+    )
+    plan = allocate([fam], policy(per_family_cap=5, per_root_cap=5))
+    assert plan.decisions[0].reason == "duplicate_root" and plan.units == 0
+
+
+@pytest.mark.parametrize("bad", [-1, True, 1.5])
+def test_admitted_children_cannot_be_negative_to_widen_caps(bad: object) -> None:
+    root = RootInput("generated-root", "generated-d1", (R1, R2, R3), bad, "generated-c1")  # type: ignore[arg-type]
+    with pytest.raises(AllocationError) as err:
+        allocate([family("f1", roots=(root,))], policy(per_family_cap=1, per_root_cap=1))
+    assert err.value.code == "input_invalid"
+
+
+def test_ledger_refuses_forged_cost_or_repeated_lines() -> None:
+    led = ledger(units=5, spend=5)
+    good = plan_of("generated-p", 2)
+    forged = replace(good, lines=tuple(replace(x, cost=-5) for x in good.lines))
+    repeated = replace(good, lines=(good.lines[0], good.lines[0]))
+    for bad in (forged, repeated):
+        with pytest.raises(AllocationError) as err:
+            led.reserve("generated-budget", bad)
+        assert err.value.code == "plan_invalid"
+    assert led.status("generated-budget")["used_spend"] == 0
+
+
+def test_record_shapes_are_strict() -> None:
+    base = {"family_id": "f", "split": "training", "verification": "verified", "roots": []}
+    for cell in ({"protected_answer": 1, "x": 2}, ["a"], [1, 2]):
+        with pytest.raises(AllocationError) as err:
+            family_from_record({**base, "cell": cell})
+        assert err.value.code == "cell_invalid"
+    with pytest.raises(AllocationError) as err2:
+        family_from_record({**base, "cell": ["a", "b"], "roots": {"x": 1}})
+    assert err2.value.code == "roots_invalid"
