@@ -28,6 +28,12 @@ hold against the existing freeze. No result digest or metrics are invented. If
 the execution journal shows that the same intent already started, or the journal
 cannot be reconciled, the state remains held for reconciliation; it is not
 reported as a fresh unscored execution. Retry uses the original references.
+The scoring writer serializes on the existing private directory inode before
+opening its DELETE-mode SQLite journal. Any WAL, shared-memory or rollback
+sidecar (including a dangling link), incomplete schema or damaged existing
+database holds for explicit recovery; the worker never rebuilds a restored
+journal. Directory locking adds no new lock file or schema and is released
+before either prediction adapter runs. Read-only Home never takes this writer lock.
 
 `entries()` enumerates only currently authorized retained-owner navigation
 metadata. `entry(execution_ref)` returns one such reference or unavailable.

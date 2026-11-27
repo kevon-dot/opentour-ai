@@ -1,6 +1,7 @@
 """Generated deterministic inference executes over actual frozen owner-reviewed cases."""
 
 import json
+import os
 import sqlite3
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -338,6 +339,52 @@ def test_concurrent_same_intent_has_one_prediction_execution_per_arm(scored_setu
     assert all(r["state"] in {"scored", "frozen_unscored"} for r in results)
     assert run(scored_setup)["state"] == "scored"
     assert len(scorer.baseline.calls) == len(scorer.comparator.calls) == 1
+
+
+@pytest.mark.parametrize("suffix", ["-wal", "-shm", "-journal"])
+@pytest.mark.parametrize("existing", [False, True])
+@pytest.mark.parametrize("link", [False, True])
+def test_interrupted_journal_holds_before_writer_or_dispatch(scored_setup, suffix, existing, link):
+    scorer, *_ = scored_setup
+    if existing:
+        with scorer._db(write=True):
+            pass
+    sidecar = scorer.path.with_name(scorer.path.name + suffix)
+    if link:
+        sidecar.symlink_to(scorer.path.with_name("missing-restore-file"))
+    else:
+        sidecar.write_bytes(b"generated incomplete restore")
+        sidecar.chmod(0o600)
+    original = scorer.path.read_bytes() if existing else None
+    with pytest.raises(IntakeError, match="starter_execution_recovery_required"):
+        run(scored_setup)
+    assert scorer.path.exists() == existing and os.path.lexists(sidecar)
+    if existing:
+        assert scorer.path.read_bytes() == original
+    assert not scorer.baseline.calls and not scorer.comparator.calls
+
+
+@pytest.mark.parametrize("state", ["empty", "partial_schema", "malformed", "dangling"])
+def test_restored_main_journal_is_never_silently_initialized(scored_setup, state):
+    scorer, *_ = scored_setup
+    if state == "dangling":
+        scorer.path.symlink_to(scorer.path.with_name("missing-backup"))
+    elif state == "malformed":
+        scorer.path.write_bytes(b"generated damaged backup")
+    else:
+        with sqlite3.connect(scorer.path) as db:
+            if state == "partial_schema":
+                db.execute("CREATE TABLE evaluations(ref TEXT,definition TEXT,result TEXT)")
+        db.close()
+    if state != "dangling":
+        scorer.path.chmod(0o600)
+    before = scorer.path.read_bytes() if state != "dangling" else None
+    with pytest.raises((ValueError, OSError, sqlite3.Error)):
+        run(scored_setup)
+    assert os.path.lexists(scorer.path)
+    if before is not None:
+        assert scorer.path.read_bytes() == before
+    assert not scorer.baseline.calls and not scorer.comparator.calls
 
 
 def test_cached_prediction_must_match_independent_adapter_receipt(scored_setup):

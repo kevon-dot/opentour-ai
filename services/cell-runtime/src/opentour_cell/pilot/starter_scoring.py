@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import sqlite3
 import time
 from collections.abc import Iterator, Mapping
-from contextlib import AbstractContextManager, contextmanager
+from contextlib import AbstractContextManager, closing, contextmanager
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Protocol, cast
@@ -134,45 +135,85 @@ class StarterScoring:
 
     @contextmanager
     def _db(self, *, write: bool = False) -> Iterator[sqlite3.Connection]:
-        if write:
-            parent = self.path.parent
-            _require(parent.resolve(strict=True) == parent and parent.is_dir())
-            _require(parent.stat().st_uid == os.getuid() and not parent.stat().st_mode & 0o077)
-            try:
-                os.close(
-                    os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o600)
-                )
-            except FileExistsError:
-                pass
-        _check_file(self.path)
-        if not write:
-            require_readonly_snapshot(self.path)
-        db = sqlite3.connect(
-            self.path.as_uri() + ("?mode=rw" if write else "?mode=ro"),
-            uri=True,
-            isolation_level=None,
-            timeout=10,
-        )
-        db.row_factory = sqlite3.Row
+        parent = self.path.parent
+        _require(parent.resolve(strict=True) == parent and parent.is_dir())
+        _require(parent.stat().st_uid == os.getuid() and not parent.stat().st_mode & 0o077)
+        # Every scorer transaction uses the existing private directory inode.
+        # Serializing before SQLite opens prevents another legitimate writer's
+        # transient rollback journal from looking like interrupted recovery.
+        lock = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
         try:
-            db.execute("PRAGMA trusted_schema=OFF")
-            db.execute("BEGIN IMMEDIATE" if write else "BEGIN")
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            # This journal is created in DELETE mode. Recovery files (including
+            # dangling links) are uncertain prior work, never a fresh intent.
+            _require(
+                not any(
+                    os.path.lexists(str(self.path) + suffix)
+                    for suffix in ("-wal", "-shm", "-journal")
+                ),
+                "starter_execution_recovery_required",
+            )
+            fresh = False
             if write:
-                db.execute(
-                    "CREATE TABLE IF NOT EXISTS evaluations("
-                    "ref TEXT PRIMARY KEY, definition TEXT, result TEXT)"
-                )
-                db.execute(
-                    "CREATE TABLE IF NOT EXISTS predictions("
-                    "ref TEXT PRIMARY KEY, request TEXT, receipt TEXT)"
-                )
-            yield db
-            db.commit()
-        except BaseException:
-            db.rollback()
-            raise
+                try:
+                    os.close(
+                        os.open(
+                            self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o600
+                        )
+                    )
+                    fresh = True
+                except FileExistsError:
+                    pass
+            _check_file(self.path)
+            if not fresh:
+                require_readonly_snapshot(self.path)
+                with closing(sqlite3.connect(self.path.as_uri() + "?mode=ro", uri=True)) as old:
+                    old.execute("PRAGMA query_only=ON")
+                    old.execute("PRAGMA trusted_schema=OFF")
+                    _require(
+                        old.execute("PRAGMA quick_check").fetchall() == [("ok",)],
+                        "starter_execution_recovery_required",
+                    )
+                    for table, fields in (
+                        ("evaluations", {"ref", "definition", "result"}),
+                        ("predictions", {"ref", "request", "receipt"}),
+                    ):
+                        _require(
+                            old.execute(
+                                "SELECT type FROM sqlite_master WHERE name=?", (table,)
+                            ).fetchone()
+                            == ("table",)
+                            and {r[1] for r in old.execute(f"PRAGMA table_info({table})")}
+                            == fields,
+                            "starter_execution_recovery_required",
+                        )
+            db = sqlite3.connect(
+                self.path.as_uri() + ("?mode=rw" if write else "?mode=ro"),
+                uri=True,
+                isolation_level=None,
+                timeout=10,
+            )
+            db.row_factory = sqlite3.Row
+            try:
+                db.execute("PRAGMA trusted_schema=OFF")
+                db.execute("BEGIN IMMEDIATE" if write else "BEGIN")
+                if fresh:
+                    db.execute(
+                        "CREATE TABLE evaluations("
+                        "ref TEXT PRIMARY KEY, definition TEXT, result TEXT)"
+                    )
+                    db.execute(
+                        "CREATE TABLE predictions(ref TEXT PRIMARY KEY, request TEXT, receipt TEXT)"
+                    )
+                yield db
+                db.commit()
+            except BaseException:
+                db.rollback()
+                raise
+            finally:
+                db.close()
         finally:
-            db.close()
+            os.close(lock)
 
     def _permission(
         self,
