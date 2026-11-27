@@ -274,6 +274,17 @@ class _Authority:
                 (grant["viewer_actor"], grant["owner_ref"])
                 == (cap["owner_actor"], cap["owner_ref"])
             )
+        # These identities are already available from the sealed original case
+        # envelope. Reject a rebound evaluator/plan before opening policy bytes.
+        plan = FrozenPlan(**cap["frozen_plan"])
+        _require(
+            plan.evaluator_ref == permission.evaluator
+            and digest(asdict(plan)) == permission.plan_digest
+            and plan.baseline_ref in {"baseline-pending", permission.model_ref}
+            and plan.evaluated_model_ref in {None, permission.model_ref}
+            and re.fullmatch(r"[0-9a-f]{64}", permission.freeze_revision)
+            and permission.freeze_ref == "starter-freeze-" + permission.freeze_revision[:40]
+        )
         return metadata
 
     def _map_capability(self, service: MapReviewService, metadata: CaseAuthorityMetadata) -> Json:
@@ -351,6 +362,7 @@ class _Authority:
             _require(records and records[-1]["ref"] == cap["map_confirmation_ref"])
             record = records[-1]
             _require(record["capability_revision"] == digest(map_cap))
+            _require(set(permission.input_fields) <= set(map_cap["field_kinds"]))
             authorize()
             _require(self._metadata(grant, permission).record == metadata.record)
             _require(self._map_capability(service, metadata) == map_cap)
