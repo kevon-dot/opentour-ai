@@ -2414,6 +2414,10 @@ def starter_case_detail(context: str, pack: Mapping[str, Any], index: int) -> Bl
         f"{field}={value if value is not None else 'missing'}"
         for field, value in case["decision_inputs"]
     )
+    origin = {
+        "generated_starter": "Generated case",
+        "owner_counterexample": "Owner counterexample",
+    }[case["case_origin"]]
     blocks = [
         _section(
             f"{sum(c['status'] == 'proposed' for c in pack['cases'])} awaiting review · "
@@ -2421,7 +2425,7 @@ def starter_case_detail(context: str, pack: Mapping[str, Any], index: int) -> Bl
             f"{sum(c['status'] == 'unresolved' for c in pack['cases'])} unresolved · "
             f"{len({c['family_id'] for c in pack['cases']})} independent families"
         ),
-        _section(f"Generated case {index + 1} of {len(pack['cases'])} · {_ref(case['case_id'])}"),
+        _section(f"{origin} {index + 1} of {len(pack['cases'])} · {_ref(case['case_id'])}"),
         _section(f"Family {_ref(case['family_id'])} · Branch {_ref(case['branch_id'])}"),
         _section(f"Decision-time inputs · {_display(inputs, 1800)}"),
         _section(
