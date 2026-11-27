@@ -327,6 +327,39 @@ def test_valid_changed_operating_terms_reach_normal_worker(tmp_path):
     assert any(p["method"] == "resources/read" for p in s.protocol())
 
 
+@pytest.mark.parametrize("exported", [False, True])
+def test_saved_legacy_terms_require_signed_repair_before_reexport(tmp_path, exported):
+    s = Setup(tmp_path)
+    policy = deepcopy(s.policy)
+    policy["agreement"]["terms"]["unknown_term"] = "generated"
+    policy["mandate"]["agreement_revision"] = digest(policy["agreement"])
+    # Reproduce the prior writer's missing terms validation while retaining real
+    # signature, source authority, durable save and worker export behavior.
+    with patch.object(
+        settings.comparison_plan, "_terms", return_value=policy["agreement"]["terms"]
+    ):
+        legacy = s.apply(policy)
+        old = s.service.worker_config(legacy, actor=s.operator) if exported else None
+    before = s.protocol()
+    with pytest.raises(ValueError, match="invalid_protected_terms"):
+        s.service.worker_config(legacy, actor=s.operator)
+    assert s.protocol() == before
+    assert s.service.inspect(actor=s.owner)["current"] == legacy
+    assert not s.customer.ledger.inspect(legacy["mandate_id"])["withdrawn"]
+    # Repair is an authorized successor, never an in-place rewrite of the receipt.
+    repaired_policy = deepcopy(s.policy)
+    repaired_policy["mandate"]["mandate_id"] = "settings-repaired-terms"
+    repaired = s.apply(repaired_policy, action="renew")
+    assert repaired["prior_revision"] == legacy["revision"]
+    assert s.customer.ledger.inspect(legacy["mandate_id"])["withdrawn"]
+    assert s.service.worker_config(repaired, actor=s.operator)["revision"] == repaired["revision"]
+    if old is not None:
+        before = s.protocol()
+        result = autonomous_cycle.cycle_once(s.customer.owner, s.customer.org, old["config"])
+        assert result["state"] == "held"
+        assert s.protocol() == before
+
+
 @pytest.mark.parametrize("action", ["pause", "revoke"])
 def test_pause_revoke_old_worker_and_stale_receipt_zero_reads(tmp_path, action):
     s = Setup(tmp_path)

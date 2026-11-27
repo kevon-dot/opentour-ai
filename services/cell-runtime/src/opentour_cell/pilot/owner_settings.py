@@ -628,6 +628,7 @@ class OwnerSettings:
             assert head is not None
             _need(head["authority_revision"] == digest(a), "settings_authority_changed")
             _need(head["state"] == "active", "settings_not_active")
+            comparison_plan._terms(head["policy"]["agreement"]["terms"])
             spec = head["policy"]["mandate"]
             row, stored = self.ledger._mandate(db, head["mandate_id"])
             self.ledger._active(row, stored, spec["delegate"])
