@@ -134,9 +134,12 @@ def _authorize_case_review(h, draft, maps, confirmed):
 
 
 @pytest.fixture
-def p1_frozen_from_home(tmp_path, monkeypatch):
+def p1_frozen_from_home(tmp_path, monkeypatch, request):
     h = Harness(tmp_path, seed_generated_dataset=False)
     configure_starter(h)
+    if getattr(request, "param", False):
+        h.config["recipient"] = ACTOR
+        h.save()
     directory = h.path.parent
     with sqlite3.connect(h.store.path) as db:
         assert db.execute("SELECT count(*) FROM datasets").fetchone() == (0,)
@@ -435,14 +438,11 @@ def _stored_score(directory, execution):
     return json.loads(row[0])
 
 
-def test_generated_p1_worker_scores_same_frozen_families_and_private_home(
-    p1_frozen_from_home,
-    monkeypatch,
-):
+def score_p1_from_frozen(journey, monkeypatch):
     from opentour_cell.pilot.starter_evaluation_session import StarterEvaluationSession
     from test_starter_evaluation_worker import provision_invocation
 
-    h, owner, draft, _maps, confirmed, pack = p1_frozen_from_home
+    h, owner, draft, _maps, confirmed, pack = journey
     directory = h.path.parent
     permission, registration = _authorize_p1_evaluation(h, owner, draft, confirmed, pack)
     viewer = StarterEvaluationSession(owner.settings, owner.actor)
@@ -558,3 +558,10 @@ def test_generated_p1_worker_scores_same_frozen_families_and_private_home(
     assert _stored_score(directory, permission.execution_ref) == result
     assert owner.review() == pack
     assert effects(h) == (0,) * 7
+    return permission, registration, result
+
+
+def test_generated_p1_worker_scores_same_frozen_families_and_private_home(
+    p1_frozen_from_home, monkeypatch
+):
+    score_p1_from_frozen(p1_frozen_from_home, monkeypatch)
