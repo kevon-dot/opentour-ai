@@ -59,18 +59,12 @@ MAX_TEXT_RISE_EM = 2.0
 # 1.3 is roughly a grey level above 0.89 (about #E3E3E3) and is far below the 3:1 legibility
 # floor, so coloured headings (red, navy, mid grey, brand colours) are never flagged.
 MIN_TEXT_CONTRAST_AGAINST_WHITE = 1.3
-# Estimated advance of one character, in em. The generous value (uppercase W is 0.94 em, digits
-# 0.56 em, average lowercase 0.5 em) bounds where text may extend, for image overlap. The tight
-# value (narrow lowercase runs) is used where over-estimating would over-flag: the page edge
-# and clip containment.
-TEXT_WIDTH_EM_WIDE = 0.7
-TEXT_WIDTH_EM_TIGHT = 0.4
 # An image whose placed bounding box covers at least this fraction of the visible page can hide
 # a paragraph, so a page with such an image and text goes to review. Logos, stamps and
 # signatures are typically under 10% of a page; a quarter page is large enough to cover several
 # lines. Any image overlapping an extracted text fragment also flags, whatever its size, since
-# a small opaque image placed over text conceals it. Fragment extents are estimated from
-# TEXT_WIDTH_EM_WIDE, Tj advance and Tc, so overlap is approximate.
+# a small opaque image placed over text conceals it. Fragment extents come from glyph widths,
+# Tj advance and Tc (see UNKNOWN_FONT_TIGHT_FACTOR below), so overlap is approximate.
 IMAGE_REVIEW_PAGE_FRACTION = 0.25
 _OBJ = re.compile(rb"(?<![0-9])(\d{1,7})\s+(\d{1,5})\s+obj\b")
 _REF = rb"(\d+)\s+\d+\s+R"
@@ -284,6 +278,83 @@ def _concat(m: tuple[float, ...], n: tuple[float, ...]) -> tuple[float, ...]:
     )
 
 
+# Text extents are estimated from per-glyph advance widths (1000 units per em) of the standard
+# fonts, which are published data (Adobe core-14 AFM). An over-wide estimate makes text and an
+# image placed side by side (letterheads, two-column layouts) look overlapping and flags them
+# falsely; an under-wide one lets an image over the tail of wide glyphs through. Real advances
+# keep both errors small. A font with no table here (embedded or non-standard fonts, Times
+# bold and italic, composite fonts) falls back to GENEROUS widths for image overlap
+# (Helvetica-Bold, wider than most body faces, so side-by-side layouts in such fonts may flag
+# falsely) and to UNKNOWN_FONT_TIGHT_FACTOR x Helvetica for the page-edge and clip checks
+# (so a long run of very wide glyphs in such a font can still escape those two checks).
+UNKNOWN_FONT_TIGHT_FACTOR = 0.8
+_ASCII = (
+    " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    "[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~"
+)
+_HELVETICA = (
+    278, 278, 355, 556, 556, 889, 667, 191, 333, 333, 389, 584, 278, 333, 278, 278,
+    556, 556, 556, 556, 556, 556, 556, 556, 556, 556, 278, 278, 584, 584, 584, 556, 1015,
+    667, 667, 722, 722, 667, 611, 778, 722, 278, 500, 667, 556, 833, 722, 778, 667, 778,
+    722, 667, 611, 722, 667, 944, 667, 667, 611, 278, 278, 278, 469, 556, 333,
+    556, 556, 500, 556, 556, 278, 556, 556, 222, 222, 500, 222, 833, 556, 556, 556, 556,
+    333, 500, 278, 556, 500, 722, 500, 500, 500, 334, 260, 334, 584,
+)  # fmt: skip
+_HELVETICA_BOLD = (
+    278, 333, 474, 556, 556, 889, 722, 238, 333, 333, 389, 584, 278, 333, 278, 278,
+    556, 556, 556, 556, 556, 556, 556, 556, 556, 556, 333, 333, 584, 584, 584, 611, 975,
+    722, 722, 722, 722, 667, 611, 778, 722, 278, 556, 722, 611, 833, 722, 778, 667, 778,
+    722, 667, 611, 722, 667, 944, 667, 667, 611, 333, 278, 333, 584, 556, 333,
+    556, 611, 556, 611, 556, 333, 611, 611, 278, 278, 556, 278, 889, 611, 611, 611, 611,
+    389, 556, 333, 611, 556, 778, 556, 556, 500, 389, 280, 389, 584,
+)  # fmt: skip
+_TIMES_ROMAN = (
+    250, 333, 408, 500, 500, 833, 778, 180, 333, 333, 500, 564, 250, 333, 250, 278,
+    500, 500, 500, 500, 500, 500, 500, 500, 500, 500, 278, 278, 564, 564, 564, 444, 921,
+    722, 667, 667, 722, 611, 556, 722, 722, 333, 389, 722, 611, 889, 722, 722, 556, 722,
+    667, 556, 611, 722, 722, 944, 722, 722, 611, 333, 278, 333, 469, 500, 333,
+    444, 500, 444, 500, 444, 333, 500, 500, 278, 278, 500, 278, 778, 500, 500, 500, 500,
+    333, 389, 278, 500, 500, 722, 500, 500, 444, 480, 200, 480, 541,
+)  # fmt: skip
+_GLYPH_WIDTHS: dict[str, tuple[dict[str, int], int]] = {
+    "helvetica": (dict(zip(_ASCII, _HELVETICA, strict=True)), 556),
+    "helvetica-bold": (dict(zip(_ASCII, _HELVETICA_BOLD, strict=True)), 556),
+    "times": (dict(zip(_ASCII, _TIMES_ROMAN, strict=True)), 500),
+    "courier": ({}, 600),  # monospaced: every glyph, whatever its code, advances 600
+}
+
+
+def _width_table_for(font: _Object | None) -> str | None:
+    """Name the width table of a simple standard-metric font, or None when there is none."""
+    if font is None or not re.search(rb"/Subtype\s*/(Type1|TrueType|MMType1)\b", font.head):
+        return None
+    base = re.search(rb"/BaseFont\s*/([^\s/<>\[\]()]+)", font.head)
+    if base is None:
+        return None
+    name = re.sub(r"^[A-Z]{6}\+", "", base[1].decode("latin-1")).lower().replace(",", "-")
+    styled = any(word in name for word in ("bold", "italic", "oblique"))
+    if name.startswith("courier"):
+        return "courier"
+    if name.startswith(("helvetica", "arial")):
+        return "helvetica-bold" if "bold" in name else "helvetica"
+    if name in {"times-roman", "timesnewroman", "timesnewromanpsmt"} and not styled:
+        return "times"
+    return None
+
+
+def _extent_units(text: str, table: str | None) -> tuple[float, float]:
+    """(generous, tight) advance of `text` in 1/1000 em, from the real glyph widths."""
+
+    def total(name: str) -> int:
+        glyphs, default = _GLYPH_WIDTHS[name]
+        return sum(glyphs.get(char, default) for char in text)
+
+    if table is not None:
+        known = float(total(table))
+        return known, known
+    return float(total("helvetica-bold")), UNKNOWN_FONT_TIGHT_FACTOR * total("helvetica")
+
+
 def _relative_luminance(red: float, green: float, blue: float) -> float:
     def linear(channel: float) -> float:
         channel = min(max(channel, 0.0), 1.0)
@@ -429,6 +500,7 @@ def _fragments(
     forms: frozenset[bytes] = frozenset(),
     images: frozenset[bytes] = frozenset(),
     page_box: tuple[float, float, float, float] | None = None,
+    font_tables: dict[bytes, str | None] | None = None,
 ) -> tuple[list[_Fragment], set[str]]:
     """Return positioned fragments and the review flags the content stream earned.
 
@@ -487,13 +559,15 @@ def _fragments(
             adv_anchor, adv_wide, adv_tight = anchor, 0.0, 0.0
         step = scale_x * gs.h_scale
 
-        def run(em: float) -> float:
-            return len(text) * max(em * size + gs.char_spacing, 0.0) * step
+        units_wide, units_tight = _extent_units(text, (font_tables or {}).get(gs.font))
 
-        wide_end = px + adv_wide + run(TEXT_WIDTH_EM_WIDE)
-        tight_end = px + adv_tight + run(TEXT_WIDTH_EM_TIGHT)
-        adv_wide += run(TEXT_WIDTH_EM_WIDE)
-        adv_tight += run(TEXT_WIDTH_EM_TIGHT)
+        def run(units: float) -> float:
+            return max(units / 1000.0 * size + len(text) * gs.char_spacing, 0.0) * step
+
+        wide_end = px + adv_wide + run(units_wide)
+        tight_end = px + adv_tight + run(units_tight)
+        adv_wide += run(units_wide)
+        adv_tight += run(units_tight)
         # The baseline origin and the glyph box must lie inside the page: an origin at the top
         # edge puts the whole glyph above it, and a long string can run off the right edge.
         if (
@@ -784,7 +858,8 @@ def read_pdf(data: bytes, limits: Limits, deadline: Deadline) -> ReadResult:
             for name, obj in _named_refs(resources, b"XObject", objects).items()
             if re.search(rb"/Subtype\s*/Form", obj.head)
         )
-        fragments, marks = _fragments(stream, deadline, forms, frozenset(images), page_box)
+        tables = {name: _width_table_for(obj) for name, obj in fonts.items()}
+        fragments, marks = _fragments(stream, deadline, forms, frozenset(images), page_box, tables)
         if len(readable) != len(refs):
             # A referenced content stream that cannot be resolved means the page was not read.
             marks.add("content_stream_unresolved")

@@ -805,7 +805,7 @@ _BIG_IMAGE_NONE = b"q 20 0 0 20 %d 695 cm /Im1 Do Q"
 def test_pdf_image_over_uppercase_wide_or_spaced_text_goes_to_review() -> None:
     flag = "image_text_overlay_unverified"
     caps = b"BT /F1 12 Tf 72 700 Td (HEADING IN ALL CAPS) Tj ET "
-    _flagged(caps + _BIG_IMAGE_NONE % 215, flag, extra={8: _IMAGE}, resources=_IMAGE_RESOURCES)
+    _flagged(caps + _BIG_IMAGE_NONE % 190, flag, extra={8: _IMAGE}, resources=_IMAGE_RESOURCES)
     spaced = b"BT /F1 11 Tf 10 Tc 72 700 Td (abcdefgh) Tj ET "
     _flagged(spaced + _BIG_IMAGE_NONE % 195, flag, extra={8: _IMAGE}, resources=_IMAGE_RESOURCES)
     twice = b"BT /F1 11 Tf 72 700 Td (AAAAAAAAAA) Tj (BBBBBBBBBB) Tj ET "
@@ -823,3 +823,73 @@ def test_pdf_page_whose_only_contents_is_a_dangling_reference_has_its_own_reason
     assert result.state is ExtractionState.NEEDS_RENDITION
     assert result.reason == "pdf_content_stream_unresolved"
     assert result.reason != "image_only_pdf_needs_authorized_ocr_rendition"
+
+
+# ------------------------------------------------------------------ glyph-width extents
+# Image position x is where the image's left edge sits; the true text end is stated per case
+# (Helvetica advance widths, 1000 units per em).
+
+_IMG = {"extra": {8: _IMAGE}, "resources": _IMAGE_RESOURCES}
+_OVERLAP = "image_text_overlay_unverified"
+
+
+def _logo_at(x: int) -> bytes:
+    return b" q 20 0 0 20 %d 695 cm /Im1 Do Q" % x
+
+
+@pytest.mark.parametrize(
+    ("text", "size", "start", "true_end", "clear_x"),
+    [
+        (b"iiiiiiiiii", 11, 72, 96.4, 110),  # narrow text: an estimate of 0.7 em/char said 149
+        (b"The quick brown fox jumps over the lazy dog.", 11, 72, 292.7, 310),  # lowercase prose
+        (b"left column line of ordinary body text", 11, 72, 281.0, 330),  # two columns
+        (b"ACME Corp", 14, 400, 474.7, 480),  # letterhead name, logo to its right
+    ],
+)
+def test_pdf_image_clearly_beside_text_stays_eligible(
+    text: bytes, size: int, start: int, true_end: float, clear_x: int
+) -> None:
+    assert true_end < clear_x
+    show = b"BT /F1 %d Tf %d 700 Td (%s) Tj ET" % (size, start, text)
+    _eligible(show + _logo_at(clear_x), **_IMG)
+    _eligible(_logo_at(clear_x) + b" " + show, **_IMG)
+
+
+def test_pdf_two_column_layout_with_a_normal_gutter_stays_eligible() -> None:
+    left = b"BT /F1 11 Tf 72 700 Td (left column line of ordinary body text) Tj ET "
+    right = b"BT /F1 11 Tf 340 700 Td (right column text starts here) Tj ET "
+    picture = b"q 20 0 0 20 300 640 cm /Im1 Do Q"  # in the gutter, below both lines
+    _eligible(left + right + picture, **_IMG)
+
+
+@pytest.mark.parametrize(
+    ("text", "size", "start", "true_end", "over_x"),
+    [
+        (b"WWWWWWWW", 12, 72, 162.6, 150),  # W is 0.94 em; 0.7 em/char put the end at 139
+        (b"abcdefgh", 11, 72, 117.3, 115),  # tight true overlap
+        (b"HEADING IN ALL CAPS", 12, 72, 202.7, 190),
+    ],
+)
+def test_pdf_image_over_the_true_tail_of_text_goes_to_review(
+    text: bytes, size: int, start: int, true_end: float, over_x: int
+) -> None:
+    assert over_x < true_end < over_x + 20  # the 20 pt image covers the tail
+    show = b"BT /F1 %d Tf %d 700 Td (%s) Tj ET" % (size, start, text)
+    _flagged(show + _logo_at(over_x), _OVERLAP, **_IMG)
+    _flagged(_logo_at(over_x) + b" " + show, _OVERLAP, **_IMG)
+
+
+def test_pdf_extents_follow_the_font_in_use() -> None:
+    courier = b"<< /Type /Font /Subtype /Type1 /BaseFont /Courier /Encoding /WinAnsiEncoding >>"
+    show = b"BT /F1 11 Tf 72 700 Td (iiiiiiiiii) Tj ET"  # 10 x 600 units: ends at 138
+    _flagged(show + _logo_at(130), _OVERLAP, font=courier, **_IMG)
+    _eligible(show + _logo_at(145), font=courier, **_IMG)
+    # A font with no width table falls back to generous widths, so it can flag a bit early
+    # but never misses wide glyphs.
+    unknown = b"<< /Type /Font /Subtype /Type1 /BaseFont /Foo /Encoding /WinAnsiEncoding >>"
+    wide = b"BT /F1 12 Tf 72 700 Td (WWWWWWWW) Tj ET"
+    _flagged(wide + _logo_at(150), _OVERLAP, font=unknown, **_IMG)
+
+
+def test_pdf_long_run_of_wide_glyphs_in_a_known_font_runs_off_the_page() -> None:
+    _flagged(b"BT /F1 11 Tf 72 700 Td (" + b"W" * 70 + b") Tj ET", "text_outside_page")
