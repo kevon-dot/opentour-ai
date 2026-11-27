@@ -7,7 +7,7 @@ import sqlite3
 import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from decimal import Decimal
 
 import pytest
@@ -149,6 +149,105 @@ def adjudicate(session):
             expected_revision=i,
             operation_ref=f"owner-label-{i}",
         )
+
+
+def test_named_owner_adds_cited_counterexample_under_current_revision(joined):
+    h, owner, _, _, _ = joined
+    provider = FiveFamilies()
+    proposal = owner.propose(provider)
+    branch = owner.review()["cases"][0]
+    candidate = ProposedCase(
+        "owner-missing-po",
+        "family-0",
+        "template-0",
+        branch["branch_id"],
+        (("po", None), ("total", 12)),
+        "REVIEW",
+        "Missing order at a different amount",
+        branch["citation"],
+    )
+    operation = dict(case=candidate, expected_revision=0, operation_ref="counterexample-a")
+    other = StarterCaseSession(owner.settings, replace(owner.actor, actor=OTHER))
+    before = owner.review()
+    with pytest.raises(IntakeError):
+        other.add_counterexample(**operation)
+    with pytest.raises(IntakeError, match="target_leakage"):
+        owner.add_counterexample(
+            **(
+                operation
+                | {
+                    "case": replace(candidate, decision_inputs=(("posted_code", "REVIEW"),)),
+                }
+            )
+        )
+    with pytest.raises(IntakeError, match="starter_family_conflict"):
+        owner.add_counterexample(
+            **(
+                operation
+                | {
+                    "case": replace(candidate, family_id="different-family"),
+                }
+            )
+        )
+    assert owner.review() == before
+    assert owner.add_counterexample(**operation) == 1
+    reopened = StarterCaseSession(owner.settings, owner.actor)
+    assert reopened.add_counterexample(**operation) == 1
+    with pytest.raises(IntakeError, match="starter_action_conflict"):
+        reopened.add_counterexample(
+            **(operation | {"case": replace(candidate, rationale="Changed")})
+        )
+    with pytest.raises(IntakeError, match="starter_revision_changed"):
+        reopened.add_counterexample(**(operation | {"operation_ref": "stale-owner-action"}))
+    assert reopened.propose(provider) == proposal and provider.calls == 1
+    rows = reopened.review()["cases"]
+    added = rows[-1]
+    assert added["case_origin"] == "owner_counterexample"
+    assert added["counterexample_owner"] == "workflow-owner"
+    assert added["counterexample_operation"] == "counterexample-a"
+    assert added["owner_adjudicated_target"] is None
+    for revision, (row, label) in enumerate(
+        zip(rows, ("REVIEW", "REVIEW", "APPROVE", "MANUAL", "MANUAL", "REVIEW"), strict=True),
+        start=1,
+    ):
+        reopened.adjudicate(
+            case_id=row["case_id"],
+            target=label,
+            reason="Checked cited source",
+            expected_revision=revision,
+            operation_ref="label-" + row["case_id"],
+        )
+    frozen = reopened.freeze(
+        splits={row["family_id"]: "reserved" for row in rows},
+        expected_revision=7,
+    )
+    assert frozen.proposed == 6 and frozen.reserved == 5
+    assert reopened.add_counterexample(**operation) == 1
+    with pytest.raises(IntakeError, match="starter_successor_required"):
+        reopened.add_counterexample(
+            **(
+                operation
+                | {
+                    "case": replace(candidate, case_id="another-example"),
+                    "expected_revision": 7,
+                    "operation_ref": "after-freeze",
+                }
+            )
+        )
+    assert not (h.path.parent / "starter-evaluations.sqlite3").exists()
+
+
+def test_proposal_provider_cannot_attribute_its_example_to_owner(joined):
+    _, owner, _, _, _ = joined
+
+    class ImpersonatingProvider(FiveFamilies):
+        def propose(self, snapshot):
+            cases = super().propose(snapshot)
+            return (replace(cases[0], case_origin="owner_counterexample"), *cases[1:])
+
+    with pytest.raises(IntakeError):
+        owner.propose(ImpersonatingProvider())
+    assert not owner.core.path.exists()
 
 
 def test_actual_owner_map_to_frozen_unscored_and_worker_readback(joined):

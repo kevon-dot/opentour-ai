@@ -533,6 +533,7 @@ class StarterCaseSession:
                         )
             cases = provider.propose(pinned.snapshot)
             self._current(pinned)
+            _require(all(case.case_origin == "generated_starter" for case in cases))
             return self.core.propose(pinned.principal, pinned.scope.work, cases)
 
     def review(self) -> Json:
@@ -570,6 +571,18 @@ class StarterCaseSession:
                 case_id=case_id,
                 target=target,
                 reason=reason,
+                expected_revision=expected_revision,
+                operation_ref=operation_ref,
+            )
+
+    def add_counterexample(
+        self, *, case: ProposedCase, expected_revision: int, operation_ref: str
+    ) -> int:
+        with self._pin("adjudicate") as pinned:
+            return self.core.add_counterexample(
+                pinned.principal,
+                pinned.scope.work,
+                case=case,
                 expected_revision=expected_revision,
                 operation_ref=operation_ref,
             )
