@@ -64,6 +64,14 @@ excluding both missing-PO families leaves only REVIEW uncovered. The core's
 optional coverage contract preserves the exact identities of earlier freezes
 that did not declare separate coverage cells.
 
+Before freeze, the named owner can append a cited counterexample through
+`StarterCaseSession.add_counterexample` under the existing case adjudication
+grant. It records the current owner and operation, then leaves the proposed
+answer unadjudicated. The original generated proposal and its identity remain
+available for replay. Identical decision inputs and variants of the same
+template must retain their original family. A new append after production of
+the frozen version requires a successor and cannot change protected truth.
+
 The private Slack Home offers **Review starter cases** to the current named
 owner with the signed case-review purpose. **Generate guided cases** uses the
 local guided authoring profile when proposal authority is present. The owner
