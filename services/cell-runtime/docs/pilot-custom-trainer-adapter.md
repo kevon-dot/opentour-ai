@@ -53,7 +53,7 @@ silent degradation.
 5. Usage the trainer reports above the authorized bound, malformed, or in another currency stops
    the job. It is reported `FAILED` only once the trainer confirms the stop; an unhonored stop
    stays `RUNNING` with a durable cancel intent. Malformed usage raises `INVALID_USAGE`.
-6. `fence(tenant)` is durable across restart: it blocks new submit, collect and replay and stops
+6. `fence(scope)` (the scope is the tenant) is durable across restart: it blocks new submit, collect and replay and stops
    live jobs. `canceled_job_refs` lists only jobs the trainer confirmed stopped for that exact
    job; if any live job (including one whose dispatch was never acknowledged) cannot be confirmed
    stopped, `fence` raises `FENCE_JOB_NOT_STOPPED` and the marker stays. `usable_target` keeps
@@ -76,8 +76,8 @@ transport:
 
 ```python
 results = run_trainer_conformance(
-    TrainerHarness(make_transport, credential, registration, make_request,
-                   complete_pending, frozen_inputs, task, model_revision),
+    TrainerHarness(make_transport, credential, registration, request,
+                   complete_pending, inputs, task, model_revision),
     workdir,
 )
 assert all_passed(results)
