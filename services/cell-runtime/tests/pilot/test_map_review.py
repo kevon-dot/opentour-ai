@@ -15,7 +15,12 @@ from opentour_cell.pilot.guided_decision_map import Condition
 from opentour_cell.pilot.intake_admission import DurableIntake
 from opentour_cell.pilot.intake_local import LocalStarterAuthority
 from opentour_cell.pilot.intake_mcp import IntakeError, IntakePrincipal
-from opentour_cell.pilot.map_review import BranchEdit, StaleMapError, open_map_review
+from opentour_cell.pilot.map_review import (
+    BranchEdit,
+    MapSettingsEdit,
+    StaleMapError,
+    open_map_review,
+)
 from opentour_cell.pilot.operating_point import canonical
 from test_guided_policy import ACTIONS, FIELDS, PURCHASE_POLICY
 from test_intake_mcp import _sealed_starter, _write_private
@@ -381,7 +386,14 @@ def test_partial_restored_ledger_does_not_project_unverified_map(starter, mutati
 def test_source_successor_preserves_history_marks_only_changed_branches(starter):
     source, workflow, request, _ = starter(PURCHASE_POLICY)
     service, cap = stage_map_review(source, workflow)
-    old = accept_all(service)
+    accepted = accept_all(service)
+    old = service.save(
+        OWNER_A,
+        expected_revision=accepted.review_revision,
+        operation_ref="old-settings",
+        changes=(),
+        settings=MapSettingsEdit("Old policy trigger", "REVIEW", "Old source scope"),
+    )
     old_body = service.path.read_bytes()
     successor = PURCHASE_POLICY.replace(b"250", b"300")
     source.path.write_bytes(successor)
@@ -414,6 +426,7 @@ def test_source_successor_preserves_history_marks_only_changed_branches(starter)
     preview = current.preview(OWNER_A)
     assert service.path.read_bytes() == old_body
     assert preview.confirmed_ref is None
+    assert preview.settings_trigger is None and preview.fallback_action is None
     po_before = next(r for r in old.branches if r.action == "REVIEW")
     po_after = next(r for r in preview.branches if r.action == "REVIEW")
     assert po_after.disposition == "accepted" and po_after.branch_ref == po_before.branch_ref
@@ -427,6 +440,7 @@ def test_source_successor_preserves_history_marks_only_changed_branches(starter)
             changes=(BranchEdit(old.branches[1].branch_ref, "accepted", "Old action"),),
         )
     assert all(item.before is None for item in stale.value.diff)
+    assert stale.value.previous is None
 
 
 def test_duplicate_semantic_branches_hold_before_ambiguous_edit(starter):
@@ -571,3 +585,125 @@ def test_stale_error_does_not_disclose_after_permission_withdrawal(starter, monk
             changes=(BranchEdit(old.branches[0].branch_ref, "accepted", "Old edit"),),
         )
     assert not isinstance(denied.value, StaleMapError)
+
+
+def test_trigger_fallback_are_explicit_attributed_and_idempotent(starter):
+    source, workflow, _, _ = starter(b"# Policy\nIf total < 250, APPROVE.\n")
+    service, _ = stage_map_review(source, workflow)
+    before = accept_all(service)
+    fields = {"total": Decimal("300")}
+    assert before.expected_action(fields)[0] is None
+    assertion = MapSettingsEdit("When an invoice arrives", "REVIEW", "Owner confirms escalation")
+    saved = service.save(
+        OWNER_A,
+        expected_revision=before.review_revision,
+        operation_ref="settings",
+        changes=(),
+        settings=assertion,
+    )
+    assert saved.trigger == saved.settings_trigger == assertion.trigger
+    assert saved.fallback_action == "REVIEW" and saved.settings_support == "owner_assertion"
+    assert saved.settings_actor_ref == OWNER_A.actor and saved.settings_editor_ref == "person-a"
+    assert saved.settings_reason == assertion.reason
+    assert saved.expected_action(fields) == ("REVIEW", (saved.settings_ref,))
+    assert all(row.fallback == "Owner-asserted fallback: REVIEW" for row in saved.branches)
+    assert (
+        service.save(
+            OWNER_A,
+            expected_revision=before.review_revision,
+            operation_ref="settings",
+            changes=(),
+            settings=assertion,
+        )
+        == saved
+    )
+    assert open_map_review(service.directory, OWNER_A.tenant).preview(OWNER_A) == saved
+    cleared = service.save(
+        OWNER_A,
+        expected_revision=saved.review_revision,
+        operation_ref="clear",
+        changes=(),
+        settings=MapSettingsEdit(None, None, "Unresolved by owner"),
+    )
+    assert cleared.settings_trigger is None and cleared.trigger == "Trigger has not been specified"
+    assert cleared.fallback_action is None and cleared.expected_action(fields)[0] is None
+
+
+def test_settings_stale_diff_and_explicit_reapply(starter):
+    source, workflow, _, _ = starter(PURCHASE_POLICY)
+    service, _ = stage_map_review(source, workflow)
+    original = service.preview(OWNER_B)
+    a = service.save(
+        OWNER_A,
+        expected_revision=service.preview(OWNER_A).review_revision,
+        operation_ref="a-settings",
+        changes=(),
+        settings=MapSettingsEdit("A's trigger", "REVIEW", "A checked scope"),
+    )
+    submitted = MapSettingsEdit("B's trigger", "MANUAL", "B checked scope")
+    with pytest.raises(StaleMapError) as stale:
+        service.save(
+            OWNER_B,
+            expected_revision=original.review_revision,
+            operation_ref="b-settings",
+            changes=(),
+            settings=submitted,
+        )
+    assert stale.value.previous.settings_trigger is None
+    assert stale.value.current.settings_trigger == "A's trigger"
+    assert stale.value.current.settings_reason == a.settings_reason
+    b = service.save(
+        OWNER_B,
+        expected_revision=stale.value.current.review_revision,
+        operation_ref="b-settings",
+        changes=(),
+        settings=submitted,
+    )
+    assert b.settings_trigger == "B's trigger" and b.version == 2
+    assert b.settings_actor_ref == OWNER_B.actor
+
+
+@pytest.mark.parametrize(
+    "assertion",
+    [
+        MapSettingsEdit("", "REVIEW", "Reason"),
+        MapSettingsEdit("x" * 161, "REVIEW", "Reason"),
+        MapSettingsEdit("trigger\nsecond", "REVIEW", "Reason"),
+        MapSettingsEdit("Trigger", "UNGRANTED", "Reason"),
+        MapSettingsEdit("Trigger", "REVIEW", ""),
+    ],
+)
+def test_invalid_settings_have_no_saved_version(starter, assertion):
+    source, workflow, _, _ = starter(PURCHASE_POLICY)
+    service, _ = stage_map_review(source, workflow)
+    snap = service.preview(OWNER_A)
+    with pytest.raises(IntakeError, match="invalid_map_settings"):
+        service.save(
+            OWNER_A,
+            expected_revision=snap.review_revision,
+            operation_ref="bad-settings",
+            changes=(),
+            settings=assertion,
+        )
+    assert service.preview(OWNER_A).version == 0
+
+
+def test_unconfirmed_or_unresolved_branch_prevents_fallback_truth(starter):
+    source, workflow, _, _ = starter(b"# Policy\nIf total < 250, APPROVE.\n")
+    service, _ = stage_map_review(source, workflow)
+    snap = service.preview(OWNER_A)
+    current = service.save(
+        OWNER_A,
+        expected_revision=snap.review_revision,
+        operation_ref="before-confirm",
+        changes=(),
+        settings=MapSettingsEdit("Invoice arrival", "REVIEW", "Pending review"),
+    )
+    assert current.expected_action({"total": Decimal("300")})[0] is None
+    unresolved = service.save(
+        OWNER_A,
+        expected_revision=current.review_revision,
+        operation_ref="unresolved",
+        changes=(BranchEdit(current.branches[0].branch_ref, "unresolved", "Unclear rule"),),
+    )
+    assert unresolved.expected_action({"total": Decimal("300")})[0] is None

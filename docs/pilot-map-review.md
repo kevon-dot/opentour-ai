@@ -26,6 +26,7 @@ the mandatory PRD/shared implementation contract:
 | M7 | Source successor | New source/grant opens successor, preserves old artifact and marks dependent branch changes; old confirmations and stale patches never transfer silently |
 | M8 | Disclosure and navigation | Metadata-only Home entry reads no policy; explicit view/citation and final disclosure recheck current actor, grants, source and revision; no unsafe historical source text in stale diff |
 | M9 | Starter handoff | Only a real current confirmed map is eligible for OPE-513; draft/charter or unresolved authority is held. Case labels and frozen plan need their own actual confirmations |
+| M10 | Editable trigger and fallback | Explicit named-editor assertion, reason and revision; current permitted fallback action or unresolved; stale settings diff/reapply, source successor invalidation and no implied dispatch |
 
 The Slack action IDs, forms, accessible table, stale reapply controls and fixture
 submissions belong to the assigned UI implementation. Integration and distinct
@@ -52,7 +53,14 @@ grant declares explicit editor-to-person mappings, read identities, permitted
 decision fields and actions, along with the exact source/owner/workflow scope.
 It must be issued by the actual current custodian; editing the selector cannot
 create a grant. No wire role is used as authority. An unspecified trigger is
-shown as unspecified. Source priority has its own citation; an asserted priority
+shown as unspecified. A `MapSettingsEdit` records a bounded trigger, optional
+permitted fallback action and reason under the authenticated editor's identity.
+Absent fallback remains unresolved. The fallback applies only when no supported
+rule matches and all operative branches have been reviewed; it cannot turn an
+unknown clause into scored truth. Its provenance is an owner assertion, never a
+fabricated source citation. These settings grant no invocation or dispatch right
+and require explicit reapplication after a source successor. Source priority has
+its own citation; an asserted priority
 records the named actor and reason. Duplicate semantic branch identities hold
 instead of allowing an ambiguous citation or edit.
 

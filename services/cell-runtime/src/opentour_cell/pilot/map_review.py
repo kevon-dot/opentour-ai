@@ -81,6 +81,13 @@ class BranchEdit:
 
 
 @dataclass(frozen=True)
+class MapSettingsEdit:
+    trigger: str | None
+    fallback_action: str | None
+    reason: str
+
+
+@dataclass(frozen=True)
 class MapBranch:
     branch_ref: str
     conditions: tuple[Condition, ...]
@@ -119,6 +126,13 @@ class MapReviewSnapshot:
     precedence_citation: PolicySpan | None = None
     precedence_reason: str | None = None
     precedence_actor_ref: str | None = None
+    fallback_action: str | None = None
+    settings_reason: str | None = None
+    settings_actor_ref: str | None = None
+    settings_editor_ref: str | None = None
+    settings_ref: str | None = None
+    settings_support: str | None = None
+    settings_trigger: str | None = None
 
     def expected_action(
         self, fields: Mapping[str, str | Decimal | None]
@@ -132,7 +146,16 @@ class MapReviewSnapshot:
             if r.disposition != "out_of_scope" and all(c.matches(fields) for c in r.conditions)
         ]
         citations = tuple(r.citation_ref for r in matched)
-        if not matched or any(not r.confirmed for r in matched):
+        if not matched:
+            if (
+                self.confirmed_ref
+                and self.fallback_action is not None
+                and self.settings_ref
+                and all(r.confirmed or r.disposition == "out_of_scope" for r in self.branches)
+            ):
+                return self.fallback_action, (self.settings_ref,)
+            return None, citations
+        if any(not r.confirmed for r in matched):
             return None, citations
         if all(r.precedence is not None for r in matched):
             chosen = min(matched, key=lambda r: r.precedence or 0)
@@ -149,9 +172,15 @@ class MapDiff:
 
 
 class StaleMapError(IntakeError):
-    def __init__(self, current: MapReviewSnapshot, diff: tuple[MapDiff, ...]):
+    def __init__(
+        self,
+        current: MapReviewSnapshot,
+        diff: tuple[MapDiff, ...],
+        previous: MapReviewSnapshot | None = None,
+    ):
         super().__init__("map_review_stale_revision")
         self.current, self.diff = current, diff
+        self.previous = previous
 
 
 @dataclass(frozen=True)
@@ -380,6 +409,12 @@ class MapReviewService:
     def _records(self, db: sqlite3.Connection | None) -> list[Json]:
         if db is None:
             return []
+        required = {"maps", "operations", "heads"}
+        present = {r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        if not present:
+            # A rejected first save may leave an empty file after its DDL rolls back.
+            return []
+        _require(required <= present, "map_review_receipt_invalid")
         rows = db.execute(
             "SELECT version,ref,body,seal FROM maps WHERE scope=? ORDER BY version", (self.scope,)
         ).fetchall()
@@ -514,6 +549,17 @@ class MapReviewService:
                 inherited.append(row)
             rows = tuple(inherited)
             changed = tuple(sorted(affected))
+        settings = record.get("settings") if same and record else None
+        fallback = settings["fallback_action"] if settings else None
+        rows = tuple(
+            replace(
+                r,
+                fallback="Owner-asserted fallback: " + fallback
+                if fallback is not None
+                else "Unresolved when no supported rule matches",
+            )
+            for r in rows
+        )
         precedence = record["precedence"] if same and record else None
         if precedence is None and ctx.draft.first_match_clause is not None:
             precedence = [b.branch_ref for b in rows if b.action is not None]
@@ -612,11 +658,21 @@ class MapReviewService:
             tuple(ctx.capability["actions"]),
             dict(ctx.capability["field_kinds"]),
             record["version"] if record else 0,
+            trigger=settings["trigger"]
+            if settings and settings["trigger"] is not None
+            else "Trigger has not been specified",
             precedence_citation=ctx.draft.first_match_clause
             if not (same and record and record["precedence"] is not None)
             else None,
             precedence_reason=record["precedence_reason"] if same and record else None,
             precedence_actor_ref=record["precedence_actor_ref"] if same and record else None,
+            fallback_action=fallback,
+            settings_reason=settings["reason"] if settings else None,
+            settings_actor_ref=settings["actor_ref"] if settings else None,
+            settings_editor_ref=settings["editor_ref"] if settings else None,
+            settings_ref="map-assertion-" + digest(settings)[:40] if settings else None,
+            settings_support="owner_assertion" if settings else None,
+            settings_trigger=settings["trigger"] if settings else None,
         )
 
     def _blocking_rules(self, row: MapBranch, rows: tuple[MapBranch, ...]) -> set[str]:
@@ -708,7 +764,7 @@ class MapReviewService:
             for ref in sorted(old.keys() | new.keys())
             if old.get(ref) != new.get(ref)
         )
-        return StaleMapError(current, diff)
+        return StaleMapError(current, diff, prior)
 
     @staticmethod
     def _edit(row: MapBranch, edit: BranchEdit, ctx: _Context, actor: IntakePrincipal) -> MapBranch:
@@ -765,15 +821,22 @@ class MapReviewService:
         changes: tuple[BranchEdit, ...],
         precedence: tuple[str, ...] | None = None,
         precedence_reason: str | None = None,
+        settings: MapSettingsEdit | None = None,
     ) -> MapReviewSnapshot:
         require_ref(operation_ref)
-        _require(changes or precedence is not None, "empty_map_edit")
+        _require(changes or precedence is not None or settings is not None, "empty_map_edit")
         _require(
             len(changes) <= 128 and len({c.branch_ref for c in changes}) == len(changes),
             "invalid_map_edit",
         )
         intent = digest(
-            [expected_revision, [asdict(c) for c in changes], precedence, precedence_reason]
+            [
+                expected_revision,
+                [asdict(c) for c in changes],
+                precedence,
+                precedence_reason,
+                asdict(settings) if settings is not None else None,
+            ]
         )
         with (
             self._guard(actor, write=True) as ctx,
@@ -807,6 +870,30 @@ class MapReviewService:
             order = previous["precedence"] if previous else None
             order_reason = previous["precedence_reason"] if previous else None
             order_actor = previous["precedence_actor_ref"] if previous else None
+            assertion = previous.get("settings") if previous else None
+            if settings is not None:
+                _require(
+                    (
+                        settings.trigger is None
+                        or isinstance(settings.trigger, str)
+                        and 0 < len(settings.trigger) <= 160
+                        and settings.trigger == settings.trigger.strip()
+                        and settings.trigger.isprintable()
+                    )
+                    and (
+                        settings.fallback_action is None
+                        or settings.fallback_action in ctx.capability["actions"]
+                    )
+                    and isinstance(settings.reason, str)
+                    and 0 < len(settings.reason) <= 1000
+                    and settings.reason == settings.reason.strip()
+                    and settings.reason.isprintable(),
+                    "invalid_map_settings",
+                )
+                assertion = asdict(settings) | {
+                    "actor_ref": actor.actor,
+                    "editor_ref": ctx.capability["editors"][actor.actor],
+                }
             if precedence is not None:
                 wanted = {
                     r.branch_ref
@@ -840,6 +927,7 @@ class MapReviewService:
                 precedence=order,
                 precedence_reason=order_reason,
                 precedence_actor_ref=order_actor,
+                settings=assertion,
             )
             seal = digest(body)
             ref = "map-review-" + seal[:40]
