@@ -21,7 +21,7 @@ from contextlib import ExitStack, contextmanager, nullcontext
 from pathlib import Path
 from typing import Any
 
-from opentour_cell.pilot import autonomous_cycle, repair_bundle, repair_workflow
+from opentour_cell.pilot import autonomous_cycle, comparison_plan, repair_bundle, repair_workflow
 from opentour_cell.pilot import workplace_context as workplace
 from opentour_cell.pilot.learning_mandate import LearningMandates, _normalized
 from opentour_cell.pilot.operating_point import canonical, digest
@@ -211,6 +211,8 @@ class OwnerSettings:
             },
             "invalid_standing_agreement",
         )
+        # Reject unusable operating terms before catalog reads or mandate succession.
+        comparison_plan._terms(agreement["terms"])
         _need(
             spec["owner_id"] == a["custodian"]
             and spec["delegate"] == a["operator"]
