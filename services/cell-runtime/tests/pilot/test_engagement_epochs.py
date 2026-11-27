@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import sqlite3
+import threading
 from dataclasses import replace
 from pathlib import Path
 
@@ -448,3 +449,37 @@ def test_torn_fence_journal_tail_holds_instead_of_lifting_the_fence(tmp_path):
         EngagementLedger(root)
     journal.write_text(original)
     assert EngagementLedger(root).get(ORG, E1).state == "terminal"
+
+
+def test_withdrawal_waits_until_live_page_commit(tmp_path, monkeypatch):
+    case = LiveCase(tmp_path / "owner")
+    enroll(case.ledger, E1, "lease-a", 10)
+    case.ledger.activate(ORG, E1)
+    case.bind(E1, "lease-a", 10)
+
+    started = threading.Event()
+    withdrawn = threading.Event()
+    receipt_count = []
+    original = case.store._record_event
+
+    def withdraw():
+        started.set()
+        case.ledger.withdraw(ORG, E1, revocation_epoch=1)
+        receipt_count.append(case.page_rows())
+        withdrawn.set()
+
+    thread = threading.Thread(target=withdraw)
+
+    def record(*args):
+        thread.start()
+        assert started.wait(2)
+        assert not withdrawn.wait(0.1)
+        original(*args)
+
+    monkeypatch.setattr(case.store, "_record_event", record)
+    try:
+        assert case.ingest(decision(), position=20).startswith("live-")
+    finally:
+        thread.join(timeout=2)
+    assert withdrawn.is_set()
+    assert receipt_count == [1]

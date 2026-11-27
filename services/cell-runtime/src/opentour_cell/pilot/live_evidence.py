@@ -75,6 +75,8 @@ class EngagementGate(Protocol):
     Declared here so this module's import closure is unchanged. Its errors are `ValueError`.
     """
 
+    def pin(self) -> AbstractContextManager[None]: ...
+
     def live_gate(self, org: str, epoch: str, resource: str, lease_ref: str) -> int: ...
 
     def known_prior_epoch(self, org: str, epoch: str) -> bool: ...
@@ -304,11 +306,20 @@ class LiveEvidence:
             db.close()
 
     @contextmanager
-    def _scope(self, actor: IntakePrincipal, workflow: str) -> Iterator[LiveScope]:
+    def _scope(
+        self, actor: IntakePrincipal, workflow: str, *, pin_epoch: bool = False
+    ) -> Iterator[LiveScope]:
         with self.authority.guard(actor, workflow) as scope:
             _require(scope.tenant == actor.tenant and scope.workflow_ref == workflow)
             _require(scope.expires_at > int(time.time()))
-            yield scope
+            gate = self._engagement_gate(scope) if pin_epoch else None
+            if gate is None:
+                yield scope
+            else:
+                with gate.pin():
+                    for grant in scope.grants:
+                        self._engagement_checkpoint(scope, grant, gate)
+                    yield scope
             _require(scope.expires_at > int(time.time()))
 
     @staticmethod
@@ -353,7 +364,7 @@ class LiveEvidence:
         expected_revision: str | None = None,
     ) -> str:
         with (
-            self._scope(actor, workflow) as selected,
+            self._scope(actor, workflow, pin_epoch=True) as selected,
             self._db(write=True) as db,
             self._scope(actor, workflow) as scope,
         ):
@@ -529,7 +540,10 @@ class LiveEvidence:
                 require_ref(read_metadata["next_cursor"])
         with self._db() as db:
             body, _ = self._binding(db, reference)
-        with self._scope(actor, body["workflow_ref"]) as scope, self._db(write=True) as db:
+        with (
+            self._scope(actor, body["workflow_ref"], pin_epoch=True) as scope,
+            self._db(write=True) as db,
+        ):
             _require(scope.expires_at > int(time.time()))
             _require(scope.can_ingest and scope.engagement_epoch == body["engagement_epoch"])
             fresh, successor = self._binding(db, reference)

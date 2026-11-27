@@ -13,6 +13,7 @@ this ledger makes no cross-CRM deduplication or counting claim (OPE-452/455 own 
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
 import os
@@ -130,6 +131,7 @@ class EngagementLedger:
             raise EngagementError("absolute_private_directory_required")
         self.path = directory / "engagement-epochs.sqlite3"
         self.journal = directory / "engagement-fences.jsonl"
+        self.guard_path = directory / "engagement-epochs.lock"
         try:
             _check_directory(self.path)
             if not existing_only and not self.path.exists():
@@ -142,6 +144,17 @@ class EngagementLedger:
             self.reconcile_fences()
 
     # -- storage ---------------------------------------------------------------------
+
+    @contextmanager
+    def pin(self, *, exclusive: bool = False) -> Iterator[None]:
+        """Order a live operation's commit against withdrawal and database restore."""
+        fd = os.open(self.guard_path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+        try:
+            _check_file(self.guard_path)
+            fcntl.flock(fd, fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)
+            yield
+        finally:
+            os.close(fd)
 
     @contextmanager
     def _db(self) -> Iterator[sqlite3.Connection]:
@@ -388,7 +401,7 @@ class EngagementLedger:
         """Persist terminal state and revocation epoch (fence first). Idempotent."""
         org, epoch = _ref(org), _ref(epoch)
         _int(revocation_epoch, "invalid_revocation_epoch", minimum=1)
-        with self._db() as db:
+        with self.pin(exclusive=True), self._db() as db:
             row = self._require_row(db, org, epoch)
             if row["revocation_epoch"] is not None and row["revocation_epoch"] != revocation_epoch:
                 raise EngagementError("revocation_epoch_conflict")
@@ -429,13 +442,14 @@ class EngagementLedger:
 
     def restore_backup(self, backup: Path) -> None:
         """Replace the database with an older backup, then re-apply every journaled fence."""
-        _check_file(backup)
-        temporary = self.path.with_name(self.path.name + ".restore")
-        shutil.copyfile(backup, temporary)
-        os.chmod(temporary, 0o600)
-        os.replace(temporary, self.path)
-        self._create_schema()
-        self.reconcile_fences()
+        with self.pin(exclusive=True):
+            _check_file(backup)
+            temporary = self.path.with_name(self.path.name + ".restore")
+            shutil.copyfile(backup, temporary)
+            os.chmod(temporary, 0o600)
+            os.replace(temporary, self.path)
+            self._create_schema()
+            self.reconcile_fences()
 
     def backup(self, destination: Path) -> None:
         shutil.copyfile(self.path, destination)
