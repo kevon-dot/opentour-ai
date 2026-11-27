@@ -38,6 +38,7 @@ from opentour_cell.pilot.status_questions import (
 
 if TYPE_CHECKING:
     from opentour_cell.pilot.map_review import MapReviewService
+    from opentour_cell.pilot.starter_evaluation_session import StarterEvaluationSession
     from opentour_cell.pilot.starter_map_confirmation import StarterCaseEntry, StarterCaseSession
     from opentour_cell.pilot.verifier_form import VerifierForm
 
@@ -2628,7 +2629,7 @@ class Workbench:
                 principal, workflow, matches[0].resource, expected_revision=choice
             )
 
-    def _starter_score_session(self, actor: str):
+    def _starter_score_session(self, actor: str) -> StarterEvaluationSession:
         from opentour_cell.pilot.starter_evaluation_session import StarterEvaluationSession
 
         cfg = self.settings(check_engagement=False)
@@ -3326,10 +3327,10 @@ class Workbench:
             page = state["page"]
             if action == "ot_score_next":
                 _check(value == "next" and page == 0)
-                target = 1
+                page_target = 1
             elif action == "ot_score_previous":
                 _check(value == "previous" and page in (1, 2))
-                target = page - 1
+                page_target = page - 1
             else:
                 _check(
                     action == "ot_score_reconnect"
@@ -3337,10 +3338,16 @@ class Workbench:
                     and page == 1
                     and state["reconnect"]
                 )
-                target = 2
+                page_target = 2
             _check(state["entry"]["execution_ref"] == ctx["job"])
             self._open_starter_score(
-                cfg, actor, view, state["entry"], page=target, previous=state, old_hash=old_hash
+                cfg,
+                actor,
+                view,
+                state["entry"],
+                page=page_target,
+                previous=state,
+                old_hash=old_hash,
             )
             return
         if ctx["kind"] == "starter_scores":
