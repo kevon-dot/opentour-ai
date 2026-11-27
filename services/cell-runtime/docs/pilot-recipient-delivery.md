@@ -50,6 +50,14 @@ hashes `[tenant, workflow_ref, engagement, grant_ref]`. Restore the current
 marker with the custody state before returning a backup to service. Retain
 the historical handoff status through the custody process.
 
+The private handoff readback takes the workflow explicitly selected in
+Home and the frozen run, run revision and artifact identity from its
+verified evidence. It also requires the viewer's current inspection
+permission. An approval with no outbox entry returns its recorded time
+and destination with delivery unset. An existing outbox entry returns
+only the durable stage, check time and independently confirmed receipt
+fields it holds. The reader performs no network or reconciliation call.
+
 The hosted Zap still needs the authenticated fetch binding and versioned
 workflow. The separate, explicitly authorized test activation and its
 rollback retain their own evidence requirements.
