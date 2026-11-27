@@ -1,0 +1,34 @@
+/* OPE-253 feedback and asynchronous state: Data state (Figma 12:109), Progress (12:125), Toast (12:138).
+   Uses the custom properties and Geist faces of styles/product-tokens.css; import that first.
+   The design has no motion, shadow, indicator or dismiss control, so none is declared here. */
+.ot-data-state, .ot-progress, .ot-toast { display: flex; flex-direction: column; gap: var(--ot-space-8); box-sizing: border-box; inline-size: 100%; min-inline-size: 0; padding: var(--ot-space-16); border: 1px solid var(--ot-border-default); border-radius: var(--ot-radius-8); font-family: Geist, sans-serif; overflow-wrap: anywhere; }
+.ot-data-state-title, .ot-data-state-body, .ot-progress-title, .ot-progress-body, .ot-toast-title, .ot-toast-body { margin: 0; }
+.ot-data-state-title, .ot-progress-title, .ot-toast-title { font-size: var(--ot-type-label-size); font-weight: var(--ot-type-label-weight); line-height: var(--ot-type-label-line); }
+.ot-data-state-body, .ot-progress-body, .ot-toast-body { font-size: var(--ot-type-small-size); font-weight: var(--ot-type-small-weight); line-height: var(--ot-type-small-line); }
+.ot-data-state--loading { background: var(--ot-surface-base); color: var(--ot-text-primary); }
+.ot-data-state--loading > .ot-data-state-body { color: var(--ot-text-secondary); }
+.ot-data-state--empty { background: var(--ot-surface-base); color: var(--ot-text-primary); }
+.ot-data-state--empty > .ot-data-state-body { color: var(--ot-text-secondary); }
+.ot-data-state--partial { background: var(--ot-surface-base); color: var(--ot-text-primary); }
+.ot-data-state--partial > .ot-data-state-body { color: var(--ot-text-secondary); }
+.ot-data-state--error { background: var(--ot-failure-background); color: var(--ot-failure-text); }
+.ot-data-state--denied { background: var(--ot-unknown-background); color: var(--ot-unknown-text); }
+.ot-data-state--stale { background: var(--ot-unknown-background); color: var(--ot-unknown-text); }
+.ot-data-state--offline { background: var(--ot-unknown-background); color: var(--ot-unknown-text); }
+.ot-data-state--revoked { background: var(--ot-unknown-background); color: var(--ot-unknown-text); }
+.ot-data-state--unknown-outcome { background: var(--ot-unknown-background); color: var(--ot-unknown-text); }
+.ot-progress--queued { background: var(--ot-surface-base); color: var(--ot-text-primary); }
+.ot-progress--queued > .ot-progress-body { color: var(--ot-text-secondary); }
+.ot-progress--running { background: var(--ot-surface-base); color: var(--ot-text-primary); }
+.ot-progress--running > .ot-progress-body { color: var(--ot-text-secondary); }
+.ot-progress--stopping { background: var(--ot-hold-background); color: var(--ot-hold-text); }
+.ot-progress--complete { background: var(--ot-success-background); color: var(--ot-success-text); }
+.ot-progress--failed { background: var(--ot-failure-background); color: var(--ot-failure-text); }
+.ot-toast--accepted { background: var(--ot-surface-base); color: var(--ot-text-primary); }
+.ot-toast--accepted > .ot-toast-body { color: var(--ot-text-secondary); }
+.ot-toast--confirmed { background: var(--ot-success-background); color: var(--ot-success-text); }
+.ot-toast--failed { background: var(--ot-failure-background); color: var(--ot-failure-text); }
+.ot-toast--unknown { background: var(--ot-unknown-background); color: var(--ot-unknown-text); }
+@media (forced-colors: active) {
+  .ot-data-state, .ot-progress, .ot-toast { border-color: CanvasText; }
+}

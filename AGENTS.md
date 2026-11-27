@@ -4,7 +4,7 @@ Linear's current full issue specification and mandatory linked contracts govern 
 
 Use `codex/<issue>-<scope>` branches unless an explicitly approved executor workflow requires otherwise. Shared schemas, generated clients, lockfiles, migrations and global routing each have one serialized writer. OPE-122 owns the initial `just setup` scaffold; after its accepted handoff SHA, OPE-123 exclusively owns `justfile` and command wrappers. Do not claim parallel ownership of those files.
 
-All frontend/UI implementation requires the user's GPT Astra assignment and independent Codex review. Backend/bootstrap follows its issue assignment. A distinct qualified reviewer may replace unavailable preferred review tooling where the governing planning contract permits that fallback; record the actual reviewer and exact reviewed commit. No self-acceptance.
+All frontend/UI implementation is assigned to Claude under the owner's front-end handoff of 16 November 2026, with independent Codex review. Claude front-end branches use `claude/<issue>-<scope>`. Backend/bootstrap follows its issue assignment. A distinct qualified reviewer may replace unavailable preferred review tooling where the governing planning contract permits that fallback; record the actual reviewer and exact reviewed commit. No self-acceptance.
 
 Before implementation, map every acceptance ID and additional named fixture to positive/adverse tests and evidence. Run actual commands, record exit status and fixture kind. Missing dependencies, credentials, providers, GPU capacity, zero tests and required skipped cases are not PASS. Local/simulated results cannot satisfy provider or customer-evidence gates. Parent completion requires integration, not just closed children.
 

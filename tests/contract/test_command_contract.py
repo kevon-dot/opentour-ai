@@ -342,7 +342,10 @@ def test_exact_canonical_browser_inventory_preserved(checkout):
     manifest = runner.manifest(checkout)
     source = json.loads((checkout / runner.COMMON / "browser-suite-inventory.json").read_text())
     assert set(manifest["browser_suites"]) == set(source["paths"])
-    assert len(manifest["browser_suites"]) == source["distinct_paths"] == 63
+    assert len(manifest["browser_suites"]) == source["distinct_paths"] == 64
+    shell = "apps/web/features/workspace/customer-shell.visual.spec.ts"
+    assert source["paths"][shell] == ["OPE-239"]
+    assert manifest["browser_profiles"][shell] == {"kind": "simulated", "owner": "OPE-307"}
 
 
 @pytest.mark.parametrize(
@@ -940,9 +943,9 @@ def test_runner_kills_descendants_even_when_leader_exits_successfully(checkout):
     [
         (None, 1_048_576, True),
         (None, 1_048_577, False),
-        (2_097_152, 1_048_577, True),
-        (2_097_152, 2_097_152, True),
-        (2_097_152, 2_097_153, False),
+        (8_388_608, 1_048_577, True),
+        (8_388_608, 8_388_608, True),
+        (8_388_608, 8_388_609, False),
     ],
 )
 def test_actual_runner_output_limit_counts_both_streams(checkout, limit, size, passes):
@@ -997,7 +1000,7 @@ def test_actual_runner_output_limit_counts_utf8_bytes(checkout, limit, passes):
         assert error.value.code == 1
 
 
-@pytest.mark.parametrize("limit", [0, -1, 2_097_153, True, 1.5, "2097152"])
+@pytest.mark.parametrize("limit", [0, -1, 8_388_609, True, 1.5, "8388608"])
 def test_invalid_runner_output_limit_refuses_before_launch(checkout, monkeypatch, limit):
     monkeypatch.setattr(runner, "_MANAGED_POPEN", lambda *a, **k: pytest.fail("Child was launched"))
     invocation = runner.Invocation(

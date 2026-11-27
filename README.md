@@ -66,7 +66,7 @@ Container smoke uses pinned CPU images and separate deployable targets. It verif
 
 - `services/control-api`, `services/cell-runtime`, `services/audit-journal`: separate CPU uv workspace packages.
 - `training`: separate locked Python project; trainer and protected evaluator have distinct execution profiles. CUDA/framework/model qualification is separate and remains NOT_RUN until its owning tickets execute it.
-- `apps/web`: Next.js dependency boundary; frontend functionality and Figma state implementation belong to GPT Astra tickets.
+- `apps/web`: Next.js dependency boundary; frontend functionality and Figma state implementation belong to Claude front-end tickets under the owner's handoff of 16 November 2026, with independent Codex review.
 - `packages/client-ts`: generated-client boundary; no invented API endpoints.
 - `packages/contracts`: shared versioned contracts have a serialized owner.
 - `infrastructure`: approved deployment/IAM implementations and tests are separate from setup.

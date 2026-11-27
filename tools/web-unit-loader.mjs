@@ -12,16 +12,17 @@ registerHooks({
     try {
       return nextResolve(specifier, context);
     } catch (error) {
-      if (error.code !== 'ERR_MODULE_NOT_FOUND' || !local(context.parentURL) ||
+      const directoryImport = error.code === 'ERR_UNSUPPORTED_DIR_IMPORT';
+      if ((!directoryImport && error.code !== 'ERR_MODULE_NOT_FOUND') || !local(context.parentURL) ||
           !(specifier.startsWith('./') || specifier.startsWith('../'))) throw error;
       const url = new URL(specifier, context.parentURL);
       if (!local(url.href)) throw error;
       const extension = extname(url.pathname);
-      if (extension && extension !== '.js') throw error;
-      if (extension) url.pathname = url.pathname.slice(0, -extension.length);
+      if (extension === '.js') url.pathname = url.pathname.slice(0, -extension.length);
+      const stem = directoryImport ? url.pathname.replace(/\/$/, '') + '/index' : url.pathname;
       for (const sourceExtension of ['.ts', '.tsx']) {
         const candidate = new URL(url);
-        candidate.pathname += sourceExtension;
+        candidate.pathname = stem + sourceExtension;
         if (existsSync(candidate)) return nextResolve(candidate.href, context);
       }
       throw error;
@@ -34,6 +35,10 @@ registerHooks({
     if (extension === '.css') {
       // Unit tests render markup. Browser suites load and verify the actual stylesheets.
       return { format: 'module', shortCircuit: true, source: 'export {};' };
+    }
+    if (extension === '.svg') {
+      const assetPath = '/' + url.slice(repository.length);
+      return { format: 'module', shortCircuit: true, source: `export default ${JSON.stringify(assetPath)};` };
     }
     if (extension === '.json' && !context.importAttributes.type) {
       const data = readFileSync(file, 'utf8');

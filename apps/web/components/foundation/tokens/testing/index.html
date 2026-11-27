@@ -9,6 +9,11 @@ body { margin: 0; background: var(--ot-surface-canvas, #fafbfd); }
 .gallery header, .gallery section { margin-block-end: 32px; overflow-wrap: anywhere; }
 .gallery .examples { display: flex; flex-wrap: wrap; gap: 24px; align-items: flex-start; }
 .gallery .example { display: flex; flex-direction: column; align-items: flex-start; gap: 16px; min-width: 0; max-width: 100%; margin-block-end: 24px; }
+.overlay-probes { display: flex; flex-direction: column; gap: 16px; }
+.overlay-probes p { margin: 0; }
+.overlay-edge { display: block; color: var(--ot-text-link); }
+.overlay-edge:focus { outline: 2px solid var(--ot-action-primary); outline-offset: 2px; }
+.overlay-gallery > output { display: block; }
 @media (min-width: 768px) { .gallery { padding: 24px; } }
 @media (min-width: 1280px) { .gallery { padding: 40px; } }
 </style></head><body><div id="root"></div><script type="module" src="./gallery.tsx"></script></body></html>

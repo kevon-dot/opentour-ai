@@ -42,6 +42,7 @@
     "apps/web/features/product-surfaces/workflow-contract/visual.spec.ts",
     "apps/web/features/support-case-private/privacy.spec.ts",
     "apps/web/features/support-case-private/visual.spec.ts",
+    "apps/web/features/workspace/customer-shell.visual.spec.ts",
     "apps/web/tests/accessibility.spec.ts",
     "apps/web/tests/account-entry.browser.spec.ts",
     "apps/web/tests/autonomy-status.spec.ts",
@@ -283,6 +284,30 @@
     "apps/web/components/foundation/tokens/visual.spec.ts": {
       "kind": "simulated",
       "owner": "OPE-253"
+    },
+    "apps/web/components/foundation/data-display/chart-evidence.visual.spec.ts": {
+      "kind": "simulated",
+      "owner": "OPE-303"
+    },
+    "apps/web/components/foundation/data-display/metric-semantics.visual.spec.ts": {
+      "kind": "simulated",
+      "owner": "OPE-304"
+    },
+    "apps/web/components/foundation/data-display/table-populations.visual.spec.ts": {
+      "kind": "simulated",
+      "owner": "OPE-305"
+    },
+    "apps/web/components/foundation/async-state/status-copy.visual.spec.ts": {
+      "kind": "simulated",
+      "owner": "OPE-306"
+    },
+    "apps/web/components/foundation/async-state/operation-state.visual.spec.ts": {
+      "kind": "simulated",
+      "owner": "OPE-308"
+    },
+    "apps/web/features/workspace/customer-shell.visual.spec.ts": {
+      "kind": "simulated",
+      "owner": "OPE-307"
     }
   }
 }

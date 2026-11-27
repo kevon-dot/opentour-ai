@@ -29,6 +29,11 @@ with expected kind `simulated`. Other declared paths require an explicitly revie
 profile before execution. Future provider/customer profiles need their owning
 authority/prerequisite checks; a report cannot grant itself that authority.
 
+The scoped presentation profile runs the metric, status-copy and operation-state
+suites owned by OPE-304, OPE-306 and OPE-308. Each reports once for the generated
+fixtures. The adapter writes child-specific evidence under `evidence/OPE-<id>/runs`.
+Status copy compares its screenshots with the reviewed platform images.
+
 REPORT is a fresh absent file inside a private wrapper-created directory. The wrapper
 sets `OPENTOUR_RESULT_NONCE` to a fresh 32-character lowercase hexadecimal nonce,
 `OPENTOUR_RESULT_FILE` to REPORT, `OPENTOUR_TEST_TARGET` to PATH, and
@@ -55,7 +60,8 @@ profiles automatically.
 
 `mode` is `customer_controlled`, `opentour_managed` or null. Aggregate null denotes
 mixed or mode-inapplicable execution. Each actual UI test records its actual mode;
-null per test is limited to mode-inapplicable runner/setup probes. Test IDs must be
+null per test is limited to mode-inapplicable runner/setup probes and explicitly
+registered presentation fixtures whose local props have no deployment mode. Test IDs must be
 unique across test, project and mode. `tests` records every collected test as
 `{id,file,status,mode}`. Status is `passed`, `failed` or `skipped`. Collected but
 unexecuted cases are skipped; failed attempts, timeout, interruption and expected
