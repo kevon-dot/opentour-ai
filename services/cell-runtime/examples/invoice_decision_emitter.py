@@ -20,7 +20,7 @@ from opentour_cell.pilot.repair_workflow import _record
 from opentour_cell.pilot.training import _check_file
 
 SCHEMA = "opentour.example.invoice-decision-emitter.v1"
-INVOICE_ACTIONS = ("freight", "review", "defer", "ask")
+INVOICE_ACTIONS = ("freight", "review", "defer", "ask", "supplies")
 Json = dict[str, Any]
 
 
