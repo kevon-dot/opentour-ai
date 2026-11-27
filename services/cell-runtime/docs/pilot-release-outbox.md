@@ -43,3 +43,22 @@ after the recipient writes, two status reads, one reconciliation, restored
 backup, wrong destination/digest, stale observation and withdrawal during the
 lookup. The native approval producers, remote receivers, deployment workflow and
 custody handoff consume the register through their separately owned adapters.
+
+## Bind a durable approval
+
+`RecordedReleaseAuthority` consumes the real worker approval and a current
+custodian-issued destination permission resolved through the trusted actor and
+action boundary. It verifies the sealed presentation, permitted candidate
+digest, recipient, dataset's authorized workflow, and active engagement. The
+approval reference binds the exact durable decision. The approval recorder
+keeps the first local recording time, within its presentation window, on retry.
+An older unstamped receipt remains available through the approval-only path.
+Dispatch from such a receipt needs a current timed approval.
+
+During reservation, claim and reconciliation the worker checks current scope
+after staging changes, before transaction commit. The generated normal-entry
+test exercises an actual Slack approval, three equivalent intake keys, one
+independently stored receiver effect with a lost reply, two read-only checks,
+and reconciliation after restart. The destination authority and receiver are
+generated fixture ports. Installed dispatch, independent recipient replay and
+Slack status integration require their corresponding product adapters.

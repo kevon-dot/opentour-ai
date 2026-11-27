@@ -76,7 +76,7 @@ def check_release_inspection(
         ),
         "release_reviewer_mismatch",
     )
-    return _inspection(
+    checked = _inspection(
         directory,
         organization,
         run_id,
@@ -86,6 +86,8 @@ def check_release_inspection(
         inspection_ref,
         fresh=True,
     )
+    del checked["presented_at"]
+    return checked
 
 
 def _inspection(
@@ -115,7 +117,7 @@ def _inspection(
         journal = _JournalSnapshot(db, ledger, binding[0])
         journal.active(db)
         row = db.execute(
-            "SELECT p.id,p.snapshot,p.expires,p.policy FROM presentations p "
+            "SELECT p.id,p.snapshot,p.expires,p.policy,p.presented FROM presentations p "
             "JOIN exposures e ON e.id=p.id "
             "WHERE p.actor=? AND (p.id=? OR p.revision=?) AND "
             "e.status='presented' ORDER BY p.presented DESC,p.rowid DESC LIMIT 1",
@@ -160,9 +162,21 @@ def _inspection(
         return {
             "engagement": seen["engagement"],
             "expires_at": row[2],
+            "presented_at": row[4],
             "provider": cfg.approval_provider,
             "presentation_id": row[0],
         }
+
+
+def _check_recorded_at(receipt: Json, presentation: Json) -> None:
+    if "recorded_at" in receipt:
+        recorded = receipt["recorded_at"]
+        _require(
+            type(recorded) is int
+            and presentation["presented_at"] <= recorded < presentation["expires_at"]
+            and recorded <= int(time.time()),
+            "release_record_time_invalid",
+        )
 
 
 def record_release(
@@ -212,7 +226,7 @@ def record_release(
     store = LocalTrainingStore(directory / "training.sqlite3", organization, existing_only=True)
     with store.engagement_guard(engagement_id=seen["engagement"]):
         _binding(directory, organization, run_id, run_revision, artifact_sha)
-        _inspection(
+        presentation = _inspection(
             directory,
             organization,
             run_id,
@@ -222,8 +236,22 @@ def record_release(
             seen["presentation_id"],
             fresh=True,
         )
-        _record(work / "release-decision.json", value)
-    return value
+        path = work / "release-decision.json"
+        try:
+            saved = _private_json(path)
+        except FileNotFoundError:
+            saved = value | {"recorded_at": int(time.time())}
+            _check_recorded_at(saved, presentation)
+            _record(path, saved)
+        else:
+            # A retry must preserve the time of the first durable decision. Old
+            # receipts remain usable for their existing approval-only pathways.
+            _require(
+                {k: v for k, v in saved.items() if k != "recorded_at"} == value,
+                "existing_result_conflict",
+            )
+            _check_recorded_at(saved, presentation)
+        return saved
 
 
 def inspect_recorded_release(
@@ -245,7 +273,7 @@ def inspect_recorded_release(
         and receipt.get("artifact_sha") == artifact_sha,
         "human_release_approval_required",
     )
-    _inspection(
+    presentation = _inspection(
         directory,
         organization,
         run_id,
@@ -255,6 +283,7 @@ def inspect_recorded_release(
         receipt["presentation_id"],
         fresh=False,
     )
+    _check_recorded_at(receipt, presentation)
     return receipt
 
 

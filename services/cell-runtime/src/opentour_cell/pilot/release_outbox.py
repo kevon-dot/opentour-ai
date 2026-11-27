@@ -164,6 +164,15 @@ class ReleaseOutbox:
         assert grant is not None
         return grant
 
+    def _check_current(
+        self, db: sqlite3.Connection, grant: ApprovedRelease, actor: str, action: Action
+    ) -> None:
+        _require(
+            self._current(db, grant.selection, actor, action) == grant, "release_intent_changed"
+        )
+        if os.path.lexists(self.store.path.with_name("custody.sqlite3")):
+            raise TrainingError("engagement_withdrawn")
+
     @contextmanager
     def _read(self) -> Iterator[sqlite3.Connection]:
         custody = self.store.path.with_name("custody.sqlite3")
@@ -301,12 +310,14 @@ class ReleaseOutbox:
                 (grant.engagement, actor, client, operation_key, grant.reference),
             )
             assert row is not None
+            self._check_current(db, grant, actor, "reserve")
             return self._status(row, grant)
 
     def status(self, selection: ReleaseSelection, actor: str) -> ReleaseStatus | None:
         with self._read() as db:
             grant = self._current(db, selection, actor, "inspect")
             row = self._stage(db, grant)
+            self._check_current(db, grant, actor, "inspect")
             return None if row is None else self._status(row, grant)
 
     def claim(self, selection: ReleaseSelection, actor: str, receiver: ReceiverLookup) -> Claim:
@@ -331,6 +342,7 @@ class ReleaseOutbox:
             _require(row is not None)
             assert row is not None
             if row["stage"] == "delivered" or (action == "claim" and row["claimed_at"] is not None):
+                self._check_current(db, grant, actor, action)
                 return Claim(self._status(row, grant), False)
         requested_at = self.clock()
         lookup_ref = "lookup-" + secrets.token_hex(16)
@@ -357,7 +369,9 @@ class ReleaseOutbox:
                 isinstance(observed, ReceiverObservation) and observed.lookup_ref == lookup_ref,
                 "receiver_observation_scope_mismatch",
             )
-            return self._apply(db, row, grant, observed, action, requested_at)
+            applied = self._apply(db, row, grant, observed, action, requested_at)
+            self._check_current(db, grant, actor, action)
+            return applied
 
     def _apply(
         self,

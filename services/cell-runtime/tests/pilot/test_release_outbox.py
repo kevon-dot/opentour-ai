@@ -38,8 +38,10 @@ class Approvals:
 
 
 class Recipient:
-    def __init__(self, path: Path):
+    def __init__(self, path: Path, *, observed_at: int = 103, received_at: int = 102):
         self.path = path
+        self.observed_at = observed_at
+        self.received_at = received_at
         self.calls = []
         self.before_reply: Callable[[], None] = lambda: None
         self.unknown = False
@@ -59,7 +61,7 @@ class Recipient:
                     grant.destination_ref,
                     grant.artifact_sha256,
                     "receiver-delivery",
-                    102,
+                    self.received_at,
                 ),
             )
         raise TimeoutError("generated loss after receiver commit")
@@ -85,7 +87,7 @@ class Recipient:
             grant.reference,
             grant.destination_ref,
             grant.artifact_sha256,
-            103,
+            self.observed_at,
             lookup_ref,
             *(row or (None, None)),
         )
