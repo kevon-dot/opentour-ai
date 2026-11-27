@@ -802,3 +802,54 @@ def test_ledger_refuses_negative_settlement_and_forged_json() -> None:
             SpendLedger.from_json(raw)
         assert err.value.code.startswith("ledger_forged")
     assert SpendLedger.from_json(ledger.to_json()).to_json() == ledger.to_json()
+
+
+def _forged_refusal(raw: dict[str, Any]) -> str:
+    with pytest.raises(TuningBenefitError) as err:
+        SpendLedger.from_json(raw)
+    return err.value.code
+
+
+def test_ledger_refuses_fit_keys_that_store_a_different_kind() -> None:
+    # Reviewer reproduction: two fit-keyed reservations stored as generation would
+    # slip past a fit count taken from stored kinds, bypassing a one-fit grant.
+    ledger = SpendLedger(spend_cap=100, fits_authorized=1)
+    raw = ledger.to_json()
+    raw["reserved"]["d|a|fit"] = ["generation", 10]
+    raw["reserved"]["d|b|fit"] = ["generation", 10]
+    assert _forged_refusal(raw) == "ledger_forged_reservation"
+
+
+def test_ledger_refuses_non_fit_key_that_stores_fit() -> None:
+    ledger = SpendLedger(spend_cap=100, fits_authorized=1)
+    raw = ledger.to_json()
+    raw["reserved"]["d|a|generation"] = ["fit", 10]
+    assert _forged_refusal(raw) == "ledger_forged_reservation"
+
+
+@pytest.mark.parametrize(
+    "key", ["garbage", "d|fit", "d|a|b|fit", "|fit", "d||fit", "d|a|", "", "||"]
+)
+def test_ledger_refuses_malformed_reservation_keys(key: str) -> None:
+    ledger = SpendLedger(spend_cap=100, fits_authorized=1)
+    raw = ledger.to_json()
+    raw["reserved"][key] = ["generation", 1]
+    assert _forged_refusal(raw) == "ledger_forged_reservation"
+
+
+def test_ledger_round_trip_accepts_honest_state_at_grant_and_cap() -> None:
+    ledger = SpendLedger(spend_cap=30, fits_authorized=2)
+    assert ledger.reserve("d", "a", "fit", 10) == "reserved"
+    assert ledger.reserve("d", "b", "fit", 10) == "reserved"
+    assert ledger.reserve("d", "a", "generation", 10) == "reserved"
+    assert ledger.settle("d", "a", "fit", 10) == "settled"
+    raw = ledger.to_json()
+    restored = SpendLedger.from_json(raw)
+    assert restored.to_json() == raw and restored.charged == 10
+    # Exactly at the fit grant and exactly at the cap: nothing further is admitted.
+    with pytest.raises(TuningBenefitError) as grant:
+        restored.reserve("d", "c", "fit", 1)
+    assert grant.value.code == "fit_grant_exceeded"
+    with pytest.raises(TuningBenefitError) as cap:
+        restored.reserve("d", "c", "generation", 1)
+    assert cap.value.code == "spend_cap_exceeded"
