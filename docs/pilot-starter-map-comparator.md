@@ -1,0 +1,7 @@
+# Run the local starter policy comparator
+
+The evaluation worker supplies a current authorized, confirmed typed map and the same frozen case handles and decision inputs used by the selected model. The context provider checks the exact original map, settings and source revision and permits comparator-specific policy context. It withholds unresolved maps and date-dependent rules when an authorized decision-time selection is unavailable. The comparator evaluates typed conditions, declared precedence and the confirmed fallback. Indeterminate or invalid inputs produce a missing prediction; REVIEW produces an abstention.
+
+For initial local provisioning the installation owner invokes `initialize_journal(private_directory)` once. The directory is private, owner-controlled and existing. The fixed file is `starter-comparator-receipts.sqlite3`. The trusted factory provides a stable private receipt key of at least 32 bytes. Restore the retained journal and matching key together. The evaluation factory opens existing state only. Missing or ambiguous storage holds execution.
+
+The journal seals the exact prediction request and outputs under the private key, omitting raw prompts, case fields and targets. Lookup validates current evaluator, freeze, source and map permissions even for a completed operation. Transactional retries preserve one result per request. Generated tests exercise that port against the local frozen scorer. Installed customer authorization and a protected product integration need their own evidence.
