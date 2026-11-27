@@ -5,19 +5,19 @@ Local and simulated only: no provider, protected set, ledger reservation or fit 
 
 from __future__ import annotations
 
-import builtins
-import os
+import io
 import sqlite3
+import sys
 import threading
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
 import pytest
+from opentour_cell.pilot import comparison_plan
 from opentour_cell.pilot import repair_routing as rr
-from opentour_cell.pilot import source_intake
 from opentour_cell.pilot.operating_point import canonical, digest
-from opentour_cell.pilot.simple_repair import declared_rule
+from opentour_cell.pilot.simple_repair import RepairError, declared_rule
 
 AS_OF = 10_000
 MODEL = rr.ModelTarget("simulated:model-a", "label_correction", "generated-capability-1")
@@ -604,6 +604,136 @@ def test_sufficient_simple_repair_without_scheduling_is_refused(
     assert scheduled["fit_starts"] == 0
 
 
+def test_an_empty_protected_population_is_not_a_scheduled_comparison(
+    store: rr.RepairRoutingStore,
+) -> None:
+    # freeze_plan accepts an empty population, so without a check of its own the simple route
+    # would report a comparison scheduled against a plan frozen over zero members.
+    empty = rr.ComparisonScheduling(
+        digest("generated-intake"), (), "generated-incumbent-1", "generated-audience"
+    )
+    held = store.evaluate(request(data_fix(), scheduling=empty))
+    assert (held["outcome"], held["reason_code"]) == (
+        "request_evidence",
+        "comparison_scheduling_required",
+    )
+    assert held["comparison_scheduled"] is False and held["comparison_plan_revision"] is None
+    assert held["frozen_arm"] is None
+
+
+def test_a_slice_failure_also_names_the_missing_population(
+    store: rr.RepairRoutingStore,
+) -> None:
+    # The slice failure keeps precedence, but a caller missing both learns both in one trip.
+    both = store.evaluate(
+        request(data_fix(), t=terms(critical_slices=("bucket:q",)), run="generated-run-a")
+    )
+    assert (both["outcome"], both["reason_code"]) == (
+        "request_evidence",
+        "critical_slice_unobserved",
+    )
+    assert both["next_evidence"] == [
+        "supply_independent_evidence",
+        "provide_comparison_scheduling",
+    ]
+    only_slice = store.evaluate(
+        request(
+            data_fix(),
+            t=terms(critical_slices=("bucket:q",)),
+            run="generated-run-b",
+            scheduling=scheduling(),
+        )
+    )
+    assert only_slice["next_evidence"] == ["supply_independent_evidence"]
+
+
+@pytest.mark.parametrize(
+    ("kw", "error", "code"),
+    [
+        ({"mandate": mandate(withdrawn=True)}, rr.RoutingError, "STANDING_MANDATE_UNAVAILABLE"),
+        ({"mandate": mandate(expired=True)}, rr.RoutingError, "STANDING_MANDATE_UNAVAILABLE"),
+        (
+            {"mandate": mandate(uses=frozenset({"inspect"}))},
+            rr.RoutingError,
+            "EVALUATION_NOT_AUTHORIZED",
+        ),
+        ({"augmentation": "enabled"}, rr.RoutingError, "AUGMENTATION_NOT_SUPPORTED"),
+    ],
+)
+def test_replay_cannot_return_what_a_fresh_decision_would_refuse(
+    store: rr.RepairRoutingStore, kw: dict[str, Any], error: type[Exception], code: str
+) -> None:
+    # Withdrawal, expiry and the evaluate right are in neither the evaluation key nor the input
+    # revision, so only a refusal that runs before the replay lookup can cover them.
+    sched = scheduling()
+    first = store.evaluate(request(data_fix(), scheduling=sched))
+    assert first["outcome"] == "simple_repair"
+    with pytest.raises(error, match=code):
+        rr.decide(request(data_fix(), scheduling=sched, **kw))
+    with pytest.raises(error, match=code):
+        store.evaluate(request(data_fix(), scheduling=sched, **kw))
+    assert store.count() == 1
+
+
+def test_replay_refuses_a_protected_row_or_a_tampered_rule(
+    store: rr.RepairRoutingStore,
+) -> None:
+    sched, cases = scheduling(), data_fix()
+    store.evaluate(request(cases, scheduling=sched))
+    tainted = [replace(cases[0], split="protected")] + cases[1:]
+    for refused in (rr.decide, store.evaluate):
+        with pytest.raises(rr.RoutingError, match="PROTECTED_ROW_SUPPLIED"):
+            refused(request(tainted, scheduling=sched))
+    forged = dict(rule(), mapping={"x": "b"})
+    for refused in (rr.decide, store.evaluate):
+        with pytest.raises(RepairError, match="rule_revision_mismatch"):
+            refused(request(cases, scheduling=sched, rule=forged))
+    assert store.count() == 1
+
+
+def test_replayed_fit_eligibility_rechecks_the_signature(
+    store: rr.RepairRoutingStore,
+) -> None:
+    # The verdict is a runtime check, not a digest input, so it is re-run rather than replayed.
+    first = store.evaluate(request(independent_residual()))
+    assert first["outcome"] == "fit_eligible"
+    refusing = Verifier(False)
+    with pytest.raises(rr.RoutingError, match="SIGNED_POLICY_REQUIRED"):
+        store.evaluate(request(independent_residual(), verifier=refusing))
+    assert refusing.calls == 1
+    accepting = Verifier()
+    again = store.evaluate(request(independent_residual(), verifier=accepting))
+    assert (again["replayed"], again["outcome"]) == (True, "fit_eligible")
+    assert accepting.calls == 1
+    # A replayed non-fit receipt needs no signature, so the verifier is left alone.
+    untouched = Verifier(False)
+    sched = scheduling()
+    store.evaluate(request(data_fix(), scheduling=sched, run="generated-run-s"))
+    held = store.evaluate(
+        request(data_fix(), scheduling=sched, run="generated-run-s", verifier=untouched)
+    )
+    assert (held["replayed"], held["outcome"]) == (True, "simple_repair")
+    assert untouched.calls == 0
+
+
+def test_a_stored_evaluation_from_an_older_router_is_never_replayed(
+    store: rr.RepairRoutingStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The input revision covers the request, not decide()'s logic, so a behaviour change would
+    # otherwise keep handing back a receipt the current router would no longer produce.
+    sched = scheduling()
+    first = store.evaluate(request(data_fix(), scheduling=sched))
+    assert first["router_revision"] == rr.ROUTER_REVISION
+    monkeypatch.setattr(rr, "ROUTER_REVISION", "repair-routing.decide.generated-next")
+    with pytest.raises(rr.RoutingError, match="EVALUATION_ROUTER_REVISION_CHANGED"):
+        store.evaluate(request(data_fix(), scheduling=sched))
+    assert store.count() == 1
+    monkeypatch.undo()
+    again = store.evaluate(request(data_fix(), scheduling=sched))
+    assert (again["replayed"], again["outcome"]) == (True, "simple_repair")
+    assert again["evaluation_id"] == first["evaluation_id"]
+
+
 def test_replay_with_a_different_protected_population_conflicts(
     store: rr.RepairRoutingStore,
 ) -> None:
@@ -645,25 +775,38 @@ def test_replay_with_an_unchanged_authority_still_returns_one_evaluation(
     assert store.count() == 1
 
 
+# Observed through the interpreter's audit hook rather than by patching callables. Patching
+# `builtins.open`, `os.open` and `sqlite3.connect` leaves `io.open` and `pathlib.Path.open` /
+# `.read_text` / `.read_bytes` unobserved, so a read through any of those passed as zero
+# protected reads. The `open` audit event is raised underneath all of them.
+_WATCHED = "open", "sqlite3.connect", "mmap.__new__"
+_WATCHING: list[tuple[str, str]] | None = None
+
+
+def _audit(event: str, args: tuple[object, ...]) -> None:
+    sink = _WATCHING
+    if sink is None or event not in _WATCHED:
+        return
+    try:
+        target = str(args[0]) if args else ""
+    except Exception:  # pragma: no cover - a hook that raises would break the interpreter
+        target = "<unprintable>"
+    sink.append((event, target))
+
+
+# An audit hook cannot be removed once added, so it stays installed for the session and is
+# inert whenever `_WATCHING` is None.
+sys.addaudithook(_audit)
+
+
 class _Access:
-    """Record every file, database and protected-store access, then delegate to the real call."""
+    """Record every file, database and memory-mapping access while the context is open."""
 
     def __init__(self, patch: pytest.MonkeyPatch) -> None:
         self.seen: list[tuple[str, str]] = []
-
-        def watch(kind: str, real: Any) -> Any:
-            def call(target: Any, *args: Any, **kw: Any) -> Any:
-                self.seen.append((kind, str(target)))
-                return real(target, *args, **kw)
-
-            return call
-
-        patch.setattr(builtins, "open", watch("open", builtins.open))
-        patch.setattr(os, "open", watch("os.open", os.open))
-        patch.setattr(sqlite3, "connect", watch("sqlite3.connect", sqlite3.connect))
-        for name in ("protected_inputs", "development_rows", "load_intake", "inspect_intake"):
-            reader = getattr(source_intake, name)
-            patch.setattr(source_intake, name, watch("source_intake." + name, reader))
+        # monkeypatch restores `_WATCHING` to None on context exit, re-arming the hook's
+        # inert state without relying on this object being torn down.
+        patch.setattr(sys.modules[__name__], "_WATCHING", self.seen)
 
     @property
     def kinds(self) -> set[str]:
@@ -678,8 +821,13 @@ def test_routing_opens_nothing_and_reads_no_protected_rows(
     store: rr.RepairRoutingStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # Acceptance 7, observed rather than read back from the receipt's own zero: the decision
-    # performs no file, database or protected-store access at all, and the durable path
-    # touches exactly one file, the router's private evaluation journal.
+    # performs no file, database or memory-mapping access at all, and the durable path touches
+    # exactly one file, the router's private evaluation journal.
+    #
+    # What the audit hook still cannot see, so this test does not claim it: a raw read on a
+    # descriptor that was already open before the window (including one inherited from a
+    # parent process), and protected content that is already resident in memory and so needs
+    # no syscall to reach. It proves nothing was opened, not that nothing was known.
     sched = scheduling()
     req = request(data_fix(), scheduling=sched)
     with monkeypatch.context() as patch:
@@ -694,6 +842,39 @@ def test_routing_opens_nothing_and_reads_no_protected_rows(
     with monkeypatch.context() as patch:
         watched = _Access(patch)
         stored = store.evaluate(req)
-    assert watched.kinds == {"os.open", "sqlite3.connect"}
+    assert watched.kinds == {"open", "sqlite3.connect"}
     assert watched.targets == {str(store.path)}
     assert (stored["protected_reads"], stored["fit_starts"], stored["reservations"]) == (0, 0, 0)
+
+
+@pytest.mark.parametrize("how", ["path_read_text", "path_read_bytes", "io_open", "path_open"])
+def test_the_protected_read_monitor_catches_every_read_route(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, how: str
+) -> None:
+    # Each of these four routes bypasses a patched `builtins.open` / `os.open`, so the monitor
+    # has to observe the `open` audit event underneath them rather than the callables.
+    sentinel = tmp_path / "generated-protected-rows.jsonl"
+    sentinel.write_text('{"case_id":"generated-protected-1","label":"a"}\n')
+    real = comparison_plan.freeze_plan
+    read: dict[str, object] = {}
+
+    def leaky(**kw: Any) -> Any:
+        if how == "path_read_text":
+            read["rows"] = sentinel.read_text()
+        elif how == "path_read_bytes":
+            read["rows"] = sentinel.read_bytes()
+        elif how == "io_open":
+            with io.open(sentinel) as handle:  # noqa: UP020 - the point is this exact route
+                read["rows"] = handle.read()
+        else:
+            with sentinel.open() as handle:
+                read["rows"] = handle.read()
+        return real(**kw)
+
+    monkeypatch.setattr(comparison_plan, "freeze_plan", leaky)
+    req = request(data_fix(), scheduling=scheduling())
+    with monkeypatch.context() as patch:
+        watched = _Access(patch)
+        rr.decide(req)
+    assert read["rows"]
+    assert ("open", str(sentinel)) in watched.seen
