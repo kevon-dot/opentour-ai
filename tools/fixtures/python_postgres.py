@@ -35,8 +35,10 @@ TARGETS = {
     PILOT_POSTGRES: "OPE-142",
 }
 INTAKE_TLS = "services/cell-runtime/tests/pilot/test_tls_intake.py"
+HANDOFF_TLS = "services/cell-runtime/tests/pilot/recipient_handoff_tls_fixture.py"
 TLS_TARGETS = {
     INTAKE_TLS: "OPE-537",
+    HANDOFF_TLS: "OPE-415",
     "services/control-api/tests/auth/test_browser_private_listener.py": "OPE-142",
     "services/control-api/tests/auth/test_browser_private_pilot_listener.py": "OPE-142",
     PILOT_POSTGRES: "OPE-142",
@@ -86,6 +88,20 @@ def source_paths(target: str) -> tuple[str, ...]:
             "services/cell-runtime/src/opentour_cell/pilot/intake_mcp.py",
             "services/cell-runtime/src/opentour_cell/pilot/intake_local.py",
             "services/cell-runtime/src/opentour_cell/pilot/intake_admission.py",
+            "tools/build_slack_pilot_kit.py",
+        )
+    if target == HANDOFF_TLS:
+        paths += (
+            "services/cell-runtime/integrations/zapier/handoff-recipe-v2.json",
+            "services/cell-runtime/src/opentour_cell/pilot/handoff_connection.py",
+            "services/cell-runtime/src/opentour_cell/pilot/handoff_https.py",
+            "services/cell-runtime/src/opentour_cell/pilot/local_handoff_permissions.py",
+            "services/cell-runtime/src/opentour_cell/pilot/recipient_delivery.py",
+            "services/cell-runtime/src/opentour_cell/pilot/release_authority.py",
+            "services/cell-runtime/src/opentour_cell/pilot/release_outbox.py",
+            "services/cell-runtime/src/opentour_cell/pilot/repair_bundle.py",
+            "services/cell-runtime/tests/pilot/test_recipient_handoff_simulator.py",
+            "services/cell-runtime/tests/pilot/test_repair_bundle.py",
             "tools/build_slack_pilot_kit.py",
         )
     if target == PILOT_POSTGRES:

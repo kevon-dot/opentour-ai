@@ -1,0 +1,98 @@
+{
+  "revision": "opentour.approved-handoff.v2",
+  "artifact_kind": "manual_builder_field_map",
+  "enabled_by_default": false,
+  "production_activation": false,
+  "provider_import_qualified": false,
+  "installed_provider_witness": false,
+  "evidence_level": "generated_local_contract",
+  "trigger": {
+    "app": "Webhooks by Zapier",
+    "event": "Catch Hook",
+    "alias": "release_outbox",
+    "source": "committed_worker_release_outbox",
+    "fields": ["release_ref"]
+  },
+  "connection": {
+    "app": "API by Zapier",
+    "role": "per_tenant_handoff_dispatcher",
+    "authentication_type": "Static Headers (API key)",
+    "credential_location": "dedicated_app_connection_only",
+    "static_headers": {
+      "Authorization": "Bearer {operator_configured_private_dispatcher_credential}",
+      "X-OpenTour-Audience": "{owner_bound_handoff_audience}"
+    },
+    "domain_filter": "{exact_owner_bound_handoff_hostname}",
+    "wildcard_domains": false,
+    "shared_with_intake": false,
+    "test_url": null
+  },
+  "action": {
+    "app": "API by Zapier",
+    "event": "API Request",
+    "alias": "dispatch_handoff",
+    "builder_fields": {
+      "Method": "POST",
+      "URL": "{owner_bound_https_handoff_origin}/v1/handoff/dispatch",
+      "Query String Parameters": {},
+      "Headers": {"Content-Type": "application/json"},
+      "Body": "{\"release_ref\":\"{{release_outbox.release_ref}}\"}"
+    },
+    "dynamic_input_fields": ["release_ref"],
+    "caller_supplied_origin_required": false
+  },
+  "request_schema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["release_ref"],
+    "properties": {
+      "release_ref": {
+        "type": "string",
+        "minLength": 56,
+        "maxLength": 56,
+        "pattern": "^release-[0-9a-f]{48}$"
+      }
+    }
+  },
+  "response": {
+    "schema_version": "opentour.pilot.handoff-dispatch.v1",
+    "fields": ["schema_version", "release_ref", "state", "receiver_receipt_ref", "owner_action"],
+    "states": ["queued", "delivery_unconfirmed", "delivered"],
+    "denial": {"error": "private_handoff_unavailable"},
+    "provider_history": "opaque_references_and_outcomes_only"
+  },
+  "recovery": {
+    "retry_identity": "same_release_ref",
+    "unknown_outcome": "worker_reconciles_independent_receiver_state_or_holds",
+    "zap_receiver_operations": [],
+    "delivery_requires": "worker_verified_independent_receiver_receipt",
+    "recipient_replay": "separate_recipient_identity_and_evidence",
+    "rollback": "separate_current_authority_and_independent_readback",
+    "revocation": "revoke_dispatcher_credential_at_worker_and_disable_zap"
+  },
+  "manual_assembly": [
+    "This file is a local field map, not an import payload or an installed Zap. Keep the Zap draft/off.",
+    "Name the trigger release_outbox. The committed outbox publisher sends one object containing only release_ref; the hook URL is private installation state.",
+    "Create a dedicated API by Zapier connection using Static Headers (API key). The operator enters the bearer credential and bound audience inside that connection and restricts its domain filter to the exact worker hostname.",
+    "Name the API Request step dispatch_handoff. Enter the fixed owner-approved HTTPS URL, POST method and explicit JSON body. In the Builder select the trigger's release_ref output for the body token; aliases here identify steps, not provider action IDs.",
+    "Keep query parameters empty. Do not map the endpoint, credentials, audience, actor, tenant, destination, artifact, approval or activation from the trigger. The worker resolves them under current local authority.",
+    "Do not use the dispatch route as a connection Test URL. Any trigger/action test can perform work and needs its own authorized generated installation scope.",
+    "After separately authorized installation, record the pinned app/action revision, account and connection scope, Zap version, worker/package digest, origin and redacted task history. Verify denial, replay and independent receiver readback before claiming installed qualification."
+  ],
+  "limitations": [
+    "API by Zapier is a premium beta app; its availability and an existing eligible plan must be verified before installation. This mapping provisions nothing.",
+    "Webhooks Custom Request is not used for the dispatch action because its credential fields are stored in the Zap step rather than a dedicated app connection.",
+    "No provider action ID, authentication ID, import ABI or disabled imported instance has been discovered or validated. Manual Builder assembly is documented; provider deployment and execution remain unverified.",
+    "The Catch Hook is an event signal, not release authority. A hook acknowledgement, HTTP 200 or successful Zap task does not prove artifact delivery, recipient replay or rollback.",
+    "Mapped JSON must remain valid after interpolation. This map forwards no raw source, bundle, recipient credential, signed fetch permit or private path through Zapier.",
+    "Unknown transport or receiver outcomes retain the same release reference. The worker reconciles or holds; the Zap never sends to, fetches from, activates or rolls back the receiver."
+  ],
+  "documentation_checked_on": "2026-11-27",
+  "documentation_sources": [
+    "https://help.zapier.com/hc/en-us/articles/8496288690317-Trigger-Zap-workflows-from-webhooks",
+    "https://help.zapier.com/hc/en-us/articles/44391650357005-Send-API-requests-in-Zap-workflows",
+    "https://help.zapier.com/hc/en-us/articles/44391660158733-How-to-get-started-with-API-by-Zapier",
+    "https://help.zapier.com/hc/en-us/articles/44391646192397-Ways-to-make-API-requests-in-Zapier"
+  ]
+}
