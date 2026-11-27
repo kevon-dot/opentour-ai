@@ -60,6 +60,7 @@ class ConfirmedBranch:
     citations: tuple[str, ...]
     scoring_rule: str
     critical: bool = False
+    coverage_actions: tuple[str, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -76,6 +77,15 @@ class ConfirmedStarterMap:
     settings_revision: str
     branches: tuple[ConfirmedBranch, ...]
     frozen_plan: FrozenPlan
+
+
+def _scope_record(scope: ConfirmedStarterMap) -> Json:
+    """Preserve pre-coverage-contract identities when the optional field is absent."""
+    record = asdict(scope)
+    for branch in record["branches"]:
+        if branch["coverage_actions"] is None:
+            del branch["coverage_actions"]
+    return record
 
 
 class StarterConfirmation(Protocol):
@@ -169,6 +179,17 @@ class StarterCases:
         _require(self.confirmation is not None, "confirmed_starter_map_unavailable")
         assert self.confirmation is not None
         with self.confirmation.guard(actor, work, purpose=purpose) as scope:
+            for branch in scope.branches:
+                _require(
+                    branch.coverage_actions is None
+                    or (
+                        isinstance(branch.coverage_actions, tuple)
+                        and bool(branch.coverage_actions)
+                        and len(set(branch.coverage_actions)) == len(branch.coverage_actions)
+                        and set(branch.coverage_actions) <= set(branch.allowed_actions)
+                    ),
+                    "invalid_starter_coverage_contract",
+                )
             _require(
                 scope.tenant == actor.tenant
                 and scope.work == work
@@ -247,12 +268,12 @@ class StarterCases:
 
     @staticmethod
     def _ref(scope: ConfirmedStarterMap) -> str:
-        return "starter-" + digest(asdict(scope))[:40]
+        return "starter-" + digest(_scope_record(scope))[:40]
 
     def _load(self, db: sqlite3.Connection, scope: ConfirmedStarterMap) -> Json:
         ref = self._ref(scope)
         row = db.execute("SELECT * FROM packs WHERE ref=?", (ref,)).fetchone()
-        _require(row is not None and row["scope"] == canonical(asdict(scope)))
+        _require(row is not None and row["scope"] == canonical(_scope_record(scope)))
         assert row is not None
         return self._validated_pack(db, row)
 
@@ -297,7 +318,7 @@ class StarterCases:
         only for the same tenant/epoch/workflow. A changed scope cannot hide a pack
         because its immutable reference is derived from that complete scope.
         """
-        key = self._scope_key(asdict(scope))
+        key = self._scope_key(_scope_record(scope))
         known = set()
         relevant = set()
         for row in db.execute("SELECT ref,scope FROM packs"):
@@ -421,7 +442,7 @@ class StarterCases:
                 body = dict(cases=rows, revision=0, operations={}, frozen=None)
                 db.execute(
                     "INSERT INTO packs VALUES(?,?,?,?,?)",
-                    (ref, canonical(asdict(scope)), proposal, canonical(body), digest(body)),
+                    (ref, canonical(_scope_record(scope)), proposal, canonical(body), digest(body)),
                 )
                 return ref
 
@@ -555,7 +576,9 @@ class StarterCases:
                     ),
                 )
                 for b in scope.branches
-                for action in b.allowed_actions
+                for action in (
+                    b.allowed_actions if b.coverage_actions is None else b.coverage_actions
+                )
             )
             missing = tuple(
                 sorted(
@@ -567,7 +590,7 @@ class StarterCases:
                     }
                 )
             )
-            revision = digest([asdict(scope), cases, asdict(plan), splits])
+            revision = digest([_scope_record(scope), cases, asdict(plan), splits])
             result = FrozenStarter(
                 "starter-freeze-" + revision[:40],
                 revision,
