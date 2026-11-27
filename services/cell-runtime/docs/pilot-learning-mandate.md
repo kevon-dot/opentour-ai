@@ -24,6 +24,15 @@ Enroll only against the exact active engagement in the customer’s `training.sq
 
 The ledger counts a unique admitted source pair once and reserves compute before fitting. A model attempt consumes one fit and its full reserved seconds. A timeout, unknown completion or interrupted process retains those charges. Retrying the identical source/reservation returns its existing identity. A completed artifact can be replayed without training again. A successful rule comparison spends zero fit budget. The model grant and customer source/class confirmations record delegated provenance and bind the original mandate. Status reports runs, rows, reserved fits and seconds.
 
+A local fit reservation binds the current mandate revision and pinned model
+profile to one exact intake snapshot, comparison plan, residual and compute
+limit. Equivalent calls reuse the original reservation and admitted run.
+Worker adapters may attach a retry key scoped to the authenticated client and
+delegate. The alias and reservation commit together. A changed intent under
+the same client key conflicts. If restored history contains competing
+reservations for one canonical fit, reconciliation is required before
+reserving or reporting a match.
+
 Withdraw the current mandate to stop new work, prevent later grant replay and signal any active bound model fit. A fresh owner grant can supersede the withdrawn or expired mandate while preserving the earlier budget ledger.
 
 ```sh
