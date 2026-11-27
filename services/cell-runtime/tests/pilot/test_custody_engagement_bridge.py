@@ -166,15 +166,17 @@ def test_public_custody_command_retires_epoch_and_frees_slot_for_same_directory_
     case.write()
     epoch = case.body["engagement_epoch"]
     ledger = EngagementLedger(case.directory)
-    enroll(
-        ledger,
-        "org-a",
-        epoch,
-        DECISION.lease_ref,
-        DECISION.checkpoint,
-        resources=(DECISION.resource, OUTCOME.resource),
-    )
-    ledger.activate("org-a", epoch)
+    if ledger.get("org-a", epoch) is None:  # the fixture may already enroll its epoch
+        enroll(
+            ledger,
+            "org-a",
+            epoch,
+            DECISION.lease_ref,
+            DECISION.checkpoint,
+            resources=(DECISION.resource, OUTCOME.resource),
+        )
+        ledger.activate("org-a", epoch)
+    assert ledger.get("org-a", epoch).state == "active"
     assert case.connect()
 
     command = [
