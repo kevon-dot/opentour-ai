@@ -80,7 +80,10 @@ def encode(tokenizer: Any, messages: list[dict[str, str]], *, generation: bool) 
     rendered = tokenizer.apply_chat_template(
         messages, tokenize=False, add_generation_prompt=generation
     )
-    return tokenizer.encode(rendered, add_special_tokens=False, truncation=False)
+    tokens = tokenizer.encode(rendered, add_special_tokens=False, truncation=False)
+    if not isinstance(tokens, list) or not all(type(token) is int for token in tokens):
+        raise ValueError("expected_integer_token_ids")
+    return tokens
 
 
 def completion_example(
@@ -140,12 +143,12 @@ def fit_examples(tokenizer: Any, rows: Any, protected: Any) -> list[dict[str, li
 
 
 def load_model(torch: Any, model_dir: Path) -> tuple[Any, Any]:
-    from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
+    transformers = importlib.import_module("transformers")
 
-    options = BitsAndBytesConfig(
+    options = transformers.BitsAndBytesConfig(
         load_in_4bit=True, bnb_4bit_quant_type="nf4", bnb_4bit_compute_dtype=torch.bfloat16
     )
-    model = AutoModelForCausalLM.from_pretrained(
+    model = transformers.AutoModelForCausalLM.from_pretrained(
         model_dir,
         local_files_only=True,
         trust_remote_code=False,
@@ -154,14 +157,14 @@ def load_model(torch: Any, model_dir: Path) -> tuple[Any, Any]:
         device_map={"": 0},
         dtype=torch.bfloat16,
     )
-    tokenizer = AutoTokenizer.from_pretrained(
+    tokenizer = transformers.AutoTokenizer.from_pretrained(
         model_dir, local_files_only=True, trust_remote_code=False
     )
     return model, tokenizer
 
 
 def runtime() -> Any:
-    import torch
+    torch = importlib.import_module("torch")
 
     if not torch.cuda.is_available() or not torch.cuda.is_bf16_supported():
         raise ValueError("compatible_cuda_gpu_required")
@@ -233,7 +236,7 @@ def fit(args: argparse.Namespace) -> None:
         started = time.monotonic()
 
         def elapsed() -> float:
-            return saved["active_seconds"] + (time.monotonic() - started)
+            return float(saved["active_seconds"]) + (time.monotonic() - started)
 
         try:
             train(training, run, saved, elapsed)
@@ -254,7 +257,7 @@ def train(
     args: argparse.Namespace, run: Run, saved: dict[str, Any], elapsed: Callable[[], float]
 ) -> None:
     torch = runtime()
-    from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
+    peft = importlib.import_module("peft")
 
     base_hashes = verify_base(args.model_dir)
     rows, protected = read_file(args.development), read_file(args.protected_membership)
@@ -262,11 +265,11 @@ def train(
     torch.cuda.reset_peak_memory_stats()
     model, tokenizer = load_model(torch, args.model_dir)
     examples = fit_examples(tokenizer, rows, protected)
-    model = prepare_model_for_kbit_training(model, use_gradient_checkpointing=True)
+    model = peft.prepare_model_for_kbit_training(model, use_gradient_checkpointing=True)
     model.config.use_cache = False
-    model = get_peft_model(
+    model = peft.get_peft_model(
         model,
-        LoraConfig(
+        peft.LoraConfig(
             task_type="CAUSAL_LM",
             r=LORA_RANK,
             lora_alpha=LORA_ALPHA,
@@ -428,7 +431,7 @@ def publish_candidate(candidate: Path, output: Path) -> None:
 
 
 def replay(args: argparse.Namespace) -> None:
-    from peft import PeftModel
+    peft = importlib.import_module("peft")
 
     torch = runtime()
     base_hashes = verify_base(args.model_dir)
@@ -438,7 +441,7 @@ def replay(args: argparse.Namespace) -> None:
     if manifest["adapter_files"] != file_hashes(args.adapter, ADAPTER_FILES):
         raise ValueError("adapter_digest_mismatch")
     model, tokenizer = load_model(torch, args.model_dir)
-    model = PeftModel.from_pretrained(model, args.adapter, is_trainable=False)
+    model = peft.PeftModel.from_pretrained(model, args.adapter, is_trainable=False)
     model.eval()
     device = model.get_input_embeddings().weight.device
     results = []
@@ -485,7 +488,10 @@ def generate(model: Any, tokenizer: Any, input_ids: Any, max_new_tokens: int) ->
         max_new_tokens=max_new_tokens,
         pad_token_id=tokenizer.eos_token_id,
     )
-    return tokenizer.decode(output[0, input_ids.shape[1] :], skip_special_tokens=True)
+    text = tokenizer.decode(output[0, input_ids.shape[1] :], skip_special_tokens=True)
+    if not isinstance(text, str):
+        raise ValueError("expected_decoded_text")
+    return text
 
 
 def main() -> None:
