@@ -79,6 +79,7 @@ MODULES = (
     "opentour_cell/pilot/engagement_epochs.py",
     "opentour_cell/pilot/live_authority.py",
     "opentour_cell/pilot/live_evidence.py",
+    "opentour_cell/pilot/live_outcome_history.py",
     "opentour_cell/pilot/verifier_form.py",
     "opentour_cell/pilot/live_reader.py",
     "opentour_cell/pilot/live_readiness.py",

@@ -10,7 +10,7 @@ import os
 import re
 import sqlite3
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
@@ -98,7 +98,46 @@ class PrivateLiveAuthority:
         _require(directory.is_absolute() and directory.resolve(strict=True) == directory)
         self.path = directory / f"live-authority-{workflow_ref}.json"
 
-    def _document(self) -> dict[str, Any]:
+    @staticmethod
+    def _archive_mac(key: bytes, revision: str, body: dict[str, Any]) -> str:
+        purpose = hmac.digest(key, b"opentour.live-aggregate-archive.v1", "sha256")
+        return hmac.digest(purpose, _canonical([revision, body]).encode(), "sha256").hex()
+
+    def _seal_snapshot_archive(self, scope: LiveScope, body: dict[str, Any]) -> dict[str, str]:
+        document, key = self._authenticated_document()
+        _require(scope.authority_revision == _digest(document))
+        mac = self._archive_mac(key, scope.authority_revision, body)
+        # Check again inside the live writer, before it can commit the page or form.
+        _require(self._authenticated_document() == (document, key))
+        return {
+            "version": "v1",
+            "authority_revision": scope.authority_revision,
+            "mac": mac,
+        }
+
+    def _verify_snapshot_archive(self, body: dict[str, Any], seal: Any) -> Callable[[], None]:
+        _require(isinstance(seal, dict) and set(seal) == {"version", "authority_revision", "mac"})
+        _require(
+            seal["version"] == "v1"
+            and all(
+                isinstance(seal[k], str) and re.fullmatch("[0-9a-f]{64}", seal[k])
+                for k in ("authority_revision", "mac")
+            )
+        )
+        document, key = self._authenticated_document()
+        _require(
+            hmac.compare_digest(
+                seal["mac"], self._archive_mac(key, seal["authority_revision"], body)
+            )
+        )
+
+        def revalidate() -> None:
+            _require(self._authenticated_document() == (document, key))
+
+        revalidate()
+        return revalidate
+
+    def _authenticated_document(self) -> tuple[dict[str, Any], bytes]:
         keys = _read_private(self.directory / "live-authority-key.json", 4096)
         envelope = _read_private(self.path, 32768)
         _require(set(keys) == {"key"} and set(envelope) == {"grant", "seal_sha256"})
@@ -164,7 +203,10 @@ class PrivateLiveAuthority:
                     for g in body["grants"]
                 )
             )
-        return dict(body)
+        return dict(body), bytes.fromhex(key)
+
+    def _document(self) -> dict[str, Any]:
+        return self._authenticated_document()[0]
 
     def engagement_gate(self, scope: LiveScope) -> EngagementLedger:
         """Open the engagement ledger; always enforcing, never None.

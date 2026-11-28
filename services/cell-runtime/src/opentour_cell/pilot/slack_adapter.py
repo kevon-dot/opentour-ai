@@ -149,6 +149,7 @@ ACTIONS = {
     "ot_nominate_verifier",
     "ot_week_bind",
     "ot_week_scopes",
+    "ot_week_history",
     "ot_current_training",
     "ot_readiness_proof",
     "ot_training_scopes",
@@ -2988,6 +2989,56 @@ class Workbench:
             self.on_decision()
         self._home(cfg, actor, view, ctx["job"], old_hash)
 
+    def _verification_history(
+        self,
+        cfg: Settings,
+        actor: str,
+        view: str,
+        selected: Json,
+        old_hash: str,
+    ) -> None:
+        from opentour_cell.pilot.live_outcome_history import (
+            HistoryScope,
+            HistoryWindow,
+            OutcomeHistory,
+            compare_snapshots,
+        )
+
+        workflow = selected["workflow"]
+        start = datetime.fromtimestamp(selected["week_start"], UTC).date()
+        window = HistoryWindow(start, start + timedelta(days=6), "UTC")
+
+        def read() -> OutcomeHistory:
+            current = self.settings()
+            _check(
+                current.permission(actor, "inspect", selected["dataset"])["aggregate"]
+                and self._live_workflow(current, actor) == workflow
+            )
+            scope = HistoryScope(
+                current.organization,
+                workflow,
+                selected["epoch"],
+                selected["dataset"],
+                selected["dataset_revision"],
+            )
+            return compare_snapshots(
+                current.directory,
+                IntakePrincipal(current.organization, actor, "slack"),
+                scope,
+                window,
+                historical_sequence=selected["sequence"],
+                historical_evidence_revision=selected["revision"],
+            )
+
+        comparison = read()
+        token = self.journal.context(actor, cfg.channel, view, "current_week")
+        self._show(
+            view,
+            self.views.verification_history(token, comparison),
+            old_hash,
+            authorize=lambda: _check(read() == comparison),
+        )
+
     def _live_summary(self, actor: str) -> Json | None:
         cfg = self.settings(check_engagement=False)
         try:
@@ -3004,6 +3055,11 @@ class Workbench:
                     "workflow": workflow,
                     "dataset": scope.dataset_ref,
                     "revision": snapshot.evidence_revision,
+                    "sequence": snapshot.sequence,
+                    "verifier_bound": snapshot.verifier_bound,
+                    "quarantined": snapshot.quarantined,
+                    "engagement": scope.engagement_epoch,
+                    "dataset_revision": scope.dataset_revision,
                     "decisions": snapshot.decisions,
                     "verified": snapshot.verified,
                     "pending": snapshot.pending,
@@ -3030,11 +3086,12 @@ class Workbench:
 
     def _readiness(self, actor: str) -> Json | None:
         from opentour_cell.pilot.readiness_selection import open_readiness
+        from opentour_cell.pilot.status_questions import ReadinessScope, project_training_readiness
 
         cfg = self.settings(check_engagement=False)
         try:
             workflow = self._live_workflow(cfg, actor)
-            with self._live_scope(actor, workflow) as (principal, _, scope):
+            with self._live_scope(actor, workflow) as (principal, live, scope):
                 _check(
                     scope.can_inspect
                     and cfg.permission(actor, "inspect", scope.dataset_ref)["aggregate"]
@@ -3047,6 +3104,20 @@ class Workbench:
                     receipt["dataset_ref"] == scope.dataset_ref
                     and receipt["dataset_revision"] == scope.dataset_revision
                 )
+                snapshot = live.snapshot(principal, workflow)
+                projected = project_training_readiness(
+                    receipt,
+                    scope=ReadinessScope(
+                        cfg.organization,
+                        workflow,
+                        scope.engagement_epoch,
+                        scope.dataset_ref,
+                        scope.dataset_revision,
+                        snapshot.evidence_revision,
+                    ),
+                    as_of=int(time.time()),
+                )
+                _check(not projected.held)
                 if receipt["next_action"] == "bind_verifier" and not (
                     scope.can_bind and any(g.kind == "independent_outcome" for g in scope.grants)
                 ):
@@ -4162,15 +4233,39 @@ class Workbench:
                 )
                 self._live_view(cfg, actor, view, workflow, old_hash, verifier_only=True)
                 return
-            token = self.journal.context(actor, cfg.channel, view, "current_week", revision=pin)
+            summary = weekly_facts["summary"]
+            history = ""
+            if (
+                summary
+                and summary["sequence"]
+                and summary["verifier_bound"]
+                and not (summary["disputed"] or summary["quarantined"])
+            ):
+                history = _json(
+                    {
+                        "workflow": workflow,
+                        "epoch": summary["engagement"],
+                        "dataset": summary["dataset"],
+                        "dataset_revision": summary["dataset_revision"],
+                        "sequence": summary["sequence"],
+                        "revision": summary["revision"],
+                        "week_start": weekly_facts["week_start"],
+                    }
+                )
+            token = self.journal.context(actor, cfg.channel, view, "current_week", history, pin)
             self._show(
                 view,
-                self.views.weekly_question(token, workflow, weekly_facts, pin),
+                self.views.weekly_question(
+                    token, workflow, weekly_facts, pin, history=bool(history)
+                ),
                 old_hash,
                 authorize=lambda: _check(
                     self._current_question(actor, StatusTopic.LIVE_ERRORS) == weekly
                 ),
             )
+        elif action == "ot_week_history":
+            _check(ctx["kind"] == "current_week" and value == ctx["revision"] and ctx["job"])
+            self._verification_history(cfg, actor, view, json.loads(ctx["job"]), old_hash)
         elif action == "ot_week_scopes":
             _check(ctx["kind"] == "current_week" and value == "scopes")
             self._regression_picker(cfg, actor, view, old_hash, topic=StatusTopic.LIVE_ERRORS.value)
