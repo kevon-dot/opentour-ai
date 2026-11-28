@@ -609,3 +609,150 @@ def test_row_absent_when_the_closeout_opened_keeps_existing_behaviour(tmp_path: 
     assert fences(directory) == []
     assert (directory / "engagement-epochs.sqlite3").read_bytes() == before
     assert Closeout(directory, ORG).reconcile()["reconciled"] is True
+
+
+def settle_receipt_only(directory: Path) -> dict:
+    closeout = Closeout(directory, ORG)
+    for item, kind, disposition in (
+        ("inventory-review", "inventory", "inventory_verified"),
+        ("support-handoff", "support", "handoff_confirmed"),
+    ):
+        closeout.record(
+            item=item,
+            kind=kind,
+            disposition=disposition,
+            owner="audit-owner",
+            due="2040-04-01",
+            evidence="generated-receipt",
+        )
+    return closeout.finish(custodian="custodian-a", evidence="generated-closure", receipt_only=True)
+
+
+def test_journal_without_its_database_holds_and_is_not_recreated(tmp_path: Path) -> None:
+    # S1b: an earlier epoch's fence is journaled; the database is gone before the closeout opens.
+    directory = private(tmp_path / ORG)
+    epoch = LocalTrainingStore(directory / "training.sqlite3", ORG).engagement_id
+    ledger = EngagementLedger(directory)
+    enroll(ledger, ORG, "earlier-epoch", "lease-0", 5)
+    ledger.activate(ORG, "earlier-epoch")
+    ledger.retire(ORG, "earlier-epoch")
+    enroll(ledger, ORG, epoch, "lease-a", 40)
+    ledger.activate(ORG, epoch)
+    (directory / "engagement-epochs.lock").unlink()  # isolate the journal-only path
+    database = directory / "engagement-epochs.sqlite3"
+    database.unlink()
+    with pytest.raises(CustodyError, match="engagement_ledger_unavailable"):
+        Closeout(directory, ORG).withdraw(**START)
+    assert not database.exists()  # reconcile did not recreate an empty ledger
+    assert Closeout(directory, ORG).status()["reconciled"] is False
+    assert len(fences(directory)) == 1
+
+
+def test_zero_byte_ledger_database_holds(tmp_path: Path) -> None:
+    # S2: a truncated ledger is not an empty ledger.
+    directory, epoch = engaged(tmp_path)
+    database = directory / "engagement-epochs.sqlite3"
+    database.write_bytes(b"")
+    with pytest.raises(CustodyError, match="engagement_ledger_unavailable"):
+        Closeout(directory, ORG).withdraw(**START)
+    with closing(sqlite3.connect(database)) as db:  # no schema was created over it
+        assert db.execute("SELECT count(*) FROM sqlite_master").fetchone()[0] == 0
+    assert Closeout(directory, ORG).status()["reconciled"] is False
+
+
+@pytest.mark.parametrize("trace", ["engagement-epochs.lock", "live-evidence.sqlite3"])
+def test_ledger_deleted_while_its_traces_remain_holds(tmp_path: Path, trace: str) -> None:
+    # S11: the ledger is gone before the closeout opens, but the directory shows it was used.
+    directory, epoch = engaged(tmp_path)
+    if trace == "engagement-epochs.lock":
+        with EngagementLedger(directory).pin():  # what every pinned live write leaves behind
+            pass
+    else:
+        (directory / trace).write_bytes(b"")
+        (directory / trace).chmod(0o600)
+    assert (directory / trace).exists()
+    (directory / "engagement-epochs.sqlite3").unlink()
+    with pytest.raises(CustodyError, match="engagement_ledger_unavailable"):
+        Closeout(directory, ORG).withdraw(**START)
+    assert closeout_ledger_state(directory) == "present"
+    assert Closeout(directory, ORG).status()["reconciled"] is False
+    assert not (directory / "engagement-epochs.sqlite3").exists()
+
+
+def test_older_backup_restored_before_the_closeout_opens_holds(tmp_path: Path) -> None:
+    # S6: the restore itself takes the epoch lock, so the missing row is a hold, not a skip.
+    directory = private(tmp_path / ORG)
+    epoch = LocalTrainingStore(directory / "training.sqlite3", ORG).engagement_id
+    ledger = EngagementLedger(directory)
+    older = tmp_path / "older.sqlite3"
+    ledger.backup(older)
+    enroll(ledger, ORG, epoch, "lease-a", 10)
+    ledger.activate(ORG, epoch)
+    ledger.restore_backup(older)
+    with pytest.raises(CustodyError, match="engagement_ledger_unavailable"):
+        Closeout(directory, ORG).withdraw(**START)
+    assert Closeout(directory, ORG).status()["reconciled"] is False
+
+
+def test_busy_ledger_at_open_refuses_instead_of_recording_a_guess(tmp_path: Path) -> None:
+    directory, epoch = engaged(tmp_path)
+    holder = sqlite3.connect(directory / "engagement-epochs.sqlite3", isolation_level=None)
+    try:
+        holder.execute("BEGIN EXCLUSIVE")
+        with pytest.raises(CustodyError, match="engagement_ledger_busy"):
+            Closeout(directory, ORG).withdraw(**START)
+    finally:
+        holder.execute("ROLLBACK")
+        holder.close()
+    # Admission stopped first; the closeout did not open on a downgraded record.
+    assert not LocalTrainingStore(directory / "training.sqlite3", ORG).engagement_active()
+    with pytest.raises(CustodyError, match="closeout_not_open"):
+        Closeout(directory, ORG).status()
+    assert raw_row(directory, ORG, epoch) == ("active", None, 0)
+    # The caller retries once the ledger is free.
+    assert Closeout(directory, ORG).withdraw(**START)["reconciled"] is True
+    assert closeout_ledger_state(directory) == "bound"
+    assert_retired_once(directory, epoch)
+
+
+def test_ledger_present_at_open_without_the_row_must_stay_present(tmp_path: Path) -> None:
+    directory = private(tmp_path / ORG)
+    LocalTrainingStore(directory / "training.sqlite3", ORG)
+    ledger = EngagementLedger(directory)
+    enroll(ledger, ORG, "unrelated-epoch", "lease-u", 10)
+    ledger.activate(ORG, "unrelated-epoch")
+    assert Closeout(directory, ORG).withdraw(**START)["reconciled"] is True
+    assert closeout_ledger_state(directory) == "present"
+    assert not (directory / "engagement-epochs.lock").exists()
+    (directory / "engagement-epochs.sqlite3").unlink()
+    with pytest.raises(CustodyError, match="engagement_ledger_unavailable"):
+        Closeout(directory, ORG).reconcile()
+    assert Closeout(directory, ORG).status()["reconciled"] is False
+
+
+def test_minimized_closeout_still_retires_and_requires_the_ledger(tmp_path: Path) -> None:
+    directory, epoch = engaged(tmp_path)
+    crash_withdrawal(directory, "before_fence")
+    before_retire = tmp_path / "before-retire.sqlite3"
+    EngagementLedger(directory).backup(before_retire)  # row active, slot held
+    assert Closeout(directory, ORG).reconcile()["reconciled"] is True
+    closed = settle_receipt_only(directory)
+    assert closed["state"] == "closed" and closed["retained"] == "receipt_only"
+    assert_retired_once(directory, epoch)
+
+    # Restoring the pre-retirement ledger re-applies the journaled fence but holds the slot;
+    # both minimized entry points must complete the release again.
+    for entry in ("reconcile", "withdraw"):
+        EngagementLedger(directory).restore_backup(before_retire)
+        assert raw_row(directory, ORG, epoch) == ("terminal", 1, 0)
+        closeout = Closeout(directory, ORG)
+        result = closeout.reconcile() if entry == "reconcile" else closeout.withdraw(**START)
+        assert result == closed
+        assert_retired_once(directory, epoch)
+
+    # And a minimized closeout still requires the ledger it retired.
+    (directory / "engagement-epochs.sqlite3").unlink()
+    with pytest.raises(CustodyError, match="engagement_ledger_unavailable"):
+        Closeout(directory, ORG).reconcile()
+    with pytest.raises(CustodyError, match="engagement_ledger_unavailable"):
+        Closeout(directory, ORG).withdraw(**START)

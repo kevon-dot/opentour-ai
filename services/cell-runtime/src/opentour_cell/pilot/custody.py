@@ -88,9 +88,15 @@ _PRIVATE_STATE = {
     ),
 }
 _ENGAGEMENT_LEDGER = ("engagement-epochs.sqlite3", "engagement-fences.jsonl")
+# Files that outlive a deleted ledger and show it was in use: every pinned ledger operation
+# (each live write since OPE-543's #199, every withdrawal and restore) creates the epoch lock,
+# and live evidence is only written under a ledger-required grant.
+_LEDGER_TRACES = ("engagement-epochs.lock", "live-evidence.sqlite3")
+_LEDGER_BUSY_BACKOFF = (0.05, 0.1, 0.2, 0.4, 0.8)
 # What the closeout has seen of the engagement ledger. It only ever strengthens:
-# NULL (closeout predates this record) < absent < present < row_seen (this engagement's row
-# was in the ledger when the closeout opened) < bound (this closeout retired that row).
+# NULL (closeout predates this record) < absent < present (the ledger, or one of its traces,
+# was there when the closeout opened) < row_seen (this engagement's row was in the ledger when
+# the closeout opened) < bound (this closeout retired that row).
 _LEDGER_SEEN = (None, "absent", "present", "row_seen", "bound")
 _ROW_REQUIRED = {"row_seen", "bound"}
 _SCHEMA = """
@@ -325,27 +331,43 @@ class Closeout:
     def _ledger_present(self) -> bool:
         return any(os.path.lexists(self.directory / name) for name in _ENGAGEMENT_LEDGER)
 
+    def _ledger_traces_present(self) -> bool:
+        return any(os.path.lexists(self.directory / name) for name in _LEDGER_TRACES)
+
     def _ledger_at_open(self, engagement: str) -> str:
         """Record what the ledger holds for this engagement, without creating anything.
 
         Opened read-write only so SQLite can recover an interrupted transaction; `mode=rw`
-        never creates a missing file, and only a SELECT runs. A ledger that cannot be read
-        here is recorded as present; reconcile then holds until it can be read.
+        never creates a missing file, and only a SELECT runs. A busy ledger is retried with
+        bounded backoff and then refused (`engagement_ledger_busy`, retryable): the closeout
+        does not open on a guess. Any other unreadable ledger is recorded as present, and
+        reconcile then holds until it can be read.
         """
         if not self._ledger_present():
-            return "absent"
+            return "present" if self._ledger_traces_present() else "absent"
         path = self.directory / _ENGAGEMENT_LEDGER[0]
-        try:
-            _check_file(path)
-            with closing(sqlite3.connect(path.as_uri() + "?mode=rw", uri=True, timeout=5)) as db:
-                db.execute("PRAGMA trusted_schema=OFF")
-                found = db.execute(
-                    "SELECT 1 FROM engagement WHERE org=? AND epoch=?",
-                    (self.organization, engagement),
-                ).fetchone()
-        except (TrainingError, OSError, sqlite3.Error):
-            return "present"
-        return "row_seen" if found else "present"
+        for pause in (*_LEDGER_BUSY_BACKOFF, None):
+            try:
+                _check_file(path)
+                with closing(
+                    sqlite3.connect(path.as_uri() + "?mode=rw", uri=True, timeout=0.25)
+                ) as db:
+                    db.execute("PRAGMA trusted_schema=OFF")
+                    found = db.execute(
+                        "SELECT 1 FROM engagement WHERE org=? AND epoch=?",
+                        (self.organization, engagement),
+                    ).fetchone()
+            except sqlite3.OperationalError as error:
+                if error.sqlite_errorcode not in {sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED}:
+                    return "present"
+                if pause is None:
+                    raise CustodyError("engagement_ledger_busy") from None
+                time.sleep(pause)
+                continue
+            except (TrainingError, OSError, sqlite3.Error):
+                return "present"
+            return "row_seen" if found else "present"
+        raise CustodyError("engagement_ledger_busy")  # pragma: no cover - loop always returns
 
     def _grant_requires_ledger(self) -> bool:
         """Names only: a live grant here means live work that needs the engagement ledger.
@@ -366,19 +388,25 @@ class Closeout:
         state before it frees the slot; repeating after any interruption completes the release.
 
         Enforced, else `engagement_ledger_unavailable` and the closeout stays unreconciled:
-        - a ledger present when the closeout opened (`present`) must stay present;
+        - the ledger database must exist; it is opened `existing_only`, so a journal without
+          its database holds instead of being recreated empty;
+        - a ledger present when the closeout opened, or a trace of one (`present`), must stay
+          present;
         - once this engagement's row has been seen, at open (`row_seen`) or by retiring it
           (`bound`), the row must stay in the ledger, so restoring an older backup that lacks
           it holds instead of skipping retirement;
-        - any live grant file requires a present ledger holding this engagement's row.
-        Not enforced: a ledger absent when the closeout opened, in a directory with no live
-        grant file, cannot be told apart from no ledger at all and is not required.
+        - a live grant file, the epoch lock or the live-evidence database, now or at open,
+          requires a present ledger holding this engagement's row.
+        Not enforced (fails open): this engagement's row is not in the ledger when the closeout
+        opens, and the directory has no live grant file, epoch lock or live-evidence database.
+        Retirement is then skipped as before, because nothing distinguishes that directory
+        from one where this engagement never used the ledger.
         """
         engagement = row["engagement"]
         recorded = row["engagement_ledger"] if "engagement_ledger" in row.keys() else None
         if recorded not in _LEDGER_SEEN:
             raise CustodyError("engagement_ledger_unavailable")
-        required = self._grant_requires_ledger()
+        required = self._grant_requires_ledger() or self._ledger_traces_present()
         seen = recorded
         if not self._ledger_present():
             if required or recorded in {"present", *_ROW_REQUIRED}:
@@ -386,7 +414,9 @@ class Closeout:
             seen = "absent"
         else:
             try:
-                ledger = EngagementLedger(self.directory)
+                # Never create a ledger here: a journal without its database is a hold.
+                ledger = EngagementLedger(self.directory, existing_only=True)
+                ledger.reconcile_fences()
                 if ledger.get(self.organization, engagement) is None:
                     if required or recorded in _ROW_REQUIRED:
                         raise CustodyError("engagement_ledger_unavailable")
