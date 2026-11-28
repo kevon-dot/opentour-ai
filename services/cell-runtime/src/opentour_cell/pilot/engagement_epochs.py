@@ -9,6 +9,50 @@ The withdrawal fence is also kept in an append-only, hash-chained journal outsid
 SQLite file, so restoring an older database backup re-applies every fence before work
 restarts. Unknown or unreliable lineage is a hold, never a guess. Fixtures are generated;
 this ledger makes no cross-CRM deduplication or counting claim (OPE-452/455 own that).
+
+Anti-rollback records (OPE-543). The ledger, its journal and every grant live in the
+snapshotted worker volume (`/var/lib/opentour-worker`), so restoring an older snapshot could
+bring back an engagement that was withdrawn after the snapshot, and deleting the ledger left
+nothing that showed one had existed. Two kinds of record are therefore kept outside the
+snapshot, in the anti-rollback location (`ANTI_ROLLBACK_DIRECTORY`, the worker-host state
+directory `/var/lib/opentour-antirollback`; `OPENTOUR_ANTI_ROLLBACK_DIRECTORY` overrides it):
+
+* the ledger marker, written atomically when the directory's first grant is ingested
+  (`record_engagement` on a ledger with no history) and before that ingest commits. It binds
+  the store identity: the directory's real path, its device and inode, and the random store
+  id kept in the ledger database. A marker with no ledger, or one that does not match the
+  ledger beside it, is a hold;
+* per organization, the highest revocation epoch and the engagement epoch it terminated, as a
+  forward-only record. It is written under the record lock after the fence journal entry and
+  before the database fence commits; a slot is released only once it is durable. A volume
+  whose journal is behind the record is a hold, at startup and before any live write.
+
+Both use the `opentour.pilot.trust-state.v1` record format of OPE-566's `TrustStateStore`
+(one canonical JSON file per key under `records/`, named by the key's SHA-256), with their
+own namespaces, so no format change is needed. They are written here with the standard
+library only, which keeps the packaged worker's import closure unchanged.
+
+What these records protect against, and what they do not. They defend against a snapshot
+restore or an accidental rollback of `/var/lib/opentour-worker`: they are worker-attested at
+most, labelled `worker_attested` and `snapshot_restore_only`. They are not tamper-proof. Both
+worker units run as the same uid, which can ptrace the other, rewrite the shared volume and
+wipe or rewrite the anti-rollback directory; such a process can undo all of this.
+Defending against a hostile same-uid process needs a separate uid for the anti-rollback
+writer or an external anchor (OPE-566/OPE-583), which this module does not provide.
+
+Fail-closed rules:
+* an unusable location (unset, missing, a link, not a private directory owned by this uid,
+  or inside the ledger directory) holds every ledger operation and refuses the first-grant
+  ingest before any state changes;
+* a marker that cannot be parsed exactly holds (`anti_rollback_marker_corrupt`);
+* a marker with the ledger database missing holds and creates nothing;
+* a ledger with history but no marker holds (`anti_rollback_marker_missing`). The marker is
+  never re-derived from the volume it protects: it is written before the first ingest
+  commits, so no crash produces this state; it means the anti-rollback state was lost or
+  reset, and re-baselining it needs a supervised decision this module does not make;
+* a marker with an empty ledger of the same store is the crash window between the marker
+  write and the first commit, and the ingest may proceed.
+Times recorded are the worker's own clock, never a caller's.
 """
 
 from __future__ import annotations
@@ -18,11 +62,15 @@ import hashlib
 import json
 import os
 import re
+import secrets
 import shutil
 import sqlite3
+import stat
+import time
 from collections.abc import Iterator
 from contextlib import closing, contextmanager
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -30,6 +78,33 @@ from opentour_cell.pilot.text_classifier import TrainingError
 from opentour_cell.pilot.training import _check_directory, _check_file
 
 SCHEMA = "opentour.pilot.engagement-epochs.v1"
+# Worker-host layout (OPE-577): a StateDirectory owned by the worker uid, mode 0700, outside
+# the snapshot volume. The environment variable exists for tests and non-host runs.
+ANTI_ROLLBACK_DIRECTORY: Path | None = Path("/var/lib/opentour-antirollback")
+ANTI_ROLLBACK_ENV = "OPENTOUR_ANTI_ROLLBACK_DIRECTORY"
+ANTI_ROLLBACK_ASSURANCE = "worker_attested"
+ANTI_ROLLBACK_SCOPE = "snapshot_restore_only"
+TRUST_STATE_FORMAT = "opentour.pilot.trust-state.v1"
+MARKER_NAMESPACE = "engagement_ledger_marker"
+REVOCATION_NAMESPACE = "engagement_revocation"
+_RECORDS = "records"
+_RECORD_LOCK = "pilot-trust-state.lock"  # shared with OPE-566's TrustStateStore writers
+_MAX_RECORD_BYTES = 1048576
+_RECORD_KEY = re.compile(r"[a-z][a-z0-9_]{0,63}(?::[^\x00-\x1f]{1,512})?")
+_SEQUENCE = re.compile(r"[1-9][0-9]{0,18}")
+_STORE_ID = re.compile(r"[0-9a-f]{32}")
+_DIGITS = re.compile(r"[0-9]{1,20}")
+_TIMESTAMP = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z")
+_MARKER_FIELDS = frozenset(
+    {"kind", "store_id", "directory", "device", "inode", "written_at", "assurance"}
+    | {"protects_against"}
+)
+_REVOCATION_FIELDS = frozenset(
+    {"kind", "store_id", "org", "epoch", "revocation_epoch", "recorded_at", "assurance"}
+    | {"protects_against"}
+)
+_MARKER_CORRUPT = "anti_rollback_marker_corrupt"
+_RECORD_CORRUPT = "anti_rollback_record_corrupt"
 BINDING_KINDS = ("queue", "session", "grant", "callback", "receipt", "storage")
 EFFECT_KINDS = ("decision", "read", "fit", "export")
 _REF = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}")
@@ -63,6 +138,10 @@ CREATE TABLE IF NOT EXISTS budget_reservation (
 CREATE TABLE IF NOT EXISTS fence (
  org TEXT NOT NULL, epoch TEXT NOT NULL, revocation_epoch INTEGER NOT NULL,
  PRIMARY KEY (org, epoch)
+);
+CREATE TABLE IF NOT EXISTS ledger_store (
+ singleton INTEGER PRIMARY KEY CHECK(singleton=1), store_id TEXT NOT NULL,
+ created_at INTEGER NOT NULL
 );
 """
 # Defence in depth against code bugs, not a security boundary: the worker or custodian uid
@@ -126,6 +205,261 @@ def _digest(value: object) -> str:
     return hashlib.sha256(text.encode()).hexdigest()
 
 
+# -- anti-rollback records (worker-attested; snapshot_restore_only; see module docstring) ----
+
+
+def _canonical(value: object) -> bytes:
+    """RFC 8785 bytes for the string-valued records kept here (objects and strings only)."""
+    try:
+        text = json.dumps(
+            value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False
+        )
+        return text.encode("utf-8")
+    except (TypeError, ValueError, UnicodeEncodeError):
+        raise EngagementHold("anti_rollback_record_invalid") from None
+
+
+def _worker_time() -> str:
+    now = datetime.now(UTC)
+    return now.strftime("%Y-%m-%dT%H:%M:%S.") + f"{now.microsecond // 1000:03d}Z"
+
+
+def _private_directory(path: Path) -> bool:
+    """A real directory (never a link) owned by this uid, not writable by group or others."""
+    try:
+        status = os.lstat(path)
+    except OSError:
+        return False
+    return (
+        stat.S_ISDIR(status.st_mode)
+        and status.st_uid == os.geteuid()
+        and not status.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+    )
+
+
+def marker_key(directory: Path) -> str:
+    """The marker's key: bound to the ledger directory's real path."""
+    return f"{MARKER_NAMESPACE}:{os.path.realpath(directory)}"
+
+
+def revocation_key(store_id: str, org: str) -> str:
+    """The revocation record's key: one per ledger store and organization."""
+    return f"{REVOCATION_NAMESPACE}:{store_id}:{org}"
+
+
+def record_path(location: Path, key: str) -> Path:
+    if _RECORD_KEY.fullmatch(key) is None:
+        raise EngagementHold("anti_rollback_key_invalid")
+    try:
+        name = hashlib.sha256(key.encode("utf-8")).hexdigest()
+    except UnicodeEncodeError:
+        raise EngagementHold("anti_rollback_key_invalid") from None
+    return location / _RECORDS / (name + ".json")
+
+
+def _unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result = dict(pairs)
+    if len(result) != len(pairs):
+        raise ValueError("duplicate key")
+    return result
+
+
+def _not_a_string(_value: str) -> Any:
+    raise ValueError("only strings are recorded")
+
+
+def _write_record(records: Path, name: str, body: bytes) -> None:
+    """Atomic: temporary file, fsync, rename, directory fsync. Leaves no partial record."""
+    temporary = records / (name + ".tmp")
+    try:
+        fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+        try:
+            view = memoryview(body)
+            while view:
+                view = view[os.write(fd, view) :]
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        os.replace(temporary, records / name)
+        directory = os.open(records, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    except OSError:
+        try:
+            os.unlink(temporary)
+        except OSError:
+            pass
+        raise EngagementHold("anti_rollback_unavailable") from None
+
+
+class _AntiRollback:
+    """Records kept outside the worker snapshot. Worker-attested at most; not tamper-proof."""
+
+    def __init__(self, ledger_directory: Path):
+        configured = os.environ.get(ANTI_ROLLBACK_ENV)
+        location = Path(configured) if configured else ANTI_ROLLBACK_DIRECTORY
+        if location is None or not location.is_absolute() or not _private_directory(location):
+            raise EngagementHold("anti_rollback_unavailable")
+        real, ledger = os.path.realpath(location), os.path.realpath(ledger_directory)
+        if os.path.commonpath([real, ledger]) in {real, ledger}:
+            # Inside the ledger directory (or containing it), a snapshot would carry it along.
+            raise EngagementHold("anti_rollback_inside_snapshot")
+        self.location = location
+
+    @contextmanager
+    def locked(self) -> Iterator[None]:
+        """Exclusive writer lock, acquired before any state is written."""
+        try:
+            fd = os.open(
+                self.location / _RECORD_LOCK, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600
+            )
+        except OSError:
+            raise EngagementHold("anti_rollback_unavailable") from None
+        try:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX)
+            except OSError:
+                raise EngagementHold("anti_rollback_unavailable") from None
+            yield
+        finally:
+            os.close(fd)
+
+    def _records(self, *, create: bool) -> Path | None:
+        records = self.location / _RECORDS
+        if create:
+            try:
+                records.mkdir(mode=0o700)
+            except FileExistsError:
+                pass
+            except OSError:
+                raise EngagementHold("anti_rollback_unavailable") from None
+        elif not os.path.lexists(records):
+            return None
+        if not _private_directory(records):
+            raise EngagementHold("anti_rollback_unavailable")
+        return records
+
+    def read(self, key: str, corrupt: str) -> tuple[int, dict[str, str]] | None:
+        """The record's sequence and value, None when absent, or a hold when not exact."""
+        path = record_path(self.location, key)
+        if self._records(create=False) is None:
+            return None
+        try:
+            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        except FileNotFoundError:
+            return None
+        except OSError:
+            raise EngagementHold(corrupt) from None
+        try:
+            with os.fdopen(fd, "rb") as handle:
+                if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+                    raise EngagementHold(corrupt)
+                data = handle.read(_MAX_RECORD_BYTES + 1)
+        except OSError:
+            raise EngagementHold(corrupt) from None
+        try:
+            state = json.loads(
+                data.decode("utf-8"),
+                object_pairs_hook=_unique_object,
+                parse_int=_not_a_string,
+                parse_float=_not_a_string,
+                parse_constant=_not_a_string,
+            )
+        except (ValueError, UnicodeDecodeError, RecursionError):
+            raise EngagementHold(corrupt) from None
+        if (
+            len(data) > _MAX_RECORD_BYTES
+            or not isinstance(state, dict)
+            or set(state) != {"format", "key", "sequence", "value"}
+            or state["format"] != TRUST_STATE_FORMAT
+            or state["key"] != key
+            or not isinstance(state["sequence"], str)
+            or _SEQUENCE.fullmatch(state["sequence"]) is None
+            or not isinstance(state["value"], dict)
+            or not all(isinstance(item, str) for item in state["value"].values())
+        ):
+            raise EngagementHold(corrupt)
+        try:
+            exact = _canonical(state) == data
+        except EngagementHold:
+            exact = False
+        if not exact:
+            raise EngagementHold(corrupt)
+        return int(state["sequence"]), state["value"]
+
+    def write(self, key: str, sequence: int, value: dict[str, str]) -> None:
+        """Requires `locked`. Atomic replacement in the trust-state record format."""
+        path = record_path(self.location, key)
+        body = _canonical(
+            {"format": TRUST_STATE_FORMAT, "key": key, "sequence": str(sequence), "value": value}
+        )
+        records = self._records(create=True)
+        assert records is not None
+        _write_record(records, path.name, body)
+
+
+def _identity(directory: Path) -> tuple[str, str, str]:
+    real = os.path.realpath(directory)
+    try:
+        status = os.stat(real)
+    except OSError:
+        raise EngagementHold("anti_rollback_store_mismatch") from None
+    return real, str(status.st_dev), str(status.st_ino)
+
+
+def _marker(value: dict[str, str]) -> dict[str, str]:
+    if (
+        set(value) != _MARKER_FIELDS
+        or value["kind"] != MARKER_NAMESPACE
+        or value["assurance"] != ANTI_ROLLBACK_ASSURANCE
+        or value["protects_against"] != ANTI_ROLLBACK_SCOPE
+        or _STORE_ID.fullmatch(value["store_id"]) is None
+        or _DIGITS.fullmatch(value["device"]) is None
+        or _DIGITS.fullmatch(value["inode"]) is None
+        or _TIMESTAMP.fullmatch(value["written_at"]) is None
+    ):
+        raise EngagementHold(_MARKER_CORRUPT)
+    return value
+
+
+def _bound(value: dict[str, str]) -> tuple[str, str, str, str]:
+    """What a valid marker binds: real path, device, inode and the ledger's store id."""
+    marker = _marker(value)
+    return marker["directory"], marker["device"], marker["inode"], marker["store_id"]
+
+
+def _revocation(record: tuple[int, dict[str, str]], store_id: str, org: str) -> dict[str, str]:
+    sequence, value = record
+    if (
+        set(value) != _REVOCATION_FIELDS
+        or value["kind"] != REVOCATION_NAMESPACE
+        or value["assurance"] != ANTI_ROLLBACK_ASSURANCE
+        or value["protects_against"] != ANTI_ROLLBACK_SCOPE
+        or value["store_id"] != store_id
+        or value["org"] != org
+        or value["revocation_epoch"] != str(sequence)
+        or _REF.fullmatch(value["epoch"]) is None
+        or _TIMESTAMP.fullmatch(value["recorded_at"]) is None
+    ):
+        raise EngagementHold(_RECORD_CORRUPT)
+    return value
+
+
+def ledger_marker_present(directory: Path) -> bool:
+    """Whether a ledger must exist in `directory`, as the anti-rollback marker shows.
+
+    Fails closed: True when a marker exists, or when the location or the marker cannot be
+    read. Worker-attested at most (see the module docstring); it shows that a first grant
+    was ingested here, not which engagements the ledger held.
+    """
+    try:
+        return _AntiRollback(directory).read(marker_key(directory), _MARKER_CORRUPT) is not None
+    except EngagementError:
+        return True
+
+
 @dataclass(frozen=True)
 class Engagement:
     org: str
@@ -162,8 +496,16 @@ class EngagementLedger:
         self.path = directory / "engagement-epochs.sqlite3"
         self.journal = directory / "engagement-fences.jsonl"
         self.guard_path = directory / "engagement-epochs.lock"
+        self.directory = directory
         try:
             _check_directory(self.path)
+        except (TrainingError, OSError):
+            raise EngagementError("private_store_required") from None
+        if not existing_only and not os.path.lexists(self.path):
+            # A marker shows this directory's ledger existed: never recreate it empty.
+            if _AntiRollback(directory).read(marker_key(directory), _MARKER_CORRUPT) is not None:
+                raise EngagementHold("anti_rollback_ledger_missing")
+        try:
             if not existing_only and not self.path.exists():
                 os.close(os.open(self.path, os.O_CREAT | os.O_WRONLY | os.O_NOFOLLOW, 0o600))
             _check_file(self.path)
@@ -187,7 +529,8 @@ class EngagementLedger:
             os.close(fd)
 
     @contextmanager
-    def _db(self) -> Iterator[sqlite3.Connection]:
+    def _db(self, org: str | None = None, *, verify: bool = True) -> Iterator[sqlite3.Connection]:
+        """One immediate transaction, verified against the anti-rollback records first."""
         try:
             _check_file(self.path)
         except (TrainingError, OSError):
@@ -197,6 +540,8 @@ class EngagementLedger:
             db.execute("PRAGMA trusted_schema=OFF")
             db.execute("BEGIN IMMEDIATE")
             try:
+                if verify:
+                    self._verify_anti_rollback(db, org)
                 yield db
             except BaseException:
                 db.execute("ROLLBACK")
@@ -204,12 +549,152 @@ class EngagementLedger:
             db.execute("COMMIT")
 
     def _create_schema(self) -> None:
-        with self._db() as db:
+        with self._db(verify=False) as db:
             for statement in _SCHEMA_SQL.split(";"):
                 if statement.strip():
                     db.execute(statement)
             for trigger in _TRIGGERS:
                 db.execute(trigger)
+            db.execute(
+                "INSERT OR IGNORE INTO ledger_store VALUES (1,?,?)",
+                (secrets.token_hex(16), int(time.time())),
+            )
+            # Inside the same transaction: a refused open leaves the schema untouched.
+            self._verify_anti_rollback(db)
+
+    def _history(self, db: sqlite3.Connection) -> bool:
+        """Whether this volume shows any ingest: an engagement, a fence or a journal entry."""
+        tables = self._tables(db)
+        return bool(self._journal_entries()) or any(
+            db.execute(f"SELECT 1 FROM {table} LIMIT 1").fetchone() is not None
+            for table in ("engagement", "fence")
+            if table in tables
+        )
+
+    @staticmethod
+    def _tables(db: sqlite3.Connection) -> set[str]:
+        return {r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+
+    def _store_id(self, db: sqlite3.Connection) -> str | None:
+        if "ledger_store" not in self._tables(db):
+            return None
+        row = db.execute("SELECT store_id FROM ledger_store WHERE singleton=1").fetchone()
+        return None if row is None else str(row[0])
+
+    def _verify_anti_rollback(self, db: sqlite3.Connection, org: str | None = None) -> None:
+        """Hold unless this volume matches the records kept outside its snapshot.
+
+        Runs at startup and before every ledger operation, live writes included. The marker
+        must match this store when the ledger has history; every organization's journal must
+        reach its recorded highest revocation epoch, naming the same engagement epoch.
+        """
+        entries = self._journal_entries()
+        tables = self._tables(db)
+        orgs = {entry["org"] for entry in entries}
+        for table in ("engagement", "fence"):
+            if table in tables:
+                orgs |= {r[0] for r in db.execute(f"SELECT DISTINCT org FROM {table}")}
+        if isinstance(org, str) and _REF.fullmatch(org) is not None:
+            orgs.add(org)
+        store = _AntiRollback(self.directory)
+        marker = store.read(marker_key(self.directory), _MARKER_CORRUPT)
+        if marker is None:
+            if self._history(db):
+                raise EngagementHold("anti_rollback_marker_missing")
+            return
+        if marker[0] != 1:
+            raise EngagementHold(_MARKER_CORRUPT)
+        store_id = self._store_id(db)
+        if store_id is None or _bound(marker[1]) != (*_identity(self.directory), store_id):
+            raise EngagementHold("anti_rollback_store_mismatch")
+        journaled: dict[str, dict[int, str]] = {}
+        for entry in entries:
+            journaled.setdefault(entry["org"], {})[entry["revocation_epoch"]] = entry["epoch"]
+        for name in sorted(orgs):
+            record = store.read(revocation_key(store_id, name), _RECORD_CORRUPT)
+            if record is None:
+                continue
+            recorded = _revocation(record, store_id, name)
+            seen = journaled.get(name, {})
+            if max(seen, default=0) < record[0]:
+                raise EngagementHold("anti_rollback_volume_behind")
+            if seen.get(record[0]) != recorded["epoch"]:
+                raise EngagementHold("anti_rollback_revocation_conflict")
+
+    def _mark_first_grant(self, db: sqlite3.Connection) -> None:
+        """Write the marker durably before the directory's first ingest commits.
+
+        Only reached once `_verify_anti_rollback` found no history in this transaction, so
+        this is the first grant. Any failure refuses the ingest; the transaction rolls back.
+        """
+        store_id = self._store_id(db)
+        if store_id is None:
+            raise EngagementHold("anti_rollback_baseline_missing")
+        store = _AntiRollback(self.directory)
+        key = marker_key(self.directory)
+        with store.locked():
+            current = store.read(key, _MARKER_CORRUPT)
+            directory, device, inode = _identity(self.directory)
+            if current is not None:
+                # The crash window between a marker write and the first commit: same store.
+                if current[0] != 1 or _bound(current[1]) != (directory, device, inode, store_id):
+                    raise EngagementHold("anti_rollback_store_mismatch")
+                return
+            store.write(
+                key,
+                1,
+                {
+                    "kind": MARKER_NAMESPACE,
+                    "store_id": store_id,
+                    "directory": directory,
+                    "device": device,
+                    "inode": inode,
+                    "written_at": _worker_time(),
+                    "assurance": ANTI_ROLLBACK_ASSURANCE,
+                    "protects_against": ANTI_ROLLBACK_SCOPE,
+                },
+            )
+
+    def _record_revocation(
+        self, store: _AntiRollback, store_id: str, org: str, epoch: str, revocation: int
+    ) -> None:
+        """Requires `store.locked()`. Forward only; equal epoch must name the same epoch."""
+        key = revocation_key(store_id, org)
+        current = store.read(key, _RECORD_CORRUPT)
+        if current is not None:
+            recorded = _revocation(current, store_id, org)
+            if current[0] > revocation:
+                return
+            if current[0] == revocation:
+                if recorded["epoch"] != epoch:
+                    raise EngagementHold("anti_rollback_revocation_conflict")
+                return
+        store.write(
+            key,
+            revocation,
+            {
+                "kind": REVOCATION_NAMESPACE,
+                "store_id": store_id,
+                "org": org,
+                "epoch": epoch,
+                "revocation_epoch": str(revocation),
+                "recorded_at": _worker_time(),
+                "assurance": ANTI_ROLLBACK_ASSURANCE,
+                "protects_against": ANTI_ROLLBACK_SCOPE,
+            },
+        )
+
+    def _revocation_durable(
+        self, db: sqlite3.Connection, org: str, epoch: str, revocation: int
+    ) -> bool:
+        store_id = self._store_id(db)
+        if store_id is None:
+            return False
+        record = _AntiRollback(self.directory).read(revocation_key(store_id, org), _RECORD_CORRUPT)
+        if record is None:
+            return False
+        recorded = _revocation(record, store_id, org)
+        return record[0] > revocation or (record[0] == revocation and recorded["epoch"] == epoch)
 
     def _journal_entries(self) -> list[dict[str, Any]]:
         if not self.journal.exists():
@@ -328,7 +813,7 @@ class EngagementLedger:
         _int(checkpoint, "invalid_checkpoint")
         _int(budget_limit, "invalid_budget")
         identity = (lease_ref, authority_digest, resource, lineage_ref, checkpoint, budget_limit)
-        with self._db() as db:
+        with self._db(org) as db:
             existing = db.execute(
                 "SELECT * FROM engagement WHERE org=? AND epoch=?", (org, epoch)
             ).fetchone()
@@ -382,6 +867,9 @@ class EngagementLedger:
                 # Re-binding the same resource must start strictly after what was seen.
                 raise EngagementHold("checkpoint_not_after_prior_rows")
             ordinal = len(prior) + 1
+            if not self._history(db):
+                # The directory's first grant: the marker is durable before this commits.
+                self._mark_first_grant(db)
             db.execute(
                 "INSERT INTO engagement(org,epoch,ordinal,state,lease_ref,authority_digest,"
                 "lineage_ref,resource,checkpoint,observed_high,budget_limit,label) "
@@ -444,7 +932,7 @@ class EngagementLedger:
     def activate(self, org: str, epoch: str) -> Engagement:
         """Open the live binding. Requires the recorded checkpoint, unfenced, slot free."""
         org, epoch = _ref(org), _ref(epoch)
-        with self._db() as db:
+        with self._db(org) as db:
             row = self._require_row(db, org, epoch)
             if db.execute("SELECT 1 FROM fence WHERE org=? AND epoch=?", (org, epoch)).fetchone():
                 raise EngagementError("epoch_fenced")
@@ -465,7 +953,7 @@ class EngagementLedger:
         """
         org, epoch = _ref(org), _ref(epoch)
         _int(revocation_epoch, "invalid_revocation_epoch", minimum=1)
-        with self.pin(exclusive=True), self._db() as db:
+        with self.pin(exclusive=True), self._db(org) as db:
             row = self._require_row(db, org, epoch)
             recorded = row["revocation_epoch"]
             if recorded is None:
@@ -491,8 +979,16 @@ class EngagementLedger:
         ).fetchone()[0]
         if row["revocation_epoch"] is None and peak is not None and revocation_epoch <= peak:
             raise EngagementError("revocation_epoch_not_monotonic")
-        # Journal (fsync) first, then the database row; both commit before any release.
-        self._append_fence(org, epoch, revocation_epoch)
+        store_id = self._store_id(db)
+        if store_id is None:
+            raise EngagementHold("anti_rollback_baseline_missing")
+        store = _AntiRollback(self.directory)
+        # The record lock is taken before any write, so an unusable anti-rollback location
+        # refuses here with nothing journaled. Then journal (fsync), then the revocation record
+        # outside the snapshot, then the database row; all of them before any release.
+        with store.locked():
+            self._append_fence(org, epoch, revocation_epoch)
+            self._record_revocation(store, store_id, org, epoch, revocation_epoch)
         db.execute("INSERT OR IGNORE INTO fence VALUES (?,?,?)", (org, epoch, revocation_epoch))
         if row["state"] != "terminal" or row["revocation_epoch"] != revocation_epoch:
             db.execute(
@@ -513,7 +1009,7 @@ class EngagementLedger:
         """
         org, epoch = _ref(org), _ref(epoch)
         with self.pin(exclusive=True):
-            with self._db() as db:
+            with self._db(org) as db:
                 row = self._require_row(db, org, epoch)
                 revocation = row["revocation_epoch"]
                 if revocation is None:
@@ -539,11 +1035,12 @@ class EngagementLedger:
         """Free the live slot only after the terminal state and revocation epoch persist.
 
         Persisted means the committed database row, its fence row and the fsynced journal
-        entry all carry the same revocation epoch. Releasing an already released slot is a
-        no-op.
+        entry all carry the same revocation epoch, and the organization's anti-rollback
+        revocation record outside the snapshot has reached it. Releasing an already released
+        slot is a no-op.
         """
         org, epoch = _ref(org), _ref(epoch)
-        with self._db() as db:
+        with self._db(org) as db:
             row = self._require_row(db, org, epoch)
             fenced = db.execute(
                 "SELECT revocation_epoch FROM fence WHERE org=? AND epoch=?", (org, epoch)
@@ -557,18 +1054,32 @@ class EngagementLedger:
             ):
                 raise EngagementHold("terminal_state_not_persisted")
             if not row["slot_released"]:
+                # A withdrawal is complete only once its anti-rollback record is durable.
+                if not self._revocation_durable(db, org, epoch, row["revocation_epoch"]):
+                    raise EngagementHold("anti_rollback_revocation_not_durable")
                 db.execute(
                     "UPDATE engagement SET slot_released=1 WHERE org=? AND epoch=?", (org, epoch)
                 )
             return self._row(self._require_row(db, org, epoch))
 
     def restore_backup(self, backup: Path) -> None:
-        """Replace the database with an older backup, then re-apply every journaled fence."""
+        """Replace the database with an older backup, then re-apply every journaled fence.
+
+        The backup is verified against the anti-rollback records before it replaces anything:
+        a backup of another store, or one the records show is behind, is refused unchanged.
+        """
         with self.pin(exclusive=True):
             _check_file(backup)
             temporary = self.path.with_name(self.path.name + ".restore")
             shutil.copyfile(backup, temporary)
             os.chmod(temporary, 0o600)
+            try:
+                with closing(sqlite3.connect(temporary, isolation_level=None)) as candidate:
+                    candidate.execute("PRAGMA trusted_schema=OFF")
+                    self._verify_anti_rollback(candidate)
+            except BaseException:
+                temporary.unlink(missing_ok=True)
+                raise
             os.replace(temporary, self.path)
             self._create_schema()
             self.reconcile_fences()
@@ -584,7 +1095,7 @@ class EngagementLedger:
         org, epoch, ref = _ref(org), _ref(epoch), _ref(ref)
         if kind not in BINDING_KINDS:
             raise EngagementError("unknown_binding_kind")
-        with self._db() as db:
+        with self._db(org) as db:
             row = self._require_row(db, org, epoch)
             if row["state"] == "terminal" or self._fenced(db, org, epoch):
                 raise EngagementError("epoch_terminal")
@@ -597,7 +1108,7 @@ class EngagementLedger:
 
     def authorize(self, org: str, epoch: str, kind: str, ref: str) -> bool:
         """True only for a ref bound to this exact, live, unfenced epoch."""
-        with self._db() as db:
+        with self._db(org) as db:
             if not self._live(db, org, epoch):
                 return False
             row = db.execute(
@@ -606,14 +1117,14 @@ class EngagementLedger:
             return row is not None and row[0] == epoch
 
     def grant_approval(self, org: str, epoch: str, ref: str) -> None:
-        with self._db() as db:
+        with self._db(org) as db:
             if not self._live(db, org, epoch):
                 raise EngagementError("epoch_not_live")
             db.execute("INSERT OR IGNORE INTO approval VALUES (?,?,?)", (org, epoch, _ref(ref)))
 
     def has_approval(self, org: str, epoch: str, ref: str) -> bool:
         """Approvals never carry over: the lookup is by exact live epoch."""
-        with self._db() as db:
+        with self._db(org) as db:
             return (
                 self._live(db, org, epoch)
                 and db.execute(
@@ -625,7 +1136,7 @@ class EngagementLedger:
     def reserve_budget(self, org: str, epoch: str, key: str, amount: int) -> bool:
         """Reserve against this epoch's own ledger. Idempotent by key; False when over limit."""
         _int(amount, "invalid_amount", minimum=1)
-        with self._db() as db:
+        with self._db(org) as db:
             if not self._live(db, org, epoch):
                 raise EngagementError("epoch_not_live")
             row = self._require_row(db, org, epoch)
@@ -652,7 +1163,7 @@ class EngagementLedger:
         if kind not in EFFECT_KINDS:
             raise EngagementError("unknown_effect_kind")
         key = _ref(key)
-        with self._db() as db:
+        with self._db(org) as db:
             if not self._live(db, org, epoch):
                 return False
             cursor = db.execute(
@@ -662,7 +1173,7 @@ class EngagementLedger:
 
     def counts(self, org: str, epoch: str) -> dict[str, int]:
         """Epoch-bound counts only; prior epochs never leak in. See `historical`."""
-        with self._db() as db:
+        with self._db(org) as db:
             self._require_row(db, _ref(org), _ref(epoch))
             rows = db.execute(
                 "SELECT kind, count(*) FROM effect WHERE org=? AND epoch=? GROUP BY kind",
@@ -673,7 +1184,7 @@ class EngagementLedger:
 
     def historical(self, org: str, *, before: str) -> tuple[dict[str, Any], ...]:
         """Allowed prior-epoch evidence, labelled historical and never part of current counts."""
-        with self._db() as db:
+        with self._db(org) as db:
             current = self._require_row(db, _ref(org), _ref(before))
             rows = db.execute(
                 "SELECT * FROM engagement WHERE org=? AND ordinal<? ORDER BY ordinal",
@@ -706,7 +1217,7 @@ class EngagementLedger:
 
         Anything else is a hold; no source row may be admitted without it.
         """
-        with self._db() as db:
+        with self._db(org) as db:
             row = db.execute(
                 "SELECT * FROM engagement WHERE org=? AND epoch=?", (org, epoch)
             ).fetchone()
@@ -724,7 +1235,7 @@ class EngagementLedger:
 
     def known_prior_epoch(self, org: str, epoch: str) -> bool:
         """True when `epoch` is a different, already-terminal or fenced epoch of this org."""
-        with self._db() as db:
+        with self._db(org) as db:
             row = db.execute(
                 "SELECT state FROM engagement WHERE org=? AND epoch=?", (org, epoch)
             ).fetchone()
@@ -757,7 +1268,7 @@ class EngagementLedger:
     def observe_positions(self, org: str, epoch: str, high: int) -> None:
         """Remember the highest admitted source position; later epochs must start after it."""
         _int(high, "invalid_position")
-        with self._db() as db:
+        with self._db(org) as db:
             db.execute(
                 "UPDATE engagement SET observed_high=max(observed_high,?) "
                 "WHERE org=? AND epoch=? AND state='active'",
@@ -767,14 +1278,14 @@ class EngagementLedger:
     # -- reads -------------------------------------------------------------------------------
 
     def engagements(self, org: str) -> tuple[Engagement, ...]:
-        with self._db() as db:
+        with self._db(org) as db:
             rows = db.execute(
                 "SELECT * FROM engagement WHERE org=? ORDER BY ordinal", (_ref(org),)
             ).fetchall()
         return tuple(self._row(r) for r in rows)
 
     def get(self, org: str, epoch: str) -> Engagement | None:
-        with self._db() as db:
+        with self._db(org) as db:
             row = db.execute(
                 "SELECT * FROM engagement WHERE org=? AND epoch=?", (org, epoch)
             ).fetchone()

@@ -429,7 +429,10 @@ def test_released_slot_without_persisted_terminal_epoch_is_impossible(tmp_path: 
     # A database fence without its fsynced journal entry is not a persisted termination.
     ledger.withdraw(ORG, epoch, revocation_epoch=1)
     (directory / "engagement-fences.jsonl").write_text("")
-    with pytest.raises(EngagementHold, match="terminal_state_not_persisted"):
+    # The revocation record kept outside the snapshot now catches the emptied journal first
+    # (OPE-543 anti-rollback); without that record the same release still holds with
+    # terminal_state_not_persisted (test_engagement_anti_rollback.py).
+    with pytest.raises(EngagementHold, match="anti_rollback_volume_behind"):
         ledger.release_slot(ORG, epoch)
     assert raw_row(directory, ORG, epoch) == ("terminal", 1, 0)
     with closing(sqlite3.connect(ledger.path)) as db:
