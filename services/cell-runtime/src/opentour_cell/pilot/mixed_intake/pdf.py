@@ -152,13 +152,18 @@ def _read_body(
             raw_start += 2
         elif data[raw_start : raw_start + 1] in (b"\n", b"\r"):
             raw_start += 1
+        # The stream dictionary's own /Length, parsed rather than searched: a `/Length` inside
+        # a string or a nested dictionary is not its key, and `/Len#67th` is. A dictionary that
+        # cannot be read, or a /Length that is not a non-negative integer or a reference that
+        # resolves to one, leaves the extent in doubt.
         length: int | None = None
-        direct = re.search(rb"/Length\s+(\d+)(?!\s+\d+\s+R)", head)
-        if direct:
-            length = int(direct[1])
-        elif indirect := re.search(rb"/Length\s+(\d+)\s+\d+\s+R", head):
-            length = indirect_length(int(indirect[1])) if indirect_length else None
-            unresolved = length is None
+        parsed = _parse_dict(head)
+        declared = parsed.get("Length") if parsed is not None else None
+        if type(declared) is int and declared >= 0:
+            length = declared
+        elif isinstance(declared, _Ref) and indirect_length is not None:
+            length = indirect_length(declared.number)
+        unresolved = length is None
         raw_end = -1
         first = data.find(b"endstream", raw_start)
         if length is not None:

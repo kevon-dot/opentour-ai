@@ -1998,3 +1998,27 @@ def test_pdf_escaped_names_that_are_not_encrypt_stay_eligible() -> None:
     for name in ("/Encr#79ption", "/Info#20x", "/EncryptMetadata"):
         result = read(_escaped_encrypt_pdf(f"{name} 6 0 R "), "x.pdf")[1]
         assert result.state is ExtractionState.ELIGIBLE, (name, result.reason)
+
+
+def test_pdf_stream_length_is_the_dictionarys_own_key() -> None:
+    # A /Length inside a string or a nested dictionary is not the stream's key. Each decoy lands
+    # on a literal endstream after the first line; poppler draws both lines (it reads the real
+    # /Length), so stopping there would drop the second.
+    body = b"BT /F1 11 Tf 72 700 Td (Refund allowed) Tj ET\nendstream\n" + _CONDITION
+    cut = body.index(b"\nendstream")
+    for head in (
+        b"<< /X (/Length %d) /Length %d >>" % (cut, len(body)),
+        b"<< /DecodeParms << /Length %d >> /Length %d >>" % (cut, len(body)),
+        b"<< /Len#67th %d >>" % len(body),
+    ):
+        extra = {5: head + b"\nstream\n" + body + b"\nendstream"}
+        result = read(_pdf(_VISIBLE, extra=extra), "x.pdf")[1]
+        assert result.state is ExtractionState.NEEDS_REVIEW, head
+        assert "pdf_stream_length_unverified" in result.reason, (head, result.reason)
+        assert "NOT for orders over 100" in result.spans[0].text, head  # the real extent is read
+    # A decoy beside a correct /Length, with no endstream inside the data, is read as written.
+    for head in (b"<< /X (/Length 3) /Length %d >>", b"<< /Len#67th %d >>"):
+        extra = {5: head % len(_VISIBLE) + b"\nstream\n" + _VISIBLE + b"\nendstream"}
+        _eligible(_VISIBLE, extra=extra)
+    _flagged(_VISIBLE, "pdf_stream_length_unverified",
+             extra={5: b"<< /Length (12) >>\nstream\n" + _VISIBLE + b"\nendstream"})  # fmt: skip
