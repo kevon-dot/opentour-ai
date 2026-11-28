@@ -247,40 +247,135 @@ class PolicyFloor:
     min_improvement_bps: int
     min_families: int
     min_coverage_floor_bps: int
+    max_coverage_loss_bps: int
     max_missing: int
+    min_verified_cases: int
+    min_slice_cases: int
+    max_verdict_validity_seconds: int
+    interval_method: str
+    decoding: str
 
     def shortfalls(self, policy: Mapping[str, Any]) -> list[str]:
-        def value(name: str) -> int | None:
-            v = policy.get(name) if isinstance(policy, Mapping) else None
-            return v if type(v) is int else None
+        """Every floor term the bound ``policy`` (its ``as_json`` form) fails, in a fixed order.
 
-        checks: tuple[tuple[str, Callable[[int], bool]], ...] = (
-            ("alpha_bps", lambda v: v <= self.max_alpha_bps),
-            ("minimum_improvement_bps", lambda v: v >= self.min_improvement_bps),
-            ("min_families", lambda v: v >= self.min_families),
-            ("coverage_floor_bps", lambda v: v >= self.min_coverage_floor_bps),
-            ("max_missing", lambda v: v <= self.max_missing),
+        Fail closed: a policy or ``operating_point_terms`` that is not a Mapping, and a term that
+        is missing or not exactly the floor's type (``type(v) is int``, so ``True`` and int
+        subclasses fail; ``type(v) is str``, so str subclasses fail), is a shortfall, never a
+        pass. ``operating_point_terms.minimum_slice_cases`` is required whenever the policy's
+        ``critical_slices`` or the terms' ``critical_slices`` is anything but an empty list or
+        tuple (a missing or wrong-typed policy ``critical_slices`` therefore requires it).
+        """
+        doc: Mapping[str, Any] = policy if isinstance(policy, Mapping) else {}
+        raw_terms = doc.get("operating_point_terms")
+        terms: Mapping[str, Any] = raw_terms if isinstance(raw_terms, Mapping) else {}
+
+        def no_slices(value: object) -> bool:
+            return isinstance(value, (list, tuple)) and len(value) == 0
+
+        needs_slice_cases = not no_slices(doc.get("critical_slices")) or not no_slices(
+            terms.get("critical_slices", [])
         )
-        out = []
-        for name, ok in checks:
-            v = value(name)
-            if v is None or not ok(v):
-                out.append(name)
-        return out
+
+        def at_most(limit: int) -> Callable[[object], bool]:
+            return lambda v: type(v) is int and v <= limit
+
+        def at_least(limit: int) -> Callable[[object], bool]:
+            return lambda v: type(v) is int and v >= limit
+
+        def exactly(expected: str) -> Callable[[object], bool]:
+            return lambda v: type(v) is str and v == expected
+
+        checks: tuple[tuple[str, object, Callable[[object], bool]], ...] = (
+            ("alpha_bps", doc.get("alpha_bps"), at_most(self.max_alpha_bps)),
+            (
+                "minimum_improvement_bps",
+                doc.get("minimum_improvement_bps"),
+                at_least(self.min_improvement_bps),
+            ),
+            ("min_families", doc.get("min_families"), at_least(self.min_families)),
+            (
+                "coverage_floor_bps",
+                doc.get("coverage_floor_bps"),
+                at_least(self.min_coverage_floor_bps),
+            ),
+            (
+                "max_coverage_loss_bps",
+                doc.get("max_coverage_loss_bps"),
+                at_most(self.max_coverage_loss_bps),
+            ),
+            ("max_missing", doc.get("max_missing"), at_most(self.max_missing)),
+            (
+                "operating_point_terms.minimum_verified_cases",
+                terms.get("minimum_verified_cases"),
+                at_least(self.min_verified_cases),
+            ),
+            (
+                "operating_point_terms.minimum_slice_cases",
+                terms.get("minimum_slice_cases"),
+                at_least(self.min_slice_cases) if needs_slice_cases else lambda v: True,
+            ),
+            (
+                "verdict_validity_seconds",
+                doc.get("verdict_validity_seconds"),
+                at_most(self.max_verdict_validity_seconds),
+            ),
+            ("interval_method", doc.get("interval_method"), exactly(self.interval_method)),
+            ("decoding", doc.get("decoding"), exactly(self.decoding)),
+        )
+        return [name for name, value, ok in checks if not ok(value)]
 
 
-# D11 SEAM. The owner has not decided a minimum verdict policy (alpha, minimum improvement,
-# minimum families, coverage, the comparator-gap allowance and whether a tie at the ceiling
-# counts), so NO floor is registered and every effect a verified_gain could drive holds with
-# ``policy_floor_unset``. As with the OPE-526 audit/verdict issuer hold in comparison_packet,
-# there is no re-enable path short of a reviewed code change here: registering a floor means
-# replacing this ``None`` with the owner's ``PolicyFloor`` (and adding any D11 terms it lacks).
-# It is never a caller argument, a policy field or an environment setting.
-REGISTERED_POLICY_FLOOR: PolicyFloor | None = None
+# D11 SEAM. The owner's minimum verdict policy is ``d11.v1`` (product owner decision, recorded
+# on Linear OPE-528). Every effect a verified_gain could drive is held, by ``authorize`` and in
+# the issued ``effects``, unless the verdict's bound policy is at least this strict on EVERY
+# term; one laxer term refuses with ``policy_below_registered_floor``. Meeting the floor lifts
+# only this hold: integrity, freshness and revocation still apply, this module never makes a
+# release or handoff request eligible, and comparison_packet keeps its own issuer hold
+# (``audit_and_verdict_issuers_unverified``, until the OPE-566 signing contract lands).
+#   alpha_bps <= 500                         minimum_improvement_bps >= 100
+#   min_families >= 30                       coverage_floor_bps >= 5000
+#   max_coverage_loss_bps <= 200             max_missing <= 0 (no missing/malformed output)
+#   operating_point_terms.minimum_verified_cases >= 100
+#   operating_point_terms.minimum_slice_cases >= 10, required only with critical slices
+#   verdict_validity_seconds <= 604800 (7 days)
+#   interval_method == "bounded_independent_family_hoeffding_v1"
+#   decoding == "deterministic"
+# Values must be exact ints (or exact strs); a missing or wrong-typed term is a shortfall.
+# d11.v1 does not set the error ceiling or whether a tie at it counts; those stay as the frozen
+# operating point and ``_decide`` define them (newly automated errors AT the ceiling are not a
+# regression).
+#
+# Implied sensitivity. The interval is two-sided Hoeffding on the mean family effect in [-1, 1]
+# (``_family_interval``): radius = sqrt(2 ln(2 / alpha) / n). At alpha 0.05 the smallest mean
+# family gain that can verify (lower bound above the 1 pp minimum improvement) is:
+#   families             30     100    200    500    1000   2000
+#   minimum gain (pp)    50.6   28.2   20.2   13.1   9.6    7.1
+# Smaller real gains are inconclusive by design, however many cases each family holds.
+#
+# As with the OPE-526 audit/verdict issuer hold in comparison_packet, the floor changes only by
+# a reviewed code change here (a new ``floor_id``). It is never a caller argument, a policy field
+# or an environment setting. ``None`` would hold every gain with ``policy_floor_unset``.
+REGISTERED_POLICY_FLOOR: PolicyFloor | None = PolicyFloor(
+    floor_id="d11.v1",
+    max_alpha_bps=500,
+    min_improvement_bps=100,
+    min_families=30,
+    min_coverage_floor_bps=5000,
+    max_coverage_loss_bps=200,
+    max_missing=0,
+    min_verified_cases=100,
+    min_slice_cases=10,
+    max_verdict_validity_seconds=604_800,
+    interval_method="bounded_independent_family_hoeffding_v1",
+    decoding="deterministic",
+)
 
 
 def policy_floor_status(policy: Mapping[str, Any]) -> str:
-    """``unset`` (no D11 floor registered), ``satisfied`` or ``below_registered_floor``."""
+    """``satisfied`` or ``below_registered_floor`` against the registered D11 floor (``d11.v1``).
+
+    ``unset`` only if ``REGISTERED_POLICY_FLOOR`` were ``None``; it is not.
+    """
     floor = REGISTERED_POLICY_FLOOR
     if floor is None:
         return "unset"
@@ -1851,8 +1946,9 @@ class IndependentEvaluator:
         holds before acting. It refuses a revoked key, an expired verdict, a document that is not
         the one stored under its key (including an older archived generation), and an effect the
         verdict did not make eligible. Any effect on a ``verified_gain`` also refuses with
-        ``policy_floor_unset`` while no D11 floor is registered (``REGISTERED_POLICY_FLOOR``),
-        and with ``policy_below_registered_floor`` when the verdict's policy is laxer than it.
+        ``policy_below_registered_floor`` when the verdict's bound policy is laxer than the
+        registered D11 floor (``REGISTERED_POLICY_FLOOR``, ``d11.v1``) on any term, and would
+        refuse with ``policy_floor_unset`` if no floor were registered.
         There is deliberately no argument for a policy or a floor here. Custody tampering raises
         ``CustodyError``.
         """
@@ -1882,8 +1978,8 @@ class IndependentEvaluator:
             return refuse("verdict_expired", "expired")
         held_doc = stored.document
         if held_doc["outcome"] == "verified_gain":
-            # D11: no consumer acts on a gain until an owner-registered floor exists and the
-            # verdict's bound policy meets it. Read from this module, never from the caller.
+            # D11: no consumer acts on a gain unless the verdict's bound policy meets the
+            # owner-registered floor. Read from this module, never from the caller.
             floor = policy_floor_status(held_doc["policy"])
             if floor != "satisfied":
                 return refuse(
@@ -2835,7 +2931,7 @@ class IndependentEvaluator:
             "predictions_commitment": self._commit(record),
             "predictions_custody": "evaluator_private_retention_limited",
             "effects": {
-                # Held until a D11 policy floor is registered and met (``policy_floor_status``).
+                # Held unless the bound policy meets the D11 floor (``policy_floor_status``).
                 "improvement_alert_eligible": alert and floor == "satisfied",
                 "release_request_eligible": False,
                 "handoff_request_eligible": False,
