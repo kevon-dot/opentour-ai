@@ -188,6 +188,7 @@ class MandateState:
     runs_used: int
     max_fits: int
     fits_reserved: int
+    lineage: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -542,10 +543,13 @@ class LearningRuns:
     def _budget_hold(
         self, db: sqlite3.Connection, tenant: str, mandate: MandateState, effective: str
     ) -> str | None:
+        # Count the whole renewal lineage, as the mandate's own usage does; renewal never resets.
+        lineage = mandate.lineage or (mandate.mandate_id,)
         admitted = db.execute(
-            "SELECT count(*) FROM lr_runs WHERE tenant=? AND mandate_id=? "
+            "SELECT count(*) FROM lr_runs WHERE tenant=? "
+            f"AND mandate_id IN ({','.join('?' * len(lineage))}) "
             "AND (state IN ('queued','benchmark_only') OR dispatched=1)",
-            (tenant, mandate.mandate_id),
+            (tenant, *lineage),
         ).fetchone()[0]
         if max(admitted, mandate.runs_used) >= mandate.max_runs:
             return "standing_run_budget_exhausted"
@@ -902,7 +906,7 @@ class LearningRuns:
                 or pending["state"] != "pending"
                 or row["state"] != "cancellation_pending"
                 or row["lease"] is not None
-                or row["submission"] is not None
+                or row["submission"] not in (None, "stopped")
                 or row["fit_reservation"] is None
                 or self.ledger is None
             ):
@@ -1094,17 +1098,22 @@ class LearningRuns:
             mandate = self._mandate(scope, principal)
             with self._db() as db:
                 self._fence_waiting(db, scope, mandate)
-                if self._mandate_hold(mandate) is not None:
-                    return None
                 now = self._now()
+                # Reconcile abandoned work first, even under a lapsed mandate: the next worker
+                # must stop it, seal it and settle measured usage. New work needs active authority.
                 row = db.execute(
-                    "SELECT * FROM lr_runs WHERE tenant=? AND workflow_ref=? AND ("
-                    "(state IN ('queued','benchmark_only') AND cancel_requested=0) OR "
-                    "(state IN ('running','verifying','held','cancellation_pending') "
-                    "AND lease IS NOT NULL AND lease_expires<?)) "
-                    "ORDER BY created_at,rowid LIMIT 1",
+                    "SELECT * FROM lr_runs WHERE tenant=? AND workflow_ref=? "
+                    "AND state IN ('running','verifying','held','cancellation_pending') "
+                    "AND lease IS NOT NULL AND lease_expires<? ORDER BY created_at,rowid LIMIT 1",
                     (scope.tenant, scope.workflow_ref, now),
                 ).fetchone()
+                if row is None and self._mandate_hold(mandate) is None:
+                    row = db.execute(
+                        "SELECT * FROM lr_runs WHERE tenant=? AND workflow_ref=? "
+                        "AND state IN ('queued','benchmark_only') AND cancel_requested=0 "
+                        "ORDER BY created_at,rowid LIMIT 1",
+                        (scope.tenant, scope.workflow_ref),
+                    ).fetchone()
                 if row is None:
                     return None
                 changes: Json = {
@@ -1419,10 +1428,17 @@ class LearningRuns:
         _need(_units(consumed_units), "invalid_arguments")
         with self._leased(principal, claim, allow_cancel=True) as (db, row):
             _need(row["cancel_requested"], "learning_run_cancel_not_requested")
-            _need(row["submission"] != "uncertain", "trainer_submission_uncertain")
+            _need(row["submission"] in (None, "submitted"), "trainer_submission_uncertain")
             reservation = row["fit_reservation"]
-            # Keep the measured usage first, so a retry after a ledger outage settles it.
-            self._set(db, row, lease=None, measured_units=consumed_units)
+            # Record that backend work stopped and keep the measured usage first, so a retry
+            # after a ledger outage can settle it without a worker.
+            self._set(
+                db,
+                row,
+                lease=None,
+                measured_units=consumed_units,
+                submission=None if row["submission"] is None else "stopped",
+            )
         settled = None if reservation is None else self._settle(reservation, consumed_units)
         self._confirm_cancel(principal.tenant, claim.run_ref, reservation, settled)
         with self._db(write=False) as db:
@@ -1621,7 +1637,7 @@ class LocalMandateSource:
     def current(self, scope: LearningScope, principal: LearningPrincipal) -> MandateState:
         try:
             registry = LearningMandates(self.directory, scope.tenant, scope.engagement_epoch)
-            mandate_id, head = self._current(registry, scope.mandate_id)
+            mandate_id, head, lineage = self._current(registry, scope.mandate_id)
             details = registry.inspect(mandate_id)
             spec = details["scope"]
             if head == "pause":
@@ -1644,6 +1660,7 @@ class LocalMandateSource:
                 runs_used=int(details["cumulative_runs"]),
                 max_fits=int(spec["max_fits"]),
                 fits_reserved=int(details["cumulative_reserved_fits"]),
+                lineage=lineage,
             )
         except (
             MandateError,
@@ -1658,7 +1675,9 @@ class LocalMandateSource:
             raise LearningRunError("standing_mandate_unavailable") from error
 
     @staticmethod
-    def _current(registry: LearningMandates, pinned: str) -> tuple[str, str | None]:
+    def _current(
+        registry: LearningMandates, pinned: str
+    ) -> tuple[str, str | None, tuple[str, ...]]:
         """Follow the owner's renewals; the owner-settings head, when present, is current."""
         with registry._db(write=False) as db:
             chain = [pinned]
@@ -1681,8 +1700,8 @@ class LocalMandateSource:
                 if head is not None:
                     receipt = json.loads(head[0])
                     _need(receipt.get("mandate_id") in chain, "standing_mandate_unavailable")
-                    return str(receipt["mandate_id"]), receipt.get("state")
-            return chain[-1], None
+                    return str(receipt["mandate_id"]), receipt.get("state"), tuple(chain)
+            return chain[-1], None, tuple(chain)
 
 
 def plan_record_path(directory: Path, tenant: str, workflow_ref: str) -> Path:

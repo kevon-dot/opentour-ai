@@ -1028,3 +1028,78 @@ def test_installed_tick_holds_fit_capable_work_until_a_ledger_is_attached(tmp_pa
     legacy = worker_once(site.directory)
     assert legacy.returncode == 2 and not legacy.stdout
     assert json.loads(legacy.stderr)["reason"] == "check_private_configuration_and_source"
+
+
+def test_abandoned_fit_under_a_revoked_mandate_is_reclaimed_and_settled(site):
+    slack, service = site.open(site.authorize("slack-owner"))
+    scheduler, worker = site.open(site.authorize("schedule", role="scheduler", channel="schedule"))
+    clock = [time.time()]
+    worker.clock = lambda: clock[0]
+    run = submit(service, slack, site.publish(), "click")["run_ref"]
+    queued = submit(service, slack, site.publish(site.plan("source-v2")), "later")["run_ref"]
+    claim = worker.claim(scheduler)
+    worker.reserve_fit(
+        scheduler, claim, residual_ref="residual-1", model_digest="base-digest-1", max_units=90
+    )
+    key = worker.begin_submission(scheduler, claim)
+    worker.record_submission(scheduler, claim, execution_ref=site.trainer.submit(key))
+    # The worker dies mid-fit, then the owner revokes the mandate.
+    site.registry.withdraw(MANDATE, actor=OWNER)
+    clock[0] += lr.LEASE_SECONDS + 1
+    reclaimed = worker.claim(scheduler)
+    assert reclaimed is not None and reclaimed.run_ref == run
+    assert reclaimed.execution_ref == site.trainer.find(key)
+    with pytest.raises(lr.LearningRunError, match="standing_mandate_withdrawn"):
+        worker.advance(scheduler, reclaimed, stage="fit")
+    worker.finish(
+        scheduler, reclaimed, "refused", reason_code="standing_mandate_withdrawn", consumed_units=30
+    )
+    assert service.status(slack, run)["usage"]["consumed_units"] == 30
+    # The queued run was fenced, never dispatched, and nothing else can be claimed.
+    assert service.status(slack, queued)["state"] == "refused"
+    assert worker.claim(scheduler) is None
+    assert site.trainer.submissions == 1 and list(site.ledger.settled.values()) == [30]
+
+
+def test_stopped_trainer_job_settles_after_a_ledger_outage(site):
+    slack, service = site.open(site.authorize("slack-owner"))
+    scheduler, worker = site.open(site.authorize("schedule", role="scheduler", channel="schedule"))
+    run = submit(service, slack, site.publish(), "click")["run_ref"]
+    claim = worker.claim(scheduler)
+    worker.reserve_fit(
+        scheduler, claim, residual_ref="residual-1", model_digest="base-digest-1", max_units=90
+    )
+    key = worker.begin_submission(scheduler, claim)
+    worker.record_submission(scheduler, claim, execution_ref=site.trainer.submit(key))
+    assert service.cancel(slack, run, "cancel")["cancellation"] == "pending"
+    site.ledger.available = False
+    with pytest.raises(lr.LearningRunError, match="fit_ledger_unavailable"):
+        worker.confirm_cancel(scheduler, claim, consumed_units=11)
+    assert service.status(slack, run)["state"] == "cancellation_pending"
+    site.ledger.available = True
+    # No worker is needed any more: the schedule tick (or a cancel retry) settles it.
+    tick = worker.schedule_tick(scheduler)
+    assert tick["tick"] == "no_change"
+    status = service.status(slack, run)
+    assert (status["state"], status["usage"]["consumed_units"]) == ("canceled", 11)
+    assert service.cancel(slack, run, "cancel")["cancellation"] == "confirmed"
+    assert site.trainer.submissions == 1 and list(site.ledger.settled.values()) == [11]
+
+
+def test_run_cap_counts_the_whole_renewal_lineage(tmp_path):
+    site = Site(tmp_path, max_runs=1)
+    slack, service = site.open(site.authorize("slack-owner"))
+    scheduler, worker = site.open(site.authorize("schedule", role="scheduler", channel="schedule"))
+    submit(service, slack, site.publish(), "click", operation="benchmark_only")
+    worker.finish(scheduler, worker.claim(scheduler), "completed")
+    site.registry.withdraw(MANDATE, actor=OWNER)
+    successor = site.registry.reauthorize(MANDATE, site.spec("standing-2", max_runs=1), actor=OWNER)
+    renewed = submit(
+        service,
+        slack,
+        site.publish(site.plan(receipt=successor)),
+        "after-renewal",
+        operation="benchmark_only",
+    )
+    assert renewed["state"] == "held" and renewed["reason_code"] == "standing_run_budget_exhausted"
+    assert site.counts()["lr_runs"] == 1
