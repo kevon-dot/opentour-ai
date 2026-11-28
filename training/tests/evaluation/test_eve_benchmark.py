@@ -1426,7 +1426,7 @@ def test_copy_destination_may_not_be_or_contain_the_registry(tmp_path: Path) -> 
             eb.record_one_disposition, registry, card, None, disposition="benchmark_only",
             owner_id="generated-owner-1", recorded_at="2026-01-01", copy_to=dest,
         )  # fmt: skip
-        assert _code(attempt) == "copy_destination_contains_registry", dest
+        assert _code(attempt) == "copy_destination_overlaps_registry", dest
     assert registry.lookup(card.scorecard_digest) is None  # refused before registering
     beside = tmp_path / "copies"
     assert eb.record_one_disposition(
@@ -1439,16 +1439,16 @@ def test_copy_destination_may_not_be_or_contain_the_registry(tmp_path: Path) -> 
 def test_cli_refuses_a_registry_equal_to_or_inside_out(tmp_path: Path) -> None:
     """LOW 3: the CLI refuses before writing anything to --out or the registry."""
     same = _registry_root(tmp_path)
-    run =_cli_run(_env(same), "run-generated", "--out", str(same), "--disposition",
+    run = _cli_run(_env(same), "run-generated", "--out", str(same), "--disposition",
                    "benchmark_only")  # fmt: skip
-    assert run.returncode == 2 and "copy_destination_contains_registry" in run.stderr
+    assert run.returncode == 2 and "copy_destination_overlaps_registry" in run.stderr
     assert not list(same.iterdir())
     out = tmp_path / "out"
     out.mkdir()
     inner = _registry_root(out)
     run = _cli_run(_env(inner), "run-generated", "--out", str(out), "--disposition",
                    "benchmark_only")  # fmt: skip
-    assert run.returncode == 2 and "copy_destination_contains_registry" in run.stderr
+    assert run.returncode == 2 and "copy_destination_overlaps_registry" in run.stderr
     assert sorted(p.name for p in out.iterdir()) == ["registry"]
     assert not list(inner.iterdir())
     # --copy-to of dispose-generated gets the same check.
@@ -1457,8 +1457,47 @@ def test_cli_refuses_a_registry_equal_to_or_inside_out(tmp_path: Path) -> None:
     for dest in (inner, out):
         later = _cli_run(_env(inner), "dispose-generated", "--from", str(src), "--disposition",
                          "benchmark_only", "--copy-to", str(dest))  # fmt: skip
-        assert later.returncode == 2 and "copy_destination_contains_registry" in later.stderr
+        assert later.returncode == 2 and "copy_destination_overlaps_registry" in later.stderr
     assert not list(inner.iterdir())
+
+
+def test_copy_destination_inside_the_registry_is_refused(tmp_path: Path) -> None:
+    """Owner-delegate decision on the reverse nesting: a copy written inside the registry root
+    could be mistaken for, or collide with, registry state, so any overlap fails closed."""
+    card = _score()
+    root = _registry_root(tmp_path)
+    registry = eb.DispositionRegistry(root)
+    (tmp_path / "into").symlink_to(root)  # a path outside that resolves inside the root
+    for dest in (root / "copies", root / "a" / "b", tmp_path / "into" / "copies"):
+        attempt = functools.partial(
+            eb.record_one_disposition, registry, card, None, disposition="benchmark_only",
+            owner_id="generated-owner-1", recorded_at="2026-01-01", copy_to=dest,
+        )  # fmt: skip
+        assert _code(attempt) == "copy_destination_overlaps_registry", dest
+    assert sorted(p.name for p in root.iterdir()) == []  # nothing registered, nothing copied
+    assert registry.lookup(card.scorecard_digest) is None
+    # A sibling whose name only shares the root's prefix is not inside it.
+    sibling = tmp_path / "registry-copies"
+    assert eb.record_one_disposition(
+        registry, card, None, disposition="benchmark_only", owner_id="generated-owner-1",
+        recorded_at="2026-01-01", copy_to=sibling,
+    )  # fmt: skip
+    assert len(list(sibling.glob("disposition-*.json"))) == 1
+
+
+def test_cli_refuses_out_or_copy_to_inside_the_registry(tmp_path: Path) -> None:
+    root = _registry_root(tmp_path)
+    env = _env(root)
+    inside = root / "out"
+    run = _cli_run(env, "run-generated", "--out", str(inside), "--disposition", "benchmark_only")
+    assert run.returncode == 2 and "copy_destination_overlaps_registry" in run.stderr
+    assert not list(root.iterdir())  # refused before --out was created
+    src = tmp_path / "src"
+    assert _cli_run(env, "run-generated", "--out", str(src)).returncode == 0
+    later = _cli_run(env, "dispose-generated", "--from", str(src), "--disposition",
+                     "benchmark_only", "--copy-to", str(root / "copies"))  # fmt: skip
+    assert later.returncode == 2 and "copy_destination_overlaps_registry" in later.stderr
+    assert not list(root.iterdir())
 
 
 class _RegistrySubclass(eb.DispositionRegistry):

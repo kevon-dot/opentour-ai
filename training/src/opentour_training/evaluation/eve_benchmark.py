@@ -33,10 +33,11 @@ already at a scorecard's name that is not a well-formed record of this registry 
 scorecard is ``registry_entry_invalid``: it still blocks that scorecard (fail closed) but is
 never read as a disposition. Planting a well-formed record needs the registry's own uid, the
 same limit as the seal. Copies are written elsewhere and are just copies: a copy destination
-may not be, or contain, the registry root. The claim is one disposition per scorecard per registry:
-the training package has no installed worker root of its own, so whoever configures the
-worker (``OPENTOUR_EVE_DISPOSITION_REGISTRY`` for the CLI) chooses the registry, and someone
-able to configure a second registry can record a second disposition there.
+may not overlap the registry root (be it, contain it, or lie inside it). The claim is one
+disposition per scorecard per registry: the training package has no installed worker root of
+its own, so whoever configures the worker (``OPENTOUR_EVE_DISPOSITION_REGISTRY`` for the CLI)
+chooses the registry, and someone able to configure a second registry can record a second
+disposition there.
 """
 
 from __future__ import annotations
@@ -1167,15 +1168,18 @@ class DispositionRegistry:
 
 
 def check_copy_destination(registry: DispositionRegistry, destination: Path) -> None:
-    """Refuse a copy destination that is, or contains, the registry root.
+    """Refuse a copy destination that overlaps the registry root in either direction.
 
-    Copies are just copies; a destination at or above the root would put them in the registry.
-    The destination is resolved (symlinks followed, need not exist yet) before comparing.
+    Copies are just copies. A destination at or above the root would put them in the registry,
+    and one inside the root could be mistaken for, or collide with, registry state, so the root,
+    any ancestor of it and any path under it are all refused. The destination is resolved
+    (symlinks followed, need not exist yet) before comparing.
     """
     resolved = Path(destination).resolve()
+    root = registry.root
     _need(
-        resolved != registry.root and resolved not in registry.root.parents,
-        "copy_destination_contains_registry",
+        resolved != root and resolved not in root.parents and root not in resolved.parents,
+        "copy_destination_overlaps_registry",
         str(destination),
     )
 
@@ -1194,7 +1198,8 @@ def record_one_disposition(
 
     The registry decides; ``copy_to`` only receives a copy of a record the registry accepted
     (or already holds identically), so a second ``copy_to`` cannot host a second disposition.
-    ``copy_to`` may not be, or contain, the registry root (checked before registering).
+    ``copy_to`` may not overlap the registry root in either direction (checked before
+    registering).
     """
     _need(type(registry) is DispositionRegistry, "disposition_registry_invalid")
     if copy_to is not None:
