@@ -6,6 +6,7 @@ from __future__ import annotations
 import dataclasses
 import functools
 import json
+import os
 import subprocess
 import sys
 from collections.abc import Callable
@@ -1498,6 +1499,144 @@ def test_cli_refuses_out_or_copy_to_inside_the_registry(tmp_path: Path) -> None:
                      "benchmark_only", "--copy-to", str(root / "copies"))  # fmt: skip
     assert later.returncode == 2 and "copy_destination_overlaps_registry" in later.stderr
     assert not list(root.iterdir())
+
+
+# ---- review of #270 at 76881dd: overlap is decided by directory identity, not path strings
+
+
+def _stat_alias(monkeypatch: pytest.MonkeyPatch, aliases: dict[Path, Any]) -> None:
+    """``os.stat`` of an alias path answers for its target: a Path, a ready stat_result, or an
+    exception to raise. Every other path, and every fd, is stat'ed for real."""
+    real = os.stat
+
+    def fake(path: Any, *args: Any, **kwargs: Any) -> os.stat_result:
+        if not isinstance(path, int):
+            target = aliases.get(Path(os.fsdecode(path)))
+            if isinstance(target, BaseException):
+                raise target
+            if isinstance(target, os.stat_result):
+                return target
+            if target is not None:
+                return real(target, *args, **kwargs)
+        return real(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "stat", fake)
+
+
+def _second_path_to(
+    root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest
+) -> tuple[Path, str]:
+    """A second, symlink-free path to the registry root. A real bind mount where ``mount`` is
+    permitted (root in the dev container); elsewhere a plain directory whose ``os.stat``
+    answers as the root, which is what a bind mount looks like to the check. Never a skip."""
+    alias = tmp_path / "bind"
+    alias.mkdir()
+    try:
+        done = subprocess.run(
+            ["mount", "--bind", str(root), str(alias)], capture_output=True, check=False
+        )
+    except OSError:
+        done = None
+    if done is not None and done.returncode == 0:
+
+        def unmount() -> None:
+            if subprocess.run(["umount", str(alias)], check=False).returncode != 0:
+                subprocess.run(["umount", "-l", str(alias)], check=False)
+
+        request.addfinalizer(unmount)
+        assert os.stat(alias).st_ino == os.stat(root).st_ino
+        return alias, "bind_mount"
+    _stat_alias(monkeypatch, {alias: root})
+    return alias, "simulated_bind_mount"
+
+
+def _copy_attempt(registry: eb.DispositionRegistry, card: eb.Scorecard, dest: Path) -> Any:
+    return functools.partial(
+        eb.record_one_disposition, registry, card, None, disposition="benchmark_only",
+        owner_id="generated-owner-1", recorded_at="2026-01-01", copy_to=dest,
+    )  # fmt: skip
+
+
+def test_copy_destination_through_a_second_path_to_the_root_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest
+) -> None:
+    """Reviewer repro: ``mount --bind registry bind`` let ``bind`` and ``bind/sub`` through."""
+    card = _score()
+    root = _registry_root(tmp_path)
+    registry = eb.DispositionRegistry(root)
+    alias, mode = _second_path_to(root, tmp_path, monkeypatch, request)
+    assert mode in {"bind_mount", "simulated_bind_mount"}
+    assert alias.resolve() != root  # the string checks alone would accept every case below
+    (alias / "sub").mkdir()
+    for dest in (alias, alias / "sub", alias / "new" / "deeper"):
+        assert _code(_copy_attempt(registry, card, dest)) == (
+            "copy_destination_overlaps_registry"
+        ), (mode, dest)
+    assert registry.lookup(card.scorecard_digest) is None
+    assert not list(root.rglob("disposition-*.json")) and not list(alias.rglob("disposition-*"))
+
+
+def test_copy_destination_case_variant_alias_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A case-insensitive filesystem (e.g. APFS) gives the root, and its parent, a second
+    spelling that stats as the same directory; both directions are refused."""
+    card = _score()
+    root = _registry_root(tmp_path)
+    registry = eb.DispositionRegistry(root)
+    root_variant = tmp_path / "REGISTRY"
+    parent_variant = tmp_path.with_name(tmp_path.name.swapcase())
+    assert parent_variant != tmp_path and not parent_variant.exists()
+    real_root = os.stat(root)
+    same_ino_other_dev = os.stat_result(
+        (real_root.st_mode, real_root.st_ino, real_root.st_dev + 1, *tuple(real_root)[3:10])
+    )
+    other_dev = tmp_path / "other-dev"
+    other_dev.mkdir()
+    _stat_alias(
+        monkeypatch,
+        {root_variant: root, parent_variant: tmp_path, other_dev: same_ino_other_dev},
+    )
+    for dest in (root_variant, root_variant / "sub", root_variant / "a" / "b", parent_variant):
+        assert _code(_copy_attempt(registry, card, dest)) == (
+            "copy_destination_overlaps_registry"
+        ), dest
+    assert registry.lookup(card.scorecard_digest) is None
+    # Identity is (st_dev, st_ino): the same inode number on another device is not the root.
+    assert eb.record_one_disposition(
+        registry, card, None, disposition="benchmark_only", owner_id="generated-owner-1",
+        recorded_at="2026-01-01", copy_to=other_dev,
+    )  # fmt: skip
+    assert len(list(other_dev.glob("disposition-*.json"))) == 1
+
+
+def test_existing_sibling_and_parent_side_destinations_are_still_accepted(tmp_path: Path) -> None:
+    """The identity walk must not refuse a destination that merely shares an ancestor."""
+    card = _score()
+    root = _registry_root(tmp_path)
+    registry = eb.DispositionRegistry(root)
+    existing = tmp_path / "copies"
+    existing.mkdir()
+    for dest in (existing, tmp_path / "fresh" / "deeper"):
+        eb.check_copy_destination(registry, dest)
+    assert eb.record_one_disposition(
+        registry, card, None, disposition="benchmark_only", owner_id="generated-owner-1",
+        recorded_at="2026-01-01", copy_to=existing,
+    )  # fmt: skip
+
+
+def test_copy_destination_whose_identity_cannot_be_read_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    card = _score()
+    root = _registry_root(tmp_path)
+    registry = eb.DispositionRegistry(root)
+    locked = tmp_path / "locked"
+    _stat_alias(monkeypatch, {locked: PermissionError(13, "generated-denied")})
+    assert _code(_copy_attempt(registry, card, locked / "x")) == (
+        "copy_destination_overlaps_registry"
+    )
+    assert registry.lookup(card.scorecard_digest) is None
 
 
 class _RegistrySubclass(eb.DispositionRegistry):

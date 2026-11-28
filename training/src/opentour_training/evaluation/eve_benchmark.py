@@ -1174,14 +1174,43 @@ def check_copy_destination(registry: DispositionRegistry, destination: Path) -> 
     and one inside the root could be mistaken for, or collide with, registry state, so the root,
     any ancestor of it and any path under it are all refused. The destination is resolved
     (symlinks followed, need not exist yet) before comparing.
+
+    Path strings are only a cheap first pass: a bind mount or a case-insensitive filesystem
+    gives the same directory a second spelling. So overlap is then decided by directory
+    identity ``(st_dev, st_ino)``. Inside: no directory from the destination's nearest
+    existing ancestor up to ``/`` may be the pinned root. Ancestor: when the destination
+    exists, no directory from the root up to ``/`` may be the destination. (A destination
+    that does not exist yet cannot be an existing ancestor of the root.) A directory in either
+    chain whose identity cannot be read is refused too, since overlap cannot be ruled out.
     """
     resolved = Path(destination).resolve()
     root = registry.root
+    code, detail = "copy_destination_overlaps_registry", str(destination)
     _need(
         resolved != root and resolved not in root.parents and root not in resolved.parents,
-        "copy_destination_overlaps_registry",
-        str(destination),
+        code,
+        detail,
     )
+    root_id = registry._pin[1:]
+    chain = (resolved, *resolved.parents)
+    try:
+        nearest = 0
+        while True:  # the nearest existing ancestor (``/`` always exists)
+            try:
+                dest_info = os.stat(chain[nearest])
+                break
+            except (FileNotFoundError, NotADirectoryError):
+                nearest += 1
+        dest_id = (dest_info.st_dev, dest_info.st_ino)
+        for path in chain[nearest:]:
+            info = os.stat(path)
+            _need((info.st_dev, info.st_ino) != root_id, code, detail)
+        if nearest == 0:  # the destination itself exists
+            for path in (root, *root.parents):
+                info = os.stat(path)
+                _need((info.st_dev, info.st_ino) != dest_id, code, detail)
+    except OSError:
+        raise BenchmarkError(code, f"{detail}: identity unreadable") from None
 
 
 def record_one_disposition(
