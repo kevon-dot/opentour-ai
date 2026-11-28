@@ -74,24 +74,9 @@ def _write(kit: Kit, filename: str, record: bytes) -> None:
 
 
 @pytest.fixture
-def enrolled(signer_kit: Kit, monkeypatch: pytest.MonkeyPatch) -> Kit:  # noqa: F811
+def enrolled(signer_kit: Kit) -> Kit:  # noqa: F811
     kit = signer_kit
-    # The serialized verifier writer owns this exact registration. Exercise the real
-    # canonical parser, keys and signatures under the approved policy in this fixture.
-    if PUBLICATION_PURPOSE not in sr.RECORD_PURPOSES:
-        for table in ("CONSENT_PURPOSES", "RECORD_PURPOSES"):
-            monkeypatch.setattr(sr, table, getattr(sr, table) | {PUBLICATION_PURPOSE})
-        monkeypatch.setitem(
-            sr.REQUIRED_ROLES,
-            PUBLICATION_PURPOSE,
-            frozenset({sr.CUSTOMER_OWNER, sr.OPERATOR_CUSTODIAN}),
-        )
-        monkeypatch.setitem(
-            sr.REGISTRY_ROLES,
-            sr.OPERATOR_CUSTODIAN,
-            sr.REGISTRY_ROLES[sr.OPERATOR_CUSTODIAN] | {PUBLICATION_PURPOSE},
-        )
-    kit.operator.purposes.append(PUBLICATION_PURPOSE)
+    assert PUBLICATION_PURPOSE == sr.WORKFLOW_INDEX_PUBLICATION_PURPOSE
     registry = kit.registry()
     _write(kit, REGISTRY_FILE, registry)
     kit.verifier(registry).pin_customer_anchor(kit.enrolment())
