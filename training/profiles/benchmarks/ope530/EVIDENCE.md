@@ -88,7 +88,7 @@ Service-side fit split (C):
 | Frozen forward across the three workers | ~57.5% | ~59.9% |
 | SHA-256 integrity hashing across the three workers | ~24.0% | ~25.6% |
 
-## 3. The batch-size probe behind the opportunity bound
+## 3. The batch-size probe behind the opportunity estimate
 
 `harness/batch_probe.py` (committed; run as row `8910bd724775-warm-D_batch_probe`) runs in one warm worker-like process with the profile's address-space limit. It compares the frozen forward over the 8 fit prompts in two layouts, alternating the order over 20 trials:
 - **incumbent:** two batches of 4;
@@ -96,15 +96,17 @@ Service-side fit split (C):
 
 Hidden states were identical (max absolute difference 0.0).
 
-| | Median | Min | Worst |
+| | Median | Min | Max |
 |---|---|---|---|
 | incumbent (2×4) | 1,588.9 ms | 1,394.9 | 2,143.1 |
 | merged (1×8) | 1,525.8 ms | 1,309.3 | 1,689.6 |
 | saving per trial | **97.8 ms** | −117.4 | 547.0 |
 
+Saving quartiles over the 20 trials (inclusive method): Q1 53.7 ms, median 97.8 ms, Q3 234.7 ms. Two of 20 trials (525.4 and 547.0 ms) exceeded the ~450 ms a 20% fit cut would need.
+
 The probe is noisy under the load described above. Two of 20 trials were slower merged. The large savings coincide with slow incumbent trials.
 
-The **opportunity bound** for the ticket's bounded alternative (cached training-only tokenization plus length-bucketed, token-budgeted batches) on this fixture is an upper estimate. It removes:
+The **opportunity estimate** for the ticket's bounded alternative (cached training-only tokenization plus length-bucketed, token-budgeted batches) on this fixture is median-based, not a ceiling. It removes:
 - all tokenization;
 - all padded forward positions;
 - the median merge saving.
@@ -113,8 +115,9 @@ The **opportunity bound** for the ticket's bounded alternative (cached training-
 |---|---|---|
 | Removable time | 2.3 + 14.2 + 97.8 = **114.3 ms** | 1.1 + 14.2 + 97.8 = **113.1 ms** |
 | Share of median fit wall | **5.09%** | **5.20%** |
+| Same, with the Q1 / Q3 saving | 3.13% / 11.19% | 3.17% / 11.49% |
 
-The superseded contended run at `cf074e3` gave a 122.3 ms median saving, which puts the bound at 6.04% / 6.15%. **Stated bound: about 5–6% of fit wall time, about 2% of time to verified verdict.** A 20% median fit-time reduction would need about 450 ms per fit. The earlier "~17 ms / ≤0.8%" figure was wrong, because it left out per-batch overhead, and is withdrawn.
+The superseded contended run at `cf074e3` gave a 122.3 ms median saving, which puts the median-based estimate at 6.04% / 6.15%. **Stated estimate: about 5–6% of fit wall time at the median saving (about 2% of time to verified verdict), and about 11–11.5% at the upper-quartile saving.** Because the probe is noisy, this is not a hard ceiling: 2 of 20 trials alone would have cleared 20%. A 20% median fit-time reduction would need about 450 ms per fit. The earlier "~17 ms / ≤0.8%" figure was wrong, because it left out per-batch overhead, and is withdrawn.
 
 ## 4. Decision (ticket decision table, priority order)
 
@@ -126,13 +129,13 @@ The superseded contended run at `cf074e3` gave a 122.3 ms median saving, which p
 3. **Tokenization repeats or excessive padding dominates the actual fit?** No.
    - Tokenization takes 1–2 ms per worker and padding is 0.98%.
    - The fit is dominated by the frozen forward pass (about 67%) and integrity hashing (about 22%).
-   - The bounded alternative's ceiling is about 5–6% of fit wall, so it **cannot reach the 20% median fit-time target**.
+   - The bounded alternative's median-based estimate is about 5–6% of fit wall (about 11–11.5% at the upper-quartile saving), so it **is not expected to reach the 20% median fit-time target**.
 4. **Faster, but a slice regresses, cost exceeds the cap, or quality is uncertain?** Not applicable, because no candidate was built.
 5. **Owner D4 / step-3 stop.** The objective is time to a verified verdict. The fit is 38–39% of that time, so it does not dominate. The two fresh protected replays (about 59%) do.
 
 **Decision: keep current behavior.** The default `smollm2_135m_lora_v1` recipe is unchanged, and no speed or accuracy claim is made. The new numbers **do not change** the earlier decision. They do correct its supporting figures:
 - the cold/warm gap is about 398 ms, not about 64 ms;
-- the bound is about 5–6%, not ≤0.8%;
+- the median-based estimate is about 5–6% (upper quartile about 11–11.5%), not ≤0.8%;
 - fit shares are 38.34% / 38.83%.
 
 **Evidence level.** Generated engineering rehearsal, one named CPU backend, a shared and loaded machine. It is not customer evidence and not real-label quality.
@@ -180,6 +183,7 @@ Commands 12–14 ran at `0bb0bec`, with only the untracked evidence files presen
 ## 7. Deviations and limitations
 
 - **Shared, loaded machine.** Other sessions' test suites ran throughout, with a 1-minute load of 2.2–6.4 on 4 vCPUs. Absolute times carry a few percent of noise, and the probe trials vary widely. The order alternated, and load is recorded per process.
+- **Residency check scope.** `resident_at_start` is read by the orchestrator just before each process is spawned, and it checks only `model.safetensors`. The venv and CPython files are evicted for cold runs but their residency is not verified.
 - **Host page cache.** It is uncontrolled. "Cold" means the guest page cache was evicted, as verified by mincore. It does not mean a cold device.
 - **Reused staging.** The model venv in the staging directory was created earlier with uv 0.11.32. Its interpreter is the toolchain-pinned CPython 3.12.16 tarball, and the hash-locked wheels are installed. The pinned uv 0.13.8 was used for the root and training syncs.
 - **Instrumented replica.** The worker sub-stage split comes from `harness/worker_replica.py`, which calls the product worker's own functions and now applies its checks:
@@ -189,7 +193,7 @@ Commands 12–14 ran at `0bb0bec`, with only the untracked evidence files presen
   - nonfinite-logit check.
   
   Phase totals come from the unmodified product CLI.
-- **Probe scope.** The probe is warm and in-process only. It bounds one mechanism, merging forward batches. It does not implement or time an actual candidate recipe.
+- **Probe scope.** The probe is warm and in-process only. It estimates one mechanism, merging forward batches. It does not implement or time an actual candidate recipe.
 - **Generated data only.** The fixture has 8 near-equal-length rows and 0.98% padding. There is no real-label, variable-length, critical-slice or customer evidence.
 
 ## Reproduce
