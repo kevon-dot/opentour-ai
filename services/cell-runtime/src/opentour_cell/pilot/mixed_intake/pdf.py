@@ -848,7 +848,8 @@ def _tokens(data: bytes):  # type: ignore[no-untyped-def]
             while j < n and data[j] not in _WS and data[j] not in _DELIM:
                 j += 1
             # Names match resource keys after #xx decoding, as the dictionaries are read.
-            yield ("name", _HEX_PAIR.sub(lambda m: bytes([int(m[1], 16)]), data[i + 1 : j]))
+            name = _HEX_PAIR.sub(lambda m: bytes([int(m[1], 16)]), data[i + 1 : j])
+            yield ("name", _ContentName(name))
             i = j
         else:
             j = i
@@ -924,6 +925,67 @@ def _inline_image_size(entries: list[object]) -> int | None:
     if min(width, height, bits) <= 0 or not all(v == int(v) for v in (width, height, bits)):
         return None
     return (int(width) * int(bits) * components + 7) // 8 * int(height)
+
+
+class _ContentName(bytes):
+    """A name operand in a content stream (a string operand stays plain bytes)."""
+
+
+# Operand signatures of every operator the hidden-text checks depend on: n a number, name a
+# name, str a string, arr an array, props a name or an inline dictionary. A viewer such as
+# poppler takes the last operands and ignores an operator whose operands have the wrong types,
+# while a reader that filters operands by type reads something else; any other operand list
+# therefore goes to review (content_operand_mismatch, see _operands_fit).
+_SIGNATURES: dict[bytes, tuple[str, ...]] = {
+    **{op: () for op in (b"BT", b"ET", b"q", b"Q", b"T*", b"W", b"W*", b"h", b"BI", b"EMC")},
+    **{op: () for op in (b"n", b"S", b"s", b"f", b"F", b"f*", b"B", b"B*", b"b", b"b*")},
+    **{op: ("n",) for op in (b"Tr", b"Ts", b"Tz", b"Tc", b"Tw", b"TL", b"g", b"G")},
+    **{op: ("n",) for op in (b"w", b"j", b"M")},
+    **{op: ("n", "n") for op in (b"Td", b"TD", b"m", b"l")},
+    **{op: ("n",) * 3 for op in (b"rg", b"RG")},
+    **{op: ("n",) * 4 for op in (b"k", b"K", b"re", b"v", b"y")},
+    **{op: ("n",) * 6 for op in (b"Tm", b"cm", b"c")},
+    **{op: ("name",) for op in (b"cs", b"CS", b"gs", b"Do", b"sh", b"BMC")},
+    b"Tf": ("name", "n"),
+    b"Tj": ("str",),
+    b"'": ("str",),
+    b'"': ("n", "n", "str"),
+    b"TJ": ("arr",),
+    b"BDC": ("name", "props"),
+    b"d": ("arr", "n"),
+}
+
+
+def _operand_kind(value: object) -> str:
+    if isinstance(value, float):
+        return "n"
+    if isinstance(value, _ContentName):
+        return "name"
+    if isinstance(value, _ContentArray):
+        return "arr"
+    if isinstance(value, _ContentDict):
+        return "dict"
+    return "str" if isinstance(value, bytes) else "other"
+
+
+def _kinds_fit(operands: list[object], signature: tuple[str, ...]) -> bool:
+    kinds = [_operand_kind(value) for value in operands]
+    return len(kinds) == len(signature) and all(
+        kind == want or (want == "props" and kind in ("name", "dict"))
+        for kind, want in zip(kinds, signature, strict=True)
+    )
+
+
+def _operands_fit(op: bytes, operands: list[object]) -> bool | None:
+    """Whether the operands are exactly what `op` takes; None when `op` is not checked."""
+    kinds = [_operand_kind(value) for value in operands]
+    if op in (b"sc", b"SC"):
+        return 1 <= len(kinds) <= 4 and all(kind == "n" for kind in kinds)
+    if op in (b"scn", b"SCN"):
+        numbers = kinds[:-1] if kinds and kinds[-1] == "name" else kinds
+        return bool(kinds) and len(numbers) <= 32 and all(kind == "n" for kind in numbers)
+    signature = _SIGNATURES.get(op)
+    return None if signature is None else _kinds_fit(operands, signature)
 
 
 class _ContentArray(list[object]):
@@ -2039,6 +2101,19 @@ def _fragments(
             stack.clear()
             continue
         op = value
+        if _operands_fit(op, stack) is False:
+            marks.add("content_operand_mismatch")
+            signature = _SIGNATURES.get(op)
+            width = len(signature) if signature is not None else -1
+            if (
+                signature is not None
+                and len(stack) > width
+                and _kinds_fit(stack[len(stack) - width :], signature)
+            ):
+                del stack[: len(stack) - width]  # extra operands: the last ones are used
+            else:
+                stack.clear()  # operands of the wrong types: the operator is ignored
+                continue
         nums = [v for v in stack if isinstance(v, float)]
         if op == b"BI":
             inline_open = True
@@ -2198,14 +2273,17 @@ def _fragments(
             move_line(0.0, -gs.leading)
             emit(_show(stack[-1]), [stack[-1]])
         elif op == b"TJ" and stack and isinstance(stack[-1], _ContentArray):
-            if any(not isinstance(item, (bytes, float)) for item in stack[-1]):
+            if any(
+                not isinstance(item, (bytes, float)) or isinstance(item, _ContentName)
+                for item in stack[-1]
+            ):
                 # A nested array, a dictionary or anything but strings and numbers: viewers
                 # draw some of it, skip some, or reject the operator, each differently.
                 marks.add("text_operand_malformed")
             parts = []
             pieces: list[bytes | float] = []
             for item in stack[-1]:
-                if isinstance(item, bytes):
+                if isinstance(item, bytes) and not isinstance(item, _ContentName):
                     parts.append(_show(item))
                     pieces.append(item)
                 elif isinstance(item, float):

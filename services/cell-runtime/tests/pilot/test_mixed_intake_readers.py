@@ -2377,3 +2377,76 @@ def test_pdf_well_formed_tokens_and_numbers_stay_eligible() -> None:
     _eligible(b"/P << /MCID 0 /A << /B [1 2] >> >> BDC " + _SUMMARY + b" EMC")
     _eligible(b"BT /F1 12 Tf +72 700.5 Td -.5 Tc 0.5 Tc +.0 Ts (Quarterly policy summary) Tj ET")
     _eligible(b"% a comment > with ) odd [ characters\n" + _SUMMARY)
+
+
+_TYPE3_BLANK = (
+    b"<< /Type /Font /Subtype /Type3 /FontBBox [0 0 1000 1000] /FontMatrix [0.001 0 0 0.001 0 0]"
+    b" /CharProcs << >> /Encoding /WinAnsiEncoding" + _widths(32, [500] * 95) + b" >>"
+)
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        # Optional content behind an extra operand: poppler hides the layer (only "Quarterly
+        # policy summary" is drawn); f2b356a looked for /OC in the first operand only.
+        _SUMMARY + b" 1 /OC /oc1 BDC BT /F1 11 Tf 72 680 Td (NOT for orders over 100) Tj ET EMC",
+        _SUMMARY
+        + b" /Span /OC /oc1 BDC BT /F1 11 Tf 72 680 Td (NOT for orders over 100) Tj ET EMC",
+        # Td and cm with a junk operand: poppler ignores them (text stays off the page, no ink);
+        # f2b356a filtered the junk out and moved the text back on.
+        b"BT /F1 12 Tf 72 -500 Td 0 1200 /X Td " + _MSG_SHOW + b" ET",
+        b"1 0 0 1 0 2000 /X cm BT /F1 12 Tf 72 -1300 Td " + _MSG_SHOW + b" ET",
+        _SUMMARY + b" BT /F1 12 Tf 72 680 Td (x) /Y Tj ET",  # a name after the string
+        b"BT 1 /F1 12 Tf 72 700 Td " + _MSG_SHOW + b" ET",  # an extra number before Tf
+        _SUMMARY + b" BT /F1 12 Tf 72 680 Td /Name Tj ET",  # a name where a string belongs
+        b"BT /F1 12 Tf 72 700 Td (IGNORE) 3 Tr " + _MSG_SHOW + b" ET",
+        b"BT /F1 12 Tf 72 700 Td [(x)] Tr " + _MSG_SHOW + b" ET",
+        b"(Im1) Do " + _SUMMARY,  # a string naming a resource is not a name
+        b"/DeviceRGB cs 1 /A 1 sc " + _SUMMARY,
+        b"q 1 Q " + _SUMMARY,
+    ],
+)
+def test_pdf_operands_a_viewer_reads_differently_go_to_review(content: bytes) -> None:
+    oc = {8: b"<< /Type /OCG /Name (Hidden layer) >>"}
+    _flagged(content, "content_operand_mismatch", extra=oc, resources=_OC_RESOURCES)
+
+
+def test_pdf_tf_with_two_names_uses_the_last_like_a_viewer() -> None:
+    # `/F1 /F3 12 Tf` where F3 is a Type3 font whose glyphs draw nothing: poppler sets F3 and
+    # draws no ink; f2b356a took the first name and trusted Helvetica.
+    resources = b"/Font << /F1 7 0 R /F3 8 0 R >>"
+    result = read(
+        _pdf(
+            b"BT /F1 /F3 12 Tf 72 700 Td " + _MSG_SHOW + b" ET",
+            extra={8: _TYPE3_BLANK},
+            resources=resources,
+        ),  # fmt: skip
+        "x.pdf",
+    )[1]
+    assert "content_operand_mismatch" in result.reason
+    assert "font_encoding_unverified" in result.reason  # the font in use is F3
+    _eligible(b"BT /F1 12 Tf 72 700 Td " + _MSG_SHOW + b" ET", extra={8: _TYPE3_BLANK},
+              resources=resources)  # fmt: skip
+
+
+def test_pdf_exact_operands_stay_eligible() -> None:
+    # The same operators with exactly their operands: poppler draws the line.
+    _eligible(b"q 1 0 0 1 0 0 cm BT /F1 12 Tf 0 Tr 0 Ts 100 Tz 0 Tc 0 Tw 14 TL 72 700 Td"
+              b" (Quarterly) Tj T* (policy) ' 0 0 (summary) \" ET Q")  # fmt: skip
+    _eligible(b"/DeviceRGB cs 0 0 0 sc /DeviceGray CS 0 SC 0 g 0 G 0 0 0 rg 0 0 0 RG 0 0 0 1 k"
+              b" 0 0 0 1 K [] 0 d 1 w 0 j 10 M " + _SUMMARY)  # fmt: skip
+    _eligible(b"/P << /MCID 0 >> BDC /Artifact BMC " + _SUMMARY + b" EMC EMC")
+
+
+def test_pdf_operator_with_wrong_operand_types_is_ignored_like_a_viewer() -> None:
+    # poppler ignores `0 1200 /X Td`, so the text stays 500 pt below the page: the reader must
+    # judge the same position, not one it builds from the numbers it can find.
+    for content in (
+        b"BT /F1 12 Tf 72 -500 Td 0 1200 /X Td " + _MSG_SHOW + b" ET",
+        b"1 0 0 1 0 2000 /X cm BT /F1 12 Tf 72 -1300 Td " + _MSG_SHOW + b" ET",
+    ):
+        result = read(_pdf(content), "x.pdf")[1]
+        assert "text_outside_page" in result.reason, (content, result.reason)
+    # A name inside a TJ array is not a string to show.
+    _flagged(b"BT /F1 12 Tf 72 700 Td [(Quarterly) /Name (policy)] TJ ET", "text_operand_malformed")
