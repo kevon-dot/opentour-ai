@@ -200,3 +200,40 @@ def test_wrong_suggestion_is_editable_and_unresolved_family_stays_outside_reserv
     assert frozen["uncovered_critical"] and "Frozen, unscored" in text(h, view)
     assert "Owner decision" not in text(h, view) and "Suggested action" not in text(h, view)
     assert effects(h) == (0,) * 7
+
+
+def test_case_review_labels_generated_and_owner_origins(joined, monkeypatch):
+    from opentour_cell.pilot.starter_cases import ProposedCase
+    from test_starter_map_confirmation import FiveFamilies
+
+    h, owner, _, _, _ = joined
+    owner.propose(FiveFamilies())
+    branch = owner.review()["cases"][0]
+    example = ProposedCase(
+        "owner-missing-po",
+        "family-0",
+        "template-0",
+        branch["branch_id"],
+        (("po", None), ("total", 12)),
+        "REVIEW",
+        "Missing order at a different amount",
+        branch["citation"],
+    )
+    owner.add_counterexample(case=example, expected_revision=0, operation_ref="owner-append")
+    pack = owner.review()
+    assert pack["cases"][-1]["case_origin"] == "owner_counterexample"
+    view = open_cases(h, monkeypatch)
+    assert set(dict(actions(screen(h, view)))) == {"ot_case_review", "ot_case_generate"}
+    choose(h, view, "ot_case_review")
+    assert pack["cases"][0]["case_origin"] == "generated_starter"
+    assert "Generated case 1 of" in text(h, view)
+    for _ in range(len(pack["cases"]) - 1):
+        choose(h, view, "ot_case_page_next")
+    assert "owner-missing-po" in text(h, view)
+    assert "Generated case" not in text(h, view)
+    assert "Owner counterexample" in text(h, view)
+    assert set(dict(actions(screen(h, view)))) == {
+        "ot_case_page_previous",
+        "ot_case_citation",
+        "ot_case_edit",
+    }

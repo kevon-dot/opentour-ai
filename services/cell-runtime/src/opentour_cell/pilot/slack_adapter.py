@@ -27,6 +27,7 @@ from urllib.parse import urlsplit
 
 from opentour_cell.pilot.intake_mcp import REF_PATTERN, IntakePrincipal
 from opentour_cell.pilot.live_evidence import LiveEvidence, LiveScope, binding_candidate
+from opentour_cell.pilot.scoped_query_plan import ReadoutQuestion, plan_query
 from opentour_cell.pilot.starter_setup import StarterBinding, StarterPreview, StarterSetup
 from opentour_cell.pilot.status_questions import (
     ApprovalEvidence,
@@ -37,6 +38,7 @@ from opentour_cell.pilot.status_questions import (
 )
 
 if TYPE_CHECKING:
+    from opentour_cell.pilot.handoff_readback import HandoffReadback
     from opentour_cell.pilot.map_review import MapReviewService
     from opentour_cell.pilot.starter_evaluation_session import StarterEvaluationSession
     from opentour_cell.pilot.starter_map_confirmation import StarterCaseEntry, StarterCaseSession
@@ -52,6 +54,7 @@ REGRESSION_QUESTION = re.compile(
     r"(?:what (?:got|became) worse|(?:which|what) (?:cases|decisions|answers) "
     r"(?:(?:got|became) (?:worse|wrong|incorrect)|regressed))\??"
 )
+WORKPLACE_QUESTIONS = {ReadoutQuestion.WORKPLACE_SUPPORT, ReadoutQuestion.SYNTHETIC_BENEFIT}
 ROLES = {"inspect", "tune", "review"}
 CALLBACKS = {
     "ot_dataset_search",
@@ -130,6 +133,8 @@ ACTIONS = {
     "ot_repair_confirm",
     "ot_repair_refresh",
     "ot_release_approve",
+    "ot_release_receipt",
+    "ot_delivery_status",
     "ot_release_changes",
     "ot_help",
     "ot_question",
@@ -1641,11 +1646,14 @@ class Workbench:
         topic: str = "changes",
     ) -> None:
         policy = self._policy(cfg, actor)
+        workflow_scoped = topic in WORKPLACE_QUESTIONS or topic == StatusTopic.DELIVERY
         eligible = []
         if cfg.permission(actor, "inspect")["aggregate"]:
             for dataset, source in self._result_sources(cfg, actor):
                 target = self._readout(cfg, actor, source)
                 if target and self.journal.inspected(actor, target.revision, policy):
+                    if workflow_scoped and not self._workplace_scope(cfg, target):
+                        continue
                     eligible.append((dataset, source, target.revision))
         page = max(0, min(page, (len(eligible) - 1) // RESULT_PAGE_SIZE))
         start = page * RESULT_PAGE_SIZE
@@ -1655,8 +1663,27 @@ class Workbench:
             if topic in {StatusTopic.TRAINING, StatusTopic.LIVE_ERRORS}
             else None
         )
+
+        def delivery_choices(settings: Settings) -> dict[str, tuple[str, str]]:
+            choices = {}
+            if topic == StatusTopic.DELIVERY and settings.live_workflow_ref:
+                for _, source, revision in rows:
+                    target = self._readout(settings, actor, source)
+                    if target and target.revision == revision:
+                        receipt = self._handoff_receipt(settings, actor, target)
+                        if receipt:
+                            choices[revision] = (
+                                receipt.selection.workflow_ref,
+                                self._receipt_pin(actor, revision, receipt),
+                            )
+            return choices
+
+        deliveries = delivery_choices(cfg)
         listing = {
             "page": page,
+            "workplace_scope": cfg.live_workflow_ref if topic in WORKPLACE_QUESTIONS else None,
+            "delivery_scope": cfg.live_workflow_ref if topic == StatusTopic.DELIVERY else None,
+            "deliveries": {revision: pin for revision, (_, pin) in deliveries.items()},
             "items": {revision: source for _, source, revision in rows},
             "topic": topic,
             "current": current[1] if current else None,
@@ -1664,7 +1691,11 @@ class Workbench:
         ctx = self.journal.context(actor, cfg.channel, view, "regressions", revision=_json(listing))
 
         def authorize() -> None:
-            self._authorize_question_rows(cfg, actor, rows)
+            latest = self._authorize_question_rows(
+                cfg, actor, rows, workflow_scoped=workflow_scoped
+            )
+            if deliveries:
+                _check(delivery_choices(latest) == deliveries)
             if current is not None:
                 _check(self._current_question(actor, topic) == current)
 
@@ -1677,27 +1708,121 @@ class Workbench:
                 more=start + len(rows) < len(eligible),
                 topic=topic,
                 **({"current_workflow": current[:2]} if current else {}),
+                **(
+                    {"delivery_workflows": {k: v[0] for k, v in deliveries.items()}}
+                    if deliveries
+                    else {}
+                ),
             ),
             old_hash,
             authorize=authorize,
         )
 
     def _authorize_question_rows(
-        self, cfg: Settings, actor: str, rows: list[tuple[str, str, str]]
-    ) -> None:
+        self,
+        cfg: Settings,
+        actor: str,
+        rows: list[tuple[str, str, str]],
+        *,
+        workflow_scoped: bool = False,
+    ) -> Settings:
         # Both the withdrawal guard and the exposure transaction are held at admission.
         current = self.settings()
         current.permission(actor, "inspect")
         policy = self._policy(current, actor)
         _check(policy == self._policy(cfg, actor))
+        if workflow_scoped:
+            _check(current.live_workflow_ref == cfg.live_workflow_ref)
         for dataset, source, revision in rows:
             _check(current.permission(actor, "inspect", dataset)["aggregate"])
             target = self._readout(current, actor, source)
             _check(target and target.dataset == dataset and target.revision == revision)
+            if workflow_scoped:
+                _check(target and self._workplace_scope(current, target))
             _check(self.journal.inspected(actor, revision, policy))
+        return current
+
+    def _handoff_receipt(self, cfg: Settings, actor: str, target: Target) -> HandoffReadback | None:
+        from opentour_cell.pilot.handoff_readback import read_handoff
+
+        if not (
+            cfg.live_workflow_ref
+            and cfg.explicit_recipient
+            and cfg.approval_provider == target.audit.get("release_provider") == "slack"
+            and actor == cfg.reviewer == target.audit.get("release_reviewer")
+            and cfg.permission(actor, "review", target.dataset)["aggregate"]
+        ):
+            return None
+        # The selector locates a workflow. The independently signed inspection
+        # grant and current source intake bind that workflow to this frozen run.
+        return read_handoff(
+            self.store,
+            actor=actor,
+            workflow_ref=cfg.live_workflow_ref,
+            proposal_ref=target.audit["job_id"],
+            proposal_revision=target.audit["run_revision"],
+            artifact_sha256=target.audit["model_revision"],
+        )
+
+    def _receipt_pin(self, actor: str, revision: str, receipt: HandoffReadback) -> str:
+        return self.journal.opaque(
+            "release-receipt",
+            [
+                actor,
+                revision,
+                receipt.selection.workflow_ref,
+                receipt.selection.proposal_ref,
+                receipt.selection.approval_ref,
+                receipt.destination_ref,
+            ],
+        )
+
+    @staticmethod
+    def _workplace_scope(cfg: Settings, target: Target) -> bool:
+        if not cfg.live_workflow_ref:
+            return True
+        if target.audit["mode"] not in {"managed_rule", "managed_model"}:
+            return False
+        from opentour_cell.pilot.source_intake import check_current_intake
+
+        intake = check_current_intake(
+            cfg.directory, cfg.organization, target.audit["engagement"], target.dataset_revision
+        )
+        return bool(
+            intake["workflow"] == cfg.live_workflow_ref and intake["dataset_id"] == target.dataset
+        )
+
+    def _workplace_answer(self, cfg: Settings, target: Target, topic: str) -> StatusAnswer:
+        _check(self._workplace_scope(cfg, target))
+        scope = f"Workflow {cfg.live_workflow_ref}. " if cfg.live_workflow_ref else ""
+        mode = target.audit["mode"]
+        basis = {
+            "evaluation_only": "This result scored supplied outputs.",
+            "training": "This result records a completed CPU fit.",
+            "managed_rule": "This result evaluates a simple rule.",
+            "managed_model": "This result includes a model comparison.",
+        }[mode]
+        if topic == ReadoutQuestion.WORKPLACE_SUPPORT:
+            return StatusAnswer(
+                "Independent workplace support is unavailable for this result.",
+                f"{scope}{basis} The frozen cohort contains {target.audit['population']} cases. "
+                "No receipt links them to independently verified workplace families.",
+                "The data custodian can provide verified case lineage for this frozen result.",
+            )
+        return StatusAnswer(
+            "Augmentation benefit is unproven for this result.",
+            f"{scope}{basis} The result has no matched real-only and augmented arms "
+            "scored on the same untouched real cases. Incremental cost is unavailable.",
+            "The evaluation operator can provide a matched comparison and its cost receipt.",
+        )
 
     def _status_answer(
-        self, cfg: Settings, actor: str, target: Target, topic: StatusTopic
+        self,
+        cfg: Settings,
+        actor: str,
+        target: Target,
+        topic: StatusTopic,
+        receipt: HandoffReadback | None = None,
     ) -> StatusAnswer:
         approval = None
         if topic == StatusTopic.DELIVERY:
@@ -1735,18 +1860,26 @@ class Workbench:
                     target.audit["run_revision"],
                     target.audit["model_revision"],
                 )
+                if recorded and recorded["decision"] == "approved" and receipt:
+                    from opentour_cell.pilot.slack_views import handoff_status
+
+                    return handoff_status(receipt, target.audit)
                 if recorded:
                     stage = (
                         "release_changes_requested"
                         if recorded["decision"] == "changes_requested"
                         else recorded["decision"]
                     )
-                    approval = ApprovalEvidence(stage, recorded["presentation_id"])
+                    approval = ApprovalEvidence(
+                        stage, recorded["presentation_id"], recorded.get("recorded_at")
+                    )
             else:
-                state, receipt = self._recorded_decision(target.revision)
+                state, decision_receipt = self._recorded_decision(target.revision)
                 if state in {"approved", "changes_requested"}:
                     stage = "readout_changes_requested" if state == "changes_requested" else state
-                    approval = ApprovalEvidence(stage, receipt["receipt"], receipt["decided"])
+                    approval = ApprovalEvidence(
+                        stage, decision_receipt["receipt"], decision_receipt["decided"]
+                    )
         answer = read_status(
             topic,
             target.audit,
@@ -1784,6 +1917,7 @@ class Workbench:
         revision: str,
         topic: str,
         old_hash: str = "",
+        expected_receipt_pin: str | None = None,
     ) -> None:
         target = self._readout(cfg, actor, source)
         _check(target and target.revision == revision)
@@ -1793,21 +1927,58 @@ class Workbench:
             entry["aggregate"] and self.journal.inspected(actor, revision, self._policy(cfg, actor))
         )
         status_topic = StatusTopic(topic) if topic in StatusTopic else None
-        _check(not topic or status_topic or topic in self.views.QUESTION_LABELS)
+        _check(
+            not topic
+            or status_topic
+            or topic in WORKPLACE_QUESTIONS
+            or topic in self.views.QUESTION_LABELS
+        )
         current = self.settings()
         _check(self._policy(cfg, actor) == self._policy(current, actor))
         current.permission(actor, "inspect", target.dataset)
-        token = self.journal.context(actor, cfg.channel, view, "questions", source, revision)
-        answer = self._status_answer(current, actor, target, status_topic) if status_topic else None
+        delivery_scoped = status_topic == StatusTopic.DELIVERY and expected_receipt_pin is not None
+        if delivery_scoped:
+            _check(
+                current.live_workflow_ref == cfg.live_workflow_ref
+                and self._workplace_scope(current, target)
+            )
+        receipt = (
+            self._handoff_receipt(current, actor, target)
+            if status_topic == StatusTopic.DELIVERY and expected_receipt_pin
+            else None
+        )
+        answer = (
+            self._status_answer(current, actor, target, status_topic, receipt)
+            if status_topic
+            else self._workplace_answer(current, target, topic)
+            if topic in WORKPLACE_QUESTIONS
+            else None
+        )
+        pin = self._receipt_pin(actor, revision, receipt) if receipt else ""
+        if expected_receipt_pin is not None:
+            _check(pin == expected_receipt_pin)
+        kind = "handoff_question" if pin else "questions"
+        token = self.journal.context(actor, cfg.channel, view, kind, source, revision)
 
         def authorize() -> None:
-            self._authorize_question_rows(cfg, actor, [(target.dataset, source, revision)])
+            latest = self._authorize_question_rows(
+                cfg, actor, [(target.dataset, source, revision)], workflow_scoped=delivery_scoped
+            )
+            if topic in WORKPLACE_QUESTIONS:
+                _check(self._workplace_answer(self.settings(), target, topic) == answer)
+            if receipt:
+                _check(self._handoff_receipt(latest, actor, target) == receipt)
             if status_topic:
-                _check(self._status_answer(self.settings(), actor, target, status_topic) == answer)
+                settings = latest if delivery_scoped else self.settings()
+                _check(
+                    self._status_answer(settings, actor, target, status_topic, receipt) == answer
+                )
 
         self._show(
             view,
-            self.views.status_question_modal(token, revision, target.dataset, answer)
+            self.views.status_question_modal(
+                token, revision, target.dataset, answer, receipt_pin=pin
+            )
             if answer
             else self.views.question_modal(token, revision, target.report, target.audit, topic),
             old_hash,
@@ -2247,6 +2418,49 @@ class Workbench:
             audit=target.audit,
         )
 
+    def _open_handoff(
+        self,
+        cfg: Settings,
+        actor: str,
+        view: str,
+        ctx: Json,
+        action: str,
+        value: str,
+        old_hash: str,
+    ) -> None:
+        job = ctx["job"]
+        _check(bool(old_hash))
+        kinds = (
+            {"release_recorded", "handoff_question"}
+            if action == "ot_release_receipt"
+            else {"handoff"}
+        )
+        _check(ctx["kind"] in kinds)
+        target = self._readout(cfg, actor, job)
+        _check(target and target.revision == ctx["revision"])
+        assert target is not None
+        rows = [(target.dataset, job, target.revision)]
+        self._authorize_question_rows(cfg, actor, rows)
+        receipt = self._handoff_receipt(cfg, actor, target)
+        _check(receipt)
+        assert receipt is not None
+        _check(self._receipt_pin(actor, target.revision, receipt) == value)
+        token = self.journal.context(actor, cfg.channel, view, "handoff", job, target.revision)
+
+        def authorize_receipt() -> None:
+            self._authorize_question_rows(cfg, actor, rows)
+            _check(self._handoff_receipt(self.settings(), actor, target) == receipt)
+
+        self._show(
+            view,
+            self.views.handoff_modal(token, value, receipt, target.audit),
+            old_hash,
+            dataset=target.dataset,
+            dataset_revision=target.dataset_revision,
+            audit=target.audit,
+            authorize=authorize_receipt,
+        )
+
     def _release(
         self, cfg: Settings, actor: str, view: str, ctx: Json, action: str, old_hash: str
     ) -> None:
@@ -2281,18 +2495,36 @@ class Workbench:
             inspection_ref=target.revision,
             provider="slack",
         )
+        receipt = (
+            self._handoff_receipt(current, actor, target)
+            if saved["decision"] == "approved"
+            else None
+        )
+
+        def authorize() -> None:
+            self._authorize_question_rows(
+                current, actor, [(target.dataset, ctx["job"], target.revision)]
+            )
+            if receipt:
+                _check(self._handoff_receipt(self.settings(), actor, target) == receipt)
+
         token = self.journal.context(
             actor, current.channel, view, "release_recorded", ctx["job"], target.revision
         )
         self._show(
             view,
             self.views.release_recorded(
-                token, saved["decision"], target.audit["model_revision"], current.recipient
+                token,
+                saved["decision"],
+                target.audit["model_revision"],
+                current.recipient,
+                revision=self._receipt_pin(actor, target.revision, receipt) if receipt else "",
             ),
             old_hash,
             dataset=target.dataset,
             dataset_revision=target.dataset_revision,
             audit=target.audit,
+            authorize=authorize,
         )
 
     def _decide(
@@ -3503,12 +3735,23 @@ class Workbench:
         elif action in {"ot_result_prev", "ot_result_next", "ot_result_open"}:
             if ctx["kind"] == "regressions":
                 listing = json.loads(ctx["revision"])
+                if listing.get("topic") in WORKPLACE_QUESTIONS:
+                    _check(listing.get("workplace_scope") == cfg.live_workflow_ref)
+                if listing.get("topic") == StatusTopic.DELIVERY:
+                    _check(listing.get("delivery_scope") == cfg.live_workflow_ref)
                 if action == "ot_result_open":
                     _check(value in listing["items"])
                     source = listing["items"][value]
                     _check(source in {s for _, s in self._result_sources(cfg, actor)})
                     self._questions(
-                        cfg, actor, view, source, value, listing.get("topic", "changes"), old_hash
+                        cfg,
+                        actor,
+                        view,
+                        source,
+                        value,
+                        listing.get("topic", "changes"),
+                        old_hash,
+                        expected_receipt_pin=listing.get("deliveries", {}).get(value, ""),
                     )
                 else:
                     self._regression_picker(
@@ -3704,7 +3947,8 @@ class Workbench:
             )
         elif action == "ot_evidence":
             _check(
-                ctx["kind"] in {"home", "evidence", "status", "eval_detail", "questions"}
+                ctx["kind"]
+                in {"home", "evidence", "status", "eval_detail", "questions", "handoff_question"}
                 and value == ctx["revision"]
             )
             self._evidence(cfg, actor, view, ctx, old_hash)
@@ -3712,6 +3956,8 @@ class Workbench:
             _check(ctx["kind"] in {"evidence", "questions"} and value == ctx["revision"])
             topic = "" if action == "ot_question" else action.removeprefix("ot_question_")
             self._questions(cfg, actor, view, job, ctx["revision"], topic, old_hash)
+        elif action in {"ot_release_receipt", "ot_delivery_status"}:
+            self._open_handoff(cfg, actor, view, ctx, action, value, old_hash)
         elif action in {"ot_release_approve", "ot_release_changes"}:
             _check(ctx["kind"] == "evidence" and value == ctx["revision"])
             self._release(cfg, actor, view, ctx, action, old_hash)
@@ -4208,6 +4454,10 @@ class Workbench:
         status_topic = resolve_status(prompt)
         if status_topic:
             self._regression_picker(cfg, actor, view, topic=status_topic.value)
+            return
+        plan = plan_query(prompt)
+        if isinstance(plan, ReadoutQuestion) and plan in WORKPLACE_QUESTIONS:
+            self._regression_picker(cfg, actor, view, topic=plan.value)
             return
         if REGRESSION_QUESTION.fullmatch(" ".join(prompt.casefold().split())):
             self._regression_picker(cfg, actor, view)

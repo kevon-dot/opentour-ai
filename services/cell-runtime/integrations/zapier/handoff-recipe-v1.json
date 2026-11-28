@@ -1,0 +1,21 @@
+{
+  "revision": "opentour.approved-handoff.v1",
+  "enabled_by_default": false,
+  "production_activation": false,
+  "trigger": {
+    "source": "committed_worker_release_outbox",
+    "fields": ["release_ref"]
+  },
+  "worker_local": {
+    "module": "opentour_cell.pilot.recipient_handoff_simulator",
+    "configuration_source": "owner_managed_generated_worker",
+    "receipt_fields": ["schema_version", "release_ref", "state", "receiver_receipt_ref", "owner_action"],
+    "effects": ["resolve_current_release", "claim_or_reconcile", "deliver_signed_artifact"]
+  },
+  "hosted_mapping": {
+    "connection": "per_tenant_authenticated_worker",
+    "state": "pending_hosted_fetch_and_receiver_binding",
+    "provider_history": "opaque_metadata_only",
+    "on_unconfirmed": "independent_receiver_lookup_or_operator_hold"
+  }
+}

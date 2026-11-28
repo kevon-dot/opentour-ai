@@ -601,7 +601,15 @@ class LearningMandates:
                 db.execute("INSERT INTO classes VALUES(?,?,?)", (self.scope, run_id, encoded))
             return document
 
-    def reserve(self, mandate_id: str, request: Mapping[str, Any], *, actor: str) -> Json:
+    def reserve(
+        self,
+        mandate_id: str,
+        request: Mapping[str, Any],
+        *,
+        actor: str,
+        operation_key: str | None = None,
+        authenticated_client: str | None = None,
+    ) -> Json:
         require(
             isinstance(request, Mapping) and request.keys() == RESERVE_KEYS,
             "invalid_fit_reservation",
@@ -612,6 +620,20 @@ class LearningMandates:
                 _hex(req[key]) for key in ("plan_revision", "intake_revision", "residual_revision")
             ),
             "immutable_fit_revisions_required",
+        )
+        require(
+            operation_key is not None or authenticated_client is None,
+            "fit_operation_key_required",
+        )
+        alias_key = (
+            (
+                self.scope,
+                actor,
+                _id(actor if authenticated_client is None else authenticated_client),
+                _id(operation_key),
+            )
+            if operation_key is not None
+            else None
         )
         with self._authorized_db() as db:
             row, spec = self._mandate(db, mandate_id)
@@ -637,9 +659,61 @@ class LearningMandates:
                 _count(req["max_seconds"], 1, spec["max_seconds_per_fit"]),
                 "per_fit_budget_exceeded",
             )
-            existing = db.execute(
+            same_run = db.execute(
                 "SELECT * FROM reservations WHERE scope=? AND run=?", (self.scope, run["id"])
             ).fetchone()
+            require(
+                same_run is None or same_run["request"] == canonical(req),
+                "fit_reservation_conflict",
+            )
+            binding = {key: value for key, value in req.items() if key != "run_id"}
+            intent = digest(
+                [
+                    "standing-local-fit-v1",
+                    row["revision"],
+                    open_weight.BASE_SHA256,
+                    open_weight.PROFILE_SHA256,
+                    binding,
+                ]
+            )
+            alias = None
+            if alias_key is not None:
+                db.execute(
+                    "CREATE TABLE IF NOT EXISTS fit_operation_aliases("
+                    "scope TEXT NOT NULL,actor TEXT NOT NULL,client TEXT NOT NULL,"
+                    "operation_key TEXT NOT NULL,intent TEXT NOT NULL,reservation TEXT NOT NULL,"
+                    "PRIMARY KEY(scope,actor,client,operation_key))"
+                )
+                alias = db.execute(
+                    "SELECT intent,reservation FROM fit_operation_aliases "
+                    "WHERE (scope,actor,client,operation_key)=(?,?,?,?)",
+                    alias_key,
+                ).fetchone()
+                require(alias is None or alias["intent"] == intent, "fit_operation_key_conflict")
+            try:
+                candidates = db.execute(
+                    "SELECT * FROM reservations WHERE scope=? AND mandate=? "
+                    "AND json_extract(request,'$.plan_revision')=? "
+                    "AND json_extract(request,'$.intake_revision')=? LIMIT 2",
+                    (self.scope, mandate_id, req["plan_revision"], req["intake_revision"]),
+                ).fetchall()
+            except sqlite3.DatabaseError:
+                raise MandateError("fit_reservation_integrity_unavailable") from None
+            require(len(candidates) <= 1, "fit_intent_requires_reconciliation")
+            existing = candidates[0] if candidates else None
+            if existing is not None:
+                prior = json.loads(existing["request"])
+                require(
+                    isinstance(prior, dict)
+                    and prior.pop("run_id", None) == existing["run"]
+                    and prior == binding,
+                    "fit_reservation_conflict",
+                )
+            if alias is not None:
+                require(
+                    existing is not None and existing["id"] == alias["reservation"],
+                    "fit_intent_requires_reconciliation",
+                )
             if existing is None:
                 usage = self._usage(db, mandate_id)
                 require(
@@ -654,10 +728,14 @@ class LearningMandates:
                     (self.scope, mandate_id, rid, run["id"], canonical(req), req["max_seconds"]),
                 )
                 existing = self._reservation(db, rid)
-            require(existing["request"] == canonical(req), "fit_reservation_conflict")
+            if alias_key is not None and alias is None:
+                db.execute(
+                    "INSERT INTO fit_operation_aliases VALUES(?,?,?,?,?,?)",
+                    (*alias_key, intent, existing["id"]),
+                )
             return {
                 "reservation_id": existing["id"],
-                "run_id": run["id"],
+                "run_id": existing["run"],
                 "status": existing["state"],
                 "reserved_seconds": existing["seconds"],
                 "authority_kind": KIND,

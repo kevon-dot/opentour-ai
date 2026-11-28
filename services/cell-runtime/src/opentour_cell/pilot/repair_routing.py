@@ -1,0 +1,946 @@
+"""Route a recurring error to the lowest-cost credible repair on development evidence only.
+
+Four outcomes exist: ``keep_incumbent``, ``simple_repair``, ``request_evidence`` and
+``fit_eligible``. The router never receives protected rows, scores or labels, never
+reserves a fit and never starts one; ``fit_eligible`` is a status that references a
+verified policy, not an authorization. One durable evaluation is keyed by the accepted
+run, the worker-local snapshot reference and the standing mandate revision, so a replayed
+trigger or a restarted worker returns the stored receipt instead of a second evaluation.
+
+Limits of what this proves: inputs are the caller's already-admitted development cases.
+Nothing here reads a provider, a live workplace or a protected store.
+"""
+
+from __future__ import annotations
+
+import json
+import math
+import os
+import sqlite3
+from collections import defaultdict
+from collections.abc import Mapping, Sequence
+from contextlib import closing
+from dataclasses import dataclass
+from fractions import Fraction
+from pathlib import Path
+from typing import Any, Protocol
+
+from opentour_cell.pilot import comparison_plan, simple_repair
+from opentour_cell.pilot.operating_point import canonical, digest
+from opentour_cell.pilot.simple_repair import RepairError
+from opentour_cell.pilot.training import _check_file
+
+Json = dict[str, Any]
+SCHEMA = "opentour.pilot.repair-routing.v1"
+# The stored input revision covers the request, not decide()'s logic, so a receipt decided by a
+# different router must never be replayed. BUMP THIS whenever a change to decide(), _body() or
+# anything they call can alter the outcome, reason code or recorded body for some input. A stored
+# evaluation carrying an older value is refused, not re-decided: the record is durable and
+# immutable, and silently replacing it would destroy the evidence trail it exists to provide.
+#
+# v3 (OPE-568): the contradiction check keys on the independence group plus the full feature
+# map instead of the entity plus features, so cases grouped only by family or by a transitive
+# chain now hold as contradictory_labels where v2 could route them onward.
+#
+# v4 (OPE-568 follow-up): feature maps are validated and keyed by value, so Python-equal
+# values are the same evidence: True and 1, 1 and 1.0, 0.0 and -0.0 now conflict where v3 kept
+# them apart. A value that is not None, bool, int, finite float, str, list or str-keyed dict (a
+# tuple, a set, NaN, a non-str key) is refused as invalid_feature_value or invalid_feature_key
+# where v3 routed it, or failed with an untyped ValueError or TypeError.
+ROUTER_REVISION = "repair-routing.decide.v4"
+OUTCOMES = ("keep_incumbent", "simple_repair", "request_evidence", "fit_eligible")
+_ORIGINS_COUNTED = ("live",)
+_DEV = "development"
+
+
+class RoutingError(ValueError):
+    """Fail-closed refusal with a fixed reason code; never carries row content."""
+
+    def __init__(self, code: str) -> None:
+        self.code = code.upper()
+        super().__init__(self.code)
+
+
+def _need(condition: object, code: str) -> None:
+    if not condition:
+        raise RoutingError(code)
+
+
+def _ident(value: Any) -> str:
+    try:
+        return simple_repair.identifier(value)
+    except RepairError:
+        raise RoutingError("invalid_scope_or_identifier") from None
+
+
+def _int(value: Any, low: int, high: int, code: str) -> int:
+    _need(type(value) is int and low <= value <= high, code)
+    return int(value)
+
+
+@dataclass(frozen=True)
+class RoutingTerms:
+    """Thresholds the owner pinned before any protected set was viewed."""
+
+    error_family: tuple[str, str]
+    min_independent_groups: int
+    recurrence_window_seconds: int
+    material_residual_cases: int
+    min_coverage_bps: int
+    max_wrong_automatic_bps: int
+    critical_slices: tuple[str, ...]
+    min_development_cases: int
+    min_groups_per_label: int
+    documentation_revision: str
+    prefer_simpler_on_tie: bool = True
+
+    def validate(self) -> RoutingTerms:
+        _need(len(self.error_family) == 2, "invalid_error_family")
+        for label in self.error_family:
+            _ident(label)
+        _int(self.min_independent_groups, 2, 5000, "invalid_group_minimum")
+        _int(self.recurrence_window_seconds, 1, 10**9, "invalid_recurrence_window")
+        _int(self.material_residual_cases, 1, 5000, "invalid_material_residual")
+        _int(self.min_coverage_bps, 0, 10_000, "invalid_coverage")
+        _int(self.max_wrong_automatic_bps, 0, 10_000, "invalid_wrong_automatic_ceiling")
+        _int(self.min_development_cases, 1, 5000, "invalid_development_minimum")
+        _int(self.min_groups_per_label, 1, 5000, "invalid_label_group_minimum")
+        _need(len(self.critical_slices) <= 32, "invalid_critical_slices")
+        _need(
+            len(set(self.critical_slices)) == len(self.critical_slices), "invalid_critical_slices"
+        )
+        for item in self.critical_slices:
+            _need(":" in item, "invalid_critical_slices")
+            _ident(item)
+        _ident(self.documentation_revision)
+        _need(self.prefer_simpler_on_tie is True, "simpler_tie_preference_required")
+        return self
+
+    def as_json(self) -> Json:
+        return {
+            "error_family": list(self.error_family),
+            "min_independent_groups": self.min_independent_groups,
+            "recurrence_window_seconds": self.recurrence_window_seconds,
+            "material_residual_cases": self.material_residual_cases,
+            "min_coverage_bps": self.min_coverage_bps,
+            "max_wrong_automatic_bps": self.max_wrong_automatic_bps,
+            "critical_slices": sorted(self.critical_slices),
+            "min_development_cases": self.min_development_cases,
+            "min_groups_per_label": self.min_groups_per_label,
+            "documentation_revision": self.documentation_revision,
+            "prefer_simpler_on_tie": self.prefer_simpler_on_tie,
+        }
+
+    @property
+    def revision(self) -> str:
+        return digest(self.as_json())
+
+    def comparison_terms(self) -> Json:
+        """The subset the shared comparison code understands."""
+        return {
+            "minimum_coverage_bps": self.min_coverage_bps,
+            "error_ceiling_bps": self.max_wrong_automatic_bps,
+            "minimum_development_cases": self.min_development_cases,
+            "minimum_residual_errors": self.min_independent_groups,
+        }
+
+
+@dataclass(frozen=True)
+class DevelopmentCase:
+    case_id: str
+    entity_id: str
+    family_id: str
+    decided_at: int
+    features: Mapping[str, Any]
+    incumbent: Mapping[str, Any]
+    reference: str | None
+    split: str = _DEV
+    origin: str = "live"
+    context_state: str = "observed"
+
+
+@dataclass(frozen=True)
+class AdmittedSnapshot:
+    organization: str
+    workflow_ref: str
+    run_id: str
+    snapshot_ref: str
+    evidence_revision: str
+    documentation_revision: str
+    as_of: int
+
+
+@dataclass(frozen=True)
+class MandateView:
+    """Resolved standing-mandate facts. Carries no authority by itself."""
+
+    mandate_ref: str
+    mandate_revision: str
+    withdrawn: bool
+    expired: bool
+    uses: frozenset[str]
+    max_fits: int
+    reserved_fits: int
+    max_seconds_per_fit: int
+    max_total_seconds: int
+    reserved_seconds: int
+
+    @classmethod
+    def from_inspection(cls, details: Mapping[str, Any]) -> MandateView:
+        """Adapt ``LearningMandates.inspect`` output."""
+        scope = details["scope"]
+        return cls(
+            details["mandate_id"],
+            details["mandate_revision"],
+            bool(details["withdrawn"]),
+            bool(details["expired"]),
+            frozenset(scope["uses"]),
+            scope["max_fits"],
+            details["reserved_fits"],
+            scope["max_seconds_per_fit"],
+            scope["max_total_seconds"],
+            details["reserved_seconds"],
+        )
+
+    @property
+    def active(self) -> bool:
+        return not (self.withdrawn or self.expired)
+
+    @property
+    def has_budget(self) -> bool:
+        return (
+            self.reserved_fits < self.max_fits
+            and self.reserved_seconds + self.max_seconds_per_fit <= self.max_total_seconds
+        )
+
+
+@dataclass(frozen=True)
+class SignedPolicy:
+    policy_ref: str
+    snapshot_ref: str
+    terms_revision: str
+    signature: str
+
+
+class PolicyVerifier(Protocol):
+    def verify(self, policy: SignedPolicy) -> bool:
+        """True only if the signature covers this policy's snapshot and terms revision."""
+        ...
+
+
+@dataclass(frozen=True)
+class Recipe:
+    recipe_id: str
+    version: int
+    models: frozenset[str]
+    tasks: frozenset[str]
+    split: str
+    metric: str
+    direction: str
+    allowed_params: tuple[str, ...]
+    trial_limit: int
+    step_limit: int
+    stopping_rule: str
+    est_seconds_per_trial: int
+    paid_probe: bool = False
+
+    def budget_estimate(self) -> int:
+        # Conservative: 50 percent above the declared per-trial estimate, every allowed trial.
+        return (self.est_seconds_per_trial * self.trial_limit * 3 + 1) // 2
+
+
+@dataclass(frozen=True)
+class ModelTarget:
+    model_ref: str
+    task: str
+    capability_receipt_ref: str | None
+
+
+@dataclass(frozen=True)
+class ComparisonScheduling:
+    intake_revision: str
+    protected_ids: tuple[str, ...]
+    incumbent_revision: str
+    audience: str
+
+
+@dataclass(frozen=True)
+class RoutingRequest:
+    terms: RoutingTerms
+    policy: SignedPolicy
+    verifier: PolicyVerifier
+    snapshot: AdmittedSnapshot
+    mandate: MandateView
+    cases: Sequence[DevelopmentCase]
+    rule: Json
+    recipes: Sequence[Recipe] = ()
+    model: ModelTarget | None = None
+    scheduling: ComparisonScheduling | None = None
+    augmentation: str = "not_enabled"
+
+
+def _root(case_id: str) -> str:
+    return "root-" + digest(["case", case_id])[:40]
+
+
+def _identity(identifier: str) -> str:
+    """The one definition of "same entity/family": identifiers are ASCII, compared case-blind."""
+    return identifier.casefold()
+
+
+def _components(cases: Sequence[DevelopmentCase]) -> dict[str, str]:
+    """Cases sharing an entity or a family are one independent group (union-find)."""
+    parent: dict[str, str] = {}
+    # Identifiers are compared case-insensitively: merging more is the conservative direction
+    # for independence, so "Entity-A" and "entity-a" can never count as two groups.
+
+    def find(x: str) -> str:
+        parent.setdefault(x, x)
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    for case in cases:
+        a = find("e:" + _identity(case.entity_id))
+        b = find("f:" + _identity(case.family_id))
+        if a != b:
+            parent[max(a, b)] = min(a, b)
+    return {c.case_id: "grp-" + digest(find("e:" + _identity(c.entity_id)))[:24] for c in cases}
+
+
+_FEATURE_DEPTH = 16
+
+
+def _feature_value(value: Any, depth: int) -> Any:
+    """One feature value in a canonical form where Python-equal values share one key.
+
+    ``True == 1 == 1.0`` and ``0.0 == -0.0`` in Python, and a case that differs from another
+    only by such a value is the same evidence, so conflicting references over it must hold
+    (fail closed) rather than pass as independent. Every bool, int and finite float becomes the
+    exact rational it denotes, so equal numbers share a key and an int no float can represent
+    keeps its own. Strings stay exact. Anything outside the JSON value types is refused
+    rather than coerced, and so is a non-finite float, which has no equal to share a key with.
+    """
+    _need(depth <= _FEATURE_DEPTH, "invalid_feature_value")
+    kind = type(value)
+    if value is None:
+        return ["none"]
+    if kind in (bool, int, float):
+        if kind is float:
+            _need(math.isfinite(value), "invalid_feature_value")
+        exact = Fraction(value)
+        return ["number", exact.numerator, exact.denominator]
+    if kind is str:
+        return ["str", value]
+    if kind is list:
+        return ["list", [_feature_value(item, depth + 1) for item in value]]
+    if kind is dict:
+        return ["dict", _feature_map(value, depth + 1)]
+    raise RoutingError("invalid_feature_value")
+
+
+def _feature_map(features: Mapping[Any, Any], depth: int = 0) -> list[list[Any]]:
+    """A feature map as sorted ``[key, value]`` pairs; every key must be a str."""
+    _need(isinstance(features, Mapping), "invalid_feature_value")
+    _need(all(type(key) is str for key in features), "invalid_feature_key")
+    return sorted([key, _feature_value(item, depth)] for key, item in features.items())
+
+
+def _validate_cases(cases: Sequence[DevelopmentCase]) -> None:
+    _need(len(cases) <= simple_repair.MAX_ROWS, "too_many_cases")
+    seen: set[str] = set()
+    for c in cases:
+        _need(c.split == _DEV, "protected_row_supplied")
+        _ident(c.case_id)
+        _ident(c.entity_id)
+        _ident(c.family_id)
+        _need(c.case_id not in seen, "duplicate_case")
+        seen.add(c.case_id)
+        _need(c.context_state in ("observed", "missing"), "invalid_context_state")
+        _need(c.origin in ("live", "starter", "generated_child"), "invalid_origin")
+        _need(type(c.decided_at) is int and c.decided_at >= 0, "invalid_decision_time")
+        # In the preflight, so a replay is refused for the same features a decision would be.
+        _feature_map(c.features)
+
+
+def _recipe_inputs(recipes: Sequence[Recipe]) -> list[list[Any]]:
+    """Every catalog field the recorded selection can depend on, in a stable order."""
+    return sorted(
+        [
+            r.recipe_id,
+            r.version,
+            sorted(r.models),
+            sorted(r.tasks),
+            r.split,
+            r.metric,
+            r.direction,
+            list(r.allowed_params),
+            r.trial_limit,
+            r.step_limit,
+            r.stopping_rule,
+            r.est_seconds_per_trial,
+            r.paid_probe,
+        ]
+        for r in recipes
+    )
+
+
+def _authority_inputs(request: RoutingRequest) -> list[Any]:
+    """The caller-supplied inputs the receipt publishes a digest or a selection of.
+
+    Leaving these out makes the stored-evaluation conflict check fail open: a second
+    trigger on the same evaluation key carrying a different protected population, model
+    target or recipe catalog is answered with the first receipt, whose comparison plan
+    digest and frozen recipe cover the earlier inputs instead. Mandate counters stay out
+    on purpose; the mandate revision is already part of the evaluation key.
+    """
+    policy, model, scheduling = request.policy, request.model, request.scheduling
+    return [
+        [policy.policy_ref, policy.snapshot_ref, policy.terms_revision, policy.signature],
+        None if model is None else [model.model_ref, model.task, model.capability_receipt_ref],
+        _recipe_inputs(request.recipes),
+        None
+        if scheduling is None
+        else [
+            scheduling.intake_revision,
+            sorted(scheduling.protected_ids),
+            scheduling.incumbent_revision,
+            scheduling.audience,
+        ],
+        request.augmentation,
+    ]
+
+
+def _input_revision(request: RoutingRequest) -> str:
+    return digest(
+        [
+            request.terms.revision,
+            request.snapshot.workflow_ref,
+            request.snapshot.as_of,
+            request.policy.policy_ref,
+            request.snapshot.evidence_revision,
+            request.snapshot.documentation_revision,
+            request.rule["revision"],
+            sorted(
+                [
+                    c.case_id,
+                    c.entity_id,
+                    c.family_id,
+                    c.decided_at,
+                    dict(c.features),
+                    dict(c.incumbent),
+                    c.reference,
+                    c.origin,
+                    c.context_state,
+                ]
+                for c in request.cases
+            ),
+            _authority_inputs(request),
+            ROUTER_REVISION,
+        ]
+    )
+
+
+def evaluation_key(request: RoutingRequest) -> str:
+    s, m = request.snapshot, request.mandate
+    return digest([s.organization, s.run_id, s.snapshot_ref, m.mandate_ref, m.mandate_revision])
+
+
+def _repair_wrong(rule: Json, case: DevelopmentCase) -> tuple[Json, bool]:
+    out = simple_repair.apply_frozen_rule(rule, dict(case.features), dict(case.incumbent))
+    inc, ref = case.incumbent, case.reference
+    residual = (out["status"] == "automatic" and out["label"] != ref) or (
+        out["status"] != "automatic" and inc["status"] == "automatic" and inc["label"] != ref
+    )
+    return out, residual
+
+
+def _slice_failure(rule: Json, terms: RoutingTerms, cases: Sequence[DevelopmentCase]) -> str | None:
+    feature = rule["feature"]
+    for item in sorted(terms.critical_slices):
+        name, value = item.split(":", 1)
+        _need(name == feature, "critical_slice_outside_permitted_feature")
+        members = [c for c in cases if c.features.get(name) == value]
+        if not members:
+            return "critical_slice_unobserved"
+        wrong = regress = 0
+        for c in members:
+            out, _ = _repair_wrong(rule, c)
+            bad = out["status"] == "automatic" and out["label"] != c.reference
+            wrong += bad
+            was = c.incumbent["status"] == "automatic" and c.incumbent["label"] == c.reference
+            regress += bad and was
+        if regress or wrong * 10_000 > len(members) * terms.max_wrong_automatic_bps:
+            return "critical_slice_failed"
+    return None
+
+
+def select_recipe(
+    recipes: Sequence[Recipe], model: ModelTarget | None, mandate: MandateView
+) -> Json:
+    """Deterministic lowest-estimate selection. Every alternative is logged with its reason."""
+    rejected: list[Json] = []
+    viable: list[Recipe] = []
+    for r in sorted(recipes, key=lambda r: (r.recipe_id, r.version)):
+        why = None
+        if model is None or model.model_ref not in r.models:
+            why = "unsupported_model"
+        elif model.task not in r.tasks:
+            why = "unsupported_task"
+        elif r.paid_probe:
+            why = "paid_probe_requires_separate_authority"
+        elif mandate.max_fits == 1 and (r.trial_limit > 1 or r.allowed_params):
+            why = "parameter_sweep_exceeds_owner_fit_limit"
+        elif r.budget_estimate() > mandate.max_seconds_per_fit:
+            why = "estimate_exceeds_owner_budget"
+        if why:
+            rejected.append({"recipe": [r.recipe_id, r.version], "reason": why})
+        else:
+            viable.append(r)
+    viable.sort(key=lambda r: (r.budget_estimate(), r.trial_limit, r.recipe_id, r.version))
+    chosen = viable[0] if viable else None
+    for r in viable[1:]:
+        rejected.append({"recipe": [r.recipe_id, r.version], "reason": "higher_estimate"})
+    frozen = None
+    if chosen is not None and model is not None:
+        frozen = {
+            "recipe": [chosen.recipe_id, chosen.version],
+            "model_ref": model.model_ref,
+            "task": model.task,
+            "validation_split": chosen.split,
+            "metric": chosen.metric,
+            "direction": chosen.direction,
+            "allowed_params": list(chosen.allowed_params),
+            "trial_limit": chosen.trial_limit,
+            "step_limit": chosen.step_limit,
+            "stopping_rule": chosen.stopping_rule,
+            "capability_receipt_ref": model.capability_receipt_ref,
+            "budget_estimate_seconds": chosen.budget_estimate(),
+            "protected_access": "none_before_freeze",
+        }
+    return {
+        "selected": frozen,
+        "rejected": sorted(rejected, key=lambda x: (x["recipe"], x["reason"])),
+    }
+
+
+def _unscheduled(scheduling: ComparisonScheduling | None) -> bool:
+    """No protected population to compare against is the same gap as no scheduling at all.
+
+    ``freeze_plan`` accepts an empty population, so without this an empty tuple would freeze
+    a plan over zero members and report the comparison as scheduled.
+    """
+    return scheduling is None or not scheduling.protected_ids
+
+
+def _preflight(request: RoutingRequest) -> tuple[RoutingTerms, Json]:
+    """Every refusal that does not depend on the development evidence itself.
+
+    ``RepairRoutingStore.evaluate`` runs this before its replay lookup, so a stored receipt
+    can never answer a request that a fresh decision would refuse. Mandate withdrawal and
+    expiry, the ``evaluate`` right and a case's split are in neither the evaluation key nor
+    the input revision, so this preamble is the only thing that covers them on that path.
+    """
+    terms, snapshot, mandate = request.terms.validate(), request.snapshot, request.mandate
+    for item in (snapshot.organization, snapshot.workflow_ref, snapshot.run_id):
+        _ident(item)
+    _ident(snapshot.snapshot_ref)
+    _need(request.policy.snapshot_ref == snapshot.snapshot_ref, "policy_snapshot_mismatch")
+    _need(request.policy.terms_revision == terms.revision, "policy_terms_mismatch")
+    _need(mandate.active, "standing_mandate_unavailable")
+    _need("evaluate" in mandate.uses, "evaluation_not_authorized")
+    _need(request.augmentation == "not_enabled", "augmentation_not_supported_on_this_branch")
+    _validate_cases(request.cases)
+    return terms, simple_repair.validate_rule(request.rule)
+
+
+def decide(request: RoutingRequest) -> Json:
+    """Pure, deterministic routing decision. No clock, store or protected input."""
+    terms, rule = _preflight(request)
+    snapshot, mandate = request.snapshot, request.mandate
+
+    live = [c for c in request.cases if c.origin in _ORIGINS_COUNTED]
+    excluded_origin = len(request.cases) - len(live)
+    low = snapshot.as_of - terms.recurrence_window_seconds
+    window = [c for c in live if low <= c.decided_at <= snapshot.as_of]
+    groups = _components(window)
+    family = list(terms.error_family)
+
+    def hold(reason: str, missing: Sequence[str] = ()) -> Json:
+        return _body(request, "request_evidence", reason, rule, window, groups, None, missing)
+
+    # Distinct, unusable-evidence outcomes. None of them is a statement about the repair.
+    if snapshot.documentation_revision != terms.documentation_revision:
+        return hold("stale_documentation", ["refresh_workflow_documentation"])
+    feature = rule["feature"]
+    if any(c.context_state != "observed" or c.features.get(feature) is None for c in window):
+        return hold("missing_decision_time_context", ["provide_decision_time_input"])
+    # Grouped cases with identical features must agree (OPE-568): keyed on the independence
+    # group, so a shared family or a transitive chain conflicts just as a shared entity does.
+    # A missing reference (None) counts as a disagreeing label here, so an unlabeled case that
+    # shares only a family with a labeled sibling of identical features now holds as
+    # contradictory_labels rather than unusable_labels. Both are holds; nothing is routed.
+    # Features compare by value (v4): 1 and 1.0, True and 1, or 0.0 and -0.0 are the same
+    # evidence, so conflicting references over them hold here too.
+    by_group: defaultdict[str, set[str | None]] = defaultdict(set)
+    for c in window:
+        by_group[digest([groups[c.case_id], _feature_map(c.features)])].add(c.reference)
+    if any(len(v) > 1 for v in by_group.values()):
+        return hold("contradictory_labels", ["resolve_contradictory_labels"])
+    if any(c.reference is None for c in window):
+        return hold("unusable_labels", ["supply_verified_labels"])
+    if not any(c.incumbent.get("label") == family[0] and c.reference == family[1] for c in window):
+        return hold("error_family_not_observed", ["supply_independent_evidence"])
+
+    rows = [
+        {
+            "case_id": c.case_id,
+            "group_id": groups[c.case_id],
+            "features": dict(c.features),
+            "incumbent": simple_repair.decision(dict(c.incumbent)),
+            "reference": c.reference,
+        }
+        for c in window
+    ]
+    # Rights are judged below, never by the shared comparison, so a hold cannot hide a route.
+    assessed = simple_repair.assess_development(
+        rows,
+        rule,
+        terms=terms.comparison_terms() | {"critical_slices": sorted(terms.critical_slices)},
+        model_authorized=False,
+        compute_authorized=False,
+    )
+    residual = [c for c in window if c.reference == family[1] and _repair_wrong(rule, c)[1]]
+    residual = [c for c in residual if c.incumbent.get("label") == family[0]]
+    res_groups = {groups[c.case_id] for c in residual}
+    route = assessed["route"]
+    ctx: Json = {
+        "assessed": assessed,
+        "residual": residual,
+        "residual_groups": len(res_groups),
+        "excluded_origin": excluded_origin,
+    }
+    if route == "no_change":
+        return _body(
+            request,
+            "keep_incumbent",
+            "incumbent_tied_prefer_simpler",
+            rule,
+            window,
+            groups,
+            ctx,
+            [],
+        )
+    if route == "simple":
+        # A disqualified critical slice is a statement about the repair itself, so it keeps
+        # precedence over an incomplete request.
+        failed = _slice_failure(rule, terms, window)
+        if failed:
+            # Name both gaps in one round-trip when the caller is also missing a population.
+            missing = ["supply_independent_evidence"]
+            if _unscheduled(request.scheduling):
+                missing.append("provide_comparison_scheduling")
+            return _body(request, "request_evidence", failed, rule, window, groups, ctx, missing)
+        if _unscheduled(request.scheduling):
+            # A sufficient repair freezes the simple arm and schedules the comparison. With no
+            # protected population to schedule against there is nothing to freeze, so this is a
+            # held evidence request; the requirement cannot depend on the caller passing a field.
+            return _body(
+                request,
+                "request_evidence",
+                "comparison_scheduling_required",
+                rule,
+                window,
+                groups,
+                ctx,
+                ["provide_comparison_scheduling"],
+            )
+        return _body(
+            request,
+            "simple_repair",
+            "simple_repair_meets_development_limits",
+            rule,
+            window,
+            groups,
+            ctx,
+            [],
+        )
+    if assessed["reason"] == "insufficient_independent_development_evidence":
+        return _body(
+            request,
+            "request_evidence",
+            assessed["reason"],
+            rule,
+            window,
+            groups,
+            ctx,
+            ["supply_independent_evidence"],
+        )
+    # No credible simple repair. Only an independent, material residual may become fit-eligible.
+    if len(residual) < terms.material_residual_cases:
+        return _body(
+            request,
+            "request_evidence",
+            "residual_below_material_threshold",
+            rule,
+            window,
+            groups,
+            ctx,
+            ["supply_independent_evidence"],
+        )
+    if len(res_groups) < terms.min_independent_groups:
+        return _body(
+            request,
+            "request_evidence",
+            "residual_not_independent",
+            rule,
+            window,
+            groups,
+            ctx,
+            ["supply_independent_evidence"],
+        )
+    label_groups: defaultdict[str, set[str]] = defaultdict(set)
+    for c in window:
+        label_groups[str(c.reference)].add(groups[c.case_id])
+    if any(len(g) < terms.min_groups_per_label for g in label_groups.values()):
+        return _body(
+            request,
+            "request_evidence",
+            "label_imbalance_inadequate_group_support",
+            rule,
+            window,
+            groups,
+            ctx,
+            ["supply_independent_evidence"],
+        )
+    gate: str | None = None
+    if "train" not in mandate.uses:
+        gate = "training_rights_required"
+    elif not mandate.has_budget:
+        gate = "training_budget_required"
+    elif request.model is None or request.model.capability_receipt_ref is None:
+        gate = "qualified_model_required"
+    selection = select_recipe(request.recipes, request.model, mandate)
+    ctx["selection"] = selection
+    if gate is None and selection["selected"] is None:
+        gate = "unsupported_recipe"
+    if gate is None and not request.verifier.verify(request.policy):
+        gate = "signed_policy_required"
+    if gate is not None:
+        return _body(request, "request_evidence", gate, rule, window, groups, ctx, [gate])
+    return _body(
+        request, "fit_eligible", "independent_material_residual", rule, window, groups, ctx, []
+    )
+
+
+def _body(
+    request: RoutingRequest,
+    outcome: str,
+    reason: str,
+    rule: Json,
+    window: Sequence[DevelopmentCase],
+    groups: Mapping[str, str],
+    ctx: Json | None,
+    missing: Sequence[str],
+) -> Json:
+    s, m, terms = request.snapshot, request.mandate, request.terms
+    residual = ctx["residual"] if ctx else []
+    plan: str | None = None
+    if outcome == "simple_repair":
+        # decide() refuses this outcome without a protected population, so a plan frozen over a
+        # non-empty population is an invariant of the outcome rather than something a caller can
+        # opt out of by omitting the field or passing an empty tuple.
+        sch = request.scheduling
+        _need(not _unscheduled(sch) and ctx is not None, "comparison_scheduling_required")
+        assert sch is not None and ctx is not None
+        plan = comparison_plan.freeze_plan(
+            organization=s.organization,
+            engagement=s.workflow_ref,
+            audience=sch.audience,
+            intake_revision=sch.intake_revision,
+            protected_ids=list(sch.protected_ids),
+            incumbent_revision=sch.incumbent_revision,
+            rule=rule,
+            development_decision=ctx["assessed"],
+            terms=terms.comparison_terms() | {"critical_slices": sorted(terms.critical_slices)},
+        )["revision"]
+    selection = ctx.get("selection") if ctx else None
+    body: Json = {
+        "schema_version": SCHEMA,
+        "router_revision": ROUTER_REVISION,
+        "outcome": outcome,
+        "reason_code": reason,
+        "next_evidence": list(dict.fromkeys(missing)),
+        "organization": s.organization,
+        "workflow_ref": s.workflow_ref,
+        "run_id": s.run_id,
+        "snapshot_ref": s.snapshot_ref,
+        "evidence_revision": s.evidence_revision,
+        "documentation_revision": s.documentation_revision,
+        "mandate_ref": m.mandate_ref,
+        "mandate_revision": m.mandate_revision,
+        "policy_ref": request.policy.policy_ref,
+        "terms_revision": terms.revision,
+        "terms": terms.as_json(),
+        "rule_revision": rule["revision"],
+        "development_cases": len(window),
+        "independent_groups": len(set(groups.values())),
+        "excluded_non_live_cases": ctx["excluded_origin"] if ctx else None,
+        "residual_roots": sorted(_root(c.case_id) for c in residual),
+        "independent_residual_groups": len({groups[c.case_id] for c in residual}),
+        "development_decision_revision": ctx["assessed"]["revision"] if ctx else None,
+        "comparison_plan_revision": plan,
+        "comparison_scheduled": plan is not None,
+        "frozen_arm": rule["revision"] if outcome == "simple_repair" else None,
+        "recipe_selection": selection,
+        "train_eligible_policy_ref": request.policy.policy_ref
+        if outcome == "fit_eligible"
+        else None,
+        "augmentation_state": request.augmentation,
+        "fit_starts": 0,
+        "reservations": 0,
+        "protected_reads": 0,
+    }
+    ident = digest(body)
+    return dict(body, revision=ident)
+
+
+def _readiness_handoff(receipt: Json) -> Json:
+    """The exact facts OPE-542 persists; this module does not own the readiness transition."""
+    return {
+        "evaluation_id": receipt["evaluation_id"],
+        "outcome": receipt["outcome"],
+        "reason_code": receipt["reason_code"],
+        "independent_residual_groups": receipt["independent_residual_groups"],
+        "owner_minimum": receipt["terms"]["min_independent_groups"],
+        "residual_roots": list(receipt["residual_roots"]),
+        "evidence_revisions": {
+            "evidence_revision": receipt["evidence_revision"],
+            "documentation_revision": receipt["documentation_revision"],
+            "snapshot_ref": receipt["snapshot_ref"],
+            "mandate_revision": receipt["mandate_revision"],
+        },
+        "next_evidence": list(receipt["next_evidence"]),
+        "fit_starts": 0,
+        "reservations": 0,
+        "augmentation_state": receipt["augmentation_state"],
+    }
+
+
+class RepairRoutingStore:
+    """One durable, immutable evaluation per accepted run, snapshot and mandate revision."""
+
+    def __init__(self, directory: Path) -> None:
+        _need(directory.is_absolute() and directory.resolve() == directory, "private_dir_required")
+        self.path = directory / "repair-routing.sqlite3"
+
+    def _connect(self) -> sqlite3.Connection:
+        try:
+            fd = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o600)
+        except FileExistsError:
+            pass
+        else:
+            os.close(fd)
+        _check_file(self.path)
+        db = sqlite3.connect(self.path, isolation_level=None, timeout=30)
+        db.execute(
+            "CREATE TABLE IF NOT EXISTS evaluations(key TEXT PRIMARY KEY, evaluation_id TEXT "
+            "UNIQUE NOT NULL, input_revision TEXT NOT NULL, body TEXT NOT NULL)"
+        )
+        return db
+
+    def evaluate(self, request: RoutingRequest) -> Json:
+        # Refuse before the replay lookup: a stored receipt must never answer a request that a
+        # fresh decision would refuse, including on grounds the stored digest cannot carry.
+        _preflight(request)
+        key, inputs = evaluation_key(request), _input_revision(request)
+        stored: Json | None = None
+        fresh: Json | None = None
+        with closing(self._connect()) as db:
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                row = db.execute(
+                    "SELECT input_revision, body FROM evaluations WHERE key=?", (key,)
+                ).fetchone()
+                if row is not None:
+                    stored = dict(json.loads(row[1]))
+                    # Checked before the input revision so the operator sees the specific cause:
+                    # a router upgrade also moves the input revision, which would otherwise
+                    # surface as a generic conflict.
+                    _need(
+                        stored.get("router_revision") == ROUTER_REVISION,
+                        "evaluation_router_revision_changed",
+                    )
+                    _need(row[0] == inputs, "evaluation_conflict")
+                else:
+                    fresh = dict(decide(request), evaluation_id="eval-" + key[:40])
+                    fresh["readiness_handoff"] = _readiness_handoff(fresh)
+                    db.execute(
+                        "INSERT INTO evaluations VALUES(?,?,?,?)",
+                        (key, fresh["evaluation_id"], inputs, canonical(fresh)),
+                    )
+                db.execute("COMMIT")
+            except BaseException:
+                db.execute("ROLLBACK")
+                raise
+        if stored is not None:
+            # A signature is a runtime verdict, not part of the stored digest, so it is
+            # re-checked on every replay instead of being replayed with the receipt.
+            if stored["outcome"] == "fit_eligible":
+                _need(request.verifier.verify(request.policy), "signed_policy_required")
+            return dict(stored, replayed=True)
+        assert fresh is not None
+        return dict(fresh, replayed=False)
+
+    def read(self, evaluation_id: str) -> Json | None:
+        with closing(self._connect()) as db:
+            row = db.execute(
+                "SELECT body FROM evaluations WHERE evaluation_id=?", (evaluation_id,)
+            ).fetchone()
+        return None if row is None else dict(json.loads(row[0]))
+
+    def count(self) -> int:
+        with closing(self._connect()) as db:
+            return int(db.execute("SELECT count(*) FROM evaluations").fetchone()[0])
+
+    def current_eligibility(
+        self, evaluation_id: str, *, snapshot: AdmittedSnapshot, mandate: MandateView
+    ) -> Json:
+        """Eligibility is recomputed against today's evidence and mandate, never cached."""
+        receipt = self.read(evaluation_id)
+        _need(receipt is not None, "evaluation_unavailable")
+        assert receipt is not None
+        reason = None
+        if receipt.get("router_revision") != ROUTER_REVISION:
+            # A receipt another router decided is not this router's verdict, so an old
+            # fit_eligible outcome is held rather than read as today's eligibility.
+            reason = "evaluation_router_revision_changed"
+        elif receipt["outcome"] != "fit_eligible":
+            reason = "not_fit_eligible"
+        elif not mandate.active:
+            reason = "mandate_withdrawn_or_expired"
+        elif (
+            mandate.mandate_ref != receipt["mandate_ref"]
+            or mandate.mandate_revision != receipt["mandate_revision"]
+        ):
+            reason = "mandate_revision_changed"
+        elif (
+            snapshot.organization != receipt["organization"]
+            or snapshot.run_id != receipt["run_id"]
+            or snapshot.evidence_revision != receipt["evidence_revision"]
+            or snapshot.documentation_revision != receipt["documentation_revision"]
+            or snapshot.snapshot_ref != receipt["snapshot_ref"]
+        ):
+            reason = "evidence_revision_changed"
+        elif "train" not in mandate.uses:
+            reason = "training_rights_required"
+        elif not mandate.has_budget:
+            reason = "training_budget_required"
+        return {
+            "evaluation_id": evaluation_id,
+            "eligible": reason is None,
+            "reason_code": reason or "fit_eligible",
+            "reservations": 0,
+            "automatic_promotion": False,
+        }

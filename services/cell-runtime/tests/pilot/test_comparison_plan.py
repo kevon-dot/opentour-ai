@@ -283,6 +283,74 @@ def test_critical_slices_unknown_references_or_empty_cases_stop_recommendation(
     }
 
 
+# Generated, illegal slice names. Each must be refused by the planner's own identifier rule
+# (simple_repair.identifier, [A-Za-z0-9][A-Za-z0-9_.:-]{0,127}) when the plan is frozen.
+ILLEGAL_SLICE_NAMES = {
+    "empty": "",
+    "leading_hyphen": "-vip",
+    "leading_dot": ".vip",
+    "leading_underscore": "_vip",
+    "leading_colon": ":vip",
+    "over_128_chars": "a" * 129,
+    "inner_space": "vip accounts",
+    "leading_space": " vip",
+    "trailing_space": "vip ",
+    "tab": "vip\taccounts",
+    "trailing_newline": "vip\n",
+    "nul": "vip\x00",
+    "escape_sequence": "vip\x1b[0m",
+    "zero_width_space": "vip\u200b",
+    "cyrillic_homoglyph": "v\u0456p",
+    "fullwidth_homoglyph": "\uff56ip",
+    "not_a_string": 7,
+}
+
+
+@pytest.mark.parametrize("position", [0, 1, 2], ids=["first", "middle", "last"])
+@pytest.mark.parametrize("key", ["critical_slices", "material_slices"])
+@pytest.mark.parametrize("name", ILLEGAL_SLICE_NAMES.values(), ids=ILLEGAL_SLICE_NAMES.keys())
+def test_illegal_agreed_slice_names_are_refused_when_the_plan_is_frozen(
+    tmp_path, key, name, position
+):
+    """Every item in the slice lists is checked: the illegal name is placed first, in the
+    middle and last among legal names, so a planner that validates only the first or only
+    the last item is caught. The refusal is the fixed identifier code (the offending value
+    never appears in it)."""
+    store = LocalTrainingStore(tmp_path / "training.sqlite3", "generated")
+    items = ["critical", "rare"]
+    items.insert(position, name)
+    terms = {"minimum_coverage_bps": 10000, "error_ceiling_bps": 0, key: items}
+    with pytest.raises(RepairError) as caught:
+        setup(enroll(store), terms=terms)
+    assert str(caught.value) == "invalid_scope_or_identifier"
+
+
+@pytest.mark.parametrize("key", ["critical_slices", "material_slices"])
+@pytest.mark.parametrize(
+    "items, code",
+    [
+        (["critical", "critical"], "invalid_agreed_slice"),
+        ("critical", "invalid_agreed_slice"),
+        ([f"slice{i}" for i in range(33)], "invalid_agreed_slice"),
+        (["a" * 128, "vip-accounts", "Tier1", "bucket:x", "enterprise.eu"], None),
+        ([f"slice{i}" for i in range(32)], None),
+    ],
+    ids=["duplicate", "not_a_list", "over_32", "legal_including_128_chars", "exactly_32"],
+)
+def test_agreed_slice_list_shape_is_enforced_and_legal_names_freeze(tmp_path, key, items, code):
+    """Controls for the test above: the other slice-list refusals keep their own code, and
+    planner-legal names (including the 128-character boundary) still freeze."""
+    store = LocalTrainingStore(tmp_path / "training.sqlite3", "generated")
+    terms = {"minimum_coverage_bps": 10000, "error_ceiling_bps": 0, key: items}
+    if code is None:
+        plan, _ = setup(enroll(store), terms=terms)
+        assert plan["terms"][key] == items
+        return
+    with pytest.raises(RepairError) as caught:
+        setup(enroll(store), terms=terms)
+    assert str(caught.value) == code
+
+
 def test_higher_real_cost_tradeoff_and_no_change_are_reported(tmp_path):
     store = LocalTrainingStore(tmp_path / "training.sqlite3", "generated")
     data = enroll(store)

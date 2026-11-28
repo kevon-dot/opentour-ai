@@ -15,9 +15,9 @@ import sqlite3
 import time
 from collections.abc import Iterator, Mapping
 from contextlib import AbstractContextManager, contextmanager
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Literal, Protocol
+from typing import Any, Literal, Protocol, runtime_checkable
 
 from opentour_cell.pilot.intake_mcp import IntakeError, IntakePrincipal, LiveBinding, require_ref
 from opentour_cell.pilot.training import _check_file
@@ -69,9 +69,53 @@ class LiveScope:
     can_nominate: bool = False
 
 
+class EngagementGate(Protocol):
+    """Worker-owned engagement-epoch ledger port (OPE-543); see `engagement_epochs`.
+
+    Declared here so this module's import closure is unchanged. Its errors are `ValueError`.
+    """
+
+    def pin(self) -> AbstractContextManager[None]: ...
+
+    def live_gate(self, org: str, epoch: str, resource: str, lease_ref: str) -> int: ...
+
+    def known_prior_epoch(self, org: str, epoch: str) -> bool: ...
+
+    def observe_positions(self, org: str, epoch: str, high: int) -> None: ...
+
+
 class LiveAuthority(Protocol):
     def guard(self, actor: IntakePrincipal, workflow_ref: str) -> AbstractContextManager[LiveScope]:
         """Pin current custody, resource grants and actor rights until operation returns."""
+
+
+@runtime_checkable
+class EngagementAuthority(Protocol):
+    def engagement_gate(self, scope: LiveScope) -> EngagementGate | None:
+        """Return the gate to enforce. `PrivateLiveAuthority` never returns None."""
+
+
+# Closed vocabulary recorded beside read receipts and archived snapshots (OPE-543 follow-up).
+# It states whether engagement-epoch enforcement was applied to the operation that wrote the
+# record, so an unenforced result can never be read as an enforced one.
+#   applied                      a gate was resolved and its checks ran for this operation
+#   not_available_from_authority the authority offers no engagement gate, so nothing was enforced
+#   not_evaluated                the writing operation does not evaluate epoch enforcement
+# Read side only (never written by this code):
+#   not_recorded                 a row written before this marker existed
+#   not_required_by_grant        legacy value from an earlier revision of this follow-up, when a
+#                                grant without the flag ran unenforced. Grants without the flag
+#                                are now refused, so no new row can carry it. Kept readable so a
+#                                stored row is never rejected.
+EPOCH_ENFORCEMENT_STATES = frozenset({"applied", "not_available_from_authority", "not_evaluated"})
+_READABLE_ENFORCEMENT_STATES = EPOCH_ENFORCEMENT_STATES | {"not_recorded", "not_required_by_grant"}
+
+
+def _enforcement_marker(value: object, *, reading: bool = False) -> str:
+    allowed = _READABLE_ENFORCEMENT_STATES if reading else EPOCH_ENFORCEMENT_STATES
+    _require(isinstance(value, str) and value in allowed)
+    assert isinstance(value, str)
+    return value
 
 
 def grant_digest(grant: FeedGrant) -> str:
@@ -120,6 +164,12 @@ class LiveSnapshot:
     quarantined: int
     unmatched_outcomes: int = 0
     last_ingested_at: int | None = None
+    # Whether epoch enforcement applied to the write that archived this view. A current view
+    # computed on read evaluates nothing, so it is `not_evaluated`; an archived view
+    # (`as_of_revision`) carries the validated stored marker.
+    # Provenance, not evidence: excluded from equality so an archived view still equals the
+    # current view of identical evidence.
+    epoch_enforcement: str = field(default="not_evaluated", compare=False)
 
 
 _COMMON = {"kind", "event_id", "event_revision", "decision_id", "decision_revision"}
@@ -184,9 +234,42 @@ def _event(value: Mapping[str, Any], grant: FeedGrant) -> dict[str, Any]:
 class LiveEvidence:
     """Explicit initialization writes; resolution and snapshots never create or migrate state."""
 
-    def __init__(self, directory: Path, authority: LiveAuthority):
+    def __init__(
+        self,
+        directory: Path,
+        authority: LiveAuthority,
+        engagements: EngagementGate | None = None,
+    ):
         self.path = directory / "live-evidence.sqlite3"
         self.authority = authority
+        # When configured (OPE-543), no binding or source page is admitted unless the epoch's
+        # trusted high-water checkpoint and lease were durably recorded and the epoch is live.
+        self.engagements = engagements
+
+    def _engagement_gate(self, scope: LiveScope) -> EngagementGate | None:
+        if self.engagements is not None:
+            return self.engagements
+        if isinstance(self.authority, EngagementAuthority):
+            return self.authority.engagement_gate(scope)
+        return None
+
+    def _enforcement_state(self, gate: EngagementGate | None) -> str:
+        """Name why `gate` is present or absent; never imply enforcement that did not run."""
+        return "applied" if gate is not None else "not_available_from_authority"
+
+    def _engagement_checkpoint(
+        self, scope: LiveScope, grant: FeedGrant, gate: EngagementGate | None
+    ) -> int | None:
+        if gate is None:
+            return None
+        try:
+            recorded = gate.live_gate(
+                scope.tenant, scope.engagement_epoch, grant.resource, grant.lease_ref
+            )
+        except (ValueError, sqlite3.Error):
+            raise IntakeError("engagement_epoch_hold") from None
+        _require(grant.checkpoint >= recorded, "engagement_epoch_hold")
+        return recorded
 
     def initialize(self) -> None:
         parent = self.path.parent
@@ -257,11 +340,20 @@ class LiveEvidence:
             db.close()
 
     @contextmanager
-    def _scope(self, actor: IntakePrincipal, workflow: str) -> Iterator[LiveScope]:
+    def _scope(
+        self, actor: IntakePrincipal, workflow: str, *, pin_epoch: bool = False
+    ) -> Iterator[LiveScope]:
         with self.authority.guard(actor, workflow) as scope:
             _require(scope.tenant == actor.tenant and scope.workflow_ref == workflow)
             _require(scope.expires_at > int(time.time()))
-            yield scope
+            gate = self._engagement_gate(scope) if pin_epoch else None
+            if gate is None:
+                yield scope
+            else:
+                with gate.pin():
+                    for grant in scope.grants:
+                        self._engagement_checkpoint(scope, grant, gate)
+                    yield scope
             _require(scope.expires_at > int(time.time()))
 
     @staticmethod
@@ -306,7 +398,7 @@ class LiveEvidence:
         expected_revision: str | None = None,
     ) -> str:
         with (
-            self._scope(actor, workflow) as selected,
+            self._scope(actor, workflow, pin_epoch=True) as selected,
             self._db(write=True) as db,
             self._scope(actor, workflow) as scope,
         ):
@@ -322,6 +414,7 @@ class LiveEvidence:
             )
             _require(type(grant.checkpoint) is int and grant.checkpoint >= 0)
             require_ref(grant.lease_ref)
+            self._engagement_checkpoint(scope, grant, self._engagement_gate(scope))
             body = {
                 "tenant": scope.tenant,
                 "workflow_ref": workflow,
@@ -481,7 +574,10 @@ class LiveEvidence:
                 require_ref(read_metadata["next_cursor"])
         with self._db() as db:
             body, _ = self._binding(db, reference)
-        with self._scope(actor, body["workflow_ref"]) as scope, self._db(write=True) as db:
+        with (
+            self._scope(actor, body["workflow_ref"], pin_epoch=True) as scope,
+            self._db(write=True) as db,
+        ):
             _require(scope.expires_at > int(time.time()))
             _require(scope.can_ingest and scope.engagement_epoch == body["engagement_epoch"])
             fresh, successor = self._binding(db, reference)
@@ -489,6 +585,17 @@ class LiveEvidence:
             grant = FeedGrant(**fresh["grant"])
             _require(successor is None and grant in scope.grants)
             _require(source_revision == grant.source_revision)
+            gate = self._engagement_gate(scope)
+            recorded = self._engagement_checkpoint(scope, grant, gate)
+            if gate is not None:
+                # A late callback or replay from a withdrawn epoch is denied before any write,
+                # even at a later source position than the new epoch's checkpoint.
+                for event_epoch in event_epochs:
+                    _require(
+                        event_epoch == scope.engagement_epoch
+                        or not gate.known_prior_epoch(scope.tenant, event_epoch),
+                        "engagement_epoch_fenced",
+                    )
             _require(type(checkpoint) is int and checkpoint >= grant.checkpoint)
             _require(all(type(p) is int and p <= checkpoint for p in source_positions))
             page_identity: list[Any] = [
@@ -508,10 +615,12 @@ class LiveEvidence:
             if old:
                 _require(old[0] == fingerprint, "source_page_conflict")
                 return str(old[1])
+            highest_admitted: int | None = None
             for event, position, epoch in zip(events, source_positions, event_epochs, strict=True):
                 try:
                     _require(
-                        epoch == scope.engagement_epoch and position > grant.checkpoint,
+                        epoch == scope.engagement_epoch
+                        and position > max(grant.checkpoint, recorded or 0),
                         "source_epoch_mismatch",
                     )
                     parsed = _event(event, grant)
@@ -530,6 +639,7 @@ class LiveEvidence:
                     )
                     continue
                 self._record_event(db, scope, grant, reference, parsed)
+                highest_admitted = max(highest_admitted or 0, position)
             receipt = "live-" + _digest([reference, page_ref, fingerprint])[:32]
             db.execute(
                 "INSERT INTO live_pages VALUES (?,?,?,?,?)",
@@ -553,12 +663,15 @@ class LiveEvidence:
                                 "checkpoint": checkpoint,
                                 "row_count": len(events),
                                 "polled_at": int(time.time()),
+                                "epoch_enforcement": self._enforcement_state(gate),
                             }
                         ),
                     ),
                 )
-            self._archive(db, scope)
+            self._archive(db, scope, self._enforcement_state(gate))
             _require(scope.expires_at > int(time.time()))
+            if gate is not None and highest_admitted is not None:
+                gate.observe_positions(scope.tenant, scope.engagement_epoch, highest_admitted)
             return receipt
 
     def _record_event(
@@ -613,7 +726,10 @@ class LiveEvidence:
         )
         db.execute("INSERT OR IGNORE INTO live_event_origins VALUES (?,?)", (row[0], reference))
 
-    def _archive(self, db: sqlite3.Connection, scope: LiveScope) -> None:
+    def _archive(
+        self, db: sqlite3.Connection, scope: LiveScope, enforcement: str = "not_evaluated"
+    ) -> None:
+        enforcement = _enforcement_marker(enforcement)
         sequence = db.execute(
             "SELECT coalesce(max(sequence), 0) + 1 FROM live_snapshots "
             "WHERE tenant=? AND workflow=? AND epoch=?",
@@ -632,6 +748,7 @@ class LiveEvidence:
                         "snapshot": asdict(snapshot),
                         "grants": [asdict(g) for g in scope.grants],
                         "slack_verifiers": dict(scope.slack_verifiers),
+                        "epoch_enforcement": enforcement,
                     }
                 ),
             ),
@@ -661,9 +778,11 @@ class LiveEvidence:
                         and self._same_scope(body, scope)
                         and FeedGrant(**body["grant"]) in scope.grants
                     ):
-                        receipts.append(
-                            {"binding_ref": row[0], "page_ref": row[1], **json.loads(row[2])}
+                        saved = json.loads(row[2])
+                        saved["epoch_enforcement"] = _enforcement_marker(
+                            saved.get("epoch_enforcement", "not_recorded"), reading=True
                         )
+                        receipts.append({"binding_ref": row[0], "page_ref": row[1], **saved})
                 return tuple(receipts)
 
     def _snapshot(
@@ -920,5 +1039,8 @@ class LiveEvidence:
             # Historical evidence survives; historical role claims do not grant current actions.
             value["can_bind_verifier"] = scope.can_bind and any(
                 g.kind == "independent_outcome" for g in scope.grants
+            )
+            value["epoch_enforcement"] = _enforcement_marker(
+                saved.get("epoch_enforcement", "not_recorded"), reading=True
             )
             return LiveSnapshot(**value)
