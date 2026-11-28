@@ -60,6 +60,7 @@ def watcher(approved):  # noqa: F811
     return service, click, site, issuer, ledger, authority, payload
 
 
+@pytest.mark.parametrize("approved", [("b" * 64, "b" * 64)], indirect=True)
 def test_normal_entry_waits_coalesces_and_fences_native_paid_start(watcher, monkeypatch, capsys):
     scanner, click, site, issuer, ledger, authority, payload = watcher
     spec = payload["reservation"]
@@ -98,8 +99,8 @@ def test_normal_entry_waits_coalesces_and_fences_native_paid_start(watcher, monk
     assert tick()[1]["source_revision"] == "a" * 64
     assert tick()[1]["state"] == "watching" and len(snapshots) == 1
     stage("a" * 64, g)
-    with authority.current(scope, write=False) as current:
-        assert current.can_control
+    with pytest.raises(ValueError):
+        claim()
     assert click("done_for_now")["state"] == "parked"
     assert tick()[1]["state"] == "parked" and len(snapshots) == 1
     with pytest.raises(ValueError):
@@ -115,6 +116,8 @@ def test_normal_entry_waits_coalesces_and_fences_native_paid_start(watcher, monk
     with pytest.raises(ValueError):
         claim()
     stage("b" * 64, next_g)
+    with authority.current(scope, write=False) as current:
+        assert current.can_control
     claim()
     claim()
     entry = ledger.get(spec["reservation_ref"]).execution
@@ -126,6 +129,24 @@ def test_normal_entry_waits_coalesces_and_fences_native_paid_start(watcher, monk
         assert db.execute("SELECT count(*) FROM proposals").fetchone()[0] == 1
     (site.directory / eve_scan.DISCOVERY_FILE).unlink()
     assert tick()[0] == 2 and len(snapshots) == 3
+
+
+@pytest.mark.parametrize("approved", [("a" * 64, "b" * 64), ("b" * 64, "a" * 64)], indirect=True)
+def test_frozen_plan_and_native_reservation_must_both_match_observed_source(watcher):
+    scanner, click, site, issuer, ledger, authority, payload = watcher
+    spec = payload["reservation"]
+    generation = click("start_scan")["generation"]
+    row = scanner.tick(site.directory / "cycle.json", 300, lambda *_: "b" * 64)
+    assert row["source_revision"] == "b" * 64
+    spec.update(source_snapshot=row["source_revision"], scan_generation=generation)
+    private(
+        site.directory / eve_authority.CAP_FILE,
+        sign(payload, sr.SPEND_MANDATE_PURPOSE, issuer.customer, issuer.operator),
+    )
+    with pytest.raises(ValueError):
+        with authority.current(eve_authority.scope_from(spec), write=True) as grant:
+            authority.claim(grant)
+    assert ledger.get(spec["reservation_ref"]).execution.stage == fd.Stage.RESERVED
 
 
 def test_done_during_read_fences_result_across_worker_restart(watcher):

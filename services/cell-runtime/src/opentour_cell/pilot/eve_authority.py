@@ -174,6 +174,7 @@ class EveAuthority:
             entry.execution_id != grant.reservation_ref
             or record["intent_digest"] != spec["fit_intent_digest"]
             or record["development_digest"] != spec["development_sha256"]
+            or ("source_snapshot" in spec and record.get("snapshot_ref") != spec["source_snapshot"])
             or record["tenant"] != spec["tenant"]
             or record["engagement"] != spec["engagement_id"]
             or record["mandate_id"] != spec["mandate_id"]
@@ -306,6 +307,7 @@ class EveAuthority:
                 or plan.mandate_id != mandate.mandate_id
                 or plan.mandate_revision != mandate.mandate_revision
                 or plan.plan_ref != grant.plan_ref
+                or ("source_snapshot" in spec and plan.source_revision != spec["source_snapshot"])
                 or plan.benchmark_ref != grant.benchmark_ref
                 or plan.model_route_ref != "eve-24b-qlora"
             ):
