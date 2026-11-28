@@ -378,7 +378,9 @@ class LearningMandates:
         receipt = self._enroll(db, spec, actor)
         return dict(receipt, supersedes=previous, prior_revision=prior["revision"])
 
-    def _usage(self, db: sqlite3.Connection, mandate_id: str) -> Json:
+    def _usage(
+        self, db: sqlite3.Connection, mandate_id: str, *, include_dispatch: bool = True
+    ) -> Json:
         """Charge the whole renewal lineage, including failed/withdrawn reservations.
 
         No counter copies or synthetic reservations: SQLite reads the original immutable
@@ -403,12 +405,30 @@ class LearningMandates:
             "WHERE scope=? AND mandate IN (SELECT id FROM lineage)",
             args,
         ).fetchone()
+        dispatched = (0, 0)
+        if include_dispatch and self._has_dispatch(db):
+            budget = "budget-" + digest([self.scope, self._lineage_root(db, mandate_id)])[:40]
+            dispatched = db.execute(
+                """SELECT count(*),
+                       coalesce(sum(json_extract(record,'$.bound.maximum_seconds')),0)
+                   FROM dispatch_fits WHERE scope=? AND budget_scope=?""",
+                (self.scope, budget),
+            ).fetchone()
         return {
             "cumulative_runs": runs[0],
             "cumulative_rows": runs[1],
-            "cumulative_reserved_fits": fits[0],
-            "cumulative_reserved_seconds": fits[1],
+            "cumulative_reserved_fits": fits[0] + dispatched[0],
+            "cumulative_reserved_seconds": fits[1] + dispatched[1],
         }
+
+    @staticmethod
+    def _has_dispatch(db: sqlite3.Connection) -> bool:
+        return (
+            db.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='dispatch_fits'"
+            ).fetchone()
+            is not None
+        )
 
     def inspect(self, mandate_id: str, *, actor: str | None = None) -> Json:
         with self._db(write=False) as db:
@@ -426,14 +446,22 @@ class LearningMandates:
                 "WHERE scope=? AND mandate=?",
                 (self.scope, mandate_id),
             ).fetchone()
+            dispatched = (0, 0)
+            if self._has_dispatch(db):
+                dispatched = db.execute(
+                    """SELECT count(*),
+                       coalesce(sum(json_extract(record,'$.bound.maximum_seconds')),0)
+                       FROM dispatch_fits WHERE scope=? AND mandate=?""",
+                    (self.scope, mandate_id),
+                ).fetchone()
             return {
                 **self._receipt(row, spec),
                 "withdrawn": row["withdrawn"] is not None,
                 "expired": time.time() >= spec["expires_at"],
                 "runs": runs[0],
                 "rows": runs[1],
-                "reserved_fits": fits[0],
-                "reserved_seconds": fits[1],
+                "reserved_fits": fits[0] + dispatched[0],
+                "reserved_seconds": fits[1] + dispatched[1],
                 **self._usage(db, mandate_id),
             }
 
@@ -614,7 +642,7 @@ class LearningMandates:
                 "caps": {key: spec[key] for key in sorted(CAPS)},
                 "run": {"run_id": run["id"], "source_revision": run["source"], "rows": run["rows"]},
                 "open_reserved_fits": open_fits,
-                **self._usage(db, mandate_id),
+                **self._usage(db, mandate_id, include_dispatch=False),
             }
 
     def confirm_class(
@@ -778,7 +806,37 @@ class LearningMandates:
                     existing is not None and existing["id"] == alias["reservation"],
                     "fit_intent_requires_reconciliation",
                 )
+            if self._has_dispatch(db):
+                if alias_key:
+                    require(
+                        not db.execute(
+                            "SELECT 1 FROM dispatch_aliases WHERE "
+                            "(scope,actor,client,operation_key)=(?,?,?,?)",
+                            alias_key,
+                        ).fetchone(),
+                        "fit_operation_key_conflict",
+                    )
+                require(
+                    not db.execute(
+                        """SELECT 1 FROM dispatch_fits WHERE scope=? AND mandate=?
+                    AND (run=? OR json_extract(record,'$.plan_revision')=?)""",
+                        (self.scope, mandate_id, run["id"], req["plan_revision"]),
+                    ).fetchone(),
+                    "fit_reservation_conflict",
+                )
             if existing is None:
+                if self._has_dispatch(db):
+                    budget = (
+                        "budget-" + digest([self.scope, self._lineage_root(db, mandate_id)])[:40]
+                    )
+                    require(
+                        not db.execute(
+                            """SELECT 1 FROM dispatch_fits WHERE scope=? AND budget_scope=?
+                        AND json_extract(execution,'$.stage') NOT IN ('held','settled')""",
+                            (self.scope, budget),
+                        ).fetchone(),
+                        "concurrent_fit_limit_reached",
+                    )
                 usage = self._usage(db, mandate_id)
                 require(
                     usage["cumulative_reserved_fits"] < spec["max_fits"]
