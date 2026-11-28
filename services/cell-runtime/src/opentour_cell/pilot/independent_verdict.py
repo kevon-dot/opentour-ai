@@ -1002,6 +1002,12 @@ class IndependentEvaluator:
                 comparisons = self._compare_all(claim, policy, population, arms, rows, reasons)
                 self._check_reproduction(claim, comparisons, reasons)
                 self._check_selection(key, claim, population, reasons)
+                if reasons.outcome() == "verified_gain":
+                    # A gain the worker never stated is not a reproduced claim, so it is never
+                    # emitted as verified_gain beside verdict "not_reproduced".
+                    for name in policy.required_comparators:
+                        if name not in claim.claimed_paired:
+                            reasons.add("inconclusive", "claimed_counts_not_stated_" + name)
                 gate = {
                     "status": reasons.outcome(),
                     "reason": ",".join(reasons.reasons()) or "all_registered_gates_cleared",

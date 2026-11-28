@@ -299,7 +299,7 @@ def run(
     **claim_over,
 ):
     pol = pol or policy()
-    return (ev or evaluator(tmp_path)).evaluate(
+    verdict = (ev or evaluator(tmp_path)).evaluate(
         claim=claim(scenario, pol=pol, **claim_over),
         population=scenario.population,
         audit_receipt=receipt or receipt_for(scenario.population),
@@ -307,6 +307,10 @@ def run(
         replays=replays or scenario.replays(),
         fit_manifest=manifest,
     )
+    # Invariant on every verdict here (review 577a774 F5): verified_gain iff reproduced.
+    doc = verdict.document
+    assert (doc["outcome"] == "verified_gain") == (doc["verdict"] == "reproduced")
+    return verdict
 
 
 CLEAN_WIN = [("WR", 120), ("RR", 80)]
@@ -719,10 +723,19 @@ def test_x8_unrun_augmentation_and_simple_repair_without_fit(tmp_path):
     pol = policy(optional_comparators=("real_only",))
     v = run(tmp_path, s, pol=pol)
     assert v.outcome == "verified_gain" and v.document["verdict"] == "reproduced"
-    unstated = run(tmp_path / "u", s, claimed_paired={})
-    assert unstated.outcome == "verified_gain" and unstated.document["verdict"] == "not_reproduced"
-    assert unstated.document["claim_counts_stated"] is False
-    assert unstated.document["effects"]["improvement_alert_eligible"] is False
+    # A gain whose counts the worker never stated is not reproduced, so it is never emitted as
+    # verified_gain (review 577a774 F5): outcome and verdict always agree.
+    unstated = held(
+        run(tmp_path / "u", s, claimed_paired={}),
+        "inconclusive",
+        "claimed_counts_not_stated_incumbent",
+    )
+    assert "claimed_counts_not_stated_simple_repair" in unstated["reasons"]
+    assert unstated["claim_counts_stated"] is False
+    assert unstated["statements"]["paired_gain_cleared_gates"]["status"] == "inconclusive"
+    partial = {"incumbent": recompute_pairs(s, "incumbent")}
+    doc = held(run(tmp_path / "p", s, claimed_paired=partial), "inconclusive")
+    assert doc["reasons"] == ["claimed_counts_not_stated_simple_repair"]
     assert v.document["comparisons"]["real_only"] == {
         "outcome": "unrun",
         "required": False,
