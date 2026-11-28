@@ -338,7 +338,9 @@ def test_synthetic_children_cannot_change_live_counts(tmp_path: Path) -> None:
     parents = w.recorder.training_parents(fx.TENANT_A, fx.WF, digest, fx.reader(source))
     children = [{"child_ref": f"var-{n}", "root_ref": refs[0]} for n in range(100)]
     children.append({"child_ref": "var-orphan", "root_ref": "ex-not-a-parent"})
-    union = union_synthetic(w.recorder, fx.TENANT_A, fx.WF, parents, children)
+    union = union_synthetic(
+        w.recorder, fx.TENANT_A, fx.WF, parents, children, read_pair=fx.reader(source)
+    )
     assert (
         union["live_counts"]
         == parents["counts"]
@@ -542,11 +544,7 @@ def test_the_ope516_seed_projection_rereads_values_and_refuses_a_changed_label(
     digest = receipt["snapshot_digest"]
     for ticket in ("T1", "T2"):
         _record(w, digest, _example(w, receipt, ticket)["example_ref"])
-    parents = w.recorder.training_parents(fx.TENANT_A, fx.WF, digest, fx.reader(source))
-    sealed = w.recorder.seal(fx.TENANT_A, fx.WF, digest)
-    settings = parse_settings(fx.settings())
-    key = w.producer.label_key(fx.TENANT_A, fx.WF)
-    roots, seal = to_seed_roots(parents, sealed, settings, source, label_key=key)
+    roots, seal = to_seed_roots(w.recorder, fx.TENANT_A, fx.WF, digest, source)
     assert [r.target for r in roots] == ["REFUND", "REFUND"]
     assert {r.split for r in roots} == {"training"} and all(r.target_verified for r in roots)
     assert "customer_age" not in roots[0].fields
@@ -560,7 +558,7 @@ def test_the_ope516_seed_projection_rereads_values_and_refuses_a_changed_label(
         ],
     )
     with pytest.raises(ProfileError, match="seed_label_changed"):
-        to_seed_roots(parents, sealed, settings, swapped, label_key=key)
+        to_seed_roots(w.recorder, fx.TENANT_A, fx.WF, digest, swapped)
 
 
 def test_later_artifacts_attach_as_versioned_caller_asserted_relations(tmp_path: Path) -> None:
@@ -678,12 +676,18 @@ def test_f3_union_synthetic_refuses_a_forged_parents_mapping(tmp_path: Path) -> 
     forged = json.loads(json.dumps(parents))
     forged["counts"]["verified_observed"] = 999
     with pytest.raises(ProfileError, match="parents_manifest_tampered"):
-        union_synthetic(w.recorder, fx.TENANT_A, fx.WF, forged, children)
+        union_synthetic(
+            w.recorder, fx.TENANT_A, fx.WF, forged, children, read_pair=fx.reader(source)
+        )
     body = {k: v for k, v in forged.items() if k != "manifest_digest"}
     forged["manifest_digest"] = digest(body)
     with pytest.raises(ProfileError, match="parents_manifest_unknown"):
-        union_synthetic(w.recorder, fx.TENANT_A, fx.WF, forged, children)
-    union = union_synthetic(w.recorder, fx.TENANT_A, fx.WF, parents, children)
+        union_synthetic(
+            w.recorder, fx.TENANT_A, fx.WF, forged, children, read_pair=fx.reader(source)
+        )
+    union = union_synthetic(
+        w.recorder, fx.TENANT_A, fx.WF, parents, children, read_pair=fx.reader(source)
+    )
     assert union["live_counts"]["verified_observed"] == 2
 
 
@@ -806,20 +810,19 @@ def test_r33_a_training_parent_missing_from_the_source_pair_is_refused(tmp_path:
     digest = receipt["snapshot_digest"]
     for ticket in ("T1", "T2"):
         _record(w, digest, _example(w, receipt, ticket)["example_ref"])
-    parents = w.recorder.training_parents(fx.TENANT_A, fx.WF, digest, fx.reader(source))
-    sealed = w.recorder.seal(fx.TENANT_A, fx.WF, digest)
+    both = w.recorder.training_parents(fx.TENANT_A, fx.WF, digest, fx.reader(source))
     without_t2 = fx.pair(
         live=[fx.dec("T1", fx.at(10))],
         outcomes=[fx.cor("c-1", "T1", fx.at(10, 5)), fx.cor("c-2", "T2", fx.at(10, 6))],
     )
+    # Recomputed over this pair, T2 is retracted and is not seeded at all.
+    roots, _ = to_seed_roots(w.recorder, fx.TENANT_A, fx.WF, digest, without_t2)
+    assert [r.root_ref for r in roots] == [_example(w, receipt, "T1")["example_ref"]]
+    # Defence in depth: if the recomputed parents ever named a root the pair lacks (here a
+    # stored manifest from the fuller read is substituted), the projection refuses.
+    w.recorder.training_parents = lambda *_args: both  # type: ignore[method-assign]
     with pytest.raises(ProfileError, match="seed_parent_missing"):
-        to_seed_roots(
-            parents,
-            sealed,
-            parse_settings(fx.settings()),
-            without_t2,
-            label_key=w.producer.label_key(fx.TENANT_A, fx.WF),
-        )
+        to_seed_roots(w.recorder, fx.TENANT_A, fx.WF, digest, without_t2)
 
 
 def test_f2_a_rewritten_record_naming_another_settings_store_is_refused(tmp_path: Path) -> None:
@@ -860,6 +863,95 @@ def test_f3_a_rewritten_stored_parents_manifest_is_refused(tmp_path: Path) -> No
     path.write_text(body)
     path.with_suffix(".pin").write_text(_pin(body))
     with pytest.raises(ProfileError, match="parents_manifest_tampered"):
-        union_synthetic(w.recorder, fx.TENANT_A, fx.WF, forged, [])
+        union_synthetic(w.recorder, fx.TENANT_A, fx.WF, forged, [], read_pair=fx.reader(source))
     with pytest.raises(ProfileError, match="parents_manifest_tampered"):
-        union_synthetic(w.recorder, fx.TENANT_A, fx.WF, parents, [])
+        union_synthetic(w.recorder, fx.TENANT_A, fx.WF, parents, [], read_pair=fx.reader(source))
+
+
+# --------------------------------------------------------------------------- re-review findings
+# Each test below reproduces one re-review finding on fc603ca and fails there.
+
+
+@pytest.mark.parametrize(
+    ("status", "reason"), [("reopened", "reopened"), ("withdrawn", "correction_withdrawn")]
+)
+def test_n1_a_stale_parents_manifest_never_readmits_children_of_a_retracted_root(
+    tmp_path: Path, status: str, reason: str
+) -> None:
+    w = _setup(tmp_path)
+    receipt, source = _two_verified(w)
+    digest = receipt["snapshot_digest"]
+    t1, t2 = (_example(w, receipt, t)["example_ref"] for t in ("T1", "T2"))
+    _record(w, digest, t1)
+    _record(w, digest, t2)
+    m1 = w.recorder.training_parents(fx.TENANT_A, fx.WF, digest, fx.reader(source))
+    assert {p["example_ref"] for p in m1["parents"]} == {t1, t2}
+
+    w.clock.set(fx.at(13))
+    retracted = fx.pair(
+        live=[fx.dec("T1", fx.at(10)), fx.dec("T2", fx.at(10, 1))],
+        outcomes=[
+            fx.cor("c-1", "T1", fx.at(10, 5)),
+            fx.cor("c-1b", "T1", fx.at(10, 30), ver=2, status=status, value=None),
+            fx.cor("c-2", "T2", fx.at(10, 6)),
+        ],
+        captured=fx.at(13),
+    )
+    m2 = w.recorder.training_parents(fx.TENANT_A, fx.WF, digest, fx.reader(retracted))
+    assert [p["example_ref"] for p in m2["parents"]] == [t2]
+    assert m2["retracted"] == [{"example_ref": t1, "reason": reason}]
+
+    # The stale, authentic M1 is handed in: the union recomputes and refuses T1's child.
+    union = union_synthetic(
+        w.recorder,
+        fx.TENANT_A,
+        fx.WF,
+        m1,
+        [{"child_ref": "syn-1", "root_ref": t1}, {"child_ref": "syn-2", "root_ref": t2}],
+        read_pair=fx.reader(retracted),
+    )
+    assert union["admitted"] == [{"child_ref": "syn-2", "root_ref": t2, "origin": "synthetic"}]
+    assert union["rejected"] == [{"child_ref": "syn-1", "reason": "child_of_retracted_root"}]
+    assert union["requested_manifest"] == m1["manifest_digest"]
+    assert union["parent_manifest"] == m2["manifest_digest"]
+    assert union["live_counts"] == m2["counts"] and union["rows"] == 2
+
+
+def test_n2_to_seed_roots_takes_neither_parents_nor_a_key_from_its_caller(tmp_path: Path) -> None:
+    import hashlib
+    import hmac
+
+    from opentour_cell.pilot.operating_point import canonical
+
+    w = _setup(tmp_path)
+    receipt, source = _two_verified(w)
+    digest = receipt["snapshot_digest"]
+    for ticket in ("T1", "T2"):
+        _record(w, digest, _example(w, receipt, ticket)["example_ref"])
+    parents = w.recorder.training_parents(fx.TENANT_A, fx.WF, digest, fx.reader(source))
+    sealed = w.recorder.seal(fx.TENANT_A, fx.WF, digest)
+    evil = b"\x66" * 32
+    forged = json.loads(json.dumps(parents))
+    for parent in forged["parents"]:
+        message = canonical(
+            ["opentour.pilot.label.v2", fx.TENANT_A, parent["example_ref"], "ATTACKER-TARGET"]
+        ).encode()
+        parent["label_digest"] = hmac.new(evil, message, hashlib.sha256).hexdigest()
+    attacker = fx.pair(
+        live=[fx.dec("T1", fx.at(10)), fx.dec("T2", fx.at(10, 1))],
+        outcomes=[
+            fx.cor("c-1", "T1", fx.at(10, 5), value="ATTACKER-TARGET"),
+            fx.cor("c-2", "T2", fx.at(10, 6), value="ATTACKER-TARGET"),
+        ],
+    )
+    # The earlier call shape, with caller parents and a caller key, is no longer accepted.
+    try:
+        roots, _ = to_seed_roots(  # type: ignore[call-arg]
+            forged, sealed, parse_settings(fx.settings()), attacker, label_key=evil
+        )
+    except TypeError:
+        roots = []
+    assert all(r.target != "ATTACKER-TARGET" for r in roots)
+    # Through the worker store and the worker key, the substituted target is refused.
+    with pytest.raises(ProfileError, match="seed_label_changed"):
+        to_seed_roots(w.recorder, fx.TENANT_A, fx.WF, digest, attacker)

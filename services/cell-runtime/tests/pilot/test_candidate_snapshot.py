@@ -141,13 +141,13 @@ def test_duplicate_contradictory_late_and_unattested_corrections_are_explicit_ex
         "quarantined": 0,
         "disputed": 1,
     }
-    # Every non-zero cell is below the default threshold of 5, so the receipt shows "<k".
-    assert receipt["reason_codes"] == dict.fromkeys(snap["reason_codes"], "<k")
+    # Every non-zero cell is below the default threshold of 5, so each group is withheld.
+    assert receipt["reason_codes"] == dict.fromkeys(snap["reason_codes"], "withheld")
     assert receipt["counters"] == {
-        "eligible": "<k",
-        "pending": "<k",
+        "eligible": "withheld",
+        "pending": "withheld",
         "quarantined": 0,
-        "disputed": "<k",
+        "disputed": "withheld",
     }
 
 
@@ -220,7 +220,7 @@ def test_disputed_source_rows_are_excluded_from_training_and_verified_counts(
         "disputed": 2,
     }
     assert snap["counters"]["disputed"] == 2 and snap["counters"]["eligible"] == 0
-    assert receipt["counters"]["disputed"] == "<k" and receipt["counters"]["eligible"] == 0
+    assert receipt["counters"]["disputed"] == "withheld" and receipt["counters"]["eligible"] == 0
     with pytest.raises(ProfileError, match="disputed_not_consumable"):
         w.recorder.record(
             fx.TENANT_A,
@@ -258,7 +258,7 @@ def test_malformed_or_unattributable_decisions_are_quarantined_and_count_zero(
     assert snap["examples"] == []
     assert [q["reason"] for q in snap["quarantined"]] == [reason]
     assert snap["counters"]["quarantined"] == 1
-    assert receipt["counters"]["quarantined"] == "<k"
+    assert receipt["counters"]["quarantined"] == "withheld"
 
 
 @pytest.mark.parametrize(
@@ -517,8 +517,8 @@ def test_no_protected_feature_or_label_appears_in_the_receipt_or_counters(tmp_pa
     receipt = w.producer.trigger(fx.TENANT_A, fx.WF, "t", fx.reader(source))
     assert tuple(receipt) == RECEIPT_FIELDS
     assert set(receipt["counters"]) <= set(COUNTERS)
-    assert all(type(v) is int or v == "<k" for v in receipt["counters"].values())
-    assert all(type(v) is int or v == "<k" for v in receipt["reason_codes"].values())
+    assert all(type(v) is int or v == "withheld" for v in receipt["counters"].values())
+    assert all(type(v) is int or v == "withheld" for v in receipt["reason_codes"].values())
     assert set(receipt["reason_codes"]) <= REASONS
     text = json.dumps(receipt)
     forbidden = (
@@ -732,11 +732,13 @@ def test_the_committed_synthetic_source_pair_yields_the_committed_expected_count
     assert snap["metrics"] == local["metrics"]
     # Two decisions on case-L1 count as one case everywhere.
     assert local["counters"]["live"]["decisions"] == local["counters"]["live"]["cases"] + 1
-    # What leaves the worker: the protected case is a small cell, never a number.
+    # What leaves the worker: the protected case is in a withheld group, never a number.
     released = make_receipt({**snap, "settings_store": None})
     assert released["counters"] == fixture["expected"]["receipt"]["counters"]
     assert released["reason_codes"] == fixture["expected"]["receipt"]["reason_codes"]
-    assert released["reason_codes"]["protected_partition"] == "<k"
+    assert released["reason_codes"]["protected_partition"] == "withheld"
+    # eligible (3) is at the threshold, but it shares a group with the protected case.
+    assert local["counters"]["eligible"] == 3 and released["counters"]["eligible"] == "withheld"
 
 
 def test_the_documented_receipt_and_reason_vocabulary_match_the_implementation() -> None:
@@ -948,7 +950,7 @@ def test_f4_the_receipt_filters_reason_codes_through_the_allowed_counters(tmp_pa
     }
     assert receipt["counters"] == {"eligible": 0}
     # Only codes that break down an allowed counter, and a single case is a small cell.
-    assert receipt["reason_codes"] == {"protected_partition": "<k"}
+    assert receipt["reason_codes"] == {"protected_partition": "withheld"}
 
 
 def test_f4_cells_below_the_threshold_read_as_small_and_the_threshold_has_a_floor(
@@ -962,10 +964,16 @@ def test_f4_cells_below_the_threshold_read_as_small_and_the_threshold_has_a_floo
         outcomes=[fx.cor(f"c-{t}", t, fx.at(10, 5)) for t in tickets[:3]],
     )
     receipt = w.producer.trigger(fx.TENANT_A, fx.WF, "t", fx.reader(source))
-    assert receipt["counters"] == {"eligible": 3, "pending": "<k", "quarantined": 0, "disputed": 0}
-    assert receipt["reason_codes"] == {"awaiting_outcome": "<k"}
+    # The pending group has a cell below 3, so its total is withheld with it.
+    assert receipt["counters"] == {
+        "eligible": 3,
+        "pending": "withheld",
+        "quarantined": 0,
+        "disputed": 0,
+    }
+    assert receipt["reason_codes"] == {"awaiting_outcome": "withheld"}
     assert parse_settings(fx.settings()).min_reportable_cell == 5
-    for bad in (1, 0, True, 2.0):
+    for bad in (2, 1, 0, True, 3.0):
         with pytest.raises(ProfileError, match="settings_min_reportable_cell"):
             parse_settings(fx.settings(min_reportable_cell=bad))
 
@@ -1234,3 +1242,138 @@ def test_f2_a_snapshot_naming_another_settings_store_is_refused(tmp_path: Path) 
     (folder / "snap-00000002.pin").write_text(_pin(body))
     with pytest.raises(ProfileError, match="settings_store_mismatch"):
         w.producer.snapshots(fx.TENANT_A, fx.WF)
+
+
+# --------------------------------------------------------------------------- re-review findings
+# Each test below reproduces one re-review finding on fc603ca and fails there.
+
+
+def _released(counter: str, total: int, breakdown: dict[str, int], k: int) -> dict[str, Any]:
+    snapshot = {
+        "counters": {counter: total},
+        "receipt_counters": [counter],
+        "min_reportable_cell": k,
+        "reason_codes": {code: n for code, n in breakdown.items() if n},
+        "settings_store": None,
+        "policy_revision": "generated-policy-1",
+    }
+    released = make_receipt(snapshot)
+    return {**released["counters"], **released["reason_codes"]}
+
+
+def test_n3_the_reported_example_hides_the_small_cell_and_its_complement() -> None:
+    shown = _released("pending", 6, {"awaiting_outcome": 5, "unattested_label": 1}, 5)
+    assert shown == {
+        "pending": "withheld",
+        "awaiting_outcome": "withheld",
+        "unattested_label": "withheld",
+    }
+
+
+@pytest.mark.parametrize("k", [3, 5])
+def test_n3_no_withheld_cell_is_derivable_from_the_rest_of_one_receipt(k: int) -> None:
+    """Exhaustive over a generated grid, assuming the worst case that the counter is the exact
+    sum of its breakdown: every withheld cell must take at least two values across all worlds
+    that release an identical receipt."""
+    import itertools
+
+    codes = ("awaiting_outcome", "unattested_label", "reopened")
+    worlds: dict[str, list[dict[str, int]]] = {}
+    for values in itertools.product(range(10), repeat=len(codes)):
+        cells = dict(zip(codes, values, strict=True))
+        world = {"pending": sum(values), **cells}
+        released = json.dumps(_released("pending", world["pending"], cells, k), sort_keys=True)
+        worlds.setdefault(released, []).append(world)
+    checked = 0
+    for values in itertools.product(range(7), repeat=len(codes)):
+        cells = dict(zip(codes, values, strict=True))
+        shown = _released("pending", sum(values), cells, k)
+        alike = worlds[json.dumps(shown, sort_keys=True)]
+        for name, value in shown.items():
+            if type(value) is not int:
+                checked += 1
+                assert len({w[name] for w in alike}) >= 2, (values, name, shown)
+        # A world is only ever released with a small cell hidden.
+        assert not any(type(v) is int and 0 < v < k for v in shown.values())
+    assert checked > 0
+
+
+def test_n3_the_floor_is_three_because_withholding_at_two_would_hide_nothing() -> None:
+    from opentour_cell.pilot.learning_profile import MIN_REPORTABLE_CELL_FLOOR
+
+    assert MIN_REPORTABLE_CELL_FLOOR == 3
+    with pytest.raises(ProfileError, match="settings_min_reportable_cell"):
+        parse_settings(fx.settings(min_reportable_cell=2))
+    with pytest.raises(ProfileError, match="receipt_unsafe"):
+        _released("pending", 6, {"awaiting_outcome": 5, "unattested_label": 1}, 2)
+
+
+def test_n_residual_a_revision_committed_by_an_actor_never_bound_is_refused(
+    tmp_path: Path,
+) -> None:
+    from opentour_cell.pilot.learning_profile import write_pinned
+
+    w = fx.world(tmp_path)
+    _committed(w)
+    body = parse_settings(fx.settings(revision=2)).body
+    write_pinned(
+        tmp_path / "settings" / fx.TENANT_A / fx.WF / "settings",
+        "rev-00000002",
+        {
+            "schema": "opentour.pilot.learning-profile-revision.v1",
+            "settings": body,
+            "committed_by": {
+                "actor_id": "never-bound",
+                "role": "data_custodian",
+                "basis": "role_asserted_by_resolved_connection_bound_on_first_use",
+                "binding_revision": 1,
+            },
+        },
+        "x",
+    )
+    with pytest.raises(ProfileError, match="settings_tampered"):
+        w.store.current(fx.TENANT_A, fx.WF)
+
+
+def test_n_residual_a_replaced_label_key_is_refused(tmp_path: Path) -> None:
+    w = fx.world(tmp_path)
+    _committed(w)
+    source = fx.pair(live=[fx.dec("K1", fx.at(10))], outcomes=[fx.cor("c-1", "K1", fx.at(10, 5))])
+    first = w.producer.trigger(fx.TENANT_A, fx.WF, "t1", fx.reader(source))
+    key = tmp_path / "snapshots" / fx.TENANT_A / fx.WF / "private" / "label.key"
+    key.write_bytes(b"\x07" * 32)  # same owner, mode and size: only the fingerprint differs
+    w.clock.set(fx.at(12, 30))
+    held = w.producer.trigger(
+        fx.TENANT_A, fx.WF, "t2", fx.reader(fx.pair(live=[fx.dec("K2", fx.at(10))]))
+    )
+    assert (held["state"], held["reason"]) == ("held", "label_key_replaced")
+    with pytest.raises(ProfileError, match="label_key_replaced"):
+        w.producer.current(fx.TENANT_A, fx.WF, first["snapshot_digest"], fx.reader(source))
+    # Deleting the fingerprint once snapshots exist is refused the same way, never re-pinned.
+    for suffix in ("json", "pin"):
+        (tmp_path / "snapshots" / fx.TENANT_A / fx.WF / f"label-key.{suffix}").unlink()
+    with pytest.raises(ProfileError, match="label_key_replaced"):
+        w.producer.label_key(fx.TENANT_A, fx.WF, create=True)
+
+
+@pytest.mark.parametrize("target", ["file", "folder"])
+def test_n_residual_a_badly_permissioned_key_gives_a_held_receipt(
+    tmp_path: Path, target: str
+) -> None:
+    w = fx.world(tmp_path)
+    _committed(w)
+    source = fx.pair(live=[fx.dec("K1", fx.at(10))], outcomes=[fx.cor("c-1", "K1", fx.at(10, 5))])
+    w.producer.trigger(fx.TENANT_A, fx.WF, "t1", fx.reader(source))
+    private = tmp_path / "snapshots" / fx.TENANT_A / fx.WF / "private"
+    if target == "file":
+        (private / "label.key").chmod(0o644)
+    else:
+        private.chmod(0o750)
+    w.clock.set(fx.at(12, 30))
+    held = w.producer.trigger(
+        fx.TENANT_A, fx.WF, "t2", fx.reader(fx.pair(live=[fx.dec("K2", fx.at(10))]))
+    )
+    assert (held["state"], held["reason"]) == ("held", "label_key_unusable")
+    expected = "private_key_required" if target == "file" else "private_key_folder_required"
+    with pytest.raises(ProfileError, match=expected):
+        w.producer.label_key(fx.TENANT_A, fx.WF)

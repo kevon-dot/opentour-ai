@@ -60,6 +60,7 @@ from opentour_cell.pilot.learning_profile import (
     DECISION,
     EVIDENCE_TIER,
     LABEL_DIGEST_TIER,
+    MIN_REPORTABLE_CELL_FLOOR,
     NON_VERIFYING_PROVENANCE,
     OBSERVED_DECISION,
     STARTER_ORIGINS,
@@ -146,8 +147,11 @@ HOLD_REASONS = frozenset(
         "snapshot_commit_conflict",
         "settings_store_mismatch",
         "label_key_missing",
+        "label_key_replaced",
+        "label_key_unusable",
     }
 )
+LABEL_KEY_FINGERPRINT = b"opentour.pilot.label-key-fingerprint.v1"
 REASONS = QUARANTINE_REASONS | EXCLUSION_REASONS | STATE_REASONS | HOLD_REASONS
 # The receipt counter each data reason code breaks down. A reason code is disclosed only when
 # its counter is one the settings allow. Row-level exclusions count zero, like quarantine.
@@ -176,7 +180,9 @@ REASON_COUNTER: dict[str, str] = {
     **{r: "eligible" for r in _ELIGIBILITY_REASONS},
     **{r: "pending" for r in STATE_REASONS - _DISPUTED_REASONS - _ELIGIBILITY_REASONS},
 }
-SUPPRESSED = "<k"
+# The one marker for a withheld cell. It says only "non-zero": a withheld cell may be below
+# ``min_reportable_cell`` or withheld to protect one that is (complementary suppression).
+WITHHELD = "withheld"
 RECEIPT_FIELDS = (
     "schema",
     "state",
@@ -744,11 +750,24 @@ def _assemble(
     }
 
 
-def _cell(value: object, k: int) -> int | str:
-    """A disclosed count: zero and counts of at least ``k`` as integers, others as ``"<k"``."""
+def _count(value: object) -> int:
     need(type(value) is int and value >= 0, "receipt_unsafe")
     assert type(value) is int
-    return SUPPRESSED if 0 < value < k else value
+    return value
+
+
+def _disclose(cells: Mapping[str, int], k: int) -> dict[str, int | str]:
+    """Small-cell rule for one disclosure group (a counter and its reason-code breakdown).
+
+    If any non-zero cell in the group is below ``k``, every non-zero cell in the group, the
+    counter included, reads ``"withheld"``; otherwise every cell is shown. Zero is always
+    shown. A withheld cell therefore reveals only that it is non-zero, and no subtraction or
+    range argument within one receipt pins it: the group's total is withheld whenever any
+    part is, and with ``k >= 3`` a withheld cell that is forced below ``k`` still has at least
+    two possible values.
+    """
+    small = any(0 < n < k for n in cells.values())
+    return {name: WITHHELD if small and n else n for name, n in cells.items()}
 
 
 def receipt(
@@ -758,13 +777,29 @@ def receipt(
 
     No tenant, case, decision, group, feature, prediction or label value can appear. Only the
     counters the settings allow are present, and only the reason codes that break one of them
-    down. Every non-zero cell below ``min_reportable_cell`` reads ``"<k"``.
+    down. The small-cell rule (``_disclose``) applies per counter and its breakdown: when any
+    non-zero cell there is below ``min_reportable_cell``, all of that group's non-zero cells
+    read ``"withheld"``.
     """
     need(state in {"committed", "rolled_back"}, "receipt_state")
     counters = snapshot["counters"]
     allowed = list(snapshot["receipt_counters"])
     k = snapshot["min_reportable_cell"]
-    need(type(k) is int and k >= 2, "receipt_unsafe")
+    need(type(k) is int and k >= MIN_REPORTABLE_CELL_FLOOR, "receipt_unsafe")
+    shown_counters: dict[str, int | str] = {}
+    shown_codes: dict[str, int | str] = {}
+    for name in allowed:
+        group = {"": _count(counters[name])}
+        group.update(
+            {
+                code: _count(n)
+                for code, n in snapshot["reason_codes"].items()
+                if REASON_COUNTER.get(code) == name
+            }
+        )
+        shown = _disclose(group, k)
+        shown_counters[name] = shown.pop("")
+        shown_codes.update(shown)
     body: dict[str, Any] = {
         "schema": RECEIPT_SCHEMA,
         "state": state,
@@ -773,18 +808,14 @@ def receipt(
         "digest_tier": EVIDENCE_TIER,
         "settings_store": snapshot["settings_store"],
         "policy_revision": snapshot["policy_revision"],
-        "counters": {name: _cell(counters[name], k) for name in allowed},
-        "reason_codes": {
-            code: _cell(n, k)
-            for code, n in snapshot["reason_codes"].items()
-            if REASON_COUNTER.get(code) in allowed
-        },
+        "counters": shown_counters,
+        "reason_codes": dict(sorted(shown_codes.items())),
     }
     need(
         set(body["counters"]) <= set(COUNTERS)
         and set(body["reason_codes"]) <= REASONS
         and all(
-            type(v) is int or v == SUPPRESSED
+            type(v) is int or v == WITHHELD
             for v in [*body["counters"].values(), *body["reason_codes"].values()]
         ),
         "receipt_unsafe",
@@ -865,12 +896,27 @@ class SnapshotProducer:
 
     def label_key(self, tenant: str, workflow_ref: str, *, create: bool = False) -> bytes:
         """The private HMAC key for label digests. Created only before any snapshot exists;
-        a key missing after that is refused (``label_key_missing``), never re-keyed."""
-        return local_key(
+        a key missing after that is refused (``label_key_missing``), never re-keyed.
+
+        On first use a fingerprint of the key (its HMAC of a fixed constant) is pinned beside
+        the snapshots; a key that no longer matches it is refused (``label_key_replaced``).
+        """
+        first = create and not self._names(tenant, workflow_ref)
+        key = local_key(
             self._folder(tenant, workflow_ref, "private"),
-            create=create and not self._names(tenant, workflow_ref),
+            create=first,
             missing="label_key_missing",
         )
+        body = {
+            "schema": "opentour.pilot.label-key-fingerprint.v1",
+            "fingerprint": hmac.new(key, LABEL_KEY_FINGERPRINT, hashlib.sha256).hexdigest(),
+        }
+        base = self._base(tenant, workflow_ref)
+        if not (base / "label-key.json").exists():
+            need(first, "label_key_replaced")
+            write_pinned(base, "label-key", body, "label_key_replaced")
+        need(read_pinned(base, "label-key", "label_key_replaced") == body, "label_key_replaced")
+        return key
 
     def snapshots(self, tenant: str, workflow_ref: str) -> list[dict[str, Any]]:
         """Every committed snapshot in sequence order, each verified against its pin, the
@@ -931,8 +977,10 @@ class SnapshotProducer:
         try:
             key = self.label_key(tenant, workflow_ref, create=True)
         except ProfileError as exc:
-            if exc.reason == "label_key_missing":
-                return held("label_key_missing")
+            if exc.reason in {"label_key_missing", "label_key_replaced"}:
+                return held(exc.reason)
+            if exc.reason in {"private_key_required", "private_key_folder_required"}:
+                return held("label_key_unusable")
             raise
         pair = read_pair(before)
         after = self.settings.current(tenant, workflow_ref)

@@ -21,7 +21,10 @@ they are HMAC-SHA256 under a 32-byte key the producer creates on first use in it
 folder (`private/label.key`, mode 0600, in an owner-checked 0700 folder). That evidence level is
 `locally_keyed`: it stops anyone from recovering a label by enumerating a small vocabulary,
 but nobody outside the worker can verify it, and it is not a signature. If the key is missing
-once snapshots exist, the producer refuses (`label_key_missing`) rather than re-keying. The
+once snapshots exist, the producer refuses (`label_key_missing`) rather than re-keying. On
+first use the producer also pins the key's fingerprint (its HMAC of a fixed constant) beside
+the snapshots, so a replaced key is refused (`label_key_replaced`). A key file or folder with
+the wrong owner or mode makes `trigger` return a held receipt (`label_key_unusable`). The
 committed fixture (`tests/pilot/fixtures/candidate-snapshot-v1.json`) is generated. Nothing here
 is provider, installed-Zap, Slack or customer evidence.
 
@@ -35,9 +38,11 @@ first use; it is not authenticated until OPE-566. The first commit for a tenant 
 binds that actor ID as the only custodian (trust on first use). After that only a bound
 custodian actor ID may commit (`custodian_not_bound`). Binding or unbinding a custodian takes
 a currently bound custodian, and the last custodian cannot be unbound (`last_custodian`). Each
-revision file records the committing actor ID and the binding revision it relied on, and the
-binding chain is re-verified on every read. Any other or unknown role is refused. A connection
-that asserts the role under an already bound actor ID is still believed.
+revision file records the committing actor ID and the binding revision it relied on. On every
+read the binding chain is re-verified, and each revision's committer must be bound under the
+binding revision it names; a revision committed by an actor who was never bound is refused
+(`settings_tampered`). Any other or unknown role is refused. A connection that asserts the role
+under an already bound actor ID is still believed.
 
 Store identity. The first commit writes a random store ID inside the store. The store's
 identity digests that ID with the tenant, workflow, and the real paths and device/inode
@@ -48,12 +53,18 @@ recorder pins it too. A copied, restored or second settings store is then refuse
 and a snapshot whose settings revision or digest the pinned store does not hold is refused the
 same way.
 
+Recovery. A moved or restored store, a copied one, and a store in the earlier `2779f27`
+format (unwrapped revision files, no custodian bindings) are all refused, by design. The
+approved recovery is to start a new store, with new snapshots and dependency folders, and
+commit the settings again under the custodian who should be bound. Nothing has been deployed,
+so no store needs migrating.
+
 The batch pins the tenant, workflow, intake-created benchmark and version, policy and
 evaluation-policy revisions, engagement and grant epochs, the bound sources (role `decision`
 or `correction`, and an evidence origin), the redacted field mapping, the decision-time
 feature allowlist, the adjudicators (role `verifier` only), the abstain values, the freshness
 and maturity windows, the development/protected split, the permitted uses, the receipt
-counters the mandate allows, `min_reportable_cell` (optional, default 5, never below 2) and
+counters the mandate allows, `min_reportable_cell` (optional, default 5, never below 3) and
 `row_state_values` (optional, default admitted `["admitted"]`, disputed `["disputed"]`).
 
 Redacted field mapping. Logical join field to source column; the committed fixture shows one.
@@ -84,8 +95,8 @@ decision, group, feature, prediction or label value can appear.
 | `digest_tier` | Always `digest_self_consistent_only` today. |
 | `settings_store` | The pinned settings-store identity digest the snapshot was made against; null when held. |
 | `policy_revision` | The policy revision the snapshot was built under; null when held. |
-| `counters` | Counters restricted to the `receipt_counters` the settings allow. Each is an integer, or the string `"<k"` for a non-zero count below `min_reportable_cell`. |
-| `reason_codes` | Reason code to count, only for codes that break down an allowed counter (see the table below), with the same `"<k"` rule. A held receipt carries its single hold code with count 1; that is the hold state, not a data cell. |
+| `counters` | Counters restricted to the `receipt_counters` the settings allow. Each is an integer, or the string `"withheld"` under the small-cell rule below. |
+| `reason_codes` | Reason code to count, only for codes that break down an allowed counter (see the table below), under the same rule. A held receipt carries its single hold code with count 1; that is the hold state, not a data cell. |
 
 The same trigger, or the same canonical intent (tenant, workflow, settings digest and capture
 fingerprints) under a different trigger, returns the same receipt. The same trigger reused for
@@ -106,10 +117,17 @@ ratio (`wrong_automatic_decisions`) counts distinct cases in both numerator and 
 Starter evidence is counted separately inside the snapshot and never enters these counters,
 recurrence or training parents. A zero denominator is reported as `unavailable`.
 
-Small cells. A non-zero count below `min_reportable_cell` is disclosed as `"<k"`, in counters
-and reason codes alike. Suppression is per cell: differencing two receipts whose cells are at
-or above the threshold can still reveal a change of that size. The OPE-526 exposure guard owns
-differencing control across released cells; this receipt does not claim it.
+Small cells. Each allowed counter and the reason codes that break it down form one
+disclosure group. If any non-zero cell in a group is below `min_reportable_cell`, every
+non-zero cell in that group, the counter included, reads `"withheld"`; otherwise the group is
+shown in full. Zero is always shown. A withheld cell says only that the count is non-zero: it
+may be below the threshold, or withheld so that a small cell beside it cannot be recovered by
+subtraction (complementary suppression). Because the group's total is withheld whenever any
+part is, and the threshold is at least 3, no withheld cell can be derived from the other
+cells of the same receipt, even assuming the counter is the exact sum of its breakdown.
+Across receipts this is not claimed: a change from 0 to `"withheld"`, or differencing two
+receipts that disclose a group in full, can still reveal a change. The OPE-526 exposure guard
+owns differencing control across released cells.
 
 ## Reason codes
 
@@ -159,6 +177,8 @@ differencing control across released cells; this receipt does not claim it.
 | `snapshot_commit_conflict` | hold | none (hold) |
 | `settings_store_mismatch` | hold | none (hold) |
 | `label_key_missing` | hold | none (hold) |
+| `label_key_replaced` | hold | none (hold) |
+| `label_key_unusable` | hold | none (hold) |
 
 ## Interpretations recorded as gaps
 
@@ -175,12 +195,21 @@ differencing control across released cells; this receipt does not claim it.
   and projects only references the worker mints from its own records (`lineage_refs`): the
   committed snapshot as the result, the example as the candidate, and one claim per record.
   Caller-asserted artifacts and relations are not projected. No worker-side producer of
-  OPE-544 workflow claims or frozen results exists yet.
+  OPE-544 workflow claims or frozen results exists yet. The manifest's `rule_kind` is the
+  record's consumer kind, which the consumer declared when it consumed. OPE-544's schema has
+  no field to mark it caller-declared, so it is recorded here: it names the kind of rule, it
+  authorizes nothing, and it never selects a claim.
 - **Proposal references.** Proposal references come from consumers. They are labelled
   `caller_asserted` wherever they surface (`stale_proposals` in current eligibility and in the
   training-parent manifest).
 - **Synthetic union.** `union_synthetic` verifies the parents manifest it is handed against
-  the copy this worker stored under that digest before copying any count.
+  the copy this worker stored under that digest, then recomputes the current parents from the
+  worker store and admits only children whose root is a parent now. A child of a root
+  reopened or withdrawn since is rejected (`child_of_retracted_root`), and the live counts
+  come from the recomputed manifest.
+- **Seed roots.** `to_seed_roots` takes no parents and no key from its caller: it recomputes
+  the current parents from the worker store, reads the settings revision they name from the
+  pinned store and uses the producer's own label key.
 - **Seal scope.** The seal covers `dataset_preparation` records only, so an evaluation or
   other record made after sealing never conflicts with it. Dataset records and sealing share
   one lock.

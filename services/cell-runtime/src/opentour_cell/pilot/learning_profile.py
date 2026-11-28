@@ -116,9 +116,10 @@ NON_VERIFYING_PROVENANCE = frozenset(
 USES = frozenset({"inspect", "evaluate", "train"})
 COUNTERS = ("eligible", "pending", "quarantined", "disputed")
 # Small-cell threshold for anything that leaves the worker. No repository-wide constant exists,
-# so the settings carry ``min_reportable_cell``: default 5, never below 2.
+# so the settings carry ``min_reportable_cell``: default 5, never below 3. At 2 a withheld cell
+# that is forced below the threshold could only be 1, so withholding it would hide nothing.
 DEFAULT_MIN_REPORTABLE_CELL = 5
-MIN_REPORTABLE_CELL_FLOOR = 2
+MIN_REPORTABLE_CELL_FLOOR = 3
 
 _KEYS = frozenset(
     {
@@ -665,6 +666,12 @@ class SettingsBatchStore:
         The chain is re-verified on every read: each change is made by a custodian bound in
         the previous revision, and the set never becomes empty.
         """
+        history = self._binding_history(tenant, workflow_ref)
+        return len(history), history[-1] if history else frozenset()
+
+    def _binding_history(self, tenant: str, workflow_ref: str) -> list[frozenset[str]]:
+        """The bound custodian set after each binding revision, in order, re-verified."""
+        history: list[frozenset[str]] = []
         folder = self._base(tenant, workflow_ref) / "custodians"
         numbers = _numbered(folder, "bind-")
         need(numbers == list(range(1, len(numbers) + 1)), "custodian_binding_tampered")
@@ -695,7 +702,8 @@ class SettingsBatchStore:
                 "custodian_binding_tampered",
             )
             bound = frozenset(expected)
-        return len(numbers), bound
+            history.append(bound)
+        return history
 
     def _bind(
         self, tenant: str, workflow_ref: str, kind: str, target: str, by: str
@@ -823,6 +831,18 @@ class SettingsBatchStore:
             and settings.workflow_ref == workflow_ref
             and settings.settings_revision == revision
             and settings.body == record["settings"],
+            "settings_tampered",
+        )
+        # The committer must have been a bound custodian under the binding revision it names.
+        committed = record["committed_by"]
+        history = self._binding_history(tenant, workflow_ref)
+        number = committed.get("binding_revision")
+        need(
+            type(number) is int
+            and 1 <= number <= len(history)
+            and committed["actor_id"] in history[number - 1]
+            and committed.get("role") == CUSTODIAN
+            and committed.get("basis") == CUSTODIAN_BASIS,
             "settings_tampered",
         )
         return settings

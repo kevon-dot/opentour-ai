@@ -627,29 +627,42 @@ def union_synthetic(
     workflow_ref: str,
     parents: Mapping[str, Any],
     children: Iterable[Mapping[str, Any]],
+    *,
+    read_pair: PairReader,
 ) -> dict[str, Any]:
     """Union admitted synthetic descendants into a training set without touching live counts.
 
-    The parents mapping is never trusted as handed in: its digest must match its body and
-    the manifest this worker stored under that digest, and the live counts and parents come
-    from the stored copy. A child must name a current real parent; any other child is
-    rejected with a reason.
+    The parents mapping is never trusted as handed in: its digest must match its body and the
+    manifest this worker stored under that digest. Authenticity is not currency, so the
+    current parents are then recomputed from the worker's own store (``training_parents``
+    over the same snapshot, the pinned settings store and the worker's reader), and only a
+    child whose root is a parent *now* is admitted. A child of a root that has since been
+    reopened or withdrawn is rejected as ``child_of_retracted_root``; any other child without a
+    current parent as ``child_without_live_parent``. Live counts come from the recomputed
+    manifest.
     """
     claimed = parents.get("manifest_digest") if isinstance(parents, Mapping) else None
     stored = recorder.parents_manifest(tenant, workflow_ref, claimed)  # type: ignore[arg-type]
     need(dict(parents) == stored, "parents_manifest_tampered")
-    parents = stored
-    roots = {p["example_ref"] for p in parents["parents"]}
+    current = recorder.training_parents(tenant, workflow_ref, stored["snapshot_digest"], read_pair)
+    roots = {p["example_ref"] for p in current["parents"]}
+    retracted = {r["example_ref"] for r in current["retracted"]} | (
+        {p["example_ref"] for p in stored["parents"]} - roots
+    )
     admitted, rejected = [], []
     for child in children:
         child_ref, root = child.get("child_ref"), child.get("root_ref")
         if type(child_ref) is not str or type(root) is not str:
             rejected.append({"child_ref": None, "reason": "malformed_child"})
-        elif root not in roots:
-            rejected.append({"child_ref": child_ref, "reason": "child_without_live_parent"})
-        else:
+        elif root in roots:
             admitted.append({"child_ref": child_ref, "root_ref": root, "origin": "synthetic"})
+        elif root in retracted:
+            rejected.append({"child_ref": child_ref, "reason": "child_of_retracted_root"})
+        else:
+            rejected.append({"child_ref": child_ref, "reason": "child_without_live_parent"})
+    parents = current
     return {
+        "requested_manifest": stored["manifest_digest"],
         "parent_manifest": parents["manifest_digest"],
         "live_counts": dict(parents["counts"]),
         "synthetic_children": len(admitted),
@@ -716,7 +729,9 @@ def to_lineage_manifest(
     anything else) is refused with ``lineage_ref_caller_asserted`` and nothing is written. For
     the same reason the record's caller-asserted artifacts and the caller-asserted later
     relations (``attach_artifact``) are not projected; only worker-resolved outcome relations
-    are. The rule kind is the record's own consumer kind, fixed when the consumption happened.
+    are. The rule kind is the record's own consumer kind, which the consumer declared when the
+    consumption happened. OPE-544's schema has no field to mark it caller-declared, so that is
+    documented here and in the docs page: it names the kind of rule and never selects a claim.
     Unknown dependencies carry over, so the reader returns ``hold`` for them rather than a
     guessed edge. With ``store`` (an OPE-544 ``ManifestStore``) the manifest is also written.
     """
@@ -804,18 +819,20 @@ def to_recompute_families(sealed: Mapping[str, Any]) -> list[Any]:
 
 
 def to_seed_roots(
-    parents: Mapping[str, Any],
-    sealed: Mapping[str, Any],
-    settings: PilotSettings,
+    recorder: DependencyRecorder,
+    tenant: str,
+    workflow_ref: str,
+    snapshot_digest: str,
     pair: SourcePair,
-    *,
-    label_key: bytes,
 ) -> tuple[list[Any], Any]:
-    """Project training parents onto OPE-516 ``SeedRoot`` and ``SplitSeal`` inputs.
+    """Project the current training parents onto OPE-516 ``SeedRoot`` and ``SplitSeal`` inputs.
 
-    Values are re-read from the worker's source pair and must match the sealed label and
-    input digests (the label digest under the producer's private ``label_key``), so a caller
-    cannot substitute a target. Every parent must be found; a missing one is refused.
+    Nothing that decides a target comes from the caller. The parents are recomputed from the
+    worker store (``training_parents`` over ``pair``) and re-read through
+    ``parents_manifest``; the settings revision is the one that manifest names in the pinned
+    store; the HMAC key is the producer's own (``label_key``). Values are re-read from the
+    source pair and must match the stored input and label digests, so a substituted target
+    is refused (``seed_label_changed``). Every parent must be found; a missing one is refused.
     Vocabulary gap: OPE-516 names its seed population ``training``; this producer's
     populations are ``development`` and ``protected``. A training parent is a development
     example, so it maps to ``training``.
@@ -823,6 +840,15 @@ def to_seed_roots(
     from opentour_cell.pilot.candidate_snapshot import example_ref as make_ref
     from opentour_cell.pilot.training_variants import SeedRoot, SplitSeal
 
+    computed = recorder.training_parents(tenant, workflow_ref, snapshot_digest, lambda _s: pair)
+    parents = recorder.parents_manifest(tenant, workflow_ref, computed["manifest_digest"])
+    held = recorder.producer.settings.revision(
+        tenant, workflow_ref, parents["current_settings_revision"]
+    )
+    need(held is not None, "settings_missing")
+    assert held is not None
+    settings: PilotSettings = held
+    label_key = recorder.producer.label_key(tenant, workflow_ref)
     captures = pair.by_ref()
     wanted = {p["example_ref"]: p for p in parents["parents"]}
     roots = []

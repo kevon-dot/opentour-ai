@@ -5,18 +5,18 @@
   "expected": {
     "receipt": {
       "counters": {
-        "disputed": "<k",
-        "eligible": 3,
-        "pending": "<k",
-        "quarantined": "<k"
+        "disputed": "withheld",
+        "eligible": "withheld",
+        "pending": "withheld",
+        "quarantined": "withheld"
       },
       "reason_codes": {
-        "awaiting_outcome": "<k",
-        "contradictory_corrections": "<k",
-        "malformed_decision": "<k",
-        "orphan_correction": "<k",
-        "protected_partition": "<k",
-        "starter_origin": "<k"
+        "awaiting_outcome": "withheld",
+        "contradictory_corrections": "withheld",
+        "malformed_decision": "withheld",
+        "orphan_correction": "withheld",
+        "protected_partition": "withheld",
+        "starter_origin": "withheld"
       }
     },
     "snapshot": {
@@ -64,7 +64,7 @@
     }
   },
   "fixture_kind": "generated",
-  "note": "Generated sentinel source pair for OPE-416. Not provider or customer evidence. L1 and L8 are two decisions on one case, so live totals count 7 decisions but 6 cases. min_reportable_cell is 2 here (the floor) so the expected receipt shows both an integer and '<k' cells.",
+  "note": "Generated sentinel source pair for OPE-416. Not provider or customer evidence. L1 and L8 are two decisions on one case, so live totals count 7 decisions but 6 cases. min_reportable_cell is 3 (the floor). eligible is 3, but its breakdown holds the single protected case, so the whole eligible group is withheld (complementary suppression).",
   "product_acceptance": "NOT_RUN",
   "settings": {
     "abstain_values": [
@@ -117,7 +117,7 @@
       }
     },
     "maturity_seconds": 600,
-    "min_reportable_cell": 2,
+    "min_reportable_cell": 3,
     "policy_revision": "generated-policy-1",
     "receipt_counters": [
       "eligible",
