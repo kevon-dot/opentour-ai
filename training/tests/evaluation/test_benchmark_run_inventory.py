@@ -343,9 +343,13 @@ def test_claim_provenance_fields_are_copied_when_the_receipt_reports_them() -> N
     spec, build = POPULATIONS[0]
     inputs = build()
     receipt = audit(inputs)
-    plain = inventory_row(spec, inputs, receipt, MEASURED, elapsed_ms=0.0)
+    bare = json.loads(json.dumps(receipt))
+    for key in ("caller_asserted_dependencies", "customer_accuracy_alert_blocked_by"):
+        bare["claims"].pop(key, None)
+    plain = inventory_row(spec, inputs, bare, MEASURED, elapsed_ms=0.0)
     assert "caller_asserted_dependencies" not in plain["claims"]
-    reported = json.loads(json.dumps(receipt))
+    assert "customer_accuracy_alert_blocked_by" not in plain["claims"]
+    reported = json.loads(json.dumps(bare))
     reported["claims"]["caller_asserted_dependencies"] = ["exposed_families"]
     reported["claims"]["customer_accuracy_alert_blocked_by"] = ["evidence_origin_not_observed"]
     row = inventory_row(spec, inputs, reported, MEASURED, elapsed_ms=0.0)
