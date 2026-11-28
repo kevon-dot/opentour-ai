@@ -29,18 +29,25 @@ the journal directory can set ``cap_verified`` or ``maximum_minor_units`` direct
 the journal is trusted storage that only this connector can write. Closing that would need
 authenticated events (an HMAC or signature over each event, keyed outside the state directory).
 
-Over-cap usage is a hard refusal. A COMPLETED job whose provider-reported usage is above the
-journaled approved maximum is held with the fixed reason ``over_cap``: ``collect`` builds no
-candidate, and ``handoff_reference`` and ``predict_for_replay`` never use its tuned-model id.
-Usage that cannot be shown to be within the cap is held the same way (fail closed), under its own
-fixed reason: ``usage_unverifiable`` when the usage is missing, non-finite, negative, non-integer
-or bool (including when read back from the journal), and ``cap_unverifiable`` when it is in a
-currency other than the cap's or the journal has no valid maximum or currency. Usage exactly at
-the cap is accepted. ``hold_reason`` reports the specific reason. The receipt state stays the
-provider's own (COMPLETED); the hold is enforced where the result would be released. ``usage``
-still returns the real figure with ``cap_status == "over_cap"`` and ``settleable is False``; no
-code in this repository reconciles it, so the reservation owner must handle it (see
-``ReportedUsage``).
+Over-cap usage is a hard refusal. Every bounded dimension is compared: money against the
+journaled approved maximum, and seconds, rows and steps against the intent's ``FitBound``. A
+COMPLETED job with any verified dimension above its bound is held with the fixed reason
+``over_cap``: ``collect`` builds no candidate, and ``handoff_reference`` and
+``predict_for_replay`` never use its tuned-model id. Usage that cannot be shown to be within
+every bound is held the same way (fail closed), under its own fixed reason:
+``usage_unverifiable`` when the usage is missing, non-finite, negative, non-integer or bool, or
+has the wrong shape (including when read back from the journal), and ``cap_unverifiable`` when it
+is in a currency other than the cap's or a bound is missing or invalid. A verified excess wins
+over an unusable bound. Usage exactly at a bound is accepted. ``hold_reason`` reports the specific
+reason, and ``None`` for a job that is not COMPLETED. The receipt state stays the provider's own
+(COMPLETED); the hold is enforced where the result would be released. ``usage`` still returns
+the real figure with ``cap_status == "over_cap"`` and ``settleable is False``; no code in this
+repository reconciles it, so the reservation owner must handle it (see ``ReportedUsage``).
+
+Known limits of the hold: a terminal observation is final, so usage that arrives after the
+provider reports success is never re-read. A job held as ``usage_unverifiable`` therefore has no
+recovery path here, and a later upward revision by the provider is not seen. A held job's
+tuned-model id is never returned, but it is still written to the 0600 on-disk journal.
 
 Simulated: tests drive this connector through a generated in-memory provider double (the transport
 port is the only boundary). Every receipt, evidence ref and tuned-model id is a ``simulated:*``
@@ -260,10 +267,13 @@ class ReportedUsage(Usage):
     """Provider-reported usage plus a closed-vocabulary comparison to the approved cap.
 
     ``incurred_minor_units`` is always the provider's real figure and is never clamped, so genuine
-    overspend stays visible, with the provider's own currency. ``cap_status`` is ``within_cap``
-    (same currency, at or under the journaled approved maximum), ``over_cap`` (same currency,
-    above it) or ``cap_unknown`` (no valid journaled maximum, no journaled currency, or a
-    different currency; the match is exact and case-sensitive, so ``usd`` is not ``USD``).
+    overspend stays visible, with the provider's own currency. Every bounded dimension is
+    compared: money against the journaled approved maximum (same currency only; the match is
+    exact and case-sensitive, so ``usd`` is not ``USD``), and seconds, rows and steps against the
+    intent's ``FitBound`` (bound to the journal by the intent digest). ``cap_status`` is
+    ``over_cap`` when any comparable dimension is above its bound, else ``cap_unknown`` when any
+    dimension cannot be compared (no valid bound, no journaled currency, or a different
+    currency), else ``within_cap`` (every dimension at or under its bound).
     Anything but ``within_cap`` is not ``settleable``: it must not flow to settlement as ordinary
     actual spend. A consumer must gate on ``settleable`` or ``cap_status``, never on ``source`` or
     ``incurred_minor_units``, which look ordinary on an over-cap job. Nothing in this repository
@@ -298,42 +308,79 @@ HOLD_USAGE_UNVERIFIABLE = "usage_unverifiable"  # usage missing or malformed
 HOLD_CAP_UNVERIFIABLE = "cap_unverifiable"  # usage not comparable to the approved cap
 
 
+# Usage dimensions bounded by ``FitBound`` besides money, as (usage field, bound field). Money is
+# compared separately because it also needs a matching currency. Nothing else is compared.
+_BOUNDED_DIMENSIONS = (
+    ("seconds", "maximum_seconds"),
+    ("rows", "maximum_rows"),
+    ("steps", "maximum_steps"),
+)
+_USAGE_FIELDS = frozenset({"currency", "minor_units", "seconds", "rows", "steps"})
+
+
+def _limit(value: object) -> int | None:
+    """A bound is a non-negative ``int`` (never ``bool`` or ``float``); anything else is invalid."""
+    return value if type(value) is int and value >= 0 else None
+
+
 def _approved_cap(view: _View) -> tuple[int | None, str | None]:
     """The journaled approved maximum and currency, or ``None`` for one that is not valid."""
-    recorded = view.maximum_minor_units
-    approved = recorded if type(recorded) is int and recorded >= 0 else None
     currency = view.currency if isinstance(view.currency, str) and view.currency else None
-    return approved, currency
+    return _limit(view.maximum_minor_units), currency
 
 
-def _cap_status(view: _View) -> str | None:
-    """Compare journaled usage to the journaled cap; ``None`` when the usage itself is invalid."""
+def _cap_status(view: _View, bound: mc.FitBound) -> str | None:
+    """Compare journaled usage to every bound; ``None`` when the usage itself is invalid.
+
+    A verified excess on any dimension is ``over_cap`` even when another dimension cannot be
+    compared; otherwise a dimension that cannot be compared makes the result ``cap_unknown``.
+    """
     reported = view.usage
     if reported is None or not _usage_valid(reported):
         return None
     approved, approved_currency = _approved_cap(view)
-    if approved is None or approved_currency is None or reported.currency != approved_currency:
-        # Units differ or are unrecorded (exact, case-sensitive match): the numbers are not
-        # comparable, so fail closed.
+    # Units differ or are unrecorded (exact, case-sensitive match): money is not comparable.
+    comparable = approved_currency is not None and reported.currency == approved_currency
+    money = approved if comparable else None
+    comparisons = [(reported.minor_units, money)] + [
+        (getattr(reported, used), _limit(getattr(bound, limit)))
+        for used, limit in _BOUNDED_DIMENSIONS
+    ]
+    if any(limit is not None and used > limit for used, limit in comparisons):
+        return CAP_OVER
+    if any(limit is None for _, limit in comparisons):
         return CAP_UNKNOWN
-    return CAP_OVER if reported.minor_units > approved else CAP_WITHIN
+    return CAP_WITHIN
 
 
-def _hold(view: _View) -> str | None:
-    """A COMPLETED result is released only when its usage is verifiably within the cap.
+def _hold(view: _View, bound: mc.FitBound) -> str | None:
+    """A COMPLETED result is released only when its usage is verifiably within every bound.
 
-    Invalid usage is reported before an unusable cap: with no usable figure there is nothing to
-    compare, whatever the journaled cap says.
+    Only a job whose receipt reads COMPLETED is held; a CANCELED or UNKNOWN job never yields a
+    result anyway and reports no hold. Invalid usage is reported first: a malformed record
+    yields no verified figure, so there is nothing to compare whatever the bounds say.
     """
-    if not view.terminal or view.state is not mc.JobState.COMPLETED:
+    if not (
+        view.terminal
+        and view.state is mc.JobState.COMPLETED
+        and view.cap_verified
+        and not view.cancel_requested
+    ):
         return None
-    status = _cap_status(view)
+    status = _cap_status(view, bound)
     if status is None:
         return HOLD_USAGE_UNVERIFIABLE
-    if status == CAP_UNKNOWN:
-        return HOLD_CAP_UNVERIFIABLE
     if status == CAP_OVER:
         return HOLD_OVER_CAP
+    if status == CAP_UNKNOWN:
+        return HOLD_CAP_UNVERIFIABLE
+    return None
+
+
+def _journaled_usage(value: object) -> ProviderUsage | None:
+    """Usage read back from the journal; any other shape is unknown, never an error."""
+    if isinstance(value, dict) and set(value) == _USAGE_FIELDS:
+        return ProviderUsage(**value)
     return None
 
 
@@ -529,8 +576,7 @@ class ManagedConnector:
                 view.terminal = True
                 view.state = mc.JobState(event["state"])
                 view.tuned_model_id = event.get("tuned_model_id", "")
-                usage = event.get("usage")
-                view.usage = ProviderUsage(**usage) if usage else None
+                view.usage = _journaled_usage(event.get("usage"))
             elif kind == "cancel_requested":
                 view.cancel_requested = True
             elif kind == "disposition":
@@ -789,7 +835,7 @@ class ManagedConnector:
             or not view.tuned_model_id
         ):
             raise ValueError("job_not_collectable")
-        hold = _hold(view)
+        hold = _hold(view, job.intent.bound)  # the bound is the journal's, by intent digest
         if hold is not None:
             raise ValueError(hold)
         return key, view
@@ -820,7 +866,7 @@ class ManagedConnector:
             or candidate.parent_revision != candidate.intent.binding.immutable_revision
         ):
             raise ValueError("candidate_lineage_unverified")
-        hold = _hold(view)
+        hold = _hold(view, candidate.intent.bound)
         if hold is not None:
             raise ValueError(hold)  # a held job's tuned-model id is never used or released
         return view
@@ -828,12 +874,14 @@ class ManagedConnector:
     def hold_reason(self, job: mc.JobReceipt) -> str | None:
         """The fixed reason a COMPLETED job's result is held, else ``None``.
 
-        One of ``over_cap``, ``usage_unverifiable`` or ``cap_unverifiable``.
+        One of ``over_cap``, ``usage_unverifiable`` or ``cap_unverifiable``. A job whose receipt
+        does not read COMPLETED (running, CANCELED, FAILED or UNKNOWN) reports ``None``: it
+        yields no result to hold.
         """
         view = self._view(self._key_from_ref(job.job_ref))
         if view.intent_sha != intent_digest(job.intent):
             raise ValueError("job_receipt_mismatched")
-        return _hold(view)
+        return _hold(view, job.intent.bound)
 
     def handoff_reference(self, candidate: mc.Candidate, recipient: str) -> str:
         """Release the tuned-model id only to a recipient the customer permitted."""
@@ -863,7 +911,7 @@ class ManagedConnector:
         reported = view.usage
         state = view.state
         approved, approved_currency = _approved_cap(view)
-        status = _cap_status(view) or CAP_UNKNOWN
+        status = _cap_status(view, job.intent.bound) or CAP_UNKNOWN
         return ReportedUsage(
             self._job_ref(key),
             reported.currency,
