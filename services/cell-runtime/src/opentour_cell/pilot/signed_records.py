@@ -38,10 +38,10 @@ Trust chain:
    validly signed, can change an anchor or introduce a customer-owner key.
 
 Required signer roles per purpose (``REQUIRED_ROLES``): customer consent records
-(engagement grant, spend mandate, routing policy) need the customer owner and the operator
-custodian; a verdict needs the independent evaluator; an audit receipt needs the benchmark
-auditor; a registry needs the operator root; a customer key rotation needs the previous
-customer key and the new key. A missing, duplicated or unexpected role, one key signing
+(engagement grant, spend mandate, routing policy, handoff lifecycle policy) need the customer
+owner and the operator custodian. Verdict, audit, recipient replay and rollback observations
+require their individually authorized roles. Only the operator root signs the registry.
+A customer key rotation needs the previous and new key. A missing or unexpected role, a key signing
 under two roles, or a key signing outside its own role or purposes is refused.
 
 Anti-rollback state: ``TrustStateStore`` keeps named monotonic records in a strict,
@@ -162,6 +162,9 @@ from pydantic import Field, TypeAdapter, ValidationError
 GRANT_PURPOSE: Final = "opentour.pilot.engagement-grant.v1"
 SPEND_MANDATE_PURPOSE: Final = "opentour.pilot.spend-mandate.v1"
 ROUTING_POLICY_PURPOSE: Final = "opentour.pilot.routing-policy.v1"
+HANDOFF_LIFECYCLE_POLICY_PURPOSE: Final = "opentour.pilot.handoff-lifecycle-policy.v1"
+RECIPIENT_REPLAY_PURPOSE: Final = "opentour.pilot.recipient-replay.v1"
+SERVING_ROLLBACK_PURPOSE: Final = "opentour.pilot.serving-rollback.v1"
 VERDICT_PURPOSE: Final = "opentour.pilot.independent-verdict.v1"
 BENCHMARK_AUDIT_PURPOSE: Final = "opentour.pilot.benchmark-audit.v1"
 REGISTRY_PURPOSE: Final = "opentour.pilot.issuer-registry.v1"
@@ -174,14 +177,26 @@ CUSTOMER_OWNER_SUCCESSOR: Final = "customer_owner_successor"
 OPERATOR_CUSTODIAN: Final = "operator_custodian"
 INDEPENDENT_EVALUATOR: Final = "independent_evaluator"
 BENCHMARK_AUDITOR: Final = "benchmark_auditor"
+RECIPIENT_REPLAY_ISSUER: Final = "recipient_replay_issuer"
+DESTINATION_OBSERVER: Final = "destination_observer"
 OPERATOR_ROOT: Final = "operator_root"
 
-CONSENT_PURPOSES: Final = frozenset({GRANT_PURPOSE, SPEND_MANDATE_PURPOSE, ROUTING_POLICY_PURPOSE})
-RECORD_PURPOSES: Final = CONSENT_PURPOSES | {VERDICT_PURPOSE, BENCHMARK_AUDIT_PURPOSE}
+CONSENT_PURPOSES: Final = frozenset(
+    {GRANT_PURPOSE, SPEND_MANDATE_PURPOSE, ROUTING_POLICY_PURPOSE, HANDOFF_LIFECYCLE_POLICY_PURPOSE}
+)
+RECORD_PURPOSES: Final = CONSENT_PURPOSES | {
+    VERDICT_PURPOSE,
+    BENCHMARK_AUDIT_PURPOSE,
+    RECIPIENT_REPLAY_PURPOSE,
+    SERVING_ROLLBACK_PURPOSE,
+}
 REQUIRED_ROLES: Final[Mapping[str, frozenset[str]]] = {
     GRANT_PURPOSE: frozenset({CUSTOMER_OWNER, OPERATOR_CUSTODIAN}),
     SPEND_MANDATE_PURPOSE: frozenset({CUSTOMER_OWNER, OPERATOR_CUSTODIAN}),
     ROUTING_POLICY_PURPOSE: frozenset({CUSTOMER_OWNER, OPERATOR_CUSTODIAN}),
+    HANDOFF_LIFECYCLE_POLICY_PURPOSE: frozenset({CUSTOMER_OWNER, OPERATOR_CUSTODIAN}),
+    RECIPIENT_REPLAY_PURPOSE: frozenset({RECIPIENT_REPLAY_ISSUER}),
+    SERVING_ROLLBACK_PURPOSE: frozenset({DESTINATION_OBSERVER}),
     VERDICT_PURPOSE: frozenset({INDEPENDENT_EVALUATOR}),
     BENCHMARK_AUDIT_PURPOSE: frozenset({BENCHMARK_AUDITOR}),
     REGISTRY_PURPOSE: frozenset({OPERATOR_ROOT}),
@@ -192,9 +207,9 @@ REQUIRED_ROLES: Final[Mapping[str, frozenset[str]]] = {
 # Purposes each registry role may be granted. Customer-owner keys are never registry keys,
 # and the root role only exists in the kit-pinned root configuration.
 REGISTRY_ROLES: Final[Mapping[str, frozenset[str]]] = {
-    OPERATOR_CUSTODIAN: frozenset(
-        {GRANT_PURPOSE, SPEND_MANDATE_PURPOSE, ROUTING_POLICY_PURPOSE, ENROLMENT_PURPOSE}
-    ),
+    OPERATOR_CUSTODIAN: CONSENT_PURPOSES | {ENROLMENT_PURPOSE},
+    RECIPIENT_REPLAY_ISSUER: frozenset({RECIPIENT_REPLAY_PURPOSE}),
+    DESTINATION_OBSERVER: frozenset({SERVING_ROLLBACK_PURPOSE}),
     INDEPENDENT_EVALUATOR: frozenset({VERDICT_PURPOSE}),
     BENCHMARK_AUDITOR: frozenset({BENCHMARK_AUDIT_PURPOSE}),
 }

@@ -250,6 +250,7 @@ def kit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Kit:
                 sr.GRANT_PURPOSE,
                 sr.SPEND_MANDATE_PURPOSE,
                 sr.ROUTING_POLICY_PURPOSE,
+                sr.HANDOFF_LIFECYCLE_POLICY_PURPOSE,
                 sr.ENROLMENT_PURPOSE,
             ],
         ),
