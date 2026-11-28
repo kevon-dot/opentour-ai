@@ -43,7 +43,12 @@ A policy whose slice entries are not digest-shaped is refused before anything is
 plain. Every verdict declares ``operating_point_digest_form`` as
 ``comparison_packet.OPERATING_POINT_DIGEST_FORM`` (``slice_substituted.v1``), the only form the
 OPE-421 packet accepts; the packet still recomputes the digest from the comparison under the
-engagement key and refuses any other value with ``verdict_binding_mismatch``.
+engagement key and refuses any other value with ``verdict_binding_mismatch``. The verdict's
+``denominator.membership_digest`` is the plan's own form
+(``comparison_plan.protected_membership_digest`` over the sealed case ids), so the packet refuses
+a verdict over any other cohort with ``denominator_changed``; the domain-tagged
+``SealedPopulation.membership_digest`` still binds the claim and is exported as
+``sealed_membership_digest``.
 
 Comparator gaps never hide candidate errors: more comparator missing or malformed outputs than
 the policy's ``max_missing`` hold the comparison as incompatible; the candidate's total wrong
@@ -156,9 +161,10 @@ from fractions import Fraction
 from pathlib import Path
 from typing import Any, Protocol
 
-from opentour_cell.pilot import comparison_packet
+from opentour_cell.pilot import comparison_packet, comparison_plan
 from opentour_cell.pilot import open_weight as ow
 from opentour_cell.pilot.operating_point import digest
+from opentour_cell.pilot.simple_repair import RepairError
 
 Json = dict[str, Any]
 VERDICT = "opentour.pilot.independent-verdict.v1"
@@ -391,7 +397,22 @@ class SealedPopulation:
 
     @property
     def membership_digest(self) -> str:
+        """Domain-tagged membership: the claim binding and this evaluator's own records."""
         return digest(["opentour.pilot.sealed-membership.v1", [c.case_id for c in self.cases]])
+
+    @property
+    def plan_membership_digest(self) -> str | None:
+        """The same id set in ``comparison_plan``'s ``protected_membership_digest`` form.
+
+        This is what ``comparison_packet`` compares the verdict's ``denominator`` against, so it
+        is computed by ``comparison_plan.protected_membership_digest`` itself, never re-derived.
+        ``None`` when some case id is not a plan identifier: such a population cannot be any
+        plan's protected cohort, and the packet refuses it as ``denominator_changed``.
+        """
+        try:
+            return comparison_plan.protected_membership_digest(c.case_id for c in self.cases)
+        except RepairError:
+            return None
 
     @property
     def inputs_digest(self) -> str:
@@ -2838,10 +2859,14 @@ class IndependentEvaluator:
             "operating_point_digest": claim.operating_point_digest,
             "target_metric": TARGET_METRIC,
             "policy": policy.as_json(),
+            # Exactly the two keys ``comparison_packet`` compares, in the plan's membership form,
+            # so a verdict scoring any other cohort than the comparison's is refused there.
             "denominator": {
                 "protected_rows": len(population.cases),
-                "membership_digest": population.membership_digest,
+                "membership_digest": population.plan_membership_digest,
             },
+            # The domain-tagged form the claim is bound by (``_check_binding``).
+            "sealed_membership_digest": population.membership_digest,
             "scorer": {
                 "scorer_id": self.scorer.scorer_id,
                 "scorer_version": self.scorer.scorer_version,

@@ -6,7 +6,7 @@ import json
 import re
 import sqlite3
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from contextlib import AbstractContextManager
 from itertools import combinations
 from typing import Any
@@ -40,6 +40,19 @@ PLAN = "opentour.pilot.protected-plan.v1"
 RESULT = "opentour.pilot.protected-comparison.v1"
 BASELINE_PLAN = "opentour.pilot.recorded-baseline-plan.v1"
 BASELINE_RESULT = "opentour.pilot.recorded-baseline-result.v1"
+
+
+def protected_membership_digest(case_ids: Iterable[str]) -> str:
+    """The ``protected_membership_digest`` a plan freezes: SHA-256 over the sorted case ids.
+
+    The single definition, used by every plan and by any producer (such as the OPE-528
+    independent verdict) whose document ``comparison_packet`` compares against a comparison's
+    membership. Order-independent; each id must be a plan identifier (``RepairError`` if not).
+    Duplicates are the caller's check, as the plan does.
+    """
+    return digest(sorted(identifier(i) for i in case_ids))
+
+
 _REGISTRY = """CREATE TABLE IF NOT EXISTS protected_comparisons(
  revision TEXT PRIMARY KEY, reserved_at INTEGER NOT NULL, result TEXT)"""
 
@@ -160,7 +173,7 @@ def freeze_plan(
         "engagement": engagement,
         "audience": audience,
         "intake_revision": intake_revision,
-        "protected_membership_digest": digest(ids),
+        "protected_membership_digest": protected_membership_digest(ids),
         "protected_count": len(ids),
         "incumbent_revision": incumbent_revision,
         "rule_revision": rule["revision"],
@@ -211,7 +224,7 @@ def freeze_recorded_baseline(
         "engagement": engagement,
         "audience": audience,
         "intake_revision": intake_revision,
-        "protected_membership_digest": digest(ids),
+        "protected_membership_digest": protected_membership_digest(ids),
         "protected_count": len(ids),
         "incumbent_revision": incumbent_revision,
         "terms": terms,
@@ -338,8 +351,8 @@ def _check_inputs(
         raise RepairError("protected_population_mismatch")
     ids = sorted(identifier(row["case_id"]) for row in rows)
     if (
-        digest(ids) != plan["protected_membership_digest"]
-        or digest(ids) != intake["protected_membership_digest"]
+        protected_membership_digest(ids) != plan["protected_membership_digest"]
+        or protected_membership_digest(ids) != intake["protected_membership_digest"]
     ):
         raise RepairError("protected_population_mismatch")
     dev = plan["development_decision"]
