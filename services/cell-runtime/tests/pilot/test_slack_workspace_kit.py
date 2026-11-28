@@ -135,6 +135,8 @@ def test_reproducible_kit_runs_isolated_data_mcp_and_slack_entrypoints(tmp_path,
     with ZipFile(target / "opentour-slack.pyz") as archive:
         assert "opentour_cell/pilot/workflow_index.py" in archive.namelist()
         assert "opentour_cell/pilot/workflow_index_authority.py" in archive.namelist()
+        assert "opentour_cell/pilot/recipient_lifecycle.py" in archive.namelist()
+        assert "opentour_cell/pilot/recipient_lifecycle_authority.py" in archive.namelist()
         assert archive.read(platform_verifier) == verifier_source
         assert root_member not in archive.namelist()
         for module in settings["JOURNAL_MODULES"]:
