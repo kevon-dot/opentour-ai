@@ -11,6 +11,7 @@ import random
 from dataclasses import replace
 from typing import Any
 
+import opentour_training.evaluation.benchmark_audit.audit as audit_module
 import pytest
 from audit_fixtures import (
     CONSUMED,
@@ -27,6 +28,7 @@ from opentour_training.evaluation.benchmark_audit.audit import (
     draw_audit_sample,
     mapper_view,
 )
+from opentour_training.evaluation.benchmark_audit.exposure import ExposureGuard
 from opentour_training.evaluation.benchmark_audit.inference import (
     design_weighted_error,
     families_needed_for_ceiling,
@@ -34,6 +36,7 @@ from opentour_training.evaluation.benchmark_audit.inference import (
     zero_error_upper_bound,
 )
 from opentour_training.evaluation.benchmark_audit.model import (
+    ExposureRecord,
     PopulationKind,
     PreprocessingRecord,
     SamplingDesign,
@@ -429,8 +432,15 @@ def test_real_sample_with_precision_is_eligible_but_alerts_wait_for_the_upstream
     assert receipt["claims"]["overall_accuracy_claim"] == "eligible_pending_upstream_receipt"
     assert receipt["claims"]["customer_accuracy_alert_permitted"] is False
     assert receipt["label_audit"]["design_weighted_error"] == 0.0
-    # Consumer contract only: a future OPE-416 consumer would set this after verifying it.
-    assert real(upstream_snapshot_verified=True)["claims"]["customer_accuracy_alert_permitted"]
+    # A caller's verification flag is caller-asserted and cannot by itself enable the alert;
+    # it waits for an upstream receipt the worker verifies itself (OPE-416, unlanded).
+    asserted = real(upstream_snapshot_verified=True)
+    assert asserted["claims"]["customer_accuracy_alert_permitted"] is False
+    assert (
+        "upstream_receipt_not_worker_verified"
+        in (asserted["claims"]["customer_accuracy_alert_blocked_by"])
+    )
+    assert any("OPE-416" in text for text in asserted["next_evidence_request"])
 
 
 def test_real_sample_without_snapshot_binding_is_insufficient() -> None:
@@ -692,9 +702,48 @@ def test_receipt_labels_caller_asserted_fields_and_the_claims_resting_on_them() 
     assert eligible["overall_accuracy_claim"] == "eligible_pending_upstream_receipt"
     assert eligible["caller_asserted_dependencies"] == ["exposed_families", "unlogged_disclosures"]
     alert = real(upstream_snapshot_verified=True)["claims"]
-    assert alert["caller_asserted_dependencies"] == [
-        "evidence_origin",
-        "exposed_families",
-        "unlogged_disclosures",
-        "upstream_snapshot_verified",
+    assert alert["customer_accuracy_alert_permitted"] is False
+    assert alert["caller_asserted_dependencies"] == ["exposed_families", "unlogged_disclosures"]
+
+
+# ---- Customer accuracy alert: worker-verified upstream receipt and covering history ----
+
+
+def covering_history() -> Any:
+    records, _ = real_sample_records()
+    universe = frozenset(r.family_id for r in records if r.split == "protected")
+    return ExposureGuard(universe, frozenset()).record()
+
+
+def test_customer_accuracy_alert_requires_worker_held_evidence_not_caller_flags() -> None:
+    blocked = "customer_accuracy_alert_blocked_by"
+    no_history = real(upstream_snapshot_verified=True)["claims"]
+    assert no_history["customer_accuracy_alert_permitted"] is False
+    assert no_history[blocked] == [
+        "upstream_receipt_not_worker_verified",
+        "exposure_not_derived_from_covering_history",
     ]
+    covered = real(upstream_snapshot_verified=True, exposure_record=covering_history())
+    assert covered["verdict"] == V.EVALUATION_ALLOWED.value
+    assert covered["claims"]["customer_accuracy_alert_permitted"] is False
+    assert covered["claims"][blocked] == ["upstream_receipt_not_worker_verified"]
+    assert covered["claims"]["broad_improvement_alert_permitted"] is False
+    assert any("OPE-416" in text for text in covered["next_evidence_request"])
+    partial = ExposureRecord(frozenset({"generated-sc000"}), ())
+    uncovered = real(upstream_snapshot_verified=True, exposure_record=partial)["claims"]
+    assert "exposure_not_derived_from_covering_history" in uncovered[blocked]
+    generated = run()["claims"][blocked]
+    assert generated[:2] == ["overall_accuracy_not_eligible", "evidence_origin_not_observed"]
+
+
+def test_alert_gate_opens_only_with_a_stand_in_worker_verifier_and_covering_history(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Gate composition only. No verifiable OPE-416 receipt type exists (held gap); the
+    stand-in verifier is test-local and cannot be reached from production inputs."""
+    monkeypatch.setattr(audit_module, "_upstream_receipt_verified_by_worker", lambda _s: True)
+    allowed = real(exposure_record=covering_history())["claims"]
+    assert allowed["customer_accuracy_alert_permitted"] is True
+    assert allowed["customer_accuracy_alert_blocked_by"] == []
+    assert allowed["caller_asserted_dependencies"] == ["evidence_origin"]
+    assert real()["claims"]["customer_accuracy_alert_permitted"] is False  # no history

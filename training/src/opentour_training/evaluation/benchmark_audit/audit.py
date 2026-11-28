@@ -13,7 +13,10 @@ from collections.abc import Iterable, Sequence
 from dataclasses import asdict, dataclass, replace
 from typing import Any
 
-from opentour_training.evaluation.benchmark_audit.evidence_requests import NEXT_EVIDENCE
+from opentour_training.evaluation.benchmark_audit.evidence_requests import (
+    ALERT_EVIDENCE,
+    NEXT_EVIDENCE,
+)
 from opentour_training.evaluation.benchmark_audit.exposure import replay_exposure
 from opentour_training.evaluation.benchmark_audit.inference import (
     design_weighted_error,
@@ -25,6 +28,7 @@ from opentour_training.evaluation.benchmark_audit.model import (
     RECEIPT_SCHEMA,
     AuditInputs,
     BindingDigests,
+    CandidateSnapshotBinding,
     FamilyRecord,
     PopulationKind,
     Reason,
@@ -140,6 +144,21 @@ def _overlaps(records: Sequence[FamilyRecord]) -> tuple[dict[str, int], int]:
     return found, unknown
 
 
+_WORKER_DERIVED = "worker_derived_from_exposure_log"
+
+
+def _upstream_receipt_verified_by_worker(snapshot: CandidateSnapshotBinding | None) -> bool:
+    """Whether the worker itself verified the OPE-416 verified-candidate snapshot receipt.
+
+    Held gap: OPE-416 has not landed, so no verifiable upstream receipt type or issuer key exists
+    and nothing here can verify one. A well-formed binding is only an opaque reference, and the
+    caller's ``upstream_snapshot_verified`` boolean is deliberately not read. Until a real
+    verifier lands, this is always false and the customer accuracy alert stays off.
+    """
+    del snapshot
+    return False
+
+
 @dataclass(frozen=True)
 class _Exposure:
     families: frozenset[str]
@@ -164,7 +183,7 @@ def _exposure(inputs: AuditInputs) -> _Exposure:
     return _Exposure(
         inputs.exposed_families | derived,
         max(inputs.unlogged_disclosures, unlogged),
-        "worker_derived_from_exposure_log",
+        _WORKER_DERIVED,
         protected <= record.universe,
     )
 
@@ -397,14 +416,21 @@ def audit(inputs: AuditInputs) -> dict[str, Any]:
     )
     matches = sum(1 for r in verified if not r.mismatch)
     independence, independence_counts = _independence(rows)
-    alert_ok = (
-        verdict is Verdict.EVALUATION_ALLOWED
-        and real
-        and p.evidence_origin == "observed"
-        and precision_ok
-        and inputs.upstream_snapshot_verified
-    )
     eligible = verdict is Verdict.EVALUATION_ALLOWED and real and precision_ok
+    # The alert needs worker-held evidence, never a caller boolean: an upstream receipt the
+    # worker verified itself and exposure replayed from a history covering every family.
+    alert_blockers: list[str] = []
+    if not eligible:
+        alert_blockers.append("overall_accuracy_not_eligible")
+    if p.evidence_origin != "observed":
+        alert_blockers.append("evidence_origin_not_observed")
+    if not _upstream_receipt_verified_by_worker(inputs.candidate_snapshot):
+        alert_blockers.append("upstream_receipt_not_worker_verified")
+    if exposure.basis != _WORKER_DERIVED or not exposure.scope_ok:
+        alert_blockers.append("exposure_not_derived_from_covering_history")
+    alert_ok = not alert_blockers
+    if eligible:
+        requests.extend(ALERT_EVIDENCE[b] for b in alert_blockers if b in ALERT_EVIDENCE)
     # Caller assertions a permitted claim currently rests on; the worker cannot verify these.
     dependencies: set[str] = set()
     if eligible or alert_ok:
@@ -413,7 +439,7 @@ def audit(inputs: AuditInputs) -> dict[str, Any]:
         if any(r.verifier == "blinded_adjudicator" for r in verified):
             dependencies.add("adjudicator_blinding_flags")
     if alert_ok:
-        dependencies.update({"evidence_origin", "upstream_snapshot_verified"})
+        dependencies.add("evidence_origin")
     receipt: dict[str, Any] = {
         "schema_version": RECEIPT_SCHEMA,
         "verdict": verdict.value,
@@ -503,6 +529,7 @@ def audit(inputs: AuditInputs) -> dict[str, Any]:
             "broad_improvement_alerts_emitted": 0,
             "customer_accuracy_alert_permitted": alert_ok,
             "broad_improvement_alert_permitted": alert_ok,
+            "customer_accuracy_alert_blocked_by": alert_blockers,
             "caller_asserted_dependencies": sorted(dependencies),
         },
         "audit_selection": {

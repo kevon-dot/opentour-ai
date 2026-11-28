@@ -76,3 +76,18 @@ NEXT_EVIDENCE: dict[str, str] = {
         "authorized evidence."
     ),
 }
+
+# Why an otherwise eligible claim still cannot fire the customer accuracy alert.
+ALERT_EVIDENCE: dict[str, str] = {
+    "upstream_receipt_not_worker_verified": (
+        "Supply an OPE-416 verified-candidate snapshot receipt that the worker verifies itself; "
+        "a caller's verification flag cannot enable the customer accuracy alert."
+    ),
+    "exposure_not_derived_from_covering_history": (
+        "Supply the exposure guard's release history covering every protected family so the "
+        "worker derives exposure itself."
+    ),
+    "evidence_origin_not_observed": (
+        "Audit an observed population; generated evidence cannot enable the alert."
+    ),
+}
