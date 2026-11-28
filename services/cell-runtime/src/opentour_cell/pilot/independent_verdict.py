@@ -75,11 +75,19 @@ closed for the cohort gate, again while reference fields are declared honestly. 
 declaration is held or refused, never trusted: an undeclared field carrying the case's own id
 holds as ``undeclared_reference_field`` before any inference (D2, E1); a declared name that
 differs from its feature key by case or a look-alike letter is refused (D3, D3b); a declared
-reference whose value does not carry its case's own id is refused, so content cannot be
-declared away (G7, G8: ``reference_field_carries_no_id``); and a population whose id-free
-content collapses is refused (``decision_content_collapsed``). Case and family ids must be
-opaque, not purely numeric and at least ``MIN_ID_LENGTH`` characters
-(``case_id_format_unverifiable``), so these own-id checks do not fire on ordinary text.
+reference must carry its case's own id (G7, G8: ``reference_field_carries_no_id``) and, once
+those ids are removed, be identical across all cases, so a reference can carry at most a
+constant decoration and no per-case content (J1c, J1d: ``reference_field_carries_content``);
+and a population whose id-free content collapses is refused (``decision_content_collapsed``,
+exact rule in ``_check_content_not_collapsed``). A producer can still edit or split the
+decision text itself; that is new content (D5 below), not content hidden in a reference. Case
+and family ids must be random or opaque (for example a UUID or a hash), not purely numeric and
+at least ``MIN_ID_LENGTH`` characters (``case_id_format_unverifiable``; only length and the
+not-numeric rule are enforced), so these own-id checks do not fire on ordinary text.
+Populations that cannot be compared (``undeclared_reference_field``,
+``decision_content_unverifiable``) are decided when they are built and held before any arm is
+replayed. One ``served_identity`` readback per arm still runs before the hold (the identity
+statement is computed first): one provider call, but no inference.
 Relabelling the same partition (swapping label names consistently) escapes the answer-key
 content match; the fresh-cohort gate is the backstop there. Residual, NOT closed: A1 (a new
 field with a fresh per-case value), D5 (any edit to the decision text is new content, so a
@@ -348,6 +356,7 @@ class SealedPopulation:
         _check_id_format(cases)
         _check_schema(cases, reference_fields)
         _check_references_carry_ids(cases, reference_fields)
+        _check_references_carry_no_content(cases, reference_fields)
         _check_content_not_collapsed(cases, reference_fields)
         self.cases = tuple(sorted(cases, key=lambda c: c.case_id))
         self._labels = dict(labels)
@@ -357,9 +366,14 @@ class SealedPopulation:
         # The benchmark schema's declared reference/id fields, by exact field name. They are left
         # out of the id-free decision content; nothing is ever excluded by what a value contains.
         self.reference_fields = tuple(sorted(reference_fields))
-        # Computed once, before any inference: some undeclared value carries its case's own id.
-        # ``evaluate`` holds such a population as ``undeclared_reference_field`` without replay.
+        # Computed once, before any inference. ``evaluate`` holds such a population without
+        # replaying any arm: some undeclared value carries its case's own id
+        # (``undeclared_reference_field``), or some case has no id-free content left to compare
+        # (``decision_content_unverifiable``).
         self.undeclared_reference = any(carries_own_id(c, self.reference_fields) for c in cases)
+        self.content_unverifiable = any(
+            decision_content_digest(c, self.reference_fields) is None for c in cases
+        )
 
     def __repr__(self) -> str:
         return f"SealedPopulation(<{len(self.cases)} sealed cases>)"
@@ -410,8 +424,9 @@ class SealedPopulation:
 # Feature keys and declared reference names: ASCII identifiers only. Hyphenated ("case-ref") and
 # dotted ("case.ref") keys are refused too; a schema using them must be mapped first.
 _ASCII_KEY = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
-# Case and family ids: opaque, not purely numeric, at least this many characters, so that an
-# id cannot appear inside ordinary decision text by accident ("1", "en", "ref").
+# Case and family ids: random or opaque (for example a UUID or a hash), not purely numeric, at
+# least this many characters. Only the length and the not-numeric parts are enforced; whether an
+# id is really opaque is not (no dictionary is consulted).
 MIN_ID_LENGTH = 8
 
 
@@ -430,12 +445,35 @@ def _contains_own_id(case: DecisionCase, value: object) -> bool:
     return _fold(case.case_id) in text or _fold(case.family_id) in text
 
 
+def _id_free_remainder(case: DecisionCase, value: object) -> str:
+    """The folded value with EVERY occurrence of the case's own case and family id removed.
+
+    Non-string values are folded from their canonical JSON, so ids nested in lists or mappings
+    are removed too. The longer id is removed first, so one id inside the other is handled.
+    """
+    text = _value_text(value)
+    for own in sorted({_fold(case.case_id), _fold(case.family_id)}, key=len, reverse=True):
+        text = text.replace(own, "")
+    return text
+
+
 def _check_id_format(cases: Sequence[DecisionCase]) -> None:
     """Refuse ids too short or plain to tell from content (``case_id_format_unverifiable``).
 
-    The documented id format: opaque, not purely numeric, at least ``MIN_ID_LENGTH`` characters.
-    Short or numeric ids ("1", "200", "en", "ref") occur inside honest decision text, so the
-    own-id checks below could neither trust nor hold them fairly; they are refused up front.
+    The documented id format: random or opaque, for example a UUID or a hash; not purely
+    numeric; at least ``MIN_ID_LENGTH`` characters. Only the length and the not-numeric parts
+    are enforced. Short or numeric ids ("1", "200", "en", "ref") occur inside honest decision
+    text, so the own-id checks could neither trust nor hold them fairly; they are refused.
+
+    Consequences of ids that are NOT opaque, which pass this check:
+      * dictionary-word ids (a family called ``shipping`` or ``customer``) appear in honest
+        text, and every such case holds the cohort as ``undeclared_reference_field``;
+      * a benchmark whose decision text cites its own ticket id (``TCK-000042``) cannot be
+        scored today: undeclared, the text carries its own id and holds; declared a reference,
+        its id-free remainder is not constant and is refused
+        (``reference_field_carries_content``), and if it were constant no decision content would
+        remain (``decision_content_unverifiable``).
+    Use random ids that never appear in the decision content.
     """
     for c in cases:
         for i in (c.case_id, c.family_id):
@@ -451,10 +489,8 @@ def _check_references_carry_ids(
     Declaring a field a reference removes it from the content, so declaring real content (a
     decision text, a locale) as a reference would collapse the cohort's content. A declared
     reference must therefore carry its case's own case id or family id, in every case
-    (``reference_field_carries_no_id``). A decision text that cites its own ticket id may be
-    declared a reference and passes this check, but it then leaves the content: the remaining
-    undeclared fields must still carry the decision content, or the case holds as
-    ``decision_content_unverifiable``.
+    (``reference_field_carries_no_id``). ``_check_references_carry_no_content`` then bounds
+    what else it may carry.
     """
     for c in cases:
         for name in reference_fields:
@@ -462,15 +498,39 @@ def _check_references_carry_ids(
                 raise VerdictInputError("reference_field_carries_no_id")
 
 
+def _check_references_carry_no_content(
+    cases: Sequence[DecisionCase], reference_fields: Sequence[str]
+) -> None:
+    """Refuse a declared reference that also carries varying content (J1c, J1d).
+
+    Carrying the own id is not enough: ``<case id> + first 10 chars of the text`` carries the id
+    and smuggles content out of the comparison. So, for each declared reference, the value with
+    every occurrence of its case's own ids removed (``_id_free_remainder``) must be identical
+    across all cases: only a constant decoration such as ``ref:`` or ``.json`` may surround the
+    id. Otherwise ``reference_field_carries_content``.
+
+    What this enforces, precisely: a declared reference carries no per-case content beyond its
+    own ids. It does not stop a producer from editing or splitting the decision text itself
+    (moving a constant prefix out of the text, or splitting one value into two undeclared
+    fields): that is new content, residual D5.
+    """
+    for name in reference_fields:
+        remainders = {_id_free_remainder(c, c.features[name]) for c in cases}
+        if len(remainders) > 1:
+            raise VerdictInputError("reference_field_carries_content")
+
+
 def _check_content_not_collapsed(
     cases: Sequence[DecisionCase], reference_fields: Sequence[str]
 ) -> None:
     """Refuse a population whose id-free content collapses (``decision_content_collapsed``).
 
-    Conservative rule: among the cases that have id-free content, a single distinct content
-    digest across more than one case is refused, and so is any population where fewer than half
-    of those cases have distinct content. Benchmarks with heavy duplication are refused rather
-    than compared, because duplicated content makes the fresh-cohort register meaningless.
+    Exactly what is refused: among the cases that have id-free content (``n`` of them, with
+    ``d`` distinct digests), the population is refused only when ``n > 1`` and either every case
+    shares one digest (``d == 1``) or fewer than half are distinct (``2 * d < n``). So exactly
+    50% distinct is accepted, 49.5% is refused, and one duplicate pair among 200 cases is
+    accepted. A mostly templated honest benchmark (60% or more identical inputs) has no route
+    today: it is refused, not compared. Where that threshold should sit is an owner decision.
     """
     digests = [decision_content_digest(c, reference_fields) for c in cases]
     present = [d for d in digests if d is not None]
@@ -1904,11 +1964,22 @@ class IndependentEvaluator:
         comparisons: Json = {}
         record: Json = {"rows": [], "predictions": {}}
         gate: Json = {"status": "not_evaluated", "reason": "integrity_or_staleness_hold"}
-        if population.undeclared_reference:
-            # An undeclared field carries a case's own id (D2, E1): its content digest would
-            # rename with the ids, so the cohort cannot be compared. Held before any inference.
-            reasons.add("inconclusive", "undeclared_reference_field")
-            gate = {"status": "not_evaluated", "reason": "undeclared_reference_field"}
+        # Populations that cannot be compared were decided when they were built; they hold here,
+        # before any arm is replayed (only the served-identity readbacks above have run).
+        population_holds = [
+            reason
+            for reason, flag in (
+                # An undeclared field carries a case's own id (D2, E1).
+                ("undeclared_reference_field", population.undeclared_reference),
+                # Some case has no id-free content to compare (J1a).
+                ("decision_content_unverifiable", population.content_unverifiable),
+            )
+            if flag
+        ]
+        for reason in population_holds:
+            reasons.add("inconclusive", reason)
+        if population_holds:
+            gate = {"status": "not_evaluated", "reason": ",".join(population_holds)}
         elif not reasons.has("integrity_failure", "stale"):
             arms = self._replay(policy, population, replays, identities, reasons)
             if arms is not None:
@@ -2604,9 +2675,8 @@ class IndependentEvaluator:
         digests = [
             decision_content_digest(c, population.reference_fields) for c in population.cases
         ]
+        # An unverifiable (empty-content) case never reaches here: it is held before replay.
         contents = {d for d in digests if d is not None}
-        if None in digests:
-            reasons.add("inconclusive", "decision_content_unverifiable")
         id_overlap = content_overlap = False
         for path in sorted((self._root / "cohorts").glob("*.json")):
             if path.name == key + ".json":

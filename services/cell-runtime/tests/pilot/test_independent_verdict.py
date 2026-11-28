@@ -1960,6 +1960,163 @@ def test_g13_hyphenated_and_dotted_keys_are_refused(key):
         respelled(Scenario(CLEAN_WIN), lambda c: {**c.features, key: "x"})
 
 
+def varied(scenario):
+    """Decision texts whose first 10 characters and whose tail both differ per case (J1c)."""
+    return respelled(
+        scenario,
+        lambda c: {
+            **c.features,
+            "text": "t" + c.case_id[-4:] + "-generated-input-" + c.case_id[-4:],
+        },
+    )
+
+
+def renamed_cohort(prefix, base=varied):
+    """The scored cohort's substance under renamed ids and families."""
+    return renamed_to(
+        base(Scenario(CLEAN_WIN, prefix=prefix, content_prefix="")), lambda c: "r-" + c.case_id
+    )
+
+
+def test_j1c_review_r6_a_reference_carrying_its_id_plus_content_is_refused(tmp_path):
+    """Round 6 J1c: case_ref = id + first 10 chars of text, text_tail = rest: verified_gain."""
+    ev = evaluator(tmp_path)
+    assert run(tmp_path, varied(Scenario(CLEAN_WIN)), ev=ev).outcome == "verified_gain"
+    with pytest.raises(iv.VerdictInputError, match="^reference_field_carries_content$"):
+        respelled(
+            renamed_cohort("j1c-"),
+            lambda c: {
+                "case_ref": c.case_id + c.features["text"][:10],
+                "text_tail": c.features["text"][10:],
+            },
+        )
+
+
+def test_j1d_review_r6_a_family_ref_carrying_the_full_text_is_refused(tmp_path):
+    """Round 6 J1d: family_ref = family|full text, bucket = "b" + last 3 chars: verified_gain."""
+    ev = evaluator(tmp_path)
+    assert run(tmp_path, Scenario(CLEAN_WIN), ev=ev).outcome == "verified_gain"
+    with pytest.raises(iv.VerdictInputError, match="^reference_field_carries_content$"):
+        respelled(
+            renamed_cohort("j1d-", base=lambda s: s),
+            lambda c: {
+                "case_ref": c.case_id,
+                "family_ref": c.family_id + "|" + c.features["text"],
+                "bucket": "b" + c.features["text"][-3:],
+            },
+            reference_fields=("case_ref", "family_ref"),
+        )
+
+
+def test_j1e_review_r6_control_content_in_a_reference_beside_the_full_text_never_verifies(
+    tmp_path,
+):
+    """Round 6 J1e (control, held at 3bfc830): now refused at build, which is stricter."""
+    with pytest.raises(iv.VerdictInputError, match="^reference_field_carries_content$"):
+        respelled(
+            renamed_cohort("j1e-"),
+            lambda c: {"case_ref": c.case_id + c.features["text"][:10], "text": c.features["text"]},
+        )
+
+
+def test_j2_review_r6_control_an_honest_family_ref_is_accepted_and_held_as_seen(tmp_path):
+    ev = evaluator(tmp_path)
+    assert run(tmp_path, Scenario(CLEAN_WIN), ev=ev).outcome == "verified_gain"
+    j2 = respelled(
+        renamed_cohort("j2-", base=lambda s: s),
+        lambda c: {**c.features, "family_ref": "fam:" + c.family_id},
+        reference_fields=("case_ref", "family_ref"),
+    )
+    held(
+        run(tmp_path, j2, ev=ev, result_revision=sha("j2")),
+        "inconclusive",
+        "decision_content_seen_in_scored_cohort",
+    )
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        lambda c: "Ref:" + c.case_id.upper() + ".JSON",  # compared after NFKC and casefold
+        lambda c: c.case_id + "/" + c.case_id,  # every occurrence is removed
+        lambda c: c.case_id + ":" + c.family_id,  # both own ids
+        lambda c: {"links": [c.case_id, c.case_id]},  # nested non-string, twice (S10)
+        lambda c: [c.family_id, "constant"],
+    ],
+    ids=["folded", "two_occurrences", "both_ids", "nested_twice", "list"],
+)
+def test_j3_constant_decorations_around_the_own_id_are_accepted(value):
+    s = respelled(
+        Scenario(CLEAN_WIN),
+        lambda c: {**c.features, "ref2": value(c)},
+        reference_fields=("case_ref", "ref2"),
+    )
+    assert not s.population.undeclared_reference
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        lambda c: {"id": c.case_id, "text": c.features["text"]},  # nested content
+        lambda c: c.case_id + "#" + c.case_id[-1],  # one varying character
+        lambda c: c.case_id if c.case_id != "case-0199" else c.case_id + "!",  # one case only
+    ],
+    ids=["nested_content", "one_varying_char", "one_case_differs"],
+)
+def test_j3b_any_per_case_content_in_a_reference_is_refused(value):
+    with pytest.raises(iv.VerdictInputError, match="^reference_field_carries_content$"):
+        respelled(
+            Scenario(CLEAN_WIN),
+            lambda c: {**c.features, "ref2": value(c)},
+            reference_fields=("case_ref", "ref2"),
+        )
+
+
+def test_j1a_review_r6_unverifiable_content_is_held_before_any_replay(tmp_path):
+    """Round 6 J1a: decision_content_unverifiable was added after full replay and scoring."""
+    s = respelled(Scenario(CLEAN_WIN), lambda c: {"case_ref": c.case_id}, ("case_ref",))
+    assert s.population.content_unverifiable is True
+    replays = s.replays()
+    doc = held(run(tmp_path, s, replays=replays), "inconclusive", "decision_content_unverifiable")
+    assert all(r.calls == [] for r in replays.values())
+    assert doc["comparisons"] == {}
+    assert doc["statements"]["paired_gain_cleared_gates"] == {
+        "status": "not_evaluated",
+        "reason": "decision_content_unverifiable",
+    }
+    assert list((tmp_path / "evaluator-custody" / "cohorts").glob("*.json")) == []
+    assert not Scenario(CLEAN_WIN).population.content_unverifiable
+
+
+def test_j4_collapse_rule_exact_boundaries_and_documented_wording():
+    """Round 6 LOW: exactly 50% distinct accepted, 49.5% refused, one duplicate pair accepted."""
+    with pytest.raises(iv.VerdictInputError, match="^decision_content_collapsed$"):
+        respelled(  # 99 distinct among 200: 49.5%
+            Scenario(CLEAN_WIN),
+            lambda c: {"case_ref": c.case_id, "text": "t" + str(int(c.case_id[-4:]) % 99)},
+        )
+    pair = respelled(  # 199 distinct among 200: one duplicate pair
+        Scenario(CLEAN_WIN),
+        lambda c: {
+            "case_ref": c.case_id,
+            "text": "t" + str(min(int(c.case_id[-4:]), 198)),
+        },
+    )
+    assert len(pair.population.cases) == 200
+    doc = " ".join((iv._check_content_not_collapsed.__doc__ or "").split())
+    assert "exactly 50% distinct is accepted, 49.5% is refused" in doc
+    assert "one duplicate pair among 200 cases is accepted" in doc and "owner decision" in doc
+
+
+def test_j5_docs_say_what_is_enforced():
+    module = " ".join((iv.__doc__ or "").split())
+    assert "cannot be declared away" not in module
+    assert "reference_field_carries_content" in module and "random or opaque" in module
+    assert "One ``served_identity`` readback per arm still runs before the hold" in module
+    fmt = " ".join((iv._check_id_format.__doc__ or "").split())
+    assert "for example a UUID or a hash" in fmt and "cannot be scored today" in fmt
+
+
 def test_e1_review_r4_renamed_ids_and_an_undeclared_reference_cannot_escape_both(
     tmp_path, registered_floor
 ):
