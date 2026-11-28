@@ -60,6 +60,7 @@ def test_reproducible_kit_runs_isolated_data_mcp_and_slack_entrypoints(tmp_path)
         settings["ARCHIVE_HELPER"],
         *settings["ASSETS"].values(),
         *(f"{settings['CELL']}/src/{name}" for name in settings["MODULES"]),
+        *(f"{settings['JOURNAL']}/src/{name}" for name in settings["JOURNAL_MODULES"]),
     }
     repo = tmp_path / "snapshot"
     for path in paths:
@@ -97,6 +98,11 @@ def test_reproducible_kit_runs_isolated_data_mcp_and_slack_entrypoints(tmp_path)
         for line in sums:
             sha, name = line.split("  ")
             assert sha == hashlib.sha256(archive.read(name)).hexdigest()
+    with ZipFile(target / "opentour-slack.pyz") as archive:
+        assert "opentour_cell/pilot/recipient_lifecycle.py" in archive.namelist()
+        for module in settings["JOURNAL_MODULES"]:
+            source = root / settings["JOURNAL"] / "src" / module
+            assert archive.read(module) == source.read_bytes()
     executable = [*python, str(target / "opentour-slack.pyz")]
 
     def run(*args, stdin=b""):

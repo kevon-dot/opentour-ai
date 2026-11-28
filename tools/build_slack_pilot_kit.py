@@ -16,8 +16,16 @@ ROOT = Path(__file__).resolve().parents[1]
 BUILDER = "tools/build_slack_pilot_kit.py"
 ARCHIVE_HELPER = "tools/build_pilot_kit.py"
 CELL = "services/cell-runtime"
+JOURNAL = "packages/authority-journal"
 VERSION = "1.0.0-rc.4"
 PYTHON = (3, 12, 16)
+JOURNAL_MODULES = (
+    "opentour_journal/__init__.py",
+    "opentour_journal/crypto.py",
+    "opentour_journal/models.py",
+    "opentour_journal/ports.py",
+    "opentour_journal/replay.py",
+)
 MODULES = (
     "opentour_cell/__init__.py",
     "opentour_cell/pilot/__init__.py",
@@ -46,6 +54,7 @@ MODULES = (
     "opentour_cell/pilot/handoff_readback.py",
     "opentour_cell/pilot/local_handoff_permissions.py",
     "opentour_cell/pilot/recipient_delivery.py",
+    "opentour_cell/pilot/recipient_lifecycle.py",
     "opentour_cell/pilot/recipient_handoff_simulator.py",
     "opentour_cell/pilot/release_authority.py",
     "opentour_cell/pilot/release_outbox.py",
@@ -268,6 +277,7 @@ def build(revision: str) -> bytes:
             raise ValueError("Build from the recorded version of both packaging scripts.")
     archive = runpy.run_path(str(ROOT / ARCHIVE_HELPER))["_archive"]
     modules = {name: read(f"{CELL}/src/{name}") for name in MODULES}
+    modules.update({name: read(f"{JOURNAL}/src/{name}") for name in JOURNAL_MODULES})
     version = f"OpenTour Slack workspace kit {VERSION} ({revision})"
     modules["__main__.py"] = (f"VERSION = {version!r}\n" + ENTRY).encode()
     files = {name: read(path) for name, path in ASSETS.items()}
