@@ -9,7 +9,7 @@ import dataclasses
 import hashlib
 import inspect
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Iterator, Mapping
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -547,6 +547,236 @@ def test_lying_str_subclass_ref_is_refused_writes_nothing_and_wedges_nothing(
     assert [m["manifest_ref"] for m in store.all(TENANT)] == ["a", "b"]
 
 
+@pytest.mark.parametrize("value", ["a/../x", "a/b", "..", "../x", "a\\b", "/x"])
+@pytest.mark.parametrize("key", ["tenant", "manifest_ref"])
+def test_exact_str_traversal_ref_is_refused_and_writes_nothing(
+    tmp_path: Path, key: str, value: str
+) -> None:
+    """NIT-3: a plain ``str`` that names another folder or file is never a tenant or ref."""
+    store = ManifestStore(tmp_path / "root" / "m")
+    store.put(manifest("a"))
+    before = _tree(tmp_path)
+    with pytest.raises(LineageError, match=f"^manifest_{key}$"):
+        store.put(manifest("b", **{key: value}))
+    assert _tree(tmp_path) == before
+    if key == "tenant":
+        with pytest.raises(LineageError, match="^manifest_tenant$"):
+            store.all(value)
+    assert [m["manifest_ref"] for m in store.all(TENANT)] == ["a"]
+
+
+class _ClaimsStr(str):
+    """Its buffer is one string; ``__eq__``/``__hash__`` claim it is another."""
+
+    claimed: str
+
+    def __new__(cls, buffer: str, claimed: str) -> "_ClaimsStr":
+        obj = super().__new__(cls, buffer)
+        obj.claimed = claimed
+        return obj
+
+    def __eq__(self, other: object) -> bool:
+        return self.claimed == other
+
+    def __ne__(self, other: object) -> bool:
+        return self.claimed != other
+
+    def __hash__(self) -> int:
+        return hash(self.claimed)
+
+
+class _AlwaysAtLeast(int):
+    """A negative int whose ``>=`` always answers True."""
+
+    def __ge__(self, other: object) -> bool:
+        return True
+
+
+def _lying_key(entry: dict[str, Any], key: str) -> dict[str, Any]:
+    return {(_ClaimsStr("zzz", key) if k == key else k): v for k, v in entry.items()}
+
+
+def _poisoned(where: str, tenant: str = TENANT) -> dict[str, Any]:
+    m = manifest("b", claim_refs=["claim-b"], tenant=tenant)
+    lying_int = _AlwaysAtLeast(-5)
+    if where == "partition":
+        m["partition"] = _ClaimsStr("zzz", "development")
+    elif where == "rule_kind":
+        m["rule_kind"] = _ClaimsStr("zzz", "simple_rule")
+    elif where == "descendant_kind":
+        m["descendants"][0]["kind"] = _ClaimsStr("zzz", "dataset")
+    elif where in ("grant_epoch", "engagement_epoch", "correction_version"):
+        m[where] = lying_int
+    elif where == "source_revision":
+        m["consumed"][0]["source_revision"] = lying_int
+    elif where in ("path", "span"):
+        m["consumed"][0][where] = _StrImpostor()
+    elif where == "later_kind":
+        m["later_relationships"][0]["kind"] = _StrImpostor()
+    elif where == "unknown_dependency":
+        m["unknown_dependencies"] = [_ClaimsStr("zzz", "*")]  # never silently becomes "*"
+    elif where == "top_key":
+        m = _lying_key(m, "case_ref")
+    elif where == "consumed_key":
+        m["consumed"][0] = _lying_key(m["consumed"][0], "path")
+    elif where == "descendant_key":
+        m["descendants"][0] = _lying_key(m["descendants"][0], "kind")
+    elif where == "later_key":
+        m["later_relationships"][0] = _lying_key(m["later_relationships"][0], "kind")
+    else:  # pragma: no cover - parametrize typo guard
+        raise AssertionError(where)
+    return m
+
+
+@pytest.mark.parametrize(
+    "where,reason",
+    [
+        ("partition", "manifest_partition"),
+        ("rule_kind", "manifest_rule_kind"),
+        ("descendant_kind", "manifest_descendant"),
+        ("grant_epoch", "manifest_grant_epoch"),
+        ("engagement_epoch", "manifest_engagement_epoch"),
+        ("correction_version", "manifest_correction_version"),
+        ("source_revision", "manifest_consumed_revision"),
+        ("path", "manifest_consumed_path"),
+        ("span", "manifest_consumed_span"),
+        ("later_kind", "manifest_later_relationship"),
+        ("unknown_dependency", "manifest_unknown_dependencies"),
+        ("top_key", "manifest_unknown_key"),
+        ("consumed_key", "manifest_consumed_entry"),
+        ("descendant_key", "manifest_descendant"),
+        ("later_key", "manifest_later_relationship"),
+    ],
+)
+def test_value_put_accepts_but_reads_refuse_is_refused_at_put_and_wedges_nothing(
+    tmp_path: Path, where: str, reason: str
+) -> None:
+    """LOW-4: put only stores what every later read accepts as the same record."""
+    store, grants = ManifestStore(tmp_path / "root" / "m"), Grants()
+    reader = ConsumptionReader(store, grants)
+    store.put(manifest("a"))
+    before = _tree(tmp_path)
+    # The validator itself refuses (reads use it too), not only put's round trip.
+    with pytest.raises(LineageError, match=f"^{reason}$"):
+        lineage.validate_manifest(_poisoned(where))
+    for tenant in (TENANT, OTHER):  # an existing tenant folder, and one not yet created
+        with pytest.raises(LineageError, match=f"^{reason}$"):
+            store.put(_poisoned(where, tenant))
+    assert _tree(tmp_path) == before  # no manifest, pin, temp file or folder
+    # The tenant is not wedged: reads, resolution and impact still work, and the honest
+    # record is still accepted afterwards.
+    assert [m["manifest_ref"] for m in store.all(TENANT)] == ["a"]
+    assert resolved(reader.resolve_claim(request(), "claim-a")).status == "resolved"
+    assert impact(reader.impact(request(), Change("refund-request", "amount", 9))).dirty
+    store.put(manifest("b", claim_refs=["claim-b"]))
+    assert resolved(reader.resolve_claim(request(), "claim-b")).status == "resolved"
+    assert [m["manifest_ref"] for m in store.all(TENANT)] == ["a", "b"]
+
+
+@pytest.mark.parametrize("version", [True, _AlwaysAtLeast(1)])
+def test_relationship_version_is_exactly_int(tmp_path: Path, version: int) -> None:
+    """LOW-4: a bool or int subclass is not a relationship version, so it is never stored."""
+    store = ManifestStore(tmp_path / "m")
+    m = manifest("b")
+    m["later_relationships"][0]["relationship_version"] = version
+    with pytest.raises(LineageError, match="^manifest_later_relationship$"):
+        store.put(m)
+    assert _tree(tmp_path) == ["m"]
+
+
+class _Exploding(Mapping[str, Any]):
+    """A manifest-shaped mapping whose lookup of one key raises ``error``."""
+
+    def __init__(self, data: dict[str, Any], key: str, error: BaseException) -> None:
+        self.data, self.key, self.error = data, key, error
+
+    def __getitem__(self, key: str) -> Any:
+        if key == self.key:
+            raise self.error
+        return self.data[key]
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self.data)
+
+    def __len__(self) -> int:
+        return len(self.data)
+
+
+@pytest.mark.parametrize("error", [TypeError("t"), ValueError("v"), RecursionError("r")])
+def test_errors_raised_while_validating_are_typed_lineage_errors(
+    tmp_path: Path, error: BaseException
+) -> None:
+    """LOW-4: TypeError, ValueError and RecursionError in validation never escape raw."""
+    store = ManifestStore(tmp_path / "m")
+    store.put(manifest("a"))
+    before = _tree(tmp_path)
+    for key in ("schema", "consumed", "later_relationships"):
+        with pytest.raises(LineageError, match="^manifest_malformed$"):
+            store.put(_Exploding(manifest("b"), key, error))
+    assert _tree(tmp_path) == before
+    assert [m["manifest_ref"] for m in store.all(TENANT)] == ["a"]
+
+
+def test_deeply_nested_pinned_file_is_unreadable_not_a_recursion_error(tmp_path: Path) -> None:
+    store = ManifestStore(tmp_path)
+    store.put(manifest("a"))
+    folder = tmp_path / TENANT
+    body = "[" * 200_000 + "]" * 200_000
+    (folder / "manifest-a.json").write_text(body)
+    (folder / "manifest-a.sha256").write_text(hashlib.sha256(body.encode()).hexdigest())
+    with pytest.raises(LineageError, match="^manifest_unreadable$"):
+        store.all(TENANT)
+
+
+@pytest.mark.parametrize(
+    "taint,reason",
+    [
+        # Same JSON bytes, wrong Python type: only an exact-type comparison notices.
+        (lambda out: {**out, "partition": _ClaimsStr("development", "development")},
+         "manifest_not_canonical"),
+        (lambda out: {**out, "claim_refs": [_ClaimsStr("claim-b", "claim-b")]},
+         "manifest_not_canonical"),
+        (lambda out: {**out, "consumed": [{**out["consumed"][0], "source_revision": True}]},
+         "manifest_consumed_revision"),
+        (lambda out: {**out, "grant_epoch": 3.0}, "manifest_grant_epoch"),
+        (lambda out: {**out, "result_ref": _StrImpostor()}, "manifest_not_canonical"),
+        # Same types, different order: the re-read record is sorted, so the bytes differ.
+        (lambda out: {**out, "claim_refs": ["claim-z", "claim-b"]}, "manifest_not_canonical"),
+        (lambda out: {_ClaimsStr("tenant", "tenant") if k == "tenant" else k: v
+                      for k, v in out.items()}, "manifest_not_canonical"),
+    ],
+)  # fmt: skip
+def test_put_refuses_a_record_that_does_not_round_trip_exactly(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    taint: Callable[[dict[str, Any]], dict[str, Any]],
+    reason: str,
+) -> None:
+    """LOW-4 backstop: even if validation let a value through, put re-reads its own bytes and
+    stores only a record that validates back to exactly itself (exact types, recursively)."""
+    store = ManifestStore(tmp_path / "m")
+    store.put(manifest("a"))
+    before = _tree(tmp_path)
+    real = lineage.validate_manifest
+    calls: list[int] = []
+
+    def leaky(raw: Any) -> dict[str, Any]:
+        calls.append(1)
+        out = real(raw)
+        return taint(out) if len(calls) == 1 else out  # only the first, pre-write call leaks
+
+    monkeypatch.setattr(lineage, "validate_manifest", leaky)
+    for tenant in (TENANT, OTHER):  # an existing tenant folder, and one not yet created
+        calls.clear()
+        with pytest.raises(LineageError, match=f"^{reason}$"):
+            store.put(manifest("b", claim_refs=["claim-b"], tenant=tenant))
+    assert _tree(tmp_path) == before
+    monkeypatch.setattr(lineage, "validate_manifest", real)
+    assert [m["manifest_ref"] for m in store.all(TENANT)] == ["a"]
+    store.put(manifest("b", claim_refs=["claim-b"]))
+    assert [m["manifest_ref"] for m in store.all(TENANT)] == ["a", "b"]
+
+
 def test_integrity_marker_is_inside_the_digested_receipt_body(tmp_path: Path) -> None:
     """NIT-2: editing the marker breaks the receipt's reader_digest."""
     _, _, reader = build(tmp_path, manifest("a"))
@@ -816,6 +1046,8 @@ def test_protected_claim_exposes_aggregate_status_only_even_with_unknown_depende
         ({"schema": "x"}, "manifest_schema"),
         ({"extra": 1}, "manifest_unknown_key"),
         ({"partition": "other"}, "manifest_partition"),
+        ({"grant_epoch": -1}, "manifest_grant_epoch"),
+        ({"correction_version": True}, "manifest_correction_version"),
         ({"claim_refs": []}, "manifest_claim_refs"),
         ({"consumed": [field("a", "bad path")]}, "manifest_consumed_path"),
         ({"consumed": [field("a", "p"), field("a", "p")]}, "manifest_consumed_duplicate"),
