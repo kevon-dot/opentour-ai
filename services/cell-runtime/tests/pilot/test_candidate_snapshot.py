@@ -14,10 +14,13 @@ from typing import Any
 import candidate_snapshot_fixture as fx
 import pytest
 from opentour_cell.pilot.candidate_snapshot import (
+    REASON_COUNTER,
     REASONS,
     RECEIPT_FIELDS,
     SnapshotHold,
-    reduce_pair,
+)
+from opentour_cell.pilot.candidate_snapshot import (
+    receipt as make_receipt,
 )
 from opentour_cell.pilot.learning_profile import (
     COUNTERS,
@@ -126,13 +129,26 @@ def test_duplicate_contradictory_late_and_unattested_corrections_are_explicit_ex
         "STRANGER": ("pending", "unattested_label"),
     }
     assert [x["reason"] for x in snap["exclusions"]] == ["duplicate_correction"]
-    assert receipt["reason_codes"] == {
+    assert snap["reason_codes"] == {
         "contradictory_corrections": 1,
         "duplicate_correction": 1,
         "late_correction_revision": 1,
         "unattested_label": 2,
     }
-    assert receipt["counters"] == {"eligible": 1, "pending": 3, "quarantined": 0, "disputed": 1}
+    assert {k: snap["counters"][k] for k in COUNTERS} == {
+        "eligible": 1,
+        "pending": 3,
+        "quarantined": 0,
+        "disputed": 1,
+    }
+    # Every non-zero cell is below the default threshold of 5, so the receipt shows "<k".
+    assert receipt["reason_codes"] == dict.fromkeys(snap["reason_codes"], "<k")
+    assert receipt["counters"] == {
+        "eligible": "<k",
+        "pending": "<k",
+        "quarantined": 0,
+        "disputed": "<k",
+    }
 
 
 @pytest.mark.parametrize("how", ["model_answer", "ticket_close", "thumbs_up", "repeated_reply"])
@@ -196,8 +212,15 @@ def test_disputed_source_rows_are_excluded_from_training_and_verified_counts(
             "source_disputed",
             False,
         )
-    assert snap["counters"]["live"] == {"decisions": 2, "verified": 0, "pending": 0, "disputed": 2}
-    assert receipt["counters"]["disputed"] == 2 and receipt["counters"]["eligible"] == 0
+    assert snap["counters"]["live"] == {
+        "cases": 2,
+        "decisions": 2,
+        "verified": 0,
+        "pending": 0,
+        "disputed": 2,
+    }
+    assert snap["counters"]["disputed"] == 2 and snap["counters"]["eligible"] == 0
+    assert receipt["counters"]["disputed"] == "<k" and receipt["counters"]["eligible"] == 0
     with pytest.raises(ProfileError, match="disputed_not_consumable"):
         w.recorder.record(
             fx.TENANT_A,
@@ -234,7 +257,8 @@ def test_malformed_or_unattributable_decisions_are_quarantined_and_count_zero(
     snap = _snapshot(w, receipt)
     assert snap["examples"] == []
     assert [q["reason"] for q in snap["quarantined"]] == [reason]
-    assert receipt["counters"]["quarantined"] == 1
+    assert snap["counters"]["quarantined"] == 1
+    assert receipt["counters"]["quarantined"] == "<k"
 
 
 @pytest.mark.parametrize(
@@ -324,7 +348,7 @@ def test_revision_chains_are_reconciled_or_held_explicitly(
     excluded: list[str],
 ) -> None:
     source = fx.pair(live=decisions, outcomes=outcomes)
-    snap = reduce_pair(parse_settings(fx.settings()), source, parse_time(fx.at(12), "t"))
+    snap = fx.reduce(parse_settings(fx.settings()), source, fx.at(12))
     (example,) = snap["examples"]
     assert (example["state"], example["reason"]) == expected
     assert [x["reason"] for x in snap["exclusions"]] == excluded
@@ -347,7 +371,7 @@ def test_reopen_and_revision_sequence_follows_the_shared_reducer_contract(tmp_pa
     ):
         w.clock.set(now)
         source = fx.pair(live=[fx.dec("R1", fx.at(10))], outcomes=outcomes, captured=now)
-        snap = reduce_pair(parse_settings(fx.settings()), source, parse_time(now, "t"))
+        snap = fx.reduce(parse_settings(fx.settings()), source, now)
         live = snap["counters"]["live"]
         observed.append((live["verified"], live["pending"]))
     assert observed == [(1, 0), (0, 1), (0, 1), (1, 0)]
@@ -362,9 +386,8 @@ def test_a_newer_decision_revision_clears_verification_until_it_is_reverified(
         live=[fx.dec("V1", fx.at(10)), fx.dec("V1", fx.at(10, 30), rev=2, action="REFUND")],
         outcomes=[fx.cor("c-1", "V1", fx.at(10, 5))],
     )
-    now = parse_time(fx.at(12), "t")
-    assert _by_ticket(reduce_pair(settings, first, now))["V1"]["state"] == "verified"
-    example = _by_ticket(reduce_pair(settings, revised, now))["V1"]
+    assert _by_ticket(fx.reduce(settings, first, fx.at(12)))["V1"]["state"] == "verified"
+    example = _by_ticket(fx.reduce(settings, revised, fx.at(12)))["V1"]
     assert (example["state"], example["reason"]) == ("pending", "superseded_decision_revision")
 
 
@@ -375,8 +398,8 @@ def test_an_immature_correction_stays_pending_until_its_window_closes() -> None:
         outcomes=[fx.cor("c-1", "M1", fx.at(10, 5))],
         captured=fx.at(10, 10),
     )
-    early = reduce_pair(settings, source, parse_time(fx.at(10, 10), "t"))
-    late = reduce_pair(settings, source, parse_time(fx.at(10, 15), "t"))
+    early = fx.reduce(settings, source, fx.at(10, 10))
+    late = fx.reduce(settings, source, fx.at(10, 15))
     assert _by_ticket(early)["M1"]["reason"] == "correction_immature"
     assert _by_ticket(late)["M1"]["state"] == "verified"
 
@@ -388,7 +411,7 @@ def test_an_immature_correction_stays_pending_until_its_window_closes() -> None:
 def test_capture_freshness_is_checked_against_the_worker_clock(captured: str, reason: str) -> None:
     source = fx.pair(live=[fx.dec("F1", fx.at(10))], captured=captured)
     with pytest.raises(SnapshotHold) as caught:
-        reduce_pair(parse_settings(fx.settings()), source, parse_time(fx.at(12), "t"))
+        fx.reduce(parse_settings(fx.settings()), source, fx.at(12))
     assert caught.value.reason == reason
 
 
@@ -494,7 +517,8 @@ def test_no_protected_feature_or_label_appears_in_the_receipt_or_counters(tmp_pa
     receipt = w.producer.trigger(fx.TENANT_A, fx.WF, "t", fx.reader(source))
     assert tuple(receipt) == RECEIPT_FIELDS
     assert set(receipt["counters"]) <= set(COUNTERS)
-    assert all(type(v) is int for v in receipt["counters"].values())
+    assert all(type(v) is int or v == "<k" for v in receipt["counters"].values())
+    assert all(type(v) is int or v == "<k" for v in receipt["reason_codes"].values())
     assert set(receipt["reason_codes"]) <= REASONS
     text = json.dumps(receipt)
     forbidden = (
@@ -541,7 +565,13 @@ def test_evidence_origin_is_carried_and_starter_cases_count_zero_toward_recurren
     only_starter = fx.pair(starter=starter, outcomes=starter_truth)
     first = _snapshot(w, w.producer.trigger(fx.TENANT_A, fx.WF, "t1", fx.reader(only_starter)))
     assert first["counters"]["starter"]["verified"] == 3
-    assert first["counters"]["live"] == {"decisions": 0, "verified": 0, "pending": 0, "disputed": 0}
+    assert first["counters"]["live"] == {
+        "cases": 0,
+        "decisions": 0,
+        "verified": 0,
+        "pending": 0,
+        "disputed": 0,
+    }
     assert first["metrics"]["independent_incumbent_error_groups"] == 0
     assert first["metrics"]["wrong_automatic_decisions"] == {
         "state": "unavailable",
@@ -574,7 +604,7 @@ def test_a_zero_denominator_is_reported_as_unavailable(tmp_path: Path) -> None:
         live=[fx.dec("Z1", fx.at(10), action="REVIEW")],
         outcomes=[fx.cor("c-1", "Z1", fx.at(10, 5))],
     )
-    snap = reduce_pair(settings, source, parse_time(fx.at(12), "t"))
+    snap = fx.reduce(settings, source, fx.at(12))
     assert snap["counters"]["live"]["verified"] == 1
     assert snap["metrics"]["wrong_automatic_decisions"] == {
         "state": "unavailable",
@@ -598,7 +628,7 @@ def test_held_out_customers_and_related_cases_follow_the_existing_partitioner(
         ],
         outcomes=[fx.cor(f"c-{t}", t, fx.at(10, 5)) for t in ("H1", "D1", "D2", "X1", "X2")],
     )
-    examples = _by_ticket(reduce_pair(settings, source, parse_time(fx.at(12), "t")))
+    examples = _by_ticket(fx.reduce(settings, source, fx.at(12)))
     assert (examples["H1"]["partition"], examples["H1"]["reason"]) == (
         "protected",
         "protected_partition",
@@ -612,7 +642,7 @@ def test_held_out_customers_and_related_cases_follow_the_existing_partitioner(
 def test_training_use_must_be_granted_for_any_example_to_be_eligible() -> None:
     settings = parse_settings(fx.settings(uses=["inspect", "evaluate"]))
     source = fx.pair(live=[fx.dec("U1", fx.at(10))], outcomes=[fx.cor("c-1", "U1", fx.at(10, 5))])
-    (example,) = reduce_pair(settings, source, parse_time(fx.at(12), "t"))["examples"]
+    (example,) = fx.reduce(settings, source, fx.at(12))["examples"]
     assert (example["state"], example["eligible"], example["reason"]) == (
         "verified",
         False,
@@ -630,7 +660,7 @@ def test_training_use_must_be_granted_for_any_example_to_be_eligible() -> None:
         (Principal("generated-owner", "workflow_owner"), "custodian_required"),
     ],
 )
-def test_only_a_bound_custodian_commits_settings_and_unknown_roles_fail_closed(
+def test_only_the_custodian_role_asserted_by_the_connection_commits_and_unknown_roles_fail(
     tmp_path: Path, principal: Principal, reason: str
 ) -> None:
     w = fx.world(tmp_path)
@@ -695,10 +725,18 @@ def test_the_committed_synthetic_source_pair_yields_the_committed_expected_count
         outcomes=fixture["source_pair"][fx.OUTCOMES],
         captured=fixture["captured_at"],
     )
-    snap = reduce_pair(settings, source, parse_time(fixture["as_of"], "t"))
-    assert snap["counters"] == fixture["expected"]["counters"]
-    assert snap["reason_codes"] == fixture["expected"]["reason_codes"]
-    assert snap["metrics"] == fixture["expected"]["metrics"]
+    snap = fx.reduce(settings, source, fixture["as_of"])
+    local = fixture["expected"]["snapshot"]
+    assert snap["counters"] == local["counters"]
+    assert snap["reason_codes"] == local["reason_codes"]
+    assert snap["metrics"] == local["metrics"]
+    # Two decisions on case-L1 count as one case everywhere.
+    assert local["counters"]["live"]["decisions"] == local["counters"]["live"]["cases"] + 1
+    # What leaves the worker: the protected case is a small cell, never a number.
+    released = make_receipt({**snap, "settings_store": None})
+    assert released["counters"] == fixture["expected"]["receipt"]["counters"]
+    assert released["reason_codes"] == fixture["expected"]["receipt"]["reason_codes"]
+    assert released["reason_codes"]["protected_partition"] == "<k"
 
 
 def test_the_documented_receipt_and_reason_vocabulary_match_the_implementation() -> None:
@@ -712,6 +750,13 @@ def test_the_documented_receipt_and_reason_vocabulary_match_the_implementation()
     assert section("Receipt fields") == set(RECEIPT_FIELDS)
     assert section("Reason codes") == REASONS
     assert section("Receipt counters") == set(COUNTERS)
+    body = text.split("## Reason codes\n", 1)[1].split("\n## ", 1)[0]
+    documented = {
+        line.split("`")[1]: line.rstrip(" |").rsplit("|", 1)[1].strip()
+        for line in body.splitlines()
+        if line.startswith("| `")
+    }
+    assert documented == {code: REASON_COUNTER.get(code, "none (hold)") for code in REASONS}
 
 
 def test_the_drift_check_fails_on_real_drift(tmp_path: Path) -> None:
@@ -719,3 +764,473 @@ def test_the_drift_check_fails_on_real_drift(tmp_path: Path) -> None:
     body = edited.split("## Reason codes\n", 1)[1].split("\n## ", 1)[0]
     found = {line.split("`")[1] for line in body.splitlines() if line.startswith("| `")}
     assert found != REASONS
+
+
+# --------------------------------------------------------------------------- review findings
+# Each test below reproduces one review finding on 2779f27 and fails there.
+
+
+class _Liar(str):
+    """A ``str`` whose buffer says one thing while equality and hashing claim another."""
+
+    claim = ""
+
+    def __eq__(self, other: object) -> bool:
+        return other == self.claim
+
+    def __ne__(self, other: object) -> bool:
+        return other != self.claim
+
+    def __hash__(self) -> int:
+        return hash(self.claim)
+
+
+def _liar(buffer: str, claim: str) -> str:
+    value = _Liar(buffer)
+    value.claim = claim
+    return value
+
+
+def test_f1_a_self_asserted_custodian_is_refused_once_a_custodian_is_bound(tmp_path: Path) -> None:
+    w = fx.world(tmp_path)
+    _committed(w)
+    # The first commit bound its actor on first use and every revision names its committer.
+    assert w.store.custodians(fx.TENANT_A, fx.WF) == (1, frozenset({fx.CUSTODIAN.actor_id}))
+    audit = w.store.committed_by(fx.TENANT_A, fx.WF, 1)
+    assert audit["actor_id"] == fx.CUSTODIAN.actor_id and audit["binding_revision"] == 1
+    assert audit["basis"] == "role_asserted_by_resolved_connection_bound_on_first_use"
+    attacker = Principal("attacker-anyone", "data_custodian")
+    forged = fx.settings(
+        revision=2,
+        adjudicators=[
+            {"actor_id": fx.VERIFIER, "role": "verifier"},
+            {"actor_id": "attacker-anyone", "role": "verifier"},
+        ],
+    )
+    with pytest.raises(ProfileError, match="custodian_not_bound"):
+        w.store.commit(forged, principal=attacker)
+    with pytest.raises(ProfileError, match="custodian_not_bound"):
+        w.store.bind_custodian(fx.TENANT_A, fx.WF, "attacker-anyone", principal=attacker)
+    current = w.store.current(fx.TENANT_A, fx.WF)
+    assert current is not None and current.settings_revision == 1
+    assert "attacker-anyone" not in current.adjudicators
+
+
+def test_f1_bindings_change_only_through_a_bound_custodian_and_the_last_one_stays(
+    tmp_path: Path,
+) -> None:
+    w = fx.world(tmp_path)
+    _committed(w)
+    second = Principal("generated-custodian-2", "data_custodian")
+    bound = w.store.bind_custodian(fx.TENANT_A, fx.WF, second.actor_id, principal=fx.CUSTODIAN)
+    assert bound == {fx.CUSTODIAN.actor_id, second.actor_id}
+    w.store.commit(fx.settings(revision=2), principal=second)
+    assert w.store.committed_by(fx.TENANT_A, fx.WF, 2)["actor_id"] == second.actor_id
+    w.store.unbind_custodian(fx.TENANT_A, fx.WF, fx.CUSTODIAN.actor_id, principal=second)
+    with pytest.raises(ProfileError, match="custodian_not_bound"):
+        w.store.commit(fx.settings(revision=3), principal=fx.CUSTODIAN)
+    with pytest.raises(ProfileError, match="last_custodian"):
+        w.store.unbind_custodian(fx.TENANT_A, fx.WF, second.actor_id, principal=second)
+    # A binding file edited to add an actor is caught when the chain is re-verified.
+    folder = tmp_path / "settings" / fx.TENANT_A / fx.WF / "custodians"
+    path = folder / "bind-00000003.json"
+    path.write_text(path.read_text().replace('"custodians":[', '"custodians":["x-1",'))
+    with pytest.raises(ProfileError, match="custodian_binding_tampered"):
+        w.store.commit(fx.settings(revision=3), principal=second)
+
+
+def test_f1_a_store_with_revisions_but_no_binding_never_trusts_a_first_use(tmp_path: Path) -> None:
+    w = fx.world(tmp_path)
+    _committed(w)
+    import shutil
+
+    shutil.rmtree(tmp_path / "settings" / fx.TENANT_A / fx.WF / "custodians")
+    with pytest.raises(ProfileError, match="custodian_binding_missing"):
+        w.store.commit(fx.settings(revision=2), principal=Principal("x-2", "data_custodian"))
+
+
+def _rogue(tmp_path: Path, w: fx.World) -> fx.World:
+    """A copy of the settings store, sharing the original snapshots and dependencies."""
+    import shutil
+
+    from opentour_cell.pilot.candidate_snapshot import SnapshotProducer
+    from opentour_cell.pilot.consumed_dependencies import DependencyRecorder
+    from opentour_cell.pilot.learning_profile import SettingsBatchStore
+
+    shutil.copytree(tmp_path / "settings", tmp_path / "rogue-settings")
+    store = SettingsBatchStore(tmp_path / "rogue-settings")
+    producer = SnapshotProducer(tmp_path / "snapshots", store, clock=w.clock)
+    recorder = DependencyRecorder(tmp_path / "dependencies", producer, clock=w.clock)
+    return fx.World(tmp_path, w.clock, store, producer, recorder)
+
+
+def test_f2_a_copied_settings_store_cannot_commit_into_the_shared_snapshots(
+    tmp_path: Path,
+) -> None:
+    w = fx.world(tmp_path)
+    _committed(w)
+    source = fx.pair(
+        live=[fx.dec("R1", fx.at(10))],
+        outcomes=[fx.cor("c-1", "R1", fx.at(10, 5), by="generated-rogue-verifier")],
+    )
+    first = w.producer.trigger(fx.TENANT_A, fx.WF, "t1", fx.reader(source))
+    assert _by_ticket(_snapshot(w, first))["R1"]["reason"] == "unattested_label"
+
+    rogue = _rogue(tmp_path, w)
+    rogue.store.commit(
+        fx.settings(
+            revision=2,
+            adjudicators=[{"actor_id": "generated-rogue-verifier", "role": "verifier"}],
+        ),
+        principal=fx.CUSTODIAN,
+    )
+    w.clock.set(fx.at(12, 30))
+    held = rogue.producer.trigger(fx.TENANT_A, fx.WF, "t2", fx.reader(source))
+    assert (held["state"], held["reason"]) == ("held", "settings_store_mismatch")
+    assert len(w.producer.snapshots(fx.TENANT_A, fx.WF)) == 1
+    real = w.store.current(fx.TENANT_A, fx.WF)
+    assert real is not None and real.settings_revision == 1
+    # Reads through the rogue store are refused as well.
+    for read in (
+        lambda: rogue.producer.snapshot(fx.TENANT_A, fx.WF, first["snapshot_digest"]),
+        lambda: rogue.producer.current(
+            fx.TENANT_A, fx.WF, first["snapshot_digest"], fx.reader(source)
+        ),
+    ):
+        with pytest.raises(ProfileError, match="settings_store_mismatch"):
+            read()
+    assert first["settings_store"] == w.store.identity(fx.TENANT_A, fx.WF)
+    assert first["settings_store"] != rogue.store.identity(fx.TENANT_A, fx.WF)
+
+
+def test_f2_a_planted_snapshot_or_a_removed_pin_is_refused(tmp_path: Path) -> None:
+    from opentour_cell.pilot.learning_profile import _pin
+    from opentour_cell.pilot.operating_point import canonical
+
+    w = fx.world(tmp_path)
+    _committed(w)
+    source = fx.pair(live=[fx.dec("R1", fx.at(10))], outcomes=[fx.cor("c-1", "R1", fx.at(10, 5))])
+    first = w.producer.trigger(fx.TENANT_A, fx.WF, "t1", fx.reader(source))
+    folder = tmp_path / "snapshots" / fx.TENANT_A / fx.WF
+    # A canonical, pinned snapshot claiming a settings revision the store does not hold.
+    planted = dict(_snapshot(w, first))
+    planted["sequence"], planted["settings_revision"] = 2, 2
+    body = canonical(planted)
+    (folder / "snapshots" / "snap-00000002.json").write_text(body)
+    (folder / "snapshots" / "snap-00000002.pin").write_text(_pin(body))
+    with pytest.raises(ProfileError, match="settings_store_mismatch"):
+        w.producer.snapshots(fx.TENANT_A, fx.WF)
+    for suffix in ("json", "pin"):
+        (folder / "snapshots" / f"snap-00000002.{suffix}").unlink()
+    (folder / "settings-store.json").unlink()
+    with pytest.raises(ProfileError, match="settings_store_mismatch"):
+        w.producer.snapshot(fx.TENANT_A, fx.WF, first["snapshot_digest"])
+    again = w.producer.trigger(fx.TENANT_A, fx.WF, "t2", fx.reader(source))
+    assert (again["state"], again["reason"]) == ("held", "settings_store_mismatch")
+
+
+def test_f4_the_receipt_filters_reason_codes_through_the_allowed_counters(tmp_path: Path) -> None:
+    w = fx.world(tmp_path)
+    _committed(w, receipt_counters=["eligible"])
+    source = fx.pair(
+        live=[
+            fx.dec("A1", fx.at(10)),
+            fx.dec("P1", fx.at(10), customer=fx.HELD_OUT),
+            fx.dec("D1", fx.at(10), state="disputed"),
+        ],
+        outcomes=[fx.cor("c-p1", "P1", fx.at(10, 5)), fx.cor("c-d1", "D1", fx.at(10, 5))],
+    )
+    receipt = w.producer.trigger(fx.TENANT_A, fx.WF, "t", fx.reader(source))
+    assert _snapshot(w, receipt)["reason_codes"] == {
+        "awaiting_outcome": 1,
+        "protected_partition": 1,
+        "source_disputed": 1,
+    }
+    assert receipt["counters"] == {"eligible": 0}
+    # Only codes that break down an allowed counter, and a single case is a small cell.
+    assert receipt["reason_codes"] == {"protected_partition": "<k"}
+
+
+def test_f4_cells_below_the_threshold_read_as_small_and_the_threshold_has_a_floor(
+    tmp_path: Path,
+) -> None:
+    w = fx.world(tmp_path)
+    _committed(w, min_reportable_cell=3)
+    tickets = [f"E{n}" for n in range(3)] + ["W1", "W2"]
+    source = fx.pair(
+        live=[fx.dec(t, fx.at(10)) for t in tickets],
+        outcomes=[fx.cor(f"c-{t}", t, fx.at(10, 5)) for t in tickets[:3]],
+    )
+    receipt = w.producer.trigger(fx.TENANT_A, fx.WF, "t", fx.reader(source))
+    assert receipt["counters"] == {"eligible": 3, "pending": "<k", "quarantined": 0, "disputed": 0}
+    assert receipt["reason_codes"] == {"awaiting_outcome": "<k"}
+    assert parse_settings(fx.settings()).min_reportable_cell == 5
+    for bad in (1, 0, True, 2.0):
+        with pytest.raises(ProfileError, match="settings_min_reportable_cell"):
+            parse_settings(fx.settings(min_reportable_cell=bad))
+
+
+def test_f6_live_totals_and_recurrence_count_distinct_cases_not_decisions() -> None:
+    settings = parse_settings(fx.settings())
+    source = fx.pair(
+        live=[
+            fx.dec("A1", fx.at(10), case="case-one", action="DENY"),
+            fx.dec("A2", fx.at(10, 1), case="case-one", action="DENY"),
+            fx.dec("B1", fx.at(10), case="case-two"),
+            fx.dec("B2", fx.at(10, 1), case="case-two"),
+        ],
+        outcomes=[
+            fx.cor("c-a1", "A1", fx.at(10, 5), case="case-one"),
+            fx.cor("c-a2", "A2", fx.at(10, 6), case="case-one"),
+            fx.cor("c-b1", "B1", fx.at(10, 5), case="case-two"),
+        ],
+    )
+    snap = fx.reduce(settings, source, fx.at(12))
+    assert snap["counters"]["live"] == {
+        "cases": 2,
+        "decisions": 4,
+        "verified": 1,
+        "pending": 1,  # case-two still has a decision without verified truth
+        "disputed": 0,
+    }
+    assert snap["counters"]["eligible"] == 2
+    assert snap["metrics"]["wrong_automatic_decisions"] == {
+        "state": "available",
+        "numerator": 2,
+        "denominator": 2,
+    }
+    only_one = fx.pair(
+        live=[
+            fx.dec("A1", fx.at(10), case="case-one", action="DENY"),
+            fx.dec("A2", fx.at(10, 1), case="case-one", action="DENY"),
+        ],
+        outcomes=[
+            fx.cor("c-a1", "A1", fx.at(10, 5), case="case-one"),
+            fx.cor("c-a2", "A2", fx.at(10, 6), case="case-one"),
+        ],
+    )
+    snap = fx.reduce(settings, only_one, fx.at(12))
+    assert (snap["counters"]["live"]["verified"], snap["counters"]["eligible"]) == (1, 1)
+    assert snap["metrics"]["wrong_automatic_decisions"]["denominator"] == 1
+
+
+def test_f7_label_digests_are_keyed_per_store_and_resist_vocabulary_enumeration(
+    tmp_path: Path,
+) -> None:
+    import stat
+
+    from opentour_cell.pilot.operating_point import digest
+
+    source = fx.pair(live=[fx.dec("K1", fx.at(10))], outcomes=[fx.cor("c-1", "K1", fx.at(10, 5))])
+    found = []
+    for name in ("one", "two"):
+        w = fx.world(tmp_path / name)
+        _committed(w)
+        snap = _snapshot(w, w.producer.trigger(fx.TENANT_A, fx.WF, "t", fx.reader(source)))
+        (example,) = snap["examples"]
+        found.append(example["correction"]["label_digest"])
+        assert snap["evidence"]["label_digest_tier"] == "locally_keyed"
+        vocabulary = ["REFUND", "DENY", "PARTIAL", "REVIEW", "ESCALATE"]
+        unkeyed = {
+            digest(["opentour.pilot.label.v1", fx.TENANT_A, example["example_ref"], v])
+            for v in vocabulary
+        }
+        assert example["correction"]["label_digest"] not in unkeyed
+        private = tmp_path / name / "snapshots" / fx.TENANT_A / fx.WF / "private"
+        assert stat.S_IMODE(private.stat().st_mode) == 0o700
+        assert stat.S_IMODE((private / "label.key").stat().st_mode) == 0o600
+    assert found[0] != found[1]  # a different store holds a different key
+
+
+def test_f7_a_missing_or_exposed_label_key_is_refused_never_re_keyed(tmp_path: Path) -> None:
+    w = fx.world(tmp_path)
+    _committed(w)
+    source = fx.pair(live=[fx.dec("K1", fx.at(10))], outcomes=[fx.cor("c-1", "K1", fx.at(10, 5))])
+    first = w.producer.trigger(fx.TENANT_A, fx.WF, "t1", fx.reader(source))
+    private = tmp_path / "snapshots" / fx.TENANT_A / fx.WF / "private"
+    private.chmod(0o750)
+    with pytest.raises(ProfileError, match="private_key_folder_required"):
+        w.producer.label_key(fx.TENANT_A, fx.WF)
+    private.chmod(0o700)
+    (private / "label.key").unlink()
+    w.clock.set(fx.at(12, 30))
+    held = w.producer.trigger(
+        fx.TENANT_A, fx.WF, "t2", fx.reader(fx.pair(live=[fx.dec("K2", fx.at(10))]))
+    )
+    assert (held["state"], held["reason"]) == ("held", "label_key_missing")
+    assert not (private / "label.key").exists()
+    with pytest.raises(ProfileError, match="label_key_missing"):
+        w.producer.current(fx.TENANT_A, fx.WF, first["snapshot_digest"], fx.reader(source))
+
+
+def test_f8_an_unmapped_column_changes_neither_the_snapshot_digest_nor_the_receipt(
+    tmp_path: Path,
+) -> None:
+    from opentour_cell.pilot.operating_point import digest
+
+    settings = parse_settings(fx.settings())
+    rows = [fx.dec("U1", fx.at(10))]
+    changed = [fx.dec("U1", fx.at(10), customer_age="SENTINEL-PROTECTED-AGE-48")]
+    outcomes = [fx.cor("c-1", "U1", fx.at(10, 5), unmapped_note="first")]
+    outcomes_changed = [fx.cor("c-1", "U1", fx.at(10, 5), unmapped_note="second")]
+    a = fx.reduce(settings, fx.pair(live=rows, outcomes=outcomes), fx.at(12))
+    b = fx.reduce(settings, fx.pair(live=changed, outcomes=outcomes_changed), fx.at(12))
+    assert digest(a) == digest(b)
+    assert [s["capture_digest"] for s in a["sources"]] == [
+        s["capture_digest"] for s in b["sources"]
+    ]
+    w = fx.world(tmp_path)
+    _committed(w)
+    first = w.producer.trigger(
+        fx.TENANT_A, fx.WF, "t1", fx.reader(fx.pair(live=rows, outcomes=outcomes))
+    )
+    second = w.producer.trigger(
+        fx.TENANT_A, fx.WF, "t2", fx.reader(fx.pair(live=changed, outcomes=outcomes_changed))
+    )
+    assert second == first
+    # A mapped column still moves the digest.
+    moved = fx.reduce(settings, fx.pair(live=[fx.dec("U1", fx.at(10), gateway="x")]), fx.at(12))
+    assert digest(moved) != digest(a)
+
+
+def test_f9_a_settings_commit_after_the_reduce_but_before_the_write_rolls_back(
+    tmp_path: Path,
+) -> None:
+    w = fx.world(tmp_path)
+    _committed(w)
+    source = fx.pair(live=[fx.dec("P1", fx.at(10))], outcomes=[fx.cor("c-1", "P1", fx.at(10, 5))])
+    first = w.producer.trigger(fx.TENANT_A, fx.WF, "t1", fx.reader(source))
+
+    def moving_clock() -> Any:
+        # The worker clock is read inside the reduce: commit a new revision right then.
+        if w.store.current(fx.TENANT_A, fx.WF).settings_revision == 1:  # type: ignore[union-attr]
+            w.store.commit(fx.settings(revision=2), principal=fx.CUSTODIAN)
+        return parse_time(fx.at(12, 30), "t")
+
+    w.producer.clock = moving_clock
+    later = fx.pair(live=[fx.dec("P2", fx.at(11))], captured=fx.at(12, 30))
+    rolled = w.producer.trigger(fx.TENANT_A, fx.WF, "t2", fx.reader(later))
+    assert (rolled["state"], rolled["reason"]) == ("rolled_back", "policy_changed_during_read")
+    assert rolled["snapshot_digest"] == first["snapshot_digest"]
+    assert len(w.producer.snapshots(fx.TENANT_A, fx.WF)) == 1
+
+
+@pytest.mark.parametrize("side", ["decision", "correction"])
+def test_f10_a_mapping_without_row_state_is_refused(tmp_path: Path, side: str) -> None:
+    raw = fx.settings()
+    del raw["mapping"][side]["row_state"]
+    w = fx.world(tmp_path)
+    with pytest.raises(ProfileError, match=f"mapping_{side}"):
+        w.store.commit(raw, principal=fx.CUSTODIAN)
+    assert w.store.current(fx.TENANT_A, fx.WF) is None
+
+
+@pytest.mark.parametrize(
+    "values",
+    [
+        {"admitted": ["admitted", "disputed"], "disputed": ["disputed"]},
+        {"admitted": ["admitted"], "disputed": []},
+        {"admitted": [], "disputed": ["disputed"]},
+        {"admitted": ["admitted"]},
+        {"admitted": ["admitted"], "disputed": ["bad value"]},
+    ],
+)
+def test_f10_row_state_values_are_closed_disjoint_sets(values: dict[str, Any]) -> None:
+    with pytest.raises(ProfileError, match="settings_row_state_values"):
+        parse_settings(fx.settings(row_state_values=values))
+
+
+def test_f10_a_declared_row_state_vocabulary_is_honoured_and_anything_else_quarantined() -> None:
+    settings = parse_settings(
+        fx.settings(row_state_values={"admitted": ["ok"], "disputed": ["contested"]})
+    )
+    source = fx.pair(
+        live=[
+            fx.dec("V1", fx.at(10), state="ok"),
+            fx.dec("V2", fx.at(10), state="contested"),
+            fx.dec("V3", fx.at(10), state="admitted"),
+        ],
+        outcomes=[fx.cor(f"c-{t}", t, fx.at(10, 5), state="ok") for t in ("V1", "V2", "V3")],
+    )
+    snap = fx.reduce(settings, source, fx.at(12))
+    states = {k: (e["state"], e["eligible"]) for k, e in _by_ticket(snap).items()}
+    assert states == {"V1": ("verified", True), "V2": ("disputed", False)}
+    assert [q["reason"] for q in snap["quarantined"]] == ["unknown_row_state"]
+
+
+def test_r24_a_decision_made_after_the_as_of_instant_is_not_in_the_snapshot() -> None:
+    source = fx.pair(
+        live=[fx.dec("N1", fx.at(10)), fx.dec("LATER", fx.at(12, 30))],
+        outcomes=[fx.cor("c-1", "N1", fx.at(10, 5))],
+    )
+    snap = fx.reduce(parse_settings(fx.settings()), source, fx.at(12))
+    assert set(_by_ticket(snap)) == {"N1"}
+    assert snap["counters"]["live"]["decisions"] == 1
+
+
+def test_r25_a_correction_made_after_the_as_of_instant_is_not_yet_known() -> None:
+    source = fx.pair(live=[fx.dec("N1", fx.at(10))], outcomes=[fx.cor("c-1", "N1", fx.at(12, 30))])
+    snap = fx.reduce(parse_settings(fx.settings()), source, fx.at(12))
+    (example,) = snap["examples"]
+    assert (example["state"], example["reason"]) == ("pending", "awaiting_outcome")
+
+
+def test_r02_a_row_state_that_only_pretends_to_be_admitted_is_quarantined() -> None:
+    source = fx.pair(
+        live=[fx.dec("L1", fx.at(10), state=_liar("disputed", "admitted"))],
+        outcomes=[fx.cor("c-1", "L1", fx.at(10, 5))],
+    )
+    snap = fx.reduce(parse_settings(fx.settings()), source, fx.at(12))
+    assert snap["examples"] == []
+    assert [q["reason"] for q in snap["quarantined"]] == ["unknown_row_state"]
+
+
+def test_r13_a_role_that_only_pretends_to_be_the_custodian_is_refused(tmp_path: Path) -> None:
+    w = fx.world(tmp_path)
+    pretender = Principal("generated-owner", _liar("workflow_owner", "data_custodian"))
+    with pytest.raises(ProfileError, match="unknown_principal_role"):
+        w.store.commit(fx.settings(), principal=pretender)
+    assert w.store.current(fx.TENANT_A, fx.WF) is None
+
+
+def test_f1_a_pinned_binding_added_by_an_unbound_actor_is_refused(tmp_path: Path) -> None:
+    from opentour_cell.pilot.learning_profile import write_pinned
+
+    w = fx.world(tmp_path)
+    _committed(w)
+    # A well-formed, pinned binding revision whose author was never bound.
+    write_pinned(
+        tmp_path / "settings" / fx.TENANT_A / fx.WF / "custodians",
+        "bind-00000002",
+        {
+            "schema": "opentour.pilot.custodian-binding.v1",
+            "binding_revision": 2,
+            "custodians": sorted([fx.CUSTODIAN.actor_id, "attacker-anyone"]),
+            "change": {"kind": "bind", "actor_id": "attacker-anyone"},
+            "by": "attacker-anyone",
+            "basis": "role_asserted_by_resolved_connection_bound_on_first_use",
+        },
+        "x",
+    )
+    with pytest.raises(ProfileError, match="custodian_binding_tampered"):
+        w.store.commit(
+            fx.settings(revision=2), principal=Principal("attacker-anyone", "data_custodian")
+        )
+
+
+def test_f2_a_snapshot_naming_another_settings_store_is_refused(tmp_path: Path) -> None:
+    from opentour_cell.pilot.learning_profile import _pin
+    from opentour_cell.pilot.operating_point import canonical
+
+    w = fx.world(tmp_path)
+    _committed(w)
+    source = fx.pair(live=[fx.dec("R1", fx.at(10))], outcomes=[fx.cor("c-1", "R1", fx.at(10, 5))])
+    first = w.producer.trigger(fx.TENANT_A, fx.WF, "t1", fx.reader(source))
+    planted = dict(_snapshot(w, first))
+    planted["sequence"], planted["settings_store"] = 2, "0" * 64
+    body = canonical(planted)
+    folder = tmp_path / "snapshots" / fx.TENANT_A / fx.WF / "snapshots"
+    (folder / "snap-00000002.json").write_text(body)
+    (folder / "snap-00000002.pin").write_text(_pin(body))
+    with pytest.raises(ProfileError, match="settings_store_mismatch"):
+        w.producer.snapshots(fx.TENANT_A, fx.WF)

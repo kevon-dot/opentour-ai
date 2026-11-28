@@ -22,6 +22,15 @@ recorded under ``unknown_dependencies`` and the example's root family is held at
 artifacts attach as separate, versioned relationship files; the original record's bytes never
 change, so a later completion cannot alter the inputs the original decision saw.
 
+The seal covers ``dataset_preparation`` records only: an evaluation, rule or comparison record
+made after sealing changes nothing in it, so a later record never wedges training parents.
+A dataset record and the seal take the same lock, so neither can slip between the other's check
+and write.
+
+The recorder pins the settings store's identity on first use, like the producer, and refuses a
+mismatch (``settings_store_mismatch``). Consumer-declared proposal references are labelled
+``caller_asserted`` wherever they surface, and none is ever projected for OPE-544.
+
 Evidence tier: ``digest_self_consistent_only``. Pins detect a one-file edit; they are not
 keyed. Simulated and NOT proven: generated sentinel fixtures in a local directory only.
 """
@@ -49,8 +58,10 @@ from opentour_cell.pilot.learning_profile import (
     ProfileError,
     SourcePair,
     format_time,
+    locked,
     map_row,
     need,
+    pin_identity,
     read_pinned,
     ref,
     write_pinned,
@@ -86,13 +97,23 @@ class DependencyRecorder:
         self.producer = producer
         self.clock = clock
 
-    def _folder(self, tenant: str, workflow_ref: str, kind: str) -> Path:
+    def _base(self, tenant: str, workflow_ref: str) -> Path:
         return (
             self.directory
             / ref(tenant, "dependency_tenant")
             / ref(workflow_ref, "dependency_workflow")
-            / kind
         )
+
+    def _folder(self, tenant: str, workflow_ref: str, kind: str) -> Path:
+        return self._base(tenant, workflow_ref) / kind
+
+    def store_identity(self, tenant: str, workflow_ref: str) -> str:
+        """The producer's pinned settings store, pinned here too on this recorder's first use."""
+        identity = self.producer.store_identity(tenant, workflow_ref)
+        base = self._base(tenant, workflow_ref)
+        first = not any((base / kind).is_dir() for kind in ("records", "seals", "parents"))
+        pin_identity(base, identity, create=first)
+        return identity
 
     # ------------------------------------------------------------------ write on consumption
 
@@ -125,6 +146,10 @@ class DependencyRecorder:
             "invalid_consumed_path",
         )
         snapshot = self.producer.snapshot(tenant, workflow_ref, snapshot_digest)
+        need(
+            self.store_identity(tenant, workflow_ref) == snapshot["settings_store"],
+            "settings_store_mismatch",
+        )
         example = next((e for e in snapshot["examples"] if e["example_ref"] == example_ref), None)
         need(example is not None, "example_unknown")
         assert example is not None
@@ -132,13 +157,6 @@ class DependencyRecorder:
         need(example["state"] != DISPUTED, "disputed_not_consumable")
         if purpose == "dataset_preparation":
             need(example["eligible"], "example_not_eligible")
-            need(
-                not (
-                    self._folder(tenant, workflow_ref, "seals") / f"{_seal_name(snapshot_digest)}"
-                    ".json"
-                ).exists(),
-                "snapshot_sealed",
-            )
         if example["partition"] == PROTECTED:
             need(purpose == "evaluation", "protected_evaluation_only")
 
@@ -176,6 +194,7 @@ class DependencyRecorder:
             "engagement_epoch": snapshot["engagement_epoch"],
             "grant_epoch": snapshot["grant_epoch"],
             "snapshot_digest": snapshot_digest,
+            "settings_store": snapshot["settings_store"],
             "settings_revision": snapshot["settings_revision"],
             "policy_revision": snapshot["policy_revision"],
             "split_revision": snapshot["split_revision"],
@@ -213,16 +232,24 @@ class DependencyRecorder:
         }
         record_ref = "dep-" + digest(body)[:32]
         folder = self._folder(tenant, workflow_ref, "records")
-        if (folder / f"{record_ref}.json").exists():
-            existing = read_pinned(folder, record_ref, "dependency_tampered")
-            need(existing["body"] == body, "dependency_conflict")
-            return dict(existing)
-        stored = {
-            "record_ref": record_ref,
-            "body": body,
-            "recorded_at": format_time(self.clock().astimezone(UTC)),
-        }
-        write_pinned(folder, record_ref, stored, "dependency_conflict")
+        # One lock with ``seal``: the sealed check and the write are a single step.
+        with locked(self._base(tenant, workflow_ref)):
+            if (folder / f"{record_ref}.json").exists():
+                existing = read_pinned(folder, record_ref, "dependency_tampered")
+                need(existing["body"] == body, "dependency_conflict")
+                return dict(existing)
+            if purpose == "dataset_preparation":
+                sealed = self._folder(tenant, workflow_ref, "seals")
+                need(
+                    not (sealed / f"{_seal_name(snapshot_digest)}.json").exists(),
+                    "snapshot_sealed",
+                )
+            stored = {
+                "record_ref": record_ref,
+                "body": body,
+                "recorded_at": format_time(self.clock().astimezone(UTC)),
+            }
+            write_pinned(folder, record_ref, stored, "dependency_conflict")
         return stored
 
     def records(
@@ -230,7 +257,9 @@ class DependencyRecorder:
     ) -> list[dict[str, Any]]:
         folder = self._folder(tenant, workflow_ref, "records")
         found = []
-        for path in sorted(folder.glob("dep-*.json")) if folder.is_dir() else []:
+        paths = sorted(folder.glob("dep-*.json")) if folder.is_dir() else []
+        identity = self.store_identity(tenant, workflow_ref) if paths else None
+        for path in paths:
             stored = read_pinned(folder, path.stem, "dependency_tampered")
             body = stored["body"]
             need(
@@ -239,6 +268,7 @@ class DependencyRecorder:
                 and body["workflow_ref"] == workflow_ref,
                 "dependency_tampered",
             )
+            need(body["settings_store"] == identity, "settings_store_mismatch")
             if snapshot_digest is None or body["snapshot_digest"] == snapshot_digest:
                 found.append(stored)
         return found
@@ -344,7 +374,11 @@ class DependencyRecorder:
     def proposals(
         self, tenant: str, workflow_ref: str, snapshot_digest: str
     ) -> dict[str, set[str]]:
-        """Outstanding proposal reference -> example references it actually consumed."""
+        """Outstanding proposal reference -> example references it actually consumed.
+
+        The proposal references are consumer-declared (``caller_asserted``); the example
+        references come from the worker's own records. ``current`` labels them on output.
+        """
         out: dict[str, set[str]] = {}
         for stored in self.records(tenant, workflow_ref, snapshot_digest):
             proposal = stored["body"]["caller_asserted"]["artifacts"].get("proposal_ref")
@@ -360,20 +394,26 @@ class DependencyRecorder:
         Redacted: references, paths, revisions and digests only, never a value. Deterministic:
         resealing after a restart yields the same bytes, so the same digest. Each eligible
         development example needs a recorded dataset-preparation consumption; a missing one, or
-        an unknown dependency, holds that root family only. Protected roots expose aggregate
-        status only.
+        an unknown dependency in one, holds that root family only. Only dataset-preparation
+        records are sealed: a record for any other purpose, before or after sealing, does not
+        change the seal. Protected roots expose aggregate status only.
         """
+        with locked(self._base(tenant, workflow_ref)):
+            return self._seal(tenant, workflow_ref, snapshot_digest)
+
+    def _seal(self, tenant: str, workflow_ref: str, snapshot_digest: str) -> dict[str, Any]:
         snapshot = self.producer.snapshot(tenant, workflow_ref, snapshot_digest)
         records = [
             r["body"] | {"record_ref": r["record_ref"]}
             for r in self.records(tenant, workflow_ref, snapshot_digest)
+            if r["body"]["caller_asserted"]["purpose"] == "dataset_preparation"
         ]
         eligible = [e for e in snapshot["examples"] if e["eligible"]]
         protected = [e for e in snapshot["examples"] if e["partition"] == PROTECTED]
         forward, holds, unknown = [], [], set()
         for example in eligible:
             mine = [r for r in records if r["example_ref"] == example["example_ref"]]
-            prepared = [r for r in mine if r["caller_asserted"]["purpose"] == "dataset_preparation"]
+            prepared = mine
             entry_unknown = sorted({p for r in mine for p in r["unknown_dependencies"]})
             unknown.update(entry_unknown)
             reason = None
@@ -417,6 +457,8 @@ class DependencyRecorder:
             "tenant": tenant,
             "workflow_ref": workflow_ref,
             "snapshot_digest": snapshot_digest,
+            "settings_store": snapshot["settings_store"],
+            "covers_purposes": ["dataset_preparation"],
             "settings_revision": snapshot["settings_revision"],
             "policy_revision": snapshot["policy_revision"],
             "benchmark": snapshot["benchmark"],
@@ -461,6 +503,7 @@ class DependencyRecorder:
         withdrawn correction is excluded from future training here even though the as-of
         snapshot still shows what the reviewer inspected.
         """
+        identity = self.store_identity(tenant, workflow_ref)
         sealed = self.seal(tenant, workflow_ref, snapshot_digest)
         current = self.producer.current(
             tenant,
@@ -470,6 +513,7 @@ class DependencyRecorder:
             self.proposals(tenant, workflow_ref, snapshot_digest),
         )
         need(current["state"] == "current", "current_eligibility_held")
+        need(current["settings_store"] == identity, "settings_store_mismatch")
         snapshot = self.producer.snapshot(tenant, workflow_ref, snapshot_digest)
         by_ref = {e["example_ref"]: e for e in snapshot["examples"]}
         now = set(current["eligible"])
@@ -496,6 +540,7 @@ class DependencyRecorder:
             "schema": PARENTS_SCHEMA,
             "seal_digest": sealed["seal_digest"],
             "snapshot_digest": snapshot_digest,
+            "settings_store": identity,
             "current_settings_revision": current["settings_revision"],
             "parents": parents,
             "counts": {
@@ -508,7 +553,39 @@ class DependencyRecorder:
             "holds": sealed["holds"],
             "evidence_tier": EVIDENCE_TIER,
         }
-        return {**body, "manifest_digest": digest(body)}
+        manifest = {**body, "manifest_digest": digest(body)}
+        # Kept write-once by digest, so ``union_synthetic`` can verify a manifest it is handed
+        # against what this worker actually produced.
+        write_pinned(
+            self._folder(tenant, workflow_ref, "parents"),
+            _parents_name(manifest["manifest_digest"]),
+            manifest,
+            "parents_manifest_conflict",
+        )
+        return manifest
+
+    def parents_manifest(self, tenant: str, workflow_ref: str, manifest_digest: str) -> Any:
+        """A training-parent manifest this worker produced, re-verified from its own store."""
+        self.store_identity(tenant, workflow_ref)
+        folder = self._folder(tenant, workflow_ref, "parents")
+        name = _parents_name(manifest_digest)
+        need((folder / f"{name}.json").exists(), "parents_manifest_unknown")
+        stored = read_pinned(folder, name, "parents_manifest_tampered")
+        body = {k: v for k, v in stored.items() if k != "manifest_digest"}
+        need(
+            stored.get("manifest_digest") == manifest_digest == digest(body),
+            "parents_manifest_tampered",
+        )
+        return stored
+
+
+def _parents_name(manifest_digest: object) -> str:
+    need(
+        type(manifest_digest) is str and re.fullmatch(r"[0-9a-f]{64}", manifest_digest),
+        "parents_manifest_unknown",
+    )
+    assert type(manifest_digest) is str
+    return f"parents-{manifest_digest[:40]}"
 
 
 def _seal_name(snapshot_digest: str) -> str:
@@ -545,12 +622,23 @@ def propagate_retractions(
 
 
 def union_synthetic(
-    parents: Mapping[str, Any], children: Iterable[Mapping[str, Any]]
+    recorder: DependencyRecorder,
+    tenant: str,
+    workflow_ref: str,
+    parents: Mapping[str, Any],
+    children: Iterable[Mapping[str, Any]],
 ) -> dict[str, Any]:
     """Union admitted synthetic descendants into a training set without touching live counts.
 
-    A child must name a current real parent; any other child is rejected with a reason.
+    The parents mapping is never trusted as handed in: its digest must match its body and
+    the manifest this worker stored under that digest, and the live counts and parents come
+    from the stored copy. A child must name a current real parent; any other child is
+    rejected with a reason.
     """
+    claimed = parents.get("manifest_digest") if isinstance(parents, Mapping) else None
+    stored = recorder.parents_manifest(tenant, workflow_ref, claimed)  # type: ignore[arg-type]
+    need(dict(parents) == stored, "parents_manifest_tampered")
+    parents = stored
     roots = {p["example_ref"] for p in parents["parents"]}
     admitted, rejected = [], []
     for child in children:
@@ -575,29 +663,77 @@ def union_synthetic(
 # Each projection imports its consumer lazily, so the producer runs with every consumer absent.
 
 
+def lineage_refs(stored: Mapping[str, Any]) -> dict[str, Any]:
+    """The worker-derived references an OPE-544 manifest of one record carries.
+
+    Each is minted here from worker-held records only (the committed snapshot digest, the
+    example and the record reference), never from anything a consumer declared:
+
+    * ``result_ref``: the committed as-of snapshot the consumption read from;
+    * ``candidate_ref``: the verified candidate (the example) inside that snapshot;
+    * ``claim_refs``: one claim, "this record consumed exactly these fields".
+
+    Gap: no worker-side producer of OPE-544 workflow claims or frozen results exists yet, so a
+    claim made elsewhere (a Slack answer, a frozen result) cannot be projected until one does.
+    """
+    body = stored["body"]
+    snapshot, example = body["snapshot_digest"], body["example_ref"]
+    return {
+        "result_ref": "asof-" + snapshot[:48],
+        "candidate_ref": "cand-"
+        + digest(["opentour.pilot.lineage-candidate.v1", snapshot, example])[:32],
+        "claim_refs": [
+            "claim-"
+            + digest(
+                [
+                    "opentour.pilot.lineage-claim.v1",
+                    body["tenant"],
+                    body["workflow_ref"],
+                    stored["record_ref"],
+                ]
+            )[:32]
+        ],
+    }
+
+
+_LINEAGE_RULE_KINDS = frozenset({"simple_rule", "local_adapter"})
+
+
 def to_lineage_manifest(
     recorder: DependencyRecorder,
     tenant: str,
     workflow_ref: str,
     record_ref: str,
     *,
-    rule_kind: str,
-    result_ref: str,
-    candidate_ref: str,
-    claim_refs: list[str],
+    store: Any = None,
+    **caller_refs: Any,
 ) -> dict[str, Any]:
     """Project one record onto OPE-544's ``consumed-field-manifest.v1`` reader shape.
 
-    OPE-544 needs result, candidate and claim references that this writer does not produce;
-    they are taken here as caller-asserted inputs. Unknown dependencies carry over, so the
-    reader returns ``hold`` for them rather than a guessed edge.
+    Only worker-derived references are projected (``lineage_refs``). OPE-544's manifest has no
+    field that could mark a value caller-asserted, so any caller-supplied reference
+    (``result_ref``, ``candidate_ref``, ``claim_refs``, ``proposal_refs``, ``rule_kind``, or
+    anything else) is refused with ``lineage_ref_caller_asserted`` and nothing is written. For
+    the same reason the record's caller-asserted artifacts and the caller-asserted later
+    relations (``attach_artifact``) are not projected; only worker-resolved outcome relations
+    are. The rule kind is the record's own consumer kind, fixed when the consumption happened.
+    Unknown dependencies carry over, so the reader returns ``hold`` for them rather than a
+    guessed edge. With ``store`` (an OPE-544 ``ManifestStore``) the manifest is also written.
     """
+    need(not caller_refs, "lineage_ref_caller_asserted")
     from opentour_cell.pilot import consumption_lineage
 
     stored = recorder._record(tenant, workflow_ref, record_ref)
     body = stored["body"]
     need(body["partition"] in (DEVELOPMENT, PROTECTED), "lineage_partition_unavailable")
-    relations = recorder.relations(tenant, workflow_ref, record_ref)
+    kind = body["caller_asserted"]["consumer"]["kind"]
+    need(kind in _LINEAGE_RULE_KINDS, "lineage_rule_kind_unavailable")
+    relations = [
+        r
+        for r in recorder.relations(tenant, workflow_ref, record_ref)
+        if r["kind"] == "outcome" and "caller_asserted" not in r["basis"]
+    ]
+    refs = lineage_refs(stored)
     correction = body["label_inputs"][0]["correction_version"] if body["label_inputs"] else 0
     manifest = {
         "schema": consumption_lineage.MANIFEST_SCHEMA,
@@ -607,15 +743,15 @@ def to_lineage_manifest(
         "engagement_epoch": body["engagement_epoch"],
         "grant_epoch": body["grant_epoch"],
         "partition": body["partition"],
-        "rule_kind": rule_kind,
+        "rule_kind": kind,
         "case_ref": body["case"],
         "decision_time": body["decision"]["decision_time"],
-        "result_ref": result_ref,
-        "candidate_ref": candidate_ref,
+        "result_ref": refs["result_ref"],
+        "candidate_ref": refs["candidate_ref"],
         "example_ref": body["example_ref"],
         "correction_version": correction,
         "policy_revision": body["policy_revision"],
-        "claim_refs": claim_refs,
+        "claim_refs": refs["claim_refs"],
         "consumed": [
             {
                 "source_ref": c["source_ref"],
@@ -633,7 +769,10 @@ def to_lineage_manifest(
             for r in relations
         ],
     }
-    return consumption_lineage.validate_manifest(manifest)
+    validated = consumption_lineage.validate_manifest(manifest)
+    if store is not None:
+        store.put(validated)
+    return validated
 
 
 def to_recompute_families(sealed: Mapping[str, Any]) -> list[Any]:
@@ -669,13 +808,17 @@ def to_seed_roots(
     sealed: Mapping[str, Any],
     settings: PilotSettings,
     pair: SourcePair,
+    *,
+    label_key: bytes,
 ) -> tuple[list[Any], Any]:
     """Project training parents onto OPE-516 ``SeedRoot`` and ``SplitSeal`` inputs.
 
     Values are re-read from the worker's source pair and must match the sealed label and
-    input digests, so a caller cannot substitute a target. Vocabulary gap: OPE-516 names its
-    seed population ``training``; this producer's populations are ``development`` and
-    ``protected``. A training parent is a development example, so it maps to ``training``.
+    input digests (the label digest under the producer's private ``label_key``), so a caller
+    cannot substitute a target. Every parent must be found; a missing one is refused.
+    Vocabulary gap: OPE-516 names its seed population ``training``; this producer's
+    populations are ``development`` and ``protected``. A training parent is a development
+    example, so it maps to ``training``.
     """
     from opentour_cell.pilot.candidate_snapshot import example_ref as make_ref
     from opentour_cell.pilot.training_variants import SeedRoot, SplitSeal
@@ -707,7 +850,7 @@ def to_seed_roots(
             )
             target = _target(settings, pair, mapped, parent)
             need(
-                label_digest(settings.tenant, ex, target) == parent["label_digest"],
+                label_digest(label_key, settings.tenant, ex, target) == parent["label_digest"],
                 "seed_label_changed",
             )
             roots.append(

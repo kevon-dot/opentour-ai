@@ -32,6 +32,9 @@ CUSTODIAN = Principal("generated-custodian-1", "data_custodian")
 BASE = datetime(2026, 1, 1, tzinfo=UTC)
 HELD_OUT = "generated-cust-held"
 
+# A generated label key for calls to the pure reducer; producers create their own private key.
+TEST_LABEL_KEY = bytes(range(32))
+
 # Sentinels that must never leave the customer-local records.
 PROTECTED_SENTINEL = "SENTINEL-PROTECTED-AGE-47"
 LABEL_SENTINEL = "SENTINEL-LABEL-FREIGHT"
@@ -211,3 +214,11 @@ def world(root: Path, moment: str | None = None) -> World:
 
 def reader(source: SourcePair) -> Any:
     return lambda _settings: source
+
+
+def reduce(settings: Any, source: SourcePair, moment: str) -> dict[str, Any]:
+    """The pure reducer at ``moment`` under the generated test label key."""
+    from opentour_cell.pilot.candidate_snapshot import reduce_pair
+    from opentour_cell.pilot.learning_profile import parse_time
+
+    return reduce_pair(settings, source, parse_time(moment, "t"), label_key=TEST_LABEL_KEY)

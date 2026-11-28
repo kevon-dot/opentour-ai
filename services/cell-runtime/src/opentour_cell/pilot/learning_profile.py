@@ -10,11 +10,22 @@ A settings batch is the worker-held record that pins, for one tenant and workflo
 * the development/protected split handed to the existing partitioner;
 * the permitted uses and the counters the snapshot receipt may disclose.
 
-Revisions are write-once and consecutive. Re-committing identical bytes is a no-op; different
-bytes under a committed revision conflict. Only a principal bound as ``data_custodian`` may
-commit. The principal is resolved by the worker's authenticated connection; this module does
-not authenticate it (that is the connection's job) and never accepts an authority value from
-the rows it maps.
+Revisions are write-once and consecutive. Re-committing identical settings is a no-op;
+different settings under a committed revision conflict.
+
+Who may commit. The principal's ``data_custodian`` role is asserted by the resolved connection,
+bound on first use; it is not authenticated until OPE-566. Concretely: the first commit for a
+tenant and workflow records that actor as the only bound custodian (trust on first use). After
+that, only a bound custodian actor ID may commit, and adding or removing a custodian binding
+takes a commit by a currently bound custodian; the last custodian cannot be removed. Every
+revision records the committing actor ID. A connection that asserts the role under a bound
+actor ID is still believed: nothing here authenticates it. This module never accepts an
+authority value from the rows it maps.
+
+Store identity. On first use the store writes a random store ID inside itself. ``identity``
+digests that ID with the tenant, workflow, real paths and device/inode numbers of the store
+folder and its identity files, so a copied or recreated store has a different identity. The
+snapshot producer and the dependency recorder pin that identity on first use.
 
 Evidence tier: every record here is ``digest_self_consistent_only``. The pin beside each file
 detects an edit of one file; anyone who can rewrite both files can forge a batch. No signing or
@@ -26,11 +37,15 @@ is provider, installed-witness or customer evidence.
 
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import json
 import os
 import re
+import secrets
+import stat
 import tempfile
-from collections.abc import Mapping
+from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -39,7 +54,14 @@ from typing import Any
 from opentour_cell.pilot.operating_point import canonical, digest
 
 SETTINGS_SCHEMA = "opentour.pilot.learning-profile-settings.v1"
+REVISION_SCHEMA = "opentour.pilot.learning-profile-revision.v1"
+BINDING_SCHEMA = "opentour.pilot.custodian-binding.v1"
+IDENTITY_SCHEMA = "opentour.pilot.settings-store-identity.v1"
 EVIDENCE_TIER = "digest_self_consistent_only"
+# Label digests are HMACs under a key held in the worker's private directory: they resist
+# enumeration of a small label vocabulary, but nobody else can verify them. Not a signature.
+LABEL_DIGEST_TIER = "locally_keyed"
+CUSTODIAN_BASIS = "role_asserted_by_resolved_connection_bound_on_first_use"
 
 CUSTODIAN = "data_custodian"
 PRINCIPAL_ROLES = frozenset({CUSTODIAN, "workflow_owner", "reviewer", "verifier"})
@@ -82,8 +104,9 @@ CORRECTION_FIELDS = frozenset(
         "correction_time",
     }
 )
-OPTIONAL_FIELDS = frozenset({"row_state"})
-ROW_STATES = frozenset({"admitted", "disputed"})
+# ``row_state`` is required on both sides: without it a disputed source row would be admitted.
+ROW_STATE = "row_state"
+DEFAULT_ROW_STATE_VALUES = {"admitted": ["admitted"], "disputed": ["disputed"]}
 STATUSES = frozenset({"final", "reopened", "withdrawn"})
 VERIFYING_PROVENANCE = frozenset({"independent_adjudication"})
 # A model answer, ticket close, thumbs-up or repeated reply never verifies a correction.
@@ -92,6 +115,10 @@ NON_VERIFYING_PROVENANCE = frozenset(
 )
 USES = frozenset({"inspect", "evaluate", "train"})
 COUNTERS = ("eligible", "pending", "quarantined", "disputed")
+# Small-cell threshold for anything that leaves the worker. No repository-wide constant exists,
+# so the settings carry ``min_reportable_cell``: default 5, never below 2.
+DEFAULT_MIN_REPORTABLE_CELL = 5
+MIN_REPORTABLE_CELL_FLOOR = 2
 
 _KEYS = frozenset(
     {
@@ -117,6 +144,7 @@ _KEYS = frozenset(
         "receipt_counters",
     }
 )
+_OPTIONAL_KEYS = frozenset({"min_reportable_cell", "row_state_values"})
 _REF = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:\-]{0,127}")
 _COLUMN = re.compile(r"[A-Za-z][A-Za-z0-9_]{0,63}")
 _TIME = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z")
@@ -178,7 +206,11 @@ class Source:
 
 @dataclass(frozen=True)
 class Principal:
-    """An actor already resolved by the worker's authenticated connection."""
+    """An actor resolved by the worker's connection.
+
+    The role is asserted by the resolved connection, bound on first use; it is not
+    authenticated until OPE-566.
+    """
 
     actor_id: str
     role: str
@@ -207,6 +239,9 @@ class PilotSettings:
     split: Mapping[str, Any]
     uses: frozenset[str]
     receipt_counters: tuple[str, ...]
+    min_reportable_cell: int
+    admitted_states: frozenset[str]
+    disputed_states: frozenset[str]
     body: Mapping[str, Any]
 
     @property
@@ -223,7 +258,7 @@ def _mapping(raw: object, required: frozenset[str], reason: str) -> dict[str, st
     keys = set(raw) - {"features"}
     # A mapping names logical join fields only. An unknown logical field (for example a
     # caller-shaped "verified" or "authority" column) is refused, never silently dropped.
-    need(required <= keys <= required | OPTIONAL_FIELDS, reason)
+    need(keys == required | {ROW_STATE}, reason)
     columns = {key: raw[key] for key in keys}
     need(all(type(c) is str and _COLUMN.fullmatch(c) for c in columns.values()), reason)
     need(len(set(columns.values())) == len(columns), reason)
@@ -233,7 +268,7 @@ def _mapping(raw: object, required: frozenset[str], reason: str) -> dict[str, st
 def parse_settings(raw: Mapping[str, Any]) -> PilotSettings:
     """Validate a settings batch; every unknown key, role, origin or value fails closed."""
     need(isinstance(raw, Mapping) and raw.get("schema") == SETTINGS_SCHEMA, "settings_schema")
-    need(set(raw) == _KEYS, "settings_unknown_or_missing_key")
+    need(_KEYS <= set(raw) <= _KEYS | _OPTIONAL_KEYS, "settings_unknown_or_missing_key")
     tenant = ref(raw["tenant"], "settings_tenant")
     workflow = ref(raw["workflow_ref"], "settings_workflow")
     revision = count(raw["settings_revision"], "settings_revision", 1)
@@ -323,6 +358,13 @@ def parse_settings(raw: Mapping[str, Any]) -> PilotSettings:
         "settings_receipt_counters",
     )
     receipt_counters = tuple(c for c in COUNTERS if c in counters_raw)
+    min_cell = count(
+        raw.get("min_reportable_cell", DEFAULT_MIN_REPORTABLE_CELL),
+        "settings_min_reportable_cell",
+        MIN_REPORTABLE_CELL_FLOOR,
+        1_000_000,
+    )
+    admitted, disputed = _row_state_values(raw.get("row_state_values", DEFAULT_ROW_STATE_VALUES))
 
     body: dict[str, Any] = {
         "schema": SETTINGS_SCHEMA,
@@ -351,6 +393,8 @@ def parse_settings(raw: Mapping[str, Any]) -> PilotSettings:
         "split": split_out,
         "uses": sorted(uses),
         "receipt_counters": list(receipt_counters),
+        "min_reportable_cell": min_cell,
+        "row_state_values": {"admitted": sorted(admitted), "disputed": sorted(disputed)},
     }
     return PilotSettings(
         tenant=tenant,
@@ -374,8 +418,32 @@ def parse_settings(raw: Mapping[str, Any]) -> PilotSettings:
         split=split_out,
         uses=frozenset(uses),
         receipt_counters=receipt_counters,
+        min_reportable_cell=min_cell,
+        admitted_states=admitted,
+        disputed_states=disputed,
         body=body,
     )
+
+
+def _row_state_values(raw: object) -> tuple[frozenset[str], frozenset[str]]:
+    """The mapped ``row_state`` column's closed value sets: admitted and disputed are disjoint.
+
+    A value in neither set is quarantined as ``unknown_row_state``, so a column whose values
+    are not declared here (for example a status column) admits nothing.
+    """
+    reason = "settings_row_state_values"
+    need(isinstance(raw, Mapping) and set(raw) == {"admitted", "disputed"}, reason)
+    assert isinstance(raw, Mapping)
+    sets = []
+    for side in ("admitted", "disputed"):
+        values = raw[side]
+        need(type(values) is list and 0 < len(values) <= 16, reason)
+        assert type(values) is list
+        need(all(type(v) is str and _REF.fullmatch(v) for v in values), reason)
+        need(len(set(values)) == len(values), reason)
+        sets.append(frozenset(values))
+    need(not sets[0] & sets[1], reason)
+    return sets[0], sets[1]
 
 
 # --------------------------------------------------------------------------- storage
@@ -434,60 +502,340 @@ def read_pinned(folder: Path, name: str, reason: str) -> Any:
     return value
 
 
+@contextlib.contextmanager
+def locked(folder: Path) -> Iterator[None]:
+    """An exclusive advisory lock on ``folder/.lock`` for one check-and-write sequence."""
+    folder.mkdir(parents=True, exist_ok=True)
+    fd = os.open(folder / ".lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(fd)
+
+
+def _private_folder(folder: Path) -> None:
+    info = folder.lstat()
+    need(
+        stat.S_ISDIR(info.st_mode) and info.st_uid == os.geteuid() and not info.st_mode & 0o077,
+        "private_key_folder_required",
+    )
+
+
+def local_key(folder: Path, *, create: bool, missing: str) -> bytes:
+    """A 32-byte key in ``folder/label.key`` (0600, owner-checked, in a 0700 folder).
+
+    Created on first use only when ``create``; otherwise a missing key is refused with
+    ``missing`` rather than silently re-keyed.
+    """
+    path = folder / "label.key"
+    if not path.exists() and create:
+        folder.mkdir(mode=0o700, parents=True, exist_ok=True)
+        _private_folder(folder)
+        try:
+            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o600)
+        except FileExistsError:
+            pass
+        else:
+            with os.fdopen(fd, "wb") as stream:
+                stream.write(secrets.token_bytes(32))
+                stream.flush()
+                os.fsync(stream.fileno())
+    need(path.exists(), missing)
+    _private_folder(folder)
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError as exc:
+        raise ProfileError("private_key_required") from exc
+    with os.fdopen(fd, "rb") as stream:
+        info = os.fstat(stream.fileno())
+        need(
+            stat.S_ISREG(info.st_mode)
+            and info.st_uid == os.geteuid()
+            and info.st_nlink == 1
+            and not info.st_mode & 0o077
+            and info.st_size == 32,
+            "private_key_required",
+        )
+        key = stream.read(33)
+    need(len(key) == 32, "private_key_required")
+    return key
+
+
+def pin_identity(folder: Path, identity: str, *, create: bool) -> None:
+    """Pin a settings-store identity into ``folder`` on first use; later it must match.
+
+    A missing pin is created only when ``create`` (nothing has been committed against any store
+    yet); otherwise it is itself a mismatch.
+    """
+    name = "settings-store"
+    if not (folder / f"{name}.json").exists():
+        need(create, "settings_store_mismatch")
+        write_pinned(
+            folder,
+            name,
+            {"schema": IDENTITY_SCHEMA, "identity": identity},
+            "settings_store_mismatch",
+        )
+    pinned = read_pinned(folder, name, "settings_store_mismatch")
+    need(
+        isinstance(pinned, dict) and pinned == {"schema": IDENTITY_SCHEMA, "identity": identity},
+        "settings_store_mismatch",
+    )
+
+
+def _numbered(folder: Path, prefix: str) -> list[int]:
+    found = (
+        sorted(
+            int(p.stem[len(prefix) :])
+            for p in folder.glob(f"{prefix}*.json")
+            if re.fullmatch(r"\d{8}", p.stem[len(prefix) :])
+        )
+        if folder.is_dir()
+        else []
+    )
+    return found
+
+
 class SettingsBatchStore:
-    """Write-once, consecutive settings revisions per tenant and workflow."""
+    """Write-once, consecutive settings revisions and custodian bindings per tenant/workflow."""
 
     def __init__(self, directory: Path) -> None:
         self.directory = Path(directory)
 
-    def _folder(self, tenant: str, workflow_ref: str) -> Path:
+    def _base(self, tenant: str, workflow_ref: str) -> Path:
         return (
-            self.directory
-            / ref(tenant, "settings_tenant")
-            / ref(workflow_ref, "settings_workflow")
-            / "settings"
+            self.directory / ref(tenant, "settings_tenant") / ref(workflow_ref, "settings_workflow")
         )
 
-    def commit(self, raw: Mapping[str, Any], *, principal: Principal) -> PilotSettings:
+    def _folder(self, tenant: str, workflow_ref: str) -> Path:
+        return self._base(tenant, workflow_ref) / "settings"
+
+    def lock(self, tenant: str, workflow_ref: str) -> contextlib.AbstractContextManager[None]:
+        """Held by every commit; the snapshot producer holds it for its final check and write."""
+        return locked(self._base(tenant, workflow_ref))
+
+    # ------------------------------------------------------------------ identity
+
+    def identity(self, tenant: str, workflow_ref: str) -> str | None:
+        """This store's identity for one tenant and workflow, or None before its first commit."""
+        base = self._base(tenant, workflow_ref)
+        if not (base / "identity.json").exists():
+            return None
+        body = read_pinned(base, "identity", "settings_store_tampered")
+        need(
+            isinstance(body, dict)
+            and set(body) == {"schema", "store_id", "tenant", "workflow_ref"}
+            and body["schema"] == IDENTITY_SCHEMA
+            and body["tenant"] == tenant
+            and body["workflow_ref"] == workflow_ref
+            and type(body["store_id"]) is str
+            and re.fullmatch(r"[0-9a-f]{32}", body["store_id"]),
+            "settings_store_tampered",
+        )
+        parts: list[object] = [IDENTITY_SCHEMA, body["store_id"], tenant, workflow_ref]
+        try:
+            for item in (base, base / "identity.json", base / "identity.pin"):
+                info = os.stat(item, follow_symlinks=False)
+                parts += [os.path.realpath(item), info.st_dev, info.st_ino]
+        except OSError as exc:
+            raise ProfileError("settings_store_tampered") from exc
+        return digest(parts)
+
+    def _ensure_identity(self, tenant: str, workflow_ref: str) -> None:
+        base = self._base(tenant, workflow_ref)
+        if not (base / "identity.json").exists():
+            write_pinned(
+                base,
+                "identity",
+                {
+                    "schema": IDENTITY_SCHEMA,
+                    "store_id": secrets.token_hex(16),
+                    "tenant": tenant,
+                    "workflow_ref": workflow_ref,
+                },
+                "settings_store_tampered",
+            )
+
+    # ------------------------------------------------------------------ custodian bindings
+
+    def custodians(self, tenant: str, workflow_ref: str) -> tuple[int, frozenset[str]]:
+        """(binding revision, bound custodian actor IDs); (0, empty) before the first commit.
+
+        The chain is re-verified on every read: each change is made by a custodian bound in
+        the previous revision, and the set never becomes empty.
+        """
+        folder = self._base(tenant, workflow_ref) / "custodians"
+        numbers = _numbered(folder, "bind-")
+        need(numbers == list(range(1, len(numbers) + 1)), "custodian_binding_tampered")
+        bound: frozenset[str] = frozenset()
+        for number in numbers:
+            body = read_pinned(folder, f"bind-{number:08d}", "custodian_binding_tampered")
+            need(
+                isinstance(body, dict)
+                and body.get("schema") == BINDING_SCHEMA
+                and body.get("binding_revision") == number
+                and type(body.get("custodians")) is list
+                and isinstance(body.get("change"), dict),
+                "custodian_binding_tampered",
+            )
+            change, by = body["change"], body.get("by")
+            target = change.get("actor_id")
+            if number == 1:
+                expected = {target}
+                ok = change.get("kind") == "first_use" and by == target
+            elif change.get("kind") == "bind":
+                expected, ok = set(bound) | {target}, by in bound and target not in bound
+            elif change.get("kind") == "unbind":
+                expected, ok = set(bound) - {target}, by in bound and target in bound
+            else:
+                expected, ok = set(), False
+            need(
+                ok and expected and body["custodians"] == sorted(expected),
+                "custodian_binding_tampered",
+            )
+            bound = frozenset(expected)
+        return len(numbers), bound
+
+    def _bind(
+        self, tenant: str, workflow_ref: str, kind: str, target: str, by: str
+    ) -> tuple[int, frozenset[str]]:
+        number, bound = self.custodians(tenant, workflow_ref)
+        members = (
+            {target}
+            if kind == "first_use"
+            else (set(bound) | {target} if kind == "bind" else set(bound) - {target})
+        )
+        write_pinned(
+            self._base(tenant, workflow_ref) / "custodians",
+            f"bind-{number + 1:08d}",
+            {
+                "schema": BINDING_SCHEMA,
+                "binding_revision": number + 1,
+                "custodians": sorted(members),
+                "change": {"kind": kind, "actor_id": target},
+                "by": by,
+                "basis": CUSTODIAN_BASIS,
+            },
+            "custodian_binding_conflict",
+        )
+        return self.custodians(tenant, workflow_ref)
+
+    def _bound_actor(self, principal: Principal) -> str:
+        # Exactly ``str``: a subclass could claim the custodian role through ``__eq__``.
         need(
             type(principal.role) is str and principal.role in PRINCIPAL_ROLES,
             "unknown_principal_role",
         )
         need(principal.role == CUSTODIAN, "custodian_required")
-        ref(principal.actor_id, "unknown_principal_role")
+        return ref(principal.actor_id, "unknown_principal_role")
+
+    def bind_custodian(
+        self, tenant: str, workflow_ref: str, actor_id: str, *, principal: Principal
+    ) -> frozenset[str]:
+        """Bind another custodian; only a currently bound custodian may do so."""
+        by = self._bound_actor(principal)
+        target = ref(actor_id, "custodian_actor")
+        with self.lock(tenant, workflow_ref):
+            number, bound = self.custodians(tenant, workflow_ref)
+            need(number > 0 and by in bound, "custodian_not_bound")
+            if target in bound:
+                return bound
+            return self._bind(tenant, workflow_ref, "bind", target, by)[1]
+
+    def unbind_custodian(
+        self, tenant: str, workflow_ref: str, actor_id: str, *, principal: Principal
+    ) -> frozenset[str]:
+        """Remove a custodian binding; the last custodian cannot be removed."""
+        by = self._bound_actor(principal)
+        target = ref(actor_id, "custodian_actor")
+        with self.lock(tenant, workflow_ref):
+            number, bound = self.custodians(tenant, workflow_ref)
+            need(number > 0 and by in bound, "custodian_not_bound")
+            need(target in bound, "custodian_actor")
+            need(len(bound) > 1, "last_custodian")
+            return self._bind(tenant, workflow_ref, "unbind", target, by)[1]
+
+    # ------------------------------------------------------------------ revisions
+
+    def commit(self, raw: Mapping[str, Any], *, principal: Principal) -> PilotSettings:
+        actor = self._bound_actor(principal)
         settings = parse_settings(raw)
-        folder = self._folder(settings.tenant, settings.workflow_ref)
-        if settings.settings_revision > 1:
-            previous = self.revision(
-                settings.tenant, settings.workflow_ref, settings.settings_revision - 1
+        tenant, workflow_ref = settings.tenant, settings.workflow_ref
+        folder = self._folder(tenant, workflow_ref)
+        name = f"rev-{settings.settings_revision:08d}"
+        with self.lock(tenant, workflow_ref):
+            number, bound = self.custodians(tenant, workflow_ref)
+            if number == 0:
+                # Trust on first use, and only for a store that has never been committed to.
+                need(not _numbered(folder, "rev-"), "custodian_binding_missing")
+                self._ensure_identity(tenant, workflow_ref)
+                number, bound = self._bind(tenant, workflow_ref, "first_use", actor, actor)
+            need(actor in bound, "custodian_not_bound")
+            if (folder / f"{name}.json").exists():
+                existing = self.revision(tenant, workflow_ref, settings.settings_revision)
+                assert existing is not None
+                need(existing.body == settings.body, "settings_conflict")
+                return existing
+            if settings.settings_revision > 1:
+                previous = self.revision(tenant, workflow_ref, settings.settings_revision - 1)
+                need(previous is not None, "settings_revision_gap")
+            write_pinned(
+                folder,
+                name,
+                {
+                    "schema": REVISION_SCHEMA,
+                    "settings": settings.body,
+                    "committed_by": {
+                        "actor_id": actor,
+                        "role": CUSTODIAN,
+                        "basis": CUSTODIAN_BASIS,
+                        "binding_revision": number,
+                    },
+                },
+                "settings_conflict",
             )
-            need(previous is not None, "settings_revision_gap")
-        write_pinned(
-            folder, f"rev-{settings.settings_revision:08d}", settings.body, "settings_conflict"
-        )
         return settings
 
-    def revision(self, tenant: str, workflow_ref: str, revision: int) -> PilotSettings | None:
+    def _revision_record(self, tenant: str, workflow_ref: str, revision: int) -> Any:
         folder = self._folder(tenant, workflow_ref)
         name = f"rev-{count(revision, 'settings_revision', 1):08d}"
         if not (folder / f"{name}.json").exists():
             return None
-        settings = parse_settings(read_pinned(folder, name, "settings_tampered"))
+        record = read_pinned(folder, name, "settings_tampered")
+        need(
+            isinstance(record, dict)
+            and set(record) == {"schema", "settings", "committed_by"}
+            and record["schema"] == REVISION_SCHEMA
+            and isinstance(record["committed_by"], dict)
+            and type(record["committed_by"].get("actor_id")) is str,
+            "settings_tampered",
+        )
+        return record
+
+    def revision(self, tenant: str, workflow_ref: str, revision: int) -> PilotSettings | None:
+        record = self._revision_record(tenant, workflow_ref, revision)
+        if record is None:
+            return None
+        settings = parse_settings(record["settings"])
         need(
             settings.tenant == tenant
             and settings.workflow_ref == workflow_ref
-            and settings.settings_revision == revision,
+            and settings.settings_revision == revision
+            and settings.body == record["settings"],
             "settings_tampered",
         )
         return settings
 
+    def committed_by(self, tenant: str, workflow_ref: str, revision: int) -> dict[str, Any]:
+        """The audit entry of one revision: the committing actor ID and binding revision."""
+        record = self._revision_record(tenant, workflow_ref, revision)
+        need(record is not None, "settings_missing")
+        return dict(record["committed_by"])
+
     def current(self, tenant: str, workflow_ref: str) -> PilotSettings | None:
         folder = self._folder(tenant, workflow_ref)
-        if not folder.is_dir():
-            return None
-        revisions = sorted(
-            int(p.stem[4:]) for p in folder.glob("rev-*.json") if re.fullmatch(r"\d{8}", p.stem[4:])
-        )
+        revisions = _numbered(folder, "rev-")
         if not revisions:
             return None
         need(revisions == list(range(1, len(revisions) + 1)), "settings_revision_gap")
@@ -511,14 +859,23 @@ class SourceCapture:
     captured_at: str
     rows: tuple[Mapping[str, Any], ...]
 
-    def fingerprint(self) -> str:
+    def fingerprint(self, columns: Iterable[str]) -> str:
+        """Digest of the binding and of the mapped columns only.
+
+        An unmapped column (for example a protected one that is present in the source) never
+        reaches the digest, so changing it cannot be detected through a snapshot or receipt.
+        """
+        wanted = sorted(set(columns))
         return digest(
             [
                 self.tenant,
                 self.source_ref,
                 self.source_revision,
                 self.captured_at,
-                [dict(row) for row in self.rows],
+                [
+                    {c: row[c] for c in wanted if c in row} if isinstance(row, Mapping) else None
+                    for row in self.rows
+                ],
             ]
         )
 
@@ -529,6 +886,15 @@ class SourcePair:
 
     def by_ref(self) -> dict[str, SourceCapture]:
         return {c.source_ref: c for c in self.captures}
+
+
+def mapped_columns(settings: PilotSettings, role: str) -> tuple[str, ...]:
+    """Every source column the settings map for one source role (allowlisted columns only)."""
+    if role == DECISION:
+        return tuple(
+            sorted({*settings.decision_mapping.values(), *settings.feature_columns.values()})
+        )
+    return tuple(sorted(settings.correction_mapping.values()))
 
 
 def map_row(row: Mapping[str, Any], columns: Mapping[str, str]) -> dict[str, Any]:

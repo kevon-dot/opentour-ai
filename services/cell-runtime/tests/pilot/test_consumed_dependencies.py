@@ -18,6 +18,7 @@ from typing import Any
 import candidate_snapshot_fixture as fx
 import pytest
 from opentour_cell.pilot.consumed_dependencies import (
+    lineage_refs,
     propagate_retractions,
     to_lineage_manifest,
     to_recompute_families,
@@ -196,7 +197,7 @@ def test_resealing_after_a_restart_gives_the_same_redacted_digest_and_actual_pat
     assert "REFUND" not in text and fx.PROTECTED_SENTINEL not in text and "amt " not in text
 
     results = []
-    for seed in ("0", "7"):
+    for seed in ("0", "1", "42"):
         done = subprocess.run(
             [sys.executable, "-c", _RESEAL, str(tmp_path), str(HERE), digest],
             capture_output=True,
@@ -205,7 +206,7 @@ def test_resealing_after_a_restart_gives_the_same_redacted_digest_and_actual_pat
             env={**os.environ, "PYTHONHASHSEED": seed},
         )
         results.append(json.loads(done.stdout))
-    assert results == [{"digest": sealed["seal_digest"], "paths": paths}] * 2
+    assert results == [{"digest": sealed["seal_digest"], "paths": paths}] * 3
 
     # A later dataset record cannot change a sealed snapshot's manifest.
     with pytest.raises(ProfileError, match="snapshot_sealed"):
@@ -294,7 +295,11 @@ def test_reopen_or_withdrawal_retracts_future_training_and_stales_proposals_only
         ],
         key=lambda r: r["example_ref"],
     )
-    assert current["stale_proposals"] == ["generated-prop-1", "generated-prop-2"]
+    # Proposal references are consumer-declared, so they surface labelled as such.
+    assert current["stale_proposals"] == [
+        {"proposal_ref": "generated-prop-1", "basis": "caller_asserted"},
+        {"proposal_ref": "generated-prop-2", "basis": "caller_asserted"},
+    ]
     assert current["eligible"] == [refs["K3"]]
     assert current["counters"]["live"]["verified"] == 1  # the visible current denominator moved
     # The as-of report the reviewer inspected is unchanged.
@@ -309,7 +314,7 @@ def test_reopen_or_withdrawal_retracts_future_training_and_stales_proposals_only
         "independent_root_families": 1,
         "verified_observed": 1,
     }
-    assert parents["stale_proposals"] == ["generated-prop-1", "generated-prop-2"]
+    assert parents["stale_proposals"] == current["stale_proposals"]
 
     from opentour_cell.pilot.training_variants import VariantLedger
 
@@ -333,7 +338,7 @@ def test_synthetic_children_cannot_change_live_counts(tmp_path: Path) -> None:
     parents = w.recorder.training_parents(fx.TENANT_A, fx.WF, digest, fx.reader(source))
     children = [{"child_ref": f"var-{n}", "root_ref": refs[0]} for n in range(100)]
     children.append({"child_ref": "var-orphan", "root_ref": "ex-not-a-parent"})
-    union = union_synthetic(parents, children)
+    union = union_synthetic(w.recorder, fx.TENANT_A, fx.WF, parents, children)
     assert (
         union["live_counts"]
         == parents["counts"]
@@ -472,27 +477,23 @@ def test_the_ope544_reader_resolves_a_claim_from_a_projected_record(tmp_path: Pa
         w,
         receipt["snapshot_digest"],
         _example(w, receipt, "T1")["example_ref"],
+        consumer_kind="simple_rule",
         paths=["features/amount", "outcome/label"],
     )
-    manifest = to_lineage_manifest(
-        w.recorder,
-        fx.TENANT_A,
-        fx.WF,
-        stored["record_ref"],
-        rule_kind="simple_rule",
-        result_ref="generated-result-1",
-        candidate_ref="generated-cand-1",
-        claim_refs=["generated-claim-1"],
-    )
     store = cl.ManifestStore(tmp_path / "lineage")
-    store.put(manifest)
+    manifest = to_lineage_manifest(
+        w.recorder, fx.TENANT_A, fx.WF, stored["record_ref"], store=store
+    )
+    refs = lineage_refs(stored)
+    assert manifest["claim_refs"] == refs["claim_refs"]
+    assert manifest["rule_kind"] == "simple_rule"
     owner = cl.Actor(fx.TENANT_A, "generated-owner-1", cl.OWNER)
     grant = cl.GrantState(
         fx.TENANT_A, fx.WF, 3, False, "2099-01-01T00:00:00Z", {"generated-owner-1": cl.OWNER}
     )
     reader = cl.ConsumptionReader(store, lambda tenant, wf: grant)
     resolved = reader.resolve_claim(
-        cl.Request(owner, fx.WF, 3, "2026-01-02T00:00:00Z"), "generated-claim-1"
+        cl.Request(owner, fx.WF, 3, "2026-01-02T00:00:00Z"), refs["claim_refs"][0]
     )
     assert isinstance(resolved, cl.Resolution) and resolved.status == "resolved"
     assert [link.path for link in resolved.inputs] == ["features/amount"]
@@ -501,21 +502,12 @@ def test_the_ope544_reader_resolves_a_claim_from_a_projected_record(tmp_path: Pa
         w,
         receipt["snapshot_digest"],
         _example(w, receipt, "T2")["example_ref"],
+        consumer_kind="simple_rule",
         paths=["features/amount", "features/unlisted"],
     )
-    doubtful = to_lineage_manifest(
-        w.recorder,
-        fx.TENANT_A,
-        fx.WF,
-        held["record_ref"],
-        rule_kind="simple_rule",
-        result_ref="generated-result-2",
-        candidate_ref="generated-cand-2",
-        claim_refs=["generated-claim-2"],
-    )
-    store.put(doubtful)
+    to_lineage_manifest(w.recorder, fx.TENANT_A, fx.WF, held["record_ref"], store=store)
     again = reader.resolve_claim(
-        cl.Request(owner, fx.WF, 3, "2026-01-02T00:00:00Z"), "generated-claim-2"
+        cl.Request(owner, fx.WF, 3, "2026-01-02T00:00:00Z"), lineage_refs(held)["claim_refs"][0]
     )
     assert isinstance(again, cl.Resolution) and again.status == "hold"
 
@@ -553,7 +545,8 @@ def test_the_ope516_seed_projection_rereads_values_and_refuses_a_changed_label(
     parents = w.recorder.training_parents(fx.TENANT_A, fx.WF, digest, fx.reader(source))
     sealed = w.recorder.seal(fx.TENANT_A, fx.WF, digest)
     settings = parse_settings(fx.settings())
-    roots, seal = to_seed_roots(parents, sealed, settings, source)
+    key = w.producer.label_key(fx.TENANT_A, fx.WF)
+    roots, seal = to_seed_roots(parents, sealed, settings, source, label_key=key)
     assert [r.target for r in roots] == ["REFUND", "REFUND"]
     assert {r.split for r in roots} == {"training"} and all(r.target_verified for r in roots)
     assert "customer_age" not in roots[0].fields
@@ -567,7 +560,7 @@ def test_the_ope516_seed_projection_rereads_values_and_refuses_a_changed_label(
         ],
     )
     with pytest.raises(ProfileError, match="seed_label_changed"):
-        to_seed_roots(parents, sealed, settings, swapped)
+        to_seed_roots(parents, sealed, settings, swapped, label_key=key)
 
 
 def test_later_artifacts_attach_as_versioned_caller_asserted_relations(tmp_path: Path) -> None:
@@ -592,3 +585,281 @@ def test_later_artifacts_attach_as_versioned_caller_asserted_relations(tmp_path:
         w.recorder.attach_artifact(fx.TENANT_A, fx.WF, stored["record_ref"], "outcome", "x-1")
     with pytest.raises(ProfileError, match="dependency_unknown"):
         w.recorder.attach_artifact(fx.TENANT_A, fx.WF, "dep-missing", "proposal", "p-1")
+
+
+# --------------------------------------------------------------------------- review findings
+# Each test below reproduces one review finding on 2779f27 and fails there.
+
+
+@pytest.mark.parametrize(
+    "caller",
+    [
+        {"claim_refs": ["claim-release-approved"], "result_ref": "forged-result"},
+        {"result_ref": "forged-result"},
+        {"candidate_ref": "forged-cand"},
+        {"proposal_refs": ["generated-prop-1"]},
+        {"rule_kind": "simple_rule"},
+    ],
+)
+def test_f3_a_caller_asserted_ref_is_never_projected_for_ope544(
+    tmp_path: Path, caller: dict[str, Any]
+) -> None:
+    from opentour_cell.pilot import consumption_lineage as cl
+
+    w = _setup(tmp_path)
+    receipt, _ = _two_verified(w)
+    stored = _record(
+        w,
+        receipt["snapshot_digest"],
+        _example(w, receipt, "T1")["example_ref"],
+        consumer_kind="simple_rule",
+        paths=["features/amount"],
+    )
+    store = cl.ManifestStore(tmp_path / "lineage")
+    with pytest.raises(ProfileError, match="lineage_ref_caller_asserted"):
+        to_lineage_manifest(
+            w.recorder, fx.TENANT_A, fx.WF, stored["record_ref"], store=store, **caller
+        )
+    assert list((tmp_path / "lineage").rglob("*")) == []
+    owner = cl.Actor(fx.TENANT_A, "generated-owner-1", cl.OWNER)
+    grant = cl.GrantState(
+        fx.TENANT_A, fx.WF, 3, False, "2099-01-01T00:00:00Z", {"generated-owner-1": cl.OWNER}
+    )
+    reader = cl.ConsumptionReader(store, lambda tenant, wf: grant)
+    found = reader.resolve_claim(
+        cl.Request(owner, fx.WF, 3, "2026-01-02T00:00:00Z"), "claim-release-approved"
+    )
+    assert found.status == "unknown"
+
+
+def test_f3_only_worker_resolved_relations_reach_the_ope544_manifest(tmp_path: Path) -> None:
+    w = _setup(tmp_path)
+    receipt, _ = _two_verified(w)
+    stored = _record(
+        w,
+        receipt["snapshot_digest"],
+        _example(w, receipt, "T1")["example_ref"],
+        purpose="evaluation",
+        consumer_kind="simple_rule",
+        artifacts={"proposal_ref": "generated-prop-1", "frozen_result_ref": "generated-res-1"},
+    )
+    w.clock.set(fx.at(12, 30))
+    w.recorder.attach_artifact(fx.TENANT_A, fx.WF, stored["record_ref"], "proposal", "forged-p")
+    w.recorder.attach_outcome(fx.TENANT_A, fx.WF, stored["record_ref"], receipt["snapshot_digest"])
+    manifest = to_lineage_manifest(w.recorder, fx.TENANT_A, fx.WF, stored["record_ref"])
+    assert [r["kind"] for r in manifest["later_relationships"]] == ["outcome"]
+    text = json.dumps(manifest)
+    for value in ("forged-p", "generated-prop-1", "generated-res-1"):
+        assert value not in text
+    refs = lineage_refs(stored)
+    assert (manifest["result_ref"], manifest["candidate_ref"], manifest["claim_refs"]) == (
+        refs["result_ref"],
+        refs["candidate_ref"],
+        refs["claim_refs"],
+    )
+    # A dataset consumer is not an OPE-544 rule kind, so it is not projected at all.
+    dataset = _record(w, receipt["snapshot_digest"], _example(w, receipt, "T2")["example_ref"])
+    with pytest.raises(ProfileError, match="lineage_rule_kind_unavailable"):
+        to_lineage_manifest(w.recorder, fx.TENANT_A, fx.WF, dataset["record_ref"])
+
+
+def test_f3_union_synthetic_refuses_a_forged_parents_mapping(tmp_path: Path) -> None:
+    from opentour_cell.pilot.operating_point import digest
+
+    w = _setup(tmp_path)
+    receipt, source = _two_verified(w)
+    refs = [_example(w, receipt, t)["example_ref"] for t in ("T1", "T2")]
+    for ref in refs:
+        _record(w, receipt["snapshot_digest"], ref)
+    parents = w.recorder.training_parents(
+        fx.TENANT_A, fx.WF, receipt["snapshot_digest"], fx.reader(source)
+    )
+    children = [{"child_ref": "var-1", "root_ref": refs[0]}]
+    forged = json.loads(json.dumps(parents))
+    forged["counts"]["verified_observed"] = 999
+    with pytest.raises(ProfileError, match="parents_manifest_tampered"):
+        union_synthetic(w.recorder, fx.TENANT_A, fx.WF, forged, children)
+    body = {k: v for k, v in forged.items() if k != "manifest_digest"}
+    forged["manifest_digest"] = digest(body)
+    with pytest.raises(ProfileError, match="parents_manifest_unknown"):
+        union_synthetic(w.recorder, fx.TENANT_A, fx.WF, forged, children)
+    union = union_synthetic(w.recorder, fx.TENANT_A, fx.WF, parents, children)
+    assert union["live_counts"]["verified_observed"] == 2
+
+
+def test_f3_stale_proposal_refs_are_labelled_caller_asserted(tmp_path: Path) -> None:
+    w = _setup(tmp_path)
+    receipt, source = _two_verified(w)
+    t1 = _example(w, receipt, "T1")["example_ref"]
+    _record(w, receipt["snapshot_digest"], t1, artifacts={"proposal_ref": "generated-prop-1"})
+    w.clock.set(fx.at(13))
+    reopened = fx.pair(
+        live=[fx.dec("T1", fx.at(10)), fx.dec("T2", fx.at(10, 1))],
+        outcomes=[
+            fx.cor("c-1", "T1", fx.at(10, 5)),
+            fx.cor("c-1b", "T1", fx.at(10, 30), ver=2, status="reopened", value=None),
+            fx.cor("c-2", "T2", fx.at(10, 6)),
+        ],
+        captured=fx.at(13),
+    )
+    current = w.producer.current(
+        fx.TENANT_A,
+        fx.WF,
+        receipt["snapshot_digest"],
+        fx.reader(reopened),
+        w.recorder.proposals(fx.TENANT_A, fx.WF, receipt["snapshot_digest"]),
+    )
+    assert current["stale_proposals"] == [
+        {"proposal_ref": "generated-prop-1", "basis": "caller_asserted"}
+    ]
+
+
+def test_f5_a_later_evaluation_record_never_wedges_training_parents(tmp_path: Path) -> None:
+    w = _setup(tmp_path)
+    receipt, source = _two_verified(w)
+    digest = receipt["snapshot_digest"]
+    t1, t2 = (_example(w, receipt, t)["example_ref"] for t in ("T1", "T2"))
+    _record(w, digest, t1)
+    _record(w, digest, t2)
+    first = w.recorder.training_parents(fx.TENANT_A, fx.WF, digest, fx.reader(source))
+    _record(
+        w,
+        digest,
+        t1,
+        purpose="evaluation",
+        consumer_kind="comparator",
+        consumer_ref="generated-cmp",
+        paths=["features/amount", "features/unlisted"],
+    )
+    again = w.recorder.training_parents(fx.TENANT_A, fx.WF, digest, fx.reader(source))
+    assert again["seal_digest"] == first["seal_digest"]
+    assert [p["example_ref"] for p in again["parents"]] == [
+        p["example_ref"] for p in first["parents"]
+    ]
+
+    # A retraction still propagates after the later evaluation record.
+    w.clock.set(fx.at(13))
+    reopened = fx.pair(
+        live=[fx.dec("T1", fx.at(10)), fx.dec("T2", fx.at(10, 1))],
+        outcomes=[
+            fx.cor("c-1", "T1", fx.at(10, 5)),
+            fx.cor("c-1b", "T1", fx.at(10, 30), ver=2, status="reopened", value=None),
+            fx.cor("c-2", "T2", fx.at(10, 6)),
+        ],
+        captured=fx.at(13),
+    )
+    later = w.recorder.training_parents(fx.TENANT_A, fx.WF, digest, fx.reader(reopened))
+    assert [r["example_ref"] for r in later["retracted"]] == [t1]
+    from opentour_cell.pilot.training_variants import VariantLedger
+
+    ledger = VariantLedger(tmp_path / "variants.sqlite")
+    snapshot = w.producer.snapshot(fx.TENANT_A, fx.WF, digest)
+    assert set(propagate_retractions(ledger, later, snapshot)) == {t1}
+    # A dataset record after sealing is still refused.
+    with pytest.raises(ProfileError, match="snapshot_sealed"):
+        _record(w, digest, t1, consumer_ref="generated-dataset-2")
+
+
+def test_f2_the_recorder_refuses_a_producer_bound_to_another_settings_store(
+    tmp_path: Path,
+) -> None:
+    import shutil
+
+    from opentour_cell.pilot.candidate_snapshot import SnapshotProducer
+    from opentour_cell.pilot.consumed_dependencies import DependencyRecorder
+    from opentour_cell.pilot.learning_profile import SettingsBatchStore
+
+    w = _setup(tmp_path)
+    receipt, source = _two_verified(w)
+    t1 = _example(w, receipt, "T1")["example_ref"]
+    _record(w, receipt["snapshot_digest"], t1)
+    # A copied store with its own snapshots folder, writing into the shared dependencies.
+    shutil.copytree(tmp_path / "settings", tmp_path / "rogue-settings")
+    rogue_store = SettingsBatchStore(tmp_path / "rogue-settings")
+    rogue_producer = SnapshotProducer(tmp_path / "rogue-snapshots", rogue_store, clock=w.clock)
+    rogue_receipt = rogue_producer.trigger(fx.TENANT_A, fx.WF, "trigger-1", fx.reader(source))
+    assert rogue_receipt["state"] == "committed"
+    rogue = DependencyRecorder(tmp_path / "dependencies", rogue_producer, clock=w.clock)
+    with pytest.raises(ProfileError, match="settings_store_mismatch"):
+        rogue.record(
+            fx.TENANT_A,
+            fx.WF,
+            rogue_receipt["snapshot_digest"],
+            t1,
+            purpose="dataset_preparation",
+            consumer_kind="dataset",
+            consumer_ref="generated-dataset-9",
+            consumer_revision="r1",
+            rule_revision="generated-rule-1",
+            paths=["features/amount"],
+        )
+    with pytest.raises(ProfileError, match="settings_store_mismatch"):
+        rogue.training_parents(
+            fx.TENANT_A, fx.WF, rogue_receipt["snapshot_digest"], fx.reader(source)
+        )
+    assert len(w.recorder.records(fx.TENANT_A, fx.WF)) == 1
+
+
+def test_r33_a_training_parent_missing_from_the_source_pair_is_refused(tmp_path: Path) -> None:
+    w = _setup(tmp_path)
+    receipt, source = _two_verified(w)
+    digest = receipt["snapshot_digest"]
+    for ticket in ("T1", "T2"):
+        _record(w, digest, _example(w, receipt, ticket)["example_ref"])
+    parents = w.recorder.training_parents(fx.TENANT_A, fx.WF, digest, fx.reader(source))
+    sealed = w.recorder.seal(fx.TENANT_A, fx.WF, digest)
+    without_t2 = fx.pair(
+        live=[fx.dec("T1", fx.at(10))],
+        outcomes=[fx.cor("c-1", "T1", fx.at(10, 5)), fx.cor("c-2", "T2", fx.at(10, 6))],
+    )
+    with pytest.raises(ProfileError, match="seed_parent_missing"):
+        to_seed_roots(
+            parents,
+            sealed,
+            parse_settings(fx.settings()),
+            without_t2,
+            label_key=w.producer.label_key(fx.TENANT_A, fx.WF),
+        )
+
+
+def test_f2_a_rewritten_record_naming_another_settings_store_is_refused(tmp_path: Path) -> None:
+    from opentour_cell.pilot.learning_profile import write_pinned
+    from opentour_cell.pilot.operating_point import digest as digest_of
+
+    w = _setup(tmp_path)
+    receipt, _ = _two_verified(w)
+    stored = _record(w, receipt["snapshot_digest"], _example(w, receipt, "T1")["example_ref"])
+    body = dict(stored["body"], settings_store="0" * 64)
+    ref = "dep-" + digest_of(body)[:32]
+    write_pinned(
+        tmp_path / "dependencies" / fx.TENANT_A / fx.WF / "records",
+        ref,
+        {"record_ref": ref, "body": body, "recorded_at": stored["recorded_at"]},
+        "x",
+    )
+    with pytest.raises(ProfileError, match="settings_store_mismatch"):
+        w.recorder.records(fx.TENANT_A, fx.WF)
+
+
+def test_f3_a_rewritten_stored_parents_manifest_is_refused(tmp_path: Path) -> None:
+    from opentour_cell.pilot.learning_profile import _pin
+    from opentour_cell.pilot.operating_point import canonical
+
+    w = _setup(tmp_path)
+    receipt, source = _two_verified(w)
+    for ticket in ("T1", "T2"):
+        _record(w, receipt["snapshot_digest"], _example(w, receipt, ticket)["example_ref"])
+    parents = w.recorder.training_parents(
+        fx.TENANT_A, fx.WF, receipt["snapshot_digest"], fx.reader(source)
+    )
+    folder = tmp_path / "dependencies" / fx.TENANT_A / fx.WF / "parents"
+    (path,) = folder.glob("parents-*.json")
+    forged = json.loads(path.read_text())
+    forged["counts"]["verified_observed"] = 999
+    body = canonical(forged)
+    path.write_text(body)
+    path.with_suffix(".pin").write_text(_pin(body))
+    with pytest.raises(ProfileError, match="parents_manifest_tampered"):
+        union_synthetic(w.recorder, fx.TENANT_A, fx.WF, forged, [])
+    with pytest.raises(ProfileError, match="parents_manifest_tampered"):
+        union_synthetic(w.recorder, fx.TENANT_A, fx.WF, parents, [])

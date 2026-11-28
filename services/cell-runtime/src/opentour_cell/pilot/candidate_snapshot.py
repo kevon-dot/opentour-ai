@@ -24,14 +24,27 @@ only from worker-held records. A model answer, ticket close, thumbs-up or repeat
 verifies a correction. The trigger reference is the only caller-supplied value; it is labelled
 ``caller_asserted`` and supports no claim.
 
+Disclosure: the receipt carries only the counters the settings allow, and only the reason
+codes that break those counters down (``REASON_COUNTER``). Any non-zero cell below the
+settings' ``min_reportable_cell`` is reported as ``"<k"``, never as a number. Live totals count
+distinct cases, not decisions.
+
+Store binding: the producer pins the settings store's identity into its snapshots folder on
+first use and into every snapshot and receipt; a snapshot made against, or read through, any
+other store is refused with ``settings_store_mismatch``.
+
 Evidence tier: ``digest_self_consistent_only``. The snapshot digest agrees with its own bytes; it
-is not keyed or signed (OPE-566 owns custody). Simulated and NOT proven: generated sentinel
-fixtures only; no provider, installed Zap, Slack or customer evidence.
+is not keyed or signed (OPE-566 owns custody). Label digests are HMACs under a key in the
+producer's private folder (``locally_keyed``), so a short label vocabulary cannot be enumerated
+from them; that is not a signature. Simulated and NOT proven: generated sentinel fixtures only;
+no provider, installed Zap, Slack or customer evidence.
 """
 
 from __future__ import annotations
 
 import copy
+import hashlib
+import hmac
 import re
 from collections import Counter, defaultdict
 from collections.abc import Callable, Iterable, Mapping
@@ -43,11 +56,12 @@ from typing import Any
 from opentour_cell.pilot import source_intake
 from opentour_cell.pilot.learning_profile import (
     CORRECTION,
+    COUNTERS,
     DECISION,
     EVIDENCE_TIER,
+    LABEL_DIGEST_TIER,
     NON_VERIFYING_PROVENANCE,
     OBSERVED_DECISION,
-    ROW_STATES,
     STARTER_ORIGINS,
     STATUSES,
     VERIFYING_PROVENANCE,
@@ -59,14 +73,17 @@ from opentour_cell.pilot.learning_profile import (
     SourcePair,
     count,
     format_time,
+    local_key,
     map_row,
+    mapped_columns,
     need,
     parse_time,
+    pin_identity,
     read_pinned,
     ref,
     write_pinned,
 )
-from opentour_cell.pilot.operating_point import digest
+from opentour_cell.pilot.operating_point import canonical, digest
 
 SNAPSHOT_SCHEMA = "opentour.pilot.candidate-snapshot.v1"
 RECEIPT_SCHEMA = "opentour.pilot.candidate-snapshot-receipt.v1"
@@ -127,15 +144,46 @@ HOLD_REASONS = frozenset(
         "no_committed_snapshot",
         "trigger_conflict",
         "snapshot_commit_conflict",
+        "settings_store_mismatch",
+        "label_key_missing",
     }
 )
 REASONS = QUARANTINE_REASONS | EXCLUSION_REASONS | STATE_REASONS | HOLD_REASONS
+# The receipt counter each data reason code breaks down. A reason code is disclosed only when
+# its counter is one the settings allow. Row-level exclusions count zero, like quarantine.
+_ELIGIBILITY_REASONS = frozenset(
+    {
+        "starter_origin",
+        "protected_partition",
+        "training_not_permitted",
+        "group_crosses_split",
+        "development_label_after_split",
+        "decision_absent",
+    }
+)
+_DISPUTED_REASONS = frozenset(
+    {
+        "source_disputed",
+        "contradictory_decision",
+        "decision_case_changed",
+        "correction_id_conflict",
+        "contradictory_corrections",
+    }
+)
+REASON_COUNTER: dict[str, str] = {
+    **{r: "quarantined" for r in QUARANTINE_REASONS | EXCLUSION_REASONS},
+    **{r: "disputed" for r in _DISPUTED_REASONS},
+    **{r: "eligible" for r in _ELIGIBILITY_REASONS},
+    **{r: "pending" for r in STATE_REASONS - _DISPUTED_REASONS - _ELIGIBILITY_REASONS},
+}
+SUPPRESSED = "<k"
 RECEIPT_FIELDS = (
     "schema",
     "state",
     "reason",
     "snapshot_digest",
     "digest_tier",
+    "settings_store",
     "policy_revision",
     "counters",
     "reason_codes",
@@ -161,8 +209,11 @@ def example_ref(tenant: str, workflow_ref: str, source_ref: str, decision_id: st
     )
 
 
-def label_digest(tenant: str, example: str, value: str) -> str:
-    return digest(["opentour.pilot.label.v1", tenant, example, value])
+def label_digest(key: bytes, tenant: str, example: str, value: str) -> str:
+    """HMAC-SHA256 under the producer's private key (``locally_keyed``, not a signature)."""
+    need(type(key) is bytes and len(key) == 32, "label_key_missing")
+    message = canonical(["opentour.pilot.label.v2", tenant, example, value]).encode()
+    return hmac.new(key, message, hashlib.sha256).hexdigest()
 
 
 @dataclass(frozen=True)
@@ -230,12 +281,14 @@ class _Correction:
         return digest([self.value, self.status, self.provenance, self.verifier])
 
 
-def _row_state(settings_map: Mapping[str, str], mapped: Mapping[str, Any]) -> bool:
-    if "row_state" not in settings_map:
-        return False
+def _row_state(settings: PilotSettings, mapped: Mapping[str, Any]) -> bool:
+    """True when the row is disputed. ``row_state`` is always mapped; anything outside the
+    settings' closed admitted and disputed sets is quarantined."""
     value = mapped["row_state"]
-    need(type(value) is str and value in ROW_STATES, "unknown_row_state")
-    return bool(value == "disputed")
+    # Exactly ``str``: a subclass could answer membership in one set through ``__eq__``.
+    need(type(value) is str, "unknown_row_state")
+    need(value in settings.admitted_states | settings.disputed_states, "unknown_row_state")
+    return value in settings.disputed_states
 
 
 def _text(value: object, reason: str, limit: int = 128) -> str:
@@ -248,7 +301,7 @@ def _decision(settings: PilotSettings, source: Source, cap: SourceCapture, row: 
     bad = "malformed_decision"
     need(isinstance(row, Mapping), bad)
     mapped = map_row(row, settings.decision_mapping)
-    disputed = _row_state(settings.decision_mapping, mapped)
+    disputed = _row_state(settings, mapped)
     features: dict[str, str] = {}
     for name, column in settings.feature_columns.items():
         value = row.get(column)
@@ -281,7 +334,7 @@ def _correction(
     bad = "malformed_correction"
     need(isinstance(row, Mapping), bad)
     mapped = map_row(row, settings.correction_mapping)
-    disputed = _row_state(settings.correction_mapping, mapped)
+    disputed = _row_state(settings, mapped)
     status = mapped["status"]
     need(type(status) is str and status in STATUSES, "unknown_correction_status")
     provenance = mapped["provenance"]
@@ -312,6 +365,12 @@ def _correction(
     )
 
 
+def capture_digest(settings: PilotSettings, capture: SourceCapture) -> str:
+    """Fingerprint of one capture over the columns its source role maps, and nothing else."""
+    source = settings.source(capture.source_ref)
+    return capture.fingerprint(mapped_columns(settings, source.role) if source else ())
+
+
 def _check_captures(settings: PilotSettings, pair: SourcePair, as_of: datetime) -> None:
     captures = pair.by_ref()
     if len(captures) != len(pair.captures) or set(captures) != {
@@ -332,8 +391,14 @@ def _check_captures(settings: PilotSettings, pair: SourcePair, as_of: datetime) 
             raise SnapshotHold("source_stale")
 
 
-def reduce_pair(settings: PilotSettings, pair: SourcePair, as_of: datetime) -> dict[str, Any]:
-    """Pure reducer: the as-of snapshot body for one tenant and workflow (no I/O)."""
+def reduce_pair(
+    settings: PilotSettings, pair: SourcePair, as_of: datetime, *, label_key: bytes
+) -> dict[str, Any]:
+    """Pure reducer: the as-of snapshot body for one tenant and workflow (no I/O).
+
+    ``label_key`` is the producer's private HMAC key for label digests.
+    """
+    need(type(label_key) is bytes and len(label_key) == 32, "label_key_missing")
     _check_captures(settings, pair, as_of)
     captures = pair.by_ref()
     quarantined: list[dict[str, Any]] = []
@@ -471,7 +536,7 @@ def reduce_pair(settings: PilotSettings, pair: SourcePair, as_of: datetime) -> d
                 "verifier": chosen.verifier,
                 "settings_revision": settings.settings_revision,
                 "outcome_time": format_time(chosen.time),
-                "label_digest": label_digest(settings.tenant, ex, chosen.value),
+                "label_digest": label_digest(label_key, settings.tenant, ex, chosen.value),
             }
             record["wrong"] = record["automatic"] and decision.prediction != chosen.value
             if decision.source.origin == OBSERVED_DECISION:
@@ -585,11 +650,23 @@ def _assemble(
     quarantined: list[dict[str, Any]],
     exclusions: list[dict[str, Any]],
 ) -> dict[str, Any]:
+    def case_states(chosen: list[dict[str, Any]]) -> dict[str, str]:
+        # One state per distinct case: any disputed decision disputes it, else any pending one
+        # keeps it pending; only a case whose every decision is verified counts as verified.
+        by_case: dict[str, set[str]] = defaultdict(set)
+        for e in chosen:
+            by_case[e["case"]].add(e["state"])
+        return {
+            case: next(s for s in (DISPUTED, PENDING, VERIFIED) if s in states)
+            for case, states in by_case.items()
+        }
+
     def tally(origins: Iterable[str]) -> dict[str, int]:
         wanted = set(origins)
         chosen = [e for e in examples if e["origin"] in wanted]
-        states = Counter(e["state"] for e in chosen)
+        states = Counter(case_states(chosen).values())
         return {
+            "cases": sum(states.values()),
             "decisions": len(chosen),
             "verified": states[VERIFIED],
             "pending": states[PENDING],
@@ -597,8 +674,13 @@ def _assemble(
         }
 
     live = [e for e in examples if e["origin"] == OBSERVED_DECISION]
-    automatic = [e for e in live if e["state"] == VERIFIED and e["automatic"]]
-    wrong = [e for e in automatic if e["wrong"]]
+    # Recurrence over distinct cases: a case is wrong when any of its verified automatic
+    # decisions was wrong.
+    automatic = {e["case"] for e in live if e["state"] == VERIFIED and e["automatic"]}
+    wrong_cases = {
+        e["case"] for e in live if e["state"] == VERIFIED and e["automatic"] and e["wrong"]
+    }
+    wrong = [e for e in live if e["state"] == VERIFIED and e["automatic"] and e["wrong"]]
     reasons: Counter[str] = Counter(e["reason"] for e in examples if e["reason"])
     reasons.update(q["reason"] for q in quarantined)
     reasons.update(x["reason"] for x in exclusions)
@@ -624,7 +706,7 @@ def _assemble(
                 "role": s.role,
                 "origin": s.origin,
                 "source_revision": captures[s.source_ref].source_revision,
-                "capture_digest": captures[s.source_ref].fingerprint(),
+                "capture_digest": capture_digest(settings, captures[s.source_ref]),
             }
             for s in settings.sources
         ],
@@ -634,7 +716,7 @@ def _assemble(
         "counters": {
             "live": live_tally,
             "starter": tally(STARTER_ORIGINS),
-            "eligible": sum(1 for e in examples if e["eligible"]),
+            "eligible": len({e["case"] for e in examples if e["eligible"]}),
             "pending": live_tally["pending"],
             "disputed": live_tally["disputed"],
             "quarantined": len(quarantined),
@@ -642,7 +724,7 @@ def _assemble(
         },
         "metrics": {
             # Live observed evidence only: starter cases count zero toward recurrence.
-            "wrong_automatic_decisions": _ratio(len(wrong), len(automatic)),
+            "wrong_automatic_decisions": _ratio(len(wrong_cases), len(automatic)),
             "independent_incumbent_error_groups": len(
                 {e["group"] for e in wrong if e["partition"] == DEVELOPMENT}
             ),
@@ -653,11 +735,20 @@ def _assemble(
         },
         "reason_codes": dict(sorted(reasons.items())),
         "receipt_counters": list(settings.receipt_counters),
+        "min_reportable_cell": settings.min_reportable_cell,
         "evidence": {
             "tier": EVIDENCE_TIER,
+            "label_digest_tier": LABEL_DIGEST_TIER,
             "origins": sorted({e["origin"] for e in examples}),
         },
     }
+
+
+def _cell(value: object, k: int) -> int | str:
+    """A disclosed count: zero and counts of at least ``k`` as integers, others as ``"<k"``."""
+    need(type(value) is int and value >= 0, "receipt_unsafe")
+    assert type(value) is int
+    return SUPPRESSED if 0 < value < k else value
 
 
 def receipt(
@@ -665,25 +756,37 @@ def receipt(
 ) -> dict[str, Any]:
     """The opaque receipt: digest, policy revision, disclosed counters and reason codes only.
 
-    No tenant, case, decision, group, feature, prediction or label value can appear: counters
-    are integers and reason codes are drawn from the closed ``REASONS`` vocabulary.
+    No tenant, case, decision, group, feature, prediction or label value can appear. Only the
+    counters the settings allow are present, and only the reason codes that break one of them
+    down. Every non-zero cell below ``min_reportable_cell`` reads ``"<k"``.
     """
     need(state in {"committed", "rolled_back"}, "receipt_state")
     counters = snapshot["counters"]
+    allowed = list(snapshot["receipt_counters"])
+    k = snapshot["min_reportable_cell"]
+    need(type(k) is int and k >= 2, "receipt_unsafe")
     body: dict[str, Any] = {
         "schema": RECEIPT_SCHEMA,
         "state": state,
         "reason": reason,
         "snapshot_digest": digest(snapshot),
         "digest_tier": EVIDENCE_TIER,
+        "settings_store": snapshot["settings_store"],
         "policy_revision": snapshot["policy_revision"],
-        "counters": {name: counters[name] for name in snapshot["receipt_counters"]},
-        "reason_codes": dict(snapshot["reason_codes"]),
+        "counters": {name: _cell(counters[name], k) for name in allowed},
+        "reason_codes": {
+            code: _cell(n, k)
+            for code, n in snapshot["reason_codes"].items()
+            if REASON_COUNTER.get(code) in allowed
+        },
     }
     need(
-        all(type(v) is int for v in body["counters"].values())
+        set(body["counters"]) <= set(COUNTERS)
         and set(body["reason_codes"]) <= REASONS
-        and all(type(v) is int for v in body["reason_codes"].values()),
+        and all(
+            type(v) is int or v == SUPPRESSED
+            for v in [*body["counters"].values(), *body["reason_codes"].values()]
+        ),
         "receipt_unsafe",
     )
     return body
@@ -697,8 +800,10 @@ def held(reason: str) -> dict[str, Any]:
         "reason": reason,
         "snapshot_digest": None,
         "digest_tier": EVIDENCE_TIER,
+        "settings_store": None,
         "policy_revision": None,
         "counters": {},
+        # The hold state itself, not a data cell: it is never suppressed.
         "reason_codes": {reason: 1},
     }
 
@@ -709,7 +814,13 @@ PairReader = Callable[[PilotSettings], SourcePair]
 
 
 class SnapshotProducer:
-    """Commits as-of snapshots write-once; the clock is the worker's, never the caller's."""
+    """Commits as-of snapshots write-once; the clock is the worker's, never the caller's.
+
+    On first use the producer pins the settings store's identity into its snapshots folder.
+    Every later trigger, snapshot read and current-eligibility read checks it: a snapshot made
+    against, or read through, another store (a copy, a restore, a second store sharing this
+    snapshots folder) is refused with ``settings_store_mismatch``.
+    """
 
     def __init__(
         self,
@@ -722,22 +833,54 @@ class SnapshotProducer:
         self.settings = settings
         self.clock = clock
 
-    def _folder(self, tenant: str, workflow_ref: str, kind: str) -> Path:
+    def _base(self, tenant: str, workflow_ref: str) -> Path:
         return (
-            self.directory
-            / ref(tenant, "snapshot_tenant")
-            / ref(workflow_ref, "snapshot_workflow")
-            / kind
+            self.directory / ref(tenant, "snapshot_tenant") / ref(workflow_ref, "snapshot_workflow")
         )
+
+    def _folder(self, tenant: str, workflow_ref: str, kind: str) -> Path:
+        return self._base(tenant, workflow_ref) / kind
 
     def _now(self) -> datetime:
         return self.clock().astimezone(UTC).replace(microsecond=0)
 
-    def snapshots(self, tenant: str, workflow_ref: str) -> list[dict[str, Any]]:
-        """Every committed snapshot in sequence order, each verified against its pin."""
+    def _names(self, tenant: str, workflow_ref: str) -> list[str]:
         folder = self._folder(tenant, workflow_ref, "snapshots")
+        return sorted(p.stem for p in folder.glob("snap-*.json")) if folder.is_dir() else []
+
+    def store_identity(self, tenant: str, workflow_ref: str, *, create: bool = False) -> str:
+        """The pinned settings-store identity; refuses ``settings_store_mismatch`` otherwise.
+
+        The pin is created only on first use, before any snapshot exists.
+        """
+        identity = self.settings.identity(tenant, workflow_ref)
+        need(identity is not None, "settings_store_mismatch")
+        assert identity is not None
+        pin_identity(
+            self._base(tenant, workflow_ref),
+            identity,
+            create=create and not self._names(tenant, workflow_ref),
+        )
+        return identity
+
+    def label_key(self, tenant: str, workflow_ref: str, *, create: bool = False) -> bytes:
+        """The private HMAC key for label digests. Created only before any snapshot exists;
+        a key missing after that is refused (``label_key_missing``), never re-keyed."""
+        return local_key(
+            self._folder(tenant, workflow_ref, "private"),
+            create=create and not self._names(tenant, workflow_ref),
+            missing="label_key_missing",
+        )
+
+    def snapshots(self, tenant: str, workflow_ref: str) -> list[dict[str, Any]]:
+        """Every committed snapshot in sequence order, each verified against its pin, the
+        pinned settings store and the exact settings revision that store holds."""
+        folder = self._folder(tenant, workflow_ref, "snapshots")
+        names = self._names(tenant, workflow_ref)
+        if not names:
+            return []
+        identity = self.store_identity(tenant, workflow_ref)
         found = []
-        names = sorted(p.stem for p in folder.glob("snap-*.json")) if folder.is_dir() else []
         for position, name in enumerate(names, start=1):
             need(name == f"snap-{position:08d}", "snapshot_tampered")
             body = read_pinned(folder, name, "snapshot_tampered")
@@ -748,6 +891,17 @@ class SnapshotProducer:
                 and body.get("workflow_ref") == workflow_ref
                 and body.get("sequence") == position,
                 "snapshot_tampered",
+            )
+            need(body.get("settings_store") == identity, "settings_store_mismatch")
+            revision = body.get("settings_revision")
+            held_by_store = (
+                self.settings.revision(tenant, workflow_ref, revision)
+                if type(revision) is int and revision >= 1
+                else None
+            )
+            need(
+                held_by_store is not None and held_by_store.digest == body.get("settings_digest"),
+                "settings_store_mismatch",
             )
             found.append(body)
         return found
@@ -761,26 +915,39 @@ class SnapshotProducer:
     def trigger(
         self, tenant: str, workflow_ref: str, trigger_ref: str, read_pair: PairReader
     ) -> dict[str, Any]:
-        """Read, reduce and commit one snapshot; return its opaque receipt."""
+        """Read, reduce and commit one snapshot; return its opaque receipt.
+
+        A hold is not memoized: a held trigger commits nothing, and retrying the same trigger
+        later re-evaluates it (for example once a stale source is fresh again).
+        """
         need(type(trigger_ref) is str and _TRIGGER.fullmatch(trigger_ref), "trigger_ref")
         before = self.settings.current(tenant, workflow_ref)
         if before is None:
             return held("settings_missing")
+        try:
+            identity = self.store_identity(tenant, workflow_ref, create=True)
+        except ProfileError:
+            return held("settings_store_mismatch")
+        try:
+            key = self.label_key(tenant, workflow_ref, create=True)
+        except ProfileError as exc:
+            if exc.reason == "label_key_missing":
+                return held("label_key_missing")
+            raise
         pair = read_pair(before)
         after = self.settings.current(tenant, workflow_ref)
         previous = self.snapshots(tenant, workflow_ref)
         if after is None or after.digest != before.digest:
             # The policy moved under the read: keep the previous committed snapshot.
-            if not previous:
-                return held("no_committed_snapshot")
-            return receipt(previous[-1], "rolled_back", "policy_changed_during_read")
+            return self._rolled_back(previous)
         intent = digest(
             [
                 "opentour.pilot.snapshot-intent.v1",
                 tenant,
                 workflow_ref,
+                identity,
                 before.digest,
-                sorted(c.fingerprint() for c in pair.captures),
+                sorted(capture_digest(before, c) for c in pair.captures),
             ]
         )
         triggers = self._folder(tenant, workflow_ref, "triggers")
@@ -793,23 +960,36 @@ class SnapshotProducer:
             if body["intent"] == intent:
                 return receipt(body)
         try:
-            body = reduce_pair(before, pair, self._now())
+            body = reduce_pair(before, pair, self._now(), label_key=key)
         except SnapshotHold as hold:
             return held(hold.reason)
         sequence = len(previous) + 1
         body["sequence"] = sequence
         body["intent"] = intent
+        body["settings_store"] = identity
         body["caller_asserted"] = {"first_trigger_ref": trigger_ref}
-        try:
-            write_pinned(
-                self._folder(tenant, workflow_ref, "snapshots"),
-                f"snap-{sequence:08d}",
-                body,
-                "snapshot_commit_conflict",
-            )
-        except ProfileError:
-            return held("snapshot_commit_conflict")
+        # The final check and the write happen under the settings store's commit lock, so no
+        # settings commit can land between them.
+        with self.settings.lock(tenant, workflow_ref):
+            final = self.settings.current(tenant, workflow_ref)
+            if final is None or final.digest != before.digest:
+                return self._rolled_back(previous)
+            try:
+                write_pinned(
+                    self._folder(tenant, workflow_ref, "snapshots"),
+                    f"snap-{sequence:08d}",
+                    body,
+                    "snapshot_commit_conflict",
+                )
+            except ProfileError:
+                return held("snapshot_commit_conflict")
         return receipt(body)
+
+    @staticmethod
+    def _rolled_back(previous: list[dict[str, Any]]) -> dict[str, Any]:
+        if not previous:
+            return held("no_committed_snapshot")
+        return receipt(previous[-1], "rolled_back", "policy_changed_during_read")
 
     def current(
         self,
@@ -822,15 +1002,20 @@ class SnapshotProducer:
         """Current eligibility over a committed as-of snapshot; the snapshot is never rewritten.
 
         ``proposals`` maps an outstanding proposal reference to the example references it
-        actually consumed (from the consumed-dependency manifest). Any proposal that consumed a
-        retracted example is returned as stale.
+        actually consumed (from the consumed-dependency manifest). The proposal references are
+        consumer-declared, so every stale proposal is returned labelled ``caller_asserted``.
         """
         as_of = self.snapshot(tenant, workflow_ref, snapshot_digest)
         settings = self.settings.current(tenant, workflow_ref)
         need(settings is not None, "settings_missing")
         assert settings is not None
+        need(
+            self.store_identity(tenant, workflow_ref) == as_of["settings_store"],
+            "settings_store_mismatch",
+        )
+        key = self.label_key(tenant, workflow_ref)
         try:
-            now = reduce_pair(settings, read_pair(settings), self._now())
+            now = reduce_pair(settings, read_pair(settings), self._now(), label_key=key)
         except SnapshotHold as hold:
             return {"schema": CURRENT_SCHEMA, "state": "held", "reason": hold.reason}
         current = {e["example_ref"]: e for e in now["examples"]}
@@ -852,11 +1037,12 @@ class SnapshotProducer:
             "schema": CURRENT_SCHEMA,
             "state": "current",
             "as_of_snapshot": snapshot_digest,
+            "settings_store": as_of["settings_store"],
             "settings_revision": settings.settings_revision,
             "evaluated_at": now["as_of"],
             "eligible": sorted(r for r, e in current.items() if e["eligible"]),
             "retracted": retracted,
-            "stale_proposals": stale,
+            "stale_proposals": [{"proposal_ref": p, "basis": "caller_asserted"} for p in stale],
             "counters": now["counters"],
             "metrics": now["metrics"],
             "reason_codes": now["reason_codes"],

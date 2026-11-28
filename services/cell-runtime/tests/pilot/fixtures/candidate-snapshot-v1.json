@@ -3,48 +3,68 @@
   "captured_at": "2026-01-01T12:00:00Z",
   "evidence_tier": "digest_self_consistent_only",
   "expected": {
-    "counters": {
-      "awaiting_decision": 1,
-      "disputed": 1,
-      "eligible": 3,
-      "live": {
-        "decisions": 6,
+    "receipt": {
+      "counters": {
+        "disputed": "<k",
+        "eligible": 3,
+        "pending": "<k",
+        "quarantined": "<k"
+      },
+      "reason_codes": {
+        "awaiting_outcome": "<k",
+        "contradictory_corrections": "<k",
+        "malformed_decision": "<k",
+        "orphan_correction": "<k",
+        "protected_partition": "<k",
+        "starter_origin": "<k"
+      }
+    },
+    "snapshot": {
+      "counters": {
+        "awaiting_decision": 1,
         "disputed": 1,
+        "eligible": 3,
+        "live": {
+          "cases": 6,
+          "decisions": 7,
+          "disputed": 1,
+          "pending": 1,
+          "verified": 4
+        },
         "pending": 1,
-        "verified": 4
+        "quarantined": 1,
+        "starter": {
+          "cases": 1,
+          "decisions": 1,
+          "disputed": 0,
+          "pending": 0,
+          "verified": 1
+        }
       },
-      "pending": 1,
-      "quarantined": 1,
-      "starter": {
-        "decisions": 1,
-        "disputed": 0,
-        "pending": 0,
-        "verified": 1
-      }
-    },
-    "metrics": {
-      "independent_incumbent_error_groups": 1,
-      "post_simple_repair_residual_groups": {
-        "reason": "simple_repair_not_bound",
-        "state": "unavailable"
+      "metrics": {
+        "independent_incumbent_error_groups": 1,
+        "post_simple_repair_residual_groups": {
+          "reason": "simple_repair_not_bound",
+          "state": "unavailable"
+        },
+        "wrong_automatic_decisions": {
+          "denominator": 3,
+          "numerator": 1,
+          "state": "available"
+        }
       },
-      "wrong_automatic_decisions": {
-        "denominator": 3,
-        "numerator": 1,
-        "state": "available"
+      "reason_codes": {
+        "awaiting_outcome": 1,
+        "contradictory_corrections": 1,
+        "malformed_decision": 1,
+        "orphan_correction": 1,
+        "protected_partition": 1,
+        "starter_origin": 1
       }
-    },
-    "reason_codes": {
-      "awaiting_outcome": 1,
-      "contradictory_corrections": 1,
-      "malformed_decision": 1,
-      "orphan_correction": 1,
-      "protected_partition": 1,
-      "starter_origin": 1
     }
   },
   "fixture_kind": "generated",
-  "note": "Generated sentinel source pair for OPE-416. Not provider or customer evidence.",
+  "note": "Generated sentinel source pair for OPE-416. Not provider or customer evidence. L1 and L8 are two decisions on one case, so live totals count 7 decisions but 6 cases. min_reportable_cell is 2 here (the floor) so the expected receipt shows both an integer and '<k' cells.",
   "product_acceptance": "NOT_RUN",
   "settings": {
     "abstain_values": [
@@ -97,6 +117,7 @@
       }
     },
     "maturity_seconds": 600,
+    "min_reportable_cell": 2,
     "policy_revision": "generated-policy-1",
     "receipt_counters": [
       "eligible",
@@ -236,6 +257,20 @@
         "thread": "thr-L7",
         "ticket": "L7",
         "ticket_rev": "x"
+      },
+      {
+        "action": "DENY",
+        "amount_text": "amt L8",
+        "case_no": "case-L1",
+        "customer": "generated-cust-1",
+        "customer_age": "SENTINEL-PROTECTED-AGE-47",
+        "decided_at": "2026-01-01T10:02:00Z",
+        "gateway": "ok",
+        "inputs_at": "2026-01-01T10:02:00Z",
+        "state": "admitted",
+        "thread": "thr-L1",
+        "ticket": "L8",
+        "ticket_rev": 1
       }
     ],
     "generated-dec-starter": [
@@ -356,6 +391,19 @@
         "state": "admitted",
         "status": "final",
         "ticket": "NOPE",
+        "ticket_rev": 1,
+        "ver": 1
+      },
+      {
+        "at": "2026-01-01T10:07:00Z",
+        "by": "generated-verifier-1",
+        "case_no": "case-L1",
+        "cid": "c-L8",
+        "final_action": "REFUND",
+        "how": "independent_adjudication",
+        "state": "admitted",
+        "status": "final",
+        "ticket": "L8",
         "ticket_rev": 1,
         "ver": 1
       }
