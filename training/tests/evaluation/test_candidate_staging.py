@@ -9,6 +9,7 @@ merged), and nothing here stages, promotes or requests release of anything real.
 from __future__ import annotations
 
 import threading
+from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
 
@@ -954,16 +955,21 @@ def test_k1_confirmation_must_predate_the_first_protected_readout() -> None:
     for missing in (None, True, "24", 24.0):  # no sequence, or not an int
         bad = replace(ok, fresh_confirmation=_confirmation(changed, p, issued_seq=missing))
         assert "fresh_confirmation_required" in reasons(bad)
-    tampered = replace(ok.fresh_confirmation, issued_seq=26)  # rewritten after attestation
-    assert not AUTH.verify_confirmation(tampered)  # type: ignore[arg-type]
-    rewound = replace(ok.fresh_confirmation, issued_seq=1)  # re-dated earlier, also unattested
+    conf = ok.fresh_confirmation
+    assert conf is not None
+    tampered = replace(conf, issued_seq=26)  # rewritten after attestation
+    assert not AUTH.verify_confirmation(tampered)
+    rewound = replace(conf, issued_seq=1)  # re-dated earlier, also unattested
     assert "fresh_confirmation_required" in reasons(replace(ok, fresh_confirmation=rewound))
-    assert "issued_seq" in confirmation_body(ok.fresh_confirmation)  # type: ignore[arg-type]
-    # A cohort whose protected answers were never read: any sequenced confirmation predates it.
+    assert "issued_seq" in confirmation_body(conf)
+    # An unknown first readout never means "never viewed": no worker-held view log exists, so
+    # None holds and no confirmation can be checked against it (see k4).
     unviewed = replace(ok, protected_view_seq=None)
-    assert evaluate(unviewed).outcome == "eligible"
+    out = evaluate(unviewed)
+    assert out.outcome == "hold"
+    assert out.reasons == ("fresh_confirmation_required", "protected_view_unrecorded")
     late_unviewed = replace(unviewed, fresh_confirmation=_confirmation(changed, p, issued_seq=99))
-    assert evaluate(late_unviewed).outcome == "eligible"
+    assert evaluate(late_unviewed).outcome == "hold"
 
 
 @pytest.mark.parametrize(
@@ -1000,3 +1006,216 @@ def test_k3_empty_candidate_id_never_matches_an_empty_confirmation_binding() -> 
     named = replace(blank, candidate_id="generated-candidate-1")
     good = replace(p, candidate=named, fresh_confirmation=_confirmation(named, p))
     assert evaluate(good).outcome == "eligible"  # the same packet with a real id confirms
+
+
+# ------------------------------------------------------------ L: review follow-up (2026-11-28)
+# Cross-session review of PR #231: base-behaviour probe, unknown protected view, negative
+# sequence, self-confirmation by producer or selector, and the authority type pin.
+
+
+def _changed(p: StagingPacket) -> CandidateRecord:
+    return replace(p.candidate, selection_digest="sha256:" + "6" * 64)
+
+
+@pytest.mark.parametrize("actor", ["generated-owner", "generated-independent-verifier"])
+def test_l1_verdict_issuers_cannot_confirm_a_changed_choice(actor: str) -> None:
+    """Behavioural fails-first probe: on the base this confirmation verified and was eligible.
+
+    Built without ``issued_seq`` so it constructs on the base too; it fails there by assertion.
+    """
+    p = packet()
+    changed = _changed(p)
+    conf = attest_confirmation(
+        FreshConfirmation(
+            actor,
+            True,
+            changed.selection_digest,
+            p.benchmark.digest,
+            candidate_id=changed.candidate_id,
+            identity_digest=changed.identity_digest,
+            arm_id=TUNED,
+        )
+    )
+    assert p.protected_view_seq == 25
+    assert not AUTH.verify_confirmation(conf)  # registered, valid MAC, verdict-issuer kind
+    out = evaluate(replace(p, candidate=changed, fresh_confirmation=conf))
+    assert out.outcome == "hold" and "fresh_confirmation_required" in out.reasons
+
+
+@pytest.mark.parametrize("view", [None, -1, -(10**30), True, False, "25", 25.0])
+def test_l2_unknown_protected_view_holds_every_packet(view: object) -> None:
+    p = packet()
+    assert evaluate(p).outcome == "eligible"
+    unknown = replace(p, protected_view_seq=view)  # type: ignore[arg-type]
+    out = evaluate(unknown)
+    assert out.outcome == "hold" and out.reasons == ("protected_view_unrecorded",)
+    # a late selection cannot hide behind an unknown view either
+    late = replace(unknown, candidate=replace(p.candidate, selection_seq=10**9))
+    assert "protected_view_unrecorded" in reasons(late)
+    assert evaluate(late).outcome == "hold"
+    # and no confirmation can be checked against an unknown readout
+    changed = _changed(p)
+    confirmed = replace(unknown, candidate=changed, fresh_confirmation=_confirmation(changed, p))
+    out = evaluate(confirmed)
+    assert out.outcome == "hold"
+    assert out.reasons == ("fresh_confirmation_required", "protected_view_unrecorded")
+    # the earliest valid readout still works
+    zero = replace(p, protected_view_seq=0, candidate=replace(p.candidate, selection_seq=-1))
+    assert "protected_view_unrecorded" not in reasons(zero)
+
+
+def test_l3_sequence_numbers_are_caller_supplied_and_only_self_consistent() -> None:
+    """Pins a documented limit: nothing ties either sequence to a worker-held view log."""
+    p = packet()
+    changed = _changed(p)
+    inflated = replace(
+        p,
+        protected_view_seq=10**9,
+        candidate=changed,
+        fresh_confirmation=_confirmation(changed, p, issued_seq=99),
+    )
+    assert evaluate(inflated).outcome == "eligible"  # self-consistent, not verified
+
+
+@pytest.mark.parametrize("seq", [-1, -2, -(10**30)])
+def test_l4_negative_issued_seq_never_confirms(seq: int) -> None:
+    p = packet()
+    changed = _changed(p)
+    conf = _confirmation(changed, p, issued_seq=seq)
+    assert AUTH.verify_confirmation(conf)  # attested; refused on the value alone
+    out = evaluate(replace(p, candidate=changed, fresh_confirmation=conf))
+    assert out.outcome == "hold" and out.reasons == ("fresh_confirmation_required",)
+    zero = _confirmation(changed, p, issued_seq=0)  # the lowest valid sequence confirms
+    assert evaluate(replace(p, candidate=changed, fresh_confirmation=zero)).outcome == "eligible"
+
+
+@pytest.mark.parametrize("role", ["producer_id", "selector_id"])
+@pytest.mark.parametrize("alias", ["generated-confirmer", "Generated-Confirmer"])
+def test_l5_producer_or_selector_cannot_confirm_its_own_changed_choice(
+    role: str, alias: str
+) -> None:
+    p = packet()
+
+    def as_role(c: CandidateRecord, actor: str) -> CandidateRecord:
+        return (
+            replace(c, producer_id=actor)
+            if role == "producer_id"
+            else replace(c, selector_id=actor)
+        )
+
+    changed = as_role(_changed(p), alias)
+    conf = _confirmation(changed, p)
+    assert conf.actor_id == "generated-confirmer"
+    assert AUTH.verify_confirmation(conf)  # registered confirmation issuer, valid MAC
+    # its verdicts come from someone else, so only the confirmation is self-issued
+    assert all(v.issuer_id != "generated-confirmer" for v in p.verdicts)
+    out = evaluate(replace(p, candidate=changed, fresh_confirmation=conf))
+    assert out.outcome == "hold" and out.reasons == ("fresh_confirmation_required",)
+    other = as_role(changed, "generated-someone-else")
+    assert evaluate(replace(p, candidate=other, fresh_confirmation=conf)).outcome == "eligible"
+
+
+class _ApprovingSubclass(HmacVerdictAuthority):
+    def verify_verdict(self, verdict: IndependentVerdict) -> bool:
+        return True
+
+    def verify_confirmation(self, confirmation: FreshConfirmation) -> bool:
+        return True
+
+
+class _DuckAuthority:
+    def verify_verdict(self, verdict: IndependentVerdict) -> bool:
+        return True
+
+    def verify_confirmation(self, confirmation: FreshConfirmation) -> bool:
+        return True
+
+
+def _patched(name: str) -> HmacVerdictAuthority:
+    auth = HmacVerdictAuthority(ISSUERS)
+    always: object = staticmethod(lambda *_: True) if name == "mac" else (lambda *_: True)
+    setattr(auth, name, always)
+    return auth
+
+
+@pytest.mark.parametrize(
+    "make",
+    [
+        lambda: _ApprovingSubclass(ISSUERS),
+        lambda: _DuckAuthority(),
+        lambda: _patched("verify_verdict"),
+        lambda: _patched("verify_confirmation"),
+        lambda: _patched("mac"),
+    ],
+    ids=[
+        "subclass",
+        "duck",
+        "patched-verify-verdict",
+        "patched-verify-confirmation",
+        "patched-mac",
+    ],
+)
+def test_l6_only_the_exact_sentinel_authority_type_is_accepted(
+    make: Callable[[], object], tmp_path: Path
+) -> None:
+    p = packet()
+    changed = _changed(p)
+    unattested = tuple(replace(v, attestation="") for v in p.verdicts)
+    forged = replace(
+        p,
+        candidate=changed,
+        verdicts=unattested,
+        fresh_confirmation=replace(_confirmation(changed, p), attestation=""),
+    )
+    authority = make()
+    out = _evaluate(forged, authority)  # type: ignore[arg-type]
+    assert out.outcome == "refused"
+    assert {
+        "verdict_authority_unrecognised",
+        "verdict_authority_unavailable",
+        "fresh_confirmation_required",
+    } <= set(out.reasons)
+    assert "verdict_unattested" not in out.reasons  # never consulted
+    # an honest packet is refused too: the type pin is not about the packet
+    honest = _evaluate(p, authority)  # type: ignore[arg-type]
+    assert honest.outcome == "refused"
+    assert set(honest.reasons) == {
+        "verdict_authority_unrecognised",
+        "verdict_authority_unavailable",
+    }
+    ledger = _Ledger(tmp_path / "pin.json", authority=authority)  # type: ignore[arg-type]
+    assert ledger.stage(p).status == "not_staged"
+    assert not ledger.is_staged(p.candidate.candidate_id, p.candidate.identity_digest)
+
+
+def test_l7_sentinel_registry_is_a_read_only_copy() -> None:
+    issuers = dict(ISSUERS)
+    auth = HmacVerdictAuthority(issuers)
+    p = packet()
+    changed = _changed(p)
+    rogue = _confirmation(changed, p, actor_id="generated-rogue-confirmer")
+    issuers["generated-rogue-confirmer"] = ("confirmation_issuer", b"generated-unregistered-key")
+    assert not auth.verify_confirmation(rogue)  # later edits to the source mapping do nothing
+    with pytest.raises(TypeError):
+        auth._issuers["generated-rogue-confirmer"] = (  # type: ignore[index]
+            "confirmation_issuer",
+            b"generated-unregistered-key",
+        )
+    # Documented limit: whoever constructs the authority chooses its issuers.
+    caller_built = HmacVerdictAuthority(issuers)
+    assert caller_built.verify_confirmation(rogue)
+    packet_ = replace(p, candidate=changed, fresh_confirmation=rogue)
+    assert _evaluate(packet_, caller_built).outcome == "eligible"
+
+
+def test_l8_a_shadowed_mac_on_the_instance_cannot_forge_an_attestation() -> None:
+    """The sentinel computes its MACs through the class, never an instance attribute."""
+    auth = HmacVerdictAuthority(ISSUERS)
+    auth.mac = lambda *_: "generated-forged-mac"  # type: ignore[method-assign]
+    p = packet()
+    changed = _changed(p)
+    conf = replace(_confirmation(changed, p), attestation="generated-forged-mac")
+    assert not auth.verify_confirmation(conf)
+    v = replace(p.verdicts[0], attestation="generated-forged-mac")
+    assert not auth.verify_verdict(v)
+    assert AUTH.verify_confirmation(_confirmation(changed, p))  # an unpatched sentinel verifies
