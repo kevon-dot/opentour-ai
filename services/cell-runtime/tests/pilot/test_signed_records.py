@@ -7,6 +7,7 @@ signing helpers below exist only in the test tree: the verifier module cannot si
 from __future__ import annotations
 
 import base64
+import copy
 import hashlib
 import inspect
 import json
@@ -114,6 +115,17 @@ def as_successor(signer: Signer, payload: Json, **changes: Any) -> Json:
     )
 
 
+# The literal string, so the tests pin it rather than echo the module's constant.
+SCOPE_PURPOSE = "opentour.pilot.customer-consent-scope.v1"
+
+
+def at(signer: Signer, revision: str) -> Signer:
+    """The same customer key, signing at another anchor revision."""
+    moved = copy.copy(signer)
+    moved.registry_revision = revision
+    return moved
+
+
 def consent(**changes: Any) -> Json:
     value: Json = {
         "engagement_id": ENGAGEMENT,
@@ -188,6 +200,9 @@ class Kit:
             "engagement_id": ENGAGEMENT,
             "anchor_revision": "1",
             "customer_key": (customer or self.customer).public(),
+            # Purpose-scoped (OPE-566 68da165c): by default every current consent purpose,
+            # so tests written before scoping keep their meaning.
+            "consent_purposes": sorted(sr.CONSENT_PURPOSES),
             "issued_at": stamp(-60),
             "not_after": stamp(3600),
         }
@@ -234,6 +249,40 @@ class Kit:
             }
         )
 
+    def scope_payload(
+        self,
+        purposes: Any = None,
+        *,
+        customer: Signer | None = None,
+        previous: str = "1",
+        **changes: Any,
+    ) -> Json:
+        payload: Json = {
+            "profile_version": "1.0",
+            "engagement_id": ENGAGEMENT,
+            "customer_key_id": (customer or self.customer).key_id,
+            "previous_anchor_revision": previous,
+            "anchor_revision": str(int(previous) + 1),
+            "consent_purposes": sorted(sr.CONSENT_PURPOSES) if purposes is None else purposes,
+            "issued_at": stamp(-60),
+            "not_after": stamp(3600),
+        }
+        payload.update(changes)
+        return payload
+
+    def scope_update(
+        self,
+        purposes: Any = None,
+        *signers: Signer,
+        customer: Signer | None = None,
+        previous: str = "1",
+        **changes: Any,
+    ) -> bytes:
+        """Co-signed by the anchored customer key (at ``previous``) and the custodian."""
+        payload = self.scope_payload(purposes, customer=customer, previous=previous, **changes)
+        default = (at(customer or self.customer, previous), self.operator)
+        return sign(payload, SCOPE_PURPOSE, *(signers or default))
+
 
 @pytest.fixture
 def kit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Kit:
@@ -252,6 +301,7 @@ def kit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Kit:
                 sr.ROUTING_POLICY_PURPOSE,
                 sr.WORKFLOW_INDEX_PUBLICATION_PURPOSE,
                 sr.ENROLMENT_PURPOSE,
+                SCOPE_PURPOSE,
             ],
         ),
         evaluator=Signer(sr.INDEPENDENT_EVALUATOR, [sr.VERDICT_PURPOSE]),
@@ -1925,3 +1975,542 @@ def test_verifier_module_holds_no_signing_capability() -> None:
     ):
         assert forbidden not in source
     assert not any(callable(getattr(sr, name, None)) for name in ("sign", "create_signature"))
+
+
+# --- Purpose-scoped customer keys (OPE-566 decision 68da165c) ------------------------
+
+GRANT, SPEND, ROUTING = sr.GRANT_PURPOSE, sr.SPEND_MANDATE_PURPOSE, sr.ROUTING_POLICY_PURPOSE
+EVERY_CONSENT = frozenset({GRANT, SPEND, ROUTING, PUBLICATION})
+
+
+def anchor_files(kit: Kit) -> tuple[bytes, bytes]:
+    return record_path(kit, ANCHOR_KEY).read_bytes(), record_path(kit, REVISION_KEY).read_bytes()
+
+
+def restore(kit: Kit, files: tuple[bytes, bytes]) -> None:
+    record_path(kit, ANCHOR_KEY).write_bytes(files[0])
+    record_path(kit, REVISION_KEY).write_bytes(files[1])
+
+
+def test_scope_purpose_is_a_custodian_co_signed_chain_entry_not_a_consent_purpose(
+    kit: Kit,
+) -> None:
+    assert sr.CONSENT_SCOPE_PURPOSE == SCOPE_PURPOSE
+    assert sr.REQUIRED_ROLES[SCOPE_PURPOSE] == {sr.CUSTOMER_OWNER, sr.OPERATOR_CUSTODIAN}
+    holders = {role for role, purposes in sr.REGISTRY_ROLES.items() if SCOPE_PURPOSE in purposes}
+    assert holders == {sr.OPERATOR_CUSTODIAN}
+    assert sr.REGISTRY_ROLES[sr.OPERATOR_CUSTODIAN] == EVERY_CONSENT | {
+        sr.ENROLMENT_PURPOSE,
+        SCOPE_PURPOSE,
+    }
+    # Unchanged: other registry roles, the root and the consent table itself.
+    assert sr.REGISTRY_ROLES[sr.INDEPENDENT_EVALUATOR] == {sr.VERDICT_PURPOSE}
+    assert sr.REGISTRY_ROLES[sr.BENCHMARK_AUDITOR] == {sr.BENCHMARK_AUDIT_PURPOSE}
+    assert sr.ROOT_ROLES == {sr.OPERATOR_ROOT: {sr.REGISTRY_PURPOSE}}
+    # (APPROVED_ROOT_PIN_SHA256 stays None: test_root_pin_required_and_not_yet_approved...)
+    assert sr.CONSENT_PURPOSES == EVERY_CONSENT
+    assert SCOPE_PURPOSE not in sr.RECORD_PURPOSES
+    # Accepted only through its own entry point, never as a verified record.
+    verifier = kit.enrolled()
+    update = kit.scope_update([GRANT])
+    refused("purpose_unknown", partial(verifier.verify, update, SCOPE_PURPOSE))
+    assert len(inspect.signature(sr.PilotVerifier.update_customer_scope).parameters) == 2
+
+
+def test_a_key_enrolled_without_publication_cannot_sign_one_until_a_co_signed_update(
+    kit: Kit,
+) -> None:
+    registry = kit.registry()
+    verifier = sr.PilotVerifier(registry)
+    without = sorted(EVERY_CONSENT - {PUBLICATION})
+    pinned = verifier.pin_customer_anchor(kit.enrolment(consent_purposes=without))
+    assert pinned.consent_purposes == frozenset(without)
+    publication = sign(consent(), PUBLICATION, kit.customer, kit.operator)
+    refused("customer_purpose_not_enrolled", partial(verifier.verify, publication, PUBLICATION))
+    assert verifier.verify(sign(consent(), GRANT, kit.customer, kit.operator), GRANT)
+    updated = verifier.update_customer_scope(kit.scope_update(sorted(EVERY_CONSENT)))
+    assert updated == sr.CustomerAnchor(
+        ENGAGEMENT,
+        kit.customer.key_id,
+        2,
+        hashlib.sha256(kit.customer.der).hexdigest(),
+        EVERY_CONSENT,
+    )
+    customer = at(kit.customer, "2")
+    allowed = sign(consent(), PUBLICATION, customer, kit.operator)
+    assert verifier.verify(allowed, PUBLICATION)
+    # Every customer signature names the anchor revision it was made under, so a record
+    # signed under the narrower scope is never reinterpreted under the wider one.
+    refused("customer_key_not_anchored", partial(verifier.verify, publication, PUBLICATION))
+    # A fresh verifier re-derives the same scope from the stored chain.
+    assert sr.PilotVerifier(registry).verify(allowed, PUBLICATION)
+
+
+def test_a_narrowing_update_refuses_a_previously_allowed_purpose(kit: Kit) -> None:
+    verifier = kit.enrolled()
+    assert verifier.verify(sign(consent(), ROUTING, kit.customer, kit.operator), ROUTING)
+    anchor = verifier.update_customer_scope(kit.scope_update([GRANT]))
+    assert (anchor.anchor_revision, anchor.consent_purposes) == (2, {GRANT})
+    customer = at(kit.customer, "2")
+    assert verifier.verify(sign(consent(), GRANT, customer, kit.operator), GRANT)
+    for purpose in sorted(EVERY_CONSENT - {GRANT}):
+        record = sign(consent(), purpose, customer, kit.operator)
+        refused("customer_purpose_not_enrolled", partial(verifier.verify, record, purpose))
+    # Widening again is another co-signed update at the next revision.
+    wider = verifier.update_customer_scope(kit.scope_update([GRANT, ROUTING], previous="2"))
+    assert (wider.anchor_revision, wider.consent_purposes) == (3, {GRANT, ROUTING})
+    record = sign(consent(), ROUTING, at(kit.customer, "3"), kit.operator)
+    assert verifier.verify(record, ROUTING)
+
+
+def test_rotation_inherits_the_scope_by_default(kit: Kit) -> None:
+    verifier = kit.verifier()
+    verifier.pin_customer_anchor(kit.enrolment(consent_purposes=[GRANT]))
+    second = Signer(sr.CUSTOMER_OWNER, registry_revision="2")
+    rotated = verifier.rotate_customer_key(kit.rotation(kit.customer, second))
+    assert (rotated.key_id, rotated.consent_purposes) == (second.key_id, {GRANT})
+    assert verifier.verify(sign(consent(), GRANT, second, kit.operator), GRANT)
+    refused(
+        "customer_purpose_not_enrolled",
+        partial(verifier.verify, sign(consent(), PUBLICATION, second, kit.operator), PUBLICATION),
+    )
+    # After a scope update, the next rotation inherits the updated scope.
+    widened = sorted({GRANT, PUBLICATION})
+    verifier.update_customer_scope(kit.scope_update(widened, customer=second, previous="2"))
+    third = Signer(sr.CUSTOMER_OWNER, registry_revision="4")
+    final = verifier.rotate_customer_key(kit.rotation(at(second, "3"), third))
+    assert (final.anchor_revision, final.consent_purposes) == (4, {GRANT, PUBLICATION})
+    assert verifier.verify(sign(consent(), PUBLICATION, third, kit.operator), PUBLICATION)
+    refused(
+        "customer_purpose_not_enrolled",
+        partial(verifier.verify, sign(consent(), SPEND, third, kit.operator), SPEND),
+    )
+
+
+def test_rotation_can_replace_the_scope(kit: Kit) -> None:
+    verifier = kit.enrolled()
+    second = Signer(sr.CUSTOMER_OWNER, registry_revision="2")
+    for bad in ([], [GRANT, GRANT], [SPEND, GRANT], ["opentour.pilot.other.v1"], None, GRANT):
+        refused(
+            "customer_consent_scope_invalid",
+            partial(
+                verifier.rotate_customer_key,
+                kit.rotation(kit.customer, second, consent_purposes=bad),
+            ),
+        )
+    replaced = kit.rotation(kit.customer, second, consent_purposes=[PUBLICATION])
+    anchor = verifier.rotate_customer_key(replaced)
+    assert anchor.consent_purposes == {PUBLICATION}
+    assert verifier.verify(sign(consent(), PUBLICATION, second, kit.operator), PUBLICATION)
+    refused(
+        "customer_purpose_not_enrolled",
+        partial(verifier.verify, sign(consent(), GRANT, second, kit.operator), GRANT),
+    )
+
+
+def test_a_scope_update_needs_the_anchored_customer_and_a_permitted_custodian(
+    kit: Kit,
+) -> None:
+    narrow = Signer(sr.OPERATOR_CUSTODIAN, [GRANT])
+    other = Signer(sr.OPERATOR_CUSTODIAN, [SCOPE_PURPOSE])
+    verifier = kit.verifier(kit.registry(keys=[*kit.issuers(), narrow.entry(), other.entry()]))
+    verifier.pin_customer_anchor(kit.enrolment())
+    payload = kit.scope_payload([GRANT])
+    # The customer alone or the custodian alone.
+    for signers in ((kit.customer,), (kit.operator,), (other,)):
+        record = sign(payload, SCOPE_PURPOSE, *signers)
+        refused("signature_role_missing", partial(verifier.update_customer_scope, record))
+    # A custodian key whose registry entry lacks the scope purpose.
+    record = sign(payload, SCOPE_PURPOSE, kit.customer, narrow)
+    refused("key_purpose_not_permitted", partial(verifier.update_customer_scope, record))
+    # Two operator keys, one claiming the customer role.
+    claims = kit.operator.signature(payload, SCOPE_PURPOSE, signer_role=sr.CUSTOMER_OWNER)
+    both_operator = canonical(
+        {"payload": payload, "signatures": [claims, other.signature(payload, SCOPE_PURPOSE)]}
+    )
+    refused("customer_key_not_anchored", partial(verifier.update_customer_scope, both_operator))
+    # Another registry role standing in for the custodian.
+    stand_in = kit.evaluator.signature(payload, SCOPE_PURPOSE, signer_role=sr.OPERATOR_CUSTODIAN)
+    by_evaluator = canonical(
+        {
+            "payload": payload,
+            "signatures": [kit.customer.signature(payload, SCOPE_PURPOSE), stand_in],
+        }
+    )
+    refused("key_role_not_permitted", partial(verifier.update_customer_scope, by_evaluator))
+    # Rotation-style signers (customer plus a successor) are not a scope update.
+    successor = Signer(sr.CUSTOMER_OWNER, registry_revision="2")
+    pair = canonical(
+        {
+            "payload": payload,
+            "signatures": [
+                kit.customer.signature(payload, SCOPE_PURPOSE),
+                successor.signature(
+                    payload, SCOPE_PURPOSE, signer_role=sr.CUSTOMER_OWNER_SUCCESSOR
+                ),
+            ],
+        }
+    )
+    refused("signature_role_unexpected", partial(verifier.update_customer_scope, pair))
+    # Signatures made under another purpose do not carry over.
+    as_grant = sign(payload, GRANT, kit.customer, kit.operator)
+    refused("purpose_mismatch", partial(verifier.update_customer_scope, as_grant))
+    # Nothing changed: the anchor is still at revision 1 with its full scope.
+    assert stored(kit, REVISION_KEY)["sequence"] == "1"
+    publication = sign(consent(), PUBLICATION, kit.customer, kit.operator)
+    assert verifier.verify(publication, PUBLICATION)
+    # Any current custodian whose purposes include the scope purpose may co-sign.
+    assert verifier.update_customer_scope(kit.scope_update([GRANT], kit.customer, other))
+
+
+def test_a_scope_update_by_a_stale_or_rotated_away_customer_key_is_refused(kit: Kit) -> None:
+    verifier = kit.enrolled()
+    second = Signer(sr.CUSTOMER_OWNER, registry_revision="2")
+    verifier.rotate_customer_key(kit.rotation(kit.customer, second))
+    # The rotated-away key, at its own revision or at the current one.
+    for stale in (kit.customer, at(kit.customer, "2")):
+        record = kit.scope_update([GRANT], stale, kit.operator, previous="2")
+        refused("customer_key_not_anchored", partial(verifier.update_customer_scope, record))
+    # The current key signing at a stale anchor revision.
+    stale_revision = kit.scope_update([GRANT], at(second, "1"), kit.operator, customer=second)
+    refused("customer_key_not_anchored", partial(verifier.update_customer_scope, stale_revision))
+    # The current key at the current revision, naming the wrong key or skipping a revision.
+    for changes in ({"customer_key_id": kit.customer.key_id}, {"anchor_revision": "4"}):
+        payload = kit.scope_payload([GRANT], customer=second, previous="2", **changes)
+        record = sign(payload, SCOPE_PURPOSE, second, kit.operator)
+        refused("customer_scope_not_successor", partial(verifier.update_customer_scope, record))
+    anchor = verifier.update_customer_scope(
+        kit.scope_update([GRANT], customer=second, previous="2")
+    )
+    assert (anchor.key_id, anchor.anchor_revision) == (second.key_id, 3)
+    # After an update, the same key signing at the pre-update revision is stale too.
+    again = kit.scope_update([SPEND], second, kit.operator, customer=second, previous="2")
+    refused("customer_key_not_anchored", partial(verifier.update_customer_scope, again))
+
+
+INVALID_SCOPES: list[Any] = [
+    [],
+    ["opentour.pilot.other.v1"],
+    [GRANT, GRANT],
+    [SPEND, GRANT],
+    sorted(EVERY_CONSENT, reverse=True),
+    [GRANT, "opentour.pilot.other.v1"],
+    [sr.ENROLMENT_PURPOSE],
+    [SCOPE_PURPOSE],
+    sorted({GRANT, SCOPE_PURPOSE}),
+    sorted({GRANT, sr.ENROLMENT_PURPOSE}),
+    [sr.ROTATION_PURPOSE],
+    [sr.VERDICT_PURPOSE],
+    [sr.REGISTRY_PURPOSE],
+    [GRANT.upper()],
+    [" " + GRANT],
+    [GRANT + " "],
+    [3],
+    [[GRANT]],
+    [None],
+    None,
+    GRANT,
+    {GRANT: True},
+]
+
+
+@pytest.mark.parametrize("purposes", INVALID_SCOPES)
+def test_an_invalid_scope_is_refused_on_update_and_enrolment(kit: Kit, purposes: Any) -> None:
+    verifier = kit.enrolled()
+    update = kit.scope_update(consent_purposes=purposes)  # an explicit null included
+    refused("customer_consent_scope_invalid", partial(verifier.update_customer_scope, update))
+    assert stored(kit, REVISION_KEY)["sequence"] == "1"
+    other = Signer(sr.CUSTOMER_OWNER, registry_revision="1")
+    payload = kit.enrolment_payload(other, engagement_id=OTHER, consent_purposes=purposes)
+    enrolment = sign(payload, sr.ENROLMENT_PURPOSE, other, kit.operator)
+    refused("customer_consent_scope_invalid", partial(verifier.pin_customer_anchor, enrolment))
+    assert not record_path(kit, "customer_anchor:" + OTHER).exists()
+
+
+def test_a_scope_must_hold_exact_strings() -> None:
+    class Sneaky(str):
+        pass
+
+    assert sr._consent_scope([GRANT, PUBLICATION], fresh=True) == {GRANT, PUBLICATION}
+    for value in ([Sneaky(GRANT)], [GRANT, Sneaky(PUBLICATION)], (GRANT,)):
+        refused("customer_consent_scope_invalid", partial(sr._consent_scope, value, fresh=True))
+
+
+def test_an_update_or_enrolment_without_a_scope_is_refused_as_missing(kit: Kit) -> None:
+    verifier = kit.enrolled()
+    payload = kit.scope_payload([GRANT])
+    del payload["consent_purposes"]
+    update = sign(payload, SCOPE_PURPOSE, kit.customer, kit.operator)
+    refused("customer_consent_scope_missing", partial(verifier.update_customer_scope, update))
+    other = Signer(sr.CUSTOMER_OWNER, registry_revision="1")
+    enrolment = kit.enrolment_payload(other, engagement_id=OTHER)
+    del enrolment["consent_purposes"]
+    signed = sign(enrolment, sr.ENROLMENT_PURPOSE, other, kit.operator)
+    refused("customer_consent_scope_missing", partial(verifier.pin_customer_anchor, signed))
+
+
+def test_a_legacy_anchor_without_a_scope_is_never_defaulted(kit: Kit) -> None:
+    verifier = kit.verifier()
+    payload = kit.enrolment_payload()
+    del payload["consent_purposes"]
+    legacy = sign(payload, sr.ENROLMENT_PURPOSE, kit.customer, kit.operator)
+    refused("customer_consent_scope_missing", partial(verifier.pin_customer_anchor, legacy))
+    assert not record_path(kit, ANCHOR_KEY).exists()
+    # A store already holding a validly signed pre-scope anchor, with a matching floor.
+    write_record(kit, ANCHOR_KEY, 1, {"chain": [json.loads(legacy)]})
+    write_record(kit, REVISION_KEY, 1, {"head_payload_sha256": payload_digest(legacy)})
+    for purpose in sorted(EVERY_CONSENT):
+        record = sign(consent(), purpose, kit.customer, kit.operator)
+        refused("customer_consent_scope_missing", partial(verifier.verify, record, purpose))
+    second = Signer(sr.CUSTOMER_OWNER, registry_revision="2")
+    rotation = kit.rotation(kit.customer, second, consent_purposes=sorted(EVERY_CONSENT))
+    refused("customer_consent_scope_missing", partial(verifier.rotate_customer_key, rotation))
+    update = kit.scope_update()
+    refused("customer_consent_scope_missing", partial(verifier.update_customer_scope, update))
+
+
+def test_a_retired_purpose_drops_out_of_the_effective_scope(
+    kit: Kit, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    registry = kit.registry()
+    verifier = sr.PilotVerifier(registry)
+    # Every accepted entry lists the purpose that is later retired: the enrolment, a
+    # rotation that restates the scope and a scope update.
+    verifier.pin_customer_anchor(kit.enrolment())
+    second = Signer(sr.CUSTOMER_OWNER, registry_revision="2")
+    every = sorted(EVERY_CONSENT)
+    verifier.rotate_customer_key(kit.rotation(kit.customer, second, consent_purposes=every))
+    verifier.update_customer_scope(kit.scope_update(every, customer=second, previous="2"))
+    current = at(second, "3")
+    publication = sign(consent(), PUBLICATION, current, kit.operator)
+    assert verifier.verify(publication, PUBLICATION)
+    monkeypatch.setattr(sr, "CONSENT_PURPOSES", EVERY_CONSENT - {PUBLICATION})
+    refused("customer_purpose_not_enrolled", partial(verifier.verify, publication, PUBLICATION))
+    # The anchored chain still re-verifies; the remaining purposes are unaffected.
+    grant = sign(consent(), GRANT, current, kit.operator)
+    assert sr.PilotVerifier(registry).verify(grant, GRANT)
+    # A new scope may not list the retired purpose, and what resolves excludes it.
+    refused(
+        "customer_consent_scope_invalid",
+        partial(
+            verifier.update_customer_scope,
+            kit.scope_update(every, customer=second, previous="3"),
+        ),
+    )
+    third = Signer(sr.CUSTOMER_OWNER, registry_revision="4")
+    rotated = verifier.rotate_customer_key(kit.rotation(current, third))
+    assert rotated.consent_purposes == EVERY_CONSENT - {PUBLICATION}
+
+
+def test_a_rolled_back_scope_update_is_refused_at_the_floor(kit: Kit) -> None:
+    verifier = kit.enrolled()
+    before = record_path(kit, ANCHOR_KEY).read_bytes()
+    verifier.update_customer_scope(kit.scope_update([GRANT]))
+    # Restoring the earlier chain (which allowed publication) is a rollback.
+    record_path(kit, ANCHOR_KEY).write_bytes(before)
+    for customer in (kit.customer, at(kit.customer, "2")):
+        record = sign(consent(), PUBLICATION, customer, kit.operator)
+        refused("customer_anchor_rolled_back", partial(verifier.verify, record, PUBLICATION))
+    for update in (kit.scope_update([GRANT]), kit.scope_update([GRANT], previous="2")):
+        refused("customer_anchor_rolled_back", partial(verifier.update_customer_scope, update))
+    second = Signer(sr.CUSTOMER_OWNER, registry_revision="2")
+    refused(
+        "customer_anchor_rolled_back",
+        partial(verifier.rotate_customer_key, kit.rotation(kit.customer, second)),
+    )
+
+
+def test_a_superseded_scope_update_cannot_be_replayed(kit: Kit) -> None:
+    verifier = kit.enrolled()
+    narrow = kit.scope_update([GRANT])
+    verifier.update_customer_scope(narrow)
+    verifier.update_customer_scope(kit.scope_update(sorted(EVERY_CONSENT), previous="2"))
+    refused("customer_key_not_anchored", partial(verifier.update_customer_scope, narrow))
+    record = sign(consent(), PUBLICATION, at(kit.customer, "3"), kit.operator)
+    assert verifier.verify(record, PUBLICATION)
+
+
+def test_re_presenting_a_scope_update_is_a_no_op_keyed_on_its_payload(kit: Kit) -> None:
+    verifier = kit.enrolled()
+    payload = kit.scope_payload([GRANT])
+    first = sign(payload, SCOPE_PURPOSE, kit.customer, kit.operator)
+    anchor = verifier.update_customer_scope(first)
+    files = anchor_files(kit)
+    assert verifier.update_customer_scope(first) == anchor
+    # Re-signed (fresh ECDSA nonces) and in the other signature order: the same update.
+    resigned = sign(payload, SCOPE_PURPOSE, kit.operator, kit.customer)
+    assert resigned != first
+    assert verifier.update_customer_scope(resigned) == anchor
+    assert anchor_files(kit) == files
+    # The same payload under a forged customer signature is refused, not a no-op.
+    impostor = Signer(sr.CUSTOMER_OWNER, registry_revision="1")
+    forged = canonical(
+        {
+            "payload": payload,
+            "signatures": [
+                impostor.signature(payload, SCOPE_PURPOSE, key_id=kit.customer.key_id),
+                kit.operator.signature(payload, SCOPE_PURPOSE),
+            ],
+        }
+    )
+    refused("signature_invalid", partial(verifier.update_customer_scope, forged))
+    # A custodian-only copy of the same payload is refused too.
+    alone = sign(payload, SCOPE_PURPOSE, kit.operator)
+    refused("signature_role_missing", partial(verifier.update_customer_scope, alone))
+    # A different scope at the same revision is not a re-presentation.
+    refused(
+        "customer_key_not_anchored",
+        partial(verifier.update_customer_scope, kit.scope_update([SPEND])),
+    )
+    assert anchor_files(kit) == files
+
+
+def test_another_engagements_scope_update_cannot_apply(kit: Kit) -> None:
+    verifier = kit.enrolled()
+    refused(
+        "customer_anchor_missing",
+        partial(verifier.update_customer_scope, kit.scope_update([GRANT], engagement_id=OTHER)),
+    )
+    # The same customer key is enrolled for engagement Y too.
+    other_enrolment = kit.enrolment_payload(engagement_id=OTHER)
+    verifier.pin_customer_anchor(
+        sign(other_enrolment, sr.ENROLMENT_PURPOSE, kit.customer, kit.operator)
+    )
+    update_y = kit.scope_update([GRANT], engagement_id=OTHER)
+    anchor_y = verifier.update_customer_scope(update_y)
+    assert (anchor_y.engagement_id, anchor_y.consent_purposes) == (OTHER, {GRANT})
+    # Engagement X is untouched.
+    publication = sign(consent(), PUBLICATION, kit.customer, kit.operator)
+    assert verifier.verify(publication, PUBLICATION)
+    # A store writer splicing Y's update into X's chain.
+    enrolment_x = stored(kit, ANCHOR_KEY)["value"]["chain"][0]
+    write_record(kit, ANCHOR_KEY, 2, {"chain": [enrolment_x, json.loads(update_y)]})
+    grant = sign(consent(), GRANT, at(kit.customer, "2"), kit.operator)
+    # Pending (floor still at 1): the foreign update is ignored.
+    assert verifier.verify(publication, PUBLICATION)
+    refused("customer_key_not_anchored", partial(verifier.verify, grant, GRANT))
+    # Accepted (floor advanced to cover it): the chain is unverifiable.
+    write_record(kit, REVISION_KEY, 2, {"head_payload_sha256": payload_digest(update_y)})
+    refused("customer_anchor_unverifiable", partial(verifier.verify, grant, GRANT))
+
+
+def test_an_interrupted_scope_update_is_pending_then_settled(kit: Kit) -> None:
+    verifier = kit.enrolled()
+    old_floor = record_path(kit, REVISION_KEY).read_bytes()
+    update = kit.scope_update([GRANT])
+    verifier.update_customer_scope(update)
+    record_path(kit, REVISION_KEY).write_bytes(old_floor)  # the floor write was lost
+    customer = at(kit.customer, "2")
+    # Inside its window the pending update counts.
+    assert verifier.verify(sign(consent(), GRANT, customer, kit.operator), GRANT)
+    record = sign(consent(), PUBLICATION, customer, kit.operator)
+    refused("customer_purpose_not_enrolled", partial(verifier.verify, record, PUBLICATION))
+    old = sign(consent(), PUBLICATION, kit.customer, kit.operator)
+    refused("customer_key_not_anchored", partial(verifier.verify, old, PUBLICATION))
+    # Any locked operation settles it; re-presenting it is then a no-op.
+    assert verifier.update_customer_scope(update).anchor_revision == 2
+    assert stored(kit, REVISION_KEY)["sequence"] == "2"
+    assert len(stored(kit, ANCHOR_KEY)["value"]["chain"]) == 2
+
+
+def test_an_untouched_pending_scope_update_reverts_after_its_window(
+    kit: Kit, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    verifier = kit.enrolled()
+    old_floor = record_path(kit, REVISION_KEY).read_bytes()
+    verifier.update_customer_scope(kit.scope_update([GRANT]))
+    record_path(kit, REVISION_KEY).write_bytes(old_floor)
+    real_now = sr._utc_now
+    monkeypatch.setattr(sr, "_utc_now", lambda: real_now() + timedelta(seconds=7200))
+    # Expired and never settled: the anchor is derived at the floor, scope included.
+    old = sign(consent(not_after=stamp(80000)), PUBLICATION, kit.customer, kit.operator)
+    assert verifier.verify(old, PUBLICATION)
+    new = sign(consent(not_after=stamp(80000)), GRANT, at(kit.customer, "2"), kit.operator)
+    refused("customer_key_not_anchored", partial(verifier.verify, new, GRANT))
+    # A fresh update from the floor replaces the ignored pending tail.
+    later = kit.scope_update([SPEND], issued_at=stamp(7000), not_after=stamp(20000))
+    assert verifier.update_customer_scope(later).consent_purposes == {SPEND}
+    assert stored(kit, ANCHOR_KEY)["sequence"] == "3"
+
+
+def test_an_unknown_chain_entry_kind_fails_closed(kit: Kit) -> None:
+    verifier = kit.enrolled()
+    genuine = anchor_files(kit)
+    enrolment = stored(kit, ANCHOR_KEY)["value"]["chain"][0]
+    grant = sign(consent(), GRANT, kit.customer, kit.operator)
+    # Validly signed documents that are not chain entries, and malformed entries.
+    mixed_payload = kit.scope_payload([GRANT])
+    mixed = {
+        "payload": mixed_payload,
+        "signatures": [
+            kit.customer.signature(mixed_payload, SCOPE_PURPOSE),
+            kit.operator.signature(mixed_payload, sr.ROTATION_PURPOSE),
+        ],
+    }
+    for planted in (
+        json.loads(grant),
+        json.loads(kit.enrolment()),
+        mixed,
+        {"payload": {}, "signatures": []},
+        {"payload": {}, "signatures": [{"purpose": 7}]},
+        {"payload": {}},
+    ):
+        write_record(kit, ANCHOR_KEY, 2, {"chain": [enrolment, planted]})
+        # Pending: ignored, the anchor is derived at the floor.
+        assert verifier.verify(grant, GRANT)
+        # Covered by the floor: unverifiable, refused rather than raised.
+        digest = hashlib.sha256(canonical(planted["payload"])).hexdigest()
+        write_record(kit, REVISION_KEY, 2, {"head_payload_sha256": digest})
+        refused("customer_anchor_unverifiable", partial(verifier.verify, grant, GRANT))
+        restore(kit, genuine)
+    assert verifier.verify(grant, GRANT)
+
+
+def test_replaying_a_scope_update_needs_a_custodian_that_still_holds_the_scope_purpose(
+    kit: Kit,
+) -> None:
+    kit.enrolled().update_customer_scope(kit.scope_update([GRANT]))
+    payload = consent()
+    customer = at(kit.customer, "2")
+    # Relisted at a new registry revision with the purpose: the chain still verifies.
+    relisted_keys = [kit.operator.entry(registry_revision="rev-2"), kit.evaluator.entry()]
+    relisted = kit.verifier(kit.registry("2", keys=relisted_keys))
+    grant = canonical(
+        {
+            "payload": payload,
+            "signatures": [
+                customer.signature(payload, GRANT),
+                kit.operator.signature(payload, GRANT, key_registry_revision="rev-2"),
+            ],
+        }
+    )
+    assert relisted.verify(grant, GRANT)
+    # The custodian keeps enrolment but loses the scope purpose: fail closed.
+    narrowed = kit.operator.entry(purposes=[GRANT, sr.ENROLMENT_PURPOSE])
+    dropped = kit.verifier(kit.registry("3", keys=[narrowed, kit.evaluator.entry()]))
+    by_narrowed = sign(payload, GRANT, customer, kit.operator)
+    refused("customer_anchor_unverifiable", partial(dropped.verify, by_narrowed, GRANT))
+    # The verify-only former list re-verifies enrolments only, never scope updates.
+    custodian2 = Signer(sr.OPERATOR_CUSTODIAN, sorted(sr.REGISTRY_ROLES[sr.OPERATOR_CUSTODIAN]))
+    current = [custodian2.entry(), kit.evaluator.entry()]
+    retired = kit.verifier(former_registry(kit, "4", current, [kit.operator.public()]))
+    by_new = sign(payload, GRANT, customer, custodian2)
+    refused("customer_anchor_unverifiable", partial(retired.verify, by_new, GRANT))
+
+
+def test_scope_update_refuses_with_a_code_never_raises(
+    kit: Kit, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    verifier = kit.enrolled()
+    update = kit.scope_update([GRANT])
+
+    def boom(*args: object, **kwargs: object) -> Any:
+        raise RuntimeError("injected")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(sr, "_open", boom)
+        refused("verifier_internal_error", partial(verifier.update_customer_scope, update))
+    for junk in (b"", b"{}", b"[]", "text", None):
+        with pytest.raises(sr.PilotRecordRefused):
+            verifier.update_customer_scope(junk)  # type: ignore[arg-type]
+    assert verifier.update_customer_scope(update).anchor_revision == 2
