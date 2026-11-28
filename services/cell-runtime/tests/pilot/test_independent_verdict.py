@@ -660,6 +660,7 @@ def test_x5_critical_slice_regression_despite_aggregate_win(tmp_path):
         "comparable": 10,
         "fixes": 0,
         "new_errors": 10,
+        "uncovered": 0,
         "status": "veto",
     }
     unsupported = policy(critical_slices=(ABSENT,))
@@ -1521,9 +1522,73 @@ def test_m5_candidate_deferrals_cannot_hide_a_critical_slice_veto(tmp_path):
         "comparable": 20,
         "fixes": 0,
         "new_errors": 20,
+        "uncovered": 0,
         "status": "veto",
     }
     assert "coverage_expansion_within_ceiling" not in json.dumps(doc["reasons"])
+
+
+def test_m6_review_f2_candidate_errors_on_comparator_gaps_reach_the_slice_veto(tmp_path):
+    """Review 577a774 F2: WR120, RR77, RR3, MW5, last 8 in the slice, read comparable 3, ok."""
+
+    def last_eight(index, codes):
+        return (CRITICAL,) if index >= 197 else ()
+
+    s = Scenario([("WR", 120), ("RR", 77), ("RR", 3), ("MW", 5)], slice_of=last_eight)
+    pol = policy(critical_slices=(CRITICAL,), max_missing=5)
+    doc = held(run(tmp_path, s, pol=pol), "regression", "critical_slice_veto")
+    pair = doc["comparisons"]["incumbent"]
+    assert pair["critical_slices"][CRITICAL] == {
+        "comparable": 3,
+        "fixes": 0,
+        "new_errors": 5,
+        "uncovered": 5,
+        "status": "veto",
+    }
+    assert pair["comparator_gap_candidate_wrong"] == 5
+
+
+def test_m7_review_f2_candidate_missing_slice_cases_hold_the_comparison(tmp_path):
+    """Review 577a774 F2: RR3 + RM5 inside the slice gave verified_gain on 3 comparable cases."""
+
+    def last_eight(index, codes):
+        return (CRITICAL,) if index >= 197 else ()
+
+    s = Scenario([("WR", 120), ("RR", 77), ("RR", 3), ("RM", 5)], slice_of=last_eight)
+    pol = policy(critical_slices=(CRITICAL,), max_missing=5)
+    doc = held(run(tmp_path, s, pol=pol), "inconclusive", "critical_slice_insufficient_comparable")
+    slice_ = doc["comparisons"]["incumbent"]["critical_slices"][CRITICAL]
+    assert slice_ == {
+        "comparable": 3,
+        "fixes": 0,
+        "new_errors": 0,
+        "uncovered": 5,
+        "status": "insufficient_comparable",
+    }
+    # The share boundary: 7 comparable of 10 is exactly the 7000 bps floor and is not held;
+    # 6 of 10 is below it and is.
+    for comparable, status in ((7, "ok"), (6, "insufficient_comparable")):
+        plan = [("WR", 120), ("RR", 70), ("RR", comparable), ("RM", 10 - comparable)]
+        t = Scenario(plan, slice_of=lambda i, c: (CRITICAL,) if i >= 190 else ())
+        loose = policy(critical_slices=(CRITICAL,), max_missing=4)
+        out = run(tmp_path / f"share-{comparable}", t, pol=loose).document
+        assert out["comparisons"]["incumbent"]["critical_slices"][CRITICAL]["status"] == status
+
+
+def test_m8_a_slice_veto_is_not_masked_by_thin_support(tmp_path):
+    """Slice errors regress even when the slice is below its minimum comparable cases."""
+    t = {**terms_for((CRITICAL,)), "minimum_slice_cases": 50}
+    p = policy(
+        critical_slices=(CRITICAL,),
+        operating_point_terms=t,
+        operating_point_digest=digest(t),
+    )
+    s = Scenario(
+        [("WR", 120), ("RR", 70), ("RW", 10)],
+        slice_of=lambda i, c: (CRITICAL,) if i >= 190 else (),
+    )
+    doc = held(run(tmp_path, s, pol=p), "regression", "critical_slice_veto")
+    assert doc["comparisons"]["incumbent"]["critical_slices"][CRITICAL]["comparable"] == 10
 
 
 # ----------------------------------------------------------------- G: final delta-review tests

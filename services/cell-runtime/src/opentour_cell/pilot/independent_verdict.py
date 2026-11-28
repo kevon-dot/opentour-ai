@@ -1293,8 +1293,10 @@ class IndependentEvaluator:
         cand_arm, comp_arm = _arm_counts(cand), _arm_counts(comp)
         families: dict[str, list[int]] = {}
         slices: dict[str, Json] = {
-            s: {"comparable": 0, "fixes": 0, "new_errors": 0} for s in policy.critical_slices
+            s: {"comparable": 0, "fixes": 0, "new_errors": 0, "uncovered": 0}
+            for s in policy.critical_slices
         }
+        gaps = ("missing_output", "malformed_output")
         for case, c, t in zip(population.cases, comp, cand, strict=True):
             if _is_auto(c) and _is_auto(t):
                 effect = (t == "correct_automatic") - (c == "correct_automatic")
@@ -1302,6 +1304,14 @@ class IndependentEvaluator:
                 # Newly automated: no credit when right, a full error when wrong.
                 effect = -1 if t == "wrong_automatic" else 0
             else:
+                if c in gaps or t in gaps:
+                    # A comparator gap or a candidate missing/malformed output still counts
+                    # against the slice: it is an uncovered slice case, and a wrong automatic
+                    # candidate decision on it is a slice error the veto must see.
+                    for s in case.slices:
+                        if s in slices:
+                            slices[s]["uncovered"] += 1
+                            slices[s]["new_errors"] += t == "wrong_automatic"
                 continue
             families.setdefault(case.family_id, []).append(effect)
             for s in case.slices:
@@ -1316,12 +1326,18 @@ class IndependentEvaluator:
         )
         threshold = Fraction(policy.minimum_improvement_bps, 10_000)
         min_slice = max(1, policy.term("minimum_slice_cases"))
+        # The slice's comparable share must meet the same coverage floor the comparison does
+        # (no slice-specific share term is registered yet).
+        floor = max(policy.coverage_floor_bps, policy.term("minimum_coverage_bps"))
         for v in slices.values():
+            # The veto is checked first: slice errors regress even where support is thin.
             v["status"] = (
-                "unsupported"
-                if v["comparable"] < min_slice
-                else "veto"
+                "veto"
                 if v["new_errors"] > v["fixes"]
+                else "unsupported"
+                if v["comparable"] < min_slice
+                else "insufficient_comparable"
+                if v["comparable"] * 10_000 < floor * (v["comparable"] + v["uncovered"])
                 else "ok"
             )
         checks = {
@@ -1389,7 +1405,8 @@ class IndependentEvaluator:
 
         Order: identity/copy (exactly zero change) -> every regression gate (shared-case paired
         errors, newly automated errors over the ceiling, critical-slice veto, interval wholly
-        below zero) -> holds (missing outputs, comparator gaps, coverage, no ceiling) -> the
+        below zero) -> holds (missing outputs, comparator gaps, coverage, critical-slice
+        comparable share, no ceiling) -> the
         residual total-wrong check -> support -> the interval decision. Only after no regression
         gate fires may an excess of total wrong decisions that is entirely newly automated (and
         within the ceiling) map to ``coverage_expansion_within_ceiling``.
@@ -1422,6 +1439,8 @@ class IndependentEvaluator:
             (comp_cov - cand_cov) * 10_000 > policy.max_coverage_loss_bps
         ):
             return "inconclusive", "coverage_incompatible"
+        if any(v["status"] == "insufficient_comparable" for v in slices.values()):
+            return "inconclusive", "critical_slice_insufficient_comparable"
         if newly and type(ceiling) is not int:
             return "inconclusive", "newly_automated_without_error_ceiling"
         # ---- residual total-wrong check, safe only after the shared-case gate above
