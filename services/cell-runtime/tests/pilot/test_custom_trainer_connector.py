@@ -8,28 +8,40 @@ credential, restart, fence, bound and lineage behaviour. Fixture kind: generated
 Software behavior only: no real trainer, GPU, provider or customer evidence.
 """
 
+import ast
+import functools
 import hashlib
 import json
+import os
 import threading
 import time
 from contextlib import nullcontext
-from dataclasses import replace
+from dataclasses import fields, replace
+from pathlib import Path
 
 import pytest
 from opentour_cell.pilot import connector_conformance as cc
+from opentour_cell.pilot import custom_trainer_connector as ctc
 from opentour_cell.pilot import model_connector as mc
 from opentour_cell.pilot import trainer_conformance as tc
 from opentour_cell.pilot.connector_ext import EvidenceTier, Usage
 from opentour_cell.pilot.custom_trainer_connector import (
     ADAPTER_VERSION,
+    CUSTOMER_WITNESS_PURPOSE,
+    WITNESS_ROLE_CUSTOMER_OWNER,
     Credential,
+    CustomerWitness,
     CustomTrainerConnector,
+    IntegrationVerdict,
     TrainerJobRequest,
     TrainerRegistration,
     TrainerUsage,
     TrainerView,
+    WitnessSubject,
     check_compatibility,
+    classify_integration,
     integration_tier,
+    is_fixture_trainer,
     replay_matches,
     settle_callback,
     sign_result,
@@ -362,6 +374,160 @@ def test_trainer_quote_above_authorized_bound_is_refused(tmp_path):
 
 
 # ---- A6: evidence tiers ----
+#
+# Production entry points (classify_integration, integration_tier) accept no witness verifier, so
+# CUSTOMER_WITNESSED is unreachable from them. Rules that sit before verification are exercised
+# through the private test seam ``ctc._classify_integration`` with an accepting test double, which
+# shows each refusal holds even against a verifier that would accept anything.
+
+
+REAL_ORIGIN = "customer-trainer-a"
+WITNESS_SUBJECT = WitnessSubject(
+    engagement="engagement-sentinel-1",
+    trainer_id=REAL_ORIGIN,
+    job_id="job-sentinel-1",
+    artifact_revision="artifact-revision-sentinel-1",
+    observed_outcome="completed",
+)
+BOUND_FIELDS = ("engagement", "trainer_id", "job_id", "artifact_revision", "observed_outcome")
+WITNESS_FIELDS = (*BOUND_FIELDS, "witness_role", "purpose", "attestation")
+
+
+def _witness(**changes):
+    base = CustomerWitness(
+        engagement=WITNESS_SUBJECT.engagement,
+        trainer_id=WITNESS_SUBJECT.trainer_id,
+        job_id=WITNESS_SUBJECT.job_id,
+        artifact_revision=WITNESS_SUBJECT.artifact_revision,
+        observed_outcome=WITNESS_SUBJECT.observed_outcome,
+        witness_role=WITNESS_ROLE_CUSTOMER_OWNER,
+        purpose=CUSTOMER_WITNESS_PURPOSE,
+        attestation="generated-attestation-sentinel",
+    )
+    return replace(base, **changes)
+
+
+class AcceptingWitnessVerifierDouble:
+    """Test double only: accepts every record. Production accepts no verifier (OPE-566/OPE-582)."""
+
+    def __init__(self):
+        self.calls = []
+
+    def verify_customer_witness(self, witness, subject):
+        self.calls.append((witness, subject))
+        return True
+
+
+class RefusingWitnessVerifierDouble:
+    def verify_customer_witness(self, witness, subject):
+        return False
+
+
+class RaisingWitnessVerifierDouble:
+    def verify_customer_witness(self, witness, subject):
+        raise RuntimeError("generated verifier failure")
+
+
+class TruthyWitnessVerifierDouble:
+    def verify_customer_witness(self, witness, subject):
+        return "yes"
+
+
+class OneWitnessVerifierDouble:
+    def verify_customer_witness(self, witness, subject):
+        return 1
+
+
+class PilotVerifier:
+    """A lookalike named after the pending OPE-566 class. Production must still refuse it."""
+
+    def verify_customer_witness(self, witness, subject):
+        return True
+
+
+class AlwaysEqualStr(str):
+    def __eq__(self, other):
+        return True
+
+    def __ne__(self, other):
+        return False
+
+    __hash__ = str.__hash__
+
+
+class StripLiarStr(str):
+    def strip(self, chars=None):
+        return "not-blank"
+
+
+class RaisingEqStr(str):
+    def __eq__(self, other):
+        raise RuntimeError("generated comparison failure")
+
+    def __ne__(self, other):
+        raise RuntimeError("generated comparison failure")
+
+    __hash__ = str.__hash__
+
+
+class CasefoldLiarStr(str):
+    def casefold(self):
+        return "customer-trainer"
+
+
+class PlainStrSubclass(str):
+    pass
+
+
+def _subject_for(origin):
+    return replace(WITNESS_SUBJECT, trainer_id=origin)
+
+
+def _classify(origin=REAL_ORIGIN, qualification="qualification-1", witness=None, **kwargs):
+    """The production entry point."""
+    kwargs.setdefault("subject", _subject_for(origin))
+    return classify_integration(origin, qualification, witness, **kwargs)
+
+
+_GATE_FROM_VERIFIER = object()
+
+
+def _seam(
+    origin=REAL_ORIGIN,
+    qualification="qualification-1",
+    witness=None,
+    *,
+    accept=_GATE_FROM_VERIFIER,
+    **kwargs,
+):
+    """The private rules with ``_ACCEPTED_VERIFIER_TYPE`` monkeypatched for this call only.
+
+    By default the gate admits the passed verifier's own class, so a refusal shown here holds even
+    against a verifier the gate would call. ``accept`` sets the gate explicitly.
+    """
+    kwargs.setdefault("subject", _subject_for(origin))
+    verifier = kwargs.setdefault("verifier", None)
+    if accept is _GATE_FROM_VERIFIER:
+        accept = None if verifier is None else type(verifier)
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(ctc, "_ACCEPTED_VERIFIER_TYPE", accept)
+        return ctc._classify_integration(origin, qualification, witness, **kwargs)
+
+
+def _bound_args(verifier):
+    """Arguments for a well-formed, correctly bound witness, for calling the rules directly."""
+    return (REAL_ORIGIN, "qualification-1", _witness()), {
+        "subject": WITNESS_SUBJECT,
+        "verifier": verifier,
+    }
+
+
+def _refused_everywhere(expected, **kwargs):
+    """``expected`` from production, and from the rules with an admitted accepting verifier."""
+    verifier = AcceptingWitnessVerifierDouble()
+    assert _classify(**kwargs, witness_verifier=verifier) == expected
+    assert _seam(**kwargs, verifier=verifier) == expected
+    assert verifier.calls == []
 
 
 def test_generated_trainer_is_fixture_tier_whatever_refs_are_claimed():
@@ -371,13 +537,530 @@ def test_generated_trainer_is_fixture_tier_whatever_refs_are_claimed():
 
 
 def test_real_origin_tiers_need_their_own_refs():
-    assert integration_tier("customer-trainer-a", None, None) is EvidenceTier.FIXTURE
-    assert integration_tier("customer-trainer-a", "qualification-1", None) is (
+    assert integration_tier(REAL_ORIGIN, None, None) is EvidenceTier.FIXTURE
+    assert integration_tier(REAL_ORIGIN, "  ", None) is EvidenceTier.FIXTURE
+    assert integration_tier(REAL_ORIGIN, "qualification-1", None) is (
         EvidenceTier.SOFTWARE_QUALIFIED
     )
-    assert integration_tier("customer-trainer-a", "qualification-1", "witness-1") is (
-        EvidenceTier.CUSTOMER_WITNESSED
+
+
+def test_witness_record_matches_the_owner_ruling():
+    # Owner ruling on OPE-566: purpose opentour.pilot.customer-witness.v1, binding engagement,
+    # trainer id, job id, artifact revision and observed outcome; customer_owner only.
+    assert CUSTOMER_WITNESS_PURPOSE == "opentour.pilot.customer-witness.v1"
+    assert WITNESS_ROLE_CUSTOMER_OWNER == "customer_owner"
+    assert tuple(f.name for f in fields(WitnessSubject)) == BOUND_FIELDS
+    assert {f.name for f in fields(CustomerWitness)} == set(WITNESS_FIELDS)
+    for retired in ("tenant", "trainer_revision", "job_ref"):
+        assert retired not in {f.name for f in fields(CustomerWitness)}
+
+
+def test_bare_witness_string_never_reaches_customer_witnessed():
+    # The old classifier returned CUSTOMER_WITNESSED for any non-empty string.
+    for bare in ("witness-1", "customer_witnessed", "signed-by-customer"):
+        _refused_everywhere(
+            IntegrationVerdict(EvidenceTier.SOFTWARE_QUALIFIED, "customer_witness_unstructured"),
+            witness=bare,
+        )
+        assert integration_tier(REAL_ORIGIN, "qualification-1", bare) is (
+            EvidenceTier.SOFTWARE_QUALIFIED
+        )
+
+
+def test_empty_or_whitespace_witness_is_not_a_witness():
+    for bare in ("", " ", "\t\n"):
+        _refused_everywhere(
+            IntegrationVerdict(EvidenceTier.SOFTWARE_QUALIFIED, "customer_witness_unstructured"),
+            witness=bare,
+        )
+    # Every field of the record, including role, purpose, artifact revision and outcome.
+    assert {f.name for f in fields(CustomerWitness)} == set(WITNESS_FIELDS)
+    for field_name in WITNESS_FIELDS:
+        for blank in ("", "   ", "job\u200b", None, 7):
+            _refused_everywhere(
+                IntegrationVerdict(EvidenceTier.SOFTWARE_QUALIFIED, "customer_witness_malformed"),
+                witness=_witness(**{field_name: blank}),
+            )
+
+
+def test_structured_witness_without_a_verifier_is_unverifiable():
+    verdict = _classify(witness=_witness())
+    assert verdict == IntegrationVerdict(
+        EvidenceTier.SOFTWARE_QUALIFIED, "customer_witness_unverifiable"
     )
+    assert _seam(witness=_witness()) == verdict
+    assert integration_tier(
+        REAL_ORIGIN, "qualification-1", _witness(), subject=WITNESS_SUBJECT
+    ) is (EvidenceTier.SOFTWARE_QUALIFIED)
+
+
+@pytest.mark.parametrize(
+    "make_verifier",
+    [
+        AcceptingWitnessVerifierDouble,
+        RefusingWitnessVerifierDouble,
+        RaisingWitnessVerifierDouble,
+        TruthyWitnessVerifierDouble,
+        OneWitnessVerifierDouble,
+        PilotVerifier,
+        object,
+    ],
+)
+def test_production_entry_points_refuse_every_verifier_uncalled(make_verifier):
+    # Owner ruling: only the OPE-566 PilotVerifier may authenticate a customer witness, and it has
+    # not landed. Until it does, no verifier object of any kind reaches CUSTOMER_WITNESSED.
+    verifier = make_verifier()
+    verdict = _classify(witness=_witness(), witness_verifier=verifier)
+    assert verdict == IntegrationVerdict(
+        EvidenceTier.SOFTWARE_QUALIFIED, "customer_witness_unverifiable"
+    )
+    assert (
+        integration_tier(
+            REAL_ORIGIN,
+            "qualification-1",
+            _witness(),
+            subject=WITNESS_SUBJECT,
+            witness_verifier=verifier,
+        )
+        is EvidenceTier.SOFTWARE_QUALIFIED
+    )
+    assert getattr(verifier, "calls", []) == []
+
+
+def test_no_verifier_type_is_accepted_in_production():
+    # The primary line: until the OPE-566 PilotVerifier lands, the rules admit no verifier class.
+    assert ctc._ACCEPTED_VERIFIER_TYPE is None
+
+
+def test_every_path_to_the_rules_refuses_an_unadmitted_verifier_uncalled():
+    # No monkeypatch: each indirect route reaches the rules with an accepting verifier, and the
+    # gate still refuses it with customer_witness_unverifiable without calling it.
+    from opentour_cell.pilot.custom_trainer_connector import _classify_integration as imported
+
+    alias = ctc._classify_integration  # B1: an alias of the rules
+
+    def partial_route(args, kwargs):  # B2
+        bound = functools.partial(ctc._classify_integration, verifier=kwargs.pop("verifier"))
+        return bound(*args, **kwargs)
+
+    routes = {
+        "alias": lambda args, kwargs: alias(*args, **kwargs),
+        "partial": partial_route,
+        "globals": lambda args, kwargs: vars(ctc)["_classify_" + "integration"](*args, **kwargs),
+        "getattr": lambda args, kwargs: getattr(ctc, "_classify" + "_integration")(*args, **kwargs),
+        "import": lambda args, kwargs: imported(*args, **kwargs),
+    }
+    unverifiable = IntegrationVerdict(
+        EvidenceTier.SOFTWARE_QUALIFIED, "customer_witness_unverifiable"
+    )
+    for name, route in routes.items():
+        for verifier in (AcceptingWitnessVerifierDouble(), PilotVerifier()):
+            args, kwargs = _bound_args(verifier)
+            assert route(args, kwargs) == unverifiable, name
+            assert getattr(verifier, "calls", []) == [], name
+
+
+def test_the_gate_admits_only_the_exact_accepted_class():
+    class AcceptingSubclass(AcceptingWitnessVerifierDouble):
+        pass
+
+    class Lookalike:
+        def __init__(self):
+            self.calls = []
+
+        def verify_customer_witness(self, witness, subject):
+            self.calls.append((witness, subject))
+            return True
+
+    unverifiable = IntegrationVerdict(
+        EvidenceTier.SOFTWARE_QUALIFIED, "customer_witness_unverifiable"
+    )
+    for verifier in (AcceptingSubclass(), Lookalike()):
+        verdict = _seam(
+            witness=_witness(), verifier=verifier, accept=AcceptingWitnessVerifierDouble
+        )
+        assert verdict == unverifiable
+        assert verifier.calls == []
+    # With the gate open, the production entry point still forwards no verifier.
+    verifier = AcceptingWitnessVerifierDouble()
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(ctc, "_ACCEPTED_VERIFIER_TYPE", AcceptingWitnessVerifierDouble)
+        assert _classify(witness=_witness(), witness_verifier=verifier) == unverifiable
+    assert verifier.calls == []
+
+
+_SCAN_SKIPPED = frozenset(
+    {"." + "git", ".venv", "node_modules", ".claude", "__pycache__", ".mypy_cache", ".ruff_cache"}
+)
+
+
+def _repo_python_files():
+    repo_root = Path(__file__).resolve().parents[4]
+    for directory, subdirs, files in os.walk(repo_root):
+        subdirs[:] = sorted(d for d in subdirs if d not in _SCAN_SKIPPED)
+        for name in sorted(files):
+            if name.endswith(".py"):
+                yield Path(directory) / name
+
+
+def test_no_other_code_names_the_rules():
+    # Second line: across the whole repository, only the defining module and this test name the
+    # rules, and the defining module refers to them exactly once, in a call with verifier=None.
+    # (A split-string lookup cannot be seen statically; the gate above refuses it.)
+    seam = "_classify_integration"
+    module = Path(ctc.__file__).resolve()
+    seen = set()
+    for path in _repo_python_files():
+        if seam in path.read_text(encoding="utf-8", errors="replace"):
+            seen.add(path.resolve())
+    assert seen == {module, Path(__file__).resolve()}
+    tree = ast.parse(module.read_text(encoding="utf-8"))
+    names = [n for n in ast.walk(tree) if isinstance(n, ast.Name) and n.id == seam]
+    attributes = [n for n in ast.walk(tree) if isinstance(n, ast.Attribute) and n.attr == seam]
+    definitions = [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == seam]
+    assert len(definitions) == 1 and attributes == [] and len(names) == 1
+    calls = [n for n in ast.walk(tree) if isinstance(n, ast.Call) and n.func is names[0]]
+    assert len(calls) == 1
+    verifier_args = [kw.value for kw in calls[0].keywords if kw.arg == "verifier"]
+    assert len(verifier_args) == 1
+    assert isinstance(verifier_args[0], ast.Constant) and verifier_args[0].value is None
+
+
+@pytest.mark.parametrize(
+    "outcome",
+    [
+        "failed",
+        "completed ",
+        "Completed",
+        "customer says great",
+        mc.JobState.CANCELED.value,
+        mc.JobState.UNKNOWN.value,
+        mc.JobState.QUEUED.value,
+        mc.JobState.RUNNING.value,
+    ],
+)
+def test_only_a_successfully_completed_job_can_be_witnessed(outcome):
+    refused = IntegrationVerdict(
+        EvidenceTier.SOFTWARE_QUALIFIED, "customer_witness_outcome_refused"
+    )
+    # Witness and subject agree on the outcome, or either one alone claims it.
+    _refused_everywhere(
+        refused,
+        witness=_witness(observed_outcome=outcome),
+        subject=replace(WITNESS_SUBJECT, observed_outcome=outcome),
+    )
+    _refused_everywhere(refused, witness=_witness(observed_outcome=outcome))
+    _refused_everywhere(
+        refused, witness=_witness(), subject=replace(WITNESS_SUBJECT, observed_outcome=outcome)
+    )
+
+
+def test_completed_is_the_only_witnessable_outcome():
+    assert WITNESS_SUBJECT.observed_outcome == mc.JobState.COMPLETED.value == "completed"
+    verifier = AcceptingWitnessVerifierDouble()
+    assert _seam(witness=_witness(), verifier=verifier).reason == "customer_witness_verified"
+    # The enum member itself is a str subclass, so it is refused as malformed, never compared.
+    _refused_everywhere(
+        IntegrationVerdict(EvidenceTier.SOFTWARE_QUALIFIED, "customer_witness_malformed"),
+        witness=_witness(observed_outcome=mc.JobState.COMPLETED),
+    )
+
+
+def test_records_built_without_attributes_are_malformed_not_errors():
+    empty_witness = object.__new__(CustomerWitness)
+    partial_witness = object.__new__(CustomerWitness)
+    object.__setattr__(partial_witness, "engagement", WITNESS_SUBJECT.engagement)
+    object.__setattr__(partial_witness, "trainer_id", REAL_ORIGIN)
+    malformed = IntegrationVerdict(EvidenceTier.SOFTWARE_QUALIFIED, "customer_witness_malformed")
+    for witness in (empty_witness, partial_witness):
+        assert classify_integration(REAL_ORIGIN, "q", witness) == malformed
+        assert integration_tier(REAL_ORIGIN, "q", witness) is EvidenceTier.SOFTWARE_QUALIFIED
+        _refused_everywhere(malformed, witness=witness)
+    empty_subject = object.__new__(WitnessSubject)
+    partial_subject = object.__new__(WitnessSubject)
+    object.__setattr__(partial_subject, "trainer_id", REAL_ORIGIN)
+    subject_malformed = IntegrationVerdict(
+        EvidenceTier.SOFTWARE_QUALIFIED, "customer_witness_subject_malformed"
+    )
+    for subject in (empty_subject, partial_subject):
+        assert classify_integration(REAL_ORIGIN, "q", _witness(), subject=subject) == (
+            subject_malformed
+        )
+        assert integration_tier(REAL_ORIGIN, "q", _witness(), subject=subject) is (
+            EvidenceTier.SOFTWARE_QUALIFIED
+        )
+        _refused_everywhere(subject_malformed, witness=_witness(), subject=subject)
+
+
+def test_a_verifier_that_refuses_raises_or_answers_truthy_is_a_refusal():
+    for verifier in (
+        RefusingWitnessVerifierDouble(),
+        RaisingWitnessVerifierDouble(),
+        TruthyWitnessVerifierDouble(),
+        OneWitnessVerifierDouble(),
+        object(),  # no verify_customer_witness method at all
+    ):
+        verdict = _seam(witness=_witness(), verifier=verifier)
+        assert verdict == IntegrationVerdict(
+            EvidenceTier.SOFTWARE_QUALIFIED, "customer_witness_refused"
+        )
+
+
+@pytest.mark.parametrize("field_name", BOUND_FIELDS)
+def test_witness_for_another_subject_is_refused_before_verification(field_name):
+    mismatch = IntegrationVerdict(
+        EvidenceTier.SOFTWARE_QUALIFIED, "customer_witness_binding_mismatch"
+    )
+    if field_name == "observed_outcome":  # any outcome but "completed" is refused as such
+        mismatch = IntegrationVerdict(
+            EvidenceTier.SOFTWARE_QUALIFIED, "customer_witness_outcome_refused"
+        )
+    wrong = _witness(**{field_name: "other-" + getattr(WITNESS_SUBJECT, field_name)})
+    _refused_everywhere(mismatch, witness=wrong)
+    # A case-only difference is a different binding, not a normalised match.
+    upper = _witness(**{field_name: getattr(WITNESS_SUBJECT, field_name).upper()})
+    _refused_everywhere(mismatch, witness=upper)
+
+
+def test_witness_and_subject_agreeing_on_another_trainer_are_refused():
+    # Witness and subject match each other but name a trainer other than the one classified.
+    other = "customer-trainer-b"
+    _refused_everywhere(
+        IntegrationVerdict(EvidenceTier.SOFTWARE_QUALIFIED, "customer_witness_binding_mismatch"),
+        witness=_witness(trainer_id=other),
+        subject=_subject_for(other),
+    )
+
+
+def test_witness_needs_a_subject_for_this_trainer_and_the_customer_owner_role():
+    mismatch = IntegrationVerdict(
+        EvidenceTier.SOFTWARE_QUALIFIED, "customer_witness_binding_mismatch"
+    )
+    _refused_everywhere(mismatch, witness=_witness(), subject=None)
+    _refused_everywhere(mismatch, witness=_witness(), subject=_subject_for("customer-trainer-b"))
+    for role in ("operator_custodian", "Customer_Owner", "customer_owner ", "auditor"):
+        _refused_everywhere(
+            IntegrationVerdict(EvidenceTier.SOFTWARE_QUALIFIED, "customer_witness_role_refused"),
+            witness=_witness(witness_role=role),
+        )
+
+
+def test_witness_under_another_purpose_is_refused():
+    for purpose in (
+        "opentour.pilot.engagement-grant.v1",
+        "opentour.pilot.customer-witness.v2",
+        "OPENTOUR.PILOT.CUSTOMER-WITNESS.V1",
+        CUSTOMER_WITNESS_PURPOSE + " ",
+    ):
+        _refused_everywhere(
+            IntegrationVerdict(EvidenceTier.SOFTWARE_QUALIFIED, "customer_witness_purpose_refused"),
+            witness=_witness(purpose=purpose),
+        )
+
+
+def test_witness_cannot_stand_in_for_missing_software_qualification():
+    _refused_everywhere(
+        IntegrationVerdict(EvidenceTier.FIXTURE, "software_qualification_absent"),
+        qualification=None,
+        witness=_witness(),
+    )
+
+
+def test_duck_typed_or_subclassed_records_are_refused():
+    class LookalikeWitness:
+        engagement = WITNESS_SUBJECT.engagement
+        trainer_id = WITNESS_SUBJECT.trainer_id
+        job_id = WITNESS_SUBJECT.job_id
+        artifact_revision = WITNESS_SUBJECT.artifact_revision
+        observed_outcome = WITNESS_SUBJECT.observed_outcome
+        witness_role = WITNESS_ROLE_CUSTOMER_OWNER
+        purpose = CUSTOMER_WITNESS_PURPOSE
+        attestation = "generated-attestation-sentinel"
+
+    class SubWitness(CustomerWitness):
+        pass
+
+    class SubSubject(WitnessSubject):
+        pass
+
+    unstructured = IntegrationVerdict(
+        EvidenceTier.SOFTWARE_QUALIFIED, "customer_witness_unstructured"
+    )
+    _refused_everywhere(unstructured, witness=LookalikeWitness())
+    _refused_everywhere(unstructured, witness=SubWitness(**vars(_witness())))
+    _refused_everywhere(
+        IntegrationVerdict(EvidenceTier.SOFTWARE_QUALIFIED, "customer_witness_binding_mismatch"),
+        witness=_witness(),
+        subject=SubSubject(**vars(WITNESS_SUBJECT)),
+    )
+
+
+@pytest.mark.parametrize("hostile", [AlwaysEqualStr, StripLiarStr, RaisingEqStr])
+def test_hostile_str_subclasses_in_records_are_refused_with_a_reason(hostile):
+    malformed = IntegrationVerdict(EvidenceTier.SOFTWARE_QUALIFIED, "customer_witness_malformed")
+    for field_name in WITNESS_FIELDS:
+        # A different value (AlwaysEqual would pass binding), a blank one (StripLiar would pass the
+        # blank check) and the correct one (RaisingEq would raise inside the comparison).
+        for value in ("other-value", "   ", getattr(_witness(), field_name)):
+            _refused_everywhere(malformed, witness=_witness(**{field_name: hostile(value)}))
+    subject_malformed = IntegrationVerdict(
+        EvidenceTier.SOFTWARE_QUALIFIED, "customer_witness_subject_malformed"
+    )
+    for field_name in BOUND_FIELDS:
+        for value in ("other-value", "   ", getattr(WITNESS_SUBJECT, field_name)):
+            subject = replace(WITNESS_SUBJECT, **{field_name: hostile(value)})
+            _refused_everywhere(subject_malformed, witness=_witness(), subject=subject)
+    for value in ("   ", "qualification-1"):
+        _refused_everywhere(
+            IntegrationVerdict(EvidenceTier.FIXTURE, "software_qualification_absent"),
+            qualification=hostile(value),
+            witness=_witness(),
+        )
+
+
+def test_blank_subject_fields_are_refused():
+    for field_name in BOUND_FIELDS:
+        for blank in ("", "   ", None):
+            _refused_everywhere(
+                IntegrationVerdict(
+                    EvidenceTier.SOFTWARE_QUALIFIED, "customer_witness_subject_malformed"
+                ),
+                witness=_witness(),
+                subject=replace(WITNESS_SUBJECT, **{field_name: blank}),
+            )
+
+
+@pytest.mark.parametrize(
+    "origin",
+    [
+        CasefoldLiarStr("generated-trainer"),
+        CasefoldLiarStr("customer-trainer-a"),
+        PlainStrSubclass("customer-trainer-a"),
+        AlwaysEqualStr("customer-trainer-a"),
+    ],
+    ids=["casefold-liar-generated", "casefold-liar-real", "plain-subclass", "always-equal"],
+)
+def test_str_subclass_trainer_identity_is_fixture(origin):
+    # A subclass's overridden casefold (or any method) never chooses the key: fail low.
+    expected = IntegrationVerdict(EvidenceTier.FIXTURE, "trainer_identity_unverifiable")
+    _refused_everywhere(expected, origin=origin, witness=_witness(trainer_id=origin))
+    assert is_fixture_trainer(origin)
+    assert integration_tier(origin, "qualification-1") is EvidenceTier.FIXTURE
+
+
+@pytest.mark.parametrize(
+    "origin",
+    [
+        "Generated-trainer",
+        "GENERATED-trainer",
+        "GENERATED-",
+        "generated_trainer",
+        "Simulated:trainer",
+        "acme-reference-trainer",
+        "Reference-Trainer",
+        "FIXTURE trainer",
+        # Names merely CONTAINING a token (owner ruling: substring, not whole-token).
+        "GeneratedTrainer",
+        "generatedtrainer",
+        "ReferenceTrainer",
+        "simulatedtrainer",
+        "fixtures-trainer",
+        "references-acme",
+        "generated1-trainer",
+        "sentinel-trainer",
+        "Sentinel_Trainer",
+        "sentinels",
+        "acmesentinelml",
+        # .invalid as a host label, with a trailing dot, port or path.
+        "trainer.GENERATED.INVALID",
+        "customer-trainer.invalid.",
+        "customer-trainer.invalid",
+        "trainer.invalid:443",
+        "trainer.invalid/x",
+        "https://trainer.invalid/path",
+        "a.invalid.example",
+        # Unicode variants.
+        "\uff27\uff45\uff4e\uff45\uff52\uff41\uff54\uff45\uff44-trainer",  # fullwidth "Generated"
+        "\uff27\uff25\uff2e\uff25\uff32\uff21\uff34\uff25\uff24\uff0dtrainer",  # fullwidth upper
+        "\uff53\uff45\uff4e\uff54\uff49\uff4e\uff45\uff4c-trainer",  # fullwidth "sentinel"
+        "gen\u200berated-trainer",  # zero-width space
+        "\u200bgenerated-trainer",
+        "generated\u2060-trainer",  # word joiner
+        "\ufeffcustomer-trainer-a",  # byte-order mark on an otherwise real id
+        "g\u0435nerated-trainer",  # Cyrillic homoglyph
+        "ge\u0301nerated-trainer",  # combining acute accent
+        "g\u00e9nerated-trainer",  # precomposed accent
+        "\ufb01xture-trainer",  # fi ligature folds to "fixture"
+        "  ",
+    ],
+)
+def test_generated_variants_are_fixture_even_with_an_accepting_verifier(origin):
+    verifier = AcceptingWitnessVerifierDouble()
+    for verdict in (
+        _classify(origin=origin, witness=_witness(trainer_id=origin), witness_verifier=verifier),
+        _seam(origin=origin, witness=_witness(trainer_id=origin), verifier=verifier),
+    ):
+        assert verdict.tier is EvidenceTier.FIXTURE
+        assert verdict.reason in ("fixture_trainer", "trainer_identity_unverifiable")
+    assert is_fixture_trainer(origin)
+    assert verifier.calls == []
+
+
+@pytest.mark.parametrize(
+    "origin",
+    [REAL_ORIGIN, "acme-ml.example:443", "trainer.invalidation.example", "invalid-runs-trainer"],
+)
+def test_names_without_a_fixture_marker_are_not_downgraded(origin):
+    # Positive control for the substring rule: an unmarked name keeps its tier.
+    assert not is_fixture_trainer(origin)
+    assert _classify(origin=origin, witness=_witness(trainer_id=origin)) == IntegrationVerdict(
+        EvidenceTier.SOFTWARE_QUALIFIED, "customer_witness_unverifiable"
+    )
+    verifier = AcceptingWitnessVerifierDouble()
+    assert _seam(origin=origin, witness=_witness(trainer_id=origin), verifier=verifier) == (
+        IntegrationVerdict(EvidenceTier.CUSTOMER_WITNESSED, "customer_witness_verified")
+    )
+
+
+def test_reference_trainer_with_a_valid_looking_witness_stays_fixture():
+    for origin in ("generated-reference-trainer", TRAINER_VERSION, "reference-trainer"):
+        _refused_everywhere(
+            IntegrationVerdict(EvidenceTier.FIXTURE, "fixture_trainer"),
+            origin=origin,
+            witness=_witness(trainer_id=origin, artifact_revision=TRAINER_VERSION),
+            subject=replace(_subject_for(origin), artifact_revision=TRAINER_VERSION),
+        )
+
+
+def test_legacy_positional_witness_string_and_non_string_identity_are_refused():
+    for origin in (None, 7, b"customer-trainer-a"):
+        assert integration_tier(origin, "qualification-1", _witness()) is EvidenceTier.FIXTURE
+    # The pre-fix positional call shape integration_tier(origin, qual, "witness-ref").
+    assert integration_tier(REAL_ORIGIN, "qualification-1", "witness-ref") is (
+        EvidenceTier.SOFTWARE_QUALIFIED
+    )
+
+
+def test_customer_witnessed_only_through_the_test_seam_with_an_authenticating_verifier():
+    # Positive case, test seam only: a well-formed, bound record that the verifier authenticates.
+    verifier = AcceptingWitnessVerifierDouble()
+    verdict = _seam(witness=_witness(), verifier=verifier)
+    assert verdict == IntegrationVerdict(
+        EvidenceTier.CUSTOMER_WITNESSED, "customer_witness_verified"
+    )
+    assert verifier.calls == [(_witness(), WITNESS_SUBJECT)]
+    # The same rules with the gate closed (production) refuse the same verifier uncalled.
+    closed = AcceptingWitnessVerifierDouble()
+    assert _seam(witness=_witness(), verifier=closed, accept=None) == IntegrationVerdict(
+        EvidenceTier.SOFTWARE_QUALIFIED, "customer_witness_unverifiable"
+    )
+    assert closed.calls == []
+    # The same inputs through the production entry point stop at SOFTWARE_QUALIFIED, uncalled.
+    production = AcceptingWitnessVerifierDouble()
+    assert _classify(witness=_witness(), witness_verifier=production) == IntegrationVerdict(
+        EvidenceTier.SOFTWARE_QUALIFIED, "customer_witness_unverifiable"
+    )
+    assert production.calls == []
 
 
 # ---- A7: conformance suite ----
@@ -1158,6 +1841,9 @@ def test_malformed_or_foreign_currency_usage_cannot_bypass_the_cap(env, usage):
 
 @pytest.mark.parametrize("bad", [-1, 1.5, True, float("nan")])
 def test_usage_report_rejects_malformed_values(env, bad):
+    # OPE-508 follow-up: usage is the journaled terminal figure, as on the managed route. A
+    # malformed report is never journaled, so it reads as unknown (``None``), never settleable;
+    # it used to raise ``INVALID_USAGE`` from the live poll.
     receipt = env.dispatch()
 
     class Garbage(Proxy):
@@ -1165,8 +1851,9 @@ def test_usage_report_rejects_malformed_values(env, bad):
             view = self.inner.poll(credential, job_id)
             return replace(view, usage=TrainerUsage("USD", bad, 1, 1, 1))
 
-    with pytest.raises(ValueError, match="INVALID_USAGE"):
-        env.make_connector(Garbage(env.trainer)).usage(receipt)
+    connector = env.make_connector(Garbage(env.trainer))
+    assert connector.usage(receipt) is None
+    assert connector.status(receipt).state is mc.JobState.FAILED  # stopped, as before
 
 
 def test_usage_is_never_estimated_or_settleable_by_string(env):
@@ -1347,3 +2034,430 @@ def test_conformance_replay_honours_a_declared_tolerance(tmp_path):
     )
     results = tc.run_trainer_conformance(harness, tmp_path)
     assert {r.name: r.outcome for r in results}["replay_deterministic"] is tc.Outcome.PASSED
+
+
+# ---- OPE-508 follow-up: the custom-trainer route adopts the managed route's usage-vs-cap hold ----
+# T1 a COMPLETED job whose journaled usage is above the journaled cap is held ``over_cap``: no
+#    result is fetched, no candidate, no replay; ``hold_reason`` reports it; ``settleable`` False;
+#    the job is not stopped (it already finished) and its state stays COMPLETED
+# T2 a COMPLETED job with missing or malformed usage is held ``usage_unverifiable`` (the gap)
+# T3 usage not comparable to the journaled cap (currency, missing or invalid cap) is held
+#    ``cap_unverifiable``
+# T4 usage exactly at the cap is accepted and released
+# T5 the intent journals all four maxima and the currency; release compares to those
+# T6 ``hold_reason`` is None unless the job is COMPLETED, and checks the receipt
+# T7 an intent bound that is not exactly ``int`` is refused before anything is journaled or sent
+TRAINER_MAXIMA = ("maximum_minor_units", "maximum_seconds", "maximum_rows", "maximum_steps")
+REFERENCE_USAGE = TrainerUsage("USD", 3, 1, 4, 1)  # what the reference trainer reports
+
+
+class SneakyInt(int):
+    """An ``int`` subclass. It serializes like the plain int, so it matches the intent digest."""
+
+
+class Observed(Proxy):
+    """Reports ``reported`` usage on a completed job and records result fetches and replays."""
+
+    def __init__(self, inner, reported):
+        super().__init__(inner)
+        self.reported = reported
+        self.fetched = []
+        self.predicted = []
+        self.stops = []
+
+    def poll(self, credential, job_id):
+        view = self.inner.poll(credential, job_id)
+        return replace(view, usage=self.reported) if view.state == "completed" else view
+
+    def fetch_result(self, credential, job_id):
+        self.fetched.append(job_id)
+        return self.inner.fetch_result(credential, job_id)
+
+    def predict(self, credential, artifact_ref, inputs):
+        self.predicted.append(artifact_ref)
+        return self.inner.predict(credential, artifact_ref, inputs)
+
+    def request_cancel(self, credential, job_id):
+        self.stops.append(job_id)
+        return self.inner.request_cancel(credential, job_id)
+
+
+def _completed_reporting(env, reported):
+    receipt = env.dispatch()
+    env.trainer.run_pending()
+    transport = Observed(env.trainer, reported)
+    connector = env.make_connector(transport)
+    return connector, transport, connector.status(receipt)
+
+
+def _journal_path(env):
+    return env.tmp / "connector" / "trainer-journal.jsonl"
+
+
+def _rewrite_trainer_journal(env, edit):
+    path = _journal_path(env)
+    records = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+    for record in records:
+        edit(record)
+    path.write_text("".join(json.dumps(record, sort_keys=True) + "\n" for record in records))
+
+
+def _journal_collected(env, done):
+    """A collection record for a held job (a legacy journal), so replay itself can be probed."""
+    with _journal_path(env).open("a") as handle:
+        handle.write(
+            json.dumps(
+                {"t": "collected", "k": TOKEN, "ref": "generated-artifact-x", "digest": "0" * 64}
+            )
+            + "\n"
+        )
+    return mc.Candidate(
+        done.intent, done.job_ref, REVISION, "generated-artifact-x", "replay-manifest:x"
+    )
+
+
+def _assert_trainer_held(env, connector, transport, done, reason):
+    exact = f"^{reason}$"
+    assert done.state is mc.JobState.COMPLETED  # the trainer's own state is kept
+    assert connector.hold_reason(done) == reason
+    with pytest.raises(ValueError, match=exact):
+        connector.collect(done)
+    with pytest.raises(mc.CapabilityError, match="candidate_lineage_unverified"):
+        env.make_preflight(connector).collect_candidate("training", done)
+    assert transport.fetched == [] and transport.stops == []
+    usage = connector.usage(done)
+    if reason == "usage_unverifiable":
+        assert usage is None
+    else:
+        assert usage is not None and usage.settleable is False
+        assert usage.cap_status == ("over_cap" if reason == "over_cap" else "cap_unknown")
+    # A restart replays the hold from the journal alone.
+    assert env.make_connector(env.trainer).hold_reason(done) == reason
+    candidate = _journal_collected(env, done)
+    with pytest.raises(ValueError, match=exact):
+        connector.predict_for_replay(candidate, FROZEN)
+    assert transport.predicted == []
+
+
+def _assert_trainer_released(env, connector, transport, done):
+    assert done.state is mc.JobState.COMPLETED
+    assert connector.hold_reason(done) is None
+    candidate = env.make_preflight(connector).collect_candidate("training", done)
+    assert connector.predict_for_replay(candidate, FROZEN) == EXPECTED
+    usage = connector.usage(done)
+    assert usage is not None and usage.settleable is True and usage.cap_status == "within_cap"
+    assert transport.stops == []
+
+
+@pytest.mark.parametrize(
+    "reported",
+    [
+        TrainerUsage("USD", 501, 1, 4, 1),
+        TrainerUsage("USD", 10**9, 1, 4, 1),
+        TrainerUsage("USD", 3, 61, 4, 1),
+        TrainerUsage("USD", 3, 1, 21, 1),
+        TrainerUsage("USD", 3, 1, 4, 101),
+    ],
+    ids=["money", "money-far", "seconds", "rows", "steps"],
+)
+def test_t1_completed_job_over_its_journaled_cap_is_held(env, reported):
+    connector, transport, done = _completed_reporting(env, reported)
+    _assert_trainer_held(env, connector, transport, done, "over_cap")
+    usage = connector.usage(done)
+    assert usage.incurred_minor_units == reported.minor_units  # the real figure, never clamped
+
+
+@pytest.mark.parametrize(
+    "reported",
+    [
+        None,  # the trainer reported no usage: the decided route gap
+        TrainerUsage("USD", float("nan"), 1, 4, 1),
+        TrainerUsage("USD", -1, 1, 4, 1),
+        TrainerUsage("USD", True, 1, 4, 1),
+        TrainerUsage("USD", 1.5, 1, 4, 1),
+        TrainerUsage("USD", "3", 1, 4, 1),
+        TrainerUsage("USD", 3, None, 4, 1),
+        TrainerUsage("", 3, 1, 4, 1),
+    ],
+)
+def test_t2_completed_job_with_missing_or_malformed_usage_is_held(env, reported):
+    connector, transport, done = _completed_reporting(env, reported)
+    _assert_trainer_held(env, connector, transport, done, "usage_unverifiable")
+
+
+@pytest.mark.parametrize("currency", ["EUR", "usd"])
+def test_t3_usage_in_another_currency_is_cap_unverifiable(env, currency):
+    reported = replace(REFERENCE_USAGE, currency=currency)
+    connector, transport, done = _completed_reporting(env, reported)
+    _assert_trainer_held(env, connector, transport, done, "cap_unverifiable")
+
+
+@pytest.mark.parametrize(
+    "edit",
+    [
+        lambda cap: None,  # an older journal: no cap recorded at all
+        lambda cap: {k: v for k, v in cap.items() if k != "currency"},
+        lambda cap: {k: v for k, v in cap.items() if k != "maximum_steps"},
+        lambda cap: {**cap, "maximum_rows": True},
+        lambda cap: {**cap, "maximum_seconds": 60.0},
+        lambda cap: {**cap, "maximum_minor_units": -1},
+        lambda cap: "generated-not-a-cap",
+    ],
+    ids=["absent", "no-currency", "no-steps", "bool", "float", "negative", "string"],
+)
+def test_t3_unusable_journaled_cap_is_cap_unverifiable(env, edit):
+    connector, transport, done = _completed_reporting(env, REFERENCE_USAGE)
+    assert connector.hold_reason(done) is None
+
+    def corrupt(record):
+        if record.get("t") == "intent":
+            replaced = edit(record.get("cap", {}))
+            if replaced is None:
+                record.pop("cap", None)
+            else:
+                record["cap"] = replaced
+
+    _rewrite_trainer_journal(env, corrupt)
+    _assert_trainer_held(env, connector, transport, done, "cap_unverifiable")
+
+
+def test_t4_usage_exactly_at_the_cap_is_released(env):
+    at_cap = TrainerUsage("USD", 500, 60, 20, 100)
+    assert (at_cap.minor_units, at_cap.seconds, at_cap.rows, at_cap.steps) == (
+        LIMIT.maximum_minor_units,
+        LIMIT.maximum_seconds,
+        LIMIT.maximum_rows,
+        LIMIT.maximum_steps,
+    )
+    connector, transport, done = _completed_reporting(env, at_cap)
+    _assert_trainer_released(env, connector, transport, done)
+
+
+def test_t4_ordinary_usage_is_released(env):
+    connector, transport, done = _completed_reporting(env, REFERENCE_USAGE)
+    _assert_trainer_released(env, connector, transport, done)
+
+
+def test_t5_intent_journals_all_four_maxima_and_release_compares_to_them(env):
+    connector, transport, done = _completed_reporting(env, REFERENCE_USAGE)
+    records = [json.loads(line) for line in _journal_path(env).read_text().splitlines()]
+    intent_record = next(record for record in records if record["t"] == "intent")
+    assert intent_record["cap"] == {
+        "currency": "USD",
+        "maximum_minor_units": 500,
+        "maximum_seconds": 60,
+        "maximum_rows": 20,
+        "maximum_steps": 100,
+    }
+    terminal = next(r for r in records if r["t"] == "state" and r["state"] == "completed")
+    assert terminal["usage"] == {
+        "currency": "USD",
+        "minor_units": 3,
+        "seconds": 1,
+        "rows": 4,
+        "steps": 1,
+    }
+
+    def lower(record):
+        if record.get("t") == "intent":
+            record["cap"]["maximum_rows"] = REFERENCE_USAGE.rows - 1  # the caller's bound is 20
+
+    _rewrite_trainer_journal(env, lower)
+    _assert_trainer_held(env, connector, transport, done, "over_cap")
+
+
+def test_t5_a_late_usage_report_never_changes_the_journaled_figure(env):
+    connector, transport, done = _completed_reporting(env, REFERENCE_USAGE)
+    transport.reported = TrainerUsage("USD", 10**9, 1, 4, 1)  # a later, upward revision
+    assert connector.status(done) == done
+    assert connector.hold_reason(done) is None
+    assert connector.usage(done).incurred_minor_units == 3
+
+
+def test_t6_hold_reason_is_none_unless_completed_and_checks_the_receipt(env):
+    queued = env.dispatch()
+    assert queued.state is mc.JobState.QUEUED and env.connector.hold_reason(queued) is None
+    canceled = env.connector.cancel(queued)
+    assert canceled.state is mc.JobState.CANCELED and env.connector.hold_reason(canceled) is None
+    with pytest.raises(LookupError, match="job_unknown"):
+        env.connector.hold_reason(replace(queued, job_ref="generated-job-other"))
+
+
+def test_t6_failed_job_reports_no_hold(tmp_path):
+    env = Env(tmp_path)
+    receipt = env.dispatch()
+
+    class Fails(Proxy):
+        def poll(self, credential, job_id):
+            view = self.inner.poll(credential, job_id)
+            return replace(view, state="failed", usage=None)
+
+    connector = env.make_connector(Fails(env.trainer))
+    failed = connector.status(receipt)
+    assert failed.state is mc.JobState.FAILED and connector.hold_reason(failed) is None
+
+
+def test_t6_a_running_job_over_its_cap_is_still_stopped(env):
+    receipt = env.dispatch()
+
+    class Running(Observed):
+        def poll(self, credential, job_id):
+            view = self.inner.poll(credential, job_id)
+            return replace(view, state="running", usage=TrainerUsage("USD", 501, 1, 1, 1))
+
+    transport = Running(env.trainer, None)
+    connector = env.make_connector(transport)
+    stopped = connector.status(receipt)
+    assert stopped.state is mc.JobState.FAILED and transport.stops == [receipt.job_ref]
+    assert connector.hold_reason(stopped) is None
+
+
+@pytest.mark.parametrize("limit", TRAINER_MAXIMA)
+@pytest.mark.parametrize("kind", ["subclass", "bool", "float"])
+def test_t7_intent_bound_that_is_not_exactly_int_is_refused_before_dispatch(env, limit, kind):
+    value = getattr(LIMIT, limit)
+    forged_value = {"subclass": SneakyInt(value), "bool": bool(value), "float": float(value)}[kind]
+    forged = replace(env.intent, bound=replace(LIMIT, **{limit: forged_value}))
+    with pytest.raises(ValueError, match="^fit_bound_not_exact_int$"):
+        env.connector.submit(forged, env.connector.serialize_development(forged, ROWS))
+    assert env.executions() == 0
+    assert '"intent"' not in _journal_path(env).read_text()
+
+
+@pytest.mark.parametrize("limit", TRAINER_MAXIMA)
+def test_t7_int_subclass_receipt_is_refused_and_cannot_change_the_hold_reason(env, limit):
+    reported = replace(REFERENCE_USAGE, minor_units=10**9, seconds=61, rows=21, steps=101)
+    connector, transport, done = _completed_reporting(env, reported)
+    sneaky = replace(done.intent, bound=replace(LIMIT, **{limit: SneakyInt(getattr(LIMIT, limit))}))
+    forged = replace(done, intent=sneaky)
+    for call in (
+        lambda: connector.hold_reason(forged),
+        lambda: connector.collect(forged),
+        lambda: connector.usage(forged),
+        lambda: connector.status(forged),
+        lambda: connector.cancel(forged),
+        lambda: connector.lookup(sneaky),
+    ):
+        with pytest.raises(ValueError, match="^fit_bound_not_exact_int$"):
+            call()
+    assert transport.fetched == [] and transport.stops == []
+    assert connector.hold_reason(done) == "over_cap"
+
+
+# ---- Review of #241 ----
+# F1 a receipt that reads COMPLETED before ``status`` journaled it (from ``lookup`` or
+#    ``Preflight.reconcile_fit``) still reports its hold: ``hold_reason`` and ``collect`` observe
+#    the job first
+# F2 the running-job guard compares only against the journaled cap: a journal without a cap, or
+#    with a lower one, stops a running job even when the caller's bound would allow its usage
+# F4 a negative maximum or an invalid currency is refused before anything is journaled or sent
+OVER = TrainerUsage("USD", 501, 1, 4, 1)
+
+
+def _live_completed(env, reported):
+    """A job the trainer finished, seen by a connector that has not journaled the outcome."""
+    env.dispatch()
+    env.trainer.run_pending()
+    transport = Observed(env.trainer, reported)
+    return env.make_connector(transport), transport
+
+
+def test_f1_lookup_receipt_reads_completed_and_reports_its_hold(env):
+    connector, transport = _live_completed(env, OVER)
+    receipt = connector.lookup(env.intent)
+    assert receipt.state is mc.JobState.COMPLETED
+    assert connector.hold_reason(receipt) == "over_cap"  # observed first, then journaled
+    assert connector.status(receipt).state is mc.JobState.COMPLETED
+    assert env.make_connector(env.trainer).hold_reason(receipt) == "over_cap"
+    assert transport.stops == [] and transport.fetched == []
+
+
+def test_f1_collect_on_a_lookup_receipt_reports_the_hold(env):
+    connector, transport = _live_completed(env, OVER)
+    receipt = connector.lookup(env.intent)
+    with pytest.raises(ValueError, match="^over_cap$"):
+        connector.collect(receipt)
+    assert transport.fetched == []
+
+
+def test_f1_reconcile_fit_receipt_reports_its_hold(env):
+    connector, transport = _live_completed(env, OVER)
+    preflight = env.make_preflight(connector)
+    receipt = preflight.reconcile_fit("training", env.intent)
+    assert receipt.state is mc.JobState.COMPLETED
+    assert connector.hold_reason(receipt) == "over_cap"
+    with pytest.raises(mc.CapabilityError, match="candidate_lineage_unverified"):
+        preflight.collect_candidate("training", receipt)
+    assert transport.fetched == []
+
+
+def test_f1_lookup_receipt_within_the_cap_reports_no_hold_and_is_released(env):
+    connector, transport = _live_completed(env, REFERENCE_USAGE)
+    receipt = connector.lookup(env.intent)
+    assert connector.hold_reason(receipt) is None
+    candidate = env.make_preflight(connector).collect_candidate("training", receipt)
+    assert connector.predict_for_replay(candidate, FROZEN) == EXPECTED
+
+
+def test_f1_hold_reason_of_a_live_job_is_none(env):
+    receipt = env.dispatch()
+    assert env.connector.hold_reason(receipt) is None  # observed: still queued
+    assert env.connector.status(receipt).state is mc.JobState.QUEUED
+
+
+class RunningWithin(Observed):
+    """A running job whose usage is within the caller's bound (LIMIT)."""
+
+    def poll(self, credential, job_id):
+        view = self.inner.poll(credential, job_id)
+        return replace(view, state="running", usage=REFERENCE_USAGE)
+
+
+@pytest.mark.parametrize(
+    "edit",
+    [
+        lambda record: record.pop("cap", None),  # an older journal: no cap recorded
+        lambda record: record["cap"].update(maximum_rows=REFERENCE_USAGE.rows - 1),
+        lambda record: record["cap"].update(currency="EUR"),
+    ],
+    ids=["no-cap", "lower-journaled-rows", "other-journaled-currency"],
+)
+def test_f2_running_guard_uses_only_the_journaled_cap(env, edit):
+    receipt = env.dispatch()
+
+    def corrupt(record):
+        if record.get("t") == "intent":
+            edit(record)
+
+    _rewrite_trainer_journal(env, corrupt)
+    transport = RunningWithin(env.trainer, None)
+    connector = env.make_connector(transport)
+    stopped = connector.status(receipt)
+    assert transport.stops == [receipt.job_ref]  # fails closed: the caller's bound is not used
+    assert stopped.state is mc.JobState.FAILED
+
+
+def test_f2_running_job_within_the_journaled_cap_is_not_stopped(env):
+    receipt = env.dispatch()
+    transport = RunningWithin(env.trainer, None)
+    connector = env.make_connector(transport)
+    assert connector.status(receipt).state is mc.JobState.RUNNING
+    assert transport.stops == []
+
+
+@pytest.mark.parametrize("limit", TRAINER_MAXIMA)
+def test_f4_negative_intent_bound_is_refused_before_dispatch(env, limit):
+    forged = replace(env.intent, bound=replace(LIMIT, **{limit: -1}))
+    with pytest.raises(ValueError, match="^fit_bound_negative$"):
+        env.connector.submit(forged, env.connector.serialize_development(forged, ROWS))
+    assert env.executions() == 0
+    assert '"intent"' not in _journal_path(env).read_text()
+
+
+@pytest.mark.parametrize("currency", ["", "usd", "US", "USDX", None])
+def test_f4_invalid_intent_currency_is_refused_before_dispatch(env, currency):
+    forged = replace(env.intent, bound=replace(LIMIT, currency=currency))
+    with pytest.raises(ValueError, match="^fit_bound_currency_invalid$"):
+        env.connector.submit(forged, env.connector.serialize_development(forged, ROWS))
+    assert env.executions() == 0
+    assert '"intent"' not in _journal_path(env).read_text()

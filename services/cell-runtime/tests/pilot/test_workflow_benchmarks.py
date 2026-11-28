@@ -310,6 +310,48 @@ def test_live_admission_leaves_benchmark_unchanged(prepared):
         reopened.materialize(ACTOR, live.run_ref, Producer())
 
 
+def test_explicit_version_inspection_stays_in_workflow_and_current_authority(prepared):
+    intake, authority = prepared
+    first = intake.submit_intake(ACTOR, HISTORY)
+    producer = Producer("scored")
+    assert intake.materialize(ACTOR, first.run_ref, producer)
+    history = intake.get_run(ACTOR, first.run_ref)
+    next_run = intake.submit_intake(
+        ACTOR, replace(HISTORY, source_revision="trace-v2", idempotency_key="history-successor")
+    )
+    successor = intake.get_run(ACTOR, next_run.run_ref)
+    starter = intake.submit_intake(ACTOR, STARTER)
+    other = intake.get_run(ACTOR, starter.run_ref)
+    assert history.benchmark.version == other.benchmark.version == 1
+    assert successor.benchmark.version == 2
+    before = intake.benchmarks.path.read_bytes()
+
+    reopened = BenchmarkIntake(
+        DurableIntake(authority.directory, authority), inspection=Inspection(authority)
+    )
+    v2 = reopened.inspect_benchmark(ACTOR, history.workflow_ref, 2)
+    assert v2 == reopened.inspect_benchmark(
+        ACTOR, history.workflow_ref, successor.benchmark.benchmark_ref
+    )
+    assert v2["benchmark_state"] == "draft" and v2["materialized"] is None
+    v1 = reopened.inspect_benchmark(ACTOR, history.workflow_ref, 1)
+    assert v1["benchmark_ref"] == history.benchmark.benchmark_ref
+    assert v1["benchmark_state"] == "superseded"
+    assert v1["materialized"]["result_digest"] == "b" * 64
+    assert reopened.inspect_benchmark(ACTOR, other.workflow_ref, 1)["materialized"] is None
+    assert reopened.inspect_benchmark(ACTOR, other.workflow_ref, 2) is None
+    for selector in (False, 0, -1, 2**63):
+        with pytest.raises(IntakeError):
+            reopened.inspect_benchmark(ACTOR, history.workflow_ref, selector)
+    with pytest.raises(IntakeError):
+        reopened.inspect_benchmark(replace(ACTOR, tenant="foreign"), history.workflow_ref, 1)
+    authority.allowed = False
+    with pytest.raises(IntakeError, match="intake_unavailable"):
+        reopened.inspect_benchmark(ACTOR, history.workflow_ref, 1)
+    assert intake.benchmarks.path.read_bytes() == before
+    assert producer.calls == 1 and producer.readbacks == 0
+
+
 def test_live_only_never_creates_a_benchmark_or_implies_inspection(prepared):
     intake, authority = prepared
     receipt = intake.submit_intake(ACTOR, LiveRefresh("feed", "feed-v1", "only-live"))
@@ -571,6 +613,7 @@ def test_corrupted_completion_is_denied_on_replay_and_every_projection(prepared,
         lambda: intake.inspect_benchmark(
             ACTOR, original.workflow_ref, original.benchmark.benchmark_ref
         ),
+        lambda: intake.inspect_benchmark(ACTOR, original.workflow_ref, original.benchmark.version),
         lambda: intake.benchmarks.current(scope),
     ]
     for read in reads:
