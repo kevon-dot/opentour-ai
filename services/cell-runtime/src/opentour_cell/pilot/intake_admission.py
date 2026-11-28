@@ -172,6 +172,39 @@ def require_readonly_snapshot(path: Path) -> None:
             private_header(Path(str(path) + suffix))
 
 
+@contextmanager
+def _intake_db(path: Path, *, write: bool) -> Iterator[sqlite3.Connection]:
+    if not write:
+        require_readonly_snapshot(path)
+    target = path.as_uri() + ("?mode=rw" if write else "?mode=ro")
+    db = sqlite3.connect(target, uri=True, timeout=5, isolation_level=None)
+    db.row_factory = sqlite3.Row
+    try:
+        if not write:
+            db.execute("PRAGMA query_only=ON")
+        db.execute("BEGIN IMMEDIATE" if write else "BEGIN")
+        yield db
+        db.commit()
+    except BaseException:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+
+def read_current_benchmark_run(
+    directory: Path, tenant: str, workflow: str, epoch: str
+) -> str | None:
+    """Read admission order under the caller's current exact-scope inspection grant."""
+    with _intake_db(directory / "intake.sqlite3", write=False) as db:
+        row = db.execute(
+            "SELECT run_ref FROM intake_benchmark_admissions WHERE tenant=? AND epoch=? "
+            "AND workflow_ref=? ORDER BY version DESC LIMIT 1",
+            (tenant, epoch, workflow),
+        ).fetchone()
+        return None if row is None else str(row["run_ref"])
+
+
 class DurableIntake:
     """An admission queue with one operation per authorized canonical intent."""
 
@@ -257,22 +290,8 @@ class DurableIntake:
                 and not info.st_mode & 0o077,
                 "private_intake_required",
             )
-        if not write:
-            require_readonly_snapshot(self.path)
-        target = self.path.as_uri() + ("?mode=rw" if write else "?mode=ro")
-        db = sqlite3.connect(target, uri=True, timeout=5, isolation_level=None)
-        db.row_factory = sqlite3.Row
-        try:
-            if not write:
-                db.execute("PRAGMA query_only=ON")
-            db.execute("BEGIN IMMEDIATE" if write else "BEGIN")
+        with _intake_db(self.path, write=write) as db:
             yield db
-            db.commit()
-        except BaseException:
-            db.rollback()
-            raise
-        finally:
-            db.close()
 
     def discover_sources(
         self, actor: IntakePrincipal, *, limit: int, cursor: str | None
@@ -641,13 +660,7 @@ class DurableIntake:
 
     def current_benchmark_run(self, tenant: str, workflow: str, epoch: str) -> str | None:
         """Metadata only; caller must hold a current exact-scope inspection guard."""
-        with self._db(write=False) as db:
-            row = db.execute(
-                "SELECT run_ref FROM intake_benchmark_admissions WHERE tenant=? AND epoch=? "
-                "AND workflow_ref=? ORDER BY version DESC LIMIT 1",
-                (tenant, epoch, workflow),
-            ).fetchone()
-            return None if row is None else str(row["run_ref"])
+        return read_current_benchmark_run(self.path.parent, tenant, workflow, epoch)
 
     @staticmethod
     def _materialized(db: sqlite3.Connection, actor: IntakePrincipal, run_ref: str) -> bool:

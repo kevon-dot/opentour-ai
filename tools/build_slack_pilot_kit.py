@@ -72,6 +72,7 @@ MODULES = (
     "opentour_cell/pilot/operating_point.py",
     "opentour_cell/pilot/receipt_recovery.py",
     "opentour_cell/pilot/scoped_query_plan.py",
+    "opentour_cell/pilot/scoped_query_report.py",
     "opentour_cell/pilot/slack_adapter.py",
     "opentour_cell/pilot/engagement_epochs.py",
     "opentour_cell/pilot/live_authority.py",

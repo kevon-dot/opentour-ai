@@ -7,10 +7,11 @@ import math
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 from opentour_cell.pilot.readout import INPUT_VERSION, MAX_CASES, OUTPUT_VERSION, evaluate_manifest
+from opentour_cell.pilot.scoped_query_plan import ArmChart, QueryHold, WorkflowDiscovery
 from opentour_cell.pilot.starter_setup import StarterPreview
 from opentour_cell.pilot.status_questions import StatusAnswer
 from opentour_cell.pilot.text_classifier import (
@@ -23,6 +24,7 @@ from opentour_cell.pilot.text_classifier import (
 
 if TYPE_CHECKING:
     from opentour_cell.pilot.handoff_readback import HandoffReadback
+    from opentour_cell.pilot.scoped_query_report import MonthlyInvoiceReport
     from opentour_cell.pilot.workflow_index import IndexPage
 
 from opentour_cell.pilot.training_data import EVALUATION_FIELDS, FIELD_NAMES
@@ -630,6 +632,10 @@ def regression_picker(
             "its evidence to ask about it."
         )
     ]
+    if topic == "arm_chart":
+        blocks = [
+            _section("Choose the frozen workflow comparison for the requested benchmark version.")
+        ]
     if current_workflow:
         workflow, token = current_workflow
         weekly = topic == "live_errors"
@@ -782,6 +788,92 @@ def current_training_question(
         "ot_current_training_proof" if proof else "ot_current_training_status",
         context,
         blocks,
+    )
+
+
+def frozen_rule_chart(
+    context: str, workflow: str, version: int, report: Mapping[str, Any]
+) -> Block:
+    checked = managed_report(report)
+    blocks = [
+        _section(f"Workflow {_display(workflow)} · frozen benchmark v{version}"),
+        _section(
+            "Incorrect automatic decisions among automatic decisions with a verified reference"
+        ),
+    ]
+    for key, label in (("current", "Incumbent"), ("repair", "Simple repair")):
+        arm = checked[key]
+        total = arm["observed_error_rate"]["denominator"]
+        wrong = arm["incorrect_automatic"]
+        if total:
+            filled = round(10 * wrong / total)
+            bar = "■" * filled + "□" * (10 - filled)
+            blocks.append(
+                _section(f"{label} · {bar} · {wrong}/{total} ({100 * wrong / total:.1f}%)")
+            )
+        else:
+            blocks.append(_section(f"{label} · 0/0 · rate unavailable"))
+        coverage = arm["coverage"]
+        blocks.append(
+            _section(
+                f"{label} automatic coverage · {coverage['numerator']}/{coverage['denominator']}"
+            )
+        )
+    paired = checked["paired"]
+    blocks.append(
+        _section(
+            f"Eligible pairs · {paired['comparable']}/{checked['cohort_size']}. "
+            f"Excluded from the paired comparison · {paired['excluded']}."
+        )
+    )
+    return _modal("Frozen comparison", "ot_arm_chart", context, blocks)
+
+
+def monthly_invoice_answer(context: str, rows: Sequence[tuple[str, MonthlyInvoiceReport]]) -> Block:
+    first = rows[0][1]
+    through = first.end - timedelta(days=1)
+    blocks = [
+        _section(
+            f"Recurring invoice-code errors · {first.start} through {through} ({first.timezone})"
+        )
+    ]
+    for workflow, report in rows:
+        blocks.append(
+            _section(
+                f"{_display(workflow)} · {report.recurring_errors} recurring errors "
+                f"among {report.verified_decisions} verified decisions. "
+                f"Excluded decisions: {report.excluded_decisions}."
+            )
+        )
+    return _modal("Monthly invoice errors", "ot_monthly_invoice", context, blocks)
+
+
+def query_hold_modal(context: str, plan: ArmChart | WorkflowDiscovery | QueryHold) -> Block:
+    if isinstance(plan, WorkflowDiscovery):
+        answer = StatusAnswer(
+            "Recurring invoice-code errors for the previous calendar month are unavailable.",
+            "This request needs a verified monthly report for the workflows you can inspect.",
+            "The data custodian can supply a scoped report with the reporting timezone and dates.",
+        )
+    elif isinstance(plan, ArmChart):
+        answer = StatusAnswer(
+            f"The baseline and rule chart for requested version {plan.version} is unavailable.",
+            "There is no verified comparison linking both arms to that version for this request.",
+            "The evaluation operator can provide the version-bound benchmark comparison.",
+        )
+    elif plan == QueryHold.VERSION_REQUIRED:
+        answer = StatusAnswer(
+            "Choose one benchmark version for the baseline and rule chart.",
+            "A comparison needs the same frozen benchmark version for both arms.",
+            "Ask again with one exact version, such as “Graph baseline versus rule on v2”.",
+        )
+    else:
+        raise ValueError("Unsupported query hold.")
+    return _modal(
+        "Ask OpenTour",
+        "ot_query_hold",
+        context,
+        [_section(answer.finding), _section(answer.basis), _section(answer.next_action)],
     )
 
 
