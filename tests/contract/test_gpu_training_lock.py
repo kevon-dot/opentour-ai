@@ -138,6 +138,13 @@ def test_is_gpu_only_catches_the_gpu_lock_contents():
 
 
 PINNED_PYTHON = "/opt/python/bin/python3.12"
+# Images are written into FROM by digest; ARG selection would let `--build-arg` swap them.
+BASE_IMAGE = (
+    "docker.io/nvidia/cuda:13.0.3-base-ubuntu24.04"
+    "@sha256:97d085a7423ee18ec483a2878b9be2c976dc4ba908aef96518beb00e1899dcc4"
+)
+UV_IMAGE = json.loads((ROOT / "tools/toolchain.json").read_text())["bootstrap_images"]["uv"]
+EXPECTED_FROMS = [f"{UV_IMAGE} AS uv", f"{BASE_IMAGE} AS build", BASE_IMAGE]
 VENV_PYTHON = "/opt/venv/bin/python"
 REQUIREMENTS = "/tmp/requirements.txt"
 # Every package-tool command the image may run, token for token. Anything else is refused.
@@ -353,8 +360,22 @@ def image_hazards(text: str) -> list[str]:
     if copies != ["pyproject.toml uv.lock ./"]:
         hazards.append("copy_not_allowed")
     froms = [stage["from"] for stage in stages[1:]]
-    if froms != ["${UV_IMAGE} AS uv", "${CUDA_BASE_IMAGE} AS build", "${CUDA_BASE_IMAGE}"]:
+    if froms != EXPECTED_FROMS:
         hazards.append("from_not_pinned")
+    for args in froms:
+        if "$" in args:
+            hazards.append("from_uses_variable")
+        reference = next((tok for tok in args.split() if not tok.startswith("--")), "")
+        if not DIGEST_REF.fullmatch(reference):
+            hazards.append("from_not_digest_pinned")
+    # An ARG declared before the first FROM is the only kind a FROM line can expand.
+    global_args = [
+        a.split("=", 1)[0].split()[0] for keyword, a in stages[0]["steps"] if keyword == "ARG" and a
+    ]
+    if any(
+        re.search(rf"\$\{{?{re.escape(name)}\b", args) for name in global_args for args in froms
+    ):
+        hazards.append("from_selected_by_arg")
     users = [args for stage in stages for keyword, args in stage["steps"] if keyword == "USER"]
     final_keywords = [keyword for keyword, _ in final["steps"]]
     if (
@@ -371,17 +392,14 @@ def test_trainer_image_installs_only_from_the_hashed_lock_as_non_root():
     toolchain = json.loads((ROOT / "tools/toolchain.json").read_text())
     _, stages = parse_dockerfile(text)
     steps = [step for stage in stages for step in stage["steps"]]
-    args = dict(a.split("=", 1) for keyword, a in steps if keyword == "ARG")
-    assert DIGEST_REF.fullmatch(args["CUDA_BASE_IMAGE"])
+    # No ARG at all: nothing a `--build-arg` could change.
+    assert [a for keyword, a in steps if keyword == "ARG"] == []
+    assert DIGEST_REF.fullmatch(BASE_IMAGE) and DIGEST_REF.fullmatch(UV_IMAGE)
     # The base flavour carries no cuBLAS/NCCL that could shadow the locked wheels.
-    assert args["CUDA_BASE_IMAGE"].startswith("docker.io/nvidia/cuda:13.0.3-base-ubuntu24.04@")
-    assert args["UV_IMAGE"] == toolchain["bootstrap_images"]["uv"]
+    assert BASE_IMAGE.startswith("docker.io/nvidia/cuda:13.0.3-base-ubuntu24.04@sha256:")
+    assert UV_IMAGE == toolchain["bootstrap_images"]["uv"]
     assert "TODO" not in text
-    assert [stage["from"] for stage in stages[1:]] == [
-        "${UV_IMAGE} AS uv",
-        "${CUDA_BASE_IMAGE} AS build",
-        "${CUDA_BASE_IMAGE}",
-    ]
+    assert [stage["from"] for stage in stages[1:]] == EXPECTED_FROMS
     # ADD, COPY and FROM inventories are enforced in image_hazards.
     run_commands = [
         tuple(command)
@@ -509,13 +527,35 @@ MUTATIONS = {
     ),
     "lowercase_add": (before_workdir("add https://x.invalid/f /tmp/f"), "add_not_pinned"),
     "tag_only_from": (
-        (("FROM ${CUDA_BASE_IMAGE}\n", "from docker.io/nvidia/cuda:13.0.3-base-ubuntu24.04\n"),),
-        "from_not_pinned",
+        ((f"FROM {BASE_IMAGE}\n", "from docker.io/nvidia/cuda:13.0.3-base-ubuntu24.04\n"),),
+        "from_not_digest_pinned",
+    ),
+    "arg_selected_base": (
+        (
+            (f"FROM {UV_IMAGE} AS uv", f"ARG CUDA_BASE_IMAGE={BASE_IMAGE}\nFROM {UV_IMAGE} AS uv"),
+            (f"FROM {BASE_IMAGE} AS build", "FROM ${CUDA_BASE_IMAGE} AS build"),
+        ),
+        "from_selected_by_arg",
+    ),
+    "arg_selected_base_no_braces": (
+        (
+            (f"FROM {UV_IMAGE} AS uv", f"ARG BASE={BASE_IMAGE}\nFROM {UV_IMAGE} AS uv"),
+            (f"FROM {BASE_IMAGE}\n", "FROM $BASE\n"),
+        ),
+        "from_selected_by_arg",
+    ),
+    "from_variable_without_arg": (
+        ((f"FROM {BASE_IMAGE}\n", "FROM ${BASE_IMAGE:-ubuntu}\n"),),
+        "from_uses_variable",
+    ),
+    "from_digest_dropped": (
+        ((f"FROM {BASE_IMAGE}\n", f"FROM {BASE_IMAGE.split('@')[0]}\n"),),
+        "from_not_digest_pinned",
     ),
     "extra_copy": (before_workdir("COPY . /src"), "copy_not_allowed"),
     "lowercase_run_apt": (before_workdir("run apt-get install -y git"), "system_package_tool"),
     "lowercase_arg_token": (
-        (("ARG UV_IMAGE=", "arg HF_TOKEN\nARG UV_IMAGE="),),
+        before_workdir("arg HF_TOKEN"),
         "secret_like_build_variable",
     ),
     "lowercase_env_cuda": (
@@ -550,11 +590,11 @@ MUTATIONS = {
     "dpkg_install": (before_workdir("RUN dpkg -i /tmp/x.deb"), "system_package_tool"),
     "sh_runs_file": (before_workdir("RUN sh -e /tmp/f"), "shell_runs_file"),
     "arg_hf_token": (
-        (("ARG UV_IMAGE=", "ARG HF_TOKEN\nARG UV_IMAGE="),),
+        before_workdir("ARG HF_TOKEN"),
         "secret_like_build_variable",
     ),
     "arg_hf_auth": (
-        (("ARG UV_IMAGE=", "ARG HF_AUTH\nARG UV_IMAGE="),),
+        before_workdir("ARG HF_AUTH"),
         "secret_like_build_variable",
     ),
     "legacy_env_hf_token": (before_workdir("ENV HF_TOKEN generated"), "secret_like_build_variable"),
