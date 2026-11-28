@@ -330,7 +330,9 @@ def _claim_times(observed_at: int, issued_at: int, expires_at: int) -> dict[str,
     if not 0 < observed_at <= issued_at < expires_at:
         raise ValueError("invalid_lifecycle_claim_window")
     return {
-        field: datetime.fromtimestamp(timestamp, UTC).isoformat().replace("+00:00", "Z")
+        field: datetime.fromtimestamp(timestamp, UTC)
+        .isoformat(timespec="milliseconds")
+        .replace("+00:00", "Z")
         for field, timestamp in (
             ("observed_at", observed_at),
             ("issued_at", issued_at),

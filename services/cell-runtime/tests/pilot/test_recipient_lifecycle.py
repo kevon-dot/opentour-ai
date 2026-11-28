@@ -278,6 +278,8 @@ def test_real_recipient_replay_producer_binds_installed_benchmark(
     assert claim["receiver_receipt_ref"] == target.receipt_ref
     assert claim["package_sha256"] == delivery["package_sha256"]
     assert claim["replayed_cases"] > 0 and len(claim["cohort_revision"]) == 64
+    for field in ("issued_at", "not_after", "observed_at"):
+        assert claim[field].endswith(".000Z")
     withheld = target.receipt_path.with_name("delivery-receipt-withheld.json")
     target.receipt_path.rename(withheld)
     with pytest.raises((OSError, ValueError)):
