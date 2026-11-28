@@ -1,7 +1,6 @@
 """Private Slack composition with generated responses at the canonical verifier boundary."""
 
 from dataclasses import asdict, fields, replace
-from datetime import UTC, datetime
 from pathlib import Path
 from time import time
 
@@ -96,6 +95,7 @@ def test_recipient_replay_and_restored_target_through_private_home(generated_tar
     for rejected in (
         replace(replay_record, payload=claim | {"recipient_ref": "other-recipient"}),
         replace(replay_record, payload=claim | {"release_ref": "release-" + "9" * 48}),
+        replace(replay_record, payload=claim | {"not_after": "2000-01-01T00:00:00Z"}),
         replace(replay_record, signer_role=lifecycle.ROLLBACK_ISSUER),
     ):
         authority.observe(directory, binding, "replay", lifecycle.REPLAY_PURPOSE, rejected)
@@ -115,8 +115,9 @@ def test_recipient_replay_and_restored_target_through_private_home(generated_tar
     request = sample.config.with_name("signed-change-request.json")
     write(request, sample.envelope())
     target_cli(sample.config, "change", "--request", request)
+    before_rollback = target_cli(sample.config, "inspect")
     assert_readback(
-        target_cli(sample.config, "inspect"),
+        before_rollback,
         sample.release.artifact_sha256,
         sample.winner_decision,
         1,
@@ -130,22 +131,28 @@ def test_recipient_replay_and_restored_target_through_private_home(generated_tar
             request_ref=rollback_policy.authorization_ref,
         ),
     )
-    target_cli(sample.config, "change", "--request", request)
+    operation = target_cli(sample.config, "change", "--request", request)
     restored = target_cli(sample.config, "inspect")
-    observed_at = datetime.now(UTC).replace(microsecond=0).isoformat()
+    observed_at = int(time())
     assert_readback(restored, sample.incumbent_version, sample.incumbent_decision, 2)
-    rollback_claim = {
-        **asdict(binding),
-        "profile_version": "1.0",
-        "observed_at": observed_at,
-        "issued_at": observed_at,
-        "not_after": claim["not_after"],
-        "package_sha256": claim["package_sha256"],
-        "environment_ref": restored["target_ref"],
-        "restored_version": restored["active_version"],
-        "rollback_authorization_ref": rollback_policy.authorization_ref,
-        "serving_readback_ref": "serving-" + digest(restored)[:48],
-    }
+    assert restored == {key: value for key, value in operation.items() if key != "action_ref"}
+    rollback_claim = lifecycle.prepare_destination_rollback_claim(
+        authority.policy,
+        lifecycle.DestinationRollbackObservation(
+            binding=binding,
+            authorization_ref=rollback_policy.authorization_ref,
+            environment_ref=restored["target_ref"],
+            previous_serving_version=before_rollback["active_version"],
+            restored_version=restored["active_version"],
+            operation_receipt_ref=operation["action_ref"],
+            serving_readback_ref="serving-" + digest(restored)[:48],
+            package_sha256=claim["package_sha256"],
+            delivery_received_at=delivered.received_at,
+            observed_at=observed_at,
+        ),
+    )
+    assert rollback_claim["rollback_operation_receipt_ref"] == operation["action_ref"]
+    assert rollback_claim["serving_readback_ref"] != operation["action_ref"]
     rollback_record = lifecycle.VerifiedLifecycleRecord(
         rollback_claim, lifecycle.ROLLBACK_ISSUER, rollback_policy.observer_key_id
     )
@@ -154,6 +161,11 @@ def test_recipient_replay_and_restored_target_through_private_home(generated_tar
         replace(
             rollback_record,
             payload=rollback_claim | {"restored_version": sample.release.artifact_sha256},
+        ),
+        replace(
+            rollback_record,
+            payload=rollback_claim
+            | {"rollback_operation_receipt_ref": rollback_policy.authorization_ref},
         ),
         replace(rollback_record, key_id=replay_record.key_id),
     ):
