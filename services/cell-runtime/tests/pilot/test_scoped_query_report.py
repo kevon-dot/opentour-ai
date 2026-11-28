@@ -24,18 +24,21 @@ def _write(path: Path, record: bytes) -> None:
     path.chmod(0o600)
 
 
-def test_signed_monthly_report_binds_issuer_window_and_corrections(
-    signer_kit: Kit,  # noqa: F811
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def reporting_signers(monkeypatch: pytest.MonkeyPatch) -> tuple[Signer, Signer]:
     # The serialized verifier writer owns the compiled role registration. This
     # fixture exercises the existing canonical verifier with the approved policy.
     if REPORT_PURPOSE not in sr.RECORD_PURPOSES:
         monkeypatch.setattr(sr, "RECORD_PURPOSES", sr.RECORD_PURPOSES | {REPORT_PURPOSE})
         monkeypatch.setitem(sr.REQUIRED_ROLES, REPORT_PURPOSE, frozenset({REPORT_ROLE}))
         monkeypatch.setitem(sr.REGISTRY_ROLES, REPORT_ROLE, frozenset({REPORT_PURPOSE}))
-    issuer = Signer(REPORT_ROLE, [REPORT_PURPOSE])
-    different_issuer = Signer(REPORT_ROLE, [REPORT_PURPOSE])
+    return Signer(REPORT_ROLE, [REPORT_PURPOSE]), Signer(REPORT_ROLE, [REPORT_PURPOSE])
+
+
+def test_signed_monthly_report_binds_issuer_window_and_corrections(
+    signer_kit: Kit,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    issuer, different_issuer = reporting_signers(monkeypatch)
     directory = signer_kit.worker
     _write(
         directory / "pilot-issuer-registry.json",

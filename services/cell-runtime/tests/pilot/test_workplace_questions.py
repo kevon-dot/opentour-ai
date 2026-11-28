@@ -2,7 +2,9 @@
 
 import json
 from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 from unittest.mock import Mock
+from zoneinfo import ZoneInfo
 
 import pytest
 from opentour_cell.pilot.intake_admission import AuthorizedSource, DurableIntake
@@ -13,6 +15,9 @@ from opentour_cell.pilot.workflow_benchmarks import BenchmarkIntake, Materialize
 from test_app_home import click, publish
 from test_managed_slack import setup_workflow
 from test_reviewer_workflow import buttons, screen, supplied, text
+from test_scoped_query_report import reporting_signers
+from test_signed_records import kit as signer_kit  # noqa: F401
+from test_signed_records import sign, stamp
 from test_slack_adapter import ACTOR, Harness
 from test_status_questions import counts, inspect
 from test_workflow_benchmarks import HISTORY
@@ -256,10 +261,11 @@ def test_chart_selection_rechecks_frozen_receipt_and_named_grant(tmp_path, monke
 
 @pytest.mark.parametrize("surface", ["home", "slash"])
 def test_scoped_monthly_answer_checks_live_membership_and_signed_receipt_at_render(
-    tmp_path, monkeypatch, surface
+    tmp_path,
+    monkeypatch,
+    surface,
+    signer_kit,  # noqa: F811
 ):
-    from datetime import date
-
     from opentour_cell.pilot import scoped_query_report
     from opentour_cell.pilot.training import LocalTrainingStore
     from test_live_authority import SignedCase
@@ -268,35 +274,74 @@ def test_scoped_monthly_answer_checks_live_membership_and_signed_receipt_at_rend
     live = SignedCase(tmp_path / "authority")
     live.body["actors"][ACTOR] = ["inspect"]
     live.write()
+    issuer, _ = reporting_signers(monkeypatch)
+
+    def write(path, data):
+        path.write_bytes(data)
+        path.chmod(0o600)
+
+    write(
+        live.directory / "pilot-issuer-registry.json",
+        signer_kit.registry(keys=[*signer_kit.issuers(), issuer.entry()]),
+    )
     h = Harness(tmp_path / "workspace", organization="org-a")
     h.config["directory"] = str(live.directory)
     h.config["users"][ACTOR]["datasets"] = [live.body["dataset_ref"]]
     pin = dict(
         workflow_ref=live.workflow,
         publication_file="customer-month.json",
-        custodian_key_id="issuer-01",
+        custodian_key_id=issuer.key_id,
     )
     hidden = dict(
         pin, workflow_ref="unrelated-confidential", publication_file="unrelated-month.json"
     )
-    h.config["monthly_invoice_reports"] = dict(timezone="America/New_York", workflows=[hidden, pin])
+    timezone = "America/New_York"
+    h.config["monthly_invoice_reports"] = dict(timezone=timezone, workflows=[hidden, pin])
     h.save()
     h.store = LocalTrainingStore(live.directory / "training.sqlite3", "org-a", existing_only=True)
     restart(h)
+    month_end = datetime.now(UTC).astimezone(ZoneInfo(timezone)).date().replace(day=1)
+    last = month_end - timedelta(days=1)
+    start = last.replace(day=1)
+    payload = {
+        "profile_version": "1.0",
+        "tenant": "org-a",
+        "engagement_id": h.store.engagement_id,
+        "workflow_ref": live.workflow,
+        "metric": "recurring_invoice_code_errors",
+        "timezone": timezone,
+        "covered_from": start.isoformat(),
+        "covered_until": month_end.isoformat(),
+        "recurring_errors": 0,
+        "verified_decisions": 0,
+        "excluded_decisions": 0,
+        "issued_at": stamp(5),
+        "not_after": stamp(3600),
+    }
+    report_path = live.directory / pin["publication_file"]
+
+    def publish_report(body):
+        write(report_path, sign(body, scoped_query_report.REPORT_PURPOSE, issuer))
+
+    publish_report(payload)
     calls = []
-    report = scoped_query_report.MonthlyInvoiceReport(
-        date(2026, 10, 1), date(2026, 11, 1), "America/New_York", 0, 0, 0
-    )
-    receipt = [report, "generated-digest"]
+    original_read = scoped_query_report.open_signed_monthly_invoice_report
 
     def read(directory, publication_file, scope, *, timezone, at, custodian_key_id):
         assert directory == live.directory and publication_file == pin["publication_file"]
         assert (
             scope.workflow_ref == live.workflow and scope.engagement_epoch == h.store.engagement_id
         )
-        assert timezone == report.timezone and custodian_key_id == pin["custodian_key_id"]
+        assert timezone == payload["timezone"] and custodian_key_id == pin["custodian_key_id"]
         calls.append(publication_file)
-        return tuple(receipt) if receipt else None
+        return original_read(
+            directory,
+            publication_file,
+            scope,
+            timezone=timezone,
+            at=at,
+            custodian_key_id=custodian_key_id,
+        )
 
     monkeypatch.setattr(scoped_query_report, "open_signed_monthly_invoice_report", read)
     before = counts(h)
@@ -313,18 +358,25 @@ def test_scoped_monthly_answer_checks_live_membership_and_signed_receipt_at_rend
     v = ask()
     assert screen(h, v)["callback_id"] == "ot_monthly_invoice" and len(calls) == 2
     answer = text(h, v)
-    assert "2026-10-01 through 2026-10-31 (America/New_York)" in answer
+    assert f"{start} through {last} ({timezone})" in answer
     assert "0 recurring errors among 0 verified decisions" in answer and live.workflow in answer
     assert hidden["workflow_ref"] not in answer
-    from dataclasses import replace
-
-    receipt[0] = replace(report, recurring_errors=3, verified_decisions=42, excluded_decisions=5)
+    corrected = {
+        **payload,
+        "issued_at": stamp(10),
+        "recurring_errors": 3,
+        "verified_decisions": 42,
+        "excluded_decisions": 5,
+    }
+    publish_report(corrected)
     assert "3 recurring errors among 42 verified decisions. Excluded decisions: 5." in text(
         h, ask()
     )
-    receipt.clear()
+    publish_report(payload)
     assert screen(h, ask())["callback_id"] == "ot_query_hold"
-    receipt.extend((report, "generated-digest"))
+    report_path.unlink()
+    assert screen(h, ask())["callback_id"] == "ot_query_hold"
+    publish_report(corrected)
     original = h.app.journal.admit_view
 
     def revoke(kind, **kw):
