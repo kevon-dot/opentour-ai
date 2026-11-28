@@ -5,10 +5,10 @@ every value-like string is assembled at runtime; no real key, provider or accoun
 tests prove local software behavior only (EvidenceTier.FIXTURE). Provider-side refusal,
 provider-side revocation and the customer's real secret store remain open external gates.
 
-Item 1  least-privilege reference record and value refusal ........ C1-C6
-Item 2  value only at the locator; resolver; leak scan ............ R1-R5, L1
+Item 1  least-privilege reference record and value refusal ........ C1-C7
+Item 2  value only at the locator; resolver; leak scan ............ R1-R6, L1-L2
 Item 3  rotation drill with fresh-subprocess refusal of the old .... T1-T3
-Item 4  durable append-only revocation; fenced jobs; outcome ...... V1-V5
+Item 4  durable append-only revocation; fenced jobs; outcome ...... V1-V4
 Item 5  mandate owner, payer and cap bound before dispatch ........ D1-D5
 Scope   evidence tier, gates and the not-proven document .......... E1
 """
@@ -157,11 +157,16 @@ def _prefixed() -> list[str]:
 
 def _high_entropy() -> list[str]:
     return [
-        secrets.token_urlsafe(32)[:32],
+        secrets.token_urlsafe(32)[:32].replace("-", "a").replace("_", "b"),
+        # Fragmented tokens whose pieces are each short: only the whole-value screen sees them.
+        "-".join(["Xk9", "Qm2", "Lp7", "Rt4", "Wz8", "Hy3"]),
+        "-".join(["qwzx", "plmk", "jnhb", "gvfc", "dxsr", "teyu", "oiaq"]),
         secrets.token_hex(20),
         base64.b64encode(secrets.token_bytes(30)).decode(),
         "acct-" + secrets.token_hex(12),
         "q" * 4 + "".join(secrets.choice("bcdfghjklmnpqrstvwxz") for _ in range(20)),
+        "acct-" + "k3" * 5,  # a 10-character letter and digit run with low entropy
+        "acct-" + "Ab" * 5,  # a 10-character mixed-case run with low entropy
     ]
 
 
@@ -559,10 +564,10 @@ def test_l1_no_value_reaches_logs_exceptions_reprs_files_or_the_journal(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     first, second, bad = sentinel(), sentinel(), sentinel()
-    clock = Clock()
-    ledger = pc.CredentialLedger(ledger_dir, clock=clock)
+    # Real time, so the fresh probe processes see the same reference windows.
+    ledger = pc.CredentialLedger(ledger_dir)
     resolver = pc.CredentialResolver(ledger, expected_uid=os.getuid())
-    old = reference(put_secret(store, "acct-0001.secret", first))
+    old = _real_time_reference(store, "acct-0001.secret", first)
     ledger.issue(old)
     rotation0 = ledger.activate("pcref-0001")
     exceptions: list[BaseException] = []
@@ -583,12 +588,15 @@ def test_l1_no_value_reaches_logs_exceptions_reprs_files_or_the_journal(
     objects.append(secret)
     authorization = ledger.authorize_dispatch(request(), lambda: mandate())
     objects.append(authorization)
-    new = reference(
-        put_secret(store, "acct-0001-rotation-0002.secret", second), reference_id="pcref-0002"
+    new = _real_time_reference(
+        store, "acct-0001-rotation-0002.secret", second, reference_id="pcref-0002"
     )
     rotation = ledger.rotate(new)
     objects += [new, rotation]
     assert resolver.resolve("pcref-0002").reveal() == second
+    # A fresh process that resolves successfully, and one that is refused.
+    resolved_probe = _probe(ledger_dir, "pcref-0002")
+    retired_probe = _probe(ledger_dir, "pcref-0001")
     expect_refusal(lambda: resolver.resolve("pcref-0001"))
     # Refusals that happen after the value was read must not carry it.
     put_secret(store, "acct-0001-rotation-0002.secret", second + " " + bad)
@@ -614,45 +622,8 @@ def test_l1_no_value_reaches_logs_exceptions_reprs_files_or_the_journal(
         "fit-" + "c" * 40, pc.JobOutcome.UNKNOWN, pc.ObservedBy.NOT_OBSERVABLE, "evidence-0001"
     )
     objects.append(status)
-    probe = subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "opentour_cell.pilot.provider_credential",
-            "probe",
-            "--ledger",
-            str(ledger_dir),
-            "--reference",
-            "pcref-0002",
-            "--expected-uid",
-            str(os.getuid()),
-        ],
-        env=dict(os.environ, PYTHONPATH=str(SRC)),
-        capture_output=True,
-        text=True,
-        timeout=60,
-        check=False,
-    )
-    probe_with_value = subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "opentour_cell.pilot.provider_credential",
-            "probe",
-            "--ledger",
-            str(ledger_dir),
-            "--reference",
-            first,
-            "--expected-uid",
-            str(os.getuid()),
-        ],
-        env=dict(os.environ, PYTHONPATH=str(SRC)),
-        capture_output=True,
-        text=True,
-        timeout=60,
-        check=False,
-    )
-    assert json.loads(probe_with_value.stdout)["reference"] is None
+    revoked_probe = _probe(ledger_dir, "pcref-0002")
+    value_probe = _probe(ledger_dir, first)
     out = capsys.readouterr()
     gc.collect()
     leaks = scan_for_leaks(
@@ -664,14 +635,17 @@ def test_l1_no_value_reaches_logs_exceptions_reprs_files_or_the_journal(
         [
             out.out,
             out.err,
-            probe.stdout,
-            probe.stderr,
-            probe_with_value.stdout,
-            probe_with_value.stderr,
+            *(p[2] for p in (resolved_probe, retired_probe, revoked_probe, value_probe)),
         ],
         tuple(refused_inputs),
     )
     assert leaks == []
+    assert [p[1]["result"] for p in (resolved_probe, retired_probe, revoked_probe)] == [
+        "resolved_locally",
+        "reference_retired",
+        "reference_revoked",
+    ]
+    assert value_probe[1]["reference"] is None
     # The scan is live: it saw module log records, refusals and the journal.
     assert any(r.name == pc.__name__ for r in captured.records)
     assert len(exceptions) >= 4 and len(refused_inputs) == 4 and len(lines(ledger)) >= 5

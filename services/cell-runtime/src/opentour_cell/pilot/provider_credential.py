@@ -198,8 +198,6 @@ def _locator(kind: LocatorKind, value: object) -> str:
     assert isinstance(value, str)
     if len(value) > MAX_LOCATOR:
         _fail("reference_field_too_long")
-    if _PREFIXES.search(value):
-        _fail("suspected_credential_prefix")
     for segment in value.split("/"):
         if segment:
             _text(segment)
