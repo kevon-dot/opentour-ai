@@ -1565,7 +1565,15 @@ def handoff_modal(
     _, rows = _handoff_projection(receipt, audit)
     controls = [_home()]
     if not receipt.delivery or receipt.delivery.stage != "delivered":
-        controls.insert(0, _button("Check delivery status", "ot_delivery_status", revision))
+        refresh = "Check delivery status"
+    elif not receipt.replay:
+        refresh = "Check replay status"
+    elif not receipt.replay.evaluation_only and not receipt.rollback:
+        refresh = "Check serving status"
+    else:
+        refresh = None
+    if refresh:
+        controls.insert(0, _button(refresh, "ot_delivery_status", revision))
     return _modal(
         "Handoff receipt",
         "ot_handoff_receipt",

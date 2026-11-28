@@ -143,8 +143,12 @@ def test_private_status_refresh_reads_only_current_independent_receiver(tmp_path
         f"Delivered to the selected destination.\nLast checked {stamp(delivered.last_checked_at)}.",
         f"Receiver receipt {committed[0]} at {stamp(delivered.received_at)}.",
         "The recipient can independently replay the artifact.",
-        can_refresh=False,
+        can_refresh=True,
     )
+    for _ in range(2):
+        assert "Check replay status" in text(h, view)
+        click(view, "ot_delivery_status")
+        assert "Replayed by recipient" not in text(h, view)
     assert outbox.status(selection, actor) == delivered
     assert counts(h) == before and len(committed) == 1
 
