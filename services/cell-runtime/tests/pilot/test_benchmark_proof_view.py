@@ -40,7 +40,7 @@ def test_revoked_reviewer_cannot_reuse_current_calculation_button(tmp_path):
     h.save()
     h.action(view, "ot_bench_calc", revision)
     assert "Incumbent · routed to review" not in text(h, view)
-    assert screen(h, view)["callback_id"] != "ot_bench_proof_view"
+    assert "Access unavailable" in text(h, view)
     assert counts(h) == before
 
 
