@@ -251,10 +251,12 @@ def configure_readiness(directory, tmp_path, scope, context_digest):
     indirect=["p1_frozen_from_home"],
 )
 def test_p1_invoice_commit_then_independent_truth(
-    p1_frozen_from_home, monkeypatch, tmp_path, observed
+    p1_frozen_from_home, monkeypatch, tmp_path, observed, record_testsuite_property, request
 ):
-    h, owner, draft, _maps, _confirmed, pack = p1_frozen_from_home
+    h, owner, draft, _maps, confirmed, pack = p1_frozen_from_home
     directory = h.path.parent
+    initial_effects = effects(h)
+    assert initial_effects == (0,) * 7
     workflow = draft["workflow_ref"]
     tenant, epoch = h.store.organization, h.store.engagement_id
     if observed:
@@ -331,25 +333,27 @@ def test_p1_invoice_commit_then_independent_truth(
         dict(schema_version=SELECTION_SCHEMA, tenant=tenant, workflow_ref=workflow, actor="worker"),
     )
     worker, intake = open_intake(selection)
-    request = dict(
+    intake_request = dict(
         mode="live",
         feed_binding_ref=binding,
         source_revision=DECISION.source_revision,
         idempotency_key="p1-app-committed-decision",
     )
     if os.environ.get("OPENTOUR_P1_MCP_WITNESS") == "1":
-        catalog, first_admission = sdk_actions(selection, [(DISCOVER, {}), (SUBMIT, request)])
+        catalog, first_admission = sdk_actions(
+            selection, [(DISCOVER, {}), (SUBMIT, intake_request)]
+        )
         assert not catalog.isError and not first_admission.isError
         assert {s["feed_binding_ref"] for s in catalog.structuredContent["sources"]} == {binding}
         [repeat] = sdk_actions(
-            selection, [(SUBMIT, request | {"idempotency_key": "p1-app-second-sdk-session"})]
+            selection, [(SUBMIT, intake_request | {"idempotency_key": "p1-app-second-sdk-session"})]
         )
         assert not repeat.isError
         run_ref = first_admission.structuredContent["run_ref"]
         assert repeat.structuredContent["run_ref"] == run_ref
         assert first_admission.structuredContent == repeat.structuredContent
     else:
-        run_ref = intake.submit_intake(worker, parse_intake(request)).run_ref
+        run_ref = intake.submit_intake(worker, parse_intake(intake_request)).run_ref
     kit = next((path for path in Path(live_reader.__file__).parents if path.suffix == ".pyz"), None)
     command = [str(kit), "live-reader"] if kit else ["-m", live_reader.__name__]
 
@@ -377,9 +381,13 @@ def test_p1_invoice_commit_then_independent_truth(
         assert readback.structuredContent["state"] == "materialized"
         assert readback.structuredContent["workflow_ref"] == workflow
 
+    observed_counts = []
+
     def snapshot(counts):
         current = live.snapshot(actor, workflow)
-        assert (current.decisions, current.verified, current.pending, current.disputed) == counts
+        actual = (current.decisions, current.verified, current.pending, current.disputed)
+        assert actual == counts
+        observed_counts.append(actual)
         assert (current.workflow_ref, current.engagement_epoch) == (workflow, epoch)
         return current
 
@@ -467,4 +475,39 @@ def test_p1_invoice_commit_then_independent_truth(
         assert _stored_score(directory, permission.execution_ref) == score
     assert live.snapshot(actor, workflow, as_of_revision=first.sequence) == first
     assert owner.review() == pack
-    assert effects(h) == (0,) * 7
+    final_effects = effects(h)
+    assert final_effects == (0,) * 7
+    record_testsuite_property(
+        f"p1_{request.node.callspec.id}",
+        json.dumps(
+            {
+                "fixture": "generated",
+                "intake_transport": "mcp-sdk-stdio"
+                if os.environ.get("OPENTOUR_P1_MCP_WITNESS") == "1"
+                else "local-service",
+                "workflow_ref_sha256": digest(workflow),
+                "policy_sha256": confirmed.source_digest,
+                "policy_revision": confirmed.source_revision,
+                "map_revision": confirmed.map_revision,
+                "benchmark_revision": pack["frozen"]["revision"],
+                "decision_ref_sha256": digest(
+                    [root.namespace, root.decision_id, root.decision_revision]
+                ),
+                "outcome_ref_sha256": digest(root.outcome_ref),
+                "counts_decisions_verified_pending_disputed": observed_counts,
+                "effect_order": [
+                    "proposals",
+                    "decisions",
+                    "approval_posts",
+                    "jobs",
+                    "slack_posts",
+                    "workplace_snapshots",
+                    "release_decisions",
+                ],
+                "initial_effects": initial_effects,
+                "final_effects": final_effects,
+                "starter_metrics": score["metrics"] if observed else None,
+            },
+            sort_keys=True,
+        ),
+    )
