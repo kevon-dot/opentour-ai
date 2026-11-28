@@ -96,7 +96,7 @@ All tests are in `tests/pilot/test_fit_dispatch.py` and use generated fixtures.
 | Revoke during fit: no later publication or export | `test_revocation_during_fit_cancels_and_never_publishes_or_exports`, `test_invalidated_evidence_or_revoked_grant_stops_an_in_flight_fit`, `test_revocation_between_reservation_and_submission_sends_nothing` |
 | Rule suffices: zero training starts | `test_a_rule_that_suffices_starts_zero_fits` |
 | `current_eligibility` before reserving and before starting | `test_eligibility_is_recomputed_inside_the_reservation_and_before_submission`, `test_a_fit_eligible_receipt_alone_never_reserves` |
-| Fail closed without the OPE-442 ledger | `test_without_a_ledger_nothing_is_reserved_or_sent`, `test_a_ledger_failure_never_submits` |
+| Fail closed without the OPE-442 ledger | `test_without_a_ledger_nothing_is_reserved_or_sent`, `test_a_ledger_failure_never_submits`, `test_an_unavailable_collaborator_holds_with_nothing_reserved` |
 | Matching model, capability, benchmark, recipe, split, residual and mandate revisions | `test_recipe_model_capability_and_receipt_revisions_must_match`, `test_a_model_outside_the_mandate_profile_is_refused` |
 | Reserve the maximum authorized cost before the first call; bind the record | `test_reservation_record_binds_model_benchmark_backend_and_limits` |
 | Unknown cost or unsupported hardware is a setup hold | `test_unknown_cost_or_unsupported_hardware_is_a_setup_hold` |

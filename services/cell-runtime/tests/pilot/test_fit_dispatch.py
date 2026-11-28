@@ -1246,6 +1246,30 @@ def test_status_reads_have_no_effects(tmp_path: Path) -> None:
     assert (foreign.reason, foreign.execution_id) == ("execution_unavailable", None)
 
 
+def test_an_unavailable_collaborator_holds_with_nothing_reserved(tmp_path: Path) -> None:
+    world = World(tmp_path)
+    run, receipt = world.admit()
+
+    def grants_down(*args: Any) -> mc.Grant | None:
+        raise OSError("simulated owner grant store unavailable")
+
+    world.preflight.current_grant = grants_down
+    status = world.dispatcher().dispatch(
+        world.request(run, receipt), client="generated-client", operation_key="op-1"
+    )
+    assert (status.learning_run_state, status.reason, status.reservations) == (
+        "held",
+        "fit_dispatch_unavailable",
+        0,
+    )
+    (world.dir / "routing" / "repair-routing.sqlite3").chmod(0o644)  # unsafe custody
+    unreadable = world.dispatcher().dispatch(
+        world.request(run, receipt), client="generated-client", operation_key="op-2"
+    )
+    assert (unreadable.reason, unreadable.reservations) == ("evaluation_unavailable", 0)
+    assert world.ledger.count("entries") == 0 and world.backend.calls.get("submit", 0) == 0
+
+
 def test_a_ledger_failure_never_submits(tmp_path: Path) -> None:
     world = World(tmp_path)
     run, receipt = world.admit()

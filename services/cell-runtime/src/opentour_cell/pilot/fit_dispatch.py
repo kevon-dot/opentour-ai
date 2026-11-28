@@ -58,6 +58,7 @@ from __future__ import annotations
 import math
 import re
 import secrets
+import sqlite3
 import time
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
@@ -1042,6 +1043,7 @@ class _SubmitWitness:
 
 _TERMINAL_JOBS = (mc.JobState.COMPLETED, mc.JobState.CANCELED, mc.JobState.FAILED)
 _BACKEND_ERRORS = (OSError, ValueError, LookupError)
+_UNAVAILABLE = (OSError, sqlite3.Error, ValueError, LookupError)
 
 
 def _confirmed(intent: mc.FitIntent, job: object) -> mc.JobReceipt | None:
@@ -1117,6 +1119,10 @@ class FitDispatcher:
             return _without_entry("held", exc.reason)
         except mc.CapabilityError as exc:
             return _without_entry("held", _reason(exc, "model_capability_unavailable"))
+        except _UNAVAILABLE:
+            # A collaborator (grant lookup, routing or mandate store) could not answer: fail
+            # closed with nothing reserved. Programming errors are not caught.
+            return _without_entry("held", "fit_dispatch_unavailable")
         status = self._advance(entry)
         if status.execution_id == entry.execution_id:
             status = replace(status, replayed=entry.replayed)
@@ -1220,6 +1226,8 @@ class FitDispatcher:
             receipt = self.routing.read(request.evaluation_id)
         except rr.RoutingError as exc:
             raise DispatchError(_reason(exc, "evaluation_unavailable")) from None
+        except _UNAVAILABLE:
+            raise DispatchError("evaluation_unavailable") from None
         _need(isinstance(receipt, dict), "evaluation_unavailable")
         assert receipt is not None
         _need(receipt.get("revision") == request.evaluation_revision, "evaluation_revision_changed")
@@ -1321,6 +1329,8 @@ class FitDispatcher:
             )
         except rr.RoutingError as exc:
             raise DispatchError(_reason(exc, "evaluation_unavailable")) from None
+        except _UNAVAILABLE:
+            raise DispatchError("evaluation_unavailable") from None
         _need(isinstance(result, dict), "evaluation_unavailable")
         if result.get("eligible") is not True:
             code = result.get("reason_code")
