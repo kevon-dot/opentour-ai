@@ -17,8 +17,10 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from opentour_cell.pilot import eve_evaluator as ev
 from opentour_cell.pilot import eve_replay as rp
 from opentour_cell.pilot import eve_scorer as sc
+from opentour_cell.pilot import eve_staging as st
 from opentour_cell.pilot import eve_task as task
 from opentour_cell.pilot import model_connector as mc
 
@@ -85,6 +87,10 @@ def key() -> rp.AnswerKey:
 
 def scorer() -> sc.DeterministicScorer:
     return sc.DeterministicScorer("generated-scorer-v1", "generated-rubric-r1")
+
+
+EVALUATOR_ID = "generated-independent-evaluator"
+AUTO: Any = object()
 
 
 def output(n: int, kind: str) -> rp.ArmOutput:
@@ -259,6 +265,50 @@ class Env:
             "key": self.key,
         }
 
+    @property
+    def custody_dir(self) -> Path:
+        """The separate evaluator's custody, outside every worker directory (OPE-573)."""
+        return self.root.parent / f"{self.root.name}-evaluator-custody"
+
+    def evaluator(self, scorer_: Any = None) -> ev.EveEvaluator:
+        return ev.EveEvaluator(
+            evaluator_id=EVALUATOR_ID,
+            custody_dir=self.custody_dir,
+            worker_data_dirs=[self.root, self.keys_dir],
+            scorer=scorer_ or ev.IndependentGenerativeScorer(self.manifest.rubric_revision),
+            answer_key=key(),  # the evaluator's own sealed copy
+            cases=PROTECTED,
+        )
+
+    def replays(self) -> dict[str, Any]:
+        """How the evaluator replays each arm: the same served behaviour, its own lineage check."""
+        replays: dict[str, Any] = {
+            "baseline": ScriptedInference(BASE, BASELINE),
+            "simple_repair": ScriptedInference(BASE, SIMPLE),
+        }
+        job = self.transport.jobs.get("generated-fit-intent-1")
+        if job is not None:
+            replays["candidate"] = ev.EvaluatorCandidateReplay(
+                self.transport, job, self.transport.collect(job), self.reg
+            )
+        return replays
+
+    def independent_verdict(
+        self, result: Mapping[str, Any], journal: rp.ReplayJournal
+    ) -> dict[str, Any] | None:
+        """The separate evaluator's verdict on ``result``, or None if it refuses to issue one."""
+        try:
+            return self.evaluator().evaluate(
+                manifest=self.manifest,
+                result=result,
+                registration=self.reg,
+                journal=journal,
+                keys=rp.CommitmentKeyStore(self.keys_dir / f"{journal.path.name}.keys"),
+                replays=self.replays(),
+            )
+        except task.EveRefusal:
+            return None
+
     def arm(self, arm_id: str, served: str = BASE, **changes: str) -> rp.ArmSpec:
         spec = rp.ArmSpec(
             arm_id, served, "generated-snapshot-1", "generated-retrieval-1",
@@ -358,6 +408,22 @@ def env(tmp_path: Path) -> Env:
 
 def refuses(code: str) -> Any:
     return pytest.raises(task.EveRefusal, match=f"^{code}$")
+
+
+def stage(
+    env: Env,
+    result: Mapping[str, Any],
+    *,
+    recomputed_digest: str,
+    journal: rp.ReplayJournal | None = None,
+    scorer_: rp.Scorer | None = None,
+    verdict: Any = AUTO,
+) -> st.StageDecision:
+    """The one staging gate, with the separate evaluator's own verdict unless one is given."""
+    kwargs = env.staging(journal, scorer_)
+    if verdict is AUTO:
+        verdict = env.independent_verdict(result, kwargs["journal"])
+    return st.stage_decision(result, recomputed_digest=recomputed_digest, verdict=verdict, **kwargs)
 
 
 def full_result(env: Env, worker: rp.EveReplayWorker | None = None) -> dict[str, Any]:
@@ -825,20 +891,20 @@ def test_v5_broken_scorer_cannot_stage(env: Env) -> None:
         worker=worker,
     )
     good = env.result(arms, journal=worker.journal)
-    assert rp.stage_decision(
-        good, recomputed_digest=good["result_digest"], **env.staging(worker.journal)
+    assert stage(
+        env, good, recomputed_digest=good["result_digest"], journal=worker.journal
     ).stageable
     broken = env.result(arms, journal=worker.journal, scorer_=AlwaysCorrect())
     assert broken["body"]["scorer"]["selfcheck_passed"] is False
-    decision = rp.stage_decision(
+    decision = stage(
+        env,
         broken,
         recomputed_digest=broken["result_digest"],
-        **env.staging(worker.journal, AlwaysCorrect()),
+        journal=worker.journal,
+        scorer_=AlwaysCorrect(),
     )
     assert not decision.stageable and "scorer_selfcheck_failed" in decision.reasons
-    mismatch = rp.stage_decision(
-        good, recomputed_digest="sha256:" + "3" * 64, **env.staging(worker.journal)
-    )
+    mismatch = stage(env, good, recomputed_digest="sha256:" + "3" * 64, journal=worker.journal)
     assert not mismatch.stageable and "recompute_mismatch" in mismatch.reasons
     forged_body = {
         **good["body"],
@@ -846,8 +912,8 @@ def test_v5_broken_scorer_cannot_stage(env: Env) -> None:
         "fit_authorized": True,
     }
     tampered = {"body": forged_body, "result_digest": good["result_digest"]}
-    assert not rp.stage_decision(
-        tampered, recomputed_digest=good["result_digest"], **env.staging(worker.journal)
+    assert not stage(
+        env, tampered, recomputed_digest=good["result_digest"], journal=worker.journal
     ).stageable
     assert good["body"]["fit_authorized"] is False and good["body"]["release_authorized"] is False
 
@@ -858,7 +924,7 @@ def test_v5_no_net_fixes_is_not_stageable(env: Env) -> None:
     arms["candidate"] = env.replay(env.arm("candidate", infer.served_revision), infer)
     result = env.result(arms)
     assert result["body"]["improvement_claim"] == "no_net_fixes"
-    decision = rp.stage_decision(result, recomputed_digest=result["result_digest"], **env.staging())
+    decision = stage(env, result, recomputed_digest=result["result_digest"])
     assert not decision.stageable and decision.reasons == ("improvement_no_net_fixes",)
 
 
@@ -966,9 +1032,7 @@ def test_e1_registered_task_runs_eligible_arms_candidate_and_recomputable_scorec
     other.transport.jobs = env.transport.jobs
     recomputed = full_result(other, other.worker())
     assert recomputed["result_digest"] == result["result_digest"]
-    assert rp.stage_decision(
-        result, recomputed_digest=recomputed["result_digest"], **other.staging()
-    ).stageable
+    assert stage(other, result, recomputed_digest=recomputed["result_digest"]).stageable
     candidate_body = body["arms"]["candidate"]
     assert candidate_body["served_revision"] == "generated-adapter-digest-1"
     assert candidate_body["correct"] == 5 and body["arms"]["baseline"]["correct"] == 1
@@ -1136,9 +1200,7 @@ def test_x_selfcheck_is_computed_and_arms_must_be_journaled(env: Env) -> None:
 
 def test_x_a_redigested_forged_body_is_not_stageable(env: Env) -> None:
     result = full_result(env)
-    assert rp.stage_decision(
-        result, recomputed_digest=result["result_digest"], **env.staging()
-    ).stageable
+    assert stage(env, result, recomputed_digest=result["result_digest"]).stageable
     for change in (
         {"evidence_tier": "customer_witnessed"},
         {"claim_scope": "release"},
@@ -1148,11 +1210,9 @@ def test_x_a_redigested_forged_body_is_not_stageable(env: Env) -> None:
     ):
         body = {**result["body"], **change}
         forged = {"body": body, "result_digest": task.digest(body)}
-        decision = rp.stage_decision(
-            forged, recomputed_digest=forged["result_digest"], **env.staging()
-        )
+        decision = stage(env, forged, recomputed_digest=forged["result_digest"])
         assert not decision.stageable, change
-    assert not rp.stage_decision({"body": {}}, recomputed_digest="x", **env.staging()).stageable
+    assert not stage(env, {"body": {}}, recomputed_digest="x").stageable
 
 
 def test_x_credentials_are_checked_before_any_provider_observation(env: Env) -> None:
