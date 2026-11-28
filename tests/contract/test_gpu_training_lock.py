@@ -267,6 +267,9 @@ def read_dockerfile(path: Path = GPU / "trainer.Dockerfile") -> str:
 
 # Printable ASCII and tab only. \n separates lines and one trailing \r per line is dropped.
 DOCKERFILE_FORBIDDEN = re.compile(r"[^\t\x20-\x7e]")
+# BuildKit's line-continuation test and trim (default escape character `\`).
+CONTINUATION = re.compile(r"\\[ \t]*$")
+CONTINUATION_TRIM = re.compile(r"([^\\])\\[ \t]*$")
 
 
 def parse_dockerfile(text: str) -> tuple[list[str], list[dict]]:
@@ -284,6 +287,7 @@ def parse_dockerfile(text: str) -> tuple[list[str], list[dict]]:
     joined: list[str] = []
     pending = ""
     continuing = False
+    glued = False  # the last continuation had no blank before its backslash
     for line in lines:
         if not line.strip():
             # BuildKit skips an empty or blank line inside a continuation and keeps joining, so
@@ -297,14 +301,20 @@ def parse_dockerfile(text: str) -> tuple[list[str], list[dict]]:
             if continuing:
                 hazards.append("dockerfile_comment_in_continuation")
             continue
-        if line.rstrip().endswith("\\"):
-            pending += line.rstrip()[:-1] + " "
+        # BuildKit appends a continued line verbatim: no space is added, so `A="x"\` followed by
+        # an unindented `B=y` is the single word `A=xB=y` and B is never set. Refused, and
+        # joined exactly as BuildKit does so the allowlists compare what it builds.
+        if continuing and glued and not line.startswith((" ", "\t")):
+            hazards.append("dockerfile_continuation_without_separator")
+        if CONTINUATION.search(line):
+            glued = not re.search(r"[ \t]\\[ \t]*$", line)
+            pending += CONTINUATION_TRIM.sub(r"\1", line)
             continuing = True
             continue
         joined.append((pending + line).strip())
         pending = ""
         continuing = False
-    if pending:
+    if continuing:
         hazards.append("dangling_continuation")
     stages: list[dict] = [{"from": None, "steps": []}]
     for raw in joined:
@@ -1027,6 +1037,39 @@ MUTATIONS = {
         "cmd_not_allowlisted",
     ),
     # CMD is compared verbatim, so whitespace inside the JSON is not collapsed away.
+    # J1: BuildKit joins continued lines verbatim; `\` glued to text plus an unindented next
+    # line fuses two ENV pairs into one word, leaving the second variable unset.
+    "j1_f1_path_absorbs_library_path": (
+        (
+            (
+                'ENV PATH="/opt/venv/bin:${PATH}" \\\n    LD_LIBRARY_PATH=',
+                'ENV PATH="/opt/venv/bin:${PATH}"\\\nLD_LIBRARY_PATH=',
+            ),
+        ),
+        ("dockerfile_continuation_without_separator", "env_not_allowlisted"),
+    ),
+    "j1_f2_library_path_absorbs_driver_floor": (
+        (
+            (
+                "/usr/local/nvidia/lib64 \\\n    NVIDIA_REQUIRE_CUDA=",
+                "/usr/local/nvidia/lib64\\\nNVIDIA_REQUIRE_CUDA=",
+            ),
+        ),
+        ("dockerfile_continuation_without_separator", "env_not_allowlisted"),
+    ),
+    "j1_f3_hf_home_absorbs_offline": (
+        (
+            (
+                "    HF_HOME=/home/trainer/.cache/huggingface \\\n    HF_HUB_OFFLINE=1",
+                "    HF_HOME=/home/trainer/.cache/huggingface\\\nHF_HUB_OFFLINE=1",
+            ),
+        ),
+        ("dockerfile_continuation_without_separator", "env_not_allowlisted"),
+    ),
+    "j1_run_fused": (
+        ((" && ldconfig \\\n && test", " && ldconfig\\\n&& test"),),
+        ("dockerfile_continuation_without_separator", "run_not_allowlisted"),
+    ),
     "comment_inside_continuation": (
         ((INSTALL, INSTALL + "# kept out of the RUN by BuildKit\n"),),
         "dockerfile_comment_in_continuation",
@@ -1104,6 +1147,21 @@ def test_env_bare_word_is_kept_as_unparseable() -> None:
         ("__UNPARSEABLE__", "WORKDIR"),
         ("__UNPARSEABLE__", "/x"),
     ]
+
+
+def test_glued_backslash_before_an_indented_line_is_equivalent() -> None:
+    """Positive control for J1: in BuildKit's verbatim join a blank on either side of `\\`
+    separates the words, so dropping only one of the two blanks changes nothing."""
+    text = read_dockerfile()
+    for old, new in (
+        ('ENV PATH="/opt/venv/bin:${PATH}" \\\n', 'ENV PATH="/opt/venv/bin:${PATH}"\\\n'),
+        (" && ldconfig \\\n", " && ldconfig\\\n"),
+        # A blank before `\` is the separator when the next line is not indented.
+        ("huggingface \\\n    HF_HUB_OFFLINE=1", "huggingface \\\nHF_HUB_OFFLINE=1"),
+    ):
+        assert text.count(old) == 1, old
+        text = text.replace(old, new)
+    assert image_hazards(text) == []
 
 
 def test_x1_reviewer_payload_is_refused() -> None:
