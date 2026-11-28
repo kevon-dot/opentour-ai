@@ -2761,6 +2761,48 @@ class Workbench:
             audit=target.audit,
         )
 
+    def _benchmark_proof(
+        self,
+        cfg: Settings,
+        actor: str,
+        view: str,
+        ctx: Json,
+        action: str,
+        value: str,
+        old_hash: str,
+    ) -> None:
+        _check(
+            ctx["kind"] == ("evidence" if action == "ot_bench_proof" else "bench_proof")
+            and value == ctx["revision"]
+        )
+        target = self._readout(cfg, actor, ctx["job"])
+        _check(
+            target
+            and target.revision == value
+            and target.audit.get("mode") in {"managed_rule", "managed_model"}
+        )
+        assert target is not None
+        rows = [(target.dataset, ctx["job"], value)]
+
+        def authorized_audit() -> Json:
+            current = self._authorize_question_rows(cfg, actor, rows)
+            entry = current.permission(actor, "inspect", target.dataset)
+            if current.reviewer == actor and "review" in entry["roles"]:
+                return target.audit
+            return {}
+
+        audit = authorized_audit()
+        token = self.journal.context(actor, cfg.channel, view, "bench_proof", ctx["job"], value)
+        self._show(
+            view,
+            self.views.benchmark_proof_modal(token, value, audit, cfg.workflow_label, action),
+            old_hash,
+            dataset=target.dataset,
+            dataset_revision=target.dataset_revision,
+            audit=target.audit,
+            authorize=lambda: _check(authorized_audit() == audit),
+        )
+
     def _open_handoff(
         self,
         cfg: Settings,

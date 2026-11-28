@@ -1442,6 +1442,86 @@ def status_modal(
     )
 
 
+def benchmark_proof_blocks(
+    audit: Mapping[str, Any],
+    workflow: str,
+    *,
+    show_calculation: bool = False,
+    show_audit: bool = False,
+) -> list[Block]:
+    """Present only the validated aggregate supplied for this viewer and result."""
+    blocks = [
+        _section(
+            f"Workflow · {_display(workflow)}\nEvaluation purpose · compare the frozen "
+            "candidate and incumbent on the protected cohort."
+        )
+    ]
+    benchmark = audit.get("workflow_benchmark")
+    if benchmark:
+        from opentour_cell.pilot.slack_benchmark import validated_benchmark
+
+        checked = validated_benchmark(
+            benchmark,
+            cohort_revision=audit["cohort_revision"],
+            population=audit["population"],
+            candidate_arm=benchmark["candidate_arm"],
+            candidate_revision=benchmark["candidate_revision"],
+        )
+        blocks.append(
+            _section(
+                f"Worker comparison · {_ref(audit['run_revision'])}\n"
+                f"Frozen cohort · {_ref(checked['cohort_revision'])}\n"
+                f"Candidate · {_ref(checked['candidate_revision'])}"
+            )
+        )
+        if show_calculation:
+            lines = [
+                "Review routing uses all eligible decisions. Verified error uses "
+                "automatic decisions with a verified reference."
+            ]
+            for key, label in (("incumbent", "Incumbent"), ("candidate", "Candidate")):
+                arm = checked[key]
+                lines.append(
+                    f"{label} · routed to review "
+                    f"{_ratio(arm['review'], checked['population'])}; "
+                    f"incorrect automatic decisions {_ratio(arm['wrong'], arm['verified'])}."
+                )
+            blocks.append(_section("\n".join(lines)))
+        if show_audit:
+            blocks.extend(_audit_blocks(audit))
+    else:
+        blocks.append(_section("No benchmark calculation is available for this result and access."))
+    blocks.append(
+        _section(
+            "Benchmark approval unavailable. This view has no current purpose-bound owner grant "
+            "and benchmark audit receipt linked to this result. The workflow owner can ask the "
+            "benchmark custodian to supply the scoped proof. Independent result verification "
+            "is unavailable here."
+        )
+    )
+    return blocks
+
+
+def benchmark_proof_modal(
+    context: str, revision: str, audit: Mapping[str, Any], workflow: str, action: str
+) -> Block:
+    blocks = benchmark_proof_blocks(
+        audit,
+        workflow,
+        show_calculation=action == "ot_bench_calc",
+        show_audit=action == "ot_bench_audit",
+    )
+    if audit.get("workflow_benchmark"):
+        blocks.append(
+            _actions(
+                _button("Show calculation", "ot_bench_calc", revision),
+                _button("View audit trail", "ot_bench_audit", revision),
+            )
+        )
+    blocks.append(_actions(_button("Back to evidence", "ot_evidence", revision), _home()))
+    return _modal("Benchmark proof", "ot_bench_proof_view", context, blocks)
+
+
 def evidence_modal(
     *,
     recipe: bool = False,
@@ -1564,6 +1644,8 @@ def evidence_modal(
             }
             blocks.append(_actions(approve, change))
         explore = []
+        if audit and audit.get("mode") in {"managed_rule", "managed_model"}:
+            blocks.append(_actions(_button("View proof", "ot_bench_proof", ref)))
         if recipe and not release_allowed:
             explore.append(_button("View current status", "ot_managed_review_status", ref))
         if recipe and report:
