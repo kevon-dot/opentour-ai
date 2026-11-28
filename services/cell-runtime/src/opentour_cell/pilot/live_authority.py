@@ -1,4 +1,7 @@
-"""Resolve live authority from a custodian-signed local configuration and current custody."""
+"""Resolve live authority from a locally sealed configuration and current custody.
+
+Integrity here is a self-consistency check, not issuer authentication: see `PrivateLiveAuthority`.
+"""
 
 from __future__ import annotations
 
@@ -51,6 +54,11 @@ _FIELDS = {
     "actors",
     "grants",
 }
+LEDGER_REQUIRED_MISSING = "engagement_ledger_required_missing"
+# Shown to the authenticated caller. It names exactly what a grant must carry.
+LEDGER_REQUIRED_MISSING_MESSAGE = (
+    LEDGER_REQUIRED_MISSING + ': the grant body must carry "engagement_ledger_required": true'
+)
 _ROLES = {"inspect", "intake", "custodian", "verify", "workflow_owner"}
 
 
@@ -63,8 +71,24 @@ class PrivateLiveAuthority:
     """Consume an existing grant; setup never mints custodian or source authority.
 
     Configuration replacement belongs to the local custody writer and must use
-    the existing engagement guard. The file itself is bounded, private and
-    authenticated. Every operation reloads it; no UI role or event can override it.
+    the existing engagement guard. The file itself is bounded and private. Every
+    operation reloads it; no UI role or event can override it.
+
+    What the "seal" is, and is not. `seal_sha256` is an HMAC-SHA256 over the canonical
+    grant body, keyed by the symmetric hex key in `live-authority-key.json`, which sits in
+    the same private directory as the grant and the engagement ledger. It proves the grant
+    is self-consistent with that key. It does not authenticate an issuer: anyone able to
+    write this directory can mint or alter a grant. No key-custody or custodian-identity
+    contract exists yet.
+
+    Epoch enforcement is mandatory; there is no opt-out. A grant MUST carry
+    `"engagement_ledger_required": true` in its body (the sealed `grant` object, beside
+    `state` and `grants`). A grant without the field is refused with
+    `engagement_ledger_required_missing`; `false` and any other value are refused with
+    `live_evidence_unavailable`. With `true`, the engagement-epoch ledger must exist and be
+    enrolled, else the operation holds with `engagement_epoch_hold`. To migrate an older
+    grant, add that one field and re-seal it. An engagement that does not want epoch
+    enforcement must not use live evidence.
     """
 
     def __init__(self, directory: Path, tenant: str, workflow_ref: str):
@@ -93,6 +117,9 @@ class PrivateLiveAuthority:
                 hmac.digest(bytes.fromhex(key), _canonical(body).encode(), "sha256").hex(),
             )
         )
+        if "engagement_ledger_required" not in body:
+            # Checked after the seal so the guidance is only given for a self-consistent grant.
+            raise IntakeError(LEDGER_REQUIRED_MISSING_MESSAGE)
         _require(body["schema_version"] == SCHEMA and body["state"] == "current")
         _require(body["tenant"] == self.tenant and body["workflow_ref"] == self.workflow_ref)
         _require(type(body["expires_at"]) is int and int(time.time()) < body["expires_at"] < 2**63)
@@ -139,12 +166,17 @@ class PrivateLiveAuthority:
             )
         return dict(body)
 
-    def engagement_gate(self, scope: LiveScope) -> EngagementLedger | None:
-        """Open only a ledger explicitly required by the custodian-signed grant."""
+    def engagement_gate(self, scope: LiveScope) -> EngagementLedger:
+        """Open the engagement ledger; always enforcing, never None.
+
+        `_document` has already refused a grant whose `engagement_ledger_required` is absent
+        (`engagement_ledger_required_missing`) or anything other than true. The seal is a
+        locally keyed HMAC with a co-located key; it proves self-consistency only, so anyone
+        with write access to the directory can mint or alter a grant (though one without the
+        requirement is refused), and could also replace the ledger itself.
+        """
         body = self._document()
         _require(_digest(body) == scope.authority_revision)
-        if body.get("engagement_ledger_required") is not True:
-            return None
         try:
             ledger = EngagementLedger(self.directory, existing_only=True)
             for grant in scope.grants:
@@ -210,8 +242,7 @@ class PrivateLiveAuthority:
                 "verify" in roles and actor.role == "slack",
                 "workflow_owner" in roles and actor.role == "slack",
             )
-            if body.get("engagement_ledger_required") is True:
-                self.engagement_gate(scope)
+            self.engagement_gate(scope)
             yield scope
             _require(self._document() == body)
 
