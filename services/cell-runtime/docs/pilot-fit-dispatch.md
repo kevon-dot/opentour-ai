@@ -123,7 +123,7 @@ All tests are in `tests/pilot/test_fit_dispatch.py` and use generated fixtures.
 * OPE-566 signed reservation and settlement receipts. Today's records are `digest_self_consistent_only` at most.
 * OPE-426 owner settings for a paid cap and a concurrency setting.
 * The learning-run endpoints (OPE-559) that resolve a plan into a `DispatchRequest`.
-* Packaging `fit_dispatch` into the Slack pilot kit. It is not listed in `tools/build_slack_pilot_kit.py`.
+* An installed worker must bind the packaged dispatcher to its authorized local connector and current run resolver.
 
 ## Run the tests
 
