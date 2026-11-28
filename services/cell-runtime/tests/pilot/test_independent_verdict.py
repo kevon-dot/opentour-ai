@@ -135,7 +135,7 @@ class Scenario:
         self,
         plan,
         *,
-        comparators=("incumbent",),
+        comparators=("incumbent", "simple_repair"),
         family_size=1,
         slice_of=None,
         prefix="",
@@ -148,7 +148,8 @@ class Scenario:
         index = 0
         for codes, count in plan:
             if isinstance(codes, str):
-                codes = {comparators[0]: codes[0], "candidate": codes[1]}
+                # A two-letter plan gives every comparator the same transition to the candidate.
+                codes = {**{c: codes[0] for c in comparators}, "candidate": codes[1]}
             for _ in range(count):
                 case_id = f"{prefix}case-{index:04d}"
                 truth = A if index % 2 == 0 else B
@@ -214,7 +215,7 @@ def policy(**over):
         "max_coverage_loss_bps": 500,
         "max_missing": 0,
         "min_families": 2,
-        "required_comparators": ("incumbent",),
+        "required_comparators": ("incumbent", "simple_repair"),
     }
     values.update(over)
     return iv.GatePolicy(**values)
@@ -356,6 +357,10 @@ def test_c1_clean_win_verifies_all_three_statements_and_is_alert_eligible(tmp_pa
     }
     assert pair["improvement"]["percentage_points"] == "60.0000"
     assert pair["uncertainty"]["families"] == 200
+    # A tuned candidate's win stands only with a separate win against the simple repair too.
+    assert doc["comparisons"]["simple_repair"]["outcome"] == "verified_gain"
+    assert doc["comparisons"]["simple_repair"]["required"] is True
+    assert doc["policy"]["required_comparators"] == ["incumbent", "simple_repair"]
     assert float(pair["uncertainty"]["lower"]) > 0.02
     assert doc["effects"]["improvement_alert_eligible"] is True
     assert doc["effects"]["release_request_eligible"] is False
@@ -507,8 +512,10 @@ def test_s2_deliberately_wrong_scorer_fails_the_fixture_oracle(tmp_path, wrong):
 
 
 def test_s3_b4_paired_arithmetic_exact_and_inconclusive_under_registered_uncertainty(tmp_path):
-    s = Scenario(B4, comparators=("real_only",))
-    pol = policy(required_comparators=("real_only",))
+    # A tuned candidate is compared against incumbent and simple repair too; here every
+    # comparator carries the B4 real-only arm, and the real-only comparison is the one checked.
+    s = Scenario(B4, comparators=("incumbent", "simple_repair", "real_only"))
+    pol = policy(required_comparators=("incumbent", "simple_repair", "real_only"))
     v = run(tmp_path, s, pol=pol)
     pair = v.document["comparisons"]["real_only"]
     assert pair["paired"] == {
@@ -582,7 +589,7 @@ def test_x1_copied_prediction_and_unchanged_incumbent_are_zero_improvement(tmp_p
     same = iv.ClaimedResult(
         **{
             **claim(s).__dict__,
-            "comparator_digests": {"incumbent": CANDIDATE},
+            "comparator_digests": {"incumbent": CANDIDATE, "simple_repair": SIMPLE},
             "claimed_paired": {},
         }
     )
@@ -849,7 +856,7 @@ def test_k3_private_predictions_are_attributed_committed_access_controlled_and_r
     v = run(tmp_path, s, ev=ev)
     private = ev.private_predictions(v.verdict_key, accessor_id=EVALUATOR)
     rows = private["record"]["rows"]
-    assert len(rows) == 400 and all(
+    assert len(rows) == 600 and all(  # 200 cases x (candidate, incumbent, simple repair)
         r["scorer_id"] == iv.SCORER_ID and r["rubric_revision"] == iv.RUBRIC_REVISION for r in rows
     )
     assert private["record"]["predictions"]["candidate"]["case-0000"]["status"] == "automatic"
@@ -895,6 +902,32 @@ def test_i1_evaluator_must_not_be_the_producer_and_out_of_scope_routes_refuse(tm
         run(tmp_path, s, candidate_kind="managed_provider")
     with pytest.raises(iv.VerdictInputError, match="stochastic_decoding_not_supported"):
         run(tmp_path, s, pol=policy(decoding="sampled"))
+    # A tuned candidate must face both the incumbent and the simple repair (OPE-528 AC).
+    only_incumbent = Scenario(CLEAN_WIN, comparators=("incumbent",))
+    with pytest.raises(iv.VerdictInputError, match="requires_incumbent_and_simple_repair"):
+        run(tmp_path, only_incumbent, pol=policy(required_comparators=("incumbent",)))
+    with pytest.raises(iv.VerdictInputError, match="requires_incumbent_and_simple_repair"):
+        run(tmp_path, s, pol=policy(required_comparators=("incumbent",)))  # policy declares fewer
+    with pytest.raises(iv.VerdictInputError, match="requires_incumbent_and_simple_repair"):
+        run(tmp_path, s, comparator_digests={"incumbent": INCUMBENT})  # claim declares fewer
+    with pytest.raises(iv.VerdictInputError, match="requires_incumbent_and_simple_repair"):
+        run(  # simple repair present only as an optional comparator
+            tmp_path,
+            s,
+            pol=policy(
+                required_comparators=("incumbent",), optional_comparators=("simple_repair",)
+            ),
+        )
+    repair = Scenario(CLEAN_WIN, comparators=("incumbent",))
+    no_fit = run(
+        tmp_path / "repair",
+        repair,
+        pol=policy(required_comparators=("incumbent",)),
+        manifest=None,
+        candidate_kind="simple_repair",
+        job_manifest_digest=None,
+    )
+    assert no_fit.outcome == "verified_gain"  # a no-fit repair is compared to the incumbent
     assert not (tmp_path / "evaluator-custody" / "verdicts").exists() or not list(
         (tmp_path / "evaluator-custody" / "verdicts").iterdir()
     )
@@ -1165,10 +1198,11 @@ def test_r4_p4_a_different_claim_never_replays_another_claims_verdict(tmp_path):
 
 def test_r5_p5_full_policy_and_operating_point_terms_are_bound_and_enforced(tmp_path):
     """Probe P5: same revision label, loosened thresholds; terms minimums were ignored."""
-    s = Scenario(B4, comparators=("real_only",))
-    strict = policy(required_comparators=("real_only",))
+    every = ("incumbent", "simple_repair", "real_only")
+    s = Scenario(B4, comparators=every)
+    strict = policy(required_comparators=every)
     loose = policy(
-        required_comparators=("real_only",),
+        required_comparators=every,
         alpha_bps=9999,
         minimum_improvement_bps=0,
         coverage_floor_bps=0,

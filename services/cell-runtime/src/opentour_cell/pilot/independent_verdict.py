@@ -118,6 +118,9 @@ CASE_VERDICTS = (
 _SHA = re.compile(r"[0-9a-f]{64}")
 _ID = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9_.:@/-]{0,127}")
 _KINDS = ("open_weight_fit", "simple_repair")
+# A tuned candidate must beat both the incumbent and the credible simple repair (OPE-528 AC).
+_TUNED_KINDS = ("open_weight_fit",)
+_TUNED_COMPARATORS = ("incumbent", "simple_repair")
 _SELECTION = ("frozen_before_readout", "after_protected_readout")
 _PAIR_FIELDS = ("comparable", "fixes", "new_errors", "unchanged_right", "unchanged_wrong")
 
@@ -940,6 +943,13 @@ class IndependentEvaluator:
     ) -> IndependentVerdict:
         claim.validate()
         policy.validate()
+        if claim.candidate_kind in _TUNED_KINDS and not (
+            set(_TUNED_COMPARATORS) <= set(policy.required_comparators)
+            and set(_TUNED_COMPARATORS) <= set(claim.comparator_digests)
+        ):
+            # Separate comparisons against both, on the same untouched population; a claim or
+            # policy that declares fewer is out of scope, not a weaker verdict.
+            raise VerdictInputError("tuned_candidate_requires_incumbent_and_simple_repair")
         if claim.producer_id == self.evaluator_id:
             raise IndependenceError("evaluator_is_producer")
         if not isinstance(audit_receipt, Mapping):
