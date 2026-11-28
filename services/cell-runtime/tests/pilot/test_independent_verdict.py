@@ -1563,6 +1563,67 @@ def test_m5_candidate_deferrals_cannot_hide_a_critical_slice_veto(tmp_path):
     assert "coverage_expansion_within_ceiling" not in json.dumps(doc["reasons"])
 
 
+def test_b1_retention_limit_is_exclusive_at_retention_until(tmp_path, monkeypatch):
+    """Mutant: retention ``<=`` -> ``<`` would leave a record readable at its limit."""
+    ev = evaluator(tmp_path)
+    v = run(tmp_path, Scenario(CLEAN_WIN), ev=ev)
+    path = tmp_path / "evaluator-custody" / "predictions" / (v.verdict_key + ".json")
+    until = json.loads(path.read_bytes())["retention_until"]
+    monkeypatch.setattr(iv.time, "time", lambda: until - 1)
+    assert ev.private_predictions(v.verdict_key, accessor_id=EVALUATOR)["retention_until"] == until
+    assert ev.purge_expired() == 0
+    monkeypatch.setattr(iv.time, "time", lambda: until)
+    with pytest.raises(iv.CustodyError, match="private_predictions_expired"):
+        ev.private_predictions(v.verdict_key, accessor_id=EVALUATOR)
+    assert ev.purge_expired() == 1
+
+
+@pytest.mark.parametrize(
+    "lower,upper,outcome,reason",
+    [
+        ("0.020000", "0.500000", "inconclusive", "interval_spans_threshold"),  # lower == threshold
+        ("0.020001", "0.500000", "verified_gain", None),
+        ("-0.100000", "0.020000", "inconclusive", "interval_spans_threshold"),  # upper == it
+        ("-0.100000", "0.019999", "no_material_gain", "upper_bound_below_threshold"),
+    ],
+)
+def test_b2_interval_decision_boundaries_at_the_threshold(
+    tmp_path, monkeypatch, lower, upper, outcome, reason
+):
+    """Mutant: ``lower > threshold`` -> ``>=`` must fail when lower equals the 200 bps threshold."""
+
+    def fixed(effects, alpha_bps):
+        return {
+            "method": iv.INTERVAL_METHOD,
+            "status": "available",
+            "families": len(effects),
+            "alpha_bps": alpha_bps,
+            "estimate": "0.100000",
+            "lower": lower,
+            "upper": upper,
+        }
+
+    monkeypatch.setattr(iv, "_family_interval", fixed)
+    v = run(tmp_path, Scenario(CLEAN_WIN))
+    assert v.outcome == outcome
+    if reason is not None:
+        held(v, outcome, reason)
+
+
+def test_b3_slice_veto_fires_above_a_tie_not_at_it(tmp_path):
+    """Mutant: slice veto ``>`` -> ``>=`` must fail: 5 fixes and 5 new errors is not a veto."""
+    for errors, status in ((5, "ok"), (6, "veto")):
+        plan = [("WR", 115), ("RR", 80 - errors), ("WR", 5), ("RW", errors)]
+        first = 195 - errors  # the WR x5 and RW x errors blocks are the critical slice
+        s = Scenario(plan, slice_of=lambda i, c, first=first: (CRITICAL,) if i >= first else ())
+        pol = policy(critical_slices=(CRITICAL,))
+        doc = run(tmp_path / str(errors), s, pol=pol).document
+        sl = doc["comparisons"]["incumbent"]["critical_slices"][CRITICAL]
+        assert (sl["comparable"], sl["fixes"], sl["new_errors"]) == (5 + errors, 5, errors)
+        assert sl["status"] == status
+        assert ("critical_slice_veto" in json.dumps(doc["reasons"])) is (status == "veto")
+
+
 def test_m6_review_f2_candidate_errors_on_comparator_gaps_reach_the_slice_veto(tmp_path):
     """Review 577a774 F2: WR120, RR77, RR3, MW5, last 8 in the slice, read comparable 3, ok."""
 
