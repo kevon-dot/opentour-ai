@@ -24,6 +24,7 @@ def test_signed_publication_drives_actual_socket_mode_home_and_private_selection
     socket_mode = importlib.import_module("slack_sdk.socket_mode")
     request_type = importlib.import_module("slack_sdk.socket_mode.request").SocketModeRequest
     assert importlib.import_module("slack_sdk.version").__version__ == "3.47.0"
+    assert PUBLICATION_PURPOSE == records.WORKFLOW_INDEX_PUBLICATION_PURPOSE
     assert records.REQUIRED_ROLES[PUBLICATION_PURPOSE] == {
         records.CUSTOMER_OWNER,
         records.OPERATOR_CUSTODIAN,
@@ -35,8 +36,6 @@ def test_signed_publication_drives_actual_socket_mode_home_and_private_selection
     h.config["workflow_index_publication_file"] = "workflow-index.json"
     h.save()
     kit = signer_kit
-    if PUBLICATION_PURPOSE not in kit.operator.purposes:
-        kit.operator.purposes.append(PUBLICATION_PURPOSE)
     registry = kit.registry()
     registry_path = cfg.directory / REGISTRY_FILE
     registry_path.write_bytes(registry)
