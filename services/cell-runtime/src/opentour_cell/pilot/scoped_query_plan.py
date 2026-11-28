@@ -24,6 +24,7 @@ class ReadoutQuestion(StrEnum):
     REGRESSIONS = "regressions"
     WORKPLACE_SUPPORT = "independent_workplace_cases"
     SYNTHETIC_BENEFIT = "synthetic_benefit"
+    LABEL_SAVINGS = "label_savings"
 
 
 class QueryHold(StrEnum):
@@ -77,6 +78,10 @@ _READOUT_QUESTIONS = (
             r"(?:help|improve the (?:result|comparison))"
         ),
         ReadoutQuestion.SYNTHETIC_BENEFIT,
+    ),
+    (
+        re.compile(r"how many (?:real |verified )(?:training )?labels did (?:this|we) save"),
+        ReadoutQuestion.LABEL_SAVINGS,
     ),
 )
 

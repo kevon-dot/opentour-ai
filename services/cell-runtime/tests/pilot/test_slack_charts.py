@@ -82,6 +82,20 @@ def test_small_and_different_automated_subsets_remain_visible():
     assert "No comparable paired cases" in result["text"]
 
 
+def test_equal_coverage_with_distinct_memberships_reports_each_paired_intersection():
+    current = ["a"] * 160 + ["review"] * 40
+    rule = readout([("a", incumbent, incumbent) for incumbent in current])
+    model = readout(
+        [("a", incumbent, "review" if i < 40 else "a") for i, incumbent in enumerate(current)]
+    )
+    result = decision_charts(rule, metrics(rule, model, result="hold"), VERSION)
+    assert result["text"].count("160/200 eligible cases automated") == 3
+    assert "Current vs. simple repair: 160 comparable cases, 40 excluded" in result["text"]
+    assert "Current vs. tuned model: 120 comparable cases, 80 excluded" in result["text"]
+    assert "Only current automated: 40. Only tuned model automated: 40." in result["text"]
+    assert result["blocks"][0]["text"]["text"] == result["text"]
+
+
 @pytest.mark.parametrize("bad", ["cohort", "binding", "winner", "shape", "mismatch", "foreign"])
 def test_wrong_comparator_missing_scope_or_inconsistent_aggregate_refused(bad):
     audit = metrics(deepcopy(RULE), deepcopy(MODEL), result="model_candidate")

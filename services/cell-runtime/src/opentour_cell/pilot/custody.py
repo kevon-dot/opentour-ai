@@ -455,7 +455,8 @@ class Closeout:
                 (
                     "approval-requests",
                     "destination",
-                    any(self.directory.glob("approval-ready-*.json")),
+                    any(self.directory.glob("approval-ready-*.json"))
+                    or any(self.directory.glob("approval-held-*.json")),
                     "Account for Slack or Zapier messages already admitted, any "
                     "pending decision and every recipient copy.",
                 ),
