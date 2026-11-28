@@ -947,12 +947,16 @@ def test_i1_evaluator_must_not_be_the_producer_and_out_of_scope_routes_refuse(tm
     )
 
 
-def test_i2_unsigned_record_is_locally_keyed_and_consumable_by_the_packet_boundary(tmp_path):
-    v = run(tmp_path, Scenario(CLEAN_WIN))
+def test_i2_exported_record_is_digest_only_and_consumable_by_the_packet_boundary(tmp_path):
+    ev = evaluator(tmp_path)
+    s = Scenario(CLEAN_WIN)
+    v = run(tmp_path, s, ev=ev)
     doc = v.document
     assert v.signature is None
     assert doc["evidence"] == {
-        "evidence_tier": "locally_keyed",
+        "evidence_tier": "digest_self_consistent_only",
+        "store_seal": "evaluator_hmac_held_in_custody_not_exported",
+        "audit_receipt_tier": "self_sealed_digest_only",
         "evidence_origin": "generated",
         "producer_distinct_from_evaluator": "caller_asserted_identity_labels",
         "custody_separated": False,
@@ -963,6 +967,23 @@ def test_i2_unsigned_record_is_locally_keyed_and_consumable_by_the_packet_bounda
     assert cp.VERDICT == iv.VERDICT and cp._verdict_ok(doc)
     assert doc["verifier_id"] == EVALUATOR and doc["producer_id"] == WORKER
     assert doc["denominator"]["protected_rows"] == 200
+    # Only a re-read from the evaluator's own store, with its HMAC seal checked, is keyed.
+    assert v.custody_tier == "digest_self_consistent_only"
+    reread = run(tmp_path, s, ev=ev)
+    assert reread.replayed and reread.custody_tier == "locally_keyed"
+    assert reread.document == doc  # the tier is never written into the document
+
+
+def test_i2b_why_the_export_says_digest_only_a_recomputed_forgery_passes_the_digest_check(
+    tmp_path,
+):
+    """Review 577a774 F4: anyone can rewrite the export and recompute its plain digest."""
+    v = run(tmp_path, Scenario([("RW", 120), ("RR", 80)]))
+    forged = {k: x for k, x in v.document.items() if k != "verdict_digest"}
+    forged.update(outcome="verified_gain", verdict="reproduced")
+    forged["verdict_digest"] = digest(forged)
+    assert cp._verdict_ok(forged)  # a digest-only consumer cannot tell
+    assert forged["evidence"]["evidence_tier"] == "digest_self_consistent_only"
 
 
 def test_i3_signing_seam_hands_the_journal_transcript_to_the_evaluator_key(tmp_path):
@@ -991,7 +1012,8 @@ def test_i3_signing_seam_hands_the_journal_transcript_to_the_evaluator_key(tmp_p
         "key_registry_revision": "generated-registry-r1",
     }
     test_key.public_key().verify(raw_to_der(env["signature"]), seen[0], ec.ECDSA(hashes.SHA256()))
-    assert v.document["evidence"]["evidence_tier"] == "locally_keyed"  # never self-upgraded
+    # A signature never self-upgrades the exported tier; raising it is the verifier's decision.
+    assert v.document["evidence"]["evidence_tier"] == "digest_self_consistent_only"
 
 
 def test_i4_a_malformed_signature_is_refused_and_nothing_is_stored(tmp_path):

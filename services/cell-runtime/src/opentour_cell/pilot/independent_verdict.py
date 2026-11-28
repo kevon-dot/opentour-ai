@@ -50,10 +50,15 @@ the producer declares, since that basis is caller-asserted) is held when its cas
 overlap any cohort a verdict in this directory scored. Another evaluator's custody directory
 does not share it.
 
-Evidence tier, stated precisely: every record is ``locally_keyed``. The evaluator commits its
-private predictions with an HMAC key held in its own custody directory, but that directory sits on
-a host the operator controls, so custody is NOT separated and the record is NOT proof to a third
-party. The signing seam (``EvaluatorSigner``) hands the exact RFC 8785 transcript
+Evidence tier, stated precisely: an exported verdict document is ``digest_self_consistent_only``.
+Its ``verdict_digest`` is a plain SHA-256 that anyone can recompute after rewriting the document,
+so a consumer that checks only that digest (as ``comparison_packet._verdict_ok`` does) accepts a
+forgery. The keyed seal stays in the evaluator's store: only a verdict the evaluator re-reads from
+its own custody directory, after checking its HMAC seal, is ``locally_keyed``
+(``IndependentVerdict.custody_tier``). That key is held on a host the operator controls, so
+custody is NOT separated and even a ``locally_keyed`` record is NOT proof to a third party. The
+audit receipt it binds is self-sealed by a plain digest too, and is recorded as such. The signing
+seam (``EvaluatorSigner``) hands the exact RFC 8785 transcript
 ``{"purpose": "opentour.pilot.independent-verdict.v1", "payload": <document>}`` to an evaluator
 key and attaches an ES256 envelope in the ``opentour_journal`` format. No such key exists yet
 (OPE-566 key ceremony), so production records carry no signature; nothing here fabricates one.
@@ -92,7 +97,11 @@ VERDICT = "opentour.pilot.independent-verdict.v1"
 PURPOSE = "opentour.pilot.independent-verdict.v1"
 RECEIPT = "opentour.benchmark-audit-receipt.v1"
 FIT_MANIFEST = "opentour.open_weight_fit.v1"
-EVIDENCE_TIER = "locally_keyed"
+# The exported document's tier: its plain verdict_digest can be recomputed by anyone.
+EVIDENCE_TIER = "digest_self_consistent_only"
+# Only a verdict re-read from the evaluator's own store, with its HMAC seal checked.
+STORE_TIER = "locally_keyed"
+RECEIPT_TIER = "self_sealed_digest_only"
 INTERVAL_METHOD = "bounded_independent_family_hoeffding_v1"
 TARGET_METRIC = "wrong_automatic_decisions"
 SCORER_ID = "opentour.pilot.independent-decision-scorer"
@@ -425,6 +434,9 @@ class IndependentVerdict:
     document: Json
     signature: Json | None
     replayed: bool
+    # ``locally_keyed`` only when the evaluator re-read this verdict from its own store and
+    # checked the HMAC seal; otherwise the document's own digest tier. Never in the document.
+    custody_tier: str = EVIDENCE_TIER
 
     @property
     def verdict_key(self) -> str:
@@ -867,7 +879,7 @@ class IndependentEvaluator:
             raise CustodyError("stored_verdict_corrupt") from None
         if not (sealed and keyed and document["verdict_key"] == key):
             raise CustodyError("stored_verdict_tampered")
-        return IndependentVerdict(document, signature, replayed=True)
+        return IndependentVerdict(document, signature, replayed=True, custody_tier=STORE_TIER)
 
     def private_predictions(self, verdict_key: str, *, accessor_id: str) -> Json:
         """Return the private per-case record while it is within its retention limit.
@@ -1604,7 +1616,11 @@ class IndependentEvaluator:
                 "handoff_request_eligible": False,
             },
             "evidence": {
+                # This exported document: a plain digest anyone can recompute. The keyed seal
+                # stays in the evaluator's store (``IndependentVerdict.custody_tier``).
                 "evidence_tier": EVIDENCE_TIER,
+                "store_seal": "evaluator_hmac_held_in_custody_not_exported",
+                "audit_receipt_tier": RECEIPT_TIER,
                 "evidence_origin": population.evidence_origin,
                 # Only the identity labels differ; who actually runs each side is asserted by
                 # the caller and not established by this record.
