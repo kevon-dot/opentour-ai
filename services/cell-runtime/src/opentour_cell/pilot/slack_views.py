@@ -1519,8 +1519,9 @@ def _handoff_projection(
         ]
 
     assert delivery.received_at is not None and delivery.receiver_receipt_ref
-    state = "Delivered to the selected destination."
-    rows = [scope, approval, f"{state}\n{checked}"]
+    delivered = "Delivered to the selected destination."
+    state = delivered
+    observed_times = []
     evidence = [
         f"Receiver receipt {_ref(delivery.receiver_receipt_ref)} at {when(delivery.received_at)}."
     ]
@@ -1528,6 +1529,7 @@ def _handoff_projection(
     replay = receipt.replay
     rollback = receipt.rollback
     if replay:
+        observed_times.append(replay.observed_at)
         evidence.append(
             f"Replayed by recipient at {when(replay.observed_at)}. "
             f"Replay receipt {_ref(replay.receipt_ref)}."
@@ -1537,6 +1539,7 @@ def _handoff_projection(
         evidence.append(state)
         next_action = "The reviewer can inspect the completed evaluation receipt."
     elif rollback:
+        observed_times.append(rollback.observed_at)
         state = "Rollback verified."
         evidence.append(
             f"Rollback verified at {when(rollback.observed_at)}. "
@@ -1549,8 +1552,19 @@ def _handoff_projection(
         state = "Activation unconfirmed."
         evidence.append(state)
         next_action = "The environment operator can check the serving version."
-    rows.extend(evidence)
-    rows.append(next_action)
+    latest = max(observed_times, default=None)
+    if latest is not None and (
+        delivery.last_checked_at is None or latest > delivery.last_checked_at
+    ):
+        summary_check = f"Last checked {when(latest)}."
+        basis = f"{scope} · {approval} {summary_check}"
+        scope = f"{scope}\n{summary_check}"
+        checked = (
+            f"Delivery last checked {when(delivery.last_checked_at)}."
+            if delivery.last_checked_at is not None
+            else "No independent delivery check time is recorded."
+        )
+    rows = [scope, approval, f"{delivered}\n{checked}", *evidence, next_action]
     return StatusAnswer(state, " ".join([basis, *evidence]), next_action), rows
 
 

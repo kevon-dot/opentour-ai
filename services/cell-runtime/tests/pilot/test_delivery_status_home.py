@@ -297,3 +297,21 @@ def test_timeline_renders_only_applicable_post_delivery_observations():
     unknown = replace(receipt, delivery=replace(delivered, stage="delivery_unconfirmed"))
     assert "Delivery is unconfirmed." in rows(unknown)
     assert "replay-proof" not in rows(unknown) and "rollback-proof" not in rows(unknown)
+
+    def check_summary(current, timestamp):
+        checked = f"Last checked {datetime.fromtimestamp(timestamp, UTC).isoformat()}."
+        assert checked in handoff_status(current, audit).basis
+        assert checked in rows(current)
+
+    # A hidden rollback cannot advance even the summary timestamp.
+    check_summary(receipt, 4)
+    assert "1970-01-01T00:00:05+00:00" not in evaluation
+    check_summary(restored, 5)
+    assert "Delivery last checked 1970-01-01T00:00:03+00:00." in rows(restored)
+    check_summary(rollback_only, 5)
+    check_summary(
+        replace(restored, replay=replace(replay, evaluation_only=False, observed_at=7)), 7
+    )
+    check_summary(replace(restored, delivery=replace(delivered, last_checked_at=8)), 8)
+    check_summary(replace(restored, replay=None, rollback=None), 3)
+    check_summary(unknown, 3)
