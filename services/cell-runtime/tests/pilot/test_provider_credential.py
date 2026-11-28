@@ -12,7 +12,7 @@ Item 2  value only at the locator; resolver; leak scan ............ R1-R7, L1-L3
 Item 3  rotation drill with fresh-subprocess refusal of the old .... T1-T4
 Item 4  durable append-only revocation; withdrawal; outcomes ...... V1-V7
 Item 5  verified mandate owner, payer and cap before dispatch ..... D1-D9
-Store   pinned mandate store identity (copy, recreate, replace) ... P1-P4
+Store   pinned mandate store identity (copy, move, recreate) ...... P1-P6
 Scope   source registry, clock, evidence tier and the document .... S1-S3, E1
 """
 
@@ -34,6 +34,7 @@ import sqlite3
 import subprocess
 import sys
 import time
+import types
 import uuid
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, replace
@@ -1716,6 +1717,15 @@ def _recreate_at_same_path(env: MandateEnv) -> None:
     env.directory.chmod(0o700)
 
 
+def _new_directory_same_files(env: MandateEnv) -> None:
+    """A new directory at the same path holding the very same (moved, not copied) files."""
+    moved = env.directory.parent / (env.directory.name + "-moved")
+    env.directory.rename(moved)
+    env.directory.mkdir(mode=0o700)
+    for child in moved.iterdir():
+        child.rename(env.directory / child.name)
+
+
 def _replace_database(env: MandateEnv) -> None:
     database = env.directory / "learning-mandates.sqlite3"
     staged = env.directory / "staged.sqlite3"
@@ -1735,6 +1745,7 @@ def _drop_store_id(env: MandateEnv) -> None:
 
 STORE_CHANGES: dict[str, Callable[[MandateEnv], None]] = {
     "recreated-same-path": _recreate_at_same_path,
+    "new-directory-same-files": _new_directory_same_files,
     "database-replaced": _replace_database,
     "store-id-changed": _new_store_id,
     "store-id-removed": _drop_store_id,
@@ -1754,11 +1765,51 @@ def test_p2_a_store_recreated_or_replaced_in_place_is_refused(
     )
     status, body, _ = _probe(ledger_dir, env, auth.authorization_id, "job-0001")
     assert (status, body["result"]) == (2, "mandate_store_mismatch")
-    dispatch = request(env, "job-0002") if change != "recreated-same-path" else None
-    if dispatch is not None:
-        assert refusal(ledger.authorize_dispatch, dispatch, mandates=reopened, actor=WORKER) == (
-            "mandate_store_mismatch"
-        )
+    dispatch = request(env, "job-0002", reservation={})
+    assert refusal(ledger.authorize_dispatch, dispatch, mandates=reopened, actor=WORKER) == (
+        "mandate_store_mismatch"
+    )
+
+
+@pytest.mark.parametrize("target", ["directory", "database"])
+def test_p6_the_same_inode_number_on_another_device_is_refused(
+    ledger_dir: Path, store: Path, env: MandateEnv, target: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Simulated: a second filesystem cannot be mounted here, so ``os.stat`` reports another
+    device for an otherwise identical store."""
+    ledger, source, auth, resolver = authorized(ledger_dir, store, env, sentinel())
+    path = os.path.realpath(env.directory)
+    if target == "database":
+        path = os.path.join(path, "learning-mandates.sqlite3")
+    real_stat = os.stat
+
+    def other_device(name: Any, *args: Any, **kwargs: Any) -> Any:
+        info = real_stat(name, *args, **kwargs)
+        if not args and not kwargs and os.path.realpath(name) == path:
+            return types.SimpleNamespace(st_dev=info.st_dev + 1, st_ino=info.st_ino)
+        return info
+
+    monkeypatch.setattr(pc.os, "stat", other_device)
+    assert refusal(resolver.resolve, auth.authorization_id, job_ref="job-0001") == (
+        "mandate_store_mismatch"
+    )
+    del ledger, source
+
+
+def test_p5_a_store_moved_to_another_path_is_refused(
+    ledger_dir: Path, store: Path, env: MandateEnv
+) -> None:
+    """Same inodes, store id and scope; only the path differs."""
+    ledger, _, auth, _ = authorized(ledger_dir, store, env, sentinel())
+    moved = env.directory.parent / (env.directory.name + "-elsewhere")
+    env.directory.rename(moved)
+    relocated = lm.LearningMandates(moved, ORG, env.engagement)
+    resolver = pc.CredentialResolver(ledger, expected_uid=os.getuid(), mandates=relocated)
+    assert refusal(resolver.resolve, auth.authorization_id, job_ref="job-0001") == (
+        "mandate_store_mismatch"
+    )
+    status, body, _ = _probe(ledger_dir, env, auth.authorization_id, "job-0001", moved)
+    assert (status, body["result"]) == (2, "mandate_store_mismatch")
 
 
 def test_p3_another_scope_in_the_same_store_is_refused(

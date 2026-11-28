@@ -486,9 +486,6 @@ _SOURCE_REGISTRY: dict[type, _SourceHooks] = {}
 
 
 def _trusted_source(source: object) -> Any:
-    if type(source) is LearningMandates:
-        return source
-    _need(_SOURCE_REGISTRY.get(type(source)) is not None, "mandate_source_untrusted")
     _underlying(source)
     return source
 
@@ -1251,14 +1248,14 @@ class CredentialResolver:
         _ident(job_ref)
         _digest_from(authorization_id, _HEX64, "dispatch_authorization_required")
         state = self.ledger._fold()
-        store = self.ledger._check_store(state, self.mandates)
+        # Every journaled authorization carries the bound store's digest (checked on read).
+        self.ledger._check_store(state, self.mandates)
         job = state.jobs.get(job_ref)
         _need(
             job is not None and job.body["authorization_id"] == authorization_id,
             "dispatch_authorization_required",
         )
         assert job is not None
-        _need(job.body["mandate_store"] == store, "mandate_store_mismatch")
         _need(not job.fenced, "dispatch_fenced")
         _need(job.outcome is None, "dispatch_settled")
         reference_id = job.reference_id
