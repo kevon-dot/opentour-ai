@@ -447,33 +447,45 @@ def _contains_own_id(case: DecisionCase, value: object) -> bool:
 
 
 def _id_free_remainder(case: DecisionCase, value: object) -> str:
-    """The folded value with every occurrence of the case's own case and family id masked.
+    """The folded value with each occurrence of the case's own ids replaced by a typed token.
 
-    One pass, independent of order: every match span of either id (overlapping matches
-    included) is found in the folded value, overlapping or touching spans are merged, and the
-    union is cut out. So the result never depends on which id is removed first, on their
-    lengths or on set iteration order (PYTHONHASHSEED): one id inside the other, and two ids
-    of equal length that overlap, are handled the same way every time. Non-string values are
-    folded from their canonical JSON, so ids nested in lists or mappings are masked too.
+    One pass, independent of order: every match span of either id is found in the folded value,
+    overlapping matches included (a self-overlapping id such as ``aaaaaaaa`` in ``aaaaaaaaa``
+    is one span). Spans that truly overlap are merged; spans that merely touch are not. Each
+    resulting span is replaced by a placeholder, ``\\x00c`` when it covers only the case id,
+    ``\\x00f`` only the family id and ``\\x00m`` when merged from both, rather than deleted, so
+    how many times the ids occur and in what order stays visible (T4, T5): a varying count or
+    sequence changes the remainder. NUL characters already in the value are doubled first, so
+    no value can forge a placeholder. The result never depends on removal order, id lengths or
+    set iteration order (PYTHONHASHSEED). Non-string values are folded from their canonical
+    JSON, so ids nested in lists or mappings are masked too.
+
+    Cost: because the token records which ids a span covers, a population in which the family
+    id sits inside SOME case ids (``\\x00m``) but not others (``\\x00c``) is refused, even when
+    each reference is honest. Use one id scheme for the whole population. Not visible: the
+    number of overlapping repeats of one self-overlapping id (``aaaaaaaaa`` and ``aaaaaaaaaa``
+    both mask to one span).
     """
     text = _value_text(value)
-    spans: list[tuple[int, int]] = []
-    for own in sorted({_fold(case.case_id), _fold(case.family_id)}):
+    spans: list[tuple[int, int, str]] = []
+    for own, kind in sorted({(_fold(case.case_id), "c"), (_fold(case.family_id), "f")}):
         start = text.find(own)
         while start != -1:
-            spans.append((start, start + len(own)))
+            spans.append((start, start + len(own), kind))
             start = text.find(own, start + 1)
-    merged: list[list[int]] = []
-    for begin, end in sorted(spans):
-        if merged and begin <= merged[-1][1]:
+    merged: list[list[Any]] = []
+    for begin, end, kind in sorted(spans):
+        if merged and begin < merged[-1][1]:
             merged[-1][1] = max(merged[-1][1], end)
+            merged[-1][2].add(kind)
         else:
-            merged.append([begin, end])
+            merged.append([begin, end, {kind}])
     kept, cursor = [], 0
-    for begin, end in merged:
-        kept.append(text[cursor:begin])
+    for begin, end, kinds in merged:
+        kept.append(text[cursor:begin].replace("\x00", "\x00\x00"))
+        kept.append("\x00" + (kinds.pop() if len(kinds) == 1 else "m"))
         cursor = end
-    kept.append(text[cursor:])
+    kept.append(text[cursor:].replace("\x00", "\x00\x00"))
     return "".join(kept)
 
 
@@ -525,14 +537,17 @@ def _check_references_carry_no_content(
 
     Carrying the own id is not enough: ``<case id> + first 10 chars of the text`` carries the id
     and smuggles content out of the comparison. So, for each declared reference, the value with
-    every occurrence of its case's own ids removed (``_id_free_remainder``) must be identical
-    across all cases: only a constant decoration such as ``ref:`` or ``.json`` may surround the
-    id. Otherwise ``reference_field_carries_content``.
+    every occurrence of its case's own ids replaced by a typed placeholder
+    (``_id_free_remainder``) must be identical across all cases: only a constant decoration such
+    as ``ref:`` or ``.json`` may surround the ids. Otherwise ``reference_field_carries_content``.
 
-    What this enforces, precisely: a declared reference carries no per-case content beyond its
-    own ids. It does not stop a producer from editing or splitting the decision text itself
-    (moving a constant prefix out of the text, or splitting one value into two undeclared
-    fields): that is new content, residual D5.
+    What this enforces, precisely: across all cases, a declared reference has the same
+    decoration and the same sequence of own-id occurrences (which id, how many times, in which
+    order, and whether case and family ids overlap). Its only per-case variation is the
+    identity of the ids themselves, and ids are producer-chosen (see D5). It does not stop a
+    producer from editing or splitting the decision text itself (moving a constant prefix out of
+    the text, or splitting one value into two undeclared fields): that is new content, residual
+    D5.
     """
     for name in reference_fields:
         remainders = {_id_free_remainder(c, c.features[name]) for c in cases}

@@ -2132,37 +2132,150 @@ def test_j6_review_r7_id_masking_does_not_depend_on_the_hash_seed():
     assert set(outcomes.values()) == {"accepted"}, outcomes
     # In process, too: the union of both ids is masked in one pass.
     case = iv.DecisionCase("abcdefgh-12k", "gh-12k-zzzzz", {}, ())
-    assert iv._id_free_remainder(case, "ref:abcdefgh-12k-zzzzz") == "ref:"
+    # Equal-length overlapping ids merge into one span from both kinds: "\x00m".
+    assert iv._id_free_remainder(case, "ref:abcdefgh-12k-zzzzz") == "ref:\x00m"
     assert not overlap_population(equal_length_overlap).undeclared_reference
 
 
 @pytest.mark.parametrize(
-    "shape",
+    "shape,expected",
     [
-        # Family id as a prefix of its own case id; "<family>/<case>" leaves "/".
-        lambda i: (
-            f"fam-{i:04d}x-case-{i:04d}",
-            f"fam-{i:04d}x",
-            f"fam-{i:04d}x/fam-{i:04d}x-case-{i:04d}",
+        # Family id as a prefix of its own case id: "<family>/<case>".
+        (
+            lambda i: (
+                f"fam-{i:04d}x-case-{i:04d}",
+                f"fam-{i:04d}x",
+                f"fam-{i:04d}x/fam-{i:04d}x-case-{i:04d}",
+            ),
+            "\x00f/\x00m",
         ),
         # Family id strictly inside its case id: needs the spans merged, not just removed.
-        lambda i: (f"zz-fam-{i:04d}x-c{i:04d}", f"fam-{i:04d}x", f"zz-fam-{i:04d}x-c{i:04d}"),
+        (
+            lambda i: (f"zz-fam-{i:04d}x-c{i:04d}", f"fam-{i:04d}x", f"zz-fam-{i:04d}x-c{i:04d}"),
+            "\x00m",
+        ),
         # The same, with the family also repeated outside the case id.
-        lambda i: (
-            f"zz-fam-{i:04d}x-c{i:04d}",
-            f"fam-{i:04d}x",
-            f"fam-{i:04d}x|zz-fam-{i:04d}x-c{i:04d}",
+        (
+            lambda i: (
+                f"zz-fam-{i:04d}x-c{i:04d}",
+                f"fam-{i:04d}x",
+                f"fam-{i:04d}x|zz-fam-{i:04d}x-c{i:04d}",
+            ),
+            "\x00f|\x00m",
         ),
     ],
     ids=["family_prefix_of_case", "family_inside_case", "family_inside_and_outside"],
 )
-def test_j7_review_r7_one_id_inside_the_other_is_masked_whole(shape):
+def test_j7_review_r7_one_id_inside_the_other_is_masked_whole(shape, expected):
     """Round 7 W3: removing the shorter id first left "/-case-0001" and refused honest refs."""
     pop = overlap_population(shape)
     assert len(pop.cases) == 6
-    case_id, family_id, ref = shape(1)
-    remainder = iv._id_free_remainder(iv.DecisionCase(case_id, family_id, {}, ()), ref)
-    assert remainder in ("/", "", "|")
+    for i in range(6):
+        case_id, family_id, ref = shape(i)
+        remainder = iv._id_free_remainder(iv.DecisionCase(case_id, family_id, {}, ()), ref)
+        assert remainder == expected
+
+
+def own_ids(i):
+    return f"case-{i:04d}", f"fam-{i:04d}x"
+
+
+@pytest.mark.parametrize(
+    "ref",
+    [
+        lambda c, f, i: "ref:" + c,
+        lambda c, f, i: f + "/" + c,
+        lambda c, f, i: c + ".json",
+        lambda c, f, i: "https://tickets.example.invalid/browse/" + c,
+        lambda c, f, i: ("REF:" if i % 2 else "ref:") + c,  # mixed case, folded alike
+        lambda c, f, i: [c, f],  # JSON list
+        lambda c, f, i: c + f,  # no separator: two tokens, not one merged span
+        lambda c, f, i: {"case": c, "family": f},
+    ],
+    ids=[
+        "ref_prefix",
+        "family_slash_case",
+        "case_dot_json",
+        "constant_url",
+        "mixed_case_prefix",
+        "json_list",
+        "case_then_family",
+        "json_mapping",
+    ],
+)
+def test_j8_review_r8_honest_references_stay_accepted(ref):
+    def shape(i):
+        case_id, family_id = own_ids(i)
+        return case_id, family_id, ref(case_id, family_id, i)
+
+    assert len(overlap_population(shape).cases) == 6
+
+
+@pytest.mark.parametrize(
+    "ref",
+    [
+        # T4: the own id repeated a varying number of times.
+        lambda c, f, i: "ref:" + c * (1 + i % 3),
+        # T5: a per-case sequence of case/family tokens encoding 4 bits, with separators.
+        lambda c, f, i: "ref:" + "-".join(c if (i >> b) & 1 else f for b in range(4)),
+        # T5 without separators: adjacent spans are not merged, so the sequence still shows.
+        lambda c, f, i: "ref:" + "".join(c if (i >> b) & 1 else f for b in range(4)),
+        # The same ids in a varying order.
+        lambda c, f, i: c + "/" + f if i % 2 else f + "/" + c,
+    ],
+    ids=["t4_repeat_count", "t5_token_bits", "t5_adjacent_tokens", "varying_order"],
+)
+def test_j9_review_r8_id_count_and_order_cannot_carry_content(ref):
+    """Round 8 T4/T5: deleting every occurrence hid how many and in what order: accepted."""
+
+    def shape(i):
+        case_id, family_id = own_ids(i)
+        return case_id, family_id, ref(case_id, family_id, i)
+
+    with pytest.raises(iv.VerdictInputError, match="^reference_field_carries_content$"):
+        overlap_population(shape)
+
+
+def test_j10_review_r8_y3_a_self_overlapping_id_masks_as_one_span():
+    """Round 8 Y3: a non-overlapping search must fail here."""
+    case = iv.DecisionCase("aaaaaaaa", "family-xyz", {}, ())
+    assert iv._id_free_remainder(case, "ref:aaaaaaaaa") == "ref:\x00c"
+    assert iv._id_free_remainder(case, "ref:aaaaaaaa") == "ref:\x00c"
+    assert iv._id_free_remainder(case, "ref:aaaaaaaa/aaaaaaaa") == "ref:\x00c/\x00c"
+
+
+def test_j11_placeholders_cannot_be_forged_and_kinds_are_distinct():
+    case = iv.DecisionCase("case-0001", "fam-0001x", {}, ())
+    genuine = iv._id_free_remainder(case, "ref:case-0001case-0001")
+    forged = iv._id_free_remainder(case, "ref:case-0001\x00c")
+    assert genuine == "ref:\x00c\x00c" and forged != genuine
+    assert iv._id_free_remainder(case, "fam-0001x") == "\x00f"
+    assert iv._id_free_remainder(case, "case-0001") == "\x00c"
+    with pytest.raises(iv.VerdictInputError, match="^reference_field_carries_content$"):
+        overlap_population(
+            lambda i: (
+                f"case-{i:04d}",
+                f"fam-{i:04d}x",
+                f"ref:case-{i:04d}" + (f"case-{i:04d}" if i % 2 else "\x00c"),
+            )
+        )
+
+
+def test_j12_documented_cost_mixed_id_schemes_are_refused():
+    """The family id inside SOME case ids gives "\\x00m" there and "\\x00c" elsewhere."""
+
+    def mixed(i):
+        family_id = f"fam-{i:04d}x"
+        case_id = f"zz-{family_id}-c{i:04d}" if i % 2 else f"case-{i:04d}"
+        return case_id, family_id, case_id
+
+    with pytest.raises(iv.VerdictInputError, match="^reference_field_carries_content$"):
+        overlap_population(mixed)
+    doc = " ".join((iv._id_free_remainder.__doc__ or "").split())
+    assert "the family id sits inside SOME case ids" in doc and "is refused" in doc
+    contract = " ".join((iv._check_references_carry_no_content.__doc__ or "").split())
+    assert "the same sequence of own-id occurrences" in contract
+    assert "carries no per-case content beyond its own ids" not in contract
 
 
 def test_j1a_review_r6_unverifiable_content_is_held_before_any_replay(tmp_path):
