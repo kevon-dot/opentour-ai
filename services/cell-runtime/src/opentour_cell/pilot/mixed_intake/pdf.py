@@ -16,34 +16,46 @@ key or cannot be read goes to review.
 
 This is not a renderer, and invisibility is flagged only where it can be seen in the content
 stream without painting. A construct the reader does not model goes to review, never to
-ELIGIBLE. Covered:
+ELIGIBLE, and so does content a viewer may read differently from this reader. Covered:
 
+- content syntax: tokens are lexed strictly; a stray `>`, `)` or brace, a closer that closes
+  nothing, an unterminated string and a word that starts like a number but is not one go to
+  review (content_lexer_ambiguous). Every operator the checks depend on has an exact operand
+  signature (_SIGNATURES); any other operands go to review (content_operand_mismatch) and are
+  read as poppler reads them (the last operands, or the operator ignored). A TJ element that
+  is not a string or number, an unmatched Q (the state is kept, as poppler keeps it) and a
+  /Contents array split inside a comment, string or open array go to review;
 - glyph positions: the text and text line matrices follow PDF 9.4 exactly (Tm, Td, TD, T*,
   ' and " restart the pen at the line start, their offsets scaled by the line matrix; shows
   advance it), through the CTM; rotated or skewed text goes to review;
 - size and placement: effective size (Tf, Tm, cm, Tz, Ts), text origin or glyph extent
-  outside the page box, text outside a rectangular clip (any other clip goes to review),
-  page-sized or text-overlapping image XObjects;
+  outside the page box, text outside a rectangular clip (the clip taken from the whole path
+  when it is painted; any other clip goes to review), page-sized or text-overlapping image
+  XObjects, all judged on the risen (Ts) glyph box;
 - glyphs drawn onto each other anywhere on the page, by any operator (_page_overprint), and
   within a run of shows along one line (_extent_units);
 - render modes: 3 and 7 are invisible; 4 to 7 clip, and any undefined mode, go to review;
 - paint colour: near-white in DeviceGray, DeviceRGB and DeviceCMYK, for the fill (g, rg, k,
   cs, sc, scn) and, in stroking render modes, the stroke (G, RG, K, CS, SC, SCN), composited
   at the ExtGState constant alpha (/ca, /CA); any other colour space (ICCBased, Separation,
-  DeviceN, Lab, CalGray, CalRGB, Indexed, Pattern, an unknown name) or operands that do not
-  fit the space go to review;
+  DeviceN, Lab, CalGray, CalRGB, Indexed, Pattern, an unknown name), operands that do not fit
+  the space, and a page whose resources remap device spaces (/DefaultGray, /DefaultRGB,
+  /DefaultCMYK, or a resource named like a device space) go to review;
 - graphics state: a soft mask, a blend mode other than Normal, a transfer function, an
   ExtGState font, an unreadable or missing ExtGState, or a dash on stroked text go to review;
-- vector paint and shadings (_paint_flags): paint over a glyph box after the text, or paint
-  under it too close to its colour (or of a colour that cannot be judged), goes to review;
+- vector paint, shadings and stroked text (_paint_flags): paint over a glyph box after the
+  text, or paint under it too close to its colour composited at its alpha (or of a colour that
+  cannot be judged), goes to review; all overlap checks run on a grid within a work budget and
+  the deadline (_Meter);
 - images: page-sized or text-overlapping image XObjects and inline images; inline image data
   is skipped, and data whose extent its dictionary does not confirm goes to review;
-- annotations a viewer may draw over a glyph box, and /ActualText or /E replacement text, go
-  to review;
+- annotations a viewer may draw over a glyph box (any subtype not Hidden or NoView; a Link
+  with no appearance by its border), and /ActualText or /E replacement text, go to review;
 - optional content: any `/OC` marked content goes to review, whatever the layer state;
 - XObjects: text in a Form XObject is not read and goes to review; a `Do` of anything not
   classified as a form or an image (indirect /Subtype resolved) goes to review;
-- file structure: objects are those the cross-reference data selects; a stream whose extent
+- file structure: objects are those the cross-reference data selects; a reference into an
+  object stream (not read) or to an object defined nowhere goes to review; a stream whose extent
   is in doubt (its parsed /Length, direct or indirect, against the first endstream), an
   unreadable dictionary, a dictionary left open in a content stream, or a non-finite operand
   goes to review; `#xx`-escaped names are decoded wherever names are compared, /Encrypt
@@ -57,9 +69,13 @@ NOT covered, and therefore able to admit hidden text as ELIGIBLE:
   valid /Widths and no standard name is boxed by its declared widths, so paint, clip and image
   checks see that box, not the ink.
 
-Known cost, by design: white or reverse-out text on a dark band (banner and table headers) is
+Known costs, by design: white or reverse-out text on a dark band (banner and table headers) is
 flagged `text_color_invisible`, since visibility on paper is judged against white. Anything
-painted over a glyph box after the text is flagged, a strike-through line included.
+painted over a glyph box after the text is flagged, a strike-through line included; strokes
+at most 1 pt wide are judged against the glyph ink interior only, so ruled table grids drawn
+after the text stay ELIGIBLE while a thicker rule along a cell edge goes to review. A paint
+with alpha below 1, a pattern or a shading under text goes to review as
+text_background_unverified, highlights included.
 """
 
 from __future__ import annotations
@@ -83,7 +99,7 @@ from opentour_cell.pilot.mixed_intake.model import (
     finish,
 )
 
-PDF_REVISION = "opentour.reader.pdf-text@1.0.8"
+PDF_REVISION = "opentour.reader.pdf-text@1.0.9"
 # The three thresholds below are adjustable judgement values, not contract values: they trade
 # review volume against missed concealment and may be retuned without a format change.
 # Effective text size, in points, below which text is treated as not human-readable. Real
