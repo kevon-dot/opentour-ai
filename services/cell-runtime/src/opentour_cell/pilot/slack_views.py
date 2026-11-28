@@ -1525,30 +1525,30 @@ def _handoff_projection(
         f"Receiver receipt {_ref(delivery.receiver_receipt_ref)} at {when(delivery.received_at)}."
     ]
     next_action = "The recipient can independently replay the artifact."
-    if receipt.replay:
-        replay = receipt.replay
+    replay = receipt.replay
+    rollback = receipt.rollback
+    if replay:
         evidence.append(
             f"Replayed by recipient at {when(replay.observed_at)}. "
             f"Replay receipt {_ref(replay.receipt_ref)}."
         )
-        if replay.evaluation_only:
-            state = "Evaluation handoff complete."
-            evidence.append(state)
-            next_action = "The reviewer can inspect the completed evaluation receipt."
-        elif receipt.rollback:
-            rollback = receipt.rollback
-            state = "Rollback verified."
-            evidence.append(
-                f"Rollback verified at {when(rollback.observed_at)}. "
-                f"Environment {_ref(rollback.environment_ref)} · "
-                f"Restored serving version {_ref(rollback.restored_version)}. "
-                f"Rollback receipt {_ref(rollback.receipt_ref)}."
-            )
-            next_action = "The reviewer can inspect the restored serving version."
-        else:
-            state = "Activation unconfirmed."
-            evidence.append(state)
-            next_action = "The environment operator can check the serving version."
+    if replay and replay.evaluation_only:
+        state = "Evaluation handoff complete."
+        evidence.append(state)
+        next_action = "The reviewer can inspect the completed evaluation receipt."
+    elif rollback:
+        state = "Rollback verified."
+        evidence.append(
+            f"Rollback verified at {when(rollback.observed_at)}. "
+            f"Environment {_ref(rollback.environment_ref)} · "
+            f"Restored serving version {_ref(rollback.restored_version)}. "
+            f"Rollback receipt {_ref(rollback.receipt_ref)}."
+        )
+        next_action = "The reviewer can inspect the restored serving version."
+    elif replay:
+        state = "Activation unconfirmed."
+        evidence.append(state)
+        next_action = "The environment operator can check the serving version."
     rows.extend(evidence)
     rows.append(next_action)
     return StatusAnswer(state, " ".join([basis, *evidence]), next_action), rows
@@ -1566,9 +1566,11 @@ def handoff_modal(
     controls = [_home()]
     if not receipt.delivery or receipt.delivery.stage != "delivered":
         refresh = "Check delivery status"
+    elif receipt.rollback:
+        refresh = None
     elif not receipt.replay:
         refresh = "Check replay status"
-    elif not receipt.replay.evaluation_only and not receipt.rollback:
+    elif not receipt.replay.evaluation_only:
         refresh = "Check serving status"
     else:
         refresh = None

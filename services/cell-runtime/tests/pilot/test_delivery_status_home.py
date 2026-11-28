@@ -290,6 +290,10 @@ def test_timeline_renders_only_applicable_post_delivery_observations():
     assert "Rollback verified at 1970-01-01T00:00:05+00:00." in rows(restored)
     assert "Environment test-environment · Restored serving version restored." in rows(restored)
 
+    rollback_only = replace(restored, replay=None)
+    assert handoff_status(rollback_only, audit).finding == "Rollback verified."
+    assert "Replayed by recipient" not in rows(rollback_only)
+
     unknown = replace(receipt, delivery=replace(delivered, stage="delivery_unconfirmed"))
     assert "Delivery is unconfirmed." in rows(unknown)
     assert "replay-proof" not in rows(unknown) and "rollback-proof" not in rows(unknown)

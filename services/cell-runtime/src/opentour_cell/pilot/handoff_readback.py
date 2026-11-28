@@ -6,24 +6,15 @@ from dataclasses import dataclass
 
 from opentour_cell.pilot import release_gate
 from opentour_cell.pilot.local_handoff_permissions import LocalHandoffPermissions, handoff_outbox
+from opentour_cell.pilot.recipient_lifecycle import (
+    LifecycleAuthority,
+    ReplayReadback,
+    RollbackReadback,
+    read_lifecycle,
+)
 from opentour_cell.pilot.release_authority import approval_ref
 from opentour_cell.pilot.release_outbox import ReleaseSelection, ReleaseStatus
 from opentour_cell.pilot.training import LocalTrainingStore
-
-
-@dataclass(frozen=True)
-class ReplayReadback:
-    receipt_ref: str
-    observed_at: int
-    evaluation_only: bool
-
-
-@dataclass(frozen=True)
-class RollbackReadback:
-    receipt_ref: str
-    observed_at: int
-    environment_ref: str
-    restored_version: str
 
 
 @dataclass(frozen=True)
@@ -44,6 +35,8 @@ def read_handoff(
     proposal_ref: str,
     proposal_revision: str,
     artifact_sha256: str,
+    cohort_revision: str | None = None,
+    lifecycle_authority: LifecycleAuthority | None = None,
 ) -> HandoffReadback | None:
     """Resolve the installed worker's current scoped receipt without claiming delivery."""
     directory = store.path.parent
@@ -66,6 +59,25 @@ def read_handoff(
         return None
     selection = ReleaseSelection(workflow_ref, proposal_ref, approval_ref(recorded))
     delivery = handoff_outbox(store).status(selection, actor)
+    replay = None
+    rollback = None
+    if (
+        lifecycle_authority is not None
+        and cohort_revision
+        and delivery
+        and delivery.stage == "delivered"
+    ):
+        lifecycle = read_lifecycle(
+            directory,
+            permission=permit,
+            selection=selection,
+            delivery=delivery,
+            cohort_revision=cohort_revision,
+            authority=lifecycle_authority,
+        )
+        replay, rollback = lifecycle.replay, lifecycle.rollback
     if permissions.resolve(workflow_ref, actor, "inspect") != permit:
         return None
-    return HandoffReadback(selection, permit.destination_ref, recorded["recorded_at"], delivery)
+    return HandoffReadback(
+        selection, permit.destination_ref, recorded["recorded_at"], delivery, replay, rollback
+    )
