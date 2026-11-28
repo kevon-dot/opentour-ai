@@ -71,6 +71,22 @@ class LifecyclePolicy:
 
 
 @dataclass(frozen=True)
+class DestinationRollbackObservation:
+    """A destination observer's independently read operation and post-change state."""
+
+    binding: LifecycleBinding
+    authorization_ref: str
+    environment_ref: str
+    previous_serving_version: str
+    restored_version: str
+    operation_receipt_ref: str
+    serving_readback_ref: str
+    package_sha256: str
+    delivery_received_at: int
+    observed_at: int
+
+
+@dataclass(frozen=True)
 class VerifiedLifecycleRecord:
     payload: Mapping[str, object]
     signer_role: str
@@ -145,6 +161,18 @@ def _rollback_valid(policy: LifecyclePolicy, rollback: RollbackPolicy, now: floa
     )
 
 
+def _delivery_reference(binding: LifecycleBinding, package_sha256: str, received_at: int) -> str:
+    body = delivery_receipt_binding(
+        release_ref=binding.release_ref,
+        tenant=binding.tenant,
+        engagement=binding.engagement,
+        destination_ref=binding.destination_ref,
+        artifact_sha256=binding.artifact_sha256,
+        package_sha256=package_sha256,
+    )
+    return delivery_receipt_reference(body | {"received_at": received_at})
+
+
 def _observation(
     directory: Path,
     authority: LifecycleAuthority,
@@ -194,16 +222,8 @@ def _observation(
                 return None
         else:
             require_ref(payload["serving_readback_ref"])
-        delivery_binding = delivery_receipt_binding(
-            release_ref=binding.release_ref,
-            tenant=binding.tenant,
-            engagement=binding.engagement,
-            destination_ref=binding.destination_ref,
-            artifact_sha256=binding.artifact_sha256,
-            package_sha256=str(payload["package_sha256"]),
-        )
-        if binding.receiver_receipt_ref != delivery_receipt_reference(
-            delivery_binding | {"received_at": received_at}
+        if binding.receiver_receipt_ref != _delivery_reference(
+            binding, str(payload["package_sha256"]), received_at
         ):
             return None
         observed = _epoch(payload["observed_at"])
@@ -363,3 +383,47 @@ def prepare_recipient_replay_claim(
             "replayed_cases": replayed["cases"],
             "package_sha256": delivery["package_sha256"],
         }
+
+
+def prepare_destination_rollback_claim(
+    policy: LifecyclePolicy, observed: DestinationRollbackObservation
+) -> dict[str, object]:
+    """Prepare an unsigned request from a destination observer's actual independent readback.
+
+    The off-worker observer supplies separately verified policy and observations.
+    A matching current version alone cannot supply a rollback operation receipt.
+    """
+    now = int(time.time())
+    rollback = policy.rollback
+    require_ref(observed.operation_receipt_ref)
+    require_ref(observed.serving_readback_ref)
+    if (
+        rollback is None
+        or not _policy_valid(policy, observed.binding, now)
+        or not _rollback_valid(policy, rollback, now)
+        or observed.authorization_ref != rollback.authorization_ref
+        or observed.environment_ref != rollback.environment_ref
+        or observed.previous_serving_version != policy.binding.artifact_sha256
+        or observed.restored_version != rollback.expected_fallback_version
+        or observed.operation_receipt_ref == observed.serving_readback_ref
+        or not _sha(observed.package_sha256)
+        or type(observed.observed_at) is not int
+        or type(observed.delivery_received_at) is not int
+        or not 0 < observed.delivery_received_at <= observed.observed_at <= now
+        or observed.observed_at < rollback.authorized_at
+        or _delivery_reference(
+            policy.binding, observed.package_sha256, observed.delivery_received_at
+        )
+        != policy.binding.receiver_receipt_ref
+    ):
+        raise ValueError("destination_rollback_claim_unavailable")
+    return {
+        **asdict(policy.binding),
+        "profile_version": "1.0",
+        **_claim_times(observed.observed_at, now, rollback.expires_at),
+        "package_sha256": observed.package_sha256,
+        "rollback_authorization_ref": rollback.authorization_ref,
+        "environment_ref": rollback.environment_ref,
+        "restored_version": rollback.expected_fallback_version,
+        "serving_readback_ref": observed.serving_readback_ref,
+    }
