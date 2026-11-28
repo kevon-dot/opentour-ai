@@ -76,17 +76,24 @@ What a record above `FIXTURE` does enforce, at construction (`EVIDENCE_TIER_UNSU
 * `results` holds exactly one boolean outcome for every check the record's role requires, with no duplicates and no
   unknown names. An empty or partial result set is refused and can never read as qualified; `passed` and `qualified`
   re-check coverage.
-* `PROVIDER_WITNESSED` carries a `witness_ref`: one exact `str` token of letters, digits and `._:/#@-`, at most 256
-  characters, starting with a letter or digit.
-* `CUSTOMER_WITNESSED` is unreachable. Under the owner ruling recorded on OPE-566 it needs an
-  `opentour.pilot.customer-witness.v1` record that only the OPE-566 `PilotVerifier` may check, and that verifier has not
-  landed. A record is therefore `SOFTWARE_QUALIFIED` at most. A `CUSTOMER_WITNESSED` claim that is otherwise consistent
-  is refused with `CUSTOMER_WITNESS_UNSTRUCTURED` whatever `witness_ref` says, because a string is never a witness record.
+* A witnessed-tier claim carries a `witness_ref`: one exact `str` token of letters, digits and `._:/#@-`, at most 256
+  characters, starting with a letter or digit. A missing or malformed one gives `EVIDENCE_TIER_UNSUPPORTED`.
+* Both witnessed tiers are unreachable, so a record is `SOFTWARE_QUALIFIED` at most. These checks run after every
+  consistency check above, so an inconsistent claim still gets `EVIDENCE_TIER_UNSUPPORTED`.
+  * `CUSTOMER_WITNESSED`: under the owner ruling recorded on OPE-566 it needs an `opentour.pilot.customer-witness.v1`
+    record that only the OPE-566 `PilotVerifier` may check, and that verifier has not landed. An otherwise consistent
+    claim is refused with `CUSTOMER_WITNESS_UNSTRUCTURED` whatever `witness_ref` says.
+  * `PROVIDER_WITNESSED`: under the owner-delegate decision recorded on OPE-507 (following the #218 fail-closed
+    precedent), a caller-supplied string never stands in for provider attestation, and no provider-attestation
+    verifier exists. An otherwise consistent claim is refused with `PROVIDER_WITNESS_UNSTRUCTURED` whatever
+    `witness_ref` says.
 
 What it does not establish:
 
 * `witness_ref` is an unverified opaque string. Its shape is checked; nobody confirms that a witness exists or what it saw.
-  It never raises a record to `CUSTOMER_WITNESSED`.
+  It never raises a record above `SOFTWARE_QUALIFIED`.
+* What a model-family customer or provider witness would bind (its subject) is not decided. Both tiers stay unreachable
+  until their verifiers and subjects exist.
 * Check outcomes, the revision and the digest are asserted by the caller. A record proves internal consistency, not that
   a run happened.
 * Frozen dataclasses are not tamper-proof. `object.__setattr__(record, "tier", ...)` changes a frozen record, and the same
@@ -139,6 +146,7 @@ Besides the connector's own refusal codes, these are raised by the shared value 
 | `INVALID_EVIDENCE_TIER` | `QualificationRecord` (`FamilyError`) | `tier` is not an `EvidenceTier` member (a plain string is refused). |
 | `EVIDENCE_TIER_UNSUPPORTED` | `QualificationRecord` (`FamilyError`) | The record claims a tier above `FIXTURE` that its own fields cannot support: wrong fixture kind, a fixture-named or non-`str` family id, a non-40-hex or non-`str` revision, missing or partial check coverage, a missing-pin gate, or a missing or malformed `witness_ref`. |
 | `CUSTOMER_WITNESS_UNSTRUCTURED` | `QualificationRecord` (`FamilyError`) | An otherwise consistent record claims `CUSTOMER_WITNESSED` with a `witness_ref` string. A string is never an `opentour.pilot.customer-witness.v1` record, and only the OPE-566 `PilotVerifier` (not landed) may accept one. Mirrors `customer_witness_unstructured` in `custom_trainer_connector`. |
+| `PROVIDER_WITNESS_UNSTRUCTURED` | `QualificationRecord` (`FamilyError`) | An otherwise consistent record claims `PROVIDER_WITNESSED`. A caller-supplied `witness_ref` string never stands in for provider attestation, and no provider-attestation verifier exists (owner-delegate decision recorded on OPE-507). |
 
 ## Open items (recorded, not fixed here)
 

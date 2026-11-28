@@ -15,12 +15,15 @@ party that built a record, signs it, holds a key for it or checks it against an 
 enforced is internal consistency: a tier above ``FIXTURE`` is refused unless the record is an
 installed-model record of a pinned (40-hex) revision, names a family whose id is an exact ``str``
 and not a fixture name (see ``is_fixture_family_id``), carries exactly one boolean outcome for
-every check its role requires, lists no missing-pin gate, and (for PROVIDER_WITNESSED) carries a
-``witness_ref`` of a defined shape. ``witness_ref`` is an unverified opaque string: its shape is
-checked, its meaning never is. CUSTOMER_WITNESSED is unreachable (OPE-566 owner ruling): it needs
-an ``opentour.pilot.customer-witness.v1`` record that only the OPE-566 ``PilotVerifier`` may
-check, which has not landed, so a record is SOFTWARE_QUALIFIED at most and a CUSTOMER_WITNESSED
-claim is refused with ``CUSTOMER_WITNESS_UNSTRUCTURED`` whatever ``witness_ref`` says. A
+every check its role requires, lists no missing-pin gate, and (for a witnessed-tier claim) carries
+a ``witness_ref`` of a defined shape. ``witness_ref`` is an unverified opaque string: its shape is
+checked, its meaning never is, and it never raises a record above SOFTWARE_QUALIFIED. Both
+witnessed tiers are unreachable. CUSTOMER_WITNESSED (OPE-566 owner ruling) needs an
+``opentour.pilot.customer-witness.v1`` record that only the OPE-566 ``PilotVerifier`` may check,
+which has not landed; an otherwise consistent claim is refused with
+``CUSTOMER_WITNESS_UNSTRUCTURED``. PROVIDER_WITNESSED (owner-delegate decision recorded on
+OPE-507) needs a provider-attestation verifier, which does not exist; an otherwise consistent
+claim is refused with ``PROVIDER_WITNESS_UNSTRUCTURED``. A
 record is a frozen dataclass and Python cannot make that tamper-proof (``object.__setattr__``
 bypasses it), so a consumer that needs authority must obtain it from a signed or journaled source
 outside this module, not from a record's own fields.
@@ -105,6 +108,11 @@ def is_generated_family_id(family_id: object) -> bool:
 #   most. A ``witness_ref`` string is never a witness record: a CUSTOMER_WITNESSED claim that is
 #   otherwise consistent is refused with ``CUSTOMER_WITNESS_UNSTRUCTURED`` (the #218
 #   ``customer_witness_unstructured`` reason), and CUSTOMER_WITNESSED is unreachable.
+# * PROVIDER_WITNESSED follows the same fail-closed rule (owner-delegate decision recorded on
+#   OPE-507, after the #218 precedent): a caller-supplied string never stands in for provider
+#   attestation, and no provider-attestation verifier or model-family provider witness subject
+#   exists. An otherwise consistent PROVIDER_WITNESSED claim is refused with
+#   ``PROVIDER_WITNESS_UNSTRUCTURED``. SOFTWARE_QUALIFIED is therefore the highest reachable tier.
 
 # Any one of these tokens anywhere in a normalised family id marks a fixture family.
 _FIXTURE_TOKENS = frozenset({"generated", "simulated", "reference", "fixture", "sentinel"})
@@ -432,6 +440,10 @@ class QualificationRecord:
             # the OPE-566 ``PilotVerifier`` (not landed) may accept one. The cap is
             # SOFTWARE_QUALIFIED.
             raise FamilyError("CUSTOMER_WITNESS_UNSTRUCTURED")
+        if self.tier is EvidenceTier.PROVIDER_WITNESSED:
+            # A caller-supplied string never stands in for provider attestation, and no
+            # provider-attestation verifier exists (owner-delegate decision recorded on OPE-507).
+            raise FamilyError("PROVIDER_WITNESS_UNSTRUCTURED")
 
     @property
     def covers_required_checks(self) -> bool:
@@ -461,7 +473,7 @@ class QualificationRecord:
 def _witness_ref_ok(value: object, *, required: bool) -> bool:
     """A witness reference must be a well-formed opaque exact ``str``; the witnessed tiers need one.
 
-    Shape only. At CUSTOMER_WITNESSED a well-formed string is still refused (see ``__post_init__``).
+    Shape only. At either witnessed tier a well-formed string is still refused (``__post_init__``).
     """
     if type(value) is not str:
         return False

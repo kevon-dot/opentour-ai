@@ -363,12 +363,14 @@ def test_a_malformed_witness_ref_is_refused_at_both_witnessed_tiers(
 
 
 @pytest.mark.parametrize("good", ["generated-witness", "witness:generated-0001", "ref/2026#7"])
-def test_a_well_formed_witness_ref_is_accepted_at_the_provider_tier(
+def test_a_well_formed_witness_ref_is_refused_at_the_provider_tier(
     tmp_path: Path, good: str
 ) -> None:
-    # PROVIDER_WITNESSED is outside the OPE-566 customer-witness ruling and is unchanged here.
-    record = _claim(tmp_path, EvidenceTier.PROVIDER_WITNESSED, witness_ref=good)
-    assert record.qualified and record.witness_ref == good
+    # Owner-delegate decision recorded on OPE-507 (follows the #218 fail-closed precedent): a
+    # caller-supplied string never stands in for provider attestation, so PROVIDER_WITNESSED is
+    # refused until a provider-attestation verifier exists. The shape check still runs first.
+    with pytest.raises(fam.FamilyError, match="^PROVIDER_WITNESS_UNSTRUCTURED$"):
+        _claim(tmp_path, EvidenceTier.PROVIDER_WITNESSED, witness_ref=good)
 
 
 @pytest.mark.parametrize("bad", ["junk", "A" * 40, "a" * 39, "a" * 41, " " + "a" * 39, "g" * 40, 5])
@@ -390,6 +392,7 @@ def test_a_valid_40_hex_revision_is_accepted_on_the_record(tmp_path: Path) -> No
 # needs an ``opentour.pilot.customer-witness.v1`` record checked only by the OPE-566
 # ``PilotVerifier``. It does not exist, so a model-family record reaches SOFTWARE_QUALIFIED at
 # most, a witness string is refused, identities must be exact ``str`` and fixture names downgrade.
+# PROVIDER_WITNESSED is refused the same way (owner-delegate decision recorded on OPE-507).
 # Fixture kind: generated.
 # ---------------------------------------------------------------------------------------------
 
@@ -426,6 +429,52 @@ def test_a_witness_string_never_reaches_customer_witnessed(
     assert capped.tier is EvidenceTier.SOFTWARE_QUALIFIED and capped.qualified
 
 
+@pytest.mark.parametrize("witness", WELL_FORMED_WITNESS_STRINGS)
+@pytest.mark.parametrize("role", [fam.Role.REFERENCE.value, fam.Role.CANDIDATE.value])
+def test_a_witness_string_never_reaches_provider_witnessed(
+    tmp_path: Path, witness: str, role: str
+) -> None:
+    with pytest.raises(fam.FamilyError, match="^PROVIDER_WITNESS_UNSTRUCTURED$"):
+        _claim(tmp_path, EvidenceTier.PROVIDER_WITNESSED, role=role, witness_ref=witness)
+    capped = _claim(tmp_path, EvidenceTier.SOFTWARE_QUALIFIED, role=role, witness_ref=witness)
+    assert capped.tier is EvidenceTier.SOFTWARE_QUALIFIED and capped.qualified
+
+
+_WITNESS_REFUSALS = {
+    EvidenceTier.PROVIDER_WITNESSED: "PROVIDER_WITNESS_UNSTRUCTURED",
+    EvidenceTier.CUSTOMER_WITNESSED: "CUSTOMER_WITNESS_UNSTRUCTURED",
+}
+
+
+def test_software_qualified_is_the_highest_reachable_tier(tmp_path: Path) -> None:
+    # Every tier above SOFTWARE_QUALIFIED has its own refusal, and no tier is left unmapped.
+    order = list(EvidenceTier)
+    above = order[order.index(EvidenceTier.SOFTWARE_QUALIFIED) + 1 :]
+    assert set(above) == set(_WITNESS_REFUSALS)
+    assert _claim(tmp_path, EvidenceTier.SOFTWARE_QUALIFIED).qualified
+    for tier in above:
+        with pytest.raises(fam.FamilyError, match=f"^{_WITNESS_REFUSALS[tier]}$"):
+            _claim(tmp_path, tier)
+
+
+@pytest.mark.parametrize("tier", _WITNESSED_TIERS)
+def test_a_witnessed_claim_failing_consistency_keeps_the_generic_code(
+    tmp_path: Path, tier: EvidenceTier
+) -> None:
+    # Consistency checks run first at both witnessed tiers, exactly as in #218.
+    for changes in (
+        {"family_id": "generated-x"},
+        {"revision": "junk"},
+        {"fixture_kind": fam.FixtureKind.GENERATED},
+        {"external_gates": ("profile_pin_missing:revision",)},
+        {"results": ()},
+        {"witness_ref": ""},
+        {"witness_ref": "has space"},
+    ):
+        with pytest.raises(fam.FamilyError, match="^EVIDENCE_TIER_UNSUPPORTED$"):
+            _claim(tmp_path, tier, **changes)
+
+
 def test_a_structured_customer_witness_record_is_still_refused_without_the_verifier(
     tmp_path: Path,
 ) -> None:
@@ -453,6 +502,8 @@ def test_build_record_never_exceeds_software_qualified(tmp_path: Path) -> None:
     assert "customer_witness_not_recorded" in record.external_gates
     with pytest.raises(fam.FamilyError, match="^CUSTOMER_WITNESS_UNSTRUCTURED$"):
         replace(record, tier=EvidenceTier.CUSTOMER_WITNESSED, witness_ref="witness:acme-1")
+    with pytest.raises(fam.FamilyError, match="^PROVIDER_WITNESS_UNSTRUCTURED$"):
+        replace(record, tier=EvidenceTier.PROVIDER_WITNESSED, witness_ref="witness:acme-1")
 
 
 @pytest.mark.parametrize(
