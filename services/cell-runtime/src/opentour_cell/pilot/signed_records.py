@@ -38,11 +38,12 @@ Trust chain:
    validly signed, can change an anchor or introduce a customer-owner key.
 
 Required signer roles per purpose (``REQUIRED_ROLES``): customer consent records
-(engagement grant, spend mandate, routing policy) need the customer owner and the operator
-custodian; a verdict needs the independent evaluator; an audit receipt needs the benchmark
-auditor; a registry needs the operator root; a customer key rotation needs the previous
-customer key and the new key. A missing, duplicated or unexpected role, one key signing
-under two roles, or a key signing outside its own role or purposes is refused.
+(engagement grant, spend mandate, routing policy, workflow-index publication) need the
+customer owner and the operator custodian; a verdict needs the independent evaluator; an
+audit receipt needs the benchmark auditor; a registry needs the operator root; a customer
+key rotation needs the previous customer key and the new key. A missing, duplicated or
+unexpected role, one key signing under two roles, or a key signing outside its own role or
+purposes is refused.
 
 Anti-rollback state: ``TrustStateStore`` keeps named monotonic records in a strict,
 versioned format (``opentour.pilot.trust-state.v1``). This module uses three namespaces:
@@ -162,6 +163,9 @@ from pydantic import Field, TypeAdapter, ValidationError
 GRANT_PURPOSE: Final = "opentour.pilot.engagement-grant.v1"
 SPEND_MANDATE_PURPOSE: Final = "opentour.pilot.spend-mandate.v1"
 ROUTING_POLICY_PURPOSE: Final = "opentour.pilot.routing-policy.v1"
+# Customer-owner consent to publish private workflow display metadata and optional directory
+# viewers (OPE-547). Proposal actions are governed separately and never derive from it.
+WORKFLOW_INDEX_PUBLICATION_PURPOSE: Final = "opentour.pilot.workflow-index-publication.v1"
 VERDICT_PURPOSE: Final = "opentour.pilot.independent-verdict.v1"
 BENCHMARK_AUDIT_PURPOSE: Final = "opentour.pilot.benchmark-audit.v1"
 REGISTRY_PURPOSE: Final = "opentour.pilot.issuer-registry.v1"
@@ -176,12 +180,20 @@ INDEPENDENT_EVALUATOR: Final = "independent_evaluator"
 BENCHMARK_AUDITOR: Final = "benchmark_auditor"
 OPERATOR_ROOT: Final = "operator_root"
 
-CONSENT_PURPOSES: Final = frozenset({GRANT_PURPOSE, SPEND_MANDATE_PURPOSE, ROUTING_POLICY_PURPOSE})
+CONSENT_PURPOSES: Final = frozenset(
+    {
+        GRANT_PURPOSE,
+        SPEND_MANDATE_PURPOSE,
+        ROUTING_POLICY_PURPOSE,
+        WORKFLOW_INDEX_PUBLICATION_PURPOSE,
+    }
+)
 RECORD_PURPOSES: Final = CONSENT_PURPOSES | {VERDICT_PURPOSE, BENCHMARK_AUDIT_PURPOSE}
 REQUIRED_ROLES: Final[Mapping[str, frozenset[str]]] = {
     GRANT_PURPOSE: frozenset({CUSTOMER_OWNER, OPERATOR_CUSTODIAN}),
     SPEND_MANDATE_PURPOSE: frozenset({CUSTOMER_OWNER, OPERATOR_CUSTODIAN}),
     ROUTING_POLICY_PURPOSE: frozenset({CUSTOMER_OWNER, OPERATOR_CUSTODIAN}),
+    WORKFLOW_INDEX_PUBLICATION_PURPOSE: frozenset({CUSTOMER_OWNER, OPERATOR_CUSTODIAN}),
     VERDICT_PURPOSE: frozenset({INDEPENDENT_EVALUATOR}),
     BENCHMARK_AUDIT_PURPOSE: frozenset({BENCHMARK_AUDITOR}),
     REGISTRY_PURPOSE: frozenset({OPERATOR_ROOT}),
@@ -193,7 +205,13 @@ REQUIRED_ROLES: Final[Mapping[str, frozenset[str]]] = {
 # and the root role only exists in the kit-pinned root configuration.
 REGISTRY_ROLES: Final[Mapping[str, frozenset[str]]] = {
     OPERATOR_CUSTODIAN: frozenset(
-        {GRANT_PURPOSE, SPEND_MANDATE_PURPOSE, ROUTING_POLICY_PURPOSE, ENROLMENT_PURPOSE}
+        {
+            GRANT_PURPOSE,
+            SPEND_MANDATE_PURPOSE,
+            ROUTING_POLICY_PURPOSE,
+            WORKFLOW_INDEX_PUBLICATION_PURPOSE,
+            ENROLMENT_PURPOSE,
+        }
     ),
     INDEPENDENT_EVALUATOR: frozenset({VERDICT_PURPOSE}),
     BENCHMARK_AUDITOR: frozenset({BENCHMARK_AUDIT_PURPOSE}),
