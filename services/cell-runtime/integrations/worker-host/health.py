@@ -1,4 +1,4 @@
-"""Customer-operated TLS listener for an isolated health or intake connection."""
+"""Customer-operated TLS listener for an isolated health, intake or learning-run connection."""
 
 import argparse
 import asyncio
@@ -35,6 +35,17 @@ INTAKE_ROUTES = {
     b"POST /v1/submit_intake HTTP/1.1": "submit_intake",
     b"POST /v1/get_run HTTP/1.1": "get_run",
 }
+INTAKE_STATUSES = {
+    "invalid_arguments": b"400 Bad Request",
+    "idempotency_conflict": b"409 Conflict",
+    "intake_rate_limited": b"429 Too Many Requests",
+}
+STATUS_LINES = {
+    400: b"400 Bad Request",
+    403: b"403 Forbidden",
+    409: b"409 Conflict",
+    429: b"429 Too Many Requests",
+}
 MAX_ARGUMENT_BYTES = 4096
 MAX_RESPONSE_BYTES = 32768
 
@@ -66,6 +77,24 @@ def intake_connection(selection, config):
     return intake_dispatch(principal, admission)
 
 
+def learning_connection(selection, config, *, ledger=None):
+    # A separate scoped permission: routes, codes and handlers all come from the installed zip,
+    # so the gateway has no hand-typed copy of the learning-run contract.
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "opentour-slack.pyz"))
+    from opentour_cell.pilot import learning_runs
+
+    principal, service = learning_runs.open_learning_runs(selection, ledger=ledger)
+    expected = (config["learning_tenant"], config["learning_actor"], config["learning_client"])
+    if (principal.tenant, principal.actor, principal.client) != expected:
+        raise ValueError("private selection mismatch")
+    statuses = {code: STATUS_LINES[value] for code, value in learning_runs.ERRORS.items()}
+    return (
+        learning_runs.learning_run_dispatch(principal, service),
+        learning_runs.http_routes(),
+        statuses,
+    )
+
+
 def unique_object(pairs):
     obj = dict(pairs)
     if len(obj) != len(pairs):
@@ -73,11 +102,23 @@ def unique_object(pairs):
     return obj
 
 
-async def response(reader, config, token_path, body, call):
+def learning_route(line, routes):
+    for pattern, operation in routes:
+        match = pattern.fullmatch(line)
+        if match is not None:
+            return operation, {k: v.decode("ascii") for k, v in match.groupdict().items()}
+    return None, {}
+
+
+async def response(reader, config, token_path, body, call, learning=None):
     request = await reader.readuntil(b"\r\n\r\n")
     lines = request[:-4].split(b"\r\n")
-    health = call is None and lines[0] == b"GET /v1/health HTTP/1.1"
+    health = call is None and learning is None and lines[0] == b"GET /v1/health HTTP/1.1"
     operation = INTAKE_ROUTES.get(lines[0]) if call is not None else None
+    statuses, path_arguments = INTAKE_STATUSES, {}
+    if learning is not None:
+        call, routes, statuses = learning
+        operation, path_arguments = learning_route(lines[0], routes)
     if not health and operation is None:
         return b"404 Not Found", b""
     headers = {}
@@ -91,38 +132,42 @@ async def response(reader, config, token_path, body, call):
         return b"400 Bad Request", b""
     if not authenticated(headers, config, token_path):
         return b"403 Forbidden", b""
-    if health:
+    if health or lines[0].startswith(b"GET "):
+        # Health and learning-run status reads carry no body.
         if headers.get(b"content-length", b"0") != b"0":
             return b"400 Bad Request", b""
-        return b"200 OK", body
-    if headers.get(b"content-type", b"").lower() != b"application/json":
-        return b"415 Unsupported Media Type", b""
-    length = headers.get(b"content-length", b"")
-    if not re.fullmatch(rb"[1-9][0-9]*", length):
+        if health:
+            return b"200 OK", body
+        arguments = {}
+    else:
+        if headers.get(b"content-type", b"").lower() != b"application/json":
+            return b"415 Unsupported Media Type", b""
+        length = headers.get(b"content-length", b"")
+        if not re.fullmatch(rb"[1-9][0-9]*", length):
+            return b"400 Bad Request", b""
+        if len(length) > 4 or int(length) > MAX_ARGUMENT_BYTES:
+            return b"413 Content Too Large", b""
+        try:
+            arguments = json.loads(
+                (await reader.readexactly(int(length))).decode("utf-8"),
+                object_pairs_hook=unique_object,
+            )
+            if not isinstance(arguments, dict) or any(
+                type(v) not in (str, int) for v in arguments.values()
+            ):
+                raise ValueError("expected flat argument object")
+        except (ValueError, RecursionError):
+            return b"400 Bad Request", b""
+    if path_arguments.keys() & arguments.keys():
         return b"400 Bad Request", b""
-    if len(length) > 4 or int(length) > MAX_ARGUMENT_BYTES:
-        return b"413 Content Too Large", b""
-    try:
-        arguments = json.loads(
-            (await reader.readexactly(int(length))).decode("utf-8"), object_pairs_hook=unique_object
-        )
-        if not isinstance(arguments, dict) or any(
-            type(v) not in (str, int) for v in arguments.values()
-        ):
-            raise ValueError("expected flat argument object")
-    except (ValueError, RecursionError):
-        return b"400 Bad Request", b""
+    arguments.update(path_arguments)
     # A credential can rotate while the client sends its body.
     if not authenticated(headers, config, token_path):
         return b"403 Forbidden", b""
     result = call(operation, arguments)
     if result.get("isError"):
         code = result["content"][0]["text"]
-        status = {
-            "invalid_arguments": b"400 Bad Request",
-            "idempotency_conflict": b"409 Conflict",
-            "intake_rate_limited": b"429 Too Many Requests",
-        }.get(code, b"403 Forbidden")
+        status = statuses.get(code, b"403 Forbidden")
         payload = {"error": code}
     else:
         status, payload = b"200 OK", result["structuredContent"]
@@ -150,7 +195,13 @@ async def bind_server(args):
         or config["source_commit"] != provenance["source_commit"]
     ):
         raise ValueError("invalid origin or package binding")
-    call = intake_connection(args.selection, config) if getattr(args, "selection", None) else None
+    selection = getattr(args, "selection", None)
+    learning_selection = getattr(args, "learning_selection", None)
+    if selection and learning_selection:
+        # Intake and learning-run control are separate permissions with separate credentials.
+        raise ValueError("intake and learning-run connections need separate listeners")
+    call = intake_connection(selection, config) if selection else None
+    learning = learning_connection(learning_selection, config) if learning_selection else None
     body = json.dumps(
         {
             "status": "ready",
@@ -168,7 +219,7 @@ async def bind_server(args):
     async def handle(reader, writer):
         try:
             async with asyncio.timeout(4):
-                status, payload = await response(reader, config, args.token, body, call)
+                status, payload = await response(reader, config, args.token, body, call, learning)
                 writer.write(
                     b"HTTP/1.1 " + status + b"\r\nCache-Control: no-store\r\nConnection: close"
                     b"\r\nContent-Type: application/json\r\nContent-Length: "
@@ -209,6 +260,11 @@ if __name__ == "__main__":
         "--selection",
         type=Path,
         help="private approved intake selection for a separate connector listener",
+    )
+    parser.add_argument(
+        "--learning-selection",
+        type=Path,
+        help="private owner-authorized learning-run selection for a separate listener",
     )
     parser.add_argument("--bind", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8443)
