@@ -56,7 +56,11 @@ def run(
     def scan_once() -> int:
         try:
             outcome: dict[str, Any]
-            if os.path.lexists(directory / SCHEDULE_SELECTION):
+            if os.path.lexists(directory / SELECTION_FILE):
+                # On the EVE route every fit consumes its own Slack decision. The separate
+                # standing classifier schedule may admit work automatically and cannot run here.
+                outcome = {"state": "waiting_for_scan"}
+            elif os.path.lexists(directory / SCHEDULE_SELECTION):
                 # Scheduled learning goes only through the shared learning-run admission, so a
                 # Slack or Zapier trigger for the same intent converges on the same run.
                 outcome = learning_tick(directory, organization)

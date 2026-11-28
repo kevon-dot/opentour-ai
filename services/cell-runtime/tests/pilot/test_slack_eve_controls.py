@@ -189,6 +189,10 @@ def test_private_card_rejects_stale_forged_and_revoked_controls(installed):
     h.save()
     h.send("interactive", press)
     h.app.sync_learning_card()
+    assert calls[-1] == (
+        "update",
+        {"channel": CHANNEL, "ts": "101.101", "blocks": [], "text": "Run details are unavailable."},
+    )
     h.config["channel_aggregates"] = True
     h.save()
     worker.receipt = replace(worker.receipt, revision="new")
@@ -196,9 +200,64 @@ def test_private_card_rejects_stale_forged_and_revoked_controls(installed):
     worker.receipt = replace(worker.receipt, revision="receipt-1", stale=True)
     h.send("interactive", press)
     h.app.sync_learning_card()
-    assert [op for op, _ in calls] == ["post", "update"]
+    assert [op for op, _ in calls] == ["post", "update", "update"]
     assert "Progress is stale" in content(calls[-1][1]) and not buttons(calls[-1][1])
     assert worker.requests == []
+
+
+@pytest.mark.parametrize("revoked", ["reviewer", "membership", "service", "plan"])
+def test_withdrawal_scrubs_owned_timestamp_after_restart(installed, monkeypatch, revoked):
+    h, worker, calls = installed
+    h.app.sync_learning_card()
+    old = press_payload(calls[-1][1], "ot_learning_stop")
+    restart(h)
+    if revoked != "service":
+        h.app.learning_service = worker
+    if revoked == "reviewer":
+        h.config["users"][OTHER]["roles"].remove("review")
+        h.save()
+    if revoked == "membership":
+        h.slack.members.remove(OTHER)
+    with monkeypatch.context() as patch:
+        if revoked == "plan":
+            patch.setattr(worker, "plan", lambda scope: None)
+        h.app.sync_learning_card()
+        h.app.sync_learning_card()
+    assert [op for op, _ in calls] == ["post", "update"]
+    assert calls[-1][1] == {
+        "channel": CHANNEL,
+        "ts": "101.101",
+        "blocks": [],
+        "text": "Run details are unavailable.",
+    }
+    h.send("interactive", old)
+    assert not worker.requests
+
+
+@pytest.mark.parametrize("uneditable", ["shared", "missing_scope"])
+def test_uneditable_private_card_disables_clicks_and_retries(installed, monkeypatch, uneditable):
+    h, worker, calls = installed
+    h.app.sync_learning_card()
+    old = press_payload(calls[-1][1], "ot_learning_pause")
+    h.config["channel_aggregates"] = False
+    h.save()
+    with monkeypatch.context() as patch:
+        if uneditable == "shared":
+            patch.setitem(h.slack.channel, "is_ext_shared", True)
+        else:
+            patch.setattr(
+                h.slack, "chat_update", lambda **kw: {"ok": False, "error": "missing_scope"}
+            )
+        with pytest.raises(Refused):
+            h.app.sync_learning_card()
+    h.config["channel_aggregates"] = True
+    h.save()
+    h.send("interactive", old)
+    assert not worker.requests and len(calls) == 1
+    restart(h)
+    h.app.sync_learning_card()
+    assert [op for op, _ in calls] == ["post", "update"]
+    assert calls[-1][1]["blocks"] == [] and calls[-1][1]["ts"] == "101.101"
 
 
 def test_completed_card_does_not_publish_a_release(installed):
@@ -209,6 +268,44 @@ def test_completed_card_does_not_publish_a_release(installed):
     h.app.sync_learning_card()
     assert "thread_ts" not in calls[-1][1]
     assert "Awaiting independent scoring" in content(calls[-1][1]) and not buttons(calls[-1][1])
+
+
+def test_scrub_requires_original_installation_journal(installed):
+    h, _, calls = installed
+    h.app.sync_learning_card()
+    h.config["channel_aggregates"] = False
+    h.save()
+    with h.app.journal.db() as db:
+        db.execute("UPDATE identity SET binding='other-installation' WHERE id=1")
+    with pytest.raises(Refused):
+        h.app.sync_learning_card()
+    assert len(calls) == 1
+
+
+def test_missing_older_message_does_not_block_current_private_card(installed, monkeypatch):
+    h, worker, calls = installed
+    h.app.sync_learning_card()
+    original = h.slack.chat_update
+
+    def update(**payload):
+        if payload["ts"] == "99.001":
+            return {"ok": False, "error": "message_not_found"}
+        return original(**payload)
+
+    monkeypatch.setattr(h.slack, "chat_update", update)
+    with h.app.journal.db() as db:
+        db.execute(
+            "INSERT INTO learning_cards(id,thread,ts,rendered) VALUES(?,?,?,?)",
+            ("older-card", "98.001", "99.001", "older-render"),
+        )
+    worker.receipt = replace(worker.receipt, revision="updated", completed_steps=4)
+    h.app.sync_learning_card()
+    assert "4 of 12 steps" in content(calls[-1][1])
+    with h.app.journal.db() as db:
+        assert (
+            db.execute("SELECT rendered FROM learning_cards WHERE id='older-card'").fetchone()[0]
+            == "redaction_pending"
+        )
 
 
 def test_uncertain_post_is_not_repeated_after_restart(installed, monkeypatch):

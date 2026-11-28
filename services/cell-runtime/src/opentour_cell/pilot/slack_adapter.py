@@ -5536,9 +5536,10 @@ class Workbench:
 
     def sync_learning_card(self) -> None:
         """Publish a single card per bound run. A lost initial reply holds the send claim."""
-        cfg = self.settings()
+        cfg = self.settings(check_engagement=False)
         if self.learning_service is None or not cfg.channel_aggregates:
-            return
+            if not self._has_published_learning_cards():
+                return
         flags = os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK
         with os.fdopen(
             os.open(cfg.directory / "slack-learning-card.lock", flags, 0o600), "rb"
@@ -5556,8 +5557,74 @@ class Workbench:
                 return
             self._sync_learning_card(cfg)
 
+    def _has_published_learning_cards(self) -> bool:
+        with self.journal.db() as db:
+            return (
+                db.execute(
+                    "SELECT 1 FROM learning_cards WHERE ts IS NOT NULL "
+                    "AND rendered IS NOT 'redacted' LIMIT 1"
+                ).fetchone()
+                is not None
+            )
+
+    def _redact_learning_cards(self, cfg: Settings, keep: str = "") -> None:
+        """Remove obsolete disclosures using only this installation's confirmed message bindings."""
+        with self.journal.db() as db:
+            db.execute("BEGIN IMMEDIATE")
+            _check(
+                db.execute(
+                    "SELECT 1 FROM identity WHERE id=1 AND binding=?", (cfg.binding,)
+                ).fetchone()
+            )
+            rows = db.execute(
+                "SELECT id,ts FROM learning_cards WHERE ts IS NOT NULL "
+                "AND rendered IS NOT 'redacted' AND (id!=? OR thread!=?)",
+                (keep, cfg.learning_thread_ts),
+            ).fetchall()
+            db.executemany(
+                "UPDATE learning_cards SET rendered='redaction_pending' WHERE id=?",
+                [(row["id"],) for row in rows],
+            )
+        if not rows:
+            return
+        # A departed reviewer no longer authorizes protected data. The installed app can still
+        # replace its own message with plain, data-free text in the verified private channel.
+        pending = False
+        for row in rows:
+            _check(self.settings(check_engagement=False).binding == cfg.binding)
+            # Missing Slack edit access leaves the binding pending for a retry. Old controls
+            # stay disabled even when Slack still displays the last successful update.
+            self.private_channel(cfg)
+            try:
+                response = self.web.chat_update(
+                    channel=cfg.channel,
+                    ts=row["ts"],
+                    blocks=[],
+                    text="Run details are unavailable.",
+                )
+                _check(
+                    response.get("ok") is True
+                    and response.get("channel") == cfg.channel
+                    and response.get("ts") == row["ts"]
+                )
+            except Exception:
+                pending = True
+                continue
+            with self.journal.db() as db:
+                db.execute("UPDATE learning_cards SET rendered='redacted' WHERE id=?", (row["id"],))
+        _check(not pending or keep)
+
     def _sync_learning_card(self, cfg: Settings) -> None:
-        projection = self._current_learning_card(cfg)
+        try:
+            with self.journal.db() as db:
+                self.journal.active(db)
+            projection = self._current_learning_card(cfg)
+            if projection:
+                self.private_channel(cfg, cfg.reviewer)
+        except Exception:
+            self._redact_learning_cards(cfg)
+            return
+        self._redact_learning_cards(cfg, projection[2] if projection else "")
         if not projection:
             return
         plan, receipt, key = projection
@@ -5575,9 +5642,13 @@ class Workbench:
             ):
                 return
         # Reauthorize disclosure after layout. The measured values describe the observation above.
-        self.private_channel(cfg, cfg.reviewer)
-        current = self._learning_plan(cfg.reviewer, plan.scope.workflow)
-        _check(self.settings() == cfg and current and current[0] == plan)
+        try:
+            self.private_channel(cfg, cfg.reviewer)
+            current = self._learning_plan(cfg.reviewer, plan.scope.workflow)
+            _check(self.settings() == cfg and current and current[0] == plan)
+        except Exception:
+            self._redact_learning_cards(cfg)
+            raise
         exposure = secrets.token_urlsafe(18)
         with self.journal.db() as db:
             db.execute("BEGIN IMMEDIATE")
@@ -5657,8 +5728,15 @@ class Workbench:
         plan, receipt, key = current
         with self.journal.db() as db:
             self.journal.active(db)
-            row = db.execute("SELECT ts,thread FROM learning_cards WHERE id=?", (key,)).fetchone()
-            _check(row and row["ts"] == message["ts"] and row["thread"] == cfg.learning_thread_ts)
+            row = db.execute(
+                "SELECT ts,thread,rendered FROM learning_cards WHERE id=?", (key,)
+            ).fetchone()
+            _check(
+                row
+                and row["ts"] == message["ts"]
+                and row["thread"] == cfg.learning_thread_ts
+                and row["rendered"] not in {None, "redacted", "redaction_pending"}
+            )
         self._control_learning(
             cfg, plan, receipt, LEARNING_CONTROLS[action["action_id"]], action["value"]
         )
@@ -5713,6 +5791,10 @@ class Workbench:
                         [plan.scope.__dict__, plan.plan_ref, operation], plan.approval_revision
                     ),
                 )
+                if improve and plan.approval_revision:
+                    _check(self._can_control_learning(cfg, plan))
+                    self.private_channel(cfg, actor)
+                    _check(self._learning_plan(actor, workflow) == bound and self.settings() == cfg)
                 receipt = service.start(plan.scope, plan.plan_ref, operation, key)
             else:
                 _check(action == "ot_learning_status" and plan.current_run)
@@ -6578,7 +6660,7 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 app.on_decision = drainer.wake
                 drainer.start()
-            if app.learning_service is None:
+            if app.learning_service is None and not app._has_published_learning_cards():
                 threading.Event().wait()
             else:
                 while True:

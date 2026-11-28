@@ -362,11 +362,8 @@ def test_same_plan_with_replacement_spend_mandate_requires_new_click(installed):
     assert not exchange.starts
 
 
-def _exercise_private_card(ready, monkeypatch):
+def _install_private_eve(ready):
     from opentour_cell.pilot.eve_exchange import Exchange as LocalExchange
-    from test_app_home import click
-    from test_reviewer_workflow import buttons, screen
-    from test_slack_eve_controls import content, press_payload
 
     h = ready.h
     h.config.update(channel_aggregates=True, learning_thread_ts="100.001")
@@ -388,7 +385,62 @@ def _exercise_private_card(ready, monkeypatch):
     auth.grant.spec.update(reviewer=actor, starts_at=now - 10, deadline=now + 300)
     exchange = LocalExchange(cfg.directory / "eve-exchange")
     h.app.learning_service = eve.EveLearningService(auth, exchange, cfg.directory, cfg.channel)
+    return cfg, auth, exchange
 
+
+def _preview_private_eve(ready, actor):
+    from test_app_home import click
+    from test_reviewer_workflow import buttons, screen
+
+    h = ready.h
+    click(h, ready.home(actor), "ot_app_prompt", actor)
+    view = list(h.slack.screens)[-1]
+    h.form(view, {"command": {"command": {"value": "Why didn't it train?"}}}, actor)
+    for action in ("ot_current_training", "ot_learning_preview"):
+        h.action(view, action, buttons(screen(h, view))[action], actor)
+    return view, buttons(screen(h, view))["ot_learning_improve"]
+
+
+@pytest.mark.parametrize("withdrawal", ["review", "membership", "shared", "changed_during_check"])
+def test_paid_start_rechecks_installed_authority_after_preview(ready, monkeypatch, withdrawal):
+    h = ready.h
+    cfg, auth, exchange = _install_private_eve(ready)
+    view, pin = _preview_private_eve(ready, cfg.reviewer)
+    if withdrawal == "membership":
+        h.slack.members.remove(cfg.reviewer)
+    elif withdrawal == "shared":
+        h.slack.channel["is_ext_shared"] = True
+    else:
+
+        def revoke():
+            roles = h.config["users"][cfg.reviewer]["roles"]
+            roles.remove("review")
+            assert {"inspect", "tune"} <= set(roles)
+            h.save()
+
+        if withdrawal == "review":
+            revoke()
+        else:
+            private_channel = h.app.private_channel
+
+            def change(cfg, actor=None):
+                private_channel(cfg, actor)
+                if actor and "review" in h.config["users"][actor]["roles"]:
+                    revoke()
+
+            monkeypatch.setattr(h.app, "private_channel", change)
+    h.action(view, "ot_learning_improve", pin, cfg.reviewer)
+    assert not auth.claim_calls and exchange.get(auth.grant.reservation_ref) is None
+    with exchange.transaction() as db:
+        assert db.execute("SELECT count(*) FROM eve_jobs").fetchone()[0] == 0
+
+
+def _exercise_private_card(ready, monkeypatch):
+    from test_reviewer_workflow import buttons, screen
+    from test_slack_eve_controls import content, press_payload
+
+    h = ready.h
+    cfg, auth, exchange = _install_private_eve(ready)
     posts, updates = [], []
 
     def post(**payload):
@@ -404,11 +456,8 @@ def _exercise_private_card(ready, monkeypatch):
     monkeypatch.setattr(h.slack, "chat_postMessage", post)
     monkeypatch.setattr(h.slack, "chat_update", update, raising=False)
 
-    click(h, ready.home(actor), "ot_app_prompt", actor)
-    view = list(h.slack.screens)[-1]
-    h.form(view, {"command": {"command": {"value": "Why didn't it train?"}}}, actor)
-    for action in ("ot_current_training", "ot_learning_preview", "ot_learning_improve"):
-        submission = h.action(view, action, buttons(screen(h, view))[action], actor)
+    view, pin = _preview_private_eve(ready, cfg.reviewer)
+    submission = h.action(view, "ot_learning_improve", pin, cfg.reviewer)
     row = exchange.get(auth.grant.reservation_ref)
     run_ref = row["run_ref"]
     assert row["state"] == "queued" and run_ref in str(screen(h, view))
@@ -438,6 +487,13 @@ def _exercise_private_card(ready, monkeypatch):
     observe("running", 3, 7)
     running = sync()
     assert "3 of 16 steps" in content(running) and "7 seconds" in content(running)
+    auth.active = False
+    h.app.sync_learning_card()
+    assert updates[-1]["blocks"] == [] and updates[-1]["text"] == "Run details are unavailable."
+    auth.active = True
+    h.send("interactive", press_payload(running, "ot_learning_pause"))
+    assert exchange.get(auth.grant.reservation_ref)["state"] == "running"
+    running = sync()
     pausing = request(running, "pause", "pausing")
     assert "Pause requested" in content(pausing) and "Awaiting confirmation" in content(pausing)
     observe("paused", 4, 11, checkpoint=4)
@@ -456,12 +512,18 @@ def _exercise_private_card(ready, monkeypatch):
     assert "Held" in content(held) and set(buttons(held)) == {"ot_learning_stop"}
     stopping = request(held, "stop", "stopping")
     assert "Stop requested" in content(stopping)
+    with monkeypatch.context() as patch:
+        patch.setattr(eve.time, "time", lambda: auth.grant.spec["deadline"] + 1)
+        stale = sync()
+        assert "Stop requested" in content(stale) and "Progress is stale" in content(stale)
+        assert "Watching continues" not in content(stale) and not buttons(stale)
     observe("stopped", 7, 24)
+    monkeypatch.setattr(eve.time, "time", lambda: auth.grant.spec["deadline"] + 1)
     stopped = sync()
     assert "Watching continues" in content(stopped) and not buttons(stopped)
     assert "Confirmed checkpoint · Step 4" in content(stopped)
     h.app.sync_learning_card()
-    assert len(posts) == 1 and len(updates) == 7
+    assert len(posts) == 1 and len(updates) == 10
     with exchange.transaction() as db:
         assert db.execute("SELECT count(*) FROM eve_jobs").fetchone()[0] == 1
         assert [r[0] for r in db.execute("SELECT action FROM eve_controls ORDER BY rowid")] == [
@@ -473,6 +535,21 @@ def _exercise_private_card(ready, monkeypatch):
 
 def test_home_and_private_card_control_same_exchange_run(ready, monkeypatch):
     _exercise_private_card(ready, monkeypatch)
+
+
+def test_spending_window_expires_before_worker_acknowledges(installed, monkeypatch):
+    service, auth, ex = installed
+    with monkeypatch.context() as patch:
+        patch.setattr(eve.time, "time", lambda: auth.grant.spec["deadline"])
+        assert service.plan(auth.scope) is None
+    receipt = admit(installed)
+    ex.row.update(state="running", completed_steps=3, heartbeat=NOW)
+    monkeypatch.setattr(eve.time, "time", lambda: auth.grant.spec["deadline"])
+    plan = service.plan(auth.scope)
+    assert plan.current_run == receipt.run_ref and not plan.can_improve
+    status = service.status(auth.scope, receipt.run_ref)
+    assert status.state == "running" and status.stale and not status.controls()
+    assert status.completed_steps == 3
 
 
 def qualified_eve_sdk_card_controls(ready, monkeypatch):
@@ -519,7 +596,7 @@ def qualified_eve_sdk_card_controls(ready, monkeypatch):
     monkeypatch.setattr(h.app, "web", sdk)
     monkeypatch.setattr(h, "send", send)
     _exercise_private_card(ready, monkeypatch)
-    assert api.count("chat.postMessage") == 1 and api.count("chat.update") == 7
+    assert api.count("chat.postMessage") == 1 and api.count("chat.update") == 10
     assert {"views.publish", "views.open", "views.update"} <= set(api)
 
 
