@@ -43,7 +43,7 @@
     }
   ],
   "fixture_kind": "generated_sentinel",
-  "generated_at": "2026-11-28T01:01:28Z",
+  "generated_at": "2026-11-28T01:34:32Z",
   "generator": "training/tests/evaluation/ope526_run_inventory.py",
   "groups": [
     {
@@ -124,11 +124,11 @@
   "local_engineering_checks": [
     "audit verdict regressions over the hand-checked packs and mutations A-D",
     "rescore replay of identical inputs",
-    "worker-side release check of the receipt (refuses non-allowed, stale, superseded)",
+    "worker-side release check of the receipt, read from a worker store it opens itself (refuses non-allowed, stale, superseded, copied or replaced store, broken chain)",
     "exposure guard fail-open fixes (PR #219, parallel lane)",
     "regeneration of this inventory"
   ],
-  "measured_git_sha": "27e0012eabfa2ab1dd78a3070072ec50c7525b57",
+  "measured_git_sha": "70687521fad89398b04c0a6d414c8af95174ffb0",
   "missing_for_every_run": [
     "independent_customer_label_audit_receipt",
     "customer_approved_sampling_frame_and_tolerances",
@@ -138,10 +138,21 @@
     "independent_result_verification_ope_528",
     "real_stage_times_or_effects_beyond_local_audit_cpu_time"
   ],
-  "redaction": "No family id, label, label commitment or verifier identity is included; verifier identities appear only as short digests.",
+  "redaction": "pseudonymised_with_unkeyed_digests_dictionary_attackable: no family id, label, label commitment or verifier identity is copied verbatim, but the fields in unkeyed_digest_fields are unkeyed SHA-256 digests or prefixes that anyone who can guess the input can confirm. No keyed pseudonymisation helper or key custody exists for this output.",
   "release_worker": {
-    "finding": "No release worker on main consumes the OPE-526 receipt. release_gate, release_authority and release_outbox (services/cell-runtime) gate a human release decision on repair runs, take no audit receipt and cannot import the training package. candidate_staging (OPE-545) stages, does not release, and reads a caller-supplied audit_verdict string.",
-    "interface_provided": "opentour_training.evaluation.benchmark_audit.release_check.check_receipt_for_release",
+    "existing_receipt_consumers": [
+      {
+        "checks": "receipt_digest_and_id_self_consistency_only",
+        "issue": "OPE-421",
+        "module": "services/cell-runtime/src/opentour_cell/pilot/comparison_packet.py",
+        "uses_worker_release_check": false
+      }
+    ],
+    "finding": "No release worker on main consumes the OPE-526 receipt. release_gate, release_authority and release_outbox (services/cell-runtime) gate a human release decision on repair runs, take no audit receipt and cannot import the training package. candidate_staging (OPE-545) stages, does not release, and reads a caller-supplied audit_verdict string. comparison_packet (OPE-421, services/cell-runtime) does consume opentour.benchmark-audit-receipt.v1, but checks only that its digest and id are self-consistent and reads verdict, status and bindings from the supplied document; it does not call this check and cannot import the training package.",
+    "interface_provided": [
+      "opentour_training.evaluation.benchmark_audit.release_check.check_receipt_for_release",
+      "opentour_training.evaluation.benchmark_audit.worker_store.WorkerAuditStore"
+    ],
     "status": "gap"
   },
   "runs": [
@@ -192,6 +203,7 @@
       "dirty": false,
       "evidence": {
         "customer_scope": null,
+        "declared_origin_contradicts_fixture_kind": false,
         "evidence_label": "generated_fixture_evidence",
         "evidence_origin_basis": "caller_asserted_in_preregistration",
         "evidence_origin_declared": "generated",
@@ -200,7 +212,6 @@
       },
       "expectation_met": true,
       "expected_verdict": "evaluation_allowed",
-      "held": false,
       "inputs_and_configuration": {
         "acceptable_error_ceiling": 0.05,
         "alpha": 0.05,
@@ -221,7 +232,7 @@
         "scorer_version": "generated-scorer-v1",
         "tolerable_label_error": 0.0
       },
-      "measured_git_sha": "27e0012eabfa2ab1dd78a3070072ec50c7525b57",
+      "measured_git_sha": "70687521fad89398b04c0a6d414c8af95174ffb0",
       "metric": {
         "ceiling": 0.05,
         "conclusion": "inconclusive",
@@ -239,7 +250,7 @@
         "candidate_snapshot_binding",
         "upstream_snapshot_verification"
       ],
-      "observed_audit_cpu_ms": 0.65,
+      "observed_audit_cpu_ms": 0.679,
       "population": "baseline",
       "reason_codes": [],
       "receipt": {
@@ -248,18 +259,41 @@
         "schema_version": "opentour.benchmark-audit-receipt.v1"
       },
       "release_check": {
-        "decision_basis": "worker_ledger_and_recomputed_bindings",
+        "binding_basis": {
+          "answer_key": "recomputed_from_worker_store_material",
+          "canonical_inputs": "recomputed_from_worker_store_material",
+          "label_manifest": "recomputed_from_worker_store_records",
+          "scoring_policy": "recomputed_from_worker_store_material",
+          "source_revisions": "recomputed_from_worker_store_material",
+          "split_manifest": "recomputed_from_worker_store_records"
+        },
+        "decision_basis": {
+          "bindings_absent": [],
+          "bindings_caller_asserted": [],
+          "bindings_recomputed_by_worker": [
+            "answer_key",
+            "canonical_inputs",
+            "label_manifest",
+            "scoring_policy",
+            "source_revisions",
+            "split_manifest"
+          ],
+          "event_log": "sha256_hash_chain_to_worker_stored_head_unsigned",
+          "receipt_and_status": "read_by_check_from_worker_store_after_identity_chain_and_head_checks"
+        },
         "holds": [
+          "audit_ledger_unsigned",
           "audit_receipt_issuer_unauthenticated",
           "generated_fixture_evidence_only"
         ],
         "integrity": "digest_self_consistent_only",
         "issuer_authenticated": false,
+        "ledger_signed": false,
         "outcome": "held",
         "receipt_id": "audit-4ac7054c9cb2269f",
         "refusals": [],
         "release_permitted": false,
-        "schema_version": "opentour.benchmark-audit-release-check.v1",
+        "schema_version": "opentour.benchmark-audit-release-check.v2",
         "verified_receipt_digest": "4ac7054c9cb2269fa76b08f9c30ee106af59b673519b0a2477fb8f116cc3921d"
       },
       "rerun_of": null,
@@ -289,8 +323,9 @@
         "unknown_links_recorded": 0
       },
       "status": "completed",
-      "timestamp": "2026-11-28T01:01:28Z",
+      "timestamp": "2026-11-28T01:34:32Z",
       "verdict": "evaluation_allowed",
+      "verdict_allows_evaluation": true,
       "verifier": {
         "adjudicator_digests": [
           "sha256:94ffb2b5266c"
@@ -357,6 +392,7 @@
       "dirty": false,
       "evidence": {
         "customer_scope": null,
+        "declared_origin_contradicts_fixture_kind": false,
         "evidence_label": "generated_fixture_evidence",
         "evidence_origin_basis": "caller_asserted_in_preregistration",
         "evidence_origin_declared": "generated",
@@ -365,7 +401,6 @@
       },
       "expectation_met": true,
       "expected_verdict": "evaluation_allowed",
-      "held": false,
       "inputs_and_configuration": {
         "acceptable_error_ceiling": 0.05,
         "alpha": 0.05,
@@ -386,7 +421,7 @@
         "scorer_version": "generated-scorer-v1",
         "tolerable_label_error": 0.0
       },
-      "measured_git_sha": "27e0012eabfa2ab1dd78a3070072ec50c7525b57",
+      "measured_git_sha": "70687521fad89398b04c0a6d414c8af95174ffb0",
       "metric": {
         "ceiling": 0.05,
         "conclusion": "inconclusive",
@@ -404,7 +439,7 @@
         "candidate_snapshot_binding",
         "upstream_snapshot_verification"
       ],
-      "observed_audit_cpu_ms": 0.502,
+      "observed_audit_cpu_ms": 0.607,
       "population": "baseline_rescore",
       "reason_codes": [],
       "receipt": {
@@ -413,18 +448,41 @@
         "schema_version": "opentour.benchmark-audit-receipt.v1"
       },
       "release_check": {
-        "decision_basis": "worker_ledger_and_recomputed_bindings",
+        "binding_basis": {
+          "answer_key": "recomputed_from_worker_store_material",
+          "canonical_inputs": "recomputed_from_worker_store_material",
+          "label_manifest": "recomputed_from_worker_store_records",
+          "scoring_policy": "recomputed_from_worker_store_material",
+          "source_revisions": "recomputed_from_worker_store_material",
+          "split_manifest": "recomputed_from_worker_store_records"
+        },
+        "decision_basis": {
+          "bindings_absent": [],
+          "bindings_caller_asserted": [],
+          "bindings_recomputed_by_worker": [
+            "answer_key",
+            "canonical_inputs",
+            "label_manifest",
+            "scoring_policy",
+            "source_revisions",
+            "split_manifest"
+          ],
+          "event_log": "sha256_hash_chain_to_worker_stored_head_unsigned",
+          "receipt_and_status": "read_by_check_from_worker_store_after_identity_chain_and_head_checks"
+        },
         "holds": [
+          "audit_ledger_unsigned",
           "audit_receipt_issuer_unauthenticated",
           "generated_fixture_evidence_only"
         ],
         "integrity": "digest_self_consistent_only",
         "issuer_authenticated": false,
+        "ledger_signed": false,
         "outcome": "held",
         "receipt_id": "audit-4ac7054c9cb2269f",
         "refusals": [],
         "release_permitted": false,
-        "schema_version": "opentour.benchmark-audit-release-check.v1",
+        "schema_version": "opentour.benchmark-audit-release-check.v2",
         "verified_receipt_digest": "4ac7054c9cb2269fa76b08f9c30ee106af59b673519b0a2477fb8f116cc3921d"
       },
       "rerun_of": "baseline",
@@ -454,8 +512,9 @@
         "unknown_links_recorded": 0
       },
       "status": "completed",
-      "timestamp": "2026-11-28T01:01:28Z",
+      "timestamp": "2026-11-28T01:34:32Z",
       "verdict": "evaluation_allowed",
+      "verdict_allows_evaluation": true,
       "verifier": {
         "adjudicator_digests": [
           "sha256:94ffb2b5266c"
@@ -522,6 +581,7 @@
       "dirty": false,
       "evidence": {
         "customer_scope": null,
+        "declared_origin_contradicts_fixture_kind": false,
         "evidence_label": "generated_fixture_evidence",
         "evidence_origin_basis": "caller_asserted_in_preregistration",
         "evidence_origin_declared": "generated",
@@ -530,7 +590,6 @@
       },
       "expectation_met": true,
       "expected_verdict": "claim_limited_to_named_population",
-      "held": true,
       "inputs_and_configuration": {
         "acceptable_error_ceiling": 0.05,
         "alpha": 0.05,
@@ -551,7 +610,7 @@
         "scorer_version": "generated-scorer-v1",
         "tolerable_label_error": 0.0
       },
-      "measured_git_sha": "27e0012eabfa2ab1dd78a3070072ec50c7525b57",
+      "measured_git_sha": "70687521fad89398b04c0a6d414c8af95174ffb0",
       "metric": {
         "ceiling": 0.05,
         "conclusion": "inconclusive",
@@ -569,7 +628,7 @@
         "candidate_snapshot_binding",
         "upstream_snapshot_verification"
       ],
-      "observed_audit_cpu_ms": 0.443,
+      "observed_audit_cpu_ms": 0.487,
       "population": "mutation_a_corrections_only",
       "reason_codes": [
         "correction_only_sample"
@@ -580,17 +639,39 @@
         "schema_version": "opentour.benchmark-audit-receipt.v1"
       },
       "release_check": {
-        "decision_basis": "worker_ledger_and_recomputed_bindings",
+        "binding_basis": {
+          "answer_key": "recomputed_from_worker_store_material",
+          "canonical_inputs": "recomputed_from_worker_store_material",
+          "label_manifest": "recomputed_from_worker_store_records",
+          "scoring_policy": "recomputed_from_worker_store_material",
+          "source_revisions": "recomputed_from_worker_store_material",
+          "split_manifest": "recomputed_from_worker_store_records"
+        },
+        "decision_basis": {
+          "bindings_absent": [],
+          "bindings_caller_asserted": [],
+          "bindings_recomputed_by_worker": [
+            "answer_key",
+            "canonical_inputs",
+            "label_manifest",
+            "scoring_policy",
+            "source_revisions",
+            "split_manifest"
+          ],
+          "event_log": "sha256_hash_chain_to_worker_stored_head_unsigned",
+          "receipt_and_status": "read_by_check_from_worker_store_after_identity_chain_and_head_checks"
+        },
         "holds": [],
         "integrity": "digest_self_consistent_only",
         "issuer_authenticated": false,
+        "ledger_signed": false,
         "outcome": "refused",
         "receipt_id": "audit-f79d698e755b2dcc",
         "refusals": [
           "audit_claim_limited_to_named_population"
         ],
         "release_permitted": false,
-        "schema_version": "opentour.benchmark-audit-release-check.v1",
+        "schema_version": "opentour.benchmark-audit-release-check.v2",
         "verified_receipt_digest": "f79d698e755b2dccbc04af7d2f21bb3a2ac1c16c5926b5584ec0413699327c6e"
       },
       "rerun_of": null,
@@ -620,8 +701,9 @@
         "unknown_links_recorded": 0
       },
       "status": "completed",
-      "timestamp": "2026-11-28T01:01:28Z",
+      "timestamp": "2026-11-28T01:34:32Z",
       "verdict": "claim_limited_to_named_population",
+      "verdict_allows_evaluation": false,
       "verifier": {
         "adjudicator_digests": [
           "sha256:94ffb2b5266c"
@@ -688,6 +770,7 @@
       "dirty": false,
       "evidence": {
         "customer_scope": null,
+        "declared_origin_contradicts_fixture_kind": false,
         "evidence_label": "generated_fixture_evidence",
         "evidence_origin_basis": "caller_asserted_in_preregistration",
         "evidence_origin_declared": "generated",
@@ -696,7 +779,6 @@
       },
       "expectation_met": true,
       "expected_verdict": "claim_limited_to_named_population",
-      "held": true,
       "inputs_and_configuration": {
         "acceptable_error_ceiling": 0.05,
         "alpha": 0.05,
@@ -717,7 +799,7 @@
         "scorer_version": "generated-scorer-v1",
         "tolerable_label_error": 0.0
       },
-      "measured_git_sha": "27e0012eabfa2ab1dd78a3070072ec50c7525b57",
+      "measured_git_sha": "70687521fad89398b04c0a6d414c8af95174ffb0",
       "metric": {
         "ceiling": 0.05,
         "conclusion": "inconclusive",
@@ -735,7 +817,7 @@
         "candidate_snapshot_binding",
         "upstream_snapshot_verification"
       ],
-      "observed_audit_cpu_ms": 0.441,
+      "observed_audit_cpu_ms": 0.541,
       "population": "mutation_a_selective_under_full_design",
       "reason_codes": [
         "correction_only_sample"
@@ -746,17 +828,39 @@
         "schema_version": "opentour.benchmark-audit-receipt.v1"
       },
       "release_check": {
-        "decision_basis": "worker_ledger_and_recomputed_bindings",
+        "binding_basis": {
+          "answer_key": "recomputed_from_worker_store_material",
+          "canonical_inputs": "recomputed_from_worker_store_material",
+          "label_manifest": "recomputed_from_worker_store_records",
+          "scoring_policy": "recomputed_from_worker_store_material",
+          "source_revisions": "recomputed_from_worker_store_material",
+          "split_manifest": "recomputed_from_worker_store_records"
+        },
+        "decision_basis": {
+          "bindings_absent": [],
+          "bindings_caller_asserted": [],
+          "bindings_recomputed_by_worker": [
+            "answer_key",
+            "canonical_inputs",
+            "label_manifest",
+            "scoring_policy",
+            "source_revisions",
+            "split_manifest"
+          ],
+          "event_log": "sha256_hash_chain_to_worker_stored_head_unsigned",
+          "receipt_and_status": "read_by_check_from_worker_store_after_identity_chain_and_head_checks"
+        },
         "holds": [],
         "integrity": "digest_self_consistent_only",
         "issuer_authenticated": false,
+        "ledger_signed": false,
         "outcome": "refused",
         "receipt_id": "audit-d757ca736ea9e0ca",
         "refusals": [
           "audit_claim_limited_to_named_population"
         ],
         "release_permitted": false,
-        "schema_version": "opentour.benchmark-audit-release-check.v1",
+        "schema_version": "opentour.benchmark-audit-release-check.v2",
         "verified_receipt_digest": "d757ca736ea9e0ca2ac255ce62d3629237baf974ae994975e9c1d3d50a1e10aa"
       },
       "rerun_of": null,
@@ -786,8 +890,9 @@
         "unknown_links_recorded": 0
       },
       "status": "completed",
-      "timestamp": "2026-11-28T01:01:28Z",
+      "timestamp": "2026-11-28T01:34:32Z",
       "verdict": "claim_limited_to_named_population",
+      "verdict_allows_evaluation": false,
       "verifier": {
         "adjudicator_digests": [
           "sha256:94ffb2b5266c"
@@ -854,6 +959,7 @@
       "dirty": false,
       "evidence": {
         "customer_scope": null,
+        "declared_origin_contradicts_fixture_kind": false,
         "evidence_label": "generated_fixture_evidence",
         "evidence_origin_basis": "caller_asserted_in_preregistration",
         "evidence_origin_declared": "generated",
@@ -862,7 +968,6 @@
       },
       "expectation_met": true,
       "expected_verdict": "claim_limited_to_named_population",
-      "held": true,
       "inputs_and_configuration": {
         "acceptable_error_ceiling": 0.05,
         "alpha": 0.05,
@@ -883,7 +988,7 @@
         "scorer_version": "generated-scorer-v1",
         "tolerable_label_error": 0.0
       },
-      "measured_git_sha": "27e0012eabfa2ab1dd78a3070072ec50c7525b57",
+      "measured_git_sha": "70687521fad89398b04c0a6d414c8af95174ffb0",
       "metric": {
         "ceiling": 0.05,
         "conclusion": "inconclusive",
@@ -902,7 +1007,7 @@
         "candidate_snapshot_binding",
         "upstream_snapshot_verification"
       ],
-      "observed_audit_cpu_ms": 0.601,
+      "observed_audit_cpu_ms": 0.488,
       "population": "mutation_b_no_critical_verification",
       "reason_codes": [
         "critical_coverage_gap"
@@ -913,17 +1018,39 @@
         "schema_version": "opentour.benchmark-audit-receipt.v1"
       },
       "release_check": {
-        "decision_basis": "worker_ledger_and_recomputed_bindings",
+        "binding_basis": {
+          "answer_key": "recomputed_from_worker_store_material",
+          "canonical_inputs": "recomputed_from_worker_store_material",
+          "label_manifest": "recomputed_from_worker_store_records",
+          "scoring_policy": "recomputed_from_worker_store_material",
+          "source_revisions": "recomputed_from_worker_store_material",
+          "split_manifest": "recomputed_from_worker_store_records"
+        },
+        "decision_basis": {
+          "bindings_absent": [],
+          "bindings_caller_asserted": [],
+          "bindings_recomputed_by_worker": [
+            "answer_key",
+            "canonical_inputs",
+            "label_manifest",
+            "scoring_policy",
+            "source_revisions",
+            "split_manifest"
+          ],
+          "event_log": "sha256_hash_chain_to_worker_stored_head_unsigned",
+          "receipt_and_status": "read_by_check_from_worker_store_after_identity_chain_and_head_checks"
+        },
         "holds": [],
         "integrity": "digest_self_consistent_only",
         "issuer_authenticated": false,
+        "ledger_signed": false,
         "outcome": "refused",
         "receipt_id": "audit-1fc4f42fd013c729",
         "refusals": [
           "audit_claim_limited_to_named_population"
         ],
         "release_permitted": false,
-        "schema_version": "opentour.benchmark-audit-release-check.v1",
+        "schema_version": "opentour.benchmark-audit-release-check.v2",
         "verified_receipt_digest": "1fc4f42fd013c72947f0a09da5cddb016c47aff49b0b9faa2de3bab511ffdf40"
       },
       "rerun_of": null,
@@ -953,8 +1080,9 @@
         "unknown_links_recorded": 0
       },
       "status": "completed",
-      "timestamp": "2026-11-28T01:01:28Z",
+      "timestamp": "2026-11-28T01:34:32Z",
       "verdict": "claim_limited_to_named_population",
+      "verdict_allows_evaluation": false,
       "verifier": {
         "adjudicator_digests": [
           "sha256:94ffb2b5266c"
@@ -1021,6 +1149,7 @@
       "dirty": false,
       "evidence": {
         "customer_scope": null,
+        "declared_origin_contradicts_fixture_kind": false,
         "evidence_label": "generated_fixture_evidence",
         "evidence_origin_basis": "caller_asserted_in_preregistration",
         "evidence_origin_declared": "generated",
@@ -1029,7 +1158,6 @@
       },
       "expectation_met": true,
       "expected_verdict": "invalid",
-      "held": true,
       "inputs_and_configuration": {
         "acceptable_error_ceiling": 0.05,
         "alpha": 0.05,
@@ -1050,7 +1178,7 @@
         "scorer_version": "generated-scorer-v1",
         "tolerable_label_error": 0.0
       },
-      "measured_git_sha": "27e0012eabfa2ab1dd78a3070072ec50c7525b57",
+      "measured_git_sha": "70687521fad89398b04c0a6d414c8af95174ffb0",
       "metric": {
         "ceiling": 0.05,
         "conclusion": "inconclusive",
@@ -1068,7 +1196,7 @@
         "candidate_snapshot_binding",
         "upstream_snapshot_verification"
       ],
-      "observed_audit_cpu_ms": 0.496,
+      "observed_audit_cpu_ms": 0.586,
       "population": "mutation_c_cross_split_sibling",
       "reason_codes": [
         "family_crosses_split"
@@ -1079,17 +1207,39 @@
         "schema_version": "opentour.benchmark-audit-receipt.v1"
       },
       "release_check": {
-        "decision_basis": "worker_ledger_and_recomputed_bindings",
+        "binding_basis": {
+          "answer_key": "recomputed_from_worker_store_material",
+          "canonical_inputs": "recomputed_from_worker_store_material",
+          "label_manifest": "recomputed_from_worker_store_records",
+          "scoring_policy": "recomputed_from_worker_store_material",
+          "source_revisions": "recomputed_from_worker_store_material",
+          "split_manifest": "recomputed_from_worker_store_records"
+        },
+        "decision_basis": {
+          "bindings_absent": [],
+          "bindings_caller_asserted": [],
+          "bindings_recomputed_by_worker": [
+            "answer_key",
+            "canonical_inputs",
+            "label_manifest",
+            "scoring_policy",
+            "source_revisions",
+            "split_manifest"
+          ],
+          "event_log": "sha256_hash_chain_to_worker_stored_head_unsigned",
+          "receipt_and_status": "read_by_check_from_worker_store_after_identity_chain_and_head_checks"
+        },
         "holds": [],
         "integrity": "digest_self_consistent_only",
         "issuer_authenticated": false,
+        "ledger_signed": false,
         "outcome": "refused",
         "receipt_id": "audit-442f91d65083e995",
         "refusals": [
           "audit_verdict_invalid"
         ],
         "release_permitted": false,
-        "schema_version": "opentour.benchmark-audit-release-check.v1",
+        "schema_version": "opentour.benchmark-audit-release-check.v2",
         "verified_receipt_digest": "442f91d65083e9953f1faa4a1a5dfbdb80e8f72a19b08896227a9b17b1f4267a"
       },
       "rerun_of": null,
@@ -1119,8 +1269,9 @@
         "unknown_links_recorded": 0
       },
       "status": "completed",
-      "timestamp": "2026-11-28T01:01:28Z",
+      "timestamp": "2026-11-28T01:34:32Z",
       "verdict": "invalid",
+      "verdict_allows_evaluation": false,
       "verifier": {
         "adjudicator_digests": [
           "sha256:94ffb2b5266c"
@@ -1187,6 +1338,7 @@
       "dirty": false,
       "evidence": {
         "customer_scope": null,
+        "declared_origin_contradicts_fixture_kind": false,
         "evidence_label": "generated_fixture_evidence",
         "evidence_origin_basis": "caller_asserted_in_preregistration",
         "evidence_origin_declared": "generated",
@@ -1195,7 +1347,6 @@
       },
       "expectation_met": true,
       "expected_verdict": "evaluation_allowed",
-      "held": false,
       "inputs_and_configuration": {
         "acceptable_error_ceiling": 0.05,
         "alpha": 0.05,
@@ -1216,7 +1367,7 @@
         "scorer_version": "generated-scorer-v1",
         "tolerable_label_error": 0.0
       },
-      "measured_git_sha": "27e0012eabfa2ab1dd78a3070072ec50c7525b57",
+      "measured_git_sha": "70687521fad89398b04c0a6d414c8af95174ffb0",
       "metric": {
         "ceiling": 0.05,
         "conclusion": "inconclusive",
@@ -1234,7 +1385,7 @@
         "candidate_snapshot_binding",
         "upstream_snapshot_verification"
       ],
-      "observed_audit_cpu_ms": 0.632,
+      "observed_audit_cpu_ms": 0.552,
       "population": "mutation_c_resealed",
       "reason_codes": [],
       "receipt": {
@@ -1243,18 +1394,41 @@
         "schema_version": "opentour.benchmark-audit-receipt.v1"
       },
       "release_check": {
-        "decision_basis": "worker_ledger_and_recomputed_bindings",
+        "binding_basis": {
+          "answer_key": "recomputed_from_worker_store_material",
+          "canonical_inputs": "recomputed_from_worker_store_material",
+          "label_manifest": "recomputed_from_worker_store_records",
+          "scoring_policy": "recomputed_from_worker_store_material",
+          "source_revisions": "recomputed_from_worker_store_material",
+          "split_manifest": "recomputed_from_worker_store_records"
+        },
+        "decision_basis": {
+          "bindings_absent": [],
+          "bindings_caller_asserted": [],
+          "bindings_recomputed_by_worker": [
+            "answer_key",
+            "canonical_inputs",
+            "label_manifest",
+            "scoring_policy",
+            "source_revisions",
+            "split_manifest"
+          ],
+          "event_log": "sha256_hash_chain_to_worker_stored_head_unsigned",
+          "receipt_and_status": "read_by_check_from_worker_store_after_identity_chain_and_head_checks"
+        },
         "holds": [
+          "audit_ledger_unsigned",
           "audit_receipt_issuer_unauthenticated",
           "generated_fixture_evidence_only"
         ],
         "integrity": "digest_self_consistent_only",
         "issuer_authenticated": false,
+        "ledger_signed": false,
         "outcome": "held",
         "receipt_id": "audit-4ac7054c9cb2269f",
         "refusals": [],
         "release_permitted": false,
-        "schema_version": "opentour.benchmark-audit-release-check.v1",
+        "schema_version": "opentour.benchmark-audit-release-check.v2",
         "verified_receipt_digest": "4ac7054c9cb2269fa76b08f9c30ee106af59b673519b0a2477fb8f116cc3921d"
       },
       "rerun_of": "baseline",
@@ -1284,8 +1458,9 @@
         "unknown_links_recorded": 0
       },
       "status": "completed",
-      "timestamp": "2026-11-28T01:01:28Z",
+      "timestamp": "2026-11-28T01:34:32Z",
       "verdict": "evaluation_allowed",
+      "verdict_allows_evaluation": true,
       "verifier": {
         "adjudicator_digests": [
           "sha256:94ffb2b5266c"
@@ -1352,6 +1527,7 @@
       "dirty": false,
       "evidence": {
         "customer_scope": null,
+        "declared_origin_contradicts_fixture_kind": false,
         "evidence_label": "generated_fixture_evidence",
         "evidence_origin_basis": "caller_asserted_in_preregistration",
         "evidence_origin_declared": "generated",
@@ -1360,7 +1536,6 @@
       },
       "expectation_met": true,
       "expected_verdict": "stale",
-      "held": true,
       "inputs_and_configuration": {
         "acceptable_error_ceiling": 0.05,
         "alpha": 0.05,
@@ -1381,7 +1556,7 @@
         "scorer_version": "generated-scorer-v1",
         "tolerable_label_error": 0.0
       },
-      "measured_git_sha": "27e0012eabfa2ab1dd78a3070072ec50c7525b57",
+      "measured_git_sha": "70687521fad89398b04c0a6d414c8af95174ffb0",
       "metric": {
         "ceiling": 0.05,
         "conclusion": "inconclusive",
@@ -1399,7 +1574,7 @@
         "candidate_snapshot_binding",
         "upstream_snapshot_verification"
       ],
-      "observed_audit_cpu_ms": 0.6,
+      "observed_audit_cpu_ms": 0.588,
       "population": "mutation_d_post_freeze_relabel",
       "reason_codes": [
         "bound_digest_changed"
@@ -1410,17 +1585,39 @@
         "schema_version": "opentour.benchmark-audit-receipt.v1"
       },
       "release_check": {
-        "decision_basis": "worker_ledger_and_recomputed_bindings",
+        "binding_basis": {
+          "answer_key": "recomputed_from_worker_store_material",
+          "canonical_inputs": "recomputed_from_worker_store_material",
+          "label_manifest": "recomputed_from_worker_store_records",
+          "scoring_policy": "recomputed_from_worker_store_material",
+          "source_revisions": "recomputed_from_worker_store_material",
+          "split_manifest": "recomputed_from_worker_store_records"
+        },
+        "decision_basis": {
+          "bindings_absent": [],
+          "bindings_caller_asserted": [],
+          "bindings_recomputed_by_worker": [
+            "answer_key",
+            "canonical_inputs",
+            "label_manifest",
+            "scoring_policy",
+            "source_revisions",
+            "split_manifest"
+          ],
+          "event_log": "sha256_hash_chain_to_worker_stored_head_unsigned",
+          "receipt_and_status": "read_by_check_from_worker_store_after_identity_chain_and_head_checks"
+        },
         "holds": [],
         "integrity": "digest_self_consistent_only",
         "issuer_authenticated": false,
+        "ledger_signed": false,
         "outcome": "refused",
         "receipt_id": "audit-6924c2162996b695",
         "refusals": [
           "audit_receipt_stale"
         ],
         "release_permitted": false,
-        "schema_version": "opentour.benchmark-audit-release-check.v1",
+        "schema_version": "opentour.benchmark-audit-release-check.v2",
         "verified_receipt_digest": "6924c2162996b6954661e9365c56e79bdad8e09f6ae6b94e415fe995df27223a"
       },
       "rerun_of": null,
@@ -1450,8 +1647,9 @@
         "unknown_links_recorded": 0
       },
       "status": "completed",
-      "timestamp": "2026-11-28T01:01:28Z",
+      "timestamp": "2026-11-28T01:34:32Z",
       "verdict": "stale",
+      "verdict_allows_evaluation": false,
       "verifier": {
         "adjudicator_digests": [
           "sha256:94ffb2b5266c"
@@ -1518,6 +1716,7 @@
       "dirty": false,
       "evidence": {
         "customer_scope": null,
+        "declared_origin_contradicts_fixture_kind": false,
         "evidence_label": "generated_fixture_evidence",
         "evidence_origin_basis": "caller_asserted_in_preregistration",
         "evidence_origin_declared": "generated",
@@ -1526,7 +1725,6 @@
       },
       "expectation_met": true,
       "expected_verdict": "starter_only",
-      "held": true,
       "inputs_and_configuration": {
         "acceptable_error_ceiling": 0.05,
         "alpha": 0.05,
@@ -1547,7 +1745,7 @@
         "scorer_version": "generated-scorer-v1",
         "tolerable_label_error": 0.0
       },
-      "measured_git_sha": "27e0012eabfa2ab1dd78a3070072ec50c7525b57",
+      "measured_git_sha": "70687521fad89398b04c0a6d414c8af95174ffb0",
       "metric": {
         "ceiling": 0.05,
         "conclusion": "unavailable",
@@ -1567,7 +1765,7 @@
         "candidate_snapshot_binding",
         "upstream_snapshot_verification"
       ],
-      "observed_audit_cpu_ms": 0.287,
+      "observed_audit_cpu_ms": 0.227,
       "population": "pack_policy_only_starter",
       "reason_codes": [
         "policy_only_starter"
@@ -1578,17 +1776,39 @@
         "schema_version": "opentour.benchmark-audit-receipt.v1"
       },
       "release_check": {
-        "decision_basis": "worker_ledger_and_recomputed_bindings",
+        "binding_basis": {
+          "answer_key": "recomputed_from_worker_store_material",
+          "canonical_inputs": "recomputed_from_worker_store_material",
+          "label_manifest": "recomputed_from_worker_store_records",
+          "scoring_policy": "recomputed_from_worker_store_material",
+          "source_revisions": "recomputed_from_worker_store_material",
+          "split_manifest": "recomputed_from_worker_store_records"
+        },
+        "decision_basis": {
+          "bindings_absent": [],
+          "bindings_caller_asserted": [],
+          "bindings_recomputed_by_worker": [
+            "answer_key",
+            "canonical_inputs",
+            "label_manifest",
+            "scoring_policy",
+            "source_revisions",
+            "split_manifest"
+          ],
+          "event_log": "sha256_hash_chain_to_worker_stored_head_unsigned",
+          "receipt_and_status": "read_by_check_from_worker_store_after_identity_chain_and_head_checks"
+        },
         "holds": [],
         "integrity": "digest_self_consistent_only",
         "issuer_authenticated": false,
+        "ledger_signed": false,
         "outcome": "refused",
         "receipt_id": "audit-d89bd4d888d713c8",
         "refusals": [
           "audit_verdict_starter_only"
         ],
         "release_permitted": false,
-        "schema_version": "opentour.benchmark-audit-release-check.v1",
+        "schema_version": "opentour.benchmark-audit-release-check.v2",
         "verified_receipt_digest": "d89bd4d888d713c886dfce5d9e4ecedec79109f45e0fba72bb9babb5a7008a73"
       },
       "rerun_of": null,
@@ -1618,8 +1838,9 @@
         "unknown_links_recorded": 0
       },
       "status": "completed",
-      "timestamp": "2026-11-28T01:01:28Z",
+      "timestamp": "2026-11-28T01:34:32Z",
       "verdict": "starter_only",
+      "verdict_allows_evaluation": false,
       "verifier": {
         "adjudicator_digests": [],
         "adjudicator_independence": "blinded_to_first_label_and_predictions",
@@ -1682,6 +1903,7 @@
       "dirty": false,
       "evidence": {
         "customer_scope": null,
+        "declared_origin_contradicts_fixture_kind": false,
         "evidence_label": "generated_fixture_evidence",
         "evidence_origin_basis": "caller_asserted_in_preregistration",
         "evidence_origin_declared": "generated",
@@ -1690,7 +1912,6 @@
       },
       "expectation_met": true,
       "expected_verdict": "invalid",
-      "held": true,
       "inputs_and_configuration": {
         "acceptable_error_ceiling": 0.05,
         "alpha": 0.05,
@@ -1711,7 +1932,7 @@
         "scorer_version": "generated-scorer-v1",
         "tolerable_label_error": 0.0
       },
-      "measured_git_sha": "27e0012eabfa2ab1dd78a3070072ec50c7525b57",
+      "measured_git_sha": "70687521fad89398b04c0a6d414c8af95174ffb0",
       "metric": {
         "ceiling": 0.05,
         "conclusion": "inconclusive",
@@ -1729,7 +1950,7 @@
         "candidate_snapshot_binding",
         "upstream_snapshot_verification"
       ],
-      "observed_audit_cpu_ms": 0.721,
+      "observed_audit_cpu_ms": 0.549,
       "population": "pack_two_reviewers_overturned",
       "reason_codes": [
         "label_overturned_by_independent_record"
@@ -1740,17 +1961,39 @@
         "schema_version": "opentour.benchmark-audit-receipt.v1"
       },
       "release_check": {
-        "decision_basis": "worker_ledger_and_recomputed_bindings",
+        "binding_basis": {
+          "answer_key": "recomputed_from_worker_store_material",
+          "canonical_inputs": "recomputed_from_worker_store_material",
+          "label_manifest": "recomputed_from_worker_store_records",
+          "scoring_policy": "recomputed_from_worker_store_material",
+          "source_revisions": "recomputed_from_worker_store_material",
+          "split_manifest": "recomputed_from_worker_store_records"
+        },
+        "decision_basis": {
+          "bindings_absent": [],
+          "bindings_caller_asserted": [],
+          "bindings_recomputed_by_worker": [
+            "answer_key",
+            "canonical_inputs",
+            "label_manifest",
+            "scoring_policy",
+            "source_revisions",
+            "split_manifest"
+          ],
+          "event_log": "sha256_hash_chain_to_worker_stored_head_unsigned",
+          "receipt_and_status": "read_by_check_from_worker_store_after_identity_chain_and_head_checks"
+        },
         "holds": [],
         "integrity": "digest_self_consistent_only",
         "issuer_authenticated": false,
+        "ledger_signed": false,
         "outcome": "refused",
         "receipt_id": "audit-a0ce27e5992254fc",
         "refusals": [
           "audit_verdict_invalid"
         ],
         "release_permitted": false,
-        "schema_version": "opentour.benchmark-audit-release-check.v1",
+        "schema_version": "opentour.benchmark-audit-release-check.v2",
         "verified_receipt_digest": "a0ce27e5992254fc9aae1033e2363f90be5090e026be6d9f720e05d2c512dfa0"
       },
       "rerun_of": null,
@@ -1780,8 +2023,9 @@
         "unknown_links_recorded": 0
       },
       "status": "completed",
-      "timestamp": "2026-11-28T01:01:28Z",
+      "timestamp": "2026-11-28T01:34:32Z",
       "verdict": "invalid",
+      "verdict_allows_evaluation": false,
       "verifier": {
         "adjudicator_digests": [
           "sha256:94ffb2b5266c"
@@ -1848,6 +2092,7 @@
       "dirty": false,
       "evidence": {
         "customer_scope": null,
+        "declared_origin_contradicts_fixture_kind": false,
         "evidence_label": "generated_fixture_evidence",
         "evidence_origin_basis": "caller_asserted_in_preregistration",
         "evidence_origin_declared": "generated",
@@ -1856,7 +2101,6 @@
       },
       "expectation_met": true,
       "expected_verdict": "insufficient_evidence",
-      "held": true,
       "inputs_and_configuration": {
         "acceptable_error_ceiling": 0.05,
         "alpha": 0.05,
@@ -1877,7 +2121,7 @@
         "scorer_version": "generated-scorer-v1",
         "tolerable_label_error": 0.0
       },
-      "measured_git_sha": "27e0012eabfa2ab1dd78a3070072ec50c7525b57",
+      "measured_git_sha": "70687521fad89398b04c0a6d414c8af95174ffb0",
       "metric": {
         "ceiling": 0.05,
         "conclusion": "inconclusive",
@@ -1895,7 +2139,7 @@
         "candidate_snapshot_binding",
         "upstream_snapshot_verification"
       ],
-      "observed_audit_cpu_ms": 0.814,
+      "observed_audit_cpu_ms": 0.591,
       "population": "pack_unresolved_ambiguity",
       "reason_codes": [
         "unresolved_ambiguity"
@@ -1906,17 +2150,39 @@
         "schema_version": "opentour.benchmark-audit-receipt.v1"
       },
       "release_check": {
-        "decision_basis": "worker_ledger_and_recomputed_bindings",
+        "binding_basis": {
+          "answer_key": "recomputed_from_worker_store_material",
+          "canonical_inputs": "recomputed_from_worker_store_material",
+          "label_manifest": "recomputed_from_worker_store_records",
+          "scoring_policy": "recomputed_from_worker_store_material",
+          "source_revisions": "recomputed_from_worker_store_material",
+          "split_manifest": "recomputed_from_worker_store_records"
+        },
+        "decision_basis": {
+          "bindings_absent": [],
+          "bindings_caller_asserted": [],
+          "bindings_recomputed_by_worker": [
+            "answer_key",
+            "canonical_inputs",
+            "label_manifest",
+            "scoring_policy",
+            "source_revisions",
+            "split_manifest"
+          ],
+          "event_log": "sha256_hash_chain_to_worker_stored_head_unsigned",
+          "receipt_and_status": "read_by_check_from_worker_store_after_identity_chain_and_head_checks"
+        },
         "holds": [],
         "integrity": "digest_self_consistent_only",
         "issuer_authenticated": false,
+        "ledger_signed": false,
         "outcome": "refused",
         "receipt_id": "audit-10cd1e652a767f71",
         "refusals": [
           "audit_verdict_insufficient_evidence"
         ],
         "release_permitted": false,
-        "schema_version": "opentour.benchmark-audit-release-check.v1",
+        "schema_version": "opentour.benchmark-audit-release-check.v2",
         "verified_receipt_digest": "10cd1e652a767f71488f511039ac7f6611a95b882df37a22dcc84304265e8840"
       },
       "rerun_of": null,
@@ -1946,8 +2212,9 @@
         "unknown_links_recorded": 0
       },
       "status": "completed",
-      "timestamp": "2026-11-28T01:01:28Z",
+      "timestamp": "2026-11-28T01:34:32Z",
       "verdict": "insufficient_evidence",
+      "verdict_allows_evaluation": false,
       "verifier": {
         "adjudicator_digests": [
           "sha256:94ffb2b5266c"
@@ -2014,6 +2281,7 @@
       "dirty": false,
       "evidence": {
         "customer_scope": null,
+        "declared_origin_contradicts_fixture_kind": false,
         "evidence_label": "generated_fixture_evidence",
         "evidence_origin_basis": "caller_asserted_in_preregistration",
         "evidence_origin_declared": "generated",
@@ -2022,7 +2290,6 @@
       },
       "expectation_met": true,
       "expected_verdict": "invalid",
-      "held": true,
       "inputs_and_configuration": {
         "acceptable_error_ceiling": 0.05,
         "alpha": 0.05,
@@ -2043,7 +2310,7 @@
         "scorer_version": "generated-scorer-v1",
         "tolerable_label_error": 0.0
       },
-      "measured_git_sha": "27e0012eabfa2ab1dd78a3070072ec50c7525b57",
+      "measured_git_sha": "70687521fad89398b04c0a6d414c8af95174ffb0",
       "metric": {
         "ceiling": 0.05,
         "conclusion": "inconclusive",
@@ -2061,7 +2328,7 @@
         "candidate_snapshot_binding",
         "upstream_snapshot_verification"
       ],
-      "observed_audit_cpu_ms": 0.672,
+      "observed_audit_cpu_ms": 0.822,
       "population": "pack_future_only_field",
       "reason_codes": [
         "future_only_field"
@@ -2072,17 +2339,39 @@
         "schema_version": "opentour.benchmark-audit-receipt.v1"
       },
       "release_check": {
-        "decision_basis": "worker_ledger_and_recomputed_bindings",
+        "binding_basis": {
+          "answer_key": "recomputed_from_worker_store_material",
+          "canonical_inputs": "recomputed_from_worker_store_material",
+          "label_manifest": "recomputed_from_worker_store_records",
+          "scoring_policy": "recomputed_from_worker_store_material",
+          "source_revisions": "recomputed_from_worker_store_material",
+          "split_manifest": "recomputed_from_worker_store_records"
+        },
+        "decision_basis": {
+          "bindings_absent": [],
+          "bindings_caller_asserted": [],
+          "bindings_recomputed_by_worker": [
+            "answer_key",
+            "canonical_inputs",
+            "label_manifest",
+            "scoring_policy",
+            "source_revisions",
+            "split_manifest"
+          ],
+          "event_log": "sha256_hash_chain_to_worker_stored_head_unsigned",
+          "receipt_and_status": "read_by_check_from_worker_store_after_identity_chain_and_head_checks"
+        },
         "holds": [],
         "integrity": "digest_self_consistent_only",
         "issuer_authenticated": false,
+        "ledger_signed": false,
         "outcome": "refused",
         "receipt_id": "audit-2945f5025e3918e9",
         "refusals": [
           "audit_verdict_invalid"
         ],
         "release_permitted": false,
-        "schema_version": "opentour.benchmark-audit-release-check.v1",
+        "schema_version": "opentour.benchmark-audit-release-check.v2",
         "verified_receipt_digest": "2945f5025e3918e931e14fadea78979b5e15f6cc88842e435d918e09c8be0209"
       },
       "rerun_of": null,
@@ -2112,8 +2401,9 @@
         "unknown_links_recorded": 0
       },
       "status": "completed",
-      "timestamp": "2026-11-28T01:01:28Z",
+      "timestamp": "2026-11-28T01:34:32Z",
       "verdict": "invalid",
+      "verdict_allows_evaluation": false,
       "verifier": {
         "adjudicator_digests": [
           "sha256:94ffb2b5266c"
@@ -2180,6 +2470,7 @@
       "dirty": false,
       "evidence": {
         "customer_scope": null,
+        "declared_origin_contradicts_fixture_kind": false,
         "evidence_label": "generated_fixture_evidence",
         "evidence_origin_basis": "caller_asserted_in_preregistration",
         "evidence_origin_declared": "generated",
@@ -2188,7 +2479,6 @@
       },
       "expectation_met": true,
       "expected_verdict": "insufficient_evidence",
-      "held": true,
       "inputs_and_configuration": {
         "acceptable_error_ceiling": 0.05,
         "alpha": 0.05,
@@ -2209,7 +2499,7 @@
         "scorer_version": "generated-scorer-v1",
         "tolerable_label_error": 0.0
       },
-      "measured_git_sha": "27e0012eabfa2ab1dd78a3070072ec50c7525b57",
+      "measured_git_sha": "70687521fad89398b04c0a6d414c8af95174ffb0",
       "metric": {
         "ceiling": 0.05,
         "conclusion": "unavailable",
@@ -2229,7 +2519,7 @@
         "candidate_snapshot_binding",
         "upstream_snapshot_verification"
       ],
-      "observed_audit_cpu_ms": 0.393,
+      "observed_audit_cpu_ms": 0.319,
       "population": "adverse_empty_audit",
       "reason_codes": [
         "no_verified_families"
@@ -2240,17 +2530,39 @@
         "schema_version": "opentour.benchmark-audit-receipt.v1"
       },
       "release_check": {
-        "decision_basis": "worker_ledger_and_recomputed_bindings",
+        "binding_basis": {
+          "answer_key": "recomputed_from_worker_store_material",
+          "canonical_inputs": "recomputed_from_worker_store_material",
+          "label_manifest": "recomputed_from_worker_store_records",
+          "scoring_policy": "recomputed_from_worker_store_material",
+          "source_revisions": "recomputed_from_worker_store_material",
+          "split_manifest": "recomputed_from_worker_store_records"
+        },
+        "decision_basis": {
+          "bindings_absent": [],
+          "bindings_caller_asserted": [],
+          "bindings_recomputed_by_worker": [
+            "answer_key",
+            "canonical_inputs",
+            "label_manifest",
+            "scoring_policy",
+            "source_revisions",
+            "split_manifest"
+          ],
+          "event_log": "sha256_hash_chain_to_worker_stored_head_unsigned",
+          "receipt_and_status": "read_by_check_from_worker_store_after_identity_chain_and_head_checks"
+        },
         "holds": [],
         "integrity": "digest_self_consistent_only",
         "issuer_authenticated": false,
+        "ledger_signed": false,
         "outcome": "refused",
         "receipt_id": "audit-3fa22b3777c1f2f7",
         "refusals": [
           "audit_verdict_insufficient_evidence"
         ],
         "release_permitted": false,
-        "schema_version": "opentour.benchmark-audit-release-check.v1",
+        "schema_version": "opentour.benchmark-audit-release-check.v2",
         "verified_receipt_digest": "3fa22b3777c1f2f7d1ae149ab8e147755f72123b28ddcd286461fc513d994749"
       },
       "rerun_of": null,
@@ -2280,8 +2592,9 @@
         "unknown_links_recorded": 0
       },
       "status": "completed",
-      "timestamp": "2026-11-28T01:01:28Z",
+      "timestamp": "2026-11-28T01:34:32Z",
       "verdict": "insufficient_evidence",
+      "verdict_allows_evaluation": false,
       "verifier": {
         "adjudicator_digests": [],
         "adjudicator_independence": "blinded_to_first_label_and_predictions",
@@ -2344,6 +2657,7 @@
       "dirty": false,
       "evidence": {
         "customer_scope": null,
+        "declared_origin_contradicts_fixture_kind": false,
         "evidence_label": "generated_fixture_evidence",
         "evidence_origin_basis": "caller_asserted_in_preregistration",
         "evidence_origin_declared": "generated",
@@ -2352,7 +2666,6 @@
       },
       "expectation_met": true,
       "expected_verdict": "invalid",
-      "held": true,
       "inputs_and_configuration": {
         "acceptable_error_ceiling": 0.05,
         "alpha": 0.05,
@@ -2373,7 +2686,7 @@
         "scorer_version": "generated-scorer-v1",
         "tolerable_label_error": 0.0
       },
-      "measured_git_sha": "27e0012eabfa2ab1dd78a3070072ec50c7525b57",
+      "measured_git_sha": "70687521fad89398b04c0a6d414c8af95174ffb0",
       "metric": {
         "ceiling": 0.05,
         "conclusion": "inconclusive",
@@ -2391,7 +2704,7 @@
         "candidate_snapshot_binding",
         "upstream_snapshot_verification"
       ],
-      "observed_audit_cpu_ms": 0.507,
+      "observed_audit_cpu_ms": 0.619,
       "population": "adverse_protected_selection",
       "reason_codes": [
         "protected_comparison_used_for_selection"
@@ -2402,17 +2715,39 @@
         "schema_version": "opentour.benchmark-audit-receipt.v1"
       },
       "release_check": {
-        "decision_basis": "worker_ledger_and_recomputed_bindings",
+        "binding_basis": {
+          "answer_key": "recomputed_from_worker_store_material",
+          "canonical_inputs": "recomputed_from_worker_store_material",
+          "label_manifest": "recomputed_from_worker_store_records",
+          "scoring_policy": "recomputed_from_worker_store_material",
+          "source_revisions": "recomputed_from_worker_store_material",
+          "split_manifest": "recomputed_from_worker_store_records"
+        },
+        "decision_basis": {
+          "bindings_absent": [],
+          "bindings_caller_asserted": [],
+          "bindings_recomputed_by_worker": [
+            "answer_key",
+            "canonical_inputs",
+            "label_manifest",
+            "scoring_policy",
+            "source_revisions",
+            "split_manifest"
+          ],
+          "event_log": "sha256_hash_chain_to_worker_stored_head_unsigned",
+          "receipt_and_status": "read_by_check_from_worker_store_after_identity_chain_and_head_checks"
+        },
         "holds": [],
         "integrity": "digest_self_consistent_only",
         "issuer_authenticated": false,
+        "ledger_signed": false,
         "outcome": "refused",
         "receipt_id": "audit-6a4ea99fae245d29",
         "refusals": [
           "audit_verdict_invalid"
         ],
         "release_permitted": false,
-        "schema_version": "opentour.benchmark-audit-release-check.v1",
+        "schema_version": "opentour.benchmark-audit-release-check.v2",
         "verified_receipt_digest": "6a4ea99fae245d29aa5e8cfb85e64a9c2ce2d29367621976cee9a70eea78bc7e"
       },
       "rerun_of": null,
@@ -2442,8 +2777,9 @@
         "unknown_links_recorded": 0
       },
       "status": "completed",
-      "timestamp": "2026-11-28T01:01:28Z",
+      "timestamp": "2026-11-28T01:34:32Z",
       "verdict": "invalid",
+      "verdict_allows_evaluation": false,
       "verifier": {
         "adjudicator_digests": [
           "sha256:94ffb2b5266c"
@@ -2510,6 +2846,7 @@
       "dirty": false,
       "evidence": {
         "customer_scope": null,
+        "declared_origin_contradicts_fixture_kind": false,
         "evidence_label": "generated_fixture_evidence",
         "evidence_origin_basis": "caller_asserted_in_preregistration",
         "evidence_origin_declared": "generated",
@@ -2518,7 +2855,6 @@
       },
       "expectation_met": true,
       "expected_verdict": "invalid",
-      "held": true,
       "inputs_and_configuration": {
         "acceptable_error_ceiling": 0.05,
         "alpha": 0.05,
@@ -2539,7 +2875,7 @@
         "scorer_version": "generated-scorer-v1",
         "tolerable_label_error": 0.0
       },
-      "measured_git_sha": "27e0012eabfa2ab1dd78a3070072ec50c7525b57",
+      "measured_git_sha": "70687521fad89398b04c0a6d414c8af95174ffb0",
       "metric": {
         "ceiling": 0.05,
         "conclusion": "inconclusive",
@@ -2557,7 +2893,7 @@
         "candidate_snapshot_binding",
         "upstream_snapshot_verification"
       ],
-      "observed_audit_cpu_ms": 0.856,
+      "observed_audit_cpu_ms": 0.67,
       "population": "adverse_preprocessing_fit_on_protected",
       "reason_codes": [
         "preprocessing_fit_on_protected"
@@ -2568,17 +2904,39 @@
         "schema_version": "opentour.benchmark-audit-receipt.v1"
       },
       "release_check": {
-        "decision_basis": "worker_ledger_and_recomputed_bindings",
+        "binding_basis": {
+          "answer_key": "recomputed_from_worker_store_material",
+          "canonical_inputs": "recomputed_from_worker_store_material",
+          "label_manifest": "recomputed_from_worker_store_records",
+          "scoring_policy": "recomputed_from_worker_store_material",
+          "source_revisions": "recomputed_from_worker_store_material",
+          "split_manifest": "recomputed_from_worker_store_records"
+        },
+        "decision_basis": {
+          "bindings_absent": [],
+          "bindings_caller_asserted": [],
+          "bindings_recomputed_by_worker": [
+            "answer_key",
+            "canonical_inputs",
+            "label_manifest",
+            "scoring_policy",
+            "source_revisions",
+            "split_manifest"
+          ],
+          "event_log": "sha256_hash_chain_to_worker_stored_head_unsigned",
+          "receipt_and_status": "read_by_check_from_worker_store_after_identity_chain_and_head_checks"
+        },
         "holds": [],
         "integrity": "digest_self_consistent_only",
         "issuer_authenticated": false,
+        "ledger_signed": false,
         "outcome": "refused",
         "receipt_id": "audit-1013f941ec931041",
         "refusals": [
           "audit_verdict_invalid"
         ],
         "release_permitted": false,
-        "schema_version": "opentour.benchmark-audit-release-check.v1",
+        "schema_version": "opentour.benchmark-audit-release-check.v2",
         "verified_receipt_digest": "1013f941ec931041b05b492c9f56203f3a2f88d574893df83323653309075ee6"
       },
       "rerun_of": null,
@@ -2608,8 +2966,9 @@
         "unknown_links_recorded": 0
       },
       "status": "completed",
-      "timestamp": "2026-11-28T01:01:28Z",
+      "timestamp": "2026-11-28T01:34:32Z",
       "verdict": "invalid",
+      "verdict_allows_evaluation": false,
       "verifier": {
         "adjudicator_digests": [
           "sha256:94ffb2b5266c"
@@ -2676,6 +3035,7 @@
       "dirty": false,
       "evidence": {
         "customer_scope": null,
+        "declared_origin_contradicts_fixture_kind": false,
         "evidence_label": "generated_fixture_evidence",
         "evidence_origin_basis": "caller_asserted_in_preregistration",
         "evidence_origin_declared": "generated",
@@ -2684,7 +3044,6 @@
       },
       "expectation_met": true,
       "expected_verdict": "invalid",
-      "held": true,
       "inputs_and_configuration": {
         "acceptable_error_ceiling": 0.05,
         "alpha": 0.05,
@@ -2705,7 +3064,7 @@
         "scorer_version": "generated-scorer-v1",
         "tolerable_label_error": 0.0
       },
-      "measured_git_sha": "27e0012eabfa2ab1dd78a3070072ec50c7525b57",
+      "measured_git_sha": "70687521fad89398b04c0a6d414c8af95174ffb0",
       "metric": {
         "ceiling": 0.05,
         "conclusion": "inconclusive",
@@ -2723,7 +3082,7 @@
         "candidate_snapshot_binding",
         "upstream_snapshot_verification"
       ],
-      "observed_audit_cpu_ms": 0.621,
+      "observed_audit_cpu_ms": 0.531,
       "population": "adverse_unlogged_disclosure",
       "reason_codes": [
         "unlogged_case_level_disclosure"
@@ -2734,17 +3093,39 @@
         "schema_version": "opentour.benchmark-audit-receipt.v1"
       },
       "release_check": {
-        "decision_basis": "worker_ledger_and_recomputed_bindings",
+        "binding_basis": {
+          "answer_key": "recomputed_from_worker_store_material",
+          "canonical_inputs": "recomputed_from_worker_store_material",
+          "label_manifest": "recomputed_from_worker_store_records",
+          "scoring_policy": "recomputed_from_worker_store_material",
+          "source_revisions": "recomputed_from_worker_store_material",
+          "split_manifest": "recomputed_from_worker_store_records"
+        },
+        "decision_basis": {
+          "bindings_absent": [],
+          "bindings_caller_asserted": [],
+          "bindings_recomputed_by_worker": [
+            "answer_key",
+            "canonical_inputs",
+            "label_manifest",
+            "scoring_policy",
+            "source_revisions",
+            "split_manifest"
+          ],
+          "event_log": "sha256_hash_chain_to_worker_stored_head_unsigned",
+          "receipt_and_status": "read_by_check_from_worker_store_after_identity_chain_and_head_checks"
+        },
         "holds": [],
         "integrity": "digest_self_consistent_only",
         "issuer_authenticated": false,
+        "ledger_signed": false,
         "outcome": "refused",
         "receipt_id": "audit-7a90f97937818f46",
         "refusals": [
           "audit_verdict_invalid"
         ],
         "release_permitted": false,
-        "schema_version": "opentour.benchmark-audit-release-check.v1",
+        "schema_version": "opentour.benchmark-audit-release-check.v2",
         "verified_receipt_digest": "7a90f97937818f46f614feb4cede9a595964e94b75e9d98e1d5aa32bc191acb5"
       },
       "rerun_of": null,
@@ -2774,8 +3155,9 @@
         "unknown_links_recorded": 0
       },
       "status": "completed",
-      "timestamp": "2026-11-28T01:01:28Z",
+      "timestamp": "2026-11-28T01:34:32Z",
       "verdict": "invalid",
+      "verdict_allows_evaluation": false,
       "verifier": {
         "adjudicator_digests": [
           "sha256:94ffb2b5266c"
@@ -2842,6 +3224,7 @@
       "dirty": false,
       "evidence": {
         "customer_scope": null,
+        "declared_origin_contradicts_fixture_kind": false,
         "evidence_label": "generated_fixture_evidence",
         "evidence_origin_basis": "caller_asserted_in_preregistration",
         "evidence_origin_declared": "generated",
@@ -2850,7 +3233,6 @@
       },
       "expectation_met": true,
       "expected_verdict": "invalid",
-      "held": true,
       "inputs_and_configuration": {
         "acceptable_error_ceiling": 0.05,
         "alpha": 0.05,
@@ -2871,7 +3253,7 @@
         "scorer_version": "generated-scorer-v1",
         "tolerable_label_error": 0.0
       },
-      "measured_git_sha": "27e0012eabfa2ab1dd78a3070072ec50c7525b57",
+      "measured_git_sha": "70687521fad89398b04c0a6d414c8af95174ffb0",
       "metric": {
         "ceiling": 0.05,
         "conclusion": "inconclusive",
@@ -2889,7 +3271,7 @@
         "candidate_snapshot_binding",
         "upstream_snapshot_verification"
       ],
-      "observed_audit_cpu_ms": 0.735,
+      "observed_audit_cpu_ms": 0.565,
       "population": "adverse_preregistered_after_reveal",
       "reason_codes": [
         "preregistration_after_reveal"
@@ -2900,17 +3282,39 @@
         "schema_version": "opentour.benchmark-audit-receipt.v1"
       },
       "release_check": {
-        "decision_basis": "worker_ledger_and_recomputed_bindings",
+        "binding_basis": {
+          "answer_key": "recomputed_from_worker_store_material",
+          "canonical_inputs": "recomputed_from_worker_store_material",
+          "label_manifest": "recomputed_from_worker_store_records",
+          "scoring_policy": "recomputed_from_worker_store_material",
+          "source_revisions": "recomputed_from_worker_store_material",
+          "split_manifest": "recomputed_from_worker_store_records"
+        },
+        "decision_basis": {
+          "bindings_absent": [],
+          "bindings_caller_asserted": [],
+          "bindings_recomputed_by_worker": [
+            "answer_key",
+            "canonical_inputs",
+            "label_manifest",
+            "scoring_policy",
+            "source_revisions",
+            "split_manifest"
+          ],
+          "event_log": "sha256_hash_chain_to_worker_stored_head_unsigned",
+          "receipt_and_status": "read_by_check_from_worker_store_after_identity_chain_and_head_checks"
+        },
         "holds": [],
         "integrity": "digest_self_consistent_only",
         "issuer_authenticated": false,
+        "ledger_signed": false,
         "outcome": "refused",
         "receipt_id": "audit-a05a52d4e2849b8b",
         "refusals": [
           "audit_verdict_invalid"
         ],
         "release_permitted": false,
-        "schema_version": "opentour.benchmark-audit-release-check.v1",
+        "schema_version": "opentour.benchmark-audit-release-check.v2",
         "verified_receipt_digest": "a05a52d4e2849b8b71188ad2424a6591704e2be90e6f0e113ed6d40398f7acd3"
       },
       "rerun_of": null,
@@ -2940,8 +3344,9 @@
         "unknown_links_recorded": 0
       },
       "status": "completed",
-      "timestamp": "2026-11-28T01:01:28Z",
+      "timestamp": "2026-11-28T01:34:32Z",
       "verdict": "invalid",
+      "verdict_allows_evaluation": false,
       "verifier": {
         "adjudicator_digests": [
           "sha256:94ffb2b5266c"
@@ -3008,6 +3413,7 @@
       "dirty": false,
       "evidence": {
         "customer_scope": null,
+        "declared_origin_contradicts_fixture_kind": false,
         "evidence_label": "generated_fixture_evidence",
         "evidence_origin_basis": "caller_asserted_in_preregistration",
         "evidence_origin_declared": "generated",
@@ -3016,7 +3422,6 @@
       },
       "expectation_met": true,
       "expected_verdict": "stale",
-      "held": true,
       "inputs_and_configuration": {
         "acceptable_error_ceiling": 0.05,
         "alpha": 0.05,
@@ -3037,7 +3442,7 @@
         "scorer_version": "generated-scorer-v1",
         "tolerable_label_error": 0.0
       },
-      "measured_git_sha": "27e0012eabfa2ab1dd78a3070072ec50c7525b57",
+      "measured_git_sha": "70687521fad89398b04c0a6d414c8af95174ffb0",
       "metric": {
         "ceiling": 0.05,
         "conclusion": "inconclusive",
@@ -3055,7 +3460,7 @@
         "candidate_snapshot_binding",
         "upstream_snapshot_verification"
       ],
-      "observed_audit_cpu_ms": 4.987,
+      "observed_audit_cpu_ms": 0.58,
       "population": "adverse_superseded",
       "reason_codes": [
         "superseded"
@@ -3066,10 +3471,32 @@
         "schema_version": "opentour.benchmark-audit-receipt.v1"
       },
       "release_check": {
-        "decision_basis": "worker_ledger_and_recomputed_bindings",
+        "binding_basis": {
+          "answer_key": "recomputed_from_worker_store_material",
+          "canonical_inputs": "recomputed_from_worker_store_material",
+          "label_manifest": "recomputed_from_worker_store_records",
+          "scoring_policy": "recomputed_from_worker_store_material",
+          "source_revisions": "recomputed_from_worker_store_material",
+          "split_manifest": "recomputed_from_worker_store_records"
+        },
+        "decision_basis": {
+          "bindings_absent": [],
+          "bindings_caller_asserted": [],
+          "bindings_recomputed_by_worker": [
+            "answer_key",
+            "canonical_inputs",
+            "label_manifest",
+            "scoring_policy",
+            "source_revisions",
+            "split_manifest"
+          ],
+          "event_log": "sha256_hash_chain_to_worker_stored_head_unsigned",
+          "receipt_and_status": "read_by_check_from_worker_store_after_identity_chain_and_head_checks"
+        },
         "holds": [],
         "integrity": "digest_self_consistent_only",
         "issuer_authenticated": false,
+        "ledger_signed": false,
         "outcome": "refused",
         "receipt_id": "audit-50c6121648c972c1",
         "refusals": [
@@ -3077,7 +3504,7 @@
           "audit_receipt_superseded"
         ],
         "release_permitted": false,
-        "schema_version": "opentour.benchmark-audit-release-check.v1",
+        "schema_version": "opentour.benchmark-audit-release-check.v2",
         "verified_receipt_digest": "50c6121648c972c17f1645292bf5a45d854fcec87d1857918d1d403aabd5ef83"
       },
       "rerun_of": null,
@@ -3107,8 +3534,9 @@
         "unknown_links_recorded": 0
       },
       "status": "completed",
-      "timestamp": "2026-11-28T01:01:28Z",
+      "timestamp": "2026-11-28T01:34:32Z",
       "verdict": "stale",
+      "verdict_allows_evaluation": false,
       "verifier": {
         "adjudicator_digests": [
           "sha256:94ffb2b5266c"
@@ -3175,6 +3603,7 @@
       "dirty": false,
       "evidence": {
         "customer_scope": null,
+        "declared_origin_contradicts_fixture_kind": true,
         "evidence_label": "generated_fixture_evidence",
         "evidence_origin_basis": "caller_asserted_in_preregistration",
         "evidence_origin_declared": "observed",
@@ -3183,7 +3612,6 @@
       },
       "expectation_met": true,
       "expected_verdict": "evaluation_allowed",
-      "held": false,
       "inputs_and_configuration": {
         "acceptable_error_ceiling": 0.05,
         "alpha": 0.05,
@@ -3204,7 +3632,7 @@
         "scorer_version": "generated-scorer-v1",
         "tolerable_label_error": 0.02
       },
-      "measured_git_sha": "27e0012eabfa2ab1dd78a3070072ec50c7525b57",
+      "measured_git_sha": "70687521fad89398b04c0a6d414c8af95174ffb0",
       "metric": {
         "ceiling": 0.05,
         "conclusion": "ruled_out_at_ceiling",
@@ -3220,7 +3648,7 @@
       "missing_fields": [
         "upstream_snapshot_verification"
       ],
-      "observed_audit_cpu_ms": 15.921,
+      "observed_audit_cpu_ms": 12.251,
       "population": "real_sample_standin",
       "reason_codes": [],
       "receipt": {
@@ -3229,17 +3657,42 @@
         "schema_version": "opentour.benchmark-audit-receipt.v1"
       },
       "release_check": {
-        "decision_basis": "worker_ledger_and_recomputed_bindings",
+        "binding_basis": {
+          "answer_key": "recomputed_from_worker_store_material",
+          "canonical_inputs": "recomputed_from_worker_store_material",
+          "label_manifest": "recomputed_from_worker_store_records",
+          "scoring_policy": "recomputed_from_worker_store_material",
+          "source_revisions": "recomputed_from_worker_store_material",
+          "split_manifest": "recomputed_from_worker_store_records"
+        },
+        "decision_basis": {
+          "bindings_absent": [],
+          "bindings_caller_asserted": [],
+          "bindings_recomputed_by_worker": [
+            "answer_key",
+            "canonical_inputs",
+            "label_manifest",
+            "scoring_policy",
+            "source_revisions",
+            "split_manifest"
+          ],
+          "event_log": "sha256_hash_chain_to_worker_stored_head_unsigned",
+          "receipt_and_status": "read_by_check_from_worker_store_after_identity_chain_and_head_checks"
+        },
         "holds": [
-          "audit_receipt_issuer_unauthenticated"
+          "audit_ledger_unsigned",
+          "audit_receipt_issuer_unauthenticated",
+          "evidence_origin_contradicts_worker_record",
+          "generated_fixture_evidence_only"
         ],
         "integrity": "digest_self_consistent_only",
         "issuer_authenticated": false,
+        "ledger_signed": false,
         "outcome": "held",
         "receipt_id": "audit-926f2a033db4ddd1",
         "refusals": [],
         "release_permitted": false,
-        "schema_version": "opentour.benchmark-audit-release-check.v1",
+        "schema_version": "opentour.benchmark-audit-release-check.v2",
         "verified_receipt_digest": "926f2a033db4ddd182db07b63869fbe6218ffc4f5e9be618645194bca63f9fb1"
       },
       "rerun_of": null,
@@ -3278,8 +3731,9 @@
         "unknown_links_recorded": 0
       },
       "status": "completed",
-      "timestamp": "2026-11-28T01:01:28Z",
+      "timestamp": "2026-11-28T01:34:32Z",
       "verdict": "evaluation_allowed",
+      "verdict_allows_evaluation": true,
       "verifier": {
         "adjudicator_digests": [
           "sha256:94ffb2b5266c"
@@ -3346,6 +3800,7 @@
       "dirty": false,
       "evidence": {
         "customer_scope": null,
+        "declared_origin_contradicts_fixture_kind": true,
         "evidence_label": "generated_fixture_evidence",
         "evidence_origin_basis": "caller_asserted_in_preregistration",
         "evidence_origin_declared": "observed",
@@ -3354,7 +3809,6 @@
       },
       "expectation_met": true,
       "expected_verdict": "insufficient_evidence",
-      "held": true,
       "inputs_and_configuration": {
         "acceptable_error_ceiling": 0.05,
         "alpha": 0.05,
@@ -3375,7 +3829,7 @@
         "scorer_version": "generated-scorer-v1",
         "tolerable_label_error": 0.0
       },
-      "measured_git_sha": "27e0012eabfa2ab1dd78a3070072ec50c7525b57",
+      "measured_git_sha": "70687521fad89398b04c0a6d414c8af95174ffb0",
       "metric": {
         "ceiling": 0.05,
         "conclusion": "inconclusive",
@@ -3391,7 +3845,7 @@
       "missing_fields": [
         "upstream_snapshot_verification"
       ],
-      "observed_audit_cpu_ms": 10.802,
+      "observed_audit_cpu_ms": 3.834,
       "population": "real_sample_standin_small",
       "reason_codes": [
         "precision_cannot_rule_out_ceiling"
@@ -3402,17 +3856,39 @@
         "schema_version": "opentour.benchmark-audit-receipt.v1"
       },
       "release_check": {
-        "decision_basis": "worker_ledger_and_recomputed_bindings",
+        "binding_basis": {
+          "answer_key": "recomputed_from_worker_store_material",
+          "canonical_inputs": "recomputed_from_worker_store_material",
+          "label_manifest": "recomputed_from_worker_store_records",
+          "scoring_policy": "recomputed_from_worker_store_material",
+          "source_revisions": "recomputed_from_worker_store_material",
+          "split_manifest": "recomputed_from_worker_store_records"
+        },
+        "decision_basis": {
+          "bindings_absent": [],
+          "bindings_caller_asserted": [],
+          "bindings_recomputed_by_worker": [
+            "answer_key",
+            "canonical_inputs",
+            "label_manifest",
+            "scoring_policy",
+            "source_revisions",
+            "split_manifest"
+          ],
+          "event_log": "sha256_hash_chain_to_worker_stored_head_unsigned",
+          "receipt_and_status": "read_by_check_from_worker_store_after_identity_chain_and_head_checks"
+        },
         "holds": [],
         "integrity": "digest_self_consistent_only",
         "issuer_authenticated": false,
+        "ledger_signed": false,
         "outcome": "refused",
         "receipt_id": "audit-887bc75a11267732",
         "refusals": [
           "audit_verdict_insufficient_evidence"
         ],
         "release_permitted": false,
-        "schema_version": "opentour.benchmark-audit-release-check.v1",
+        "schema_version": "opentour.benchmark-audit-release-check.v2",
         "verified_receipt_digest": "887bc75a1126773205ae4a9534c502c1fc182034b2e95f80587bf1ffb5cec902"
       },
       "rerun_of": null,
@@ -3451,8 +3927,9 @@
         "unknown_links_recorded": 0
       },
       "status": "completed",
-      "timestamp": "2026-11-28T01:01:28Z",
+      "timestamp": "2026-11-28T01:34:32Z",
       "verdict": "insufficient_evidence",
+      "verdict_allows_evaluation": false,
       "verifier": {
         "adjudicator_digests": [
           "sha256:94ffb2b5266c"
@@ -3484,9 +3961,9 @@
   "step4_decision_record": {
     "baseline_run_id": "ope526-fixture-baseline-4ac7054c9cb2",
     "branch": "missing_audit",
-    "change_revision": "27e0012eabfa2ab1dd78a3070072ec50c7525b57",
+    "change_revision": "70687521fad89398b04c0a6d414c8af95174ffb0",
     "change_revision_dirty": false,
-    "change_under_test": "No benchmark or label change. This revision adds the run inventory and the worker-side release check of the audit receipt.",
+    "change_under_test": "No benchmark or label change. This revision adds the run inventory, the worker audit store (identity, hash-chained event log, benchmark state) and the worker-side release check that reads the receipt from that store.",
     "decision": "hold_for_specified_evidence",
     "evidence_level": "generated_fixture_evidence",
     "expectation_met": true,
@@ -3564,7 +4041,7 @@
     },
     "trade_offs": [
       "Holding the real-population claim delays any customer accuracy alert until independent evidence exists; the starter and fixture-agreement views stay available.",
-      "The release check refuses or holds every receipt today, because receipts are digest-consistent only and unsigned."
+      "The release check refuses or holds every receipt today, because receipts are digest-consistent only, the issuer is unauthenticated and the worker event log is unsigned."
     ]
   },
   "summary": {
@@ -3572,8 +4049,17 @@
     "completed": 20,
     "evaluation_allowed": 4,
     "failed": 0,
-    "held": 16,
     "matching_hand_checked_verdict": 20,
-    "release_permitted": 0
+    "release_held_or_refused": 20,
+    "release_permitted": 0,
+    "verdict_not_evaluation_allowed": 16
+  },
+  "unkeyed_digest_fields": {
+    "inputs_and_configuration.binding_digests": "first 12 hex of each unkeyed binding digest",
+    "receipt.receipt_digest": "sha256 of the receipt body, full",
+    "sampling_frame.frame_digest": "sha256(canonical_json(sorted protected family ids)), full",
+    "verifier.adjudicator_digests": "sha256(canonical_json(name))[:12]",
+    "verifier.independent_source_digests": "sha256(canonical_json(name))[:12]",
+    "verifier.label_authority_digest": "sha256(canonical_json(name))[:12]"
   }
 }
