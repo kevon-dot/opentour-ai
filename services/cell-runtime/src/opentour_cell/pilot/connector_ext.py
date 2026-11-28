@@ -128,7 +128,8 @@ class Fenceable(Protocol):
 #   empty or non-string currency, or has the wrong shape. Reported first: a malformed record yields
 #   no verified figure, so there is nothing to compare whatever the cap says.
 # * ``cap_unverifiable``: the usage is in a currency other than the cap's (exact, case-sensitive),
-#   or a journaled maximum or the currency is missing or not a plain non-negative ``int``.
+#   a journaled maximum is missing or not a plain non-negative ``int``, or the journaled currency is
+#   missing or not an ISO-4217-shaped code (``cap_currency``).
 # Each route decides what COMPLETED means and enforces the hold where its result would be released;
 # ``hold_reason`` is ``None`` for a job that is not COMPLETED.
 #
@@ -138,6 +139,16 @@ class Fenceable(Protocol):
 # dispatch (``require_exact_bound``): an ``int`` subclass serializes like the plain int, so a digest
 # alone cannot tell them apart (OPE-508 L1). A negative maximum or a currency that is not an
 # ISO-4217-shaped code is refused there too (review of #241, F4: refuse before spend).
+#
+# Where the shape check applies (review of #241 at 7ae8613, F1-241, owner-delegate decision): only
+# on submit, before a new digest is journaled. A route's intent digest applies no shape check, so a
+# job journaled by an older build under a bound the current rule refuses stays reachable by every
+# receipt path (status, cancel, lookup, usage, hold and disposition). Its release stays closed: the
+# journaled cap is read back through ``cap_limit`` and ``cap_currency``, which accept only what
+# ``require_exact_bound`` accepts, so such a job is held as ``cap_unverifiable`` (or a verified
+# ``over_cap``) and never releases. A route's receipt paths compare only journaled values, so an
+# ``int`` subclass in a receipt names the same job as the plain int and changes nothing.
+# A receipt whose bound cannot be serialized digests to ``UNSERIALIZABLE_DIGEST``: it names no job.
 CAP_WITHIN = "within_cap"
 CAP_OVER = "over_cap"
 CAP_UNKNOWN = "cap_unknown"
@@ -147,6 +158,10 @@ HOLD_CAP_UNVERIFIABLE = "cap_unverifiable"
 BOUND_NOT_EXACT_INT = "fit_bound_not_exact_int"
 BOUND_NEGATIVE = "fit_bound_negative"
 BOUND_CURRENCY_INVALID = "fit_bound_currency_invalid"
+# The digest a route reports for an intent its canonical JSON cannot write (for example a
+# ``Decimal`` or non-finite maximum). It is not a sha256 hex digest, so it equals no journaled
+# digest, and none is ever journaled because ``submit`` refuses such a bound first.
+UNSERIALIZABLE_DIGEST = "unserializable-intent"
 _CURRENCY = re.compile(r"[A-Z]{3}")
 
 # (usage field, cap field) for every bounded dimension. Money also needs a matching currency.
@@ -163,7 +178,9 @@ USAGE_FIELDS = frozenset({"currency", "minor_units", "seconds", "rows", "steps"}
 def require_exact_bound(bound: FitBound) -> None:
     """Refuse, before anything is journaled or sent, a bound that is not exactly well formed.
 
-    Checked in this order, each with a fixed reason:
+    Applied on submit only, never to the digest of an intent that is already journaled (F1-241).
+    Checked in this order, each with a fixed reason; with several defects the first one is
+    reported:
     * ``fit_bound_not_exact_int``: a maximum is not exactly ``int`` (bool and subclasses too);
     * ``fit_bound_negative``: a maximum is below zero (zero is accepted);
     * ``fit_bound_currency_invalid``: the currency is not an exact ``str`` of three ASCII
@@ -263,8 +280,15 @@ def cap_limit(value: object) -> int | None:
 
 
 def cap_currency(cap: JournaledCap) -> str | None:
-    """The journaled currency, or ``None`` when it is missing or not a non-empty string."""
-    return cap.currency if isinstance(cap.currency, str) and cap.currency else None
+    """The journaled currency, or ``None`` unless it is an exact ``str`` of the ISO-4217 shape.
+
+    The same shape ``require_exact_bound`` demands at submit, so a currency an older build
+    journaled (``"usd"``, ``"US"``) never compares, even with usage that repeats it (F1-241).
+    """
+    currency = cap.currency
+    if type(currency) is not str or _CURRENCY.fullmatch(currency) is None:
+        return None
+    return currency
 
 
 def cap_status(usage: UsageLike | None, cap: JournaledCap) -> str | None:

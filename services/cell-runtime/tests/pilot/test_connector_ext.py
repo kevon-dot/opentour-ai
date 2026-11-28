@@ -240,3 +240,60 @@ def test_x4_capped_usage_is_settleable_only_within_the_cap(status: str, settleab
         "simulated:job", "USD", 3, 2, 4, 5, UsageSource.ESTIMATED, cap_status="within_cap"
     )
     assert estimated.settleable is False
+
+
+# ---- Review of #241 (follow-ups)
+# N7  ``require_exact_bound`` reports the first defect in its documented order
+# F1a a journaled currency that is not ISO-4217-shaped is ``cap_unverifiable``: a job whose bound
+#     an older rule accepted never releases, even when its usage repeats that currency
+# F1b the digest of an unserializable intent is a fixed value that is never a sha256 digest
+@pytest.mark.parametrize(
+    "changes, reason",
+    [
+        ({"maximum_steps": 5.0, "currency": "usd"}, "fit_bound_not_exact_int"),
+        ({"maximum_rows": True, "maximum_seconds": -1}, "fit_bound_not_exact_int"),
+        (
+            {"maximum_minor_units": None, "maximum_steps": -1, "currency": ""},
+            "fit_bound_not_exact_int",
+        ),
+        ({"maximum_steps": -1, "currency": "usd"}, "fit_bound_negative"),
+        ({"maximum_minor_units": -1, "currency": None}, "fit_bound_negative"),
+    ],
+    ids=["float-currency", "bool-negative", "all-three", "negative-currency", "negative-none"],
+)
+def test_n7_two_defects_report_the_first_in_the_documented_order(
+    changes: dict[str, object], reason: str
+) -> None:
+    bound = replace(BOUND, **changes)
+    with pytest.raises(ValueError, match=f"^{reason}$"):
+        ext.require_exact_bound(bound)
+    with pytest.raises(ValueError, match=f"^{reason}$"):
+        ext.journal_bound(bound)
+
+
+@pytest.mark.parametrize("currency", ["usd", "Usd", "US", "USDX", " USD", "U5D", 840])
+def test_f1a_a_journaled_currency_that_is_not_iso_shaped_is_cap_unverifiable(
+    currency: object,
+) -> None:
+    journaled = cap(currency=currency)
+    assert ext.cap_currency(journaled) is None
+    # Usage in the very same (legacy) currency is not comparable either: release stays closed.
+    same = figures(currency=currency) if isinstance(currency, str) else figures()
+    assert same is not None
+    assert ext.cap_status(same, journaled) == ext.CAP_UNKNOWN
+    assert ext.usage_hold(same, journaled) == "cap_unverifiable"
+    capped = ext.capped_usage("simulated:job", same, journaled, UsageSource.MEASURED)
+    assert capped.approved_currency is None and capped.settleable is False
+    # A verified excess still wins over the unusable currency.
+    assert ext.usage_hold(figures(steps=101), journaled) == "over_cap"
+
+
+def test_f1a_an_iso_shaped_journaled_currency_is_still_comparable() -> None:
+    assert ext.cap_currency(cap()) == "USD"
+    assert ext.usage_hold(figures(), cap()) is None
+
+
+def test_f1b_the_unserializable_digest_is_never_a_sha256_digest() -> None:
+    digest = ext.UNSERIALIZABLE_DIGEST
+    assert isinstance(digest, str) and digest
+    assert len(digest) != 64 or any(c not in "0123456789abcdef" for c in digest)

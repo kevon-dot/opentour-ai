@@ -33,8 +33,14 @@ Over-cap usage is a hard refusal. Every bounded dimension is compared against th
 at dispatch (currency and all four maxima; never the caller's values at release), using the hold
 shared with the other routes (``connector_ext.usage_hold``). An intent bound whose maxima are not
 exactly ``int`` (bool and ``int`` subclasses included), is negative, or whose currency is not an
-ISO-4217-shaped code is refused by ``intent_digest`` (``connector_ext.require_exact_bound``), so it
-can neither dispatch, even through a direct ``submit``, nor be presented later in a receipt. A
+ISO-4217-shaped code is refused by ``submit`` (``connector_ext.require_exact_bound``) before
+anything is journaled or sent, so it cannot dispatch, even through a direct ``submit``.
+``intent_digest`` itself applies no shape check (review of #241, F1-241, owner-delegate decision):
+a job journaled by an older build under a bound the current rule refuses stays reachable by
+``lookup``, ``status``, ``cancel``, ``usage``, ``hold_reason`` and disposition, while its release
+stays closed (the journaled cap reads as ``cap_unverifiable``). No receipt path compares the
+caller's bound: the provider's cap acknowledgement is confirmed against the journaled maximum on
+``status`` and ``lookup`` too, so an ``int`` subclass in a receipt changes nothing. A
 COMPLETED job with any verified dimension above its bound is held with the fixed reason
 ``over_cap``: ``collect`` builds no candidate, and ``handoff_reference`` and
 ``predict_for_replay`` never use its tuned-model id. Usage that cannot be shown to be within
@@ -85,6 +91,7 @@ from opentour_cell.pilot.connector_ext import HOLD_CAP_UNVERIFIABLE as HOLD_CAP_
 from opentour_cell.pilot.connector_ext import HOLD_OVER_CAP as HOLD_OVER_CAP
 from opentour_cell.pilot.connector_ext import HOLD_USAGE_UNVERIFIABLE as HOLD_USAGE_UNVERIFIABLE
 from opentour_cell.pilot.connector_ext import (
+    UNSERIALIZABLE_DIGEST,
     CappedUsage,
     EvidenceTier,
     FenceReceipt,
@@ -262,15 +269,16 @@ def _binding_document(binding: mc.ModelBinding) -> dict[str, str]:
 
 
 def intent_digest(intent: mc.FitIntent) -> str:
-    """The journal's binding to one intent. Refuses a bound whose maxima are not exactly ``int``.
+    """The journal's binding to one intent. Applies no bound shape check (F1-241).
 
-    JSON writes an ``int`` subclass exactly like the plain int, so without the refusal such a bound
-    would match the digest while comparing differently (OPE-508 L1).
+    ``submit`` refuses a malformed bound before a digest is journaled; a receipt for a job an older
+    build journaled must still reach it. JSON writes an ``int`` subclass exactly like the plain int,
+    so such a receipt names the same job; that is safe because no receipt path compares the
+    caller's bound (OPE-508 L1). An intent JSON cannot write digests to ``UNSERIALIZABLE_DIGEST``.
     """
     bound = intent.bound
-    require_exact_bound(bound)
-    return _sha(
-        _canonical(
+    try:
+        document = _canonical(
             [
                 _binding_document(intent.binding),
                 intent.grant_revision,
@@ -287,7 +295,9 @@ def intent_digest(intent: mc.FitIntent) -> str:
                 ],
             ]
         )
-    )
+    except (TypeError, ValueError):
+        return UNSERIALIZABLE_DIGEST
+    return _sha(document)
 
 
 @dataclass(frozen=True)
@@ -616,18 +626,19 @@ class ManagedConnector:
     def _token(self, key: str) -> str:
         return f"opentour-{key}"
 
-    def _reconcile(
-        self, key: str, view: _View, maximum_minor_units: int | None = None
-    ) -> _View | None:
-        """Read-only toward the provider: find by client token. ``None`` means unverifiable."""
+    def _reconcile(self, key: str, view: _View, *, confirm_cap: bool = False) -> _View | None:
+        """Read-only toward the provider: find by client token. ``None`` means unverifiable.
+
+        With ``confirm_cap`` the provider's cap is confirmed against the journaled maximum.
+        """
         binding = self._binding_of(view)
         job = self.transport.find_job(binding, self._token(key))
         if job is None:
             return None
         self._adopt(key, view, job)
         view = self._view(key)
-        if maximum_minor_units is not None and not view.cancel_requested:
-            if not self._confirm_cap(key, view, job, maximum_minor_units):
+        if confirm_cap and not view.cancel_requested:
+            if not self._confirm_cap(key, view, job):
                 return self._view(key)
         self._absorb(key, view, job)
         view = self._view(key)
@@ -646,6 +657,8 @@ class ManagedConnector:
     def submit(self, intent: mc.FitIntent, development: bytes) -> mc.JobReceipt:
         self._require_open()
         self._require_binding(intent.binding)
+        # The one place the bound's shape is checked: before a new digest can be journaled.
+        require_exact_bound(intent.bound)
         key = self._key(intent)
         digest = intent_digest(intent)
         with self._locked(key):
@@ -654,7 +667,7 @@ class ManagedConnector:
                 if view.intent_sha != digest:
                     raise ValueError("idempotency_conflict")
                 if not view.job_id or (not view.cap_verified and not view.terminal):
-                    reconciled = self._reconcile(key, view, intent.bound.maximum_minor_units)
+                    reconciled = self._reconcile(key, view, confirm_cap=True)
                     if reconciled is None:
                         raise OSError("dispatch_outcome_unknown")
                     view = reconciled
@@ -687,7 +700,7 @@ class ManagedConnector:
             )
             self._adopt(key, self._view(key), job)
             view = self._view(key)
-            if not self._confirm_cap(key, view, job, intent.bound.maximum_minor_units):
+            if not self._confirm_cap(key, view, job):
                 raise ValueError("provider_cap_not_enforced")
             self._absorb(key, view, job)
             return self._receipt(intent, key, self._view(key))
@@ -717,12 +730,16 @@ class ManagedConnector:
         if development != canonical_payload:
             raise ValueError("training_payload_invalid")
 
-    def _confirm_cap(
-        self, key: str, view: _View, job: ProviderJob, maximum_minor_units: int
-    ) -> bool:
+    def _confirm_cap(self, key: str, view: _View, job: ProviderJob) -> bool:
+        """Confirm the provider's cap against the journaled maximum, never the caller's bound.
+
+        A journaled maximum that is missing or not a plain non-negative ``int`` cannot bound the
+        provider's cap: the job is stopped (fail closed), as for an unenforced cap.
+        """
         self._require_same_job(key, view, job)
         cap = job.cap_minor_units
-        if type(cap) is not int or not 0 <= cap <= maximum_minor_units:
+        maximum = cap_limit(view.maximum_minor_units)
+        if maximum is None or type(cap) is not int or not 0 <= cap <= maximum:
             self._cancel_unbounded(key, view, self._binding_of(view))
             return False
         if not view.cap_verified:
@@ -743,7 +760,7 @@ class ManagedConnector:
             if view.intent_sha != digest:
                 raise ValueError("idempotency_conflict")
             if not view.job_id or (not view.cap_verified and not view.terminal):
-                reconciled = self._reconcile(key, view, intent.bound.maximum_minor_units)
+                reconciled = self._reconcile(key, view, confirm_cap=True)
                 if reconciled is None:
                     return None
                 view = reconciled
@@ -757,9 +774,7 @@ class ManagedConnector:
                 raise ValueError("job_receipt_mismatched")
             if not view.terminal and view.job_id:
                 provider = self.transport.get_job(self._binding_of(view), view.job_id)
-                if view.cancel_requested or self._confirm_cap(
-                    key, view, provider, job.intent.bound.maximum_minor_units
-                ):
+                if view.cancel_requested or self._confirm_cap(key, view, provider):
                     self._absorb(key, view, provider)
                 view = self._view(key)
             return self._receipt(job.intent, key, view)
@@ -947,7 +962,7 @@ class ManagedConnector:
                     return False
                 try:
                     observed = self.transport.get_job(self._binding_of(view), job_id)
-                    if self._confirm_cap(key, view, observed, view.maximum_minor_units):
+                    if self._confirm_cap(key, view, observed):
                         self._absorb(key, view, observed)
                 except (OSError, LookupError, ValueError):
                     return False

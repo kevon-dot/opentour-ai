@@ -27,8 +27,14 @@ as ``over_cap``, ``usage_unverifiable`` (including a trainer that reported no us
 refuses it, ``hold_reason`` reports the reason (``None`` unless the job is COMPLETED) and
 ``usage().settleable`` is False. This route has no ``handoff_reference``; ``collect`` and replay
 are where its result is released. A job still running whose reported usage is not verifiably
-within the cap is stopped, as before. An intent bound whose maxima are not exactly ``int`` is
-refused before anything is journaled and in every receipt.
+within the cap is stopped, as before. An intent bound whose maxima are not exactly ``int``, are
+negative, or whose currency is not an ISO-4217-shaped code is refused by ``submit`` before anything
+is journaled. The intent digest applies no shape check (review of #241, F1-241, owner-delegate
+decision): a job journaled by an older build under a bound the current rule refuses stays
+reachable by ``lookup``, ``status``, ``cancel``, ``usage`` and ``hold_reason``, and its release
+stays closed (its journaled cap reads as ``cap_unverifiable``). ``hold_reason`` never polls a
+fenced tenant (F2-241); for an open tenant it observes a live job as ``status`` does (see its
+docstring for the side effects).
 
 Simulated: tests drive this module with a generated sentinel trainer written independently of it
 (``reference_customer_trainer``) and with fault-injecting wrappers. Credentials are generated
@@ -62,6 +68,7 @@ from typing import Any, Protocol, cast
 from opentour_cell.pilot import model_connector as mc
 from opentour_cell.pilot.connector_ext import (
     CAP_WITHIN,
+    UNSERIALIZABLE_DIGEST,
     EvidenceTier,
     FenceReceipt,
     JournaledCap,
@@ -571,9 +578,18 @@ def _token(intent: mc.FitIntent) -> str:
 
 
 def _intent_digest(intent: mc.FitIntent) -> str:
-    """The journal's binding to one intent. Refuses a bound whose maxima are not exactly ``int``."""
-    require_exact_bound(intent.bound)
-    return hashlib.sha256(_canon(asdict(intent)).encode()).hexdigest()
+    """The journal's binding to one intent. Applies no bound shape check (F1-241).
+
+    ``submit`` refuses a malformed bound before a digest is journaled; a receipt for a job an older
+    build journaled must still reach it. No receipt path compares the caller's bound, so an ``int``
+    subclass that digests like the plain int changes nothing. An intent JSON cannot write digests
+    to ``UNSERIALIZABLE_DIGEST``, which matches no journal.
+    """
+    try:
+        document = _canon(asdict(intent))
+    except (TypeError, ValueError):
+        return UNSERIALIZABLE_DIGEST
+    return hashlib.sha256(document.encode()).hexdigest()
 
 
 def _terminal_record(token: str, state: str, view: TrainerView) -> dict[str, Any]:
@@ -833,7 +849,8 @@ class CustomTrainerConnector:
 
     def submit(self, intent: mc.FitIntent, development: bytes) -> mc.JobReceipt:
         binding = intent.binding
-        cap = journal_bound(intent.bound)  # refuses a bound that is not exactly int, first
+        require_exact_bound(intent.bound)  # first, and the one place the shape is checked (F1-241)
+        cap = journal_bound(intent.bound)  # the cap compared at release
         self._open(binding)
         registration, credential, manifest = self._gate(binding)
         if hashlib.sha256(development).hexdigest() != intent.development_digest:
@@ -977,11 +994,24 @@ class CustomTrainerConnector:
     def hold_reason(self, job: mc.JobReceipt) -> str | None:
         """The fixed reason a COMPLETED job's result is held, else ``None``.
 
-        One of ``over_cap``, ``usage_unverifiable`` or ``cap_unverifiable``. A job whose terminal
-        state is not journaled yet is observed first (as ``status`` would); a settled job is read
-        from the journal only.
+        One of ``over_cap``, ``usage_unverifiable`` or ``cap_unverifiable``. A settled job is read
+        from the journal only. The fence is checked first (F2-241 decision): for a fenced tenant
+        nothing is polled and the reason is what the journal shows (``None`` while no terminal
+        state is journaled).
+
+        For an open tenant this is NOT a pure read. A job whose terminal state is not journaled
+        yet is observed first, exactly as ``status`` does, so that every path reading a hold sees
+        the same outcome. That observation has two side effects a caller must allow for:
+        * it may stop the job: a running job whose reported usage is not verifiably within the
+          journaled cap gets durable cancel intent and a ``request_cancel`` (and then reports no
+          hold, since only a COMPLETED job has one);
+        * it may raise: a transport error from the poll or the stop (``OSError``, or a
+          ``ValueError`` for a reply about another job) propagates, never read as "no hold".
         """
-        return self._hold(self._observed(job, _token(job.intent)))
+        token = _token(job.intent)
+        if job.intent.binding.tenant in self.journal.read().fenced:
+            return self._hold(self._known(job, token))  # fenced: the journal only, never a poll
+        return self._hold(self._observed(job, token))
 
     @staticmethod
     def _same_job(view: TrainerView, token: str, entry: _Entry) -> None:

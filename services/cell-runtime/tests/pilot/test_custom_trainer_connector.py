@@ -17,10 +17,12 @@ import threading
 import time
 from contextlib import nullcontext
 from dataclasses import fields, replace
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
 from opentour_cell.pilot import connector_conformance as cc
+from opentour_cell.pilot import connector_ext as ext
 from opentour_cell.pilot import custom_trainer_connector as ctc
 from opentour_cell.pilot import model_connector as mc
 from opentour_cell.pilot import trainer_conformance as tc
@@ -2330,16 +2332,16 @@ def test_t7_int_subclass_receipt_is_refused_and_cannot_change_the_hold_reason(en
     connector, transport, done = _completed_reporting(env, reported)
     sneaky = replace(done.intent, bound=replace(LIMIT, **{limit: SneakyInt(getattr(LIMIT, limit))}))
     forged = replace(done, intent=sneaky)
-    for call in (
-        lambda: connector.hold_reason(forged),
-        lambda: connector.collect(forged),
-        lambda: connector.usage(forged),
-        lambda: connector.status(forged),
-        lambda: connector.cancel(forged),
-        lambda: connector.lookup(sneaky),
-    ):
-        with pytest.raises(ValueError, match="^fit_bound_not_exact_int$"):
-            call()
+    # F1-241: it names the same journaled job and reads exactly what the genuine receipt reads;
+    # release compares only the journaled cap, so the genuine ``over_cap`` stands.
+    assert connector.hold_reason(forged) == "over_cap"
+    with pytest.raises(ValueError, match="^over_cap$"):
+        connector.collect(forged)
+    usage = connector.usage(forged)
+    assert usage is not None and usage.cap_status == "over_cap" and usage.settleable is False
+    assert connector.status(forged).state is mc.JobState.COMPLETED
+    assert connector.cancel(forged).state is mc.JobState.COMPLETED  # settled: nothing to stop
+    assert connector.lookup(sneaky).state is mc.JobState.COMPLETED
     assert transport.fetched == [] and transport.stops == []
     assert connector.hold_reason(done) == "over_cap"
 
@@ -2461,3 +2463,210 @@ def test_f4_invalid_intent_currency_is_refused_before_dispatch(env, currency):
         env.connector.submit(forged, env.connector.serialize_development(forged, ROWS))
     assert env.executions() == 0
     assert '"intent"' not in _journal_path(env).read_text()
+
+
+# ---- Review of #241 at 7ae8613 (follow-ups)
+# G1 F1-241 (owner-delegate decision: validate the bound shape only on submit): a RUNNING job
+#    dispatched under an older rule with a bound the current rule refuses (the reviewer's repro)
+#    answers status, lookup, hold_reason, usage and collect, and can be canceled
+# G2 F1-241: such a job, once COMPLETED, is held ``cap_unverifiable`` and never released, even
+#    when the trainer reports usage in the legacy bound's own currency
+# G4 F1-241: a receipt whose bound cannot be serialized names no job (a fixed refusal)
+# H1 F2-241 (decision): ``hold_reason`` checks the fence first and never polls a fenced tenant; it
+#    returns what the journal shows
+# H2 F2-241: for an open tenant ``hold_reason`` observes like ``status``: it may stop a running
+#    over-cap job, and a transport error propagates (both documented)
+# N10 ``collect`` re-checks cancel intent after its own observation journals one
+# N11 a fenced ``collect`` never polls the trainer
+def _old_rule(bound):
+    """The rule an older build applied at dispatch: exact ``int`` maxima only, any sign or code."""
+    if any(type(getattr(bound, limit)) is not int for limit in TRAINER_MAXIMA):
+        raise ValueError("fit_bound_not_exact_int")
+
+
+# A negative row maximum never dispatched here even then (the payload check refuses it).
+TRAINER_LEGACY_BOUNDS = {
+    "negative-steps": replace(LIMIT, maximum_steps=-1),
+    "negative-seconds": replace(LIMIT, maximum_seconds=-1),
+    "negative-money": replace(LIMIT, maximum_minor_units=-1),
+    "lowercase-currency": replace(LIMIT, currency="usd"),
+}
+
+
+def _legacy_dispatch(env, monkeypatch, bound):
+    """``direct_submit`` under the older rule, then restore the current one (the reviewer's)."""
+    intent = replace(env.intent, bound=bound)
+    with monkeypatch.context() as patch:
+        patch.setattr(ext, "require_exact_bound", _old_rule)
+        patch.setattr(ctc, "require_exact_bound", _old_rule)
+        receipt = env.direct_submit(intent)
+    with pytest.raises(ValueError, match="^fit_bound_(negative|currency_invalid)$"):
+        ctc.require_exact_bound(bound)  # the current rule is back
+    return intent, receipt
+
+
+class Polled(Observed):
+    """``Observed`` that records every poll and can force the live state the trainer reports."""
+
+    def __init__(self, inner, reported, *, state=None, fail=False):
+        super().__init__(inner, reported)
+        self.polls = []
+        self.state = state
+        self.fail = fail
+
+    def poll(self, credential, job_id):
+        self.polls.append(job_id)
+        if self.fail:
+            raise OSError("simulated:trainer-unreachable")
+        view = super().poll(credential, job_id)
+        return replace(view, state=self.state, usage=self.reported) if self.state else view
+
+
+@pytest.mark.parametrize("bound", TRAINER_LEGACY_BOUNDS.values(), ids=TRAINER_LEGACY_BOUNDS)
+def test_g1_running_job_with_a_legacy_bound_stays_reachable(env, monkeypatch, bound):
+    intent, receipt = _legacy_dispatch(env, monkeypatch, bound)
+    transport = Polled(env.trainer, None, state="running")
+    connector = env.make_connector(transport)
+    running = connector.status(receipt)
+    assert running.state is mc.JobState.RUNNING and transport.stops == []
+    found = connector.lookup(intent)
+    assert found is not None and found.job_ref == receipt.job_ref
+    assert connector.hold_reason(running) is None
+    assert connector.usage(running) is None
+    with pytest.raises(ValueError, match="^job_not_completed$"):
+        connector.collect(running)
+    canceled = connector.cancel(running)
+    assert canceled.state is mc.JobState.CANCELED and transport.stops == [receipt.job_ref]
+    assert connector.status(canceled).state is mc.JobState.CANCELED
+    assert connector.hold_reason(canceled) is None
+    with pytest.raises(ValueError, match="^job_canceled$"):
+        connector.collect(canceled)
+    assert transport.fetched == [] and transport.predicted == []
+
+
+@pytest.mark.parametrize("bound", TRAINER_LEGACY_BOUNDS.values(), ids=TRAINER_LEGACY_BOUNDS)
+def test_g2_completed_job_with_a_legacy_bound_is_held_and_never_released(env, monkeypatch, bound):
+    _, receipt = _legacy_dispatch(env, monkeypatch, bound)
+    env.trainer.run_pending()
+    transport = Observed(env.trainer, replace(REFERENCE_USAGE, currency=bound.currency))
+    connector = env.make_connector(transport)
+    done = connector.status(receipt)
+    _assert_trainer_held(env, connector, transport, done, "cap_unverifiable")
+
+
+@pytest.mark.parametrize(
+    "limit, value, unserializable",
+    [
+        ("maximum_steps", Decimal(100), True),
+        ("maximum_minor_units", object(), True),
+        ("maximum_seconds", float("nan"), False),  # this route's JSON writes NaN: a new digest
+    ],
+    ids=["decimal", "object", "nan"],
+)
+def test_g4_a_receipt_whose_bound_cannot_be_serialized_names_no_job(
+    env, limit, value, unserializable
+):
+    connector, transport, done = _completed_reporting(env, REFERENCE_USAGE)
+    forged_intent = replace(done.intent, bound=replace(LIMIT, **{limit: value}))
+    digest = ctc._intent_digest(forged_intent)
+    assert (digest == ext.UNSERIALIZABLE_DIGEST) is unserializable
+    assert digest != ctc._intent_digest(done.intent)
+    forged = replace(done, intent=forged_intent)
+    for call in (
+        lambda: connector.status(forged),
+        lambda: connector.cancel(forged),
+        lambda: connector.hold_reason(forged),
+        lambda: connector.usage(forged),
+        lambda: connector.collect(forged),
+    ):
+        with pytest.raises(LookupError, match="^job_unknown$"):
+            call()
+    with pytest.raises(ValueError, match="^idempotency_conflict$"):
+        connector.lookup(forged_intent)
+    assert transport.fetched == [] and transport.stops == []
+    assert connector.hold_reason(done) is None  # the genuine receipt is untouched
+
+
+def _fenced_live_job(env):
+    """A job the trainer finished but whose fence could not stop it, so nothing is journaled."""
+    receipt = env.dispatch()
+    env.trainer.run_pending()
+
+    class Down(Proxy):
+        def request_cancel(self, credential, job_id):
+            raise OSError("simulated:trainer-down")
+
+    with pytest.raises(ValueError, match="FENCE_JOB_NOT_STOPPED"):
+        env.make_connector(Down(env.trainer)).fence("generated-tenant")
+    return receipt
+
+
+def test_h1_fenced_hold_reason_never_polls_and_reads_the_journal(env):
+    receipt = _fenced_live_job(env)
+    transport = Polled(env.trainer, OVER)
+    connector = env.make_connector(transport)
+    before = _journal_path(env).read_text()
+    assert connector.hold_reason(receipt) is None  # the journal shows no terminal state
+    assert transport.polls == [] and transport.stops == []
+    assert _journal_path(env).read_text() == before
+    with pytest.raises(LookupError, match="^job_unknown$"):
+        connector.hold_reason(replace(receipt, job_ref="generated-job-other"))
+
+
+def test_h1_fenced_hold_reason_of_a_settled_job_is_the_journaled_reason(env):
+    connector, _, done = _completed_reporting(env, OVER)
+    connector.fence("generated-tenant")  # nothing live to stop
+    polled = Polled(env.trainer, None, fail=True)  # would raise if it were polled
+    fenced = env.make_connector(polled)
+    assert fenced.hold_reason(done) == "over_cap"
+    assert polled.polls == []
+
+
+def test_h1_a_fence_for_another_tenant_does_not_stop_observation(env):
+    receipt = env.dispatch()
+    env.trainer.run_pending()
+    transport = Polled(env.trainer, OVER)
+    connector = env.make_connector(transport)
+    connector.fence("generated-other-tenant")
+    assert connector.hold_reason(receipt) == "over_cap"  # observed, then journaled
+    assert transport.polls == [receipt.job_ref]
+
+
+def test_h2_hold_reason_may_stop_a_running_over_cap_job(env):
+    receipt = env.dispatch()
+    transport = Polled(env.trainer, OVER, state="running")
+    connector = env.make_connector(transport)
+    assert connector.hold_reason(receipt) is None  # stopped: FAILED holds no result
+    assert transport.polls == [receipt.job_ref] and transport.stops == [receipt.job_ref]
+    assert '"cancel_intent"' in _journal_path(env).read_text()
+    assert connector.status(receipt).state is mc.JobState.FAILED
+
+
+def test_h2_hold_reason_propagates_a_transport_error(env):
+    receipt = env.dispatch()
+    transport = Polled(env.trainer, None, fail=True)
+    connector = env.make_connector(transport)
+    before = _journal_path(env).read_text()
+    with pytest.raises(OSError, match="simulated:trainer-unreachable"):
+        connector.hold_reason(receipt)
+    assert transport.polls == [receipt.job_ref] and transport.stops == []
+    assert _journal_path(env).read_text() == before
+
+
+def test_n10_collect_rechecks_cancel_intent_its_own_observation_journaled(env):
+    receipt = env.dispatch()
+    transport = Polled(env.trainer, OVER, state="running")
+    connector = env.make_connector(transport)
+    assert '"cancel_intent"' not in _journal_path(env).read_text()
+    with pytest.raises(ValueError, match="^job_canceled$"):
+        connector.collect(receipt)  # observing stopped the over-cap job and journaled the cancel
+    assert transport.stops == [receipt.job_ref] and transport.fetched == []
+
+
+def test_n11_fenced_collect_never_polls_the_trainer(env):
+    receipt = _fenced_live_job(env)
+    transport = Polled(env.trainer, None)
+    connector = env.make_connector(transport)
+    with pytest.raises(ValueError, match="^connector_fenced$"):
+        connector.collect(receipt)
+    assert transport.polls == [] and transport.fetched == []
