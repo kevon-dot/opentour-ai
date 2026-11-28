@@ -84,6 +84,166 @@ def test_direct_and_dispatch_reconcile_the_same_budget_and_fit(tmp_path, direct_
     assert details["cumulative_reserved_fits"] == details["reserved_fits"] == 1
 
 
+def test_learning_fit_port_never_sends_on_reserve_or_settles_unverified_usage(tmp_path):
+    from dataclasses import replace
+
+    from opentour_cell.pilot import fit_dispatch as fd
+    from opentour_cell.pilot import learning_runs as lr
+    from opentour_cell.pilot.learning_fit_dispatch import LearningFitLedger
+
+    world = World(tmp_path)
+    run, receipt = world.admit()
+    request = world.request(run, receipt)
+    mandate = world.mandates.inspect(MANDATE)
+    dispatcher = world.dispatcher(ledger=MandateFitLedger(world.mandates))
+    learning_ref = "learning-run-one"
+    adapter = LearningFitLedger(
+        dispatcher,
+        actor=DELEGATE,
+        client="worker",
+        resolve=lambda ref: request if ref == learning_ref else None,
+    )
+    intent = lr.FitIntent(
+        world.store.organization,
+        MANDATE,
+        mandate["mandate_revision"],
+        world.snapshots[run].snapshot_ref,
+        "plan-" + request.plan_revision[:40],
+        fd.model_digest(request.binding),
+        learning_ref,
+        request.evaluation_revision,
+        request.bound.maximum_seconds,
+    )
+    assert adapter.lookup(intent) is None
+    with pytest.raises(lr.LedgerHold):
+        adapter.reserve(replace(intent, snapshot_ref="unrelated"), operation_key="bad")
+    assert world.mandates.inspect(MANDATE)["reserved_fits"] == 0
+    reserved = adapter.reserve(intent, operation_key="first")
+    assert adapter.lookup(intent) == reserved
+    with world.mandates._db(write=False) as db:
+        assert db.execute("SELECT count(*) FROM dispatch_aliases").fetchone()[0] == 1
+    assert dispatcher.status(reserved.reservation_ref, actor=DELEGATE).submissions == 0
+    with pytest.raises(lr.LedgerHold):
+        adapter.settle(reserved.reservation_ref, consumed_units=0)
+    final = world.finish(dispatcher, reserved.reservation_ref)
+    assert final.stage == "settled" and final.submissions == 1
+    with pytest.raises(lr.LedgerHold):
+        adapter.settle(reserved.reservation_ref, consumed_units=final.usage["seconds"] + 1)
+    assert (
+        adapter.settle(
+            reserved.reservation_ref, consumed_units=final.usage["seconds"]
+        ).consumed_units
+        == final.usage["seconds"]
+    )
+
+
+def test_signed_learning_plan_scheduler_and_slack_share_one_dispatch(tmp_path):
+    from dataclasses import replace
+
+    from opentour_cell.pilot import fit_dispatch as fd
+    from opentour_cell.pilot import learning_runs as lr
+    from opentour_cell.pilot.learning_fit_dispatch import LearningFitLedger
+    from test_fit_dispatch import OWNER
+
+    world = World(tmp_path)
+    run, receipt = world.admit()
+    request = world.request(run, receipt)
+    tenant = world.store.organization
+    mandate = world.mandates.inspect(MANDATE)
+    workflow = mandate["scope"]["workflow"]
+
+    def authorize(channel, actor, role):
+        path = world.dir / f"learning-{channel}.json"
+        assert (
+            lr.main(
+                [
+                    "authorize",
+                    "--selection",
+                    str(path),
+                    "--tenant",
+                    tenant,
+                    "--owner",
+                    OWNER,
+                    "--actor",
+                    actor,
+                    "--role",
+                    role,
+                    "--channel",
+                    channel,
+                    "--client",
+                    f"client-{channel}",
+                    "--workflow",
+                    workflow,
+                    "--mandate",
+                    MANDATE,
+                    "--grant-ref",
+                    f"grant-{channel}",
+                    "--expires-at",
+                    str(int(world.clock()) + 600),
+                ]
+            )
+            == 0
+        )
+        return path
+
+    slack_path = authorize("slack", OWNER, "owner")
+    schedule_path = authorize("schedule", DELEGATE, "scheduler")
+    plan = lr.LearningPlan(
+        tenant,
+        world.store.engagement_id,
+        workflow,
+        MANDATE,
+        mandate["mandate_revision"],
+        world.snapshots[run].snapshot_ref,
+        "incumbent-1",
+        request.benchmark_revision,
+        "baseline-1",
+        request.recipe.recipe_id,
+        str(request.binding.route),
+        True,
+    )
+    request = replace(request, plan_revision=digest(plan.document()))
+    plan_ref = lr.publish_plan(world.dir, plan)
+    resolved = {}
+    dispatcher = world.dispatcher(ledger=MandateFitLedger(world.mandates))
+    adapter = LearningFitLedger(
+        dispatcher, actor=DELEGATE, client="local-worker", resolve=resolved.get
+    )
+    slack, service = lr.open_learning_runs(slack_path, ledger=adapter)
+    scheduler, worker = lr.open_learning_runs(schedule_path, ledger=adapter)
+    assert worker.schedule_tick(scheduler)["tick"] == "admitted"
+    admitted = service.submit(
+        slack, lr.SubmitRequest(plan_ref, "evaluate_and_improve", "slack-run")
+    )
+    claim = worker.claim(scheduler)
+    assert claim and claim.run_ref == admitted["run_ref"]
+    resolved[claim.run_ref] = request
+    fit = dict(
+        residual_ref=receipt["revision"],
+        model_digest=fd.model_digest(request.binding),
+        max_units=request.bound.maximum_seconds,
+    )
+    reserved = worker.reserve_fit(scheduler, claim, **fit)
+    assert reserved["state"] == "reserved"
+    assert worker.reserve_fit(scheduler, claim, **fit) == reserved
+    execution = reserved["reservation_ref"]
+    assert dispatcher.status(execution, actor=DELEGATE).submissions == 0
+    worker.begin_submission(scheduler, claim)
+    started = dispatcher.advance(execution, actor=DELEGATE)
+    assert started.submissions == 1 and started.job_ref
+    worker.record_submission(scheduler, claim, execution_ref=started.job_ref)
+    final = world.finish(dispatcher, execution)
+    worker.finish(scheduler, claim, "completed", consumed_units=final.usage["seconds"])
+    current = service.status(slack, claim.run_ref)
+    assert current["state"] == "completed"
+    assert current["usage"] == {
+        "fit_reservations": 1,
+        "reserved_units": request.bound.maximum_seconds,
+        "consumed_units": final.usage["seconds"],
+    }
+    assert world.mandates.inspect(MANDATE)["reserved_fits"] == 1
+
+
 def test_unacknowledged_submission_recovers_from_restored_mandate_database(tmp_path):
     import sqlite3
 

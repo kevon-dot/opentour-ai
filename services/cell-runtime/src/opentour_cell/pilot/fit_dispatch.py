@@ -1107,6 +1107,36 @@ class FitDispatcher:
         self, request: DispatchRequest, *, client: str, operation_key: str
     ) -> DispatchStatus:
         """Admit one fit intent: at most one reservation and one job across every retry."""
+        entry = self._reserve_entry(request, client=client, operation_key=operation_key)
+        if isinstance(entry, DispatchStatus):
+            return entry
+        status = self._advance(entry)
+        if status.execution_id == entry.execution_id:
+            status = replace(status, replayed=entry.replayed)
+        return status
+
+    def reserve_only(
+        self,
+        request: DispatchRequest,
+        *,
+        client: str,
+        operation_key: str,
+        expected_id: str,
+    ) -> DispatchStatus:
+        """Reserve for an admitted learning run; the worker starts it separately with advance."""
+        entry = self._reserve_entry(
+            request, client=client, operation_key=operation_key, expected_id=expected_id
+        )
+        return entry if isinstance(entry, DispatchStatus) else status_of(entry)
+
+    def _reserve_entry(
+        self,
+        request: DispatchRequest,
+        *,
+        client: str,
+        operation_key: str,
+        expected_id: str | None = None,
+    ) -> LedgerEntry | DispatchStatus:
         try:
             request.validate()
             _ident(client)
@@ -1116,7 +1146,7 @@ class FitDispatcher:
         if self.ledger is None:
             return _without_entry("held", "fit_ledger_unavailable")
         try:
-            entry = self._admit(request, client, operation_key)
+            return self._admit(request, client, operation_key, expected_id=expected_id)
         except _Outcome as outcome:
             return _without_entry(outcome.state, outcome.reason)
         except DispatchError as exc:
@@ -1127,10 +1157,6 @@ class FitDispatcher:
             # A collaborator (grant lookup, routing or mandate store) could not answer: fail
             # closed with nothing reserved. Programming errors are not caught.
             return _without_entry("held", "fit_dispatch_unavailable")
-        status = self._advance(entry)
-        if status.execution_id == entry.execution_id:
-            status = replace(status, replayed=entry.replayed)
-        return status
 
     def advance(self, execution_id: str, *, actor: str) -> DispatchStatus:
         """One supervision step: submit, reconcile, enforce limits, stop or settle."""
@@ -1167,36 +1193,15 @@ class FitDispatcher:
 
     # Admission ------------------------------------------------------------------------------
 
-    def _admit(self, request: DispatchRequest, client: str, operation_key: str) -> LedgerEntry:
-        receipt = self._receipt(request)
-        authority = self._authority(
-            {
-                "tenant": request.tenant,
-                "engagement": request.engagement,
-                "mandate_id": request.mandate_id,
-                "run_id": request.run_id,
-                "actor": request.actor,
-            }
-        )
-        snapshot_ref = receipt["snapshot_ref"]
-        canonical = _canonical_intent(request, authority.revision, snapshot_ref, authority.payer)
-        key = intent_key(
-            request.tenant,
-            authority.revision,
-            snapshot_ref,
-            request.plan_revision,
-            canonical["model_digest"],
-        )
-        record: Json = {
-            **canonical,
-            "schema_version": RECORD_SCHEMA,
-            "execution_id": execution_id_for(key),
-            "intent_key": key,
-            "intent_digest": digest(canonical),
-            "budget_scope": authority.budget_scope,
-            "owner_id": authority.owner_id,
-            "limits": self._limits(authority),
-        }
+    def _admit(
+        self,
+        request: DispatchRequest,
+        client: str,
+        operation_key: str,
+        *,
+        expected_id: str | None = None,
+    ) -> LedgerEntry:
+        record, authority = self._admission_record(request, expected_id)
         existing = self._get(record["execution_id"])
         if existing is not None:
             # A replay: the ledger returns the existing entry, or refuses a changed intent.
@@ -1223,6 +1228,53 @@ class FitDispatcher:
             raise
         except Exception:  # noqa: BLE001 - any other ledger failure reserves nothing
             raise DispatchError("fit_ledger_unavailable") from None
+
+    def lookup_reserved(self, request: DispatchRequest, *, expected_id: str) -> LedgerEntry | None:
+        """Read an exact reservation under current mandate and residual authority."""
+        request.validate()
+        _need(self.ledger is not None, "fit_ledger_unavailable")
+        record, _ = self._admission_record(request, expected_id)
+        entry = self._get(expected_id)
+        _need(
+            entry is None or entry.record["intent_digest"] == record["intent_digest"],
+            "fit_intent_conflict",
+        )
+        return entry
+
+    def _admission_record(
+        self, request: DispatchRequest, expected_id: str | None
+    ) -> tuple[Json, _Authority]:
+        receipt = self._receipt(request)
+        authority = self._authority(
+            {
+                "tenant": request.tenant,
+                "engagement": request.engagement,
+                "mandate_id": request.mandate_id,
+                "run_id": request.run_id,
+                "actor": request.actor,
+            }
+        )
+        snapshot_ref = receipt["snapshot_ref"]
+        canonical = _canonical_intent(request, authority.revision, snapshot_ref, authority.payer)
+        key = intent_key(
+            request.tenant,
+            authority.revision,
+            snapshot_ref,
+            request.plan_revision,
+            canonical["model_digest"],
+        )
+        _need(expected_id is None or expected_id == execution_id_for(key), "fit_intent_conflict")
+        record: Json = {
+            **canonical,
+            "schema_version": RECORD_SCHEMA,
+            "execution_id": execution_id_for(key),
+            "intent_key": key,
+            "intent_digest": digest(canonical),
+            "budget_scope": authority.budget_scope,
+            "owner_id": authority.owner_id,
+            "limits": self._limits(authority),
+        }
+        return record, authority
 
     def _receipt(self, request: DispatchRequest) -> Json:
         """The residual receipt this intent cites, matched to its model, recipe and split."""
