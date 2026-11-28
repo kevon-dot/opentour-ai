@@ -10,6 +10,22 @@ control workspace installs.
 | `uv.lock` | The GPU training lock. Linux x86_64 only. Every artifact carries a SHA-256. |
 | `trainer.Dockerfile` | Trainer image built only from `uv.lock`, with hashes, as a non-root user. |
 | `.dockerignore` | Admits only `pyproject.toml` and `uv.lock` into the image build context. |
+| `eve-bake.hcl`, `eve.Dockerfile` | Build the runnable Linux/amd64 EVE trainer from that locked runtime and four allowlisted Python source files. |
+
+## Package the runnable trainer on CPU
+
+From the repository root, run `docker buildx bake -f training/gpu/eve-bake.hcl --load eve`.
+The resulting `opentour/eve-trainer:local` image runs the installed trainer module in isolated
+Python mode as UID 10001. `docker run --rm --network none opentour/eve-trainer:local --help`
+lists fit, status, pause, resume, stop and replay. Weights, examples and credentials are supplied
+on the approved host at run time.
+
+The **Package EVE trainer on CPU** workflow builds the same image and exercises checkpoint
+restart with a small generated model inside it. Its downloadable archive contains the image,
+source commit, image ID, SHA-256 checksums and CPU receipt. After extracting the artifact, run
+`sha256sum -c SHA256SUMS`, `docker load -i eve-trainer.tar.gz` and compare
+`docker image inspect --format '{{.Id}}' opentour/eve-trainer:local` with `image-id.txt`.
+Use this exact image ID in the pilot installation.
 
 ## Isolation rules
 
@@ -152,6 +168,6 @@ a recorded commit. Each run records:
   None of them is GPU qualification, an EVE fit or replay, or customer evidence.
 - `tools/toolchain.json` `gpu_qualification.status` stays `NOT_RUN` until the OPE-565 host
   records the items above.
-- This image does not yet contain the OPE-558 trainer. The trainer commit `a62e4e5` was never
-  pushed. It must be reimplemented and reviewed at an exact commit (OPE-579 item 4) before it is
-  added here.
+- The runnable image packages the OPE-558 trainer recovered and independently reviewed at
+  `d9943f31074c50b1f4aa3733f5f17cdd837e39ce`. Its EVE 24B qualification requires the approved
+  GPU, a fresh Slack training approval and the measured evidence above.

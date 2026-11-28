@@ -1,0 +1,5 @@
+**
+!src/opentour_training/__init__.py
+!src/opentour_training/training/__init__.py
+!src/opentour_training/training/eve_run.py
+!src/opentour_training/training/eve_sft.py
