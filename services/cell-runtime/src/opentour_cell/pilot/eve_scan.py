@@ -19,7 +19,6 @@ from typing import Any
 from opentour_cell.pilot import learning_runs as lr
 from opentour_cell.pilot.eve_exchange import digest
 from opentour_cell.pilot.repair_bundle import _private_directory, _read
-from opentour_cell.pilot.signed_records import PilotRecordRefused
 
 DISCOVERY_FILE = "eve-discovery-scope.json"
 SELECTION = "eve-learning-selection.json"
@@ -389,7 +388,15 @@ def installed(directory: Path) -> bool:
 
 
 def scan_tick(directory: Path, organization: str, config: Path, interval: int) -> dict[str, Any]:
-    from opentour_cell.pilot.signed_records import GRANT_PURPOSE, MAX_CONFIG_BYTES, PilotVerifier
+    try:
+        from opentour_cell.pilot.signed_records import (
+            GRANT_PURPOSE,
+            MAX_CONFIG_BYTES,
+            PilotRecordRefused,
+            PilotVerifier,
+        )
+    except ImportError:
+        return {"state": "held", "reason": "check_eve_discovery_authority"}
 
     try:
         verifier = PilotVerifier(_read(directory / "pilot-issuer-registry.json", MAX_CONFIG_BYTES))
