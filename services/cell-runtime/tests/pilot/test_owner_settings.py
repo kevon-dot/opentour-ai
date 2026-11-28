@@ -141,6 +141,99 @@ def test_signed_preview_retry_roles_and_real_worker(tmp_path):
     assert s.service.reconcile(first, actor=s.owner)["withdrawn"] is True
 
 
+def test_owner_cli_uses_displayed_revision_for_signed_lifecycle(tmp_path):
+    s = Setup(tmp_path)
+    c = s.customer
+    workflow = s.policy["mandate"]["workflow"]
+    archive = Path(settings.__file__).parents[2]
+    entry = (
+        [sys.executable, "-I", "-S", "-B", str(archive), "owner-settings"]
+        if archive.suffix == ".pyz" and archive.is_file()
+        else [sys.executable, "-m", "opentour_cell.pilot.owner_settings"]
+    )
+    common = [
+        "--directory",
+        str(c.owner),
+        "--organization",
+        c.org,
+        "--engagement",
+        c.eng,
+        "--authority",
+        str(s.authority),
+    ]
+    policy_file = c.owner / "generated-owner-policy.json"
+    packet_file = c.owner / "generated-owner-packet.json"
+
+    def cli(command, *args, actor=s.owner, allowed=True):
+        result = subprocess.run(
+            [*entry, command, *common, "--actor", actor, *args],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if allowed:
+            assert result.returncode == 0, result.stderr
+            return json.loads(result.stdout)
+        assert result.returncode == 2 and not result.stdout
+        return None
+
+    def prepare(base, *, action="save", policy=None):
+        args = ["--expected-revision", base, "--action", action]
+        if policy is not None:
+            save(policy_file, policy)
+            args += ["--input", str(policy_file)]
+        return cli("preview", *args)
+
+    def approve(preview):
+        save(packet_file, s.sign(preview["claim"]))
+        return cli("save", "--input", str(packet_file))
+
+    status = cli("status", "--workflow", workflow)
+    assert status["revision"] is None and status["state"] == "unconfigured"
+    first_preview = prepare("initial", policy=s.policy)
+    assert first_preview["claim"]["prior_revision"] is None
+    assert not any(p["method"] == "resources/read" for p in s.protocol())
+    before = s.protocol()
+    save(packet_file, {"claim": first_preview["claim"]})
+    cli("save", "--input", str(packet_file), allowed=False)
+    assert s.protocol() == before
+    first = approve(first_preview)
+    assert cli("save", "--input", str(packet_file)) == first
+    assert cli("status", "--workflow", workflow, actor=s.reviewer)["budget"] is None
+
+    saved = c.owner / "generated-owner-receipt.json"
+    save(saved, first)
+    worker = cli("worker", "--input", str(saved), actor=s.operator)
+    assert autonomous_cycle.cycle_once(c.owner, c.org, worker["config"])["state"] == (
+        "pending_slack_review"
+    )
+    before = s.protocol()
+    for invalid in ("initial", "generated-invalid-revision"):
+        cli("preview", "--expected-revision", invalid, "--input", str(policy_file), allowed=False)
+    assert s.protocol() == before
+
+    next_policy = deepcopy(s.policy)
+    next_policy["mandate"].update(mandate_id="cli-renewed-settings", max_runs=1)
+    renewal = prepare(first["revision"], action="renew", policy=next_policy)
+    assert renewal["changed_fields"] == ["mandate_id", "max_runs"]
+    assert renewal["prior"]["revision"] == first["revision"]
+    renewed = approve(renewal)
+    status = cli("status", "--workflow", workflow, actor=s.operator)
+    assert status["revision"] == renewed["revision"]
+    assert status["budget"]["runs"] == {"limit": 1, "used": 1, "remaining": 0}
+    assert status["budget"]["monetary_usage"] == "unavailable"
+
+    before = s.protocol()
+    pause = approve(prepare(renewed["revision"], action="pause"))
+    assert cli("status", "--workflow", workflow)["state"] == "paused"
+    revoked = approve(prepare(pause["revision"], action="revoke"))
+    status = cli("status", "--workflow", workflow, actor=s.reviewer)
+    assert status["state"] == "revoked" and status["revision"] == revoked["revision"]
+    cli("worker", "--input", str(saved), actor=s.operator, allowed=False)
+    assert autonomous_cycle.cycle_once(c.owner, c.org, worker["config"])["state"] == "held"
+    assert s.protocol() == before
+
+
 def test_scoped_setup_status_is_read_only_and_rechecks_roles_after_restart(tmp_path):
     s = Setup(tmp_path)
     c = s.customer

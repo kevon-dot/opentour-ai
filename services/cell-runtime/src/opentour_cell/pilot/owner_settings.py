@@ -13,6 +13,7 @@ import binascii
 import fcntl
 import json
 import os
+import re
 import sqlite3
 import tempfile
 import time
@@ -831,12 +832,31 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--input", type=Path)
     parser.add_argument("--workflow", help="restrict settings status to the selected workflow")
     parser.add_argument(
+        "--expected-revision",
+        metavar="SHA256|initial",
+        help="require the displayed settings revision when preparing a signed edit",
+    )
+    parser.add_argument(
         "--action", choices=("save", "renew", "pause", "revoke", "replace_reviewer"), default="save"
     )
     parser.add_argument("--assignment-revision")
     args = parser.parse_args(argv)
     try:
         _need(args.workflow is None or args.command == "status", "unexpected_workflow_selection")
+        expected_revision: str | None | _RevisionSelection = _RevisionSelection.CURRENT
+        if args.expected_revision is not None:
+            _need(
+                args.command == "preview"
+                and args.action != "replace_reviewer"
+                and (
+                    args.expected_revision == "initial"
+                    or re.fullmatch("[0-9a-f]{64}", args.expected_revision)
+                ),
+                "invalid_settings_revision_selection",
+            )
+            expected_revision = (
+                None if args.expected_revision == "initial" else args.expected_revision
+            )
         open_service = OwnerSettings.open_readback if args.workflow is not None else OwnerSettings
         service = open_service(
             args.directory, args.organization, args.engagement, authority_file=args.authority
@@ -848,6 +868,7 @@ def main(argv: list[str] | None = None) -> int:
                 actor=args.actor,
                 action=args.action,
                 assignment_revision=args.assignment_revision,
+                expected_revision=expected_revision,
             )
         elif args.command == "status":
             result = (

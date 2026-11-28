@@ -52,12 +52,21 @@ and `--actor`. Use `--input` for private JSON, and select the preview action
 with `--action`. Keep output in the private owner directory because it includes
 actor identities and scope.
 
+Start by reading `status --workflow <selected-workflow>`, then prepare the
+edit with `preview --expected-revision <displayed-sha256>`. Use
+`--expected-revision initial` when the selected status has no saved revision.
+Review and sign the returned claim outside the worker, then submit the signed
+packet through `save --input <packet.json>`. Use the same revision check for
+renewal, pause and revoke. If a newer revision was saved, open the current
+status before preparing a fresh claim.
+
 ## Acceptance and limits
 
 | Current native requirement | Executable evidence |
 | --- | --- |
 | Exact previous revision, candidate diff, signed CAS, stable worker receipt | `test_signed_preview_retry_roles_and_real_worker`, `test_competing_saves_and_explicit_prior_preview_atomicity` |
 | Scoped readback and explicit viewed revision, role drift, lower balance without new source reads | `test_scoped_setup_status_is_read_only_and_rechecks_roles_after_restart`, `test_preview_and_signed_save_refuse_outdated_and_cross_workflow_claims_without_io`, `test_lowered_renewal_row_cap_stops_before_content_acquisition` |
+| Owner-local reviewed revision through signed edit, renewal, pause and revoke | `test_owner_cli_uses_displayed_revision_for_signed_lifecycle` |
 | Distinct custodian/reviewer/operator; no owner-only save | wrong-role parameter cases and `test_workflow_owner_binding_is_distinct_from_custodian_save` |
 | Live grant/field/source/pair authority, independent verifier, expiry | live-change parameter cases; forged/foreign/expired/unknown packet cases; expired-grant pause |
 | Pause/revoke/renew; stale worker/receipt denial; no source reads on denial | pause/revoke parameter cases, read-only policy test, lower-cap normal worker test |
