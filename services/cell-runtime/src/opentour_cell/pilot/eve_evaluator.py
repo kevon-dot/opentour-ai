@@ -456,6 +456,7 @@ class _ArmCheck:
     replayed: bool = False
     committed: int = 0
     not_committed: int = 0
+    unverifiable: int = 0
     disagreements: int = 0
     verdicts: list[str] = field(default_factory=list)
     answered: list[bool] = field(default_factory=list)
@@ -933,6 +934,7 @@ class EveEvaluator:
         for case_id in manifest.eligible_case_ids:
             output = outputs.get(case_id)
             ref = _case_ref(manifest.digest, case_id)
+            same: bool | None
             try:
                 same = verify_output(
                     keys=keys,
@@ -943,12 +945,17 @@ class EveEvaluator:
                     presented=output,
                 )
             except EveRefusal as refusal:
+                # Could not check (for example the run key is missing): a hold, never a stored
+                # failure, so restoring the key lets the next evaluation proceed. Only a
+                # commitment that was checked and did not match is an integrity failure.
                 reasons.add(_HELD, f"commitment_unverifiable_{refusal}")
-                same = False
-            if same:
+                same = None
+            if same is True:
                 check.committed += 1
-            else:
+            elif same is False:
                 check.not_committed += 1
+            else:
+                check.unverifiable += 1
             verdict = self.scorer.judge(self._key.entry(case_id), shown[case_id], output)
             if verdict not in VERDICTS:
                 raise EveRefusal("evaluator_scorer_unqualified")
@@ -1075,6 +1082,7 @@ class EveEvaluator:
                 "replayed": check.replayed,
                 "outputs_committed": check.committed,
                 "outputs_not_committed": check.not_committed,
+                "outputs_unverifiable": check.unverifiable,
                 "verdict_disagreements": check.disagreements,
                 "totals": totals,
             }

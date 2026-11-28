@@ -492,6 +492,40 @@ def test_h1_a_missing_replay_or_run_key_holds_and_a_hold_is_never_final(env: Env
     assert staged(env, worker, result, again).stageable
 
 
+def test_h2_a_missing_run_key_holds_and_restoring_the_key_recovers(env: Env) -> None:
+    worker = env.worker()
+    result = full_result(env, worker)
+    store = worker.keys.path
+    aside = store.with_name(store.name + ".aside")
+    store.rename(aside)
+    held = evaluate(env, worker, result)
+    # nothing could be checked, so nothing is a stored failure
+    assert held["outcome"] == "held"
+    assert held["reasons"] == ["commitment_unverifiable_commitment_key_unavailable"]
+    for arm in held["arms"].values():
+        assert arm["outputs_unverifiable"] == 5
+        assert arm["outputs_not_committed"] == 0 and arm["outputs_committed"] == 0
+    assert "independent_verdict_held" in staged(env, worker, result, held).reasons
+    aside.rename(store)
+    recovered = evaluate(env, worker, result)
+    assert recovered["outcome"] == "reproduced" and recovered["reasons"] == []
+    assert all(a["outputs_committed"] == 5 for a in recovered["arms"].values())
+    assert staged(env, worker, result, recovered).stageable
+
+
+def test_h3_a_commitment_checked_and_not_matching_stays_a_stored_failure(env: Env) -> None:
+    worker = env.worker()
+    result = full_result(env, worker)
+    replays = env.replays()
+    replays["baseline"] = ScriptedInference(BASE, {**BASELINE, 2: "correct"})
+    failed = evaluate(env, worker, result, replays=replays)
+    assert failed["outcome"] == "integrity_failure"
+    assert "outputs_not_committed_baseline" in failed["reasons"]
+    honest = env.replays()
+    again = evaluate(env, worker, result, replays=honest)
+    assert again == failed and honest["baseline"].calls == 0  # sticky, not re-run
+
+
 # ---------------------------------------------------------------- G the staging gate
 def test_g1_staging_calls_reconcile_and_requires_all_three_checks(
     env: Env, monkeypatch: pytest.MonkeyPatch

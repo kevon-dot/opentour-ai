@@ -139,6 +139,26 @@ def test_b3c_the_independent_scorer_shares_no_code_with_the_worker_scorer_or_agg
     assert "verify_output(" in source  # the production caller of the commitment check
 
 
+def test_b3e_the_worker_entry_never_reaches_the_evaluator() -> None:
+    """The worker runs in its own process and consumes only the exported verdict document."""
+    reachable = closure(WORKER)
+    assert {REPLAY, STAGING, SCORER} <= reachable  # not vacuous: it is the worker's wiring
+    assert EVALUATOR not in reachable
+    probe = (
+        "import sys, importlib\n"
+        "importlib.import_module(sys.argv[1])\n"
+        "print('\\n'.join(sorted(m for m in sys.modules if m.startswith('opentour_cell'))))\n"
+    )
+    loaded = subprocess.run(
+        [sys.executable, "-c", probe, WORKER],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=True,
+    ).stdout.split()
+    assert WORKER in loaded and EVALUATOR not in loaded
+
+
 def test_b3d_the_staging_gate_is_the_one_place_rebuild_and_reconcile_meet() -> None:
     reachable = closure(STAGING)
     assert {REPLAY, AGGREGATOR} <= reachable
