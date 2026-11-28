@@ -240,6 +240,54 @@ class WorkerRecord:
 # ------------------------------------------------------------------ OPE-505 production sink
 
 
+_ADMISSION_INDEXES = (
+    "CREATE UNIQUE INDEX IF NOT EXISTS ope505_admitted_draft ON ledger("
+    "json_extract(payload, '$.draft_key')) WHERE kind = 'ope505_admitted'",
+    "CREATE UNIQUE INDEX IF NOT EXISTS ope505_admitted_run ON ledger("
+    "json_extract(payload, '$.run_ref')) WHERE kind = 'ope505_admitted'",
+)
+
+
+def ensure_admission_indexes(store: IntakeStore) -> None:
+    """One admission per draft and per OPE-505 run, enforced by the worker store itself.
+
+    Additive and idempotent (`IF NOT EXISTS`), like the store's own schema. A store that
+    already holds a duplicate admission fails to build the index and is refused.
+    """
+    try:
+        with store.tx() as db:
+            for statement in _ADMISSION_INDEXES:
+                db.execute(statement)
+    except sqlite3.IntegrityError as error:
+        raise WorkerRefused("WORKER_STORE_INCONSISTENT") from error
+
+
+def _admitted_rows(db: sqlite3.Connection) -> list[Json]:
+    rows = db.execute("SELECT payload FROM ledger WHERE kind=? ORDER BY id", (ADMITTED,)).fetchall()
+    return [json.loads(row["payload"]) for row in rows]
+
+
+def _admitted_on(db: sqlite3.Connection, draft_key: str) -> Json | None:
+    row = db.execute(
+        "SELECT payload FROM ledger WHERE kind=? AND json_extract(payload, '$.draft_key')=?",
+        (ADMITTED, draft_key),
+    ).fetchone()
+    return None if row is None else dict(json.loads(row["payload"]))
+
+
+def _ancestors(db: sqlite3.Connection, draft_key: str) -> set[str]:
+    """The local supersedes chain above `draft_key` (cycle-safe)."""
+    seen: set[str] = set()
+    current: str | None = draft_key
+    while current is not None:
+        row = db.execute("SELECT supersedes FROM drafts WHERE draft_key=?", (current,)).fetchone()
+        current = None if row is None else row["supersedes"]
+        if current is None or current in seen or current == draft_key:
+            break
+        seen.add(current)
+    return seen
+
+
 class StarterBenchmarkSink:
     """`DraftSink` bound to the production OPE-505 starter admission.
 
@@ -248,20 +296,34 @@ class StarterBenchmarkSink:
     values come from the owner's sealed setup grant; the frozen payload only has to contain that
     exact eligible policy occurrence, and the principal must be the draft's own tenant.
 
+    Lineage follows the local supersedes chain only. A superseded draft is never dispatched.
     The sealed grant, not the draft, fixes the OPE-505 run identity (the grant pins
-    `creation_ref` and both revisions). One OPE-505 run is bound to one draft: a successor or any
-    other draft that would resolve to an already bound run is held before anything is
-    submitted, and a successor is admitted only on a fresh owner grant, as a new run that OPE-505
-    links to its predecessor in its own benchmark lineage. The ledger is keyed by draft, so
-    reopening the same evidence in another session reads the same admission. `enqueue_job`
-    creates nothing: the admitted run is the OPE-505 job, and this call only confirms it was
-    recorded.
+    `creation_ref` and both revisions), so one OPE-505 run is bound to one draft, and within one
+    OPE-505 workflow a draft may only follow an admitted draft from its own supersedes chain:
+    a successor under the same grant, or any draft outside that chain, is held before anything
+    is submitted. A chain successor under a fresh owner grant becomes the next OPE-505 version,
+    and is recorded only if OPE-505's own parent run is the chain's admitted run.
+
+    The final checks and the ledger write run in one `BEGIN IMMEDIATE` transaction, backed by
+    unique indexes, so concurrent dispatchers (the UI host and the stdio launcher on one
+    directory) record at most one admission per draft and per run; the loser re-reads and is
+    held, or reads the same admission when it dispatched the same draft. `enqueue_job` creates
+    nothing: the admitted run is the OPE-505 job, and this call only confirms it was recorded.
     """
 
-    def __init__(self, selection: Path, tenant: str, store: IntakeStore):
+    def __init__(
+        self,
+        selection: Path,
+        tenant: str,
+        store: IntakeStore,
+        *,
+        check_current: Callable[[], None] | None = None,
+    ):
         self.selection = selection
         self.tenant = tenant
         self.store = store
+        self.check_current = check_current or (lambda: None)
+        ensure_admission_indexes(store)
 
     def _open(self) -> tuple[LocalStarterAuthority, BenchmarkIntake]:
         # Reopened on every dispatch so withdrawal or expiry of the grant takes effect.
@@ -275,21 +337,9 @@ class StarterBenchmarkSink:
             admission = BenchmarkIntake(DurableIntake(self.selection.parent, authority))
         return authority, admission
 
-    def _entry(self, field: str, value: str, *, other_than: str | None = None) -> Json | None:
-        with self.store.tx() as db:
-            rows = db.execute(
-                "SELECT payload FROM ledger WHERE kind=? AND json_extract(payload, ?)=? "
-                "ORDER BY id",
-                (ADMITTED, f"$.{field}", value),
-            ).fetchall()
-        for row in rows:
-            found: Json = json.loads(row["payload"])
-            if other_than is None or found["draft_key"] != other_than:
-                return found
-        return None
-
     def admitted(self, draft_key: str) -> Json | None:
-        return self._entry("draft_key", draft_key)
+        with self.store.tx() as db:
+            return _admitted_on(db, draft_key)
 
     def _draft_tenant(self, session_id: object) -> str | None:
         with self.store.tx() as db:
@@ -298,12 +348,50 @@ class StarterBenchmarkSink:
             ).fetchone()
         return None if row is None else str(row["tenant"])
 
+    @staticmethod
+    def _lineage(
+        db: sqlite3.Connection,
+        draft_key: str,
+        identity: str,
+        workflow: str,
+        link: Json,
+        run_ref: str | None = None,
+    ) -> Json | None:
+        """Hold unless `draft_key` may be admitted; return the admitted chain parent, if any."""
+        superseded = db.execute(
+            "SELECT 1 FROM drafts WHERE supersedes=? AND draft_key!=? LIMIT 1",
+            (draft_key, draft_key),
+        ).fetchone()
+        if superseded is not None:
+            raise IntakeError("DRAFT_SUPERSEDED")
+        chain = _ancestors(db, draft_key)
+        others = [e for e in _admitted_rows(db) if e["draft_key"] != draft_key]
+        for entry in others:
+            if entry.get("run_identity") == identity or entry["run_ref"] == run_ref:
+                if entry["draft_key"] in chain:
+                    raise IntakeError("OPE505_SUCCESSOR_NEEDS_NEW_SETUP_GRANT", link)
+                raise IntakeError("OPE505_RUN_BOUND_TO_OTHER_DRAFT")
+        latest = None
+        for entry in others:
+            if entry.get("workflow_identity") == workflow:
+                latest = entry
+        if latest is not None and latest["draft_key"] not in chain:
+            # Never let a draft outside the chain become the next version of another's run.
+            raise IntakeError("OPE505_RUN_BOUND_TO_OTHER_DRAFT")
+        return latest
+
+    def _current(self) -> None:
+        try:
+            self.check_current()
+        except WorkerRefused as refused:
+            raise IntakeError(refused.code) from refused
+
     def create_draft(self, draft_key: str, payload: Json) -> None:
         if self.admitted(draft_key) is not None:
             return  # recorded: a replay after a crash before the draft was marked dispatched
         predecessor = payload.get("supersedes")
         prior = self.admitted(predecessor) if type(predecessor) is str else None
-        link = {
+        link: Json = {
             "predecessor_draft_key": predecessor if type(predecessor) is str else None,
             "predecessor_run_ref": prior["run_ref"] if prior else None,
         }
@@ -312,7 +400,13 @@ class StarterBenchmarkSink:
                 self._draft_tenant(payload["session_id"]) == self.tenant,
                 "OPE505_TENANT_MISMATCH",
             )
+            with self.store.tx() as db:
+                superseded = db.execute(
+                    "SELECT 1 FROM drafts WHERE supersedes=? LIMIT 1", (draft_key,)
+                ).fetchone()
+            _refuse(superseded is None, "DRAFT_SUPERSEDED")
             authority, admission = self._open()
+            self._current()  # the record may have changed while the grant was opening
             principal = authority.principal
             with authority.setup_grant(principal) as grant:
                 policy_ref, revision = grant.policy_resource_ref, grant.source_revision
@@ -324,30 +418,28 @@ class StarterBenchmarkSink:
                 for item in payload["included"]
             )
             _refuse(covered, "OPE505_GRANT_DOES_NOT_COVER_POLICY")
+            epoch = authority.selected.engagement_epoch
+            workflow = digest(["ope505-starter-workflow", principal.tenant, epoch, creation_ref])
             identity = digest(
                 [
                     "ope505-starter-run",
                     principal.tenant,
-                    authority.selected.engagement_epoch,
+                    epoch,
                     policy_ref,
                     revision,
                     setup_revision,
                     creation_ref,
                 ]
             )
-            bound = self._entry("run_identity", identity, other_than=draft_key)
-            if bound is not None:
-                successor = prior is not None and prior["run_ref"] == bound["run_ref"]
-                raise IntakeError(
-                    "OPE505_SUCCESSOR_NEEDS_NEW_SETUP_GRANT"
-                    if successor
-                    else "OPE505_RUN_BOUND_TO_OTHER_DRAFT",
-                    link if successor else None,
-                )
+            with self.store.tx() as db:
+                self._lineage(db, draft_key, identity, workflow, link)
             request = Starter(
                 policy_resource_ref=policy_ref,
                 source_revision=revision,
                 setup_policy_revision=setup_revision,
+                # OPE-505 deduplicates by intent, so this key cannot split or merge runs. It
+                # keeps retries of one draft on one OPE-505 key row and keeps distinct drafts on
+                # distinct keys, so a reused key can never silently stand for another intent.
                 idempotency_key="mixed-intake-" + draft_key[:48],
                 creation_ref=creation_ref,
                 workflow_ref=None,
@@ -355,11 +447,6 @@ class StarterBenchmarkSink:
             receipt = admission.submit_intake(principal, request)
             if isinstance(receipt, AdmissionHold):
                 raise WorkerRefused("OPE505_HOLD")
-            # OPE-505 deduplicates by its own intent; never claim another draft's run.
-            _refuse(
-                self._entry("run_ref", receipt.run_ref, other_than=draft_key) is None,
-                "OPE505_RUN_BOUND_TO_OTHER_DRAFT",
-            )
             status = admission.get_run(principal, receipt.run_ref)
             with admission.intake.admitted_work(principal, receipt.run_ref) as work:
                 parent_run = work.benchmark_parent_run
@@ -368,7 +455,17 @@ class StarterBenchmarkSink:
         except (AdmissionError, OSError, sqlite3.Error, ValueError) as error:
             raise IntakeError("OPE505_UNAVAILABLE") from error
         benchmark = status.benchmark
+        # One serialized transaction re-checks everything that a concurrent dispatcher, a record
+        # change or OPE-505's own deduplication may have changed, then records the admission.
         with self.store.tx() as db:
+            db.execute("BEGIN IMMEDIATE")
+            self._current()
+            if _admitted_on(db, draft_key) is not None:
+                return  # another dispatcher of this same draft recorded it first
+            parent = self._lineage(db, draft_key, identity, workflow, link, receipt.run_ref)
+            expected = parent["run_ref"] if parent is not None else None
+            if parent_run != expected:
+                raise IntakeError("OPE505_LINEAGE_MISMATCH")
             self.store.log(
                 db,
                 str(payload["session_id"]),
@@ -376,6 +473,7 @@ class StarterBenchmarkSink:
                 {
                     "draft_key": draft_key,
                     "run_identity": identity,
+                    "workflow_identity": workflow,
                     "run_ref": receipt.run_ref,
                     "correlation_ref": receipt.correlation_ref,
                     "run_state": receipt.state,
@@ -384,6 +482,7 @@ class StarterBenchmarkSink:
                     "benchmark_version": benchmark.version if benchmark else None,
                     "benchmark_state": benchmark.benchmark_state if benchmark else None,
                     **link,
+                    "lineage_parent_draft_key": parent["draft_key"] if parent else None,
                     # OPE-505's own lineage field for the benchmark this run admitted.
                     "ope505_parent_run": parent_run,
                 },
@@ -458,6 +557,7 @@ class MixedIntakeWorker:
         self.record_path = directory / RECORD_FILE
         WorkerRecord.read(self.record_path)  # refuse to start without a valid record
         self.store = IntakeStore(directory / STORE_FILE)
+        ensure_admission_indexes(self.store)
         self.transports = dict(transports or {})
         self.fault = fault
 
@@ -536,7 +636,19 @@ class MixedIntakeWorker:
     def _sink(self, record: WorkerRecord) -> StarterBenchmarkSink | None:
         if record.starter_selection is None:
             return None
-        return StarterBenchmarkSink(record.starter_selection, record.tenant, self.store)
+
+        def unchanged() -> None:
+            # No lock covers the record file. This narrows the window to the instants between
+            # this re-read and the sink's commit; it cannot close it.
+            try:
+                now = WorkerRecord.read(self.record_path)
+            except WorkerRefused as refused:
+                raise WorkerRefused("WORKER_RECORD_CHANGED") from refused
+            _refuse(now.revision == record.revision, "WORKER_RECORD_CHANGED")
+
+        return StarterBenchmarkSink(
+            record.starter_selection, record.tenant, self.store, check_current=unchanged
+        )
 
     # -------------------------------------------------------------- the single entry
 
@@ -656,7 +768,7 @@ class MixedIntakeWorker:
                 MixedIntakeService(self.store, sink=sink).dispatch_draft(draft_key)
                 admitted = sink.admitted(draft_key)
                 if admitted is not None:
-                    hidden = {"kind", "run_identity"}
+                    hidden = {"kind", "run_identity", "workflow_identity"}
                     return {
                         "state": "admitted",
                         **{k: v for k, v in admitted.items() if k not in hidden},

@@ -1278,6 +1278,9 @@ class MixedIntakeService:
             else "",
         }
         with self.store.tx() as db:
+            # Serialized with concurrent freezes of the same evidence from other sessions or
+            # processes, so the existence check and the insert cannot race.
+            db.execute("BEGIN IMMEDIATE")
             existing = db.execute("SELECT 1 FROM drafts WHERE draft_key=?", (draft_key,)).fetchone()
             prior = db.execute(
                 "SELECT draft_key FROM drafts WHERE session_id=? ORDER BY rowid DESC LIMIT 1",
