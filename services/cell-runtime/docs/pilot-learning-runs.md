@@ -176,7 +176,7 @@ These are local Python interfaces for the trusted worker. They are not HTTP rout
 
 * **Plan producer (OPE-562).** Call `publish_plan(directory, plan)` after a new eligible verified source revision. It seals the current plan for the workflow with the owner-local learning-run key. Readers ignore a plan whose seal, tenant, workflow or mandate revision does not match.
 * **Executor (OPE-561).** Call `claim` to lease the oldest dispatchable run. Then use `advance` for stage and progress, `reserve_fit` for the single fit reservation, and `begin_submission`, `record_submission` and `reconcile_submission` for the trainer job. Finish with `finish` or `confirm_cancel`. Every call rechecks the grant, mandate, lease and cancellation first. An uncertain trainer submission holds the run until it is reconciled, and a new claim never resubmits blindly.
-* **Fit ledger (OPE-442).** Implement `FitLedger.lookup`, `reserve` and `settle`. `reserve` must be unique per fit identity across operation keys. The service always calls `lookup` before `reserve`, and never calls the ledger while it holds the grant guard.
+* **Fit ledger (OPE-442).** Configure `LearningFitLedger(dispatcher, actor=delegate, client=worker_identity, resolve=worker_request_resolver)` on `open_learning_runs`. The worker resolver rechecks the admitted run and supplies its frozen dispatch request. Bind the full plan document digest, routing receipt revision, connector model digest, and maximum seconds to the fit. Reservation sends nothing. The executor calls `FitDispatcher.advance` or `cancel`, and learning settlement checks the dispatcher’s independently verified seconds. The service always calls `lookup` before `reserve`, and never calls the ledger while it holds the grant guard.
 
 ## Install and authorize
 
@@ -198,7 +198,7 @@ Start a **separate** health.py instance for each hosted learning-run connection 
 
 * Real dispatch to a GPU trainer and its evidence: OPE-561.
 * Plan derivation from verified events: OPE-562.
-* The fit reservation ledger itself: OPE-442.
+* Installed composition of the qualified connector, verified frozen request resolver and fit dispatcher for the selected route.
 * Slack App Home views and buttons: OPE-560. The Zapier template: OPE-549. A real Slack or Zapier install and provider receipts are separate installed-provider evidence.
 * Release approval: OPE-529, OPE-413, OPE-403 and OPE-404.
 
