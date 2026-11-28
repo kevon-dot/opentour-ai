@@ -69,13 +69,14 @@ Verified non-wins (no material gain, regression, inconclusive) are first-class o
 
 Only a gain on the evaluator-replayed open-weight route (``candidate_kind`` ``open_weight_fit``
 with a ``self_consistent_manifest`` job statement, where the evaluator holds the fit manifest
-and the served artifact digest itself) can make an effect eligible. A managed provider or
-customer trainer gain rests on unauthenticated provider or trainer statements
-(``provider_reported`` / ``trainer_reported``, ``identity_kind: provider_self_claim``), and a
-simple repair has no job evidence at all, so every effect on those holds with
-``candidate_identity_unauthenticated`` (``candidate_identity_hold``), in the issued ``effects``
-and in ``authorize`` alike, even when the policy meets the D11 floor, until a provider/trainer
-attestation verifier exists (OPE-566/OPE-507).
+and the served artifact digest itself) can make an effect eligible (owner decision recorded on
+OPE-528, 2026-11-28). A managed provider or customer trainer gain rests on unauthenticated
+provider or trainer statements (``provider_reported`` / ``trainer_reported``,
+``identity_kind: provider_self_claim``), and a simple repair has no job evidence at all, so
+every effect on those holds with ``candidate_identity_unauthenticated``
+(``candidate_identity_hold``), in the issued ``effects`` and in ``authorize`` alike, even when
+the policy meets the D11 floor. The provider and trainer holds lift only once an attestation
+verifier exists (OPE-566/OPE-507); the simple repair hold lifts only by a new owner decision.
 
 Correction and revocation: ``revoke_verdict`` appends one sealed, write-once revocation per
 verdict key. From then on ``read_verdict``, ``evaluate`` and the consumer check ``authorize``
@@ -361,8 +362,9 @@ class PolicyFloor:
 # (``audit_and_verdict_issuers_unverified``, until the OPE-566 signing contract lands). Nor does
 # it lift the route hold: a gain whose candidate identity rests on provider or trainer statements
 # (managed provider, customer trainer) or on no job evidence (simple repair) holds with
-# ``candidate_identity_unauthenticated`` at any policy, until a provider/trainer attestation
-# verifier exists (OPE-566/OPE-507); only the evaluator-replayed open-weight route authorizes.
+# ``candidate_identity_unauthenticated`` at any policy; only the evaluator-replayed open-weight
+# route authorizes. The provider and trainer holds lift only with an attestation verifier
+# (OPE-566/OPE-507), the simple repair hold only by a new owner decision.
 #   alpha_bps <= 500                         minimum_improvement_bps >= 100
 #   min_families >= 30                       coverage_floor_bps >= 5000
 #   max_coverage_loss_bps <= 200             max_missing <= 0 (no missing/malformed output)
@@ -424,8 +426,9 @@ def candidate_identity_hold(document: Mapping[str, Any]) -> str | None:
     Reads the verdict's ``candidate_kind`` and its ``job_produced_candidate`` statement. Managed
     provider and customer trainer candidates rest on unauthenticated provider or trainer
     statements, and a simple repair carries no job evidence, so their gains hold with
-    ``candidate_identity_unauthenticated`` until a provider/trainer attestation verifier exists
-    (OPE-566/OPE-507). Fails closed on any missing or malformed field, or a non-dict document.
+    ``candidate_identity_unauthenticated``: the provider and trainer holds until an attestation
+    verifier exists (OPE-566/OPE-507), the simple repair hold until a new owner decision. Fails
+    closed on any missing or malformed field, or a non-dict document.
     """
     if type(document) is not dict:
         return "candidate_identity_unauthenticated"
@@ -2102,8 +2105,8 @@ class IndependentEvaluator:
                     "policy_floor_unset" if floor == "unset" else "policy_below_registered_floor",
                     stored.outcome,
                 )
-            # Only the evaluator-replayed open-weight route; provider/trainer statements and
-            # no-job repairs hold until an attestation verifier exists (OPE-566/OPE-507).
+            # Only the evaluator-replayed open-weight route (owner decision, OPE-528): provider
+            # and trainer statements and no-fit repairs hold, whatever the stored effects say.
             identity_hold = candidate_identity_hold(held_doc)
             if identity_hold is not None:
                 return refuse(identity_hold, stored.outcome)
