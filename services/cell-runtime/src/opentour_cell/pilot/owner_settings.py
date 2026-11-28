@@ -18,6 +18,7 @@ import tempfile
 import time
 from collections.abc import Iterator
 from contextlib import ExitStack, contextmanager, nullcontext
+from enum import Enum
 from pathlib import Path
 from typing import Any
 
@@ -26,6 +27,7 @@ from opentour_cell.pilot import workplace_context as workplace
 from opentour_cell.pilot.learning_mandate import LearningMandates, _normalized
 from opentour_cell.pilot.operating_point import canonical, digest
 from opentour_cell.pilot.readout import parse_manifest
+from opentour_cell.pilot.simple_repair import identifier
 from opentour_cell.pilot.training import LocalTrainingStore, _check_file
 
 Json = dict[str, Any]
@@ -53,6 +55,10 @@ EXCLUSIONS = [
 
 class SettingsError(ValueError):
     """A public-safe refusal; never includes customer input or signature bytes."""
+
+
+class _RevisionSelection(Enum):
+    CURRENT = "current"
 
 
 def _need(check: object, reason: str) -> None:
@@ -188,6 +194,78 @@ class OwnerSettings:
                 "usage": self.ledger._usage(db, head["mandate_id"]) if head else None,
             }
 
+    def setup_readback(self, *, actor: str, workflow: str) -> Json:
+        """Read the selected workflow's setup without provider access or a worker effect."""
+        workflow = identifier(workflow)
+        authority = self._authority(actor)
+        with self.ledger._authorized_db(write=False) as db:
+            _need(self.ledger._owner(db) == authority["custodian"], "settings_owner_mismatch")
+            head = self._head(db)
+            result: Json = {
+                "workflow": workflow,
+                "revision": None,
+                "mandate_revision": None,
+                "state": "unconfigured",
+                "may_preview": actor == authority["custodian"],
+                "budget": None,
+            }
+            mandate = head["mandate_id"] if head else authority["initial_mandate"]
+            if mandate is not None:
+                row, spec = self.ledger._mandate(db, mandate)
+                _need(spec["workflow"] == workflow, "settings_workflow_mismatch")
+                if head is not None:
+                    _need(
+                        row["revision"] == head["mandate_revision"]
+                        and spec == head["policy"]["mandate"],
+                        "settings_mandate_changed",
+                    )
+                    current = head["authority_revision"] == digest(authority)
+                    result.update(
+                        revision=head["revision"],
+                        mandate_revision=row["revision"],
+                        state=self._setup_state(head, row, spec)
+                        if current
+                        else "authority_changed",
+                    )
+                    if current and actor in {authority["custodian"], authority["operator"]}:
+                        usage = self.ledger._usage(db, mandate)
+                        result["budget"] = {
+                            "currency": head["policy"]["currency"],
+                            "monetary_limit_cents": spec["max_cost_cents"],
+                            "monetary_usage": "unavailable",
+                            **{
+                                name: {
+                                    "limit": spec[cap],
+                                    "used": usage[counter],
+                                    "remaining": max(0, spec[cap] - usage[counter]),
+                                }
+                                for name, cap, counter in (
+                                    ("runs", "max_runs", "cumulative_runs"),
+                                    ("rows", "max_total_rows", "cumulative_rows"),
+                                    ("fits", "max_fits", "cumulative_reserved_fits"),
+                                    ("seconds", "max_total_seconds", "cumulative_reserved_seconds"),
+                                )
+                            },
+                        }
+            _need(self._authority(actor) == authority, "settings_authority_changed")
+        return result
+
+    def _setup_state(self, head: Json, row: sqlite3.Row, spec: Json) -> str:
+        if head["state"] == "pause":
+            return "paused"
+        if head["state"] == "revoke" or row["withdrawn"] is not None:
+            return "revoked"
+        if time.time() >= spec["expires_at"]:
+            return "expired"
+        if spec["mode"] == "manual":
+            return "read_only"
+        try:
+            comparison_plan._terms(head["policy"]["agreement"]["terms"])
+            self._live(head["policy"], discover=False)
+        except (OSError, ValueError):
+            return "held"
+        return "active"
+
     def _policy(self, p: Json, a: Json) -> Json:
         _need(
             isinstance(p, dict)
@@ -302,12 +380,15 @@ class OwnerSettings:
         actor: str,
         action: str = "save",
         assignment_revision: str | None = None,
+        expected_revision: str | None | _RevisionSelection = _RevisionSelection.CURRENT,
     ) -> Json:
         if action == "replace_reviewer":
             from opentour_cell.pilot.reviewer_assignment import ReviewerAssignments
 
             _need(
-                isinstance(policy, dict) and isinstance(assignment_revision, str),
+                isinstance(policy, dict)
+                and isinstance(assignment_revision, str)
+                and expected_revision is _RevisionSelection.CURRENT,
                 "saved_owner_assignment_required",
             )
             assert isinstance(policy, dict) and isinstance(assignment_revision, str)
@@ -318,6 +399,11 @@ class OwnerSettings:
         with self.ledger._authorized_db(write=False) as db:
             _need(self.ledger._owner(db) == a["custodian"], "settings_owner_mismatch")
             head = self._head(db)
+            _need(
+                expected_revision is _RevisionSelection.CURRENT
+                or expected_revision == (head["revision"] if head else None),
+                "settings_revision_conflict",
+            )
             prior_mandate = head["mandate_id"] if head else a["initial_mandate"]
             if head is None and prior_mandate is None:
                 _need(
@@ -337,6 +423,10 @@ class OwnerSettings:
         else:
             _need(action != "renew" or head is not None, "saved_settings_required")
             p = self._policy(policy, a)  # type: ignore[arg-type]
+            _need(
+                not prior_spec or prior_spec["workflow"] == p["mandate"]["workflow"],
+                "settings_workflow_mismatch",
+            )
             _need(
                 not prior_spec or prior_spec["reviewer"] == p["mandate"]["reviewer"],
                 "reviewer_replacement_settings_required",
@@ -426,6 +516,24 @@ class OwnerSettings:
             raise SettingsError("invalid_settings_signature") from exc
         return claim, a
 
+    def _claim_prior(
+        self, db: sqlite3.Connection, claim: Json, authority: Json
+    ) -> tuple[Json | None, Json | None]:
+        head = self._head(db)
+        prior = head["mandate_id"] if head else authority["initial_mandate"]
+        _need(
+            claim["prior_revision"] == (head["revision"] if head else None)
+            and claim["prior_mandate"] == prior,
+            "settings_revision_conflict",
+        )
+        prior_spec = self.ledger._mandate(db, prior)[1] if prior else None
+        if prior_spec is not None and claim["action"] not in {"pause", "revoke"}:
+            _need(
+                prior_spec["workflow"] == claim["policy"]["mandate"]["workflow"],
+                "settings_workflow_mismatch",
+            )
+        return head, prior_spec
+
     def save(self, packet: Json, *, actor: str) -> Json:
         encoded = canonical(packet).encode()
         _need(len(encoded) <= 64 * 1024, "settings_packet_too_large")
@@ -442,11 +550,19 @@ class OwnerSettings:
             from opentour_cell.pilot.reviewer_assignment import ReviewerAssignments
 
             replacement = ReviewerAssignments(self)
+        revision = digest(claim)
         if changing:
             p = self._policy(p, authority)
             _need(p == claim["policy"], "noncanonical_settings_policy")
+            # Decline stale or cross-workflow claims before contacting the source catalogue.
+            # Previously accepted retries still revalidate current authority and source.
+            with self.ledger._authorized_db(write=False) as db:
+                if not db.execute(
+                    "SELECT 1 FROM owner_settings_revisions WHERE scope=? AND revision=?",
+                    (self.ledger.scope, revision),
+                ).fetchone():
+                    self._claim_prior(db, claim, authority)
             _need(self._live(p, discover=True) == claim["binding"], "settings_live_binding_changed")
-        revision = digest(claim)
         # All changing saves take approval -> training -> mandate -> lease,
         # even before replacement history exists; never decide from a stale ledger read.
         # Commit before releasing the lease; the empty stack changes no acquisition order.
@@ -465,15 +581,8 @@ class OwnerSettings:
             if found:
                 _need(json.loads(found["packet"])["claim"] == claim, "settings_receipt_conflict")
                 return parse_manifest(found["receipt"].encode())
-            head = self._head(db)
-            _need(
-                claim["prior_revision"] == (head["revision"] if head else None)
-                and claim["prior_mandate"]
-                == (head["mandate_id"] if head else authority["initial_mandate"]),
-                "settings_revision_conflict",
-            )
+            head, prior_spec = self._claim_prior(db, claim, authority)
             prior = claim["prior_mandate"]
-            prior_spec = self.ledger._mandate(db, prior)[1] if prior else None
             if changing:
                 live = self._live(p, discover=False)
                 _need(
@@ -669,12 +778,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--authority", type=Path, required=True)
     parser.add_argument("--actor", required=True)
     parser.add_argument("--input", type=Path)
+    parser.add_argument("--workflow", help="restrict settings status to the selected workflow")
     parser.add_argument(
         "--action", choices=("save", "renew", "pause", "revoke", "replace_reviewer"), default="save"
     )
     parser.add_argument("--assignment-revision")
     args = parser.parse_args(argv)
     try:
+        _need(args.workflow is None or args.command == "status", "unexpected_workflow_selection")
         service = OwnerSettings(
             args.directory, args.organization, args.engagement, authority_file=args.authority
         )
@@ -687,7 +798,11 @@ def main(argv: list[str] | None = None) -> int:
                 assignment_revision=args.assignment_revision,
             )
         elif args.command == "status":
-            result = service.inspect(actor=args.actor)
+            result = (
+                service.setup_readback(actor=args.actor, workflow=args.workflow)
+                if args.workflow is not None
+                else service.inspect(actor=args.actor)
+            )
         else:
             _need(isinstance(value, dict), "settings_input_required")
             assert isinstance(value, dict)

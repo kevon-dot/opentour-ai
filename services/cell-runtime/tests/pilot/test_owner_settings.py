@@ -141,6 +141,117 @@ def test_signed_preview_retry_roles_and_real_worker(tmp_path):
     assert s.service.reconcile(first, actor=s.owner)["withdrawn"] is True
 
 
+def test_scoped_setup_status_is_read_only_and_rechecks_roles_after_restart(tmp_path):
+    s = Setup(tmp_path)
+    c = s.customer
+    workflow = s.policy["mandate"]["workflow"]
+    first = s.service.setup_readback(actor=s.owner, workflow=workflow)
+    assert first == {
+        "workflow": workflow,
+        "revision": None,
+        "mandate_revision": None,
+        "state": "unconfigured",
+        "may_preview": True,
+        "budget": None,
+    }
+    preview = s.service.preview(s.policy, actor=s.owner, expected_revision=first["revision"])
+    receipt = s.service.save(s.sign(preview["claim"]), actor=s.owner)
+    before = s.protocol()
+
+    def status(actor, selected):
+        return subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "opentour_cell.pilot.owner_settings",
+                "status",
+                "--directory",
+                str(c.owner),
+                "--organization",
+                c.org,
+                "--engagement",
+                c.eng,
+                "--authority",
+                str(s.authority),
+                "--actor",
+                actor,
+                "--workflow",
+                selected,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+
+    reviewer = status(s.reviewer, workflow)
+    assert reviewer.returncode == 0, reviewer.stderr
+    assert json.loads(reviewer.stdout) == {
+        **first,
+        "revision": receipt["revision"],
+        "mandate_revision": receipt["mandate_revision"],
+        "state": "active",
+        "may_preview": False,
+    }
+    operator = status(s.operator, workflow)
+    assert operator.returncode == 0, operator.stderr
+    money = json.loads(operator.stdout)["budget"]
+    assert money["currency"] == "USD"
+    assert money["monetary_limit_cents"] == 0 and money["monetary_usage"] == "unavailable"
+    denied = status(s.reviewer, "generated-different-workflow")
+    assert denied.returncode == 2 and not denied.stdout
+    save(s.authority, dict(read(s.authority), reviewers=["UOTHER"]))
+    denied = status(s.reviewer, workflow)
+    assert denied.returncode == 2 and not denied.stdout
+    held_status = s.service.setup_readback(actor=s.operator, workflow=workflow)
+    assert held_status["state"] == "authority_changed"
+    assert held_status["budget"] is None
+    assert s.protocol() == before
+    assert not list(c.owner.glob("settings-cycle-*.json"))
+
+
+def test_preview_and_signed_save_refuse_outdated_and_cross_workflow_claims_without_io(tmp_path):
+    s = Setup(tmp_path)
+    first = s.apply()
+    successor = deepcopy(s.policy)
+    successor["mandate"]["mandate_id"] = "setup-successor"
+    foreign = deepcopy(successor)
+    foreign["mandate"]["workflow"] = "generated-foreign-workflow"
+    before = s.protocol()
+    with pytest.raises(settings.SettingsError, match="settings_workflow_mismatch"):
+        s.service.preview(foreign, actor=s.owner, expected_revision=first["revision"])
+    with pytest.raises(settings.SettingsError, match="settings_revision_conflict"):
+        s.service.preview(successor, actor=s.owner, expected_revision=None)
+    assert s.protocol() == before
+    preview = s.service.preview(successor, actor=s.owner, expected_revision=first["revision"])
+    original = preview["claim"]
+    rogue = deepcopy(original)
+    rogue["policy"] = foreign
+    before = s.protocol()
+    with pytest.raises(settings.SettingsError, match="settings_workflow_mismatch"):
+        s.service.save(s.sign(rogue), actor=s.owner)
+    assert s.protocol() == before
+    receipt = s.service.save(s.sign(original), actor=s.owner)
+    before = s.protocol()
+    stale = deepcopy(original)
+    stale["policy"]["mandate"]["mandate_id"] = "stale-successor"
+    with pytest.raises(settings.SettingsError, match="settings_revision_conflict"):
+        s.service.save(s.sign(stale), actor=s.owner)
+    assert s.protocol() == before
+    assert s.service.inspect(actor=s.owner)["current"] == receipt
+
+
+def test_unqualified_monetary_cap_is_refused_before_catalogue(tmp_path):
+    s = Setup(tmp_path)
+    baseline = s.apply()
+    policy = deepcopy(s.policy)
+    policy["mandate"].update(mandate_id="paid-successor", max_cost_cents=1)
+    before = s.protocol()
+    with pytest.raises(MandateError, match="invalid_mandate_budget"):
+        s.service.preview(policy, actor=s.owner, expected_revision=baseline["revision"])
+    assert s.service.inspect(actor=s.owner)["current"] == baseline
+    assert s.protocol() == before
+
+
 @pytest.mark.parametrize("actor", ["generated-worker", "UREVIEWER", "forged-owner"])
 def test_wrong_roles_cannot_preview_or_save_before_provider(tmp_path, actor):
     s = Setup(tmp_path)
@@ -370,6 +481,9 @@ def test_pause_revoke_old_worker_and_stale_receipt_zero_reads(tmp_path, action):
     assert receipt["prior_revision"] == first["revision"]
     assert receipt["prior_treatment"]["release"] == "denied"
     before = s.protocol()
+    projected = s.service.setup_readback(actor=s.reviewer, workflow=s.policy["mandate"]["workflow"])
+    assert projected["state"] == {"pause": "paused", "revoke": "revoked"}[action]
+    assert projected["revision"] == receipt["revision"] and projected["budget"] is None
     held = autonomous_cycle.cycle_once(s.customer.owner, s.customer.org, config["config"])
     assert held["state"] == "held"
     assert s.protocol() == before
@@ -388,6 +502,8 @@ def test_read_only_scope_never_starts_worker_and_unknown_fields_refused(tmp_path
     s.policy["mandate"]["mode"] = "manual"
     receipt = s.apply()
     before = s.protocol()
+    projected = s.service.setup_readback(actor=s.owner, workflow=s.policy["mandate"]["workflow"])
+    assert projected["state"] == "read_only" and projected["budget"]["fits"]["limit"] == 0
     with pytest.raises(MandateError, match="manual_learning_only"):
         s.service.worker_config(receipt, actor=s.operator)
     assert s.protocol() == before
@@ -598,6 +714,12 @@ def test_lowered_renewal_row_cap_stops_before_content_acquisition(tmp_path):
     now = s.customer.ledger.inspect(receipt["mandate_id"])
     assert now["runs"] == 0 and now["cumulative_runs"] == 1
     assert now["cumulative_rows"] == usage["cumulative_rows"]
+    before = s.protocol()
+    setup = s.service.setup_readback(actor=s.owner, workflow=p["mandate"]["workflow"])
+    assert setup["revision"] == receipt["revision"]
+    assert setup["budget"]["runs"] == {"limit": 1, "used": 1, "remaining": 0}
+    assert setup["budget"]["rows"]["used"] == usage["cumulative_rows"]
+    assert s.protocol() == before
 
 
 def test_renewal_fits_seconds_accounting_and_scope_isolation(tmp_path):
