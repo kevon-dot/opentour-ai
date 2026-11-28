@@ -14,6 +14,7 @@ Nothing here reads a provider, a live workplace or a protected store.
 from __future__ import annotations
 
 import json
+import math
 import os
 import sqlite3
 from collections import defaultdict
@@ -39,7 +40,12 @@ SCHEMA = "opentour.pilot.repair-routing.v1"
 # v3 (OPE-568): the contradiction check keys on the independence group plus the full feature
 # map instead of the entity plus features, so cases grouped only by family or by a transitive
 # chain now hold as contradictory_labels where v2 could route them onward.
-ROUTER_REVISION = "repair-routing.decide.v3"
+#
+# v4 (OPE-568 follow-up): feature maps are validated and keyed with exact types. A value that
+# is not None, bool, int, finite float, str, list or str-keyed dict (a tuple, a set, NaN, a
+# non-str key) is refused as invalid_feature_value or invalid_feature_key where v3 routed it,
+# or failed with an untyped ValueError or TypeError.
+ROUTER_REVISION = "repair-routing.decide.v4"
 OUTCOMES = ("keep_incumbent", "simple_repair", "request_evidence", "fit_eligible")
 _ORIGINS_COUNTED = ("live",)
 _DEV = "development"
@@ -301,6 +307,44 @@ def _components(cases: Sequence[DevelopmentCase]) -> dict[str, str]:
     return {c.case_id: "grp-" + digest(find("e:" + _identity(c.entity_id)))[:24] for c in cases}
 
 
+_FEATURE_DEPTH = 16
+
+
+def _feature_value(value: Any, depth: int) -> Any:
+    """One feature value in a type-exact canonical form.
+
+    Python equality merges ``1``, ``1.0`` and ``True``, and ``0.0`` with ``-0.0``; JSON keeps
+    them apart only by accident of encoding, and coerces a tuple into a list. Tagging each
+    value with its exact type makes "identical features" mean identical values of identical
+    types, and anything outside the JSON value types is refused rather than coerced.
+    """
+    _need(depth <= _FEATURE_DEPTH, "invalid_feature_value")
+    kind = type(value)
+    if value is None:
+        return ["none"]
+    if kind is bool:
+        return ["bool", value]
+    if kind is int:
+        return ["int", value]
+    if kind is float:
+        _need(math.isfinite(value), "invalid_feature_value")
+        return ["float", value.hex()]
+    if kind is str:
+        return ["str", value]
+    if kind is list:
+        return ["list", [_feature_value(item, depth + 1) for item in value]]
+    if kind is dict:
+        return ["dict", _feature_map(value, depth + 1)]
+    raise RoutingError("invalid_feature_value")
+
+
+def _feature_map(features: Mapping[Any, Any], depth: int = 0) -> list[list[Any]]:
+    """A feature map as sorted ``[key, value]`` pairs; every key must be a str."""
+    _need(isinstance(features, Mapping), "invalid_feature_value")
+    _need(all(type(key) is str for key in features), "invalid_feature_key")
+    return sorted([key, _feature_value(item, depth)] for key, item in features.items())
+
+
 def _validate_cases(cases: Sequence[DevelopmentCase]) -> None:
     _need(len(cases) <= simple_repair.MAX_ROWS, "too_many_cases")
     seen: set[str] = set()
@@ -314,6 +358,8 @@ def _validate_cases(cases: Sequence[DevelopmentCase]) -> None:
         _need(c.context_state in ("observed", "missing"), "invalid_context_state")
         _need(c.origin in ("live", "starter", "generated_child"), "invalid_origin")
         _need(type(c.decided_at) is int and c.decided_at >= 0, "invalid_decision_time")
+        # In the preflight, so a replay is refused for the same features a decision would be.
+        _feature_map(c.features)
 
 
 def _recipe_inputs(recipes: Sequence[Recipe]) -> list[list[Any]]:
@@ -533,9 +579,11 @@ def decide(request: RoutingRequest) -> Json:
     # A missing reference (None) counts as a disagreeing label here, so an unlabeled case that
     # shares only a family with a labeled sibling of identical features now holds as
     # contradictory_labels rather than unusable_labels. Both are holds; nothing is routed.
+    # Features compare with exact types (v4), so 1 and 1.0, True and 1, or 0.0 and -0.0 are
+    # different evidence, never a conflict.
     by_group: defaultdict[str, set[str | None]] = defaultdict(set)
     for c in window:
-        by_group[digest([groups[c.case_id], dict(c.features)])].add(c.reference)
+        by_group[digest([groups[c.case_id], _feature_map(c.features)])].add(c.reference)
     if any(len(v) > 1 for v in by_group.values()):
         return hold("contradictory_labels", ["resolve_contradictory_labels"])
     if any(c.reference is None for c in window):

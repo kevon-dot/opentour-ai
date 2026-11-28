@@ -5,10 +5,15 @@ Local and simulated only: no provider, protected set, ledger reservation or fit 
 
 from __future__ import annotations
 
+import ast
 import glob
 import io
+import json
+import math
 import os
+import socket
 import sqlite3
+import subprocess
 import sys
 import threading
 from contextlib import closing
@@ -784,22 +789,47 @@ def test_replay_with_an_unchanged_authority_still_returns_one_evaluation(
 # protected reads. The `open` audit event is raised underneath all of them. Directory listing
 # opens no file, so it is watched separately: `os.listdir`, `os.scandir` and `glob.glob` (and
 # its `root_dir`/`dir_fd` form) each raise their own event, and `pathlib` iteration and globbing
-# go through the first two.
-_WATCHED = (
-    "open",
-    "sqlite3.connect",
-    "mmap.__new__",
-    "os.listdir",
-    "os.scandir",
-    "glob.glob",
-    "glob.glob/2",
+# go through the first two. Process creation and every `socket.*` event (creation, bind,
+# connect, name resolution, sends) are watched the same way.
+_WATCHED = frozenset(
+    {
+        "open",
+        "sqlite3.connect",
+        "mmap.__new__",
+        "os.listdir",
+        "os.scandir",
+        "glob.glob",
+        "glob.glob/2",
+        "subprocess.Popen",
+        "os.system",
+        "os.exec",
+        "os.posix_spawn",
+        "os.spawn",
+        "os.fork",
+        "os.forkpty",
+    }
 )
+_WATCHED_PREFIXES = ("socket.",)
+# Metadata probes raise no audit event, so these are wrapped for the duration of the window.
+# `os.path.exists` / `isfile` / `isdir` and `pathlib.Path.stat` / `.exists` call through them.
+_PROBES = ("stat", "lstat", "access")
 _WATCHING: list[tuple[str, str]] | None = None
+
+
+def _authorize(action: int, arg1: str | None, *_: object) -> int:
+    # ATTACH opens a database file from C, under no `open` event, so it is seen here instead.
+    # A filename passed as a bound parameter is not known when the statement is authorized.
+    sink = _WATCHING
+    if sink is not None and action == sqlite3.SQLITE_ATTACH:
+        sink.append(("sqlite3.attach", "<bound parameter>" if arg1 is None else arg1))
+    return sqlite3.SQLITE_OK
 
 
 def _audit(event: str, args: tuple[object, ...]) -> None:
     sink = _WATCHING
-    if sink is None or event not in _WATCHED:
+    if sink is None:
+        return
+    if event not in _WATCHED and not event.startswith(_WATCHED_PREFIXES):
         return
     try:
         target = str(args[0]) if args else ""
@@ -817,13 +847,31 @@ sys.addaudithook(_audit)
 
 
 class _Access:
-    """Record every file, database and memory-mapping access while the context is open."""
+    """Record every watched access while the context is open; see _WATCHED and _PROBES."""
 
     def __init__(self, patch: pytest.MonkeyPatch) -> None:
         self.seen: list[tuple[str, str]] = []
-        # monkeypatch restores `_WATCHING` to None on context exit, re-arming the hook's
-        # inert state without relying on this object being torn down.
+        # monkeypatch restores `_WATCHING` to None and the probes to the real functions on
+        # context exit, re-arming the inert state without relying on this object's teardown.
         patch.setattr(sys.modules[__name__], "_WATCHING", self.seen)
+        for name in _PROBES:
+            patch.setattr(os, name, self._probe("os." + name, getattr(os, name)))
+        # A connection opened in the window reports any ATTACH through its authorizer.
+        connect = sqlite3.connect
+
+        def connect_watched(*args: Any, **kw: Any) -> sqlite3.Connection:
+            db = connect(*args, **kw)
+            db.set_authorizer(_authorize)
+            return db
+
+        patch.setattr(sqlite3, "connect", connect_watched)
+
+    def _probe(self, kind: str, real: Any) -> Any:
+        def probe(path: Any, *args: Any, **kw: Any) -> Any:
+            self.seen.append((kind, f"<fd {path}>" if type(path) is int else os.fsdecode(path)))
+            return real(path, *args, **kw)
+
+        return probe
 
     @property
     def kinds(self) -> set[str]:
@@ -834,17 +882,24 @@ class _Access:
         return {target for _, target in self.seen}
 
 
+# The durable path: create-or-open the journal, check its directory and file, connect.
+DURABLE_KINDS = {"open", "os.stat", "sqlite3.connect"}
+
+
 def test_routing_opens_nothing_and_reads_no_protected_rows(
     store: rr.RepairRoutingStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # Acceptance 7, observed rather than read back from the receipt's own zero: the decision
-    # performs no file, database, memory-mapping or directory-listing access at all, and the
-    # durable path touches exactly one file, the router's private evaluation journal.
+    # Acceptance 7, observed rather than read back from the receipt's own zero: inside the
+    # window the decision makes none of the watched calls (file open, sqlite connect or ATTACH
+    # on a connection opened in the window, mmap, directory listing, os.stat / os.lstat /
+    # os.access probes, process creation, any socket event), and the durable path touches only
+    # the router's private evaluation journal and the directory that holds it.
     #
-    # What the audit hook still cannot see, so this test does not claim it: a raw read on a
-    # descriptor that was already open before the window (including one inherited from a
-    # parent process), and protected content that is already resident in memory and so needs
-    # no syscall to reach. It proves nothing was opened, not that nothing was known.
+    # What this does not see, so the test does not claim it: reads on a descriptor or sqlite
+    # connection that was already open before the window (including ATTACH on one, and a
+    # descriptor inherited from a parent process), metadata probes made from C code (such as
+    # DirEntry.stat or sqlite's own), any other syscall that raises no audit event, and
+    # protected content already resident in memory. It shows none of the watched calls ran.
     sched = scheduling()
     req = request(data_fix(), scheduling=sched)
     with monkeypatch.context() as patch:
@@ -859,9 +914,71 @@ def test_routing_opens_nothing_and_reads_no_protected_rows(
     with monkeypatch.context() as patch:
         watched = _Access(patch)
         stored = store.evaluate(req)
-    assert watched.kinds == {"open", "sqlite3.connect"}
-    assert watched.targets == {str(store.path)}
+    assert watched.kinds == DURABLE_KINDS
+    assert watched.targets == {str(store.path), str(store.path.parent)}
     assert (stored["protected_reads"], stored["fit_starts"], stored["reservations"]) == (0, 0, 0)
+
+
+@pytest.mark.parametrize(
+    ("how", "event"),
+    [
+        ("socket_new", "socket.__new__"),
+        ("socket_bind", "socket.bind"),
+        ("subprocess", "subprocess.Popen"),
+        ("os_stat", "os.stat"),
+        ("os_lstat", "os.lstat"),
+        ("os_access", "os.access"),
+        ("os_path_exists", "os.stat"),
+        ("path_exists", "os.stat"),
+        ("sqlite_attach", "sqlite3.attach"),
+        ("sqlite_attach_bound", "sqlite3.attach"),
+    ],
+)
+def test_the_monitor_catches_sockets_processes_probes_and_attach(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, how: str, event: str
+) -> None:
+    # Each of these reaches outside the process or the file system without opening a file.
+    sentinel = tmp_path / "generated-protected.sqlite3"
+    sqlite3.connect(sentinel).close()
+    real = comparison_plan.freeze_plan
+    done: dict[str, object] = {}
+
+    def leaky(**kw: Any) -> Any:
+        if how == "socket_new":
+            socket.socket(socket.AF_INET, socket.SOCK_STREAM).close()
+        elif how == "socket_bind":
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+                sock.bind(("127.0.0.1", 0))
+        elif how == "subprocess":
+            subprocess.run([sys.executable, "-c", "pass"], check=True)
+        elif how == "os_stat":
+            os.stat(sentinel)
+        elif how == "os_lstat":
+            os.lstat(sentinel)
+        elif how == "os_access":
+            os.access(sentinel, os.R_OK)
+        elif how == "os_path_exists":
+            assert os.path.exists(sentinel)
+        elif how == "path_exists":
+            assert sentinel.exists()
+        elif how == "sqlite_attach":
+            with closing(sqlite3.connect(":memory:")) as db:
+                db.execute(f"ATTACH DATABASE '{sentinel}' AS protected")
+        else:
+            with closing(sqlite3.connect(":memory:")) as db:
+                db.execute("ATTACH DATABASE ? AS protected", (str(sentinel),))
+        done["how"] = how
+        return real(**kw)
+
+    monkeypatch.setattr(comparison_plan, "freeze_plan", leaky)
+    req = request(data_fix(), scheduling=scheduling())
+    with monkeypatch.context() as patch:
+        watched = _Access(patch)
+        rr.decide(req)
+    assert done["how"] == how
+    assert event in watched.kinds, watched.seen
+    if how.startswith(("os_", "path_")) or how == "sqlite_attach":
+        assert (event, str(sentinel)) in watched.seen
 
 
 @pytest.mark.parametrize("how", ["path_read_text", "path_read_bytes", "io_open", "path_open"])
@@ -1077,8 +1194,41 @@ def test_case_id_stays_a_case_sensitive_row_key() -> None:
     assert conflicting["reason_code"] == "contradictory_labels"
 
 
+def _typed_pair(a: Any, b: Any) -> list[rr.DevelopmentCase]:
+    """Two grouped cases whose feature `n` differs only in type, with conflicting references."""
+    return [
+        replace(
+            case("pa", "x", "b", "a", entity="Entity-P1", family="Family-P"),
+            features={"bucket": "x", "n": a},
+        ),
+        replace(
+            case("pb", "x", "b", "b", entity="Entity-P2", family="Family-P"),
+            features={"bucket": "x", "n": b},
+        ),
+    ]
+
+
+def _with_features(features: dict[Any, Any]) -> list[rr.DevelopmentCase]:
+    return independent_residual() + [replace(case("ft", "z", "b", "a"), features=features)]
+
+
+def _recipe_catalog() -> tuple[rr.Recipe, ...]:
+    """One recipe per selection rejection reason, plus the two viable defaults."""
+    linear = recipes()[0]
+    return recipes() + (
+        replace(linear, recipe_id="generated-recipe-other-model", models=frozenset({"other"})),
+        replace(linear, recipe_id="generated-recipe-other-task", tasks=frozenset({"other"})),
+        replace(linear, recipe_id="generated-recipe-paid", paid_probe=True),
+        replace(linear, recipe_id="generated-recipe-slow", est_seconds_per_trial=100_000),
+        replace(linear, recipe_id="generated-recipe-linear-b", est_seconds_per_trial=700),
+    )
+
+
 def _pinned_requests() -> list[tuple[str, rr.RoutingRequest]]:
-    """A fixed fixture set spanning every outcome and each OPE-568 grouping shape."""
+    """The 37 pinned fixtures: every outcome, reason code, next action, recipe rejection reason
+    and authority hold decide() can produce, each refusal code raised by the functions that
+    test_every_code_the_router_can_emit_is_pinned reads, and each OPE-568 grouping and typing
+    shape."""
     cs = case("cs", "x", "b", "a", entity="generated-entity-cs", family="generated-family-cs")
     upper, lower = replace(cs, case_id="Case-1"), replace(cs, case_id="case-1")
     second_feature = [
@@ -1098,11 +1248,18 @@ def _pinned_requests() -> list[tuple[str, rr.RoutingRequest]]:
     empty = rr.ComparisonScheduling(
         digest("generated-intake"), (), "generated-incumbent-1", "generated-audience"
     )
+    missing = independent_residual()
+    missing[0] = case("fx0", "x", "b", "a", context_state="missing")
+    slice_wrong = group("fx", 6, "x", "b", "a") + [case("sf", "x", "a", "b")] + correct()
+    imbalance = group("fx", 2, "x", "b", "a") + group("rz", 3, "z", "b", "a")
+    imbalance += group("ok", 1, "y", "b", "b")
+    residual = independent_residual()
     return [
+        # The 16 OPE-568 fixtures recorded with v2 and v3, unchanged.
         ("simple_repair", request(data_fix(), scheduling=scheduling())),
         ("simple_repair_unscheduled", request(data_fix())),
         ("simple_repair_empty_population", request(data_fix(), scheduling=empty)),
-        ("fit_eligible", request(independent_residual())),
+        ("fit_eligible", request(residual)),
         ("same_entity_residual", request(same_entity_residual())),
         ("correct_only", request(correct())),
         (
@@ -1117,36 +1274,95 @@ def _pinned_requests() -> list[tuple[str, rr.RoutingRequest]]:
         ("family_conflict_case_variant", request(family_conflict("family-g"))),
         ("transitive_conflict", request(transitive_conflict())),
         ("unlabeled_family_sibling", request(unlabeled_family_sibling())),
-        ("ungrouped_identical_features", request(independent_residual() + ungrouped)),
-        ("grouped_second_feature_differs", request(independent_residual() + second_feature)),
-        ("case_variant_ids_agree", request(independent_residual() + [upper, lower])),
+        ("ungrouped_identical_features", request(residual + ungrouped)),
+        ("grouped_second_feature_differs", request(residual + second_feature)),
+        ("case_variant_ids_agree", request(residual + [upper, lower])),
         (
             "case_variant_ids_conflict",
-            request(independent_residual() + [upper, replace(lower, reference="b")]),
+            request(residual + [upper, replace(lower, reference="b")]),
         ),
+        # One per remaining reason code and authority hold.
+        ("stale_documentation", request(residual, t=terms(documentation_revision="generated-d0"))),
+        ("missing_decision_time_context", request(missing)),
+        ("unusable_labels", request(residual + [case("nolabel", "z", "b", None)])),
+        (
+            "critical_slice_failed",
+            request(
+                slice_wrong,
+                t=terms(critical_slices=("bucket:x",), max_wrong_automatic_bps=1_000),
+                scheduling=scheduling(),
+            ),
+        ),
+        (
+            "insufficient_independent_development_evidence",
+            request(residual, t=terms(min_development_cases=50)),
+        ),
+        ("residual_below_material_threshold", request(group("rz", 1, "z", "b", "a") + correct())),
+        ("label_imbalance_inadequate_group_support", request(imbalance)),
+        (
+            "training_rights_required",
+            request(residual, mandate=mandate(uses=frozenset({"inspect", "evaluate"}))),
+        ),
+        ("training_budget_required", request(residual, mandate=mandate(reserved_fits=3))),
+        (
+            "qualified_model_required",
+            request(residual, model=rr.ModelTarget("simulated:model-a", "label_correction", None)),
+        ),
+        ("unsupported_recipe", request(residual, recipes=())),
+        ("signed_policy_required", request(residual, verifier=Verifier(False))),
+        (
+            "recipe_rejection_reasons",
+            request(residual, recipes=_recipe_catalog(), mandate=mandate(max_fits=1)),
+        ),
+        # Refusals raised by decide() itself, and the v4 feature typing.
+        (
+            "critical_slice_outside_permitted_feature",
+            request(data_fix(), t=terms(critical_slices=("other:x",)), scheduling=scheduling()),
+        ),
+        ("typed_int_vs_float", request(residual + _typed_pair(1, 1.0))),
+        ("typed_bool_vs_int", request(residual + _typed_pair(True, 1))),
+        ("typed_zero_vs_negative_zero", request(residual + _typed_pair(0.0, -0.0))),
+        ("typed_same_value_conflict", request(residual + _typed_pair(1, 1))),
+        ("feature_tuple", request(_with_features({"bucket": "z", "n": (1, 2)}))),
+        ("feature_nan", request(_with_features({"bucket": "z", "n": math.nan}))),
+        ("feature_mixed_key", request(_with_features({"bucket": "z", 1: "a"}))),
     ]
 
 
-def pinned_decisions() -> list[list[Any]]:
-    """Every pinned decision with its router_revision stamp removed.
-
-    The stamp is stripped so the digest moves only when an outcome, reason code or recorded
-    body moves, never merely because the constant was bumped.
-    """
-    out: list[list[Any]] = []
-    for name, req in _pinned_requests():
+def _pinned_result(req: rr.RoutingRequest) -> list[Any]:
+    try:
         body = rr.decide(req)
-        body.pop("router_revision", None)
-        out.append([name, body])
-    return out
+    except rr.RoutingError as refused:
+        return ["refused", refused.code.lower()]
+    except (ValueError, TypeError) as error:
+        # An untyped failure (what v3 raised for NaN or a mixed-type key); only its class is
+        # recorded, because its message is the interpreter's and may change between versions.
+        return ["error", type(error).__name__]
+    # Both stamps move on a bump alone (`revision` digests a body that carries the router
+    # revision), so neither is part of what the ledger pins.
+    return ["decided", {k: v for k, v in body.items() if k not in ("router_revision", "revision")}]
 
 
-# One row per router revision, oldest first, each recorded from that revision's decide() over
-# _pinned_requests(). APPEND a row when ROUTER_REVISION is bumped; never edit an existing row.
-# v2 is the router as merged for OPE-417, before OPE-568 changed the contradiction key.
+def pinned_decisions() -> list[list[Any]]:
+    """The routing outputs over the pinned fixtures, with no revision stamp in them.
+
+    `router_revision` and `revision` are both left out, so this changes only when an outcome,
+    reason code, recorded body or refusal changes, never merely because the constant moved.
+    """
+    return [[name, _pinned_result(req)] for name, req in _pinned_requests()]
+
+
+# One row per router revision, oldest first: the digest of pinned_decisions() as that
+# revision's router produced it. APPEND a row when ROUTER_REVISION is bumped.
+#
+# The rows are tied to this version of _pinned_requests(). Adding or changing a fixture means
+# recomputing EVERY row by running each revision's router over the new set: v2 is the router
+# as merged for OPE-417 (main at 629cd0e), v3 the OPE-568 router (9ce7d49), v4 this one. A row
+# is never edited for any other reason.
 _DECISION_LEDGER = {
-    "repair-routing.decide.v2": "e6825cbb4091c45a978102e3648d61d06da4dd0c1bcc8a75b3c509c3d235453e",
-    "repair-routing.decide.v3": "6547db657dd34c21a924c7703d02abd0c186f2b6c3144cc46bc051d6288840f2",
+    "repair-routing.decide.v2": "1d59ba305cc086b879d7ab4e603ea1455dbee106fb3ee255b05a5616e724e57d",
+    "repair-routing.decide.v3": "386872152fdd0c978fd5f32fd38b5b2e08a9c22f8ff1c3f758b883a5c1ad35c6",
+    "repair-routing.decide.v4": "839ae944fdca744cc095a601eeb93304c5a59e176d4f019f476f501ca2f13a75",
 }
 
 
@@ -1159,27 +1375,135 @@ def test_routing_outputs_cannot_change_without_a_router_revision_bump() -> None:
     assert digest(pinned_decisions()) == _DECISION_LEDGER[rr.ROUTER_REVISION], (
         "routing outputs changed on the pinned fixtures: bump ROUTER_REVISION and append a row"
     )
-    # Every revision is a behaviour change the pinned set observes; a bump it cannot see means
-    # the fixture set must grow to cover the change.
+    # The digest carries no revision stamp, so a bump the fixtures cannot observe repeats the
+    # previous row and fails here: the fixture set must grow to cover the change.
     assert len(set(_DECISION_LEDGER.values())) == len(_DECISION_LEDGER)
 
 
-_PREVIOUS_ROUTER_REVISION = "repair-routing.decide.v2"
+# The functions whose string literals are the router's emitted vocabulary.
+_VOCABULARY_SOURCES = (
+    "decide",
+    "_slice_failure",
+    "select_recipe",
+    "_feature_value",
+    "_feature_map",
+)
+# Literals in those functions that are dict keys, inputs or type tags, never an emitted code.
+_STRUCTURAL = frozenset(
+    {
+        ":",
+        "allowed_params",
+        "assessed",
+        "automatic",
+        "bool",
+        "budget_estimate_seconds",
+        "capability_receipt_ref",
+        "case_id",
+        "critical_slices",
+        "dict",
+        "direction",
+        "excluded_origin",
+        "feature",
+        "features",
+        "float",
+        "group_id",
+        "incumbent",
+        "int",
+        "label",
+        "list",
+        "metric",
+        "model_ref",
+        "no_change",
+        "none",
+        "none_before_freeze",
+        "observed",
+        "protected_access",
+        "reason",
+        "recipe",
+        "reference",
+        "rejected",
+        "residual",
+        "residual_groups",
+        "route",
+        "selected",
+        "selection",
+        "simple",
+        "status",
+        "step_limit",
+        "stopping_rule",
+        "str",
+        "task",
+        "train",
+        "trial_limit",
+        "validation_split",
+    }
+)
+
+
+def _source_literals() -> set[str]:
+    tree = ast.parse(Path(rr.__file__).read_text())
+    found: set[str] = set()
+    functions = [
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name in _VOCABULARY_SOURCES
+    ]
+    assert sorted(f.name for f in functions) == sorted(_VOCABULARY_SOURCES)
+    for fn in functions:
+        doc = ast.get_docstring(fn, clean=False)
+        for node in ast.walk(fn):
+            if isinstance(node, ast.Constant) and isinstance(node.value, str):
+                if node.value != doc:
+                    found.add(node.value)
+    return found
+
+
+def _emitted(results: list[list[Any]]) -> set[str]:
+    out: set[str] = set()
+    for _, (kind, value) in results:
+        if kind == "refused":
+            out.add(value)
+        elif kind == "decided":
+            out |= {value["outcome"], value["reason_code"], *value["next_evidence"]}
+            selection = value["recipe_selection"] or {"rejected": []}
+            out |= {item["reason"] for item in selection["rejected"]}
+    return out
+
+
+def test_every_code_the_router_can_emit_is_pinned() -> None:
+    # Every string literal in the routing functions is either structural or an outcome, reason
+    # code, next action, recipe rejection reason or refusal code that some pinned fixture
+    # produces. A new code fails here until a fixture produces it, and then moves the ledger.
+    results = pinned_decisions()
+    emitted = _emitted(results)
+    literals = _source_literals()
+    assert not emitted & _STRUCTURAL
+    assert _STRUCTURAL <= literals, sorted(_STRUCTURAL - literals)
+    vocabulary = literals - _STRUCTURAL
+    assert vocabulary - emitted == set(), "unpinned codes"
+    assert emitted - vocabulary == set(), "emitted codes the source does not name"
+    assert set(rr.OUTCOMES) <= emitted
+    # Under the current router every failure is a typed refusal.
+    assert [name for name, (kind, _) in results if kind == "error"] == []
+    assert len(results) == len({name for name, _ in results})
+
+
+_V2_ROUTER_REVISION = "repair-routing.decide.v2"
 # What the v2 router decided for family_conflict(), recorded by running it (OPE-417 as merged).
 _V2_FAMILY_CONFLICT = {"outcome": "fit_eligible", "reason_code": "independent_material_residual"}
 
 
-def test_a_decision_stored_under_the_previous_revision_is_refused_not_reinterpreted(
+def test_a_decision_stored_by_the_v2_router_is_refused_not_reinterpreted(
     store: rr.RepairRoutingStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # OPE-568 changes the outcome for a family-only conflict. A receipt the v2 router stored for
     # it must not be replayed, and must not be silently re-decided over the durable record.
-    assert rr.ROUTER_REVISION == "repair-routing.decide.v3" != _PREVIOUS_ROUTER_REVISION
+    assert rr.ROUTER_REVISION != _V2_ROUTER_REVISION
     req = request(family_conflict())
     with monkeypatch.context() as patch:
-        patch.setattr(rr, "ROUTER_REVISION", _PREVIOUS_ROUTER_REVISION)
+        patch.setattr(rr, "ROUTER_REVISION", _V2_ROUTER_REVISION)
         written = store.evaluate(req)
-    assert written["router_revision"] == _PREVIOUS_ROUTER_REVISION
+    assert written["router_revision"] == _V2_ROUTER_REVISION
     # Give the row the outcome the v2 router produced for this request: v2 keyed the check on
     # entity plus features, so it missed the family-only conflict and routed the residual to fit.
     old = {k: v for k, v in written.items() if k != "replayed"} | _V2_FAMILY_CONFLICT
@@ -1195,7 +1519,7 @@ def test_a_decision_stored_under_the_previous_revision_is_refused_not_reinterpre
         assert db.execute("SELECT * FROM evaluations").fetchall() == before
     # The durable record is kept exactly as the old router left it ...
     kept = store.read(written["evaluation_id"])
-    assert kept is not None and kept["router_revision"] == _PREVIOUS_ROUTER_REVISION
+    assert kept is not None and kept["router_revision"] == _V2_ROUTER_REVISION
     assert {k: kept[k] for k in _V2_FAMILY_CONFLICT} == _V2_FAMILY_CONFLICT
     # Nor does the eligibility read take the old router's fit_eligible as today's verdict.
     eligibility = store.current_eligibility(
@@ -1208,3 +1532,138 @@ def test_a_decision_stored_under_the_previous_revision_is_refused_not_reinterpre
     # ... and the current router, deciding afresh, holds the conflict instead.
     fresh = rr.decide(req)
     assert (fresh["outcome"], fresh["reason_code"]) == ("request_evidence", "contradictory_labels")
+
+
+_ABSENT = object()
+# The revision after the current one, derived so that it is never the current value itself.
+_PREFIX, _, _NUMBER = rr.ROUTER_REVISION.rpartition(".v")
+_NEXT_ROUTER_REVISION = f"{_PREFIX}.v{int(_NUMBER) + 1}"
+
+
+@pytest.mark.parametrize(
+    "stamp",
+    [
+        _ABSENT,
+        None,
+        [rr.ROUTER_REVISION],
+        4,
+        rr.ROUTER_REVISION.upper(),
+        rr.ROUTER_REVISION + " ",
+        _NEXT_ROUTER_REVISION,
+        "repair-routing.decide.v3",
+        _V2_ROUTER_REVISION,
+    ],
+    ids=["absent", "none", "list", "int", "upper", "trailing_space", "next", "v3", "v2"],
+)
+def test_only_the_exact_current_router_revision_is_replayed_or_eligible(
+    store: rr.RepairRoutingStore, stamp: object
+) -> None:
+    # A row from before OPE-417 carries no stamp at all; anything but an exact, same-typed
+    # match of the current value is another router's verdict, on replay and on eligibility.
+    req = request(independent_residual())
+    first = store.evaluate(req)
+    assert first["outcome"] == "fit_eligible"
+    assert store.evaluate(req)["replayed"] is True
+    current = store.current_eligibility(
+        first["evaluation_id"], snapshot=req.snapshot, mandate=req.mandate
+    )
+    assert current["eligible"] is True
+    with closing(sqlite3.connect(store.path)) as db, db:
+        (raw,) = db.execute("SELECT body FROM evaluations").fetchone()
+        body = json.loads(raw)
+        if stamp is _ABSENT:
+            del body["router_revision"]
+        else:
+            body["router_revision"] = stamp
+        db.execute("UPDATE evaluations SET body=?", (canonical(body),))
+
+    with pytest.raises(rr.RoutingError, match="EVALUATION_ROUTER_REVISION_CHANGED"):
+        store.evaluate(req)
+    held = store.current_eligibility(
+        first["evaluation_id"], snapshot=req.snapshot, mandate=req.mandate
+    )
+    assert (held["eligible"], held["reason_code"]) == (False, "evaluation_router_revision_changed")
+    assert store.count() == 1
+
+
+@pytest.mark.parametrize(
+    ("a", "b"),
+    [(1, 1.0), (True, 1), (0.0, -0.0), ([1], [1.0]), ({"k": 1}, {"k": True})],
+    ids=["int_float", "bool_int", "zero_negative_zero", "nested_list", "nested_dict"],
+)
+def test_python_equal_features_of_different_types_are_different_evidence(a: Any, b: Any) -> None:
+    # 1 == 1.0, True == 1 and 0.0 == -0.0 in Python, but they are different values of different
+    # types (or signs), so the grouped pair is not identical evidence and cannot conflict.
+    residual = independent_residual()
+    assert a == b
+    apart = rr.decide(request(residual + _typed_pair(a, b)))
+    assert (apart["outcome"], apart["reason_code"]) == (
+        "fit_eligible",
+        "independent_material_residual",
+    )
+    # The same value of the same type, with conflicting references, is a contradiction.
+    same = rr.decide(request(residual + _typed_pair(a, a)))
+    assert (same["outcome"], same["reason_code"]) == ("request_evidence", "contradictory_labels")
+
+
+def _nested(depth: int) -> Any:
+    value: Any = "generated-leaf"
+    for _ in range(depth):
+        value = [value]
+    return value
+
+
+@pytest.mark.parametrize(
+    ("features", "code"),
+    [
+        ({"bucket": "z", "n": math.nan}, "INVALID_FEATURE_VALUE"),
+        ({"bucket": "z", "n": math.inf}, "INVALID_FEATURE_VALUE"),
+        ({"bucket": "z", "n": [1, -math.inf]}, "INVALID_FEATURE_VALUE"),
+        ({"bucket": "z", "n": (1, 2)}, "INVALID_FEATURE_VALUE"),
+        ({"bucket": "z", "n": {1, 2}}, "INVALID_FEATURE_VALUE"),
+        ({"bucket": "z", "n": b"generated"}, "INVALID_FEATURE_VALUE"),
+        ({"bucket": "z", "n": _nested(64)}, "INVALID_FEATURE_VALUE"),
+        ({"bucket": "z", 1: "a"}, "INVALID_FEATURE_KEY"),
+        ({"bucket": "z", "n": {1: "a", "k": "b"}}, "INVALID_FEATURE_KEY"),
+    ],
+    ids=[
+        "nan",
+        "inf",
+        "nested_inf",
+        "tuple",
+        "set",
+        "bytes",
+        "too_deep",
+        "mixed_key",
+        "nested_mixed_key",
+    ],
+)
+def test_unrepresentable_features_are_refused_with_a_typed_code(
+    store: rr.RepairRoutingStore, features: dict[Any, Any], code: str
+) -> None:
+    # Refused in the preflight, so no receipt is decided, stored or replayed for these.
+    req = request(_with_features(features))
+    with pytest.raises(rr.RoutingError, match=code):
+        rr.decide(req)
+    with pytest.raises(rr.RoutingError, match=code):
+        store.evaluate(req)
+    assert store.count() == 0
+
+
+def test_a_v3_receipt_over_a_tuple_feature_is_refused_on_replay(
+    store: rr.RepairRoutingStore,
+) -> None:
+    # v3 routed a tuple feature as if it were a list. A receipt it stored is refused by the
+    # preflight before the replay lookup, and the row is left as it was.
+    req = request(_with_features({"bucket": "z", "n": (1, 2)}))
+    key = rr.evaluation_key(req)
+    old = {"router_revision": "repair-routing.decide.v3", "outcome": "fit_eligible"}
+    store.count()  # creates the private journal
+    with closing(sqlite3.connect(store.path)) as db, db:
+        db.execute(
+            "INSERT INTO evaluations VALUES(?,?,?,?)",
+            (key, "eval-" + key[:40], "generated-v3-input", canonical(old)),
+        )
+    with pytest.raises(rr.RoutingError, match="INVALID_FEATURE_VALUE"):
+        store.evaluate(req)
+    assert store.read("eval-" + key[:40]) == old
