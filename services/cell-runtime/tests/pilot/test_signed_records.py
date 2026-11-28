@@ -2304,9 +2304,13 @@ def test_a_retired_purpose_drops_out_of_the_effective_scope(
         ),
     )
     third = Signer(sr.CUSTOMER_OWNER, registry_revision="4")
-    rotated = verifier.rotate_customer_key(
-        kit.rotation(second, third, previous_anchor_revision="3")
+    inheriting = kit.rotation(second, third, previous_anchor_revision="3")
+    refused(
+        "customer_scope_restatement_required", partial(verifier.rotate_customer_key, inheriting)
     )
+    remaining = sorted(EVERY_CONSENT - {PUBLICATION})
+    restated = kit.rotation(second, third, previous_anchor_revision="3", consent_purposes=remaining)
+    rotated = verifier.rotate_customer_key(restated)
     assert rotated.consent_purposes == EVERY_CONSENT - {PUBLICATION}
 
 
@@ -2415,23 +2419,47 @@ def test_an_interrupted_scope_update_is_pending_then_settled(kit: Kit) -> None:
     assert len(stored(kit, ANCHOR_KEY)["value"]["chain"]) == 2
 
 
-def test_an_untouched_pending_scope_update_reverts_after_its_window(
+def later_now(monkeypatch: pytest.MonkeyPatch, seconds: int = 7200) -> None:
+    real_now = sr._utc_now
+    monkeypatch.setattr(sr, "_utc_now", lambda: real_now() + timedelta(seconds=seconds))
+
+
+def lose_floor_write(kit: Kit, verifier: sr.PilotVerifier, update: bytes) -> None:
+    """Apply ``update``, then restore the floor as if its write had been lost."""
+    old_floor = record_path(kit, REVISION_KEY).read_bytes()
+    verifier.update_customer_scope(update)
+    record_path(kit, REVISION_KEY).write_bytes(old_floor)
+
+
+def test_an_untouched_pending_narrowing_sticks_after_its_window(
     kit: Kit, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     verifier = kit.enrolled()
-    old_floor = record_path(kit, REVISION_KEY).read_bytes()
-    verifier.update_customer_scope(kit.scope_update([GRANT]))
-    record_path(kit, REVISION_KEY).write_bytes(old_floor)
+    lose_floor_write(kit, verifier, kit.scope_update([GRANT]))
     publication = sign(consent(not_after=stamp(80000)), PUBLICATION, kit.customer, kit.operator)
+    grant = sign(consent(not_after=stamp(80000)), GRANT, kit.customer, kit.operator)
     refused("customer_purpose_not_enrolled", partial(verifier.verify, publication, PUBLICATION))
-    real_now = sr._utc_now
-    monkeypatch.setattr(sr, "_utc_now", lambda: real_now() + timedelta(seconds=7200))
-    # Expired and never settled: the anchor is derived at the floor, scope included.
-    assert verifier.verify(publication, PUBLICATION)
-    # A fresh update from the floor replaces the ignored pending tail.
-    later = kit.scope_update([SPEND], issued_at=stamp(7000), not_after=stamp(20000))
-    assert verifier.update_customer_scope(later).consent_purposes == {SPEND}
-    assert stored(kit, ANCHOR_KEY)["sequence"] == "3"
+    later_now(monkeypatch)
+    # Expired and never settled: the narrowing still holds (fail closed on revocation).
+    refused("customer_purpose_not_enrolled", partial(verifier.verify, publication, PUBLICATION))
+    assert verifier.verify(grant, GRANT)
+    assert stored(kit, REVISION_KEY)["sequence"] == "1"
+    # The next locked operation, even a refused one, records it as an accepted entry.
+    enrolment = kit.enrolment(issued_at=stamp(7000), not_after=stamp(20000))
+    refused("customer_anchor_already_pinned", partial(verifier.pin_customer_anchor, enrolment))
+    assert stored(kit, REVISION_KEY)["sequence"] == "2"
+    assert stored(kit, REVISION_KEY)["value"]["head_payload_sha256"] == payload_digest(
+        canonical(stored(kit, ANCHOR_KEY)["value"]["chain"][1])
+    )
+    refused("customer_purpose_not_enrolled", partial(verifier.verify, publication, PUBLICATION))
+    # Later updates build on it, at the next revision.
+    stale = kit.scope_update(sorted(EVERY_CONSENT), issued_at=stamp(7000), not_after=stamp(20000))
+    refused("customer_scope_not_successor", partial(verifier.update_customer_scope, stale))
+    wider = kit.scope_update(
+        [GRANT, SPEND], previous="2", issued_at=stamp(7000), not_after=stamp(20000)
+    )
+    assert verifier.update_customer_scope(wider).consent_purposes == {GRANT, SPEND}
+    assert stored(kit, REVISION_KEY)["sequence"] == "3"
 
 
 def test_an_unknown_chain_entry_kind_fails_closed(kit: Kit) -> None:
@@ -2642,3 +2670,199 @@ def test_dropping_a_custodian_from_both_lists_makes_its_anchors_unverifiable(kit
     )
     dropped = kit.verifier(former_registry(kit, "3", kit.issuers(), []))
     refused("customer_anchor_unverifiable", partial(dropped.verify, grant, GRANT))
+
+
+# --- F1 (review of #246): expired pending scope updates fail closed on revocation -----
+
+
+def test_an_expired_pending_widening_never_takes_effect(
+    kit: Kit, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    verifier = kit.verifier()
+    verifier.pin_customer_anchor(kit.enrolment(consent_purposes=[GRANT]))
+    lose_floor_write(kit, verifier, kit.scope_update(sorted({GRANT, PUBLICATION})))
+    publication = sign(consent(not_after=stamp(80000)), PUBLICATION, kit.customer, kit.operator)
+    assert verifier.verify(publication, PUBLICATION)  # pending, inside its window
+    later_now(monkeypatch)
+    refused("customer_purpose_not_enrolled", partial(verifier.verify, publication, PUBLICATION))
+    # A locked operation does not accept it: the floor stays where it was.
+    enrolment = kit.enrolment(issued_at=stamp(7000), not_after=stamp(20000))
+    refused("customer_anchor_already_pinned", partial(verifier.pin_customer_anchor, enrolment))
+    assert stored(kit, REVISION_KEY)["sequence"] == "1"
+    refused("customer_purpose_not_enrolled", partial(verifier.verify, publication, PUBLICATION))
+
+
+def test_an_expired_pending_mixed_update_caps_the_scope_and_is_never_accepted(
+    kit: Kit, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    verifier = kit.verifier()
+    verifier.pin_customer_anchor(kit.enrolment(consent_purposes=[GRANT, SPEND]))
+    # Adds publication, removes spend.
+    lose_floor_write(kit, verifier, kit.scope_update(sorted({GRANT, PUBLICATION})))
+    later_now(monkeypatch)
+    records = {
+        purpose: sign(consent(not_after=stamp(80000)), purpose, kit.customer, kit.operator)
+        for purpose in (GRANT, SPEND, PUBLICATION)
+    }
+    # Effective scope: floor scope ∩ pending scope.
+    assert verifier.verify(records[GRANT], GRANT)
+    for purpose in (SPEND, PUBLICATION):
+        refused(
+            "customer_purpose_not_enrolled", partial(verifier.verify, records[purpose], purpose)
+        )
+    enrolment = kit.enrolment(issued_at=stamp(7000), not_after=stamp(20000))
+    refused("customer_anchor_already_pinned", partial(verifier.pin_customer_anchor, enrolment))
+    assert stored(kit, REVISION_KEY)["sequence"] == "1"
+    refused("customer_purpose_not_enrolled", partial(verifier.verify, records[SPEND], SPEND))
+    # Inheriting would lose the cap once the tail is replaced: the rotation must restate.
+    second = Signer(sr.CUSTOMER_OWNER, registry_revision="2")
+    window = {"issued_at": stamp(7000), "not_after": stamp(20000)}
+    inheriting = kit.rotation(kit.customer, second, **window)
+    refused(
+        "customer_scope_restatement_required", partial(verifier.rotate_customer_key, inheriting)
+    )
+    restated = kit.rotation(kit.customer, second, consent_purposes=[GRANT], **window)
+    assert verifier.rotate_customer_key(restated).consent_purposes == {GRANT}
+    spend = sign(consent(not_after=stamp(80000)), SPEND, second, kit.operator)
+    refused("customer_purpose_not_enrolled", partial(verifier.verify, spend, SPEND))
+
+
+def test_a_new_co_signed_update_supersedes_an_expired_pending_cap(
+    kit: Kit, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    verifier = kit.verifier()
+    verifier.pin_customer_anchor(kit.enrolment(consent_purposes=[GRANT, SPEND]))
+    lose_floor_write(kit, verifier, kit.scope_update(sorted({GRANT, PUBLICATION})))
+    later_now(monkeypatch)
+    window = {"issued_at": stamp(7000), "not_after": stamp(20000)}
+    restated = kit.scope_update(sorted({GRANT, SPEND, ROUTING}), **window)
+    assert verifier.update_customer_scope(restated).consent_purposes == {GRANT, SPEND, ROUTING}
+    routing = sign(consent(not_after=stamp(80000)), ROUTING, kit.customer, kit.operator)
+    assert verifier.verify(routing, ROUTING)
+
+
+def test_an_expired_narrowing_signed_by_a_rotated_key_does_not_count(
+    kit: Kit, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A pending tail is walked only through scope updates by the floor key: an expired
+    # pending rotation stops the walk, and the key reverts as before.
+    verifier = kit.enrolled()
+    old_floor = record_path(kit, REVISION_KEY).read_bytes()
+    second = Signer(sr.CUSTOMER_OWNER, registry_revision="2")
+    verifier.rotate_customer_key(kit.rotation(kit.customer, second))
+    verifier.update_customer_scope(kit.scope_update([GRANT], customer=second, previous="2"))
+    record_path(kit, REVISION_KEY).write_bytes(old_floor)
+    later_now(monkeypatch)
+    publication = sign(consent(not_after=stamp(80000)), PUBLICATION, kit.customer, kit.operator)
+    assert verifier.verify(publication, PUBLICATION)
+
+
+# --- F2 (review of #246): rotation never carries a retired purpose forward ----------
+
+
+def test_a_purpose_retired_at_rotation_time_does_not_return_for_the_new_key(
+    kit: Kit, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    registry = kit.registry()
+    verifier = sr.PilotVerifier(registry)
+    verifier.pin_customer_anchor(kit.enrolment())
+    monkeypatch.setattr(sr, "CONSENT_PURPOSES", EVERY_CONSENT - {PUBLICATION})
+    second = Signer(sr.CUSTOMER_OWNER, registry_revision="2")
+    # Inheriting would carry the retired purpose in the signed chain.
+    inheriting = kit.rotation(kit.customer, second)
+    refused(
+        "customer_scope_restatement_required", partial(verifier.rotate_customer_key, inheriting)
+    )
+    assert stored(kit, REVISION_KEY)["sequence"] == "1"
+    remaining = sorted(EVERY_CONSENT - {PUBLICATION})
+    restated = kit.rotation(kit.customer, second, consent_purposes=remaining)
+    assert verifier.rotate_customer_key(restated).consent_purposes == EVERY_CONSENT - {PUBLICATION}
+    # Reinstated by a later release: the new key needs a fresh opt-in.
+    monkeypatch.setattr(sr, "CONSENT_PURPOSES", EVERY_CONSENT)
+    publication = sign(consent(), PUBLICATION, second, kit.operator)
+    for current in (verifier, sr.PilotVerifier(registry)):
+        refused("customer_purpose_not_enrolled", partial(current.verify, publication, PUBLICATION))
+    # Once nothing is retired, an inheriting rotation works again.
+    third = Signer(sr.CUSTOMER_OWNER, registry_revision="3")
+    assert verifier.rotate_customer_key(kit.rotation(second, third)).consent_purposes == set(
+        remaining
+    )
+
+
+def test_reinstating_a_purpose_restores_it_for_a_never_rotated_anchor(
+    kit: Kit, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    verifier = kit.enrolled()
+    publication = sign(consent(), PUBLICATION, kit.customer, kit.operator)
+    monkeypatch.setattr(sr, "CONSENT_PURPOSES", EVERY_CONSENT - {PUBLICATION})
+    refused("customer_purpose_not_enrolled", partial(verifier.verify, publication, PUBLICATION))
+    # Defined behaviour: the anchored scope still lists it, so reinstatement (an operator
+    # table change in a reviewed release) restores it under the intersection rule.
+    monkeypatch.setattr(sr, "CONSENT_PURPOSES", EVERY_CONSENT)
+    assert verifier.verify(publication, PUBLICATION)
+
+
+# --- F3 (review of #246): the chain cap covers scope updates ------------------------
+
+
+def test_an_anchor_at_the_chain_cap_can_neither_update_nor_rotate(kit: Kit) -> None:
+    verifier = kit.enrolled()
+    chain = [stored(kit, ANCHOR_KEY)["value"]["chain"][0]]
+    for revision in range(2, sr.MAX_ANCHOR_CHAIN + 1):
+        scope = [GRANT] if revision % 2 else sorted(EVERY_CONSENT)
+        chain.append(json.loads(kit.scope_update(scope, previous=str(revision - 1))))
+    assert len(chain) == sr.MAX_ANCHOR_CHAIN
+    write_record(kit, ANCHOR_KEY, 2, {"chain": chain})
+    head = payload_digest(canonical(chain[-1]))
+    write_record(kit, REVISION_KEY, sr.MAX_ANCHOR_CHAIN, {"head_payload_sha256": head})
+    grant = sign(consent(), GRANT, kit.customer, kit.operator)
+    assert verifier.verify(grant, GRANT)
+    top = str(sr.MAX_ANCHOR_CHAIN)
+    # Neither a narrowing nor a rotation fits: supervised re-enrolment is the path.
+    narrowing = kit.scope_update([GRANT], previous=top)
+    refused("customer_scope_limit", partial(verifier.update_customer_scope, narrowing))
+    successor = Signer(sr.CUSTOMER_OWNER, registry_revision=str(sr.MAX_ANCHOR_CHAIN + 1))
+    rotation = kit.rotation(kit.customer, successor, previous_anchor_revision=top)
+    refused("customer_rotation_limit", partial(verifier.rotate_customer_key, rotation))
+    assert stored(kit, REVISION_KEY)["sequence"] == top
+
+
+# --- INFO-2 (review of #246): re-presentation authenticates first -------------------
+
+
+def test_re_presenting_an_applied_update_after_custodian_rotation_is_refused(kit: Kit) -> None:
+    verifier = kit.enrolled()
+    update = kit.scope_update([GRANT])
+    verifier.update_customer_scope(update)
+    custodian2 = Signer(sr.OPERATOR_CUSTODIAN, sorted(sr.REGISTRY_ROLES[sr.OPERATOR_CUSTODIAN]))
+    current = [custodian2.entry(), kit.evaluator.entry()]
+    rotated = kit.verifier(former_registry(kit, "2", current, [kit.operator.public()]))
+    # Not a no-op: its custodian is no longer current, so authentication refuses it.
+    refused("key_unknown", partial(rotated.update_customer_scope, update))
+    # The accepted update itself still re-verifies through the verify-only list.
+    assert rotated.verify(sign(consent(), GRANT, kit.customer, custodian2), GRANT)
+    spend = sign(consent(), SPEND, kit.customer, custodian2)
+    refused("customer_purpose_not_enrolled", partial(rotated.verify, spend, SPEND))
+
+
+@pytest.mark.parametrize(
+    ("window", "code"),
+    [
+        ({"issued_at": 86400, "not_after": 2 * 86400}, "scope_not_yet_valid"),
+        ({"issued_at": -60, "not_after": 400 * 86400}, "scope_validity_window_too_long"),
+    ],
+    ids=["not_yet_valid", "window_too_long"],
+)
+def test_only_an_expired_pending_scope_update_restricts(
+    kit: Kit, window: dict[str, int], code: str
+) -> None:
+    verifier = kit.enrolled()
+    times = {name: stamp(seconds) for name, seconds in window.items()}
+    narrowing = kit.scope_update([GRANT], **times)
+    refused(code, partial(verifier.update_customer_scope, narrowing))
+    # A store writer plants it ahead of the floor: never valid, so never a revocation that
+    # merely expired; it does not count at all.
+    enrolment = stored(kit, ANCHOR_KEY)["value"]["chain"][0]
+    write_record(kit, ANCHOR_KEY, 2, {"chain": [enrolment, json.loads(narrowing)]})
+    publication = sign(consent(), PUBLICATION, kit.customer, kit.operator)
+    assert verifier.verify(publication, PUBLICATION)

@@ -61,16 +61,27 @@ approval signer, so a new consent purpose is an explicit customer opt-in, never 
 * Resolution: the anchored key's purposes are its anchored ``consent_purposes`` intersected
   with the current ``CONSENT_PURPOSES``, so a retired purpose drops out without making the
   anchor unverifiable. A record signed under a purpose outside that scope is refused with
-  ``customer_purpose_not_enrolled``, after it has been authenticated.
-* A rotation's successor inherits the previous anchor's scope exactly, unless the rotation
-  states a new ``consent_purposes``, validated like an enrolment's.
+  ``customer_purpose_not_enrolled``, after it has been authenticated. For an anchor that is
+  never rotated, a retired purpose that a later release reinstates is restored under the
+  same rule: reinstatement is an operator table change made in a reviewed release, while a
+  purpose new to the table still needs the customer's opt-in.
+* A rotation's successor inherits the previous anchor's effective scope, unless the
+  rotation states a new ``consent_purposes``, validated like an enrolment's. Inheritance is
+  re-derived from the signed chain on every read, and the table at rotation time is not
+  recorded, so the verifier can carry forward only a scope that is signed: when the
+  effective scope differs from the signed one (a retired purpose, or a cap from an expired
+  pending update), an inheriting rotation is refused with
+  ``customer_scope_restatement_required`` and must state its scope. A retired purpose thus
+  never comes back for the new key, even if it is reinstated.
 * ``update_customer_scope`` accepts a scope update under ``CONSENT_SCOPE_PURPOSE``: the
   full new list, which may widen or narrow the scope, at the next anchor revision,
   co-signed by the currently anchored customer key and a current ``operator_custodian``
   key permitted for that purpose. It is an anchor-chain entry,
   not a consent purpose: ``verify`` never accepts it. It follows the rotation rules: the same
   lock, the anti-rollback floor, pending-tail handling and re-verification on every read.
-  Re-presenting the head update, keyed on its payload digest, is a no-op.
+  Re-presenting the head update, keyed on its payload digest, is a no-op once it
+  authenticates now; after its custodian leaves the current registry, or once it expires,
+  the re-presentation is refused, while the accepted entry still re-verifies.
 * A customer signature names the key's signing label in ``key_registry_revision``: the
   anchor revision that installed the key (its enrolment, or the rotation that installed
   it). A scope update advances the head anchor revision but never the label, so the
@@ -101,10 +112,16 @@ re-verified for signatures and engagement binding only. Entries beyond the floor
 *pending* (for example a rotation or scope update whose floor write was interrupted): they
 count only while they also pass the time check now, the ``MAX_VALIDITY`` ceiling included,
 and a pending scope update needs a current custodian at its exact registry revision.
-Otherwise the anchor is derived at the floor and the whole pending tail is ignored. Any
-locked operation on the engagement (a pin, a rotation or a scope update) that finds a
-pending tail still inside its window first rolls the floor forward over it, after which it
-is accepted and no longer expires.
+Otherwise the anchor is derived at the floor and the pending tail does not count, except
+that revocation fails closed: pending scope updates by the floor key that pass every check
+but expiry still restrict, so the effective scope is the floor scope ∩ the pending scope. A
+pure narrowing advances the head and becomes an accepted, signed entry when the floor is
+next rolled forward; the first update that widens only caps the scope at read time and is
+never accepted, so its widening never takes effect (see ``_restrict``). A pending rotation,
+or any other failure, ends that walk. Any locked operation on the engagement (a pin, a
+rotation or a scope update) first rolls the floor forward over a pending tail that is
+still inside its window, or over the pure narrowings above, after which they are accepted
+and no longer expire.
 
 The enrolment co-signature is re-verified against the operator custodian key named by key
 id, accepted only if a current registry entry for that id carries the enrolment purpose (at
@@ -171,8 +188,19 @@ Recovery:
   and the next locked operation on that engagement rolls the floor forward. Remaining risk:
   if nothing touches the engagement's anchor under the lock before the rotation expires, the
   anchor reverts to the key the customer rotated away from. Re-run the rotation with a fresh
-  record signed by both keys. An interrupted scope update behaves the same way and reverts
-  to the earlier scope; re-run it with a fresh co-signed update.
+  record signed by both keys. An interrupted scope update counts the same way while inside
+  its window. After it expires a narrowing still holds, and the next locked operation
+  records it as accepted; a widening does not take effect, so re-run it with a fresh
+  co-signed update. An update that both widens and narrows caps the scope at their
+  intersection only while it stays stored: a rotation must then restate its scope, and a
+  fresh co-signed update replaces the cap.
+* An anchor at ``MAX_ANCHOR_CHAIN`` entries refuses every further entry
+  (``customer_scope_limit``, ``customer_rotation_limit``), so its customer can neither
+  narrow nor revoke a purpose nor rotate the key. Both need a supervised re-enrolment:
+  delete both anchor records and pin a new enrolment that states the intended scope, with
+  the customer confirming the key fingerprint out of band per OPE-583. Until then, records
+  keep verifying under the anchored scope, so treat an anchor at the cap that needs a
+  narrowing as an incident.
 * Retiring a custodian key: add it to ``former_custodian_keys`` so the enrolments and
   accepted scope updates it co-signed keep verifying. A scope update it co-signed that was
   still pending (its floor write lost) is ignored once it is retired, and the anchor reverts
@@ -476,16 +504,19 @@ class _AnchorHead:
     it (the label every customer signature must name). ``revision`` is the head anchor
     revision, which a scope update advances without changing the label. ``scope`` is the
     signed scope as anchored; a purpose retired from ``CONSENT_PURPOSES`` since then drops
-    out of ``effective``.
+    out of ``effective``. ``ceiling`` is a read-time cap from an expired pending scope update
+    that is not a pure narrowing (``_restrict``); it is never stored.
     """
 
     key: PilotTrustedKey
     revision: int
     scope: frozenset[str]
+    ceiling: frozenset[str] | None = None
 
     @property
     def effective(self) -> frozenset[str]:
-        return self.scope & CONSENT_PURPOSES
+        capped = self.scope if self.ceiling is None else self.scope & self.ceiling
+        return capped & CONSENT_PURPOSES
 
     def anchor(self, engagement_id: str) -> CustomerAnchor:
         return CustomerAnchor(
@@ -747,13 +778,14 @@ def _entry_purpose(item: object) -> str:
     """The signed purpose of a chain entry after the enrolment; unknown kinds refuse.
 
     Only a discriminator: ``_authenticate`` then requires every signature to carry it, and
-    the transcript binds it.
+    the transcript binds it. An unknown kind makes an accepted chain
+    ``customer_anchor_unverifiable`` and ends a pending tail.
     """
     signatures = item.get("signatures") if isinstance(item, dict) else None
     first = signatures[0] if isinstance(signatures, list) and signatures else None
     purpose = first.get("purpose") if isinstance(first, dict) else None
     if type(purpose) is not str or purpose not in _CHAIN_ENTRY_PURPOSES:
-        raise PilotRecordRefused("customer_anchor_entry_unknown")
+        raise PilotRecordRefused("customer_anchor_unverifiable")
     return purpose
 
 
@@ -1227,7 +1259,10 @@ class PilotVerifier:
         Co-signed by the currently anchored customer key and a current ``operator_custodian``
         key whose registry purposes include ``CONSENT_SCOPE_PURPOSE``. Carries the full new
         list, which may widen or narrow the scope. Re-presenting the head update (keyed on
-        its payload digest, so a re-signed copy counts) is an idempotent no-op.
+        its payload digest, so a re-signed copy counts) is an idempotent no-op, but only once
+        it authenticates now: after its custodian has left the current registry, or once it
+        has expired, the re-presentation is refused even though the accepted entry still
+        re-verifies.
         """
         self._registry_current()
         payload, _ = _open(record, "scope")
@@ -1427,6 +1462,11 @@ class PilotVerifier:
         self._require_distinct(successor)
         if successor.public_key_sha256 == previous.public_key_sha256:
             raise PilotRecordRefused("customer_key_not_distinct")
+        # Inheriting is re-derived from the signed chain on every read, so a purpose that is
+        # not effective now (retired, or capped by an expired pending update) would come back
+        # for the new key. A rotation then states its scope instead of inheriting it.
+        if fresh and "consent_purposes" not in payload and head.effective != head.scope:
+            raise PilotRecordRefused("customer_scope_restatement_required")
         scope = _scope_of(payload, fresh=fresh, inherit=head.scope)
         return body, _AnchorHead(successor, revision, scope), _payload_sha256(payload)
 
@@ -1541,9 +1581,52 @@ class PilotVerifier:
                     raise PilotRecordRefused("customer_anchor_unverifiable")
                 pending.append(digest)
         except (PilotRecordRefused, JournalError):
-            # Not accepted here, and not acceptable now: derive the anchor at the floor.
-            return head, digests, chain[:accepted]
+            # Not acceptable as a whole now: derive the anchor at the floor, still restricted
+            # by the expired pending scope updates (fail closed on revocation).
+            head, narrowed = self._restrict(engagement_id, head, chain[accepted:])
+            return head, digests + narrowed, chain[: accepted + len(narrowed)]
         return pending_head, digests + pending, chain
+
+    def _restrict(
+        self, engagement_id: str, head: _AnchorHead, tail: list[dict[str, Any]]
+    ) -> tuple[_AnchorHead, list[str]]:
+        """Walk a pending tail that does not count, keeping only what narrows the scope.
+
+        Only scope updates by the floor key count, each passing every check now except
+        expiry (``scope_expired``); the walk ends at anything else, including a rotation. A
+        pure narrowing (its scope within the current signed scope) advances the head, so the
+        next locked operation rolls the floor over it: it becomes an accepted, signed entry.
+        The first update that widens is never accepted, so its widening never takes effect:
+        it caps the head instead (``ceiling``: effective = current scope ∩ its scope) and ends
+        the walk.
+        That cap holds only while the update stays stored; a rotation must restate its scope
+        while it holds, and a new co-signed update replaces it.
+        """
+        narrowed: list[str] = []
+        for item in tail:
+            try:
+                if _entry_purpose(item) != CONSENT_SCOPE_PURPOSE:
+                    break
+                record = canonical(item)
+                try:
+                    body, updated, digest = self._check_scope_update(
+                        record, head, check_time=True, replay=False, fresh=False
+                    )
+                except PilotRecordRefused as refusal:
+                    if refusal.code != "scope_expired":
+                        raise
+                    body, updated, digest = self._check_scope_update(
+                        record, head, check_time=False, replay=False, fresh=False
+                    )
+            except (PilotRecordRefused, JournalError):
+                break
+            if body.engagement_id != engagement_id:
+                break
+            if not updated.scope <= head.scope:
+                return replace(head, ceiling=updated.scope), narrowed
+            head = updated
+            narrowed.append(digest)
+        return head, narrowed
 
     def _settle_pending(self, engagement_id: str) -> None:
         """Under the lock: roll the anchor floor forward over a pending tail still in window.
