@@ -1455,6 +1455,17 @@ def _device_rgb(components: list[float]) -> _RGB | None:
     return None
 
 
+def _over_white(rgb: _RGB | None, alpha: float) -> _RGB | None:
+    """A colour painted at constant `alpha` (ca or CA) over white paper, as it is seen."""
+    if rgb is None:
+        return None
+    return (
+        alpha * rgb[0] + 1.0 - alpha,
+        alpha * rgb[1] + 1.0 - alpha,
+        alpha * rgb[2] + 1.0 - alpha,
+    )
+
+
 def _invisible_on_white(rgb: _RGB) -> bool:
     """Whether a colour is near-invisible on white paper (contrast below the threshold)."""
     contrast = 1.05 / (_relative_luminance(*rgb) + 0.05)
@@ -1480,6 +1491,14 @@ class _Graphics:
     # The same for the stroke colour, which stroking render modes (1, 2, 5, 6) paint glyphs in.
     stroke: _RGB | None = _BLACK
     stroke_components: int | None = 1
+    # Constant alpha for fill and stroke (ExtGState /ca, /CA), whether the stroke is dashed
+    # (d, /D), and whether a graphics state this reader does not model is in force: a soft mask,
+    # a blend mode other than Normal, a transfer function, a font set by ExtGState, or an
+    # ExtGState that is missing or cannot be read (see _ext_states).
+    fill_alpha: float = 1.0
+    stroke_alpha: float = 1.0
+    dashed: bool = False
+    state_unverified: bool = False
     char_spacing: float = 0.0
     word_spacing: float = 0.0
     # Device-space clip rectangle (intersection of every rectangular clip so far), or None.
@@ -1519,6 +1538,7 @@ def _fragments(
     page_box: tuple[float, float, float, float] | None = None,
     font_metrics: dict[bytes, _Metrics] | None = None,
     colour_spaces: dict[bytes, int | None] | None = None,
+    ext_states: dict[bytes, _ExtState] | None = None,
 ) -> tuple[list[_Fragment], set[str]]:
     """Return positioned fragments and the review flags the content stream earned.
 
@@ -1606,15 +1626,20 @@ def _fragments(
         # of its paints is; a paint of None (Separation, DeviceN, Lab, Cal*, Indexed, Pattern,
         # ICCBased, an unknown name, or operands that do not fit the space) cannot be judged.
         mode = gs.render_mode
+        fill = _over_white(gs.fill, gs.fill_alpha)
+        stroke = _over_white(gs.stroke, gs.stroke_alpha)
         paints = (
-            (gs.fill,)
+            (fill,)
             if mode in (0.0, 4.0)
-            else (gs.stroke,)
+            else (stroke,)
             if mode in (1.0, 5.0)
-            else (gs.fill, gs.stroke)
+            else (fill, stroke)
             if mode in (2.0, 6.0)
             else ()
         )
+        if gs.state_unverified or (gs.dashed and mode in (1.0, 2.0, 5.0, 6.0)):
+            # A dash pattern can leave a stroked glyph undrawn; the rest can hide any text.
+            marks.add("graphics_state_unverified")
         if not any(paint is not None and not _invisible_on_white(paint) for paint in paints):
             if any(paint is None for paint in paints):
                 marks.add("text_color_space_unverified")
@@ -1752,6 +1777,20 @@ def _fragments(
             components = _DEVICE_COMPONENTS.get(space) or (colour_spaces or {}).get(space)
             # Every device space's initial colour is black.
             gs = replace(gs, fill=_BLACK if components else None, fill_components=components)
+        elif op == b"gs":
+            name = stack[-1] if stack and isinstance(stack[-1], bytes) else b""
+            state = (ext_states or {}).get(name, _UNREADABLE_STATE)
+            gs = replace(
+                gs,
+                fill_alpha=gs.fill_alpha if state.fill_alpha is None else state.fill_alpha,
+                stroke_alpha=gs.stroke_alpha if state.stroke_alpha is None else state.stroke_alpha,
+                dashed=gs.dashed if state.dashed is None else state.dashed,
+                state_unverified=gs.state_unverified or state.unverified,
+            )
+        elif op == b"d":
+            # `[] 0 d` is solid; any other pattern, or a malformed one, may leave gaps.
+            pattern = stack[0] if len(stack) == 2 and isinstance(stack[0], list) else None
+            gs = replace(gs, dashed=pattern != [])
         elif op in (b"G", b"RG", b"K") and nums:
             wanted = {b"G": 1, b"RG": 3, b"K": 4}[op]
             if len(nums) >= wanted:
@@ -2008,7 +2047,10 @@ def read_pdf(data: bytes, limits: Limits, deadline: Deadline) -> ReadResult:
         )
         metrics = {name: _font_metrics(font, doc) for name, font in fonts.items()}
         spaces = _colour_spaces(resources, doc)
-        fragments, marks = _fragments(stream, deadline, forms, images, page_box, metrics, spaces)
+        states = _ext_states(resources, doc)
+        fragments, marks = _fragments(
+            stream, deadline, forms, images, page_box, metrics, spaces, states
+        )
         if len(readable) != len(refs):
             # A referenced content stream that cannot be resolved means the page was not read.
             marks.add("content_stream_unresolved")
@@ -2125,6 +2167,70 @@ def _decode_names(raw: bytes) -> bytes:
         lambda m: _HEX_PAIR.sub(lambda h: bytes([int(h[1], 16)]), m[0]) if b"#" in m[0] else m[0],
         raw,
     )
+
+
+@dataclass(frozen=True)
+class _ExtState:
+    """What one ExtGState resource sets that bears on visibility (None: left as it was)."""
+
+    fill_alpha: float | None = None
+    stroke_alpha: float | None = None
+    dashed: bool | None = None
+    unverified: bool = False
+
+
+_UNREADABLE_STATE = _ExtState(unverified=True)
+_NORMAL_BLEND = frozenset({"Normal", "Compatible"})
+_IDENTITY_TRANSFER = frozenset({"Identity", "Default"})
+
+
+def _ext_states(resources: dict[str, object], doc: _Doc) -> dict[bytes, _ExtState]:
+    """Each named /ExtGState resource, as it bears on whether text can be seen.
+
+    Constant alpha (/ca, /CA) is applied to the colour (see _over_white) and a dash pattern
+    (/D) to stroked text. A soft mask other than /None, a blend mode other than Normal or
+    Compatible, a transfer function other than the identity (/TR, /TR2), a font (/Font, which
+    sets the size Tf would), an alpha outside 0 to 1, and an entry that cannot be read are not
+    modelled: text drawn under them goes to review as graphics_state_unverified. A name with no
+    resource is treated the same way (see _UNREADABLE_STATE).
+    """
+    out: dict[bytes, _ExtState] = {}
+    for name, value in (doc.dict(resources.get("ExtGState")) or {}).items():
+        state = doc.dict(value)
+        if state is None:
+            out[name.encode("latin-1")] = _UNREADABLE_STATE
+            continue
+        unverified = False
+        alphas: list[float | None] = []
+        for key in ("ca", "CA"):
+            alpha = doc.resolve(state.get(key))
+            if (
+                isinstance(alpha, (int, float))
+                and not isinstance(alpha, bool)
+                and 0 <= alpha <= 1
+            ):
+                alphas.append(float(alpha))
+            else:
+                alphas.append(None)
+                unverified = unverified or key in state
+        if "SMask" in state and doc.resolve(state["SMask"]) != "None":
+            unverified = True
+        if "BM" in state:
+            blend = doc.resolve(state["BM"])
+            modes = [doc.resolve(m) for m in blend] if isinstance(blend, list) else [blend]
+            unverified = unverified or not modes or any(m not in _NORMAL_BLEND for m in modes)
+        for key in ("TR", "TR2"):
+            if key in state and doc.resolve(state[key]) not in _IDENTITY_TRANSFER:
+                unverified = True
+        if "Font" in state:
+            unverified = True
+        dashed: bool | None = None
+        if "D" in state:
+            dash = doc.resolve(state["D"])
+            pattern = doc.resolve(dash[0]) if isinstance(dash, list) and len(dash) == 2 else None
+            dashed = pattern != []
+        out[name.encode("latin-1")] = _ExtState(alphas[0], alphas[1], dashed, unverified)
+    return out
 
 
 def _colour_spaces(resources: dict[str, object], doc: _Doc) -> dict[bytes, int | None]:
