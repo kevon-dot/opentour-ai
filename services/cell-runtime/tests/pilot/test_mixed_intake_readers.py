@@ -1951,3 +1951,50 @@ def test_xlsx_shared_string_index_is_ascii_decimal_digits_only(index: str) -> No
     _fmt, result = read(variant, "x.xlsx")
     assert result.state is ExtractionState.CORRUPT and not result.spans
     assert result.reason == "malformed_content" and result.next_actor.value == "owner"
+
+
+# ------------------------------------------------------------------ hidden-text follow-up
+# Ported from the parallel hidden-text branch (backup/ope-531-hidden-text-mine) and from the
+# cross-session reviewer's probes. Fixtures are generated sentinel bytes.
+
+
+@pytest.mark.parametrize("index", ["0_4", "\t4", "+04"])
+def test_xlsx_shared_string_index_rejects_underscores_tabs_and_signs(index: str) -> None:
+    # int() reads each of these as 4, selecting a string from text no writer produces.
+    _fmt, result = read(_xlsx_variant(b"<v>4</v>", b"<v>" + index.encode() + b"</v>"), "x.xlsx")
+    assert result.state is ExtractionState.CORRUPT and result.reason == "malformed_content"
+
+
+def test_xlsx_shared_string_index_with_leading_zeroes_still_reads() -> None:
+    _fmt, plain = read(fx.build_xlsx(), "x.xlsx")
+    _fmt, padded = read(_xlsx_variant(b"<v>4</v>", b"<v>0004</v>"), "x.xlsx")
+    assert plain.state is padded.state is ExtractionState.ELIGIBLE
+    assert [s.text for s in padded.spans] == [s.text for s in plain.spans]
+
+
+def _escaped_encrypt_pdf(trailer_extra: str, extra: dict[int, bytes] | None = None) -> bytes:
+    objects = {
+        1: b"<< /Type /Catalog /Pages 2 0 R >>",
+        2: b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        3: b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R "
+        b"/Resources << /Font << /F1 5 0 R >> >> >>",
+        4: fx._stream(_VISIBLE),
+        5: _R1_FONT,
+        6: b"<< /Filter /Standard /V 1 /R 2 /O <00> /U <00> /P -4 >>",
+        **(extra or {}),
+    }
+    return fx._assemble(objects, trailer_extra)
+
+
+def test_pdf_fully_escaped_encrypt_name_in_an_object_head_is_locked() -> None:
+    # poppler refuses the reviewer's /Encr#79pt probe ("Incorrect password"): it is encrypted.
+    spelled = "/#45#6e#63#72#79#70#74 6 0 R "
+    assert read(_escaped_encrypt_pdf(spelled), "x.pdf")[1].state is ExtractionState.LOCKED
+    xref_like = {7: b"<< /Type /XRef /Size 8 /Encr#79pt 6 0 R >>"}
+    assert read(_escaped_encrypt_pdf("", xref_like), "x.pdf")[1].state is ExtractionState.LOCKED
+
+
+def test_pdf_escaped_names_that_are_not_encrypt_stay_eligible() -> None:
+    for name in ("/Encr#79ption", "/Info#20x", "/EncryptMetadata"):
+        result = read(_escaped_encrypt_pdf(f"{name} 6 0 R "), "x.pdf")[1]
+        assert result.state is ExtractionState.ELIGIBLE, (name, result.reason)
