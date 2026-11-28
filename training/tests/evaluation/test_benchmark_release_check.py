@@ -34,6 +34,7 @@ from audit_fixtures import (
     commit,
     inputs_for,
 )
+from opentour_training.evaluation.benchmark_audit import audit as audit_module
 from opentour_training.evaluation.benchmark_audit import worker_store
 from opentour_training.evaluation.benchmark_audit.audit import audit
 from opentour_training.evaluation.benchmark_audit.ledger import AuditLedger, LedgerError
@@ -254,6 +255,33 @@ def test_fixture_materials_recompute_the_fixture_binding_digests() -> None:
     assert {k: canonical_digest(v) for k, v in BINDING_MATERIALS.items()} == expected
 
 
+VERIFIER_EDITS: dict[str, Any] = {
+    "fresh_confirmation": lambda r: replace(r, fresh_confirmation=True),
+    "adjudicator_id": lambda r: replace(r, adjudicator_id="generated-adjudicator-c"),
+    "unresolved": lambda r: replace(r, unresolved=True),
+    "final_label_digest": lambda r: replace(r, final_label_digest=commit(r.family_id, "other")),
+}
+
+
+@pytest.mark.parametrize("edit", sorted(VERIFIER_EDITS))
+def test_worker_recompute_is_the_audit_binding_function_not_a_copy(
+    tmp_path: Path, edit: str
+) -> None:
+    """The store calls audit's own digest functions, so it agrees whatever fields they bind."""
+    assert worker_store.label_manifest_digest is audit_module.label_manifest_digest
+    assert worker_store.split_manifest_digest is audit_module.split_manifest_digest
+    edited = tuple(
+        VERIFIER_EDITS[edit](r) if r.split == "protected" else r for r in baseline_records()
+    )
+    store = new_store(tmp_path, edited)
+    worker, _ = store.state().benchmarks[BENCH].bindings()
+    expected = audit_module.binding_digests(
+        edited, canonical_inputs=CANONICAL, source_revisions=SOURCES,
+        scoring_policy=SCORING, answer_key=ANSWER_KEY,
+    )  # fmt: skip
+    assert worker == {f.name: getattr(expected, f.name) for f in fields(BindingDigests)}
+
+
 @pytest.mark.parametrize("field", MATERIAL_BINDINGS)
 def test_a_caller_asserted_binding_is_labelled_and_never_counts_as_recomputed(
     tmp_path: Path, field: str
@@ -368,11 +396,23 @@ def test_receipt_superseded_in_the_worker_store_is_refused_and_successor_is_chec
     tmp_path: Path,
 ) -> None:
     store, old, successor = superseded_pair(tmp_path)
+    # The successor was audited over freshly confirmed records, so the worker's benchmark state
+    # moves to those records first; its bindings are then recomputed from them. (Once the label
+    # manifest also binds verifier evidence such as fresh_confirmation, PR #219, the old
+    # receipt is stale against these records as well as superseded.)
+    fresh = tuple(replace(r, fresh_confirmation=True) for r in baseline_records())
+    store.set_benchmark(
+        "benchmark:fresh", BENCH, fresh, evidence_kind="generated_sentinel",
+        materials=BINDING_MATERIALS,
+    )  # fmt: skip
     store.supersede("supersede:1", old["receipt_id"], successor, benchmark_id=BENCH)
-    assert check(old, store).refusals == ("audit_receipt_superseded",)
+    stale_old = check(old, store)
+    assert "audit_receipt_superseded" in stale_old.refusals
+    assert set(stale_old.refusals) <= {"audit_receipt_superseded", "audit_receipt_stale"}
     assert store.state().ledger.promotion_allowed(old["receipt_id"]) is False
     new = check(successor, store)
     assert new.refusals == () and new.release_permitted is False
+    assert new.holds == GENERATED_HOLDS
 
 
 def test_status_other_than_current_alone_is_superseded() -> None:
