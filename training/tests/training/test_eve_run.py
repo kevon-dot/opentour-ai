@@ -117,6 +117,16 @@ class RunTests(unittest.TestCase):
             hashes[name] = hashlib.sha256(b"generated").hexdigest()
         manifest = {"steps": 8, "run_id": run_id, "adapter_files": hashes}
         (self.output / "manifest.json").write_text(json.dumps(manifest))
+        # The publisher still holds its worker lease while the journal write is being recovered.
+        with self.run.worker(), self.run.edit() as state:
+            state["settings"]["deadline"] = 100
+        with (
+            self.run.worker(),
+            patch("opentour_training.training.eve_run.time.time", return_value=101),
+        ):
+            self.assertEqual(self.run.control("status")["status"], "completed")
+        with self.run.edit() as state:
+            state["status"] = "expired"
         self.assertEqual(self.run.control("stop")["status"], "completed")
         with self.run.edit() as state:
             state["status"] = "running"

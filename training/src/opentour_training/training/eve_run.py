@@ -37,6 +37,13 @@ def sync_directory(directory: Path) -> None:
         os.close(fd)
 
 
+def has_candidate_files(output: Path) -> bool:
+    # A crash can leave an empty mkdir reservation before the candidate rename.
+    return output.is_symlink() or (
+        output.exists() and (not output.is_dir() or any(output.iterdir()))
+    )
+
+
 class Run:
     def __init__(self, directory: Path) -> None:
         self.directory = directory
@@ -101,13 +108,9 @@ class Run:
             state["status"] = "expired"
 
     @staticmethod
-    def reconcile_idle(state: dict[str, Any]) -> None:
-        """A lost process cannot admit another fit. Recover a completed atomic rename if present."""
-        if state["status"] == "resuming":
-            # The runner has not yet been admitted to its next optimizer step.
-            state["status"] = "paused"
-            return
-        if state["status"] not in {"running", "pausing", "stopping", "held"}:
+    def reconcile_publication(state: dict[str, Any]) -> None:
+        """The matching candidate rename precedes the journal update, including on I/O failure."""
+        if state["status"] not in {"running", "pausing", "stopping", "held", "expired"}:
             return
         output = Path(state["settings"]["output"])
         if (
@@ -123,11 +126,21 @@ class Run:
                     and file_hashes(output, ADAPTER_FILES) == receipt.get("adapter_files")
                 ):
                     state["status"] = "completed"
-                    return
             except (OSError, ValueError):
                 state["status"] = "held"
-                return
-        state["status"] = "stopped" if state["status"] == "stopping" else "held"
+
+    @classmethod
+    def reconcile_idle(cls, state: dict[str, Any]) -> None:
+        """A lost process cannot admit another optimizer step."""
+        cls.reconcile_publication(state)
+        if state["status"] == "resuming":
+            state["status"] = "paused"
+        elif state["status"] == "stopping" and not has_candidate_files(
+            Path(state["settings"]["output"])
+        ):
+            state["status"] = "stopped"
+        elif state["status"] in {"running", "pausing", "stopping"}:
+            state["status"] = "held"
 
     def control(self, action: str, after_step: int | None = None) -> dict[str, Any]:
         with self.edit() as state:
@@ -136,15 +149,14 @@ class Run:
             with self.worker() as idle:
                 if idle:
                     self.reconcile_idle(state)
+                else:
+                    self.reconcile_publication(state)
             self.expire(state)
             if action == "stop" and state["status"] not in {"completed", "stopped", "expired"}:
-                if state["status"] == "held":
-                    output = Path(state["settings"]["output"])
-                    # A crash can leave an empty mkdir reservation before the candidate rename.
-                    if output.is_symlink() or (
-                        output.exists() and (not output.is_dir() or any(output.iterdir()))
-                    ):
-                        return self.summary(state)
+                if state["status"] == "held" and has_candidate_files(
+                    Path(state["settings"]["output"])
+                ):
+                    return self.summary(state)
                 state["status"] = "stopped" if idle or state["status"] == "paused" else "stopping"
             elif action == "pause" and state["status"] in {"running", "pausing", "resuming"}:
                 target = state["completed_steps"] if after_step is None else after_step
