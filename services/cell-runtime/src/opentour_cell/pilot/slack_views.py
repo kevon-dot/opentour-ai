@@ -24,6 +24,7 @@ from opentour_cell.pilot.text_classifier import (
 
 if TYPE_CHECKING:
     from opentour_cell.pilot.handoff_readback import HandoffReadback
+    from opentour_cell.pilot.live_outcome_history import OutcomeHistory
     from opentour_cell.pilot.scoped_query_report import MonthlyInvoiceReport
     from opentour_cell.pilot.slack_learning import LearningPlan, LearningStatus
     from opentour_cell.pilot.workflow_index import IndexPage
@@ -690,7 +691,9 @@ def regression_picker(
     )
 
 
-def weekly_question(context: str, workflow: str, facts: Mapping[str, Any], pin: str) -> Block:
+def weekly_question(
+    context: str, workflow: str, facts: Mapping[str, Any], pin: str, *, history: bool = False
+) -> Block:
     blocks = [_section(f"Current workflow · {_ref(workflow)}")]
     summary, receipt = facts["summary"], facts["readiness"]
     if summary is None:
@@ -720,6 +723,8 @@ def weekly_question(context: str, workflow: str, facts: Mapping[str, Any], pin: 
         )
     )
     nav = [_button("Back to scopes", "ot_week_scopes", "scopes")]
+    if history:
+        nav.insert(0, _button("Compare with current", "ot_week_history", pin))
     if receipt and receipt["reason_code"] in {"no_verifier_bound", "awaiting_outcome"}:
         answer = readiness_answer(receipt)
         blocks.extend(
@@ -737,6 +742,29 @@ def weekly_question(context: str, workflow: str, facts: Mapping[str, Any], pin: 
         )
     blocks.append(_actions(*nav))
     return _modal("Weekly verification", "ot_current_week_status", context, blocks)
+
+
+def verification_history(context: str, history: OutcomeHistory) -> Block:
+    blocks = [_section(f"Workflow · {_ref(history.scope.workflow_ref)}")]
+    for label, snapshot in (
+        ("Previously opened", history.historical),
+        ("Current", history.current),
+    ):
+        blocks.append(
+            _section(
+                f"{label} · {snapshot.verified}/{snapshot.decisions} decisions verified · "
+                f"{snapshot.pending} pending. Snapshot {snapshot.sequence} · "
+                f"{_ref(snapshot.evidence_revision)}."
+            )
+        )
+    blocks.append(
+        _section(
+            "These totals cover all observed decisions at each snapshot. "
+            "Individual outcome effective times and reasons for a change are unavailable."
+        )
+    )
+    blocks.append(_actions(_button("Back to scopes", "ot_week_scopes", "scopes")))
+    return _modal("Verification history", "ot_verification_history", context, blocks)
 
 
 def current_training_question(
