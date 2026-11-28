@@ -1531,8 +1531,8 @@ def test_q1c_review_m1_renamed_ids_over_scored_content_are_held(tmp_path):
 @pytest.mark.parametrize(
     "respell,refs",
     [
-        # Feature names renamed, re-cased and re-spaced.
-        (lambda c: {"case_ref": c.features["case_ref"], " TEXT ": c.features["text"]}, None),
+        # Feature names renamed and re-cased (keys must stay ASCII identifiers).
+        (lambda c: {"case_ref": c.features["case_ref"], "TEXT_Body": c.features["text"]}, None),
         # Feature order reversed.
         (lambda c: dict(reversed(list(c.features.items()))), None),
         # A declared extra reference field carrying the (renamed) id in another spelling.
@@ -1659,23 +1659,228 @@ def test_q1k_declared_reference_fields_are_part_of_the_audited_inputs():
     assert pop(("case_ref",)).inputs_digest == s.population.inputs_digest
     assert pop(()).inputs_digest != s.population.inputs_digest
     assert pop(("case_ref", "text")).inputs_digest != s.population.inputs_digest
-    for bad in ("case_ref", ("case_ref", "case_ref"), ("has spaces",)):
-        with pytest.raises(iv.VerdictInputError, match="invalid_sealed_population"):
+    for bad, error in (
+        ("case_ref", "invalid_sealed_population"),  # a bare string, not a sequence of names
+        (("case_ref", "case_ref"), "invalid_sealed_population"),
+        ((7,), "invalid_sealed_population"),
+        (("has spaces",), "feature_key_unverifiable"),
+    ):
+        with pytest.raises(iv.VerdictInputError, match="^" + error + "$"):
             pop(bad)
 
 
-def test_q1j_documented_limit_an_undeclared_id_field_is_content(tmp_path):
-    """The remaining evasion class, pinned so the docstring stays true: not closed here."""
+CYRILLIC_A = "а"  # looks like the Latin "a"
+
+
+def test_d2_review_r4_an_undeclared_id_field_with_renamed_ids_is_held(tmp_path):
+    """Round 4 D2: reference_fields=() with renamed ids came back verified_gain."""
     ev = evaluator(tmp_path)
     assert run(tmp_path, Scenario(CLEAN_WIN), ev=ev).outcome == "verified_gain"
-    undeclared = respelled(
-        Scenario(CLEAN_WIN, prefix="undeclared-", content_prefix="", family_prefix="u-"),
+    d2 = respelled(
+        renamed_to(
+            Scenario(CLEAN_WIN, prefix="d2-", content_prefix=""), lambda c: "r-" + c.case_id
+        ),
+        lambda c: dict(c.features),
+        reference_fields=(),
+    )
+    assert d2.population.reference_fields == ()
+    held(
+        run(tmp_path, d2, ev=ev, result_revision=sha("d2")),
+        "inconclusive",
+        "undeclared_reference_field",
+    )
+    # Held even as the first claim in a fresh custody: the cohort cannot be compared.
+    held(run(tmp_path / "first", d2), "inconclusive", "undeclared_reference_field")
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        lambda c: "ref:" + c.case_id + ".json",  # the id inside a longer value
+        lambda c: c.case_id.upper(),  # compared after casefold
+        lambda c: "group " + c.family_id,  # the family id
+        lambda c: c.case_id.replace("-", "－"),  # a fullwidth hyphen, compared after NFKC
+    ],
+    ids=["substring", "upper_case", "family_id", "nfkc_fullwidth"],
+)
+def test_d2b_any_undeclared_value_containing_the_own_id_holds(tmp_path, value):
+    s = respelled(Scenario(CLEAN_WIN), lambda c: {**c.features, "source": value(c)})
+    held(run(tmp_path, s), "inconclusive", "undeclared_reference_field")
+
+
+def test_d2c_positive_controls_honest_schemas_are_not_held(tmp_path):
+    ev = evaluator(tmp_path)
+    honest = respelled(
+        Scenario(CLEAN_WIN, prefix="honest-"),
+        lambda c: {**c.features, "source": "ref:" + c.case_id},
+        reference_fields=("case_ref", "source"),
+    )
+    assert run(tmp_path, honest, ev=ev).outcome == "verified_gain"
+    # Another case's id, non-ASCII decision text and a different case are all just content.
+    neighbour = respelled(
+        Scenario(CLEAN_WIN, prefix="nb-"),
+        lambda c: {
+            **c.features,
+            "previous": "nb-case-9999" if c.case_id == "nb-case-0000" else "nb-case-0000",
+            "note": "naïve café " + c.features["text"],
+        },
+    )
+    doc = run(tmp_path, neighbour, ev=ev).document
+    assert doc["outcome"] == "verified_gain"
+    assert "undeclared_reference_field" not in doc["reasons"]
+
+
+@pytest.mark.parametrize(
+    "features,refs,error",
+    [
+        # D3: the declared name differs from the feature key by case.
+        (lambda c: dict(c.features), ("Case_Ref",), "reference_field_undeclared_in_schema"),
+        # D3b: a Cyrillic look-alike key beside the declared ASCII name.
+        (
+            lambda c: {**c.features, "c" + CYRILLIC_A + "se_ref": c.case_id},
+            ("case_ref",),
+            "feature_key_unverifiable",
+        ),
+        # A non-ASCII declared name.
+        (lambda c: dict(c.features), ("c" + CYRILLIC_A + "se_ref",), "feature_key_unverifiable"),
+        # Keys that are not identifiers at all.
+        (lambda c: {**c.features, " text ": "x"}, ("case_ref",), "feature_key_unverifiable"),
+        # Two keys that collide after casefold.
+        (lambda c: {**c.features, "CASE_REF": c.case_id}, ("case_ref",), "feature_key_collision"),
+        # A declared name present in only some cases.
+        (
+            lambda c: {
+                k: v for k, v in c.features.items() if c.case_id != "case-0000" or k != "case_ref"
+            },
+            ("case_ref",),
+            "reference_field_undeclared_in_schema",
+        ),
+    ],
+    ids=["d3_case", "d3b_cyrillic_key", "cyrillic_declared", "spaced_key", "collision", "partial"],
+)
+def test_d3_review_r4_unverifiable_schema_declarations_are_refused(features, refs, error):
+    with pytest.raises(iv.VerdictInputError, match="^" + error + "$"):
+        respelled(Scenario(CLEAN_WIN), features, reference_fields=refs)
+
+
+def test_d3c_keys_colliding_across_cases_are_refused():
+    s = Scenario(CLEAN_WIN)
+
+    def mixed(c):
+        key = "Text" if c.case_id.endswith("1") else "text"
+        return {"case_ref": c.case_id, key: c.features["text"]}
+
+    with pytest.raises(iv.VerdictInputError, match="^feature_key_collision$"):
+        respelled(s, mixed)
+
+
+def test_e1_review_r4_renamed_ids_and_an_undeclared_reference_cannot_escape_both(
+    tmp_path, registered_floor
+):
+    """Round 4 E1: with the answer key revoked, this combination came back verified_gain."""
+    ev = evaluator(tmp_path)
+    hit = run(tmp_path, Scenario(CLEAN_WIN), ev=ev)
+    ev.revoke_scope(
+        "answer_key_digest",
+        hit.document["answer_key_digest"],
+        reason="answer_key_defect",
+        issued_by=EVALUATOR,
+    )
+    e1 = respelled(
+        renamed_to(
+            Scenario(CLEAN_WIN, prefix="e1-", content_prefix=""), lambda c: "r-" + c.case_id
+        ),
         lambda c: {**c.features, "source": "ref:" + c.case_id},
     )
-    doc = run(tmp_path, undeclared, ev=ev, result_revision=sha("undeclared")).document
+    v = run(tmp_path, e1, ev=ev, result_revision=sha("e1"))
+    assert v.outcome != "verified_gain"
+    doc = held(v, "inconclusive", "undeclared_reference_field")
+    assert not any(doc["effects"].values())
+    assert ev.authorize(doc, effect="improvement_alert")["authorized"] is False
+
+
+def test_v23_an_answer_key_content_digest_may_be_revoked_pre_emptively(tmp_path):
+    """Round 4 LOW: a revoker can compute this digest from a defective key itself."""
+    ev = evaluator(tmp_path)
+    s = Scenario(CLEAN_WIN)
+    content = s.population.answer_key_content_digest
+    assert content is not None
+    r = ev.revoke_scope(
+        "answer_key_content_digest", content, reason="answer_key_defect", issued_by=EVALUATOR
+    )
+    assert r.record["matched_verdicts"] == 0
+    replays = s.replays()
+    v = run(tmp_path, s, ev=ev, replays=replays)
+    assert v.outcome == "stale" and replays["candidate"].calls == []
+    assert v.document["reasons"][-1] == "verdict_revoked_by_scope_answer_key_content_digest"
+    # The other scopes still refuse a value no verdict here carries.
+    with pytest.raises(iv.VerdictInputError, match="^revocation_scope_unknown$"):
+        ev.revoke_scope(
+            "answer_key_digest",
+            s.population.answer_key_digest,
+            reason="answer_key_defect",
+            issued_by=EVALUATOR,
+        )
+    with pytest.raises(iv.VerdictInputError, match="^invalid_revocation_scope_value$"):
+        ev.revoke_scope(
+            "answer_key_content_digest", "not-a-digest", reason="scorer_defect", issued_by=EVALUATOR
+        )
+
+
+def test_v24_documented_limit_relabelling_the_partition_falls_to_the_cohort_gate(tmp_path):
+    """Round 4 LOW: swapping label names escapes the content match; the cohort gate holds it."""
+    ev = evaluator(tmp_path)
+    s = Scenario(CLEAN_WIN)
+    hit = run(tmp_path, s, ev=ev)
+    ev.revoke_scope(
+        "answer_key_digest",
+        hit.document["answer_key_digest"],
+        reason="answer_key_defect",
+        issued_by=EVALUATOR,
+    )
+    relabelled = Scenario(CLEAN_WIN, prefix="rl-", content_prefix="")
+    swap = {A: B, B: A}
+    cases = relabelled.population.cases
+    labels = {c.case_id: swap[relabelled.population.truth(c.case_id)] for c in cases}
+    relabelled.population = iv.SealedPopulation(
+        cases, labels, label_set=(A, B), benchmark_digest=BENCHMARK, reference_fields=("case_ref",)
+    )
+    relabelled.preds = {
+        arm: {
+            k: ({**p, "label": swap[p["label"]]} if p and "label" in p else p)
+            for k, p in preds.items()
+        }
+        for arm, preds in relabelled.preds.items()
+    }
+    assert (
+        relabelled.population.answer_key_content_digest != hit.document["answer_key_content_digest"]
+    )
+    doc = run(tmp_path, relabelled, ev=ev, result_revision=sha("relabel")).document
+    assert doc["outcome"] != "stale"  # the content match does not follow a relabelling
+    assert "decision_content_seen_in_scored_cohort" in doc["reasons"]  # the backstop holds
+    text = " ".join((iv.IndependentEvaluator.revoke_scope.__doc__ or "").split())
+    assert "relabelling the same partition" in text and "Trade-off" in text
+
+
+def test_q1j_documented_residual_a1_a_fresh_non_id_field_is_new_content(tmp_path):
+    """Residual A1, pinned so the docstring stays true: a varying non-id field is not caught."""
+    import hashlib
+
+    ev = evaluator(tmp_path)
+    assert run(tmp_path, Scenario(CLEAN_WIN), ev=ev).outcome == "verified_gain"
+    salted = respelled(
+        Scenario(CLEAN_WIN, prefix="salted-", content_prefix="", family_prefix="s-"),
+        lambda c: {
+            **c.features,
+            "salt": hashlib.sha256(c.case_id.encode()).hexdigest()[:12],  # not the id itself
+        },
+    )
+    doc = run(tmp_path, salted, ev=ev, result_revision=sha("salted")).document
     assert "decision_content_seen_in_scored_cohort" not in doc["reasons"]
+    assert "undeclared_reference_field" not in doc["reasons"]
     text = " ".join((iv.decision_content_digest.__doc__ or "").split())
-    assert "Remaining evasion class, NOT closed here" in text and "A2" in text and "A3" in text
+    assert "Residual, NOT closed here" in text
+    assert all(tag in text for tag in ("A1", "A2", "A3", "D2/E1", "D3/D3b", "D5"))
 
 
 def test_q1f_a_register_marker_without_content_is_corrupt(tmp_path):
@@ -2657,7 +2862,8 @@ def test_v21_documented_limit_c1_a_reminted_receipt_escapes_a_receipt_revocation
     # The cohort gate still holds the re-minted claim (the A2 fix closes the C4 combination).
     assert "decision_content_seen_in_scored_cohort" in doc["reasons"]
     text = " ".join((iv.__doc__ or "").split())
-    assert "C1 is not" in text and "self-sealed" in text
+    assert "Residual, NOT closed" in text and "C1 (nothing here can tell" in text
+    assert "self-sealed" in text and "while reference fields are declared honestly" in text
 
 
 def test_v22_matched_verdicts_counts_keys_not_generations(tmp_path, monkeypatch):

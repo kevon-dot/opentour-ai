@@ -68,11 +68,17 @@ nothing.
 Semantic re-keying (re-review C1, C2, C4). The producer supplies the population and the audit
 receipt, and the OPE-526 receipt is self-sealed by a plain digest. So a producer can re-mint an
 equivalent receipt under a new digest (C1: escapes an audit-receipt revocation) or rename every
-case id (C2: changes the answer-key digest). C2 is closed: an answer-key revocation also matches
-the key's id-free content digest. C1 is not: nothing here can tell a re-minted receipt from a
-new one. C4, re-minting combined with the A2 id renaming that once emptied the cohort content
-digest, is closed for the cohort gate by the A2 fix, but a re-minted receipt still escapes an
-audit-receipt revocation. Only an authenticated OPE-526 audit issuer closes C1.
+case id (C2: changes the answer-key digest). C2 is closed while reference fields are declared
+honestly: an answer-key revocation also matches the key's id-free content digest. C4,
+re-minting combined with the A2 id renaming that once emptied the cohort content digest, is
+closed for the cohort gate, again while reference fields are declared honestly. A dishonest
+declaration is held or refused, never trusted: an undeclared field carrying the case's own id
+holds as ``undeclared_reference_field`` (D2, E1), and a declared name that differs from its
+feature key by case or a look-alike letter is refused (D3, D3b). Relabelling the same partition
+(swapping label names consistently) escapes the answer-key content match; the fresh-cohort gate
+is the backstop there. Residual, NOT closed: A1 (a new field with a fresh per-case value), D5
+(any edit to the decision text is new content, so a fresh cohort) and C1 (nothing here can tell
+a re-minted receipt from a new one). Only an authenticated OPE-526 audit issuer closes these.
 
 Known limits of revocation, kept on purpose and pinned by tests. The revocation lives in the
 same custody directory as the verdict, so whoever can delete files there can also delete a
@@ -122,6 +128,7 @@ import re
 import secrets
 import tempfile
 import time
+import unicodedata
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from fractions import Fraction
@@ -185,7 +192,14 @@ _PAIR_FIELDS = ("comparable", "fixes", "new_errors", "unchanged_right", "unchang
 REVOCATION = "opentour.pilot.independent-verdict-revocation.v1"
 SCOPE_REVOCATION = "opentour.pilot.independent-verdict-scope-revocation.v1"
 # What a scope revocation can name, and where each value sits in a verdict document.
-REVOCATION_SCOPES = ("scorer_version", "answer_key_digest", "audit_receipt_digest")
+REVOCATION_SCOPES = (
+    "scorer_version",
+    "answer_key_digest",
+    "audit_receipt_digest",
+    "answer_key_content_digest",
+)
+# Scopes a revoker can compute without a verdict here, so they may be revoked pre-emptively.
+_PREEMPTIVE_SCOPES = ("answer_key_content_digest",)
 CORRECTION_NOTICE = "opentour.pilot.independent-verdict-correction-notice.v1"
 HELD_VIEW = "opentour.pilot.independent-verdict-held-view.v1"
 # Closed vocabulary: a revocation never carries free text.
@@ -319,10 +333,13 @@ class SealedPopulation:
             or not _is_sha(benchmark_digest)
             or evidence_origin not in ("generated", "observed")
             or isinstance(reference_fields, str)
-            or not all(isinstance(f, str) and _ID.fullmatch(f) for f in reference_fields)
+            # Shape of each declared name is checked by ``_check_schema``.
+            or not all(isinstance(f, str) for f in reference_fields)
             or len(set(reference_fields)) != len(reference_fields)
+            or not all(isinstance(c.features, Mapping) for c in cases)
         ):
             raise VerdictInputError("invalid_sealed_population")
+        _check_schema(cases, reference_fields)
         self.cases = tuple(sorted(cases, key=lambda c: c.case_id))
         self._labels = dict(labels)
         self.label_set = frozenset(label_set)
@@ -378,6 +395,54 @@ class SealedPopulation:
         return digest(["opentour.pilot.answer-key-content.v1", sorted(pairs)])
 
 
+_ASCII_KEY = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
+def _fold(text: str) -> str:
+    """NFKC then casefold: the form two names or texts are compared in."""
+    return unicodedata.normalize("NFKC", text).casefold()
+
+
+def _check_schema(cases: Sequence[DecisionCase], reference_fields: Sequence[str]) -> None:
+    """Refuse a feature schema whose reference declarations cannot be trusted by name (D3, D3b).
+
+    Every feature key and declared reference name must be an ASCII identifier (no look-alike
+    letters: ``feature_key_unverifiable``); every declared name must be, exactly, a feature key of
+    every case (``reference_field_undeclared_in_schema``); and no two names may collide after
+    NFKC and casefold, such as ``case_ref`` beside ``Case_Ref`` (``feature_key_collision``).
+    Anything else is refused, never silently matched or dropped.
+    """
+    keys = {k for c in cases for k in c.features}
+    names = keys | set(reference_fields)
+    if not all(isinstance(k, str) and _ASCII_KEY.fullmatch(k) for k in names):
+        raise VerdictInputError("feature_key_unverifiable")
+    for name in reference_fields:
+        if any(name not in c.features for c in cases):
+            raise VerdictInputError("reference_field_undeclared_in_schema")
+    folded: dict[str, str] = {}
+    for name in sorted(names):
+        if folded.setdefault(_fold(name), name) != name:
+            raise VerdictInputError("feature_key_collision")
+
+
+def carries_own_id(case: DecisionCase, reference_fields: Sequence[str]) -> bool:
+    """True when an undeclared feature value contains this case's own case or family id.
+
+    Compared by exact substring on NFKC-casefolded text. Such a value is an undeclared reference
+    (D2, E1). It is never dropped from the content, which would reopen A2: the case is held
+    instead (``undeclared_reference_field``). A decision text that genuinely contains its own id
+    is held too; that is the fail-closed cost.
+    """
+    ids = (_fold(case.case_id), _fold(case.family_id))
+    for name, value in case.features.items():
+        if name in reference_fields:
+            continue
+        text = _fold(value if isinstance(value, str) else json.dumps(value, sort_keys=True))
+        if any(i in text for i in ids):
+            return True
+    return False
+
+
 def decision_content_digest(case: DecisionCase, reference_fields: Sequence[str] = ()) -> str | None:
     """The id-free content of one decision-time input, for the fresh-cohort register.
 
@@ -389,16 +454,21 @@ def decision_content_digest(case: DecisionCase, reference_fields: Sequence[str] 
     and can never count as fresh.
 
     Probed bypasses, now closed:
-      A1 renaming case/family ids or feature names, or reordering features;
+      renaming case/family ids or feature names, or reordering features;
       A2 renaming each id to a substring of its own decision text, which defeated the earlier
-         rule of dropping any value containing the id (every case then digested to nothing).
-         Nothing is excluded by what a value contains any more, only by declared field name;
-      A3 adding surrounding whitespace to a value.
-    Remaining evasion class, NOT closed here: the producer controls the population and its
-    schema. Undeclaring a reference field that carries an id, adding a field with a fresh
-    per-case value, or changing the decision text itself yields new content. Only an
-    authenticated OPE-526 audit receipt binding the benchmark content can close that; here the
-    receipt is self-sealed.
+         rule of dropping any value containing the id. Nothing is excluded by what a value
+         contains, only by declared field name;
+      A3 adding surrounding whitespace to a value;
+      D2/E1 leaving an id-carrying field undeclared: the case is held as
+         ``undeclared_reference_field`` (``carries_own_id``), its value never dropped;
+      D3/D3b declaring a reference name that differs from the key by case or by a look-alike
+         letter: refused when the population is built (``_check_schema``).
+    These hold only while reference fields are declared honestly enough to pass those checks.
+    Residual, NOT closed here, because the producer controls the population:
+      A1 adding a field with a fresh per-case value that is not an id (such as a hash of it);
+      D5 any edit to the decision text itself, which is new content and so a fresh cohort.
+    Only an authenticated OPE-526 audit receipt binding the benchmark content can close these;
+    here the receipt is self-sealed (see also C1 in the module docstring).
     """
     excluded = set(reference_fields)
     kept = [
@@ -1411,21 +1481,28 @@ class IndependentEvaluator:
         """Revoke every verdict, issued or future, whose ``scope`` equals ``value``.
 
         ``scope`` is one of ``REVOCATION_SCOPES``: a scorer version (a scorer defect invalidates
-        every verdict it scored, not one key), an answer key digest or an audit receipt digest.
-        The value must be one this custody has actually scored a verdict with; an unknown value
-        would match nothing, so it is refused with ``revocation_scope_unknown`` rather than
-        reported as a success. The record states how many verdicts it matched when written
-        (``matched_verdicts``). It is sealed, write-once and idempotent like a key revocation, and
-        it also refuses any later verdict with the same value. From then on ``authorize`` refuses
-        a matching verdict with ``verdict_revoked_by_scope``, ``read_verdict`` reads it as revoked
-        and ``evaluate`` never scores a matching claim. ``issued_by`` is caller-asserted.
+        every verdict it scored, not one key), an answer key digest, an audit receipt digest, or
+        an answer key's id-free content digest (``SealedPopulation.answer_key_content_digest``).
+        For the first three, the value must be one this custody has actually scored a verdict
+        with; an unknown value would match nothing, so it is refused with
+        ``revocation_scope_unknown`` rather than reported as a success. Trade-off: those three
+        can no longer be revoked pre-emptively, before any verdict carries the value. The
+        content digest is the exception: a revoker can compute it from a defective key itself,
+        so it may be revoked before any verdict here uses that key (``matched_verdicts`` may be
+        0). The record states how many verdicts it matched when written. It is sealed,
+        write-once and idempotent like a key revocation, and it also refuses any later verdict
+        with the same value. From then on ``authorize`` refuses a matching verdict with
+        ``verdict_revoked_by_scope``, ``read_verdict`` reads it as revoked and ``evaluate``
+        never scores a matching claim. ``issued_by`` is caller-asserted.
 
         An answer-key revocation also records the id-free content digests of the keys it hit
         (``answer_key_content_digests``) and matches on them, so renaming every case id does not
-        escape it (re-review C2). Known limit (re-review C1, C4): an audit-receipt revocation
-        matches the receipt digest only. The OPE-526 receipt is self-sealed by a plain digest, so
-        a producer can re-mint an equivalent receipt with a new digest; combined with renamed ids
-        that also escapes the answer-key digest. Only an authenticated audit issuer closes this.
+        escape it (re-review C2), while reference fields are declared honestly. Known limits:
+        relabelling the same partition (swapping label names consistently) changes the content
+        digest and escapes this match; the fresh-cohort gate is the backstop there. An
+        audit-receipt revocation matches the receipt digest only (C1): the OPE-526 receipt is
+        self-sealed, so a re-minted equivalent receipt escapes it. Only an authenticated audit
+        issuer closes C1.
         """
         if scope not in REVOCATION_SCOPES:
             raise VerdictInputError("invalid_revocation_scope")
@@ -1444,7 +1521,7 @@ class IndependentEvaluator:
         replayed = path.exists()
         if not replayed:
             matched = [d for d in self._all_documents() if self._scope_values(d)[scope] == value]
-            if not matched:
+            if not matched and scope not in _PREEMPTIVE_SCOPES:
                 raise VerdictInputError("revocation_scope_unknown")
             body: Json = {
                 "schema_version": SCOPE_REVOCATION,
@@ -2450,6 +2527,10 @@ class IndependentEvaluator:
         contents = {d for d in digests if d is not None}
         if None in digests:
             reasons.add("inconclusive", "decision_content_unverifiable")
+        if any(carries_own_id(c, population.reference_fields) for c in population.cases):
+            # An undeclared field carries the case's own id (D2, E1): the content digest would
+            # rename with the ids, so this cohort cannot be compared. Held, never excluded.
+            reasons.add("inconclusive", "undeclared_reference_field")
         id_overlap = content_overlap = False
         for path in sorted((self._root / "cohorts").glob("*.json")):
             if path.name == key + ".json":
