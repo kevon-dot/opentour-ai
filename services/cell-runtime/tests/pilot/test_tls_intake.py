@@ -19,6 +19,8 @@ from pathlib import Path
 
 import pytest
 import test_intake_mcp as vectors
+import test_learning_runs as runs
+from opentour_cell.pilot import learning_runs as lr
 from opentour_cell.pilot.historical_worker import CONFIG as HISTORICAL_WORKER_CONFIG
 from opentour_cell.pilot.intake_local import open_intake
 from opentour_cell.pilot.intake_mcp import parse_intake
@@ -656,6 +658,347 @@ def test_historical_live_replay_authority_and_bounds(connector):
         assert counts(root) == (2, 0, 0)
         with sqlite3.connect(root / "learning-mandates.sqlite3") as db:
             assert db.execute("SELECT count(*) FROM reservations").fetchone()[0] == 0
+
+
+# ---- OPE-559: learning-run routes on the installed gateway, under a separate grant ------------
+
+
+class LearningConnector(Connector):
+    """The installed gateway with its own learning-run credential, audience and selection."""
+
+    def __init__(self, package, work, site, selection, client, audience):
+        work.mkdir(mode=0o700)
+        super().__init__(package, work)
+        self.selection = selection
+        actor = json.loads(selection.read_text())["actor"]
+        self.config.update(
+            audience=audience,
+            learning_tenant=site.tenant,
+            learning_actor=actor,
+            learning_client=client,
+        )
+        self.manifest.write_text(json.dumps(self.config))
+
+    @contextmanager
+    def serve(self, *, ledger=None, selection=None, learning=True):
+        spec = importlib.util.spec_from_file_location("installed_gateway", self.server)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        if ledger is not None:
+            # Generated OPE-442 stand-in; the installed default has no ledger and holds fits.
+            installed = module.learning_connection
+            module.learning_connection = lambda path, config: installed(path, config, ledger=ledger)
+        args = argparse.Namespace(
+            config=self.manifest,
+            cert=self.work / "tls.crt",
+            key=self.work / "tls.key",
+            token=self.work / "credential",
+            bind="127.0.0.1",
+            port=0,
+            selection=selection,
+            learning_selection=self.selection if learning else None,
+        )
+        ready = Future()
+
+        async def run():
+            try:
+                async with await module.bind_server(args) as listener:
+                    stop = asyncio.Event()
+                    ready.set_result(
+                        (listener.sockets[0].getsockname()[1], asyncio.get_running_loop(), stop)
+                    )
+                    await stop.wait()
+            except Exception as error:
+                if not ready.done():
+                    ready.set_exception(error)
+                raise
+
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            running = executor.submit(asyncio.run, run())
+            self.port, loop, stop = ready.result(timeout=10)
+            try:
+                yield
+            finally:
+                loop.call_soon_threadsafe(stop.set)
+                running.result(timeout=10)
+
+    def request(self, method, path, body=None, *, drop=False, headers=None, raw=None):
+        client = http.client.HTTPSConnection("127.0.0.1", self.port, context=self.trust, timeout=5)
+        try:
+            sent = {
+                "Host": "127.0.0.1",
+                "Origin": "https://127.0.0.1",
+                "X-OpenTour-Audience": self.config["audience"],
+                "Authorization": "Bearer " + self.token,
+            }
+            payload = (
+                raw if raw is not None else None if body is None else json.dumps(body).encode()
+            )
+            if payload is not None:
+                sent["Content-Type"] = "application/json"
+            client.request(method, path, payload, sent | (headers or {}))
+            if drop:
+                return None
+            result = client.getresponse()
+            data = result.read()
+            return result.status, json.loads(data) if data else None
+        finally:
+            client.close()
+
+
+def packaged(package, *args):
+    return subprocess.run(
+        [*PYTHON, package / "opentour-slack.pyz", *args],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+
+
+def packaged_grant(package, site, name, *, role="owner", channel="slack", client=None):
+    selection = site.directory / f"{name}.json"
+    done = packaged(
+        package,
+        "learning-runs",
+        "authorize",
+        "--selection",
+        str(selection),
+        "--tenant",
+        site.tenant,
+        "--owner",
+        runs.OWNER,
+        "--actor",
+        runs.DELEGATE if role == "scheduler" else runs.OWNER if role == "owner" else role,
+        "--role",
+        role,
+        "--channel",
+        channel,
+        "--client",
+        client or f"client-{name}",
+        "--workflow",
+        runs.WORKFLOW,
+        "--mandate",
+        runs.MANDATE,
+        "--grant-ref",
+        f"grant-{name}",
+        "--expires-at",
+        str(int(time.time()) + 3600),
+    )
+    assert done.returncode == 0, done.stdout + done.stderr
+    return selection
+
+
+def learning_counts(site):
+    counted = site.counts()
+    return counted["lr_runs"], len(site.ledger.reservations), site.trainer.submissions
+
+
+RUNS = "/v1/learning-runs"
+
+
+def test_learning_routes_replace_404_under_a_scoped_grant(kit, tmp_path):  # noqa: F811
+    site = runs.Site(tmp_path)
+    selection = packaged_grant(kit, site, "slack-owner", client="slack-hosted-1")
+    gateway = LearningConnector(
+        kit, tmp_path / "learning-tls", site, selection, "slack-hosted-1", "learning-audience"
+    )
+    # The positive legacy control: the intake connection still serves only its three routes.
+    home = tmp_path / "intake-owner"
+    intake_selection, _ = vectors._starter_only(home)
+    intake = Connector(kit, tmp_path)
+    with intake.listen(intake_selection):
+        assert intake.post(DISCOVER, {})[0] == 200
+        for path in (RUNS, RUNS + "/lrun-1/cancel"):
+            assert intake.post(path.removeprefix("/v1/"), {"idempotency_key": "k"}) == (404, None)
+    assert counts(home) == (0, 0, 0)
+    body = {"plan_ref": "plan-unknown", "operation": "evaluate_and_improve", "idempotency_key": "a"}
+    with gateway.serve():
+        held = gateway.request("POST", RUNS, body)
+        assert held[0] == 200 and held[1]["reason_code"] == "no_eligible_plan"
+        assert "run_ref" not in held[1]
+        plan_ref = site.publish()
+        body["plan_ref"] = plan_ref
+        # The installed default has no OPE-442 ledger, so fit-capable work is held, not admitted.
+        code, held = gateway.request("POST", RUNS, body)
+        assert (code, held["state"], held["reason_code"]) == (200, "held", "fit_ledger_unavailable")
+        benchmark = body | {"operation": "benchmark_only", "idempotency_key": "bench-1"}
+        code, admitted = gateway.request("POST", RUNS, benchmark)
+        assert code == 200 and admitted["state"] == "benchmark_only"
+        run = admitted["run_ref"]
+        assert gateway.request("POST", RUNS, benchmark) == (200, admitted)
+        assert gateway.request("POST", RUNS, benchmark | {"idempotency_key": "bench-2"}) == (
+            200,
+            admitted,
+        )
+        assert gateway.request("GET", f"{RUNS}/{run}") == (200, admitted)
+        changed = benchmark | {"operation": "evaluate_and_improve"}
+        assert gateway.request("POST", RUNS, changed) == (409, {"error": "idempotency_conflict"})
+        for extra in (
+            {"backend_url": "https://x.invalid"},
+            {"release": "approve"},
+            {"tenant": "b"},
+        ):
+            assert gateway.request("POST", RUNS, benchmark | extra) == (
+                400,
+                {"error": "invalid_arguments"},
+            )
+        assert gateway.request("GET", f"{RUNS}/lrun-missing") == (
+            403,
+            {"error": "learning_run_unavailable"},
+        )
+        assert gateway.request("GET", f"{RUNS}/{run}", raw=b"{}")[0] == 400
+        assert (
+            gateway.request(
+                "POST", f"{RUNS}/{run}/cancel", {"run_ref": run, "idempotency_key": "c"}
+            )[0]
+            == 400
+        )
+        for path in ("/v1/discover_sources", "/v1/get_run", "/v1/health", f"{RUNS}/{run}/approve"):
+            assert gateway.request("POST", path, {"idempotency_key": "x"}) == (404, None)
+        assert gateway.request("GET", "/v1/health") == (404, None)
+        assert gateway.request("GET", f"{RUNS}/{run}", headers={"Authorization": "Bearer x"}) == (
+            403,
+            None,
+        )
+        wrong_audience = {"X-OpenTour-Audience": "intake-audience"}
+        assert gateway.request("GET", f"{RUNS}/{run}", headers=wrong_audience) == (403, None)
+        canceled = gateway.request("POST", f"{RUNS}/{run}/cancel", {"idempotency_key": "c"})
+        assert canceled[0] == 200
+        assert (canceled[1]["cancellation"], canceled[1]["state"]) == ("confirmed", "canceled")
+        assert gateway.request("POST", f"{RUNS}/{run}/cancel", {"idempotency_key": "c"}) == canceled
+    # Revoking the grant ends access at once and reveals no earlier run reference.
+    with gateway.serve():
+        revoked = packaged(
+            kit, "learning-runs", "withdraw", "--selection", str(selection), "--owner", runs.OWNER
+        )
+        assert revoked.returncode == 0
+        denied = (403, {"error": "learning_run_unavailable"})
+        assert gateway.request("POST", RUNS, benchmark) == denied
+        assert gateway.request("GET", f"{RUNS}/{run}") == denied
+        assert gateway.request("POST", f"{RUNS}/{run}/cancel", {"idempotency_key": "c"}) == denied
+    assert site.counts()["lr_runs"] == 1
+    # A health-only listener still answers health and serves none of the learning-run routes.
+    with gateway.serve(learning=False):
+        assert gateway.request("GET", "/v1/health")[0] == 200
+        assert gateway.request("GET", f"{RUNS}/{run}") == (404, None)
+        assert gateway.request("POST", RUNS, benchmark) == (404, None)
+    # One listener never serves intake and learning-run control together.
+    with pytest.raises(ValueError, match="separate listeners"):
+        with gateway.serve(selection=intake_selection):
+            pass
+
+
+def test_tls_slack_zapier_and_schedule_converge_on_one_run_and_one_fit(kit, tmp_path):  # noqa: F811
+    site = runs.Site(tmp_path)
+    slack_selection = packaged_grant(kit, site, "slack-owner", client="slack-hosted-1")
+    zap_selection = packaged_grant(kit, site, "zap-owner", channel="zapier", client="zap-1")
+    packaged_grant(kit, site, "learning-run-schedule", role="scheduler", channel="schedule")
+    scheduler, worker = site.open(site.directory / "learning-run-schedule.json")
+    slack = LearningConnector(
+        kit, tmp_path / "slack-tls", site, slack_selection, "slack-hosted-1", "slack-audience"
+    )
+    zap = LearningConnector(kit, tmp_path / "zap-tls", site, zap_selection, "zap-1", "zap-audience")
+    plan_ref = site.publish()
+    body = {"plan_ref": plan_ref, "operation": "evaluate_and_improve", "idempotency_key": "s-1"}
+    with slack.serve(ledger=site.ledger):
+        # Run improvement; the reply is lost after durable admission.
+        slack.request("POST", RUNS, body, drop=True)
+        for _ in range(200):
+            if site.counts()["lr_runs"] == 1:
+                break
+            time.sleep(0.01)
+    assert learning_counts(site) == (1, 0, 0)
+    # The schedule tick, the restarted listener, Zapier and Socket Mode all reach the same run.
+    tick = worker.schedule_tick(scheduler)
+    assert (tick["tick"], tick["reason_code"]) == ("no_change", "already_admitted")
+    with slack.serve(ledger=site.ledger), zap.serve(ledger=site.ledger):
+        code, again = slack.request("POST", RUNS, body)
+        assert code == 200 and again["run_ref"] == tick["run_ref"]
+        code, zapped = zap.request("POST", RUNS, body | {"idempotency_key": "zap-trigger-1"})
+        assert code == 200 and zapped["run_ref"] == again["run_ref"]
+        local_principal, local_service = site.open(slack_selection)
+        local = lr.learning_run_dispatch(local_principal, local_service)
+        socket = local(lr.SUBMIT, body | {"idempotency_key": "socket-1"})["structuredContent"]
+        assert socket["run_ref"] == again["run_ref"]
+        claim = runs.drive_to_review(site, worker, scheduler)
+        assert claim.run_ref == again["run_ref"]
+        run = again["run_ref"]
+        code, status = slack.request("GET", f"{RUNS}/{run}")
+        assert code == 200 and status["state"] == "review_ready"
+        assert status["usage"] == {
+            "fit_reservations": 1,
+            "reserved_units": 90,
+            "consumed_units": 42,
+        }
+        assert zap.request("GET", f"{RUNS}/{run}") == (200, status)
+        late = zap.request("POST", f"{RUNS}/{run}/cancel", {"idempotency_key": "late"})
+        assert (late[0], late[1]["cancellation"]) == (200, "not_applicable")
+        # The scheduled path cannot start a second run while this one awaits review.
+        assert packaged(
+            kit,
+            "cycle-worker",
+            "--directory",
+            str(site.directory),
+            "--organization",
+            site.tenant,
+            "--config",
+            str(site.directory / "cycle.json"),
+            "--interval",
+            "300",
+            "--once",
+        ).stdout.strip() == json.dumps(
+            {"state": "no_change", "reason": "already_admitted", "run_id": run}
+        )
+    assert learning_counts(site) == (1, 1, 1)
+    with sqlite3.connect(site.directory / lr.DATABASE) as db:
+        triggers = db.execute(
+            "SELECT channel,count(*) FROM lr_triggers GROUP BY channel"
+        ).fetchall()
+    assert dict(triggers) == {"slack": 2, "zapier": 1}
+    assert site.ticks() == [("no_change", "already_admitted")] * 2
+
+
+def test_tls_role_tenant_and_revocation_boundaries(kit, tmp_path):  # noqa: F811
+    site = runs.Site(tmp_path)
+    other = runs.Site(tmp_path, tenant="org-b")
+    owner = packaged_grant(kit, site, "slack-owner", client="slack-hosted-1")
+    viewer = packaged_grant(kit, site, "slack-reviewer", role="reviewer", client="slack-viewer")
+    foreign = packaged_grant(kit, other, "slack-owner", client="slack-hosted-1")
+    owner_gw = LearningConnector(kit, tmp_path / "owner-tls", site, owner, "slack-hosted-1", "a1")
+    viewer_gw = LearningConnector(kit, tmp_path / "viewer-tls", site, viewer, "slack-viewer", "a2")
+    foreign_gw = LearningConnector(
+        kit, tmp_path / "foreign-tls", other, foreign, "slack-hosted-1", "a3"
+    )
+    plan_ref = site.publish()
+    body = {"plan_ref": plan_ref, "operation": "benchmark_only", "idempotency_key": "k"}
+    with owner_gw.serve(), viewer_gw.serve(), foreign_gw.serve():
+        code, admitted = owner_gw.request("POST", RUNS, body)
+        assert code == 200
+        run = admitted["run_ref"]
+        role = (403, {"error": "learning_run_role_required"})
+        assert viewer_gw.request("POST", RUNS, body | {"idempotency_key": "v"}) == role
+        assert viewer_gw.request("POST", f"{RUNS}/{run}/cancel", {"idempotency_key": "v"}) == role
+        code, seen = viewer_gw.request("GET", f"{RUNS}/{run}")
+        assert code == 200 and "usage" not in seen and seen["state"] == "benchmark_only"
+        unavailable = (403, {"error": "learning_run_unavailable"})
+        assert foreign_gw.request("GET", f"{RUNS}/{run}") == unavailable
+        assert foreign_gw.request("POST", f"{RUNS}/{run}/cancel", {"idempotency_key": "f"}) == (
+            unavailable
+        )
+        # Each listener accepts only its own credential.
+        stolen = {"Authorization": "Bearer " + owner_gw.token}
+        assert foreign_gw.request("GET", f"{RUNS}/{run}", headers=stolen) == (403, None)
+        assert viewer_gw.request("POST", RUNS, body, headers=stolen) == (403, None)
+        # A paused mandate admits nothing and fences the queued run before dispatch.
+        site.pause()
+        code, paused = owner_gw.request(
+            "POST", RUNS, body | {"plan_ref": site.publish(site.plan("v2")), "idempotency_key": "p"}
+        )
+        assert (code, paused["reason_code"]) == (200, "standing_mandate_paused")
+        code, fenced = owner_gw.request("GET", f"{RUNS}/{run}")
+        assert (fenced["state"], fenced["reason_code"]) == ("refused", "standing_mandate_paused")
+    assert site.counts()["lr_runs"] == 1 and other.counts()["lr_runs"] == 0
 
 
 class PackagedProcess(Connector):
