@@ -111,6 +111,25 @@ EXPERIMENT_IN_FLIGHT = "in_flight"
 EXPERIMENT_STALE = "stale"
 FIT_GATE_SOURCE = "learning_mandate_reservation"
 FIT_AUTHORITY_MISMATCH = "fit_authority_mismatch"
+# Answers from the worker's mandate store that definitively close a reservation (read from
+# `learning_mandate`'s grant path: `_active`, `_mandate`, `_reservation`, `_run_row`) plus this
+# module's own scope check. Every other code, notably `standing_engagement_unavailable` (which
+# `_authorized_db` also uses for lock contention, OSError, sqlite3.Error and TrainingError), is
+# treated as unverified: excluded for now, never persisted. A real engagement withdrawal shows
+# as unverified, not stale, until the store gives a distinct signal for it.
+DEFINITIVE_CLOSURES: frozenset[str] = frozenset(
+    {
+        "standing_mandate_withdrawn",
+        "standing_mandate_expired",
+        "standing_delegate_mismatch",
+        "manual_learning_only",
+        "standing_mandate_unavailable",
+        "fit_reservation_unavailable",
+        "delegated_run_unavailable",
+        "fit_reservation_outside_training_scope",
+    }
+)
+FIT_GATE_UNVERIFIED = "fit_gate_unverified"  # transient: an admission is deferred, not refused
 # Class-level behaviour of the worker's mandate ledger; an instance may shadow none of it.
 _AUTHORITY_METHODS: frozenset[str] = frozenset(
     name
@@ -1036,7 +1055,7 @@ class VariantLedger:
         if self._store_mismatch(db, authority_id, experiment):
             return FIT_AUTHORITY_MISMATCH
         if fit is None:
-            return "fit_gate_closed"
+            return "fit_gate_closed" if why in DEFINITIVE_CLOSURES else FIT_GATE_UNVERIFIED
         return None
 
     def _store_mismatch(
@@ -1051,10 +1070,11 @@ class VariantLedger:
     def _refresh_experiments(self) -> set[str]:
         """Re-read every in-flight experiment's reservation through the worker's ledger.
 
-        A closure reported by the pinned, recorded store is authoritative: the experiment is
-        persisted stale (`fit_gate_closed`, with the store's status) and its children handled as
-        on retraction. A reservation that cannot be verified here (no authority, or another
-        store) changes nothing durable; its id is returned so the caller can exclude it.
+        Only a definitive closure (`DEFINITIVE_CLOSURES`) reported by the pinned, recorded
+        store is persisted: the experiment goes stale (`fit_gate_closed`, with the store's
+        status) and its children are handled as on retraction. Anything else (no authority,
+        another store, an outage such as `standing_engagement_unavailable`, or an unknown code)
+        changes nothing durable; its id is returned so the caller can exclude it for now.
         """
         with self._tx() as db:
             rows = db.execute(
@@ -1072,8 +1092,10 @@ class VariantLedger:
                     db, authority_id, experiment
                 ):
                     unverified.add(str(rid))
-                elif fit is None:
+                elif fit is None and why in DEFINITIVE_CLOSURES:
                     closed[str(rid)] = str(why)
+                elif fit is None:
+                    unverified.add(str(rid))  # transient or unknown: never persisted
         if closed:
             with self._tx() as db:
                 for rid, status in sorted(closed.items()):
@@ -1354,6 +1376,8 @@ class VariantLedger:
             if new == ADMITTED:
                 # The fit gate is re-read at admission, not trusted from submit time.
                 blocked = self._admission_fit_reason(db, record, str(row[1]))
+                if blocked == FIT_GATE_UNVERIFIED:
+                    return HELD  # the store is unavailable: defer, write nothing, retry later
                 if blocked is not None:
                     entry = {
                         "disposition": HELD,
@@ -1593,8 +1617,9 @@ class VariantLedger:
 
         Family and mistake counts are derived from the ledger's own admitted roots and the
         sealed split, never from caller-supplied roots. A training manifest first re-reads
-        every bound reservation: a closed one stales its experiment (persisted), and one that
-        cannot be verified with this ledger's authority is excluded from fit counts.
+        every bound reservation: a definitively closed one stales its experiment (persisted);
+        one that cannot be verified now (other store, no authority, store outage, unknown code)
+        is excluded from fit counts and nothing is written, so it recovers once verifiable.
         """
         unverified = self._refresh_experiments() if mode == "training" else set()
         every = self.children()

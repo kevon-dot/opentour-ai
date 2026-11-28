@@ -22,7 +22,7 @@ from typing import Any
 
 import pytest
 from opentour_cell.pilot import open_weight
-from opentour_cell.pilot.learning_mandate import LearningMandates
+from opentour_cell.pilot.learning_mandate import LearningMandates, MandateError
 from opentour_cell.pilot.operating_point import digest
 from opentour_cell.pilot.text_classifier import TrainingError
 from opentour_cell.pilot.training import LocalTrainingStore
@@ -2011,3 +2011,133 @@ def test_an_authority_whose_mandate_file_is_elsewhere_is_never_pinned(tmp_path: 
     ledger.run(plan((PARAPHRASE,), fit_gate=FitGate(rid, DELEGATE)), VALIDATOR, now=NOW)
     assert ledger.children()[-1]["reason"] == "fit_authority_mismatch"
     assert manifest(ledger)["admitted_count"] == 0
+
+
+# --------------------------------------------- re-review of PR #225 at f737f5f (F4, F1e)
+
+
+def _admitted_and_held(world: FitWorld) -> tuple[VariantLedger, FitGate, str, str]:
+    rid = world.reserve(1)
+    gate = FitGate(rid, DELEGATE)
+    ledger = new_ledger(world=world)
+    ledger.run(plan((PARAPHRASE,), fit_gate=gate), VALIDATOR, now=NOW)
+    held = ledger.submit(plan((NO_PO,), fit_gate=gate, plan_ref="generated-plan-held"), now=NOW)
+    return ledger, gate, rid, held.child_ids[0]
+
+
+def test_a_locked_mandate_store_is_unverified_and_fully_recovers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F4 repro: a manifest read during lock contention must not stale a valid experiment."""
+    world = FitWorld(tmp_path)
+    ledger, gate, rid, held = _admitted_and_held(world)
+    before = ledger.children()
+    original = sqlite3.connect
+
+    def quick(*args: Any, **kwargs: Any) -> sqlite3.Connection:
+        if str(args[0]).endswith("learning-mandates.sqlite3"):
+            kwargs["timeout"] = 0.05  # the store's own 10 s wait, shortened for the test
+        return original(*args, **kwargs)
+
+    blocker = original(world.mandates.path, isolation_level=None)
+    blocker.execute("BEGIN EXCLUSIVE")
+    try:
+        with monkeypatch.context() as mp:
+            mp.setattr(sqlite3, "connect", quick)
+            m = manifest(ledger)
+            counts = (
+                m["admitted_count"],
+                m["unverified_admitted_count"],
+                m["stale_admitted_count"],
+            )
+            assert counts == (0, 1, 0)
+            assert m["unverified_experiments"] == [rid]
+            assert ledger.validate(held, AGREE_REVIEW) == HELD  # deferred, not refused
+    finally:
+        blocker.execute("ROLLBACK")
+        blocker.close()
+    assert ledger.children() == before  # nothing durable was written during the outage
+    (exp,) = ledger.experiments()
+    assert (exp["state"], exp["reason"]) == ("in_flight", "")
+    m = manifest(ledger)
+    assert (m["admitted_count"], m["unverified_admitted_count"]) == (1, 0)
+    assert ledger.validate(held, AGREE_REVIEW) == ADMITTED
+    ledger.run(
+        plan((PARAPHRASE,), root(2), fit_gate=gate, plan_ref="generated-plan-r2"),
+        VALIDATOR,
+        now=NOW,
+    )
+    assert ledger.children("generated-root-2")[0]["disposition"] == ADMITTED
+    assert manifest(ledger)["admitted_count"] == 3
+
+
+@pytest.mark.parametrize("failure", ["os_error", "sqlite_error", "unknown_code"])
+def test_a_failing_mandate_store_is_unverified_never_stale(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    """F4: OSError, sqlite3.Error or an unknown code from the store writes nothing."""
+    world = FitWorld(tmp_path)
+    ledger, _, _, held = _admitted_and_held(world)
+    before = ledger.children()
+
+    def broken_guard(self: LocalTrainingStore, *args: Any, **kwargs: Any) -> Any:
+        raise OSError("generated-io-failure")
+
+    def broken_db(self: LearningMandates, *, write: bool = True) -> Any:
+        raise sqlite3.DatabaseError("generated-corrupt-store")
+
+    def odd_grant(self: LearningMandates, reservation_id: str, *, actor: str) -> dict[str, Any]:
+        raise MandateError("generated-unknown-code")
+
+    with monkeypatch.context() as mp:
+        if failure == "os_error":
+            mp.setattr(LocalTrainingStore, "engagement_guard", broken_guard)
+        elif failure == "sqlite_error":
+            mp.setattr(LearningMandates, "_db", broken_db)
+        else:
+            mp.setattr(LearningMandates, "grant", odd_grant)
+        m = manifest(ledger)
+        assert (m["admitted_count"], m["unverified_admitted_count"]) == (0, 1)
+        assert ledger.validate(held, AGREE_REVIEW) == HELD
+    assert ledger.children() == before
+    assert ledger.experiments()[0]["state"] == "in_flight"
+    assert manifest(ledger)["admitted_count"] == 1
+    assert ledger.validate(held, AGREE_REVIEW) == ADMITTED
+
+
+def test_a_real_withdrawal_still_stales_while_an_outage_does_not(tmp_path: Path) -> None:
+    """F4: a definitive closure from the pinned store is still persisted."""
+    world = FitWorld(tmp_path)
+    ledger, _, _, held = _admitted_and_held(world)
+    world.mandates.withdraw(MANDATE, actor=OWNER)
+    m = manifest(ledger)
+    assert (m["admitted_count"], m["stale_admitted_count"], m["unverified_admitted_count"]) == (
+        0,
+        1,
+        0,
+    )
+    (exp,) = ledger.experiments()
+    assert (exp["state"], exp["gate_status"]) == ("stale", "standing_mandate_withdrawn")
+    reheld = [c for c in ledger.children() if c["child_id"] == held]
+    assert (reheld[0]["disposition"], reheld[0]["reason"]) == (REJECTED, "fit_experiment_stale")
+
+
+def test_a_ledger_holding_only_seed_rejected_children_is_never_pinned(tmp_path: Path) -> None:
+    """F1e: any row, including a rejected child with no root, blocks a later pin."""
+    world = _world(tmp_path, "mandates")
+    path = tmp_path / "variants.sqlite3"
+    protected = root(7, family_id="generated-fam-protected", split="protected")
+    VariantLedger(path).run(plan((PARAPHRASE,), protected), VALIDATOR, now=NOW)
+    db = sqlite3.connect(path)
+    try:
+        counts = [
+            db.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0] for t in ("roots", "children")
+        ]
+    finally:
+        db.close()
+    assert counts == [0, 1]  # only the seed-rejected child
+    later = VariantLedger(path, fit_authority=world.mandates)
+    assert _pinned(path) is None
+    gate = FitGate(world.reserve(1), DELEGATE)
+    later.run(plan((LAYOUT,), fit_gate=gate, plan_ref="generated-plan-later"), VALIDATOR, now=NOW)
+    assert later.children()[-1]["reason"] == "fit_authority_mismatch"
