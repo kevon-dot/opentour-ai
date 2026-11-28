@@ -2642,24 +2642,88 @@ def test_a_former_custodian_cannot_co_sign_a_new_scope_update(kit: Kit) -> None:
     assert verifier.update_customer_scope(by_current).consent_purposes == {GRANT, SPEND}
 
 
-def test_a_former_custodian_on_a_pending_entry_is_ignored(kit: Kit) -> None:
+def pending_by_retiring_custodian(kit: Kit, scope: list[str]) -> Signer:
+    """Enrol with every purpose; a second custodian co-signs a pending update to ``scope``."""
     retiring = Signer(sr.OPERATOR_CUSTODIAN, [SCOPE_PURPOSE])
     verifier = kit.verifier(kit.registry(keys=[*kit.issuers(), retiring.entry()]))
     verifier.pin_customer_anchor(kit.enrolment())
-    floor = record_path(kit, REVISION_KEY).read_bytes()
-    verifier.update_customer_scope(kit.scope_update([GRANT], kit.customer, retiring))
-    record_path(kit, REVISION_KEY).write_bytes(floor)  # the floor write was lost
+    lose_floor_write(kit, verifier, kit.scope_update(scope, kit.customer, retiring))
+    return retiring
+
+
+def test_a_former_custodian_on_a_pending_narrowing_restricts_but_is_never_accepted(
+    kit: Kit,
+) -> None:
+    retiring = pending_by_retiring_custodian(kit, [GRANT])
     spend = sign(consent(), SPEND, kit.customer, kit.operator)
-    # While its co-signer is current, the pending narrowing counts.
-    refused("customer_purpose_not_enrolled", partial(verifier.verify, spend, SPEND))
+    grant = sign(consent(), GRANT, kit.customer, kit.operator)
     retired = kit.verifier(former_registry(kit, "2", kit.issuers(), [retiring.public()]))
-    # Retired into the verify-only list, it no longer carries a pending entry.
-    assert retired.verify(spend, SPEND)
-    # A locked operation does not settle it; a current co-signer replaces the tail.
+    # Retired into the verify-only list, its pending narrowing still restricts at read time.
+    refused("customer_purpose_not_enrolled", partial(retired.verify, spend, SPEND))
+    assert retired.verify(grant, GRANT)
+    # It is never accepted: a locked operation leaves the floor where it was.
+    enrolment = kit.enrolment(engagement_id=ENGAGEMENT)
+    refused("customer_anchor_already_pinned", partial(retired.pin_customer_anchor, enrolment))
+    assert stored(kit, REVISION_KEY)["sequence"] == "1"
+    refused("customer_purpose_not_enrolled", partial(retired.verify, spend, SPEND))
+    # While it caps the scope, an inheriting rotation must restate.
+    second = Signer(sr.CUSTOMER_OWNER, registry_revision="2")
+    inheriting = kit.rotation(kit.customer, second)
+    refused("customer_scope_restatement_required", partial(retired.rotate_customer_key, inheriting))
+    # A current co-signer replaces the tail with a fresh update from the floor.
     fresh = kit.scope_update([SPEND], kit.customer, kit.operator)
     assert retired.update_customer_scope(fresh).consent_purposes == {SPEND}
     assert stored(kit, ANCHOR_KEY)["sequence"] == "3"
     assert retired.verify(spend, SPEND)
+    refused("customer_purpose_not_enrolled", partial(retired.verify, grant, GRANT))
+
+
+def test_a_former_custodian_on_a_pending_widening_never_widens(kit: Kit) -> None:
+    retiring = Signer(sr.OPERATOR_CUSTODIAN, [SCOPE_PURPOSE])
+    verifier = kit.verifier(kit.registry(keys=[*kit.issuers(), retiring.entry()]))
+    verifier.pin_customer_anchor(kit.enrolment(consent_purposes=[GRANT]))
+    widening = kit.scope_update(sorted({GRANT, SPEND}), kit.customer, retiring)
+    lose_floor_write(kit, verifier, widening)
+    spend = sign(consent(), SPEND, kit.customer, kit.operator)
+    assert verifier.verify(spend, SPEND)  # pending, current co-signer, inside its window
+    retired = kit.verifier(former_registry(kit, "2", kit.issuers(), [retiring.public()]))
+    refused("customer_purpose_not_enrolled", partial(retired.verify, spend, SPEND))
+    assert retired.verify(sign(consent(), GRANT, kit.customer, kit.operator), GRANT)
+    enrolment = kit.enrolment(engagement_id=ENGAGEMENT)
+    refused("customer_anchor_already_pinned", partial(retired.pin_customer_anchor, enrolment))
+    assert stored(kit, REVISION_KEY)["sequence"] == "1"
+
+
+def test_a_custodian_unknown_to_the_registry_on_a_pending_narrowing_does_not_restrict(
+    kit: Kit,
+) -> None:
+    # Dropped from both lists: the pending entry stops the walk and does not count.
+    pending_by_retiring_custodian(kit, [GRANT])
+    dropped = kit.verifier(former_registry(kit, "2", kit.issuers(), []))
+    spend = sign(consent(), SPEND, kit.customer, kit.operator)
+    assert dropped.verify(spend, SPEND)
+    # Nor does a stranger custodian key that was never in any registry.
+    stranger = Signer(sr.OPERATOR_CUSTODIAN, [SCOPE_PURPOSE])
+    enrolment = stored(kit, ANCHOR_KEY)["value"]["chain"][0]
+    planted = kit.scope_update([GRANT], kit.customer, stranger)
+    write_record(kit, ANCHOR_KEY, 3, {"chain": [enrolment, json.loads(planted)]})
+    assert dropped.verify(spend, SPEND)
+
+
+@pytest.mark.parametrize("change", ["lost_scope_purpose", "relisted_elsewhere"])
+def test_a_current_custodian_not_listed_as_former_on_a_pending_narrowing_does_not_restrict(
+    kit: Kit, change: str
+) -> None:
+    # Still current, but not permitted at the signed revision, and not verify-only listed:
+    # the ruling covers former_custodian_keys only, so the walk ends there.
+    retiring = pending_by_retiring_custodian(kit, [GRANT])
+    if change == "lost_scope_purpose":
+        entry = retiring.entry(purposes=[GRANT])
+    else:
+        entry = retiring.entry(registry_revision="rev-2")
+    current = kit.verifier(kit.registry("2", keys=[*kit.issuers(), entry]))
+    spend = sign(consent(), SPEND, kit.customer, kit.operator)
+    assert current.verify(spend, SPEND)
 
 
 def test_dropping_a_custodian_from_both_lists_makes_its_anchors_unverifiable(kit: Kit) -> None:

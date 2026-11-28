@@ -117,8 +117,10 @@ that revocation fails closed: pending scope updates by the floor key that pass e
 but expiry still restrict, so the effective scope is the floor scope ∩ the pending scope. A
 pure narrowing advances the head and becomes an accepted, signed entry when the floor is
 next rolled forward; the first update that widens only caps the scope at read time and is
-never accepted, so its widening never takes effect (see ``_restrict``). A pending rotation,
-or any other failure, ends that walk. Any locked operation on the engagement (a pin, a
+never accepted, so its widening never takes effect (see ``_restrict``). A pending update
+co-signed by a key listed in ``former_custodian_keys`` likewise only caps: it is never
+accepted and never widens. A pending rotation, a custodian key in neither list, or any
+other failure, ends that walk. Any locked operation on the engagement (a pin, a
 rotation or a scope update) first rolls the floor forward over a pending tail that is
 still inside its window, or over the pure narrowings above, after which they are accepted
 and no longer expire.
@@ -140,8 +142,9 @@ An accepted scope update's co-signature (an entry at or below the anchor floor) 
 re-verified the same way by key id: a current registry entry for that id carrying the scope
 purpose (at any registry revision), or the id in ``former_custodian_keys``. Retiring a
 custodian into that list therefore keeps the anchors whose scope updates it co-signed. A
-former custodian key never authorizes a new scope update and never carries a pending one,
-which needs a current custodian at its exact registry revision. A scope update also needs
+former custodian key never authorizes a new scope update and never makes a pending one
+count, which needs a current custodian at its exact registry revision; a pending update it
+co-signed may only restrict at read time (see the pending tail above). A scope update also needs
 the anchored customer key's signature, so a former custodian key cannot widen a scope on its
 own. Dropping a key from both lists still invalidates every anchor whose enrolment or scope
 update it co-signed.
@@ -203,8 +206,8 @@ Recovery:
   narrowing as an incident.
 * Retiring a custodian key: add it to ``former_custodian_keys`` so the enrolments and
   accepted scope updates it co-signed keep verifying. A scope update it co-signed that was
-  still pending (its floor write lost) is ignored once it is retired, and the anchor reverts
-  to the earlier scope; re-run it with a current custodian.
+  still pending (its floor write lost) then only caps the scope at read time and is never
+  accepted; re-run it with a current custodian to record it.
 
 Time: every signed document carries issuer-signed ``issued_at`` and ``not_after``. The local
 clock only shortens validity: refuse after ``not_after`` or more than ``ISSUED_AT_SKEW``
@@ -293,6 +296,11 @@ REQUIRED_ROLES: Final[Mapping[str, frozenset[str]]] = {
 # Anchor-chain entries after the enrolment, discriminated by their signed purpose. Any other
 # purpose (or a malformed entry) makes an accepted chain unverifiable.
 _CHAIN_ENTRY_PURPOSES: Final = frozenset({ROTATION_PURPOSE, CONSENT_SCOPE_PURPOSE})
+# Refusals meaning "this custodian key is not current for the scope purpose at this registry
+# revision"; only then may the restriction walk try ``former_custodian_keys``.
+_CUSTODIAN_NOT_CURRENT: Final = frozenset(
+    {"key_unknown", "key_revision_not_active", "key_purpose_not_permitted"}
+)
 # Purposes each registry role may be granted. Customer-owner keys are never registry keys,
 # and the root role only exists in the kit-pinned root configuration.
 REGISTRY_ROLES: Final[Mapping[str, frozenset[str]]] = {
@@ -1375,6 +1383,25 @@ class PilotVerifier:
 
         return resolve
 
+    def _former_scope_custodian(self) -> Resolver:
+        """Only for the read-time restriction walk: a key listed in ``former_custodian_keys``.
+
+        It may make a pending scope update restrict, never count: the walk caps the scope
+        with such an entry and never accepts it. A key in neither list resolves to nothing.
+        """
+
+        def resolve(signature: _Signature) -> PilotTrustedKey:
+            key = self._registry.former.get(signature.key_id)
+            if key is None:
+                raise PilotRecordRefused("key_unknown")
+            return replace(
+                key,
+                registry_revision=signature.key_registry_revision,
+                purposes=frozenset({CONSENT_SCOPE_PURPOSE}),
+            )
+
+        return resolve
+
     def _registry_current(self) -> None:
         _check_window(self._registry.issued_at, self._registry.not_after, "registry")
         # A newer verified registry (for example one that drops a key) supersedes this one.
@@ -1471,14 +1498,22 @@ class PilotVerifier:
         return body, _AnchorHead(successor, revision, scope), _payload_sha256(payload)
 
     def _check_scope_update(
-        self, record: bytes, head: _AnchorHead, *, check_time: bool, replay: bool, fresh: bool
+        self,
+        record: bytes,
+        head: _AnchorHead,
+        *,
+        check_time: bool,
+        replay: bool,
+        fresh: bool,
+        custodian: Resolver | None = None,
     ) -> tuple[_ScopePayload, _AnchorHead, str]:
         """A scope update applied to ``head``: the next anchor revision, the same key.
 
         The key keeps its signing label (the revision that installed it), so the customer's
         existing signatures stay valid. A new or pending update needs a current custodian at
         its exact registry revision; an accepted one (``replay``) is re-verified by key id,
-        like an enrolment's co-signer, former custodian keys included.
+        like an enrolment's co-signer, former custodian keys included. ``custodian``
+        overrides both, only for the read-time restriction walk (``_restrict``).
         """
         payload, signatures = _open(record, "scope")
         try:
@@ -1486,9 +1521,12 @@ class PilotVerifier:
         except ValidationError:
             raise PilotRecordRefused("scope_schema_invalid") from None
         previous = head.key
-        custodian = (
-            self._replay_scope_custodian() if replay else _registry_resolver(self._registry.keys)
-        )
+        if custodian is None:
+            custodian = (
+                self._replay_scope_custodian()
+                if replay
+                else _registry_resolver(self._registry.keys)
+            )
         _authenticate(
             payload,
             signatures,
@@ -1598,7 +1636,9 @@ class PilotVerifier:
         next locked operation rolls the floor over it: it becomes an accepted, signed entry.
         The first update that widens is never accepted, so its widening never takes effect:
         it caps the head instead (``ceiling``: effective = current scope ∩ its scope) and ends
-        the walk.
+        the walk. So does an update co-signed by a key listed in ``former_custodian_keys``
+        (owner-delegate ruling): it restricts, but is never accepted, never rolls the floor
+        over and never widens. A custodian key in neither list ends the walk.
         That cap holds only while the update stays stored; a rotation must restate its scope
         while it holds, and a new co-signed update replaces it.
         """
@@ -1608,25 +1648,39 @@ class PilotVerifier:
                 if _entry_purpose(item) != CONSENT_SCOPE_PURPOSE:
                     break
                 record = canonical(item)
+                retired = False
                 try:
-                    body, updated, digest = self._check_scope_update(
-                        record, head, check_time=True, replay=False, fresh=False
-                    )
+                    body, updated, digest = self._restricting(record, head, None)
                 except PilotRecordRefused as refusal:
-                    if refusal.code != "scope_expired":
+                    if refusal.code not in _CUSTODIAN_NOT_CURRENT:
                         raise
-                    body, updated, digest = self._check_scope_update(
-                        record, head, check_time=False, replay=False, fresh=False
-                    )
+                    custodian = self._former_scope_custodian()
+                    body, updated, digest = self._restricting(record, head, custodian)
+                    retired = True
             except (PilotRecordRefused, JournalError):
                 break
             if body.engagement_id != engagement_id:
                 break
-            if not updated.scope <= head.scope:
+            if retired or not updated.scope <= head.scope:
                 return replace(head, ceiling=updated.scope), narrowed
             head = updated
             narrowed.append(digest)
         return head, narrowed
+
+    def _restricting(
+        self, record: bytes, head: _AnchorHead, custodian: Resolver | None
+    ) -> tuple[_ScopePayload, _AnchorHead, str]:
+        """A pending scope update for the restriction walk: valid now, or merely expired."""
+        try:
+            return self._check_scope_update(
+                record, head, check_time=True, replay=False, fresh=False, custodian=custodian
+            )
+        except PilotRecordRefused as refusal:
+            if refusal.code != "scope_expired":
+                raise
+            return self._check_scope_update(
+                record, head, check_time=False, replay=False, fresh=False, custodian=custodian
+            )
 
     def _settle_pending(self, engagement_id: str) -> None:
         """Under the lock: roll the anchor floor forward over a pending tail still in window.
