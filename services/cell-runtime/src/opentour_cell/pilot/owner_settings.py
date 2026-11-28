@@ -22,7 +22,13 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
-from opentour_cell.pilot import autonomous_cycle, comparison_plan, repair_bundle, repair_workflow
+from opentour_cell.pilot import (
+    autonomous_cycle,
+    comparison_plan,
+    repair_bundle,
+    repair_workflow,
+    source_intake,
+)
 from opentour_cell.pilot import workplace_context as workplace
 from opentour_cell.pilot.learning_mandate import LearningMandates, _normalized
 from opentour_cell.pilot.operating_point import canonical, digest
@@ -282,10 +288,23 @@ class OwnerSettings:
             return "expired"
         if spec["mode"] == "manual":
             return "read_only"
+        policy = head["policy"]
+        agreement = policy["agreement"]
         try:
-            comparison_plan._terms(head["policy"]["agreement"]["terms"])
-            self._live(head["policy"], discover=False)
-        except (OSError, ValueError):
+            comparison_plan._terms(agreement["terms"])
+            path = self.directory / repair_workflow._name(policy["connection_file"])
+            connection = _read(path)
+            # Recheck the immutable connection and withdrawal marker without materializing
+            # a source grant. The productive worker revalidates the entire grant and lease.
+            if (
+                digest(agreement) != spec["agreement_revision"]
+                or digest(connection) != agreement["connection_revision"]
+                or os.path.lexists(
+                    source_intake._revocation(self.store, connection["scope"]["owner_attestation"])
+                )
+            ):
+                return "held"
+        except (KeyError, OSError, TypeError, ValueError):
             return "held"
         return "active"
 
@@ -579,7 +598,8 @@ class OwnerSettings:
             _need(p == claim["policy"], "noncanonical_settings_policy")
             # Decline stale or cross-workflow claims before contacting the source catalogue.
             # Previously accepted retries still revalidate current authority and source.
-            with self.ledger._authorized_db(write=False) as db:
+            with self._approval_serialized(), self.ledger._db(write=False) as db:
+                _need(self._authority(actor, save=True) == authority, "settings_authority_changed")
                 if not db.execute(
                     "SELECT 1 FROM owner_settings_revisions WHERE scope=? AND revision=?",
                     (self.ledger.scope, revision),

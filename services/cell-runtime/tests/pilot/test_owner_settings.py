@@ -225,6 +225,26 @@ def test_readback_open_cannot_initialize_settings_tables(tmp_path):
     assert s.protocol() == before
 
 
+def test_current_source_readback_checks_withdrawal_without_materializing_a_grant(tmp_path):
+    s = Setup(tmp_path)
+    receipt = s.apply()
+    workflow = s.policy["mandate"]["workflow"]
+    connection = read(s.customer.owner / s.policy["connection_file"])
+    source_owner = connection["scope"]["owner_attestation"]
+    marker = settings.source_intake._revocation(s.service.store, source_owner)
+    before = s.protocol()
+    with patch.object(
+        settings.workplace,
+        "_validated_grant",
+        side_effect=AssertionError("readback must not materialize a temporary grant"),
+    ):
+        assert s.service.setup_readback(actor=s.owner, workflow=workflow)["state"] == "active"
+        save(marker, {"kind": "generated-withdrawal-marker"})
+        held = s.service.setup_readback(actor=s.owner, workflow=workflow)
+    assert held["state"] == "held" and held["revision"] == receipt["revision"]
+    assert s.protocol() == before
+
+
 def test_independent_withdrawal_cannot_be_relabelled_by_a_pending_pause(tmp_path):
     s = Setup(tmp_path)
     receipt = s.apply()
