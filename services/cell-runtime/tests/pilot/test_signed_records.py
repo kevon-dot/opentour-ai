@@ -301,6 +301,7 @@ def kit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Kit:
                 sr.SPEND_MANDATE_PURPOSE,
                 sr.ROUTING_POLICY_PURPOSE,
                 sr.WORKFLOW_INDEX_PUBLICATION_PURPOSE,
+                sr.HANDOFF_LIFECYCLE_POLICY_PURPOSE,
                 sr.ENROLMENT_PURPOSE,
                 SCOPE_PURPOSE,
             ],
@@ -373,16 +374,18 @@ def test_workflow_index_publication_is_registered_as_customer_consent_only() -> 
     holders = {role for role, purposes in sr.REGISTRY_ROLES.items() if PUBLICATION in purposes}
     assert holders == {sr.OPERATOR_CUSTODIAN}
     assert all(PUBLICATION not in purposes for purposes in sr.ROOT_ROLES.values())
-    # Only this one purpose was added to the consent set in this registration.
     assert sr.CONSENT_PURPOSES == {
         sr.GRANT_PURPOSE,
         sr.SPEND_MANDATE_PURPOSE,
         sr.ROUTING_POLICY_PURPOSE,
         PUBLICATION,
+        sr.HANDOFF_LIFECYCLE_POLICY_PURPOSE,
     }
     assert sr.RECORD_PURPOSES == sr.CONSENT_PURPOSES | {
         sr.VERDICT_PURPOSE,
         sr.BENCHMARK_AUDIT_PURPOSE,
+        sr.RECIPIENT_REPLAY_PURPOSE,
+        sr.SERVING_ROLLBACK_PURPOSE,
     }
 
 
@@ -1981,7 +1984,7 @@ def test_verifier_module_holds_no_signing_capability() -> None:
 # --- Purpose-scoped customer keys (OPE-566 decision 68da165c) ------------------------
 
 GRANT, SPEND, ROUTING = sr.GRANT_PURPOSE, sr.SPEND_MANDATE_PURPOSE, sr.ROUTING_POLICY_PURPOSE
-EVERY_CONSENT = frozenset({GRANT, SPEND, ROUTING, PUBLICATION})
+EVERY_CONSENT = frozenset({GRANT, SPEND, ROUTING, PUBLICATION, sr.HANDOFF_LIFECYCLE_POLICY_PURPOSE})
 
 
 def anchor_files(kit: Kit) -> tuple[bytes, bytes]:
@@ -2004,7 +2007,6 @@ def test_scope_purpose_is_a_custodian_co_signed_chain_entry_not_a_consent_purpos
         sr.ENROLMENT_PURPOSE,
         SCOPE_PURPOSE,
     }
-    # Unchanged: other registry roles, the root and the consent table itself.
     assert sr.REGISTRY_ROLES[sr.INDEPENDENT_EVALUATOR] == {sr.VERDICT_PURPOSE}
     assert sr.REGISTRY_ROLES[sr.BENCHMARK_AUDITOR] == {sr.BENCHMARK_AUDIT_PURPOSE}
     assert sr.ROOT_ROLES == {sr.OPERATOR_ROOT: {sr.REGISTRY_PURPOSE}}

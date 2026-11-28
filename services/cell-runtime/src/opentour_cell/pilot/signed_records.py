@@ -41,13 +41,14 @@ Trust chain:
    it for (see Consent scope below).
 
 Required signer roles per purpose (``REQUIRED_ROLES``): customer consent records
-(engagement grant, spend mandate, routing policy, workflow-index publication) need the
-customer owner and the operator custodian; a verdict needs the independent evaluator; an
-audit receipt needs the benchmark auditor; a registry needs the operator root; a customer
-key rotation needs the previous customer key and the new key; a consent-scope update needs
-the anchored customer key and the operator custodian. A missing, duplicated or unexpected
-role, one key signing under two roles, or a key signing outside its own role or purposes is
-refused.
+(engagement grant, spend mandate, routing policy, workflow-index publication and handoff
+lifecycle policy) need the customer owner and the operator custodian. Verdicts, audits,
+recipient replay observations and serving rollback observations need their respective
+independent evaluator, benchmark auditor, recipient replay issuer or destination observer.
+A registry needs the operator root. A customer key rotation needs the previous customer key
+and the new key. A consent-scope update needs the anchored customer key and the operator
+custodian. The verifier refuses a missing, duplicated or unexpected role, one key signing
+under two roles, or a key signing outside its own role or purposes.
 
 Consent scope (OPE-566 68da165c). A customer key may sit behind automation, such as an
 approval signer, so a new consent purpose is an explicit customer opt-in, never inherited:
@@ -261,6 +262,9 @@ ROUTING_POLICY_PURPOSE: Final = "opentour.pilot.routing-policy.v1"
 # Customer-owner consent to publish private workflow display metadata and optional directory
 # viewers (OPE-547). Proposal actions are governed separately and never derive from it.
 WORKFLOW_INDEX_PUBLICATION_PURPOSE: Final = "opentour.pilot.workflow-index-publication.v1"
+HANDOFF_LIFECYCLE_POLICY_PURPOSE: Final = "opentour.pilot.handoff-lifecycle-policy.v1"
+RECIPIENT_REPLAY_PURPOSE: Final = "opentour.pilot.recipient-replay.v1"
+SERVING_ROLLBACK_PURPOSE: Final = "opentour.pilot.serving-rollback.v1"
 VERDICT_PURPOSE: Final = "opentour.pilot.independent-verdict.v1"
 BENCHMARK_AUDIT_PURPOSE: Final = "opentour.pilot.benchmark-audit.v1"
 REGISTRY_PURPOSE: Final = "opentour.pilot.issuer-registry.v1"
@@ -276,6 +280,8 @@ CUSTOMER_OWNER_SUCCESSOR: Final = "customer_owner_successor"
 OPERATOR_CUSTODIAN: Final = "operator_custodian"
 INDEPENDENT_EVALUATOR: Final = "independent_evaluator"
 BENCHMARK_AUDITOR: Final = "benchmark_auditor"
+RECIPIENT_REPLAY_ISSUER: Final = "recipient_replay_issuer"
+DESTINATION_OBSERVER: Final = "destination_observer"
 OPERATOR_ROOT: Final = "operator_root"
 
 CONSENT_PURPOSES: Final = frozenset(
@@ -284,14 +290,23 @@ CONSENT_PURPOSES: Final = frozenset(
         SPEND_MANDATE_PURPOSE,
         ROUTING_POLICY_PURPOSE,
         WORKFLOW_INDEX_PUBLICATION_PURPOSE,
+        HANDOFF_LIFECYCLE_POLICY_PURPOSE,
     }
 )
-RECORD_PURPOSES: Final = CONSENT_PURPOSES | {VERDICT_PURPOSE, BENCHMARK_AUDIT_PURPOSE}
+RECORD_PURPOSES: Final = CONSENT_PURPOSES | {
+    VERDICT_PURPOSE,
+    BENCHMARK_AUDIT_PURPOSE,
+    RECIPIENT_REPLAY_PURPOSE,
+    SERVING_ROLLBACK_PURPOSE,
+}
 REQUIRED_ROLES: Final[Mapping[str, frozenset[str]]] = {
     GRANT_PURPOSE: frozenset({CUSTOMER_OWNER, OPERATOR_CUSTODIAN}),
     SPEND_MANDATE_PURPOSE: frozenset({CUSTOMER_OWNER, OPERATOR_CUSTODIAN}),
     ROUTING_POLICY_PURPOSE: frozenset({CUSTOMER_OWNER, OPERATOR_CUSTODIAN}),
     WORKFLOW_INDEX_PUBLICATION_PURPOSE: frozenset({CUSTOMER_OWNER, OPERATOR_CUSTODIAN}),
+    HANDOFF_LIFECYCLE_POLICY_PURPOSE: frozenset({CUSTOMER_OWNER, OPERATOR_CUSTODIAN}),
+    RECIPIENT_REPLAY_PURPOSE: frozenset({RECIPIENT_REPLAY_ISSUER}),
+    SERVING_ROLLBACK_PURPOSE: frozenset({DESTINATION_OBSERVER}),
     VERDICT_PURPOSE: frozenset({INDEPENDENT_EVALUATOR}),
     BENCHMARK_AUDIT_PURPOSE: frozenset({BENCHMARK_AUDITOR}),
     REGISTRY_PURPOSE: frozenset({OPERATOR_ROOT}),
@@ -317,12 +332,15 @@ REGISTRY_ROLES: Final[Mapping[str, frozenset[str]]] = {
             SPEND_MANDATE_PURPOSE,
             ROUTING_POLICY_PURPOSE,
             WORKFLOW_INDEX_PUBLICATION_PURPOSE,
+            HANDOFF_LIFECYCLE_POLICY_PURPOSE,
             ENROLMENT_PURPOSE,
             CONSENT_SCOPE_PURPOSE,
         }
     ),
     INDEPENDENT_EVALUATOR: frozenset({VERDICT_PURPOSE}),
     BENCHMARK_AUDITOR: frozenset({BENCHMARK_AUDIT_PURPOSE}),
+    RECIPIENT_REPLAY_ISSUER: frozenset({RECIPIENT_REPLAY_PURPOSE}),
+    DESTINATION_OBSERVER: frozenset({SERVING_ROLLBACK_PURPOSE}),
 }
 ROOT_ROLES: Final[Mapping[str, frozenset[str]]] = {OPERATOR_ROOT: frozenset({REGISTRY_PURPOSE})}
 
