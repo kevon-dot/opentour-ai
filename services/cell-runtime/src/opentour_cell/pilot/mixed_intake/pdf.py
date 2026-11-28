@@ -1561,6 +1561,10 @@ class _Graphics:
     # Device-space clip rectangle (intersection of every rectangular clip so far), or None.
     clip: tuple[float, float, float, float] | None = None
     clip_unknown: bool = False  # a clip whose region could not be determined
+    # Stroke geometry (w, j, M and ExtGState /LW, /LJ, /ML), for the extent of painted strokes.
+    line_width: float = 1.0
+    line_join: float = 0.0
+    miter_limit: float = 10.0
 
 
 _PAINT = frozenset({b"n", b"S", b"s", b"f", b"F", b"f*", b"B", b"B*", b"b", b"b*"})
@@ -1593,6 +1597,140 @@ def _image_may_conceal(
         text[0] < image[2] and text[2] > image[0] and text[1] < image[3] and text[3] > image[1]
         for text in texts
     )
+
+
+# ------------------------------------------------------------------ vector paint
+# Filled and stroked paths, and shadings, are tracked as device-space boxes painted in a known
+# colour (None when it cannot be judged), in painting order with the text. A box bounds the
+# paint (it is never smaller than what is painted), so every check below errs toward review:
+# - vector_paint_over_text: anything painted after a text show over its glyph box, whatever its
+#   colour (`1 g ... re f` over a line hides it; so does a stroke 30 pt wide);
+# - text_background_contrast_low: text painted over a fill or stroke too close to its own
+#   colour (black text on a black band), and text_background_unverified when that paint's
+#   colour cannot be judged (a pattern, a shading, a colour space this reader does not read).
+#   A paint below the text is ignored where a later axis-aligned rectangle fill, still below
+#   the text, covers all of it there (a white card over a dark page);
+# - vector_paint_unchecked: more comparisons than _PAINT_BUDGET, which goes to review unchecked.
+# Stroke boxes are the segments widened by half the line width, plus each corner widened by its
+# miter length (miter joins, up to the miter limit) and each curve widened by the miter limit.
+_PAINT_BUDGET = 4_000_000
+_Box = tuple[float, float, float, float]
+
+
+@dataclass(frozen=True)
+class _Painted:
+    order: int  # painting order, shared with text shows
+    box: _Box
+    colour: _RGB | None  # as seen over white paper (alpha applied); None: cannot be judged
+    exact: bool  # the box is exactly the painted area: an axis-aligned rectangle fill
+
+
+def _overlap(first: _Box, second: _Box) -> bool:
+    return (
+        first[0] < second[2]
+        and second[0] < first[2]
+        and first[1] < second[3]
+        and second[1] < first[3]
+    )
+
+
+def _contrast(first: _RGB, second: _RGB) -> float:
+    high, low = sorted((_relative_luminance(*first), _relative_luminance(*second)), reverse=True)
+    return (high + 0.05) / (low + 0.05)
+
+
+def _widen(box: _Box, by: float) -> _Box:
+    return (box[0] - by, box[1] - by, box[2] + by, box[3] + by)
+
+
+def _miter_ratio(
+    before: tuple[float, float], at: tuple[float, float], after: tuple[float, float], limit: float
+) -> float:
+    """How far a miter join reaches past half the line width (1 when it is bevelled)."""
+    ux, uy = before[0] - at[0], before[1] - at[1]
+    wx, wy = after[0] - at[0], after[1] - at[1]
+    lengths = math.hypot(ux, uy) * math.hypot(wx, wy)
+    if lengths <= 0:
+        return max(limit, 1.0)  # no direction to measure: as far as the limit allows
+    cosine = max(-1.0, min(1.0, (ux * wx + uy * wy) / lengths))
+    half = math.acos(cosine) / 2.0
+    ratio = 1.0 / math.sin(half) if math.sin(half) > 0 else math.inf
+    return ratio if ratio <= limit else 1.0
+
+
+def _stroke_boxes(
+    subpaths: list[list[tuple[float, float]]],
+    closed: list[bool],
+    curves: list[_Box],
+    half: float,
+    miter: float | None,
+) -> list[_Box]:
+    """Boxes bounding a stroke of the path; `miter` is the miter limit, None for other joins."""
+    boxes: list[_Box] = []
+    reach = max(miter or 1.0, 1.0)
+    for points, is_closed in zip(subpaths, closed, strict=True):
+        if is_closed and len(points) > 1 and points[-1] == points[0]:
+            points = points[:-1]
+        if len(points) == 1:
+            x, y = points[0]
+            boxes.append(_widen((x, y, x, y), half))  # a dot, drawn by round or square caps
+            continue
+        segments = list(zip(points, points[1:]))
+        if is_closed and len(points) > 2:
+            segments.append((points[-1], points[0]))
+        for (x0, y0), (x1, y1) in segments:
+            boxes.append(_widen((min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1)), half))
+        count = len(points)
+        corners = range(count) if is_closed and count > 2 else range(1, count - 1)
+        for index in corners:
+            before, at, after = points[index - 1], points[index], points[(index + 1) % count]
+            ratio = 1.0 if miter is None else _miter_ratio(before, at, after, miter)
+            boxes.append(_widen((at[0], at[1], at[0], at[1]), half * ratio))
+    boxes.extend(_widen(curve, half * reach) for curve in curves)
+    return boxes
+
+
+def _paint_flags(
+    texts: list[tuple[int, _Box, tuple[_RGB | None, ...]]], paints: list[_Painted]
+) -> set[str]:
+    """Review flags for text painted over, or painted onto a background of its own colour."""
+    flags: set[str] = set()
+    budget = _PAINT_BUDGET
+    covers = [paint for paint in paints if paint.exact]
+    for order, box, colours in texts:
+        budget -= len(paints)
+        if budget < 0:
+            return flags | {"vector_paint_unchecked"}
+        for paint in paints:
+            if not _overlap(paint.box, box):
+                continue
+            if paint.order > order:
+                flags.add("vector_paint_over_text")
+                continue
+            region = (
+                max(paint.box[0], box[0]),
+                max(paint.box[1], box[1]),
+                min(paint.box[2], box[2]),
+                min(paint.box[3], box[3]),
+            )
+            budget -= len(covers)
+            if any(
+                paint.order < cover.order < order
+                and cover.box[0] <= region[0]
+                and cover.box[1] <= region[1]
+                and region[2] <= cover.box[2]
+                and region[3] <= cover.box[3]
+                for cover in covers
+            ):
+                continue  # covered, below the text, by a later rectangle
+            if paint.colour is None:
+                flags.add("text_background_unverified")
+            elif not any(
+                colour is not None and _contrast(colour, paint.colour) >= MIN_TEXT_CONTRAST_AGAINST_WHITE
+                for colour in colours
+            ):
+                flags.add("text_background_contrast_low")
+    return flags
 
 
 def _fragments(
@@ -1635,6 +1773,55 @@ def _fragments(
     dict_depth = 0
     inline_open = False  # inside an inline image dictionary (BI ... ID)
     inline_size: int | None = None  # its data size, when the dictionary determines it
+    # The current path in device space (for painted boxes, see _paint_flags): its subpaths'
+    # vertices, whether each is closed, the control-point box of each curve, and whether it is
+    # built from `re` alone. Painted boxes and text shows share one painting order.
+    subpaths: list[list[tuple[float, float]]] = []
+    closed: list[bool] = []
+    curves: list[_Box] = []
+    rect_only = True
+    painted: list[_Painted] = []
+    shown: list[tuple[int, _Box, tuple[_RGB | None, ...]]] = []
+    order = 0
+
+    def device(x: float, y: float) -> tuple[float, float]:
+        a, b, c, d, e, f = gs.ctm
+        return (a * x + c * y + e, b * x + d * y + f)
+
+    def clipped(box: _Box) -> _Box:
+        """A painted box, cut to the clip when the clip is a known rectangle."""
+        if gs.clip is None or gs.clip_unknown:
+            return box
+        return (
+            max(box[0], gs.clip[0]),
+            max(box[1], gs.clip[1]),
+            min(box[2], gs.clip[2]),
+            min(box[3], gs.clip[3]),
+        )
+
+    def paint_path(op: bytes) -> None:
+        nonlocal order
+        if op in (b"s", b"b", b"b*") and closed:
+            closed[-1] = True
+        points = [point for subpath in subpaths for point in subpath]
+        if op in (b"f", b"F", b"f*", b"B", b"B*", b"b", b"b*") and gs.fill_alpha > 0:
+            xs = [p[0] for p in points] + [v for box in curves for v in (box[0], box[2])]
+            ys = [p[1] for p in points] + [v for box in curves for v in (box[1], box[3])]
+            if xs:
+                a, b, c, d, _, _ = gs.ctm
+                exact = rect_only and len(subpaths) == 1 and b == 0 and c == 0
+                box = clipped((min(xs), min(ys), max(xs), max(ys)))
+                colour = _over_white(gs.fill, gs.fill_alpha)
+                painted.append(_Painted(order, box, colour, exact))
+        if op in (b"S", b"s", b"B", b"B*", b"b", b"b*") and gs.stroke_alpha > 0 and points:
+            a, b, c, d, _, _ = gs.ctm
+            width = gs.line_width * max(math.hypot(a, b), math.hypot(c, d))
+            half = max(width / 2.0, 0.5)  # a zero width is the thinnest line a device draws
+            miter = gs.miter_limit if gs.line_join == 0 else None
+            colour = _over_white(gs.stroke, gs.stroke_alpha)
+            for box in _stroke_boxes(subpaths, closed, curves, half, miter):
+                painted.append(_Painted(order, clipped(box), colour, False))
+        order += 1
 
     def move_line(tx: float, ty: float) -> None:
         """Td: Tlm = [1 0 0 1 tx ty] x Tlm, and Tm restarts at the new line start."""
@@ -1644,7 +1831,7 @@ def _fragments(
         run[:] = [0, None]
 
     def emit(text: str, pieces: list[bytes | float]) -> None:
-        nonlocal text_matrix
+        nonlocal text_matrix, order
         m = _concat(text_matrix, gs.ctm)
         scale_x, scale_y = math.hypot(m[0], m[1]), math.hypot(m[2], m[3])
         size = abs(gs.size)
@@ -1743,6 +1930,8 @@ def _fragments(
         ):
             marks.add("clip_region_present")
         text_boxes.append((left_end, py, right_end, py + glyph))
+        shown.append((order, (left_end, py, right_end, py + glyph), paints))
+        order += 1
         out.append(_Fragment(px, py, text, gs.size * abs(ctm[3] or 1.0), gs.font))
 
     def clip_to_path() -> None:
@@ -1876,6 +2065,9 @@ def _fragments(
                 stroke_alpha=gs.stroke_alpha if state.stroke_alpha is None else state.stroke_alpha,
                 dashed=gs.dashed if state.dashed is None else state.dashed,
                 state_unverified=gs.state_unverified or state.unverified,
+                line_width=gs.line_width if state.line_width is None else state.line_width,
+                line_join=gs.line_join if state.line_join is None else state.line_join,
+                miter_limit=gs.miter_limit if state.miter_limit is None else state.miter_limit,
             )
         elif op == b"d":
             # `[] 0 d` is solid; any other pattern, or a malformed one, may leave gaps.
@@ -1898,13 +2090,50 @@ def _fragments(
             marks.add("optional_content_present")
         elif op == b"re" and len(nums) >= 4:
             rects.append((nums[-4], nums[-3], nums[-2], nums[-1]))
+            rx, ry, rw, rh = nums[-4:]
+            subpaths.append([device(rx, ry), device(rx + rw, ry), device(rx + rw, ry + rh),
+                             device(rx, ry + rh)])  # fmt: skip
+            closed.append(True)
         elif op in _PATH_BUILD:
             path_other = True
+            rect_only = False
+            wanted = {b"m": 2, b"l": 2, b"c": 6, b"v": 4, b"y": 4}[op]
+            if len(nums) >= wanted:
+                coords = nums[-wanted:]
+                points = [device(coords[i], coords[i + 1]) for i in range(0, wanted, 2)]
+                if op == b"m" or not subpaths:
+                    subpaths.append([])
+                    closed.append(False)
+                if op in (b"c", b"v", b"y"):
+                    start = subpaths[-1][-1] if subpaths[-1] else points[-1]
+                    xs, ys = [start[0], *(p[0] for p in points)], [start[1], *(p[1] for p in points)]
+                    curves.append((min(xs), min(ys), max(xs), max(ys)))
+                subpaths[-1].append(points[-1])
+        elif op == b"h":
+            if closed:
+                closed[-1] = True
         elif op in (b"W", b"W*"):
             clip_to_path()
         elif op in _PAINT:
+            paint_path(op)
             rects.clear()
             path_other = False
+            subpaths.clear()
+            closed.clear()
+            curves.clear()
+            rect_only = True
+        elif op == b"sh":
+            # A shading paints the whole clip region (the page when there is no known clip).
+            whole = page_box or (-math.inf, -math.inf, math.inf, math.inf)
+            region = gs.clip if gs.clip is not None and not gs.clip_unknown else whole
+            painted.append(_Painted(order, region, None, False))
+            order += 1
+        elif op == b"w" and nums:
+            gs = replace(gs, line_width=abs(nums[-1]))
+        elif op == b"j" and nums:
+            gs = replace(gs, line_join=nums[-1])
+        elif op == b"M" and nums:
+            gs = replace(gs, miter_limit=nums[-1])
         elif op == b"Do" and stack and isinstance(stack[-1], bytes):
             if stack[-1] in forms:
                 marks.add("form_xobject_text_unread")
@@ -1946,6 +2175,7 @@ def _fragments(
             late.add("glyph_overprint_unchecked")
         elif overprint:
             late.add("glyph_overprint_suspected")
+        late |= _paint_flags(shown, painted)
         marks |= late
     return out, marks
 
@@ -2264,6 +2494,9 @@ class _ExtState:
     stroke_alpha: float | None = None
     dashed: bool | None = None
     unverified: bool = False
+    line_width: float | None = None
+    line_join: float | None = None
+    miter_limit: float | None = None
 
 
 _UNREADABLE_STATE = _ExtState(unverified=True)
@@ -2316,7 +2549,17 @@ def _ext_states(resources: dict[str, object], doc: _Doc) -> dict[bytes, _ExtStat
             dash = doc.resolve(state["D"])
             pattern = doc.resolve(dash[0]) if isinstance(dash, list) and len(dash) == 2 else None
             dashed = pattern != []
-        out[name.encode("latin-1")] = _ExtState(alphas[0], alphas[1], dashed, unverified)
+        geometry: list[float | None] = []
+        for key in ("LW", "LJ", "ML"):
+            number = doc.resolve(state.get(key))
+            if isinstance(number, (int, float)) and not isinstance(number, bool):
+                geometry.append(abs(float(number)))
+            else:
+                geometry.append(None)
+                unverified = unverified or key in state
+        out[name.encode("latin-1")] = _ExtState(
+            alphas[0], alphas[1], dashed, unverified, geometry[0], geometry[1], geometry[2]
+        )
     return out
 
 

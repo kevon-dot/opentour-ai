@@ -2149,3 +2149,75 @@ def test_pdf_inline_image_over_text_goes_to_review() -> None:
     # The reviewer's probe: a page-sized inline image after the text; poppler draws no text ink.
     _flagged(_inline(b"/W 1 /H 1 /CS /G /BPC 8", b"\xff", b"612 0 0 792 0 0"), _OVERLAP)
     _flagged(_inline(b"/W 1 /H 1 /CS /G /BPC 8", b"\xff", b"60 0 0 20 70 695"), _OVERLAP)
+
+
+_LINE = b" BT /F1 11 Tf 72 700 Td (Refund allowed) Tj ET "  # glyph box 72..~150 x 700..711
+
+
+def test_pdf_paint_over_text_goes_to_review() -> None:
+    flag = "vector_paint_over_text"
+    # The reviewer's probe: a white page-sized rectangle after the text (poppler: no text ink).
+    _flagged(_LINE + b"1 g 0 0 612 792 re f", flag)
+    # A white bar over one line, any fill operator, a path, a thick stroke, and a shading.
+    for paint in (
+        b"1 g 60 698 200 16 re f",
+        b"1 g 60 698 200 16 re B",
+        b"1 g 60 698 m 260 698 l 260 714 l 60 714 l h f*",
+        b"1 g 60 698 m 260 698 260 714 60 714 c f",
+        b"1 G 30 w 66 694 160 22 re S",  # a border 30 pt wide covers the line it surrounds
+        b"1 G 20 w 60 705 m 260 705 l S",
+        b"/Sh0 sh",  # a shading paints the whole page when no clip is set
+        b"q 0 0 300 792 re W n /Sh0 sh Q",
+    ):
+        _flagged(_LINE + paint, flag, resources=_SHADED)
+    # Painted after the text, but not over its glyph box: poppler draws the text.
+    for paint in (
+        b"0.5 w 72 697 m 150 697 l S",  # an underline below the baseline
+        b"0.5 w 66 694 160 22 re S",  # a cell border around the text
+        b"0.9 g 72 600 200 20 re f",  # a box elsewhere
+        b"q 0 0 50 50 re W n /Sh0 sh Q",  # a shading clipped away from the text
+        b"1 g 60 698 200 16 re n",  # a path that is not painted
+        b"/GS0 gs 1 g 60 698 200 16 re f",  # a fill with zero alpha
+    ):
+        _eligible(_LINE + paint, resources=_SHADED)
+
+
+_SHADED = (
+    b"/Font << /F1 7 0 R >> /ExtGState << /GS0 << /ca 0 >> >> /Shading << /Sh0 << /ShadingType 2"
+    b" /ColorSpace /DeviceGray /Coords [0 0 612 0] /Function << /FunctionType 2 /Domain [0 1]"
+    b" /C0 [1] /C1 [1] /N 1 >> >> >>"
+)
+
+
+def test_pdf_text_on_a_background_of_its_own_colour_goes_to_review() -> None:
+    # The reviewer's probe: black text on a black page (poppler: the page is all ink).
+    _flagged(b"0 g 0 0 612 792 re f" + _LINE, "text_background_contrast_low")
+    _flagged(b"0 g 60 690 300 30 re f" + _LINE, "text_background_contrast_low")
+    _flagged(b"0.5 g 60 690 300 30 re f" + _LINE.replace(b"BT", b"0.5 g BT"),
+             "text_background_contrast_low")  # fmt: skip
+    _flagged(b"0 G 40 w 60 705 m 300 705 l S" + _LINE, "text_background_contrast_low")
+    _flagged(b"/Sh0 sh" + _LINE, "text_background_unverified", resources=_SHADED)
+    _flagged(b"/Pattern cs /P1 scn 60 690 300 30 re f 0 g" + _LINE, "text_background_unverified")
+    # Ordinary shaded cells and bands under dark text, and a dark page under a white card.
+    _eligible(b"0.9 g 60 690 300 30 re f 0 g" + _LINE)
+    _eligible(b"0.8 0.9 1 rg 60 690 300 30 re f 0 g" + _LINE)
+    _eligible(b"0 g 0 0 612 792 re f 1 g 50 50 512 692 re f 0 g" + _LINE)
+    # The card must cover the dark paint everywhere under the text, and lie below the text.
+    _flagged(b"0 g 0 0 612 792 re f 1 g 50 50 50 692 re f 0 g" + _LINE,
+             "text_background_contrast_low")  # fmt: skip
+
+
+def test_pdf_stroke_extent_follows_width_joins_and_extgstate() -> None:
+    flag = "vector_paint_over_text"
+    # A sharp miter join reaches past its corner: a 4 pt line turning through a 20 degree
+    # corner at (100, 695) has a miter 5.76 half-widths long, its tip at y = 706.5, inside the
+    # glyph box above it, while both segments stay below y = 697.
+    spike = b"0 G 4 w 91.32 645.76 m 100 695 l 108.68 645.76 l S"
+    result = read(_pdf(_LINE + spike), "x.pdf")[1]
+    assert flag in result.reason, result.reason
+    _eligible(_LINE + spike.replace(b"4 w", b"4 w 2 j"))  # a bevel join has no spike
+    _eligible(_LINE + spike.replace(b"4 w", b"4 w 1 M"))  # nor does a miter limit of 1
+    states = b"/Font << /F1 7 0 R >> /ExtGState << /GS0 << /LW 30 >> /GS1 << /LW (x) >> >>"
+    _flagged(_LINE + b"/GS0 gs 1 G 60 690 m 260 690 l S", flag, resources=states)
+    _eligible(_LINE + b"1 G 60 690 m 260 690 l S", resources=states)  # 1 pt, 10 pt below
+    _flagged(b"/GS1 gs" + _LINE, "graphics_state_unverified", resources=states)
