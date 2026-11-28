@@ -27,6 +27,7 @@ from opentour_cell.pilot.qualification import (
     EVENT_VERSION,
     Authority,
     Json,
+    QualificationError,
     QualificationRegister,
 )
 
@@ -791,3 +792,109 @@ def test_native_reader_dispatch_and_snapshot_fence_register_writers(
         event_id="generated-source-lost",
     )
     assert terminal["disposition"] == "lost"
+
+
+def test_register_snapshot_reads_queue_lease_effect_and_terminal_states_without_writing(
+    path: Path,
+) -> None:
+    charter_a, _ = qualification(path, A)
+    charter_b, _ = qualification(path, B)
+    lease = run(path, acquire(A, charter_a))
+    assert run(path, acquire(B, charter_b, "automated"))["disposition"] == "queued"
+    begin = command(
+        A,
+        action="begin",
+        event_id="generated-first-connect",
+        generation=1,
+        lease_ref=lease["lease_ref"],
+        evidence_digest=digest("generated-source-access"),
+    )
+    assert run(path, begin)["disposition"] == "begin_authorized"
+    qualification(path, C)
+    _, lost = qualification(
+        path, C, intent="lost", source_revision=2, event_id="generated-c-lost"
+    )
+    assert lost["disposition"] == "lost"
+    before = path.read_bytes()
+    snapshot = cohort_lease.read_register_snapshot(path)
+    assert path.read_bytes() == before
+    assert sorted(item.name for item in path.parent.iterdir()) == [path.name]
+    assert cohort_lease.read_register_snapshot(path) == snapshot
+    body = {key: value for key, value in snapshot.items() if key != "snapshot_digest"}
+    assert snapshot["schema_version"] == cohort_lease.SNAPSHOT_VERSION
+    assert snapshot["snapshot_digest"] == digest(body)
+    assert [
+        (event["organization_ref"], event["engagement_revision"], event["disposition"])
+        for event in snapshot["qualification_events"]
+    ] == [(A, 1, "qualified"), (B, 1, "qualified"), (C, 1, "qualified"), (C, 1, "lost")]
+    assert all(type(event["observed_at"]) is int for event in snapshot["qualification_events"])
+    assert [waiter["organization_ref"] for waiter in snapshot["waiters"]] == [A, B]
+    assert [
+        (item["organization_ref"], item["generation"], item["terminal_kind"])
+        for item in snapshot["leases"]
+    ] == [(A, 1, None)]
+    assert snapshot["effects"] == [
+        {"generation": 1, "event_id": "generated-first-connect", "pending": True, "outcome": None}
+    ]
+    # The reconciliation nonce stays a register secret; reporting never reads it.
+    with closing(sqlite3.connect(path)) as db:
+        nonce = db.execute("SELECT revision_nonce FROM cohort_lease").fetchone()[0]
+    assert nonce not in canonical(snapshot)
+
+
+def test_register_snapshot_of_unwritten_or_unleased_register_has_no_cohort_rows(
+    path: Path,
+) -> None:
+    path.touch(mode=0o600)
+    empty = cohort_lease.read_register_snapshot(path)
+    assert [empty[key] for key in ("qualification_events", "waiters", "leases", "effects")] == [
+        [],
+        [],
+        [],
+        [],
+    ]
+    qualification(path, A)
+    unleased = cohort_lease.read_register_snapshot(path)
+    assert len(unleased["qualification_events"]) == 1
+    assert unleased["waiters"] == unleased["leases"] == unleased["effects"] == []
+
+
+@pytest.mark.parametrize(
+    ("statement", "code"),
+    [
+        ("DROP TABLE cohort_effect", "register_inconsistent"),
+        ("UPDATE qualification_event SET receipt = '{}'", "register_unreadable"),
+        ("UPDATE qualification_event SET receipt = 'not json'", "register_unreadable"),
+        ("UPDATE qualification_event SET engagement_revision = 1.5", "register_unreadable"),
+        # A naive timestamp has no UTC offset, so it is not a stored register instant.
+        ("UPDATE qualification_event SET observed_at = '2026-11-28T00:00'", "register_unreadable"),
+        ("UPDATE cohort_lease SET terminal_kind = 'handover'", "register_unreadable"),
+        ("UPDATE cohort_waiter SET organization_ref = 'Generated Name'", "register_unreadable"),
+        ("UPDATE cohort_lease SET generation = -1", "register_unreadable"),
+    ],
+)
+def test_register_snapshot_refuses_partial_or_tampered_registers(
+    path: Path, statement: str, code: str
+) -> None:
+    charter, _ = qualification(path, A)
+    assert run(path, acquire(A, charter))["disposition"] == "acquired"
+    with closing(sqlite3.connect(path)) as db:
+        db.execute(statement)
+        db.commit()
+    with pytest.raises(QualificationError) as refused:
+        cohort_lease.read_register_snapshot(path)
+    assert str(refused.value) == code
+
+
+def test_register_snapshot_requires_the_private_register(path: Path) -> None:
+    qualification(path, A)
+    path.chmod(0o644)
+    with pytest.raises(QualificationError, match="private_qualification_file_required"):
+        cohort_lease.read_register_snapshot(path)
+    path.chmod(0o600)
+    path.parent.chmod(0o755)
+    with pytest.raises(QualificationError, match="private_qualification_directory_required"):
+        cohort_lease.read_register_snapshot(path)
+    path.parent.chmod(0o700)
+    with pytest.raises(FileNotFoundError):
+        cohort_lease.read_register_snapshot(path.parent / "absent.sqlite3")

@@ -12,8 +12,9 @@ import sqlite3
 import sys
 import time
 from collections.abc import Callable, Iterator, Mapping
-from contextlib import AbstractContextManager, contextmanager
+from contextlib import AbstractContextManager, closing, contextmanager
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any, TypeGuard
 
@@ -23,6 +24,8 @@ from opentour_cell.pilot.qualification import (
     QualificationError,
     QualificationRegister,
     _private_json,
+    _private_parent,
+    _private_record,
     _ref,
     _revision,
 )
@@ -30,6 +33,7 @@ from opentour_cell.pilot.qualification import (
 AUTHORITY_VERSION = "opentour.pilot.lease-authority.v1"
 COMMAND_VERSION = "opentour.pilot.lease-command.v1"
 RECEIPT_VERSION = "opentour.pilot.lease-receipt.v1"
+SNAPSHOT_VERSION = "opentour.pilot.cohort-register-snapshot.v1"
 _ROLE = {"acquire": "operator", "begin": "operator", "reconcile": "reconciler", "close": "closer"}
 _OUTCOMES = ("observed_applied", "observed_no_effect")
 _ROUTES = {"manual", "automated"}
@@ -675,6 +679,177 @@ def claim_workplace_connection(
         )
 
     return guard
+
+
+_COHORT_TABLES = frozenset({"cohort_waiter", "cohort_lease", "cohort_command", "cohort_effect"})
+
+
+def _readable(condition: bool) -> None:
+    if not condition:
+        raise QualificationError("register_unreadable")
+
+
+def _stored_int(value: object, low: int = 0) -> int:
+    _readable(isinstance(value, int) and type(value) is int and low <= value < 2**63)
+    assert isinstance(value, int)
+    return value
+
+
+def _stored_ref(value: object) -> str:
+    _readable(_ref(value))
+    assert isinstance(value, str)
+    return value
+
+
+def _stored_hex(value: object) -> str:
+    _readable(_hex(value))
+    assert isinstance(value, str)
+    return value
+
+
+def _instant(value: object) -> int:
+    """Convert a stored ISO-8601 UTC observation into whole Unix seconds."""
+    _readable(isinstance(value, str))
+    assert isinstance(value, str)
+    try:
+        moment = datetime.fromisoformat(value)
+    except ValueError:
+        raise QualificationError("register_unreadable") from None
+    offset = moment.utcoffset()
+    _readable(offset is not None and not offset)
+    seconds = moment.timestamp()
+    _readable(seconds.is_integer() and 0 <= seconds < 2**63)
+    return int(seconds)
+
+
+def _qualification_rows(db: sqlite3.Connection) -> list[Json]:
+    rows: list[Json] = []
+    for row in db.execute(
+        """SELECT organization_ref, engagement_revision, source_revision, event_digest,
+                  observed_at, receipt FROM qualification_event
+           ORDER BY organization_ref, engagement_revision, source_revision"""
+    ):
+        try:
+            receipt = json.loads(row["receipt"])
+        except (TypeError, ValueError, RecursionError):
+            raise QualificationError("register_unreadable") from None
+        _readable(isinstance(receipt, dict))
+        disposition = receipt.get("disposition")
+        mode = receipt.get("mode")
+        operation = receipt.get("operation_ref")
+        _readable(
+            disposition in ("qualified", "lost")
+            and (mode in ("starter", "historical") if disposition == "qualified" else mode is None)
+            and isinstance(operation, str)
+            and re.fullmatch(r"qualification-[0-9a-f]{64}", operation) is not None
+        )
+        rows.append(
+            {
+                "organization_ref": _stored_ref(row["organization_ref"]),
+                "engagement_revision": _stored_int(row["engagement_revision"], 1),
+                "source_revision": _stored_int(row["source_revision"], 1),
+                "event_digest": _stored_hex(row["event_digest"]),
+                "observed_at": _instant(row["observed_at"]),
+                "disposition": disposition,
+                "mode": mode,
+                "operation_ref": operation,
+            }
+        )
+    return rows
+
+
+def _cohort_rows(db: sqlite3.Connection) -> tuple[list[Json], list[Json], list[Json]]:
+    waiters = [
+        {
+            "organization_ref": _stored_ref(row["organization_ref"]),
+            "engagement_revision": _stored_int(row["engagement_revision"], 1),
+            "slot": _stored_int(row["slot"], 1),
+            "qualification_digest": _stored_hex(row["qualification_digest"]),
+            "ready_at": _instant(row["ready_at"]),
+            "expires_at": _stored_int(row["expires_at"]),
+        }
+        for row in db.execute(
+            """SELECT organization_ref, engagement_revision, slot, qualification_digest,
+                      ready_at, expires_at FROM cohort_waiter
+               ORDER BY organization_ref, engagement_revision"""
+        )
+    ]
+    leases = []
+    for row in db.execute(
+        """SELECT generation, organization_ref, engagement_revision, slot, qualification_digest,
+                  expires_at, lease_ref, terminal_kind FROM cohort_lease ORDER BY generation"""
+    ):
+        _readable(row["terminal_kind"] in (None, "closeout", "withdrawal"))
+        leases.append(
+            {
+                "generation": _stored_int(row["generation"], 1),
+                "organization_ref": _stored_ref(row["organization_ref"]),
+                "engagement_revision": _stored_int(row["engagement_revision"], 1),
+                "slot": _stored_int(row["slot"], 1),
+                "qualification_digest": _stored_hex(row["qualification_digest"]),
+                "expires_at": _stored_int(row["expires_at"]),
+                "lease_ref": _stored_hex(row["lease_ref"]),
+                "terminal_kind": row["terminal_kind"],
+            }
+        )
+    effects = []
+    for row in db.execute(
+        """SELECT generation, event_id, reconciliation_digest IS NULL AS pending, outcome
+           FROM cohort_effect ORDER BY generation, event_id"""
+    ):
+        pending = row["pending"] == 1
+        _readable(row["outcome"] is None if pending else row["outcome"] in _OUTCOMES)
+        effects.append(
+            {
+                "generation": _stored_int(row["generation"], 1),
+                "event_id": _stored_ref(row["event_id"]),
+                "pending": pending,
+                "outcome": row["outcome"],
+            }
+        )
+    return waiters, leases, effects
+
+
+def read_register_snapshot(path: Path) -> Json:
+    """Read the authoritative register for private reporting without writing to it.
+
+    One read-only transaction (``mode=ro`` plus ``query_only``) covers every table, so the rows
+    agree with each other. A register that has never seen a lease command has no cohort tables
+    yet and reads as having no waiters or leases; a register holding only some of them is
+    refused. A row of an unexpected type or value refuses the whole read, because a partial
+    register would silently miscount organizations. Rows were HMAC-checked at admission by the
+    party that holds the keys; reading them back re-checks nothing, so the snapshot is
+    ``digest_self_consistent_only`` evidence of what the file held at read time.
+    """
+    _private_parent(path)
+    _private_record(path.lstat())
+    try:
+        with closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, timeout=5)) as db:
+            db.row_factory = sqlite3.Row
+            db.execute("PRAGMA query_only = ON")
+            db.execute("BEGIN")
+            try:
+                tables = {
+                    row[0]
+                    for row in db.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+                }
+                cohort = _COHORT_TABLES & tables
+                if cohort and (cohort != _COHORT_TABLES or "qualification_event" not in tables):
+                    raise QualificationError("register_inconsistent")
+                events = _qualification_rows(db) if "qualification_event" in tables else []
+                waiters, leases, effects = _cohort_rows(db) if cohort else ([], [], [])
+            finally:
+                db.rollback()
+    except sqlite3.Error:
+        raise QualificationError("register_unreadable") from None
+    body: Json = {
+        "schema_version": SNAPSHOT_VERSION,
+        "qualification_events": events,
+        "waiters": waiters,
+        "leases": leases,
+        "effects": effects,
+    }
+    return {**body, "snapshot_digest": digest(body)}
 
 
 def main(argv: list[str] | None = None) -> int:
