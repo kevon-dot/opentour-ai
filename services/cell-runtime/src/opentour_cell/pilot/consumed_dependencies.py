@@ -505,11 +505,29 @@ class DependencyRecorder:
         snapshot still shows what the reviewer inspected, and so is an example whose current
         chosen correction differs from the as-of one (``label_superseded``). A retraction
         recorded in any manifest this worker stored for the snapshot sticks: a later read
-        cannot re-admit the example.
+        cannot re-admit the example. So does anything a later committed snapshot of this
+        tenant and workflow shows as not eligible, absent, or on another label.
+
+        The source-revision mark advances only once the manifest is stored.
+        """
+        with self.producer.exclusive(tenant, workflow_ref):
+            manifest, pair, _ = self._training_parents(
+                tenant, workflow_ref, snapshot_digest, read_pair
+            )
+            self.producer._advance(tenant, workflow_ref, pair)
+        return manifest
+
+    def _training_parents(
+        self, tenant: str, workflow_ref: str, snapshot_digest: str, read_pair: PairReader
+    ) -> tuple[dict[str, Any], SourcePair, dict[str, Any]]:
+        """``training_parents`` without advancing the mark: (manifest, pair, current reduce).
+
+        The caller holds ``producer.exclusive`` and advances the mark once its own call
+        succeeds.
         """
         identity = self.store_identity(tenant, workflow_ref)
         sealed = self.seal(tenant, workflow_ref, snapshot_digest)
-        current = self.producer.current(
+        current, pair, reduced = self.producer.evaluate(
             tenant,
             workflow_ref,
             snapshot_digest,
@@ -517,6 +535,7 @@ class DependencyRecorder:
             self.proposals(tenant, workflow_ref, snapshot_digest),
         )
         need(current["state"] == "current", "current_eligibility_held")
+        assert pair is not None and reduced is not None
         need(current["settings_store"] == identity, "settings_store_mismatch")
         snapshot = self.producer.snapshot(tenant, workflow_ref, snapshot_digest)
         by_ref = {e["example_ref"]: e for e in snapshot["examples"]}
@@ -526,6 +545,26 @@ class DependencyRecorder:
         for stored in self._stored_manifests(tenant, workflow_ref, snapshot_digest):
             for item in stored["retracted"]:
                 retracted.setdefault(item["example_ref"], item)
+        # A later committed snapshot is worker-held evidence too: whatever it shows as not
+        # eligible, absent or on another label stays retracted here, whatever the reader says.
+        for later in self.producer.snapshots(tenant, workflow_ref)[snapshot["sequence"] :]:
+            shown = {e["example_ref"]: e for e in later["examples"]}
+            for example in snapshot["examples"]:
+                if not example["eligible"]:
+                    continue
+                seen = shown.get(example["example_ref"])
+                if seen is None:
+                    reason = "decision_absent"
+                elif not seen["eligible"]:
+                    reason = seen["reason"]
+                elif _label(seen) != _label(example):
+                    reason = "label_superseded"
+                else:
+                    continue
+                retracted.setdefault(
+                    example["example_ref"],
+                    {"example_ref": example["example_ref"], "reason": reason},
+                )
         now = set(current["eligible"]) - set(retracted)
         proposals = self.proposals(tenant, workflow_ref, snapshot_digest)
         stale = sorted(p for p, used in proposals.items() if set(used) & set(retracted))
@@ -574,7 +613,7 @@ class DependencyRecorder:
             manifest,
             "parents_manifest_conflict",
         )
-        return manifest
+        return manifest, pair, reduced
 
     def _stored_manifests(
         self, tenant: str, workflow_ref: str, snapshot_digest: str
@@ -671,7 +710,18 @@ def union_synthetic(
     claimed = parents.get("manifest_digest") if isinstance(parents, Mapping) else None
     stored = recorder.parents_manifest(tenant, workflow_ref, claimed)  # type: ignore[arg-type]
     need(dict(parents) == stored, "parents_manifest_tampered")
-    current = recorder.training_parents(tenant, workflow_ref, stored["snapshot_digest"], read_pair)
+    with recorder.producer.exclusive(tenant, workflow_ref):
+        current, pair, _ = recorder._training_parents(
+            tenant, workflow_ref, stored["snapshot_digest"], read_pair
+        )
+        union = _union(stored, current, children)
+        recorder.producer._advance(tenant, workflow_ref, pair)
+    return union
+
+
+def _union(
+    stored: Mapping[str, Any], current: Mapping[str, Any], children: Iterable[Mapping[str, Any]]
+) -> dict[str, Any]:
     roots = {p["example_ref"] for p in current["parents"]}
     retracted = {r["example_ref"] for r in current["retracted"]} | (
         {p["example_ref"] for p in stored["parents"]} - roots
@@ -867,10 +917,31 @@ def to_seed_roots(
     populations are ``development`` and ``protected``. A training parent is a development
     example, so it maps to ``training``.
     """
-    from opentour_cell.pilot.candidate_snapshot import example_ref as make_ref
     from opentour_cell.pilot.training_variants import SeedRoot, SplitSeal
 
-    computed = recorder.training_parents(tenant, workflow_ref, snapshot_digest, lambda _s: pair)
+    with recorder.producer.exclusive(tenant, workflow_ref):
+        computed, _, reduced = recorder._training_parents(
+            tenant, workflow_ref, snapshot_digest, lambda _s: pair
+        )
+        result = _seed_roots(
+            recorder, tenant, workflow_ref, snapshot_digest, pair, computed, reduced
+        )
+        # Only a projection that succeeded moves the source-revision mark.
+        recorder.producer._advance(tenant, workflow_ref, pair)
+    roots = sorted((SeedRoot(**r) for r in result), key=lambda r: r.root_ref)
+    seal = SplitSeal.from_rows([(r.case_ref, r.family_id, "training") for r in roots])
+    return roots, seal
+
+
+def _seed_roots(
+    recorder: DependencyRecorder,
+    tenant: str,
+    workflow_ref: str,
+    snapshot_digest: str,
+    pair: SourcePair,
+    computed: Mapping[str, Any],
+    reduced: Mapping[str, Any],
+) -> list[dict[str, Any]]:
     parents = recorder.parents_manifest(tenant, workflow_ref, computed["manifest_digest"])
     held = recorder.producer.settings.revision(
         tenant, workflow_ref, parents["current_settings_revision"]
@@ -882,96 +953,79 @@ def to_seed_roots(
     snapshot = recorder.producer.snapshot(tenant, workflow_ref, snapshot_digest)
     examples = {e["example_ref"]: e for e in snapshot["examples"]}
     revisions = {s["source_ref"]: s["source_revision"] for s in snapshot["sources"]}
+    now = {e["example_ref"]: e for e in reduced["examples"]}
     captures = pair.by_ref()
-    wanted = {p["example_ref"]: p for p in parents["parents"]}
     roots = []
-    for source in settings.sources:
-        if source.role != "decision":
-            continue
-        for row in captures[source.source_ref].rows:
-            mapped = map_row(row, settings.decision_mapping)
-            if type(mapped["decision_id"]) is not str:
-                continue
-            ex = make_ref(
-                settings.tenant, settings.workflow_ref, source.source_ref, mapped["decision_id"]
-            )
-            parent = wanted.get(ex)
-            if parent is None or mapped["decision_revision"] != parent["decision_revision"]:
-                continue
-            fields = {
-                name: row[column]
-                for name, column in settings.feature_columns.items()
-                if row.get(column) is not None
+    for ex, parent in sorted((p["example_ref"], p) for p in parents["parents"]):
+        example, current = examples[ex], now.get(ex)
+        need(current is not None and current["correction"] is not None, "seed_parent_missing")
+        assert current is not None
+        need("prediction_digest" in example, "snapshot_format_outdated")
+        source_ref = current["source_ref"]
+        capture = captures[source_ref]
+        # An older capture never seeds; a newer one seeds only if every value below is the
+        # one the snapshot recorded (content equality, not revision equality).
+        need(
+            type(capture.source_revision) is int
+            and capture.source_revision >= revisions[source_ref],
+            "seed_source_revision_changed",
+        )
+        # The rows this reducer chose for the example, never the first row that matches.
+        mapped = map_row(capture.rows[current["row"]], settings.decision_mapping)
+        need(
+            mapped["decision_id"] == example["decision_id"]
+            and mapped["decision_revision"] == parent["decision_revision"],
+            "seed_parent_missing",
+        )
+        row = capture.rows[current["row"]]
+        fields = {
+            name: row[column]
+            for name, column in settings.feature_columns.items()
+            if row.get(column) is not None
+        }
+        need(
+            digest(["opentour.pilot.inputs.v1", ex, fields]) == parent["inputs_digest"],
+            "seed_inputs_changed",
+        )
+        chosen = current["correction"]
+        target = map_row(
+            captures[chosen["source_ref"]].rows[chosen["row"]], settings.correction_mapping
+        )["corrected_value"]
+        need(
+            type(target) is str
+            and label_digest(label_key, settings.tenant, ex, target) == parent["label_digest"],
+            "seed_label_changed",
+        )
+        need(
+            type(mapped["case"]) is str and mapped["case"] == example["case"],
+            "seed_case_changed",
+        )
+        prediction = mapped["prediction"]
+        need(
+            type(prediction) is str
+            and prediction_digest(label_key, settings.tenant, ex, prediction)
+            == example["prediction_digest"],
+            "seed_prediction_changed",
+        )
+        roots.append(
+            {
+                "root_ref": ex,
+                "case_ref": example["case"],
+                "label_ref": "lbl-" + parent["label_digest"][:32],
+                "family_id": parent["root_family"],
+                "split": "training",
+                "policy_revision": settings.policy_revision,
+                "source_revision": str(revisions[source_ref]),
+                "fields": fields,
+                "prediction": prediction,
+                "target": target,
+                "target_verified": True,
+                "target_verifier_ref": parent["verifier"],
+                "verifier_independent": True,
             }
-            need(
-                digest(["opentour.pilot.inputs.v1", ex, fields]) == parent["inputs_digest"],
-                "seed_inputs_changed",
-            )
-            target = _target(settings, pair, mapped, parent)
-            need(
-                label_digest(label_key, settings.tenant, ex, target) == parent["label_digest"],
-                "seed_label_changed",
-            )
-            # Case, prediction and source revision come from the worker's snapshot, never the
-            # pair: the pair's values must equal what the snapshot recorded at capture.
-            example = examples[ex]
-            need(
-                type(mapped["case"]) is str and mapped["case"] == example["case"],
-                "seed_case_changed",
-            )
-            prediction = mapped["prediction"]
-            need(
-                type(prediction) is str
-                and prediction_digest(label_key, settings.tenant, ex, prediction)
-                == example["prediction_digest"],
-                "seed_prediction_changed",
-            )
-            revision = revisions[source.source_ref]
-            need(
-                type(captures[source.source_ref].source_revision) is int
-                and captures[source.source_ref].source_revision == revision,
-                "seed_source_revision_changed",
-            )
-            roots.append(
-                SeedRoot(
-                    root_ref=ex,
-                    case_ref=example["case"],
-                    label_ref="lbl-" + parent["label_digest"][:32],
-                    family_id=parent["root_family"],
-                    split="training",
-                    policy_revision=settings.policy_revision,
-                    source_revision=str(revision),
-                    fields=fields,
-                    prediction=prediction,
-                    target=target,
-                    target_verified=True,
-                    target_verifier_ref=parent["verifier"],
-                    verifier_independent=True,
-                )
-            )
-            wanted.pop(ex)
-    need(not wanted, "seed_parent_missing")
-    seal = SplitSeal.from_rows([(r.case_ref, r.family_id, "training") for r in roots])
-    return sorted(roots, key=lambda r: r.root_ref), seal
+        )
+    return roots
 
 
-def _target(
-    settings: PilotSettings,
-    pair: SourcePair,
-    decision: Mapping[str, Any],
-    parent: Mapping[str, Any],
-) -> str:
-    captures = pair.by_ref()
-    for source in settings.sources:
-        if source.role != "correction":
-            continue
-        for row in captures[source.source_ref].rows:
-            mapped = map_row(row, settings.correction_mapping)
-            if (
-                mapped["decision_id"] == decision["decision_id"]
-                and mapped["decision_revision"] == parent["decision_revision"]
-                and mapped["correction_version"] == parent["correction_version"]
-                and type(mapped["corrected_value"]) is str
-            ):
-                return str(mapped["corrected_value"])
-    raise ProfileError("seed_label_changed")
+def _label(example: Mapping[str, Any]) -> Any:
+    return (example.get("correction") or {}).get("label_digest")

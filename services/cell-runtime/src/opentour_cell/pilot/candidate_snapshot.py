@@ -42,12 +42,16 @@ no provider, installed Zap, Slack or customer evidence.
 
 from __future__ import annotations
 
+import contextlib
 import copy
 import hashlib
 import hmac
+import os
 import re
+import stat
+import threading
 from collections import Counter, defaultdict
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -72,10 +76,11 @@ from opentour_cell.pilot.learning_profile import (
     Source,
     SourceCapture,
     SourcePair,
-    _numbered,
+    _pin,
     count,
     format_time,
     local_key,
+    locked,
     map_row,
     mapped_columns,
     need,
@@ -446,6 +451,7 @@ def reduce_pair(
             )
     disputes: dict[tuple[str, str], str] = {}
     revisions: dict[tuple[str, str], dict[int, _Decision]] = defaultdict(dict)
+    delivered: dict[tuple[str, str, int], int] = {}
     for (src, did, rev), items in sorted(deliveries.items()):
         first = items[0][1]
         if len({d.payload() for _, d in items}) > 1:
@@ -456,6 +462,7 @@ def reduce_pair(
         if any(d.disputed for _, d in items):
             disputes.setdefault((src, did), "source_disputed")
         revisions[(src, did)][rev] = first
+        delivered[(src, did, rev)] = items[0][0]
     for key, revs in revisions.items():
         if len({d.case for d in revs.values()}) > 1:
             disputes.setdefault(key, "decision_case_changed")
@@ -527,6 +534,9 @@ def reduce_pair(
         ]
         record: dict[str, Any] = {
             "example_ref": ex,
+            # Row positions in this capture, so a projection re-reads the rows this reducer
+            # chose, never the first row that happens to match.
+            "row": delivered[(key[0], key[1], head_rev)],
             "source_ref": decision.source.source_ref,
             "origin": decision.source.origin,
             "decision_id": decision.decision_id,
@@ -550,6 +560,7 @@ def reduce_pair(
         if chosen is not None and state == VERIFIED:
             assert chosen.value is not None
             record["correction"] = {
+                "row": chosen.index,
                 "correction_ref": "cor-"
                 + digest([settings.tenant, chosen.source.source_ref, chosen.correction_id])[:32],
                 "source_ref": chosen.source.source_ref,
@@ -879,6 +890,8 @@ class SnapshotProducer:
         self.directory = Path(directory)
         self.settings = settings
         self.clock = clock
+        self._guard = threading.Lock()
+        self._held: dict[tuple[str, str], tuple[int, int]] = {}
 
     def _base(self, tenant: str, workflow_ref: str) -> Path:
         return (
@@ -999,83 +1012,151 @@ class SnapshotProducer:
                 return held("label_key_unusable")
             raise
         pair = read_pair(before)
-        if self._regressed(tenant, workflow_ref, pair):
-            return held("source_revision_regressed")
-        after = self.settings.current(tenant, workflow_ref)
-        previous = self.snapshots(tenant, workflow_ref)
-        if after is None or after.digest != before.digest:
-            # The policy moved under the read: keep the previous committed snapshot.
-            return self._rolled_back(previous)
-        intent = digest(
-            [
-                "opentour.pilot.snapshot-intent.v1",
-                tenant,
-                workflow_ref,
-                identity,
-                before.digest,
-                sorted(capture_digest(before, c) for c in pair.captures),
-            ]
-        )
-        triggers = self._folder(tenant, workflow_ref, "triggers")
-        name = "trigger-" + digest(["opentour.pilot.trigger.v1", trigger_ref])[:40]
-        try:
-            write_pinned(triggers, name, {"intent": intent}, "trigger_conflict")
-        except ProfileError:
-            return held("trigger_conflict")
-        for body in previous:
-            if body["intent"] == intent:
-                return receipt(body)
-        try:
-            body = reduce_pair(before, pair, self._now(), label_key=key)
-        except SnapshotHold as hold:
-            return held(hold.reason)
-        self._advance(tenant, workflow_ref, pair)
-        sequence = len(previous) + 1
-        body["sequence"] = sequence
-        body["intent"] = intent
-        body["settings_store"] = identity
-        body["caller_asserted"] = {"first_trigger_ref": trigger_ref}
-        # The final check and the write happen under the settings store's commit lock, so no
-        # settings commit can land between them.
-        with self.settings.lock(tenant, workflow_ref):
-            final = self.settings.current(tenant, workflow_ref)
-            if final is None or final.digest != before.digest:
+        # The mark check, the reduce, the commit and the mark advance are one step under the
+        # producer's lock; the mark only advances once the snapshot is committed or replayed.
+        with self.exclusive(tenant, workflow_ref):
+            refused = self._mark_refusal(tenant, workflow_ref, pair)
+            if refused is not None:
+                return held(refused)
+            after = self.settings.current(tenant, workflow_ref)
+            previous = self.snapshots(tenant, workflow_ref)
+            if after is None or after.digest != before.digest:
+                # The policy moved under the read: keep the previous committed snapshot.
                 return self._rolled_back(previous)
+            intent = digest(
+                [
+                    "opentour.pilot.snapshot-intent.v1",
+                    tenant,
+                    workflow_ref,
+                    identity,
+                    before.digest,
+                    sorted(capture_digest(before, c) for c in pair.captures),
+                ]
+            )
+            triggers = self._folder(tenant, workflow_ref, "triggers")
+            name = "trigger-" + digest(["opentour.pilot.trigger.v1", trigger_ref])[:40]
             try:
-                write_pinned(
-                    self._folder(tenant, workflow_ref, "snapshots"),
-                    f"snap-{sequence:08d}",
-                    body,
-                    "snapshot_commit_conflict",
-                )
+                write_pinned(triggers, name, {"intent": intent}, "trigger_conflict")
             except ProfileError:
-                return held("snapshot_commit_conflict")
+                return held("trigger_conflict")
+            for body in previous:
+                if body["intent"] == intent:
+                    self._advance(tenant, workflow_ref, pair)
+                    return receipt(body)
+            try:
+                body = reduce_pair(before, pair, self._now(), label_key=key)
+            except SnapshotHold as hold:
+                return held(hold.reason)
+            sequence = len(previous) + 1
+            body["sequence"] = sequence
+            body["intent"] = intent
+            body["settings_store"] = identity
+            body["caller_asserted"] = {"first_trigger_ref": trigger_ref}
+            # The final check and the write happen under the settings store's commit lock, so
+            # no settings commit can land between them.
+            with self.settings.lock(tenant, workflow_ref):
+                final = self.settings.current(tenant, workflow_ref)
+                if final is None or final.digest != before.digest:
+                    return self._rolled_back(previous)
+                try:
+                    write_pinned(
+                        self._folder(tenant, workflow_ref, "snapshots"),
+                        f"snap-{sequence:08d}",
+                        body,
+                        "snapshot_commit_conflict",
+                    )
+                except ProfileError:
+                    return held("snapshot_commit_conflict")
+            self._advance(tenant, workflow_ref, pair)
         return receipt(body)
 
-    def _revisions(self, tenant: str, workflow_ref: str, source_ref: str) -> list[int]:
-        return _numbered(
-            self._folder(tenant, workflow_ref, "source-revisions") / source_ref, "rev-"
-        )
+    @contextlib.contextmanager
+    def exclusive(self, tenant: str, workflow_ref: str) -> Iterator[None]:
+        """The producer's per-(tenant, workflow) lock, re-entrant within one thread.
 
-    def _regressed(self, tenant: str, workflow_ref: str, pair: SourcePair) -> bool:
-        """True when a capture is older than the newest revision this worker has accepted for
-        that source: a stale reader cannot undo a later retraction."""
-        for cap in _well_formed(pair):
-            seen = self._revisions(tenant, workflow_ref, cap.source_ref)
-            if seen and cap.source_revision < seen[-1]:
-                return True
-        return False
+        A single-host ``flock`` like the rest of the module; another thread or process waits.
+        """
+        key = (tenant, workflow_ref)
+        me = threading.get_ident()
+        with self._guard:
+            owner = self._held.get(key)
+            if owner is not None and owner[0] == me:
+                self._held[key] = (me, owner[1] + 1)
+                nested = True
+            else:
+                nested = False
+        if nested:
+            try:
+                yield
+            finally:
+                with self._guard:
+                    who, depth = self._held[key]
+                    self._held[key] = (who, depth - 1)
+            return
+        with locked(self._base(tenant, workflow_ref)):
+            with self._guard:
+                self._held[key] = (me, 1)
+            try:
+                yield
+            finally:
+                with self._guard:
+                    del self._held[key]
+
+    def _mark_folder(self, tenant: str, workflow_ref: str, source_ref: str) -> Path:
+        return self._folder(tenant, workflow_ref, "source-revisions") / source_ref
+
+    def source_revision_mark(self, tenant: str, workflow_ref: str, source_ref: str) -> int | None:
+        """The newest accepted capture revision of one source, or None before the first.
+
+        Only names of the form ``rev-<16 digits>.json`` count; anything else is ignored. The
+        newest mark must be a regular file (opened with ``O_NOFOLLOW``) whose pin and content
+        agree with its name, or the mark is refused (``source_revision_mark_tampered``).
+        """
+        folder = self._mark_folder(tenant, workflow_ref, source_ref)
+        if not folder.is_dir():
+            return None
+        found = sorted(int(p.name[4:20]) for p in folder.iterdir() if _MARK.fullmatch(p.name))
+        if not found:
+            return None
+        revision = found[-1]
+        name = f"rev-{revision:016d}"
+        body = _regular_text(folder / f"{name}.json")
+        pin = _regular_text(folder / f"{name}.pin")
+        expected = {"source_ref": source_ref, "source_revision": revision}
+        need(
+            pin == _pin(body) and body == canonical(expected),
+            "source_revision_mark_tampered",
+        )
+        return revision
+
+    def _mark_refusal(self, tenant: str, workflow_ref: str, pair: SourcePair) -> str | None:
+        """Why a read cannot be used against the high-water mark, or None.
+
+        A binding the mark cannot judge (a source reference or revision outside the range the
+        reducer accepts) is ``source_unbound``, so no revision ever bypasses the mark. A
+        capture older than the newest accepted one is ``source_revision_regressed``.
+        """
+        for cap in pair.captures:
+            if not _judgeable(cap):
+                return "source_unbound"
+        for cap in pair.captures:
+            seen = self.source_revision_mark(tenant, workflow_ref, cap.source_ref)
+            if seen is not None and cap.source_revision < seen:
+                return "source_revision_regressed"
+        return None
 
     def _advance(self, tenant: str, workflow_ref: str, pair: SourcePair) -> None:
-        """Record each accepted capture's source revision as the high-water mark."""
-        for cap in _well_formed(pair):
-            seen = self._revisions(tenant, workflow_ref, cap.source_ref)
-            if not seen or cap.source_revision > seen[-1]:
+        """Record each capture's revision as the high-water mark (only after success)."""
+        for cap in pair.captures:
+            if not _judgeable(cap):
+                continue
+            seen = self.source_revision_mark(tenant, workflow_ref, cap.source_ref)
+            if seen is None or cap.source_revision > seen:
                 write_pinned(
-                    self._folder(tenant, workflow_ref, "source-revisions") / cap.source_ref,
-                    f"rev-{cap.source_revision:08d}",
+                    self._mark_folder(tenant, workflow_ref, cap.source_ref),
+                    f"rev-{cap.source_revision:016d}",
                     {"source_ref": cap.source_ref, "source_revision": cap.source_revision},
-                    "source_revision_conflict",
+                    "source_revision_mark_tampered",
                 )
 
     @staticmethod
@@ -1097,6 +1178,29 @@ class SnapshotProducer:
         ``proposals`` maps an outstanding proposal reference to the example references it
         actually consumed (from the consumed-dependency manifest). The proposal references are
         consumer-declared, so every stale proposal is returned labelled ``caller_asserted``.
+        The mark check, the reduce and the mark advance happen under the producer's lock, and
+        the mark advances only when the read is usable.
+        """
+        with self.exclusive(tenant, workflow_ref):
+            result, pair, _ = self.evaluate(
+                tenant, workflow_ref, snapshot_digest, read_pair, proposals
+            )
+            if pair is not None:
+                self._advance(tenant, workflow_ref, pair)
+        return result
+
+    def evaluate(
+        self,
+        tenant: str,
+        workflow_ref: str,
+        snapshot_digest: str,
+        read_pair: PairReader,
+        proposals: Mapping[str, Iterable[str]] | None = None,
+    ) -> tuple[dict[str, Any], SourcePair | None, dict[str, Any] | None]:
+        """``current`` without advancing the mark: (result, pair read, current reduce).
+
+        The caller must hold ``exclusive`` and advance the mark itself once its own call has
+        succeeded; the pair and reduce are None when the result is held.
         """
         as_of = self.snapshot(tenant, workflow_ref, snapshot_digest)
         settings = self.settings.current(tenant, workflow_ref)
@@ -1108,17 +1212,13 @@ class SnapshotProducer:
         )
         key = self.label_key(tenant, workflow_ref)
         pair = read_pair(settings)
-        if self._regressed(tenant, workflow_ref, pair):
-            return {
-                "schema": CURRENT_SCHEMA,
-                "state": "held",
-                "reason": "source_revision_regressed",
-            }
+        refused = self._mark_refusal(tenant, workflow_ref, pair)
+        if refused is not None:
+            return {"schema": CURRENT_SCHEMA, "state": "held", "reason": refused}, None, None
         try:
             now = reduce_pair(settings, pair, self._now(), label_key=key)
         except SnapshotHold as hold:
-            return {"schema": CURRENT_SCHEMA, "state": "held", "reason": hold.reason}
-        self._advance(tenant, workflow_ref, pair)
+            return {"schema": CURRENT_SCHEMA, "state": "held", "reason": hold.reason}, None, None
         current = {e["example_ref"]: e for e in now["examples"]}
         retracted = []
         for example in as_of["examples"]:
@@ -1128,15 +1228,15 @@ class SnapshotProducer:
             if later is None or not later["eligible"]:
                 reason = "decision_absent" if later is None else later["reason"]
             elif _chosen(later) != _chosen(example):
-                # Still eligible, but on another correction (a reopen or withdrawal followed by
-                # a new final): the label the as-of snapshot admitted no longer stands.
+                # Still eligible, but on another label (a reopen or withdrawal followed by a
+                # final with a different value): the label the snapshot admitted is gone.
                 reason = "label_superseded"
             else:
                 continue
             retracted.append({"example_ref": example["example_ref"], "reason": reason})
         gone = {r["example_ref"] for r in retracted}
         stale = sorted(p for p, used in (proposals or {}).items() if set(used) & gone)
-        return {
+        result = {
             "schema": CURRENT_SCHEMA,
             "state": "current",
             "as_of_snapshot": snapshot_digest,
@@ -1150,19 +1250,38 @@ class SnapshotProducer:
             "metrics": now["metrics"],
             "reason_codes": now["reason_codes"],
         }
+        return result, pair, now
 
 
-def _chosen(example: Mapping[str, Any]) -> tuple[Any, Any]:
-    correction = example.get("correction") or {}
-    return correction.get("version"), correction.get("label_digest")
+def _chosen(example: Mapping[str, Any]) -> Any:
+    """The label an example stands on. The version is not compared: a re-final with the same
+    value at a higher version did not change the label."""
+    return (example.get("correction") or {}).get("label_digest")
 
 
-def _well_formed(pair: SourcePair) -> list[SourceCapture]:
-    return [
-        cap
-        for cap in pair.captures
-        if type(cap.source_ref) is str
-        and _TRIGGER.fullmatch(cap.source_ref)
+_MARK = re.compile(r"rev-\d{16}\.json")
+_MAX_REVISION = 2**53 - 1
+
+
+def _judgeable(cap: SourceCapture) -> bool:
+    return (
+        type(cap.source_ref) is str
+        and _TRIGGER.fullmatch(cap.source_ref) is not None
         and type(cap.source_revision) is int
-        and 0 <= cap.source_revision < 10**8
-    ]
+        and 0 <= cap.source_revision <= _MAX_REVISION
+    )
+
+
+def _regular_text(path: Path) -> str:
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError as exc:
+        raise ProfileError("source_revision_mark_tampered") from exc
+    with os.fdopen(fd, "rb") as stream:
+        need(stat.S_ISREG(os.fstat(stream.fileno()).st_mode), "source_revision_mark_tampered")
+        data = stream.read(4097)
+    try:
+        text: str = data.decode("utf-8")
+        return text
+    except UnicodeDecodeError as exc:
+        raise ProfileError("source_revision_mark_tampered") from exc

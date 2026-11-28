@@ -212,21 +212,38 @@ owns differencing control across released cells.
 - **Seed roots.** `to_seed_roots` takes no parents and no key from its caller: it recomputes
   the current parents from the worker store, reads the settings revision they name from the
   pinned store and uses the producer's own label key. The case, prediction and source revision
-  come from the snapshot: the pair's case must equal the case the snapshot stored
-  (`seed_case_changed`), its prediction must match the snapshot's keyed `prediction_digest`
-  (`seed_prediction_changed`; the prediction is kept like a label, as an HMAC), and its capture
-  revision must equal the snapshot's (`seed_source_revision_changed`). The split seal groups by
-  the snapshot's cases and root families, so the pair cannot regroup it.
+  come from the snapshot. The projection reads the rows the reducer chose for each example,
+  never the first row that matches. The pair may be at a newer source revision; it seeds only if,
+  for every example, the case (`seed_case_changed`), the inputs digest (`seed_inputs_changed`),
+  the keyed label digest (`seed_label_changed`) and the keyed `prediction_digest`
+  (`seed_prediction_changed`) all equal the snapshot's. A capture older than the snapshot's
+  revision is refused (`seed_source_revision_changed`), and the seed root carries the
+  snapshot's revision. A snapshot without `prediction_digest` (the `65329ee` format) is refused
+  as `snapshot_format_outdated`. The split seal groups by the snapshot's cases and root
+  families, so the pair cannot regroup it.
 - **Superseded labels.** Current eligibility retracts an as-of eligible example whose current
-  chosen correction (version or label digest) differs from the as-of one, as
-  `label_superseded`, even though the example is eligible again. A reopen or withdrawal
-  followed by a new final therefore never trains on the old label.
+  label digest differs from the as-of one, as `label_superseded`, even though the example is
+  eligible again. A reopen or withdrawal followed by a final with another value therefore
+  never trains on the old label. A re-final with the same value at a higher version is not a
+  supersession: the label did not change.
 - **Source revisions only move forward.** The producer keeps a per-source high-water mark of
-  the capture revisions it has accepted. A trigger or current-eligibility read whose capture is
-  older is held as `source_revision_regressed`, so a stale reader cannot undo a later
-  retraction.
+  the capture revisions it has accepted, over the whole range the reducer accepts (0 to
+  2^53−1; mark files are named with 16 digits). A trigger or current-eligibility read whose
+  capture is older is held as `source_revision_regressed`, and a revision the mark cannot
+  judge is held as `source_unbound`, so no revision bypasses it. The mark check, the reduce
+  and the advance run under the producer's lock (a single-host `flock`), and the mark advances
+  only after the whole call succeeds: a refused projection never moves it. Mark files are read
+  as regular files with `O_NOFOLLOW`; other names in the folder are ignored.
+- **Reader trust.** The mark trusts the revision the reader reports. Relabelled stale content
+  at a higher revision is read as newer; what keeps it from re-admitting a retracted example is
+  the worker's own record (next item). Deleting the mark files resets the mark (filesystem
+  writer class). A reader that reports a changed label retracts that root for the snapshot,
+  and the retraction sticks; that fails closed.
 - **Retractions stick.** `training_parents` unions the retractions of every parents manifest it
-  stored for the snapshot, so once an example is retracted no later read re-admits it.
+  stored for the snapshot (and only that snapshot: retraction reasons are relative to each
+  snapshot's as-of labels). It also treats as retracted any example that a committed snapshot
+  later than the as-of one shows as not eligible, absent or on another label. A stale read,
+  even one committed as a new snapshot, therefore never re-admits an example.
 - **Seal scope.** The seal covers `dataset_preparation` records only, so an evaluation or
   other record made after sealing never conflicts with it. Dataset records and sealing share
   one lock.

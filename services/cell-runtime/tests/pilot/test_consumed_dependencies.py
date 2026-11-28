@@ -550,7 +550,8 @@ def test_the_ope516_seed_projection_rereads_values_and_refuses_a_changed_label(
     assert "customer_age" not in roots[0].fields
     assert set(seal.assignments.values()) == {("training",)}
 
-    # A row the reducer quarantines (unknown provenance) is never taken as the target either.
+    # A row the reducer quarantines (unknown provenance) is never taken as the target: the
+    # projection reads the row the reducer chose.
     planted = fx.pair(
         live=[fx.dec("T1", fx.at(10)), fx.dec("T2", fx.at(10, 1))],
         outcomes=[
@@ -559,8 +560,8 @@ def test_the_ope516_seed_projection_rereads_values_and_refuses_a_changed_label(
             fx.cor("c-2", "T2", fx.at(10, 6)),
         ],
     )
-    with pytest.raises(ProfileError, match="seed_label_changed"):
-        to_seed_roots(w.recorder, fx.TENANT_A, fx.WF, digest, planted)
+    roots, _ = to_seed_roots(w.recorder, fx.TENANT_A, fx.WF, digest, planted)
+    assert [r.target for r in roots] == ["REFUND", "REFUND"]
     swapped = fx.pair(
         live=[fx.dec("T1", fx.at(10)), fx.dec("T2", fx.at(10, 1))],
         outcomes=[
@@ -831,9 +832,15 @@ def test_r33_a_training_parent_missing_from_the_source_pair_is_refused(tmp_path:
     # Recomputed over this pair, T2 is retracted and is not seeded at all.
     roots, _ = to_seed_roots(w.recorder, fx.TENANT_A, fx.WF, digest, without_t2)
     assert [r.root_ref for r in roots] == [_example(w, receipt, "T1")["example_ref"]]
-    # Defence in depth: if the recomputed parents ever named a root the pair lacks (here a
-    # stored manifest from the fuller read is substituted), the projection refuses.
-    w.recorder.training_parents = lambda *_args: both  # type: ignore[method-assign]
+    # Defence in depth: if the recomputed parents ever named a root the current reduce lacks
+    # (here the manifest from the fuller read is substituted), the projection refuses.
+    real = w.recorder._training_parents
+
+    def substituted(*args: Any) -> Any:
+        _, pair, reduced = real(*args)
+        return both, pair, reduced
+
+    w.recorder._training_parents = substituted  # type: ignore[method-assign]
     with pytest.raises(ProfileError, match="seed_parent_missing"):
         to_seed_roots(w.recorder, fx.TENANT_A, fx.WF, digest, without_t2)
 
@@ -1115,7 +1122,7 @@ def test_m2_a_stored_retraction_sticks_against_a_same_revision_earlier_read(
     [
         ({"case": "case-EVIL"}, "seed_case_changed"),
         ({"action": "EVIL-PREDICTION"}, "seed_prediction_changed"),
-        ({"revision": 777}, "seed_source_revision_changed"),
+        ({"gateway": "EVIL-INPUT"}, "seed_inputs_changed"),
     ],
 )
 def test_m3_seed_roots_take_case_prediction_and_revision_from_the_snapshot(
@@ -1133,7 +1140,13 @@ def test_m3_seed_roots_take_case_prediction_and_revision_from_the_snapshot(
     case = change.get("case")
     spoofed = fx.pair(
         live=[
-            fx.dec("T1", fx.at(10), case=case, action=change.get("action", "DENY")),
+            fx.dec(
+                "T1",
+                fx.at(10),
+                case=case,
+                action=change.get("action", "DENY"),
+                gateway=change.get("gateway", "ok"),
+            ),
             fx.dec("T2", fx.at(10, 1)),
         ],
         outcomes=[
@@ -1194,3 +1207,283 @@ def test_m4_a_revision_with_a_bad_committer_record_is_refused(
     )
     with pytest.raises(ProfileError, match="settings_tampered"):
         w.store.current(fx.TENANT_A, fx.WF)
+
+
+# --------------------------------------------------------------------------- fourth review
+# Every test below uses call shapes that 9558916 already has, so it fails there by assertion.
+
+
+def _mark(root: Path, source: str = fx.LIVE) -> int | None:
+    """The newest source-revision mark on disk, whatever the file-name width."""
+    folder = root / "snapshots" / fx.TENANT_A / fx.WF / "source-revisions" / source
+    found = [int(p.stem[4:]) for p in folder.glob("rev-*.json")] if folder.is_dir() else []
+    return max(found) if found else None
+
+
+def _stale(revision: int) -> Any:
+    """The original T1/T2 content, relabelled at another source revision."""
+    return fx.pair(
+        live=[fx.dec("T1", fx.at(10)), fx.dec("T2", fx.at(10, 1))],
+        outcomes=[fx.cor("c-1", "T1", fx.at(10, 5)), fx.cor("c-2", "T2", fx.at(10, 6))],
+        captured=fx.at(13),
+        revision=revision,
+    )
+
+
+def _withdrawn_at(revision: int) -> Any:
+    return fx.pair(
+        live=[fx.dec("T1", fx.at(10)), fx.dec("T2", fx.at(10, 1))],
+        outcomes=[
+            fx.cor("c-1", "T1", fx.at(10, 5)),
+            fx.cor("c-1b", "T1", fx.at(10, 30), ver=2, status="withdrawn", value=None),
+            fx.cor("c-2", "T2", fx.at(10, 6)),
+        ],
+        captured=fx.at(13),
+        revision=revision,
+    )
+
+
+def _prepared(tmp_path: Path) -> tuple[fx.World, str, str, str, dict[str, Any]]:
+    w = _setup(tmp_path)
+    receipt, source = _two_verified(w)
+    digest = receipt["snapshot_digest"]
+    t1, t2 = (_example(w, receipt, t)["example_ref"] for t in ("T1", "T2"))
+    _record(w, digest, t1, artifacts={"proposal_ref": "generated-prop-1"})
+    _record(w, digest, t2)
+    m1 = w.recorder.training_parents(fx.TENANT_A, fx.WF, digest, fx.reader(source))
+    return w, digest, t1, t2, m1
+
+
+@pytest.mark.parametrize("revision", [10**8, 2**53 - 1])
+def test_p1_large_revisions_are_marked_and_stale_content_never_trains(
+    tmp_path: Path, revision: int
+) -> None:
+    w, digest, t1, t2, m1 = _prepared(tmp_path)
+    w.clock.set(fx.at(13))
+    second = w.producer.trigger(fx.TENANT_A, fx.WF, "t-withdraw", fx.reader(_withdrawn_at(2)))
+    assert second["state"] == "committed"
+    # Old content arrives under a huge revision: it is newer by revision, so it is read ...
+    union = union_synthetic(
+        w.recorder,
+        fx.TENANT_A,
+        fx.WF,
+        m1,
+        [{"child_ref": "syn-1", "root_ref": t1}],
+        read_pair=fx.reader(_stale(revision)),
+    )
+    # ... but the committed withdrawal snapshot keeps T1 retracted.
+    assert union["admitted"] == []
+    assert union["rejected"] == [{"child_ref": "syn-1", "reason": "child_of_retracted_root"}]
+    third = w.producer.trigger(fx.TENANT_A, fx.WF, "t-stale", fx.reader(_stale(revision)))
+    assert third["state"] == "committed"
+    roots, _ = to_seed_roots(w.recorder, fx.TENANT_A, fx.WF, digest, _stale(revision))
+    assert [r.root_ref for r in roots] == [t2]
+    # The huge revision is now the mark: anything below it is refused.
+    assert _mark(tmp_path) == revision
+    held = w.producer.current(fx.TENANT_A, fx.WF, digest, fx.reader(_stale(revision - 1)))
+    assert (held["state"], held.get("reason")) == ("held", "source_revision_regressed")
+
+
+def test_p1_a_revision_the_mark_cannot_judge_is_unbound_not_ignored(tmp_path: Path) -> None:
+    w, digest, *_ = _prepared(tmp_path)
+    w.clock.set(fx.at(13))
+    for bad in (2**53, -1):
+        held = w.producer.current(fx.TENANT_A, fx.WF, digest, fx.reader(_stale(bad)))
+        assert (held["state"], held.get("reason")) == ("held", "source_unbound")
+        trigger = w.producer.trigger(fx.TENANT_A, fx.WF, f"t-{bad}", fx.reader(_stale(bad)))
+        assert (trigger["state"], trigger["reason"]) == ("held", "source_unbound")
+    assert _mark(tmp_path) == 1
+
+
+def test_p2_a_relabelled_stale_read_cannot_wash_a_committed_withdrawal(tmp_path: Path) -> None:
+    w, digest, t1, t2, m1 = _prepared(tmp_path)
+    w.clock.set(fx.at(13))
+    w.producer.trigger(fx.TENANT_A, fx.WF, "t-withdraw", fx.reader(_withdrawn_at(2)))
+    stale = fx.reader(_stale(3))
+    union = union_synthetic(
+        w.recorder,
+        fx.TENANT_A,
+        fx.WF,
+        m1,
+        [{"child_ref": "syn-1", "root_ref": t1}],
+        read_pair=stale,
+    )
+    assert union["admitted"] == []
+    # Even a snapshot committed from the relabelled content does not re-admit T1.
+    assert w.producer.trigger(fx.TENANT_A, fx.WF, "t-wash", stale)["state"] == "committed"
+    parents = w.recorder.training_parents(fx.TENANT_A, fx.WF, digest, stale)
+    assert [p["example_ref"] for p in parents["parents"]] == [t2]
+    assert parents["retracted"] == [{"example_ref": t1, "reason": "correction_withdrawn"}]
+    assert parents["stale_proposals"] == [
+        {"proposal_ref": "generated-prop-1", "basis": "caller_asserted"}
+    ]
+
+
+def test_p3_an_honest_source_advance_with_unchanged_content_still_seeds(tmp_path: Path) -> None:
+    w, digest, t1, t2, _ = _prepared(tmp_path)
+    w.clock.set(fx.at(13))
+    roots, _ = to_seed_roots(w.recorder, fx.TENANT_A, fx.WF, digest, _stale(2))
+    assert [(r.root_ref, r.source_revision, r.target) for r in roots] == sorted(
+        [(t1, "1", "REFUND"), (t2, "1", "REFUND")]
+    )
+    assert _mark(tmp_path) == 2
+    changed = fx.pair(
+        live=[fx.dec("T1", fx.at(10), gateway="changed"), fx.dec("T2", fx.at(10, 1))],
+        outcomes=[fx.cor("c-1", "T1", fx.at(10, 5)), fx.cor("c-2", "T2", fx.at(10, 6))],
+        captured=fx.at(13),
+        revision=3,
+    )
+    with pytest.raises(ProfileError, match="seed_inputs_changed"):
+        to_seed_roots(w.recorder, fx.TENANT_A, fx.WF, digest, changed)
+
+
+def test_p3_an_older_revision_never_seeds_even_with_the_mark_reset(tmp_path: Path) -> None:
+    import shutil
+
+    w, digest, *_ = _prepared(tmp_path)
+    w.clock.set(fx.at(13))
+    w.producer.trigger(fx.TENANT_A, fx.WF, "t-2", fx.reader(_stale(2)))
+    second = w.producer.snapshots(fx.TENANT_A, fx.WF)[-1]
+    from opentour_cell.pilot.operating_point import digest as digest_of
+
+    later = digest_of(second)
+    for ticket in ("T1", "T2"):
+        example = next(e for e in second["examples"] if e["decision_id"] == ticket)
+        _record(w, later, example["example_ref"])
+    # Deleting the mark files resets the mark (filesystem-writer class) ...
+    shutil.rmtree(tmp_path / "snapshots" / fx.TENANT_A / fx.WF / "source-revisions")
+    # ... yet a capture older than the snapshot's own revision still never seeds.
+    with pytest.raises(ProfileError, match="seed_source_revision_changed"):
+        to_seed_roots(w.recorder, fx.TENANT_A, fx.WF, later, _stale(1))
+
+
+def test_p4_current_eligibility_holds_the_lock_from_the_mark_check_to_the_advance(
+    tmp_path: Path,
+) -> None:
+    import threading
+
+    w, digest, *_ = _prepared(tmp_path)
+    w.clock.set(fx.at(13))
+    observed: dict[str, Any] = {}
+
+    def clock() -> Any:
+        # Inside X's reduce, a second reader (Y, at revision 2) tries to run to completion.
+        if "y" not in observed:
+            observed["y"] = threading.Thread(
+                target=lambda: observed.setdefault(
+                    "y_result",
+                    w.producer.current(fx.TENANT_A, fx.WF, digest, fx.reader(_stale(2))),
+                )
+            )
+            observed["y"].start()
+            observed["y"].join(0.5)
+            observed["y_blocked"] = observed["y"].is_alive()
+            observed["mark_inside"] = _mark(tmp_path)
+        return w.clock.now
+
+    w.producer.clock = clock
+    x = w.producer.current(fx.TENANT_A, fx.WF, digest, fx.reader(_stale(1)))
+    observed["y"].join(10)
+    assert x["state"] == "current"
+    assert observed["y_blocked"] is True and observed["mark_inside"] == 1
+    assert observed["y_result"]["state"] == "current" and _mark(tmp_path) == 2
+
+
+def test_p5_a_refused_projection_never_moves_the_mark(tmp_path: Path) -> None:
+    w, digest, *_ = _prepared(tmp_path)
+    spoofed = fx.pair(
+        live=[fx.dec("T1", fx.at(10), action="EVIL-PREDICTION"), fx.dec("T2", fx.at(10, 1))],
+        outcomes=[fx.cor("c-1", "T1", fx.at(10, 5)), fx.cor("c-2", "T2", fx.at(10, 6))],
+        revision=777,
+    )
+    with pytest.raises(ProfileError, match="seed_prediction_changed"):
+        to_seed_roots(w.recorder, fx.TENANT_A, fx.WF, digest, spoofed)
+    assert _mark(tmp_path) == 1
+
+
+def test_p6_a_snapshot_without_a_prediction_digest_is_an_outdated_format(tmp_path: Path) -> None:
+    from opentour_cell.pilot.learning_profile import _pin
+    from opentour_cell.pilot.operating_point import canonical
+    from opentour_cell.pilot.operating_point import digest as digest_of
+
+    w = _setup(tmp_path)
+    receipt, source = _two_verified(w)
+    folder = tmp_path / "snapshots" / fx.TENANT_A / fx.WF / "snapshots"
+    body = json.loads((folder / "snap-00000001.json").read_text())
+    for example in body["examples"]:
+        example.pop("prediction_digest")
+    text = canonical(body)
+    (folder / "snap-00000001.json").write_text(text)
+    (folder / "snap-00000001.pin").write_text(_pin(text))
+    old = digest_of(body)
+    for ticket in ("T1", "T2"):
+        example = next(e for e in body["examples"] if e["decision_id"] == ticket)
+        _record(w, old, example["example_ref"])
+    with pytest.raises(ProfileError, match="snapshot_format_outdated"):
+        to_seed_roots(w.recorder, fx.TENANT_A, fx.WF, old, source)
+
+
+def test_p6_mark_files_must_be_regular_and_junk_names_are_ignored(tmp_path: Path) -> None:
+    w, digest, *_ = _prepared(tmp_path)
+    w.clock.set(fx.at(13))
+    folder = tmp_path / "snapshots" / fx.TENANT_A / fx.WF / "source-revisions" / fx.LIVE
+    (folder / "rev-junk.json").write_text("{}")
+    (folder / "notes.txt").write_text("ignored")
+    assert w.producer.current(fx.TENANT_A, fx.WF, digest, fx.reader(_stale(1)))["state"] == (
+        "current"
+    )
+    real = next(folder.glob("rev-*1.json"))
+    target = tmp_path / "elsewhere.json"
+    target.write_text(real.read_text())
+    real.unlink()
+    real.symlink_to(target)
+    with pytest.raises(ProfileError, match="source_revision_mark_tampered"):
+        w.producer.current(fx.TENANT_A, fx.WF, digest, fx.reader(_stale(1)))
+
+
+def test_p7_a_re_final_with_the_same_value_is_not_a_supersession(tmp_path: Path) -> None:
+    w, digest, t1, t2, _ = _prepared(tmp_path)
+    w.clock.set(fx.at(13))
+    same = fx.pair(
+        live=[fx.dec("T1", fx.at(10)), fx.dec("T2", fx.at(10, 1))],
+        outcomes=[
+            fx.cor("c-1", "T1", fx.at(10, 5)),
+            fx.cor("c-1b", "T1", fx.at(10, 30), ver=2, status="reopened", value=None),
+            fx.cor("c-1c", "T1", fx.at(10, 45), ver=3, value="REFUND"),
+            fx.cor("c-2", "T2", fx.at(10, 6)),
+        ],
+        captured=fx.at(13),
+    )
+    current = w.producer.current(fx.TENANT_A, fx.WF, digest, fx.reader(same))
+    assert current["retracted"] == []
+    roots, _ = to_seed_roots(w.recorder, fx.TENANT_A, fx.WF, digest, same)
+    assert [(r.root_ref, r.target) for r in roots] == sorted([(t1, "REFUND"), (t2, "REFUND")])
+
+
+def test_p8_the_trigger_advances_the_mark(tmp_path: Path) -> None:
+    w, digest, *_ = _prepared(tmp_path)
+    w.clock.set(fx.at(13))
+    assert w.producer.trigger(fx.TENANT_A, fx.WF, "t-2", fx.reader(_stale(2)))["state"] == (
+        "committed"
+    )
+    assert _mark(tmp_path) == 2
+    held = w.producer.current(fx.TENANT_A, fx.WF, digest, fx.reader(_stale(1)))
+    assert (held["state"], held.get("reason")) == ("held", "source_revision_regressed")
+
+
+def test_p8_a_retraction_stored_for_another_snapshot_does_not_cross_over(
+    tmp_path: Path,
+) -> None:
+    w, s1, t1, t2, _ = _prepared(tmp_path)
+    w.clock.set(fx.at(13))
+    later = _reverified("reopened")
+    second = w.producer.trigger(fx.TENANT_A, fx.WF, "t-v3", fx.reader(later))
+    s2 = second["snapshot_digest"]
+    for ref in (t1, t2):
+        _record(w, s2, ref)
+    first = w.recorder.training_parents(fx.TENANT_A, fx.WF, s1, fx.reader(later))
+    assert first["retracted"] == [{"example_ref": t1, "reason": "label_superseded"}]
+    # In the later snapshot, v3 is the admitted label: T1 is a parent there.
+    current = w.recorder.training_parents(fx.TENANT_A, fx.WF, s2, fx.reader(later))
+    assert sorted(p["example_ref"] for p in current["parents"]) == sorted([t1, t2])
+    assert current["retracted"] == []
