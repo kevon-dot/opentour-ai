@@ -577,7 +577,11 @@ def test_s5_balanced_label_permutation_scores_exactly_half(tmp_path):
         for i, cid in enumerate(sorted(s.preds["candidate"]))
     }
     pop = iv.SealedPopulation(
-        s.population.cases, permuted, label_set=(A, B), benchmark_digest=BENCHMARK
+        s.population.cases,
+        permuted,
+        label_set=(A, B),
+        benchmark_digest=BENCHMARK,
+        reference_fields=("case_ref",),
     )
     s.population = pop
     v = run(tmp_path, s)
@@ -1617,16 +1621,23 @@ def test_q1h_review_a2_ids_renamed_to_a_substring_of_their_own_text_are_held(tmp
     assert run(tmp_path, Scenario(CLEAN_WIN), ev=ev).outcome == "verified_gain"
     a2 = renamed_to(
         Scenario(CLEAN_WIN, prefix="a2-", content_prefix=""),
-        lambda c: c.features["text"][len("generated-") :],  # "input-<n>", inside its own text
+        lambda c: c.features["text"][len("gen") :],  # "erated-input-<n>", inside its own text
     )
     case = a2.population.cases[0]
     assert case.case_id in case.features["text"]
+    # The text now carries its own id while undeclared, so the cohort holds before inference;
+    # the text is never dropped, so the content digest stays the scored one (A2 stays closed).
+    replays = a2.replays()
     doc = held(
-        run(tmp_path, a2, ev=ev, result_revision=sha("a2")),
+        run(tmp_path, a2, ev=ev, replays=replays, result_revision=sha("a2")),
         "inconclusive",
-        "decision_content_seen_in_scored_cohort",
+        "undeclared_reference_field",
     )
+    assert replays["candidate"].calls == []
     assert "decision_content_unverifiable" not in doc["reasons"]
+    refs = a2.population.reference_fields
+    original = Scenario(CLEAN_WIN).population.cases[0]
+    assert iv.decision_content_digest(case, refs) == iv.decision_content_digest(original, refs)
 
 
 @pytest.mark.parametrize(
@@ -1634,9 +1645,13 @@ def test_q1h_review_a2_ids_renamed_to_a_substring_of_their_own_text_are_held(tmp
     [
         (lambda c: {"case_ref": c.case_id}, ("case_ref",)),  # only declared references
         (lambda c: {**c.features, "text": "   "}, ("case_ref",)),  # blank decision text
-        (lambda c: dict(c.features), ("case_ref", "text")),  # the text declared a reference
+        # A text that cites its own id, declared a reference: allowed, but no content remains.
+        (
+            lambda c: {"case_ref": c.case_id, "text": "see " + c.case_id},
+            ("case_ref", "text"),
+        ),
     ],
-    ids=["only_references", "blank_text", "text_declared_as_reference"],
+    ids=["only_references", "blank_text", "citing_text_declared_as_reference"],
 )
 def test_q1i_an_empty_content_digest_never_counts_as_fresh(tmp_path, features, refs):
     """An all-excluded case cannot be compared, so it is held even on a first claim."""
@@ -1658,7 +1673,8 @@ def test_q1k_declared_reference_fields_are_part_of_the_audited_inputs():
 
     assert pop(("case_ref",)).inputs_digest == s.population.inputs_digest
     assert pop(()).inputs_digest != s.population.inputs_digest
-    assert pop(("case_ref", "text")).inputs_digest != s.population.inputs_digest
+    with pytest.raises(iv.VerdictInputError, match="^reference_field_carries_no_id$"):
+        pop(("case_ref", "text"))  # the text carries no id: content cannot be declared away
     for bad, error in (
         ("case_ref", "invalid_sealed_population"),  # a bare string, not a sequence of names
         (("case_ref", "case_ref"), "invalid_sealed_population"),
@@ -1772,6 +1788,176 @@ def test_d3c_keys_colliding_across_cases_are_refused():
 
     with pytest.raises(iv.VerdictInputError, match="^feature_key_collision$"):
         respelled(s, mixed)
+
+
+def g7(scenario, refs=("case_ref", "text")):
+    """Round 5 G7: real content declared a reference, leaving only a constant locale."""
+    return respelled(scenario, lambda c: {**c.features, "locale": "en"}, reference_fields=refs)
+
+
+def test_g7_review_r5_declaring_content_as_a_reference_is_refused(tmp_path):
+    """Round 5 G7: content declared a reference collapsed the cohort to ["en"]: verified_gain."""
+    ev = evaluator(tmp_path)
+    assert run(tmp_path, Scenario(CLEAN_WIN), ev=ev).outcome == "verified_gain"
+    renamed = renamed_to(
+        Scenario(CLEAN_WIN, prefix="g7-", content_prefix=""), lambda c: "r-" + c.case_id
+    )
+    with pytest.raises(iv.VerdictInputError, match="^reference_field_carries_no_id$"):
+        g7(renamed)
+    # Positive control: the same population declared honestly is accepted.
+    honest = g7(Scenario(CLEAN_WIN, prefix="g7ok-"), refs=("case_ref",))
+    assert honest.population.reference_fields == ("case_ref",)
+    # Every case: one declared value without its id among 199 honest ones is still refused.
+    with pytest.raises(iv.VerdictInputError, match="^reference_field_carries_no_id$"):
+        respelled(
+            Scenario(CLEAN_WIN, prefix="g7one-"),
+            lambda c: {
+                **c.features,
+                "source": "unrelated" if c.case_id.endswith("0199") else "ref:" + c.case_id,
+            },
+            reference_fields=("case_ref", "source"),
+        )
+
+
+def test_g8_review_r5_content_declared_away_cannot_dodge_a_preemptive_revocation(tmp_path):
+    """Round 5 G8: the G7 trick dodged a pre-emptive answer_key_content_digest revocation."""
+    ev = evaluator(tmp_path)
+    s = Scenario(CLEAN_WIN)
+    content = s.population.answer_key_content_digest
+    ev.revoke_scope(
+        "answer_key_content_digest", content, reason="answer_key_defect", issued_by=EVALUATOR
+    )
+    renamed = renamed_to(
+        Scenario(CLEAN_WIN, prefix="g8-", content_prefix=""), lambda c: "r-" + c.case_id
+    )
+    with pytest.raises(iv.VerdictInputError, match="^reference_field_carries_no_id$"):
+        g7(renamed)
+    # Without the declaration trick the renamed cohort matches the revoked content and is refused.
+    replays = renamed.replays()
+    v = run(tmp_path, renamed, ev=ev, replays=replays)
+    assert v.outcome == "stale" and replays["candidate"].calls == []
+
+
+@pytest.mark.parametrize(
+    "features",
+    [
+        lambda c: {"case_ref": c.case_id, "locale": "en"},  # one digest across all cases
+        # Fewer than half distinct: 200 cases over 4 values.
+        lambda c: {"case_ref": c.case_id, "bucket": "b" + str(int(c.case_id[-4:]) % 4)},
+    ],
+    ids=["single_digest", "fewer_than_half_distinct"],
+)
+def test_g9_collapsed_content_is_refused(features):
+    with pytest.raises(iv.VerdictInputError, match="^decision_content_collapsed$"):
+        respelled(Scenario(CLEAN_WIN), features)
+
+
+def test_g9b_collapse_rule_boundaries():
+    two = Scenario([("RR", 2)])
+    with pytest.raises(iv.VerdictInputError, match="^decision_content_collapsed$"):
+        respelled(two, lambda c: {"case_ref": c.case_id, "text": "same"})
+    # Exactly half distinct is accepted: 200 cases over 100 values.
+    half = respelled(
+        Scenario(CLEAN_WIN),
+        lambda c: {"case_ref": c.case_id, "text": "t" + str(int(c.case_id[-4:]) // 2)},
+    )
+    assert len(half.population.cases) == 200
+    # One case cannot collapse.
+    assert (
+        len(
+            respelled(
+                Scenario([("RR", 1)]), lambda c: {"case_ref": c.case_id, "text": "x"}
+            ).population.cases
+        )
+        == 1
+    )
+
+
+@pytest.mark.parametrize(
+    "case_id,family_id",
+    [
+        ("12345678", "family-0000"),  # purely numeric case id
+        ("1", "family-0000"),  # the measured honest-cohort failure: ids "1".."200"
+        ("case-01", "family-0000"),  # seven characters
+        ("case-0000", "en"),  # the measured locale families
+        ("case-0000", "ref"),
+        ("case-0000", "a"),
+        ("case-0000", "20261128"),  # a purely numeric family
+    ],
+)
+def test_g10_review_r5_short_or_numeric_ids_are_refused_before_inference(case_id, family_id):
+    case = iv.DecisionCase(case_id, family_id, {"case_ref": case_id, "text": "generated-x"}, ())
+    with pytest.raises(iv.VerdictInputError, match="^case_id_format_unverifiable$"):
+        iv.SealedPopulation(
+            [case],
+            {case_id: A},
+            label_set=(A, B),
+            benchmark_digest=BENCHMARK,
+            reference_fields=("case_ref",),
+        )
+
+
+def test_g10b_positive_control_eight_character_opaque_ids_are_accepted():
+    case = iv.DecisionCase("case-001", "fam-0001", {"case_ref": "case-001", "text": "t"}, ())
+    pop = iv.SealedPopulation(
+        [case],
+        {"case-001": A},
+        label_set=(A, B),
+        benchmark_digest=BENCHMARK,
+        reference_fields=("case_ref",),
+    )
+    assert not pop.undeclared_reference
+    assert iv.MIN_ID_LENGTH == 8
+
+
+def test_g11_review_r5_the_own_id_hold_is_computed_before_any_inference(tmp_path):
+    """Round 5: the hold ran after full replay and scoring; now nothing is replayed."""
+    s = respelled(Scenario(CLEAN_WIN), lambda c: {**c.features, "note": "about " + c.case_id})
+    assert s.population.undeclared_reference is True
+    replays = s.replays()
+    doc = held(run(tmp_path, s, replays=replays), "inconclusive", "undeclared_reference_field")
+    assert all(r.calls == [] for r in replays.values())
+    assert doc["comparisons"] == {}
+    assert doc["statements"]["paired_gain_cleared_gates"] == {
+        "status": "not_evaluated",
+        "reason": "undeclared_reference_field",
+    }
+    assert list((tmp_path / "evaluator-custody" / "cohorts").glob("*.json")) == []
+    # A text that cites its own ticket id passes once declared a reference, if content remains.
+    citing = respelled(
+        Scenario(CLEAN_WIN, prefix="cite-"),
+        lambda c: {**c.features, "ticket": "see " + c.case_id},
+        reference_fields=("case_ref", "ticket"),
+    )
+    assert run(tmp_path / "cite", citing).outcome == "verified_gain"
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        lambda c: {"links": [c.case_id]},  # nested in a mapping and list
+        lambda c: [1, 2, c.family_id],  # a list with the family id
+    ],
+    ids=["nested_mapping", "list"],
+)
+def test_g12_review_r5_s10_non_string_values_are_scanned_for_the_own_id(tmp_path, value):
+    """Mutant S10: skipping non-string values while scanning must fail here."""
+    s = respelled(Scenario(CLEAN_WIN), lambda c: {**c.features, "meta": value(c)})
+    assert s.population.undeclared_reference is True
+    held(run(tmp_path, s), "inconclusive", "undeclared_reference_field")
+    # Declared, a non-string reference that carries the id is accepted.
+    declared = respelled(
+        Scenario(CLEAN_WIN, prefix="nd-"),
+        lambda c: {**c.features, "meta": value(c)},
+        reference_fields=("case_ref", "meta"),
+    )
+    assert not declared.population.undeclared_reference
+
+
+@pytest.mark.parametrize("key", ["case-ref", "case.ref", "case ref", "1case"])
+def test_g13_hyphenated_and_dotted_keys_are_refused(key):
+    with pytest.raises(iv.VerdictInputError, match="^feature_key_unverifiable$"):
+        respelled(Scenario(CLEAN_WIN), lambda c: {**c.features, key: "x"})
 
 
 def test_e1_review_r4_renamed_ids_and_an_undeclared_reference_cannot_escape_both(
