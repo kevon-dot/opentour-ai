@@ -32,12 +32,15 @@ authenticated events (an HMAC or signature over each event, keyed outside the st
 Over-cap usage is a hard refusal. A COMPLETED job whose provider-reported usage is above the
 journaled approved maximum is held with the fixed reason ``over_cap``: ``collect`` builds no
 candidate, and ``handoff_reference`` and ``predict_for_replay`` never use its tuned-model id.
-Usage that cannot be shown to be within the cap (missing, non-finite, negative or non-integer, in
-another currency, or with no journaled maximum) is held the same way: fail closed. Usage exactly
-at the cap is accepted. ``hold_reason`` reports the hold. The receipt state stays the provider's
-own (COMPLETED); the hold is enforced where the result would be released. ``usage`` still returns
-the real figure with ``cap_status == "over_cap"`` and ``settleable is False``; no code in this
-repository reconciles it, so the reservation owner must handle it (see ``ReportedUsage``).
+Usage that cannot be shown to be within the cap is held the same way (fail closed), under its own
+fixed reason: ``usage_unverifiable`` when the usage is missing, non-finite, negative, non-integer
+or bool (including when read back from the journal), and ``cap_unverifiable`` when it is in a
+currency other than the cap's or the journal has no valid maximum or currency. Usage exactly at
+the cap is accepted. ``hold_reason`` reports the specific reason. The receipt state stays the
+provider's own (COMPLETED); the hold is enforced where the result would be released. ``usage``
+still returns the real figure with ``cap_status == "over_cap"`` and ``settleable is False``; no
+code in this repository reconciles it, so the reservation owner must handle it (see
+``ReportedUsage``).
 
 Simulated: tests drive this connector through a generated in-memory provider double (the transport
 port is the only boundary). Every receipt, evidence ref and tuned-model id is a ``simulated:*``
@@ -288,7 +291,11 @@ def _usage_valid(usage: ProviderUsage) -> bool:
     )
 
 
-HOLD_OVER_CAP = CAP_OVER  # the one fixed hold reason, also used for unverifiable usage
+# Fixed hold reasons. Each holds a COMPLETED result the same way; they differ only in what an
+# operator must investigate: spend above the cap, or spend that cannot be established at all.
+HOLD_OVER_CAP = CAP_OVER  # verified usage above the approved cap
+HOLD_USAGE_UNVERIFIABLE = "usage_unverifiable"  # usage missing or malformed
+HOLD_CAP_UNVERIFIABLE = "cap_unverifiable"  # usage not comparable to the approved cap
 
 
 def _approved_cap(view: _View) -> tuple[int | None, str | None]:
@@ -313,8 +320,19 @@ def _cap_status(view: _View) -> str | None:
 
 
 def _hold(view: _View) -> str | None:
-    """A COMPLETED result is released only when its usage is verifiably within the cap."""
-    if view.terminal and view.state is mc.JobState.COMPLETED and _cap_status(view) != CAP_WITHIN:
+    """A COMPLETED result is released only when its usage is verifiably within the cap.
+
+    Invalid usage is reported before an unusable cap: with no usable figure there is nothing to
+    compare, whatever the journaled cap says.
+    """
+    if not view.terminal or view.state is not mc.JobState.COMPLETED:
+        return None
+    status = _cap_status(view)
+    if status is None:
+        return HOLD_USAGE_UNVERIFIABLE
+    if status == CAP_UNKNOWN:
+        return HOLD_CAP_UNVERIFIABLE
+    if status == CAP_OVER:
         return HOLD_OVER_CAP
     return None
 
@@ -808,7 +826,10 @@ class ManagedConnector:
         return view
 
     def hold_reason(self, job: mc.JobReceipt) -> str | None:
-        """``over_cap`` when a COMPLETED job's result is held, else ``None``."""
+        """The fixed reason a COMPLETED job's result is held, else ``None``.
+
+        One of ``over_cap``, ``usage_unverifiable`` or ``cap_unverifiable``.
+        """
         view = self._view(self._key_from_ref(job.job_ref))
         if view.intent_sha != intent_digest(job.intent):
             raise ValueError("job_receipt_mismatched")
