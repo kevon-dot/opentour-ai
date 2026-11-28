@@ -2580,3 +2580,27 @@ def test_pdf_reference_to_an_object_defined_nowhere_goes_to_review() -> None:
         else:
             assert result.state is ExtractionState.ELIGIBLE, result.reason
     _flagged(_SUMMARY, "pdf_reference_unresolved", resources=b"/Font << /F1 99 0 R >>")
+
+
+def _two_streams(first: bytes, second: bytes) -> bytes:
+    return _pdf_with_contents(b"[4 0 R 5 0 R]", {4: fx._stream(first), 5: fx._stream(second)})
+
+
+def test_pdf_contents_array_split_inside_a_construct_goes_to_review() -> None:
+    flag = "content_stream_join_ambiguous"
+    second = b"BT /F1 12 Tf 72 600 Td (HIDDEN) Tj ET"
+    # A comment with no end of line runs into the next stream for poppler, which draws only
+    # "First"; joined with a newline, the reader read the second stream as well.
+    for first in (
+        b"BT /F1 12 Tf 72 700 Td (First) Tj ET % note",
+        b"BT /F1 12 Tf 72 700 Td (First) Tj ET (open",
+        b"BT /F1 12 Tf 72 700 Td (First) Tj ET [",
+        b"BT /F1 12 Tf 72 700 Td (First) Tj ET <<",
+    ):
+        result = read(_two_streams(first, second), "x.pdf")[1]
+        assert flag in result.reason, (first, result.reason)
+    # Streams that end between tokens: poppler draws both lines, with or without a newline.
+    line = b"BT /F1 12 Tf 72 700 Td (First) Tj ET"
+    for first in (line, line + b"\n", line + b" % note\n"):
+        result = read(_two_streams(first, second), "x.pdf")[1]
+        assert result.state is ExtractionState.ELIGIBLE, (first, result.reason)

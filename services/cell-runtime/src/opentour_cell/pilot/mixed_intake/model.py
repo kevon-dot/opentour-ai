@@ -197,6 +197,7 @@ REVIEW_FLAGS = frozenset(
         "graphics_state_unbalanced",
         "pdf_object_stream_unread",
         "pdf_reference_unresolved",
+        "content_stream_join_ambiguous",
         "content_operand_non_finite",
     }
 )

@@ -2532,9 +2532,8 @@ def read_pdf(data: bytes, limits: Limits, deadline: Deadline) -> ReadResult:
             and objects[ref.number].stream is not None
             and isinstance(doc.value(ref.number), dict)
         ]
-        stream = b"\n".join(
-            _decode(objects[ref.number], doc.dict(ref), doc, limits) for ref in readable
-        )
+        parts = [_decode(objects[ref.number], doc.dict(ref), doc, limits) for ref in readable]
+        stream = b"\n".join(parts)
         metrics = {name: _font_metrics(font, doc) for name, font in fonts.items()}
         spaces = _colour_spaces(resources, doc)
         states = _ext_states(resources, doc)
@@ -2549,6 +2548,8 @@ def read_pdf(data: bytes, limits: Limits, deadline: Deadline) -> ReadResult:
         )
         if annotations_unreadable:
             marks.add("annotation_unverified")
+        if _join_ambiguous(parts):
+            marks.add("content_stream_join_ambiguous")
         if len(readable) != len(refs):
             # A referenced content stream that cannot be resolved means the page was not read.
             marks.add("content_stream_unresolved")
@@ -2662,6 +2663,55 @@ def _box(value: object, doc: _Doc) -> tuple[float, float, float, float] | None:
         return None
     x0, y0, x1, y1 = (float(v) for v in box)
     return (min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1))
+
+
+def _ends_open(data: bytes) -> bool:
+    """Whether a content stream ends inside a comment, a string or an open array or dictionary.
+
+    A viewer that concatenates the streams of a /Contents array carries that construct into the
+    next stream (a comment with no end of line swallows its first line); this reader joins them
+    with a newline. Binary inline image data may look like any of these, which errs to review.
+    """
+    i, n, depth = 0, len(data), 0
+    while i < n:
+        byte = data[i]
+        if byte == 0x25:  # % comment, to the end of the line
+            ends = [at for at in (data.find(b"\n", i), data.find(b"\r", i)) if at >= 0]
+            if not ends:
+                return True
+            i = min(ends)
+        elif byte == 0x28:  # ( string
+            nested, i = 1, i + 1
+            while i < n and nested:
+                if data[i] == 0x5C:
+                    i += 2
+                    continue
+                nested += {0x28: 1, 0x29: -1}.get(data[i], 0)
+                i += 1
+            if nested:
+                return True
+        elif data.startswith(b"<<", i) or data.startswith(b">>", i):
+            depth += 1 if byte == 0x3C else -1
+            i += 2
+        elif byte == 0x3C:  # < hex string
+            close = data.find(b">", i)
+            if close < 0:
+                return True
+            i = close + 1
+        else:
+            depth += {0x5B: 1, 0x5D: -1}.get(byte, 0)
+            i += 1
+    return depth != 0
+
+
+def _join_ambiguous(parts: list[bytes]) -> bool:
+    """Whether joining a /Contents array's streams may read differently across viewers.
+
+    Any stream but the last that ends inside a construct (see _ends_open). A stream boundary
+    between two words is a token boundary (PDF 7.8.2): poppler draws `... ET` + `BT ...` and
+    does not merge `(x) T` + `j` into Tj, as this reader's newline join does not.
+    """
+    return any(_ends_open(part) for part in parts[:-1])
 
 
 def _decode_names(raw: bytes) -> bytes:
