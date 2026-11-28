@@ -429,6 +429,13 @@ def reconcile(result: Any, *, journal_path: Path, manifest: ReplayManifest) -> R
         _compare(mismatches, f"arms.{name}", arm_body, arm_totals(manifest, journaled))
     for arm_id in sorted({a.arm_id for a in arms.values()} - set(body_arms)):
         mismatches.append(f"arms.{arm_id}.absent")
+    # Two journaled runs of one arm id under one manifest: no reader can say which one the
+    # result stands for, whichever the body names.
+    runs_per_arm: dict[str, int] = {}
+    for journaled_arm in arms.values():
+        runs_per_arm[journaled_arm.arm_id] = runs_per_arm.get(journaled_arm.arm_id, 0) + 1
+    for arm_id in sorted(a for a, n in runs_per_arm.items() if n > 1):
+        mismatches.append(f"arms.{arm_id}.ambiguous")
 
     outcomes = body.get("case_outcomes_redacted")
     outcomes = outcomes if isinstance(outcomes, dict) else {}

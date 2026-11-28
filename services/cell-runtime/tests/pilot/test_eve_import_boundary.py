@@ -1,4 +1,9 @@
-"""OPE-573 import boundary: the replay worker reaches neither the scorer nor the aggregator.
+"""OPE-573 import boundary: the replay worker reaches no scorer, aggregator, evaluator or gate.
+
+The separate evaluator (``eve_evaluator``) is the independent scorer: it may read the replay
+module's types, but never the worker's scorer, the aggregator, the staging gate or the worker
+entry. The staging gate (``eve_staging``) combines the rebuild and the aggregator; nothing the
+replay worker or the aggregator imports reaches it.
 
 The static check reads source with ``ast`` and follows every import inside ``opentour_cell``
 transitively, including imports inside functions, ``if TYPE_CHECKING`` blocks, relative imports
@@ -23,6 +28,10 @@ SRC = Path(__file__).resolve().parents[2] / "src"
 REPLAY = "opentour_cell.pilot.eve_replay"
 SCORER = "opentour_cell.pilot.eve_scorer"
 AGGREGATOR = "opentour_cell.pilot.eve_aggregate"
+EVALUATOR = "opentour_cell.pilot.eve_evaluator"
+STAGING = "opentour_cell.pilot.eve_staging"
+WORKER = "opentour_cell.pilot.eve_worker"
+BACKEND = "opentour_cell.pilot.eve_reference_backend"
 
 
 def module_file(name: str) -> Path | None:
@@ -111,13 +120,62 @@ def test_b3_aggregator_has_no_import_path_to_the_scorer() -> None:
     assert SCORER not in closure(AGGREGATOR)
 
 
+def test_b3b_replay_worker_and_aggregator_reach_no_evaluator_gate_or_worker_entry() -> None:
+    for module in (EVALUATOR, STAGING, WORKER, BACKEND):
+        assert module_file(module) is not None, module
+    for root in (REPLAY, AGGREGATOR):
+        reachable = closure(root)
+        assert not {EVALUATOR, STAGING, WORKER, BACKEND} & reachable, root
+
+
+def test_b3c_the_independent_scorer_shares_no_code_with_the_worker_scorer_or_aggregator() -> None:
+    reachable = closure(EVALUATOR)
+    assert REPLAY in reachable  # not vacuous: it reads the replay module's types and verifier
+    assert not {SCORER, AGGREGATOR, STAGING, WORKER} & reachable
+    evaluator_file = module_file(EVALUATOR)
+    assert evaluator_file is not None
+    source = evaluator_file.read_text()
+    assert "class IndependentGenerativeScorer" in source and "def judge(" in source
+    assert "verify_output(" in source  # the production caller of the commitment check
+
+
+def test_b3e_the_worker_entry_never_reaches_the_evaluator() -> None:
+    """The worker runs in its own process and consumes only the exported verdict document."""
+    reachable = closure(WORKER)
+    assert {REPLAY, STAGING, SCORER} <= reachable  # not vacuous: it is the worker's wiring
+    assert EVALUATOR not in reachable
+    probe = (
+        "import sys, importlib\n"
+        "importlib.import_module(sys.argv[1])\n"
+        "print('\\n'.join(sorted(m for m in sys.modules if m.startswith('opentour_cell'))))\n"
+    )
+    loaded = subprocess.run(
+        [sys.executable, "-c", probe, WORKER],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=True,
+    ).stdout.split()
+    assert WORKER in loaded and EVALUATOR not in loaded
+
+
+def test_b3d_the_staging_gate_is_the_one_place_rebuild_and_reconcile_meet() -> None:
+    reachable = closure(STAGING)
+    assert {REPLAY, AGGREGATOR} <= reachable
+    assert not {SCORER, EVALUATOR, WORKER} & reachable
+
+
 def test_b4_importing_the_replay_module_loads_neither_at_runtime() -> None:
     probe = (
         "import sys, importlib\n"
         "importlib.import_module(sys.argv[1])\n"
         "print('\\n'.join(sorted(m for m in sys.modules if m.startswith('opentour_cell'))))\n"
     )
-    for root, forbidden in ((REPLAY, {SCORER, AGGREGATOR}), (AGGREGATOR, {SCORER})):
+    for root, forbidden in (
+        (REPLAY, {SCORER, AGGREGATOR, EVALUATOR, STAGING, WORKER, BACKEND}),
+        (AGGREGATOR, {SCORER, EVALUATOR, STAGING, WORKER}),
+        (EVALUATOR, {SCORER, AGGREGATOR, STAGING, WORKER}),
+    ):
         loaded = subprocess.run(
             [sys.executable, "-c", probe, root],
             capture_output=True,
@@ -155,12 +213,60 @@ def test_b5_the_scanner_flags_every_forbidden_form(source: str) -> None:
 
 
 # Dynamic imports cannot be followed statically, so none is allowed anywhere in the closure.
-_DYNAMIC_MODULES = frozenset({"importlib", "runpy", "builtins", "pkgutil"})
-_DYNAMIC_ATTRS = frozenset(
-    {"__import__", "import_module", "find_spec", "run_module", "run_path", "resolve_name"}
+# Besides the import machinery this denies the reflection routes the PR #210 review listed
+# (``globals()[...]``, ``__loader__``, ``__spec__``, ``operator.methodcaller``,
+# ``inspect.currentframe().f_builtins``, ``zipimport``) and their close relatives: frame and
+# function globals, ``object.__subclasses__``, loader methods, and the modules that execute or
+# load code from bytes (``marshal``, ``pickle``, ``code``, ``codeop``, ``ctypes``).
+_DYNAMIC_MODULES = frozenset(
+    {
+        "importlib",
+        "runpy",
+        "builtins",
+        "pkgutil",
+        "inspect",
+        "zipimport",
+        "operator",
+        "marshal",
+        "pickle",
+        "code",
+        "codeop",
+        "ctypes",
+    }
 )
-# Bare names: the builtins that import or run code from a string, and the builtins namespace.
-_DYNAMIC_NAMES = _DYNAMIC_ATTRS | {"exec", "eval", "compile", "__builtins__"}
+_DYNAMIC_ATTRS = frozenset(
+    {
+        "__import__",
+        "import_module",
+        "find_spec",
+        "run_module",
+        "run_path",
+        "resolve_name",
+        "__loader__",
+        "__spec__",
+        "methodcaller",
+        "currentframe",
+        "_getframe",
+        "f_builtins",
+        "f_globals",
+        "f_back",
+        "__globals__",
+        "__subclasses__",
+        "load_module",
+        "exec_module",
+    }
+)
+# Bare names: the builtins that import or run code from a string, the builtins namespace and the
+# builtins that hand out a namespace.
+_DYNAMIC_NAMES = _DYNAMIC_ATTRS | {
+    "exec",
+    "eval",
+    "compile",
+    "__builtins__",
+    "globals",
+    "locals",
+    "vars",
+}
 
 
 def dynamic_import_uses(source: str) -> list[str]:
@@ -189,7 +295,9 @@ def dynamic_import_uses(source: str) -> list[str]:
 
 
 def test_b6_nothing_reachable_from_the_replay_worker_or_aggregator_imports_dynamically() -> None:
-    for root in (REPLAY, AGGREGATOR):
+    # The evaluator and the gate too: their "never reaches the worker scorer" guarantees above
+    # are only as complete as the static scan of their closures.
+    for root in (REPLAY, AGGREGATOR, EVALUATOR, STAGING):
         reachable = closure(root)
         assert REPLAY in reachable  # the aggregator reads the replay module's constants
         for name in sorted(reachable):
@@ -226,6 +334,24 @@ def test_b6_nothing_reachable_from_the_replay_worker_or_aggregator_imports_dynam
         pytest.param("import pkgutil\npkgutil.resolve_name('x:y')\n", id="pkgutil"),
         pytest.param("from pkgutil import resolve_name\n", id="from-pkgutil"),
         pytest.param("f = getattr(__builtins__, 'ev' + 'al')\n", id="getattr-built-name"),
+        pytest.param("globals()['__builtins__']\n", id="globals"),
+        pytest.param("vars()['x']\n", id="vars"),
+        pytest.param("locals()['x']\n", id="locals"),
+        pytest.param("__loader__.load_module('x')\n", id="loader"),
+        pytest.param("__spec__.loader\n", id="spec"),
+        pytest.param("import operator\noperator.methodcaller('x', 'y')(m)\n", id="methodcaller"),
+        pytest.param("from operator import methodcaller\n", id="from-operator"),
+        pytest.param("import inspect\ninspect.currentframe().f_builtins\n", id="currentframe"),
+        pytest.param("import sys\nsys._getframe(0).f_globals\n", id="getframe"),
+        pytest.param("def f():\n    pass\nf.__globals__['__builtins__']\n", id="func-globals"),
+        pytest.param("().__class__.__base__.__subclasses__()\n", id="subclasses"),
+        pytest.param("import zipimport\nzipimport.zipimporter('x')\n", id="zipimport"),
+        pytest.param("import marshal\nmarshal.loads(b'')\n", id="marshal"),
+        pytest.param("import pickle\npickle.loads(b'')\n", id="pickle"),
+        pytest.param("import code\ncode.interact()\n", id="code"),
+        pytest.param("import ctypes\nctypes.pythonapi\n", id="ctypes"),
+        pytest.param("spec.loader.exec_module(m)\n", id="exec-module"),
+        pytest.param("f = getattr(sys, '_getframe')\n", id="getattr-getframe-name"),
     ],
 )
 def test_b7_the_dynamic_import_scanner_flags_every_form(source: str) -> None:

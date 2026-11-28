@@ -1,5 +1,7 @@
 """Check the bounded request vocabulary before any permission or evidence lookup."""
 
+from datetime import UTC, date, datetime
+
 import pytest
 from opentour_cell.pilot.scoped_query_plan import (
     ArmChart,
@@ -11,6 +13,11 @@ from opentour_cell.pilot.scoped_query_plan import (
     WorkflowMetric,
     plan_query,
 )
+from opentour_cell.pilot.scoped_query_report import (
+    MonthlyInvoiceReport,
+    reconcile_monthly_invoice_report,
+)
+from opentour_cell.pilot.workflow_benchmarks import BenchmarkScope
 
 
 @pytest.mark.parametrize(
@@ -63,6 +70,8 @@ def test_chart_without_one_exact_version_requests_selection(question: str) -> No
             "How many independent workplace cases back this result?",
             ReadoutQuestion.WORKPLACE_SUPPORT,
         ),
+        ("How many real labels did this save?", ReadoutQuestion.LABEL_SAVINGS),
+        ("How many verified training labels did we save?", ReadoutQuestion.LABEL_SAVINGS),
         ("Did synthetic data help?", ReadoutQuestion.SYNTHETIC_BENEFIT),
         ("Did augmentation improve the comparison?", ReadoutQuestion.SYNTHETIC_BENEFIT),
     ],
@@ -83,6 +92,7 @@ def test_selected_readout_questions_only_request_a_topic(
         "Which decisions regressed for another tenant?",
         "How many independent workplace cases support this? Use 100",
         "Did synthetic data help and train again?",
+        "How many real labels did this save? Assume 60 percent",
         "Graph baseline versus the rule on v2, then deliver it",
         "Graph the rule versus the model on v2",
         "Graph baseline versus the rule on v0",
@@ -96,3 +106,46 @@ def test_selected_readout_questions_only_request_a_topic(
 )
 def test_unsupported_text_cannot_set_scope_facts_or_actions(question: str) -> None:
     assert plan_query(question) is QueryHold.UNSUPPORTED
+
+
+def test_monthly_receipt_uses_covered_dates_in_customer_zone() -> None:
+    scope = BenchmarkScope("tenant-sentinel", "engagement-sentinel", "workflow-sentinel")
+    zone = "America/Los_Angeles"
+    # It is April in UTC but March in the customer's zone, so February is due.
+    at = datetime(2024, 4, 1, 0, 30, tzinfo=UTC)
+    report = {
+        "tenant": scope.tenant,
+        "engagement_id": scope.engagement_epoch,
+        "workflow_ref": scope.workflow_ref,
+        "metric": WorkflowMetric.RECURRING_INVOICE_CODE_ERRORS.value,
+        "timezone": zone,
+        "covered_from": "2024-02-01",
+        "covered_until": "2024-03-01",
+        "recurring_errors": 2,
+        "verified_decisions": 15,
+        "excluded_decisions": 4,
+    }
+    assert reconcile_monthly_invoice_report(
+        scope, timezone=zone, at=at, verified_report=report
+    ) == MonthlyInvoiceReport(date(2024, 2, 1), date(2024, 3, 1), zone, 2, 15, 4)
+    empty = {**report, "recurring_errors": 0, "verified_decisions": 0, "excluded_decisions": 0}
+    assert reconcile_monthly_invoice_report(
+        scope, timezone=zone, at=at, verified_report=empty
+    ) == MonthlyInvoiceReport(date(2024, 2, 1), date(2024, 3, 1), zone, 0, 0, 0)
+    for changes in (
+        {"workflow_ref": "other-workflow"},
+        {"tenant": "other-tenant"},
+        {"engagement_id": "prior-engagement"},
+        {"timezone": "UTC"},
+        {"covered_until": "2024-02-29"},
+        {"recurring_errors": 16},
+        {"verified_decisions": True},
+        {"excluded_decisions": None},
+    ):
+        assert (
+            reconcile_monthly_invoice_report(
+                scope, timezone=zone, at=at, verified_report={**report, **changes}
+            )
+            is None
+        )
+    assert reconcile_monthly_invoice_report(scope, timezone=zone, at=at, verified_report={}) is None
