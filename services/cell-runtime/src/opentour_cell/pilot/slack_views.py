@@ -630,6 +630,10 @@ def regression_picker(
             "its evidence to ask about it."
         )
     ]
+    if topic == "arm_chart":
+        blocks = [
+            _section("Choose the frozen workflow comparison for the requested benchmark version.")
+        ]
     if current_workflow:
         workflow, token = current_workflow
         weekly = topic == "live_errors"
@@ -783,6 +787,31 @@ def current_training_question(
         context,
         blocks,
     )
+
+
+def frozen_rule_chart(
+    context: str, workflow: str, version: int, report: Mapping[str, Any]
+) -> Block:
+    checked = managed_report(report)
+    blocks = [
+        _section(f"Workflow {_display(workflow)} · frozen benchmark v{version}"),
+        _section(
+            "Incorrect automatic decisions among automatic decisions with a verified reference"
+        ),
+    ]
+    for key, label in (("current", "Incumbent"), ("repair", "Simple repair")):
+        arm = checked[key]
+        total = arm["observed_error_rate"]["denominator"]
+        wrong = arm["incorrect_automatic"]
+        if total:
+            filled = round(10 * wrong / total)
+            bar = "■" * filled + "□" * (10 - filled)
+            blocks.append(
+                _section(f"{label} · {bar} · {wrong}/{total} ({100 * wrong / total:.1f}%)")
+            )
+        else:
+            blocks.append(_section(f"{label} · 0/0 · rate unavailable"))
+    return _modal("Frozen comparison", "ot_arm_chart", context, blocks)
 
 
 def query_hold_modal(context: str, plan: ArmChart | WorkflowDiscovery | QueryHold) -> Block:

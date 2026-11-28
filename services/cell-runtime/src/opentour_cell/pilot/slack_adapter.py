@@ -29,6 +29,7 @@ from opentour_cell.pilot.intake_mcp import REF_PATTERN, IntakePrincipal
 from opentour_cell.pilot.live_evidence import LiveEvidence, LiveScope, binding_candidate
 from opentour_cell.pilot.scoped_query_plan import (
     ArmChart,
+    ComparisonArm,
     QueryHold,
     ReadoutQuestion,
     WorkflowDiscovery,
@@ -1641,6 +1642,123 @@ class Workbench:
                 return workflow, pin, facts
         except Exception:
             return None
+
+    def _chart_match(
+        self, cfg: Settings, actor: str, source: str, version: int
+    ) -> tuple[str, str, Target] | None:
+        from opentour_cell.pilot.source_intake import check_current_intake
+        from opentour_cell.pilot.workflow_benchmarks import BenchmarkScope, WorkflowBenchmarks
+
+        try:
+            if actor != cfg.reviewer or not cfg.permission(actor, "review")["aggregate"]:
+                return None
+            target = self._managed(cfg, actor, source)
+            audit = target.audit
+            cfg.permission(actor, "review", target.dataset)
+            if audit.get("comparison_cohorts", {}).get("rule") != audit["cohort_revision"]:
+                return None
+            intake = check_current_intake(
+                cfg.directory, cfg.organization, self.store.engagement_id, target.dataset_revision
+            )
+            if intake["dataset_id"] != target.dataset:
+                return None
+            workflow = intake["workflow"]
+            scope = BenchmarkScope(cfg.organization, self.store.engagement_id, workflow)
+            receipt = WorkflowBenchmarks(cfg.directory).match_scored_comparison(
+                scope, version, audit["run_revision"]
+            )
+            if receipt is None:
+                return None
+            pin = self.journal.opaque(
+                "chart",
+                [self._policy(cfg, actor), workflow, source, target.revision, version, receipt],
+            )
+            return workflow, pin, target
+        except (ValueError, KeyError, OSError, sqlite3.Error):
+            return None
+
+    def _chart_picker(
+        self,
+        cfg: Settings,
+        actor: str,
+        view: str,
+        plan: ArmChart,
+        old_hash: str = "",
+        page: int = 0,
+    ) -> None:
+        rows = []
+        for _, source in self._result_sources(cfg, actor):
+            if source.startswith("managed:"):
+                match = self._chart_match(cfg, actor, source, plan.version)
+                if match is not None:
+                    rows.append((match[0], source, match[1]))
+        ctx = self.journal.context
+        if not rows:
+            token = ctx(actor, cfg.channel, view, "query_hold")
+            self._show(view, self.views.query_hold_modal(token, plan), old_hash)
+            return
+        page = max(0, min(page, (len(rows) - 1) // RESULT_PAGE_SIZE))
+        start = page * RESULT_PAGE_SIZE
+        visible = rows[start : start + RESULT_PAGE_SIZE]
+        listing = {
+            "version": plan.version,
+            "page": page,
+            "items": {pin: src for _, src, pin in visible},
+        }
+        token = ctx(actor, cfg.channel, view, "chart_picker", revision=_json(listing))
+
+        def authorize() -> None:
+            current = self.settings(check_engagement=False)
+            for workflow, source, pin in visible:
+                match = self._chart_match(current, actor, source, plan.version)
+                _check(match is not None and match[:2] == (workflow, pin))
+
+        self._show(
+            view,
+            self.views.regression_picker(
+                token,
+                visible,
+                previous=bool(page),
+                more=start + len(visible) < len(rows),
+                topic="arm_chart",
+            ),
+            old_hash,
+            authorize=authorize,
+        )
+
+    def _selected_chart(
+        self,
+        cfg: Settings,
+        actor: str,
+        view: str,
+        source: str,
+        version: int,
+        pin: str,
+        old_hash: str,
+    ) -> None:
+        match = self._chart_match(cfg, actor, source, version)
+        if match is None or match[1] != pin:
+            raise Refused()
+        workflow, _, target = match
+        token = self.journal.context(actor, cfg.channel, view, "arm_chart")
+
+        def authorize() -> None:
+            current = self._chart_match(
+                self.settings(check_engagement=False), actor, source, version
+            )
+            _check(current is not None and current[:2] == (workflow, pin))
+
+        self._show(
+            view,
+            self.views.frozen_rule_chart(
+                token, workflow, version, target.audit["comparisons"]["rule"]
+            ),
+            old_hash,
+            dataset=target.dataset,
+            dataset_revision=target.dataset_revision,
+            audit=target.audit,
+            authorize=authorize,
+        )
 
     def _regression_picker(
         self,
@@ -3739,6 +3857,25 @@ class Workbench:
         elif action == "ot_readouts":
             self._results(cfg, actor, view, old_hash)
         elif action in {"ot_result_prev", "ot_result_next", "ot_result_open"}:
+            if ctx["kind"] == "chart_picker":
+                listing = json.loads(ctx["revision"])
+                version = listing["version"]
+                if action == "ot_result_open":
+                    _check(value in listing["items"])
+                    self._selected_chart(
+                        cfg, actor, view, listing["items"][value], version, value, old_hash
+                    )
+                else:
+                    plan = ArmChart(version, (ComparisonArm.INCUMBENT, ComparisonArm.SIMPLE_RULE))
+                    self._chart_picker(
+                        cfg,
+                        actor,
+                        view,
+                        plan,
+                        old_hash,
+                        listing["page"] + (1 if action == "ot_result_next" else -1),
+                    )
+                return
             if ctx["kind"] == "regressions":
                 listing = json.loads(ctx["revision"])
                 if listing.get("topic") in WORKPLACE_QUESTIONS:
@@ -4462,7 +4599,10 @@ class Workbench:
             self._regression_picker(cfg, actor, view, topic=status_topic.value)
             return
         plan = plan_query(prompt)
-        if isinstance(plan, (ArmChart, WorkflowDiscovery)) or plan == QueryHold.VERSION_REQUIRED:
+        if isinstance(plan, ArmChart):
+            self._chart_picker(cfg, actor, view, plan)
+            return
+        if isinstance(plan, WorkflowDiscovery) or plan == QueryHold.VERSION_REQUIRED:
             ctx = self.journal.context(actor, cfg.channel, view, "query_hold")
             self._show(view, self.views.query_hold_modal(ctx, plan))
             return

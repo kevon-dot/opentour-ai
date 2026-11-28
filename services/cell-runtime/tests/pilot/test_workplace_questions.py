@@ -166,3 +166,59 @@ def test_typed_query_holds_are_private_and_read_only(
     assert expected in text(h, view) and next_actor in text(h, view)
     assert not buttons(screen(h, view))
     assert counts(h) == before
+
+
+@pytest.mark.parametrize("surface", ["home", "slash"])
+def test_chart_selection_rechecks_frozen_receipt_and_named_grant(tmp_path, monkeypatch, surface):
+    from opentour_cell.pilot.workflow_benchmarks import BenchmarkScope, WorkflowBenchmarks
+
+    h, plan, run, outcome = setup_workflow(tmp_path, "model")
+    assert outcome == "model_candidate"
+    cfg = h.app.settings()
+    target = h.app._managed(cfg, ACTOR, "managed:" + run)
+    intake = check_current_intake(
+        cfg.directory, cfg.organization, h.store.engagement_id, plan["intake_revision"]
+    )
+    expected = BenchmarkScope(cfg.organization, h.store.engagement_id, intake["workflow"])
+    receipt = ["generated-frozen-receipt"]
+
+    def match(self, scope, version, revision):
+        assert (scope, version, revision) == (expected, 2, target.audit["run_revision"])
+        return receipt[0]
+
+    monkeypatch.setattr(WorkflowBenchmarks, "match_scored_comparison", match)
+    before = counts(h)
+    question = "Graph baseline versus rule on v2"
+
+    def ask():
+        if surface == "slash":
+            return h.launch(prompt=question)
+        click(h, publish(h, monkeypatch, ACTOR), "ot_app_prompt", ACTOR)
+        view = list(h.slack.screens)[-1]
+        h.form(view, {"command": {"command": {"value": question}}})
+        return view
+
+    view = ask()
+    pin = buttons(screen(h, view))["ot_result_open"]
+    h.action(view, "ot_result_open", pin)
+    assert screen(h, view)["callback_id"] == "ot_arm_chart"
+    rendered = text(h, view)
+    assert "frozen benchmark v2" in rendered and "Incumbent" in rendered
+    assert "Simple repair" in rendered and "model" not in rendered.casefold()
+    for key in ("current", "repair"):
+        arm = target.audit["comparisons"]["rule"][key]
+        assert (
+            f"{arm['incorrect_automatic']}/{arm['observed_error_rate']['denominator']}" in rendered
+        )
+
+    view = ask()
+    pin = buttons(screen(h, view))["ot_result_open"]
+    receipt[0] = "generated-replacement"
+    h.action(view, "ot_result_open", pin)
+    assert screen(h, view).get("callback_id") != "ot_arm_chart"
+    view = ask()
+    pin = buttons(screen(h, view))["ot_result_open"]
+    next(cfg.directory.glob("slack-review-*.json")).unlink()
+    h.action(view, "ot_result_open", pin)
+    assert screen(h, view).get("callback_id") != "ot_arm_chart"
+    assert counts(h) == before
