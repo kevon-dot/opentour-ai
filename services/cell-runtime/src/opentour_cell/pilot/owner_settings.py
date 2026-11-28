@@ -691,11 +691,20 @@ class OwnerSettings:
             claim, a, {"claim": claim, "consent": record.decode("utf-8")}, revision, payload
         )
 
-    def save_consent(self, record: bytes, *, actor: str, workflow: str) -> Json:
+    def save_consent(
+        self,
+        record: bytes,
+        *,
+        actor: str,
+        workflow: str,
+        authorize: Callable[[Json], None] | None = None,
+    ) -> Json:
         """Apply a current owner/custodian-signed packet through the existing settings writer."""
         workflow = identifier(workflow)
         _need(type(record) is bytes and 0 < len(record) <= 64 * 1024, "invalid_settings_consent")
-        return self._save(lambda: self._verify_consent(record, actor, workflow), actor=actor)
+        return self._save(
+            lambda: self._verify_consent(record, actor, workflow), actor=actor, authorize=authorize
+        )
 
     def _claim_prior(
         self,
@@ -736,9 +745,17 @@ class OwnerSettings:
 
         return self._save(authenticate, actor=actor)
 
-    def _save(self, authenticate: Callable[[], _SettingsApproval], *, actor: str) -> Json:
+    def _save(
+        self,
+        authenticate: Callable[[], _SettingsApproval],
+        *,
+        actor: str,
+        authorize: Callable[[Json], None] | None = None,
+    ) -> Json:
         approval = authenticate()
         claim, authority, revision = approval.claim, approval.authority, approval.revision
+        if authorize is not None:
+            authorize(claim)
         action, p = claim["action"], claim["policy"]
         _need(
             action in {"save", "renew", "pause", "revoke", "replace_reviewer"},
@@ -774,6 +791,8 @@ class OwnerSettings:
             # Repeat authentication and revocation after acquiring the admission writer lock.
             _need(authenticate() == approval, "settings_authority_changed")
             _need(self.ledger._owner(db) == actor, "settings_owner_mismatch")
+            if authorize is not None:
+                authorize(claim)
             found = db.execute(
                 "SELECT packet,receipt FROM owner_settings_revisions WHERE scope=? AND revision=?",
                 (self.ledger.scope, revision),
@@ -912,6 +931,8 @@ class OwnerSettings:
                         receipt["reviewer_replacement"] = continued
             if approval.consent is not None:
                 receipt["consent_purpose"] = CONSENT_PURPOSE
+            if authorize is not None:
+                authorize(claim)
             db.execute(
                 "INSERT INTO owner_settings_revisions VALUES(?,?,?,?)",
                 (self.ledger.scope, revision, canonical(approval.packet), canonical(receipt)),

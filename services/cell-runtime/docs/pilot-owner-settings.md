@@ -88,6 +88,32 @@ pin must be installed. The existing OPE-548 replacement flow governs reviewer
 changes. Positive monetary limits and settlement require their separate
 approved budget path.
 
+### Customer-local browser entry
+
+Install the locked `opentour-cell` and `opentour-control` packages together on
+the customer host. The latter provides the reviewed WorkOS access-token
+verifier. Keep `/owner/setup` on the approved environment's private HTTPS
+origin. The already authenticated gateway forwards the exact origin's Host
+and one provider-signed, audience-bound bearer token to the page's local Unix
+socket. Browser cookies, caller identity headers and submitted tenant IDs are
+outside this interface. The gateway must authenticate the current browser
+session and restrict direct access to the socket.
+
+The administrator installs `owner-setup-binding.json` (mode 0600) in the
+existing private worker directory. Its schema is
+`opentour.pilot.owner-setup-gateway.v1`. It contains `origin`, `subject`,
+`organization`, `engagement`, `workflow`, `owner`, `custodian`,
+`authority_file`, `connection_file`, `connection_revision`, and `identity`.
+The identity object contains `issuer`, `audience`, `jwks_url`, `client_id`, and
+`credential_max_lifetime_seconds`, taken from the approved gateway's WorkOS
+configuration. The bound `subject` is the verified ID for the named local
+workflow owner. Connection selectors identify the approved existing private
+connection and its revision. Both may be null while setup is held. Install
+`owner-setup-csrf.key` alongside the binding as 32 random bytes with mode 0600.
+These files are local deployment inputs.
+
+Start `python -m opentour_cell.pilot.owner_setup_page --directory <private-worker-directory> --socket-dir <private-socket-directory>` after both directories and the private ledger have been provisioned. The service opens `owner-setup.sock` in that directory. Forward only `/owner/setup` from the authenticated gateway. The page shows the currently allowed catalog pair or a hold. Pause and revoke remain available without catalog discovery. The worker binds the selected pair again when preparing the consent and checks the current owner and connection binding when writing the signed revision.
+
 ## Acceptance and limits
 
 | Current native requirement | Executable evidence |
@@ -106,6 +132,7 @@ approved budget path.
 | Actual worker handoff | subprocess `cycle_worker --once`, real descriptor-backed generated MCP reader, pending private review; zero outbound network in container |
 | Initial baseline cannot bypass reviewer replacement; waiting operator cannot export after removal | `test_first_settings_cannot_replace_existing_mandate_reviewer`, `test_worker_rechecks_waiting_operator_and_current_authority` |
 | Lease remains held through commit; interrupted file publication recovers | `test_cohort_guard_remains_held_until_successor_commit`, `test_interrupted_worker_publication_has_no_partial_final_and_retries` |
+| Customer-local browser owner and same-origin consent submission | `test_owner_setup_page.py` exercises actual JWT verification, catalog selection, generated ES256 owner/custodian signatures and binding withdrawal during commit |
 
 Run the focused owner-settings, learning-mandate, autonomous-cycle and workplace-context tests under Python 3.12.16 on Linux. The workplace reader's verified descriptor launch is not currently macOS-qualified (existing issue #94); do not replace it with an unsafe pathname launch to make a local test green. Local Linux aarch64 generated fixtures are distinct from the required Linux x86-64 protected CI and from installed Slack/Zapier/customer qualification.
 
