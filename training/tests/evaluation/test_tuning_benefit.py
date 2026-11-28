@@ -1180,3 +1180,152 @@ def test_ledger_reload_refuses_a_missing_top_level_field(field: str) -> None:
     raw = SpendLedger(spend_cap=100, fits_authorized=1).to_json()
     del raw[field]
     assert _forged_refusal(raw) == "ledger_forged_reservation"
+
+
+# from_json on a value of the wrong JSON shape must refuse with a typed code, never a bare
+# TypeError/AttributeError/KeyError. The check is ``type(x) is dict``, so a dict subclass that
+# answers ``items`` differently from what it holds never reaches the per-entry checks.
+
+
+class _LyingItems(dict):  # type: ignore[type-arg]
+    """Empty (or anything) underneath; ``items`` yields an honest-looking entry."""
+
+    def __init__(self, *args: Any, fake: tuple[str, Any] = ("d|a|fit", ["fit", 1])) -> None:
+        super().__init__(*args)
+        self._fake = fake
+
+    def items(self) -> Any:
+        return iter([self._fake])
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        None,
+        3,
+        1.5,
+        True,
+        "spend_cap fits_authorized reserved settled",
+        b"{}",
+        [],
+        ["spend_cap", "fits_authorized", "reserved", "settled"],
+        ("spend_cap", "fits_authorized", "reserved", "settled"),
+        {"spend_cap", "fits_authorized", "reserved", "settled"},
+    ],
+    ids=[
+        "null",
+        "int",
+        "float",
+        "bool",
+        "str",
+        "bytes",
+        "list",
+        "list-of-fields",
+        "tuple-of-fields",
+        "set-of-fields",
+    ],
+)
+def test_ledger_reload_refuses_a_top_level_value_that_is_not_an_object(raw: object) -> None:
+    with pytest.raises(TuningBenefitError) as err:
+        SpendLedger.from_json(raw)  # type: ignore[arg-type]
+    assert err.value.code == "ledger_forged_reservation"
+
+
+def test_ledger_reload_refuses_a_top_level_dict_subclass() -> None:
+    # Pins the exact type on the top level: the content is honest, only the type is wrong.
+    raw = _LyingItems(SpendLedger(spend_cap=100, fits_authorized=1).to_json())
+    assert _forged_refusal(raw) == "ledger_forged_reservation"
+
+
+@pytest.mark.parametrize(
+    "field, value, code",
+    [
+        ("reserved", [], "ledger_forged_reservation"),
+        ("reserved", [["d|a|fit", ["fit", 1]]], "ledger_forged_reservation"),
+        ("reserved", None, "ledger_forged_reservation"),
+        ("reserved", "d|a|fit", "ledger_forged_reservation"),
+        ("reserved", 0, "ledger_forged_reservation"),
+        ("settled", [], "ledger_forged_settlement"),
+        ("settled", [["d|a|fit", 1]], "ledger_forged_settlement"),
+        ("settled", None, "ledger_forged_settlement"),
+        ("settled", "d|a|fit", "ledger_forged_settlement"),
+        ("settled", 0, "ledger_forged_settlement"),
+    ],
+    ids=[
+        "reserved-empty-list",
+        "reserved-pairs-list",
+        "reserved-null",
+        "reserved-str",
+        "reserved-int",
+        "settled-empty-list",
+        "settled-pairs-list",
+        "settled-null",
+        "settled-str",
+        "settled-int",
+    ],
+)
+def test_ledger_reload_refuses_reserved_or_settled_that_is_not_an_object(
+    field: str, value: object, code: str
+) -> None:
+    ledger = SpendLedger(spend_cap=100, fits_authorized=1)
+    ledger.reserve("d", "a", "fit", 5)
+    raw = ledger.to_json()
+    raw[field] = value
+    assert _forged_refusal(raw) == code
+
+
+def test_ledger_reload_refuses_reserved_or_settled_dict_subclasses() -> None:
+    # Pins the exact type on each table. Under isinstance, each would load the honest-looking
+    # entry its ``items`` yields rather than what it holds.
+    ledger = SpendLedger(spend_cap=100, fits_authorized=1)
+    ledger.reserve("d", "a", "fit", 5)
+    raw = ledger.to_json()
+    raw["reserved"] = _LyingItems()
+    assert _forged_refusal(raw) == "ledger_forged_reservation"
+    raw = ledger.to_json()
+    raw["settled"] = _LyingItems(fake=("d|a|fit", 1))
+    assert _forged_refusal(raw) == "ledger_forged_settlement"
+
+
+@pytest.mark.parametrize(
+    "stored_kind", [["fit"], {"fit": 1}, [], {}], ids=["list", "dict", "empty-list", "empty-dict"]
+)
+def test_ledger_reload_refuses_a_list_or_dict_stored_kind_with_a_code(stored_kind: object) -> None:
+    # Audit vector: a list or dict kind gives a coded refusal, not an unhashable TypeError.
+    raw = SpendLedger(spend_cap=100, fits_authorized=1).to_json()
+    raw["reserved"]["d|a|fit"] = [stored_kind, 1]
+    assert _forged_refusal(raw) == "ledger_forged_reservation"
+
+
+@pytest.mark.parametrize(
+    "row",
+    [{"fit": 1}, {"kind": "fit", "amount": 1}, "fi", None, 1],
+    ids=["dict", "dict-named", "two-char-str", "null", "int"],
+)
+def test_ledger_reload_refuses_a_reservation_row_of_the_wrong_shape(row: object) -> None:
+    raw = SpendLedger(spend_cap=100, fits_authorized=1).to_json()
+    raw["reserved"]["d|a|fit"] = row
+    assert _forged_refusal(raw) == "ledger_forged_reservation"
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [("note", "x"), ("fits_used", 0), ("", None), ("reserved ", {})],
+    ids=["note", "fits-used", "empty-name", "padded-name"],
+)
+def test_ledger_reload_refuses_an_extra_top_level_field(extra: tuple[str, object]) -> None:
+    # The persisted format is closed: an unknown field is refused, not silently dropped.
+    ledger = SpendLedger(spend_cap=100, fits_authorized=1)
+    ledger.reserve("d", "a", "fit", 5)
+    raw: dict[str, Any] = ledger.to_json()
+    raw[extra[0]] = extra[1]
+    assert _forged_refusal(raw) == "ledger_forged_reservation"
+
+
+def test_ledger_reload_after_a_json_round_trip_still_loads_honest_state() -> None:
+    # The exact-dict checks must not refuse what json.loads produces from to_json.
+    ledger = SpendLedger(spend_cap=100, fits_authorized=1)
+    ledger.reserve("d", "a", "fit", 5)
+    ledger.settle("d", "a", "fit", 4)
+    raw = json.loads(json.dumps(ledger.to_json()))
+    assert SpendLedger.from_json(raw).to_json() == ledger.to_json()

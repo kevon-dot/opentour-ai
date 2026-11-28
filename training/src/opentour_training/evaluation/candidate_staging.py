@@ -67,8 +67,10 @@ the class; a subclass, a duck-typed object or a patched instance is
 ``verdict_authority_unrecognised`` (refused, and treated as no authority). The issuer registry
 itself is built by whoever constructs the authority: there is no worker-configured registry, key
 custody or identity-store identity to pin, so a caller-built ``HmacVerdictAuthority`` that
-registers its own confirmation issuer still verifies. Closing that needs a worker-held authority
-configuration (OPE-528 boundary), which this module does not invent.
+registers its own confirmation issuer still verifies. The same holds for in-process code: the
+registry is only shallowly read-only, and a ``StagingLedger`` uses whichever authority it was
+constructed with (nothing binds a ledger file to one authority). Closing that needs a
+worker-held authority configuration (OPE-528 boundary), which this module does not invent.
 """
 
 from __future__ import annotations
@@ -354,8 +356,11 @@ class HmacVerdictAuthority:
 
     Verifies the issuer is registered with the claimed kind and that the HMAC over the full
     verdict body matches. A hand-built record without the key cannot verify. The registry is a
-    read-only copy taken at construction; whoever constructs the authority chooses its issuers
-    (see the module docstring for that limit).
+    copy taken at construction and wrapped in ``MappingProxyType``, which is read-only only
+    shallowly: it refuses item assignment, but in-process code can still replace it
+    (``vars(a)["_issuers"] = ...``) or reach the underlying dict (``gc.get_referents``) and add
+    a confirmer. That is the same class of limit as a caller-built authority: whoever constructs
+    the authority, or runs code in its process, chooses its issuers (see the module docstring).
     """
 
     def __init__(self, issuers: Mapping[str, tuple[str, bytes]]) -> None:
@@ -860,6 +865,13 @@ class StagingLedger:
     ``stage`` writes a ``decided`` intent and then the ``staged`` record in a second atomic
     write. A crash between them leaves the candidate NOT staged; replaying the same packet
     completes it exactly once. Duplicate or late callbacks never alter state.
+
+    The ledger does not bind its authority. The authority is whatever the constructor was given;
+    the file records no authority identity, so a second ``StagingLedger`` on the same file with
+    a different authority stages against that authority, and code in the process can swap
+    ``_authority`` after construction. Binding would need a worker-held authority configuration
+    to bind to (OPE-528 boundary), which this module does not invent; this is the same class of
+    limit as a caller-built authority (see the module docstring).
     """
 
     def __init__(

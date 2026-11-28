@@ -796,6 +796,12 @@ def _ledger_part(value: object, code: str) -> str:
     ``__format__`` is ever consulted. NFC is required rather than applied, so a decomposed
     spelling is refused instead of silently re-keyed. Not covered: compatibility forms (NFKC,
     e.g. fullwidth letters) and cross-script homoglyphs still key as distinct parts.
+
+    Residuals still accepted inside a part (review of PR #232): separator look-alikes such as
+    U+FF5C FULLWIDTH VERTICAL LINE and U+2223 DIVIDES, an internal U+00A0 NO-BREAK SPACE,
+    private-use (Co) and unassigned (Cn) code points, and a part made only of a combining mark.
+    None of them is the separator, so none can split or collide a key; they only let two
+    look-alike parts key as distinct.
     """
     part = _ident(value, code)
     _need(
@@ -888,7 +894,17 @@ class SpendLedger:
 
     @classmethod
     def from_json(cls, raw: Mapping[str, Any]) -> SpendLedger:
+        """Rebuild a ledger from ``to_json`` output, or refuse with a typed code.
+
+        The format is closed and exact: the top level and both tables must be exact ``dict``
+        (never a subclass, list or null) and the top level must carry exactly the four fields.
+        A wrong shape is refused, never surfaced as a bare ``TypeError``/``AttributeError``.
+        """
+        _need(type(raw) is dict, "ledger_forged_reservation", "not an object")
         _need(all(f in raw for f in _LEDGER_FIELDS), "ledger_forged_reservation", "field missing")
+        _need(len(raw) == len(_LEDGER_FIELDS), "ledger_forged_reservation", "unknown field")
+        _need(type(raw["reserved"]) is dict, "ledger_forged_reservation", "reserved")
+        _need(type(raw["settled"]) is dict, "ledger_forged_settlement", "settled")
         ledger = cls(spend_cap=raw["spend_cap"], fits_authorized=raw["fits_authorized"])
         reserved: dict[str, tuple[str, int]] = {}
         for k, v in raw["reserved"].items():
