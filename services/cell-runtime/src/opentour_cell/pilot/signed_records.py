@@ -71,10 +71,15 @@ approval signer, so a new consent purpose is an explicit customer opt-in, never 
   not a consent purpose: ``verify`` never accepts it. It follows the rotation rules: the same
   lock, the anti-rollback floor, pending-tail handling and re-verification on every read.
   Re-presenting the head update, keyed on its payload digest, is a no-op.
-* Every customer signature names the anchor revision it was made under in
-  ``key_registry_revision``, and only the head revision resolves. So after a scope update
-  (as after a rotation) the customer re-signs at the new revision, and a record signed under
-  an earlier scope is never reinterpreted under a later one.
+* A customer signature names the key's signing label in ``key_registry_revision``: the
+  anchor revision that installed the key (its enrolment, or the rotation that installed
+  it). A scope update advances the head anchor revision but never the label, so the
+  customer's existing signatures stay valid; a rotation installs a new key and label. Any
+  other label, the head revision included once they differ, is refused with
+  ``customer_key_not_anchored``. The effective scope is read from the head on every
+  verification, so narrowing applies at once to every record, however old: a record whose
+  purpose was narrowed out is refused with ``customer_purpose_not_enrolled``. A rotation or
+  scope update names the head revision as ``previous_anchor_revision``.
 
 Anti-rollback state: ``TrustStateStore`` keeps named monotonic records in a strict,
 versioned format (``opentour.pilot.trust-state.v1``). This module uses three namespaces:
@@ -106,18 +111,23 @@ id, accepted only if a current registry entry for that id carries the enrolment 
 any registry revision) or the id is listed in the registry's verify-only
 ``former_custodian_keys``. A key id maps to one public key and one role across the
 registry, so the key id fixes the pinned public-key digest. A former custodian key verifies
-existing enrolments only: never a new pin, never any other purpose. The one permitted
-overlap is a still-current custodian key listed there with the same id and public key, so
-its enrolment purpose can be removed without bricking its anchors. Dropping a key from that
+existing enrolments and accepted scope updates only (below): never a new pin, never a new
+or pending scope update, never any other purpose. The one permitted overlap is a
+still-current custodian key listed there with the same id and public key, so its enrolment
+or scope purpose can be removed without bricking its anchors. Dropping a key from that
 list (and from the enrolment purpose) deliberately invalidates every anchor it co-signed;
 that is the intended response to a compromised custodian key, and those engagements need a
 supervised re-enrolment (see Recovery).
 
-An accepted scope update's co-signature is re-verified the same way by key id, but only
-against a current registry entry for that id that carries the scope purpose (at any
-registry revision). ``former_custodian_keys`` re-verify enrolments only, so retiring a
-custodian key, or removing the scope purpose from it, makes every anchor whose chain holds a
-scope update it co-signed unverifiable (fail closed; see Recovery).
+An accepted scope update's co-signature (an entry at or below the anchor floor) is
+re-verified the same way by key id: a current registry entry for that id carrying the scope
+purpose (at any registry revision), or the id in ``former_custodian_keys``. Retiring a
+custodian into that list therefore keeps the anchors whose scope updates it co-signed. A
+former custodian key never authorizes a new scope update and never carries a pending one,
+which needs a current custodian at its exact registry revision. A scope update also needs
+the anchored customer key's signature, so a former custodian key cannot widen a scope on its
+own. Dropping a key from both lists still invalidates every anchor whose enrolment or scope
+update it co-signed.
 
 Custody of retired custodian keys: anyone holding a former custodian key plus write access
 to the anti-rollback location can substitute an anchor, by writing a chain whose enrolment
@@ -163,11 +173,10 @@ Recovery:
   anchor reverts to the key the customer rotated away from. Re-run the rotation with a fresh
   record signed by both keys. An interrupted scope update behaves the same way and reverts
   to the earlier scope; re-run it with a fresh co-signed update.
-* Accepted scope updates stay in their chain. Retiring a custodian key, or removing the
-  scope purpose from it, therefore makes every anchor holding a scope update it co-signed
-  unverifiable, and recovery is a supervised re-enrolment. Until the owner decides whether
-  ``former_custodian_keys`` should also re-verify scope updates, keep a current entry with
-  the scope purpose for that key while those anchors are in use.
+* Retiring a custodian key: add it to ``former_custodian_keys`` so the enrolments and
+  accepted scope updates it co-signed keep verifying. A scope update it co-signed that was
+  still pending (its floor write lost) is ignored once it is retired, and the anchor reverts
+  to the earlier scope; re-run it with a current custodian.
 
 Time: every signed document carries issuer-signed ``issued_at`` and ``not_after``. The local
 clock only shortens validity: refuse after ``not_after`` or more than ``ISSUED_AT_SKEW``
@@ -377,7 +386,8 @@ class _RegistryPayload(WireModel):
     issued_at: Timestamp
     not_after: Timestamp
     keys: Annotated[list[_KeyEntry], Field(min_length=1)]
-    # Verify-only: re-verify the co-signature of existing enrolments, nothing else.
+    # Verify-only: re-verify the co-signature of existing enrolments and of accepted
+    # scope updates, nothing else.
     former_custodian_keys: Annotated[
         list[_CustomerKey], Field(default_factory=list, max_length=MAX_FORMER_KEYS)
     ]
@@ -453,18 +463,24 @@ class CustomerAnchor:
     public_key_sha256: str
     # The effective scope: the anchored ``consent_purposes`` that are still current.
     consent_purposes: frozenset[str]
+    # The customer key's signing label: the anchor revision that installed it (its
+    # enrolment or rotation). Every customer signature names it in key_registry_revision.
+    key_revision: int
 
 
 @dataclass(frozen=True)
 class _AnchorHead:
     """The head of a re-verified anchor chain.
 
-    ``key`` is the anchored customer key, labelled with the head anchor revision (the
-    revision every customer signature must name). ``scope`` is the signed scope as anchored;
-    a purpose retired from ``CONSENT_PURPOSES`` since then drops out of ``effective``.
+    ``key`` is the anchored customer key, labelled with the anchor revision that installed
+    it (the label every customer signature must name). ``revision`` is the head anchor
+    revision, which a scope update advances without changing the label. ``scope`` is the
+    signed scope as anchored; a purpose retired from ``CONSENT_PURPOSES`` since then drops
+    out of ``effective``.
     """
 
     key: PilotTrustedKey
+    revision: int
     scope: frozenset[str]
 
     @property
@@ -475,9 +491,10 @@ class _AnchorHead:
         return CustomerAnchor(
             engagement_id,
             self.key.key_id,
-            int(self.key.registry_revision),
+            self.revision,
             self.key.public_key_sha256,
             self.effective,
+            int(self.key.registry_revision),
         )
 
 
@@ -584,7 +601,8 @@ def _former_custodians(
     """Verify-only former custodian keys, distinct from every current and root key.
 
     The single permitted overlap: a still-current custodian key listed with the same key id
-    and public key, so its enrolment purpose can be removed without bricking its anchors.
+    and public key, so its enrolment or scope purpose can be removed without bricking its
+    anchors. These keys re-verify accepted enrolments and scope updates only.
     """
     former: dict[str, PilotTrustedKey] = {}
     taken_ids = {key.key_id for key in taken}
@@ -1227,8 +1245,7 @@ class PilotVerifier:
             if len(digests) > 1 and _payload_sha256(payload) == digests[-1]:
                 # The head itself, re-presented: authenticate it against the state it was
                 # applied to (the same key, one revision earlier), then change nothing.
-                earlier = str(int(head.key.registry_revision) - 1)
-                prior = _AnchorHead(replace(head.key, registry_revision=earlier), head.scope)
+                prior = _AnchorHead(head.key, head.revision - 1, head.scope)
                 self._check_scope_update(record, prior, check_time=True, replay=False, fresh=True)
                 return head.anchor(engagement)
             body, updated, digest = self._check_scope_update(
@@ -1300,8 +1317,9 @@ class PilotVerifier:
         """Resolve an accepted scope update's co-signer by key id (which fixes its key).
 
         Accepted only if a current registry entry for that key id carries the scope purpose
-        (at any revision). The verify-only ``former_custodian_keys`` re-verify enrolments
-        only, so dropping that purpose, or the key, makes such an anchor unverifiable.
+        (at any revision), or the key id is listed in the verify-only
+        ``former_custodian_keys``. Used only for entries at or below the anchor floor: a new
+        or pending scope update needs a current custodian at its exact registry revision.
         """
 
         def resolve(signature: _Signature) -> PilotTrustedKey:
@@ -1311,10 +1329,11 @@ class PilotVerifier:
                 if key.key_id == signature.key_id and key.role == OPERATOR_CUSTODIAN
             ]
             permitted = [key for key in current if CONSENT_SCOPE_PURPOSE in key.purposes]
-            if not permitted:
+            key = permitted[0] if permitted else self._registry.former.get(signature.key_id)
+            if key is None:
                 raise PilotRecordRefused("key_purpose_not_permitted" if current else "key_unknown")
             return replace(
-                permitted[0],
+                key,
                 registry_revision=signature.key_registry_revision,
                 purposes=frozenset({CONSENT_SCOPE_PURPOSE}),
             )
@@ -1367,7 +1386,7 @@ class PilotVerifier:
             payload, signatures, ENROLMENT_PURPOSE, resolvers, "enrolment", check_time=not replay
         )
         scope = _scope_of(payload, fresh=not replay)
-        return body, _AnchorHead(customer, scope), _payload_sha256(payload)
+        return body, _AnchorHead(customer, 1, scope), _payload_sha256(payload)
 
     def _check_rotation(
         self, record: bytes, head: _AnchorHead, *, check_time: bool, fresh: bool
@@ -1400,8 +1419,8 @@ class PilotVerifier:
         )
         if (
             body.previous_key_id != previous.key_id
-            or body.previous_anchor_revision != previous.registry_revision
-            or revision != int(previous.registry_revision) + 1
+            or body.previous_anchor_revision != str(head.revision)
+            or revision != head.revision + 1
         ):
             raise PilotRecordRefused("customer_rotation_not_successor")
         successor = _customer_key(body.customer_key, revision, frozenset())
@@ -1409,15 +1428,17 @@ class PilotVerifier:
         if successor.public_key_sha256 == previous.public_key_sha256:
             raise PilotRecordRefused("customer_key_not_distinct")
         scope = _scope_of(payload, fresh=fresh, inherit=head.scope)
-        return body, _AnchorHead(successor, scope), _payload_sha256(payload)
+        return body, _AnchorHead(successor, revision, scope), _payload_sha256(payload)
 
     def _check_scope_update(
         self, record: bytes, head: _AnchorHead, *, check_time: bool, replay: bool, fresh: bool
     ) -> tuple[_ScopePayload, _AnchorHead, str]:
-        """A scope update applied to ``head``: the same key at the next anchor revision.
+        """A scope update applied to ``head``: the next anchor revision, the same key.
 
-        A new or pending update needs a current custodian at its exact registry revision; an
-        accepted one (``replay``) is re-verified by key id, like an enrolment's co-signer.
+        The key keeps its signing label (the revision that installed it), so the customer's
+        existing signatures stay valid. A new or pending update needs a current custodian at
+        its exact registry revision; an accepted one (``replay``) is re-verified by key id,
+        like an enrolment's co-signer, former custodian keys included.
         """
         payload, signatures = _open(record, "scope")
         try:
@@ -1444,13 +1465,12 @@ class PilotVerifier:
         revision = int(body.anchor_revision)
         if (
             body.customer_key_id != previous.key_id
-            or body.previous_anchor_revision != previous.registry_revision
-            or revision != int(previous.registry_revision) + 1
+            or body.previous_anchor_revision != str(head.revision)
+            or revision != head.revision + 1
         ):
             raise PilotRecordRefused("customer_scope_not_successor")
         scope = _scope_of(payload, fresh=fresh)
-        key = replace(previous, registry_revision=str(revision), purposes=frozenset())
-        return body, _AnchorHead(key, scope), _payload_sha256(payload)
+        return body, _AnchorHead(previous, revision, scope), _payload_sha256(payload)
 
     def _chain_step(
         self, item: dict[str, Any], head: _AnchorHead, *, accepted: bool
