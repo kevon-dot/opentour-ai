@@ -101,6 +101,19 @@ def exercise_private_settings(tmp_path, monkeypatch, *, connect=None):
     h.save()
     original = h.app.views.workflow_settings
 
+    def rotate_binding(*args, **kwargs):
+        layout = original(*args, **kwargs)
+        h.config["owner_settings_authority_file"] = "replaced-authority.json"
+        h.save()
+        return layout
+
+    monkeypatch.setattr(h.app.views, "workflow_settings", rotate_binding)
+    click(h, publish(h, monkeypatch, OTHER), "ot_app_settings", OTHER)
+    assert receipt["revision"] not in text(h, list(h.slack.screens)[-1])
+    assert "Training policy" not in open_settings(OTHER)
+    h.config["owner_settings_authority_file"] = setup.authority.name
+    h.save()
+
     def revoke(*args, **kwargs):
         layout = original(*args, **kwargs)
         save(setup.authority, {**authority, "revoked": True})

@@ -16,9 +16,7 @@ from test_slack_adapter import ACTOR, CHANNEL
 Json = dict[str, Any]
 
 
-def test_pinned_official_slack_client_serializes_only_ephemeral_charts(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def pinned_slack_sdk(monkeypatch):
     wheel_path = os.environ.get("OPENTOUR_TEST_SLACK_SDK_WHEEL")
     if wheel_path:
         wheel = Path(wheel_path)
@@ -29,6 +27,13 @@ def test_pinned_official_slack_client_serializes_only_ephemeral_charts(
         monkeypatch.syspath_prepend(str(wheel))
     sdk = importlib.import_module("slack_sdk")
     assert importlib.import_module("slack_sdk.version").__version__ == "3.47.0"
+    return sdk
+
+
+def test_pinned_official_slack_client_serializes_only_ephemeral_charts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sdk = pinned_slack_sdk(monkeypatch)
     h, _, _, _ = setup_workflow(tmp_path, "rule", release=True)
     web = sdk.WebClient(token="generated-test-token", retry_handlers=[])
     messages = []
@@ -67,8 +72,7 @@ def test_pinned_official_slack_client_serializes_only_ephemeral_charts(
 def test_signed_settings_readback_through_offline_slack_sdk(tmp_path, monkeypatch):
     from test_owner_settings_home import exercise_private_settings
 
-    sdk = importlib.import_module("slack_sdk")
-    assert importlib.import_module("slack_sdk.version").__version__ == "3.47.0"
+    sdk = pinned_slack_sdk(monkeypatch)
     published = []
 
     def connect(h):
@@ -93,4 +97,4 @@ def test_signed_settings_readback_through_offline_slack_sdk(tmp_path, monkeypatc
         h.app.web = web
 
     exercise_private_settings(tmp_path, monkeypatch, connect=connect)
-    assert len(published) == 5
+    assert len(published) == 7
