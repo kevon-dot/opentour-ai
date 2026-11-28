@@ -1,12 +1,21 @@
 """Generated private Home and slash journeys for result-scoped workplace questions."""
 
+import json
+from dataclasses import replace
+from unittest.mock import Mock
+
 import pytest
+from opentour_cell.pilot.intake_admission import AuthorizedSource, DurableIntake
+from opentour_cell.pilot.intake_mcp import IntakePrincipal
+from opentour_cell.pilot.operating_point import digest
 from opentour_cell.pilot.source_intake import check_current_intake
+from opentour_cell.pilot.workflow_benchmarks import BenchmarkIntake, MaterializedBenchmark
 from test_app_home import click, publish
 from test_managed_slack import setup_workflow
 from test_reviewer_workflow import buttons, screen, supplied, text
 from test_slack_adapter import ACTOR, Harness
 from test_status_questions import counts, inspect
+from test_workflow_benchmarks import HISTORY
 
 
 @pytest.mark.parametrize("surface", ["home", "slash"])
@@ -170,8 +179,6 @@ def test_typed_query_holds_are_private_and_read_only(
 
 @pytest.mark.parametrize("surface", ["home", "slash"])
 def test_chart_selection_rechecks_frozen_receipt_and_named_grant(tmp_path, monkeypatch, surface):
-    from opentour_cell.pilot.workflow_benchmarks import BenchmarkScope, WorkflowBenchmarks
-
     h, plan, run, outcome = setup_workflow(tmp_path, "model")
     assert outcome == "model_candidate"
     cfg = h.app.settings()
@@ -179,14 +186,33 @@ def test_chart_selection_rechecks_frozen_receipt_and_named_grant(tmp_path, monke
     intake = check_current_intake(
         cfg.directory, cfg.organization, h.store.engagement_id, plan["intake_revision"]
     )
-    expected = BenchmarkScope(cfg.organization, h.store.engagement_id, intake["workflow"])
-    receipt = ["generated-frozen-receipt"]
-
-    def match(self, scope, version, revision):
-        assert (scope, version, revision) == (expected, 2, target.audit["run_revision"])
-        return receipt[0]
-
-    monkeypatch.setattr(WorkflowBenchmarks, "match_scored_comparison", match)
+    principal = IntakePrincipal(cfg.organization, "generated-intake", "intake")
+    authority = Mock()
+    authority.guard.side_effect = lambda actor: h.store.engagement_guard(read_only=True)
+    authority.historical.return_value = AuthorizedSource(
+        intake["workflow"], h.store.engagement_id, "evaluation", HISTORY.pair_ref, "grant-v1"
+    )
+    benchmarks = BenchmarkIntake(DurableIntake(cfg.directory, authority))
+    benchmarks.submit_intake(principal, HISTORY)
+    second = replace(HISTORY, source_revision="trace-v2", idempotency_key="history-v2")
+    admitted = benchmarks.submit_intake(principal, second)
+    comparison_dir = cfg.directory / "managed-outputs" / run
+    frozen_result = digest(json.loads((comparison_dir / "comparison.json").read_bytes()))
+    frozen_plan = json.loads((comparison_dir / "plan.json").read_bytes())["revision"]
+    assert frozen_result == target.audit["run_revision"]
+    # The generated producer publishes the actual managed fixture's result through
+    # the durable benchmark API. The Slack query performs the normal real join.
+    producer = Mock()
+    producer.materialize.return_value = MaterializedBenchmark(
+        "scored",
+        "protected-plan-" + frozen_plan,
+        frozen_plan,
+        second.source_revision,
+        "protected-result-" + frozen_result,
+        frozen_result,
+    )
+    assert benchmarks.materialize(principal, admitted.run_ref, producer)
+    assert benchmarks.get_run(principal, admitted.run_ref).benchmark.version == 2
     before = counts(h)
     question = "Graph baseline versus rule on v2"
 
@@ -213,12 +239,16 @@ def test_chart_selection_rechecks_frozen_receipt_and_named_grant(tmp_path, monke
 
     view = ask()
     pin = buttons(screen(h, view))["ot_result_open"]
-    receipt[0] = "generated-replacement"
+    grant = next(cfg.directory.glob("slack-review-*.json"))
+    backup = grant.with_suffix(".generated-backup")
+    grant.rename(backup)
     h.action(view, "ot_result_open", pin)
     assert screen(h, view).get("callback_id") != "ot_arm_chart"
+    backup.rename(grant)
     view = ask()
     pin = buttons(screen(h, view))["ot_result_open"]
-    next(cfg.directory.glob("slack-review-*.json")).unlink()
+    third = replace(HISTORY, source_revision="trace-v3", idempotency_key="history-v3")
+    benchmarks.submit_intake(principal, third)
     h.action(view, "ot_result_open", pin)
     assert screen(h, view).get("callback_id") != "ot_arm_chart"
     assert counts(h) == before
