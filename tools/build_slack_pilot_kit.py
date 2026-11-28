@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import hashlib
 import json
 import os
+import re
 import runpy
 import subprocess
 import sys
@@ -16,8 +18,18 @@ ROOT = Path(__file__).resolve().parents[1]
 BUILDER = "tools/build_slack_pilot_kit.py"
 ARCHIVE_HELPER = "tools/build_pilot_kit.py"
 CELL = "services/cell-runtime"
+JOURNAL = "packages/authority-journal"
 VERSION = "1.0.0-rc.4"
 PYTHON = (3, 12, 16)
+PLATFORM_VERIFIER = "opentour_cell/pilot/signed_records.py"
+PLATFORM_ROOT_PIN = "trust/pilot-registry-root.json"
+JOURNAL_MODULES = (
+    "opentour_journal/__init__.py",
+    "opentour_journal/crypto.py",
+    "opentour_journal/models.py",
+    "opentour_journal/ports.py",
+    "opentour_journal/replay.py",
+)
 MODULES = (
     "opentour_cell/__init__.py",
     "opentour_cell/pilot/__init__.py",
@@ -46,6 +58,8 @@ MODULES = (
     "opentour_cell/pilot/handoff_readback.py",
     "opentour_cell/pilot/local_handoff_permissions.py",
     "opentour_cell/pilot/recipient_delivery.py",
+    "opentour_cell/pilot/recipient_lifecycle.py",
+    "opentour_cell/pilot/recipient_lifecycle_authority.py",
     "opentour_cell/pilot/recipient_handoff_simulator.py",
     "opentour_cell/pilot/release_authority.py",
     "opentour_cell/pilot/release_outbox.py",
@@ -60,6 +74,7 @@ MODULES = (
     "opentour_cell/pilot/operating_point.py",
     "opentour_cell/pilot/receipt_recovery.py",
     "opentour_cell/pilot/scoped_query_plan.py",
+    "opentour_cell/pilot/scoped_query_report.py",
     "opentour_cell/pilot/slack_adapter.py",
     "opentour_cell/pilot/engagement_epochs.py",
     "opentour_cell/pilot/live_authority.py",
@@ -70,6 +85,7 @@ MODULES = (
     "opentour_cell/pilot/local_decision_context.py",
     "opentour_cell/pilot/training_readiness.py",
     "opentour_cell/pilot/readiness_selection.py",
+    "opentour_cell/pilot/slack_learning.py",
     "opentour_cell/pilot/slack_views.py",
     "opentour_cell/pilot/status_questions.py",
     "opentour_cell/pilot/starter_setup.py",
@@ -94,6 +110,8 @@ MODULES = (
     "opentour_cell/pilot/map_review.py",
     "opentour_cell/pilot/map_inspection.py",
     "opentour_cell/pilot/workflow_benchmarks.py",
+    "opentour_cell/pilot/workflow_index.py",
+    "opentour_cell/pilot/workflow_index_authority.py",
     "opentour_cell/pilot/historical_benchmarks.py",
     "opentour_cell/pilot/historical_worker.py",
     "opentour_cell/pilot/slack_charts.py",
@@ -258,6 +276,39 @@ def _json(value: object) -> bytes:
     return (json.dumps(value, sort_keys=True, indent=2) + "\n").encode()
 
 
+def _approved_root_digest(verifier: bytes) -> str | None:
+    # The release builder inspects the pinned source without importing the verifier.
+    name = "APPROVED_ROOT_PIN_SHA256"
+    error = f"Platform verifier must declare one literal {name}."
+    try:
+        source = ast.parse(verifier)
+    except SyntaxError:
+        raise ValueError(error) from None
+    assignments = [
+        node
+        for node in ast.walk(source)
+        if isinstance(node, ast.Name)
+        and node.id == name
+        and isinstance(node.ctx, (ast.Store, ast.Del))
+    ]
+    if len(assignments) != 1:
+        raise ValueError(error)
+    target = assignments[0]
+    for statement in source.body:
+        if isinstance(statement, ast.AnnAssign) and statement.target is target:
+            value = statement.value
+        elif isinstance(statement, ast.Assign) and statement.targets == [target]:
+            value = statement.value
+        else:
+            continue
+        if isinstance(value, ast.Constant):
+            if value.value is None:
+                return None
+            if isinstance(value.value, str) and re.fullmatch(r"[0-9a-f]{64}", value.value):
+                return value.value
+    raise ValueError(error)
+
+
 def build(revision: str) -> bytes:
     def read(path: str) -> bytes:
         return _git("show", f"{revision}:{path}")
@@ -268,9 +319,33 @@ def build(revision: str) -> bytes:
             raise ValueError("Build from the recorded version of both packaging scripts.")
     archive = runpy.run_path(str(ROOT / ARCHIVE_HELPER))["_archive"]
     modules = {name: read(f"{CELL}/src/{name}") for name in MODULES}
+    modules.update({name: read(f"{JOURNAL}/src/{name}") for name in JOURNAL_MODULES})
+    verifier_path = f"{CELL}/src/{PLATFORM_VERIFIER}"
+    verifier_bundled = bool(_git("ls-tree", "--name-only", revision, "--", verifier_path).strip())
+    root_digest = None
+    if verifier_bundled:
+        verifier = read(verifier_path)
+        root_digest = _approved_root_digest(verifier)
+        modules[PLATFORM_VERIFIER] = verifier
     version = f"OpenTour Slack workspace kit {VERSION} ({revision})"
     modules["__main__.py"] = (f"VERSION = {version!r}\n" + ENTRY).encode()
     files = {name: read(path) for name, path in ASSETS.items()}
+    root_path = f"{CELL}/{PLATFORM_ROOT_PIN}"
+    root_entry = _git("ls-tree", revision, "--", root_path).strip()
+    if root_digest is None:
+        if root_entry:
+            raise ValueError(
+                "A public root pin requires an approved digest in the platform verifier."
+            )
+    else:
+        if not root_entry.startswith(b"100644 blob "):
+            raise ValueError(
+                "The approved public root pin must be a regular, non-executable Git file."
+            )
+        root_pin = read(root_path)
+        if hashlib.sha256(root_pin).hexdigest() != root_digest:
+            raise ValueError("The public root pin does not match the approved verifier digest.")
+        files[PLATFORM_ROOT_PIN] = root_pin
     for name in ("generated/pilot-source-trace.jsonl", "generated/pilot-source-correction.jsonl"):
         records = json.loads(files[name])
         files[name] = b"".join(
@@ -282,6 +357,8 @@ def build(revision: str) -> bytes:
             "kit_version": VERSION,
             "source_repository": "kevon-dot/opentour-ai",
             "source_commit": revision,
+            "platform_verifier_bundled": verifier_bundled,
+            "platform_root_pin_bundled": root_digest is not None,
             "python_version": "3.12.16",
             "artifact_kind": "release_candidate",
             "fixture_kind": "generated",

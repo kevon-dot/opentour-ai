@@ -23,7 +23,7 @@ from opentour_cell.pilot.intake_mcp import HistoricalPair, IntakeError
 from opentour_cell.pilot.learning_mandate import LearningMandates
 from opentour_cell.pilot.operating_point import canonical, digest
 from opentour_cell.pilot.training import LocalTrainingStore
-from opentour_cell.pilot.workflow_benchmarks import BenchmarkIntake
+from opentour_cell.pilot.workflow_benchmarks import BenchmarkIntake, BenchmarkScope
 
 EXAMPLES = Path(__file__).resolve().parents[2] / "examples"
 
@@ -40,6 +40,7 @@ def setup(
     missing_threshold=False,
     baseline_only=False,
     no_development=False,
+    evaluation_delegate="generated-worker",
 ):
     directory = tmp_path / "private"
     subprocess.run(
@@ -101,8 +102,8 @@ def setup(
         **source_scope,
         mandate_id="generated-benchmark-mandate",
         owner_id=grant["owner_id"],
-        delegate="generated-worker",
-        trainer="generated-worker",
+        delegate=evaluation_delegate,
+        trainer=evaluation_delegate,
         connectors=["generated-local"],
         fields=grant["permitted_features"],
         labels=["sale", "refund"],
@@ -194,6 +195,21 @@ def test_actual_standing_mandate_freezes_and_scores_recorded_predictions_without
     plan = json.loads((output / "plan.json").read_text())
     assert record["definition_digest"] == plan["revision"]
     assert record["result_digest"] == digest(comparison)
+    scope = BenchmarkScope(
+        actor.tenant, producer.authority.store.engagement_id, status.workflow_ref
+    )
+    assert (
+        intake.benchmarks.match_scored_comparison(scope, 1, digest(comparison))
+        == status.benchmark.benchmark_ref
+    )
+    assert intake.benchmarks.match_scored_comparison(scope, 2, digest(comparison)) is None
+    assert intake.benchmarks.match_scored_comparison(scope, 1, "0" * 64) is None
+    assert (
+        intake.benchmarks.match_scored_comparison(
+            replace(scope, workflow_ref="other-workflow"), 1, digest(comparison)
+        )
+        is None
+    )
     assert comparison["protected_rows_evaluated"] == plan["protected_count"] == 4
     assert comparison["protected_membership_digest"] == plan["protected_membership_digest"]
     assert comparison["arms"]["incumbent"]["metrics"]["incorrect_automatic"] == 2
@@ -316,3 +332,82 @@ def test_recovery_rejects_mismatched_actual_registry_without_rescoring(tmp_path,
             "UPDATE protected_comparisons SET result=? WHERE revision=?", (original, revision)
         )
     assert reopened.materialize(actor, admission.run_ref, producer)
+
+
+@pytest.mark.parametrize(
+    "same_audience", [True, False], ids=["same-audience", "separate-audiences"]
+)
+def test_historical_worker_and_separately_granted_review_join_only_exact_frozen_result(
+    tmp_path, same_audience
+):
+    from opentour_cell.pilot.managed_run import ManagedSelection, plan_revision
+    from test_reviewer_workflow import buttons, restart, screen
+    from test_slack_adapter import ACTOR, Harness
+    from test_status_questions import counts
+
+    h = Harness(tmp_path / "workspace")
+    recipient = h.config["recipient"]
+    intake, actor, request, producer, _, _ = setup(
+        tmp_path, evaluation_delegate=recipient if same_audience else "generated-worker"
+    )
+    admitted = intake.submit_intake(actor, request)
+    assert intake.materialize(actor, admitted.run_ref, producer)
+    directory = producer.directory
+    work = next((directory / "managed-outputs").glob("historical-benchmark-*"))
+    historical = json.loads((work / "comparison.json").read_bytes())
+    manifest = json.loads((work / "benchmark-manifest.json").read_bytes())
+    assert historical["audience"] == actor.actor
+    h.path = directory / "slack-config.json"
+    h.store = producer.authority.store
+    h.config.update(directory=str(directory), organization=actor.tenant)
+    h.config["users"][ACTOR]["datasets"] = ["generated-repair"]
+    h.save()
+    restart(h)
+    question = "Graph baseline versus rule on v1"
+    before = counts(h)
+    # Historical scoring alone grants neither discovery nor Slack disclosure.
+    assert screen(h, h.launch(prompt=question))["callback_id"] == "ot_query_hold"
+    manifest.update(
+        audience=recipient,
+        slack_review={
+            "team": h.config["team"],
+            "channel": h.config["channel"],
+            "audience": recipient,
+            "expires_at": int(time.time()) + 420,
+            "owner_attestation": "att-abcdef0123456789",
+            "aggregate": True,
+        },
+    )
+    path = directory / "review-managed.json"
+    write(path, manifest)
+    repair_workflow.grant_slack_review(directory, actor.tenant, manifest)
+    queue = ManagedSelection(directory, actor.tenant, path, directory / "review-queue-grant.json")
+    revision = plan_revision(manifest)
+    queue.authorize(
+        revision,
+        "att-abcddcbaabcddcba",
+        int(time.time()) + 400,
+        None,
+        repair_workflow.inspect_managed,
+    )
+    started = queue.start(revision, "generated-rule-review")
+    state = queue.once(repair_workflow.execute_managed)["state"]
+    view = h.launch(prompt=question)
+    if same_audience:
+        assert state == "ready"
+        reviewed = json.loads(
+            (directory / "managed-outputs" / started["run_id"] / "comparison.json").read_bytes()
+        )
+        assert digest(reviewed) == digest(historical)
+        selected = buttons(screen(h, view))["ot_result_open"]
+        h.action(view, "ot_result_open", selected)
+        assert screen(h, view)["callback_id"] == "ot_arm_chart"
+        view = h.launch(prompt=question)
+        selected = buttons(screen(h, view))["ot_result_open"]
+        (directory / f"slack-review-{revision}.json").unlink()
+        h.action(view, "ot_result_open", selected)
+        assert screen(h, view).get("callback_id") != "ot_arm_chart"
+    else:
+        assert state == "held"
+        assert screen(h, view)["callback_id"] == "ot_query_hold"
+    assert counts(h) == before

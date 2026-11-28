@@ -7,7 +7,7 @@ import os
 import subprocess
 import tempfile
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import AbstractContextManager, contextmanager
 from pathlib import Path
 from zipfile import BadZipFile
@@ -27,6 +27,32 @@ from opentour_cell.pilot.release_outbox import (
 
 SCHEMA = "opentour.pilot.recipient-delivery.v1"
 MAX_RECEIPT = 4096
+
+
+def delivery_receipt_binding(
+    *,
+    release_ref: str,
+    tenant: str,
+    engagement: str,
+    destination_ref: str,
+    artifact_sha256: str,
+    package_sha256: str,
+) -> bundle.Json:
+    """Return the immutable contents common to a delivery and its later readbacks."""
+    return {
+        "schema_version": SCHEMA,
+        "release_ref": release_ref,
+        "tenant": tenant,
+        "engagement": engagement,
+        "destination_ref": destination_ref,
+        "artifact_sha256": artifact_sha256,
+        "package_sha256": package_sha256,
+    }
+
+
+def delivery_receipt_reference(body: Mapping[str, object]) -> str:
+    """Name a delivery from its exact contents, including its first durable receive time."""
+    return "received-" + digest(dict(body))[:48]
 
 
 def _receiver_ref(entitlement: bundle.Json, owner_key_sha256: str) -> str:
@@ -89,15 +115,14 @@ class LocalRecipientDelivery:
 
     @staticmethod
     def _binding(release: ApprovedRelease, claim: bundle.Json) -> bundle.Json:
-        return {
-            "schema_version": SCHEMA,
-            "release_ref": release.reference,
-            "tenant": release.tenant,
-            "engagement": release.engagement,
-            "destination_ref": release.destination_ref,
-            "artifact_sha256": release.artifact_sha256,
-            "package_sha256": claim["package_sha256"],
-        }
+        return delivery_receipt_binding(
+            release_ref=release.reference,
+            tenant=release.tenant,
+            engagement=release.engagement,
+            destination_ref=release.destination_ref,
+            artifact_sha256=release.artifact_sha256,
+            package_sha256=claim["package_sha256"],
+        )
 
     @staticmethod
     def _verify_package(
@@ -157,7 +182,7 @@ class LocalRecipientDelivery:
             "recipient_delivery_receipt_mismatch",
         )
         body["received_at"] = when
-        expected = body | {"receipt_ref": "received-" + digest(body)[:48]}
+        expected = body | {"receipt_ref": delivery_receipt_reference(body)}
         bundle._require(receipt == expected, "recipient_delivery_receipt_mismatch")
         certificate = self._verify_package(
             bundle._read(slot / "artifact.zip", bundle.MAX_ARCHIVE), release, grant, claim
@@ -190,7 +215,7 @@ class LocalRecipientDelivery:
                 staged_path = Path(staged)
                 bundle._install(staged_path / "artifact.zip", offered_bytes)
                 body = self._binding(release, claim) | {"received_at": self.clock()}
-                receipt = body | {"receipt_ref": "received-" + digest(body)[:48]}
+                receipt = body | {"receipt_ref": delivery_receipt_reference(body)}
                 signature = self._sign_receipt(receipt, grant, certificate)
                 bundle._install(
                     staged_path / "receipt.json",
