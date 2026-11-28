@@ -5120,6 +5120,7 @@ def main(argv: list[str] | None = None) -> int:
         socket_sdk = importlib.import_module("slack_sdk.socket_mode")
         response = importlib.import_module("slack_sdk.socket_mode.response").SocketModeResponse
         from opentour_cell.pilot import slack_views
+        from opentour_cell.pilot.recipient_lifecycle_authority import open_lifecycle_authority
 
         bot = os.environ.get("SLACK_BOT_TOKEN", "")
         _check(bot.startswith("xoxb-"))
@@ -5132,6 +5133,11 @@ def main(argv: list[str] | None = None) -> int:
             web,
             LocalTrainingStore(cfg.directory / "training.sqlite3", cfg.organization),
             slack_views,
+            lifecycle_authority=(
+                None
+                if args.flush_approvals or args.post_launcher
+                else open_lifecycle_authority(cfg.directory)
+            ),
         )
         if args.flush_approvals:
             from opentour_cell.pilot.approval_inbox import delivery_cycle

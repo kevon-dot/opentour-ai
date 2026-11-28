@@ -185,3 +185,47 @@ def test_recipient_replay_and_restored_target_through_private_home(generated_tar
     assert counts(h) == before
     assert target_cli(sample.config, "inspect") == restored
     assert len(list(sample.receipt_path.parent.parent.glob("delivery-*/artifact.zip"))) == 1
+
+
+def test_socket_mode_worker_opens_its_installed_lifecycle_authority_once(tmp_path, monkeypatch):
+    import sys
+    from types import SimpleNamespace
+
+    from opentour_cell.pilot import recipient_lifecycle_authority, slack_adapter
+    from test_slack_adapter import Harness
+
+    h = Harness(tmp_path)
+    expected = GeneratedAuthority(None)
+    opened = []
+
+    def open_authority(directory):
+        opened.append(directory)
+        return expected
+
+    def stop_before_slack_request(workbench, cfg):
+        assert cfg.directory == h.path.parent
+        assert workbench.lifecycle_authority is expected
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(recipient_lifecycle_authority, "open_lifecycle_authority", open_authority)
+    monkeypatch.setattr(slack_adapter.Workbench, "private_channel", stop_before_slack_request)
+    monkeypatch.setenv("SLACK_BOT_TOKEN", "xoxb-generated-offline")
+    monkeypatch.setenv("SLACK_APP_TOKEN", "xapp-generated-offline")
+    monkeypatch.setitem(
+        sys.modules,
+        "slack_sdk",
+        SimpleNamespace(
+            WebClient=lambda **kwargs: SimpleNamespace(
+                auth_test=lambda: {"team_id": h.config["team"], "bot_id": "generated-bot"}
+            )
+        ),
+    )
+    monkeypatch.setitem(sys.modules, "slack_sdk.socket_mode", SimpleNamespace())
+    monkeypatch.setitem(
+        sys.modules, "slack_sdk.socket_mode.response", SimpleNamespace(SocketModeResponse=object)
+    )
+    assert slack_adapter.main([str(h.path), "--check-config"]) == 0
+    assert opened == []
+    assert slack_adapter.main([str(h.path)]) == 0
+    assert opened == [h.path.parent]
+    assert not h.slack.post
