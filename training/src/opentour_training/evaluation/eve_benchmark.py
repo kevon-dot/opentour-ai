@@ -3,17 +3,47 @@
 Everything here is deterministic arithmetic over supplied records. A result from this
 module is only as strong as its ``evidence_tier``: generated fixtures prove software
 behaviour, never real EVE capacity, provider authority or Pi School outcomes.
+
+Disposition provenance. ``record_disposition`` re-derives the scorecard digest from its body
+and requires a provenance seal that only ``score_heldout`` and ``assess_development`` stamp,
+so a ``Scorecard`` or ``DevelopmentFinding`` built by hand, or edited after scoring, is
+refused even when its digest is self-consistent. The seal is an HMAC under a key generated
+per process and never persisted. It is a code-path marker, NOT a trust root or a signature:
+any code in the same process can forge it (``_seal`` and ``_PROVENANCE_KEY`` are importable),
+and ``score_heldout`` is public, so anyone holding the frozen inputs can produce a sealed
+scorecard. It stops accidental or hand-assembled records, not an in-process adversary. It does
+not survive serialization: a scorecard read back from JSON is re-admitted only by
+``reload_scorecard``, which re-scores it from its frozen inputs and requires the same digest.
+A long-term signing key and signed custody belong to OPE-566 and are not invented here.
+
+Owner. A manifest may name the owner who may record the disposition (``named_owner_id``),
+bound by the manifest digest before any output exists. The recorder must supply that same id.
+Nothing authenticates the person behind an id, so every record reads
+``named_owner_gate_satisfied: false`` and ``owner_identity_authenticated: false``; a matching
+named id is labelled ``named_not_authenticated`` and an id with no named owner is labelled
+``caller_asserted``.
+
+One disposition per scorecard. ``DispositionRegistry`` is a write-once store keyed by the
+scorecard digest. Its root is a private worker directory pinned by realpath and
+(st_dev, st_ino), and only a record it accepted is ``registration: worker_registry``. Copies
+written elsewhere are just copies. The claim is one disposition per scorecard per registry:
+the training package has no installed worker root of its own, so whoever configures the
+worker (``OPENTOUR_EVE_DISPOSITION_REGISTRY`` for the CLI) chooses the registry, and someone
+able to configure a second registry can record a second disposition there.
 """
 
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import os
 import re
+import secrets
+import stat
 import tempfile
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Literal
 
@@ -97,6 +127,30 @@ def _text(value: object, code: str) -> str:
     _need(type(value) is str and bool(value) and len(value) <= 4096, code)
     assert isinstance(value, str)
     return value
+
+
+# The repository's identifier shape (``opentour_cell.pilot.simple_repair.identifier``; the
+# training project cannot import cell-runtime). ASCII only, so blanks, whitespace, newlines,
+# control and format characters (ZWSP) and non-ASCII look-alikes are refused.
+OWNER_ID_SHAPE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}")
+
+
+def _owner_ident(value: object, code: str) -> str:
+    _need(type(value) is str and OWNER_ID_SHAPE.fullmatch(str(value)) is not None, code)
+    assert isinstance(value, str)
+    return value
+
+
+# Process-local provenance key: generated at import, never written anywhere. See module doc.
+_PROVENANCE_KEY = secrets.token_bytes(32)
+
+
+def _seal(kind: str, value: object) -> str:
+    return hmac.new(_PROVENANCE_KEY, canonical([kind, value]), hashlib.sha256).hexdigest()
+
+
+def _sealed(kind: str, value: object, seal: object) -> bool:
+    return type(seal) is str and hmac.compare_digest(seal, _seal(kind, value))
 
 
 # ---------------------------------------------------------------- records
@@ -216,9 +270,16 @@ def freeze_manifest(
     min_recurring_families: int,
     adjudicator_kind: Literal["generated_fixture", "pi_school_domain_reviewer"],
     ground_truth_audit_receipt_ref: str | None = None,
+    named_owner_id: str | None = None,
 ) -> FrozenManifest:
-    """Freeze cases, families, rubric, scorer, arms and thresholds BEFORE any output exists."""
+    """Freeze cases, families, rubric, scorer, arms and thresholds BEFORE any output exists.
+
+    ``named_owner_id`` binds the owner who may record the disposition into the freeze. It is
+    only added to the body when given, so manifests that name no owner keep their digests.
+    """
     _text(benchmark_id, "benchmark_id_invalid")
+    if named_owner_id is not None:
+        _owner_ident(named_owner_id, "named_owner_invalid")
     # This module cannot verify a provider or customer receipt, so it only ever freezes
     # generated-tier evidence. Higher tiers need a verifier owned by the provider gate.
     _need(evidence_tier == "generated", "evidence_tier_unverifiable_here", str(evidence_tier))
@@ -300,6 +361,8 @@ def freeze_manifest(
         },
         "ground_truth_audit_receipt_ref": ground_truth_audit_receipt_ref,
     }
+    if named_owner_id is not None:
+        body["named_owner"] = {"owner_id": named_owner_id}
     return FrozenManifest(body=body, manifest_digest=digest(body))
 
 
@@ -502,6 +565,7 @@ class DevelopmentFinding:
     regressions: int
     residual_error_families: tuple[str, ...]
     material_recurring_residual: bool
+    seal: str = field(default="", repr=False)  # set only by assess_development; see module doc
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -553,7 +617,7 @@ def assess_development(
     material = (
         len(residual) >= th["materiality_min_errors"] and len(fams) >= th["min_recurring_families"]
     )
-    return DevelopmentFinding(
+    finding = DevelopmentFinding(
         manifest.manifest_digest,
         sum(1 for c in scorable if b[c] == "serious_error"),
         len(residual),
@@ -563,6 +627,7 @@ def assess_development(
         fams,
         material,
     )
+    return replace(finding, seal=_seal("development_finding", finding.to_json()))
 
 
 # ---------------------------------------------------------------- held-out scorecard
@@ -572,6 +637,7 @@ def assess_development(
 class Scorecard:
     body: Mapping[str, Any]
     scorecard_digest: str
+    seal: str = field(default="", repr=False)  # set only by score_heldout; see module doc
 
     def to_json(self) -> dict[str, Any]:
         return {"body": dict(self.body), "scorecard_digest": self.scorecard_digest}
@@ -732,10 +798,94 @@ def score_heldout(
         "unsatisfied_external_gates": gates,
         "claim_scope": "implementation_only" if tier == "generated" else tier,
     }
-    return Scorecard(body=body, scorecard_digest=digest(body))
+    if "named_owner" in manifest.body:
+        body["named_owner"] = dict(manifest.body["named_owner"])
+    card_digest = digest(body)
+    return Scorecard(body=body, scorecard_digest=card_digest, seal=_seal("scorecard", card_digest))
+
+
+@dataclass(frozen=True)
+class HeldoutInputs:
+    """The frozen inputs a held-out scorecard is computed from (protected: never serialized)."""
+
+    heldout_cases: Sequence[EveCase]
+    heldout_key: Sequence[ReferenceJudgment]
+    fit_rows: Sequence[FitRow]
+    prompt_texts: Sequence[str]
+    runs: Sequence[ArmRun]
+
+
+def reload_scorecard(
+    raw: object, manifest: FrozenManifest, inputs: HeldoutInputs | None
+) -> Scorecard:
+    """Re-admit a scorecard read back from JSON, so it can be inspected now and disposed later.
+
+    The scorecard JSON deliberately carries no cases, answer key or arm outputs (the key is
+    protected and case ids are redacted), so it cannot be re-verified from itself: without the
+    frozen inputs the reload is refused with ``scorecard_inputs_unavailable``. With them, the
+    manifest is re-verified, the scorecard is re-scored deterministically by ``score_heldout``
+    and accepted only when the recomputed digest equals the reloaded one
+    (``scorecard_not_reproduced`` otherwise). The returned scorecard is the recomputed one.
+    """
+    _need(
+        type(raw) is dict
+        and set(raw) == {"body", "scorecard_digest"}
+        and type(raw["body"]) is dict
+        and type(raw["scorecard_digest"]) is str
+        and DIGEST_SHAPE.match(raw["scorecard_digest"]) is not None,
+        "scorecard_json_invalid",
+    )
+    assert isinstance(raw, dict)
+    claimed: str = raw["scorecard_digest"]
+    _need(digest(raw["body"]) == claimed, "scorecard_digest_mismatch")
+    verify_manifest(manifest)
+    _need(
+        raw["body"].get("manifest_digest") == manifest.manifest_digest,
+        "scorecard_not_bound_to_manifest",
+    )
+    _need(inputs is not None, "scorecard_inputs_unavailable")
+    assert inputs is not None
+    isolation = verify_isolation(
+        manifest,
+        fit_rows=inputs.fit_rows,
+        prompt_texts=inputs.prompt_texts,
+        heldout_key=inputs.heldout_key,
+    )
+    card = score_heldout(
+        manifest,
+        heldout_cases=inputs.heldout_cases,
+        heldout_key=inputs.heldout_key,
+        fit_rows=inputs.fit_rows,
+        prompt_texts=inputs.prompt_texts,
+        isolation=isolation,
+        runs=inputs.runs,
+    )
+    _need(card.scorecard_digest == claimed, "scorecard_not_reproduced")
+    return card
 
 
 # ---------------------------------------------------------------- disposition
+
+
+def _genuine_finding(finding: object) -> bool:
+    """Exact type, exact field types, and the seal ``assess_development`` stamped."""
+    if type(finding) is not DevelopmentFinding:
+        return False
+    counts = (
+        finding.baseline_serious,
+        finding.repair_serious,
+        finding.verified,
+        finding.fixes,
+        finding.regressions,
+    )
+    return (
+        type(finding.manifest_digest) is str
+        and all(type(n) is int for n in counts)
+        and type(finding.material_recurring_residual) is bool
+        and type(finding.residual_error_families) is tuple
+        and all(type(f) is str for f in finding.residual_error_families)
+        and _sealed("development_finding", finding.to_json(), finding.seal)
+    )
 
 
 def record_disposition(
@@ -743,14 +893,61 @@ def record_disposition(
     finding: DevelopmentFinding | None,
     *,
     disposition: str,
-    owner_id: str,
     recorded_at: str,
+    owner_id: str | None = None,
 ) -> dict[str, Any]:
-    """The named owner records exactly one disposition, bound to the scorecard digest."""
+    """Validate and build an UNREGISTERED disposition draft for a ``score_heldout`` scorecard.
+
+    The scorecard digest is re-derived from one canonical snapshot of its body and its
+    provenance seal checked; a supplied finding must carry ``assess_development``'s seal. The
+    recorder must supply ``owner_id``; when the frozen manifest names an owner it must be that
+    exact id. The returned record is ``registration: unregistered_draft``: it is not a
+    disposition. Only ``DispositionRegistry.record`` makes one, at most one per scorecard.
+    """
+    return _finish(
+        _disposition_fields(
+            scorecard, finding, disposition=disposition, recorded_at=recorded_at, owner_id=owner_id
+        ),
+        "unregistered_draft",
+    )
+
+
+def _finish(fields: Mapping[str, Any], registration: str) -> dict[str, Any]:
+    record = {**fields, "registration": registration}
+    return {**record, "record_digest": digest(record)}
+
+
+def _disposition_fields(
+    scorecard: Scorecard,
+    finding: DevelopmentFinding | None,
+    *,
+    disposition: str,
+    recorded_at: str,
+    owner_id: str | None,
+) -> dict[str, Any]:
+    _need(
+        type(scorecard) is Scorecard and type(scorecard.scorecard_digest) is str,
+        "scorecard_not_from_scoring",
+    )
+    # One canonical snapshot: the digest is checked over it and every later read uses it, so a
+    # body Mapping that answers differently on a second read cannot change what is recorded.
+    body: dict[str, Any] = json.loads(canonical(dict(scorecard.body)))
+    _need(digest(body) == scorecard.scorecard_digest, "scorecard_digest_mismatch")
+    _need(
+        _sealed("scorecard", scorecard.scorecard_digest, scorecard.seal),
+        "scorecard_not_from_scoring",
+    )
     _need(disposition in DISPOSITIONS, "disposition_unknown", disposition)
-    _text(owner_id, "owner_missing")
     _text(recorded_at, "recorded_at_missing")
-    claim = scorecard.body["improvement_claim"]
+    _need(owner_id is not None, "owner_missing")
+    owner = _owner_ident(owner_id, "owner_invalid")
+    named = body.get("named_owner")
+    if named is not None:
+        _need(owner == named["owner_id"], "owner_not_the_named_owner")
+        binding = "named_not_authenticated"
+    else:
+        binding = "caller_asserted"
+    claim = body["improvement_claim"]
     if disposition == "adopt_test_simple_fix":
         _need(
             claim == "improvement_supported_by_interval",
@@ -761,20 +958,200 @@ def record_disposition(
         _need(finding is not None, "tuning_requires_development_finding")
         assert finding is not None
         _need(
-            finding.manifest_digest == scorecard.body["manifest_digest"],
+            finding.manifest_digest == body["manifest_digest"],
             "finding_not_bound_to_manifest",
         )
         _need(finding.material_recurring_residual, "tuning_requires_material_recurring_residual")
-    record = {
+    if finding is not None:  # any supplied finding must be genuine, used or not
+        _need(_genuine_finding(finding), "finding_not_from_assessment")
+        _need(finding.manifest_digest == body["manifest_digest"], "finding_not_bound_to_manifest")
+    return {
         "schema": DISPOSITION_SCHEMA,
         "scorecard_digest": scorecard.scorecard_digest,
-        "manifest_digest": scorecard.body["manifest_digest"],
+        "manifest_digest": body["manifest_digest"],
         "disposition": disposition,
-        "owner_id": owner_id,
+        "owner_id": owner,
+        "owner_binding": binding,
+        # No identity provider authenticates the owner yet (signed custody is OPE-566), so the
+        # named-owner gate cannot read satisfied, whatever id was supplied.
+        "named_owner_gate_satisfied": False,
+        "owner_identity_authenticated": False,
         "recorded_at": recorded_at,
         "fit_authorized": False,
     }
-    return {**record, "record_digest": digest(record)}
+
+
+REGISTRY_ENV = "OPENTOUR_EVE_DISPOSITION_REGISTRY"
+_REGISTRY_RECORD_MAX = 65536
+
+
+class DispositionRegistry:
+    """Write-once disposition registry keyed by scorecard digest, in one pinned worker root.
+
+    The root follows the cell-runtime worker-directory convention: absolute, already existing,
+    ``resolve(strict=True) == root`` (no symlinked component), a real directory owned by this
+    uid with no group or other permission bits. Its identity (realpath, st_dev, st_ino) is
+    pinned at open and re-checked through a held directory descriptor on every read and write,
+    so a root that was renamed, replaced or re-pointed is refused (``registry_root_moved``).
+    Entries are created by ``os.link`` inside the pinned directory, so two racing writers
+    cannot both win. The registry, not any copy, decides. See the module doc for its limits.
+    """
+
+    def __init__(self, root: Path) -> None:
+        _need(isinstance(root, Path) and root.is_absolute(), "registry_root_invalid")
+        try:
+            real = root.resolve(strict=True)
+            info = os.lstat(root)
+        except OSError:
+            raise BenchmarkError("registry_root_invalid") from None
+        _need(real == root and stat.S_ISDIR(info.st_mode), "registry_root_invalid")
+        _need(info.st_uid == os.getuid() and not info.st_mode & 0o077, "registry_root_not_private")
+        self.root = root
+        self._pin = (str(real), info.st_dev, info.st_ino)
+
+    @classmethod
+    def from_environment(cls, environ: Mapping[str, str] | None = None) -> DispositionRegistry:
+        """The worker's configured registry; refused when the worker configured none."""
+        value = (os.environ if environ is None else environ).get(REGISTRY_ENV, "")
+        _need(bool(value), "disposition_registry_unconfigured", REGISTRY_ENV)
+        return cls(Path(value))
+
+    def _open(self) -> int:
+        try:
+            fd = os.open(self.root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        except OSError:
+            raise BenchmarkError("registry_root_moved") from None
+        try:
+            info = os.fstat(fd)
+            try:
+                real = str(self.root.resolve(strict=True))
+            except OSError:
+                real = ""
+            _need((real, info.st_dev, info.st_ino) == self._pin, "registry_root_moved")
+            _need(
+                info.st_uid == os.getuid() and not info.st_mode & 0o077,
+                "registry_root_not_private",
+            )
+        except BaseException:
+            os.close(fd)
+            raise
+        return fd
+
+    @staticmethod
+    def _name(scorecard_digest: object) -> str:
+        _need(
+            type(scorecard_digest) is str and DIGEST_SHAPE.match(scorecard_digest) is not None,
+            "scorecard_digest_mismatch",
+        )
+        assert isinstance(scorecard_digest, str)
+        return f"disposition-{scorecard_digest.removeprefix('sha256:')}.json"
+
+    @staticmethod
+    def _read(fd: int, name: str) -> bytes | None:
+        try:
+            entry = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=fd)
+        except FileNotFoundError:
+            return None
+        except OSError:
+            raise BenchmarkError("registry_entry_invalid", name) from None
+        with os.fdopen(entry, "rb") as fh:
+            info = os.fstat(fh.fileno())
+            _need(
+                stat.S_ISREG(info.st_mode) and info.st_size <= _REGISTRY_RECORD_MAX,
+                "registry_entry_invalid",
+                name,
+            )
+            return fh.read(_REGISTRY_RECORD_MAX + 1)
+
+    def lookup(self, scorecard_digest: str) -> dict[str, Any] | None:
+        """The registered disposition for a scorecard digest, or ``None`` if there is none."""
+        name = self._name(scorecard_digest)
+        fd = self._open()
+        try:
+            raw = self._read(fd, name)
+        finally:
+            os.close(fd)
+        if raw is None:
+            return None
+        record: dict[str, Any] = json.loads(raw)
+        return record
+
+    def record(
+        self,
+        scorecard: Scorecard,
+        finding: DevelopmentFinding | None,
+        *,
+        disposition: str,
+        recorded_at: str,
+        owner_id: str | None = None,
+    ) -> tuple[dict[str, Any], bool]:
+        """Register the one disposition for this scorecard; ``(record, created)``.
+
+        An identical retry returns the stored record with ``created=False``. Any different
+        record for an already-dispositioned scorecard digest, including a later
+        ``recorded_at``, is refused with ``disposition_already_recorded``.
+        """
+        record = _finish(
+            _disposition_fields(
+                scorecard,
+                finding,
+                disposition=disposition,
+                recorded_at=recorded_at,
+                owner_id=owner_id,
+            ),
+            "worker_registry",
+        )
+        card = scorecard.scorecard_digest
+        name = self._name(card)
+        data = canonical(record)
+        fd = self._open()
+        try:
+            existing = self._read(fd, name)
+            if existing is None:
+                tmp = f".tmp-{secrets.token_hex(16)}"
+                out = os.open(
+                    tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=fd
+                )
+                try:
+                    with os.fdopen(out, "wb") as fh:
+                        fh.write(data)
+                        fh.flush()
+                        os.fsync(fh.fileno())
+                    os.link(tmp, name, src_dir_fd=fd, dst_dir_fd=fd)  # fails if another won
+                    os.fsync(fd)
+                    return record, True
+                except FileExistsError:
+                    existing = self._read(fd, name)
+                finally:
+                    os.unlink(tmp, dir_fd=fd)
+        finally:
+            os.close(fd)
+        _need(existing == data, "disposition_already_recorded", card)
+        return record, False
+
+
+def record_one_disposition(
+    registry: DispositionRegistry,
+    scorecard: Scorecard,
+    finding: DevelopmentFinding | None,
+    *,
+    disposition: str,
+    recorded_at: str,
+    owner_id: str | None = None,
+    copy_to: Path | None = None,
+) -> bool:
+    """Worker step: register the one disposition for a scorecard, then optionally copy it.
+
+    The registry decides; ``copy_to`` only receives a copy of a record the registry accepted
+    (or already holds identically), so a second ``copy_to`` cannot host a second disposition.
+    """
+    _need(type(registry) is DispositionRegistry, "disposition_registry_invalid")
+    record, created = registry.record(
+        scorecard, finding, disposition=disposition, recorded_at=recorded_at, owner_id=owner_id
+    )
+    if copy_to is not None:
+        write_once(copy_to / DispositionRegistry._name(scorecard.scorecard_digest), record)
+    return created
 
 
 # ---------------------------------------------------------------- persistence
