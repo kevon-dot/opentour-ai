@@ -34,6 +34,7 @@ from audit_fixtures import (
     commit,
     inputs_for,
 )
+from ope526_run_inventory import POPULATIONS
 from opentour_training.evaluation.benchmark_audit import audit as audit_module
 from opentour_training.evaluation.benchmark_audit import worker_store
 from opentour_training.evaluation.benchmark_audit.audit import audit
@@ -552,6 +553,64 @@ def test_a_whole_log_transplanted_into_another_store_is_refused(tmp_path: Path) 
     assert target_id != source.store_id
     with pytest.raises(worker_store.StoreError, match="audit_ledger_chain_broken"):
         target.state()
+
+
+def test_hardlinked_store_file_in_another_directory_is_refused(tmp_path: Path) -> None:
+    receipt = allowed()
+    store = issued(tmp_path, receipt)
+    other = tmp_path / "hardlinked"
+    other.mkdir()
+    os.link(store.directory / LEDGER_FILE, other / LEDGER_FILE)
+    shutil.copy2(store.directory / HEAD_FILE, other / HEAD_FILE)
+    result = check_receipt_for_release(receipt["receipt_id"], store_directory=other)
+    assert result.refusals == ("audit_store_identity_mismatch",)
+
+
+def test_forged_meta_id_is_refused(tmp_path: Path) -> None:
+    receipt = allowed()
+    victim = issued(tmp_path, receipt, name="victim")
+    forged = issued(tmp_path, receipt, name="forged")
+    db = sqlite3.connect(forged.directory / LEDGER_FILE, isolation_level=None)
+    db.execute("DROP TRIGGER meta_fixed_update")
+    db.execute("UPDATE meta SET store_id = ?", (victim.store_id,))
+    db.close()
+    assert check(receipt, forged).refusals == ("audit_store_identity_mismatch",)
+
+
+def test_residual_a_fresh_attacker_store_passes_with_only_the_holds(tmp_path: Path) -> None:
+    """Documented residual: the store vouches for itself and the caller picks the directory.
+
+    A receipt superseded in the worker's store is issued into a fresh store built with the
+    public API. Nothing is refused; only the unsigned and generated-evidence holds remain.
+    Closing this needs an expected store id from worker configuration, a signed head
+    (OPE-566/OPE-582), an external monotonic anchor and the issuing store id in a signed
+    receipt. This test pins the gap so that closing it is a deliberate, visible change.
+    """
+    store, old, successor = superseded_pair(tmp_path)
+    store.supersede("supersede:1", old["receipt_id"], successor, benchmark_id=BENCH)
+    assert check(old, store).refusals == ("audit_receipt_superseded",)
+    attacker = issued(tmp_path, old, name="attacker")
+    result = check(old, attacker)
+    assert result.refusals == ()
+    assert result.holds == GENERATED_HOLDS
+    assert result.release_permitted is False
+
+
+def test_residual_an_attacker_store_claiming_observed_leaves_exactly_the_two_holds(
+    tmp_path: Path,
+) -> None:
+    """The benchmark record's evidence kind is written by whoever writes the store."""
+    spec, build = next(p for p in POPULATIONS if p[0].name == "real_sample_standin")
+    inputs = build()
+    receipt = audit(inputs)
+    assert receipt["verdict"] == V.EVALUATION_ALLOWED.value
+    assert receipt["evidence_origin"] == "observed"
+    attacker = issued(tmp_path, receipt, records=inputs.records, evidence_kind="observed")
+    result = check(receipt, attacker)
+    assert result.refusals == ()
+    assert result.holds == UNSIGNED
+    assert result.release_permitted is False
+    assert spec.expected_verdict == V.EVALUATION_ALLOWED
 
 
 def test_resealed_forgery_is_still_held_because_the_issuer_is_unauthenticated(

@@ -5,11 +5,14 @@ opens that store itself (``worker_store.read_worker_state``); the caller supplie
 event list, no "current" bindings, and no verdict, flag or boolean about the receipt. In order:
 
 1. **Store.** The store's identity (realpath, device and inode of its directory and SQLite file)
-   matches the id pinned in it, and the event log's hash chain recomputes to the head the worker
-   stored. A copied, restored or replaced store, or a dropped, reordered or edited event, is
-   refused before any receipt is read.
-2. **Receipt.** It was issued into this store, and the store id sealed into its issuance event is
-   this store's identity now. Its ``receipt_digest`` and ``receipt_id`` recompute from the body.
+   matches the id pinned in it, and the event log's hash chain recomputes to the head stored in
+   the directory. This refuses *naive* copies and edits only: a copied directory, a store swapped
+   in under the configured path, a symlinked directory, a hardlinked SQLite file in another
+   directory, a forged meta id, and a dropped, reordered or edited event that was not re-chained
+   with the head rewritten to match.
+2. **Receipt.** It was issued into this store: the issuing store's id, recorded in the issuance
+   event (the receipt body does not carry it), must be this store's identity now. Its
+   ``receipt_digest`` and ``receipt_id`` recompute from the body.
 3. **Status.** Replayed from the verified log: it is ``current``, has no recorded successor and
    does not name one itself.
 4. **Verdict.** Exactly ``evaluation_allowed``; every other verdict is refused.
@@ -20,14 +23,28 @@ event list, no "current" bindings, and no verdict, flag or boolean about the rec
    stored, caller-asserted digest that is labelled as such (``audit_binding_caller_asserted``)
    and never reported as recomputed. Frozen, receipt-current and worker values must all agree.
 
-What it does NOT establish. The event log and its head are unsigned (verifier OPE-566, keys
-OPE-582), so receipt status rests on an unsigned, locally chained log and the receipt issuer is
-not authenticated. A receipt that passes every check is therefore still *held*
+What it does NOT establish. The caller chooses ``store_directory``; the store id is a key-free
+digest of realpath, device and inode; and the store vouches for itself. So a self-consistent
+store built or rewritten by anyone with the worker's filesystem rights passes with only the
+unsigned holds. That includes all of these:
+
+* a consistent in-place rewrite of the log and head, including truncating both to before a
+  supersession;
+* a fresh store (``create``, ``set_benchmark``, ``issue``) holding a receipt that was
+  superseded elsewhere, or pre-supersession events re-appended into a new store;
+* ``set_benchmark`` re-run with a relabelled benchmark, or with ``evidence_kind="observed"``.
+
+Closing that needs all four of the following: an expected store id from worker configuration,
+not from the caller; a signed head (OPE-566 verifier, OPE-582 keys); a monotonic anchor for the
+head outside the store; and the issuing store id inside the signed receipt. The event log and
+its head are unsigned, so receipt status rests on an unsigned, locally chained log and the
+receipt issuer is not authenticated. A receipt that passes every check is therefore still *held*
 (``audit_receipt_issuer_unauthenticated``, ``audit_ledger_unsigned``): ``release_permitted`` is
 always ``False`` in this revision. Generated evidence is held too: the receipt's
 ``evidence_origin`` is caller-asserted at audit time, so a receipt is held as
 ``generated_fixture_evidence_only`` unless both it and the worker's benchmark record say
-``observed``; a receipt that claims ``observed`` over a benchmark the worker recorded as generated
+``observed`` (the benchmark record's evidence kind is itself written by whoever writes the
+store); a receipt that claims ``observed`` over a benchmark the worker recorded as generated
 is additionally flagged ``evidence_origin_contradicts_worker_record``.
 
 There is no release worker on ``main`` that consumes this check (see the OPE-526 decision

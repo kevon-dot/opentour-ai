@@ -44,6 +44,9 @@ UNKEYED_DIGEST_FIELDS = {
     "verifier.adjudicator_digests": "sha256(canonical_json(name))[:12]",
     "sampling_frame.frame_digest": "sha256(canonical_json(sorted protected family ids)), full",
     "inputs_and_configuration.binding_digests": "first 12 hex of each unkeyed binding digest",
+    "inputs_and_configuration.preregistration_digest": (
+        "sha256 of the preregistration (includes the label-authority name), full"
+    ),
     "receipt.receipt_digest": "sha256 of the receipt body, full",
 }
 PSEUDONYMISATION = (

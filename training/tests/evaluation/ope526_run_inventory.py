@@ -358,7 +358,9 @@ def build_document(
             "audit verdict regressions over the hand-checked packs and mutations A-D",
             "rescore replay of identical inputs",
             "worker-side release check of the receipt, read from a worker store it opens itself "
-            "(refuses non-allowed, stale, superseded, copied or replaced store, broken chain)",
+            "(refuses non-allowed, stale and superseded receipts, and naive store copies or "
+            "unrechained log edits; a self-consistent store built or rewritten with the "
+            "worker's filesystem rights passes with only the unsigned holds)",
             "exposure guard fail-open fixes (PR #219, parallel lane)",
             "regeneration of this inventory",
         ],
@@ -423,19 +425,27 @@ def regenerate_like(document: dict[str, Any]) -> dict[str, Any]:
 def verify_committed(root: Path, path: Path) -> list[str]:
     """Git-backed checks of a committed inventory; needs full history (not a shallow clone).
 
-    The measured SHA must be an ancestor of HEAD and the parent of the last commit that changed
-    the file, and regenerating at HEAD must reproduce the file apart from timestamps and CPU ms.
+    Reads the blob committed at HEAD (``git show HEAD:<path>``), not the working-tree file, and
+    fails if the tracked file differs from it. The measured SHA must be an ancestor of HEAD and
+    the parent of the last commit that changed the file, and regenerating at HEAD must reproduce
+    the committed blob apart from timestamps and CPU ms.
     """
 
     def git(*args: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run(["git", *args], cwd=root, capture_output=True, text=True)
 
-    document = json.loads(path.read_text())
-    sha = document["measured_git_sha"]
+    relative = path.relative_to(root).as_posix()
     problems = []
+    if git("diff", "--quiet", "HEAD", "--", relative).returncode != 0:
+        problems.append("inventory_differs_from_committed_blob_in_working_tree")
+    blob = git("show", f"HEAD:{relative}")
+    if blob.returncode != 0:
+        return [*problems, "inventory_not_committed_at_head"]
+    document = json.loads(blob.stdout)
+    sha = document["measured_git_sha"]
     if git("merge-base", "--is-ancestor", sha, "HEAD").returncode != 0:
         problems.append("measured_sha_not_ancestor_of_head")
-    last = git("log", "-1", "--format=%H", "--", str(path.relative_to(root))).stdout.strip()
+    last = git("log", "-1", "--format=%H", "--", relative).stdout.strip()
     parent = git("rev-parse", f"{last}^").stdout.strip() if last else ""
     if parent != sha:
         problems.append("measured_sha_not_parent_of_commit_that_wrote_the_file")

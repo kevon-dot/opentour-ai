@@ -7,8 +7,10 @@ head file (``audit-ledger.head.json``).
 What the store establishes, and how:
 
 * **Identity.** The store id is the digest of the realpath, device and inode of the directory and
-  of the SQLite file. It is pinned in the store at creation and sealed into every issuance event.
-  A copied, restored or replaced store file (new inode) or a moved directory no longer matches.
+  of the SQLite file. It is pinned in the store at creation and recorded in every issuance event
+  (the receipt body does not carry it). A naively copied directory, a store swapped in under the
+  same path while the original still exists, a symlinked directory or a hardlinked SQLite file in
+  another directory no longer matches. The id is key-free and the store vouches for itself.
 * **Forward-only event log.** Every event is linked into a SHA-256 hash chain that starts from a
   genesis bound to the store id. The worker writes the chain head and event count to the head
   file on every append. Reading the store recomputes the chain and compares it with the head, so
@@ -22,12 +24,14 @@ What the store establishes, and how:
 
 What it does NOT establish. The log and the head are unsigned and live in the same directory.
 Someone with write access to both can rewrite them consistently in place (same inodes), or build a
-fresh, self-consistent store; only a signed head (verifier OPE-566, keys OPE-582) or an external
-anchor would detect that. Device and inode numbers can also be reused: if the live store is
-deleted and an older copy (log and head together) is restored in its place, the filesystem may
-hand the copy the same inodes, and that rollback is then not detected either. Binding material
-is whatever was ingested into the store: recomputing a digest from it shows the receipt matches
-the worker's copy, not that the copy matches upstream.
+fresh, self-consistent store with this class and issue any receipt into it, including one that was
+superseded elsewhere. Closing that needs all four of: an expected store id from worker
+configuration, a signed head (OPE-566, OPE-582), a monotonic anchor outside the store, and the
+issuing store id inside the signed receipt. Device and inode numbers can also be reused: if the
+live store is deleted and an older copy (log and head together) is restored in its place, the
+filesystem may hand the copy the same inodes, and that rollback is then not detected either.
+Binding material is whatever was ingested into the store: recomputing a digest from it shows the
+receipt matches the worker's copy, not that the copy matches upstream.
 """
 
 from __future__ import annotations

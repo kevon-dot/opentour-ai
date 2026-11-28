@@ -15,7 +15,13 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from ope526_run_inventory import POPULATIONS, build_document, git_measurement, write_document
+from ope526_run_inventory import (
+    POPULATIONS,
+    build_document,
+    git_measurement,
+    verify_committed,
+    write_document,
+)
 from opentour_training.evaluation.benchmark_audit.audit import audit
 from opentour_training.evaluation.benchmark_audit.model import FamilyRecord, Verdict
 from opentour_training.evaluation.benchmark_audit.run_inventory import (
@@ -356,3 +362,28 @@ def test_claim_provenance_fields_are_copied_when_the_receipt_reports_them() -> N
     assert row["claims"]["caller_asserted_dependencies"] == ["exposed_families"]
     assert row["claims"]["customer_accuracy_alert_blocked_by"] == ["evidence_origin_not_observed"]
     assert isinstance(spec, RunSpec)
+
+
+def test_verify_committed_reads_the_committed_blob_and_refuses_a_dirty_tracked_file(
+    tmp_path: Path,
+) -> None:
+    """A throwaway repository holding a freshly built inventory; its measured SHA is absent."""
+    repo = _repo(tmp_path)
+    target = repo / "fixtures" / "inventory.json"
+    target.parent.mkdir()
+    write_document(doc(), target)
+    _git(repo, "add", "fixtures/inventory.json")
+    _git(repo, "commit", "-q", "-m", "generated inventory")
+    clean = verify_committed(repo, target)
+    assert "inventory_differs_from_committed_blob_in_working_tree" not in clean
+    assert "regenerated_inventory_differs_from_committed" not in clean
+    assert "measured_sha_not_ancestor_of_head" in clean  # the measured commit is not in this repo
+    edited = json.loads(target.read_text())
+    edited["runs"][0]["verdict"] = "claim_limited_to_named_population"
+    target.write_text(json.dumps(edited))
+    dirty = verify_committed(repo, target)
+    assert "inventory_differs_from_committed_blob_in_working_tree" in dirty
+    # The comparison uses the committed blob, so the working-tree edit is not what is checked.
+    assert "regenerated_inventory_differs_from_committed" not in dirty
+    _git(repo, "commit", "-q", "-am", "hand-edited inventory")
+    assert "regenerated_inventory_differs_from_committed" in verify_committed(repo, target)
