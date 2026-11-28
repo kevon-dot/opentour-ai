@@ -40,6 +40,7 @@ MODULES = (
     "opentour_cell/pilot/intake_mcp.py",
     "opentour_cell/pilot/intake_local.py",
     "opentour_cell/pilot/intake_admission.py",
+    "opentour_cell/pilot/learning_runs.py",
     "opentour_cell/pilot/open_weight.py",
     "opentour_cell/pilot/pilot_metrics.py",
     "opentour_cell/pilot/repair_bundle.py",
@@ -119,6 +120,7 @@ ASSETS = {
     "pilot-recipient-handoff-simulator.md": f"{CELL}/docs/pilot-recipient-handoff-simulator.md",
     "pilot-release-outbox.md": f"{CELL}/docs/pilot-release-outbox.md",
     "pilot-learning-mandate.md": f"{CELL}/docs/pilot-learning-mandate.md",
+    "pilot-learning-runs.md": f"{CELL}/docs/pilot-learning-runs.md",
     "templates/pilot-learning-mandate.template.json": (
         f"{CELL}/examples/pilot-learning-mandate.template.json"
     ),
@@ -215,6 +217,7 @@ COMMANDS = {
     "repair": ("repair_workflow", "main"),
     "bundle": ("repair_bundle", "main"),
     "mcp-intake": ("intake_local", "main"),
+    "learning-runs": ("learning_runs", "main"),
     "live-reader": ("live_reader", "main"),
     "historical-worker": ("historical_worker", "main"),
     "starter-benchmark-worker": ("starter_benchmark_worker", "main"),

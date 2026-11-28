@@ -134,3 +134,15 @@ For an approved intake connection, launch a **separate** instance of health.py o
 | /v1/get_run | One run_ref | Scoped workflow, run and any existing benchmark metadata |
 
 Send application/json with Content-Length, the approved Origin, X-OpenTour-Audience and bearer credential over verified TLS. Boundaries are 8 KiB headers, 4 KiB arguments, 32 KiB result and 120 allowed calls per minute per listener. Connection, tenant, actor, grant, file paths and callback URLs never come from request arguments. A scoped failure returns an HTTP error and safe code. A held admission returns the same successful held result as stdio. Retry a lost response with the original intent. The equivalent local command is `python -I -S -B opentour-slack.pyz mcp-intake /private/tenant/selection.json`. These transports use the same private admission ledger. Live binding resolution requires the independently supplied scoped owner resolver. Without that authority or a reader, preserve the existing scoped unavailable or pending outcome.
+
+## Scoped learning-run connector
+
+Learning-run control is a separate permission. For each hosted Slack or Zapier connection, launch another **separate** instance of health.py with `--learning-selection /var/lib/opentour-worker/learning-selection-<connection>.json`, its own TLS secret directory, bearer credential, audience and configuration revision. Add `learning_tenant`, `learning_actor` and `learning_client` to that instance's private manifest. The owner creates the selection with `python -I -S -B opentour-slack.pyz learning-runs authorize` and revokes it at once with `learning-runs withdraw`. A listener refuses `--selection` and `--learning-selection` together. Route only these three exact paths to it:
+
+| HTTPS operation | JSON body | Result |
+| --- | --- | --- |
+| POST /v1/learning-runs | plan_ref, operation, idempotency_key | Durable run with state and next action, or a hold |
+| GET /v1/learning-runs/{run_ref} | none | Role-filtered state, stage, next action, progress, usage and evidence refs |
+| POST /v1/learning-runs/{run_ref}/cancel | idempotency_key | The run's single cancellation receipt |
+
+The same limits apply as for intake. The scheduled path uses the existing cycle-worker unit: once the owner authorizes the scheduler selection `learning-run-schedule.json`, each iteration runs the learning-run tick instead of the direct cycle. See pilot-learning-runs.md in the kit for the full contract, states, holds and the ports for the fit ledger, plan producer and trainer.
