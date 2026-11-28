@@ -2164,14 +2164,11 @@ def _fragments(
         mode = gs.render_mode
         fill = _over_white(gs.fill, gs.fill_alpha)
         stroke = _over_white(gs.stroke, gs.stroke_alpha)
+        # In modes 2 and 6 the stroke is painted over the fill and covers it to half the line
+        # width inside every outline, which is most of a thin stem (poppler: black fill under a
+        # 1 pt white stroke draws no ink at 11 pt), so the stroke decides there.
         paints = (
-            (fill,)
-            if mode in (0.0, 4.0)
-            else (stroke,)
-            if mode in (1.0, 5.0)
-            else (fill, stroke)
-            if mode in (2.0, 6.0)
-            else ()
+            (fill,) if mode in (0.0, 4.0) else (stroke,) if mode in (1.0, 2.0, 5.0, 6.0) else ()
         )
         if gs.state_unverified or (gs.dashed and mode in (1.0, 2.0, 5.0, 6.0)):
             # A dash pattern can leave a stroked glyph undrawn; the rest can hide any text.
@@ -2218,9 +2215,7 @@ def _fragments(
             ((gs.fill, gs.fill_alpha),)
             if mode in (0.0, 4.0)
             else ((gs.stroke, gs.stroke_alpha),)
-            if mode in (1.0, 5.0)
-            else ((gs.fill, gs.fill_alpha), (gs.stroke, gs.stroke_alpha))
-            if mode in (2.0, 6.0)
+            if mode in (1.0, 2.0, 5.0, 6.0)
             else ()
         )
         box = (left_end, ry, right_end, ry + glyph)

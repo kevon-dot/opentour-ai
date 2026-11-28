@@ -2065,7 +2065,9 @@ def test_pdf_stroked_text_is_judged_by_its_stroke_colour() -> None:
     _eligible(b"0 G BT 1 Tr" + _SHOUT[3:])
     _eligible(b"1 g 0 G BT 1 Tr" + _SHOUT[3:])  # white fill is not painted in mode 1
     _eligible(b"1 g 0 G BT 2 Tr" + _SHOUT[3:])  # fill and stroke: the stroke shows
-    _eligible(b"0 g 1 G BT 2 Tr" + _SHOUT[3:])
+    # Fill and stroke: the stroke is painted over the fill. A white 1 pt stroke over black
+    # 11 pt glyphs leaves no ink in poppler, so the stroke decides.
+    _flagged(b"0 g 1 G BT 2 Tr" + _SHOUT[3:], "text_color_invisible")
     # Fill-only text ignores the stroke colour, as before.
     _flagged(b"1 g 0 G" + _SHOUT, "text_color_invisible")
     _eligible(b"0 g 1 G" + _SHOUT)
@@ -2839,4 +2841,4 @@ def test_pdf_a_pile_of_exactly_three_glyphs_from_separate_positions_is_overprint
     # only the page-wide pile of OVERPRINT_PILE (3) catches it. Two on one spot are tolerated.
     three = b"BT /F1 11 Tf 72 700 Td (W) Tj 0 0 Td (W) Tj 0 0 Td (W) Tj ET"
     _flagged(three, _OVERPRINT)
-    _eligible(b"BT /F1 11 Tf 72 700 Td (W) Tj 0 0 Td (W) Tj ET")
+    _eligible(b"BT /F1 11 Tf 72 700 Td (W) Tj 0 -20 Td (W) Tj 0 -20 Td (W) Tj ET")  # apart
