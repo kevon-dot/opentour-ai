@@ -110,6 +110,7 @@ class Bench:
             "harness": "training/profiles/benchmarks/ope530/harness/stage_time.py",
             "cache_method": "fadvise-dontneed (cold) or read-through (warm) before every process",
             "machine": machine(),
+            "loadavg_at_start": list(os.getloadavg()),
         }
 
     def resident(self) -> float:
@@ -165,6 +166,7 @@ class Bench:
             doc["finished_at"] = now()
             doc["git_head_after"] = git("rev-parse", "HEAD")
             doc["git_head_changed"] = doc["git_head_after"] != self.sha
+            doc["loadavg_at_finish"] = list(os.getloadavg())
         doc["rows"] = self.rows
         tmp = self.out.with_name(self.out.name + ".tmp")
         with tmp.open("w") as handle:
@@ -198,6 +200,7 @@ class Bench:
                 "exit": run.returncode,
                 "resident_after_conditioning": level,
                 "resident_at_start": res0,
+                "loadavg_1m_at_start": os.getloadavg()[0],
             }
             if run.returncode:
                 entry["stderr_tail"] = run.stderr.decode()[-400:]
@@ -254,6 +257,7 @@ class Bench:
             request["adapter"] = json.loads((work / "model/adapter.json").read_bytes())
         level = self.condition(state)
         res0 = self.resident()
+        load = os.getloadavg()[0]
         spawn = time.time()
         t = time.perf_counter()
         run = subprocess.run(
@@ -276,6 +280,7 @@ class Bench:
             wall_ms=round(wall, 1),
             resident_after_conditioning=level,
             resident_at_start=res0,
+            loadavg_1m_at_start=load,
         )
         body["durations_ms"]["interpreter_start_ms"] = round((body["t0_epoch"] - spawn) * 1000, 1)
         body["durations_ms"]["module_load_ms"] = round(
@@ -293,6 +298,7 @@ class Bench:
         subprocess.run(self.cli("prepare", work), env=ENV, cwd=REPO, check=True)
         level = self.condition(state)
         res0 = self.resident()
+        load = os.getloadavg()[0]
         t = time.perf_counter()
         probe = HERE / "service_fit_probe.py"
         run = subprocess.run(
@@ -310,11 +316,13 @@ class Bench:
             wall_ms=round(wall, 1),
             resident_after_conditioning=level,
             resident_at_start=res0,
+            loadavg_1m_at_start=load,
         )
         return body
 
     def batch_probe(self, work: Path, trials: int) -> dict:
         level = self.condition("warm")
+        load = os.getloadavg()[0]
         t = time.perf_counter()
         run = subprocess.run(
             [
@@ -335,7 +343,12 @@ class Bench:
         if run.returncode:
             return {"exit": run.returncode, "stderr_tail": run.stderr.decode()[-600:]}
         body = json.loads(run.stdout)
-        body.update(exit=0, wall_ms=round(wall, 1), resident_after_conditioning=level)
+        body.update(
+            exit=0,
+            wall_ms=round(wall, 1),
+            resident_after_conditioning=level,
+            loadavg_1m_at_start=load,
+        )
         return body
 
 

@@ -51,6 +51,13 @@ def product_table(rows: list[dict]) -> dict:
             [pct(r["phases"][ph]["wall_ms"], r["end_to_end_ms"]) for r in rows], 2
         )
     t["A.replays_share_pct"] = stat([pct(replays(r), r["end_to_end_ms"]) for r in rows], 2)
+    loads = [
+        r["phases"][ph]["loadavg_1m_at_start"]
+        for r in rows
+        for ph in PHASES
+        if "loadavg_1m_at_start" in r["phases"][ph]
+    ]
+    t["A.loadavg_1m_at_phase_start"] = stat(loads, 2) if loads else None
     t["A.peak_rss_mb"] = stat([r["phases"]["fit"]["peak_rss_bytes"] / 2**20 for r in rows])
     return t
 
@@ -101,6 +108,8 @@ def main() -> int:
                 r["measured_git_sha"] == doc["measured_git_sha"] for r in rows
             ),
             "cache_method": doc["cache_method"],
+            "loadavg_at_start": doc.get("loadavg_at_start"),
+            "loadavg_at_finish": doc.get("loadavg_at_finish"),
             "machine": doc["machine"],
         },
         "attempted": {},
