@@ -24,9 +24,11 @@ Under the owner ruling recorded on OPE-566:
   of these tokens must be renamed.
 - A customer witness is an `opentour.pilot.customer-witness.v1` record. It binds the engagement,
   trainer id, job id, artifact revision and observed outcome, and only `customer_owner` may sign
-  it.
+  it. Only a successfully completed job (`JobState.COMPLETED`, exactly `"completed"`) can be
+  witnessed. A failed, cancelled or unknown job is refused with `customer_witness_outcome_refused`.
 - Only the OPE-566 `PilotVerifier` may accept a customer witness, and it has not landed. Until it
-  does, `classify_integration` and `integration_tier` accept no verifier. A well-formed, bound
+  does, no verifier class is admitted (`_ACCEPTED_VERIFIER_TYPE` is `None`), and
+  `classify_integration` and `integration_tier` forward no verifier either. A well-formed, bound
   witness therefore classifies as SOFTWARE_QUALIFIED (`customer_witness_unverifiable`), and
   CUSTOMER_WITNESSED is unreachable from production code.
 

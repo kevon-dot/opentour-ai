@@ -44,7 +44,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field
 from enum import StrEnum
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 
 from opentour_cell.pilot import model_connector as mc
 from opentour_cell.pilot.connector_ext import EvidenceTier, FenceReceipt, Usage, UsageSource
@@ -237,18 +237,27 @@ def check_compatibility(
 #   (never a bare string) under purpose ``opentour.pilot.customer-witness.v1``, bound to the exact
 #   engagement, trainer id, job id, artifact revision and observed outcome under classification,
 #   naming the ``customer_owner`` role, and authenticated by the OPE-566 ``PilotVerifier`` only
-#   (owner ruling). ``PilotVerifier`` has not landed and the OPE-582 issuer keys do not exist, so
-#   the production entry points, ``classify_integration`` and ``integration_tier``, accept no
-#   verifier: whatever verifier a caller passes is never called, and a well-formed, correctly bound
-#   witness ends at SOFTWARE_QUALIFIED with ``customer_witness_unverifiable``. CUSTOMER_WITNESSED is
-#   therefore unreachable from production code. Only the private ``_classify_integration`` seam,
-#   which no production caller passes a verifier through, can reach it, and only tests use it.
+#   (owner ruling). Only a successfully completed job can be witnessed (OPE-566 decision): the
+#   observed outcome must be exactly ``JobState.COMPLETED``'s value, so a failed, cancelled or
+#   unknown job is refused with ``customer_witness_outcome_refused``.
+# * ``PilotVerifier`` has not landed and the OPE-582 issuer keys do not exist, so no verifier is
+#   accepted anywhere. Two independent lines hold that:
+#   1. The rules (``_classify_integration``) call a verifier only when
+#      ``type(verifier) is _ACCEPTED_VERIFIER_TYPE``, and that constant is ``None`` in production.
+#      Every verifier is therefore refused with ``customer_witness_unverifiable`` and never called,
+#      whatever path reaches the rules: an alias, ``functools.partial``, a ``globals()`` lookup or
+#      an import from another module. Tests that need the CUSTOMER_WITNESSED positive case
+#      monkeypatch the constant to their test double's class.
+#   2. The production entry points, ``classify_integration`` and ``integration_tier``, drop any
+#      verifier a caller passes and call the rules with ``verifier=None``.
+#   CUSTOMER_WITNESSED is therefore unreachable from production code.
 #
-# Wiring rule for when ``PilotVerifier`` lands: the production path accepts exactly that concrete
-# class (``type(verifier) is PilotVerifier``), never any object that merely matches the structural
-# ``CustomerWitnessVerifier`` shape, and derives the ``WitnessSubject`` at wiring time from the
-# connector's journal state for the settled job (engagement, trainer id, job id, collected artifact
-# revision, terminal outcome), never from a caller argument.
+# Wiring rule for when ``PilotVerifier`` lands: ``_ACCEPTED_VERIFIER_TYPE`` becomes
+# ``PilotVerifier`` (an exact type match: never a subclass, never any object that merely matches
+# the structural ``CustomerWitnessVerifier`` shape), the entry points forward the verifier, and the
+# ``WitnessSubject`` is derived at wiring time from the connector's journal state for the settled
+# job (engagement, trainer id, job id, collected artifact revision, terminal outcome), never from a
+# caller argument.
 
 CUSTOMER_WITNESS_PURPOSE = "opentour.pilot.customer-witness.v1"
 WITNESS_ROLE_CUSTOMER_OWNER = "customer_owner"
@@ -258,6 +267,11 @@ _FIXTURE_TOKENS = frozenset({"generated", "simulated", "reference", "fixture", "
 # ``.invalid`` as a whole host label: followed by the end, a dot, a port, a path or anything that
 # cannot continue a label.
 _INVALID_HOST = re.compile(r"\.invalid(?![a-z0-9-])")
+# The only witnessable outcome: a successful terminal finish. Compared as an exact ``str``.
+_WITNESSABLE_OUTCOME: str = mc.JobState.COMPLETED.value
+# The one verifier class whose instances the rules may call. ``None``: no verifier is accepted
+# until the OPE-566 ``PilotVerifier`` lands, when this becomes that class.
+_ACCEPTED_VERIFIER_TYPE: type[object] | None = None
 _INVISIBLE_CATEGORIES = frozenset({"Cf", "Cc", "Co", "Cs", "Cn", "Zl", "Zp"})
 
 
@@ -366,8 +380,9 @@ def classify_integration(
     """Classify an integration with a fixed reason. Fails closed at every step up the ladder.
 
     The production entry point. It accepts no witness verifier until the OPE-566 ``PilotVerifier``
-    lands: ``witness_verifier`` is never called, so the highest reachable tier is
-    SOFTWARE_QUALIFIED, with ``customer_witness_unverifiable`` for a well-formed, bound witness.
+    lands: ``witness_verifier`` is never called (and ``_ACCEPTED_VERIFIER_TYPE`` is ``None``), so
+    the highest reachable tier is SOFTWARE_QUALIFIED, with ``customer_witness_unverifiable`` for a
+    well-formed, bound witness.
     """
     del witness_verifier  # refused uncalled: no verifier is accepted before PilotVerifier
     return _classify_integration(
@@ -381,9 +396,14 @@ def _classify_integration(
     customer_witness: object,
     *,
     subject: object,
-    verifier: CustomerWitnessVerifier | None,
+    verifier: object,
 ) -> IntegrationVerdict:
-    """The classification rules. Private seam: production passes ``verifier=None`` only."""
+    """The classification rules. Private: production passes ``verifier=None`` only.
+
+    Whoever calls this, a verifier is called only when its exact type is
+    ``_ACCEPTED_VERIFIER_TYPE``, which is ``None`` in production. A record built without its
+    attributes (``object.__new__``) is malformed, never an ``AttributeError``.
+    """
     if _trainer_key(trainer_origin) is None:
         return IntegrationVerdict(EvidenceTier.FIXTURE, "trainer_identity_unverifiable")
     if is_fixture_trainer(trainer_origin):
@@ -400,24 +420,32 @@ def _classify_integration(
     if type(witness) is not CustomerWitness:
         return capped("customer_witness_unstructured")
     witness_fields = (*_WITNESS_BOUND_FIELDS, "witness_role", "purpose", "attestation")
-    if not all(_clean_text(getattr(witness, name)) for name in witness_fields):
+    claimed = {name: getattr(witness, name, None) for name in witness_fields}
+    if not all(_clean_text(value) for value in claimed.values()):
         return capped("customer_witness_malformed")
-    if witness.purpose != CUSTOMER_WITNESS_PURPOSE:
+    if claimed["purpose"] != CUSTOMER_WITNESS_PURPOSE:
         return capped("customer_witness_purpose_refused")
-    if witness.witness_role not in _WITNESS_ROLES:
+    if claimed["witness_role"] not in _WITNESS_ROLES:
         return capped("customer_witness_role_refused")
     if type(subject) is not WitnessSubject:
         return capped("customer_witness_binding_mismatch")
-    if not all(_clean_text(getattr(subject, name)) for name in _WITNESS_BOUND_FIELDS):
+    about = {name: getattr(subject, name, None) for name in _WITNESS_BOUND_FIELDS}
+    if not all(_clean_text(value) for value in about.values()):
         return capped("customer_witness_subject_malformed")
-    if subject.trainer_id != trainer_origin or any(
-        getattr(witness, name) != getattr(subject, name) for name in _WITNESS_BOUND_FIELDS
+    if (
+        claimed["observed_outcome"] != _WITNESSABLE_OUTCOME
+        or about["observed_outcome"] != _WITNESSABLE_OUTCOME
+    ):
+        return capped("customer_witness_outcome_refused")
+    if about["trainer_id"] != trainer_origin or any(
+        claimed[name] != about[name] for name in _WITNESS_BOUND_FIELDS
     ):
         return capped("customer_witness_binding_mismatch")
-    if verifier is None:
+    accepted = _ACCEPTED_VERIFIER_TYPE
+    if verifier is None or accepted is None or type(verifier) is not accepted:
         return capped("customer_witness_unverifiable")
     try:
-        verified = verifier.verify_customer_witness(witness, subject)
+        verified = cast(CustomerWitnessVerifier, verifier).verify_customer_witness(witness, subject)
     except Exception:  # any verifier failure is a refusal, never "skip and continue"
         return capped("customer_witness_refused")
     if verified is not True:

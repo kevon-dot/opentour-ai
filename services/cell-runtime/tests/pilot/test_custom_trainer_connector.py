@@ -9,8 +9,10 @@ Software behavior only: no real trainer, GPU, provider or customer evidence.
 """
 
 import ast
+import functools
 import hashlib
 import json
+import os
 import threading
 import time
 from contextlib import nullcontext
@@ -487,15 +489,41 @@ def _classify(origin=REAL_ORIGIN, qualification="qualification-1", witness=None,
     return classify_integration(origin, qualification, witness, **kwargs)
 
 
-def _seam(origin=REAL_ORIGIN, qualification="qualification-1", witness=None, **kwargs):
-    """The private test-only seam that can call a verifier. No production caller passes one."""
+_GATE_FROM_VERIFIER = object()
+
+
+def _seam(
+    origin=REAL_ORIGIN,
+    qualification="qualification-1",
+    witness=None,
+    *,
+    accept=_GATE_FROM_VERIFIER,
+    **kwargs,
+):
+    """The private rules with ``_ACCEPTED_VERIFIER_TYPE`` monkeypatched for this call only.
+
+    By default the gate admits the passed verifier's own class, so a refusal shown here holds even
+    against a verifier the gate would call. ``accept`` sets the gate explicitly.
+    """
     kwargs.setdefault("subject", _subject_for(origin))
-    kwargs.setdefault("verifier", None)
-    return ctc._classify_integration(origin, qualification, witness, **kwargs)
+    verifier = kwargs.setdefault("verifier", None)
+    if accept is _GATE_FROM_VERIFIER:
+        accept = None if verifier is None else type(verifier)
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(ctc, "_ACCEPTED_VERIFIER_TYPE", accept)
+        return ctc._classify_integration(origin, qualification, witness, **kwargs)
+
+
+def _bound_args(verifier):
+    """Arguments for a well-formed, correctly bound witness, for calling the rules directly."""
+    return (REAL_ORIGIN, "qualification-1", _witness()), {
+        "subject": WITNESS_SUBJECT,
+        "verifier": verifier,
+    }
 
 
 def _refused_everywhere(expected, **kwargs):
-    """``expected`` from production and from the seam with an accepting verifier, never called."""
+    """``expected`` from production, and from the rules with an admitted accepting verifier."""
     verifier = AcceptingWitnessVerifierDouble()
     assert _classify(**kwargs, witness_verifier=verifier) == expected
     assert _seam(**kwargs, verifier=verifier) == expected
@@ -599,27 +627,169 @@ def test_production_entry_points_refuse_every_verifier_uncalled(make_verifier):
     assert getattr(verifier, "calls", []) == []
 
 
-def test_no_production_code_can_pass_a_verifier_through_the_seam():
-    # Structural guard: every call of the seam anywhere under src passes the literal verifier=None,
-    # and only the defining module names it, so CUSTOMER_WITNESSED is unreachable from production.
-    src_root = Path(ctc.__file__).resolve().parents[2]
+def test_no_verifier_type_is_accepted_in_production():
+    # The primary line: until the OPE-566 PilotVerifier lands, the rules admit no verifier class.
+    assert ctc._ACCEPTED_VERIFIER_TYPE is None
+
+
+def test_every_path_to_the_rules_refuses_an_unadmitted_verifier_uncalled():
+    # No monkeypatch: each indirect route reaches the rules with an accepting verifier, and the
+    # gate still refuses it with customer_witness_unverifiable without calling it.
+    from opentour_cell.pilot.custom_trainer_connector import _classify_integration as imported
+
+    alias = ctc._classify_integration  # B1: an alias of the rules
+
+    def partial_route(args, kwargs):  # B2
+        bound = functools.partial(ctc._classify_integration, verifier=kwargs.pop("verifier"))
+        return bound(*args, **kwargs)
+
+    routes = {
+        "alias": lambda args, kwargs: alias(*args, **kwargs),
+        "partial": partial_route,
+        "globals": lambda args, kwargs: vars(ctc)["_classify_" + "integration"](*args, **kwargs),
+        "getattr": lambda args, kwargs: getattr(ctc, "_classify" + "_integration")(*args, **kwargs),
+        "import": lambda args, kwargs: imported(*args, **kwargs),
+    }
+    unverifiable = IntegrationVerdict(
+        EvidenceTier.SOFTWARE_QUALIFIED, "customer_witness_unverifiable"
+    )
+    for name, route in routes.items():
+        for verifier in (AcceptingWitnessVerifierDouble(), PilotVerifier()):
+            args, kwargs = _bound_args(verifier)
+            assert route(args, kwargs) == unverifiable, name
+            assert getattr(verifier, "calls", []) == [], name
+
+
+def test_the_gate_admits_only_the_exact_accepted_class():
+    class AcceptingSubclass(AcceptingWitnessVerifierDouble):
+        pass
+
+    class Lookalike:
+        def __init__(self):
+            self.calls = []
+
+        def verify_customer_witness(self, witness, subject):
+            self.calls.append((witness, subject))
+            return True
+
+    unverifiable = IntegrationVerdict(
+        EvidenceTier.SOFTWARE_QUALIFIED, "customer_witness_unverifiable"
+    )
+    for verifier in (AcceptingSubclass(), Lookalike()):
+        verdict = _seam(
+            witness=_witness(), verifier=verifier, accept=AcceptingWitnessVerifierDouble
+        )
+        assert verdict == unverifiable
+        assert verifier.calls == []
+    # With the gate open, the production entry point still forwards no verifier.
+    verifier = AcceptingWitnessVerifierDouble()
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(ctc, "_ACCEPTED_VERIFIER_TYPE", AcceptingWitnessVerifierDouble)
+        assert _classify(witness=_witness(), witness_verifier=verifier) == unverifiable
+    assert verifier.calls == []
+
+
+_SCAN_SKIPPED = frozenset(
+    {"." + "git", ".venv", "node_modules", ".claude", "__pycache__", ".mypy_cache", ".ruff_cache"}
+)
+
+
+def _repo_python_files():
+    repo_root = Path(__file__).resolve().parents[4]
+    for directory, subdirs, files in os.walk(repo_root):
+        subdirs[:] = sorted(d for d in subdirs if d not in _SCAN_SKIPPED)
+        for name in sorted(files):
+            if name.endswith(".py"):
+                yield Path(directory) / name
+
+
+def test_no_other_code_names_the_rules():
+    # Second line: across the whole repository, only the defining module and this test name the
+    # rules, and the defining module refers to them exactly once, in a call with verifier=None.
+    # (A split-string lookup cannot be seen statically; the gate above refuses it.)
     seam = "_classify_integration"
-    calls = []
-    for path in sorted(src_root.rglob("*.py")):
-        text = path.read_text(encoding="utf-8")
-        if seam not in text:
-            continue
-        assert path.resolve() == Path(ctc.__file__).resolve(), path.name
-        for node in ast.walk(ast.parse(text)):
-            if isinstance(node, ast.Call):
-                name = getattr(node.func, "id", None) or getattr(node.func, "attr", None)
-                if name == seam:
-                    calls.append(node)
+    module = Path(ctc.__file__).resolve()
+    seen = set()
+    for path in _repo_python_files():
+        if seam in path.read_text(encoding="utf-8", errors="replace"):
+            seen.add(path.resolve())
+    assert seen == {module, Path(__file__).resolve()}
+    tree = ast.parse(module.read_text(encoding="utf-8"))
+    names = [n for n in ast.walk(tree) if isinstance(n, ast.Name) and n.id == seam]
+    attributes = [n for n in ast.walk(tree) if isinstance(n, ast.Attribute) and n.attr == seam]
+    definitions = [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == seam]
+    assert len(definitions) == 1 and attributes == [] and len(names) == 1
+    calls = [n for n in ast.walk(tree) if isinstance(n, ast.Call) and n.func is names[0]]
     assert len(calls) == 1
-    (call,) = calls
-    verifier_args = [kw.value for kw in call.keywords if kw.arg == "verifier"]
+    verifier_args = [kw.value for kw in calls[0].keywords if kw.arg == "verifier"]
     assert len(verifier_args) == 1
     assert isinstance(verifier_args[0], ast.Constant) and verifier_args[0].value is None
+
+
+@pytest.mark.parametrize(
+    "outcome",
+    [
+        "failed",
+        "completed ",
+        "Completed",
+        "customer says great",
+        mc.JobState.CANCELED.value,
+        mc.JobState.UNKNOWN.value,
+        mc.JobState.QUEUED.value,
+        mc.JobState.RUNNING.value,
+    ],
+)
+def test_only_a_successfully_completed_job_can_be_witnessed(outcome):
+    refused = IntegrationVerdict(
+        EvidenceTier.SOFTWARE_QUALIFIED, "customer_witness_outcome_refused"
+    )
+    # Witness and subject agree on the outcome, or either one alone claims it.
+    _refused_everywhere(
+        refused,
+        witness=_witness(observed_outcome=outcome),
+        subject=replace(WITNESS_SUBJECT, observed_outcome=outcome),
+    )
+    _refused_everywhere(refused, witness=_witness(observed_outcome=outcome))
+    _refused_everywhere(
+        refused, witness=_witness(), subject=replace(WITNESS_SUBJECT, observed_outcome=outcome)
+    )
+
+
+def test_completed_is_the_only_witnessable_outcome():
+    assert WITNESS_SUBJECT.observed_outcome == mc.JobState.COMPLETED.value == "completed"
+    verifier = AcceptingWitnessVerifierDouble()
+    assert _seam(witness=_witness(), verifier=verifier).reason == "customer_witness_verified"
+    # The enum member itself is a str subclass, so it is refused as malformed, never compared.
+    _refused_everywhere(
+        IntegrationVerdict(EvidenceTier.SOFTWARE_QUALIFIED, "customer_witness_malformed"),
+        witness=_witness(observed_outcome=mc.JobState.COMPLETED),
+    )
+
+
+def test_records_built_without_attributes_are_malformed_not_errors():
+    empty_witness = object.__new__(CustomerWitness)
+    partial_witness = object.__new__(CustomerWitness)
+    object.__setattr__(partial_witness, "engagement", WITNESS_SUBJECT.engagement)
+    object.__setattr__(partial_witness, "trainer_id", REAL_ORIGIN)
+    malformed = IntegrationVerdict(EvidenceTier.SOFTWARE_QUALIFIED, "customer_witness_malformed")
+    for witness in (empty_witness, partial_witness):
+        assert classify_integration(REAL_ORIGIN, "q", witness) == malformed
+        assert integration_tier(REAL_ORIGIN, "q", witness) is EvidenceTier.SOFTWARE_QUALIFIED
+        _refused_everywhere(malformed, witness=witness)
+    empty_subject = object.__new__(WitnessSubject)
+    partial_subject = object.__new__(WitnessSubject)
+    object.__setattr__(partial_subject, "trainer_id", REAL_ORIGIN)
+    subject_malformed = IntegrationVerdict(
+        EvidenceTier.SOFTWARE_QUALIFIED, "customer_witness_subject_malformed"
+    )
+    for subject in (empty_subject, partial_subject):
+        assert classify_integration(REAL_ORIGIN, "q", _witness(), subject=subject) == (
+            subject_malformed
+        )
+        assert integration_tier(REAL_ORIGIN, "q", _witness(), subject=subject) is (
+            EvidenceTier.SOFTWARE_QUALIFIED
+        )
+        _refused_everywhere(subject_malformed, witness=_witness(), subject=subject)
 
 
 def test_a_verifier_that_refuses_raises_or_answers_truthy_is_a_refusal():
@@ -641,6 +811,10 @@ def test_witness_for_another_subject_is_refused_before_verification(field_name):
     mismatch = IntegrationVerdict(
         EvidenceTier.SOFTWARE_QUALIFIED, "customer_witness_binding_mismatch"
     )
+    if field_name == "observed_outcome":  # any outcome but "completed" is refused as such
+        mismatch = IntegrationVerdict(
+            EvidenceTier.SOFTWARE_QUALIFIED, "customer_witness_outcome_refused"
+        )
     wrong = _witness(**{field_name: "other-" + getattr(WITNESS_SUBJECT, field_name)})
     _refused_everywhere(mismatch, witness=wrong)
     # A case-only difference is a different binding, not a normalised match.
@@ -875,6 +1049,12 @@ def test_customer_witnessed_only_through_the_test_seam_with_an_authenticating_ve
         EvidenceTier.CUSTOMER_WITNESSED, "customer_witness_verified"
     )
     assert verifier.calls == [(_witness(), WITNESS_SUBJECT)]
+    # The same rules with the gate closed (production) refuse the same verifier uncalled.
+    closed = AcceptingWitnessVerifierDouble()
+    assert _seam(witness=_witness(), verifier=closed, accept=None) == IntegrationVerdict(
+        EvidenceTier.SOFTWARE_QUALIFIED, "customer_witness_unverifiable"
+    )
+    assert closed.calls == []
     # The same inputs through the production entry point stop at SOFTWARE_QUALIFIED, uncalled.
     production = AcceptingWitnessVerifierDouble()
     assert _classify(witness=_witness(), witness_verifier=production) == IntegrationVerdict(
