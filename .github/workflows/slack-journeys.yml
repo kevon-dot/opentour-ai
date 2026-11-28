@@ -5,6 +5,13 @@ on:
   pull_request:
     paths:
       - .github/workflows/slack-journeys.yml
+      - services/cell-runtime/**
+      - packages/contracts/common/python-unit/**
+      - tools/build_slack_pilot_kit.py
+      - tools/ci/prepare.py
+      - tools/toolchain.json
+      - pyproject.toml
+      - uv.lock
 
 permissions:
   contents: read
@@ -17,6 +24,7 @@ jobs:
       - name: Check out candidate
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
         with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
       - name: Install pinned toolchain
         run: python3 tools/ci/prepare.py
@@ -25,6 +33,8 @@ jobs:
           just setup
           uv pip install --python .venv/bin/python --require-hashes --only-binary :all: -r services/cell-runtime/integrations/slack/requirements.txt
           .venv/bin/python tools/build_slack_pilot_kit.py "$RUNNER_TEMP/kit.zip"
+          git rev-parse HEAD > "$RUNNER_TEMP/candidate-sha.txt"
+          (cd "$RUNNER_TEMP" && sha256sum kit.zip > kit.sha256)
           unzip -q "$RUNNER_TEMP/kit.zip" -d "$RUNNER_TEMP/kit"
           (cd "$RUNNER_TEMP/kit" && sha256sum --check --quiet SHA256SUMS)
       - name: Check out independent customer probes from PR 87
@@ -75,3 +85,13 @@ jobs:
                   raise SystemExit(f"Missing or nonpassing customer journey in {module}")
           print(f"{len(cases)} generated packaged checks passed")
           PY
+      - name: Retain package and journey evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: packaged-slack-journeys-${{ github.event.pull_request.head.sha || github.sha }}
+          path: |
+            ${{ runner.temp }}/candidate-sha.txt
+            ${{ runner.temp }}/kit.sha256
+            ${{ runner.temp }}/journeys.xml
+          retention-days: 14
