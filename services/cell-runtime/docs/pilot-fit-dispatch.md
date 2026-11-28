@@ -2,13 +2,13 @@
 
 `opentour_cell.pilot.fit_dispatch` turns one fit intent into at most one reservation, one backend job and one settlement. It holds across duplicate triggers, lost acknowledgements, worker restarts and concurrent workers. It runs on the customer's worker. It never authorizes a handoff, publication or export.
 
-**Evidence tier:** `fixture`. The tests use generated sentinels, a durable test double of the ledger port and a simulated backend. No real weights, provider account, billing or spend are involved.
+**Evidence tier:** `fixture`. Dispatcher fault tests use generated sentinels and a simulated backend. Integration tests exercise the production mandate-backed ledger with generated inputs. No real weights, provider account, billing or spend are involved.
 
 ## Boundaries the dispatcher does not own
 
 | Boundary | Owner | What the dispatcher relies on |
 | --- | --- | --- |
-| `FitLedger` port | OPE-442 | Each method is one durable transaction. `reserve` aliases a client-scoped operation key to the canonical intent. Inside its own writer transaction it calls the dispatcher's recheck, reserves the upper bound and emits one execution ID. `transition` is a compare-and-set on a version number. `settle` runs once. The tests use `tests/pilot/fit_dispatch_doubles.py`, which is **not** the OPE-442 ledger. With no ledger configured, every dispatch holds as `fit_ledger_unavailable`: nothing is reserved and nothing is sent. |
+| `FitLedger` port | OPE-442 | Each method is one durable transaction. `reserve` aliases a client-scoped operation key to the canonical intent. Inside its own writer transaction it calls the dispatcher's recheck, reserves the upper bound and emits one execution ID. `transition` is a compare-and-set on a version number. `settle` runs once. The local implementation is `mandate_fit_ledger.MandateFitLedger(mandates)`. Dispatch records, aliases and versioned events extend the existing private mandate SQLite database. Direct local and dispatched fits share renewal-lineage caps. With no ledger configured, every dispatch holds as `fit_ledger_unavailable`: nothing is reserved and nothing is sent. |
 | `model_connector.Preflight` | OPE-506 | All discovery, estimation, submission (`submit_reserved_fit`, under the dispatcher's guard), reconciliation and candidate collection go through it. Status, cancel and usage call the connector directly. Progress, early stop, absence confirmation and hold reasons are optional protocols. |
 | `RepairRoutingStore.current_eligibility` | OPE-417 | Called inside the reservation recheck, inside the submission guard just before the backend call, and on every supervision tick. A stored `fit_eligible` receipt is never authority on its own (PR #205 contract). |
 | `LearningMandates.dispatch_authority` | this lane | A read-only view of the current standing mandate, taken under the engagement guard. It returns the caps, the payer, the profile and the run binding. It also returns the renewal lineage budget scope and the direct-path usage, which the dispatcher adds to the ledger's own usage. |
@@ -116,7 +116,7 @@ All tests are in `tests/pilot/test_fit_dispatch.py` and use generated fixtures.
 
 ## External gates (not satisfied here)
 
-* The OPE-442 durable customer-local fit ledger. It must implement `FitLedger`; production has none, so dispatch holds.
+* The installed worker must select current signed authority, verified routing evidence, the qualified connector and its mandate-backed ledger. An unconfigured dispatcher holds before reserving.
 * A real pinned-weights fit in an approved sandbox, with a nonzero adapter change and replay in a fresh process. This also needs OPE-377 for a customer's live model arm.
 * Real provider spend, billing and charge reconciliation.
 * The OPE-570 operator release of held over-cap reservations.
