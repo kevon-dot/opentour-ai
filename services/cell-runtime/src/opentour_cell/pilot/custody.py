@@ -14,7 +14,9 @@ from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 
+from opentour_cell.pilot.engagement_epochs import EngagementError, EngagementLedger
 from opentour_cell.pilot.slack_adapter import withdraw_for_custody
+from opentour_cell.pilot.text_classifier import TrainingError
 from opentour_cell.pilot.training import LocalTrainingStore, _check_directory, _check_file
 from opentour_cell.pilot.training_data import identifier
 
@@ -85,13 +87,26 @@ _PRIVATE_STATE = {
         "Account for readiness and repair assessments and their separately named private policy.",
     ),
 }
+_ENGAGEMENT_LEDGER = ("engagement-epochs.sqlite3", "engagement-fences.jsonl")
+# Files that outlive a deleted ledger and show it was in use: every pinned ledger operation
+# (each live write since OPE-543's #199, every withdrawal and restore) creates the epoch lock,
+# and live evidence is only written under a ledger-required grant.
+_LEDGER_TRACES = ("engagement-epochs.lock", "live-evidence.sqlite3")
+_LEDGER_BUSY_BACKOFF = (0.05, 0.1, 0.2, 0.4, 0.8)
+# What the closeout has seen of the engagement ledger. It only ever strengthens:
+# NULL (closeout predates this record) < absent < present (the ledger, or one of its traces,
+# was there when the closeout opened) < row_seen (this engagement's row was in the ledger when
+# the closeout opened) < bound (this closeout retired that row).
+_LEDGER_SEEN = (None, "absent", "present", "row_seen", "bound")
+_ROW_REQUIRED = {"row_seen", "bound"}
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS closeout (
  singleton INTEGER PRIMARY KEY CHECK(singleton=1), organization TEXT NOT NULL,
  engagement TEXT NOT NULL, agreement TEXT NOT NULL, custodian TEXT NOT NULL,
  support TEXT NOT NULL, due TEXT NOT NULL, revision TEXT, trigger TEXT NOT NULL,
  withdrawn_at INTEGER NOT NULL, reconciled INTEGER NOT NULL DEFAULT 0, finished_ref TEXT,
- transport TEXT NOT NULL DEFAULT '{}', minimized INTEGER NOT NULL DEFAULT 0
+ transport TEXT NOT NULL DEFAULT '{}', minimized INTEGER NOT NULL DEFAULT 0,
+ engagement_ledger TEXT
 );
 CREATE TABLE IF NOT EXISTS items (
  item TEXT PRIMARY KEY, kind TEXT NOT NULL, owner TEXT NOT NULL, due TEXT NOT NULL,
@@ -143,6 +158,9 @@ class Closeout:
                 db.executescript(_SCHEMA)
             with db:
                 db.execute("BEGIN IMMEDIATE")
+                columns = {r[1] for r in db.execute("PRAGMA table_info(closeout)")}
+                if columns and "engagement_ledger" not in columns:
+                    db.execute("ALTER TABLE closeout ADD COLUMN engagement_ledger TEXT")
                 yield db
 
     def _row(self, db: sqlite3.Connection) -> sqlite3.Row:
@@ -251,14 +269,16 @@ class Closeout:
         if trigger not in TRIGGERS:
             raise CustodyError("invalid_trigger")
         _date(due)
+        minimal: dict[str, Any] | None = None
         with self._db(create=True) as db:
             old = db.execute("SELECT * FROM closeout WHERE singleton=1").fetchone()
             binding = (self.organization, agreement, custodian, support, due, revision, trigger)
-            if old:
+            if old and old["minimized"]:
                 self._row(db)
-                if old["minimized"]:
-                    self._store(old)
-                    return self._minimal(old)
+                self._store(old)
+                minimal = self._minimal(old)
+            elif old:
+                self._row(db)
                 columns = (
                     "organization",
                     "agreement",
@@ -277,8 +297,14 @@ class Closeout:
                 stopped = store.withdraw()
                 db.execute(
                     "INSERT INTO closeout(singleton,organization,agreement,custodian,support,due,"
-                    "revision,trigger,engagement,withdrawn_at) VALUES(1,?,?,?,?,?,?,?,?,?)",
-                    (*binding, store.engagement_id, stopped["withdrawn_at"]),
+                    "revision,trigger,engagement,withdrawn_at,engagement_ledger)"
+                    " VALUES(1,?,?,?,?,?,?,?,?,?,?)",
+                    (
+                        *binding,
+                        store.engagement_id,
+                        stopped["withdrawn_at"],
+                        self._ledger_at_open(store.engagement_id),
+                    ),
                 )
                 self._observe(
                     db,
@@ -297,7 +323,112 @@ class Closeout:
                     due,
                     detail="Confirm support contact, handoff date and outstanding duties.",
                 )
+        if minimal is not None:
+            self._retire_engagement_epoch(old)
+            return minimal
         return self.reconcile()
+
+    def _ledger_present(self) -> bool:
+        return any(os.path.lexists(self.directory / name) for name in _ENGAGEMENT_LEDGER)
+
+    def _ledger_traces_present(self) -> bool:
+        return any(os.path.lexists(self.directory / name) for name in _LEDGER_TRACES)
+
+    def _ledger_at_open(self, engagement: str) -> str:
+        """Record what the ledger holds for this engagement, without creating anything.
+
+        Opened read-write only so SQLite can recover an interrupted transaction; `mode=rw`
+        never creates a missing file, and only a SELECT runs. A busy ledger is retried with
+        bounded backoff and then refused (`engagement_ledger_busy`, retryable): the closeout
+        does not open on a guess. Any other unreadable ledger is recorded as present, and
+        reconcile then holds until it can be read.
+        """
+        if not self._ledger_present():
+            return "present" if self._ledger_traces_present() else "absent"
+        path = self.directory / _ENGAGEMENT_LEDGER[0]
+        for pause in (*_LEDGER_BUSY_BACKOFF, None):
+            try:
+                _check_file(path)
+                with closing(
+                    sqlite3.connect(path.as_uri() + "?mode=rw", uri=True, timeout=0.25)
+                ) as db:
+                    db.execute("PRAGMA trusted_schema=OFF")
+                    found = db.execute(
+                        "SELECT 1 FROM engagement WHERE org=? AND epoch=?",
+                        (self.organization, engagement),
+                    ).fetchone()
+            except sqlite3.OperationalError as error:
+                if error.sqlite_errorcode not in {sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED}:
+                    return "present"
+                if pause is None:
+                    raise CustodyError("engagement_ledger_busy") from None
+                time.sleep(pause)
+                continue
+            except (TrainingError, OSError, sqlite3.Error):
+                return "present"
+            return "row_seen" if found else "present"
+        raise CustodyError("engagement_ledger_busy")  # pragma: no cover - loop always returns
+
+    def _grant_requires_ledger(self) -> bool:
+        """Names only: a live grant here means live work that needs the engagement ledger.
+
+        Every grant the live authority accepts requires the ledger, so custody does not
+        reopen grant payloads to decide; any grant file, readable or not, requires it.
+        """
+        return any(
+            path.name != "live-authority-key.json"
+            for path in self.directory.glob("live-authority-*.json")
+        )
+
+    def _retire_engagement_epoch(self, row: sqlite3.Row) -> None:
+        """Bridge withdrawal to the engagement ledger after the closeout hold has committed.
+
+        The epoch is this closeout's committed engagement and the revocation epoch is the
+        ledger's own, so no operator argument selects either. The ledger persists the terminal
+        state before it frees the slot; repeating after any interruption completes the release.
+
+        Enforced, else `engagement_ledger_unavailable` and the closeout stays unreconciled:
+        - the ledger database must exist; it is opened `existing_only`, so a journal without
+          its database holds instead of being recreated empty;
+        - a ledger present when the closeout opened, or a trace of one (`present`), must stay
+          present;
+        - once this engagement's row has been seen, at open (`row_seen`) or by retiring it
+          (`bound`), the row must stay in the ledger, so restoring an older backup that lacks
+          it holds instead of skipping retirement;
+        - a live grant file, the epoch lock or the live-evidence database, now or at open,
+          requires a present ledger holding this engagement's row.
+        Not enforced (fails open): this engagement's row is not in the ledger when the closeout
+        opens, and the directory has no live grant file, epoch lock or live-evidence database.
+        Retirement is then skipped as before, because nothing distinguishes that directory
+        from one where this engagement never used the ledger.
+        """
+        engagement = row["engagement"]
+        recorded = row["engagement_ledger"] if "engagement_ledger" in row.keys() else None
+        if recorded not in _LEDGER_SEEN:
+            raise CustodyError("engagement_ledger_unavailable")
+        required = self._grant_requires_ledger() or self._ledger_traces_present()
+        seen = recorded
+        if not self._ledger_present():
+            if required or recorded in {"present", *_ROW_REQUIRED}:
+                raise CustodyError("engagement_ledger_unavailable")
+            seen = "absent"
+        else:
+            try:
+                # Never create a ledger here: a journal without its database is a hold.
+                ledger = EngagementLedger(self.directory, existing_only=True)
+                ledger.reconcile_fences()
+                if ledger.get(self.organization, engagement) is None:
+                    if required or recorded in _ROW_REQUIRED:
+                        raise CustodyError("engagement_ledger_unavailable")
+                    seen = "present"
+                else:
+                    ledger.retire(self.organization, engagement)
+                    seen = "bound"
+            except (EngagementError, TrainingError, OSError, sqlite3.Error):
+                raise CustodyError("engagement_ledger_unavailable") from None
+        if _LEDGER_SEEN.index(seen) > _LEDGER_SEEN.index(recorded):
+            with self._db() as db:
+                db.execute("UPDATE closeout SET engagement_ledger=? WHERE singleton=1", (seen,))
 
     def reconcile(self) -> dict[str, Any]:
         # Persist the hold on closeout if a journal, training file or inventory cannot be verified.
@@ -305,8 +436,12 @@ class Closeout:
             row = self._row(db)
             if row["minimized"]:
                 self._store(row)
-                return self._minimal(row)
-            db.execute("UPDATE closeout SET reconciled=0 WHERE singleton=1")
+            else:
+                db.execute("UPDATE closeout SET reconciled=0 WHERE singleton=1")
+        # Outside any closeout transaction: the ledger takes its own withdrawal lock.
+        self._retire_engagement_epoch(row)
+        if row["minimized"]:
+            return self._minimal(row)
         with self._db() as db:
             row = self._row(db)
             store = self._store(row)

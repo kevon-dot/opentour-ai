@@ -16,6 +16,22 @@ trainer, GPU, paid compute, provider or credential was used. Real-trainer qualif
 customer witnessing are open external gates, and `integration_tier` refuses to rate a generated
 or simulated trainer above FIXTURE however many references are claimed.
 
+Under the owner ruling recorded on OPE-566:
+
+- A trainer name that contains a generated, simulated, reference, fixture or sentinel token, in any
+  case or Unicode-compatible form, is FIXTURE. So is a `.invalid` host name, with or without a
+  port or path. This rule can only lower a tier. A real customer trainer whose name contains one
+  of these tokens must be renamed.
+- A customer witness is an `opentour.pilot.customer-witness.v1` record. It binds the engagement,
+  trainer id, job id, artifact revision and observed outcome, and only `customer_owner` may sign
+  it. Only a successfully completed job (`JobState.COMPLETED`, exactly `"completed"`) can be
+  witnessed. A failed, cancelled or unknown job is refused with `customer_witness_outcome_refused`.
+- Only the OPE-566 `PilotVerifier` may accept a customer witness, and it has not landed. Until it
+  does, no verifier class is admitted (`_ACCEPTED_VERIFIER_TYPE` is `None`), and
+  `classify_integration` and `integration_tier` forward no verifier either. A well-formed, bound
+  witness therefore classifies as SOFTWARE_QUALIFIED (`customer_witness_unverifiable`), and
+  CUSTOMER_WITNESSED is unreachable from production code.
+
 ## The adapter contract
 
 | Call | Rule |
