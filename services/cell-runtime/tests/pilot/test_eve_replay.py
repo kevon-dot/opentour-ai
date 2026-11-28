@@ -12,12 +12,15 @@ from __future__ import annotations
 import json
 from collections.abc import Iterator, Mapping
 from contextlib import nullcontext
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
 import pytest
+from opentour_cell.pilot import eve_evaluator as ev
 from opentour_cell.pilot import eve_replay as rp
+from opentour_cell.pilot import eve_scorer as sc
+from opentour_cell.pilot import eve_staging as st
 from opentour_cell.pilot import eve_task as task
 from opentour_cell.pilot import model_connector as mc
 
@@ -82,8 +85,12 @@ def key() -> rp.AnswerKey:
     return rp.AnswerKey(entries)
 
 
-def scorer() -> rp.DeterministicScorer:
-    return rp.DeterministicScorer("generated-scorer-v1", "generated-rubric-r1")
+def scorer() -> sc.DeterministicScorer:
+    return sc.DeterministicScorer("generated-scorer-v1", "generated-rubric-r1")
+
+
+EVALUATOR_ID = "generated-independent-evaluator"
+AUTO: Any = object()
 
 
 def output(n: int, kind: str) -> rp.ArmOutput:
@@ -205,6 +212,8 @@ class Credentials:
 class Env:
     def __init__(self, tmp_path: Path, *, train: bool = True, training_supported: bool = True):
         self.root = tmp_path
+        # Commitment keys live outside the journal's directory tree (OPE-573).
+        self.keys_dir = tmp_path.parent / f"{tmp_path.name}-commitment-keys"
         self.reg = registration(train=train)
         self.registry = task.EveRegistry(tmp_path / "eve-registry.json")
         self.registry.register(self.reg)
@@ -241,8 +250,64 @@ class Env:
             preflight=self.preflight,
             credentials=self.credentials,
             journal=rp.ReplayJournal(self.root / name),
+            keys=rp.CommitmentKeyStore(self.keys_dir / f"{name}.keys"),
             log=self.logs.append,
         )
+
+    def staging(
+        self, journal: rp.ReplayJournal | None = None, scorer_: rp.Scorer | None = None
+    ) -> dict[str, Any]:
+        """What ``stage_decision`` needs to derive the result itself (OPE-573)."""
+        return {
+            "manifest": self.manifest,
+            "journal": journal or rp.ReplayJournal(self.root / "journal.jsonl"),
+            "scorer": scorer_ or self.scorer,
+            "key": self.key,
+        }
+
+    @property
+    def custody_dir(self) -> Path:
+        """The separate evaluator's custody, outside every worker directory (OPE-573)."""
+        return self.root.parent / f"{self.root.name}-evaluator-custody"
+
+    def evaluator(self, scorer_: Any = None) -> ev.EveEvaluator:
+        return ev.EveEvaluator(
+            evaluator_id=EVALUATOR_ID,
+            custody_dir=self.custody_dir,
+            worker_data_dirs=[self.root, self.keys_dir],
+            scorer=scorer_ or ev.IndependentGenerativeScorer(self.manifest.rubric_revision),
+            answer_key=key(),  # the evaluator's own sealed copy
+            cases=PROTECTED,
+        )
+
+    def replays(self) -> dict[str, Any]:
+        """How the evaluator replays each arm: the same served behaviour, its own lineage check."""
+        replays: dict[str, Any] = {
+            "baseline": ScriptedInference(BASE, BASELINE),
+            "simple_repair": ScriptedInference(BASE, SIMPLE),
+        }
+        job = self.transport.jobs.get("generated-fit-intent-1")
+        if job is not None:
+            replays["candidate"] = ev.EvaluatorCandidateReplay(
+                self.transport, job, self.transport.collect(job), self.reg
+            )
+        return replays
+
+    def independent_verdict(
+        self, result: Mapping[str, Any], journal: rp.ReplayJournal
+    ) -> dict[str, Any] | None:
+        """The separate evaluator's verdict on ``result``, or None if it refuses to issue one."""
+        try:
+            return self.evaluator().evaluate(
+                manifest=self.manifest,
+                result=result,
+                registration=self.reg,
+                journal=journal,
+                keys=rp.CommitmentKeyStore(self.keys_dir / f"{journal.path.name}.keys"),
+                replays=self.replays(),
+            )
+        except task.EveRefusal:
+            return None
 
     def arm(self, arm_id: str, served: str = BASE, **changes: str) -> rp.ArmSpec:
         spec = rp.ArmSpec(
@@ -343,6 +408,22 @@ def env(tmp_path: Path) -> Env:
 
 def refuses(code: str) -> Any:
     return pytest.raises(task.EveRefusal, match=f"^{code}$")
+
+
+def stage(
+    env: Env,
+    result: Mapping[str, Any],
+    *,
+    recomputed_digest: str,
+    journal: rp.ReplayJournal | None = None,
+    scorer_: rp.Scorer | None = None,
+    verdict: Any = AUTO,
+) -> st.StageDecision:
+    """The one staging gate, with the separate evaluator's own verdict unless one is given."""
+    kwargs = env.staging(journal, scorer_)
+    if verdict is AUTO:
+        verdict = env.independent_verdict(result, kwargs["journal"])
+    return st.stage_decision(result, recomputed_digest=recomputed_digest, verdict=verdict, **kwargs)
 
 
 def full_result(env: Env, worker: rp.EveReplayWorker | None = None) -> dict[str, Any]:
@@ -519,18 +600,19 @@ def test_v1_version_drift_is_refused_not_coerced(env: Env) -> None:
     worker = rp.EveReplayWorker(
         registry=other, preflight=env.preflight, credentials=env.credentials,
         journal=rp.ReplayJournal(env.root / "j2.jsonl"),
+        keys=rp.CommitmentKeyStore(env.keys_dir / "j2.keys"),
     )  # fmt: skip
     with refuses("model_version_drift"):
         env.replay(env.arm("baseline"), infer, worker=worker)
     with refuses("scorer_version_drift"):
         env.replay(
-            env.arm("baseline"), infer, scorer_=rp.DeterministicScorer("generated-scorer-v2", "r")
+            env.arm("baseline"), infer, scorer_=sc.DeterministicScorer("generated-scorer-v2", "r")
         )
     with refuses("scorer_version_drift"):
         env.replay(
             env.arm("baseline"),
             infer,
-            scorer_=rp.DeterministicScorer("generated-scorer-v1", "generated-rubric-r2"),
+            scorer_=sc.DeterministicScorer("generated-scorer-v1", "generated-rubric-r2"),
         )
     altered = dict(env.key._entries)  # noqa: SLF001
     altered["generated-p1"] = rp.ProtectedAnswer(
@@ -809,12 +891,20 @@ def test_v5_broken_scorer_cannot_stage(env: Env) -> None:
         worker=worker,
     )
     good = env.result(arms, journal=worker.journal)
-    assert rp.stage_decision(good, recomputed_digest=good["result_digest"]).stageable
+    assert stage(
+        env, good, recomputed_digest=good["result_digest"], journal=worker.journal
+    ).stageable
     broken = env.result(arms, journal=worker.journal, scorer_=AlwaysCorrect())
     assert broken["body"]["scorer"]["selfcheck_passed"] is False
-    decision = rp.stage_decision(broken, recomputed_digest=broken["result_digest"])
+    decision = stage(
+        env,
+        broken,
+        recomputed_digest=broken["result_digest"],
+        journal=worker.journal,
+        scorer_=AlwaysCorrect(),
+    )
     assert not decision.stageable and "scorer_selfcheck_failed" in decision.reasons
-    mismatch = rp.stage_decision(good, recomputed_digest="sha256:" + "3" * 64)
+    mismatch = stage(env, good, recomputed_digest="sha256:" + "3" * 64, journal=worker.journal)
     assert not mismatch.stageable and "recompute_mismatch" in mismatch.reasons
     forged_body = {
         **good["body"],
@@ -822,7 +912,9 @@ def test_v5_broken_scorer_cannot_stage(env: Env) -> None:
         "fit_authorized": True,
     }
     tampered = {"body": forged_body, "result_digest": good["result_digest"]}
-    assert not rp.stage_decision(tampered, recomputed_digest=good["result_digest"]).stageable
+    assert not stage(
+        env, tampered, recomputed_digest=good["result_digest"], journal=worker.journal
+    ).stageable
     assert good["body"]["fit_authorized"] is False and good["body"]["release_authorized"] is False
 
 
@@ -832,7 +924,7 @@ def test_v5_no_net_fixes_is_not_stageable(env: Env) -> None:
     arms["candidate"] = env.replay(env.arm("candidate", infer.served_revision), infer)
     result = env.result(arms)
     assert result["body"]["improvement_claim"] == "no_net_fixes"
-    decision = rp.stage_decision(result, recomputed_digest=result["result_digest"])
+    decision = stage(env, result, recomputed_digest=result["result_digest"])
     assert not decision.stageable and decision.reasons == ("improvement_no_net_fixes",)
 
 
@@ -868,6 +960,26 @@ def test_v6_matched_settings_make_the_tuning_comparison_available(env: Env) -> N
     assert (pair["fixes"], pair["regressions"]) == (3, 0)
     assert body["evidence_tier"] == "generated" and body["claim_scope"] == "implementation_only"
     assert set(body["unsatisfied_external_gates"]) == set(rp.EXTERNAL_GATES)
+
+
+PINNED_EXTERNAL_GATES = [
+    "real_eve_inference_capacity_unavailable",
+    "provider_or_trainer_authorization_unavailable",
+    "independent_evaluator_and_reviewer_unavailable",
+    "installed_provider_and_customer_evidence_unavailable",
+]
+
+
+def test_v6_result_tier_version_and_gates_are_pinned_to_literals(env: Env) -> None:
+    """Compared against literals, never against the module's own constants (OPE-573)."""
+    body = full_result(env)["body"]
+    assert body["schema_version"] == "opentour.pilot.eve-protected-replay.v1"
+    assert body["evidence_tier"] == "generated"
+    assert body["claim_scope"] == "implementation_only"
+    assert body["unsatisfied_external_gates"] == PINNED_EXTERNAL_GATES
+    assert rp.VERSION == "opentour.pilot.eve-protected-replay.v1"
+    assert rp.TIER == "generated"
+    assert list(rp.EXTERNAL_GATES) == PINNED_EXTERNAL_GATES
 
 
 # ---------------------------------------------------------------- V7 fail closed
@@ -920,7 +1032,7 @@ def test_e1_registered_task_runs_eligible_arms_candidate_and_recomputable_scorec
     other.transport.jobs = env.transport.jobs
     recomputed = full_result(other, other.worker())
     assert recomputed["result_digest"] == result["result_digest"]
-    assert rp.stage_decision(result, recomputed_digest=recomputed["result_digest"]).stageable
+    assert stage(other, result, recomputed_digest=recomputed["result_digest"]).stageable
     candidate_body = body["arms"]["candidate"]
     assert candidate_body["served_revision"] == "generated-adapter-digest-1"
     assert candidate_body["correct"] == 5 and body["arms"]["baseline"]["correct"] == 1
@@ -1083,12 +1195,12 @@ def test_x_selfcheck_is_computed_and_arms_must_be_journaled(env: Env) -> None:
     with refuses("arm_not_journaled"):
         env.result({"baseline": tampered})
     with refuses("scorer_version_drift"):
-        env.result(arms, scorer_=rp.DeterministicScorer("generated-scorer-v9", "r"))
+        env.result(arms, scorer_=sc.DeterministicScorer("generated-scorer-v9", "r"))
 
 
 def test_x_a_redigested_forged_body_is_not_stageable(env: Env) -> None:
     result = full_result(env)
-    assert rp.stage_decision(result, recomputed_digest=result["result_digest"]).stageable
+    assert stage(env, result, recomputed_digest=result["result_digest"]).stageable
     for change in (
         {"evidence_tier": "customer_witnessed"},
         {"claim_scope": "release"},
@@ -1098,9 +1210,9 @@ def test_x_a_redigested_forged_body_is_not_stageable(env: Env) -> None:
     ):
         body = {**result["body"], **change}
         forged = {"body": body, "result_digest": task.digest(body)}
-        decision = rp.stage_decision(forged, recomputed_digest=forged["result_digest"])
+        decision = stage(env, forged, recomputed_digest=forged["result_digest"])
         assert not decision.stageable, change
-    assert not rp.stage_decision({"body": {}}, recomputed_digest="x").stageable
+    assert not stage(env, {"body": {}}, recomputed_digest="x").stageable
 
 
 def test_x_credentials_are_checked_before_any_provider_observation(env: Env) -> None:
@@ -1374,3 +1486,179 @@ def test_absent_abstain_and_wrong_are_three_different_things(env: Env, monkeypat
             f"wrong-{n}", lambda rows, p=placeholder: ({**rows[0], "answer": p}, *rows[1:])
         )
         assert wrong == (rp.Verdict.SERIOUS_ERROR, True)
+
+
+# --- PR #204 audit follow-up: str subclasses and the type of what ``generate`` returns. --------
+
+
+class EqualsEverything(str):
+    """Generated hostile sentinel: a ``str`` subclass that compares equal to any value."""
+
+    def __eq__(self, other: object) -> bool:
+        return True
+
+    def __ne__(self, other: object) -> bool:
+        return False
+
+    __hash__ = str.__hash__
+
+
+def _no_arm_journaled(env: Env, worker: rp.EveReplayWorker, arm: rp.ArmSpec) -> bool:
+    return worker.journal.arm(rp.run_id_for(env.manifest, arm)) is None
+
+
+class Returning(ScriptedInference):
+    """A non-candidate inference whose ``generate`` returns ``edit`` of the genuine outputs."""
+
+    def __init__(self, edit: Any) -> None:
+        super().__init__(BASE, BASELINE)
+        self.edit = edit
+
+    def generate(self, arm: rp.ArmSpec, requests: tuple[rp.ReplayRequest, ...]) -> Any:
+        return self.edit(super().generate(arm, requests))
+
+
+def _smuggled(out: rp.ArmOutput, **fields: Any) -> rp.ArmOutput:
+    """An ArmOutput whose fields were swapped after its own check ran, bypassing __post_init__."""
+    for name, value in fields.items():
+        object.__setattr__(out, name, value)
+    return out
+
+
+def test_str_subclass_answer_equal_to_everything_is_refused_not_scored_correct(
+    env: Env, monkeypatch
+) -> None:
+    guess = EqualsEverything("generated-guess-without-the-answer")
+    assert guess == answer(2)  # the hostile property the boundary must not let through
+    with pytest.raises(TypeError):
+        _arm_output(answer=guess)
+    # candidate connector row: refused at the boundary, nothing journaled
+    infer = _serve(
+        env, monkeypatch, lambda rows: (rows[0], {**rows[1], "answer": guess}, *rows[2:])
+    )
+    worker = env.worker()
+    arm = env.arm("candidate", infer.served_revision)
+    with refuses("output_shape_invalid"):
+        env.replay(arm, infer, worker=worker)
+    assert _no_arm_journaled(env, worker, arm)
+    # non-candidate arm: a smuggled answer is re-checked by replay_arm before the scorer sees it
+    worker = env.worker("smuggled-answer.jsonl")
+    hostile = Returning(lambda outs: (outs[0], _smuggled(outs[1], answer=guess), *outs[2:]))
+    with refuses("output_shape_invalid"):
+        env.replay(env.arm("baseline"), hostile, worker=worker)
+    assert _no_arm_journaled(env, worker, env.arm("baseline"))
+
+
+def test_str_subclass_citation_is_refused(env: Env, monkeypatch) -> None:
+    cite = EqualsEverything("generated-unapproved-passage")
+    with pytest.raises(TypeError):
+        _arm_output(citations=(cite,))
+    with pytest.raises(TypeError):
+        _arm_output(citations=["p1-a", cite])
+    infer = _serve(env, monkeypatch, lambda rows: ({**rows[0], "citations": [cite]}, *rows[1:]))
+    worker = env.worker()
+    arm = env.arm("candidate", infer.served_revision)
+    with refuses("output_shape_invalid"):
+        env.replay(arm, infer, worker=worker)
+    assert _no_arm_journaled(env, worker, arm)
+    worker = env.worker("smuggled-citation.jsonl")
+    hostile = Returning(lambda outs: (_smuggled(outs[0], citations=(cite,)), *outs[1:]))
+    with refuses("output_shape_invalid"):
+        env.replay(env.arm("baseline"), hostile, worker=worker)
+    assert _no_arm_journaled(env, worker, env.arm("baseline"))
+
+
+def test_str_subclass_case_id_is_refused(env: Env, monkeypatch) -> None:
+    with pytest.raises(TypeError):
+        _arm_output(case_id=EqualsEverything("generated-p1"))
+    infer = _serve(
+        env,
+        monkeypatch,
+        lambda rows: ({**rows[0], "case_id": EqualsEverything(rows[0]["case_id"])}, *rows[1:]),
+    )
+    worker = env.worker()
+    arm = env.arm("candidate", infer.served_revision)
+    with refuses("output_shape_invalid"):
+        env.replay(arm, infer, worker=worker)
+    assert _no_arm_journaled(env, worker, arm)
+    worker = env.worker("smuggled-case-id.jsonl")
+    hostile = Returning(
+        lambda outs: (_smuggled(outs[0], case_id=EqualsEverything(outs[0].case_id)), *outs[1:])
+    )
+    with refuses("output_shape_invalid"):
+        env.replay(env.arm("baseline"), hostile, worker=worker)
+    assert _no_arm_journaled(env, worker, env.arm("baseline"))
+
+
+@dataclass(frozen=True)
+class LookAlike:
+    """Generated sentinel with ArmOutput's fields but not its type or its checks."""
+
+    case_id: str
+    answer: Any
+    citations: Any
+    abstained: Any
+
+
+class ArmOutputSubclass(rp.ArmOutput):
+    pass
+
+
+def _lookalike(out: rp.ArmOutput) -> LookAlike:
+    return LookAlike(out.case_id, out.answer, out.citations, out.abstained)
+
+
+@pytest.mark.parametrize(
+    "edit",
+    [
+        pytest.param(lambda outs: list(outs), id="list-not-tuple"),
+        pytest.param(lambda outs: iter(outs), id="iterator"),
+        pytest.param(lambda outs: None, id="none"),
+        pytest.param(lambda outs: {o.case_id: o for o in outs}, id="mapping"),
+        pytest.param(lambda outs: (_lookalike(outs[0]), *outs[1:]), id="look-alike-object"),
+        pytest.param(
+            lambda outs: (
+                {
+                    "case_id": outs[0].case_id,
+                    "answer": outs[0].answer,
+                    "citations": list(outs[0].citations),
+                    "abstained": outs[0].abstained,
+                },
+                *outs[1:],
+            ),
+            id="row-mapping",
+        ),
+        pytest.param(
+            lambda outs: (
+                ArmOutputSubclass(
+                    outs[0].case_id, outs[0].answer, outs[0].citations, outs[0].abstained
+                ),
+                *outs[1:],
+            ),
+            id="arm-output-subclass",
+        ),
+        pytest.param(
+            lambda outs: (_smuggled(outs[0], citations=["p1-a"]), *outs[1:]),
+            id="smuggled-list-citations",
+        ),
+        pytest.param(
+            lambda outs: (_smuggled(outs[0], abstained=0), *outs[1:]),
+            id="smuggled-int-abstained",
+        ),
+    ],
+)
+def test_generate_returns_anything_but_a_tuple_of_checked_arm_outputs_is_refused(
+    env: Env, edit: Any
+) -> None:
+    worker = env.worker()
+    with refuses("output_shape_invalid"):
+        env.replay(env.arm("baseline"), Returning(edit), worker=worker)
+    assert _no_arm_journaled(env, worker, env.arm("baseline"))
+
+
+def test_generate_returning_genuine_arm_outputs_still_scores_normally(env: Env) -> None:
+    record = env.replay(env.arm("baseline"), Returning(lambda outs: outs))
+    assert record.rows[0].verdict is rp.Verdict.CORRECT_ANSWER
+    assert [r.verdict for r in record.rows] == [
+        r.verdict for r in env.replay(env.arm("baseline"), ScriptedInference(BASE, BASELINE)).rows
+    ]

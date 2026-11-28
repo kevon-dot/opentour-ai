@@ -65,10 +65,136 @@ and pair names, comparison verdicts, slice statuses, economics basis, uncertaint
 checked against a closed vocabulary derived from what ``comparison_plan`` can emit, on every
 path including holds. A value outside its vocabulary refuses the comparison with the fixed code
 ``comparison_unverified``, which never echoes the offending value.
+
+Critical-slice names (OPE-571, decision D2): slice names are customer-chosen and can carry
+customer or personal information, so the packet never carries them. Each name is published as
+a KEYED digest, HMAC-SHA-256 under a per-engagement key that stays on the customer worker
+(the keyed-commitment pattern decided on OPE-574/OPE-563). A plain SHA-256 is not used because
+short names are guessable. Names resolve only in the customer's private view
+(``private_slice_view``), which needs the same key and is never stored or sent. No key, no
+packet: a missing or malformed engagement key refuses with ``slice_digest_key_unavailable`` and
+never falls back to plain hashing; a keyring that raises refuses with
+``slice_digest_key_lookup_failed``. Comparison refusals always precede the key lookup. The digest
+key is derived from the supplied key, the purpose label, the tenant and the engagement, so even a
+shared master key gives unlinkable digests across engagements. Until a signing and key-custody
+contract lands (OPE-566) the key is engagement-local and caller-injected (``SliceKeyView``),
+and the packet states that the digest is not issuer-authenticated. Because the key never leaves
+the worker, only the key holder can re-derive the slice digests; a consumer without it can check
+self-consistency and pointers.
+
+The operating-point digest follows the same rule. It is a plain canonical SHA-256 over the
+terms with every critical- and material-slice name first replaced by its keyed digest
+(``slice_substituted_terms``), so a guessed name cannot be confirmed against it, while a
+verifier (including OPE-528's evaluator) can still check the binding from the substituted terms
+without the key. Raw terms are never hashed anywhere in this module. A verdict must declare
+``operating_point_digest_form: "slice_substituted.v1"``: a verdict without that field refuses
+with ``operating_point_digest_predates_slice_digests`` WITHOUT any digest comparison, and a
+declared form with any other digest (including one computed over raw terms) refuses with the
+same ``verdict_binding_mismatch`` as a random wrong digest, so no reason code distinguishes a
+correct name guess from a wrong one. The rule applies on the hold path as well as the
+improvement path, because a hold publishes the verdict's digest too.
+
+Threat model for the caller-injected engagement key. Until OPE-566 defines key custody, the
+key is caller-supplied authority, so this module makes the narrow claim below and no more.
+
+* Only someone holding the key can confirm a guessed slice name, by keyed-hashing the guess.
+  A consumer without the key cannot. Whoever controls ``SliceKeyView`` holds the key, so that
+  caller can confirm guesses, and can choose a key that is weak or known to others, which lets
+  those others confirm guesses too. Nothing here detects a known or reused key: ``_key_ok``
+  checks only that it is exactly ``bytes``, 32 long and not one repeated byte value; there is
+  no entropy estimation. Key strength is ``SliceKeyView``'s responsibility under OPE-566: keys
+  come from a CSPRNG or a hardware token and are never derived from public inputs. Name
+  privacy is therefore exactly as strong as the caller's key handling.
+* Key control does not let anyone forge a comparison, audit receipt or verdict. Assembly still
+  requires the comparison, the receipt and the independent verdict to agree on exact digests,
+  denominator and expiry. A different key changes the substituted operating-point digest, so a
+  verdict bound under one key does not verify under another, and is refused rather than
+  re-bound.
+* Key control does not grant release authority. A packet is never a release decision.
+* A key controller can always deny service, by supplying no key, a malformed key or a raising
+  keyring. Every such case refuses closed.
+* The digests are not issuer-authenticated. They are at most ``locally_keyed``, and the packet
+  says so.
+
+Incumbent revision (F6). ``freeze_plan`` accepts any planner identifier as the incumbent
+revision, so it is caller-chosen free text and is published only as a keyed digest under the
+same purpose- and engagement-scoped key, domain-separated from slice names. A keyed digest was
+chosen over a digest bound to the run because no keyless verifier needs it: the verdict binds
+the raw comparator revision against the comparison, not against the packet, and a run-bound
+plain digest would be guessable from the published run reference.
+
+The keyed digest protects only ``arms.incumbent.revision``. It does NOT make the incumbent
+unlinkable. On an improvement packet the remedy binding (``remedy_binding_mismatch``) requires
+``binding.fallback_digest`` to equal the incumbent revision, because the key-less approval and
+rollback consumers need that content digest. So an improvement packet publishes the incumbent
+revision as-is: two engagements with the same incumbent publish the same value, which links
+them, and anyone can confirm a guessed revision by equality. That is kept by decision, not
+fixed. The packet states it per packet: ``critical_slice_names.incumbent_revision
+.linkable_across_engagements_via_fallback_digest`` is ``True`` whenever the fallback digest
+equals the incumbent revision, which is always so on an improvement packet. A hold does not
+bind the two, but a worker may still supply equal values, and then the flag is ``True`` there
+too. Identifier-form revisions cannot reach an improvement packet, because the fallback digest
+must be 64-hex.
+
+``previous_deployed_version`` is the revision deployed now, a compare-and-swap token the worker
+resolves, and is published verbatim. That definition is a decision by the cross-session reviewer
+of 1ff8bc8 acting as owner-delegate, recorded on OPE-571. It normally equals the incumbent
+revision, and does again after a rollback that restores the incumbent, so equality alone is not
+refused. It is refused, with ``previous_deployed_version_equals_incumbent_revision`` and before
+any key lookup, only when it equals the raw incumbent revision (identifier or 64-hex form, both
+exact ``str``) AND ``binding.fallback_digest`` does not: that is the one case in which
+publishing it would disclose a raw incumbent revision the packet does not already publish. When
+the fallback digest equals the incumbent (always on an improvement packet), the value is already
+in the packet and the refusal would protect nothing. Consequence: on a hold with an
+identifier-form incumbent the fallback digest (64-hex) is always distinct, so a normal token
+equal to the incumbent is always refused there, and the worker must pass
+``previous_deployed_version=None`` on such a hold. Only exact equality is detected. A value
+merely derived from the incumbent (a prefix, a suffix, another case) is accepted, so on a hold
+with a distinct fallback the worker remains responsible for not deriving the token from the
+incumbent revision.
+
+Published digests that still cover raw names (recorded, not fixed here). ``comparison
+.evidence_revision`` and ``plan_revision`` are plain SHA-256 over the whole comparison and
+plan, and both contain the raw slice names in ``terms`` and in each arm's ``critical_slices``.
+They are not practically guessable, because they also cover values the packet never
+publishes (timestamps, case ids, references, the intake revision). But a verdict binds
+``comparison_evidence_revision``, so an evaluator checking that binding currently needs the
+raw comparison. The follow-up, under OPE-528, is to bind a slice-substituted evidence revision
+instead.
+
+Differential tests pin what this module itself derives. They build the same packet under several
+keys and two sets of slice names (critical, material, or material only) or two incumbent
+revisions of different lengths. After every keyed digest of a varied input is replaced by a role
+token, no published leaf (dict values under digest keys compared as multisets) may be equal
+under two keys yet differ between the inputs, and no 6-character fragment of an alphanumeric
+word may be shared by three keys yet missing under every key for the other input. The only
+exceptions are ``comparison.evidence_revision`` and its ``protected_comparison`` evidence
+pointer (F4, above) and, for the incumbent on an improvement packet, ``binding.fallback_digest``
+(by contract, above). What this proves is limited to those two criteria over these fixtures.
+Neither catches a hash over a keyed value and a raw name (for example a digest over the
+published keyed arm revision and the raw material names): it varies with the key and is uniform
+hex. What catches such a hash is the spy on this module's ``digest`` and ``canonical`` (F1),
+which flags any raw slice name reaching them, run on an improvement and a hold for every source
+of slice names (critical only, critical and material, material only); a mixed hash computed
+outside those functions is caught by none of these tests. The material-only differential fixture
+catches only a hash whose inputs are all unkeyed. A leak spread over fragments shorter than six
+characters, or split into such fragments by punctuation, is not caught by the fragment check. A
+future field is caught only if it falls under one of these criteria, not whatever form it takes.
+The tests vary the comparison this module receives and hold ``plan_revision`` fixed, because
+this module copies that digest without being able to recompute it. A real re-plan with other
+names would change ``plan_revision`` too, so the F4 limit above applies to it unchanged.
+
+Schema version (INFO-C, ruling of the cross-session reviewer of 1ff8bc8): no version bump now.
+The packet stays ``opentour.pilot.comparison-packet.v1`` although
+``critical_slice_names.incumbent_revision`` changed shape after #214, because nothing consumes
+v1 yet and stored packets fail closed (``verify_packet`` digest mismatch, ``restage_conflict``).
+A version bump becomes MANDATORY once the Codex-side consumers (OPE-550 and the Slack approval
+listener) bind to v1: from then on, any change to the packet shape must change ``PACKET``.
 """
 
 from __future__ import annotations
 
+import hmac
 import json
 import os
 import re
@@ -87,6 +213,12 @@ PACKET = "opentour.pilot.comparison-packet.v1"
 EVENT = "opentour.pilot.comparison-completed-event.v1"
 VERDICT = "opentour.pilot.independent-verdict.v1"
 RECEIPT = "opentour.benchmark-audit-receipt.v1"
+SLICE_DIGEST = "opentour.pilot.critical-slice-digest.v1"
+_SLICE_TERMS = ("critical_slices", "material_slices")
+# The only operating-point digest form a verdict may bind. A verdict that does not declare it
+# predates OPE-571 and is refused by the field's absence alone, never by comparing a digest.
+OPERATING_POINT_DIGEST_FORM = "slice_substituted.v1"
+_LEGACY_POINT = "operating_point_digest_predates_slice_digests"
 EVENT_REVISION = 1
 _FIXTURE_REFUSAL = "generated_fixture_not_permitted_in_live_context"
 _ID = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9_.:@/-]{0,127}")
@@ -171,14 +303,16 @@ _EXCLUSION_KEYS = (
 # Critical-slice names are customer-chosen, so no closed vocabulary exists. This is a
 # WELL-FORMEDNESS check only, NOT a disclosure control: it is exactly the identifier shape the
 # planner enforces (``simple_repair.identifier``, used by ``comparison_plan._terms``), so every
-# planner-legal name passes, including names that carry customer identifiers. Keeping
-# customer-chosen names out of the published packet is owned by OPE-571 (publish slice names as
-# digests). A test pins this pattern to the planner's own.
+# planner-legal name passes. The disclosure control is ``slice_digest`` (OPE-571): the packet
+# carries only keyed digests of these names. A test pins this pattern to the planner's own.
 _SLICE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}")
 # Rendered decimal measurements (``pilot_metrics.rendered``): six fixed places, or absent.
 _DECIMAL = re.compile(r"[0-9]{1,40}\.[0-9]{6}")
 # The planner's own identifier shape (``simple_repair.identifier``). ``freeze_plan`` requires only
-# this of ``incumbent_revision``, so the incumbent revision cannot be required to be a digest.
+# this of ``incumbent_revision``, so the incumbent revision cannot be required to be a digest. The
+# arm field carries only its keyed digest (F6), but an improvement packet also publishes the
+# revision as-is in ``binding.fallback_digest`` (see the module docstring), and
+# ``previous_deployed_version`` may equal it only when the fallback digest does too.
 _IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}")
 _ECON_BASES = ("unavailable", "observed", "modeled", "generated")
 _UNCERTAINTY = ("wilson_95_independent_verified_cases", "unavailable")
@@ -217,6 +351,7 @@ class PacketContext:
     """Bindings the worker resolves from its current connection and mandate, never the caller."""
 
     tenant: str
+    engagement: str
     recipient: str
     mandate_revision: str
     run_ref: str
@@ -231,6 +366,7 @@ class PacketContext:
     def valid(self) -> bool:
         ids = (
             self.tenant,
+            self.engagement,
             self.recipient,
             self.mandate_revision,
             self.run_ref,
@@ -246,13 +382,17 @@ class PacketContext:
             and not isinstance(self.expires_at, bool)
             and (
                 self.previous_deployed_version is None
-                or bool(_ID.fullmatch(self.previous_deployed_version))
+                or (
+                    type(self.previous_deployed_version) is str
+                    and bool(_ID.fullmatch(self.previous_deployed_version))
+                )
             )
         )
 
     def as_json(self) -> Json:
         return {
             "tenant": self.tenant,
+            "engagement": self.engagement,
             "recipient": self.recipient,
             "mandate_revision": self.mandate_revision,
             "run_ref": self.run_ref,
@@ -269,6 +409,19 @@ class AuthorityView(Protocol):
     """Injected boundary: the worker's current mandate. ``None`` means unavailable."""
 
     def current(self, run_ref: str) -> PacketContext | None: ...
+
+
+class SliceKeyView(Protocol):
+    """Injected boundary: the engagement-local slice-digest key on the customer worker.
+
+    Returns the 32-byte key for ``(tenant, engagement)``, or ``None`` when it is unavailable.
+    The key never enters a packet, event, refusal or the outbox. Its custody and rotation are
+    owned by OPE-566; until then it is engagement-local and not issuer-authenticated. Key
+    STRENGTH is this boundary's responsibility: keys come from a CSPRNG or a hardware token and
+    are never derived from public inputs. This module only refuses obviously unusable keys.
+    """
+
+    def slice_key(self, tenant: str, engagement: str) -> bytes | None: ...
 
 
 class EventSink(Protocol):
@@ -331,6 +484,98 @@ def _fraction_ok(value: Any) -> bool:
     )
 
 
+def _key_ok(key: Any) -> bool:
+    """Exactly ``bytes`` (no subclass), 32 long, and not a single repeated byte value."""
+    return type(key) is bytes and len(key) == 32 and len(set(key)) > 1
+
+
+def _scoped_key(key: bytes, tenant: str, engagement: str) -> bytes:
+    """Derive the slice-digest key for one purpose, tenant and engagement.
+
+    Same two-step shape as the repository's other keyed seals (``starter_reconnect``): derive a
+    scoped key from the supplied key, then MAC the value. Binding tenant and engagement into the
+    derivation keeps digests unlinkable across engagements even if one master key is shared.
+    """
+    label = canonical([SLICE_DIGEST, tenant, engagement]).encode()
+    return hmac.digest(key, label, "sha256")
+
+
+def _mac(name: str, scoped: bytes) -> str:
+    return hmac.digest(scoped, name.encode(), "sha256").hex()
+
+
+def _substitute(terms: Json, scoped: bytes) -> Json:
+    return {k: [_mac(n, scoped) for n in v] if k in _SLICE_TERMS else v for k, v in terms.items()}
+
+
+def slice_digest(name: str, key: bytes, *, tenant: str, engagement: str) -> str:
+    """Keyed digest of one slice name: HMAC-SHA-256 under the tenant/engagement-scoped key.
+
+    Never a plain hash.
+    """
+    return _mac(name, _scoped_key(key, tenant, engagement))
+
+
+def slice_substituted_terms(terms: Json, key: bytes, *, tenant: str, engagement: str) -> Json:
+    """``terms`` with every critical- and material-slice name replaced by its keyed digest.
+
+    Order and every other term are kept, so the canonical form differs only in the names.
+    """
+    return _substitute(terms, _scoped_key(key, tenant, engagement))
+
+
+def operating_point_digest(substituted_terms: Json) -> str:
+    """Plain canonical SHA-256 over SLICE-SUBSTITUTED terms (OPE-571 follow-up).
+
+    Deliberately unkeyed: a verifier, including the OPE-528 evaluator, checks the binding from
+    the substituted terms alone, without the engagement key. The names inside it are already
+    keyed digests, so a guessed name cannot be confirmed against it. Never pass raw terms.
+    """
+    return digest(substituted_terms)
+
+
+def _terms_ok(terms: Any) -> bool:
+    """Terms are digested, not copied, but each slice name must be a planner-shaped string."""
+    return isinstance(terms, dict) and all(
+        isinstance(terms.get(k, []), list)
+        and all(isinstance(n, str) and bool(_SLICE_NAME.fullmatch(n)) for n in terms.get(k, []))
+        for k in _SLICE_TERMS
+    )
+
+
+def incumbent_revision_digest(revision: str, key: bytes, *, tenant: str, engagement: str) -> str:
+    """Keyed digest of the incumbent arm's revision (F6), under the same scoped slice key."""
+    return _revision_mac(revision, _scoped_key(key, tenant, engagement))
+
+
+def _revision_mac(revision: str, scoped: bytes) -> str:
+    # Domain-separated from slice names: a slice name is a bare identifier and never begins
+    # with "[", so the two can never share an input or a digest.
+    return _mac(canonical(["incumbent_revision", revision]), scoped)
+
+
+def _comparison_scope(comparison: Json) -> tuple[str, str]:
+    return comparison["organization"], comparison["engagement"]
+
+
+def _point_binding(verdict: Json, comparison: Json, slice_key: bytes) -> str | None:
+    """The verdict's operating-point binding, on the hold and the improvement path alike.
+
+    Key-free and oracle-free: the legacy case is decided by the form field's ABSENCE, with no
+    digest comparison, and every wrong digest (a raw-terms digest, correct names or not, or a
+    random one) gets the same ``verdict_binding_mismatch``. Raw terms are never hashed.
+    """
+    if "operating_point_digest_form" not in verdict:
+        return _LEGACY_POINT
+    point = operating_point_digest(_substitute(comparison.get("terms", {}), slice_key))
+    if (
+        verdict["operating_point_digest_form"] != OPERATING_POINT_DIGEST_FORM
+        or verdict.get("operating_point_digest") != point
+    ):
+        return "verdict_binding_mismatch"
+    return None
+
+
 def _arm_vocab_ok(name: str, arm: Any) -> bool:
     """Closed-vocabulary and type checks for everything ``_arm_aggregate`` copies."""
     if not isinstance(arm, dict) or not isinstance(arm.get("metrics"), dict):
@@ -342,7 +587,8 @@ def _arm_vocab_ok(name: str, arm: Any) -> bool:
     operating = metrics.get("operating_point")
     revision = arm.get("revision")
     revision_ok = (
-        isinstance(revision, str) and bool(_IDENTIFIER.fullmatch(revision))
+        # Exact ``str``: the revision is compared with ``previous_deployed_version`` (LOW-2).
+        type(revision) is str and bool(_IDENTIFIER.fullmatch(revision))
         if name == "incumbent"
         else _digest_ok(revision)
     )
@@ -425,6 +671,9 @@ def _comparison_ok(comparison: Any) -> bool:
         and isinstance(comparison.get("arms"), dict)
         and isinstance(comparison.get("comparisons"), dict)
         and _comparison_vocab_ok(comparison)
+        and _terms_ok(comparison.get("terms", {}))
+        and isinstance(comparison.get("engagement"), str)
+        and bool(_IDENTIFIER.fullmatch(comparison["engagement"]))
     )
 
 
@@ -451,6 +700,11 @@ def _verdict_ok(verdict: Any) -> bool:
         and verdict.get("schema_version") == VERDICT
         and _sealed(verdict, "verdict_digest")
         and isinstance(verdict.get("denominator"), dict)
+        # OPE-528 emits content digests here. A free-text revision (such as an identifier-form
+        # incumbent) inside a verdict whose digest the packet publishes could be confirmed by
+        # guessing, so only 64-hex values are accepted (F6).
+        and _digest_ok(verdict.get("candidate_digest"))
+        and _digest_ok(verdict.get("comparator_digest"))
     )
 
 
@@ -467,11 +721,15 @@ def _denominator_ok(comparison: Json) -> bool:
     )
 
 
-def _arm_aggregate(arm: Json) -> Json:
+def _arm_aggregate(name: str, arm: Json, slice_key: bytes) -> Json:
     metrics = arm["metrics"]
     economics = metrics["economics"]
     return {
-        "revision": arm["revision"],
+        # The incumbent revision is caller-chosen free text (any planner identifier), so it is
+        # published only as a keyed digest. The other arms' revisions are content digests.
+        "revision": _revision_mac(arm["revision"], slice_key)
+        if name == "incumbent"
+        else arm["revision"],
         "prediction_digest": arm["prediction_digest"],
         "counts": {k: metrics[k] for k in _ARM_FIELDS},
         "coverage": [metrics["coverage"]["numerator"], metrics["coverage"]["denominator"]],
@@ -483,7 +741,9 @@ def _arm_aggregate(arm: Json) -> Json:
             k: metrics["uncertainty"].get(k) for k in ("method", "lower", "upper", "small_sample")
         },
         "operating_point": metrics["operating_point"]["combined"],
-        "critical_slices": {k: v["status"] for k, v in arm["critical_slices"].items()},
+        "critical_slices": dict(
+            sorted((_mac(k, slice_key), v["status"]) for k, v in arm["critical_slices"].items())
+        ),
         "hold_reason": arm["hold_reason"],
         "economics": {k: economics[k] for k in _ECON_FIELDS},
     }
@@ -504,16 +764,21 @@ def _assemble(
     verdict: Json | None,
     ctx: PacketContext,
     *,
+    slice_key: bytes,
     allow_generated_fixture: bool,
 ) -> tuple[Json | None, str | None]:
-    """Pure and deterministic: identical inputs reproduce the identical packet digest."""
+    """Pure and deterministic: identical inputs reproduce the identical packet digest.
+
+    ``slice_key`` here (and in the helpers it calls) is the already-scoped key from
+    ``_scoped_key``, never the supplied engagement key.
+    """
     decision = comparison["decision"]
     winner = decision.get("winner")
     improvement = decision.get("disposition") == "recommend"
     if improvement and winner != "simple":
         return None, "model_winner_branch_not_in_this_packet"
     if improvement:
-        failure = _improvement_checks(comparison, receipt, verdict, ctx, winner)
+        failure = _improvement_checks(comparison, receipt, verdict, ctx, winner, slice_key)
         if failure:
             return None, failure
         assert receipt is not None
@@ -526,7 +791,15 @@ def _assemble(
             return None, "audit_receipt_unverified"
         if verdict is not None and not _verdict_ok(verdict):
             return None, "independent_verdict_unverified"
-    arms = {name: _arm_aggregate(arm) for name, arm in sorted(comparison["arms"].items())}
+        # A hold publishes the verdict's digest, so the verdict must bind the substituted
+        # operating point exactly as on the improvement path (F5).
+        point_failure = _point_binding(verdict, comparison, slice_key) if verdict else None
+        if point_failure:
+            return None, point_failure
+    arms = {
+        name: _arm_aggregate(name, arm, slice_key)
+        for name, arm in sorted(comparison["arms"].items())
+    }
     pairs = {
         name: {**pair["paired"], "observed_comparison": pair["observed_comparison"]}
         for name, pair in sorted(comparison["comparisons"].items())
@@ -540,7 +813,9 @@ def _assemble(
             "evidence_revision": comparison["evidence_revision"],
             "plan_revision": comparison["plan_revision"],
             "protected_membership_digest": comparison["protected_membership_digest"],
-            "operating_point_digest": digest(comparison.get("terms", {})),
+            "operating_point_digest": operating_point_digest(
+                _substitute(comparison.get("terms", {}), slice_key)
+            ),
             "metric": comparison.get("metric"),
         },
         "denominator": {
@@ -548,6 +823,26 @@ def _assemble(
             "excluded_counts": dict(sorted(comparison.get("exclusions", {}).items())),
         },
         "arms": arms,
+        "critical_slice_names": {
+            "form": "keyed_digest",
+            "algorithm": "hmac_sha256",
+            "key_scope": "engagement",
+            "keyed_engagement": ctx.engagement,
+            "key_custody": "customer_worker_local",
+            "names_disclosed": False,
+            # F6: the incumbent arm's revision is published under the same keyed digest, but
+            # that protects the arm field only. When the fallback digest equals the revision
+            # (always on an improvement packet, by the remedy binding) the revision is
+            # published as-is in ``binding.fallback_digest`` and links engagements.
+            "incumbent_revision": {
+                "arm_revision": "keyed_digest",
+                "linkable_across_engagements_via_fallback_digest": _fallback_is_incumbent(
+                    comparison, ctx
+                ),
+            },
+            # Engagement-local key, no custody or signing contract yet (OPE-566 unlanded).
+            "issuer_authenticated": False,
+        },
         "paired": pairs,
         "decision": {
             "disposition": decision["disposition"],
@@ -586,6 +881,11 @@ def _assemble(
     return {**packet, "packet_digest": digest(packet)}, None
 
 
+def _fallback_is_incumbent(comparison: Json, ctx: PacketContext) -> bool:
+    incumbent = comparison["arms"].get("incumbent")
+    return incumbent is not None and ctx.fallback_digest == incumbent["revision"]
+
+
 def _pointer(document: Json | None, field: str) -> str | None:
     return document.get(field) if document else None
 
@@ -596,6 +896,7 @@ def _improvement_checks(
     verdict: Json | None,
     ctx: PacketContext,
     winner: str,
+    slice_key: bytes,
 ) -> str | None:
     if receipt is None:
         return "audit_receipt_missing"
@@ -637,12 +938,16 @@ def _improvement_checks(
         or coverage["numerator"] * 10_000 < floor * coverage["denominator"]
     ):
         return "decision_inconsistent_with_evidence"
+    point_failure = _point_binding(verdict, comparison, slice_key)
+    if point_failure:
+        return point_failure
+    point = operating_point_digest(_substitute(comparison.get("terms", {}), slice_key))
     bound = {
         "audit_receipt_digest": receipt["receipt_digest"],
         "comparison_evidence_revision": comparison["evidence_revision"],
         "candidate_digest": arms[winner]["revision"],
         "comparator_digest": arms["incumbent"]["revision"],
-        "operating_point_digest": digest(comparison["terms"]),
+        "operating_point_digest": point,
         "benchmark_digest": ctx.benchmark_digest,
     }
     if any(verdict.get(k) != v for k, v in bound.items()):
@@ -661,20 +966,56 @@ def assemble_packet(
     verdict: Json | None,
     ctx: PacketContext,
     *,
+    slice_key: bytes | None,
     allow_generated_fixture: bool = False,
 ) -> tuple[Json | None, str | None]:
-    """Return ``(packet, None)`` or ``(None, reason)``. Never raises on a governance failure."""
-    if allow_generated_fixture and not _fixture_context():
-        return None, _FIXTURE_REFUSAL
-    if not ctx.valid():
-        return None, "invalid_packet_context"
-    if not _comparison_ok(comparison):
-        return None, "comparison_unverified"
-    if comparison.get("organization") != ctx.tenant:
-        return None, "comparison_scope_mismatch"
+    """Return ``(packet, None)`` or ``(None, reason)``. Never raises on a governance failure.
+
+    ``slice_key`` is the engagement key for ``comparison["engagement"]``. Without a valid one
+    there is no packet: slice names are never published plainly or under a plain hash.
+    """
+    failure = _preflight(comparison, ctx, allow_generated_fixture)
+    if failure:
+        return None, failure
+    if not _key_ok(slice_key):
+        return None, "slice_digest_key_unavailable"
+    assert slice_key is not None
     return _assemble(
-        comparison, receipt, verdict, ctx, allow_generated_fixture=allow_generated_fixture
+        comparison,
+        receipt,
+        verdict,
+        ctx,
+        slice_key=_scoped_key(slice_key, ctx.tenant, ctx.engagement),
+        allow_generated_fixture=allow_generated_fixture,
     )
+
+
+def _preflight(comparison: Any, ctx: PacketContext, allow_generated_fixture: bool) -> str | None:
+    """Refusals that never need the slice key. They always precede any key lookup."""
+    if allow_generated_fixture and not _fixture_context():
+        return _FIXTURE_REFUSAL
+    if not ctx.valid():
+        return "invalid_packet_context"
+    if not _comparison_ok(comparison):
+        return "comparison_unverified"
+    if comparison.get("organization") != ctx.tenant:
+        return "comparison_scope_mismatch"
+    if comparison.get("engagement") != ctx.engagement:
+        # The engagement is resolved by the worker, never chosen by the comparison's author.
+        return "comparison_engagement_mismatch"
+    incumbent = comparison["arms"].get("incumbent")
+    # Both values are exact ``str`` here (``PacketContext.valid`` and ``_arm_vocab_ok``), so
+    # this is plain string equality. The deployed revision normally IS the incumbent; it is
+    # refused only when publishing it would disclose a raw incumbent revision that the fallback
+    # digest does not already publish (module docstring).
+    if (
+        ctx.previous_deployed_version is not None
+        and incumbent is not None
+        and ctx.fallback_digest != incumbent["revision"]
+        and ctx.previous_deployed_version == incumbent["revision"]
+    ):
+        return "previous_deployed_version_equals_incumbent_revision"
+    return None
 
 
 def verify_packet(
@@ -684,13 +1025,52 @@ def verify_packet(
     verdict: Json | None,
     ctx: PacketContext,
     *,
+    slice_key: bytes | None,
     allow_generated_fixture: bool = False,
 ) -> bool:
-    """Independent consumer replay: re-derive the packet from its sources and compare digests."""
+    """Replay: re-derive the packet from its sources and compare digests.
+
+    Re-deriving the slice digests needs the engagement key, so only its holder (the customer
+    worker) can run a full replay. A consumer without the key checks ``packet_digest`` and the
+    evidence pointers only.
+    """
     rebuilt, reason = assemble_packet(
-        comparison, receipt, verdict, ctx, allow_generated_fixture=allow_generated_fixture
+        comparison,
+        receipt,
+        verdict,
+        ctx,
+        slice_key=slice_key,
+        allow_generated_fixture=allow_generated_fixture,
     )
     return reason is None and rebuilt == packet and _sealed(packet, "packet_digest")
+
+
+def private_slice_view(packet: Any, comparison: Any, slice_key: bytes | None) -> Json | None:
+    """The customer's private view: each arm's slice statuses under their readable names.
+
+    Resolved locally from the customer's own comparison and engagement key. The result is for
+    the customer's display only: it is never stored in the outbox, put in an event or sent.
+    Returns ``None`` unless every published digest resolves to one of the comparison's names.
+    """
+    if not (_key_ok(slice_key) and _comparison_ok(comparison)) or not isinstance(packet, dict):
+        return None
+    assert slice_key is not None
+    arms = packet.get("arms")
+    if not _sealed(packet, "packet_digest") or not isinstance(arms, dict):
+        return None
+    scoped = _scoped_key(slice_key, *_comparison_scope(comparison))
+    names = {
+        _mac(name, scoped): name
+        for arm in comparison["arms"].values()
+        for name in arm["critical_slices"]
+    }
+    view: Json = {}
+    for arm_name, arm in sorted(arms.items()):
+        slices = arm.get("critical_slices") if isinstance(arm, dict) else None
+        if not isinstance(slices, dict) or not all(d in names for d in slices):
+            return None
+        view[arm_name] = {names[d]: status for d, status in sorted(slices.items())}
+    return view
 
 
 def event_for(packet: Json) -> Json:
@@ -737,10 +1117,19 @@ _TABLES = ("packets", "outbox", "superseded_receipts", "reconciliations")
 class PacketOutbox:
     """File-backed transactional store. Reopening the file is the restart path."""
 
-    def __init__(self, path: Path | str, *, allow_generated_fixture: bool = False):
+    def __init__(
+        self,
+        path: Path | str,
+        *,
+        slice_keys: SliceKeyView | None = None,
+        allow_generated_fixture: bool = False,
+    ):
         if allow_generated_fixture and not _fixture_context():
             raise PacketStoreError(_FIXTURE_REFUSAL)
         self.path = Path(path)
+        # Engagement-local slice-digest keys on this worker. ``None``: every stage refuses with
+        # ``slice_digest_key_unavailable``; there is no plain-hash fallback.
+        self.slice_keys = slice_keys
         self.allow_generated_fixture = allow_generated_fixture
         with closing(sqlite3.connect(self.path, timeout=5)) as db:
             db.executescript(_SCHEMA)
@@ -792,8 +1181,23 @@ class PacketOutbox:
         ctx = authority.current(run_ref) if _ID.fullmatch(run_ref or "") else None
         if ctx is None or ctx.run_ref != run_ref:
             return _refuse("authority_unavailable")
+        failure = _preflight(comparison, ctx, self.allow_generated_fixture)
+        if failure:
+            return _refuse(failure)  # before any key lookup
+        if self.slice_keys is None:
+            return _refuse("slice_digest_key_unavailable")
+        try:
+            key = self.slice_keys.slice_key(ctx.tenant, ctx.engagement)
+        except Exception:
+            # An unknown keyring result is never success and never raises out of staging.
+            return _refuse("slice_digest_key_lookup_failed")
         packet, reason = assemble_packet(
-            comparison, receipt, verdict, ctx, allow_generated_fixture=self.allow_generated_fixture
+            comparison,
+            receipt,
+            verdict,
+            ctx,
+            slice_key=key,
+            allow_generated_fixture=self.allow_generated_fixture,
         )
         if packet is None:
             return _refuse(reason or "comparison_unverified")

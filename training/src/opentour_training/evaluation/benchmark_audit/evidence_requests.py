@@ -36,6 +36,20 @@ NEXT_EVIDENCE: dict[str, str] = {
         "Register the disclosure, retire the exposed families and seal a successor "
         "protected manifest."
     ),
+    "exposure_log_scope_mismatch": (
+        "Supply the exposure guard's release history for every protected family in this audit."
+    ),
+    "exposure_history_tampered": (
+        "Supply the exposure guard's release history unchanged since it was sealed."
+    ),
+    "exposure_history_malformed": (
+        "Supply the exposure guard's release history as sealed: a frozenset universe of family "
+        "ids and a tuple of release entries with exactly typed cells, role flags and authorizers."
+    ),
+    "caller_assertion_malformed": (
+        "Resubmit caller-asserted exposure as a frozenset of family ids and the unlogged "
+        "disclosure count as a non-negative integer."
+    ),
     "duplicate_family_id": (
         "Resolve duplicate family identifiers and reconcile the denominator flow."
     ),
@@ -71,5 +85,23 @@ NEXT_EVIDENCE: dict[str, str] = {
     "policy_only_starter": (
         "No outcome history: keep the policy-only starter experience and collect "
         "authorized evidence."
+    ),
+}
+
+# Why an otherwise eligible claim still cannot fire the customer accuracy alert.
+ALERT_EVIDENCE: dict[str, str] = {
+    "upstream_receipt_not_worker_verified": (
+        "Supply an OPE-416 verified-candidate snapshot receipt that the worker verifies itself; "
+        "a caller's verification flag cannot enable the customer accuracy alert."
+    ),
+    "exposure_not_derived_from_covering_history": (
+        "Supply the exposure guard's release history covering every protected family so the "
+        "worker derives exposure itself."
+    ),
+    "claim_rests_on_caller_assertions": (
+        "Replace each caller-asserted dependency listed in the receipt with worker-held evidence."
+    ),
+    "evidence_origin_not_observed": (
+        "Audit an observed population; generated evidence cannot enable the alert."
     ),
 }

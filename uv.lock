@@ -494,6 +494,7 @@ version = "0.0.0"
 source = { editable = "services/cell-runtime" }
 dependencies = [
     { name = "fastapi" },
+    { name = "opentour-journal" },
     { name = "pydantic" },
     { name = "uvicorn" },
 ]
@@ -501,6 +502,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "fastapi", specifier = "==0.163.0" },
+    { name = "opentour-journal", editable = "packages/authority-journal" },
     { name = "pydantic", specifier = "==2.14.3" },
     { name = "uvicorn", specifier = "==0.54.0" },
 ]
