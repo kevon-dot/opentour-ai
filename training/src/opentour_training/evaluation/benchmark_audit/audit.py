@@ -39,6 +39,8 @@ from opentour_training.evaluation.benchmark_audit.model import (
     SamplingDesign,
     Verdict,
     canonical_digest,
+    canonical_form,
+    canonical_json,
 )
 
 _HEX64 = re.compile(r"[a-f0-9]{64}")
@@ -53,8 +55,34 @@ class _Row:
     mismatch: bool
 
 
+# The label commitment and every field the audit reads to verify it: the verifier choice
+# (``_verifier``), the adjudicator's independence (``_distinct_adjudicator``, ``_independence``),
+# the unresolved status and the successor's fresh confirmation. Freezing them with the label
+# means adjudication is recorded before evaluation; removing or changing any of them after the
+# freeze changes the label manifest, so the receipt is stale.
+LABEL_EVIDENCE_FIELDS = (
+    "final_label_digest",
+    "first_labeler_id",
+    "adjudicator_id",
+    "adjudicator_saw_first_label",
+    "adjudicator_saw_predictions",
+    "adjudicator_label_digest",
+    "independent_source",
+    "independent_label_digest",
+    "unresolved",
+    "fresh_confirmation",
+)
+
+
 def label_manifest_digest(records: Iterable[FamilyRecord]) -> str:
-    return canonical_digest(sorted((r.family_id, r.final_label_digest) for r in records))
+    """Digest of each family's label commitment and its verification evidence."""
+    rows = [
+        canonical_form((r.family_id, tuple(getattr(r, f) for f in LABEL_EVIDENCE_FIELDS)))
+        for r in records
+    ]
+    return canonical_digest(
+        {"fields": list(LABEL_EVIDENCE_FIELDS), "rows": sorted(rows, key=canonical_json)}
+    )
 
 
 def split_manifest_digest(records: Iterable[FamilyRecord]) -> str:
@@ -204,6 +232,7 @@ class _Exposure:
     malformed: tuple[str, ...]
     verified: bool = False
     tampered: bool = False
+    history_malformed: bool = False
 
     @property
     def worker_held(self) -> bool:
@@ -217,7 +246,9 @@ def _exposure(inputs: AuditInputs) -> _Exposure:
     A caller's list or count can only add to what the replayed history implies. Without a
     history, exposure is caller-asserted; with one, it is replayed from a supplied, unsigned
     history (see ``_exposure_history_verified_by_worker``). A record whose content no longer
-    matches the digest sealed at issue is tampered. Malformed caller values fail closed.
+    matches the digest sealed at issue is tampered. Malformed caller values fail closed. A
+    history whose fields do not have their exact intended types is not replayed: it is
+    malformed, and every protected family is treated as exposed.
     """
     malformed: list[str] = []
     caller_unlogged = inputs.unlogged_disclosures
@@ -231,8 +262,19 @@ def _exposure(inputs: AuditInputs) -> _Exposure:
     record = inputs.exposure_record
     if record is None:
         return _Exposure(caller_exposed, caller_unlogged, _CALLER, True, False, tuple(malformed))
+    protected = frozenset(r.family_id for r in inputs.records if r.split == "protected")
+    if type(record) is not ExposureRecord or not record.well_typed():
+        return _Exposure(
+            caller_exposed | protected,
+            caller_unlogged,
+            _SUPPLIED_HISTORY,
+            False,
+            False,
+            tuple(malformed),
+            tampered=type(record) is not ExposureRecord or not record.intact(),
+            history_malformed=True,
+        )
     derived, unlogged = replay_exposure(record)
-    protected = {r.family_id for r in inputs.records if r.split == "protected"}
     return _Exposure(
         caller_exposed | derived,
         max(caller_unlogged, unlogged),
@@ -336,6 +378,8 @@ def audit(inputs: AuditInputs) -> dict[str, Any]:
         invalid.append(Reason("preprocessing_fit_on_protected", pre.revision))
     elif pre is not None and pre.applied_to_protected_revision != pre.revision:
         invalid.append(Reason("preprocessing_not_verified", pre.revision))
+    if exposure.history_malformed:
+        invalid.append(Reason("exposure_history_malformed", "field without its exact type"))
     if exposure.tampered:
         invalid.append(Reason("exposure_history_tampered", "content differs from sealed digest"))
     if exposure.malformed:

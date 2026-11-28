@@ -41,10 +41,7 @@ class PopulationKind(StrEnum):
 
 def canonical_digest(value: object) -> str:
     """SHA-256 of canonical JSON. Dataclasses must be converted with ``asdict`` first."""
-    encoded = json.dumps(
-        value, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False
-    )
-    return hashlib.sha256(encoded.encode("ascii")).hexdigest()
+    return hashlib.sha256(canonical_json(value).encode("ascii")).hexdigest()
 
 
 def label_commitment(salt: str, family_id: str, label: str) -> str:
@@ -60,7 +57,12 @@ class FeatureSpec:
 
 @dataclass(frozen=True)
 class BindingDigests:
-    """Everything a receipt is bound to. Any difference after freeze makes it stale."""
+    """Everything a receipt is bound to. Any difference after freeze makes it stale.
+
+    ``label_manifest`` binds each family's final label commitment together with the
+    verification evidence the audit reads for it (see ``audit.LABEL_EVIDENCE_FIELDS``), so
+    adjudication must be recorded before the freeze and cannot be removed or changed after it.
+    """
 
     canonical_inputs: str
     source_revisions: str
@@ -170,26 +172,108 @@ class ReleaseEntry:
     authorized_by: str | None = None
 
 
-def _digest_part(value: object) -> object:
-    if type(value) is str:
-        return value
-    if type(value) in (frozenset, tuple, list, set):
-        return sorted(str(_digest_part(v)) for v in value)  # type: ignore[attr-defined]
-    return f"<{type(value).__name__}:{value!r}>"
+def canonical_form(value: object) -> object:
+    """Type-tagged canonical form, so values of different types never encode alike.
+
+    ``None`` and the text ``"<NoneType:None>"``, a tuple and a frozenset with the same members, or
+    ``True`` and ``1`` all encode differently. Members of a frozenset are ordered by their own
+    canonical JSON. A subclass of ``str``, ``int``, ``frozenset``, ``tuple`` or ``list`` is tagged
+    with its exact type name and encoded from the data the base type holds, so an overridden
+    ``__repr__``, ``__str__``, ``__eq__`` or ``__iter__`` cannot change its encoding. Any other
+    value is encoded as opaque from its type name and ``repr``. The exposure audit refuses every
+    value that is not of its exact intended type (see ``ExposureRecord.well_typed``).
+    """
+    kind = type(value)
+    if value is None:
+        return ["none"]
+    if kind is str:
+        return ["str", value]
+    if kind is bool:
+        return ["bool", value]
+    if kind is int:
+        return ["int", value]
+    if kind is frozenset:
+        members = [canonical_form(v) for v in value]  # type: ignore[attr-defined]
+        return ["frozenset", sorted(members, key=canonical_json)]
+    if kind is tuple:
+        return ["tuple", [canonical_form(v) for v in value]]  # type: ignore[attr-defined]
+    if kind is list:
+        return ["list", [canonical_form(v) for v in value]]  # type: ignore[attr-defined]
+    name = f"{kind.__module__}.{kind.__qualname__}"
+    base = _base_data(value)
+    if base is not None:
+        return ["subclass", name, canonical_form(base)]
+    return ["opaque", name, repr(value)]
+
+
+def _base_data(value: object) -> object | None:
+    """The exact-type data a subclass of a supported base holds, read through the base slots."""
+    if isinstance(value, str):
+        return str.__str__(value)
+    if isinstance(value, int):  # bool cannot be subclassed; a bool is handled before this
+        return int.__int__(value)
+    if isinstance(value, frozenset):
+        return frozenset(frozenset.__iter__(value))
+    if isinstance(value, tuple):
+        return tuple(tuple.__iter__(value))
+    if isinstance(value, list):
+        return list(list.__iter__(value))
+    return None
+
+
+def canonical_json(value: object) -> str:
+    return json.dumps(
+        value, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False
+    )
+
+
+def _release_form(entry: object) -> object:
+    if type(entry) is not ReleaseEntry:
+        return ["entry", canonical_form(entry)]
+    return [
+        "release",
+        canonical_form(entry.cell),
+        canonical_form(entry.protected_role),
+        canonical_form(entry.authorized_by),
+    ]
 
 
 def exposure_record_digest(universe: object, releases: object) -> str:
-    """Content digest of a release history; any later change to it changes the digest."""
-    entries = [
-        [_digest_part(e.cell), repr(e.protected_role), _digest_part(e.authorized_by)]
-        for e in (releases if type(releases) is tuple else ())
-    ]
+    """Content digest of a release history; any later change to it changes the digest.
+
+    Every field of every entry is hashed in order, under type-tagged encoding, whatever the type
+    of the container. ``ExposureRecord.intact`` additionally requires an exact tuple.
+    """
+    entries: object
+    if type(releases) in (tuple, list):
+        listed = [_release_form(e) for e in releases]  # type: ignore[attr-defined]
+        entries = [type(releases).__name__, listed]
+    else:
+        entries = canonical_form(releases)
     return canonical_digest(
         {
-            "universe": _digest_part(universe),
-            "releases_type": type(releases).__name__,
+            "encoding": "opentour.exposure-record.typed.v1",
+            "universe": canonical_form(universe),
             "releases": entries,
         }
+    )
+
+
+def exposure_history_well_typed(universe: object, releases: object) -> bool:
+    """Exact types only: a frozenset universe of str, a tuple of ``ReleaseEntry`` whose cell is a
+    frozenset of str, whose role flag is a bool and whose authorizer is None or a str."""
+    return (
+        type(universe) is frozenset
+        and all(type(f) is str for f in universe)
+        and type(releases) is tuple
+        and all(
+            type(e) is ReleaseEntry
+            and type(e.cell) is frozenset
+            and all(type(f) is str for f in e.cell)
+            and type(e.protected_role) is bool
+            and (e.authorized_by is None or type(e.authorized_by) is str)
+            for e in releases
+        )
     )
 
 
@@ -211,12 +295,23 @@ class ExposureRecord:
 
     @classmethod
     def sealed(cls, universe: frozenset[str], releases: tuple[ReleaseEntry, ...]) -> ExposureRecord:
+        """Seal a history. ``releases`` must be an exact tuple, so it cannot be emptied later."""
+        if type(releases) is not tuple:
+            raise TypeError("an exposure history must be sealed over an exact tuple of releases")
         return cls(universe, releases, exposure_record_digest(universe, releases))
 
+    def well_typed(self) -> bool:
+        """Every field has its exact intended type (see ``exposure_history_well_typed``)."""
+        return exposure_history_well_typed(self.universe, self.releases)
+
     def intact(self) -> bool:
-        return self.content_digest is not None and self.content_digest == exposure_record_digest(
-            self.universe, self.releases
-        )
+        """Sealed, held in an exact tuple, and unchanged since sealing. Never raises."""
+        if type(self.content_digest) is not str or type(self.releases) is not tuple:
+            return False
+        try:
+            return self.content_digest == exposure_record_digest(self.universe, self.releases)
+        except Exception:  # any value that cannot be encoded is not intact
+            return False
 
 
 @dataclass(frozen=True)

@@ -181,13 +181,27 @@ def revealed_families(
     return (with_cell - isolated_families(others, universe)) | alone
 
 
+def _replayable(record: object) -> bool:
+    return (
+        type(record) is ExposureRecord
+        and type(record.universe) is frozenset
+        and all(type(f) is str for f in record.universe)
+        and type(record.releases) is tuple
+        and all(type(e) is ReleaseEntry for e in record.releases)
+    )
+
+
 def replay_exposure(record: ExposureRecord) -> tuple[frozenset[str], int]:
     """Re-derive exposed families and unauthorized disclosures from a release history.
 
     Any release that reveals a family, to any role, exposes what it reveals once combined with
     every earlier release. Without a valid named authorizer it is also an unauthorized
-    (unlogged) case-level disclosure. A malformed cell reveals everything.
+    (unlogged) case-level disclosure. A malformed cell reveals everything. A record whose
+    universe is not an exact frozenset of str, or whose releases are not an exact tuple of
+    ``ReleaseEntry``, cannot be replayed and is refused (the audit reports it as malformed).
     """
+    if not _replayable(record):
+        raise ValueError("exposure record is not replayable: universe or releases mistyped")
     released: list[frozenset[str]] = []
     exposed: set[str] = set()
     unlogged = 0

@@ -42,6 +42,10 @@ NEXT_EVIDENCE: dict[str, str] = {
     "exposure_history_tampered": (
         "Supply the exposure guard's release history unchanged since it was sealed."
     ),
+    "exposure_history_malformed": (
+        "Supply the exposure guard's release history as sealed: a frozenset universe of family "
+        "ids and a tuple of release entries with exactly typed cells, role flags and authorizers."
+    ),
     "caller_assertion_malformed": (
         "Resubmit caller-asserted exposure as a frozenset of family ids and the unlogged "
         "disclosure count as a non-negative integer."

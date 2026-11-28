@@ -24,8 +24,10 @@ from audit_fixtures import (
     real_sample_records,
 )
 from opentour_training.evaluation.benchmark_audit.audit import (
+    LABEL_EVIDENCE_FIELDS,
     audit,
     draw_audit_sample,
+    label_manifest_digest,
     mapper_view,
 )
 from opentour_training.evaluation.benchmark_audit.exposure import (
@@ -45,9 +47,12 @@ from opentour_training.evaluation.benchmark_audit.model import (
     ExposureRecord,
     PopulationKind,
     PreprocessingRecord,
+    ReleaseEntry,
     SamplingDesign,
     SelectionUse,
     Verdict,
+    canonical_form,
+    exposure_record_digest,
 )
 
 V = Verdict
@@ -234,6 +239,97 @@ def test_mutation_d_label_changed_after_freeze_is_stale_and_names_the_label_mani
     assert receipt["verdict"] == V.STALE.value
     assert any("label_manifest" in r["detail"] for r in receipt["reasons"])
     assert receipt["claims"]["broad_improvement_alert_permitted"] is False
+
+
+def overturned_r04() -> tuple[Any, ...]:
+    """Two reviewers agree on a wrong label; the independent record overturns it."""
+    wrong = commit("generated-r04", "generated-wrong-action")
+    right = commit("generated-r04", "generated-action-generated-r04")
+    return tuple(
+        replace(
+            r,
+            final_label_digest=wrong,
+            adjudicator_label_digest=wrong,
+            independent_label_digest=right,
+        )
+        if r.family_id == "generated-r04"
+        else r
+        for r in baseline_records()
+    )
+
+
+def test_repro_verifier_evidence_dropped_after_freeze_is_stale_not_allowed() -> None:
+    frozen = overturned_r04()
+    assert run(frozen)["verdict"] == V.INVALID.value
+    dropped = tuple(
+        replace(r, independent_source=None, independent_label_digest=None)
+        if r.family_id == "generated-r04"
+        else r
+        for r in frozen
+    )
+    receipt = run(dropped, frozen_records=frozen)
+    assert receipt["verdict"] == V.STALE.value
+    assert {"code": "bound_digest_changed", "detail": "label_manifest"} in receipt["reasons"]
+    assert receipt["next_evidence_request"]
+    assert receipt["claims"]["broad_improvement_alert_permitted"] is False
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("first_labeler_id", "generated-labeler-z"),
+        ("adjudicator_id", None),
+        ("adjudicator_saw_first_label", True),
+        ("adjudicator_saw_predictions", True),
+        ("adjudicator_label_digest", None),
+        ("independent_source", None),
+        ("independent_label_digest", None),
+        ("unresolved", True),
+        ("fresh_confirmation", True),
+    ],
+)
+def test_verifier_evidence_changed_after_freeze_is_stale(field: str, value: object) -> None:
+    frozen = baseline_records()
+    changed = tuple(
+        replace(r, **{field: value}) if r.family_id == "generated-r05" else r for r in frozen
+    )
+    receipt = run(changed, frozen_records=frozen)
+    assert receipt["verdict"] == V.STALE.value, field
+    assert {"code": "bound_digest_changed", "detail": "label_manifest"} in receipt["reasons"]
+    resealed = run(changed)["bindings"]  # frozen afresh over the changed evidence: not stale
+    assert resealed["frozen"] == resealed["current"]
+
+
+def test_label_manifest_tells_apart_mistyped_values_whatever_they_claim() -> None:
+    record = baseline_records()[0]
+    values = [
+        "generated-a",
+        _SubStr("generated-a"),
+        _ConstantFace("generated-a"),
+        _ConstantFace("generated-b"),
+        0.5,
+        0.25,
+    ]
+    digests = {
+        label_manifest_digest([replace(record, final_label_digest=v)])  # type: ignore[arg-type]
+        for v in values
+    }
+    assert len(digests) == len(values)
+
+
+def test_label_manifest_binds_the_label_and_every_verifier_field_the_audit_reads() -> None:
+    assert LABEL_EVIDENCE_FIELDS == (
+        "final_label_digest",
+        "first_labeler_id",
+        "adjudicator_id",
+        "adjudicator_saw_first_label",
+        "adjudicator_saw_predictions",
+        "adjudicator_label_digest",
+        "independent_source",
+        "independent_label_digest",
+        "unresolved",
+        "fresh_confirmation",
+    )
 
 
 # ---- Acceptance packs ----
@@ -811,6 +907,226 @@ def test_sealed_history_tampered_after_issue_is_invalid() -> None:
     clean = real(exposure_record=harmless_history())
     assert "exposure_history_tampered" not in codes(clean)
     assert served.record().intact() and not history.intact()
+
+
+def leaky_history() -> ExposureRecord:
+    """A sealed history: a harmless selector release, then a reader release that isolates."""
+    served = ExposureGuard(REAL_UNIVERSE, frozenset())
+    served.evaluate(selector_query("s", {"generated-sr000", "generated-sr001"}))
+    served.evaluate(selector_query("r", {"generated-sr000"}, frozenset({"reader"})))
+    history = served.record()
+    assert history.intact() and history.well_typed()
+    assert real(exposure_record=history)["verdict"] == V.INVALID.value
+    return history
+
+
+def _tamper_cell(h: ExposureRecord) -> None:
+    object.__setattr__(h.releases[1], "cell", h.releases[0].cell)  # hide the isolating cell
+
+
+def _tamper_role(h: ExposureRecord) -> None:
+    object.__setattr__(h.releases[0], "protected_role", not h.releases[0].protected_role)
+
+
+def _tamper_auth_sentinel(h: ExposureRecord) -> None:
+    object.__setattr__(h.releases[1], "authorized_by", "<NoneType:None>")
+
+
+def _tamper_auth_named(h: ExposureRecord) -> None:
+    object.__setattr__(h.releases[1], "authorized_by", "generated-owner")
+
+
+def _tamper_universe(h: ExposureRecord) -> None:
+    object.__setattr__(h, "universe", h.universe | {"generated-extra"})
+
+
+def _tamper_order(h: ExposureRecord) -> None:
+    object.__setattr__(h, "releases", h.releases[::-1])
+
+
+@pytest.mark.parametrize(
+    "tamper",
+    [
+        _tamper_cell,
+        _tamper_role,
+        _tamper_auth_sentinel,
+        _tamper_auth_named,
+        _tamper_universe,
+        _tamper_order,
+    ],
+)
+def test_sealed_history_tampered_in_any_field_or_order_is_invalid(tamper: Any) -> None:
+    history = leaky_history()
+    tamper(history)
+    assert not history.intact()
+    receipt = real(exposure_record=history)
+    assert receipt["verdict"] == V.INVALID.value
+    assert "exposure_history_tampered" in codes(receipt)
+
+
+class _SubStr(str):
+    """A str subclass; exposure history strings must be exact str."""
+
+
+class _ConstantFace(str):
+    """A str subclass whose repr, str, equality and hash hide its value."""
+
+    def __repr__(self) -> str:
+        return "generated-constant"
+
+    def __str__(self) -> str:
+        return "generated-constant"
+
+    def __eq__(self, other: object) -> bool:
+        return True
+
+    def __hash__(self) -> int:
+        return 0
+
+
+def test_digest_encoding_is_type_tagged_so_lookalike_values_differ() -> None:
+    lookalikes = [
+        (None, "<NoneType:None>"),
+        (frozenset({"generated-sr000"}), ("generated-sr000",)),
+        (frozenset({"generated-sr000"}), ["generated-sr000"]),
+        (True, 1),
+        ("1", 1),
+        (("generated-sr000",), ["generated-sr000"]),
+        (_SubStr("generated-sr000"), "generated-sr000"),
+        (_ConstantFace("generated-a"), _ConstantFace("generated-b")),
+        (0.5, 0.25),
+    ]
+    for a, b in lookalikes:
+        assert canonical_form(a) != canonical_form(b), (a, b)
+        first = (ReleaseEntry(frozenset({"generated-sr000"}), False, a),)  # type: ignore[arg-type]
+        second = (ReleaseEntry(frozenset({"generated-sr000"}), False, b),)  # type: ignore[arg-type]
+        assert exposure_record_digest(REAL_UNIVERSE, first) != exposure_record_digest(
+            REAL_UNIVERSE, second
+        )
+    entries = leaky_history().releases
+    assert exposure_record_digest(REAL_UNIVERSE, entries) != exposure_record_digest(
+        tuple(sorted(REAL_UNIVERSE)), entries
+    )
+
+
+def _mistyped(kind: str) -> ExposureRecord:
+    cell = frozenset({"generated-sr000", "generated-sr001"})
+    entry = ReleaseEntry(cell, True, None)
+    bad: dict[str, tuple[object, object]] = {
+        "tuple_universe": (tuple(sorted(REAL_UNIVERSE)), (entry,)),
+        "set_universe": (set(REAL_UNIVERSE), (entry,)),
+        "non_str_universe_member": (REAL_UNIVERSE | {7}, (entry,)),
+        "list_releases": (REAL_UNIVERSE, [entry]),
+        "non_entry_release": (REAL_UNIVERSE, ((cell, True, None),)),
+        "tuple_cell": (REAL_UNIVERSE, (ReleaseEntry(tuple(sorted(cell)), True, None),)),
+        "set_cell": (REAL_UNIVERSE, (ReleaseEntry(set(cell), True, None),)),
+        "str_subclass_cell_member": (
+            REAL_UNIVERSE,
+            (ReleaseEntry(frozenset({_SubStr("generated-sr000")}), True, None),),
+        ),
+        "int_role_flag": (REAL_UNIVERSE, (ReleaseEntry(cell, 1, None),)),
+        "str_subclass_authorizer": (
+            REAL_UNIVERSE,
+            (ReleaseEntry(cell, True, _SubStr("generated-owner")),),
+        ),
+    }
+    universe, releases = bad[kind]
+    # Digest computed over the mistyped content itself: only the type check can refuse it.
+    digest = exposure_record_digest(universe, releases)
+    return ExposureRecord(universe, releases, digest)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    "kind",
+    [
+        "tuple_universe",
+        "set_universe",
+        "non_str_universe_member",
+        "list_releases",
+        "non_entry_release",
+        "tuple_cell",
+        "set_cell",
+        "str_subclass_cell_member",
+        "int_role_flag",
+        "str_subclass_authorizer",
+    ],
+)
+def test_mistyped_history_is_refused_as_malformed_and_never_crashes(kind: str) -> None:
+    history = _mistyped(kind)
+    assert not history.well_typed()
+    receipt = real(exposure_record=history)
+    assert receipt["verdict"] == V.INVALID.value
+    assert {"code": "exposure_history_malformed", "detail": "field without its exact type"} in (
+        receipt["reasons"]
+    )
+    assert receipt["next_evidence_request"]
+    assert receipt["contamination"]["exposed_families_retired"] == len(REAL_UNIVERSE)
+    assert receipt["provenance"]["exposure_log_covers_protected_families"] is False
+    assert receipt["claims"]["overall_accuracy_claim"] == "not_established"
+
+
+@pytest.mark.parametrize(
+    "kind",
+    [
+        "tuple_universe",
+        "set_universe",
+        "non_str_universe_member",
+        "list_releases",
+        "non_entry_release",
+    ],
+)
+def test_replay_refuses_a_record_whose_universe_or_releases_are_mistyped(kind: str) -> None:
+    with pytest.raises(ValueError):
+        replay_exposure(_mistyped(kind))
+
+
+class _BrokenRepr:
+    def __repr__(self) -> str:
+        raise RuntimeError("generated-broken-repr")
+
+
+def test_a_history_value_that_cannot_be_encoded_is_not_intact_and_does_not_crash() -> None:
+    cell = frozenset({"generated-sr000", "generated-sr001"})
+    history = ExposureRecord(
+        REAL_UNIVERSE,
+        (ReleaseEntry(cell, True, _BrokenRepr()),),  # type: ignore[arg-type]
+        "0" * 64,
+    )
+    assert not history.intact() and not history.well_typed()
+    receipt = real(exposure_record=history)
+    assert receipt["verdict"] == V.INVALID.value
+    assert {"exposure_history_malformed", "exposure_history_tampered"} <= codes(receipt)
+
+
+def test_a_non_record_object_is_refused_as_malformed() -> None:
+    receipt = real(exposure_record=object())
+    assert receipt["verdict"] == V.INVALID.value
+    assert {"exposure_history_malformed", "exposure_history_tampered"} <= codes(receipt)
+
+
+def test_releases_must_be_an_exact_tuple_to_seal_or_to_stay_intact() -> None:
+    entries = list(leaky_history().releases)
+    with pytest.raises(TypeError):
+        ExposureRecord.sealed(REAL_UNIVERSE, entries)  # type: ignore[arg-type]
+    # Entries are hashed whatever the container, so emptying a list changes the digest...
+    assert exposure_record_digest(REAL_UNIVERSE, entries) != exposure_record_digest(
+        REAL_UNIVERSE, []
+    )
+    forged = ExposureRecord(
+        REAL_UNIVERSE,
+        entries,  # type: ignore[arg-type]
+        exposure_record_digest(REAL_UNIVERSE, entries),
+    )
+    # ...and a list-held record is never intact, before or after it is emptied.
+    assert not forged.intact()
+    entries.clear()
+    assert not forged.intact()
+    receipt = real(exposure_record=forged)
+    assert receipt["verdict"] == V.INVALID.value
+    assert {"exposure_history_tampered", "exposure_history_malformed"} <= codes(receipt)
+    swapped = leaky_history()
+    object.__setattr__(swapped, "releases", list(swapped.releases))
+    assert not swapped.intact()
 
 
 def test_history_coverage_and_emptiness_are_recorded_and_hold() -> None:
