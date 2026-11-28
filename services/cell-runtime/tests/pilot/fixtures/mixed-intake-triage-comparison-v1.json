@@ -1,0 +1,245 @@
+{
+  "connector_transport": "customer-local-directory",
+  "entries": [
+    {
+      "entry": 1,
+      "expected": {
+        "disposition": "eligible",
+        "format": "markdown",
+        "role": "policy"
+      },
+      "fixture_sha256": "059376d83b11ac4ea75b1e2df721a5dc41c7253c9067a3a058d6df8beb2511ea",
+      "independent_reviewer": null,
+      "ref": "generated-n01",
+      "worker": {
+        "disposition": "eligible",
+        "format": "markdown",
+        "next_actor": "none",
+        "reason": "",
+        "role": "policy"
+      },
+      "worker_matches_expected": true
+    },
+    {
+      "entry": 2,
+      "expected": {
+        "disposition": "eligible",
+        "format": "markdown",
+        "role": "policy"
+      },
+      "fixture_sha256": "059376d83b11ac4ea75b1e2df721a5dc41c7253c9067a3a058d6df8beb2511ea",
+      "independent_reviewer": null,
+      "ref": "generated-n02",
+      "worker": {
+        "disposition": "eligible",
+        "format": "markdown",
+        "next_actor": "none",
+        "reason": "",
+        "role": "policy"
+      },
+      "worker_matches_expected": true
+    },
+    {
+      "entry": 3,
+      "expected": {
+        "disposition": "eligible",
+        "format": "pdf",
+        "role": "policy"
+      },
+      "fixture_sha256": "903cb92c46d108a8a2a8da03e70fc053ff95af0b40534d809cd383ef2cc597cd",
+      "independent_reviewer": null,
+      "ref": "generated-n03",
+      "worker": {
+        "disposition": "eligible",
+        "format": "pdf",
+        "next_actor": "none",
+        "reason": "",
+        "role": "policy"
+      },
+      "worker_matches_expected": true
+    },
+    {
+      "entry": 4,
+      "expected": {
+        "disposition": "eligible",
+        "format": "docx",
+        "role": "policy"
+      },
+      "fixture_sha256": "1dca29cf531a4a8802001074c4669d82214d2bd86ecb1851b12114223bfb5f88",
+      "independent_reviewer": null,
+      "ref": "generated-n04",
+      "worker": {
+        "disposition": "eligible",
+        "format": "docx",
+        "next_actor": "none",
+        "reason": "",
+        "role": "policy"
+      },
+      "worker_matches_expected": true
+    },
+    {
+      "entry": 5,
+      "expected": {
+        "disposition": "eligible",
+        "format": "csv",
+        "role": "observed_decision"
+      },
+      "fixture_sha256": "0d5d8286e97888275fdd22b75c2573773674218604cfe6a0cfa52165d653dc01",
+      "independent_reviewer": null,
+      "ref": "generated-n05",
+      "worker": {
+        "disposition": "eligible",
+        "format": "csv",
+        "next_actor": "none",
+        "reason": "",
+        "role": "observed_decision"
+      },
+      "worker_matches_expected": true
+    },
+    {
+      "entry": 6,
+      "expected": {
+        "disposition": "eligible",
+        "format": "jsonl",
+        "role": "independent_final"
+      },
+      "fixture_sha256": "589e3d03aa62b595e7102df8eb68a0d54bd54126f9a5dba0a1e39c349394339c",
+      "independent_reviewer": null,
+      "ref": "generated-n06",
+      "worker": {
+        "disposition": "eligible",
+        "format": "jsonl",
+        "next_actor": "none",
+        "reason": "",
+        "role": "independent_final"
+      },
+      "worker_matches_expected": true
+    },
+    {
+      "entry": 7,
+      "expected": {
+        "disposition": "eligible",
+        "format": "xlsx",
+        "role": "example"
+      },
+      "fixture_sha256": "b08f664fbc2a6d6f6d4c4f0211e9de2e550d7b7922e6a526e763bdb212197596",
+      "independent_reviewer": null,
+      "ref": "generated-n07",
+      "worker": {
+        "disposition": "eligible",
+        "format": "xlsx",
+        "next_actor": "none",
+        "reason": "",
+        "role": "example"
+      },
+      "worker_matches_expected": true
+    },
+    {
+      "entry": 8,
+      "expected": {
+        "disposition": "eligible",
+        "format": "native-markdown",
+        "role": "policy"
+      },
+      "fixture_sha256": "221b886bcdff6a16521e469c8a3135d5874f87ebc86960920448dc595e604df7",
+      "independent_reviewer": null,
+      "ref": "generated-n08",
+      "worker": {
+        "disposition": "eligible",
+        "format": "native-markdown",
+        "next_actor": "none",
+        "reason": "",
+        "role": "policy"
+      },
+      "worker_matches_expected": true
+    },
+    {
+      "entry": 9,
+      "expected": {
+        "disposition": "needs_rendition",
+        "format": "pdf",
+        "role": "unknown"
+      },
+      "fixture_sha256": "60b9d79f5bd9b3e5f4668b34b0fba4867252dfb7d24a1550f2e21f0630c26d64",
+      "independent_reviewer": null,
+      "ref": "generated-n09",
+      "worker": {
+        "disposition": "needs_rendition",
+        "format": "pdf",
+        "next_actor": "owner",
+        "reason": "image_only_pdf_needs_authorized_ocr_rendition",
+        "role": "unknown"
+      },
+      "worker_matches_expected": true
+    },
+    {
+      "entry": 10,
+      "expected": {
+        "disposition": "locked",
+        "format": "cfb",
+        "role": "unknown"
+      },
+      "fixture_sha256": "b1e91b45887bab0ff7ed75a4ccc40efbd34c24419825abb0608fd85cd8810c5f",
+      "independent_reviewer": null,
+      "ref": "generated-n10",
+      "worker": {
+        "disposition": "locked",
+        "format": "cfb",
+        "next_actor": "owner",
+        "reason": "encrypted_file",
+        "role": "unknown"
+      },
+      "worker_matches_expected": true
+    },
+    {
+      "entry": 11,
+      "expected": {
+        "disposition": "unsupported",
+        "format": "binary",
+        "role": "unknown"
+      },
+      "fixture_sha256": "cc2b4e6afeb8fb24850246debb11348828d5a4a6afb33d2de11e979468de7df5",
+      "independent_reviewer": null,
+      "ref": "generated-n11",
+      "worker": {
+        "disposition": "unsupported",
+        "format": "binary",
+        "next_actor": "owner",
+        "reason": "unsupported_type",
+        "role": "unknown"
+      },
+      "worker_matches_expected": true
+    },
+    {
+      "entry": 12,
+      "expected": {
+        "disposition": "denied",
+        "format": "shortcut",
+        "role": "unknown"
+      },
+      "fixture_sha256": null,
+      "independent_reviewer": null,
+      "ref": "opaque-4c0397e4d517fd6b",
+      "worker": {
+        "disposition": "denied",
+        "format": "shortcut",
+        "next_actor": "customer_admin",
+        "reason": "shortcut_outside_grant",
+        "role": "unknown"
+      },
+      "worker_matches_expected": true
+    }
+  ],
+  "evidence_tier": "simulated_unwitnessed",
+  "expected_source": "literal gold values from the OPE-531 acceptance text",
+  "fixture_kind": "generated_sentinel",
+  "independent_comparison": {
+    "agreement": null,
+    "reviewer": null,
+    "reviewer_dispositions": null,
+    "status": "outstanding"
+  },
+  "installed_connector_coverage": false,
+  "issue": "OPE-531",
+  "schema_version": "opentour.mixed-intake.triage-comparison.v1"
+}
