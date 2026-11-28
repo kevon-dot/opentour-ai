@@ -33,7 +33,7 @@ from opentour_training.evaluation.benchmark_audit.run_inventory import (
 )
 
 COMMITTED = Path(__file__).parent / "fixtures" / "ope526-run-inventory.json"
-MEASURED_SHA = "df422e4bff152c4172d6ee465f2b8f60358fdb09"
+MEASURED_SHA = "07dcb41b62fc40ec57c27f94ff1697355661ad95"
 
 
 def committed() -> dict[str, Any]:

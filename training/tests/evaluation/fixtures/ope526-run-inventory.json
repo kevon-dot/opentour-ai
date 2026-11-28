@@ -43,11 +43,11 @@
     }
   ],
   "fixture_kind": "generated_sentinel",
-  "generated_at": "2026-11-28T02:13:59Z",
+  "generated_at": "2026-11-28T06:19:01Z",
   "generator": "training/tests/evaluation/ope526_run_inventory.py",
   "groups": [
     {
-      "baseline_run_id": "ope526-fixture-real_sample_standin-926f2a033db4",
+      "baseline_run_id": "ope526-fixture-real_sample_standin-bbb85ee7ce00",
       "comparable_baseline_present": true,
       "comparable_on": [
         "real_sample",
@@ -59,12 +59,12 @@
       "group_id": "group-282c9244ba1f",
       "next_step_if_missing": null,
       "run_ids": [
-        "ope526-fixture-real_sample_standin-926f2a033db4",
-        "ope526-fixture-real_sample_standin_small-887bc75a1126"
+        "ope526-fixture-real_sample_standin-bbb85ee7ce00",
+        "ope526-fixture-real_sample_standin_small-6528e4ee9371"
       ]
     },
     {
-      "baseline_run_id": "ope526-fixture-baseline-4ac7054c9cb2",
+      "baseline_run_id": "ope526-fixture-baseline-10c94cbbb58e",
       "comparable_baseline_present": true,
       "comparable_on": [
         "enumerated_fixture",
@@ -76,24 +76,24 @@
       "group_id": "group-d69c96c66091",
       "next_step_if_missing": null,
       "run_ids": [
-        "ope526-fixture-baseline-4ac7054c9cb2",
-        "ope526-fixture-baseline_rescore-4ac7054c9cb2",
-        "ope526-fixture-mutation_a_corrections_only-f79d698e755b",
-        "ope526-fixture-mutation_a_selective_under_full_design-d757ca736ea9",
-        "ope526-fixture-mutation_b_no_critical_verification-1fc4f42fd013",
-        "ope526-fixture-mutation_c_cross_split_sibling-442f91d65083",
-        "ope526-fixture-mutation_c_resealed-4ac7054c9cb2",
-        "ope526-fixture-mutation_d_post_freeze_relabel-6924c2162996",
-        "ope526-fixture-pack_policy_only_starter-d89bd4d888d7",
-        "ope526-fixture-pack_two_reviewers_overturned-a0ce27e59922",
-        "ope526-fixture-pack_unresolved_ambiguity-10cd1e652a76",
-        "ope526-fixture-pack_future_only_field-2945f5025e39",
-        "ope526-fixture-adverse_empty_audit-3fa22b3777c1",
-        "ope526-fixture-adverse_protected_selection-6a4ea99fae24",
-        "ope526-fixture-adverse_preprocessing_fit_on_protected-1013f941ec93",
-        "ope526-fixture-adverse_unlogged_disclosure-7a90f9793781",
-        "ope526-fixture-adverse_preregistered_after_reveal-a05a52d4e284",
-        "ope526-fixture-adverse_superseded-50c6121648c9"
+        "ope526-fixture-baseline-10c94cbbb58e",
+        "ope526-fixture-baseline_rescore-10c94cbbb58e",
+        "ope526-fixture-mutation_a_corrections_only-5e63682ebe75",
+        "ope526-fixture-mutation_a_selective_under_full_design-006cbfcc9663",
+        "ope526-fixture-mutation_b_no_critical_verification-0bce0261db25",
+        "ope526-fixture-mutation_c_cross_split_sibling-397225e68efe",
+        "ope526-fixture-mutation_c_resealed-10c94cbbb58e",
+        "ope526-fixture-mutation_d_post_freeze_relabel-752555cc7437",
+        "ope526-fixture-pack_policy_only_starter-77a93fa6f944",
+        "ope526-fixture-pack_two_reviewers_overturned-91d29d98a84c",
+        "ope526-fixture-pack_unresolved_ambiguity-434b110b1a24",
+        "ope526-fixture-pack_future_only_field-90f31457b3d5",
+        "ope526-fixture-adverse_empty_audit-ef590d747319",
+        "ope526-fixture-adverse_protected_selection-115a26fbf42f",
+        "ope526-fixture-adverse_preprocessing_fit_on_protected-5ea144f7b8fd",
+        "ope526-fixture-adverse_unlogged_disclosure-514e1d4d3d44",
+        "ope526-fixture-adverse_preregistered_after_reveal-5cd712f75e3d",
+        "ope526-fixture-adverse_superseded-4635f58c29dc"
       ]
     }
   ],
@@ -103,21 +103,21 @@
         "family_crosses_split"
       ],
       "disposition": "detected_as_designed",
-      "run_id": "ope526-fixture-mutation_c_cross_split_sibling-442f91d65083"
+      "run_id": "ope526-fixture-mutation_c_cross_split_sibling-397225e68efe"
     },
     {
       "codes": [
         "label_overturned_by_independent_record"
       ],
       "disposition": "detected_as_designed",
-      "run_id": "ope526-fixture-pack_two_reviewers_overturned-a0ce27e59922"
+      "run_id": "ope526-fixture-pack_two_reviewers_overturned-91d29d98a84c"
     },
     {
       "codes": [
         "future_only_field"
       ],
       "disposition": "detected_as_designed",
-      "run_id": "ope526-fixture-pack_future_only_field-2945f5025e39"
+      "run_id": "ope526-fixture-pack_future_only_field-90f31457b3d5"
     }
   ],
   "issue": "OPE-526",
@@ -128,7 +128,7 @@
     "exposure guard fail-open fixes (PR #219, parallel lane)",
     "regeneration of this inventory"
   ],
-  "measured_git_sha": "df422e4bff152c4172d6ee465f2b8f60358fdb09",
+  "measured_git_sha": "07dcb41b62fc40ec57c27f94ff1697355661ad95",
   "missing_for_every_run": [
     "independent_customer_label_audit_receipt",
     "customer_approved_sampling_frame_and_tolerances",
@@ -167,7 +167,14 @@
       "claims": {
         "alerts_emitted": 0,
         "broad_improvement_alert_permitted": false,
+        "caller_asserted_dependencies": [],
         "critical_inclusive_claim": "permitted_if_precision_met",
+        "customer_accuracy_alert_blocked_by": [
+          "overall_accuracy_not_eligible",
+          "evidence_origin_not_observed",
+          "upstream_receipt_not_worker_verified",
+          "exposure_not_derived_from_covering_history"
+        ],
         "customer_accuracy_alert_permitted": false,
         "error_family_claim": "not_applicable",
         "overall_accuracy_claim": "not_established"
@@ -218,7 +225,7 @@
         "binding_digests": {
           "answer_key": "b4a5a70a396b",
           "canonical_inputs": "c4f92ff431fe",
-          "label_manifest": "bfe9e3275ace",
+          "label_manifest": "39d8a8fd86de",
           "scoring_policy": "e216d97c3f37",
           "source_revisions": "4f656d7dd24a",
           "split_manifest": "0aa4587b2bb2"
@@ -228,11 +235,11 @@
         "min_critical_coverage": 1.0,
         "operating_point": "generated-operating-point",
         "policy_revision": "generated-policy-r1",
-        "preregistration_digest": "324097be5ce9e4028b3c65b717b64f3d0379d9a6a1c8b9c71072148112b2ce15",
+        "preregistration_digest": "c4d515f8060ddeac9e6a26b2ced67190f83e501c2d85c007f685318fd7862da1",
         "scorer_version": "generated-scorer-v1",
         "tolerable_label_error": 0.0
       },
-      "measured_git_sha": "df422e4bff152c4172d6ee465f2b8f60358fdb09",
+      "measured_git_sha": "07dcb41b62fc40ec57c27f94ff1697355661ad95",
       "metric": {
         "ceiling": 0.05,
         "conclusion": "inconclusive",
@@ -250,12 +257,12 @@
         "candidate_snapshot_binding",
         "upstream_snapshot_verification"
       ],
-      "observed_audit_cpu_ms": 0.69,
+      "observed_audit_cpu_ms": 0.929,
       "population": "baseline",
       "reason_codes": [],
       "receipt": {
-        "receipt_digest": "4ac7054c9cb2269fa76b08f9c30ee106af59b673519b0a2477fb8f116cc3921d",
-        "receipt_id": "audit-4ac7054c9cb2269f",
+        "receipt_digest": "10c94cbbb58e17871dbbeddacd21528421efb45db08aa09402d1e5a99d1073aa",
+        "receipt_id": "audit-10c94cbbb58e1787",
         "schema_version": "opentour.benchmark-audit-receipt.v1"
       },
       "release_check": {
@@ -290,15 +297,15 @@
         "issuer_authenticated": false,
         "ledger_signed": false,
         "outcome": "held",
-        "receipt_id": "audit-4ac7054c9cb2269f",
+        "receipt_id": "audit-10c94cbbb58e1787",
         "refusals": [],
         "release_permitted": false,
         "schema_version": "opentour.benchmark-audit-release-check.v2",
-        "verified_receipt_digest": "4ac7054c9cb2269fa76b08f9c30ee106af59b673519b0a2477fb8f116cc3921d"
+        "verified_receipt_digest": "10c94cbbb58e17871dbbeddacd21528421efb45db08aa09402d1e5a99d1073aa"
       },
       "rerun_of": null,
       "role": "baseline",
-      "run_id": "ope526-fixture-baseline-4ac7054c9cb2",
+      "run_id": "ope526-fixture-baseline-10c94cbbb58e",
       "sampling_frame": {
         "design": "full_enumeration",
         "eligible_families": 12,
@@ -323,7 +330,7 @@
         "unknown_links_recorded": 0
       },
       "status": "completed",
-      "timestamp": "2026-11-28T02:13:59Z",
+      "timestamp": "2026-11-28T06:19:01Z",
       "verdict": "evaluation_allowed",
       "verdict_allows_evaluation": true,
       "verifier": {
@@ -356,7 +363,14 @@
       "claims": {
         "alerts_emitted": 0,
         "broad_improvement_alert_permitted": false,
+        "caller_asserted_dependencies": [],
         "critical_inclusive_claim": "permitted_if_precision_met",
+        "customer_accuracy_alert_blocked_by": [
+          "overall_accuracy_not_eligible",
+          "evidence_origin_not_observed",
+          "upstream_receipt_not_worker_verified",
+          "exposure_not_derived_from_covering_history"
+        ],
         "customer_accuracy_alert_permitted": false,
         "error_family_claim": "not_applicable",
         "overall_accuracy_claim": "not_established"
@@ -407,7 +421,7 @@
         "binding_digests": {
           "answer_key": "b4a5a70a396b",
           "canonical_inputs": "c4f92ff431fe",
-          "label_manifest": "bfe9e3275ace",
+          "label_manifest": "39d8a8fd86de",
           "scoring_policy": "e216d97c3f37",
           "source_revisions": "4f656d7dd24a",
           "split_manifest": "0aa4587b2bb2"
@@ -417,11 +431,11 @@
         "min_critical_coverage": 1.0,
         "operating_point": "generated-operating-point",
         "policy_revision": "generated-policy-r1",
-        "preregistration_digest": "324097be5ce9e4028b3c65b717b64f3d0379d9a6a1c8b9c71072148112b2ce15",
+        "preregistration_digest": "c4d515f8060ddeac9e6a26b2ced67190f83e501c2d85c007f685318fd7862da1",
         "scorer_version": "generated-scorer-v1",
         "tolerable_label_error": 0.0
       },
-      "measured_git_sha": "df422e4bff152c4172d6ee465f2b8f60358fdb09",
+      "measured_git_sha": "07dcb41b62fc40ec57c27f94ff1697355661ad95",
       "metric": {
         "ceiling": 0.05,
         "conclusion": "inconclusive",
@@ -439,12 +453,12 @@
         "candidate_snapshot_binding",
         "upstream_snapshot_verification"
       ],
-      "observed_audit_cpu_ms": 0.638,
+      "observed_audit_cpu_ms": 0.78,
       "population": "baseline_rescore",
       "reason_codes": [],
       "receipt": {
-        "receipt_digest": "4ac7054c9cb2269fa76b08f9c30ee106af59b673519b0a2477fb8f116cc3921d",
-        "receipt_id": "audit-4ac7054c9cb2269f",
+        "receipt_digest": "10c94cbbb58e17871dbbeddacd21528421efb45db08aa09402d1e5a99d1073aa",
+        "receipt_id": "audit-10c94cbbb58e1787",
         "schema_version": "opentour.benchmark-audit-receipt.v1"
       },
       "release_check": {
@@ -479,15 +493,15 @@
         "issuer_authenticated": false,
         "ledger_signed": false,
         "outcome": "held",
-        "receipt_id": "audit-4ac7054c9cb2269f",
+        "receipt_id": "audit-10c94cbbb58e1787",
         "refusals": [],
         "release_permitted": false,
         "schema_version": "opentour.benchmark-audit-release-check.v2",
-        "verified_receipt_digest": "4ac7054c9cb2269fa76b08f9c30ee106af59b673519b0a2477fb8f116cc3921d"
+        "verified_receipt_digest": "10c94cbbb58e17871dbbeddacd21528421efb45db08aa09402d1e5a99d1073aa"
       },
       "rerun_of": "baseline",
       "role": "rerun",
-      "run_id": "ope526-fixture-baseline_rescore-4ac7054c9cb2",
+      "run_id": "ope526-fixture-baseline_rescore-10c94cbbb58e",
       "sampling_frame": {
         "design": "full_enumeration",
         "eligible_families": 12,
@@ -512,7 +526,7 @@
         "unknown_links_recorded": 0
       },
       "status": "completed",
-      "timestamp": "2026-11-28T02:13:59Z",
+      "timestamp": "2026-11-28T06:19:01Z",
       "verdict": "evaluation_allowed",
       "verdict_allows_evaluation": true,
       "verifier": {
@@ -545,7 +559,14 @@
       "claims": {
         "alerts_emitted": 0,
         "broad_improvement_alert_permitted": false,
+        "caller_asserted_dependencies": [],
         "critical_inclusive_claim": "permitted_if_precision_met",
+        "customer_accuracy_alert_blocked_by": [
+          "overall_accuracy_not_eligible",
+          "evidence_origin_not_observed",
+          "upstream_receipt_not_worker_verified",
+          "exposure_not_derived_from_covering_history"
+        ],
         "customer_accuracy_alert_permitted": false,
         "error_family_claim": "permitted",
         "overall_accuracy_claim": "not_established"
@@ -596,7 +617,7 @@
         "binding_digests": {
           "answer_key": "b4a5a70a396b",
           "canonical_inputs": "c4f92ff431fe",
-          "label_manifest": "79e0e63fd8d0",
+          "label_manifest": "21769a773d7e",
           "scoring_policy": "e216d97c3f37",
           "source_revisions": "4f656d7dd24a",
           "split_manifest": "e8f1d192e8b9"
@@ -606,11 +627,11 @@
         "min_critical_coverage": 1.0,
         "operating_point": "generated-operating-point",
         "policy_revision": "generated-policy-r1",
-        "preregistration_digest": "612b6fbb2f384f92b9bc563c146dae26962064bf529f7849be5db83dec4a4842",
+        "preregistration_digest": "fe3cb30fe45c4175060408df903bab47062d844de9fb956bba8320f1ca57bbe4",
         "scorer_version": "generated-scorer-v1",
         "tolerable_label_error": 0.0
       },
-      "measured_git_sha": "df422e4bff152c4172d6ee465f2b8f60358fdb09",
+      "measured_git_sha": "07dcb41b62fc40ec57c27f94ff1697355661ad95",
       "metric": {
         "ceiling": 0.05,
         "conclusion": "inconclusive",
@@ -628,14 +649,14 @@
         "candidate_snapshot_binding",
         "upstream_snapshot_verification"
       ],
-      "observed_audit_cpu_ms": 0.608,
+      "observed_audit_cpu_ms": 0.606,
       "population": "mutation_a_corrections_only",
       "reason_codes": [
         "correction_only_sample"
       ],
       "receipt": {
-        "receipt_digest": "f79d698e755b2dccbc04af7d2f21bb3a2ac1c16c5926b5584ec0413699327c6e",
-        "receipt_id": "audit-f79d698e755b2dcc",
+        "receipt_digest": "5e63682ebe75b9a8f115afb637146e8f21685a1ccf7a57ab5353398c9453661d",
+        "receipt_id": "audit-5e63682ebe75b9a8",
         "schema_version": "opentour.benchmark-audit-receipt.v1"
       },
       "release_check": {
@@ -666,17 +687,17 @@
         "issuer_authenticated": false,
         "ledger_signed": false,
         "outcome": "refused",
-        "receipt_id": "audit-f79d698e755b2dcc",
+        "receipt_id": "audit-5e63682ebe75b9a8",
         "refusals": [
           "audit_claim_limited_to_named_population"
         ],
         "release_permitted": false,
         "schema_version": "opentour.benchmark-audit-release-check.v2",
-        "verified_receipt_digest": "f79d698e755b2dccbc04af7d2f21bb3a2ac1c16c5926b5584ec0413699327c6e"
+        "verified_receipt_digest": "5e63682ebe75b9a8f115afb637146e8f21685a1ccf7a57ab5353398c9453661d"
       },
       "rerun_of": null,
       "role": "mutation",
-      "run_id": "ope526-fixture-mutation_a_corrections_only-f79d698e755b",
+      "run_id": "ope526-fixture-mutation_a_corrections_only-5e63682ebe75",
       "sampling_frame": {
         "design": "correction_only",
         "eligible_families": 4,
@@ -701,7 +722,7 @@
         "unknown_links_recorded": 0
       },
       "status": "completed",
-      "timestamp": "2026-11-28T02:13:59Z",
+      "timestamp": "2026-11-28T06:19:01Z",
       "verdict": "claim_limited_to_named_population",
       "verdict_allows_evaluation": false,
       "verifier": {
@@ -734,7 +755,14 @@
       "claims": {
         "alerts_emitted": 0,
         "broad_improvement_alert_permitted": false,
+        "caller_asserted_dependencies": [],
         "critical_inclusive_claim": "permitted_if_precision_met",
+        "customer_accuracy_alert_blocked_by": [
+          "overall_accuracy_not_eligible",
+          "evidence_origin_not_observed",
+          "upstream_receipt_not_worker_verified",
+          "exposure_not_derived_from_covering_history"
+        ],
         "customer_accuracy_alert_permitted": false,
         "error_family_claim": "permitted",
         "overall_accuracy_claim": "not_established"
@@ -785,7 +813,7 @@
         "binding_digests": {
           "answer_key": "b4a5a70a396b",
           "canonical_inputs": "c4f92ff431fe",
-          "label_manifest": "79e0e63fd8d0",
+          "label_manifest": "21769a773d7e",
           "scoring_policy": "e216d97c3f37",
           "source_revisions": "4f656d7dd24a",
           "split_manifest": "e8f1d192e8b9"
@@ -795,11 +823,11 @@
         "min_critical_coverage": 1.0,
         "operating_point": "generated-operating-point",
         "policy_revision": "generated-policy-r1",
-        "preregistration_digest": "b35a9fde2d321b3436c74136bebcf940d44411429fdef640abe18371d0bafeac",
+        "preregistration_digest": "0fdd65e5bc96dc52bed69f6fdb11e51c1fe76c1e39e0f0033f2bdb80de1ee6a8",
         "scorer_version": "generated-scorer-v1",
         "tolerable_label_error": 0.0
       },
-      "measured_git_sha": "df422e4bff152c4172d6ee465f2b8f60358fdb09",
+      "measured_git_sha": "07dcb41b62fc40ec57c27f94ff1697355661ad95",
       "metric": {
         "ceiling": 0.05,
         "conclusion": "inconclusive",
@@ -817,14 +845,14 @@
         "candidate_snapshot_binding",
         "upstream_snapshot_verification"
       ],
-      "observed_audit_cpu_ms": 0.732,
+      "observed_audit_cpu_ms": 0.68,
       "population": "mutation_a_selective_under_full_design",
       "reason_codes": [
         "correction_only_sample"
       ],
       "receipt": {
-        "receipt_digest": "d757ca736ea9e0ca2ac255ce62d3629237baf974ae994975e9c1d3d50a1e10aa",
-        "receipt_id": "audit-d757ca736ea9e0ca",
+        "receipt_digest": "006cbfcc9663f89b19f340d1cc1307eb941df37751c074261e301aceff2c96c2",
+        "receipt_id": "audit-006cbfcc9663f89b",
         "schema_version": "opentour.benchmark-audit-receipt.v1"
       },
       "release_check": {
@@ -855,17 +883,17 @@
         "issuer_authenticated": false,
         "ledger_signed": false,
         "outcome": "refused",
-        "receipt_id": "audit-d757ca736ea9e0ca",
+        "receipt_id": "audit-006cbfcc9663f89b",
         "refusals": [
           "audit_claim_limited_to_named_population"
         ],
         "release_permitted": false,
         "schema_version": "opentour.benchmark-audit-release-check.v2",
-        "verified_receipt_digest": "d757ca736ea9e0ca2ac255ce62d3629237baf974ae994975e9c1d3d50a1e10aa"
+        "verified_receipt_digest": "006cbfcc9663f89b19f340d1cc1307eb941df37751c074261e301aceff2c96c2"
       },
       "rerun_of": null,
       "role": "mutation",
-      "run_id": "ope526-fixture-mutation_a_selective_under_full_design-d757ca736ea9",
+      "run_id": "ope526-fixture-mutation_a_selective_under_full_design-006cbfcc9663",
       "sampling_frame": {
         "design": "full_enumeration",
         "eligible_families": 4,
@@ -890,7 +918,7 @@
         "unknown_links_recorded": 0
       },
       "status": "completed",
-      "timestamp": "2026-11-28T02:13:59Z",
+      "timestamp": "2026-11-28T06:19:01Z",
       "verdict": "claim_limited_to_named_population",
       "verdict_allows_evaluation": false,
       "verifier": {
@@ -923,7 +951,14 @@
       "claims": {
         "alerts_emitted": 0,
         "broad_improvement_alert_permitted": false,
+        "caller_asserted_dependencies": [],
         "critical_inclusive_claim": "held",
+        "customer_accuracy_alert_blocked_by": [
+          "overall_accuracy_not_eligible",
+          "evidence_origin_not_observed",
+          "upstream_receipt_not_worker_verified",
+          "exposure_not_derived_from_covering_history"
+        ],
         "customer_accuracy_alert_permitted": false,
         "error_family_claim": "not_applicable",
         "overall_accuracy_claim": "not_established"
@@ -974,7 +1009,7 @@
         "binding_digests": {
           "answer_key": "b4a5a70a396b",
           "canonical_inputs": "c4f92ff431fe",
-          "label_manifest": "bfe9e3275ace",
+          "label_manifest": "ba252bbc09b5",
           "scoring_policy": "e216d97c3f37",
           "source_revisions": "4f656d7dd24a",
           "split_manifest": "0aa4587b2bb2"
@@ -984,11 +1019,11 @@
         "min_critical_coverage": 1.0,
         "operating_point": "generated-operating-point",
         "policy_revision": "generated-policy-r1",
-        "preregistration_digest": "324097be5ce9e4028b3c65b717b64f3d0379d9a6a1c8b9c71072148112b2ce15",
+        "preregistration_digest": "c5469fe78c62ec8d3725b04e5895a0f974bcf9a6750b4d9d82ccb3c3bce53430",
         "scorer_version": "generated-scorer-v1",
         "tolerable_label_error": 0.0
       },
-      "measured_git_sha": "df422e4bff152c4172d6ee465f2b8f60358fdb09",
+      "measured_git_sha": "07dcb41b62fc40ec57c27f94ff1697355661ad95",
       "metric": {
         "ceiling": 0.05,
         "conclusion": "inconclusive",
@@ -1007,14 +1042,14 @@
         "candidate_snapshot_binding",
         "upstream_snapshot_verification"
       ],
-      "observed_audit_cpu_ms": 0.642,
+      "observed_audit_cpu_ms": 5.151,
       "population": "mutation_b_no_critical_verification",
       "reason_codes": [
         "critical_coverage_gap"
       ],
       "receipt": {
-        "receipt_digest": "1fc4f42fd013c72947f0a09da5cddb016c47aff49b0b9faa2de3bab511ffdf40",
-        "receipt_id": "audit-1fc4f42fd013c729",
+        "receipt_digest": "0bce0261db257be88d345b5137b06e6fec42e96ce84f3ea6c76967f473bb6b81",
+        "receipt_id": "audit-0bce0261db257be8",
         "schema_version": "opentour.benchmark-audit-receipt.v1"
       },
       "release_check": {
@@ -1045,17 +1080,17 @@
         "issuer_authenticated": false,
         "ledger_signed": false,
         "outcome": "refused",
-        "receipt_id": "audit-1fc4f42fd013c729",
+        "receipt_id": "audit-0bce0261db257be8",
         "refusals": [
           "audit_claim_limited_to_named_population"
         ],
         "release_permitted": false,
         "schema_version": "opentour.benchmark-audit-release-check.v2",
-        "verified_receipt_digest": "1fc4f42fd013c72947f0a09da5cddb016c47aff49b0b9faa2de3bab511ffdf40"
+        "verified_receipt_digest": "0bce0261db257be88d345b5137b06e6fec42e96ce84f3ea6c76967f473bb6b81"
       },
       "rerun_of": null,
       "role": "mutation",
-      "run_id": "ope526-fixture-mutation_b_no_critical_verification-1fc4f42fd013",
+      "run_id": "ope526-fixture-mutation_b_no_critical_verification-0bce0261db25",
       "sampling_frame": {
         "design": "full_enumeration",
         "eligible_families": 12,
@@ -1080,7 +1115,7 @@
         "unknown_links_recorded": 0
       },
       "status": "completed",
-      "timestamp": "2026-11-28T02:13:59Z",
+      "timestamp": "2026-11-28T06:19:01Z",
       "verdict": "claim_limited_to_named_population",
       "verdict_allows_evaluation": false,
       "verifier": {
@@ -1113,7 +1148,14 @@
       "claims": {
         "alerts_emitted": 0,
         "broad_improvement_alert_permitted": false,
+        "caller_asserted_dependencies": [],
         "critical_inclusive_claim": "permitted_if_precision_met",
+        "customer_accuracy_alert_blocked_by": [
+          "overall_accuracy_not_eligible",
+          "evidence_origin_not_observed",
+          "upstream_receipt_not_worker_verified",
+          "exposure_not_derived_from_covering_history"
+        ],
         "customer_accuracy_alert_permitted": false,
         "error_family_claim": "not_applicable",
         "overall_accuracy_claim": "not_established"
@@ -1164,7 +1206,7 @@
         "binding_digests": {
           "answer_key": "b4a5a70a396b",
           "canonical_inputs": "c4f92ff431fe",
-          "label_manifest": "a300f489b121",
+          "label_manifest": "50028c6f52e5",
           "scoring_policy": "e216d97c3f37",
           "source_revisions": "4f656d7dd24a",
           "split_manifest": "a9dbec9c9345"
@@ -1174,11 +1216,11 @@
         "min_critical_coverage": 1.0,
         "operating_point": "generated-operating-point",
         "policy_revision": "generated-policy-r1",
-        "preregistration_digest": "ce04e023cbc08ce078ce0263497a001d8445dfbdf40d95e2c2d3a2b447c0a83a",
+        "preregistration_digest": "7fd449c9d9997f88c779fea16b88131d621a49df8838ecc328ac60a86df1cabe",
         "scorer_version": "generated-scorer-v1",
         "tolerable_label_error": 0.0
       },
-      "measured_git_sha": "df422e4bff152c4172d6ee465f2b8f60358fdb09",
+      "measured_git_sha": "07dcb41b62fc40ec57c27f94ff1697355661ad95",
       "metric": {
         "ceiling": 0.05,
         "conclusion": "inconclusive",
@@ -1196,14 +1238,14 @@
         "candidate_snapshot_binding",
         "upstream_snapshot_verification"
       ],
-      "observed_audit_cpu_ms": 0.843,
+      "observed_audit_cpu_ms": 1.281,
       "population": "mutation_c_cross_split_sibling",
       "reason_codes": [
         "family_crosses_split"
       ],
       "receipt": {
-        "receipt_digest": "442f91d65083e9953f1faa4a1a5dfbdb80e8f72a19b08896227a9b17b1f4267a",
-        "receipt_id": "audit-442f91d65083e995",
+        "receipt_digest": "397225e68efea98f51023a17950bd28955474e75001463890eaeb063f3df10a2",
+        "receipt_id": "audit-397225e68efea98f",
         "schema_version": "opentour.benchmark-audit-receipt.v1"
       },
       "release_check": {
@@ -1234,17 +1276,17 @@
         "issuer_authenticated": false,
         "ledger_signed": false,
         "outcome": "refused",
-        "receipt_id": "audit-442f91d65083e995",
+        "receipt_id": "audit-397225e68efea98f",
         "refusals": [
           "audit_verdict_invalid"
         ],
         "release_permitted": false,
         "schema_version": "opentour.benchmark-audit-release-check.v2",
-        "verified_receipt_digest": "442f91d65083e9953f1faa4a1a5dfbdb80e8f72a19b08896227a9b17b1f4267a"
+        "verified_receipt_digest": "397225e68efea98f51023a17950bd28955474e75001463890eaeb063f3df10a2"
       },
       "rerun_of": null,
       "role": "mutation",
-      "run_id": "ope526-fixture-mutation_c_cross_split_sibling-442f91d65083",
+      "run_id": "ope526-fixture-mutation_c_cross_split_sibling-397225e68efe",
       "sampling_frame": {
         "design": "full_enumeration",
         "eligible_families": 12,
@@ -1269,7 +1311,7 @@
         "unknown_links_recorded": 0
       },
       "status": "completed",
-      "timestamp": "2026-11-28T02:13:59Z",
+      "timestamp": "2026-11-28T06:19:01Z",
       "verdict": "invalid",
       "verdict_allows_evaluation": false,
       "verifier": {
@@ -1302,7 +1344,14 @@
       "claims": {
         "alerts_emitted": 0,
         "broad_improvement_alert_permitted": false,
+        "caller_asserted_dependencies": [],
         "critical_inclusive_claim": "permitted_if_precision_met",
+        "customer_accuracy_alert_blocked_by": [
+          "overall_accuracy_not_eligible",
+          "evidence_origin_not_observed",
+          "upstream_receipt_not_worker_verified",
+          "exposure_not_derived_from_covering_history"
+        ],
         "customer_accuracy_alert_permitted": false,
         "error_family_claim": "not_applicable",
         "overall_accuracy_claim": "not_established"
@@ -1353,7 +1402,7 @@
         "binding_digests": {
           "answer_key": "b4a5a70a396b",
           "canonical_inputs": "c4f92ff431fe",
-          "label_manifest": "bfe9e3275ace",
+          "label_manifest": "39d8a8fd86de",
           "scoring_policy": "e216d97c3f37",
           "source_revisions": "4f656d7dd24a",
           "split_manifest": "0aa4587b2bb2"
@@ -1363,11 +1412,11 @@
         "min_critical_coverage": 1.0,
         "operating_point": "generated-operating-point",
         "policy_revision": "generated-policy-r1",
-        "preregistration_digest": "324097be5ce9e4028b3c65b717b64f3d0379d9a6a1c8b9c71072148112b2ce15",
+        "preregistration_digest": "c4d515f8060ddeac9e6a26b2ced67190f83e501c2d85c007f685318fd7862da1",
         "scorer_version": "generated-scorer-v1",
         "tolerable_label_error": 0.0
       },
-      "measured_git_sha": "df422e4bff152c4172d6ee465f2b8f60358fdb09",
+      "measured_git_sha": "07dcb41b62fc40ec57c27f94ff1697355661ad95",
       "metric": {
         "ceiling": 0.05,
         "conclusion": "inconclusive",
@@ -1385,12 +1434,12 @@
         "candidate_snapshot_binding",
         "upstream_snapshot_verification"
       ],
-      "observed_audit_cpu_ms": 0.878,
+      "observed_audit_cpu_ms": 1.332,
       "population": "mutation_c_resealed",
       "reason_codes": [],
       "receipt": {
-        "receipt_digest": "4ac7054c9cb2269fa76b08f9c30ee106af59b673519b0a2477fb8f116cc3921d",
-        "receipt_id": "audit-4ac7054c9cb2269f",
+        "receipt_digest": "10c94cbbb58e17871dbbeddacd21528421efb45db08aa09402d1e5a99d1073aa",
+        "receipt_id": "audit-10c94cbbb58e1787",
         "schema_version": "opentour.benchmark-audit-receipt.v1"
       },
       "release_check": {
@@ -1425,15 +1474,15 @@
         "issuer_authenticated": false,
         "ledger_signed": false,
         "outcome": "held",
-        "receipt_id": "audit-4ac7054c9cb2269f",
+        "receipt_id": "audit-10c94cbbb58e1787",
         "refusals": [],
         "release_permitted": false,
         "schema_version": "opentour.benchmark-audit-release-check.v2",
-        "verified_receipt_digest": "4ac7054c9cb2269fa76b08f9c30ee106af59b673519b0a2477fb8f116cc3921d"
+        "verified_receipt_digest": "10c94cbbb58e17871dbbeddacd21528421efb45db08aa09402d1e5a99d1073aa"
       },
       "rerun_of": "baseline",
       "role": "rerun",
-      "run_id": "ope526-fixture-mutation_c_resealed-4ac7054c9cb2",
+      "run_id": "ope526-fixture-mutation_c_resealed-10c94cbbb58e",
       "sampling_frame": {
         "design": "full_enumeration",
         "eligible_families": 12,
@@ -1458,7 +1507,7 @@
         "unknown_links_recorded": 0
       },
       "status": "completed",
-      "timestamp": "2026-11-28T02:13:59Z",
+      "timestamp": "2026-11-28T06:19:01Z",
       "verdict": "evaluation_allowed",
       "verdict_allows_evaluation": true,
       "verifier": {
@@ -1491,7 +1540,14 @@
       "claims": {
         "alerts_emitted": 0,
         "broad_improvement_alert_permitted": false,
+        "caller_asserted_dependencies": [],
         "critical_inclusive_claim": "permitted_if_precision_met",
+        "customer_accuracy_alert_blocked_by": [
+          "overall_accuracy_not_eligible",
+          "evidence_origin_not_observed",
+          "upstream_receipt_not_worker_verified",
+          "exposure_not_derived_from_covering_history"
+        ],
         "customer_accuracy_alert_permitted": false,
         "error_family_claim": "not_applicable",
         "overall_accuracy_claim": "not_established"
@@ -1542,7 +1598,7 @@
         "binding_digests": {
           "answer_key": "b4a5a70a396b",
           "canonical_inputs": "c4f92ff431fe",
-          "label_manifest": "bfe9e3275ace",
+          "label_manifest": "39d8a8fd86de",
           "scoring_policy": "e216d97c3f37",
           "source_revisions": "4f656d7dd24a",
           "split_manifest": "0aa4587b2bb2"
@@ -1552,11 +1608,11 @@
         "min_critical_coverage": 1.0,
         "operating_point": "generated-operating-point",
         "policy_revision": "generated-policy-r1",
-        "preregistration_digest": "324097be5ce9e4028b3c65b717b64f3d0379d9a6a1c8b9c71072148112b2ce15",
+        "preregistration_digest": "c4d515f8060ddeac9e6a26b2ced67190f83e501c2d85c007f685318fd7862da1",
         "scorer_version": "generated-scorer-v1",
         "tolerable_label_error": 0.0
       },
-      "measured_git_sha": "df422e4bff152c4172d6ee465f2b8f60358fdb09",
+      "measured_git_sha": "07dcb41b62fc40ec57c27f94ff1697355661ad95",
       "metric": {
         "ceiling": 0.05,
         "conclusion": "inconclusive",
@@ -1574,14 +1630,14 @@
         "candidate_snapshot_binding",
         "upstream_snapshot_verification"
       ],
-      "observed_audit_cpu_ms": 0.871,
+      "observed_audit_cpu_ms": 1.164,
       "population": "mutation_d_post_freeze_relabel",
       "reason_codes": [
         "bound_digest_changed"
       ],
       "receipt": {
-        "receipt_digest": "6924c2162996b6954661e9365c56e79bdad8e09f6ae6b94e415fe995df27223a",
-        "receipt_id": "audit-6924c2162996b695",
+        "receipt_digest": "752555cc743735e2fc6e6fa4bf5403e93b48f2c087f8644257752d283fa19dda",
+        "receipt_id": "audit-752555cc743735e2",
         "schema_version": "opentour.benchmark-audit-receipt.v1"
       },
       "release_check": {
@@ -1612,17 +1668,17 @@
         "issuer_authenticated": false,
         "ledger_signed": false,
         "outcome": "refused",
-        "receipt_id": "audit-6924c2162996b695",
+        "receipt_id": "audit-752555cc743735e2",
         "refusals": [
           "audit_receipt_stale"
         ],
         "release_permitted": false,
         "schema_version": "opentour.benchmark-audit-release-check.v2",
-        "verified_receipt_digest": "6924c2162996b6954661e9365c56e79bdad8e09f6ae6b94e415fe995df27223a"
+        "verified_receipt_digest": "752555cc743735e2fc6e6fa4bf5403e93b48f2c087f8644257752d283fa19dda"
       },
       "rerun_of": null,
       "role": "mutation",
-      "run_id": "ope526-fixture-mutation_d_post_freeze_relabel-6924c2162996",
+      "run_id": "ope526-fixture-mutation_d_post_freeze_relabel-752555cc7437",
       "sampling_frame": {
         "design": "full_enumeration",
         "eligible_families": 12,
@@ -1647,7 +1703,7 @@
         "unknown_links_recorded": 0
       },
       "status": "completed",
-      "timestamp": "2026-11-28T02:13:59Z",
+      "timestamp": "2026-11-28T06:19:01Z",
       "verdict": "stale",
       "verdict_allows_evaluation": false,
       "verifier": {
@@ -1680,7 +1736,14 @@
       "claims": {
         "alerts_emitted": 0,
         "broad_improvement_alert_permitted": false,
+        "caller_asserted_dependencies": [],
         "critical_inclusive_claim": "held",
+        "customer_accuracy_alert_blocked_by": [
+          "overall_accuracy_not_eligible",
+          "evidence_origin_not_observed",
+          "upstream_receipt_not_worker_verified",
+          "exposure_not_derived_from_covering_history"
+        ],
         "customer_accuracy_alert_permitted": false,
         "error_family_claim": "not_applicable",
         "overall_accuracy_claim": "not_established"
@@ -1731,7 +1794,7 @@
         "binding_digests": {
           "answer_key": "b4a5a70a396b",
           "canonical_inputs": "c4f92ff431fe",
-          "label_manifest": "4f53cda18c2b",
+          "label_manifest": "a5c8073b7c6b",
           "scoring_policy": "e216d97c3f37",
           "source_revisions": "4f656d7dd24a",
           "split_manifest": "4f53cda18c2b"
@@ -1741,11 +1804,11 @@
         "min_critical_coverage": 1.0,
         "operating_point": "generated-operating-point",
         "policy_revision": "generated-policy-r1",
-        "preregistration_digest": "500c1e95d82027912cfde6c69635cac253cf36672844a37113d32c69bdb4a362",
+        "preregistration_digest": "5104f09b6140d790f4aa1e50425a29e02df2194635d220dc6378e63899dae6a4",
         "scorer_version": "generated-scorer-v1",
         "tolerable_label_error": 0.0
       },
-      "measured_git_sha": "df422e4bff152c4172d6ee465f2b8f60358fdb09",
+      "measured_git_sha": "07dcb41b62fc40ec57c27f94ff1697355661ad95",
       "metric": {
         "ceiling": 0.05,
         "conclusion": "unavailable",
@@ -1765,14 +1828,14 @@
         "candidate_snapshot_binding",
         "upstream_snapshot_verification"
       ],
-      "observed_audit_cpu_ms": 0.374,
+      "observed_audit_cpu_ms": 0.397,
       "population": "pack_policy_only_starter",
       "reason_codes": [
         "policy_only_starter"
       ],
       "receipt": {
-        "receipt_digest": "d89bd4d888d713c886dfce5d9e4ecedec79109f45e0fba72bb9babb5a7008a73",
-        "receipt_id": "audit-d89bd4d888d713c8",
+        "receipt_digest": "77a93fa6f944ee7b15cd17912cba6fe51d0519b1eded708c910212eea336bdaf",
+        "receipt_id": "audit-77a93fa6f944ee7b",
         "schema_version": "opentour.benchmark-audit-receipt.v1"
       },
       "release_check": {
@@ -1803,17 +1866,17 @@
         "issuer_authenticated": false,
         "ledger_signed": false,
         "outcome": "refused",
-        "receipt_id": "audit-d89bd4d888d713c8",
+        "receipt_id": "audit-77a93fa6f944ee7b",
         "refusals": [
           "audit_verdict_starter_only"
         ],
         "release_permitted": false,
         "schema_version": "opentour.benchmark-audit-release-check.v2",
-        "verified_receipt_digest": "d89bd4d888d713c886dfce5d9e4ecedec79109f45e0fba72bb9babb5a7008a73"
+        "verified_receipt_digest": "77a93fa6f944ee7b15cd17912cba6fe51d0519b1eded708c910212eea336bdaf"
       },
       "rerun_of": null,
       "role": "pack",
-      "run_id": "ope526-fixture-pack_policy_only_starter-d89bd4d888d7",
+      "run_id": "ope526-fixture-pack_policy_only_starter-77a93fa6f944",
       "sampling_frame": {
         "design": "policy_only",
         "eligible_families": 0,
@@ -1838,12 +1901,12 @@
         "unknown_links_recorded": 0
       },
       "status": "completed",
-      "timestamp": "2026-11-28T02:13:59Z",
+      "timestamp": "2026-11-28T06:19:01Z",
       "verdict": "starter_only",
       "verdict_allows_evaluation": false,
       "verifier": {
         "adjudicator_digests": [],
-        "adjudicator_independence": "blinded_to_first_label_and_predictions",
+        "adjudicator_independence": "no_adjudication_recorded",
         "adjudicators": 0,
         "disagreement_matrix": {
           "agree": 0,
@@ -1867,7 +1930,14 @@
       "claims": {
         "alerts_emitted": 0,
         "broad_improvement_alert_permitted": false,
+        "caller_asserted_dependencies": [],
         "critical_inclusive_claim": "permitted_if_precision_met",
+        "customer_accuracy_alert_blocked_by": [
+          "overall_accuracy_not_eligible",
+          "evidence_origin_not_observed",
+          "upstream_receipt_not_worker_verified",
+          "exposure_not_derived_from_covering_history"
+        ],
         "customer_accuracy_alert_permitted": false,
         "error_family_claim": "not_applicable",
         "overall_accuracy_claim": "not_established"
@@ -1918,7 +1988,7 @@
         "binding_digests": {
           "answer_key": "b4a5a70a396b",
           "canonical_inputs": "c4f92ff431fe",
-          "label_manifest": "902cb5d9ed24",
+          "label_manifest": "71a8e03db952",
           "scoring_policy": "e216d97c3f37",
           "source_revisions": "4f656d7dd24a",
           "split_manifest": "0aa4587b2bb2"
@@ -1928,11 +1998,11 @@
         "min_critical_coverage": 1.0,
         "operating_point": "generated-operating-point",
         "policy_revision": "generated-policy-r1",
-        "preregistration_digest": "930345cd780bc15636f34d92bcb2ba076474e0d6d605db9aed611185f965571c",
+        "preregistration_digest": "e9af56651846b42664f2c40bcac388bc863c2f3da0cf4e7144e2673a6464dba6",
         "scorer_version": "generated-scorer-v1",
         "tolerable_label_error": 0.0
       },
-      "measured_git_sha": "df422e4bff152c4172d6ee465f2b8f60358fdb09",
+      "measured_git_sha": "07dcb41b62fc40ec57c27f94ff1697355661ad95",
       "metric": {
         "ceiling": 0.05,
         "conclusion": "inconclusive",
@@ -1950,14 +2020,14 @@
         "candidate_snapshot_binding",
         "upstream_snapshot_verification"
       ],
-      "observed_audit_cpu_ms": 0.882,
+      "observed_audit_cpu_ms": 0.885,
       "population": "pack_two_reviewers_overturned",
       "reason_codes": [
         "label_overturned_by_independent_record"
       ],
       "receipt": {
-        "receipt_digest": "a0ce27e5992254fc9aae1033e2363f90be5090e026be6d9f720e05d2c512dfa0",
-        "receipt_id": "audit-a0ce27e5992254fc",
+        "receipt_digest": "91d29d98a84c8cd64da5b5eb206a73dd561c3194928119fcf81bbddff3038c7b",
+        "receipt_id": "audit-91d29d98a84c8cd6",
         "schema_version": "opentour.benchmark-audit-receipt.v1"
       },
       "release_check": {
@@ -1988,17 +2058,17 @@
         "issuer_authenticated": false,
         "ledger_signed": false,
         "outcome": "refused",
-        "receipt_id": "audit-a0ce27e5992254fc",
+        "receipt_id": "audit-91d29d98a84c8cd6",
         "refusals": [
           "audit_verdict_invalid"
         ],
         "release_permitted": false,
         "schema_version": "opentour.benchmark-audit-release-check.v2",
-        "verified_receipt_digest": "a0ce27e5992254fc9aae1033e2363f90be5090e026be6d9f720e05d2c512dfa0"
+        "verified_receipt_digest": "91d29d98a84c8cd64da5b5eb206a73dd561c3194928119fcf81bbddff3038c7b"
       },
       "rerun_of": null,
       "role": "pack",
-      "run_id": "ope526-fixture-pack_two_reviewers_overturned-a0ce27e59922",
+      "run_id": "ope526-fixture-pack_two_reviewers_overturned-91d29d98a84c",
       "sampling_frame": {
         "design": "full_enumeration",
         "eligible_families": 12,
@@ -2023,7 +2093,7 @@
         "unknown_links_recorded": 0
       },
       "status": "completed",
-      "timestamp": "2026-11-28T02:13:59Z",
+      "timestamp": "2026-11-28T06:19:01Z",
       "verdict": "invalid",
       "verdict_allows_evaluation": false,
       "verifier": {
@@ -2056,7 +2126,14 @@
       "claims": {
         "alerts_emitted": 0,
         "broad_improvement_alert_permitted": false,
+        "caller_asserted_dependencies": [],
         "critical_inclusive_claim": "permitted_if_precision_met",
+        "customer_accuracy_alert_blocked_by": [
+          "overall_accuracy_not_eligible",
+          "evidence_origin_not_observed",
+          "upstream_receipt_not_worker_verified",
+          "exposure_not_derived_from_covering_history"
+        ],
         "customer_accuracy_alert_permitted": false,
         "error_family_claim": "not_applicable",
         "overall_accuracy_claim": "not_established"
@@ -2107,7 +2184,7 @@
         "binding_digests": {
           "answer_key": "b4a5a70a396b",
           "canonical_inputs": "c4f92ff431fe",
-          "label_manifest": "bfe9e3275ace",
+          "label_manifest": "b4195da59776",
           "scoring_policy": "e216d97c3f37",
           "source_revisions": "4f656d7dd24a",
           "split_manifest": "0aa4587b2bb2"
@@ -2117,11 +2194,11 @@
         "min_critical_coverage": 1.0,
         "operating_point": "generated-operating-point",
         "policy_revision": "generated-policy-r1",
-        "preregistration_digest": "324097be5ce9e4028b3c65b717b64f3d0379d9a6a1c8b9c71072148112b2ce15",
+        "preregistration_digest": "0e4e430fbcd5a88ca0a39b8460b9fdf38a6a604cdbe8c03fceccf89f3588ae43",
         "scorer_version": "generated-scorer-v1",
         "tolerable_label_error": 0.0
       },
-      "measured_git_sha": "df422e4bff152c4172d6ee465f2b8f60358fdb09",
+      "measured_git_sha": "07dcb41b62fc40ec57c27f94ff1697355661ad95",
       "metric": {
         "ceiling": 0.05,
         "conclusion": "inconclusive",
@@ -2139,14 +2216,14 @@
         "candidate_snapshot_binding",
         "upstream_snapshot_verification"
       ],
-      "observed_audit_cpu_ms": 0.953,
+      "observed_audit_cpu_ms": 1.301,
       "population": "pack_unresolved_ambiguity",
       "reason_codes": [
         "unresolved_ambiguity"
       ],
       "receipt": {
-        "receipt_digest": "10cd1e652a767f71488f511039ac7f6611a95b882df37a22dcc84304265e8840",
-        "receipt_id": "audit-10cd1e652a767f71",
+        "receipt_digest": "434b110b1a243eaf90856d268dc27c9d606ed97085544f7a88e1c2ca12fc474e",
+        "receipt_id": "audit-434b110b1a243eaf",
         "schema_version": "opentour.benchmark-audit-receipt.v1"
       },
       "release_check": {
@@ -2177,17 +2254,17 @@
         "issuer_authenticated": false,
         "ledger_signed": false,
         "outcome": "refused",
-        "receipt_id": "audit-10cd1e652a767f71",
+        "receipt_id": "audit-434b110b1a243eaf",
         "refusals": [
           "audit_verdict_insufficient_evidence"
         ],
         "release_permitted": false,
         "schema_version": "opentour.benchmark-audit-release-check.v2",
-        "verified_receipt_digest": "10cd1e652a767f71488f511039ac7f6611a95b882df37a22dcc84304265e8840"
+        "verified_receipt_digest": "434b110b1a243eaf90856d268dc27c9d606ed97085544f7a88e1c2ca12fc474e"
       },
       "rerun_of": null,
       "role": "pack",
-      "run_id": "ope526-fixture-pack_unresolved_ambiguity-10cd1e652a76",
+      "run_id": "ope526-fixture-pack_unresolved_ambiguity-434b110b1a24",
       "sampling_frame": {
         "design": "full_enumeration",
         "eligible_families": 12,
@@ -2212,7 +2289,7 @@
         "unknown_links_recorded": 0
       },
       "status": "completed",
-      "timestamp": "2026-11-28T02:13:59Z",
+      "timestamp": "2026-11-28T06:19:01Z",
       "verdict": "insufficient_evidence",
       "verdict_allows_evaluation": false,
       "verifier": {
@@ -2245,7 +2322,14 @@
       "claims": {
         "alerts_emitted": 0,
         "broad_improvement_alert_permitted": false,
+        "caller_asserted_dependencies": [],
         "critical_inclusive_claim": "permitted_if_precision_met",
+        "customer_accuracy_alert_blocked_by": [
+          "overall_accuracy_not_eligible",
+          "evidence_origin_not_observed",
+          "upstream_receipt_not_worker_verified",
+          "exposure_not_derived_from_covering_history"
+        ],
         "customer_accuracy_alert_permitted": false,
         "error_family_claim": "not_applicable",
         "overall_accuracy_claim": "not_established"
@@ -2296,7 +2380,7 @@
         "binding_digests": {
           "answer_key": "b4a5a70a396b",
           "canonical_inputs": "c4f92ff431fe",
-          "label_manifest": "bfe9e3275ace",
+          "label_manifest": "39d8a8fd86de",
           "scoring_policy": "e216d97c3f37",
           "source_revisions": "4f656d7dd24a",
           "split_manifest": "0aa4587b2bb2"
@@ -2306,11 +2390,11 @@
         "min_critical_coverage": 1.0,
         "operating_point": "generated-operating-point",
         "policy_revision": "generated-policy-r1",
-        "preregistration_digest": "324097be5ce9e4028b3c65b717b64f3d0379d9a6a1c8b9c71072148112b2ce15",
+        "preregistration_digest": "c4d515f8060ddeac9e6a26b2ced67190f83e501c2d85c007f685318fd7862da1",
         "scorer_version": "generated-scorer-v1",
         "tolerable_label_error": 0.0
       },
-      "measured_git_sha": "df422e4bff152c4172d6ee465f2b8f60358fdb09",
+      "measured_git_sha": "07dcb41b62fc40ec57c27f94ff1697355661ad95",
       "metric": {
         "ceiling": 0.05,
         "conclusion": "inconclusive",
@@ -2328,14 +2412,14 @@
         "candidate_snapshot_binding",
         "upstream_snapshot_verification"
       ],
-      "observed_audit_cpu_ms": 0.627,
+      "observed_audit_cpu_ms": 1.799,
       "population": "pack_future_only_field",
       "reason_codes": [
         "future_only_field"
       ],
       "receipt": {
-        "receipt_digest": "2945f5025e3918e931e14fadea78979b5e15f6cc88842e435d918e09c8be0209",
-        "receipt_id": "audit-2945f5025e3918e9",
+        "receipt_digest": "90f31457b3d5f3d7cb202f141864141bf3c93a388b33d045360230ab884bfea5",
+        "receipt_id": "audit-90f31457b3d5f3d7",
         "schema_version": "opentour.benchmark-audit-receipt.v1"
       },
       "release_check": {
@@ -2366,17 +2450,17 @@
         "issuer_authenticated": false,
         "ledger_signed": false,
         "outcome": "refused",
-        "receipt_id": "audit-2945f5025e3918e9",
+        "receipt_id": "audit-90f31457b3d5f3d7",
         "refusals": [
           "audit_verdict_invalid"
         ],
         "release_permitted": false,
         "schema_version": "opentour.benchmark-audit-release-check.v2",
-        "verified_receipt_digest": "2945f5025e3918e931e14fadea78979b5e15f6cc88842e435d918e09c8be0209"
+        "verified_receipt_digest": "90f31457b3d5f3d7cb202f141864141bf3c93a388b33d045360230ab884bfea5"
       },
       "rerun_of": null,
       "role": "pack",
-      "run_id": "ope526-fixture-pack_future_only_field-2945f5025e39",
+      "run_id": "ope526-fixture-pack_future_only_field-90f31457b3d5",
       "sampling_frame": {
         "design": "full_enumeration",
         "eligible_families": 12,
@@ -2401,7 +2485,7 @@
         "unknown_links_recorded": 0
       },
       "status": "completed",
-      "timestamp": "2026-11-28T02:13:59Z",
+      "timestamp": "2026-11-28T06:19:02Z",
       "verdict": "invalid",
       "verdict_allows_evaluation": false,
       "verifier": {
@@ -2434,7 +2518,14 @@
       "claims": {
         "alerts_emitted": 0,
         "broad_improvement_alert_permitted": false,
+        "caller_asserted_dependencies": [],
         "critical_inclusive_claim": "held",
+        "customer_accuracy_alert_blocked_by": [
+          "overall_accuracy_not_eligible",
+          "evidence_origin_not_observed",
+          "upstream_receipt_not_worker_verified",
+          "exposure_not_derived_from_covering_history"
+        ],
         "customer_accuracy_alert_permitted": false,
         "error_family_claim": "not_applicable",
         "overall_accuracy_claim": "not_established"
@@ -2485,7 +2576,7 @@
         "binding_digests": {
           "answer_key": "b4a5a70a396b",
           "canonical_inputs": "c4f92ff431fe",
-          "label_manifest": "bfe9e3275ace",
+          "label_manifest": "a1dab8e26f3e",
           "scoring_policy": "e216d97c3f37",
           "source_revisions": "4f656d7dd24a",
           "split_manifest": "0aa4587b2bb2"
@@ -2495,11 +2586,11 @@
         "min_critical_coverage": 1.0,
         "operating_point": "generated-operating-point",
         "policy_revision": "generated-policy-r1",
-        "preregistration_digest": "324097be5ce9e4028b3c65b717b64f3d0379d9a6a1c8b9c71072148112b2ce15",
+        "preregistration_digest": "9627fa4f48c945e36aeb05fbb82c3a123b7c57f96185783060d436f28dfaf7d7",
         "scorer_version": "generated-scorer-v1",
         "tolerable_label_error": 0.0
       },
-      "measured_git_sha": "df422e4bff152c4172d6ee465f2b8f60358fdb09",
+      "measured_git_sha": "07dcb41b62fc40ec57c27f94ff1697355661ad95",
       "metric": {
         "ceiling": 0.05,
         "conclusion": "unavailable",
@@ -2519,14 +2610,14 @@
         "candidate_snapshot_binding",
         "upstream_snapshot_verification"
       ],
-      "observed_audit_cpu_ms": 0.401,
+      "observed_audit_cpu_ms": 0.796,
       "population": "adverse_empty_audit",
       "reason_codes": [
         "no_verified_families"
       ],
       "receipt": {
-        "receipt_digest": "3fa22b3777c1f2f7d1ae149ab8e147755f72123b28ddcd286461fc513d994749",
-        "receipt_id": "audit-3fa22b3777c1f2f7",
+        "receipt_digest": "ef590d747319ea6e9997730a5cc52f90b2fbf8a9b9e877a1301b0cb6809c9866",
+        "receipt_id": "audit-ef590d747319ea6e",
         "schema_version": "opentour.benchmark-audit-receipt.v1"
       },
       "release_check": {
@@ -2557,17 +2648,17 @@
         "issuer_authenticated": false,
         "ledger_signed": false,
         "outcome": "refused",
-        "receipt_id": "audit-3fa22b3777c1f2f7",
+        "receipt_id": "audit-ef590d747319ea6e",
         "refusals": [
           "audit_verdict_insufficient_evidence"
         ],
         "release_permitted": false,
         "schema_version": "opentour.benchmark-audit-release-check.v2",
-        "verified_receipt_digest": "3fa22b3777c1f2f7d1ae149ab8e147755f72123b28ddcd286461fc513d994749"
+        "verified_receipt_digest": "ef590d747319ea6e9997730a5cc52f90b2fbf8a9b9e877a1301b0cb6809c9866"
       },
       "rerun_of": null,
       "role": "adverse",
-      "run_id": "ope526-fixture-adverse_empty_audit-3fa22b3777c1",
+      "run_id": "ope526-fixture-adverse_empty_audit-ef590d747319",
       "sampling_frame": {
         "design": "full_enumeration",
         "eligible_families": 12,
@@ -2592,12 +2683,12 @@
         "unknown_links_recorded": 0
       },
       "status": "completed",
-      "timestamp": "2026-11-28T02:13:59Z",
+      "timestamp": "2026-11-28T06:19:02Z",
       "verdict": "insufficient_evidence",
       "verdict_allows_evaluation": false,
       "verifier": {
         "adjudicator_digests": [],
-        "adjudicator_independence": "blinded_to_first_label_and_predictions",
+        "adjudicator_independence": "no_adjudication_recorded",
         "adjudicators": 0,
         "disagreement_matrix": {
           "agree": 0,
@@ -2621,7 +2712,14 @@
       "claims": {
         "alerts_emitted": 0,
         "broad_improvement_alert_permitted": false,
+        "caller_asserted_dependencies": [],
         "critical_inclusive_claim": "permitted_if_precision_met",
+        "customer_accuracy_alert_blocked_by": [
+          "overall_accuracy_not_eligible",
+          "evidence_origin_not_observed",
+          "upstream_receipt_not_worker_verified",
+          "exposure_not_derived_from_covering_history"
+        ],
         "customer_accuracy_alert_permitted": false,
         "error_family_claim": "not_applicable",
         "overall_accuracy_claim": "not_established"
@@ -2672,7 +2770,7 @@
         "binding_digests": {
           "answer_key": "b4a5a70a396b",
           "canonical_inputs": "c4f92ff431fe",
-          "label_manifest": "bfe9e3275ace",
+          "label_manifest": "39d8a8fd86de",
           "scoring_policy": "e216d97c3f37",
           "source_revisions": "4f656d7dd24a",
           "split_manifest": "0aa4587b2bb2"
@@ -2682,11 +2780,11 @@
         "min_critical_coverage": 1.0,
         "operating_point": "generated-operating-point",
         "policy_revision": "generated-policy-r1",
-        "preregistration_digest": "324097be5ce9e4028b3c65b717b64f3d0379d9a6a1c8b9c71072148112b2ce15",
+        "preregistration_digest": "c4d515f8060ddeac9e6a26b2ced67190f83e501c2d85c007f685318fd7862da1",
         "scorer_version": "generated-scorer-v1",
         "tolerable_label_error": 0.0
       },
-      "measured_git_sha": "df422e4bff152c4172d6ee465f2b8f60358fdb09",
+      "measured_git_sha": "07dcb41b62fc40ec57c27f94ff1697355661ad95",
       "metric": {
         "ceiling": 0.05,
         "conclusion": "inconclusive",
@@ -2704,14 +2802,14 @@
         "candidate_snapshot_binding",
         "upstream_snapshot_verification"
       ],
-      "observed_audit_cpu_ms": 0.626,
+      "observed_audit_cpu_ms": 1.238,
       "population": "adverse_protected_selection",
       "reason_codes": [
         "protected_comparison_used_for_selection"
       ],
       "receipt": {
-        "receipt_digest": "6a4ea99fae245d29aa5e8cfb85e64a9c2ce2d29367621976cee9a70eea78bc7e",
-        "receipt_id": "audit-6a4ea99fae245d29",
+        "receipt_digest": "115a26fbf42ffa6d593d4522daac5d25ce13c33215416d8e3053d6b87a8a8e15",
+        "receipt_id": "audit-115a26fbf42ffa6d",
         "schema_version": "opentour.benchmark-audit-receipt.v1"
       },
       "release_check": {
@@ -2742,17 +2840,17 @@
         "issuer_authenticated": false,
         "ledger_signed": false,
         "outcome": "refused",
-        "receipt_id": "audit-6a4ea99fae245d29",
+        "receipt_id": "audit-115a26fbf42ffa6d",
         "refusals": [
           "audit_verdict_invalid"
         ],
         "release_permitted": false,
         "schema_version": "opentour.benchmark-audit-release-check.v2",
-        "verified_receipt_digest": "6a4ea99fae245d29aa5e8cfb85e64a9c2ce2d29367621976cee9a70eea78bc7e"
+        "verified_receipt_digest": "115a26fbf42ffa6d593d4522daac5d25ce13c33215416d8e3053d6b87a8a8e15"
       },
       "rerun_of": null,
       "role": "adverse",
-      "run_id": "ope526-fixture-adverse_protected_selection-6a4ea99fae24",
+      "run_id": "ope526-fixture-adverse_protected_selection-115a26fbf42f",
       "sampling_frame": {
         "design": "full_enumeration",
         "eligible_families": 12,
@@ -2777,7 +2875,7 @@
         "unknown_links_recorded": 0
       },
       "status": "completed",
-      "timestamp": "2026-11-28T02:13:59Z",
+      "timestamp": "2026-11-28T06:19:02Z",
       "verdict": "invalid",
       "verdict_allows_evaluation": false,
       "verifier": {
@@ -2810,7 +2908,14 @@
       "claims": {
         "alerts_emitted": 0,
         "broad_improvement_alert_permitted": false,
+        "caller_asserted_dependencies": [],
         "critical_inclusive_claim": "permitted_if_precision_met",
+        "customer_accuracy_alert_blocked_by": [
+          "overall_accuracy_not_eligible",
+          "evidence_origin_not_observed",
+          "upstream_receipt_not_worker_verified",
+          "exposure_not_derived_from_covering_history"
+        ],
         "customer_accuracy_alert_permitted": false,
         "error_family_claim": "not_applicable",
         "overall_accuracy_claim": "not_established"
@@ -2861,7 +2966,7 @@
         "binding_digests": {
           "answer_key": "b4a5a70a396b",
           "canonical_inputs": "c4f92ff431fe",
-          "label_manifest": "bfe9e3275ace",
+          "label_manifest": "39d8a8fd86de",
           "scoring_policy": "e216d97c3f37",
           "source_revisions": "4f656d7dd24a",
           "split_manifest": "0aa4587b2bb2"
@@ -2871,11 +2976,11 @@
         "min_critical_coverage": 1.0,
         "operating_point": "generated-operating-point",
         "policy_revision": "generated-policy-r1",
-        "preregistration_digest": "324097be5ce9e4028b3c65b717b64f3d0379d9a6a1c8b9c71072148112b2ce15",
+        "preregistration_digest": "c4d515f8060ddeac9e6a26b2ced67190f83e501c2d85c007f685318fd7862da1",
         "scorer_version": "generated-scorer-v1",
         "tolerable_label_error": 0.0
       },
-      "measured_git_sha": "df422e4bff152c4172d6ee465f2b8f60358fdb09",
+      "measured_git_sha": "07dcb41b62fc40ec57c27f94ff1697355661ad95",
       "metric": {
         "ceiling": 0.05,
         "conclusion": "inconclusive",
@@ -2893,14 +2998,14 @@
         "candidate_snapshot_binding",
         "upstream_snapshot_verification"
       ],
-      "observed_audit_cpu_ms": 0.538,
+      "observed_audit_cpu_ms": 1.279,
       "population": "adverse_preprocessing_fit_on_protected",
       "reason_codes": [
         "preprocessing_fit_on_protected"
       ],
       "receipt": {
-        "receipt_digest": "1013f941ec931041b05b492c9f56203f3a2f88d574893df83323653309075ee6",
-        "receipt_id": "audit-1013f941ec931041",
+        "receipt_digest": "5ea144f7b8fd88611f4cda9581edf3196bf53bfb6f6516e202f38a5a9ece4567",
+        "receipt_id": "audit-5ea144f7b8fd8861",
         "schema_version": "opentour.benchmark-audit-receipt.v1"
       },
       "release_check": {
@@ -2931,17 +3036,17 @@
         "issuer_authenticated": false,
         "ledger_signed": false,
         "outcome": "refused",
-        "receipt_id": "audit-1013f941ec931041",
+        "receipt_id": "audit-5ea144f7b8fd8861",
         "refusals": [
           "audit_verdict_invalid"
         ],
         "release_permitted": false,
         "schema_version": "opentour.benchmark-audit-release-check.v2",
-        "verified_receipt_digest": "1013f941ec931041b05b492c9f56203f3a2f88d574893df83323653309075ee6"
+        "verified_receipt_digest": "5ea144f7b8fd88611f4cda9581edf3196bf53bfb6f6516e202f38a5a9ece4567"
       },
       "rerun_of": null,
       "role": "adverse",
-      "run_id": "ope526-fixture-adverse_preprocessing_fit_on_protected-1013f941ec93",
+      "run_id": "ope526-fixture-adverse_preprocessing_fit_on_protected-5ea144f7b8fd",
       "sampling_frame": {
         "design": "full_enumeration",
         "eligible_families": 12,
@@ -2966,7 +3071,7 @@
         "unknown_links_recorded": 0
       },
       "status": "completed",
-      "timestamp": "2026-11-28T02:13:59Z",
+      "timestamp": "2026-11-28T06:19:02Z",
       "verdict": "invalid",
       "verdict_allows_evaluation": false,
       "verifier": {
@@ -2999,7 +3104,14 @@
       "claims": {
         "alerts_emitted": 0,
         "broad_improvement_alert_permitted": false,
+        "caller_asserted_dependencies": [],
         "critical_inclusive_claim": "permitted_if_precision_met",
+        "customer_accuracy_alert_blocked_by": [
+          "overall_accuracy_not_eligible",
+          "evidence_origin_not_observed",
+          "upstream_receipt_not_worker_verified",
+          "exposure_not_derived_from_covering_history"
+        ],
         "customer_accuracy_alert_permitted": false,
         "error_family_claim": "not_applicable",
         "overall_accuracy_claim": "not_established"
@@ -3050,7 +3162,7 @@
         "binding_digests": {
           "answer_key": "b4a5a70a396b",
           "canonical_inputs": "c4f92ff431fe",
-          "label_manifest": "bfe9e3275ace",
+          "label_manifest": "39d8a8fd86de",
           "scoring_policy": "e216d97c3f37",
           "source_revisions": "4f656d7dd24a",
           "split_manifest": "0aa4587b2bb2"
@@ -3060,11 +3172,11 @@
         "min_critical_coverage": 1.0,
         "operating_point": "generated-operating-point",
         "policy_revision": "generated-policy-r1",
-        "preregistration_digest": "324097be5ce9e4028b3c65b717b64f3d0379d9a6a1c8b9c71072148112b2ce15",
+        "preregistration_digest": "c4d515f8060ddeac9e6a26b2ced67190f83e501c2d85c007f685318fd7862da1",
         "scorer_version": "generated-scorer-v1",
         "tolerable_label_error": 0.0
       },
-      "measured_git_sha": "df422e4bff152c4172d6ee465f2b8f60358fdb09",
+      "measured_git_sha": "07dcb41b62fc40ec57c27f94ff1697355661ad95",
       "metric": {
         "ceiling": 0.05,
         "conclusion": "inconclusive",
@@ -3082,14 +3194,14 @@
         "candidate_snapshot_binding",
         "upstream_snapshot_verification"
       ],
-      "observed_audit_cpu_ms": 0.621,
+      "observed_audit_cpu_ms": 1.349,
       "population": "adverse_unlogged_disclosure",
       "reason_codes": [
         "unlogged_case_level_disclosure"
       ],
       "receipt": {
-        "receipt_digest": "7a90f97937818f46f614feb4cede9a595964e94b75e9d98e1d5aa32bc191acb5",
-        "receipt_id": "audit-7a90f97937818f46",
+        "receipt_digest": "514e1d4d3d440691d52a01708682a0dfe0fa3bbcfdb54b3dde07ff70c781ea92",
+        "receipt_id": "audit-514e1d4d3d440691",
         "schema_version": "opentour.benchmark-audit-receipt.v1"
       },
       "release_check": {
@@ -3120,17 +3232,17 @@
         "issuer_authenticated": false,
         "ledger_signed": false,
         "outcome": "refused",
-        "receipt_id": "audit-7a90f97937818f46",
+        "receipt_id": "audit-514e1d4d3d440691",
         "refusals": [
           "audit_verdict_invalid"
         ],
         "release_permitted": false,
         "schema_version": "opentour.benchmark-audit-release-check.v2",
-        "verified_receipt_digest": "7a90f97937818f46f614feb4cede9a595964e94b75e9d98e1d5aa32bc191acb5"
+        "verified_receipt_digest": "514e1d4d3d440691d52a01708682a0dfe0fa3bbcfdb54b3dde07ff70c781ea92"
       },
       "rerun_of": null,
       "role": "adverse",
-      "run_id": "ope526-fixture-adverse_unlogged_disclosure-7a90f9793781",
+      "run_id": "ope526-fixture-adverse_unlogged_disclosure-514e1d4d3d44",
       "sampling_frame": {
         "design": "full_enumeration",
         "eligible_families": 12,
@@ -3155,7 +3267,7 @@
         "unknown_links_recorded": 0
       },
       "status": "completed",
-      "timestamp": "2026-11-28T02:13:59Z",
+      "timestamp": "2026-11-28T06:19:02Z",
       "verdict": "invalid",
       "verdict_allows_evaluation": false,
       "verifier": {
@@ -3188,7 +3300,14 @@
       "claims": {
         "alerts_emitted": 0,
         "broad_improvement_alert_permitted": false,
+        "caller_asserted_dependencies": [],
         "critical_inclusive_claim": "permitted_if_precision_met",
+        "customer_accuracy_alert_blocked_by": [
+          "overall_accuracy_not_eligible",
+          "evidence_origin_not_observed",
+          "upstream_receipt_not_worker_verified",
+          "exposure_not_derived_from_covering_history"
+        ],
         "customer_accuracy_alert_permitted": false,
         "error_family_claim": "not_applicable",
         "overall_accuracy_claim": "not_established"
@@ -3239,7 +3358,7 @@
         "binding_digests": {
           "answer_key": "b4a5a70a396b",
           "canonical_inputs": "c4f92ff431fe",
-          "label_manifest": "bfe9e3275ace",
+          "label_manifest": "39d8a8fd86de",
           "scoring_policy": "e216d97c3f37",
           "source_revisions": "4f656d7dd24a",
           "split_manifest": "0aa4587b2bb2"
@@ -3249,11 +3368,11 @@
         "min_critical_coverage": 1.0,
         "operating_point": "generated-operating-point",
         "policy_revision": "generated-policy-r1",
-        "preregistration_digest": "324097be5ce9e4028b3c65b717b64f3d0379d9a6a1c8b9c71072148112b2ce15",
+        "preregistration_digest": "c4d515f8060ddeac9e6a26b2ced67190f83e501c2d85c007f685318fd7862da1",
         "scorer_version": "generated-scorer-v1",
         "tolerable_label_error": 0.0
       },
-      "measured_git_sha": "df422e4bff152c4172d6ee465f2b8f60358fdb09",
+      "measured_git_sha": "07dcb41b62fc40ec57c27f94ff1697355661ad95",
       "metric": {
         "ceiling": 0.05,
         "conclusion": "inconclusive",
@@ -3271,14 +3390,14 @@
         "candidate_snapshot_binding",
         "upstream_snapshot_verification"
       ],
-      "observed_audit_cpu_ms": 0.529,
+      "observed_audit_cpu_ms": 0.929,
       "population": "adverse_preregistered_after_reveal",
       "reason_codes": [
         "preregistration_after_reveal"
       ],
       "receipt": {
-        "receipt_digest": "a05a52d4e2849b8b71188ad2424a6591704e2be90e6f0e113ed6d40398f7acd3",
-        "receipt_id": "audit-a05a52d4e2849b8b",
+        "receipt_digest": "5cd712f75e3d90bf561cffd998c4503ca35325a8c03c1a82075fa15b231dd6e3",
+        "receipt_id": "audit-5cd712f75e3d90bf",
         "schema_version": "opentour.benchmark-audit-receipt.v1"
       },
       "release_check": {
@@ -3309,17 +3428,17 @@
         "issuer_authenticated": false,
         "ledger_signed": false,
         "outcome": "refused",
-        "receipt_id": "audit-a05a52d4e2849b8b",
+        "receipt_id": "audit-5cd712f75e3d90bf",
         "refusals": [
           "audit_verdict_invalid"
         ],
         "release_permitted": false,
         "schema_version": "opentour.benchmark-audit-release-check.v2",
-        "verified_receipt_digest": "a05a52d4e2849b8b71188ad2424a6591704e2be90e6f0e113ed6d40398f7acd3"
+        "verified_receipt_digest": "5cd712f75e3d90bf561cffd998c4503ca35325a8c03c1a82075fa15b231dd6e3"
       },
       "rerun_of": null,
       "role": "adverse",
-      "run_id": "ope526-fixture-adverse_preregistered_after_reveal-a05a52d4e284",
+      "run_id": "ope526-fixture-adverse_preregistered_after_reveal-5cd712f75e3d",
       "sampling_frame": {
         "design": "full_enumeration",
         "eligible_families": 12,
@@ -3344,7 +3463,7 @@
         "unknown_links_recorded": 0
       },
       "status": "completed",
-      "timestamp": "2026-11-28T02:13:59Z",
+      "timestamp": "2026-11-28T06:19:02Z",
       "verdict": "invalid",
       "verdict_allows_evaluation": false,
       "verifier": {
@@ -3377,7 +3496,14 @@
       "claims": {
         "alerts_emitted": 0,
         "broad_improvement_alert_permitted": false,
+        "caller_asserted_dependencies": [],
         "critical_inclusive_claim": "permitted_if_precision_met",
+        "customer_accuracy_alert_blocked_by": [
+          "overall_accuracy_not_eligible",
+          "evidence_origin_not_observed",
+          "upstream_receipt_not_worker_verified",
+          "exposure_not_derived_from_covering_history"
+        ],
         "customer_accuracy_alert_permitted": false,
         "error_family_claim": "not_applicable",
         "overall_accuracy_claim": "not_established"
@@ -3428,7 +3554,7 @@
         "binding_digests": {
           "answer_key": "b4a5a70a396b",
           "canonical_inputs": "c4f92ff431fe",
-          "label_manifest": "bfe9e3275ace",
+          "label_manifest": "39d8a8fd86de",
           "scoring_policy": "e216d97c3f37",
           "source_revisions": "4f656d7dd24a",
           "split_manifest": "0aa4587b2bb2"
@@ -3438,11 +3564,11 @@
         "min_critical_coverage": 1.0,
         "operating_point": "generated-operating-point",
         "policy_revision": "generated-policy-r1",
-        "preregistration_digest": "324097be5ce9e4028b3c65b717b64f3d0379d9a6a1c8b9c71072148112b2ce15",
+        "preregistration_digest": "c4d515f8060ddeac9e6a26b2ced67190f83e501c2d85c007f685318fd7862da1",
         "scorer_version": "generated-scorer-v1",
         "tolerable_label_error": 0.0
       },
-      "measured_git_sha": "df422e4bff152c4172d6ee465f2b8f60358fdb09",
+      "measured_git_sha": "07dcb41b62fc40ec57c27f94ff1697355661ad95",
       "metric": {
         "ceiling": 0.05,
         "conclusion": "inconclusive",
@@ -3460,14 +3586,14 @@
         "candidate_snapshot_binding",
         "upstream_snapshot_verification"
       ],
-      "observed_audit_cpu_ms": 0.614,
+      "observed_audit_cpu_ms": 1.279,
       "population": "adverse_superseded",
       "reason_codes": [
         "superseded"
       ],
       "receipt": {
-        "receipt_digest": "50c6121648c972c17f1645292bf5a45d854fcec87d1857918d1d403aabd5ef83",
-        "receipt_id": "audit-50c6121648c972c1",
+        "receipt_digest": "4635f58c29dcd315533a741225c8d7a9587c68c53b8a29f209170e59b23a018a",
+        "receipt_id": "audit-4635f58c29dcd315",
         "schema_version": "opentour.benchmark-audit-receipt.v1"
       },
       "release_check": {
@@ -3498,18 +3624,18 @@
         "issuer_authenticated": false,
         "ledger_signed": false,
         "outcome": "refused",
-        "receipt_id": "audit-50c6121648c972c1",
+        "receipt_id": "audit-4635f58c29dcd315",
         "refusals": [
           "audit_receipt_stale",
           "audit_receipt_superseded"
         ],
         "release_permitted": false,
         "schema_version": "opentour.benchmark-audit-release-check.v2",
-        "verified_receipt_digest": "50c6121648c972c17f1645292bf5a45d854fcec87d1857918d1d403aabd5ef83"
+        "verified_receipt_digest": "4635f58c29dcd315533a741225c8d7a9587c68c53b8a29f209170e59b23a018a"
       },
       "rerun_of": null,
       "role": "adverse",
-      "run_id": "ope526-fixture-adverse_superseded-50c6121648c9",
+      "run_id": "ope526-fixture-adverse_superseded-4635f58c29dc",
       "sampling_frame": {
         "design": "full_enumeration",
         "eligible_families": 12,
@@ -3534,7 +3660,7 @@
         "unknown_links_recorded": 0
       },
       "status": "completed",
-      "timestamp": "2026-11-28T02:13:59Z",
+      "timestamp": "2026-11-28T06:19:02Z",
       "verdict": "stale",
       "verdict_allows_evaluation": false,
       "verifier": {
@@ -3567,10 +3693,19 @@
       "claims": {
         "alerts_emitted": 0,
         "broad_improvement_alert_permitted": false,
+        "caller_asserted_dependencies": [
+          "exposed_families",
+          "unlogged_disclosures"
+        ],
         "critical_inclusive_claim": "permitted_if_precision_met",
+        "customer_accuracy_alert_blocked_by": [
+          "upstream_receipt_not_worker_verified",
+          "exposure_not_derived_from_covering_history",
+          "claim_rests_on_caller_assertions"
+        ],
         "customer_accuracy_alert_permitted": false,
         "error_family_claim": "not_applicable",
-        "overall_accuracy_claim": "eligible_pending_upstream_receipt"
+        "overall_accuracy_claim": "claim_limited_caller_asserted"
       },
       "coverage": {
         "critical": "60/60",
@@ -3618,7 +3753,7 @@
         "binding_digests": {
           "answer_key": "b4a5a70a396b",
           "canonical_inputs": "c4f92ff431fe",
-          "label_manifest": "f28ad98e0475",
+          "label_manifest": "8c12e4cbad2f",
           "scoring_policy": "e216d97c3f37",
           "source_revisions": "4f656d7dd24a",
           "split_manifest": "16055da694bf"
@@ -3628,11 +3763,11 @@
         "min_critical_coverage": 1.0,
         "operating_point": "generated-operating-point",
         "policy_revision": "generated-policy-r1",
-        "preregistration_digest": "65dcf3446825922d9a3d33da30f266f31f750718793d51a79ba91048d5c392a1",
+        "preregistration_digest": "833486fcd3d728efda69a1dce4a4bd8feb82d1ec14950d888cc90d8dad755787",
         "scorer_version": "generated-scorer-v1",
         "tolerable_label_error": 0.02
       },
-      "measured_git_sha": "df422e4bff152c4172d6ee465f2b8f60358fdb09",
+      "measured_git_sha": "07dcb41b62fc40ec57c27f94ff1697355661ad95",
       "metric": {
         "ceiling": 0.05,
         "conclusion": "ruled_out_at_ceiling",
@@ -3648,12 +3783,12 @@
       "missing_fields": [
         "upstream_snapshot_verification"
       ],
-      "observed_audit_cpu_ms": 8.149,
+      "observed_audit_cpu_ms": 12.916,
       "population": "real_sample_standin",
       "reason_codes": [],
       "receipt": {
-        "receipt_digest": "926f2a033db4ddd182db07b63869fbe6218ffc4f5e9be618645194bca63f9fb1",
-        "receipt_id": "audit-926f2a033db4ddd1",
+        "receipt_digest": "bbb85ee7ce007cd69258be94c65fb5ca6e09e3139308e177e2e8eed117fcaa96",
+        "receipt_id": "audit-bbb85ee7ce007cd6",
         "schema_version": "opentour.benchmark-audit-receipt.v1"
       },
       "release_check": {
@@ -3689,15 +3824,15 @@
         "issuer_authenticated": false,
         "ledger_signed": false,
         "outcome": "held",
-        "receipt_id": "audit-926f2a033db4ddd1",
+        "receipt_id": "audit-bbb85ee7ce007cd6",
         "refusals": [],
         "release_permitted": false,
         "schema_version": "opentour.benchmark-audit-release-check.v2",
-        "verified_receipt_digest": "926f2a033db4ddd182db07b63869fbe6218ffc4f5e9be618645194bca63f9fb1"
+        "verified_receipt_digest": "bbb85ee7ce007cd69258be94c65fb5ca6e09e3139308e177e2e8eed117fcaa96"
       },
       "rerun_of": null,
       "role": "baseline",
-      "run_id": "ope526-fixture-real_sample_standin-926f2a033db4",
+      "run_id": "ope526-fixture-real_sample_standin-bbb85ee7ce00",
       "sampling_frame": {
         "design": "stratified_random",
         "eligible_families": 180,
@@ -3731,7 +3866,7 @@
         "unknown_links_recorded": 0
       },
       "status": "completed",
-      "timestamp": "2026-11-28T02:13:59Z",
+      "timestamp": "2026-11-28T06:19:02Z",
       "verdict": "evaluation_allowed",
       "verdict_allows_evaluation": true,
       "verifier": {
@@ -3764,7 +3899,13 @@
       "claims": {
         "alerts_emitted": 0,
         "broad_improvement_alert_permitted": false,
+        "caller_asserted_dependencies": [],
         "critical_inclusive_claim": "permitted_if_precision_met",
+        "customer_accuracy_alert_blocked_by": [
+          "overall_accuracy_not_eligible",
+          "upstream_receipt_not_worker_verified",
+          "exposure_not_derived_from_covering_history"
+        ],
         "customer_accuracy_alert_permitted": false,
         "error_family_claim": "not_applicable",
         "overall_accuracy_claim": "not_established"
@@ -3815,7 +3956,7 @@
         "binding_digests": {
           "answer_key": "b4a5a70a396b",
           "canonical_inputs": "c4f92ff431fe",
-          "label_manifest": "3c3ed7d46ee6",
+          "label_manifest": "45e1315a845a",
           "scoring_policy": "e216d97c3f37",
           "source_revisions": "4f656d7dd24a",
           "split_manifest": "708630bc2c12"
@@ -3825,11 +3966,11 @@
         "min_critical_coverage": 1.0,
         "operating_point": "generated-operating-point",
         "policy_revision": "generated-policy-r1",
-        "preregistration_digest": "aa51dc573cc793ed8a93994983736e0b989643e25c6f7f1e71d655beb2d02aa0",
+        "preregistration_digest": "77bd9d76f03e3a52557154dab002bc0d0892c69c2b88243012a21905b60d565d",
         "scorer_version": "generated-scorer-v1",
         "tolerable_label_error": 0.0
       },
-      "measured_git_sha": "df422e4bff152c4172d6ee465f2b8f60358fdb09",
+      "measured_git_sha": "07dcb41b62fc40ec57c27f94ff1697355661ad95",
       "metric": {
         "ceiling": 0.05,
         "conclusion": "inconclusive",
@@ -3845,14 +3986,14 @@
       "missing_fields": [
         "upstream_snapshot_verification"
       ],
-      "observed_audit_cpu_ms": 2.858,
+      "observed_audit_cpu_ms": 4.026,
       "population": "real_sample_standin_small",
       "reason_codes": [
         "precision_cannot_rule_out_ceiling"
       ],
       "receipt": {
-        "receipt_digest": "887bc75a1126773205ae4a9534c502c1fc182034b2e95f80587bf1ffb5cec902",
-        "receipt_id": "audit-887bc75a11267732",
+        "receipt_digest": "6528e4ee937108fdff0d8058e9868750f412430cd64705fa2820216af98b873f",
+        "receipt_id": "audit-6528e4ee937108fd",
         "schema_version": "opentour.benchmark-audit-receipt.v1"
       },
       "release_check": {
@@ -3883,17 +4024,17 @@
         "issuer_authenticated": false,
         "ledger_signed": false,
         "outcome": "refused",
-        "receipt_id": "audit-887bc75a11267732",
+        "receipt_id": "audit-6528e4ee937108fd",
         "refusals": [
           "audit_verdict_insufficient_evidence"
         ],
         "release_permitted": false,
         "schema_version": "opentour.benchmark-audit-release-check.v2",
-        "verified_receipt_digest": "887bc75a1126773205ae4a9534c502c1fc182034b2e95f80587bf1ffb5cec902"
+        "verified_receipt_digest": "6528e4ee937108fdff0d8058e9868750f412430cd64705fa2820216af98b873f"
       },
       "rerun_of": null,
       "role": "mutation",
-      "run_id": "ope526-fixture-real_sample_standin_small-887bc75a1126",
+      "run_id": "ope526-fixture-real_sample_standin_small-6528e4ee9371",
       "sampling_frame": {
         "design": "stratified_random",
         "eligible_families": 100,
@@ -3927,7 +4068,7 @@
         "unknown_links_recorded": 0
       },
       "status": "completed",
-      "timestamp": "2026-11-28T02:13:59Z",
+      "timestamp": "2026-11-28T06:19:02Z",
       "verdict": "insufficient_evidence",
       "verdict_allows_evaluation": false,
       "verifier": {
@@ -3959,9 +4100,9 @@
     }
   },
   "step4_decision_record": {
-    "baseline_run_id": "ope526-fixture-baseline-4ac7054c9cb2",
+    "baseline_run_id": "ope526-fixture-baseline-10c94cbbb58e",
     "branch": "missing_audit",
-    "change_revision": "df422e4bff152c4172d6ee465f2b8f60358fdb09",
+    "change_revision": "07dcb41b62fc40ec57c27f94ff1697355661ad95",
     "change_revision_dirty": false,
     "change_under_test": "No benchmark or label change. This revision adds the run inventory, the worker audit store (identity, hash-chained event log, benchmark state) and the worker-side release check that reads the receipt from that store.",
     "decision": "hold_for_specified_evidence",
@@ -4004,26 +4145,26 @@
       "runs_matching_hand_checked_verdict": 20
     },
     "preserved_unsuccessful_trials": [
-      "ope526-fixture-mutation_a_corrections_only-f79d698e755b",
-      "ope526-fixture-mutation_a_selective_under_full_design-d757ca736ea9",
-      "ope526-fixture-mutation_b_no_critical_verification-1fc4f42fd013",
-      "ope526-fixture-mutation_c_cross_split_sibling-442f91d65083",
-      "ope526-fixture-mutation_d_post_freeze_relabel-6924c2162996",
-      "ope526-fixture-pack_policy_only_starter-d89bd4d888d7",
-      "ope526-fixture-pack_two_reviewers_overturned-a0ce27e59922",
-      "ope526-fixture-pack_unresolved_ambiguity-10cd1e652a76",
-      "ope526-fixture-pack_future_only_field-2945f5025e39",
-      "ope526-fixture-adverse_empty_audit-3fa22b3777c1",
-      "ope526-fixture-adverse_protected_selection-6a4ea99fae24",
-      "ope526-fixture-adverse_preprocessing_fit_on_protected-1013f941ec93",
-      "ope526-fixture-adverse_unlogged_disclosure-7a90f9793781",
-      "ope526-fixture-adverse_preregistered_after_reveal-a05a52d4e284",
-      "ope526-fixture-adverse_superseded-50c6121648c9",
-      "ope526-fixture-real_sample_standin_small-887bc75a1126"
+      "ope526-fixture-mutation_a_corrections_only-5e63682ebe75",
+      "ope526-fixture-mutation_a_selective_under_full_design-006cbfcc9663",
+      "ope526-fixture-mutation_b_no_critical_verification-0bce0261db25",
+      "ope526-fixture-mutation_c_cross_split_sibling-397225e68efe",
+      "ope526-fixture-mutation_d_post_freeze_relabel-752555cc7437",
+      "ope526-fixture-pack_policy_only_starter-77a93fa6f944",
+      "ope526-fixture-pack_two_reviewers_overturned-91d29d98a84c",
+      "ope526-fixture-pack_unresolved_ambiguity-434b110b1a24",
+      "ope526-fixture-pack_future_only_field-90f31457b3d5",
+      "ope526-fixture-adverse_empty_audit-ef590d747319",
+      "ope526-fixture-adverse_protected_selection-115a26fbf42f",
+      "ope526-fixture-adverse_preprocessing_fit_on_protected-5ea144f7b8fd",
+      "ope526-fixture-adverse_unlogged_disclosure-514e1d4d3d44",
+      "ope526-fixture-adverse_preregistered_after_reveal-5cd712f75e3d",
+      "ope526-fixture-adverse_superseded-4635f58c29dc",
+      "ope526-fixture-real_sample_standin_small-6528e4ee9371"
     ],
     "rerun_ids": [
-      "ope526-fixture-baseline_rescore-4ac7054c9cb2",
-      "ope526-fixture-mutation_c_resealed-4ac7054c9cb2"
+      "ope526-fixture-baseline_rescore-10c94cbbb58e",
+      "ope526-fixture-mutation_c_resealed-10c94cbbb58e"
     ],
     "software_disposition": "keep_current_behavior",
     "step3_rerun": {
