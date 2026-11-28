@@ -2450,3 +2450,17 @@ def test_pdf_operator_with_wrong_operand_types_is_ignored_like_a_viewer() -> Non
         assert "text_outside_page" in result.reason, (content, result.reason)
     # A name inside a TJ array is not a string to show.
     _flagged(b"BT /F1 12 Tf 72 700 Td [(Quarterly) /Name (policy)] TJ ET", "text_operand_malformed")
+
+
+def test_pdf_unmatched_q_keeps_the_state_and_goes_to_review() -> None:
+    # poppler ignores a Q with no q: the text below stays 5000 pt off the page (no ink), or at
+    # 1/100 scale (no ink). f2b356a reset the CTM to identity and returned ELIGIBLE.
+    for transform, flag in ((b"1 0 0 1 5000 5000 cm", "text_outside_page"),
+                            (b"0.01 0 0 0.01 0 0 cm", "text_size_invisible")):  # fmt: skip
+        result = read(_pdf(transform + b" Q " + _SUMMARY), "x.pdf")[1]
+        assert "graphics_state_unbalanced" in result.reason, result.reason
+        assert flag in result.reason, result.reason  # the state is kept, as poppler keeps it
+    _flagged(b"Q " + _SUMMARY, "graphics_state_unbalanced")
+    # Balanced q/Q restores the state: poppler draws the line.
+    _eligible(b"q 1 0 0 1 5000 5000 cm Q " + _SUMMARY)
+    _eligible(b"q q 0.01 0 0 0.01 0 0 cm Q Q " + _SUMMARY)

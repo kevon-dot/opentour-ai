@@ -2144,7 +2144,12 @@ def _fragments(
         elif op == b"q":
             saved.append(gs)
         elif op == b"Q":
-            gs = saved.pop() if saved else replace(gs, ctm=_IDENTITY)
+            if saved:
+                gs = saved.pop()
+            else:
+                # A Q with no q: poppler ignores it and keeps the state; a reader that resets
+                # it (as this one did) places the text elsewhere. Kept, and sent to review.
+                marks.add("graphics_state_unbalanced")
         elif op == b"Tr" and nums:
             gs = replace(gs, render_mode=nums[-1])
         elif op == b"Tz" and nums:

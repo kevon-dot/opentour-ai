@@ -194,6 +194,7 @@ REVIEW_FLAGS = frozenset(
         "content_lexer_ambiguous",
         "text_operand_malformed",
         "content_operand_mismatch",
+        "graphics_state_unbalanced",
         "content_operand_non_finite",
     }
 )
