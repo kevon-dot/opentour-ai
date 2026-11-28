@@ -13,6 +13,7 @@ import os
 import shutil
 import sqlite3
 import stat
+import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from pathlib import Path
@@ -31,13 +32,14 @@ from opentour_cell.pilot.synthetic_allocation import (
     family_from_record,
 )
 
-WORKER_NOW = {"t": 0}
+WORKER_NOW = {"t": 100}  # TV_NOW: the worker clock agrees with the callers by default
+REAL_WORKER_NOW = sa._worker_now if hasattr(sa, "_worker_now") else None
 
 
 @pytest.fixture(autouse=True)
 def _pin_worker_clock(monkeypatch: pytest.MonkeyPatch) -> None:
     """Pin the worker clock (test-only seam, as in OPE-544); tests move it via WORKER_NOW."""
-    WORKER_NOW["t"] = 0
+    WORKER_NOW["t"] = 100
     monkeypatch.setattr(sa, "_worker_now", lambda: WORKER_NOW["t"], raising=False)
 
 
@@ -1008,9 +1010,11 @@ def test_grant_link_narrows_spend_cap_to_ope516_headroom(tmp_path: Path) -> None
         (replace(TV_GRANT, execution_location_approved=False), TV_NOW),
         (replace(TV_GRANT, budget=4), TV_NOW),  # 4 already spent
     ):
+        WORKER_NOW["t"] = now  # expiry is the worker clock's call
         assert sa.grant_headroom(grant, variants, now=now) == 0
         fresh = AllocationLedger()
         assert code_of(grant_budget, fresh, path, grant=grant, now=now) == "grant_unavailable"
+    WORKER_NOW["t"] = TV_NOW
     with pytest.raises(AllocationError, match="grant_link_invalid"):
         sa.grant_headroom(replace(TV_GRANT, budget=True), variants, now=TV_NOW)
 
@@ -1446,7 +1450,8 @@ def test_p6_reservations_across_budgets_cannot_exceed_grant_headroom(tmp_path: P
     assert code_of(led.reserve, "generated-budget-2", fresh, verified_by=sc, now=TV_NOW) == (
         "grant_headroom_exceeded"
     )
-    assert code_of(led.reserve, "generated-budget-2", fresh, verified_by=sc, now=1000) == (
+    WORKER_NOW["t"] = 1000
+    assert code_of(led.reserve, "generated-budget-2", fresh, verified_by=sc, now=TV_NOW) == (
         "grant_expired"
     )
 
@@ -1999,11 +2004,12 @@ def test_commit_refuses_an_expired_grant(tmp_path: Path) -> None:
     sc = scope(path, seal)
     plan = allocate([family("a0")], policy(), verified_by=sc)
     led.reserve("generated-budget", plan, verified_by=sc, now=TV_NOW)
+    WORKER_NOW["t"] = 1000
     assert code_of(led.commit, "generated-budget", plan.allocation_id, now=1000) == "grant_expired"
     assert code_of(led.commit, "generated-budget", plan.allocation_id, now=True) == (
         "grant_link_invalid"
     )
-    # The caller clock cannot go back: a later, smaller caller time does not re-open the grant.
+    # A back-dated caller time does not re-open the grant: the worker clock decides.
     assert code_of(led.commit, "generated-budget", plan.allocation_id, now=999) == "grant_expired"
 
 
@@ -2149,6 +2155,7 @@ def test_caller_clock_cannot_go_back_or_revive_an_expired_grant(tmp_path: Path) 
     grant_budget(led, path)
     sc = scope(path, seal)
     plan = allocate([family("a0")], policy(), verified_by=sc)
+    WORKER_NOW["t"] = 999
     led.reserve("generated-budget", plan, verified_by=sc, now=999)
     WORKER_NOW["t"] = 1000  # the real expiry passes on the worker's own clock
     # Repro 1: a back-dated commit (reserve at 999, commit at 5) is judged on the worker clock.
@@ -2158,32 +2165,31 @@ def test_caller_clock_cannot_go_back_or_revive_an_expired_grant(tmp_path: Path) 
     assert code_of(led.reserve, "generated-budget", other, verified_by=sc, now=0) == (
         "grant_expired"
     )
-    # A future caller time cannot extend the grant either.
-    assert code_of(led.reserve, "generated-budget", other, verified_by=sc, now=10**9) == (
+    # A future caller time cannot extend the grant either (and beyond the tolerance it is
+    # refused outright).
+    assert code_of(led.reserve, "generated-budget", other, verified_by=sc, now=1200) == (
         "grant_expired"
+    )
+    assert code_of(led.reserve, "generated-budget", other, verified_by=sc, now=10**9) == (
+        "clock_skew_refused"
     )
     assert sa.grant_headroom(TV_GRANT, tv.VariantLedger(path), now=0) == 0
     assert code_of(grant_budget, AllocationLedger(), path, now=0) == "grant_unavailable"
 
 
 def test_caller_time_past_expiry_still_ends_the_grant(tmp_path: Path) -> None:
-    path, seal = world(tmp_path, "a0", "b0")
+    path, seal = world(tmp_path, "a0")
     led = AllocationLedger(tmp_path / "alloc.db")
     grant_budget(led, path)
     sc = scope(path, seal)
     plan = allocate([family("a0")], policy(), verified_by=sc)
-    led.reserve("generated-budget", plan, verified_by=sc, now=TV_NOW)
-    # Worker clock still before expiry; the caller says it is past: the caller narrows the window.
+    WORKER_NOW["t"] = 800
+    led.reserve("generated-budget", plan, verified_by=sc, now=800)
+    # Worker clock still before expiry; the caller, within tolerance, says it is past: the
+    # caller narrows the window.
     assert code_of(led.commit, "generated-budget", plan.allocation_id, now=1000) == "grant_expired"
-    # The high-water mark survives the refusal and a restart: a smaller time does not re-open it.
-    restarted = AllocationLedger(tmp_path / "alloc.db")
-    assert code_of(restarted.commit, "generated-budget", plan.allocation_id, now=5) == (
-        "grant_expired"
-    )
-    other = allocate([family("b0")], policy(), verified_by=sc)
-    assert code_of(restarted.reserve, "generated-budget", other, verified_by=sc, now=TV_NOW) == (
-        "grant_expired"
-    )
+    # A refusal stores nothing, so an honest caller time still commits.
+    assert led.commit("generated-budget", plan.allocation_id, now=800)["used_units"] == 1
 
 
 # Z2: a committed line whose child OPE-516 has charged is not counted a second time.
@@ -2274,4 +2280,202 @@ def test_reserved_line_counts_even_after_its_child_is_generated(tmp_path: Path) 
     # Counted: 5 (b1 reserved, none fulfilled) + 5 (b2) + 1 spent = 11 > 10.
     assert code_of(led.reserve, "generated-budget-2", five(sc, 5), verified_by=sc, now=TV_NOW) == (
         "grant_headroom_exceeded"
+    )
+
+
+# W* (delta review of 7514fda, same reviewer). Each failed against 7514fda unless noted.
+def clock_mark(db_path: Path) -> list[tuple[object, ...]]:
+    db = sqlite3.connect(db_path)
+    try:
+        return [tuple(r) for r in db.execute("SELECT * FROM grant_clock ORDER BY grant_ref")]
+    finally:
+        db.close()
+
+
+# W1 / F1: a refused forged grant, or a huge caller time, cannot expire the real grant.
+def test_f1_forged_grant_or_huge_now_cannot_expire_the_real_grant(tmp_path: Path) -> None:
+    path, seal = world(tmp_path, "a0", "b0")
+    db_path = tmp_path / "alloc.db"
+    led = AllocationLedger(db_path)
+    grant_budget(led, path)
+    forged = replace(TV_GRANT, budget=10**9)
+    assert code_of(grant_budget, led, path, "generated-budget-2", grant=forged, now=2**62) == (
+        "clock_skew_refused"
+    )
+    assert code_of(grant_budget, led, path, "generated-budget-2", grant=forged) == (
+        "grant_conflict"
+    )
+    sc = scope(path, seal)
+    a0 = allocate([family("a0")], policy(), verified_by=sc)
+    for huge in (2**62, TV_NOW + sa.CLOCK_TOLERANCE + 1):
+        assert code_of(led.reserve, "generated-budget", a0, verified_by=sc, now=huge) == (
+            "clock_skew_refused"
+        )
+    assert led.reserve("generated-budget", a0, verified_by=sc, now=TV_NOW)["used_units"] == 1
+    assert code_of(led.commit, "generated-budget", a0.allocation_id, now=2**62) == (
+        "clock_skew_refused"
+    )
+    assert led.commit("generated-budget", a0.allocation_id, now=TV_NOW)["used_units"] == 1
+    b0 = allocate([family("b0")], policy(), verified_by=sc)
+    assert led.reserve("generated-budget", b0, verified_by=sc, now=TV_NOW)["used_units"] == 2
+    assert clock_mark(db_path)[0][1] == TV_NOW
+    assert code_of(sa.grant_headroom, TV_GRANT, tv.VariantLedger(path), now=2**62) == (
+        "clock_skew_refused"
+    )
+
+
+# W2 (mutant M18): a refused open, reserve or commit leaves the clock mark unchanged.
+def test_refused_calls_leave_the_clock_mark_unchanged(tmp_path: Path) -> None:
+    path, seal = world(tmp_path, "a0", "b0")
+    db_path = tmp_path / "alloc.db"
+    led = AllocationLedger(db_path)
+    grant_budget(led, path, cap_spend=1)
+    sc = scope(path, seal)
+    a0 = allocate([family("a0")], policy(), verified_by=sc)
+    led.reserve("generated-budget", a0, verified_by=sc, now=TV_NOW)
+    before = clock_mark(db_path)
+    assert before == [(TV_GRANT.grant_ref, TV_NOW, sa._clock_digest(TV_GRANT.grant_ref, TV_NOW))]
+    later = TV_NOW + 200  # within tolerance, so it would move the mark if it were stored
+    forged = replace(TV_GRANT, budget=10**9)
+    assert code_of(grant_budget, led, path, "generated-budget-2", grant=forged, now=later) == (
+        "grant_conflict"
+    )
+    b0 = allocate([family("b0")], policy(), verified_by=sc)
+    assert code_of(led.reserve, "generated-budget", b0, verified_by=sc, now=later) == (
+        "budget_exceeded"
+    )
+    tv_spend(path, "b0", seal, 10, "w2")  # OPE-516 spends the whole grant
+    assert code_of(led.commit, "generated-budget", a0.allocation_id, now=later) == (
+        "grant_headroom_exceeded"
+    )
+    assert clock_mark(db_path) == before
+
+
+def test_worker_clock_stepping_back_is_refused(tmp_path: Path) -> None:
+    path, seal = world(tmp_path, "a0")
+    led = AllocationLedger()
+    WORKER_NOW["t"] = 900
+    grant_budget(led, path, now=900)
+    WORKER_NOW["t"] = 100  # the worker clock jumped back (snapshot restore, NTP step)
+    sc = scope(path, seal)
+    a0 = allocate([family("a0")], policy(), verified_by=sc)
+    assert code_of(led.reserve, "generated-budget", a0, verified_by=sc, now=100) == (
+        "clock_regressed"
+    )
+
+
+# W3 / F2: a cheap child frees only what it was charged.
+def test_f2_child_frees_only_its_charged_cost(tmp_path: Path) -> None:
+    path, seal = ten_families(tmp_path)
+    led = AllocationLedger()
+    grant_budget(led, path, unit_cost=5, cap_spend=5)
+    sc = scope(path, seal)
+    one = allocate(
+        [family("a0", recipes=FULFIL)],
+        policy(total_units=1, spend_ceiling=5, unit_cost=5),
+        verified_by=sc,
+    )
+    led.reserve("generated-budget", one, verified_by=sc, now=TV_NOW)
+    led.commit("generated-budget", one.allocation_id, now=TV_NOW)
+    tv_spend(path, "a0", seal, 1, "cheap")  # charged 1 of the line's 5
+    # Room: 10 - 1 spent - (5 - 1) still committed = 5, not 9.
+    assert grant_budget(led, path, "generated-budget-2", unit_cost=5)["cap_spend"] == 5
+
+
+# W4 / F3: the open path reads OPE-516's children before its spend.
+def test_f3_open_reads_children_before_spend(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path, seal = ten_families(tmp_path)
+    led = AllocationLedger()
+    grant_budget(led, path, cap_spend=5)
+    sc = scope(path, seal)
+    b1 = five(sc, 0)
+    led.reserve("generated-budget", b1, verified_by=sc, now=TV_NOW)
+    led.commit("generated-budget", b1.allocation_id, now=TV_NOW)
+    real = sa._read_charged
+
+    def then_a_child_arrives(real_path: Path, grant_ref: str) -> object:
+        got = real(real_path, grant_ref)
+        tv_spend(path, "a0", seal, 1, "between-reads")
+        return got
+
+    monkeypatch.setattr(sa, "_read_charged", then_a_child_arrives)
+    # The child is in spent (read after) but not fulfilment (read before): 10 - 1 - 5 = 4.
+    assert grant_budget(led, path, "generated-budget-2")["cap_spend"] == 4
+
+
+# W5 / F4: the clock rows are part of the integrity check.
+@pytest.mark.parametrize(
+    "edit",
+    [
+        "UPDATE grant_clock SET high_water='generated-not-an-int'",
+        "UPDATE grant_clock SET high_water=5",
+        "DELETE FROM grant_clock",
+        "DROP TABLE grant_clock",
+    ],
+)
+def test_f4_edited_or_dropped_clock_is_refused(tmp_path: Path, edit: str) -> None:
+    path, _ = world(tmp_path, "a0")
+    db_path = tmp_path / "alloc.db"
+    grant_budget(AllocationLedger(db_path), path)
+    db = sqlite3.connect(db_path)
+    db.execute(edit)
+    db.commit()
+    db.close()
+    assert code_of(AllocationLedger(db_path).status, "generated-budget") == (
+        "ledger_integrity_failed"
+    )
+
+
+# W6 (mutant M1): the real worker clock is integer Unix seconds (not monkeypatched here).
+def test_real_worker_clock_is_integer_unix_seconds() -> None:
+    assert REAL_WORKER_NOW is not None
+    got = REAL_WORKER_NOW()
+    assert type(got) is int and abs(got - time.time()) < 5
+
+
+# W7 (mutant M11): a zero-cost child carries no spend and frees nothing.
+def test_zero_cost_child_does_not_fulfil_a_line(tmp_path: Path) -> None:
+    path, seal = ten_families(tmp_path)
+    led = AllocationLedger()
+    grant_budget(led, path, cap_spend=5)
+    sc = scope(path, seal)
+    b1 = five(sc, 0)
+    led.reserve("generated-budget", b1, verified_by=sc, now=TV_NOW)
+    led.commit("generated-budget", b1.allocation_id, now=TV_NOW)
+    tv_spend(path, "a0", seal, 0, "free")
+    assert grant_budget(led, path, "generated-budget-2")["cap_spend"] == 5
+
+
+# W8 (mutant M13): the open path nets generated lines out of the grant's live spend.
+def test_open_accounts_for_generated_lines(tmp_path: Path) -> None:
+    path, seal = ten_families(tmp_path)
+    led = AllocationLedger()
+    grant_budget(led, path, cap_spend=5)
+    sc = scope(path, seal)
+    b1 = five(sc, 0)
+    led.reserve("generated-budget", b1, verified_by=sc, now=TV_NOW)
+    led.commit("generated-budget", b1.allocation_id, now=TV_NOW)
+    for i in range(5):
+        tv_spend(path, f"a{i}", seal, 1, f"w8-{i}")
+    # 10 - 5 spent - 0 unfulfilled = 5 (without netting it would be 0: grant_unavailable).
+    assert grant_budget(led, path, "generated-budget-2")["cap_spend"] == 5
+
+
+# W9 (mutation survivor C09): a non-integer clock value is refused even with a recomputed digest.
+def test_non_integer_clock_with_recomputed_digest_is_refused(tmp_path: Path) -> None:
+    path, _ = world(tmp_path, "a0")
+    db_path = tmp_path / "alloc.db"
+    grant_budget(AllocationLedger(db_path), path)
+    bad = "generated-not-an-int"
+    db = sqlite3.connect(db_path)
+    db.execute(
+        "UPDATE grant_clock SET high_water=?, row_digest=?",
+        (bad, sa._clock_digest(TV_GRANT.grant_ref, bad)),
+    )
+    db.commit()
+    db.close()
+    assert code_of(AllocationLedger(db_path).status, "generated-budget") == (
+        "ledger_integrity_failed"
     )

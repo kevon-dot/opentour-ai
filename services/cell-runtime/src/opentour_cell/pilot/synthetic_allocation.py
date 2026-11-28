@@ -96,18 +96,23 @@ OPE-516 link (read-only import of ``training_variants``; nothing here writes OPE
   other (``grant_conflict``); it cannot verify the first one. That pin is per allocation-ledger
   file, so a new file accepts any first grant (an inflated budget, a new ``grant_ref``): hence
   the ``_unverified`` labels above.
-* Time authority: grant expiry is judged on the worker's own clock (``_worker_now``, integer
-  Unix seconds, the unit ``LearningMandates`` uses for ``expires_at``), never on the caller's
-  ``now`` alone. The caller's ``now`` can only narrow the window: expiry uses the latest of the
-  worker clock, the caller's ``now`` and the highest time this ledger has seen for the grant,
-  so back-dating never revives a grant and future-dating never extends one.
-* A committed line whose generated child OPE-516 has charged is not counted again: it is
-  *fulfilled* once a charged child for the same ``(grant_ref, root_ref, recipe_id)`` exists
-  that did not exist at its commit. Children do not name their line, so that triple is the only
-  link (a post-commit child of that root and recipe made outside the allocation also fulfils
-  it); the OPE-516 change above, a child naming its line, would make it exact. Reserved lines
-  always count, so a reservation generated *before* its commit is still counted twice and the
-  commit is refused: commit first, then generate.
+* Time authority (as OPE-544): grant expiry is judged on ``max(_worker_now(), caller now)``.
+  ``_worker_now`` is the worker's own clock in integer Unix seconds, the unit
+  ``LearningMandates`` uses for ``expires_at``. OPE-516 defines no unit; if ``expires_at`` were in
+  milliseconds the check would fail open, so the assumption is load-bearing. A caller ``now``
+  more than ``CLOCK_TOLERANCE`` (300 s) ahead of the worker clock is refused
+  (``clock_skew_refused``) and never stored, so a caller can neither extend a grant nor end it
+  early by more than that. A per-grant high-water mark (digest-covered, one row per pinned
+  grant) is written only inside an operation that succeeds, so a refused open, reserve or
+  commit never moves it; it detects a worker clock that stepped back (``clock_regressed``).
+* A committed line whose generated child OPE-516 has charged is not counted again, up to the
+  charged cost: children for the same ``(grant_ref, root_ref, recipe_id)`` that did not exist at
+  its commit reduce its counted cost by what they were charged, never below zero. Children do
+  not name their line, so that triple is the only link: an unrelated post-commit child of that
+  root and recipe also frees the line's committed cost (OPE-516's own admission check still caps
+  real spend). The OPE-516 change above, a child naming its line, would make it exact. Reserved
+  lines always count, so a reservation generated *before* its commit is still counted twice
+  and the commit is refused: commit first, then generate.
 * Inherent race until OPE-516 sees reservations: OPE-516 can admit a child between a
   ``reserve``/``commit``'s final read of its spend and the end of that transaction (for example
   8 committed plus 9 newly spent against 10). Nothing in this module can prevent that.
@@ -173,7 +178,7 @@ Json = dict[str, Any]
 PLAN_SCHEMA = "opentour.pilot.synthetic-allocation.v1"
 PROFILE_SCHEMA = "opentour.pilot.synthetic-allocation-profile.v1"
 COHORT_SCHEMA = "opentour.pilot.confirmation-cohort.v1"
-LEDGER_SCHEMA = "opentour.pilot.synthetic-allocation-ledger.v4"
+LEDGER_SCHEMA = "opentour.pilot.synthetic-allocation-ledger.v5"
 SEAL_SCHEMA = "opentour.variants.split-seal.v2"  # OPE-516's own SplitSeal.from_rows digest tag
 
 VERIFIED = "verified"
@@ -876,7 +881,7 @@ class _Corroboration:
     scope_digest: str
     variants: VariantLedger
     fit_pin: str  # digest of OPE-516's own mandate-store pin row, "" where none exists
-    charged: tuple[tuple[str, str, str], ...]  # (child_id, root_ref, recipe_id), cost > 0
+    charged: Charged  # (child_id, root_ref, recipe_id, cost) of OPE-516's charged children
 
     def root_reason(self, family_id: str, root_ref: str, case_ref: str | None = None) -> str:
         """Empty when ``root_ref`` is a live OPE-516 root of ``family_id`` sealed to it alone."""
@@ -910,23 +915,28 @@ def _fit_pin(db: sqlite3.Connection) -> str:
     )
 
 
-def _charged_children(db: sqlite3.Connection, grant_ref: str) -> tuple[tuple[str, str, str], ...]:
-    """OPE-516 children that carry spend for this grant: (child_id, root_ref, recipe_id).
+Charged = tuple[tuple[str, str, str, int], ...]  # (child_id, root_ref, recipe_id, cost > 0)
 
-    Read read-only from the same ``cost`` column ``VariantLedger.spent`` sums. Children do not
-    name the allocation line they fulfil; ``(grant_ref, root_ref, recipe_id)`` is the only link.
+
+def _charged_children(db: sqlite3.Connection, grant_ref: str) -> Charged:
+    """OPE-516 children that carry spend for this grant, with the cost each one was charged.
+
+    Read read-only from the same ``cost`` column ``VariantLedger.spent`` sums; a zero-cost
+    child carries no spend and is not returned. Children do not name the allocation line they
+    fulfil; ``(grant_ref, root_ref, recipe_id)`` is the only link.
     """
-    out: list[tuple[str, str, str]] = []
-    for child_id, root_ref, record in db.execute(
-        "SELECT child_id, root_ref, record FROM children WHERE grant_ref=? AND cost>0 ORDER BY seq",
+    out: list[tuple[str, str, str, int]] = []
+    for child_id, root_ref, cost, record in db.execute(
+        "SELECT child_id, root_ref, cost, record FROM children WHERE grant_ref=? AND cost>0"
+        " ORDER BY seq",
         (grant_ref,),
     ).fetchall():
         recipe = (json.loads(record).get("recipe") or {}).get("recipe_id")
-        out.append((str(child_id), str(root_ref), str(recipe)))
+        out.append((str(child_id), str(root_ref), str(recipe), int(cost)))
     return tuple(out)
 
 
-def _read_charged(real: Path, grant_ref: str) -> tuple[tuple[str, str, str], ...]:
+def _read_charged(real: Path, grant_ref: str) -> Charged:
     db = sqlite3.connect(real.as_uri() + "?mode=ro", uri=True, timeout=30)
     try:
         return _charged_children(db, grant_ref)
@@ -1442,13 +1452,35 @@ def allocate(
     )
 
 
+CLOCK_TOLERANCE = 300  # seconds a caller's ``now`` may run ahead of the worker clock
+
+
+def _clock_digest(grant_ref: str, high_water: object) -> str:
+    return digest(["opentour.pilot.allocation-grant-clock.v1", grant_ref, high_water])
+
+
+def _check_caller_now(now: object) -> int:
+    """The caller's time is an int within ``CLOCK_TOLERANCE`` of the worker clock, or refused.
+
+    A caller time only ever narrows the window, so a far-future value adds nothing and is
+    refused (``clock_skew_refused``) before anything is read or stored.
+    """
+    if not _int64(now):
+        raise AllocationError("grant_link_invalid", "now")
+    assert isinstance(now, int)
+    if now > _worker_now() + CLOCK_TOLERANCE:
+        raise AllocationError("clock_skew_refused", f"now is more than {CLOCK_TOLERANCE}s ahead")
+    return now
+
+
 def _worker_now() -> int:
     """The worker's own clock, in integer Unix seconds: the authority on grant expiry.
 
     Deliberately not a parameter of any entry point, so no caller can supply or replace it.
     Tests pin it by patching this module attribute (a test-only seam, as in OPE-544).
     OPE-516's ``Grant.expires_at`` is an unspecified int; Unix seconds is the unit the repo's
-    ``LearningMandates`` uses for ``expires_at``, and is assumed here.
+    ``LearningMandates`` uses for ``expires_at``, and is assumed here. The assumption matters:
+    an ``expires_at`` in milliseconds would look ~1000x later and expiry would fail open.
     """
     return int(time.time())
 
@@ -1512,7 +1544,7 @@ def grant_headroom(grant: Grant, variants: VariantLedger, *, now: int) -> int:
         raise AllocationError("grant_link_invalid")
     if not _int64(now):
         raise AllocationError("grant_link_invalid", "budget, expires_at and now must be int")
-    effective = max(_worker_now(), now)
+    effective = max(_worker_now(), _check_caller_now(now))
     return _record_headroom(_grant_record(grant), variants.spent(grant.grant_ref), effective)
 
 
@@ -1539,7 +1571,7 @@ _SCHEMA = (
         authority TEXT NOT NULL, prior_children TEXT NOT NULL,
         PRIMARY KEY (authority, root_ref, recipe_id))""",
     """CREATE TABLE IF NOT EXISTS grant_clock (
-        grant_ref TEXT PRIMARY KEY, high_water INTEGER NOT NULL)""",
+        grant_ref TEXT PRIMARY KEY, high_water INTEGER NOT NULL, row_digest TEXT NOT NULL)""",
     """CREATE TABLE IF NOT EXISTS retracted (
         family_id TEXT PRIMARY KEY, reason TEXT NOT NULL)""",
 )
@@ -1759,6 +1791,7 @@ class AllocationLedger:
             if pin is None or pin[0] != ledger_id or pin[3] != grant_dg:
                 raise AllocationError("ledger_integrity_failed", f"budget {budget_ref} grant pin")
             identity, grant = pin[1], pin[2]
+            self._load_clock(db, grant_ref)  # a dropped or edited clock row is refused
         return _Budget(
             budget_ref,
             cap_units,
@@ -1829,21 +1862,23 @@ class AllocationLedger:
         self,
         db: sqlite3.Connection,
         grant_ref: str,
-        charged: tuple[tuple[str, str, str], ...] = (),
+        charged: Charged = (),
     ) -> int:
         """Live spend on every budget of this grant in this ledger, not yet in OPE-516's total.
 
-        A committed (or spent-invalidated) line is *fulfilled*, and not counted, once OPE-516
-        holds a charged child for the same ``(grant_ref, root_ref, recipe_id)`` that did not
-        exist when the line was committed (``prior_children``): that spend is already in
+        A committed (or spent-invalidated) line is *fulfilled up to the charged cost*: OPE-516
+        children for the same ``(grant_ref, root_ref, recipe_id)`` that did not exist when the
+        line was committed (``prior_children``) reduce the line's counted cost by their charged
+        cost, never below zero (``max(0, cost - new charged cost)``). That spend is already in
         ``VariantLedger.spent``. Children do not name their line, so this is the best link that
         exists, not a reliable one: a post-commit child of that root and recipe made outside the
-        allocation also fulfils the line. Grant lines are unique per ``(root_ref, recipe_id)``
-        here, so one child fulfils at most one line. Reserved lines always count.
+        allocation also frees the line's cost (OPE-516's own admission check still caps real
+        spend). Grant lines are unique per ``(root_ref, recipe_id)`` here, so a child reduces
+        at most one line. Reserved lines always count in full.
         """
-        new_by_key: dict[tuple[str, str], set[str]] = {}
-        for child_id, root_ref, recipe_id in charged:
-            new_by_key.setdefault((root_ref, recipe_id), set()).add(child_id)
+        new_by_key: dict[tuple[str, str], dict[str, int]] = {}
+        for child_id, root_ref, recipe_id, child_cost in charged:
+            new_by_key.setdefault((root_ref, recipe_id), {})[child_id] = child_cost
         total = 0
         marks = ",".join("?" for _ in _COUNTED)
         for (ref,) in db.execute(
@@ -1863,47 +1898,48 @@ class AllocationLedger:
                         raise AllocationError(
                             "ledger_integrity_failed", f"line {root_ref}"
                         ) from exc
-                    if new_by_key.get((str(root_ref), str(recipe_id)), set()) - prior:
-                        continue  # fulfilled: its spend is already in OPE-516's total
+                    new = new_by_key.get((str(root_ref), str(recipe_id)), {})
+                    generated = sum(c for cid, c in new.items() if cid not in prior)
+                    total += max(0, int(cost) - generated)  # generated part is in OPE-516's total
+                    continue
                 total += int(cost)
         return total
 
-    def _advance_clock(
-        self, now: int | None, *, budget_ref: str | None = None, grant_ref: str | None = None
-    ) -> None:
-        """Record the caller's time against the grant in its own committed transaction.
+    @staticmethod
+    def _load_clock(db: sqlite3.Connection, grant_ref: str) -> int:
+        """The grant's high-water time. Every pinned grant has exactly one, digest-covered."""
+        row = db.execute(
+            "SELECT high_water, row_digest FROM grant_clock WHERE grant_ref=?", (grant_ref,)
+        ).fetchone()
+        if row is None or not _int64(row[0]) or row[1] != _clock_digest(grant_ref, row[0]):
+            raise AllocationError("ledger_integrity_failed", f"grant_clock {grant_ref}")
+        return int(row[0])
 
-        Done before the operation itself, so the high-water mark survives even when that
-        operation is then refused (a refused commit at a later time still ends the window).
-        """
-        if now is None or not _int64(now):
-            return
-        with self._tx() as db:
-            if grant_ref is None and budget_ref is not None:
-                row = db.execute(
-                    "SELECT grant_ref FROM budget WHERE budget_ref=?", (budget_ref,)
-                ).fetchone()
-                grant_ref = str(row[0]) if row is not None and row[0] else None
-            if grant_ref:
-                self._clock(db, grant_ref, now)
+    @staticmethod
+    def _put_clock(db: sqlite3.Connection, grant_ref: str, high_water: int) -> None:
+        db.execute(
+            "INSERT INTO grant_clock VALUES (?,?,?) ON CONFLICT(grant_ref)"
+            " DO UPDATE SET high_water=excluded.high_water, row_digest=excluded.row_digest",
+            (grant_ref, high_water, _clock_digest(grant_ref, high_water)),
+        )
 
     def _clock(self, db: sqlite3.Connection, grant_ref: str, caller_now: int) -> int:
-        """Time used for expiry: ``max(_worker_now(), caller_now, highest time seen for grant)``.
+        """Time used for expiry: ``max(_worker_now(), caller_now)``, as in OPE-544.
 
-        The caller's ``now`` can only narrow the window: back-dating never revives a grant and
-        future-dating never extends one. The per-grant high-water mark is kept in this ledger,
-        so a later, smaller caller time (or a worker clock stepping back) never re-opens it.
+        ``caller_now`` was refused before (``_check_caller_now``) if it is more than
+        ``CLOCK_TOLERANCE`` ahead of the worker clock, so it can only narrow the window by that
+        much. The per-grant high-water mark detects a worker clock that stepped back
+        (``clock_regressed``). It is written inside the caller's transaction, so a refused
+        operation never moves it; a stored mark is therefore always before ``expires_at`` and
+        never ends a grant by itself.
         """
-        row = db.execute(
-            "SELECT high_water FROM grant_clock WHERE grant_ref=?", (grant_ref,)
-        ).fetchone()
-        stored = int(row[0]) if row is not None and _int64(row[0]) else 0
-        effective = max(_worker_now(), caller_now, stored)
-        db.execute(
-            "INSERT INTO grant_clock VALUES (?,?) ON CONFLICT(grant_ref)"
-            " DO UPDATE SET high_water=excluded.high_water",
-            (grant_ref, effective),
-        )
+        worker = _worker_now()
+        stored = self._load_clock(db, grant_ref)
+        if worker + CLOCK_TOLERANCE < stored:
+            raise AllocationError("clock_regressed", f"{grant_ref}: {worker} < {stored}")
+        effective = max(worker, caller_now)
+        if effective > stored:
+            self._put_clock(db, grant_ref, effective)
         return effective
 
     # -- budgets -------------------------------------------------------------------------
@@ -1972,15 +2008,17 @@ class AllocationLedger:
         ledger_id, identity = _ledger_identity(variants)
         record = _grant_record(grant)
         grant_dg = digest(record)
+        now = _check_caller_now(now)
         try:
-            spent = VariantLedger(Path(identity["path"])).spent(grant.grant_ref)
+            # Children first, then spent (as reserve and commit do): a child landing between
+            # the two reads is then counted in spent but not as fulfilment, never the reverse.
             charged = _read_charged(Path(identity["path"]), grant.grant_ref)
+            spent = VariantLedger(Path(identity["path"])).spent(grant.grant_ref)
             fit_pin = _read_fit_pin(Path(identity["path"]))
         except sqlite3.Error as exc:
             raise AllocationError(
                 "verification_source_invalid", "ope516_ledger_unreadable"
             ) from exc
-        self._advance_clock(now, grant_ref=grant.grant_ref)
         with self._tx() as db:
             pin = self._load_pin(db, grant.grant_ref)
             if pin is None:
@@ -2004,6 +2042,7 @@ class AllocationLedger:
                         ),
                     ),
                 )
+                self._put_clock(db, grant.grant_ref, 0)  # every pinned grant has a clock row
             elif pin[0] != ledger_id:
                 raise AllocationError("ledger_identity_mismatch", grant.grant_ref)
             elif pin[3] != grant_dg:
@@ -2104,7 +2143,8 @@ class AllocationLedger:
             raise AllocationError(BINDING_MISMATCH, "allocation_id")
         if plan.roi_claim is not False:
             raise AllocationError("plan_invalid", "roi_claim is always false here")
-        self._advance_clock(now, budget_ref=budget_ref)
+        if now is not None:
+            now = _check_caller_now(now)
         with self._tx() as db:
             budget = self._load_budget(db, budget_ref)
             unit_cost = budget.unit_cost
@@ -2242,7 +2282,7 @@ class AllocationLedger:
 
         ``extra`` is spend not yet counted as live (the plan being reserved; 0 at commit, whose
         own lines are already live). Expiry is judged on ``_clock`` (worker clock, caller time
-        and the grant's high-water mark, whichever is latest). Expired is ``grant_expired``;
+        within the skew tolerance, whichever is later). Expired is ``grant_expired``;
         unauthorized flags are ``grant_unavailable``; no room is ``grant_headroom_exceeded``.
         Inherent race: OPE-516 can still admit a child between this read and the end of the
         transaction, because it does not see reservations.
@@ -2311,7 +2351,7 @@ class AllocationLedger:
             " AND state='reserved'",
             (allocation_id, budget.ref),
         ).fetchall():
-            prior = sorted(c for c, r, x in corr.charged if (r, x) == (root, recipe))
+            prior = sorted(c for c, r, x, _ in corr.charged if (r, x) == (root, recipe))
             db.execute(
                 "UPDATE line SET prior_children=? WHERE allocation_id=? AND budget_ref=?"
                 " AND root_ref=? AND recipe_id=?",
@@ -2325,7 +2365,8 @@ class AllocationLedger:
         live, grant not expired, and pinned budget minus current OPE-516 spend minus every live
         reservation on the grant still covers this one. Commit before generating the lines.
         """
-        self._advance_clock(now, budget_ref=budget_ref)
+        if now is not None:
+            now = _check_caller_now(now)
         with self._tx() as db:
             budget = self._load_budget(db, budget_ref)
             state = self._state(db, budget_ref, allocation_id)
