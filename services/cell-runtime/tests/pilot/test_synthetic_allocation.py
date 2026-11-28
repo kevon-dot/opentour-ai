@@ -31,6 +31,16 @@ from opentour_cell.pilot.synthetic_allocation import (
     family_from_record,
 )
 
+WORKER_NOW = {"t": 0}
+
+
+@pytest.fixture(autouse=True)
+def _pin_worker_clock(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pin the worker clock (test-only seam, as in OPE-544); tests move it via WORKER_NOW."""
+    WORKER_NOW["t"] = 0
+    monkeypatch.setattr(sa, "_worker_now", lambda: WORKER_NOW["t"], raising=False)
+
+
 CELL_A = ("generated-class-a", "generated-branch-1")
 CELL_B = ("generated-class-b", "generated-branch-1")
 R1, R2, R3 = "simulated:recipe-1", "simulated:recipe-2", "simulated:recipe-3"
@@ -1993,7 +2003,8 @@ def test_commit_refuses_an_expired_grant(tmp_path: Path) -> None:
     assert code_of(led.commit, "generated-budget", plan.allocation_id, now=True) == (
         "grant_link_invalid"
     )
-    assert led.commit("generated-budget", plan.allocation_id, now=999)["used_units"] == 1
+    # The caller clock cannot go back: a later, smaller caller time does not re-open the grant.
+    assert code_of(led.commit, "generated-budget", plan.allocation_id, now=999) == "grant_expired"
 
 
 # Y3 / D: ranking basis is re-derived from the bound cost basis; requests from the decisions.
@@ -2127,4 +2138,140 @@ def test_grant_pin_fit_pin_edit_is_refused(tmp_path: Path) -> None:
     db.close()
     assert code_of(AllocationLedger(db_path).status, "generated-budget") == (
         "ledger_integrity_failed"
+    )
+
+
+# Z* (delta re-review of 69e758c, same reviewer).
+# Z1: expiry is judged on the worker clock; the caller's ``now`` can only narrow the window.
+def test_caller_clock_cannot_go_back_or_revive_an_expired_grant(tmp_path: Path) -> None:
+    path, seal = world(tmp_path, "a0", "b0")
+    led = AllocationLedger()
+    grant_budget(led, path)
+    sc = scope(path, seal)
+    plan = allocate([family("a0")], policy(), verified_by=sc)
+    led.reserve("generated-budget", plan, verified_by=sc, now=999)
+    WORKER_NOW["t"] = 1000  # the real expiry passes on the worker's own clock
+    # Repro 1: a back-dated commit (reserve at 999, commit at 5) is judged on the worker clock.
+    assert code_of(led.commit, "generated-budget", plan.allocation_id, now=5) == "grant_expired"
+    # Repro 2: reserving with now=0 after the real expiry is refused too.
+    other = allocate([family("b0")], policy(), verified_by=sc)
+    assert code_of(led.reserve, "generated-budget", other, verified_by=sc, now=0) == (
+        "grant_expired"
+    )
+    # A future caller time cannot extend the grant either.
+    assert code_of(led.reserve, "generated-budget", other, verified_by=sc, now=10**9) == (
+        "grant_expired"
+    )
+    assert sa.grant_headroom(TV_GRANT, tv.VariantLedger(path), now=0) == 0
+    assert code_of(grant_budget, AllocationLedger(), path, now=0) == "grant_unavailable"
+
+
+def test_caller_time_past_expiry_still_ends_the_grant(tmp_path: Path) -> None:
+    path, seal = world(tmp_path, "a0", "b0")
+    led = AllocationLedger(tmp_path / "alloc.db")
+    grant_budget(led, path)
+    sc = scope(path, seal)
+    plan = allocate([family("a0")], policy(), verified_by=sc)
+    led.reserve("generated-budget", plan, verified_by=sc, now=TV_NOW)
+    # Worker clock still before expiry; the caller says it is past: the caller narrows the window.
+    assert code_of(led.commit, "generated-budget", plan.allocation_id, now=1000) == "grant_expired"
+    # The high-water mark survives the refusal and a restart: a smaller time does not re-open it.
+    restarted = AllocationLedger(tmp_path / "alloc.db")
+    assert code_of(restarted.commit, "generated-budget", plan.allocation_id, now=5) == (
+        "grant_expired"
+    )
+    other = allocate([family("b0")], policy(), verified_by=sc)
+    assert code_of(restarted.reserve, "generated-budget", other, verified_by=sc, now=TV_NOW) == (
+        "grant_expired"
+    )
+
+
+# Z2: a committed line whose child OPE-516 has charged is not counted a second time.
+FULFIL = (TV_RECIPE.recipe_id,)
+
+
+def ten_families(tmp: Path) -> tuple[Path, tv.SplitSeal]:
+    return world(tmp, *(f"a{i}" for i in range(10)), "u0")
+
+
+def five(sc: sa.VerificationScope, start: int) -> sa.AllocationPlan:
+    fams = [family(f"a{i}", recipes=FULFIL) for i in range(start, start + 5)]
+    return allocate(fams, policy(total_units=5, spend_ceiling=5), verified_by=sc)
+
+
+def test_generated_lines_are_not_double_counted_after_commit(tmp_path: Path) -> None:
+    path, seal = ten_families(tmp_path)
+    led = AllocationLedger()
+    grant_budget(led, path, cap_spend=5)
+    grant_budget(led, path, "generated-budget-2", cap_spend=5)
+    sc = scope(path, seal)
+    b1, b2 = five(sc, 0), five(sc, 5)
+    led.reserve("generated-budget", b1, verified_by=sc, now=TV_NOW)
+    led.reserve("generated-budget-2", b2, verified_by=sc, now=TV_NOW)
+    led.commit("generated-budget", b1.allocation_id, now=TV_NOW)
+    for i in range(5):  # generate b1's five lines through OPE-516 (same root and recipe)
+        tv_spend(path, f"a{i}", seal, 1, f"b1-{i}")
+    assert tv.VariantLedger(path).spent(TV_GRANT.grant_ref) == 5
+    # The true total is 5 spent + 5 reserved = 10 of 10: b2's commit must succeed.
+    assert led.commit("generated-budget-2", b2.allocation_id, now=TV_NOW)["used_spend"] == 5
+    for i in range(5, 10):
+        tv_spend(path, f"a{i}", seal, 1, f"b2-{i}")
+    # All ten are now spent in OPE-516 and fulfilled here: nothing is left on the grant.
+    assert code_of(grant_budget, led, path, "generated-budget-3") == "grant_unavailable"
+
+
+def test_child_made_before_commit_does_not_fulfil_the_line(tmp_path: Path) -> None:
+    path, seal = ten_families(tmp_path)
+    led = AllocationLedger()
+    grant_budget(led, path, cap_spend=5)
+    grant_budget(led, path, "generated-budget-2", cap_spend=5)
+    sc = scope(path, seal)
+    b1 = five(sc, 0)
+    led.reserve("generated-budget", b1, verified_by=sc, now=TV_NOW)
+    tv_spend(path, "a0", seal, 1, "early")  # charged before b1 commits: not b1's fulfilment
+    led.commit("generated-budget", b1.allocation_id, now=TV_NOW)  # 5 live + 1 spent <= 10
+    b2 = five(sc, 5)
+    # Counted: 5 (b1, a0's line still unfulfilled) + 5 (b2) + 1 spent = 11 > 10.
+    assert code_of(led.reserve, "generated-budget-2", b2, verified_by=sc, now=TV_NOW) == (
+        "grant_headroom_exceeded"
+    )
+
+
+# Z3 (mutant D11): commit counts live spend across the whole grant, not just its own budget.
+def test_commit_counts_live_spend_across_every_budget_of_the_grant(tmp_path: Path) -> None:
+    path, seal = ten_families(tmp_path)
+    led = AllocationLedger()
+    grant_budget(led, path, cap_spend=5)
+    grant_budget(led, path, "generated-budget-2", cap_spend=5)
+    sc = scope(path, seal)
+    b1, b2 = five(sc, 0), five(sc, 5)
+    led.reserve("generated-budget", b1, verified_by=sc, now=TV_NOW)
+    led.reserve("generated-budget-2", b2, verified_by=sc, now=TV_NOW)
+    tv_spend(path, "u0", seal, 1, "unrelated")  # OPE-516 spend no allocation line accounts for
+    # Per budget: 5 + 1 <= 10. Across the grant: 10 + 1 > 10.
+    assert code_of(led.commit, "generated-budget", b1.allocation_id, now=TV_NOW) == (
+        "grant_headroom_exceeded"
+    )
+
+
+# Z4: grant_headroom's docstring does not call a caller-supplied grant authorized.
+def test_grant_headroom_docstring_says_unverified() -> None:
+    doc = sa.grant_headroom.__doc__ or ""
+    assert "unverified" in doc and "still authorizes" not in doc
+    forged = replace(TV_GRANT, grant_ref="generated-grant-forged", budget=10**9)
+    assert sa.grant_headroom(forged, tv.VariantLedger(), now=TV_NOW) == 10**9
+
+
+# Z5 (mutation survivor F03): a reserved, uncommitted line always counts, even once generated.
+def test_reserved_line_counts_even_after_its_child_is_generated(tmp_path: Path) -> None:
+    path, seal = ten_families(tmp_path)
+    led = AllocationLedger()
+    grant_budget(led, path, cap_spend=5)
+    grant_budget(led, path, "generated-budget-2", cap_spend=5)
+    sc = scope(path, seal)
+    led.reserve("generated-budget", five(sc, 0), verified_by=sc, now=TV_NOW)
+    tv_spend(path, "a0", seal, 1, "uncommitted")  # generated before b1 commits
+    # Counted: 5 (b1 reserved, none fulfilled) + 5 (b2) + 1 spent = 11 > 10.
+    assert code_of(led.reserve, "generated-budget-2", five(sc, 5), verified_by=sc, now=TV_NOW) == (
+        "grant_headroom_exceeded"
     )

@@ -96,6 +96,21 @@ OPE-516 link (read-only import of ``training_variants``; nothing here writes OPE
   other (``grant_conflict``); it cannot verify the first one. That pin is per allocation-ledger
   file, so a new file accepts any first grant (an inflated budget, a new ``grant_ref``): hence
   the ``_unverified`` labels above.
+* Time authority: grant expiry is judged on the worker's own clock (``_worker_now``, integer
+  Unix seconds, the unit ``LearningMandates`` uses for ``expires_at``), never on the caller's
+  ``now`` alone. The caller's ``now`` can only narrow the window: expiry uses the latest of the
+  worker clock, the caller's ``now`` and the highest time this ledger has seen for the grant,
+  so back-dating never revives a grant and future-dating never extends one.
+* A committed line whose generated child OPE-516 has charged is not counted again: it is
+  *fulfilled* once a charged child for the same ``(grant_ref, root_ref, recipe_id)`` exists
+  that did not exist at its commit. Children do not name their line, so that triple is the only
+  link (a post-commit child of that root and recipe made outside the allocation also fulfils
+  it); the OPE-516 change above, a child naming its line, would make it exact. Reserved lines
+  always count, so a reservation generated *before* its commit is still counted twice and the
+  commit is refused: commit first, then generate.
+* Inherent race until OPE-516 sees reservations: OPE-516 can admit a child between a
+  ``reserve``/``commit``'s final read of its spend and the end of that transaction (for example
+  8 committed plus 9 newly spent against 10). Nothing in this module can prevent that.
 * Separate allocation-ledger files on one grant cannot see each other's reservations.
 * The two modules' cost units are assumed equal ("use the same cost unit across the run") and no
   contract defines them. ``covered_from_children`` reads OPE-516 children (disposition
@@ -141,6 +156,7 @@ import json
 import os
 import sqlite3
 import stat
+import time
 import unicodedata
 from collections import Counter
 from collections.abc import Iterable, Iterator, Mapping
@@ -157,7 +173,7 @@ Json = dict[str, Any]
 PLAN_SCHEMA = "opentour.pilot.synthetic-allocation.v1"
 PROFILE_SCHEMA = "opentour.pilot.synthetic-allocation-profile.v1"
 COHORT_SCHEMA = "opentour.pilot.confirmation-cohort.v1"
-LEDGER_SCHEMA = "opentour.pilot.synthetic-allocation-ledger.v3"
+LEDGER_SCHEMA = "opentour.pilot.synthetic-allocation-ledger.v4"
 SEAL_SCHEMA = "opentour.variants.split-seal.v2"  # OPE-516's own SplitSeal.from_rows digest tag
 
 VERIFIED = "verified"
@@ -860,6 +876,7 @@ class _Corroboration:
     scope_digest: str
     variants: VariantLedger
     fit_pin: str  # digest of OPE-516's own mandate-store pin row, "" where none exists
+    charged: tuple[tuple[str, str, str], ...]  # (child_id, root_ref, recipe_id), cost > 0
 
     def root_reason(self, family_id: str, root_ref: str, case_ref: str | None = None) -> str:
         """Empty when ``root_ref`` is a live OPE-516 root of ``family_id`` sealed to it alone."""
@@ -891,6 +908,30 @@ def _fit_pin(db: sqlite3.Connection) -> str:
     return (
         "" if row is None else digest(["opentour.pilot.ope516-fit-pin.v1", [str(v) for v in row]])
     )
+
+
+def _charged_children(db: sqlite3.Connection, grant_ref: str) -> tuple[tuple[str, str, str], ...]:
+    """OPE-516 children that carry spend for this grant: (child_id, root_ref, recipe_id).
+
+    Read read-only from the same ``cost`` column ``VariantLedger.spent`` sums. Children do not
+    name the allocation line they fulfil; ``(grant_ref, root_ref, recipe_id)`` is the only link.
+    """
+    out: list[tuple[str, str, str]] = []
+    for child_id, root_ref, record in db.execute(
+        "SELECT child_id, root_ref, record FROM children WHERE grant_ref=? AND cost>0 ORDER BY seq",
+        (grant_ref,),
+    ).fetchall():
+        recipe = (json.loads(record).get("recipe") or {}).get("recipe_id")
+        out.append((str(child_id), str(root_ref), str(recipe)))
+    return tuple(out)
+
+
+def _read_charged(real: Path, grant_ref: str) -> tuple[tuple[str, str, str], ...]:
+    db = sqlite3.connect(real.as_uri() + "?mode=ro", uri=True, timeout=30)
+    try:
+        return _charged_children(db, grant_ref)
+    finally:
+        db.close()
 
 
 def _read_fit_pin(real: Path) -> str:
@@ -935,6 +976,7 @@ def _corroborate(scope: object) -> _Corroboration:
                 _LIVE_ROOTS_SQL, (scope.policy_revision, seal.digest, scope.mode, scope.grant_ref)
             ).fetchall()
             fit_pin = _fit_pin(db)
+            charged = _charged_children(db, scope.grant_ref)
         finally:
             db.close()
     except (sqlite3.Error, OSError, ValueError) as exc:
@@ -973,6 +1015,7 @@ def _corroborate(scope: object) -> _Corroboration:
         ),
         variants=variants,
         fit_pin=fit_pin,
+        charged=charged,
     )
 
 
@@ -1399,6 +1442,17 @@ def allocate(
     )
 
 
+def _worker_now() -> int:
+    """The worker's own clock, in integer Unix seconds: the authority on grant expiry.
+
+    Deliberately not a parameter of any entry point, so no caller can supply or replace it.
+    Tests pin it by patching this module attribute (a test-only seam, as in OPE-544).
+    OPE-516's ``Grant.expires_at`` is an unspecified int; Unix seconds is the unit the repo's
+    ``LearningMandates`` uses for ``expires_at``, and is assumed here.
+    """
+    return int(time.time())
+
+
 def _check_grant(grant: object) -> Grant:
     """Exact types on every ``Grant`` field; counts within the sqlite int64 range."""
     if type(grant) is not Grant or type(grant.grant_ref) is not str or not grant.grant_ref:
@@ -1445,18 +1499,21 @@ def _record_headroom(record: Mapping[str, Any], spent: int, now: int) -> int:
 
 
 def grant_headroom(grant: Grant, variants: VariantLedger, *, now: int) -> int:
-    """Spend OPE-516's grant still authorizes: ``Grant.budget - VariantLedger.spent``.
+    """Arithmetic headroom of a *caller-supplied, unverified* grant: ``budget - spent``.
 
-    An unauthorized, expired or location-unapproved grant authorizes nothing (mirrors OPE-516's
-    own seed gate). Read-only: this only calls OPE-516's public ``spent``. It does not subtract
-    reservations held in an ``AllocationLedger`` (the ledger does that itself).
+    Nothing here verifies the ``Grant``: a forged one with ``budget=10**9`` returns about
+    ``10**9``. An unauthorized, expired or location-unapproved grant gives 0 (mirrors OPE-516's
+    seed gate); expiry is judged on ``max(_worker_now(), now)``, so ``now`` can only narrow it.
+    Read-only: this only calls OPE-516's public ``spent``. It does not subtract reservations
+    held in an ``AllocationLedger`` (the ledger does that itself).
     """
     _check_grant(grant)
     if type(variants) is not VariantLedger:
         raise AllocationError("grant_link_invalid")
     if not _int64(now):
         raise AllocationError("grant_link_invalid", "budget, expires_at and now must be int")
-    return _record_headroom(_grant_record(grant), variants.spent(grant.grant_ref), now)
+    effective = max(_worker_now(), now)
+    return _record_headroom(_grant_record(grant), variants.spent(grant.grant_ref), effective)
 
 
 _SCHEMA = (
@@ -1479,11 +1536,23 @@ _SCHEMA = (
         budget_ref TEXT NOT NULL, root_ref TEXT NOT NULL, recipe_id TEXT NOT NULL,
         family_id TEXT NOT NULL, allocation_id TEXT NOT NULL, cost INTEGER NOT NULL,
         state TEXT NOT NULL, grant_ref TEXT NOT NULL, verification_basis TEXT NOT NULL,
-        authority TEXT NOT NULL, PRIMARY KEY (authority, root_ref, recipe_id))""",
+        authority TEXT NOT NULL, prior_children TEXT NOT NULL,
+        PRIMARY KEY (authority, root_ref, recipe_id))""",
+    """CREATE TABLE IF NOT EXISTS grant_clock (
+        grant_ref TEXT PRIMARY KEY, high_water INTEGER NOT NULL)""",
     """CREATE TABLE IF NOT EXISTS retracted (
         family_id TEXT PRIMARY KEY, reason TEXT NOT NULL)""",
 )
-_TABLES = ("meta", "budget", "grant_pin", "grant_budget", "allocation", "line", "retracted")
+_TABLES = (
+    "meta",
+    "budget",
+    "grant_pin",
+    "grant_budget",
+    "allocation",
+    "line",
+    "retracted",
+    "grant_clock",
+)
 # Line states. reserved and committed count against the cap. A retraction frees an unspent
 # reservation (invalidated) but keeps committed spend counted (invalidated_spent): spend is
 # never refunded. released frees the cap (discarded unfinished selection).
@@ -1756,16 +1825,86 @@ class AllocationLedger:
         if grant_ref:
             db.execute("INSERT INTO grant_budget VALUES (?,?)", (budget_ref, grant_ref))
 
-    def _grant_live(self, db: sqlite3.Connection, grant_ref: str) -> int:
-        """Live spend on every budget of this grant in this ledger (summed in Python)."""
+    def _grant_live(
+        self,
+        db: sqlite3.Connection,
+        grant_ref: str,
+        charged: tuple[tuple[str, str, str], ...] = (),
+    ) -> int:
+        """Live spend on every budget of this grant in this ledger, not yet in OPE-516's total.
+
+        A committed (or spent-invalidated) line is *fulfilled*, and not counted, once OPE-516
+        holds a charged child for the same ``(grant_ref, root_ref, recipe_id)`` that did not
+        exist when the line was committed (``prior_children``): that spend is already in
+        ``VariantLedger.spent``. Children do not name their line, so this is the best link that
+        exists, not a reliable one: a post-commit child of that root and recipe made outside the
+        allocation also fulfils the line. Grant lines are unique per ``(root_ref, recipe_id)``
+        here, so one child fulfils at most one line. Reserved lines always count.
+        """
+        new_by_key: dict[tuple[str, str], set[str]] = {}
+        for child_id, root_ref, recipe_id in charged:
+            new_by_key.setdefault((root_ref, recipe_id), set()).add(child_id)
         total = 0
+        marks = ",".join("?" for _ in _COUNTED)
         for (ref,) in db.execute(
             "SELECT budget_ref FROM grant_budget WHERE grant_ref=? ORDER BY budget_ref",
             (grant_ref,),
         ).fetchall():
             self._load_budget(db, str(ref))
-            total += self._used(db, str(ref))[1]
+            for root_ref, recipe_id, cost, state, prior_text in db.execute(
+                "SELECT root_ref, recipe_id, cost, state, prior_children FROM line"  # noqa: S608
+                f" WHERE budget_ref=? AND state IN ({marks})",
+                (str(ref), *_COUNTED),
+            ).fetchall():
+                if state != "reserved":
+                    try:
+                        prior = set(json.loads(prior_text)) if prior_text else set()
+                    except ValueError as exc:
+                        raise AllocationError(
+                            "ledger_integrity_failed", f"line {root_ref}"
+                        ) from exc
+                    if new_by_key.get((str(root_ref), str(recipe_id)), set()) - prior:
+                        continue  # fulfilled: its spend is already in OPE-516's total
+                total += int(cost)
         return total
+
+    def _advance_clock(
+        self, now: int | None, *, budget_ref: str | None = None, grant_ref: str | None = None
+    ) -> None:
+        """Record the caller's time against the grant in its own committed transaction.
+
+        Done before the operation itself, so the high-water mark survives even when that
+        operation is then refused (a refused commit at a later time still ends the window).
+        """
+        if now is None or not _int64(now):
+            return
+        with self._tx() as db:
+            if grant_ref is None and budget_ref is not None:
+                row = db.execute(
+                    "SELECT grant_ref FROM budget WHERE budget_ref=?", (budget_ref,)
+                ).fetchone()
+                grant_ref = str(row[0]) if row is not None and row[0] else None
+            if grant_ref:
+                self._clock(db, grant_ref, now)
+
+    def _clock(self, db: sqlite3.Connection, grant_ref: str, caller_now: int) -> int:
+        """Time used for expiry: ``max(_worker_now(), caller_now, highest time seen for grant)``.
+
+        The caller's ``now`` can only narrow the window: back-dating never revives a grant and
+        future-dating never extends one. The per-grant high-water mark is kept in this ledger,
+        so a later, smaller caller time (or a worker clock stepping back) never re-opens it.
+        """
+        row = db.execute(
+            "SELECT high_water FROM grant_clock WHERE grant_ref=?", (grant_ref,)
+        ).fetchone()
+        stored = int(row[0]) if row is not None and _int64(row[0]) else 0
+        effective = max(_worker_now(), caller_now, stored)
+        db.execute(
+            "INSERT INTO grant_clock VALUES (?,?) ON CONFLICT(grant_ref)"
+            " DO UPDATE SET high_water=excluded.high_water",
+            (grant_ref, effective),
+        )
+        return effective
 
     # -- budgets -------------------------------------------------------------------------
 
@@ -1835,11 +1974,13 @@ class AllocationLedger:
         grant_dg = digest(record)
         try:
             spent = VariantLedger(Path(identity["path"])).spent(grant.grant_ref)
+            charged = _read_charged(Path(identity["path"]), grant.grant_ref)
             fit_pin = _read_fit_pin(Path(identity["path"]))
         except sqlite3.Error as exc:
             raise AllocationError(
                 "verification_source_invalid", "ope516_ledger_unreadable"
             ) from exc
+        self._advance_clock(now, grant_ref=grant.grant_ref)
         with self._tx() as db:
             pin = self._load_pin(db, grant.grant_ref)
             if pin is None:
@@ -1880,7 +2021,10 @@ class AllocationLedger:
                 ):
                     raise AllocationError("budget_conflict", budget_ref)
                 return self._status(db, budget_ref)
-            headroom = _record_headroom(record, spent, now) - self._grant_live(db, grant.grant_ref)
+            effective_now = self._clock(db, grant.grant_ref, now)
+            headroom = _record_headroom(record, spent, effective_now) - self._grant_live(
+                db, grant.grant_ref, charged
+            )
             effective = headroom if cap_spend is None else min(cap_spend, headroom)
             if effective <= 0:
                 raise AllocationError("grant_unavailable", grant.grant_ref)
@@ -1960,6 +2104,7 @@ class AllocationLedger:
             raise AllocationError(BINDING_MISMATCH, "allocation_id")
         if plan.roi_claim is not False:
             raise AllocationError("plan_invalid", "roi_claim is always false here")
+        self._advance_clock(now, budget_ref=budget_ref)
         with self._tx() as db:
             budget = self._load_budget(db, budget_ref)
             unit_cost = budget.unit_cost
@@ -2025,7 +2170,7 @@ class AllocationLedger:
                     raise RuntimeError("simulated crash")
                 try:
                     db.execute(
-                        "INSERT INTO line VALUES (?,?,?,?,?,?,?,?,?,?)",
+                        "INSERT INTO line VALUES (?,?,?,?,?,?,?,?,?,?,'')",
                         (
                             budget_ref,
                             line.root_ref,
@@ -2075,7 +2220,7 @@ class AllocationLedger:
             why = corr.root_reason(line.family_id, line.root_ref)
             if why:
                 raise AllocationError("verification_uncorroborated", f"{line.family_id}: {why}")
-        self._check_headroom(db, budget, corr.variants.spent(grant_ref), now, charge)
+        self._check_headroom(db, budget, corr, now, charge)
         seal = verified_by.seal
         return canonical(
             {
@@ -2091,22 +2236,26 @@ class AllocationLedger:
         )
 
     def _check_headroom(
-        self, db: sqlite3.Connection, budget: _Budget, spent: int, now: int, extra: int
+        self, db: sqlite3.Connection, budget: _Budget, corr: _Corroboration, now: int, extra: int
     ) -> None:
-        """Pinned grant budget - OPE-516 spent - live spend on every budget of the grant.
+        """Pinned grant budget - OPE-516 spent - unfulfilled live spend on every budget of it.
 
         ``extra`` is spend not yet counted as live (the plan being reserved; 0 at commit, whose
-        own lines are already live). Expired is ``grant_expired``; unauthorized flags are
-        ``grant_unavailable``; no room is ``grant_headroom_exceeded``.
+        own lines are already live). Expiry is judged on ``_clock`` (worker clock, caller time
+        and the grant's high-water mark, whichever is latest). Expired is ``grant_expired``;
+        unauthorized flags are ``grant_unavailable``; no room is ``grant_headroom_exceeded``.
+        Inherent race: OPE-516 can still admit a child between this read and the end of the
+        transaction, because it does not see reservations.
         """
         grant = budget.grant
         assert grant is not None  # grant-bound: pinned by _load_budget
-        if now >= grant["expires_at"]:
+        effective = self._clock(db, budget.grant_ref, now)
+        if effective >= grant["expires_at"]:
             raise AllocationError("grant_expired", budget.grant_ref)
-        if _record_headroom(grant, 0, now) == 0:
+        if _record_headroom(grant, 0, effective) == 0:
             raise AllocationError("grant_unavailable", f"{budget.grant_ref} unauthorized")
-        headroom = _record_headroom(grant, spent, now)
-        live = self._grant_live(db, budget.grant_ref)
+        headroom = _record_headroom(grant, corr.variants.spent(budget.grant_ref), effective)
+        live = self._grant_live(db, budget.grant_ref, corr.charged)
         if live + extra > headroom:
             raise AllocationError("grant_headroom_exceeded", f"{live}+{extra}>{headroom}")
 
@@ -2154,7 +2303,20 @@ class AllocationLedger:
             why = corr.root_reason(str(fam), str(root))
             if why:
                 raise AllocationError("verification_uncorroborated", f"{fam}: {why}")
-        self._check_headroom(db, budget, corr.variants.spent(budget.grant_ref), now, 0)
+        self._check_headroom(db, budget, corr, now, 0)
+        # Snapshot the charged children that already exist for each line, so that only a child
+        # made after this commit can later count as having fulfilled it.
+        for root, recipe in db.execute(
+            "SELECT root_ref, recipe_id FROM line WHERE allocation_id=? AND budget_ref=?"
+            " AND state='reserved'",
+            (allocation_id, budget.ref),
+        ).fetchall():
+            prior = sorted(c for c, r, x in corr.charged if (r, x) == (root, recipe))
+            db.execute(
+                "UPDATE line SET prior_children=? WHERE allocation_id=? AND budget_ref=?"
+                " AND root_ref=? AND recipe_id=?",
+                (canonical(prior), allocation_id, budget.ref, root, recipe),
+            )
 
     def commit(self, budget_ref: str, allocation_id: str, *, now: int | None = None) -> Json:
         """Commit a reservation: the selection is final and its spend is never refunded.
@@ -2163,6 +2325,7 @@ class AllocationLedger:
         live, grant not expired, and pinned budget minus current OPE-516 spend minus every live
         reservation on the grant still covers this one. Commit before generating the lines.
         """
+        self._advance_clock(now, budget_ref=budget_ref)
         with self._tx() as db:
             budget = self._load_budget(db, budget_ref)
             state = self._state(db, budget_ref, allocation_id)
