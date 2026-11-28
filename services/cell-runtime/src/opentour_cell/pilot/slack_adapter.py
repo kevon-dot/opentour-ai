@@ -1893,12 +1893,19 @@ class Workbench:
         version: int,
         pin: str,
         old_hash: str,
+        proof: bool = False,
     ) -> None:
         match = self._chart_match(cfg, actor, source, version)
         if match is None or match[1] != pin:
             raise Refused()
         workflow, _, target = match
-        token = self.journal.context(actor, cfg.channel, view, "arm_chart")
+        token = self.journal.context(
+            actor,
+            cfg.channel,
+            view,
+            "chart_proof" if proof else "arm_chart",
+            revision=_json({"source": source, "version": version, "pin": pin}),
+        )
 
         def authorize() -> None:
             current = self._chart_match(
@@ -1908,9 +1915,7 @@ class Workbench:
 
         self._show(
             view,
-            self.views.frozen_rule_chart(
-                token, workflow, version, target.audit["comparisons"]["rule"]
-            ),
+            self.views.frozen_rule_chart(token, workflow, version, target.audit, pin, proof),
             old_hash,
             dataset=target.dataset,
             dataset_revision=target.dataset_revision,
@@ -4103,6 +4108,20 @@ class Workbench:
         elif action == "ot_readouts":
             self._results(cfg, actor, view, old_hash)
         elif action in {"ot_result_prev", "ot_result_next", "ot_result_open"}:
+            if ctx["kind"] in {"arm_chart", "chart_proof"}:
+                selected = json.loads(ctx["revision"])
+                _check(action == "ot_result_open" and value == selected["pin"])
+                self._selected_chart(
+                    cfg,
+                    actor,
+                    view,
+                    selected["source"],
+                    selected["version"],
+                    value,
+                    old_hash,
+                    proof=ctx["kind"] == "arm_chart",
+                )
+                return
             if ctx["kind"] == "chart_picker":
                 listing = json.loads(ctx["revision"])
                 version = listing["version"]

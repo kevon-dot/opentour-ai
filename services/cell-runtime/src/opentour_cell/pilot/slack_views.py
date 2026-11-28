@@ -792,9 +792,9 @@ def current_training_question(
 
 
 def frozen_rule_chart(
-    context: str, workflow: str, version: int, report: Mapping[str, Any]
+    context: str, workflow: str, version: int, audit: Mapping[str, Any], pin: str, proof: bool
 ) -> Block:
-    checked = managed_report(report)
+    checked = managed_report(audit["comparisons"]["rule"])
     blocks = [
         _section(f"Workflow {_display(workflow)} · frozen benchmark v{version}"),
         _section(
@@ -807,10 +807,9 @@ def frozen_rule_chart(
         wrong = arm["incorrect_automatic"]
         if total:
             filled = round(10 * wrong / total)
-            bar = "■" * filled + "□" * (10 - filled)
-            blocks.append(
-                _section(f"{label} · {bar} · {wrong}/{total} ({100 * wrong / total:.1f}%)")
-            )
+            bar = "" if proof else "■" * filled + "□" * (10 - filled) + " · "
+            rate = f"{100 * wrong / total:.2f}".rstrip("0").rstrip(".")
+            blocks.append(_section(f"{label} · {bar}{wrong}/{total} ({rate}%)"))
         else:
             blocks.append(_section(f"{label} · 0/0 · rate unavailable"))
         coverage = arm["coverage"]
@@ -826,7 +825,41 @@ def frozen_rule_chart(
             f"Excluded from the paired comparison · {paired['excluded']}."
         )
     )
-    return _modal("Frozen comparison", "ot_arm_chart", context, blocks)
+    if proof:
+        changes = checked["changes"]
+        blocks.extend(
+            [
+                _section(
+                    f"On eligible pairs · {paired['fixes']} fixed · "
+                    f"{paired['regressions']} newly wrong"
+                    f" · {paired['ties_correct'] + paired['ties_incorrect']} unchanged."
+                ),
+                _section(
+                    f"Automatic only for incumbent · {changes['current_only_automatic']}. "
+                    f"Automatic only for simple repair · {changes['repair_only_automatic']}. "
+                    f"Unknown reference across the cohort · {checked['unknown_references']}."
+                ),
+                _section(
+                    "Rate = incorrect automatic decisions divided by automatic decisions with a "
+                    "verified reference. Coverage = automatic decisions divided by all cases."
+                ),
+                _section(
+                    "Source · frozen benchmark and privately reviewed comparison. "
+                    "Measurement date unavailable."
+                ),
+                _section(f"Frozen comparison · {_ref(audit['run_revision'])}"),
+                _section(f"Tested cohort · {_ref(audit['cohort_revision'])}"),
+            ]
+        )
+    blocks.append(
+        _actions(_button("Back to graph" if proof else "View proof", "ot_result_open", pin))
+    )
+    return _modal(
+        "Comparison proof" if proof else "Frozen comparison",
+        "ot_chart_proof" if proof else "ot_arm_chart",
+        context,
+        blocks,
+    )
 
 
 def monthly_invoice_answer(context: str, rows: Sequence[tuple[str, MonthlyInvoiceReport]]) -> Block:

@@ -252,10 +252,36 @@ def test_chart_selection_rechecks_frozen_receipt_and_named_grant(tmp_path, monke
     assert f"Eligible pairs · {pair['paired']['comparable']}/{pair['cohort_size']}" in rendered
     assert f"Excluded from the paired comparison · {pair['paired']['excluded']}" in rendered
 
+    h.action(view, "ot_result_open", buttons(screen(h, view))["ot_result_open"])
+    assert screen(h, view)["callback_id"] == "ot_chart_proof"
+    calculation = text(h, view)
+    assert frozen_result in calculation and target.audit["cohort_revision"] in calculation
+    assert f"{pair['paired']['fixes']} fixed" in calculation
+    assert f"{pair['paired']['regressions']} newly wrong" in calculation
+    for key in ("current", "repair"):
+        arm = pair[key]
+        denominator = arm["observed_error_rate"]["denominator"]
+        if denominator:
+            rate = f"{100 * arm['incorrect_automatic'] / denominator:.2f}".rstrip("0").rstrip(".")
+            exact = f"{arm['incorrect_automatic']}/{denominator} ({rate}%)"
+            assert exact in rendered and exact in calculation
+    h.action(view, "ot_result_open", buttons(screen(h, view))["ot_result_open"])
+    assert screen(h, view)["callback_id"] == "ot_arm_chart"
+    assert screen(h, view)["blocks"] == json.loads(rendered)["blocks"]
+
     view = ask()
     pin = buttons(screen(h, view))["ot_result_open"]
+    h.action(view, "ot_result_open", pin)
+    assert screen(h, view)["callback_id"] == "ot_arm_chart"
     grant = next(cfg.directory.glob("slack-review-*.json"))
     backup = grant.with_suffix(".generated-backup")
+    grant.rename(backup)
+    h.action(view, "ot_result_open", pin)
+    assert screen(h, view).get("callback_id") != "ot_arm_chart"
+    assert frozen_result not in text(h, view)
+    backup.rename(grant)
+    view = ask()
+    pin = buttons(screen(h, view))["ot_result_open"]
     grant.rename(backup)
     h.action(view, "ot_result_open", pin)
     assert screen(h, view).get("callback_id") != "ot_arm_chart"
