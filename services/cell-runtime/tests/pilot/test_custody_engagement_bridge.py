@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -429,7 +430,10 @@ def test_released_slot_without_persisted_terminal_epoch_is_impossible(tmp_path: 
     # A database fence without its fsynced journal entry is not a persisted termination.
     ledger.withdraw(ORG, epoch, revocation_epoch=1)
     (directory / "engagement-fences.jsonl").write_text("")
-    with pytest.raises(EngagementHold, match="terminal_state_not_persisted"):
+    # The revocation record kept outside the snapshot now catches the emptied journal first
+    # (OPE-543 anti-rollback); without that record the same release still holds with
+    # terminal_state_not_persisted (test_engagement_anti_rollback.py).
+    with pytest.raises(EngagementHold, match="anti_rollback_volume_behind"):
         ledger.release_slot(ORG, epoch)
     assert raw_row(directory, ORG, epoch) == ("terminal", 1, 0)
     with closing(sqlite3.connect(ledger.path)) as db:
@@ -578,7 +582,11 @@ def test_older_ledger_backup_without_the_seen_row_holds_the_closeout(tmp_path: P
     crash_withdrawal(directory, "before_fence")  # the closeout opened and saw the row
     assert closeout_ledger_state(directory) == "row_seen"
 
-    EngagementLedger(directory).restore_backup(older)
+    # The ledger refuses to restore a backup older than its first grant (OPE-543 review F2);
+    # a volume restore puts the same bytes back out of band, and custody still holds.
+    with pytest.raises(EngagementHold, match="anti_rollback_ledger_rewound"):
+        EngagementLedger(directory).restore_backup(older)
+    shutil.copyfile(older, directory / "engagement-epochs.sqlite3")
     assert fences(directory) == []
     with pytest.raises(CustodyError, match="engagement_ledger_unavailable"):
         Closeout(directory, ORG).reconcile()
@@ -688,7 +696,10 @@ def test_older_backup_restored_before_the_closeout_opens_holds(tmp_path: Path) -
     ledger.backup(older)
     enroll(ledger, ORG, epoch, "lease-a", 10)
     ledger.activate(ORG, epoch)
-    ledger.restore_backup(older)
+    # Refused by the ledger (OPE-543 review F2); the same bytes restored out of band still hold.
+    with pytest.raises(EngagementHold, match="anti_rollback_ledger_rewound"):
+        ledger.restore_backup(older)
+    shutil.copyfile(older, directory / "engagement-epochs.sqlite3")
     with pytest.raises(CustodyError, match="engagement_ledger_unavailable"):
         Closeout(directory, ORG).withdraw(**START)
     assert Closeout(directory, ORG).status()["reconciled"] is False

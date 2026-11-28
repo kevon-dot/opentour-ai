@@ -14,7 +14,11 @@ from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 
-from opentour_cell.pilot.engagement_epochs import EngagementError, EngagementLedger
+from opentour_cell.pilot.engagement_epochs import (
+    EngagementError,
+    EngagementLedger,
+    ledger_marker_present,
+)
 from opentour_cell.pilot.slack_adapter import withdraw_for_custody
 from opentour_cell.pilot.text_classifier import TrainingError
 from opentour_cell.pilot.training import LocalTrainingStore, _check_directory, _check_file
@@ -344,7 +348,8 @@ class Closeout:
         reconcile then holds until it can be read.
         """
         if not self._ledger_present():
-            return "present" if self._ledger_traces_present() else "absent"
+            traced = self._ledger_traces_present() or ledger_marker_present(self.directory)
+            return "present" if traced else "absent"
         path = self.directory / _ENGAGEMENT_LEDGER[0]
         for pause in (*_LEDGER_BUSY_BACKOFF, None):
             try:
@@ -396,11 +401,15 @@ class Closeout:
           (`bound`), the row must stay in the ledger, so restoring an older backup that lacks
           it holds instead of skipping retirement;
         - a live grant file, the epoch lock or the live-evidence database, now or at open,
-          requires a present ledger holding this engagement's row.
-        Not enforced (fails open): this engagement's row is not in the ledger when the closeout
-        opens, and the directory has no live grant file, epoch lock or live-evidence database.
-        Retirement is then skipped as before, because nothing distinguishes that directory
-        from one where this engagement never used the ledger.
+          requires a present ledger holding this engagement's row;
+        - the anti-rollback marker kept outside the snapshot (written at the directory's first
+          grant ingest; unreadable counts as present) requires a present ledger, so deleting
+          the ledger, with or without its traces, holds. It is worker-attested at most: it
+          covers a snapshot restore or accidental rollback, not a hostile same-uid process.
+        Not enforced (fails open): the ledger is present but this engagement's row is not in it
+        when the closeout opens, and the directory has no live grant file, epoch lock or
+        live-evidence database. Retirement is then skipped as before, because nothing
+        distinguishes that directory from one where this engagement never used the ledger.
         """
         engagement = row["engagement"]
         recorded = row["engagement_ledger"] if "engagement_ledger" in row.keys() else None
@@ -409,7 +418,11 @@ class Closeout:
         required = self._grant_requires_ledger() or self._ledger_traces_present()
         seen = recorded
         if not self._ledger_present():
-            if required or recorded in {"present", *_ROW_REQUIRED}:
+            if (
+                required
+                or recorded in {"present", *_ROW_REQUIRED}
+                or ledger_marker_present(self.directory)
+            ):
                 raise CustodyError("engagement_ledger_unavailable")
             seen = "absent"
         else:
