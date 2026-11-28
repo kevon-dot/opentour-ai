@@ -959,21 +959,65 @@ def learning_plan_modal(context: str, plan: LearningPlan, pin: str) -> Block:
     return _modal("Learning plan", "ot_learning_plan", context, blocks)
 
 
-def learning_status_modal(context: str, receipt: LearningStatus, pin: str) -> Block:
+def learning_progress_blocks(
+    receipt: LearningStatus, pin: str, *, modal: bool = False, allow_control: bool = True
+) -> list[Block]:
     from opentour_cell.pilot.slack_learning import STATE_COPY
 
-    controls = [_button("View status", "ot_learning_status", pin)]
-    if receipt.can_cancel and receipt.state in {"queued", "running", "verifying"}:
-        controls.append(_button("Cancel run", "ot_learning_cancel", pin))
+    receipt.validate()
+    state = STATE_COPY[receipt.state]
+    if receipt.revision and receipt.state == "completed":
+        state = "Training completed · Awaiting independent scoring."
+    if receipt.revision and receipt.state == "running":
+        state = "Running"
+    blocks = [_section(f"Learning run · {_ref(receipt.run_ref)}"), _section(state)]
+    if receipt.revision:
+        step = receipt.completed_steps
+        total = receipt.total_steps
+        progress = "Awaiting trainer observation" if step is None else f"{step} steps"
+        if total is not None:
+            progress = f"{step if step is not None else 'Unknown'} of {total} steps"
+        checkpoint = receipt.checkpoint_step
+        elapsed = receipt.active_seconds
+        checkpoint_text = (
+            f"Step {checkpoint}" if checkpoint is not None else "Awaiting confirmation"
+        )
+        elapsed_text = f"{elapsed} seconds" if elapsed is not None else "Awaiting measurement"
+        blocks.append(
+            _section(
+                f"Observed progress · {progress}\n"
+                f"Confirmed checkpoint · {checkpoint_text}\n"
+                f"Active training time · {elapsed_text}"
+            )
+        )
+        if receipt.stale:
+            blocks.append(_section("Progress is stale · Showing the last worker observation."))
+    controls = [_button("View status", "ot_learning_status", pin)] if modal else []
+    if allow_control:
+        labels = {"pause": "Pause", "resume": "Resume", "stop": "Stop run"}
+        controls.extend(
+            _button(labels[action], "ot_learning_" + action, pin) for action in receipt.controls()
+        )
+        if (
+            modal
+            and not receipt.revision
+            and receipt.can_cancel
+            and receipt.state in {"queued", "running", "verifying"}
+        ):
+            controls.append(_button("Cancel run", "ot_learning_cancel", pin))
+    if controls:
+        blocks.append(_actions(*controls))
+    return blocks
+
+
+def learning_status_modal(
+    context: str, receipt: LearningStatus, pin: str, *, allow_control: bool = True
+) -> Block:
     return _modal(
         "Learning run",
         "ot_learning_run",
         context,
-        [
-            _section(f"Run · {_ref(receipt.run_ref)}"),
-            _section(STATE_COPY[receipt.state]),
-            _actions(*controls),
-        ],
+        learning_progress_blocks(receipt, pin, modal=True, allow_control=allow_control),
     )
 
 

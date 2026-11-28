@@ -8,6 +8,7 @@ import os
 import signal
 import sys
 import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -40,6 +41,7 @@ def run(
     stopped: threading.Event,
 ) -> int:
     from opentour_cell.pilot.autonomous_cycle import cycle_once
+    from opentour_cell.pilot.eve_authority import SELECTION_FILE, renew_host_permit
     from opentour_cell.pilot.learning_runs import SCHEDULE_SELECTION
 
     identifier(organization)
@@ -50,7 +52,8 @@ def run(
         or not 5 <= interval <= 86400
     ):
         raise ValueError("invalid_worker_configuration")
-    while not stopped.is_set():
+
+    def scan_once() -> int:
         try:
             outcome: dict[str, Any]
             if os.path.lexists(directory / SCHEDULE_SELECTION):
@@ -73,7 +76,7 @@ def run(
                 if key in outcome
             }
             print(json.dumps(report), flush=True)
-            if once and outcome.get("state") == "held":
+            if outcome.get("state") == "held":
                 return 2
         except (OSError, ValueError):
             print(
@@ -81,10 +84,39 @@ def run(
                 file=sys.stderr,
                 flush=True,
             )
+            return 2
+        return 0
+
+    # The EVE lease is shorter than a discovery interval. Renew independently of a slow scan.
+    own_stop = threading.Event()
+
+    def permits() -> None:
+        while not own_stop.wait(5):
+            if stopped.is_set():
+                return
+            renew_host_permit(directory, organization)
+
+    keeper = None
+    next_scan = 0.0
+    try:
+        while not stopped.is_set():
+            if keeper is None and os.path.lexists(directory / SELECTION_FILE):
+                renew_host_permit(directory, organization)
+                if not once:
+                    keeper = threading.Thread(target=permits, name="eve-permit", daemon=True)
+                    keeper.start()
+            delay = next_scan - time.monotonic()
+            if delay > 0:
+                stopped.wait(min(5.0, delay) if keeper is None else delay)
+                continue
+            result = scan_once()
             if once:
-                return 2
-        if once or stopped.wait(interval):
-            break
+                return result
+            next_scan = time.monotonic() + interval
+    finally:
+        own_stop.set()
+        if keeper is not None:
+            keeper.join()
     return 0
 
 

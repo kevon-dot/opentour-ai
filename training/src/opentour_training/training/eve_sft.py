@@ -8,6 +8,8 @@ import importlib.metadata
 import json
 import math
 import os
+import re
+import stat
 import tempfile
 import time
 from collections.abc import Callable
@@ -47,8 +49,17 @@ def digest(value: Any) -> str:
     return hashlib.sha256(raw.encode()).hexdigest()
 
 
-def read_file(path: Path) -> Any:
-    return json.loads(path.read_text(encoding="utf-8"))
+def read_file(path: Path, expected: str | None = None) -> Any:
+    if expected is None:
+        return json.loads(path.read_text(encoding="utf-8"))
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(fd, "rb") as handle:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise ValueError("eve_input_digest_mismatch")
+        data = handle.read(8 * 1024 * 1024 + 1)
+    if len(data) > 8 * 1024 * 1024 or hashlib.sha256(data).hexdigest() != expected:
+        raise ValueError("eve_input_digest_mismatch")
+    return json.loads(data.decode("utf-8"))
 
 
 def verify_base(directory: Path) -> dict[str, str]:
@@ -191,13 +202,47 @@ def runtime_versions() -> dict[str, str]:
 
 
 def fit(args: argparse.Namespace) -> None:
-    settings = None
+    settings: dict[str, Any] | None = None
     if args.action == "fit":
         if not args.output.parent.is_dir():
             raise FileNotFoundError(args.output.parent)
         paths = ("model_dir", "development", "protected_membership", "output")
         settings = {name: str(getattr(args, name).resolve()) for name in paths}
         settings.update(steps=args.steps, deadline=args.deadline)
+        permit = tuple(
+            getattr(args, name, None)
+            for name in (
+                "worker_database",
+                "reservation_ref",
+                "reservation_digest",
+                "development_sha256",
+                "protected_sha256",
+                "max_rows",
+            )
+        )
+        if any(permit):
+            if (
+                not all(permit)
+                or args.deadline is None
+                or not 1 <= args.max_rows <= 5000
+                or any(
+                    not re.fullmatch(r"[0-9a-f]{64}", value)
+                    for value in (
+                        args.reservation_digest,
+                        args.development_sha256,
+                        args.protected_sha256,
+                    )
+                )
+            ):
+                raise ValueError("complete_worker_permit_required")
+            settings["worker_permit"] = {
+                "database": str(args.worker_database.resolve()),
+                "reservation_ref": args.reservation_ref,
+                "spec_digest": args.reservation_digest,
+            }
+            settings["development_sha256"] = args.development_sha256
+            settings["protected_sha256"] = args.protected_sha256
+            settings["max_rows"] = args.max_rows
         directory = args.run_dir or args.output.with_name(args.output.name + ".run")
         directory.mkdir(mode=0o700, exist_ok=True)
     else:
@@ -260,7 +305,12 @@ def train(
     peft = importlib.import_module("peft")
 
     base_hashes = verify_base(args.model_dir)
-    rows, protected = read_file(args.development), read_file(args.protected_membership)
+    rows = read_file(args.development, saved["settings"].get("development_sha256"))
+    protected = read_file(args.protected_membership, saved["settings"].get("protected_sha256"))
+    if "max_rows" in saved["settings"] and (
+        not isinstance(rows, list) or len(rows) > saved["settings"]["max_rows"]
+    ):
+        raise ValueError("eve_row_bound_exceeded")
     torch.manual_seed(SEED)
     torch.cuda.reset_peak_memory_stats()
     model, tokenizer = load_model(torch, args.model_dir)
@@ -497,6 +547,11 @@ def generate(model: Any, tokenizer: Any, input_ids: Any, max_new_tokens: int) ->
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="action", required=True)
+    server = commands.add_parser("serve", help="Supervise the installed worker's authorized run")
+    for name in ("exchange", "model-dir", "inputs", "work"):
+        server.add_argument(f"--{name}", required=True, type=Path)
+    server.add_argument("--image-id", required=True)
+    server.add_argument("--once", action="store_true")
     fit_cli = commands.add_parser("fit")
     for name in ("model-dir", "development", "protected-membership", "output"):
         fit_cli.add_argument(f"--{name}", required=True, type=Path)
@@ -505,6 +560,12 @@ def main() -> None:
         "--run-dir", type=Path, help="Private state directory (default: OUTPUT.run)"
     )
     fit_cli.add_argument("--deadline", type=int, help="Absolute Unix cutoff, including pauses")
+    fit_cli.add_argument("--worker-database", type=Path, help="Installed worker exchange")
+    fit_cli.add_argument("--reservation-ref")
+    fit_cli.add_argument("--reservation-digest")
+    fit_cli.add_argument("--development-sha256")
+    fit_cli.add_argument("--protected-sha256")
+    fit_cli.add_argument("--max-rows", type=int)
     fit_cli.set_defaults(run=fit)
     for name in ("pause", "resume", "stop", "status"):
         control_cli = commands.add_parser(name)
@@ -522,7 +583,11 @@ def main() -> None:
     replay_cli.set_defaults(run=replay)
     args = parser.parse_args()
     try:
-        if args.action == "resume":
+        if args.action == "serve":
+            from opentour_training.training.eve_host import serve
+
+            serve(args)
+        elif args.action == "resume":
             fit(args)
         elif args.action in {"pause", "stop", "status"}:
             print(

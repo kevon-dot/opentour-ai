@@ -6,6 +6,7 @@ import fcntl
 import hashlib
 import json
 import os
+import sqlite3
 import tempfile
 import time
 from collections.abc import Callable, Iterator
@@ -106,6 +107,32 @@ class Run:
         deadline = state["settings"]["deadline"]
         if deadline is not None and time.time() >= deadline and state["status"] not in TERMINAL:
             state["status"] = "expired"
+        permit = state["settings"].get("worker_permit")
+        if not permit or state["status"] in TERMINAL:
+            return
+        # Recheck at every optimizer boundary even if the supervisor or Slack worker has died.
+        try:
+            uri = Path(permit["database"]).as_uri() + "?mode=ro"
+            db = sqlite3.connect(uri, uri=True, timeout=2)
+            try:
+                row = db.execute(
+                    "SELECT permit_until,requested,state FROM eve_jobs "
+                    "WHERE reservation_ref=? AND spec_digest=?",
+                    (permit["reservation_ref"], permit["spec_digest"]),
+                ).fetchone()
+            finally:
+                db.close()
+        except (OSError, ValueError, sqlite3.Error):
+            row = None
+        if (
+            row is None
+            or time.time() >= row[0]
+            or row[1] == "stop"
+            or row[2] in {"held", "stopped", "failed", "expired", "completed"}
+        ):
+            state["status"] = "stopping"
+        elif row[1] == "pause" and state["status"] in {"running", "pausing"}:
+            state.update(status="pausing", pause_at=state["completed_steps"])
 
     @staticmethod
     def reconcile_publication(state: dict[str, Any]) -> None:

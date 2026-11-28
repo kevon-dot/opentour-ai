@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
 import hashlib
 import hmac
 import http.client
@@ -50,7 +51,13 @@ if TYPE_CHECKING:
     from opentour_cell.pilot.handoff_readback import HandoffReadback
     from opentour_cell.pilot.map_review import MapReviewService
     from opentour_cell.pilot.recipient_lifecycle import LifecycleAuthority
-    from opentour_cell.pilot.slack_learning import LearningPlan, LearningService, Operation
+    from opentour_cell.pilot.slack_learning import (
+        Control,
+        LearningPlan,
+        LearningService,
+        LearningStatus,
+        Operation,
+    )
     from opentour_cell.pilot.starter_evaluation_session import StarterEvaluationSession
     from opentour_cell.pilot.starter_map_confirmation import StarterCaseEntry, StarterCaseSession
     from opentour_cell.pilot.verifier_form import VerifierForm
@@ -94,7 +101,13 @@ CALLBACKS = {
     "ot_map_assertions_save",
     "ot_map_precedence_save",
 }
+LEARNING_CONTROLS: dict[str, Control] = {
+    "ot_learning_pause": "pause",
+    "ot_learning_resume": "resume",
+    "ot_learning_stop": "stop",
+}
 ACTIONS = {
+    *LEARNING_CONTROLS,
     "ot_workflow_starter",
     "ot_map_open",
     "ot_case_review",
@@ -264,6 +277,7 @@ class Settings:
     workflow_index_publication_file: str = ""
     owner_settings_authority_file: str = ""
     monthly_invoice_reports: MonthlyReportSettings | None = None
+    learning_thread_ts: str = ""
 
     @property
     def binding(self) -> str:
@@ -314,6 +328,7 @@ class Settings:
             "owner_settings_authority_file",
             "live_workflow_ref",
             "monthly_invoice_reports",
+            "learning_thread_ts",
         }
         _check(isinstance(doc, dict) and required <= doc.keys() <= required | optional)
         _check(isinstance(doc["organization"], str) and LOCAL_ID.fullmatch(doc["organization"]))
@@ -353,6 +368,11 @@ class Settings:
                     and label.isprintable()
                     and not any(c in label for c in "<>@#&")
                 )
+        learning_thread = doc.get("learning_thread_ts", "")
+        _check(
+            isinstance(learning_thread, str)
+            and (not learning_thread or re.fullmatch(r"[0-9]{1,15}\.[0-9]{1,12}", learning_thread))
+        )
         publication_file = ""
         if "workflow_index_publication_file" in doc:
             from opentour_cell.pilot.repair_workflow import _name
@@ -391,6 +411,7 @@ class Settings:
             path,
             explicit_recipient=explicit_recipient,
             live_workflow_ref=live_workflow,
+            learning_thread_ts=learning_thread,
             workflow_index_publication_file=publication_file,
             owner_settings_authority_file=authority_file,
             monthly_invoice_reports=MonthlyReportSettings.parse(doc["monthly_invoice_reports"])
@@ -437,6 +458,8 @@ class Journal:
                     kind TEXT, job TEXT, revision TEXT, expires INTEGER);
                 CREATE TABLE IF NOT EXISTS jobs (
                     job TEXT PRIMARY KEY, dataset TEXT, requester TEXT);
+                CREATE TABLE IF NOT EXISTS learning_cards (
+                    id TEXT PRIMARY KEY, thread TEXT NOT NULL, ts TEXT, rendered TEXT);
                 CREATE TABLE IF NOT EXISTS launcher (channel TEXT PRIMARY KEY, ts TEXT);
                 CREATE TABLE IF NOT EXISTS inspections (
                     actor TEXT, revision TEXT, policy TEXT, expires INTEGER,
@@ -1177,6 +1200,7 @@ def withdraw_for_custody(directory: Path, organization: str) -> dict[str, int]:
                     "launcher",
                     "inspections",
                     "approval_posts",
+                    "learning_cards",
                     "exposures",
                 )
             ),
@@ -1212,6 +1236,7 @@ class Workbench:
         lifecycle_authority: LifecycleAuthority | None = None,
     ):
         self.learning_service = learning_service
+        self.learning_changed = threading.Event()
         self.workflow_index_scope = workflow_index_scope
         self.config = config
         self.lifecycle_authority = lifecycle_authority
@@ -5431,6 +5456,213 @@ class Workbench:
             )
             return plan, self.journal.opaque("learning_plan", asdict(plan))
 
+    def _learning_run_pin(self, plan: LearningPlan, receipt: LearningStatus) -> str:
+        from opentour_cell.pilot.slack_learning import bind_approval
+
+        scope_pin = self.journal.opaque("learning_run", [plan.scope.__dict__, receipt.run_ref])
+        if not receipt.revision:
+            return scope_pin
+        version = self.journal.opaque(
+            "control",
+            bind_approval([scope_pin, plan.plan_ref, receipt.revision], plan.approval_revision),
+        )
+        return scope_pin + "." + version
+
+    def _can_control_learning(self, cfg: Settings, plan: LearningPlan) -> bool:
+        actor = plan.scope.actor
+        entry = cfg.permission(actor, "inspect", plan.scope.dataset)
+        return actor == cfg.reviewer and "review" in entry["roles"] and entry["aggregate"] is True
+
+    def _control_learning(
+        self,
+        cfg: Settings,
+        plan: LearningPlan,
+        receipt: LearningStatus,
+        action: Control,
+        value: str,
+    ) -> LearningStatus:
+        service = self.learning_service
+        assert service is not None
+        receipt.validate()
+        _check(
+            self._can_control_learning(cfg, plan)
+            and value == self._learning_run_pin(plan, receipt)
+            and action in receipt.controls()
+        )
+        self.private_channel(cfg, plan.scope.actor)
+        current = self._learning_plan(plan.scope.actor, plan.scope.workflow)
+        _check(
+            self.settings() == cfg
+            and current
+            and current[0] == plan
+            and plan.current_run == receipt.run_ref
+        )
+        key = self.journal.opaque("learning_control", [value, action])
+        result = service.control(plan.scope, receipt.run_ref, action, receipt.revision, key)
+        result.validate()
+        _check(result.run_ref == receipt.run_ref)
+        self.learning_changed.set()
+        return result
+
+    def _current_learning_card(
+        self, cfg: Settings
+    ) -> tuple[LearningPlan, LearningStatus, str] | None:
+        service = self.learning_service
+        if service is None or not cfg.channel_aggregates:
+            return None
+        workflow = self._live_workflow(cfg, cfg.reviewer)
+        bound = self._learning_plan(cfg.reviewer, workflow)
+        if not bound or not bound[0].current_run:
+            return None
+        plan = bound[0]
+        assert plan.current_run
+        _check(self._can_control_learning(cfg, plan))
+        receipt = service.status(plan.scope, plan.current_run)
+        receipt.validate()
+        _check(receipt.run_ref == plan.current_run)
+        if not receipt.revision:
+            return None
+        key = self.journal.opaque(
+            "learning_card",
+            [
+                plan.scope.engagement,
+                workflow,
+                plan.scope.dataset,
+                plan.scope.dataset_revision,
+                receipt.run_ref,
+            ],
+        )
+        return plan, receipt, key
+
+    def sync_learning_card(self) -> None:
+        """Publish a single card per bound run. A lost initial reply holds the send claim."""
+        cfg = self.settings()
+        if self.learning_service is None or not cfg.channel_aggregates:
+            return
+        flags = os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK
+        with os.fdopen(
+            os.open(cfg.directory / "slack-learning-card.lock", flags, 0o600), "rb"
+        ) as lock:
+            info = os.fstat(lock.fileno())
+            _check(
+                stat.S_ISREG(info.st_mode)
+                and info.st_nlink == 1
+                and info.st_uid == os.getuid()
+                and not info.st_mode & 0o077
+            )
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return
+            self._sync_learning_card(cfg)
+
+    def _sync_learning_card(self, cfg: Settings) -> None:
+        projection = self._current_learning_card(cfg)
+        if not projection:
+            return
+        plan, receipt, key = projection
+        pin = self._learning_run_pin(plan, receipt)
+        blocks = self.views.learning_progress_blocks(receipt, pin)
+        rendered = self.journal.opaque("learning_render", blocks)
+        with self.journal.db() as db:
+            db.execute("BEGIN IMMEDIATE")
+            self.journal.active(db)
+            row = db.execute("SELECT * FROM learning_cards WHERE id=?", (key,)).fetchone()
+            if row and (
+                row["thread"] != cfg.learning_thread_ts
+                or not row["ts"]
+                or row["rendered"] == rendered
+            ):
+                return
+        # Reauthorize disclosure after layout. The measured values describe the observation above.
+        self.private_channel(cfg, cfg.reviewer)
+        current = self._learning_plan(cfg.reviewer, plan.scope.workflow)
+        _check(self.settings() == cfg and current and current[0] == plan)
+        exposure = secrets.token_urlsafe(18)
+        with self.journal.db() as db:
+            db.execute("BEGIN IMMEDIATE")
+            self.journal.active(db)
+            db.execute(
+                "INSERT INTO exposures VALUES(?,'learning_card','admitted',?,NULL)",
+                (exposure, int(time.time())),
+            )
+            if row:
+                db.execute("UPDATE learning_cards SET rendered=NULL WHERE id=?", (key,))
+            else:
+                db.execute(
+                    "INSERT INTO learning_cards(id,thread) VALUES(?,?)",
+                    (key, cfg.learning_thread_ts),
+                )
+        # The claim is durable before a Slack call whose accepted response could be lost.
+        payload: Json = dict(channel=cfg.channel, text="Learning run progress", blocks=blocks)
+        if row:
+            response = self.web.chat_update(ts=row["ts"], **payload)
+        else:
+            if cfg.learning_thread_ts:
+                payload["thread_ts"] = cfg.learning_thread_ts
+            try:
+                response = self.web.chat_postMessage(
+                    unfurl_links=False, unfurl_media=False, **payload
+                )
+            except Exception as error:
+                # Slack SDK exceptions carry an API response for definite rejections.
+                response = getattr(error, "response", None)
+                if response is None:
+                    raise
+            if response.get("ok") is False and response.get("error") in {
+                "ratelimited",
+                "rate_limited",
+                "not_in_channel",
+                "channel_not_found",
+                "missing_scope",
+                "invalid_auth",
+                "token_revoked",
+                "thread_not_found",
+            }:
+                with self.journal.db() as db:
+                    db.execute("DELETE FROM learning_cards WHERE id=? AND ts IS NULL", (key,))
+                    db.execute("DELETE FROM exposures WHERE id=?", (exposure,))
+                return
+        ts = response.get("ts")
+        _check(
+            response.get("ok") is True
+            and response.get("channel") == cfg.channel
+            and isinstance(ts, str)
+            and re.fullmatch(r"[0-9]{1,15}\.[0-9]{1,12}", ts)
+            and (not row or row["ts"] == ts)
+        )
+        with self.journal.db() as db:
+            db.execute("UPDATE learning_cards SET ts=?,rendered=? WHERE id=?", (ts, rendered, key))
+            db.execute(
+                "UPDATE exposures SET status='presented',completed=? WHERE id=?",
+                (int(time.time()), exposure),
+            )
+
+    def _learning_card_action(self, cfg: Settings, actor: str, body: Json) -> None:
+        box, message, action = body["container"], body["message"], body["actions"][0]
+        _check(
+            body["type"] == "block_actions"
+            and actor == cfg.reviewer
+            and body["channel"]["id"] == box["channel_id"] == cfg.channel
+            and message["ts"] == box["message_ts"]
+            and (
+                message.get("thread_ts", "") == cfg.learning_thread_ts
+                or not cfg.learning_thread_ts
+                and message.get("thread_ts") == message["ts"]
+            )
+        )
+        current = self._current_learning_card(cfg)
+        _check(current)
+        assert current is not None
+        plan, receipt, key = current
+        with self.journal.db() as db:
+            self.journal.active(db)
+            row = db.execute("SELECT ts,thread FROM learning_cards WHERE id=?", (key,)).fetchone()
+            _check(row and row["ts"] == message["ts"] and row["thread"] == cfg.learning_thread_ts)
+        self._control_learning(
+            cfg, plan, receipt, LEARNING_CONTROLS[action["action_id"]], action["value"]
+        )
+
     def _learning_action(
         self,
         cfg: Settings,
@@ -5441,8 +5673,6 @@ class Workbench:
         value: str,
         old_hash: str,
     ) -> None:
-        from opentour_cell.pilot.slack_learning import STATE_COPY
-
         service = self.learning_service
         _check(service is not None)
         assert service is not None
@@ -5475,8 +5705,13 @@ class Workbench:
                 improve = action == "ot_learning_improve"
                 _check(plan.can_improve if improve else plan.can_benchmark)
                 operation: Operation = "evaluate_and_improve" if improve else "benchmark_only"
+                from opentour_cell.pilot.slack_learning import bind_approval
+
                 key = self.journal.opaque(
-                    "learning_start", [plan.scope.__dict__, plan.plan_ref, operation]
+                    "learning_start",
+                    bind_approval(
+                        [plan.scope.__dict__, plan.plan_ref, operation], plan.approval_revision
+                    ),
                 )
                 receipt = service.start(plan.scope, plan.plan_ref, operation, key)
             else:
@@ -5487,24 +5722,30 @@ class Workbench:
         else:
             _check(
                 ctx["kind"] == "learning_run"
-                and action in {"ot_learning_status", "ot_learning_cancel"}
+                and action in {"ot_learning_status", "ot_learning_cancel", *LEARNING_CONTROLS}
             )
             run_ref = ctx["job"]
             _check(
                 plan.current_run == run_ref
-                and value == self.journal.opaque("learning_run", [plan.scope.__dict__, run_ref])
+                and value.split(".", 1)[0]
+                == self.journal.opaque("learning_run", [plan.scope.__dict__, run_ref])
             )
             receipt = service.status(plan.scope, run_ref)
             _check(receipt.run_ref == run_ref)
-            if action == "ot_learning_cancel":
+            if action in LEARNING_CONTROLS:
+                receipt = self._control_learning(
+                    cfg, plan, receipt, LEARNING_CONTROLS[action], value
+                )
+            elif action == "ot_learning_cancel":
                 _check(
-                    receipt.can_cancel is True
+                    not receipt.revision
+                    and receipt.can_cancel is True
                     and receipt.state in {"queued", "running", "verifying"}
                 )
                 receipt = service.cancel(plan.scope, run_ref)
                 _check(receipt.run_ref == run_ref)
-        _check(receipt.state in STATE_COPY and type(receipt.can_cancel) is bool)
-        run_pin = self.journal.opaque("learning_run", [plan.scope.__dict__, receipt.run_ref])
+        receipt.validate()
+        run_pin = self._learning_run_pin(plan, receipt)
         token = self.journal.context(
             actor, cfg.channel, view, "learning_run", receipt.run_ref, run_pin
         )
@@ -5520,7 +5761,12 @@ class Workbench:
 
         self._show(
             view,
-            self.views.learning_status_modal(token, receipt, run_pin),
+            self.views.learning_status_modal(
+                token,
+                receipt,
+                run_pin,
+                allow_control=not receipt.revision or self._can_control_learning(cfg, plan),
+            ),
             old_hash,
             authorize=authorize_receipt,
         )
@@ -5994,6 +6240,9 @@ class Workbench:
             _check(not surfaced or surfaced == cfg.channel)
             if body.get("container", {}).get("type") == "message":
                 box = body["container"]
+                if len(actions) == 1 and actions[0].get("action_id") in LEARNING_CONTROLS:
+                    self._learning_card_action(cfg, actor, body)
+                    return
                 if (
                     body.get("type") == "block_actions"
                     and len(body.get("actions", [])) == 1
@@ -6046,6 +6295,34 @@ class Workbench:
                 _check(self.store.engagement_active())
             with self.view_locks[hash(view) % len(self.view_locks)]:
                 ctx = self.journal.read_context(token, actor, cfg.channel, view)
+                if (
+                    not submission
+                    and len(actions) == 1
+                    and actions[0].get("action_id") in LEARNING_CONTROLS
+                ):
+                    box = body.get("container", {})
+                    _check(
+                        body["type"] == "block_actions"
+                        and ctx["kind"] == "learning_run"
+                        and obj.get("type") == "modal"
+                        and obj.get("callback_id") == "ot_learning_run"
+                        and obj.get("team_id", cfg.team) == cfg.team
+                        and obj.get("app_id", cfg.app) == cfg.app
+                        and box.get("type", "view") == "view"
+                        and box.get("view_id", view) == view
+                        and box.get("channel_id", cfg.channel) == cfg.channel
+                    )
+                    action = actions[0]
+                    self._learning_action(
+                        cfg,
+                        actor,
+                        view,
+                        ctx,
+                        action["action_id"],
+                        action["value"],
+                        obj.get("hash", ""),
+                    )
+                    return
                 if not submission and any(
                     a.get("action_id") == "ot_charts" for a in body.get("actions", [])
                 ):
@@ -6228,6 +6505,7 @@ def main(argv: list[str] | None = None) -> int:
         socket_sdk = importlib.import_module("slack_sdk.socket_mode")
         response = importlib.import_module("slack_sdk.socket_mode.response").SocketModeResponse
         from opentour_cell.pilot import slack_views
+        from opentour_cell.pilot.eve_learning_service import open_eve_learning_service
         from opentour_cell.pilot.recipient_lifecycle_authority import open_lifecycle_authority
 
         bot = os.environ.get("SLACK_BOT_TOKEN", "")
@@ -6243,6 +6521,13 @@ def main(argv: list[str] | None = None) -> int:
             web,
             LocalTrainingStore(cfg.directory / "training.sqlite3", cfg.organization),
             slack_views,
+            learning_service=(
+                None
+                if args.flush_approvals or args.post_launcher
+                else open_eve_learning_service(
+                    cfg.directory, cfg.organization, cfg.team, cfg.channel
+                )
+            ),
             workflow_index_scope=open_workflow_index_scope
             if cfg.workflow_index_publication_file
             else None,
@@ -6293,7 +6578,17 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 app.on_decision = drainer.wake
                 drainer.start()
-            threading.Event().wait()
+            if app.learning_service is None:
+                threading.Event().wait()
+            else:
+                while True:
+                    app.learning_changed.clear()
+                    try:
+                        app.sync_learning_card()
+                    except Exception:
+                        # Disconnected Slack or unavailable current authority holds this delivery.
+                        pass
+                    app.learning_changed.wait(10)
         finally:
             socket.close()
         return 0

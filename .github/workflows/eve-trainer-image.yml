@@ -4,10 +4,18 @@ on:
     paths:
       - '.github/workflows/eve-trainer-image.yml'
       - 'training/gpu/**'
+      - 'infrastructure/images/eve-trainer.Dockerfile*'
       - 'training/src/opentour_training/__init__.py'
       - 'training/src/opentour_training/training/__init__.py'
       - 'training/src/opentour_training/training/eve_sft.py'
       - 'training/src/opentour_training/training/eve_run.py'
+      - 'training/src/opentour_training/training/eve_host.py'
+      - 'services/cell-runtime/src/opentour_cell/pilot/eve_exchange.py'
+      - 'services/cell-runtime/src/opentour_cell/pilot/eve_authority.py'
+      - 'services/cell-runtime/src/opentour_cell/pilot/eve_learning_service.py'
+      - 'services/cell-runtime/src/opentour_cell/pilot/slack_*.py'
+      - 'services/cell-runtime/src/opentour_cell/pilot/cycle_worker.py'
+      - 'tools/build_slack_pilot_kit.py'
       - 'training/profiles/*eve*.py'
   workflow_dispatch:
 
@@ -15,8 +23,38 @@ permissions:
   contents: read
 
 jobs:
-  package:
+  worker:
     runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+        with:
+          persist-credentials: false
+      - run: python3 tools/ci/prepare.py
+      - name: Verify the Linux worker, real offline Slack SDK and installable kit
+        run: |
+          set -euo pipefail
+          uv sync --frozen --all-packages --group dev
+          uv pip install --python .venv/bin/python --only-binary :all: --require-hashes -r services/cell-runtime/integrations/slack/requirements.txt
+          export PYTHONPATH=services/cell-runtime/src:packages/authority-journal/src:training/src
+          export OPENTOUR_UV="$(command -v uv)"
+          .venv/bin/python -m pytest -q services/cell-runtime/tests/pilot/{test_eve_authority,test_eve_learning_service,test_slack_eve_controls,test_slack_adapter,test_slack_views,test_learning_runs,test_cycle_worker_host,test_home_readiness}.py training/tests/training/{test_eve_sft,test_eve_run}.py tests/contract/test_gpu_training_lock.py
+          .venv/bin/python -m pytest -q -o 'python_functions=qualified_eve_*' services/cell-runtime/tests/pilot/test_eve_learning_service.py
+          .venv/bin/python tools/build_slack_pilot_kit.py "$RUNNER_TEMP/opentour-slack.zip"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: eve-worker-kit-${{ github.sha }}
+          path: ${{ runner.temp }}/opentour-slack.zip
+          if-no-files-found: error
+          retention-days: 30
+
+  package:
+    needs: worker
+    if: github.repository == 'kevon-dot/opentour-ai' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/codex/ope-563-installed-eve-controls')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
@@ -37,19 +75,37 @@ jobs:
           sudo install -d -m 0700 -o 10001 -g 10001 "$out/cpu"
           isolated=(--rm --pull never --network none --read-only --cap-drop ALL --security-opt no-new-privileges --tmpfs /tmp:rw,nosuid,nodev,size=1g)
           docker run "${isolated[@]}" "$image" --help
-          for op in fit status pause resume stop replay; do docker run "${isolated[@]}" "$image" "$op" --help; done
+          for op in serve fit status pause resume stop replay; do docker run "${isolated[@]}" "$image" "$op" --help; done
           docker run "${isolated[@]}" --mount "type=bind,src=$PWD/training/profiles,dst=/qualification,readonly" --mount "type=bind,src=$out/cpu,dst=/output" --entrypoint /opt/venv/bin/python "$image" -I -B -c 'import runpy,sys;sys.path.insert(0,"/qualification");sys.argv=["qualify", "--receipt", "/output/receipt.json"];runpy.run_path("/qualification/qualify_eve_resume_cpu.py",run_name="__main__")'
+          docker run "${isolated[@]}" --mount "type=bind,src=$PWD/training/profiles,dst=/qualification,readonly" --mount "type=bind,src=$out/cpu,dst=/output" --entrypoint /opt/venv/bin/python "$image" -I -B -c 'import runpy,sys;sys.path.insert(0,"/qualification");runpy.run_path("/qualification/qualify_eve_worker_cpu.py",run_name="__main__")' --receipt /output/worker.json --image-id "$image"
           sudo chown -R "$(id -u):$(id -g)" "$out/cpu"
           printf '%s\n' "$image" > "$out/image-id.txt"
           printf '%s\n' "$GITHUB_SHA" > "$out/source-commit.txt"
-          docker save opentour/eve-trainer:local | gzip -1 > "$out/eve-trainer.tar.gz"
+      - name: Publish the tested software image and verify its registry digest
+        env:
+          PACKAGE_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          repo="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/opentour-eve-trainer"
+          out="$RUNNER_TEMP/eve-image"
+          export DOCKER_CONFIG="$RUNNER_TEMP/eve-registry-auth"
+          mkdir -m 0700 "$DOCKER_CONFIG"
+          trap 'rm -rf "$DOCKER_CONFIG"' EXIT
+          echo "$PACKAGE_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          docker tag opentour/eve-trainer:local "$repo:$GITHUB_SHA"
+          docker push "$repo:$GITHUB_SHA"
+          ref=$(docker image inspect --format '{{index .RepoDigests 0}}' "$repo:$GITHUB_SHA")
+          [[ "$ref" =~ ^${repo}@sha256:[0-9a-f]{64}$ ]]
+          docker manifest inspect "$ref" | jq -e --arg id "$(cat "$out/image-id.txt")" '.config.digest == $id'
+          printf '%s\n' "$ref" > "$out/registry-ref.txt"
           cd "$out"
-          sha256sum eve-trainer.tar.gz image-id.txt source-commit.txt cpu/receipt.json > SHA256SUMS
-      - name: Save the loadable image and verification receipt
+          sha256sum image-id.txt registry-ref.txt source-commit.txt cpu/*.json > SHA256SUMS
+          printf 'Tested trainer image `%s`\n' "$ref" >> "$GITHUB_STEP_SUMMARY"
+      - name: Save the image identity and CPU receipts
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
-          name: eve-trainer-linux-amd64-${{ github.sha }}
+          name: eve-trainer-proof-${{ github.sha }}
           path: ${{ runner.temp }}/eve-image
           if-no-files-found: error
           compression-level: 0
-          retention-days: 7
+          retention-days: 30

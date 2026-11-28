@@ -6,8 +6,8 @@ target "runtime" {
 }
 
 target "eve" {
-  context    = "training"
-  dockerfile = "gpu/eve.Dockerfile"
+  context    = "."
+  dockerfile = "infrastructure/images/eve-trainer.Dockerfile"
   contexts   = { "eve-runtime.invalid/locked" = "target:runtime" }
   platforms  = ["linux/amd64"]
   tags       = ["opentour/eve-trainer:local"]
