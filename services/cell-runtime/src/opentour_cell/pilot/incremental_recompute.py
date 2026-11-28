@@ -14,9 +14,12 @@ carry ``fit_authorized = False`` and rows are never exposed, only digests, so pr
 per-case answers cannot leak through a manifest.
 
 A synthetic child's artifact derives from its ancestors, so the cache key binds the full
-ancestor chain as ordered ``(ancestor_id, family_revision)`` pairs: a parent revision bump or a
-re-parent is a cache miss for every descendant even when the inherited inputs are unchanged.
-That changed the key shape, so ``TOOL_VERSION`` is v2.
+ancestor chain in order, each entry ``(ancestor_id, family_revision, tenant, purpose, split)``:
+a parent revision bump, a re-parent or an ancestor's scope move is a cache miss for every
+descendant even when the inherited inputs are unchanged. That changed the key shape, so
+``TOOL_VERSION`` is v2; any further key-shape change must bump it again (a golden test pins
+the key). The registry refuses self-parenting, cycles and parent edges that cross tenant,
+purpose or split.
 
 The cache key binds ``TOOL_VERSION``, ``VERIFIER_VERSION`` (the verifier/finality rule a
 built artifact was checked under) and ``ARTIFACT_SCHEMA_VERSION``. The same versions are in
@@ -29,6 +32,8 @@ refused (``SOURCE_STATE_MOVED``; a moved grant on a published built result is re
 ``AUTHORITY_MOVED``). On the next run, the current state must equal the last published state
 with the pending events replayed onto it; otherwise the run is a bounded full rebuild
 (``source_state_rewritten``), so a rewrite cannot leave stale reused results in place.
+Residual: a writer that rewrites ``state`` and ``published_state`` together, consistently, is
+not detectable here; the store trusts its own published-state row.
 """
 
 from __future__ import annotations
@@ -216,6 +221,7 @@ class Registry:
                 if fam.parent_id not in self.families:
                     raise RecomputeError("UNKNOWN_PARENT")
                 self.children[fam.parent_id].append(fam.family_id)
+        self._validate_lineage()
         # Development and protected indexes are separate: development roots are queried alone.
         self.by_field: dict[str, dict[str, set[str]]] = {s: {} for s in SPLITS}
         self.by_source: dict[str, dict[str, set[str]]] = {s: {} for s in SPLITS}
@@ -226,6 +232,35 @@ class Registry:
                 self.by_field[fam.split].setdefault(ref.key(), set()).add(fam.family_id)
                 self.by_source[fam.split].setdefault(ref.source_ref, set()).add(fam.family_id)
 
+    def _validate_lineage(self) -> None:
+        """Refuse self-parenting, cycles and any parent edge that crosses tenant, purpose or split.
+
+        A child inherits its parent's consumption and fences, so a cross-scope edge would let
+        content from another tenant, purpose or split (a protected parent under a development
+        child) flow into the child. The OPE-525 contract forbids sharing authority across
+        tenants or purposes, and a cross-split merge invalidates the split.
+        """
+        for fam in self.families.values():
+            if fam.parent_id is None:
+                continue
+            if fam.parent_id == fam.family_id:
+                raise RecomputeError("SELF_PARENT")
+            parent = self.families[fam.parent_id]
+            if parent.tenant != fam.tenant:
+                raise RecomputeError("LINEAGE_CROSS_TENANT")
+            if parent.purpose != fam.purpose:
+                raise RecomputeError("LINEAGE_CROSS_PURPOSE")
+            if parent.split != fam.split:
+                raise RecomputeError("LINEAGE_CROSS_SPLIT")
+        for fam_id in self.families:
+            seen = {fam_id}
+            cursor = self.families[fam_id].parent_id
+            while cursor is not None:
+                if cursor in seen:
+                    raise RecomputeError("LINEAGE_CYCLE")
+                seen.add(cursor)
+                cursor = self.families[cursor].parent_id
+
     def ancestry(self, family_id: str) -> set[str]:
         chain: set[str] = set()
         cursor: str | None = family_id
@@ -235,13 +270,19 @@ class Registry:
         return chain
 
     def lineage(self, family_id: str) -> list[list[str]]:
-        """Ordered ``[ancestor_id, family_revision]`` pairs, nearest parent first, self excluded."""
+        """Ancestors nearest parent first, self excluded, as ordered entries of
+        ``[ancestor_id, family_revision, tenant, purpose, split]``.
+
+        The scope fields duplicate the child's own (the registry refuses cross-scope edges) and
+        are bound anyway, so a later move of any ancestor changes every descendant's key.
+        """
         chain: list[list[str]] = []
         seen = {family_id}
         cursor = self.families[family_id].parent_id
         while cursor is not None and cursor not in seen:
             seen.add(cursor)
-            chain.append([cursor, self.families[cursor].revision])
+            anc = self.families[cursor]
+            chain.append([cursor, anc.revision, anc.tenant, anc.purpose, anc.split])
             cursor = self.families[cursor].parent_id
         return chain
 
@@ -522,12 +563,16 @@ class RecomputeService:
 
         ``submit`` is the only writer that advances state, and it always appends the event, so
         a mismatch means the state was rewritten outside the event log. A missing row (a store
-        written before this check existed) counts as rewritten: the safe direction.
+        written before this check existed) or a corrupt one counts as rewritten: the safe
+        direction, and the bounded rebuild's publish writes a fresh row.
         """
         row = self.db.execute("select v from meta where k='published_state'").fetchone()
         if row is None:
             return True
-        expected = SourceState.from_json(json.loads(row[0]))
+        try:
+            expected = SourceState.from_json(json.loads(row[0]))
+        except (ValueError, KeyError, TypeError, IndexError):
+            return True  # corrupt row: nothing proves reuse is safe, so rebuild (and rewrite it)
         for event in pending:
             expected = apply_event(expected, event)
         return canonical(expected.to_json()) != canonical(state.to_json())

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import time
 from pathlib import Path
@@ -21,11 +22,13 @@ from opentour_cell.pilot.incremental_recompute import (
     LeaseLost,
     Manifest,
     PublishConflict,
+    RecomputeError,
     RecomputeService,
     Registry,
     SimulatedCrash,
     SourceState,
 )
+from opentour_cell.pilot.operating_point import canonical, digest
 
 TENANT, PURPOSE = "generated-tenant-a", "generated-purpose"
 SRC = "simulated:source-r1"
@@ -353,18 +356,24 @@ def test_randomized_event_sequences_match_a_clean_rebuild(tmp_path: Path) -> Non
     for seed in range(60):
         rng = random.Random(seed)
         count = rng.randint(3, 12)
-        family_list = [
-            Family(
-                f"F{i}",
-                rng.choice(("a", "b")),
-                "p",
-                rng.choice((DEVELOPMENT, PROTECTED)),
-                tuple(rng.sample(fields, rng.randint(0, 2))),
-                parent_id=f"F{rng.randrange(i)}" if i and rng.random() < 0.4 else None,
-                lineage_complete=rng.random() > 0.15,
+        family_list: list[Family] = []
+        for i in range(count):
+            tenant, split = rng.choice(("a", "b")), rng.choice((DEVELOPMENT, PROTECTED))
+            consumes = tuple(rng.sample(fields, rng.randint(0, 2)))
+            parent = family_list[rng.randrange(i)] if i and rng.random() < 0.4 else None
+            if parent is not None:  # the registry refuses cross-tenant or cross-split lineage
+                tenant, split = parent.tenant, parent.split
+            family_list.append(
+                Family(
+                    f"F{i}",
+                    tenant,
+                    "p",
+                    split,
+                    consumes,
+                    parent_id=parent.family_id if parent else None,
+                    lineage_complete=rng.random() > 0.15,
+                )
             )
-            for i in range(count)
-        ]
         state = SourceState(
             {f.key(): (1, rng.randint(0, 9)) for f in fields}, grants={("a", "p"): 1, ("b", "p"): 1}
         )
@@ -618,7 +627,11 @@ def restart_with(tmp_path: Path, revised: list[Family]) -> tuple[Manifest, ir.Ru
 
 def test_cache_key_binds_the_ordered_ancestor_chain() -> None:
     registry, state = Registry(lineage_fams()), base_state()
-    assert registry.lineage("A-grandchild") == [["A-child", "family-r1"], ["A", "family-r1"]]
+    dev = [TENANT, PURPOSE, DEVELOPMENT]
+    assert registry.lineage("A-grandchild") == [
+        ["A-child", "family-r1", *dev],
+        ["A", "family-r1", *dev],
+    ]
     assert registry.lineage("A") == []
     for revised in (lineage_fams(a_revision="family-r2"), lineage_fams(child_parent="B")):
         other = Registry(revised)
@@ -650,3 +663,223 @@ def test_reparent_with_identical_inputs_misses_the_cache(tmp_path: Path) -> None
         assert results[family].status == BUILT
         assert results[family].cache_key != boot.results[family].cache_key
     assert report.jobs_started == 2 and report.cache_hits == 3
+
+
+# Deliberate change-detector. If this fails, the cache-key shape or a bound version changed.
+# Bump TOOL_VERSION first (stores keyed under the old shape must rebuild, not reuse), then
+# update both golden values. Never update GOLDEN_KEYS alone.
+GOLDEN_TOOL_VERSION = "opentour.recompute.v2"
+GOLDEN_KEYS = {
+    "A": "b2eb0d171ce4ea69e16f820849348816f0e237c2e17d6bf0af35c05489b043e8",
+    "A-child-1": "6a3d760fd40b4f631c34b9d8970c2238774e315d3503a175e486108527e28d54",
+    "P": "9a144608c0eb3efa162970718b62c8808b5f881a0d01bd559d05727fe139b9da",
+}
+
+
+def test_cache_key_golden_change_detector() -> None:
+    assert ir.TOOL_VERSION == GOLDEN_TOOL_VERSION
+    registry, state = Registry(fams()), base_state()
+    keys = {f: ir.evaluate_family(registry, f, state).cache_key for f in GOLDEN_KEYS}
+    assert keys == GOLDEN_KEYS
+
+
+LEGACY_TOOL_VERSION = "opentour.recompute.v1"
+
+
+def legacy_cache_key(registry: Registry, family_id: str, state: SourceState) -> str:
+    """The pre-v2 (107a56c) key: the direct ``parent`` id only, no ancestor chain."""
+    fam = registry.families[family_id]
+    inputs = [
+        [ref.source_ref, ref.field_path, *state.values.get(ref.key(), (0, None))]
+        for ref in registry.effective_consumes(family_id)
+    ]
+    return digest({
+        "tenant": fam.tenant, "purpose": fam.purpose,
+        "epoch": state.grants.get((fam.tenant, fam.purpose)), "inputs": inputs,
+        "family": fam.family_id, "family_revision": fam.revision, "parent": fam.parent_id,
+        "split": fam.split, "tool": LEGACY_TOOL_VERSION, "verifier": ir.VERIFIER_VERSION,
+        "artifact_schema": ir.ARTIFACT_SCHEMA_VERSION,
+    })  # fmt: skip
+
+
+def legacy_fingerprint(registry: Registry) -> str:
+    """The pre-v2 (107a56c) stored registry fingerprint."""
+    return digest({
+        "versions": [LEGACY_TOOL_VERSION, ir.VERIFIER_VERSION, ir.ARTIFACT_SCHEMA_VERSION],
+        "families": [
+            [
+                f.family_id, f.tenant, f.purpose, f.split, f.parent_id, f.lineage_complete,
+                f.revision, [ref.key() for ref in f.consumes],
+            ]
+            for f in (registry.families[k] for k in sorted(registry.families))
+        ],
+    })  # fmt: skip
+
+
+def write_legacy_store(path: str, families: list[Family], state: SourceState) -> Manifest:
+    """A store as 107a56c left it: v1 keys in the snapshot and job cache, v1 fingerprint."""
+    service = RecomputeService(path, Registry(families))
+    boot = service.bootstrap(state)
+    results = {}
+    for family, result in boot.results.items():
+        if result.status == BUILT:
+            key = legacy_cache_key(service.registry, family, state)
+            content = digest({"cache_key": key, "kind": "family-artifact"})
+            result = dataclasses.replace(result, cache_key=key, digest=content)
+        results[family] = result
+    legacy = Manifest(1, None, None, results)
+    db = service.db
+    db.execute(
+        "update snapshots set manifest=?, semantic=? where revision=1",
+        (canonical(legacy.to_json()), legacy.semantic),
+    )
+    db.execute("delete from jobs")
+    for result in results.values():
+        if result.status == BUILT:
+            db.execute(
+                "insert into jobs values(?,?,?)",
+                (result.cache_key, result.family_id, canonical(result.to_json())),
+            )
+    db.execute(
+        "insert or replace into meta values('registry',?)", (legacy_fingerprint(service.registry),)
+    )
+    service.close()
+    return legacy
+
+
+def test_pre_v2_store_runs_one_bounded_rebuild_then_admits(tmp_path: Path) -> None:
+    path = str(tmp_path / "legacy.db")
+    legacy = write_legacy_store(path, fams(), base_state())
+    service = RecomputeService(path, Registry(fams()))
+    assert service.admit("A") is False  # v1 keys never match a v2 evaluation
+    report = service.run("w", now=0)
+    built = [f for f, r in report.manifest.results.items() if r.status == BUILT]
+    assert report.plan.mode == "bounded_full_rebuild"
+    assert all("registry_changed" in report.plan.reasons[f] for f in service.registry.families)
+    assert report.cache_hits == 0 and report.jobs_started == len(built) > 0
+    for family in built:
+        assert report.manifest.results[family].cache_key != legacy.results[family].cache_key
+    parity(service)
+    assert service.admit("A") is True and service.admit("A-child-1") is True
+    assert service.run("w", now=1).plan.dirty == ()  # v2 fingerprint stored: incremental again
+
+
+def chain_registry(root: str, middle: str) -> Registry:
+    return Registry([
+        Family(root, TENANT, PURPOSE, DEVELOPMENT, (FREIGHT,)),
+        Family(middle, TENANT, PURPOSE, DEVELOPMENT, (FREIGHT,), parent_id=root),
+        Family("G", TENANT, PURPOSE, DEVELOPMENT, (), parent_id=middle),
+    ])  # fmt: skip
+
+
+def test_ancestor_order_is_bound_not_only_the_ancestor_set() -> None:
+    """Swapping parent and grandparent keeps G's ancestor set and inputs; the key must move."""
+    first, swapped, state = chain_registry("P", "Q"), chain_registry("Q", "P"), base_state()
+    assert first.effective_consumes("G") == swapped.effective_consumes("G")
+    assert sorted(first.lineage("G")) == sorted(swapped.lineage("G"))
+    before = ir.evaluate_family(first, "G", state)
+    after = ir.evaluate_family(swapped, "G", state)
+    assert before.status == after.status == BUILT
+    assert after.cache_key != before.cache_key
+
+
+def test_registry_refuses_self_parenting() -> None:
+    with pytest.raises(RecomputeError) as exc:
+        Registry([Family("S", TENANT, PURPOSE, DEVELOPMENT, (FREIGHT,), parent_id="S")])
+    assert exc.value.code == "SELF_PARENT"
+
+
+@pytest.mark.parametrize("length", [2, 3])
+def test_registry_refuses_lineage_cycles(length: int) -> None:
+    names = [f"cycle-{i}" for i in range(length)]
+    families = [
+        Family(name, TENANT, PURPOSE, DEVELOPMENT, (FREIGHT,), parent_id=names[i - 1])
+        for i, name in enumerate(names)
+    ]
+    with pytest.raises(RecomputeError) as exc:
+        Registry(families)
+    assert exc.value.code == "LINEAGE_CYCLE"
+
+
+OTHER_PURPOSE = "generated-purpose-b"
+
+
+def move_scope(family: Family, scope: str) -> Family:
+    """The same family moved to another tenant, purpose or split."""
+    if scope == "tenant":
+        return dataclasses.replace(family, tenant=OTHER_TENANT)
+    if scope == "purpose":
+        return dataclasses.replace(family, purpose=OTHER_PURPOSE)
+    return dataclasses.replace(family, split=PROTECTED)
+
+
+@pytest.mark.parametrize(
+    ("scope", "code"),
+    [
+        ("tenant", "LINEAGE_CROSS_TENANT"),
+        ("purpose", "LINEAGE_CROSS_PURPOSE"),
+        ("split", "LINEAGE_CROSS_SPLIT"),
+    ],
+)
+def test_registry_refuses_cross_scope_lineage(scope: str, code: str) -> None:
+    """A protected (or other-tenant/purpose) parent must not feed a development child."""
+    parent = move_scope(Family("A", TENANT, PURPOSE, DEVELOPMENT, (FREIGHT,)), scope)
+    child = Family("A-child", TENANT, PURPOSE, DEVELOPMENT, (), parent_id="A")
+    with pytest.raises(RecomputeError) as exc:
+        Registry([parent, child])
+    assert exc.value.code == code
+
+
+def test_lineage_split_move_invalidates_the_child(tmp_path: Path) -> None:
+    """Moving a lineage to the protected split rebuilds the child under a new key."""
+    protected = [
+        dataclasses.replace(f, split=PROTECTED) if f.family_id in ("A", "A-child") else f
+        for f in lineage_fams()
+        if f.family_id != "A-grandchild"
+    ]
+    boot, report, _ = restart_with(tmp_path, protected)
+    assert report.plan.mode == "bounded_full_rebuild"
+    assert report.manifest.results["A-child"].split == PROTECTED
+    assert report.manifest.results["A-child"].cache_key != boot.results["A-child"].cache_key
+
+
+class _UnguardedRegistry(Registry):
+    """Skips the scope guard, to pin that the key itself binds each ancestor's scope."""
+
+    def _validate_lineage(self) -> None:
+        pass
+
+
+@pytest.mark.parametrize("scope", ["tenant", "purpose", "split"])
+def test_ancestor_scope_move_alone_changes_the_child_key(scope: str) -> None:
+    """Defence in depth: if the guard were bypassed, a moved ancestor still misses the cache."""
+    families = lineage_fams()
+    moved = [move_scope(f, scope) if f.family_id == "A" else f for f in families]
+    state = SourceState(
+        base_state().values,
+        grants={(TENANT, PURPOSE): 1, (OTHER_TENANT, PURPOSE): 1, (TENANT, OTHER_PURPOSE): 1},
+    )
+    before = ir.evaluate_family(_UnguardedRegistry(families), "A-child", state)
+    after = ir.evaluate_family(_UnguardedRegistry(moved), "A-child", state)
+    assert before.status == after.status == BUILT
+    assert after.cache_key != before.cache_key
+
+
+@pytest.mark.parametrize(
+    "corrupt",
+    [
+        "generated-not-json",
+        "[]",
+        '{"values": {}}',
+        '{"values": {"k": 5}, "withdrawn": [], "merges": [], "grants": []}',
+    ],
+)
+def test_corrupt_published_state_row_forces_bounded_rebuild(
+    svc: RecomputeService, corrupt: str
+) -> None:
+    svc.db.execute("insert or replace into meta values('published_state',?)", (corrupt,))
+    report = svc.run("w", now=0)
+    assert report.plan.mode == "bounded_full_rebuild"
+    assert all("source_state_rewritten" in report.plan.reasons[f] for f in svc.registry.families)
+    parity(svc)
+    assert svc.run("w", now=1).plan.dirty == ()  # publish wrote a fresh row
