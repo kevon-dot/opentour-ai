@@ -195,7 +195,11 @@ def _observation(
             environment_ref=rollback.environment_ref,
             restored_version=rollback.expected_fallback_version,
         )
-    specific = {"serving_readback_ref"} if is_rollback else {"evidence_revision", "replayed_cases"}
+    specific = (
+        {"rollback_operation_receipt_ref", "serving_readback_ref"}
+        if is_rollback
+        else {"evidence_revision", "replayed_cases"}
+    )
     try:
         raw = repair_bundle._read(
             directory / f"recipient-lifecycle-{binding.release_ref}.{kind}.json",
@@ -221,7 +225,10 @@ def _observation(
             ):
                 return None
         else:
-            require_ref(payload["serving_readback_ref"])
+            operation = require_ref(payload["rollback_operation_receipt_ref"])
+            readback = require_ref(payload["serving_readback_ref"])
+            if len({rollback.authorization_ref, operation, readback}) != 3:
+                return None
         if binding.receiver_receipt_ref != _delivery_reference(
             binding, str(payload["package_sha256"]), received_at
         ):
@@ -405,7 +412,14 @@ def prepare_destination_rollback_claim(
         or observed.environment_ref != rollback.environment_ref
         or observed.previous_serving_version != policy.binding.artifact_sha256
         or observed.restored_version != rollback.expected_fallback_version
-        or observed.operation_receipt_ref == observed.serving_readback_ref
+        or len(
+            {
+                rollback.authorization_ref,
+                observed.operation_receipt_ref,
+                observed.serving_readback_ref,
+            }
+        )
+        != 3
         or not _sha(observed.package_sha256)
         or type(observed.observed_at) is not int
         or type(observed.delivery_received_at) is not int
@@ -425,5 +439,6 @@ def prepare_destination_rollback_claim(
         "rollback_authorization_ref": rollback.authorization_ref,
         "environment_ref": rollback.environment_ref,
         "restored_version": rollback.expected_fallback_version,
+        "rollback_operation_receipt_ref": observed.operation_receipt_ref,
         "serving_readback_ref": observed.serving_readback_ref,
     }
