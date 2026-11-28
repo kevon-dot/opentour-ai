@@ -116,6 +116,17 @@ key is caller-supplied authority, so this module makes the narrow claim below an
 * The digests are not issuer-authenticated. They are at most ``locally_keyed``, and the packet
   says so.
 
+Incumbent revision (F6). ``freeze_plan`` accepts any planner identifier as the incumbent
+revision, so it is caller-chosen free text and is published only as a keyed digest under the
+same purpose- and engagement-scoped key, domain-separated from slice names. A keyed digest was
+chosen over a digest bound to the run because no keyless verifier needs it: the verdict binds
+the raw comparator revision against the comparison, not against the packet, and a run-bound
+plain digest would be guessable from the published run reference. Recorded limit: on an
+improvement packet the remedy binding requires ``binding.fallback_digest`` (a 64-hex content
+digest the approval consumer needs for rollback) to equal the incumbent revision, so there the
+revision is published by that context field, by contract. Identifier-form revisions cannot
+reach an improvement packet, because the fallback digest must be 64-hex.
+
 Published digests that still cover raw names (recorded, not fixed here). ``comparison
 .evidence_revision`` and ``plan_revision`` are plain SHA-256 over the whole comparison and
 plan, and both contain the raw slice names in ``terms`` and in each arm's ``critical_slices``.
@@ -243,7 +254,8 @@ _SLICE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}")
 # Rendered decimal measurements (``pilot_metrics.rendered``): six fixed places, or absent.
 _DECIMAL = re.compile(r"[0-9]{1,40}\.[0-9]{6}")
 # The planner's own identifier shape (``simple_repair.identifier``). ``freeze_plan`` requires only
-# this of ``incumbent_revision``, so the incumbent revision cannot be required to be a digest.
+# this of ``incumbent_revision``, so the incumbent revision cannot be required to be a digest. It
+# is therefore never published as-is: the packet carries ``incumbent_revision_digest`` (F6).
 _IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}")
 _ECON_BASES = ("unavailable", "observed", "modeled", "generated")
 _UNCERTAINTY = ("wilson_95_independent_verified_cases", "unavailable")
@@ -471,6 +483,17 @@ def _terms_ok(terms: Any) -> bool:
     )
 
 
+def incumbent_revision_digest(revision: str, key: bytes, *, tenant: str, engagement: str) -> str:
+    """Keyed digest of the incumbent arm's revision (F6), under the same scoped slice key."""
+    return _revision_mac(revision, _scoped_key(key, tenant, engagement))
+
+
+def _revision_mac(revision: str, scoped: bytes) -> str:
+    # Domain-separated from slice names: a slice name is a bare identifier and never begins
+    # with "[", so the two can never share an input or a digest.
+    return _mac(canonical(["incumbent_revision", revision]), scoped)
+
+
 def _comparison_scope(comparison: Json) -> tuple[str, str]:
     return comparison["organization"], comparison["engagement"]
 
@@ -616,6 +639,11 @@ def _verdict_ok(verdict: Any) -> bool:
         and verdict.get("schema_version") == VERDICT
         and _sealed(verdict, "verdict_digest")
         and isinstance(verdict.get("denominator"), dict)
+        # OPE-528 emits content digests here. A free-text revision (such as an identifier-form
+        # incumbent) inside a verdict whose digest the packet publishes could be confirmed by
+        # guessing, so only 64-hex values are accepted (F6).
+        and _digest_ok(verdict.get("candidate_digest"))
+        and _digest_ok(verdict.get("comparator_digest"))
     )
 
 
@@ -632,11 +660,15 @@ def _denominator_ok(comparison: Json) -> bool:
     )
 
 
-def _arm_aggregate(arm: Json, slice_key: bytes) -> Json:
+def _arm_aggregate(name: str, arm: Json, slice_key: bytes) -> Json:
     metrics = arm["metrics"]
     economics = metrics["economics"]
     return {
-        "revision": arm["revision"],
+        # The incumbent revision is caller-chosen free text (any planner identifier), so it is
+        # published only as a keyed digest. The other arms' revisions are content digests.
+        "revision": _revision_mac(arm["revision"], slice_key)
+        if name == "incumbent"
+        else arm["revision"],
         "prediction_digest": arm["prediction_digest"],
         "counts": {k: metrics[k] for k in _ARM_FIELDS},
         "coverage": [metrics["coverage"]["numerator"], metrics["coverage"]["denominator"]],
@@ -704,7 +736,8 @@ def _assemble(
         if point_failure:
             return None, point_failure
     arms = {
-        name: _arm_aggregate(arm, slice_key) for name, arm in sorted(comparison["arms"].items())
+        name: _arm_aggregate(name, arm, slice_key)
+        for name, arm in sorted(comparison["arms"].items())
     }
     pairs = {
         name: {**pair["paired"], "observed_comparison": pair["observed_comparison"]}
@@ -736,6 +769,8 @@ def _assemble(
             "keyed_engagement": ctx.engagement,
             "key_custody": "customer_worker_local",
             "names_disclosed": False,
+            # F6: the incumbent arm's revision is published under the same keyed digest.
+            "incumbent_revision": "keyed_digest",
             # Engagement-local key, no custody or signing contract yet (OPE-566 unlanded).
             "issuer_authenticated": False,
         },

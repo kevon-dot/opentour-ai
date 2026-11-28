@@ -1834,6 +1834,7 @@ def test_packet_states_the_slice_digest_is_not_issuer_authenticated(tmp_path):
         "keyed_engagement": comparison["engagement"],
         "key_custody": "customer_worker_local",
         "names_disclosed": False,
+        "incumbent_revision": "keyed_digest",
         "issuer_authenticated": False,
     }
     assert out.packet["audit"]["issuer_authenticated"] is False
@@ -2315,7 +2316,7 @@ def test_stage_refuses_comparison_problems_before_any_key_lookup(runs, tmp_path,
 # ---------- F: lane-owner review of d7520b0 (key-free oracle, engagement, weak keys, holds)
 
 
-def named_hold(root):
+def named_hold(root, incumbent=None):
     """A real named-slice run that the planner holds (the reviewer's probe-4 shape)."""
     dev, protected = rows("dev"), rows("protected")
     for r in dev + protected:
@@ -2326,6 +2327,7 @@ def named_hold(root):
         protected=protected,
         terms={**STRICT, "critical_slices": list(SLICE_NAMES), "minimum_verified_cases": 1000},
         allowed_slices=list(SLICE_NAMES),
+        incumbent=incumbent,
     )[0]
     assert comparison["decision"]["disposition"] == "hold", comparison["decision"]
     return comparison
@@ -2351,6 +2353,17 @@ def path_bundle(path, tmp_path):
         b = live_bundle(comparison, tmp_path / "b")
         b.receipt = make_receipt()
         b.verdict = make_verdict(comparison, b.receipt, b.ctx)  # a hold publishes its digest
+        return comparison, b
+    if path == "hold-identifier-incumbent":
+        comparison = named_hold(tmp_path, incumbent=INCUMBENT_ID)
+        b = live_bundle(comparison, tmp_path / "b")
+        b.ctx = context(comparison, fallback_digest=digest("generated-fallback"))
+        b.authority = Authority(b.ctx)
+        b.receipt = make_receipt()
+        # OPE-528 emits content digests, never the identifier, as the comparator.
+        b.verdict = make_verdict(
+            comparison, b.receipt, b.ctx, comparator_digest=digest("generated-cmp")
+        )
         return comparison, b
     comparison = named_slice_run(tmp_path)
     b = Bundle(comparison, tmp_path / "b")
@@ -2541,6 +2554,11 @@ def published_hex_runs(*surfaces):
     return found
 
 
+# A caller-chosen, identifier-form incumbent revision (F6) and what a guesser might try for it.
+INCUMBENT_ID = "incumbent-v1"
+INCUMBENT_GUESSES = ("incumbent-v1", "incumbent-v2", "generated-incumbent", "incumbent")
+
+
 def candidate_reconstructions(comparison, verdict):
     """Everything a brute-forcer can build per guessed name pair from public knowledge: the raw
     operating-point digest, a verdict re-sealed around it (form declared or not), and plain
@@ -2562,9 +2580,14 @@ def candidate_reconstructions(comparison, verdict):
                     if not declared:
                         forged.pop("operating_point_digest_form", None)
                     yield names, digest(forged)
+    for guess in INCUMBENT_GUESSES:
+        yield ("incumbent", guess), hashlib.sha256(guess.encode()).hexdigest()
+        yield ("incumbent", guess), digest(guess)
+        if body is not None:
+            yield ("incumbent", guess), digest({**body, "comparator_digest": guess})
 
 
-@pytest.mark.parametrize("path", ["improvement", "hold"])
+@pytest.mark.parametrize("path", ["improvement", "hold", "hold-identifier-incumbent"])
 def test_brute_force_recovers_nothing_from_any_published_digest(tmp_path, path):
     """F5: on both paths, every hex run published in the packet, the event and the outbox rows
     is compared (as a prefix, so truncated ids count) against every candidate reconstruction.
@@ -2593,11 +2616,30 @@ def test_brute_force_recovers_nothing_from_any_published_digest(tmp_path, path):
     assert out.packet["comparison"]["operating_point_digest"] in runs_
     assert out.packet["packet_digest"][:32] in runs_  # the truncated event id is collected
     hits = [
-        names
+        (names, run)
         for names, guess in candidate_reconstructions(comparison, b.verdict)
-        if any(guess.startswith(run) for run in runs_)
+        for run in runs_
+        if guess.startswith(run)
     ]
-    assert hits == []
+    # The one disclosure by contract (F6, module docstring): ``binding.fallback_digest`` is the
+    # worker's fallback content digest, which the remedy binding sets equal to a 64-hex incumbent
+    # revision. It is the only allowed hit, it must sit in the binding, and nowhere else.
+    contract = [h for h in hits if h[1] == b.ctx.fallback_digest]
+    assert [h for h in hits if h not in contract] == []
+    # The fixtures' 64-hex incumbent is digest("incumbent"), so the scan must see the contract
+    # hit there (proving it reads the binding); the identifier-form incumbent has none.
+    assert bool(contract) is (path != "hold-identifier-incumbent"), contract
+    if contract:
+        assert out.packet["binding"]["fallback_digest"] == b.ctx.fallback_digest
+        assert out.packet["arms"]["incumbent"]["revision"] != b.ctx.fallback_digest
+    # Plain-text scan for the incumbent revision guesses (``incumbent`` itself is an arm name).
+    texts = set(every_text([out.packet, list(b.sink.effects.values()), b.store.snapshot()]))
+    for text in [t for t in texts if t[:1] in "{["]:
+        try:
+            texts |= set(every_text(json.loads(text)))
+        except ValueError:
+            pass
+    assert [g for g in INCUMBENT_GUESSES if g != "incumbent" and g in texts] == []
     # Positive control: plant one raw-terms digest into a copy and the scan finds it.
     planted = {**out.packet, "extra": {"nested": [raw_digest_with(comparison, SLICE_NAMES)]}}
     assert any(
@@ -2605,3 +2647,37 @@ def test_brute_force_recovers_nothing_from_any_published_digest(tmp_path, path):
         for names, guess in candidate_reconstructions(comparison, None)
         if any(guess.startswith(run) for run in published_hex_runs(planted))
     )
+
+
+def test_incumbent_revision_is_published_as_a_keyed_digest(tmp_path):
+    """F6: the identifier-form incumbent revision is keyed exactly like the slice names, and the
+    keyed digest is domain-separated from a slice name with the same text."""
+    comparison = named_hold(tmp_path, incumbent=INCUMBENT_ID)
+    b = live_bundle(comparison, tmp_path / "b")
+    b.ctx = context(comparison, fallback_digest=digest("generated-fallback"))
+    b.authority = Authority(b.ctx)
+    out = b.stage()
+    assert out.status == "staged", out
+    key = key_for(comparison)
+    expected = cp.incumbent_revision_digest(INCUMBENT_ID, key, **scope(comparison))
+    assert out.packet["arms"]["incumbent"]["revision"] == expected
+    assert expected != cp.slice_digest(INCUMBENT_ID, key, **scope(comparison))
+    other = cp.incumbent_revision_digest(INCUMBENT_ID, KAT_KEY, **scope(comparison))
+    assert other != expected  # keyed: another key gives another digest
+    assert out.packet["arms"]["simple"]["revision"] == comparison["arms"]["simple"]["revision"]
+
+
+def test_verdict_with_a_free_text_comparator_is_refused(tmp_path):
+    """F6: a verdict whose comparator (or candidate) is not a content digest is refused, so an
+    identifier-form incumbent cannot be confirmed through the published verdict digest."""
+    comparison = named_hold(tmp_path, incumbent=INCUMBENT_ID)
+    b = live_bundle(comparison, tmp_path / "b")
+    b.ctx = context(comparison, fallback_digest=digest("generated-fallback"))
+    b.authority = Authority(b.ctx)
+    b.receipt = make_receipt()
+    for field in ("comparator_digest", "candidate_digest"):
+        verdict = make_verdict(comparison, b.receipt, b.ctx, **{field: INCUMBENT_ID})
+        out = b.stage(verdict=verdict)
+        assert out.reason == "independent_verdict_unverified" and empty(b.store), (field, out)
+    good = make_verdict(comparison, b.receipt, b.ctx, comparator_digest=digest("generated-cmp"))
+    assert b.stage(verdict=good).status == "staged"
