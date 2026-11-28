@@ -1,10 +1,10 @@
 """Resolve a workflow claim to its recorded consumed fields and derive impact sets (OPE-544).
 
-This is a reader over immutable, customer-local consumed-field manifests written at
-decision time (OPE-416). It never recreates provenance from current documents and never
-guesses an edge: a claim or change that cannot be linked through recorded edges returns
-``unknown`` / ``hold``. All joins happen locally; nothing here performs I/O beyond the
-manifest directory.
+This is a reader over write-once, digest-pinned (unsigned), customer-local consumed-field
+manifests written at decision time (OPE-416). It never recreates provenance from current
+documents and never guesses an edge: a claim or change that cannot be linked through recorded
+edges returns ``unknown`` / ``hold``. All joins happen locally; nothing here performs I/O
+beyond the manifest directory.
 
 The producer record shape (``opentour.pilot.consumed-field-manifest.v1``) is a reader-side
 proposal until OPE-416 publishes its writer; see ``validate_manifest`` for the exact fields.
@@ -13,6 +13,19 @@ Status vocabulary (this module's reading of a spec that permits "unknown or hold
 gap for the coordinator, not a settled product decision): ``unknown`` means no recorded edge
 links the claim or consumer; ``hold`` means an edge exists but is unusable (an unrecorded
 dependency, or two manifests claiming the same claim). Neither is ever completed by a guess.
+
+Integrity: ``digest_self_consistent_only``. A manifest is pinned by a plain, unkeyed sha256
+of its own bytes. That is tamper evidence only (an edit of one file is noticed); it is not
+authentication, and anyone who can rewrite both the manifest and its pin can forge one. No
+signing or key-custody contract exists for this reader yet (OPE-566). The resolution receipt
+(``Resolution.to_json``) and the impact receipt (``ImpactSet.to_json``) carry
+``integrity: digest_self_consistent_only`` inside their digested body, so no consumer reads
+more into them. The redacted denial receipt carries no such field.
+
+Time authority: grant expiry is judged on the worker's own clock (``_worker_now``), never on
+a caller-supplied time. ``Request.now`` can only narrow the window: the grant is treated as
+expired once either clock reaches ``expires_at``, so back-dating cannot revive an expired
+grant and future-dating cannot extend one.
 
 Simulated and NOT proven: everything here is a reader over generated sentinel manifests in a
 local directory with an in-test grant lookup. It proves software behavior only. It establishes
@@ -39,6 +52,7 @@ MANIFEST_SCHEMA = "opentour.pilot.consumed-field-manifest.v1"
 RESOLUTION_SCHEMA = "opentour.pilot.claim-resolution.v1"
 IMPACT_SCHEMA = "opentour.pilot.impact-set.v1"
 RECEIPT_SCHEMA = "opentour.pilot.lineage-receipt.v1"
+INTEGRITY = "digest_self_consistent_only"
 
 OWNER = "workflow_owner"
 REVIEWER = "reviewer"
@@ -69,17 +83,24 @@ _TIMESTAMP = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,6})?Z$")
 
 def _time(value: object, reason: str) -> datetime:
     # Full UTC timestamps only: a date-only value such as "2026-01-01Z" is not a point in time.
-    _need(isinstance(value, str) and _TIMESTAMP.fullmatch(value), reason)
+    # Exactly ``str``: a subclass can override ``__str__`` and an impostor can fake
+    # ``__class__``; either is a refused time, never a TypeError.
+    text = value if type(value) is str else ""
+    _need(_TIMESTAMP.fullmatch(text), reason)
     try:
-        parsed = datetime.fromisoformat(str(value)[:-1] + "+00:00")
+        parsed = datetime.fromisoformat(text[:-1] + "+00:00")
     except ValueError as exc:
         raise LineageError(reason) from exc
     return parsed.astimezone(UTC)
 
 
 def _ref(value: object, reason: str) -> str:
-    _need(isinstance(value, str) and _REF.fullmatch(value), reason)
-    return str(value)
+    # Exactly ``str``, returned as itself. A subclass whose buffer passes ``_REF`` can still
+    # tell a different story through ``__str__``/``__format__``, which is what names files and
+    # folders; it must never reach a path, a persisted record or a tenant folder.
+    text = value if type(value) is str else ""
+    _need(_REF.fullmatch(text), reason)
+    return text
 
 
 def _segments(path: str) -> tuple[str, ...]:
@@ -96,6 +117,33 @@ def paths_overlap(left: str, right: str) -> bool:
 # --------------------------------------------------------------------------- manifest
 
 
+def _count(value: object, reason: str) -> int:
+    # Exactly ``int``: not ``bool`` and not a subclass, whose comparisons can lie (an int
+    # subclass of -5 can answer ``>= 0`` with True and then persist as -5).
+    _need(type(value) is int, reason)
+    number: int = value  # type: ignore[assignment]
+    _need(number >= 0, reason)
+    return number
+
+
+def _choice(value: object, allowed: frozenset[str], reason: str) -> str:
+    # Exactly ``str``: a subclass can claim membership through ``__eq__``/``__hash__`` while
+    # its buffer, which is what gets persisted, says something else.
+    text = value if type(value) is str else ""
+    _need(text in allowed, reason)
+    return text
+
+
+def _keyed(value: object, reason: str) -> dict[str, Any]:
+    # One read of a mapping, whose keys must be exactly ``str``: a key subclass can match an
+    # expected name through ``__eq__``/``__hash__`` while persisting as another.
+    _need(isinstance(value, Mapping), reason)
+    mapping: Mapping[Any, Any] = value  # type: ignore[assignment]
+    copy: dict[str, Any] = dict(mapping)
+    _need(all(type(k) is str for k in copy), reason)
+    return copy
+
+
 def validate_manifest(raw: Mapping[str, Any]) -> dict[str, Any]:
     """Return a normalized copy of a manifest or raise ``LineageError``.
 
@@ -103,8 +151,21 @@ def validate_manifest(raw: Mapping[str, Any]) -> dict[str, Any]:
     partition, rule_kind, case_ref, decision_time, result_ref, candidate_ref, example_ref,
     correction_version, policy_revision, claim_refs, consumed[], and optional
     unknown_dependencies[], descendants[], later_relationships[].
+
+    Every key and string field is exactly ``str`` and every integer field exactly ``int``. A
+    ``TypeError``, ``ValueError`` or ``RecursionError`` raised while reading ``raw`` becomes
+    ``LineageError("manifest_malformed")``; nothing raw escapes.
     """
-    _need(isinstance(raw, Mapping) and raw.get("schema") == MANIFEST_SCHEMA, "manifest_schema")
+    try:
+        return _validate(raw)
+    except (TypeError, ValueError, RecursionError) as exc:
+        raise LineageError("manifest_malformed") from exc
+
+
+def _validate(given: Mapping[str, Any]) -> dict[str, Any]:
+    _need(isinstance(given, Mapping), "manifest_schema")
+    raw = _keyed(given, "manifest_unknown_key")
+    _need(raw.get("schema") == MANIFEST_SCHEMA, "manifest_schema")
     allowed = {
         "schema", "manifest_ref", "tenant", "workflow_ref", "engagement_epoch", "grant_epoch",
         "partition", "rule_kind", "case_ref", "decision_time", "result_ref", "candidate_ref",
@@ -119,16 +180,12 @@ def validate_manifest(raw: Mapping[str, Any]) -> dict[str, Any]:
     ):  # fmt: skip
         out[key] = _ref(raw.get(key), f"manifest_{key}")
     for key in ("engagement_epoch", "grant_epoch", "correction_version"):
-        value = raw.get(key)
-        _need(
-            isinstance(value, int) and not isinstance(value, bool) and value >= 0, f"manifest_{key}"
-        )
-        out[key] = value
-    _need(raw.get("partition") in PARTITIONS, "manifest_partition")
-    _need(raw.get("rule_kind") in RULE_KINDS, "manifest_rule_kind")
-    out["partition"], out["rule_kind"] = raw["partition"], raw["rule_kind"]
-    decision = _time(raw.get("decision_time"), "manifest_decision_time")
-    out["decision_time"] = raw["decision_time"]
+        out[key] = _count(raw.get(key), f"manifest_{key}")
+    out["partition"] = _choice(raw.get("partition"), PARTITIONS, "manifest_partition")
+    out["rule_kind"] = _choice(raw.get("rule_kind"), RULE_KINDS, "manifest_rule_kind")
+    stamp = raw.get("decision_time")
+    decision = _time(stamp, "manifest_decision_time")
+    out["decision_time"] = stamp
     claims: Any = raw.get("claim_refs")
     _need(isinstance(claims, list) and claims, "manifest_claim_refs")
     out["claim_refs"] = sorted({_ref(c, "manifest_claim_refs") for c in claims})
@@ -136,78 +193,120 @@ def validate_manifest(raw: Mapping[str, Any]) -> dict[str, Any]:
     _need(isinstance(consumed, list), "manifest_consumed")
     seen: set[tuple[str, str]] = set()
     entries: list[dict[str, Any]] = []
-    for item in consumed:
-        _need(isinstance(item, Mapping) and set(item) == {
+    for given_item in consumed:
+        item = _keyed(given_item, "manifest_consumed_entry")
+        _need(set(item) == {
             "source_ref", "path", "source_revision", "available_at", "span"
         }, "manifest_consumed_entry")  # fmt: skip
         source = _ref(item["source_ref"], "manifest_consumed_entry")
         path = item["path"]
-        _need(isinstance(path, str) and _PATH.fullmatch(path), "manifest_consumed_path")
-        revision = item["source_revision"]
-        _need(
-            isinstance(revision, int) and not isinstance(revision, bool) and revision >= 0,
-            "manifest_consumed_revision",
-        )
+        _need(type(path) is str and _PATH.fullmatch(path), "manifest_consumed_path")
+        revision = _count(item["source_revision"], "manifest_consumed_revision")
         # A decision may only have consumed what existed when it was made.
+        available = item["available_at"]
         _need(
-            _time(item["available_at"], "manifest_consumed_time") <= decision,
+            _time(available, "manifest_consumed_time") <= decision,
             "input_after_decision",
         )
         span = item["span"]
         _need(
-            span is None or (isinstance(span, str) and 0 < len(span) <= 64),
+            span is None or (type(span) is str and 0 < len(span) <= 64),
             "manifest_consumed_span",
         )
         _need((source, path) not in seen, "manifest_consumed_duplicate")
         seen.add((source, path))
-        entries.append(dict(item))
+        entries.append({
+            "source_ref": source, "path": path, "source_revision": revision,
+            "available_at": available, "span": span,
+        })  # fmt: skip
     out["consumed"] = sorted(entries, key=lambda e: (e["source_ref"], e["path"]))
     unknown = raw.get("unknown_dependencies", [])
     _need(isinstance(unknown, list), "manifest_unknown_dependencies")
     out["unknown_dependencies"] = sorted(
-        {"*" if u == "*" else _ref(u, "manifest_unknown_dependencies") for u in unknown}
+        {
+            "*" if type(u) is str and u == "*" else _ref(u, "manifest_unknown_dependencies")
+            for u in unknown
+        }
     )
     known = {out["result_ref"], out["candidate_ref"], out["example_ref"]}
     descendants = raw.get("descendants", [])
     _need(isinstance(descendants, list), "manifest_descendants")
     nodes: list[dict[str, Any]] = []
     names = set(known)
-    for node in descendants:
-        _need(
-            isinstance(node, Mapping) and set(node) == {"ref", "kind", "derived_from"},
-            "manifest_descendant",
-        )
+    for given_node in descendants:
+        node = _keyed(given_node, "manifest_descendant")
+        _need(set(node) == {"ref", "kind", "derived_from"}, "manifest_descendant")
         ref = _ref(node["ref"], "manifest_descendant")
-        _need(node["kind"] in ARTIFACT_KINDS and ref not in names, "manifest_descendant")
+        kind = _choice(node["kind"], ARTIFACT_KINDS, "manifest_descendant")
+        _need(ref not in names, "manifest_descendant")
         _need(isinstance(node["derived_from"], list), "manifest_descendant")
         parents = sorted({_ref(p, "manifest_descendant") for p in node["derived_from"]})
         names.add(ref)
-        nodes.append({"ref": ref, "kind": node["kind"], "derived_from": parents})
+        nodes.append({"ref": ref, "kind": kind, "derived_from": parents})
     for node in nodes:
         _need(set(node["derived_from"]) <= names - {node["ref"]}, "manifest_descendant_parent")
     out["descendants"] = sorted(nodes, key=lambda n: n["ref"])
     later = raw.get("later_relationships", [])
     _need(isinstance(later, list), "manifest_later_relationships")
     rels = []
-    for rel in later:
+    for given_rel in later:
+        rel = _keyed(given_rel, "manifest_later_relationship")
         _need(
-            isinstance(rel, Mapping)
-            and set(rel) == {"kind", "ref", "available_at", "relationship_version"},
+            set(rel) == {"kind", "ref", "available_at", "relationship_version"},
             "manifest_later_relationship",
         )
-        _ref(rel["ref"], "manifest_later_relationship")
+        rel_ref = _ref(rel["ref"], "manifest_later_relationship")
         # A "later" relationship must really be later than the decision it attaches to.
+        rel_at = rel["available_at"]
         _need(
-            _time(rel["available_at"], "manifest_later_relationship") > decision,
+            _time(rel_at, "manifest_later_relationship") > decision,
             "manifest_later_relationship",
         )
+        rel_kind, version = rel["kind"], rel["relationship_version"]
         _need(
-            isinstance(rel["kind"], str) and isinstance(rel["relationship_version"], int),
+            type(rel_kind) is str and type(version) is int,
             "manifest_later_relationship",
         )
-        rels.append(dict(rel))
+        rels.append({
+            "kind": rel_kind, "ref": rel_ref, "available_at": rel_at,
+            "relationship_version": version,
+        })  # fmt: skip
     out["later_relationships"] = sorted(rels, key=lambda r: (r["ref"], r["relationship_version"]))
     return out
+
+
+def _same(left: object, right: object) -> bool:
+    """Equal with exactly the same types at every level (dict keys included); no ``__eq__``
+    of a subclass is ever consulted."""
+    if type(left) is not type(right):
+        return False
+    if type(left) is dict:
+        a: dict[Any, Any] = left
+        b: dict[Any, Any] = right  # type: ignore[assignment]
+        return (
+            all(type(k) is str for k in a)
+            and all(type(k) is str for k in b)
+            and sorted(a) == sorted(b)
+            and all(_same(a[k], b[k]) for k in a)
+        )
+    if type(left) is list:
+        xs: list[Any] = left
+        ys: list[Any] = right  # type: ignore[assignment]
+        return len(xs) == len(ys) and all(_same(x, y) for x, y in zip(xs, ys, strict=True))
+    return left == right  # same exact type, and ``put`` passes the re-read (builtin) first
+
+
+def _canonical(manifest: Mapping[str, Any]) -> str:
+    """The exact bytes ``put`` may write: only a record that every later read accepts as
+    exactly itself. Anything else is refused before a file or folder exists, so a write can
+    never wedge its tenant's reads."""
+    try:
+        body = _body(manifest)
+        again = validate_manifest(json.loads(body))
+    except (TypeError, ValueError, RecursionError) as exc:
+        raise LineageError("manifest_not_canonical") from exc
+    _need(_same(again, manifest), "manifest_not_canonical")
+    return body
 
 
 def manifest_digest(manifest: Mapping[str, Any]) -> str:
@@ -219,17 +318,19 @@ def _body(manifest: Mapping[str, Any]) -> str:
 
 
 def _pin(body: str) -> str:
+    """Plain unkeyed sha256: ``digest_self_consistent_only`` (tamper evidence, not a seal)."""
     return hashlib.sha256(body.encode()).hexdigest()
 
 
 class ManifestStore:
     """Write-once, tenant-scoped manifest directory; survives restart by re-reading files.
 
-    Each manifest is stored under its tenant's own folder with a sidecar pin (sha256 of the
-    exact bytes) written first. Reads verify the pin, so an edit to the manifest file alone is
-    detected. This is tamper-EVIDENCE against edits of one file, not tamper-proofing: anyone
-    who can rewrite both the manifest and its pin can forge a manifest. Tenants never share
-    files, so one tenant's refs, corruption or writes cannot affect or probe another's.
+    Each manifest is stored under its tenant's own folder with a sidecar pin (plain sha256 of
+    the exact bytes) written first. Reads verify the pin, so an edit to the manifest file alone
+    is detected. Integrity is ``digest_self_consistent_only``: tamper evidence against an edit
+    of one file, not tamper-proofing or authentication. Anyone who can rewrite both the
+    manifest and its pin can forge a manifest. Tenants never share files, so one tenant's
+    refs, corruption or writes cannot affect or probe another's.
     """
 
     def __init__(self, directory: Path) -> None:
@@ -266,17 +367,20 @@ class ManifestStore:
     def put(self, raw: Mapping[str, Any]) -> str:
         """Write once. Identical replay is idempotent; different bytes for a ref conflict."""
         manifest = validate_manifest(raw)
+        body = _canonical(manifest)  # before any folder or file is created
         folder = self._folder(manifest["tenant"])
         folder.mkdir(parents=True, exist_ok=True)
         name = f"manifest-{manifest['manifest_ref']}"
-        body = _body(manifest)
         # Pin first: a crash leaves only an orphan pin, which a retry accepts as identical.
         self._create(folder, f"{name}.sha256", _pin(body))
         self._create(folder, f"{name}.json", body)
         return manifest_digest(manifest)
 
     def all(self, tenant: str) -> list[dict[str, Any]]:
-        """Every verified manifest of one tenant; any defect raises a typed LineageError."""
+        """Every manifest of one tenant whose (unsigned) digest pin matches its bytes.
+
+        Any defect raises a typed LineageError.
+        """
         folder = self._folder(tenant)
         found = []
         for path in sorted(folder.glob("manifest-*.json")) if folder.is_dir() else []:
@@ -285,7 +389,7 @@ class ManifestStore:
             _need(pin.is_file() and self._slurp(pin) == _pin(body), "manifest_tampered")
             try:
                 loaded = json.loads(body)
-            except ValueError as exc:
+            except (ValueError, RecursionError) as exc:
                 raise LineageError("manifest_unreadable") from exc
             manifest = validate_manifest(loaded)
             _need(
@@ -321,9 +425,23 @@ class GrantState:
 GrantLookup = Callable[[str, str], "GrantState | None"]
 
 
+def _worker_now() -> datetime:
+    """The worker's own clock: the only authority on whether a grant has expired.
+
+    Deliberately not a parameter of ``ConsumptionReader`` or a field of ``Request``, so no
+    caller of the production entry point can supply or replace it. Tests pin it by patching
+    this module attribute (a test-only seam).
+    """
+    return datetime.now(UTC)
+
+
 @dataclass(frozen=True)
 class Request:
-    """What the actor clicked: bound to the grant epoch observed at click time."""
+    """What the actor clicked: bound to the grant epoch observed at click time.
+
+    ``now`` is caller-supplied and untrusted. It may only make a grant expire sooner; expiry
+    itself is judged on the worker clock (``_worker_now``).
+    """
 
     actor: Actor
     workflow_ref: str
@@ -401,6 +519,7 @@ class Resolution:
             "inputs": [vars(link) for link in self.inputs],
             "unknown_dependencies": list(self.unknown_dependencies),
             "later_relationships": list(self.later_relationships),
+            "integrity": INTEGRITY,
         }
         return {**body, "reader_digest": digest(body)}
 
@@ -431,7 +550,12 @@ class ImpactSet:
         }
 
     def to_json(self) -> dict[str, Any]:
-        body = {"schema": IMPACT_SCHEMA, "status": self.status, **self.semantic()}
+        body = {
+            "schema": IMPACT_SCHEMA,
+            "status": self.status,
+            **self.semantic(),
+            "integrity": INTEGRITY,
+        }
         return {**body, "reader_digest": digest(body)}
 
     @property
@@ -450,6 +574,11 @@ class ConsumptionReader:
         self.grants = grants
 
     def _authorize(self, request: Request, what: object) -> Denial | GrantState:
+        """Checks run in a fixed order and the first failure is the reason returned.
+
+        The order is identity and role, then revocation, then time format, then expiry (worker
+        clock), then grant epoch. No contract specifies this order, so tests do not pin it.
+        """
         actor = request.actor
         grant = self.grants(actor.tenant, request.workflow_ref)
         # Unknown workflow, foreign tenant and wrong role all look identical to the caller.
@@ -460,9 +589,14 @@ class ConsumptionReader:
         if grant.revoked:
             return _denial(request, "grant_revoked", what)
         try:
-            expired = _time(request.now, "request_time") >= _time(grant.expires_at, "grant_time")
+            claimed = _time(request.now, "request_time")
+            expires = _time(grant.expires_at, "grant_time")
         except LineageError:
             return _denial(request, "invalid_time", what)
+        # The worker clock decides. A caller time can only narrow the window (take the later
+        # of the two instants), so back-dating cannot skip expiry and future-dating extends
+        # nothing.
+        expired = max(_worker_now(), claimed) >= expires
         if expired:
             return _denial(request, "grant_expired", what)
         if grant.grant_epoch != request.grant_epoch:
@@ -488,7 +622,7 @@ class ConsumptionReader:
         if not matches:
             return _finish(Resolution("unknown", "linkage_missing", claim_ref=claim_ref))
         if len(matches) > 1:
-            # Two sealed manifests claim the same claim: never pick a winner by order.
+            # Two pinned (unsigned) manifests claim the same claim: never pick a winner by order.
             return _finish(Resolution("hold", "ambiguous_linkage", claim_ref=claim_ref))
         m = matches[0]
         if m["partition"] == "protected":

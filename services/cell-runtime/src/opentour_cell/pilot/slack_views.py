@@ -7,10 +7,11 @@ import math
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 from opentour_cell.pilot.readout import INPUT_VERSION, MAX_CASES, OUTPUT_VERSION, evaluate_manifest
+from opentour_cell.pilot.scoped_query_plan import ArmChart, QueryHold, WorkflowDiscovery
 from opentour_cell.pilot.starter_setup import StarterPreview
 from opentour_cell.pilot.status_questions import StatusAnswer
 from opentour_cell.pilot.text_classifier import (
@@ -23,6 +24,9 @@ from opentour_cell.pilot.text_classifier import (
 
 if TYPE_CHECKING:
     from opentour_cell.pilot.handoff_readback import HandoffReadback
+    from opentour_cell.pilot.scoped_query_report import MonthlyInvoiceReport
+    from opentour_cell.pilot.slack_learning import LearningPlan, LearningStatus
+    from opentour_cell.pilot.workflow_index import IndexPage
 
 from opentour_cell.pilot.training_data import EVALUATION_FIELDS, FIELD_NAMES
 
@@ -629,6 +633,10 @@ def regression_picker(
             "its evidence to ask about it."
         )
     ]
+    if topic == "arm_chart":
+        blocks = [
+            _section("Choose the frozen workflow comparison for the requested benchmark version.")
+        ]
     if current_workflow:
         workflow, token = current_workflow
         weekly = topic == "live_errors"
@@ -661,7 +669,8 @@ def regression_picker(
             continue
         label = (
             "Dataset"
-            if topic in {"delivery", "independent_workplace_cases", "synthetic_benefit"}
+            if topic
+            in {"delivery", "independent_workplace_cases", "synthetic_benefit", "label_savings"}
             else "Workflow"
         )
         blocks.append(_section(f"{label} {_ref(dataset)} · {_display(source)} · {_ref(revision)}"))
@@ -731,7 +740,13 @@ def weekly_question(context: str, workflow: str, facts: Mapping[str, Any], pin: 
 
 
 def current_training_question(
-    context: str, workflow: str, receipt: Mapping[str, Any] | None, *, pin: str, proof: bool
+    context: str,
+    workflow: str,
+    receipt: Mapping[str, Any] | None,
+    *,
+    pin: str,
+    proof: bool,
+    learning_pin: str = "",
 ) -> Block:
     blocks = [_section(f"Current workflow · {_ref(workflow)}")]
     if receipt is None:
@@ -751,6 +766,18 @@ def current_training_question(
                 _section(f"{families} independent {unit}. {answer.basis}"),
                 _section(answer.next_action),
             ]
+        )
+    if not proof and learning_pin:
+        blocks.append(
+            _actions(_button("Preview learning plan", "ot_learning_preview", learning_pin))
+        )
+    elif not proof:
+        blocks.append(
+            _section(
+                "Learning runs · Controls unavailable in this installation. "
+                "Ask the workflow owner to connect the worker’s authenticated learning-run service "
+                "to start a benchmark or improvement and track its status."
+            )
         )
     nav = [_button("Back to scopes", "ot_training_scopes", "scopes")]
     if receipt is not None:
@@ -784,18 +811,191 @@ def current_training_question(
     )
 
 
+def frozen_rule_chart(
+    context: str, workflow: str, version: int, audit: Mapping[str, Any], pin: str, proof: bool
+) -> Block:
+    checked = managed_report(audit["comparisons"]["rule"])
+    blocks = [
+        _section(f"Workflow {_display(workflow)} · frozen benchmark v{version}"),
+        _section(
+            "Incorrect automatic decisions among automatic decisions with a verified reference"
+        ),
+    ]
+    for key, label in (("current", "Incumbent"), ("repair", "Simple repair")):
+        arm = checked[key]
+        total = arm["observed_error_rate"]["denominator"]
+        wrong = arm["incorrect_automatic"]
+        if total:
+            filled = round(10 * wrong / total)
+            bar = "" if proof else "■" * filled + "□" * (10 - filled) + " · "
+            rate = f"{100 * wrong / total:.2f}".rstrip("0").rstrip(".")
+            blocks.append(_section(f"{label} · {bar}{wrong}/{total} ({rate}%)"))
+        else:
+            blocks.append(_section(f"{label} · 0/0 · rate unavailable"))
+        coverage = arm["coverage"]
+        blocks.append(
+            _section(
+                f"{label} automatic coverage · {coverage['numerator']}/{coverage['denominator']}"
+            )
+        )
+    paired = checked["paired"]
+    blocks.append(
+        _section(
+            f"Eligible pairs · {paired['comparable']}/{checked['cohort_size']}. "
+            f"Excluded from the paired comparison · {paired['excluded']}."
+        )
+    )
+    if proof:
+        changes = checked["changes"]
+        blocks.extend(
+            [
+                _section(
+                    f"On eligible pairs · {paired['fixes']} fixed · "
+                    f"{paired['regressions']} newly wrong"
+                    f" · {paired['ties_correct'] + paired['ties_incorrect']} unchanged."
+                ),
+                _section(
+                    f"Automatic only for incumbent · {changes['current_only_automatic']}. "
+                    f"Automatic only for simple repair · {changes['repair_only_automatic']}. "
+                    f"Unknown reference across the cohort · {checked['unknown_references']}."
+                ),
+                _section(
+                    "Rate = incorrect automatic decisions divided by automatic decisions with a "
+                    "verified reference. Coverage = automatic decisions divided by all cases."
+                ),
+                _section(
+                    "Source · frozen benchmark and privately reviewed comparison. "
+                    "Measurement date unavailable."
+                ),
+                _section(f"Frozen comparison · {_ref(audit['run_revision'])}"),
+                _section(f"Tested cohort · {_ref(audit['cohort_revision'])}"),
+            ]
+        )
+    blocks.append(
+        _actions(_button("Back to graph" if proof else "View proof", "ot_result_open", pin))
+    )
+    return _modal(
+        "Comparison proof" if proof else "Frozen comparison",
+        "ot_chart_proof" if proof else "ot_arm_chart",
+        context,
+        blocks,
+    )
+
+
+def monthly_invoice_answer(context: str, rows: Sequence[tuple[str, MonthlyInvoiceReport]]) -> Block:
+    first = rows[0][1]
+    through = first.end - timedelta(days=1)
+    blocks = [
+        _section(
+            f"Recurring invoice-code errors · {first.start} through {through} ({first.timezone})"
+        )
+    ]
+    for workflow, report in rows:
+        blocks.append(
+            _section(
+                f"{_display(workflow)} · {report.recurring_errors} recurring errors "
+                f"among {report.verified_decisions} verified decisions. "
+                f"Excluded decisions: {report.excluded_decisions}."
+            )
+        )
+    return _modal("Monthly invoice errors", "ot_monthly_invoice", context, blocks)
+
+
+def query_hold_modal(context: str, plan: ArmChart | WorkflowDiscovery | QueryHold) -> Block:
+    if isinstance(plan, WorkflowDiscovery):
+        answer = StatusAnswer(
+            "Recurring invoice-code errors for the previous calendar month are unavailable.",
+            "This request needs a verified monthly report for the workflows you can inspect.",
+            "The data custodian can supply a scoped report with the reporting timezone and dates.",
+        )
+    elif isinstance(plan, ArmChart):
+        answer = StatusAnswer(
+            f"The baseline and rule chart for requested version {plan.version} is unavailable.",
+            "There is no verified comparison linking both arms to that version for this request.",
+            "The evaluation operator can provide the version-bound benchmark comparison.",
+        )
+    elif plan == QueryHold.VERSION_REQUIRED:
+        answer = StatusAnswer(
+            "Choose one benchmark version for the baseline and rule chart.",
+            "A comparison needs the same frozen benchmark version for both arms.",
+            "Ask again with one exact version, such as “Graph baseline versus rule on v2”.",
+        )
+    else:
+        raise ValueError("Unsupported query hold.")
+    return _modal(
+        "Ask OpenTour",
+        "ot_query_hold",
+        context,
+        [_section(answer.finding), _section(answer.basis), _section(answer.next_action)],
+    )
+
+
+def learning_plan_modal(context: str, plan: LearningPlan, pin: str) -> Block:
+    blocks = [
+        _section(f"Workflow · {_ref(plan.scope.workflow)}\nModel route · {_ref(plan.model_route)}"),
+        _section(f"Frozen benchmark · {_ref(plan.benchmark_ref)}\nPlan · {_ref(plan.plan_ref)}"),
+        _section(
+            f"Mandate · {_ref(plan.mandate_ref) if plan.mandate_ref else 'unavailable'}\n"
+            f"Fit cap · {plan.max_fits} · Spend cap · {plan.spend_cap_cents} USD cents"
+        ),
+        _section(
+            f"Scheduled learning · {plan.schedule}. "
+            "The owner can change the schedule in private workflow settings."
+        ),
+    ]
+    controls = []
+    if plan.can_benchmark:
+        controls.append(_button("Run benchmark", "ot_learning_benchmark", pin))
+    if plan.can_improve:
+        controls.append(_button("Run improvement", "ot_learning_improve", pin))
+    else:
+        blocks.append(
+            _section("Improvement unavailable · Ask the owner to check training readiness.")
+        )
+    if plan.current_run:
+        controls.append(_button("View status", "ot_learning_status", pin))
+    if controls:
+        blocks.append(_actions(*controls))
+    return _modal("Learning plan", "ot_learning_plan", context, blocks)
+
+
+def learning_status_modal(context: str, receipt: LearningStatus, pin: str) -> Block:
+    from opentour_cell.pilot.slack_learning import STATE_COPY
+
+    controls = [_button("View status", "ot_learning_status", pin)]
+    if receipt.can_cancel and receipt.state in {"queued", "running", "verifying"}:
+        controls.append(_button("Cancel run", "ot_learning_cancel", pin))
+    return _modal(
+        "Learning run",
+        "ot_learning_run",
+        context,
+        [
+            _section(f"Run · {_ref(receipt.run_ref)}"),
+            _section(STATE_COPY[receipt.state]),
+            _actions(*controls),
+        ],
+    )
+
+
 def status_question_modal(
-    context: str, revision: str, dataset: str, answer: StatusAnswer, *, receipt_pin: str = ""
+    context: str,
+    revision: str,
+    dataset: str,
+    answer: StatusAnswer,
+    *,
+    receipt_pin: str = "",
+    workflow_ref: str | None = None,
 ) -> Block:
     controls = [_button("View evidence", "ot_evidence", revision), _home()]
     if receipt_pin:
         controls.insert(0, _button("View receipt", "ot_release_receipt", receipt_pin))
+    scope = f"Workflow {_ref(workflow_ref)} · " if workflow_ref else ""
     return _modal(
         "Result status",
         "ot_status_question",
         context,
         [
-            _section(f"Dataset {_ref(dataset)} · readout {_ref(revision)}"),
+            _section(f"{scope}Dataset {_ref(dataset)} · readout {_ref(revision)}"),
             _section(answer.finding),
             _section(answer.basis),
             _section(answer.next_action),
@@ -1308,6 +1508,87 @@ def status_modal(
     )
 
 
+def benchmark_proof_blocks(
+    audit: Mapping[str, Any],
+    workflow: str,
+    *,
+    show_calculation: bool = False,
+    show_audit: bool = False,
+) -> list[Block]:
+    """Present only the validated aggregate supplied for this viewer and result."""
+    blocks = [
+        _section(
+            f"Workflow · {_display(workflow) if workflow else 'unavailable'}\n"
+            "Evaluation purpose · compare the frozen "
+            "candidate and incumbent on the protected cohort."
+        )
+    ]
+    benchmark = audit.get("workflow_benchmark")
+    if benchmark:
+        from opentour_cell.pilot.slack_benchmark import validated_benchmark
+
+        checked = validated_benchmark(
+            benchmark,
+            cohort_revision=audit["cohort_revision"],
+            population=audit["population"],
+            candidate_arm=benchmark["candidate_arm"],
+            candidate_revision=benchmark["candidate_revision"],
+        )
+        blocks.append(
+            _section(
+                f"Worker comparison · {_ref(audit['run_revision'])}\n"
+                f"Frozen cohort · {_ref(checked['cohort_revision'])}\n"
+                f"Candidate · {_ref(checked['candidate_revision'])}"
+            )
+        )
+        if show_calculation:
+            lines = [
+                "Review routing uses all eligible decisions. Verified error uses "
+                "automatic decisions with a verified reference."
+            ]
+            for key, label in (("incumbent", "Incumbent"), ("candidate", "Candidate")):
+                arm = checked[key]
+                lines.append(
+                    f"{label} · routed to review "
+                    f"{_ratio(arm['review'], checked['population'])}; "
+                    f"incorrect automatic decisions {_ratio(arm['wrong'], arm['verified'])}."
+                )
+            blocks.append(_section("\n".join(lines)))
+        if show_audit:
+            blocks.extend(_audit_blocks(audit))
+    else:
+        blocks.append(_section("No benchmark calculation is available for this result and access."))
+    blocks.append(
+        _section(
+            "Benchmark approval unavailable. This view has no current purpose-bound owner grant "
+            "and benchmark audit receipt linked to this result. The workflow owner can ask the "
+            "benchmark custodian to supply the scoped proof. Independent result verification "
+            "is unavailable here."
+        )
+    )
+    return blocks
+
+
+def benchmark_proof_modal(
+    context: str, revision: str, audit: Mapping[str, Any], workflow: str, action: str
+) -> Block:
+    blocks = benchmark_proof_blocks(
+        audit,
+        workflow,
+        show_calculation=action == "ot_bench_calc",
+        show_audit=action == "ot_bench_audit",
+    )
+    if audit.get("workflow_benchmark"):
+        blocks.append(
+            _actions(
+                _button("Show calculation", "ot_bench_calc", revision),
+                _button("View audit trail", "ot_bench_audit", revision),
+            )
+        )
+    blocks.append(_actions(_button("Back to evidence", "ot_evidence", revision), _home()))
+    return _modal("Benchmark proof", "ot_bench_proof_view", context, blocks)
+
+
 def evidence_modal(
     *,
     recipe: bool = False,
@@ -1430,6 +1711,8 @@ def evidence_modal(
             }
             blocks.append(_actions(approve, change))
         explore = []
+        if audit and audit.get("mode") in {"managed_rule", "managed_model"}:
+            blocks.append(_actions(_button("View proof", "ot_bench_proof", ref)))
         if recipe and not release_allowed:
             explore.append(_button("View current status", "ot_managed_review_status", ref))
         if recipe and report:
@@ -1487,6 +1770,7 @@ def _handoff_projection(
     scope = (
         f"Workflow {_ref(receipt.selection.workflow_ref)} · Proposal {_ref(audit['job_id'])} "
         f"revision {_ref(audit['run_revision'])} · Artifact {_ref(audit['model_revision'])}\n"
+        f"Benchmark cohort revision {_ref(audit['cohort_revision'])}\n"
         f"Destination {_ref(receipt.destination_ref)}"
     )
     approval = f"Approved {when(receipt.approved_at)}."
@@ -1496,29 +1780,68 @@ def _handoff_projection(
         checked = "No independent check time is recorded."
     basis = f"{scope} · {approval} {checked}"
 
-    receiver = None
-    if delivery and delivery.stage == "delivered":
-        assert delivery.received_at is not None and delivery.receiver_receipt_ref
-        state = "Delivered to the selected destination."
-        receiver = (
-            f"Receiver receipt {_ref(delivery.receiver_receipt_ref)} at "
-            f"{when(delivery.received_at)}."
-        )
-        next_action = "The recipient can independently replay the artifact."
-        answer = StatusAnswer(state, f"{basis} {receiver}", next_action)
-    else:
+    if not delivery or delivery.stage != "delivered":
         state = (
             "Awaiting delivery."
             if delivery and delivery.stage == "queued"
             else "Delivery is unconfirmed."
         )
         next_action = "The authorized handoff operator can reconcile delivery."
-        answer = StatusAnswer(f"Approval recorded. {state}", basis, next_action)
-    rows = [scope, approval, f"{state}\n{checked}"]
-    if receiver:
-        rows.append(receiver)
-    rows.append(next_action)
-    return answer, rows
+        return StatusAnswer(f"Approval recorded. {state}", basis, next_action), [
+            scope,
+            approval,
+            f"{state}\n{checked}",
+            next_action,
+        ]
+
+    assert delivery.received_at is not None and delivery.receiver_receipt_ref
+    delivered = "Delivered to the selected destination."
+    state = delivered
+    observed_times = []
+    evidence = [
+        f"Receiver receipt {_ref(delivery.receiver_receipt_ref)} at {when(delivery.received_at)}."
+    ]
+    next_action = "The recipient can independently replay the artifact."
+    replay = receipt.replay
+    rollback = receipt.rollback
+    if replay:
+        observed_times.append(replay.observed_at)
+        evidence.append(
+            f"Replayed by recipient at {when(replay.observed_at)}. "
+            f"Replay receipt {_ref(replay.receipt_ref)}."
+        )
+    if replay and replay.evaluation_only:
+        state = "Evaluation handoff complete."
+        evidence.append(state)
+        next_action = "The reviewer can inspect the completed evaluation receipt."
+    elif rollback:
+        observed_times.append(rollback.observed_at)
+        state = "Rollback verified."
+        evidence.append(
+            f"Rollback verified at {when(rollback.observed_at)}. "
+            f"Environment {_ref(rollback.environment_ref)} · "
+            f"Restored serving version {_ref(rollback.restored_version)}. "
+            f"Rollback receipt {_ref(rollback.receipt_ref)}."
+        )
+        next_action = "The reviewer can inspect the restored serving version."
+    elif replay:
+        state = "Activation unconfirmed."
+        evidence.append(state)
+        next_action = "The environment operator can check the serving version."
+    latest = max(observed_times, default=None)
+    if latest is not None and (
+        delivery.last_checked_at is None or latest > delivery.last_checked_at
+    ):
+        summary_check = f"Last checked {when(latest)}."
+        basis = f"{scope} · {approval} {summary_check}"
+        scope = f"{scope}\n{summary_check}"
+        checked = (
+            f"Delivery last checked {when(delivery.last_checked_at)}."
+            if delivery.last_checked_at is not None
+            else "No independent delivery check time is recorded."
+        )
+    rows = [scope, approval, f"{delivered}\n{checked}", *evidence, next_action]
+    return StatusAnswer(state, " ".join([basis, *evidence]), next_action), rows
 
 
 def handoff_status(receipt: HandoffReadback, audit: Mapping[str, Any]) -> StatusAnswer:
@@ -1532,7 +1855,17 @@ def handoff_modal(
     _, rows = _handoff_projection(receipt, audit)
     controls = [_home()]
     if not receipt.delivery or receipt.delivery.stage != "delivered":
-        controls.insert(0, _button("Check delivery status", "ot_delivery_status", revision))
+        refresh = "Check delivery status"
+    elif receipt.rollback:
+        refresh = None
+    elif not receipt.replay:
+        refresh = "Check replay status"
+    elif not receipt.replay.evaluation_only:
+        refresh = "Check serving status"
+    else:
+        refresh = None
+    if refresh:
+        controls.insert(0, _button(refresh, "ot_delivery_status", revision))
     return _modal(
         "Handoff receipt",
         "ot_handoff_receipt",
@@ -1675,6 +2008,73 @@ def _live_summary_text(summary: Mapping[str, Any]) -> str:
     )
 
 
+def _workflow_queue(page: IndexPage, *, continuation: bool) -> list[Block]:
+    blocks: list[Block] = []
+    groups = {"needs_you": "Needs you", "waiting": "Waiting", "recent": "Recent"}
+    actions = {
+        "open_review": "Review proposal",
+        "open_status": "View status",
+        "open_receipt": "View receipt",
+    }
+    for group, title in groups.items():
+        rows = [row for row in page.rows if row.group == group]
+        if not rows:
+            continue
+        blocks.append({"type": "header", "text": _text(title)})
+        for row in rows:
+            label = _display(row.label)
+            if row.proposal_ref is None and row.proposal_revision is None:
+                if (
+                    row.state != "no_visible_proposal"
+                    or row.group != "waiting"
+                    or row.action
+                    or row.selection
+                    or row.deadline is not None
+                ):
+                    raise ValueError("Invalid workflow visibility record.")
+                blocks.append(
+                    _section(f"{label} · {_ref(row.workflow_ref)}\nNo proposals available to you.")
+                )
+                continue
+            state = row.state.replace("_", " ")
+            block = _section(
+                f"{label} · {_ref(row.workflow_ref)}\n"
+                f"Proposal {_ref(row.proposal_ref)} · version {_ref(row.proposal_revision)}"
+                f" · {state}"
+            )
+            if row.aliases:
+                block["text"]["text"] += (
+                    "\nAlso known as " + ", ".join(_display(alias) for alias in row.aliases)[:450]
+                )
+            if row.deadline:
+                # Only a verified integer is interpolated into Slack's local-time date token.
+                date = datetime.fromtimestamp(row.deadline, UTC).strftime("%Y-%m-%d %H:%M UTC")
+                date_token = f"<!date^{row.deadline}^{{date_short_pretty}} {{time}}|{date}>"
+                block["fields"] = [
+                    {
+                        "type": "mrkdwn",
+                        "text": f"Review by · {date_token}",
+                    }
+                ]
+            if row.action and row.selection:
+                block["accessory"] = _button(
+                    actions[row.action], "ot_app_queue_open", row.selection
+                )
+            else:
+                block["text"]["text"] += "\nNo action available."
+            blocks.append(block)
+    if not page.rows:
+        blocks.append(_section("Your workflow queue is empty."))
+    controls = []
+    if continuation:
+        controls.append(_button("First page", "ot_app_queue_first", "first"))
+    if page.next_cursor:
+        controls.append(_button("Next page", "ot_app_queue_next", page.next_cursor))
+    if controls:
+        blocks.append(_actions(*controls))
+    return blocks
+
+
 def app_home_view(
     context: str = "",
     title: str = "",
@@ -1692,6 +2092,9 @@ def app_home_view(
     decision_map_entry: str = "",
     case_entry: str = "",
     starter_score_entry: str = "",
+    queue: IndexPage | None = None,
+    queue_denied: bool = False,
+    queue_continuation: bool = False,
 ) -> Block:
     if not context:
         return {
@@ -1704,6 +2107,10 @@ def app_home_view(
             ],
         }
     blocks = [{"type": "header", "text": _text(_display(title))}]
+    if queue is not None:
+        blocks.extend(_workflow_queue(queue, continuation=queue_continuation))
+    elif queue_denied:
+        blocks.append(_section("Workflow queue access is unavailable."))
     if workflow:
         blocks.append(_section("Workflow · " + _display(workflow)))
     nav = [
@@ -1718,13 +2125,13 @@ def app_home_view(
         blocks.append(_actions(_button("Review starter cases", "ot_app_cases", case_entry)))
     if decision_map_entry:
         blocks.append(_actions(_button("Review decision map", "ot_app_map", decision_map_entry)))
-    if pending:
+    if pending and queue is None and not queue_denied:
         blocks.append(_section("A repair is ready for your review."))
         first = _button("Review pending repair", "ot_app_pending", pending)
         first["style"] = "primary"
         nav.insert(0, first)
     elif can_review:
-        if named_reviewer:
+        if named_reviewer and queue is None and not queue_denied:
             blocks.append(_section("No repair needs your review."))
         nav.insert(0, _button("Review results", "ot_app_review", "ot_app_review"))
     if can_add_workflow:
@@ -1844,7 +2251,12 @@ def starter_charter(context: str, preview: StarterPreview, map_entry: str = "") 
 
 
 def workflow_settings(
-    context: str, workflow: str, nomination: str = "", nominee: str = ""
+    context: str,
+    workflow: str,
+    nomination: str = "",
+    nominee: str = "",
+    *,
+    setup: Mapping[str, Any] | None = None,
 ) -> Block:
     blocks = [
         _section(f"Workflow {_ref(workflow)}"),
@@ -1854,6 +2266,18 @@ def workflow_settings(
         blocks.append(_section(f"Verifier nominated for custodian review · {_ref(nominee)}"))
     if nomination:
         blocks.append(_actions(_button("Nominate verifier", "ot_nominate_verifier", nomination)))
+    if setup is not None:
+        blocks.append(_section("Training policy · " + setup["state"].replace("_", " ")))
+        if setup["revision"]:
+            blocks.append(_section(f"Settings revision {_ref(setup['revision'])}"))
+        if budget := setup["budget"]:
+            lines = [
+                f"{name.capitalize()} · {budget[name]['used']} used of {budget[name]['limit']}"
+                for name in ("runs", "rows", "fits", "seconds")
+            ]
+            lines.append(f"Spending limit · {budget['monetary_limit_cents']} USD cents")
+            lines.append("Recorded spending · unavailable")
+            blocks.append(_section("\n".join(lines)))
     return _modal("Workflow settings", "ot_workflow_settings", context, blocks)
 
 
