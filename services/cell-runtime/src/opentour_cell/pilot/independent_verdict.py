@@ -38,6 +38,17 @@ What it verifies, as three separately reported statements:
 The operating point is supplied in its OPE-571 form, the frozen terms with every slice name
 already replaced by its keyed digest plus the plain SHA-256 over them, and is checked by
 ``operating_point_binding`` alone. The evaluator never holds the slice key or plain slice names.
+A policy whose slice entries are not digest-shaped is refused before anything is issued
+(``operating_point_slice_names_not_substituted``), so no verdict echoes a name it can tell is
+plain. Every verdict declares ``operating_point_digest_form`` as
+``comparison_packet.OPERATING_POINT_DIGEST_FORM`` (``slice_substituted.v1``), the only form the
+OPE-421 packet accepts; the packet still recomputes the digest from the comparison under the
+engagement key and refuses any other value with ``verdict_binding_mismatch``. The verdict's
+``denominator.membership_digest`` is the plan's own form
+(``comparison_plan.protected_membership_digest`` over the sealed case ids), so the packet refuses
+a verdict over any other cohort with ``denominator_changed``; the domain-tagged
+``SealedPopulation.membership_digest`` still binds the claim and is exported as
+``sealed_membership_digest``.
 
 Comparator gaps never hide candidate errors: more comparator missing or malformed outputs than
 the policy's ``max_missing`` hold the comparison as incompatible; the candidate's total wrong
@@ -150,8 +161,10 @@ from fractions import Fraction
 from pathlib import Path
 from typing import Any, Protocol
 
+from opentour_cell.pilot import comparison_packet, comparison_plan
 from opentour_cell.pilot import open_weight as ow
 from opentour_cell.pilot.operating_point import digest
+from opentour_cell.pilot.simple_repair import RepairError
 
 Json = dict[str, Any]
 VERDICT = "opentour.pilot.independent-verdict.v1"
@@ -247,40 +260,135 @@ class PolicyFloor:
     min_improvement_bps: int
     min_families: int
     min_coverage_floor_bps: int
+    max_coverage_loss_bps: int
     max_missing: int
+    min_verified_cases: int
+    min_slice_cases: int
+    max_verdict_validity_seconds: int
+    interval_method: str
+    decoding: str
 
     def shortfalls(self, policy: Mapping[str, Any]) -> list[str]:
-        def value(name: str) -> int | None:
-            v = policy.get(name) if isinstance(policy, Mapping) else None
-            return v if type(v) is int else None
+        """Every floor term the bound ``policy`` (its ``as_json`` form) fails, in a fixed order.
 
-        checks: tuple[tuple[str, Callable[[int], bool]], ...] = (
-            ("alpha_bps", lambda v: v <= self.max_alpha_bps),
-            ("minimum_improvement_bps", lambda v: v >= self.min_improvement_bps),
-            ("min_families", lambda v: v >= self.min_families),
-            ("coverage_floor_bps", lambda v: v >= self.min_coverage_floor_bps),
-            ("max_missing", lambda v: v <= self.max_missing),
+        Fail closed: a policy or ``operating_point_terms`` that is not a Mapping, and a term that
+        is missing or not exactly the floor's type (``type(v) is int``, so ``True`` and int
+        subclasses fail; ``type(v) is str``, so str subclasses fail), is a shortfall, never a
+        pass. ``operating_point_terms.minimum_slice_cases`` is required whenever the policy's
+        ``critical_slices`` or the terms' ``critical_slices`` is anything but an empty list or
+        tuple (a missing or wrong-typed policy ``critical_slices`` therefore requires it).
+        """
+        doc: Mapping[str, Any] = policy if isinstance(policy, Mapping) else {}
+        raw_terms = doc.get("operating_point_terms")
+        terms: Mapping[str, Any] = raw_terms if isinstance(raw_terms, Mapping) else {}
+
+        def no_slices(value: object) -> bool:
+            return isinstance(value, (list, tuple)) and len(value) == 0
+
+        needs_slice_cases = not no_slices(doc.get("critical_slices")) or not no_slices(
+            terms.get("critical_slices", [])
         )
-        out = []
-        for name, ok in checks:
-            v = value(name)
-            if v is None or not ok(v):
-                out.append(name)
-        return out
+
+        def at_most(limit: int) -> Callable[[object], bool]:
+            return lambda v: type(v) is int and v <= limit
+
+        def at_least(limit: int) -> Callable[[object], bool]:
+            return lambda v: type(v) is int and v >= limit
+
+        def exactly(expected: str) -> Callable[[object], bool]:
+            return lambda v: type(v) is str and v == expected
+
+        checks: tuple[tuple[str, object, Callable[[object], bool]], ...] = (
+            ("alpha_bps", doc.get("alpha_bps"), at_most(self.max_alpha_bps)),
+            (
+                "minimum_improvement_bps",
+                doc.get("minimum_improvement_bps"),
+                at_least(self.min_improvement_bps),
+            ),
+            ("min_families", doc.get("min_families"), at_least(self.min_families)),
+            (
+                "coverage_floor_bps",
+                doc.get("coverage_floor_bps"),
+                at_least(self.min_coverage_floor_bps),
+            ),
+            (
+                "max_coverage_loss_bps",
+                doc.get("max_coverage_loss_bps"),
+                at_most(self.max_coverage_loss_bps),
+            ),
+            ("max_missing", doc.get("max_missing"), at_most(self.max_missing)),
+            (
+                "operating_point_terms.minimum_verified_cases",
+                terms.get("minimum_verified_cases"),
+                at_least(self.min_verified_cases),
+            ),
+            (
+                "operating_point_terms.minimum_slice_cases",
+                terms.get("minimum_slice_cases"),
+                at_least(self.min_slice_cases) if needs_slice_cases else lambda v: True,
+            ),
+            (
+                "verdict_validity_seconds",
+                doc.get("verdict_validity_seconds"),
+                at_most(self.max_verdict_validity_seconds),
+            ),
+            ("interval_method", doc.get("interval_method"), exactly(self.interval_method)),
+            ("decoding", doc.get("decoding"), exactly(self.decoding)),
+        )
+        return [name for name, value, ok in checks if not ok(value)]
 
 
-# D11 SEAM. The owner has not decided a minimum verdict policy (alpha, minimum improvement,
-# minimum families, coverage, the comparator-gap allowance and whether a tie at the ceiling
-# counts), so NO floor is registered and every effect a verified_gain could drive holds with
-# ``policy_floor_unset``. As with the OPE-526 audit/verdict issuer hold in comparison_packet,
-# there is no re-enable path short of a reviewed code change here: registering a floor means
-# replacing this ``None`` with the owner's ``PolicyFloor`` (and adding any D11 terms it lacks).
-# It is never a caller argument, a policy field or an environment setting.
-REGISTERED_POLICY_FLOOR: PolicyFloor | None = None
+# D11 SEAM. The owner's minimum verdict policy is ``d11.v1`` (product owner decision, recorded
+# on Linear OPE-528). Every effect a verified_gain could drive is held, by ``authorize`` and in
+# the issued ``effects``, unless the verdict's bound policy is at least this strict on EVERY
+# term; one laxer term refuses with ``policy_below_registered_floor``. Meeting the floor lifts
+# only this hold: integrity, freshness and revocation still apply, this module never makes a
+# release or handoff request eligible, and comparison_packet keeps its own issuer hold
+# (``audit_and_verdict_issuers_unverified``, until the OPE-566 signing contract lands).
+#   alpha_bps <= 500                         minimum_improvement_bps >= 100
+#   min_families >= 30                       coverage_floor_bps >= 5000
+#   max_coverage_loss_bps <= 200             max_missing <= 0 (no missing/malformed output)
+#   operating_point_terms.minimum_verified_cases >= 100
+#   operating_point_terms.minimum_slice_cases >= 10, required only with critical slices
+#   verdict_validity_seconds <= 604800 (7 days)
+#   interval_method == "bounded_independent_family_hoeffding_v1"
+#   decoding == "deterministic"
+# Values must be exact ints (or exact strs); a missing or wrong-typed term is a shortfall.
+# d11.v1 does not set the error ceiling or whether a tie at it counts; those stay as the frozen
+# operating point and ``_decide`` define them (newly automated errors AT the ceiling are not a
+# regression).
+#
+# Implied sensitivity. The interval is two-sided Hoeffding on the mean family effect in [-1, 1]
+# (``_family_interval``): radius = sqrt(2 ln(2 / alpha) / n). At alpha 0.05 the smallest mean
+# family gain that can verify (lower bound above the 1 pp minimum improvement) is:
+#   families             30     100    200    500    1000   2000
+#   minimum gain (pp)    50.6   28.2   20.2   13.1   9.6    7.1
+# Smaller real gains are inconclusive by design, however many cases each family holds.
+#
+# As with the OPE-526 audit/verdict issuer hold in comparison_packet, the floor changes only by
+# a reviewed code change here (a new ``floor_id``). It is never a caller argument, a policy field
+# or an environment setting. ``None`` would hold every gain with ``policy_floor_unset``.
+REGISTERED_POLICY_FLOOR: PolicyFloor | None = PolicyFloor(
+    floor_id="d11.v1",
+    max_alpha_bps=500,
+    min_improvement_bps=100,
+    min_families=30,
+    min_coverage_floor_bps=5000,
+    max_coverage_loss_bps=200,
+    max_missing=0,
+    min_verified_cases=100,
+    min_slice_cases=10,
+    max_verdict_validity_seconds=604_800,
+    interval_method="bounded_independent_family_hoeffding_v1",
+    decoding="deterministic",
+)
 
 
 def policy_floor_status(policy: Mapping[str, Any]) -> str:
-    """``unset`` (no D11 floor registered), ``satisfied`` or ``below_registered_floor``."""
+    """``satisfied`` or ``below_registered_floor`` against the registered D11 floor (``d11.v1``).
+
+    ``unset`` only if ``REGISTERED_POLICY_FLOOR`` were ``None``; it is not.
+    """
     floor = REGISTERED_POLICY_FLOOR
     if floor is None:
         return "unset"
@@ -384,7 +492,22 @@ class SealedPopulation:
 
     @property
     def membership_digest(self) -> str:
+        """Domain-tagged membership: the claim binding and this evaluator's own records."""
         return digest(["opentour.pilot.sealed-membership.v1", [c.case_id for c in self.cases]])
+
+    @property
+    def plan_membership_digest(self) -> str | None:
+        """The same id set in ``comparison_plan``'s ``protected_membership_digest`` form.
+
+        This is what ``comparison_packet`` compares the verdict's ``denominator`` against, so it
+        is computed by ``comparison_plan.protected_membership_digest`` itself, never re-derived.
+        ``None`` when some case id is not a plan identifier: such a population cannot be any
+        plan's protected cohort, and the packet refuses it as ``denominator_changed``.
+        """
+        try:
+            return comparison_plan.protected_membership_digest(c.case_id for c in self.cases)
+        except RepairError:
+            return None
 
     @property
     def inputs_digest(self) -> str:
@@ -718,6 +841,15 @@ class GatePolicy:
             or not all(_ID.fullmatch(n) for n in (*names, *self.critical_slices))
         ):
             raise VerdictInputError("invalid_gate_policy")
+        if not all(_is_sha(n) for n in self.critical_slices) or not all(
+            isinstance(self.operating_point_terms.get(k, []), list)
+            and all(_is_sha(n) for n in self.operating_point_terms.get(k, []))
+            for k in comparison_packet._SLICE_TERMS
+        ):
+            # OPE-571: the evaluator only ever receives keyed slice digests. An entry that is
+            # not digest-shaped is a plain name, and a held verdict would publish it in its
+            # policy, so nothing is issued. Format only: see ``operating_point_binding``.
+            raise VerdictInputError("operating_point_slice_names_not_substituted")
         if self.decoding != "deterministic":
             raise VerdictInputError("stochastic_decoding_not_supported")
 
@@ -1223,13 +1355,12 @@ def operating_point_binding(
 ) -> str | None:
     """Check an operating-point digest against its slice-substituted terms (OPE-571 form).
 
-    REBASE POINT (OPE-571, branch claude/ope-571-slice-digests, unmerged): the digest is a plain
-    SHA-256 over ``terms`` after every ``critical_slices``/``material_slices`` name has been
-    replaced by its keyed digest, so it is checkable without the per-engagement slice key. The
-    rebase target is ``comparison_packet.operating_point_digest`` (comparison_packet.py:411 on
-    that branch); until it merges this uses ``operating_point.digest``, the canonicalization
-    ``comparison_packet`` applies to ``terms`` on main. Returns ``None`` when bound, else the
-    hold reason.
+    The digest is ``comparison_packet.operating_point_digest``: a plain canonical SHA-256 over
+    ``terms`` after every ``comparison_packet._SLICE_TERMS`` (critical and material) name has
+    been replaced by its keyed digest, so it is checkable without the per-engagement slice key.
+    It is the packet's own function, not a copy, so the two cannot drift. A verdict binding it
+    declares ``operating_point_digest_form: comparison_packet.OPERATING_POINT_DIGEST_FORM``.
+    Returns ``None`` when bound, else the hold reason.
 
     The substitution check is FORMAT ONLY: a slice entry must be 64 lowercase hex. Without the
     slice key the evaluator cannot tell a keyed digest from a plain SHA-256 of a name (or a name
@@ -1237,12 +1368,12 @@ def operating_point_binding(
     """
     if not isinstance(substituted_terms, Mapping) or not _is_sha(operating_point_digest):
         return "operating_point_unverifiable"
-    for key in ("critical_slices", "material_slices"):
+    for key in comparison_packet._SLICE_TERMS:
         names = substituted_terms.get(key, [])
         if not isinstance(names, list) or not all(_is_sha(n) for n in names):
             return "operating_point_slice_names_not_substituted"
     try:
-        computed = digest(dict(substituted_terms))
+        computed = comparison_packet.operating_point_digest(dict(substituted_terms))
     except (TypeError, ValueError):
         return "operating_point_unverifiable"
     if computed != operating_point_digest:
@@ -1851,8 +1982,9 @@ class IndependentEvaluator:
         holds before acting. It refuses a revoked key, an expired verdict, a document that is not
         the one stored under its key (including an older archived generation), and an effect the
         verdict did not make eligible. Any effect on a ``verified_gain`` also refuses with
-        ``policy_floor_unset`` while no D11 floor is registered (``REGISTERED_POLICY_FLOOR``),
-        and with ``policy_below_registered_floor`` when the verdict's policy is laxer than it.
+        ``policy_below_registered_floor`` when the verdict's bound policy is laxer than the
+        registered D11 floor (``REGISTERED_POLICY_FLOOR``, ``d11.v1``) on any term, and would
+        refuse with ``policy_floor_unset`` if no floor were registered.
         There is deliberately no argument for a policy or a floor here. Custody tampering raises
         ``CustodyError``.
         """
@@ -1882,8 +2014,8 @@ class IndependentEvaluator:
             return refuse("verdict_expired", "expired")
         held_doc = stored.document
         if held_doc["outcome"] == "verified_gain":
-            # D11: no consumer acts on a gain until an owner-registered floor exists and the
-            # verdict's bound policy meets it. Read from this module, never from the caller.
+            # D11: no consumer acts on a gain unless the verdict's bound policy meets the
+            # owner-registered floor. Read from this module, never from the caller.
             floor = policy_floor_status(held_doc["policy"])
             if floor != "satisfied":
                 return refuse(
@@ -2816,13 +2948,21 @@ class IndependentEvaluator:
             # The same key without ids, so an answer-key revocation survives renamed ids.
             "answer_key_content_digest": population.answer_key_content_digest,
             "inputs_digest": population.inputs_digest,
+            # OPE-571: the only digest form ``comparison_packet`` accepts. The value is the
+            # claim's, bound to the substituted terms by ``operating_point_binding``; the packet
+            # recomputes it from the comparison under the engagement key before trusting it.
+            "operating_point_digest_form": comparison_packet.OPERATING_POINT_DIGEST_FORM,
             "operating_point_digest": claim.operating_point_digest,
             "target_metric": TARGET_METRIC,
             "policy": policy.as_json(),
+            # Exactly the two keys ``comparison_packet`` compares, in the plan's membership form,
+            # so a verdict scoring any other cohort than the comparison's is refused there.
             "denominator": {
                 "protected_rows": len(population.cases),
-                "membership_digest": population.membership_digest,
+                "membership_digest": population.plan_membership_digest,
             },
+            # The domain-tagged form the claim is bound by (``_check_binding``).
+            "sealed_membership_digest": population.membership_digest,
             "scorer": {
                 "scorer_id": self.scorer.scorer_id,
                 "scorer_version": self.scorer.scorer_version,
@@ -2835,7 +2975,7 @@ class IndependentEvaluator:
             "predictions_commitment": self._commit(record),
             "predictions_custody": "evaluator_private_retention_limited",
             "effects": {
-                # Held until a D11 policy floor is registered and met (``policy_floor_status``).
+                # Held unless the bound policy meets the D11 floor (``policy_floor_status``).
                 "improvement_alert_eligible": alert and floor == "satisfied",
                 "release_request_eligible": False,
                 "handoff_request_eligible": False,

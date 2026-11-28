@@ -228,6 +228,27 @@ def policy(**over):
     return iv.GatePolicy(**values)
 
 
+# The registered D11 floor ``d11.v1``: a policy exactly at every one of its bounds.
+D11 = {
+    "alpha_bps": 500,
+    "minimum_improvement_bps": 100,
+    "min_families": 30,
+    "coverage_floor_bps": 5000,
+    "max_coverage_loss_bps": 200,
+    "max_missing": 0,
+    "verdict_validity_seconds": 604_800,
+}
+D11_TERMS = {"minimum_verified_cases": 100, "minimum_slice_cases": 10}
+
+
+def d11_policy(*, terms=None, **over):
+    """``policy()`` at the d11.v1 floor's own values; ``terms`` overrides operating-point terms."""
+    t = {**terms_for(over.get("critical_slices", ())), **D11_TERMS, **(terms or {})}
+    return policy(
+        **{**D11, "operating_point_terms": t, "operating_point_digest": digest(t), **over}
+    )
+
+
 def recompute_pairs(scenario, comparator):
     """Separate hand counter over transitions (the test oracle, not the module's aggregator)."""
     counts = {
@@ -319,8 +340,15 @@ def run(
     # Invariant on every verdict here (review 577a774 F5): verified_gain iff reproduced.
     doc = verdict.document
     assert (doc["outcome"] == "verified_gain") == (doc["verdict"] == "reproduced")
-    if iv.REGISTERED_POLICY_FLOOR is None:
-        # Re-review M2: with no D11 floor registered, no verdict here makes any effect eligible.
+    # Re-review M2 / D11: an alert is eligible only for a reproduced, readback-consistent gain
+    # whose bound policy meets the registered floor; release and handoff never are here.
+    assert doc["effects"]["release_request_eligible"] is False
+    assert doc["effects"]["handoff_request_eligible"] is False
+    if doc["effects"]["improvement_alert_eligible"]:
+        assert doc["outcome"] == "verified_gain" and doc["alert_gates"]["cleared"] is True
+        assert iv.policy_floor_status(doc["policy"]) == "satisfied"
+    # A held view (stale, revoked) carries no policy and so never meets the floor.
+    if iv.policy_floor_status(doc.get("policy")) != "satisfied":
         assert not any(doc["effects"].values())
     return verdict
 
@@ -348,7 +376,7 @@ def held(verdict, outcome, reason=None):
 
 def test_c1_clean_win_verifies_all_three_statements_and_is_alert_eligible(tmp_path):
     s = Scenario(CLEAN_WIN)
-    v = run(tmp_path, s)
+    v = run(tmp_path, s, pol=d11_policy())
     doc = v.document
     assert doc["outcome"] == "verified_gain" and doc["verdict"] == "reproduced"
     st = doc["statements"]
@@ -378,13 +406,13 @@ def test_c1_clean_win_verifies_all_three_statements_and_is_alert_eligible(tmp_pa
     assert doc["comparisons"]["simple_repair"]["required"] is True
     assert doc["policy"]["required_comparators"] == ["incumbent", "simple_repair"]
     assert float(pair["uncertainty"]["lower"]) > 0.02
-    # The verdict's own gates cleared, but no D11 policy floor is registered, so no effect.
+    # The verdict's own gates cleared and its bound policy meets the registered d11.v1 floor.
     assert doc["alert_gates"] == {
         "cleared": True,
-        "policy_floor": "unset",
-        "policy_floor_hold": "policy_floor_unset",
+        "policy_floor": "satisfied",
+        "policy_floor_hold": None,
     }
-    assert doc["effects"]["improvement_alert_eligible"] is False
+    assert doc["effects"]["improvement_alert_eligible"] is True
     assert doc["effects"]["release_request_eligible"] is False
 
 
@@ -1131,15 +1159,17 @@ def test_c7_operating_point_is_bound_through_substituted_terms_without_the_slice
         "operating_point_digest_mismatch",
     )
     plain = terms_for(("critical-plain-name",))
-    held(
-        run(
-            tmp_path / "b",
-            s,
-            pol=policy(operating_point_terms=plain, operating_point_digest=digest(plain)),
-        ),
-        "integrity_failure",
-        "operating_point_slice_names_not_substituted",
+    assert iv.operating_point_binding(plain, digest(plain)) == (
+        "operating_point_slice_names_not_substituted"
     )
+    # A held verdict would publish the plain name in its policy, so nothing is issued at all.
+    for pol_b in (
+        policy(operating_point_terms=plain, operating_point_digest=digest(plain)),
+        policy(critical_slices=("critical-plain-name",)),
+    ):
+        with pytest.raises(iv.VerdictInputError, match="slice_names_not_substituted"):
+            run(tmp_path / "b", s, pol=pol_b)
+    assert list((tmp_path / "b" / "evaluator-custody" / "verdicts").iterdir()) == []
     unbound = policy(critical_slices=(CRITICAL,), operating_point_terms=terms_for())
     held(
         run(
@@ -1154,6 +1184,7 @@ def test_c7_operating_point_is_bound_through_substituted_terms_without_the_slice
     )
     doc = run(tmp_path / "d", s, pol=pol).document
     assert doc["operating_point_digest"] == pol.operating_point_digest
+    assert doc["operating_point_digest_form"] == cp.OPERATING_POINT_DIGEST_FORM
     assert doc["policy"]["operating_point_terms"]["critical_slices"] == [CRITICAL]
 
 
@@ -2386,12 +2417,10 @@ def test_j5_docs_say_what_is_enforced():
     assert sentence in " ".join((iv.decision_content_digest.__doc__ or "").split())
 
 
-def test_e1_review_r4_renamed_ids_and_an_undeclared_reference_cannot_escape_both(
-    tmp_path, registered_floor
-):
+def test_e1_review_r4_renamed_ids_and_an_undeclared_reference_cannot_escape_both(tmp_path):
     """Round 4 E1: with the answer key revoked, this combination came back verified_gain."""
     ev = evaluator(tmp_path)
-    hit = run(tmp_path, Scenario(CLEAN_WIN), ev=ev)
+    hit = run(tmp_path, Scenario(CLEAN_WIN), ev=ev, pol=d11_policy())
     ev.revoke_scope(
         "answer_key_digest",
         hit.document["answer_key_digest"],
@@ -2404,7 +2433,7 @@ def test_e1_review_r4_renamed_ids_and_an_undeclared_reference_cannot_escape_both
         ),
         lambda c: {**c.features, "source": "ref:" + c.case_id},
     )
-    v = run(tmp_path, e1, ev=ev, result_revision=sha("e1"))
+    v = run(tmp_path, e1, ev=ev, result_revision=sha("e1"), pol=d11_policy())
     assert v.outcome != "verified_gain"
     doc = held(v, "inconclusive", "undeclared_reference_field")
     assert not any(doc["effects"].values())
@@ -2845,32 +2874,14 @@ def custody_files(tmp_path, sub):
     return sorted(p.name for p in (tmp_path / "evaluator-custody" / sub).glob("*.json"))
 
 
-TEST_FLOOR = iv.PolicyFloor(
-    floor_id="generated-test-floor-r1",
-    max_alpha_bps=500,
-    min_improvement_bps=200,
-    min_families=2,
-    min_coverage_floor_bps=7000,
-    max_missing=5,
-)
-
-
-@pytest.fixture
-def registered_floor(monkeypatch):
-    """Stands in for a future owner D11 decision. Test-only: the shipped registry is empty."""
-    monkeypatch.setattr(iv, "REGISTERED_POLICY_FLOOR", TEST_FLOOR)
-    return TEST_FLOOR
-
-
-def test_v1_revoked_verified_gain_reads_as_stale_and_every_consumer_check_refuses(
-    tmp_path, registered_floor
-):
+def test_v1_revoked_verified_gain_reads_as_stale_and_every_consumer_check_refuses(tmp_path):
     ev = evaluator(tmp_path)
     s = Scenario(CLEAN_WIN)
     replays = s.replays()
-    v = run(tmp_path, s, ev=ev, replays=replays)
+    pol = d11_policy()
+    v = run(tmp_path, s, ev=ev, replays=replays, pol=pol)
     assert v.outcome == "verified_gain"
-    # With a floor registered, the gain authorizes an alert until it is revoked.
+    # Under the registered d11.v1 floor, the gain authorizes an alert until it is revoked.
     assert ev.authorize(v.document, effect="improvement_alert")["authorized"] is True
     assert ev.read_verdict(v.verdict_key) == v.document
     r = ev.revoke_verdict(v.verdict_key, reason="claim_corrected", issued_by=EVALUATOR)
@@ -2892,7 +2903,7 @@ def test_v1_revoked_verified_gain_reads_as_stale_and_every_consumer_check_refuse
             "state": "revoked",
         }
     # Re-reading through evaluate returns the revoked view and never re-scores.
-    again = run(tmp_path, s, ev=ev, replays=replays)
+    again = run(tmp_path, s, ev=ev, replays=replays, pol=pol)
     assert again.replayed and again.outcome == "stale"
     revoked_held(again.document)
     assert len(replays["candidate"].calls) == 1
@@ -3156,17 +3167,49 @@ def test_v11_each_seal_layer_is_checked_on_its_own(tmp_path):
     assert ev.correction_notice(a.verdict_key, watch_fired=True) is not None
 
 
-def test_v12_review_m2_no_effect_on_a_gain_while_the_policy_floor_is_unset(tmp_path):
-    """Re-review M2: authorize(improvement_alert) returned True with D11 undecided."""
-    assert iv.REGISTERED_POLICY_FLOOR is None  # the shipped registry is empty
+# The default ``policy()`` above is laxer than d11.v1 on exactly these terms.
+DEFAULT_POLICY_SHORTFALLS = [
+    "min_families",
+    "max_coverage_loss_bps",
+    "operating_point_terms.minimum_verified_cases",
+]
+D11_TERM_NAMES = [
+    "alpha_bps",
+    "minimum_improvement_bps",
+    "min_families",
+    "coverage_floor_bps",
+    "max_coverage_loss_bps",
+    "max_missing",
+    "operating_point_terms.minimum_verified_cases",
+    "operating_point_terms.minimum_slice_cases",
+    "verdict_validity_seconds",
+    "interval_method",
+    "decoding",
+]
+
+
+def test_v12_review_m2_no_effect_on_a_gain_whose_policy_is_below_the_floor(tmp_path):
+    """Re-review M2: authorize(improvement_alert) once returned True with D11 undecided.
+
+    Formerly pinned ``policy_floor_unset``. With d11.v1 registered, the same lax-policy gain is
+    refused as ``policy_below_registered_floor`` on every effect.
+    """
+    floor = iv.REGISTERED_POLICY_FLOOR
+    assert floor is not None and floor.floor_id == "d11.v1"
     ev = evaluator(tmp_path)
     v = run(tmp_path, Scenario(CLEAN_WIN), ev=ev)
-    assert v.outcome == "verified_gain" and v.document["alert_gates"]["cleared"] is True
+    assert v.outcome == "verified_gain"
+    assert v.document["alert_gates"] == {
+        "cleared": True,
+        "policy_floor": "below_registered_floor",
+        "policy_floor_hold": "policy_floor_below_registered_floor",
+    }
+    assert floor.shortfalls(v.document["policy"]) == DEFAULT_POLICY_SHORTFALLS
     for effect in ("improvement_alert", "release_request", "handoff_request"):
         assert ev.authorize(v.document, effect=effect) == {
             "authorized": False,
             "effect": effect,
-            "reason": "policy_floor_unset",
+            "reason": "policy_below_registered_floor",
             "state": "verified_gain",
         }
     # A non-win is not a gain: its refusal stays effect_not_eligible.
@@ -3175,7 +3218,12 @@ def test_v12_review_m2_no_effect_on_a_gain_while_the_policy_floor_is_unset(tmp_p
 
 
 def test_v13_no_caller_supplied_policy_lifts_the_floor_hold(tmp_path):
-    """The floor is the owner's, read from the module: nothing a producer sends can lift it."""
+    """The floor is the owner's, read from the module: nothing a producer sends can lift it.
+
+    Formerly pinned ``policy_floor_unset``. The policy below is stricter than d11.v1 on every
+    top-level term and names a "floor" in its terms, but its ``minimum_verified_cases`` is 1, so
+    it is refused as ``policy_below_registered_floor``.
+    """
     import inspect
 
     assert list(inspect.signature(iv.IndependentEvaluator.authorize).parameters) == [
@@ -3187,7 +3235,7 @@ def test_v13_no_caller_supplied_policy_lifts_the_floor_hold(tmp_path):
         params = inspect.signature(getattr(iv.IndependentEvaluator, name)).parameters
         assert not any("floor" in p for p in params)
     ev = evaluator(tmp_path)
-    # The strictest policy a producer could preregister, plus terms naming a "floor".
+    # The strictest top-level policy a producer could preregister, plus terms naming a "floor".
     t = {**terms_for(), "policy_floor": "satisfied", "registered_policy_floor": "d11-approved"}
     strict = policy(
         alpha_bps=1,
@@ -3201,7 +3249,14 @@ def test_v13_no_caller_supplied_policy_lifts_the_floor_hold(tmp_path):
     )
     v = run(tmp_path, Scenario(CLEAN_WIN), ev=ev, pol=strict)
     assert v.outcome == "verified_gain"
-    assert ev.authorize(v.document, effect="improvement_alert")["reason"] == "policy_floor_unset"
+    floor = iv.REGISTERED_POLICY_FLOOR
+    assert floor is not None
+    assert floor.shortfalls(v.document["policy"]) == [
+        "operating_point_terms.minimum_verified_cases"
+    ]
+    assert ev.authorize(v.document, effect="improvement_alert")["reason"] == (
+        "policy_below_registered_floor"
+    )
     # A document rewritten to claim the floor is met is not the stored verdict.
     forged = {
         **v.document,
@@ -3215,27 +3270,43 @@ def test_v13_no_caller_supplied_policy_lifts_the_floor_hold(tmp_path):
     again = run(tmp_path, Scenario(CLEAN_WIN), ev=ev, pol=strict)
     assert again.replayed
     assert ev.authorize(again.document, effect="improvement_alert")["reason"] == (
-        "policy_floor_unset"
+        "policy_below_registered_floor"
     )
 
 
-def test_v14_the_d11_seam_applies_a_registered_floor_and_refuses_a_laxer_policy(
+def test_v14_the_d11_seam_applies_the_registered_floor_and_refuses_a_laxer_policy(
     tmp_path, monkeypatch
 ):
+    """The floor applies at ``authorize`` without re-scoring; ``None`` would hold every gain."""
     ev = evaluator(tmp_path)
     s = Scenario(CLEAN_WIN)
-    held_before = run(tmp_path, s, ev=ev)  # issued while no floor existed
-    monkeypatch.setattr(iv, "REGISTERED_POLICY_FLOOR", TEST_FLOOR)
-    # A floor registered later applies to the earlier verdict without re-scoring it.
+    pol = d11_policy()
+    # Were the registry empty, the same at-floor gain would hold with policy_floor_unset.
+    monkeypatch.setattr(iv, "REGISTERED_POLICY_FLOOR", None)
+    held_before = run(tmp_path, s, ev=ev, pol=pol)
+    assert held_before.outcome == "verified_gain"
+    assert held_before.document["alert_gates"] == {
+        "cleared": True,
+        "policy_floor": "unset",
+        "policy_floor_hold": "policy_floor_unset",
+    }
+    assert held_before.document["effects"]["improvement_alert_eligible"] is False
+    assert ev.authorize(held_before.document, effect="improvement_alert")["reason"] == (
+        "policy_floor_unset"
+    )
+    monkeypatch.undo()
+    # The shipped d11.v1 floor applies to the earlier verdict without re-scoring it.
+    floor = iv.REGISTERED_POLICY_FLOOR
+    assert floor is not None and floor.floor_id == "d11.v1"
     out = ev.authorize(held_before.document, effect="improvement_alert")
     assert out["authorized"] is True and out["reason"] == "verdict_current_and_eligible"
     assert ev.authorize(held_before.document, effect="release_request")["reason"] == (
         "effect_not_eligible"
     )
-    fresh = run(tmp_path / "fresh", s)
+    fresh = run(tmp_path / "fresh", s, pol=pol)
     assert fresh.document["alert_gates"]["policy_floor"] == "satisfied"
     assert fresh.document["effects"]["improvement_alert_eligible"] is True
-    lax = policy(alpha_bps=900)
+    lax = d11_policy(alpha_bps=501)
     lax_v = run(tmp_path / "lax", s, pol=lax)
     assert lax_v.outcome == "verified_gain"
     assert lax_v.document["alert_gates"]["policy_floor_hold"] == (
@@ -3244,42 +3315,341 @@ def test_v14_the_d11_seam_applies_a_registered_floor_and_refuses_a_laxer_policy(
     assert evaluator(tmp_path / "lax").authorize(lax_v.document, effect="improvement_alert")[
         "reason"
     ] == ("policy_below_registered_floor")
-    assert TEST_FLOOR.shortfalls(lax.as_json()) == ["alpha_bps"]
-    assert TEST_FLOOR.shortfalls({}) == [
-        "alpha_bps",
-        "minimum_improvement_bps",
+    assert floor.shortfalls(lax.as_json()) == ["alpha_bps"]
+    # Nothing stated is nothing met: every term, in the fixed order.
+    assert floor.shortfalls({}) == D11_TERM_NAMES
+
+
+# ----------------------------------------------------------------- D11: registered floor d11.v1
+
+
+def _floor() -> iv.PolicyFloor:
+    floor = iv.REGISTERED_POLICY_FLOOR
+    assert floor is not None
+    return floor
+
+
+def test_d11_the_registered_floor_is_exactly_d11_v1():
+    """The owner's floor (Linear OPE-528) as a code constant, with every term's exact type."""
+    import inspect
+
+    floor = _floor()
+    assert floor == iv.PolicyFloor(
+        floor_id="d11.v1",
+        max_alpha_bps=500,
+        min_improvement_bps=100,
+        min_families=30,
+        min_coverage_floor_bps=5000,
+        max_coverage_loss_bps=200,
+        max_missing=0,
+        min_verified_cases=100,
+        min_slice_cases=10,
+        max_verdict_validity_seconds=604_800,
+        interval_method="bounded_independent_family_hoeffding_v1",
+        decoding="deterministic",
+    )
+    for name in (
+        "max_alpha_bps",
+        "min_improvement_bps",
         "min_families",
-        "coverage_floor_bps",
+        "min_coverage_floor_bps",
+        "max_coverage_loss_bps",
         "max_missing",
-    ]
-    for name, value in (
-        ("minimum_improvement_bps", 199),
-        ("min_families", 1),
-        ("coverage_floor_bps", 6999),
-        ("max_missing", 6),
-        ("alpha_bps", 501),
+        "min_verified_cases",
+        "min_slice_cases",
+        "max_verdict_validity_seconds",
     ):
-        assert TEST_FLOOR.shortfalls({**policy().as_json(), name: value}) == [name]
-    assert TEST_FLOOR.shortfalls(policy().as_json()) == []
-    # Each bound is inclusive at the floor's own value.
-    at_floor = {
-        "alpha_bps": 500,
-        "minimum_improvement_bps": 200,
-        "min_families": 2,
-        "coverage_floor_bps": 7000,
-        "max_missing": 5,
+        assert type(getattr(floor, name)) is int, name
+    assert type(floor.interval_method) is str and type(floor.decoding) is str
+    assert floor.interval_method == iv.INTERVAL_METHOD  # what the evaluator actually computes
+    # The at-floor test policy is exactly the floor, and its as_json form is satisfied.
+    assert floor.shortfalls(d11_policy().as_json()) == []
+    assert iv.policy_floor_status(d11_policy().as_json()) == "satisfied"
+    assert iv.policy_floor_status(policy().as_json()) == "below_registered_floor"
+    # A code constant: no env lookup, and no floor argument on any evaluator entry point.
+    source = inspect.getsource(iv)
+    assert "REGISTERED_POLICY_FLOOR: PolicyFloor | None = PolicyFloor(" in source
+    seam = source.split("# D11 SEAM.", 1)[1].split("REGISTERED_POLICY_FLOOR:", 1)[0]
+    assert "It is never a caller argument, a policy field" in seam
+    assert "or an environment setting" in seam
+    assert "environ" not in inspect.getsource(iv.PolicyFloor)
+    assert "environ" not in inspect.getsource(iv.policy_floor_status)
+
+
+def _first_ten_critical(index, codes):
+    return (CRITICAL,) if index < 10 else ()
+
+
+# One step laxer than the floor on one term only, as policy overrides.
+_ONE_STEP = {
+    "alpha_bps": {"alpha_bps": 501},
+    "minimum_improvement_bps": {"minimum_improvement_bps": 99},
+    "min_families": {"min_families": 29},
+    "coverage_floor_bps": {"coverage_floor_bps": 4999},
+    "max_coverage_loss_bps": {"max_coverage_loss_bps": 201},
+    "max_missing": {"max_missing": 1},
+    "operating_point_terms.minimum_verified_cases": {"terms": {"minimum_verified_cases": 99}},
+    "operating_point_terms.minimum_slice_cases": {
+        "critical_slices": (CRITICAL,),
+        "terms": {"minimum_slice_cases": 9},
+    },
+    "verdict_validity_seconds": {"verdict_validity_seconds": 604_801},
+}
+
+
+@pytest.mark.parametrize("term", sorted(_ONE_STEP))
+def test_d11_one_step_laxer_on_any_single_term_is_refused_end_to_end(tmp_path, term):
+    """Each term alone: a verified gain one step laxer than the floor is never authorized."""
+    over = _ONE_STEP[term]
+    pol = d11_policy(**over)
+    s = Scenario(CLEAN_WIN, slice_of=_first_ten_critical if "critical_slices" in over else None)
+    ev = evaluator(tmp_path)
+    v = run(tmp_path, s, ev=ev, pol=pol)
+    assert v.outcome == "verified_gain", v.document["reasons"]
+    assert v.document["alert_gates"]["cleared"] is True
+    assert v.document["alert_gates"]["policy_floor"] == "below_registered_floor"
+    assert not any(v.document["effects"].values())
+    assert _floor().shortfalls(v.document["policy"]) == [term]
+    for effect in ("improvement_alert", "release_request", "handoff_request"):
+        assert ev.authorize(v.document, effect=effect) == {
+            "authorized": False,
+            "effect": effect,
+            "reason": "policy_below_registered_floor",
+            "state": "verified_gain",
+        }
+
+
+def test_d11_exactly_at_the_floor_with_critical_slices_authorizes(tmp_path):
+    """The slice term at exactly 10 with a 10-case critical slice: satisfied and authorized."""
+    s = Scenario(CLEAN_WIN, slice_of=_first_ten_critical)
+    pol = d11_policy(critical_slices=(CRITICAL,))
+    assert pol.operating_point_terms["minimum_slice_cases"] == 10
+    ev = evaluator(tmp_path)
+    v = run(tmp_path, s, ev=ev, pol=pol)
+    assert v.outcome == "verified_gain"
+    assert v.document["comparisons"]["incumbent"]["critical_slices"][CRITICAL]["comparable"] == 10
+    assert v.document["alert_gates"]["policy_floor"] == "satisfied"
+    assert ev.authorize(v.document, effect="improvement_alert")["authorized"] is True
+
+
+def test_d11_interval_method_and_decoding_terms_hold_end_to_end(tmp_path, monkeypatch):
+    """The floor names the method itself: it does not follow the module constant if it moves."""
+    ev = evaluator(tmp_path)
+    monkeypatch.setattr(iv, "INTERVAL_METHOD", "generated_other_interval_method_v1")
+    v = run(tmp_path, Scenario(CLEAN_WIN), ev=ev, pol=d11_policy())
+    assert v.outcome == "verified_gain"
+    assert v.document["policy"]["interval_method"] == "generated_other_interval_method_v1"
+    assert _floor().shortfalls(v.document["policy"]) == ["interval_method"]
+    assert ev.authorize(v.document, effect="improvement_alert")["reason"] == (
+        "policy_below_registered_floor"
+    )
+    monkeypatch.undo()
+    # A GatePolicy cannot bind non-deterministic decoding at all; the floor refuses it too.
+    with pytest.raises(iv.VerdictInputError, match="stochastic_decoding_not_supported"):
+        d11_policy(decoding="sampled").validate()
+    at = d11_policy().as_json()
+    assert _floor().shortfalls({**at, "decoding": "sampled"}) == ["decoding"]
+
+
+# Every bound as (term, at-floor value, one-step-laxer value).
+_BOUNDS = [
+    ("alpha_bps", 500, 501),
+    ("minimum_improvement_bps", 100, 99),
+    ("min_families", 30, 29),
+    ("coverage_floor_bps", 5000, 4999),
+    ("max_coverage_loss_bps", 200, 201),
+    ("max_missing", 0, 1),
+    ("operating_point_terms.minimum_verified_cases", 100, 99),
+    ("operating_point_terms.minimum_slice_cases", 10, 9),
+    ("verdict_validity_seconds", 604_800, 604_801),
+    (
+        "interval_method",
+        "bounded_independent_family_hoeffding_v1",
+        "bounded_independent_family_hoeffding_v2",
+    ),
+    ("decoding", "deterministic", "sampled"),
+]
+
+
+def _with(doc, term, value, *, drop=False):
+    """A copy of ``doc`` with ``term`` (possibly under operating_point_terms) set or removed."""
+    out = {**doc, "operating_point_terms": dict(doc["operating_point_terms"])}
+    target, key = out, term
+    if term.startswith("operating_point_terms."):
+        target, key = out["operating_point_terms"], term.split(".", 1)[1]
+    if drop:
+        target.pop(key, None)
+    else:
+        target[key] = value
+    return out
+
+
+@pytest.mark.parametrize("term,at,laxer", _BOUNDS)
+def test_d11_each_bound_is_inclusive_at_the_floor_and_one_step_laxer_fails(term, at, laxer):
+    base = d11_policy(critical_slices=(CRITICAL,)).as_json()
+    assert _floor().shortfalls(_with(base, term, at)) == []
+    assert iv.policy_floor_status(_with(base, term, at)) == "satisfied"
+    assert _floor().shortfalls(_with(base, term, laxer)) == [term]
+    assert _floor().shortfalls(_with(base, term, None, drop=True)) == [term]
+    assert iv.policy_floor_status(_with(base, term, laxer)) == "below_registered_floor"
+
+
+class _Int(int):
+    pass
+
+
+class _Str(str):
+    pass
+
+
+@pytest.mark.parametrize(
+    "term,value",
+    [
+        ("alpha_bps", True),  # bool is an int subclass and is refused
+        ("max_missing", False),  # False == 0, and is still not an int
+        ("min_families", _Int(30)),
+        ("alpha_bps", 500.0),
+        ("coverage_floor_bps", "5000"),
+        ("verdict_validity_seconds", None),
+        ("operating_point_terms.minimum_verified_cases", True),
+        ("operating_point_terms.minimum_verified_cases", 100.0),
+        ("operating_point_terms.minimum_slice_cases", _Int(10)),
+        ("interval_method", _Str("bounded_independent_family_hoeffding_v1")),
+        ("decoding", _Str("deterministic")),
+        ("decoding", b"deterministic"),
+    ],
+)
+def test_d11_a_wrong_typed_term_is_a_shortfall_never_a_pass(term, value):
+    base = d11_policy(critical_slices=(CRITICAL,)).as_json()
+    assert _floor().shortfalls(_with(base, term, value)) == [term]
+
+
+def test_d11_missing_or_non_mapping_terms_and_policy_are_shortfalls():
+    floor = _floor()
+    at = d11_policy().as_json()
+    nested = [
+        "operating_point_terms.minimum_verified_cases",
+        "operating_point_terms.minimum_slice_cases",
+    ]
+    no_terms = {k: v for k, v in at.items() if k != "operating_point_terms"}
+    # Without critical slices only the verified-cases term is required.
+    assert floor.shortfalls(no_terms) == nested[:1]
+    for bad in (None, [], "terms", 100, [("minimum_verified_cases", 100)]):
+        assert floor.shortfalls({**at, "operating_point_terms": bad}) == nested[:1]
+    sliced = d11_policy(critical_slices=(CRITICAL,)).as_json()
+    assert floor.shortfalls({**sliced, "operating_point_terms": None}) == nested
+    # A policy that is not a Mapping fails every term.
+    for bad_policy in (None, [], "policy", 0, list(at.items())):
+        assert floor.shortfalls(bad_policy) == D11_TERM_NAMES
+        assert iv.policy_floor_status(bad_policy) == "below_registered_floor"
+
+
+def test_d11_the_slice_term_is_required_only_with_critical_slices():
+    floor = _floor()
+    name = "operating_point_terms.minimum_slice_cases"
+    plain = d11_policy().as_json()
+    assert plain["critical_slices"] == []
+    assert plain["operating_point_terms"]["critical_slices"] == []
+    # No critical slices: any or no slice term passes (GatePolicy defaults it to 0).
+    for value in (0, 1, 9):
+        assert floor.shortfalls(_with(plain, name, value)) == []
+    assert floor.shortfalls(_with(plain, name, None, drop=True)) == []
+    no_slice_term = d11_policy(terms={"minimum_slice_cases": 0})
+    no_slice_term.validate()
+    assert floor.shortfalls(no_slice_term.as_json()) == []
+    # Critical slices on the policy or on its terms: the term is required at >= 10.
+    on_terms = {
+        **plain,
+        "operating_point_terms": {**plain["operating_point_terms"], "critical_slices": [CRITICAL]},
     }
-    assert TEST_FLOOR.shortfalls(at_floor) == []
-    assert TEST_FLOOR.shortfalls({**at_floor, "max_missing": "5"}) == ["max_missing"]
+    on_policy = {**plain, "critical_slices": [CRITICAL]}
+    for doc in (on_terms, on_policy):
+        assert floor.shortfalls(_with(doc, name, 9)) == [name]
+        assert floor.shortfalls(_with(doc, name, None, drop=True)) == [name]
+        assert floor.shortfalls(_with(doc, name, 10)) == []
+    # A missing or wrong-typed critical_slices is not proof of none: the term is required.
+    for value in (None, "", CRITICAL, 0, {CRITICAL: 1}):
+        doc = {**plain, "critical_slices": value}
+        if value is None:
+            doc.pop("critical_slices")
+        assert floor.shortfalls(_with(doc, name, 9)) == [name], value
+        assert floor.shortfalls(_with(doc, name, 10)) == [], value
 
 
-def test_v15_review_r5_a_scorer_defect_revokes_every_verdict_of_that_scorer_version(
-    tmp_path, registered_floor
-):
+def test_d11_shortfalls_are_reported_by_name_in_a_fixed_order():
+    floor = _floor()
+    base = d11_policy(critical_slices=(CRITICAL,)).as_json()
+    worst = base
+    for term, _, laxer in reversed(_BOUNDS):
+        worst = _with(worst, term, laxer)
+    assert floor.shortfalls(worst) == D11_TERM_NAMES
+    assert floor.shortfalls(dict(reversed(list(worst.items())))) == D11_TERM_NAMES
+    two = _with(_with(base, "decoding", "x"), "alpha_bps", 501)
+    assert floor.shortfalls(two) == ["alpha_bps", "decoding"]
+
+
+def test_d11_b4_is_still_inconclusive_under_the_floor(tmp_path):
+    """B4 (24 vs 6 wrong of 160 comparable) stays inconclusive at d11.v1 and at the default."""
+    for name, pol in (("d11", d11_policy()), ("default", policy())):
+        v = run(tmp_path / name, Scenario(B4), pol=pol)
+        doc = held(v, "inconclusive", "interval_spans_threshold")
+        pair = doc["comparisons"]["incumbent"]
+        assert pair["paired"]["comparable"] == 160
+        assert pair["improvement"]["percentage_points"] == "11.2500"
+        out = evaluator(tmp_path / name).authorize(doc, effect="improvement_alert")
+        assert out["reason"] == "effect_not_eligible"
+    assert iv.policy_floor_status(d11_policy().as_json()) == "satisfied"
+
+
+def test_d11_a_large_gain_over_100_families_verifies_and_authorizes(tmp_path):
+    """At exactly 100 single-case families a 29 pp gain clears; 28 pp is inconclusive by design."""
+    win = Scenario([("WR", 29), ("RR", 71)], prefix="w-")
+    ev = evaluator(tmp_path)
+    v = run(tmp_path, win, ev=ev, pol=d11_policy())
+    assert v.outcome == "verified_gain", v.document["reasons"]
+    pair = v.document["comparisons"]["incumbent"]
+    assert pair["uncertainty"]["families"] == 100
+    assert pair["paired"]["comparable"] == 100
+    assert v.document["alert_gates"] == {
+        "cleared": True,
+        "policy_floor": "satisfied",
+        "policy_floor_hold": None,
+    }
+    assert v.document["effects"]["improvement_alert_eligible"] is True
+    assert ev.authorize(v.document, effect="improvement_alert") == {
+        "authorized": True,
+        "effect": "improvement_alert",
+        "reason": "verdict_current_and_eligible",
+        "state": "verified_gain",
+    }
+    near = Scenario([("WR", 28), ("RR", 72)], prefix="n-")
+    held(run(tmp_path / "near", near, pol=d11_policy()), "inconclusive", "interval_spans_threshold")
+
+
+def test_d11_seam_documents_the_implied_hoeffding_sensitivity():
+    """The seam's table is what ``_family_interval`` implies at alpha 0.05 and 100 bps."""
+    import inspect
+    from fractions import Fraction
+
+    table = {30: "50.6", 100: "28.2", 200: "20.2", 500: "13.1", 1000: "9.6", 2000: "7.1"}
+    for n, expected in table.items():
+        # Equal family effects: the radius is estimate - lower (rounded outward to 1e-6).
+        got = iv._family_interval([Fraction(1, 2)] * n, 500)
+        radius = Fraction(got["estimate"]) - Fraction(got["lower"])
+        assert f"{float(radius + Fraction(1, 100)) * 100:.1f}" == expected, n
+    source = inspect.getsource(iv)
+    seam = source.split("# D11 SEAM.", 1)[1].split("REGISTERED_POLICY_FLOOR:", 1)[0]
+    assert "#   families             30     100    200    500    1000   2000" in seam
+    assert "#   minimum gain (pp)    50.6   28.2   20.2   13.1   9.6    7.1" in seam
+    assert "Smaller real gains are inconclusive by design" in seam
+    assert "alpha 0.05" in seam and "d11.v1" in seam
+
+
+def test_v15_review_r5_a_scorer_defect_revokes_every_verdict_of_that_scorer_version(tmp_path):
     """Re-review L2/R5: after a per-key scorer_defect revocation, a sibling still authorized."""
     ev = evaluator(tmp_path)
-    a = run(tmp_path, Scenario(CLEAN_WIN, prefix="a-"), ev=ev)
-    b = run(tmp_path, Scenario(CLEAN_WIN, prefix="b-"), ev=ev)
+    a = run(tmp_path, Scenario(CLEAN_WIN, prefix="a-"), ev=ev, pol=d11_policy())
+    b = run(tmp_path, Scenario(CLEAN_WIN, prefix="b-"), ev=ev, pol=d11_policy())
     ev.revoke_verdict(a.verdict_key, reason="scorer_defect", issued_by=EVALUATOR)
     assert ev.authorize(b.document, effect="improvement_alert")["authorized"] is True  # R5
     r = ev.revoke_scope(
@@ -3304,7 +3674,7 @@ def test_v15_review_r5_a_scorer_defect_revokes_every_verdict_of_that_scorer_vers
     # The revoked scorer never scores another claim, here or after a restart.
     s = Scenario(CLEAN_WIN, prefix="c-")
     replays = s.replays()
-    c = run(tmp_path, s, ev=evaluator(tmp_path), replays=replays)
+    c = run(tmp_path, s, ev=evaluator(tmp_path), replays=replays, pol=d11_policy())
     assert c.outcome == "stale" and replays["candidate"].calls == []
     assert list((tmp_path / "evaluator-custody" / "verdicts").glob("*.json")) != []
     again = ev.revoke_scope(
@@ -3314,14 +3684,12 @@ def test_v15_review_r5_a_scorer_defect_revokes_every_verdict_of_that_scorer_vers
 
 
 @pytest.mark.parametrize("scope", ["answer_key_digest", "audit_receipt_digest"])
-def test_v16_answer_key_and_audit_receipt_scopes_revoke_matching_verdicts_only(
-    tmp_path, registered_floor, scope
-):
+def test_v16_answer_key_and_audit_receipt_scopes_revoke_matching_verdicts_only(tmp_path, scope):
     ev = evaluator(tmp_path)
     hit_s = Scenario(CLEAN_WIN, prefix="hit-")
     miss_s = Scenario(CLEAN_WIN, prefix="miss-")
-    hit = run(tmp_path, hit_s, ev=ev)
-    miss = run(tmp_path, miss_s, ev=ev)
+    hit = run(tmp_path, hit_s, ev=ev, pol=d11_policy())
+    miss = run(tmp_path, miss_s, ev=ev, pol=d11_policy())
     value = hit.document[scope]
     assert value != miss.document[scope]
     ev.revoke_scope(scope, value, reason="answer_key_defect", issued_by=EVALUATOR)
@@ -3332,7 +3700,9 @@ def test_v16_answer_key_and_audit_receipt_scopes_revoke_matching_verdicts_only(
     assert ev.read_verdict(miss.verdict_key) == miss.document
     # The same population re-submitted under a new claim is refused before scoring.
     replays = hit_s.replays()
-    again = run(tmp_path, hit_s, ev=ev, replays=replays, result_revision=sha("retry"))
+    again = run(
+        tmp_path, hit_s, ev=ev, replays=replays, result_revision=sha("retry"), pol=d11_policy()
+    )
     assert again.outcome == "stale" and replays["candidate"].calls == []
     assert again.document["reasons"][-1] == "verdict_revoked_by_scope_" + scope
 
@@ -3412,17 +3782,17 @@ def test_v17_scope_revocations_are_sealed_validated_and_refuse_unknown_values(tm
     assert ev.read_verdict(v.verdict_key) == v.document
 
 
-def test_v20_review_c2_renamed_ids_do_not_escape_an_answer_key_revocation(
-    tmp_path, registered_floor
-):
+def test_v20_review_c2_renamed_ids_do_not_escape_an_answer_key_revocation(tmp_path):
     """Re-review C2: renaming every id changed the answer-key digest and escaped revocation."""
     ev = evaluator(tmp_path)
     original = Scenario(CLEAN_WIN)
-    hit = run(tmp_path, original, ev=ev)
+    hit = run(tmp_path, original, ev=ev, pol=d11_policy())
     renamed = renamed_to(
         Scenario(CLEAN_WIN, prefix="c2-", content_prefix=""), lambda c: "r-" + c.case_id
     )
-    earlier = run(tmp_path / "other", renamed)  # issued in another custody before revocation
+    earlier = run(
+        tmp_path / "other", renamed, pol=d11_policy()
+    )  # issued in another custody before revocation
     assert earlier.document["answer_key_digest"] != hit.document["answer_key_digest"]
     assert (
         earlier.document["answer_key_content_digest"] == hit.document["answer_key_content_digest"]
@@ -3434,7 +3804,15 @@ def test_v20_review_c2_renamed_ids_do_not_escape_an_answer_key_revocation(
         issued_by=EVALUATOR,
     )
     replays = renamed.replays()
-    again = run(tmp_path, renamed, ev=ev, replays=replays, result_revision=sha("c2"), receipt=None)
+    again = run(
+        tmp_path,
+        renamed,
+        ev=ev,
+        replays=replays,
+        result_revision=sha("c2"),
+        receipt=None,
+        pol=d11_policy(),
+    )
     assert again.outcome == "stale" and replays["candidate"].calls == []
     assert again.document["reasons"][-1] == "verdict_revoked_by_scope_answer_key_digest"
     # Different labels on the same content are a different key and are not caught.
@@ -3563,12 +3941,10 @@ def test_v19_documented_limits_deleting_a_revocation_restores_authority(tmp_path
     assert "issued_by" in doc and "unauthenticated" in doc  # R6, R7
 
 
-def test_v10_consumer_check_refuses_forged_unknown_and_ineligible_documents(
-    tmp_path, registered_floor
-):
+def test_v10_consumer_check_refuses_forged_unknown_and_ineligible_documents(tmp_path):
     ev = evaluator(tmp_path)
-    win = run(tmp_path, Scenario(CLEAN_WIN), ev=ev)
-    non_win = run(tmp_path, Scenario(B4, prefix="b4-"), ev=ev)
+    win = run(tmp_path, Scenario(CLEAN_WIN), ev=ev, pol=d11_policy())
+    non_win = run(tmp_path, Scenario(B4, prefix="b4-"), ev=ev, pol=d11_policy())
     assert ev.authorize(non_win.document, effect="improvement_alert") == {
         "authorized": False,
         "effect": "improvement_alert",
@@ -3704,7 +4080,9 @@ def test_p1_provider_route_win_is_provider_reported_never_verified(tmp_path, rou
     assert job["reason"] == "job_record_names_supplied_parent_and_candidate"
     assert "immutable" not in statements
     assert doc["candidate_kind"] == KINDS[route]
-    assert doc["alert_gates"]["cleared"] is True  # same gates as open weight; D11 floor unset
+    # Same gates as open weight; this default policy is laxer than the d11.v1 floor.
+    assert doc["alert_gates"]["cleared"] is True
+    assert doc["alert_gates"]["policy_floor"] == "below_registered_floor"
     assert doc["effects"]["improvement_alert_eligible"] is False
     assert {m for m, _ in double.calls} == {CANDIDATE_IDS[route]}
     assert [n for _, n in double.calls] == [64, 64, 2]
