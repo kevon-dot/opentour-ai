@@ -143,6 +143,20 @@ def test_reproducible_kit_runs_isolated_data_mcp_and_slack_entrypoints(tmp_path,
             source = root / settings["JOURNAL"] / "src" / module
             assert archive.read(module) == source.read_bytes()
     executable = [*python, str(target / "opentour-slack.pyz")]
+    subprocess.run(
+        [
+            *python,
+            "-c",
+            "import sys; sys.path.insert(0, sys.argv[1]); "
+            "from opentour_cell.pilot import learning_fit_dispatch, mandate_fit_ledger; "
+            "assert learning_fit_dispatch.__file__.startswith(sys.argv[1] + '/'); "
+            "assert mandate_fit_ledger.__file__.startswith(sys.argv[1] + '/')",
+            executable[-1],
+        ],
+        cwd=target,
+        env={},
+        check=True,
+    )
 
     def run(*args, stdin=b""):
         return subprocess.check_output([*executable, *args], cwd=target, env={}, input=stdin)
