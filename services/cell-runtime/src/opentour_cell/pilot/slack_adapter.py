@@ -2319,7 +2319,7 @@ class Workbench:
             release_allowed=current.explicit_recipient
             and named_reviewer
             and actor == target.audit.get("release_reviewer"),
-            charts_allowed=charts,
+            charts_allowed=charts and not queue_handle,
             benchmark_allowed=named_reviewer,
             workflow=cfg.workflow_label,
         )
@@ -4727,7 +4727,10 @@ class Workbench:
                         "ORDER BY p.presented DESC,p.rowid DESC LIMIT 1",
                         (actor, target.revision, self._policy(cfg, actor), target.evidence_digest),
                     ).fetchone()
-                    assigned = actor == audit.get("release_reviewer") and "review" in entry["roles"]
+                    assigned = (
+                        cfg.reviewer == actor == audit.get("release_reviewer")
+                        and "review" in entry["roles"]
+                    )
                     if seen is not None:
                         self.journal._seal(db, "presentation", seen["id"])
                     elif not assigned or audit["release_provider"] != "slack":
@@ -4979,7 +4982,7 @@ class Workbench:
 
         if selected.action == "open_review":
             _check(
-                actor == target.audit.get("release_reviewer")
+                cfg.reviewer == actor == target.audit.get("release_reviewer")
                 and cfg.permission(actor, "review", target.dataset)["aggregate"]
             )
             self._evidence(

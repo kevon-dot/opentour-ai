@@ -62,6 +62,27 @@ def test_private_queue_reopens_exact_managed_proposal_and_fences_prior_labels(
     # The current named reviewer sees an assigned, completed proposal before inspecting it.
     assert "Needs you" in json.dumps(publish(h, monkeypatch, ACTOR))
     assert "Your workflow queue is empty." in json.dumps(publish(h, monkeypatch, OTHER))
+    assigned_home = publish(h, monkeypatch, ACTOR)
+    selected = next(b["accessory"] for b in assigned_home["blocks"] if b.get("accessory"))
+    h.config["reviewer"] = OTHER
+    h.save()
+    assert run not in json.dumps(publish(h, monkeypatch, ACTOR))
+    h.send(
+        "interactive",
+        {
+            "api_app_id": cfg.app,
+            "team": {"id": cfg.team},
+            "user": {"id": ACTOR},
+            "container": {"type": "view", "view_id": "VHOME"},
+            "view": {**assigned_home, "id": "VHOME"},
+            "type": "block_actions",
+            "trigger_id": "reassigned",
+            "actions": [{"action_id": selected["action_id"], "value": selected["value"]}],
+        },
+    )
+    assert "ot_evidence_view" not in json.dumps(screen(h, list(h.slack.screens)[-1]))
+    h.config["reviewer"] = ACTOR
+    h.save()
     _, revision = inspect(h)
     before = counts(h)
     old = publish(h, monkeypatch, ACTOR)
@@ -93,7 +114,9 @@ def test_private_queue_reopens_exact_managed_proposal_and_fences_prior_labels(
     labels[:] = [replace(label, label="Invoices", revision="v2")]
     assert revision not in json.dumps(reopen(old))
     renamed = publish(h, monkeypatch, ACTOR)
-    assert revision in json.dumps(reopen(renamed))
+    fresh_evidence = reopen(renamed)
+    assert revision in json.dumps(fresh_evidence)
+    assert "ot_charts" not in buttons(fresh_evidence)
     assert counts(h) == before
     h.config["users"][OTHER]["datasets"] = list(h.config["users"][ACTOR]["datasets"])
     h.save()
