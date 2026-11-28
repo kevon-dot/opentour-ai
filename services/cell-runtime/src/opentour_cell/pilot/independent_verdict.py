@@ -91,7 +91,8 @@ statement is computed first): one provider call, but no inference.
 Relabelling the same partition (swapping label names consistently) escapes the answer-key
 content match; the fresh-cohort gate is the backstop there. Residual, NOT closed: A1 (a new
 field with a fresh per-case value), D5 (any edit to the decision text is new content, so a
-fresh cohort) and C1 (nothing here can tell a re-minted receipt from a new one). Only an
+fresh cohort) and C1 (nothing here can tell a re-minted receipt from a new one). Ids are
+producer-chosen, up to 128 characters, and can carry content the register never sees. Only an
 authenticated OPE-526 audit issuer closes these.
 
 Known limits of revocation, kept on purpose and pinned by tests. The revocation lives in the
@@ -446,15 +447,34 @@ def _contains_own_id(case: DecisionCase, value: object) -> bool:
 
 
 def _id_free_remainder(case: DecisionCase, value: object) -> str:
-    """The folded value with EVERY occurrence of the case's own case and family id removed.
+    """The folded value with every occurrence of the case's own case and family id masked.
 
-    Non-string values are folded from their canonical JSON, so ids nested in lists or mappings
-    are removed too. The longer id is removed first, so one id inside the other is handled.
+    One pass, independent of order: every match span of either id (overlapping matches
+    included) is found in the folded value, overlapping or touching spans are merged, and the
+    union is cut out. So the result never depends on which id is removed first, on their
+    lengths or on set iteration order (PYTHONHASHSEED): one id inside the other, and two ids
+    of equal length that overlap, are handled the same way every time. Non-string values are
+    folded from their canonical JSON, so ids nested in lists or mappings are masked too.
     """
     text = _value_text(value)
-    for own in sorted({_fold(case.case_id), _fold(case.family_id)}, key=len, reverse=True):
-        text = text.replace(own, "")
-    return text
+    spans: list[tuple[int, int]] = []
+    for own in sorted({_fold(case.case_id), _fold(case.family_id)}):
+        start = text.find(own)
+        while start != -1:
+            spans.append((start, start + len(own)))
+            start = text.find(own, start + 1)
+    merged: list[list[int]] = []
+    for begin, end in sorted(spans):
+        if merged and begin <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], end)
+        else:
+            merged.append([begin, end])
+    kept, cursor = [], 0
+    for begin, end in merged:
+        kept.append(text[cursor:begin])
+        cursor = end
+    kept.append(text[cursor:])
+    return "".join(kept)
 
 
 def _check_id_format(cases: Sequence[DecisionCase]) -> None:
@@ -602,8 +622,10 @@ def decision_content_digest(case: DecisionCase, reference_fields: Sequence[str] 
     Residual, NOT closed here, because the producer controls the population:
       A1 adding a field with a fresh per-case value that is not an id (such as a hash of it);
       D5 any edit to the decision text itself, which is new content and so a fresh cohort.
-    Only an authenticated OPE-526 audit receipt binding the benchmark content can close these;
-    here the receipt is self-sealed (see also C1 in the module docstring).
+    Ids are producer-chosen, up to 128 characters, and can carry content the register never
+    sees (ids and declared references are masked out of the content). Only an authenticated
+    OPE-526 audit receipt binding the benchmark content can close these; here the receipt is
+    self-sealed (see also C1 in the module docstring).
     """
     excluded = set(reference_fields)
     kept = [

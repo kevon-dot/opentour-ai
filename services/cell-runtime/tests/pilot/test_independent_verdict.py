@@ -2072,6 +2072,99 @@ def test_j3b_any_per_case_content_in_a_reference_is_refused(value):
         )
 
 
+def overlap_population(cases_of):
+    """A small population whose declared reference is built by ``cases_of(i)``."""
+    cases = []
+    for i in range(6):
+        case_id, family_id, ref = cases_of(i)
+        features = {"case_ref": ref, "text": f"generated-text-{i}"}
+        cases.append(iv.DecisionCase(case_id, family_id, features, ()))
+    return iv.SealedPopulation(
+        cases,
+        {c.case_id: A for c in cases},
+        label_set=(A, B),
+        benchmark_digest=BENCHMARK,
+        reference_fields=("case_ref",),
+    )
+
+
+def equal_length_overlap(i):
+    """Case and family ids of equal length (13) that overlap inside the reference."""
+    case_id = f"c{i:03d}abcxy-12k"
+    family_id = "xy-12k-zzzzzz"
+    assert len(case_id) == len(family_id)
+    return case_id, family_id, "ref:" + case_id + "-zzzzzz"
+
+
+_SEED_PROBE = """
+import sys
+sys.path.insert(0, {src!r})
+import opentour_cell.pilot.independent_verdict as iv
+cases = []
+for i in range(6):
+    case_id = "c%03dabcxy-12k" % i
+    features = {{"case_ref": "ref:" + case_id + "-zzzzzz", "text": "generated-text-%d" % i}}
+    cases.append(iv.DecisionCase(case_id, "xy-12k-zzzzzz", features, ()))
+try:
+    iv.SealedPopulation(
+        cases, {{c.case_id: "A" for c in cases}}, label_set=("A", "B"),
+        benchmark_digest="a" * 64, reference_fields=("case_ref",),
+    )
+    print("accepted")
+except iv.VerdictInputError as exc:
+    print(exc)
+"""
+
+
+def test_j6_review_r7_id_masking_does_not_depend_on_the_hash_seed():
+    """Round 7: equal-length overlapping ids were refused 29/31 seeds and accepted 2/31."""
+    src = str(Path(iv.__file__).resolve().parents[2])
+    outcomes = {}
+    for seed in ("0", "1", "2", "3", "7", "11", "42", "123", "999", "2024", "31337", "65535"):
+        out = subprocess.run(
+            [sys.executable, "-c", _SEED_PROBE.format(src=src)],
+            env={**os.environ, "PYTHONHASHSEED": seed},
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        outcomes[seed] = out.stdout.strip()
+    assert set(outcomes.values()) == {"accepted"}, outcomes
+    # In process, too: the union of both ids is masked in one pass.
+    case = iv.DecisionCase("abcdefgh-12k", "gh-12k-zzzzz", {}, ())
+    assert iv._id_free_remainder(case, "ref:abcdefgh-12k-zzzzz") == "ref:"
+    assert not overlap_population(equal_length_overlap).undeclared_reference
+
+
+@pytest.mark.parametrize(
+    "shape",
+    [
+        # Family id as a prefix of its own case id; "<family>/<case>" leaves "/".
+        lambda i: (
+            f"fam-{i:04d}x-case-{i:04d}",
+            f"fam-{i:04d}x",
+            f"fam-{i:04d}x/fam-{i:04d}x-case-{i:04d}",
+        ),
+        # Family id strictly inside its case id: needs the spans merged, not just removed.
+        lambda i: (f"zz-fam-{i:04d}x-c{i:04d}", f"fam-{i:04d}x", f"zz-fam-{i:04d}x-c{i:04d}"),
+        # The same, with the family also repeated outside the case id.
+        lambda i: (
+            f"zz-fam-{i:04d}x-c{i:04d}",
+            f"fam-{i:04d}x",
+            f"fam-{i:04d}x|zz-fam-{i:04d}x-c{i:04d}",
+        ),
+    ],
+    ids=["family_prefix_of_case", "family_inside_case", "family_inside_and_outside"],
+)
+def test_j7_review_r7_one_id_inside_the_other_is_masked_whole(shape):
+    """Round 7 W3: removing the shorter id first left "/-case-0001" and refused honest refs."""
+    pop = overlap_population(shape)
+    assert len(pop.cases) == 6
+    case_id, family_id, ref = shape(1)
+    remainder = iv._id_free_remainder(iv.DecisionCase(case_id, family_id, {}, ()), ref)
+    assert remainder in ("/", "", "|")
+
+
 def test_j1a_review_r6_unverifiable_content_is_held_before_any_replay(tmp_path):
     """Round 6 J1a: decision_content_unverifiable was added after full replay and scoring."""
     s = respelled(Scenario(CLEAN_WIN), lambda c: {"case_ref": c.case_id}, ("case_ref",))
@@ -2115,6 +2208,9 @@ def test_j5_docs_say_what_is_enforced():
     assert "One ``served_identity`` readback per arm still runs before the hold" in module
     fmt = " ".join((iv._check_id_format.__doc__ or "").split())
     assert "for example a UUID or a hash" in fmt and "cannot be scored today" in fmt
+    sentence = "Ids are producer-chosen, up to 128 characters, and can carry content"
+    assert sentence in module
+    assert sentence in " ".join((iv.decision_content_digest.__doc__ or "").split())
 
 
 def test_e1_review_r4_renamed_ids_and_an_undeclared_reference_cannot_escape_both(
