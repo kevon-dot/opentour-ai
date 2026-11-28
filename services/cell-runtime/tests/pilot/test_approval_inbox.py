@@ -19,6 +19,7 @@ from opentour_cell.pilot import approval_inbox as inbox
 from opentour_cell.pilot import open_weight, release_gate, repair_workflow, source_intake
 from opentour_cell.pilot.learning_mandate import LearningMandates
 from opentour_cell.pilot.managed_run import plan_revision
+from opentour_cell.pilot.operating_point import digest
 from opentour_cell.pilot.slack_adapter import Refused
 from opentour_cell.pilot.training import LocalTrainingStore
 from test_autonomous_cycle import Customer, read, save
@@ -460,19 +461,24 @@ def test_unwithdrawn_enqueue_is_unchanged(
     )
 
 
+@pytest.mark.parametrize("error", (PermissionError, RuntimeError), ids=("os", "unexpected"))
 @pytest.mark.parametrize("marker", ("written", "unwritable"))
 def test_failed_pointer_removal_fails_closed(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, marker: str
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, marker: str, error: type[Exception]
 ) -> None:
     c, item, path = queued(tmp_path, monkeypatch)
     between_check_and_write(monkeypatch, lambda: withdraw_mandate(c))
-    monkeypatch.setattr(inbox, "_discard", undeletable, raising=False)
+
+    def undeletable_by(target: Path) -> None:
+        raise error(target.name)
+
+    monkeypatch.setattr(inbox, "_discard", undeletable_by, raising=False)
     if marker == "unwritable":
         write = inbox._record
 
         def refuse_marker(target: Path, value: Json, **kwargs: Any) -> None:
             if target.name.startswith("approval-held-"):
-                raise PermissionError(target.name)
+                raise error(target.name)
             write(target, value, **kwargs)
 
         monkeypatch.setattr(inbox, "_record", refuse_marker)
@@ -482,7 +488,23 @@ def test_failed_pointer_removal_fails_closed(
     held = c.owner / ("approval-held-" + path.stem.removeprefix("approval-ready-") + ".json")
     if marker == "written":
         assert result["pointer"] == "marked" and path.exists()
-        assert json.loads(held.read_text()) == item
+        receipt = path.stem.removeprefix("approval-ready-")
+        assert json.loads(held.read_text()) == {
+            "receipt": receipt,
+            "reason": HELD,
+            "pointer_digest": digest(item),
+        }
+        # Custody inventories the marker; it carries no Slack or run identifiers.
+        text_ = held.read_text()
+        for private in (
+            item["organization"],
+            item["run_id"],
+            item["team"],
+            item["channel"],
+            item["audience"],
+            item["reviewer"],
+        ):
+            assert private not in text_
     else:
         assert result["pointer"] == "unremoved" and path.exists() and not held.exists()
 
@@ -567,9 +589,11 @@ def test_flush_refuses_held_marker_even_when_authority_reads_current(
     held = c.owner / ("approval-held-" + receipt + ".json")
     h = cycle_inbox(c, tmp_path)
     # An unknown re-read counts as withdrawn; the pointer cannot be removed, so a marker is left.
+    # The journal hold is unavailable here, so the marker is the only durable refusal.
     with monkeypatch.context() as m:
         m.setattr(inbox, "_authority_withdrawn", lambda *_: True, raising=False)
         m.setattr(inbox, "_discard", undeletable, raising=False)
+        m.setattr(inbox, "_hold_in_journal", lambda *_: False, raising=False)
         first = enqueue(c.owner, c.org, item)
     assert first.get("state") == "held" and first.get("pointer") == "marked", first
     assert path.exists() and held.exists()
@@ -577,6 +601,7 @@ def test_flush_refuses_held_marker_even_when_authority_reads_current(
     assert inbox.flush_approvals(h.app) == 0 and not h.slack.post and posted(h) == []
     with monkeypatch.context() as m:
         m.setattr(inbox, "_discard", undeletable, raising=False)
+        m.setattr(inbox, "_hold_in_journal", lambda *_: False, raising=False)
         assert enqueue(c.owner, c.org, item).get("state") == "held"
     assert inbox.flush_approvals(h.app) == 0 and not h.slack.post
     # Control: the marker was the only refusal.
@@ -709,3 +734,220 @@ def test_click_after_post_rechecks_withdrawn_mandate(
     with pytest.raises(ValueError, match="^standing_mandate_withdrawn$"):
         release_gate.record_release(c.owner, c.org, **decision)
     assert not decided.exists()
+
+
+# --- OPE-577 review round: closeout custody, unexpected errors, missing plan, journal hold. ---
+
+CLOSEOUT = {
+    "agreement": "generated-terms",
+    "custodian": "generated-custodian",
+    "support": "generated-support",
+    "due": "2040-04-01",
+    "trigger": "withdrawal",
+}
+
+
+def closeout_items(directory: Path, organization: str) -> set[str]:
+    from opentour_cell.pilot.custody import Closeout
+
+    report = Closeout(directory, organization).withdraw(**CLOSEOUT)
+    return {item["item"] for item in report["items"]}
+
+
+@pytest.mark.parametrize("marked", (False, True), ids=("no_marker", "orphan_marker"))
+def test_closeout_inventory_lists_an_orphan_held_marker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, marked: bool
+) -> None:
+    c, item, path = queued(tmp_path, monkeypatch)
+    if marked:
+        # An unknown re-read and a failed removal leave a marker; a later pass then removes
+        # the pointer, so only the marker remains.
+        with monkeypatch.context() as m:
+            m.setattr(inbox, "_authority_withdrawn", lambda *_: True, raising=False)
+            m.setattr(inbox, "_discard", undeletable, raising=False)
+            assert enqueue(c.owner, c.org, item).get("pointer") == "marked"
+        path.unlink()
+        assert list(c.owner.glob("approval-held-*.json"))
+    assert not list(c.owner.glob("approval-ready-*.json"))
+    assert ("approval-requests" in closeout_items(c.owner, c.org)) is marked
+
+
+@pytest.mark.parametrize(
+    "fault",
+    ("runtime", "attribute", "type", "sqlite", "missing_run", "missing_review"),
+)
+def test_unexpected_recheck_errors_fail_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: str
+) -> None:
+    """Whatever the fresh re-read raises after the write, the pointer goes and the run holds."""
+    c, item, path = queued(tmp_path, monkeypatch)
+    errors: dict[str, type[Exception]] = {
+        "runtime": RuntimeError,
+        "attribute": AttributeError,
+        "type": TypeError,
+        "sqlite": sqlite3.OperationalError,
+    }
+    work = c.owner / "managed-outputs" / item["run_id"]
+    original = LearningMandates.check_run
+    armed: list[bool] = []
+
+    def check_run(self: LearningMandates, *args: Any, **kwargs: Any) -> Json:
+        if armed:
+            raise errors[fault]("generated")
+        return dict(original(self, *args, **kwargs))
+
+    def inject() -> None:
+        if fault in errors:
+            armed.append(True)
+        else:
+            (work / ("run.json" if fault == "missing_run" else "review.json")).unlink()
+
+    monkeypatch.setattr(LearningMandates, "check_run", check_run)
+    between_check_and_write(monkeypatch, inject)
+    result = enqueue(c.owner, c.org, item)
+    assert result.get("state") == "held" and result.get("reason") == HELD, result
+    assert not path.exists() and not mandate_withdrawn(c)
+
+
+def test_missing_standing_plan_counts_as_unknown(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The sealed intake shows a standing mandate governs this run, so its plan is required."""
+    c, item, path = queued(tmp_path, monkeypatch)
+    (plan,) = c.owner.glob("cycle-plan-*.json")
+    between_check_and_write(monkeypatch, plan.unlink)
+    result = enqueue(c.owner, c.org, item)
+    assert not mandate_withdrawn(c) and not engagement_withdrawn(c.owner)
+    assert result.get("state") == "held" and result.get("reason") == HELD, result
+    assert not path.exists()
+
+
+def test_manual_run_without_standing_plan_is_unchanged(tmp_path: Path) -> None:
+    """Control: a sealed intake with no delegation is a manual run and needs no plan."""
+    directory, org, item, path = manual_queued(tmp_path)
+    receipt = path.stem.removeprefix("approval-ready-")
+    assert enqueue(directory, org, item) == {"receipt": receipt, "state": "pending_review"}
+    assert path.exists()
+    # A stray standing plan beside a manual run is inconsistent, so the run holds.
+    save(directory / ("cycle-plan-" + item["run_id"] + ".json"), {"generated": "stray"})
+    assert enqueue(directory, org, item).get("state") == "held" and not path.exists()
+
+
+def test_missing_standing_plan_after_claim_is_not_posted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    c = cycled(tmp_path, monkeypatch)
+    (path,) = c.owner.glob("approval-ready-*.json")
+    receipt = path.stem.removeprefix("approval-ready-")
+    h = cycle_inbox(c, tmp_path)
+    (plan,) = c.owner.glob("cycle-plan-*.json")
+    fired = after_claim(monkeypatch, h, receipt, plan.unlink)
+    assert inbox.flush_approvals(h.app) == 0 and not h.slack.post and fired == [True]
+    assert posted(h) == [(receipt, "held")]
+
+
+def test_journal_hold_refuses_delivery_without_a_marker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    c = cycled(tmp_path, monkeypatch)
+    (path,) = c.owner.glob("approval-ready-*.json")
+    item = json.loads(path.read_text())
+    receipt = path.stem.removeprefix("approval-ready-")
+    h = cycle_inbox(c, tmp_path)
+    path.unlink()
+    write = inbox._record
+
+    def refuse_marker(target: Path, value: Json, **kwargs: Any) -> None:
+        if target.name.startswith("approval-held-"):
+            raise PermissionError(target.name)
+        write(target, value, **kwargs)
+
+    # Unknown re-read, failed removal and failed marker write: only the journal hold remains.
+    with monkeypatch.context() as m:
+        m.setattr(inbox, "_authority_withdrawn", lambda *_: True, raising=False)
+        m.setattr(inbox, "_discard", undeletable, raising=False)
+        m.setattr(inbox, "_record", refuse_marker)
+        first = enqueue(c.owner, c.org, item)
+    assert first.get("state") == "held" and first.get("pointer") == "marked", first
+    assert path.exists() and not list(c.owner.glob("approval-held-*.json"))
+    assert posted(h) == [(receipt, "held")]
+    # Authority reads current again, but flush refuses and a re-enqueue reports held.
+    assert inbox.flush_approvals(h.app) == 0 and not h.slack.post
+    with monkeypatch.context() as m:
+        m.setattr(inbox, "_discard", undeletable, raising=False)
+        m.setattr(inbox, "_record", refuse_marker)
+        assert enqueue(c.owner, c.org, item).get("state") == "held"
+    assert inbox.flush_approvals(h.app) == 0 and not h.slack.post
+    assert not list(c.owner.glob("approval-held-*.json"))
+    # Control: the journal hold was the only refusal.
+    with h.app.journal.db() as db:
+        db.execute("DELETE FROM approval_posts WHERE receipt=?", (receipt,))
+    assert inbox.flush_approvals(h.app) == 1 and posted(h) == [(receipt, "posted")]
+
+
+def test_marker_written_after_claim_releases_the_claim(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    c = cycled(tmp_path, monkeypatch)
+    (path,) = c.owner.glob("approval-ready-*.json")
+    receipt = path.stem.removeprefix("approval-ready-")
+    h = cycle_inbox(c, tmp_path)
+    held = c.owner / ("approval-held-" + receipt + ".json")
+    fired = after_claim(monkeypatch, h, receipt, lambda: save(held, {"receipt": receipt}))
+    assert inbox.flush_approvals(h.app) == 0 and not h.slack.post and fired == [True]
+    assert posted(h) == [(receipt, "held")] and not mandate_withdrawn(c)
+
+
+@pytest.mark.parametrize("point", ("before_claim", "after_claim"))
+def test_unexpected_flush_error_fails_closed_per_receipt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, point: str
+) -> None:
+    c = cycled(tmp_path, monkeypatch)
+    (path,) = c.owner.glob("approval-ready-*.json")
+    receipt = path.stem.removeprefix("approval-ready-")
+    h = cycle_inbox(c, tmp_path)
+    # A generated receipt that sorts before (or after) the real one; it never reaches Slack.
+    other = "approval-" + ("0" if point == "before_claim" else "f") * 40
+    save(c.owner / ("approval-ready-" + other + ".json"), {"generated": "unreadable"})
+    target, seen = inbox._target, []
+
+    def checked(app: Any, cfg: Any, value: str) -> Any:
+        seen.append(value)
+        if value == other:
+            raise RuntimeError("generated")
+        return target(app, cfg, value)
+
+    monkeypatch.setattr(inbox, "_target", checked)
+    if point == "after_claim":
+
+        def broken(*_: Any) -> bool:
+            raise RuntimeError("generated")
+
+        monkeypatch.setattr(inbox, "_authority_withdrawn", broken, raising=False)
+    sent = inbox.flush_approvals(h.app)
+    # The pass continued past the failing receipt to every other receipt.
+    assert sorted(seen) == sorted([receipt, other])
+    if point == "before_claim":
+        assert sent == 1 and posted(h) == [(receipt, "posted")]
+    else:
+        # Our claim is released as held, never left claimed or posted.
+        assert sent == 0 and not h.slack.post and posted(h) == [(receipt, "held")]
+        with h.app.journal.db() as db:
+            statuses = [
+                r[0]
+                for r in db.execute("SELECT status FROM exposures WHERE kind='approval_request'")
+            ]
+        assert statuses == ["withheld"]
+
+
+def test_unreadable_journal_hold_counts_as_held(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A journal whose hold cannot be read is unknown, so the pointer is not left deliverable."""
+    c, item, path = queued(tmp_path, monkeypatch)
+    journal = c.owner / "slack-pilot.sqlite3"
+    journal.write_bytes(b"generated, not a database\n" * 64)
+    journal.chmod(0o600)
+    result = enqueue(c.owner, c.org, item)
+    assert result.get("state") == "held" and result.get("reason") == HELD, result
+    assert not path.exists() and not mandate_withdrawn(c)
