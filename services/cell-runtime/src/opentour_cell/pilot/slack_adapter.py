@@ -22,7 +22,7 @@ from contextlib import closing, contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 from urllib.parse import urlsplit
 
 from opentour_cell.pilot.intake_mcp import REF_PATTERN, IntakePrincipal
@@ -44,7 +44,9 @@ if TYPE_CHECKING:
     from opentour_cell.pilot.starter_map_confirmation import StarterCaseEntry, StarterCaseSession
     from opentour_cell.pilot.verifier_form import VerifierForm
     from opentour_cell.pilot.workflow_index import (
+        Action,
         IndexPage,
+        IndexRow,
         IndexScope,
         ProposalAccess,
         WorkflowIndex,
@@ -4654,7 +4656,8 @@ class Workbench:
                         continue
                     run = audit["job_id"]
                     if (
-                        replacements
+                        ledger is not None
+                        and replacements
                         and ledger.execute(
                             "SELECT 1 FROM reviewer_replacements WHERE scope=? AND run=?",
                             (digest([cfg.organization, epoch]), run),
@@ -4682,7 +4685,9 @@ class Workbench:
                         audit["run_revision"],
                         audit["model_revision"],
                     )
-                    action, state, stamped = "open_status", "pending", seen["presented"]
+                    action: Action = "open_status"
+                    state: Literal["pending", "approved", "changes_requested"] = "pending"
+                    stamped = seen["presented"]
                     if release:
                         state = release["decision"]
                         stamped = release.get("recorded_at")
@@ -4734,7 +4739,7 @@ class Workbench:
         _check(isinstance(handle, str) and re.fullmatch(r"[0-9a-f]{64}", handle))
         principal = IntakePrincipal(cfg.organization, actor, "slack")
 
-        def resolve():
+        def resolve() -> tuple[IndexRow, Target, str]:
             current = self.settings()
             current.permission(actor, "inspect")
             index = self._workflow_index(current, actor)
@@ -4754,13 +4759,12 @@ class Workbench:
             _check(
                 target.revision == row.proposal_revision and intake["workflow"] == row.workflow_ref
             )
-            return row, target
+            return row, target, source
 
-        selected, target = resolve()
-        source = "managed:" + selected.proposal_ref
+        selected, target, source = resolve()
 
         def authorize() -> None:
-            _check(resolve() == (selected, target))
+            _check(resolve() == (selected, target, source))
 
         if selected.action == "open_review":
             _check(
