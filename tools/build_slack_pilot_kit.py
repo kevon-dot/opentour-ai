@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import hashlib
 import json
 import os
+import re
 import runpy
 import subprocess
 import sys
@@ -20,6 +22,7 @@ JOURNAL = "packages/authority-journal"
 VERSION = "1.0.0-rc.4"
 PYTHON = (3, 12, 16)
 PLATFORM_VERIFIER = "opentour_cell/pilot/signed_records.py"
+PLATFORM_ROOT_PIN = "trust/pilot-registry-root.json"
 JOURNAL_MODULES = (
     "opentour_journal/__init__.py",
     "opentour_journal/crypto.py",
@@ -269,6 +272,39 @@ def _json(value: object) -> bytes:
     return (json.dumps(value, sort_keys=True, indent=2) + "\n").encode()
 
 
+def _approved_root_digest(verifier: bytes) -> str | None:
+    # The release builder inspects the pinned source without importing the verifier.
+    name = "APPROVED_ROOT_PIN_SHA256"
+    error = f"Platform verifier must declare one literal {name}."
+    try:
+        source = ast.parse(verifier)
+    except SyntaxError:
+        raise ValueError(error) from None
+    assignments = [
+        node
+        for node in ast.walk(source)
+        if isinstance(node, ast.Name)
+        and node.id == name
+        and isinstance(node.ctx, (ast.Store, ast.Del))
+    ]
+    if len(assignments) != 1:
+        raise ValueError(error)
+    target = assignments[0]
+    for statement in source.body:
+        if isinstance(statement, ast.AnnAssign) and statement.target is target:
+            value = statement.value
+        elif isinstance(statement, ast.Assign) and statement.targets == [target]:
+            value = statement.value
+        else:
+            continue
+        if isinstance(value, ast.Constant):
+            if value.value is None:
+                return None
+            if isinstance(value.value, str) and re.fullmatch(r"[0-9a-f]{64}", value.value):
+                return value.value
+    raise ValueError(error)
+
+
 def build(revision: str) -> bytes:
     def read(path: str) -> bytes:
         return _git("show", f"{revision}:{path}")
@@ -282,11 +318,30 @@ def build(revision: str) -> bytes:
     modules.update({name: read(f"{JOURNAL}/src/{name}") for name in JOURNAL_MODULES})
     verifier_path = f"{CELL}/src/{PLATFORM_VERIFIER}"
     verifier_bundled = bool(_git("ls-tree", "--name-only", revision, "--", verifier_path).strip())
+    root_digest = None
     if verifier_bundled:
-        modules[PLATFORM_VERIFIER] = read(verifier_path)
+        verifier = read(verifier_path)
+        root_digest = _approved_root_digest(verifier)
+        modules[PLATFORM_VERIFIER] = verifier
     version = f"OpenTour Slack workspace kit {VERSION} ({revision})"
     modules["__main__.py"] = (f"VERSION = {version!r}\n" + ENTRY).encode()
     files = {name: read(path) for name, path in ASSETS.items()}
+    root_path = f"{CELL}/{PLATFORM_ROOT_PIN}"
+    root_entry = _git("ls-tree", revision, "--", root_path).strip()
+    if root_digest is None:
+        if root_entry:
+            raise ValueError(
+                "A public root pin requires an approved digest in the platform verifier."
+            )
+    else:
+        if not root_entry.startswith(b"100644 blob "):
+            raise ValueError(
+                "The approved public root pin must be a regular, non-executable Git file."
+            )
+        root_pin = read(root_path)
+        if hashlib.sha256(root_pin).hexdigest() != root_digest:
+            raise ValueError("The public root pin does not match the approved verifier digest.")
+        files[PLATFORM_ROOT_PIN] = root_pin
     for name in ("generated/pilot-source-trace.jsonl", "generated/pilot-source-correction.jsonl"):
         records = json.loads(files[name])
         files[name] = b"".join(
@@ -299,6 +354,7 @@ def build(revision: str) -> bytes:
             "source_repository": "kevon-dot/opentour-ai",
             "source_commit": revision,
             "platform_verifier_bundled": verifier_bundled,
+            "platform_root_pin_bundled": root_digest is not None,
             "python_version": "3.12.16",
             "artifact_kind": "release_candidate",
             "fixture_kind": "generated",

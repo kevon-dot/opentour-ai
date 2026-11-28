@@ -12,6 +12,12 @@ import time
 from pathlib import Path
 from zipfile import ZipFile
 
+import pytest
+
+GENERATED_ROOT = b'{"kind":"generated-kit-root-sentinel"}\n'
+GENERATED_ROOT_DIGEST = hashlib.sha256(GENERATED_ROOT).hexdigest()
+PIN_DECLARATION = "APPROVED_ROOT_PIN_SHA256: str | None"
+
 
 def verify_operating_agreement(executable, target):
     work = target / "private-agreement"
@@ -51,7 +57,8 @@ def verify_operating_agreement(executable, target):
     assert not (work / "legacy" / "decision-quality.json").exists()
 
 
-def test_reproducible_kit_runs_isolated_data_mcp_and_slack_entrypoints(tmp_path):
+@pytest.fixture
+def source_snapshot(tmp_path):
     root = Path(__file__).resolve().parents[4]
     builder = "tools/build_slack_pilot_kit.py"
     settings = runpy.run_path(str(root / builder))
@@ -66,10 +73,11 @@ def test_reproducible_kit_runs_isolated_data_mcp_and_slack_entrypoints(tmp_path)
     for path in paths:
         (repo / path).parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(root / path, repo / path)
-    platform_verifier = settings["PLATFORM_VERIFIER"]
-    verifier_source = repo / settings["CELL"] / "src" / platform_verifier
-    verifier_source.write_bytes(b'"""Generated platform verifier packaging sentinel."""\n')
     subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    return root, repo, builder, settings
+
+
+def commit_snapshot(repo):
     subprocess.run(["git", "add", "."], cwd=repo, check=True)
     subprocess.run(
         [
@@ -86,7 +94,26 @@ def test_reproducible_kit_runs_isolated_data_mcp_and_slack_entrypoints(tmp_path)
         cwd=repo,
         check=True,
     )
-    revision = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip()
+    return subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip()
+
+
+def test_reproducible_kit_runs_isolated_data_mcp_and_slack_entrypoints(tmp_path, source_snapshot):
+    root, repo, builder, settings = source_snapshot
+    platform_verifier = settings["PLATFORM_VERIFIER"]
+    verifier_path = repo / settings["CELL"] / "src" / platform_verifier
+    verifier_source = (
+        f"{PIN_DECLARATION} = {GENERATED_ROOT_DIGEST!r}\n"
+        'raise AssertionError("Packaging must never import the platform verifier")\n'
+    ).encode()
+    verifier_path.write_bytes(verifier_source)
+    root_member = settings["PLATFORM_ROOT_PIN"]
+    root_path = repo / settings["CELL"] / root_member
+    root_path.parent.mkdir()
+    root_path.write_bytes(GENERATED_ROOT)
+    revision = commit_snapshot(repo)
+    # An operator's uncommitted edits cannot change the source-bound root or verifier.
+    root_path.write_text('{"kind":"uncommitted-working-tree-sentinel"}\n')
+    verifier_path.write_text(f"{PIN_DECLARATION} = None\n")
     python = [sys.executable, "-I", "-S", "-B"]
     first, second = tmp_path / "one.zip", tmp_path / "two.zip"
     for dest in [first, second]:
@@ -98,6 +125,8 @@ def test_reproducible_kit_runs_isolated_data_mcp_and_slack_entrypoints(tmp_path)
         provenance = json.loads(archive.read("PROVENANCE.json"))
         assert provenance["source_commit"] == revision
         assert provenance["platform_verifier_bundled"] is True
+        assert provenance["platform_root_pin_bundled"] is True
+        assert archive.read(root_member) == GENERATED_ROOT
         sums = archive.read("SHA256SUMS").decode().splitlines()
         assert len(sums) == len(archive.namelist()) - 1
         for line in sums:
@@ -106,7 +135,8 @@ def test_reproducible_kit_runs_isolated_data_mcp_and_slack_entrypoints(tmp_path)
     with ZipFile(target / "opentour-slack.pyz") as archive:
         assert "opentour_cell/pilot/recipient_lifecycle.py" in archive.namelist()
         assert "opentour_cell/pilot/recipient_lifecycle_authority.py" in archive.namelist()
-        assert archive.read(platform_verifier) == verifier_source.read_bytes()
+        assert archive.read(platform_verifier) == verifier_source
+        assert root_member not in archive.namelist()
         for module in settings["JOURNAL_MODULES"]:
             source = root / settings["JOURNAL"] / "src" / module
             assert archive.read(module) == source.read_bytes()
@@ -286,3 +316,68 @@ def test_reproducible_kit_runs_isolated_data_mcp_and_slack_entrypoints(tmp_path)
     config.write_text(json.dumps(example))
     config.chmod(0o600)
     assert b"validated" in run("slack", str(config), "--check-config").lower()
+
+
+@pytest.mark.parametrize("include_verifier", [False, True])
+def test_unprovisioned_root_keeps_the_public_kit_buildable(source_snapshot, include_verifier):
+    _, repo, builder, settings = source_snapshot
+    if include_verifier:
+        verifier = repo / settings["CELL"] / "src" / settings["PLATFORM_VERIFIER"]
+        verifier.write_text(f"{PIN_DECLARATION} = None\n")
+    commit_snapshot(repo)
+    root_member = settings["PLATFORM_ROOT_PIN"]
+    untracked_root = repo / settings["CELL"] / root_member
+    untracked_root.parent.mkdir()
+    untracked_root.write_bytes(GENERATED_ROOT)
+    output = repo.parent / "unprovisioned.zip"
+    subprocess.run(
+        [sys.executable, "-I", "-S", "-B", builder, output],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+    with ZipFile(output) as archive:
+        assert root_member not in archive.namelist()
+        provenance = json.loads(archive.read("PROVENANCE.json"))
+        assert provenance["platform_verifier_bundled"] is include_verifier
+        assert provenance["platform_root_pin_bundled"] is False
+
+
+@pytest.mark.parametrize(
+    ("declaration", "root_content", "expected_error"),
+    [
+        (f"{PIN_DECLARATION} = {GENERATED_ROOT_DIGEST!r}", None, b"must be a regular"),
+        (f"{PIN_DECLARATION} = {GENERATED_ROOT_DIGEST!r}", b"substituted\n", b"does not match"),
+        (f"{PIN_DECLARATION} = None", GENERATED_ROOT, b"requires an approved digest"),
+        (None, GENERATED_ROOT, b"requires an approved digest"),
+        (
+            f"{PIN_DECLARATION} = str({GENERATED_ROOT_DIGEST!r})",
+            GENERATED_ROOT,
+            b"must declare one literal",
+        ),
+        (
+            f"{PIN_DECLARATION} = {GENERATED_ROOT_DIGEST!r}\nAPPROVED_ROOT_PIN_SHA256 = None",
+            GENERATED_ROOT,
+            b"must declare one literal",
+        ),
+    ],
+)
+def test_kit_refuses_incoherent_public_root(
+    source_snapshot, declaration, root_content, expected_error
+):
+    _, repo, builder, settings = source_snapshot
+    if declaration is not None:
+        verifier = repo / settings["CELL"] / "src" / settings["PLATFORM_VERIFIER"]
+        verifier.write_text(f"{declaration}\n")
+    if root_content is not None:
+        root_path = repo / settings["CELL"] / settings["PLATFORM_ROOT_PIN"]
+        root_path.parent.mkdir()
+        root_path.write_bytes(root_content)
+    commit_snapshot(repo)
+    output = repo.parent / "invalid.zip"
+    result = subprocess.run(
+        [sys.executable, "-I", "-S", "-B", builder, output], cwd=repo, capture_output=True
+    )
+    assert result.returncode == 2
+    assert expected_error in result.stderr
+    assert not output.exists()
