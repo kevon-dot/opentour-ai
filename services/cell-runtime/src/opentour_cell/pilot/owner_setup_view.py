@@ -178,8 +178,9 @@ def render_owner_setup(
             content += (
                 f"<h2>Saved settings</h2><p>State · {_text(receipt['state'])}. "
                 f"Saved revision · {_text(receipt['revision'])}.</p>"
+                '<a href="/owner/setup">Review current settings</a>'
             )
-        if csrf_token and status.get("may_preview") is True:
+        elif csrf_token and status.get("may_preview") is True:
             hidden = _hidden("csrf_token", csrf_token)
             if preview:
                 content += _preview(preview)

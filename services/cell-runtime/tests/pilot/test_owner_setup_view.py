@@ -113,7 +113,9 @@ def test_signing_payload_round_trips_and_result_renders_stable_revision():
     }
     assert page.attrs("textarea")[1]["name"] == "signed_packet"
     receipt = {"revision": "r-saved", "state": "active", "secret": "unprojected"}
-    saved = render_owner_setup(status(revision="r-saved"), receipt=receipt)
+    saved = render_owner_setup(status(revision="r-saved"), csrf_token="generated", receipt=receipt)
+    assert Page(saved).attrs("a") == [{"href": "/owner/setup"}]
+    assert not Page(saved).attrs("form") and "No eligible workflow" not in saved
     assert "Saved settings" in saved and "r-saved" in saved and "unprojected" not in saved
 
 
