@@ -23,6 +23,7 @@ from opentour_cell.pilot.text_classifier import (
 
 if TYPE_CHECKING:
     from opentour_cell.pilot.handoff_readback import HandoffReadback
+    from opentour_cell.pilot.workflow_index import IndexPage
 
 from opentour_cell.pilot.training_data import EVALUATION_FIELDS, FIELD_NAMES
 
@@ -1675,6 +1676,60 @@ def _live_summary_text(summary: Mapping[str, Any]) -> str:
     )
 
 
+def _workflow_queue(page: IndexPage, *, continuation: bool) -> list[Block]:
+    blocks: list[Block] = []
+    groups = {"needs_you": "Needs you", "waiting": "Waiting", "recent": "Recent"}
+    actions = {
+        "open_review": "Review proposal",
+        "open_status": "View status",
+        "open_receipt": "View receipt",
+    }
+    for group, title in groups.items():
+        rows = [row for row in page.rows if row.group == group]
+        if not rows:
+            continue
+        blocks.append({"type": "header", "text": _text(title)})
+        for row in rows:
+            state = row.state.replace("_", " ")
+            label = _display(row.label)
+            block = _section(
+                f"{label} · {_ref(row.workflow_ref)}\n"
+                f"Proposal {_ref(row.proposal_ref)} · version {_ref(row.proposal_revision)}"
+                f" · {state}"
+            )
+            if row.aliases:
+                block["text"]["text"] += (
+                    "\nAlso known as " + ", ".join(_display(alias) for alias in row.aliases)[:450]
+                )
+            if row.deadline:
+                # Only a verified integer is interpolated into Slack's local-time date token.
+                date = datetime.fromtimestamp(row.deadline, UTC).strftime("%Y-%m-%d %H:%M UTC")
+                date_token = f"<!date^{row.deadline}^{{date_short_pretty}} {{time}}|{date}>"
+                block["fields"] = [
+                    {
+                        "type": "mrkdwn",
+                        "text": f"Review by · {date_token}",
+                    }
+                ]
+            if row.action and row.selection:
+                block["accessory"] = _button(
+                    actions[row.action], "ot_app_queue_open", row.selection
+                )
+            else:
+                block["text"]["text"] += "\nNo action available."
+            blocks.append(block)
+    if not page.rows:
+        blocks.append(_section("Your workflow queue is empty."))
+    controls = []
+    if continuation:
+        controls.append(_button("First page", "ot_app_queue_first", "first"))
+    if page.next_cursor:
+        controls.append(_button("Next page", "ot_app_queue_next", page.next_cursor))
+    if controls:
+        blocks.append(_actions(*controls))
+    return blocks
+
+
 def app_home_view(
     context: str = "",
     title: str = "",
@@ -1692,6 +1747,9 @@ def app_home_view(
     decision_map_entry: str = "",
     case_entry: str = "",
     starter_score_entry: str = "",
+    queue: IndexPage | None = None,
+    queue_denied: bool = False,
+    queue_continuation: bool = False,
 ) -> Block:
     if not context:
         return {
@@ -1704,6 +1762,10 @@ def app_home_view(
             ],
         }
     blocks = [{"type": "header", "text": _text(_display(title))}]
+    if queue is not None:
+        blocks.extend(_workflow_queue(queue, continuation=queue_continuation))
+    elif queue_denied:
+        blocks.append(_section("Workflow queue access is unavailable."))
     if workflow:
         blocks.append(_section("Workflow · " + _display(workflow)))
     nav = [
@@ -1718,13 +1780,13 @@ def app_home_view(
         blocks.append(_actions(_button("Review starter cases", "ot_app_cases", case_entry)))
     if decision_map_entry:
         blocks.append(_actions(_button("Review decision map", "ot_app_map", decision_map_entry)))
-    if pending:
+    if pending and queue is None and not queue_denied:
         blocks.append(_section("A repair is ready for your review."))
         first = _button("Review pending repair", "ot_app_pending", pending)
         first["style"] = "primary"
         nav.insert(0, first)
     elif can_review:
-        if named_reviewer:
+        if named_reviewer and queue is None and not queue_denied:
             blocks.append(_section("No repair needs your review."))
         nav.insert(0, _button("Review results", "ot_app_review", "ot_app_review"))
     if can_add_workflow:

@@ -94,6 +94,7 @@ MODULES = (
     "opentour_cell/pilot/map_review.py",
     "opentour_cell/pilot/map_inspection.py",
     "opentour_cell/pilot/workflow_benchmarks.py",
+    "opentour_cell/pilot/workflow_index.py",
     "opentour_cell/pilot/historical_benchmarks.py",
     "opentour_cell/pilot/historical_worker.py",
     "opentour_cell/pilot/slack_charts.py",

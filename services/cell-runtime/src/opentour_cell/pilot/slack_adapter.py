@@ -43,6 +43,12 @@ if TYPE_CHECKING:
     from opentour_cell.pilot.starter_evaluation_session import StarterEvaluationSession
     from opentour_cell.pilot.starter_map_confirmation import StarterCaseEntry, StarterCaseSession
     from opentour_cell.pilot.verifier_form import VerifierForm
+    from opentour_cell.pilot.workflow_index import (
+        IndexPage,
+        IndexScope,
+        ProposalAccess,
+        WorkflowIndex,
+    )
 
 Json = dict[str, Any]
 SESSION_SECONDS = 900
@@ -1105,7 +1111,13 @@ class Workbench:
         training: Any,
         views: Any,
         submit: Callable[[Callable[[], None]], Any] | None = None,
+        *,
+        workflow_index_scope: Callable[
+            [Settings, IntakePrincipal, tuple[ProposalAccess, ...]], IndexScope | None
+        ]
+        | None = None,
     ):
+        self.workflow_index_scope = workflow_index_scope
         self.config = config
         first = config()
         self.binding = (
@@ -2043,7 +2055,16 @@ class Workbench:
             )
         return exposure
 
-    def _home(self, cfg: Settings, actor: str, view_id: str, job: str, old_hash: str = "") -> None:
+    def _home(
+        self,
+        cfg: Settings,
+        actor: str,
+        view_id: str,
+        job: str,
+        old_hash: str = "",
+        *,
+        authorize: Callable[[], None] | None = None,
+    ) -> None:
         entry = cfg.permission(actor, "inspect")
         target = self._readout(cfg, actor, job) if entry["aggregate"] else None
         revision = target.revision if target else ""
@@ -2085,7 +2106,9 @@ class Workbench:
                 for row in self._catalog(cfg, actor)
             ),
             audit=target.audit if target else None,
-            decision_allowed=actor == cfg.reviewer and "review" in entry["roles"],
+            decision_allowed=authorize is None
+            and actor == cfg.reviewer
+            and "review" in entry["roles"],
             reviewer_navigation=True,
             workspace_title=cfg.workspace_title,
             workflow_label=cfg.workflow_label,
@@ -2097,6 +2120,7 @@ class Workbench:
             dataset=target.dataset if target else None,
             dataset_revision=target.dataset_revision if target else None,
             audit=target.audit if target else None,
+            authorize=authorize,
         )
 
     def _browse(
@@ -2207,7 +2231,16 @@ class Workbench:
             dataset_revision=info["dataset_revision"],
         )
 
-    def _evidence(self, cfg: Settings, actor: str, view: str, ctx: Json, old_hash: str) -> None:
+    def _evidence(
+        self,
+        cfg: Settings,
+        actor: str,
+        view: str,
+        ctx: Json,
+        old_hash: str,
+        *,
+        authorize: Callable[[], None] | None = None,
+    ) -> None:
         target = self._readout(cfg, actor, ctx["job"])
         _check(target and target.revision == ctx["revision"])
         assert target is not None
@@ -2280,6 +2313,7 @@ class Workbench:
             dataset=target.dataset,
             dataset_revision=target.dataset_revision,
             audit=target.audit,
+            authorize=authorize,
         )
         with _evidence_guard(
             self.store,
@@ -2318,7 +2352,8 @@ class Workbench:
             )
 
         if (
-            not recipe
+            authorize is None
+            and not recipe
             and current.explicit_recipient
             and actor == target.audit.get("release_reviewer")
             and "review" in entry["roles"]
@@ -4564,7 +4599,207 @@ class Workbench:
             and not entry["datasets"]
         )
 
-    def _publish_app_home(self, cfg: Settings, event: Json) -> None:
+    def _workflow_index(self, cfg: Settings, actor: str) -> WorkflowIndex | None:
+        from opentour_cell.pilot.workflow_benchmarks import WorkflowBenchmarks
+        from opentour_cell.pilot.workflow_index import CurrentIndexAuthority, WorkflowIndex
+
+        provider = self.workflow_index_scope
+        if provider is None:
+            return None
+
+        def current(principal: IntakePrincipal) -> IndexScope | None:
+            latest = self.settings()
+            _check(latest == cfg and principal == IntakePrincipal(cfg.organization, actor, "slack"))
+            latest.permission(actor, "inspect")
+            proposals = self._workflow_proposals(latest, actor)
+            scope = provider(latest, principal, proposals)
+            if scope is not None:
+                _check(scope.epoch == self.store.engagement_id and scope.proposals == proposals)
+            return scope
+
+        return WorkflowIndex(WorkflowBenchmarks(cfg.directory), CurrentIndexAuthority(current))
+
+    def _workflow_proposals(self, cfg: Settings, actor: str) -> tuple[ProposalAccess, ...]:
+        from opentour_cell.pilot.operating_point import digest
+        from opentour_cell.pilot.receipt_recovery import _open_db
+        from opentour_cell.pilot.release_gate import inspect_recorded_release
+        from opentour_cell.pilot.source_intake import check_current_intake
+        from opentour_cell.pilot.workflow_benchmarks import BenchmarkScope
+        from opentour_cell.pilot.workflow_index import ProposalAccess
+
+        entry = cfg.permission(actor, "inspect")
+        if not entry["aggregate"] or not cfg.explicit_recipient:
+            return ()
+        epoch = self.store.engagement_id
+        output = []
+        with (
+            self.journal.db() as db,
+            _open_db(cfg.directory / "learning-mandates.sqlite3") as ledger,
+        ):
+            self.journal.active(db)
+            replacements = (
+                ledger is not None
+                and ledger.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' "
+                    "AND name='reviewer_replacements'"
+                ).fetchone()
+            )
+            for _, source in self._result_sources(cfg, actor):
+                if not source.startswith("managed:"):
+                    continue
+                try:
+                    target = self._managed(cfg, actor, source)
+                    audit = target.audit
+                    if audit.get("release_provider") != "slack":
+                        continue
+                    run = audit["job_id"]
+                    if (
+                        replacements
+                        and ledger.execute(
+                            "SELECT 1 FROM reviewer_replacements WHERE scope=? AND run=?",
+                            (digest([cfg.organization, epoch]), run),
+                        ).fetchone()
+                    ):
+                        # Only the replacement verifier can grant access to the successor.
+                        continue
+                    seen = db.execute(
+                        "SELECT p.id, p.presented, p.expires FROM presentations p "
+                        "JOIN exposures e ON p.id=e.id WHERE e.status='presented' "
+                        "AND p.actor=? AND p.revision=? AND p.policy=? AND p.scope=? "
+                        "ORDER BY p.presented DESC,p.rowid DESC LIMIT 1",
+                        (actor, target.revision, self._policy(cfg, actor), target.evidence_digest),
+                    ).fetchone()
+                    if seen is None:
+                        continue
+                    self.journal._seal(db, "presentation", seen["id"])
+                    intake = check_current_intake(
+                        cfg.directory, cfg.organization, epoch, target.dataset_revision
+                    )
+                    release = inspect_recorded_release(
+                        cfg.directory,
+                        cfg.organization,
+                        run,
+                        audit["run_revision"],
+                        audit["model_revision"],
+                    )
+                    action, state, stamped = "open_status", "pending", seen["presented"]
+                    if release:
+                        state = release["decision"]
+                        stamped = release.get("recorded_at")
+                        if not stamped:
+                            continue
+                        if state == "approved" and self._handoff_receipt(cfg, actor, target):
+                            action = "open_receipt"
+                    elif actor == audit.get("release_reviewer") and "review" in entry["roles"]:
+                        action = "open_review"
+                    visibility = min(entry["expires_at"], intake["expires_at"])
+                    if not release:
+                        visibility = min(visibility, seen["expires"])
+                    output.append(
+                        ProposalAccess(
+                            BenchmarkScope(cfg.organization, epoch, intake["workflow"]),
+                            actor,
+                            digest(
+                                [seen["id"], intake["authority_revision"], self._policy(cfg, actor)]
+                            ),
+                            run,
+                            target.revision,
+                            state,
+                            stamped,
+                            seen["expires"] if not release else None,
+                            visibility,
+                            action,
+                            visibility,
+                        )
+                    )
+                except (ValueError, OSError, KeyError, sqlite3.Error):
+                    continue
+        return tuple(output)
+
+    def _workflow_page(
+        self, cfg: Settings, actor: str, cursor: str | None
+    ) -> tuple[IndexPage | None, bool]:
+        try:
+            index = self._workflow_index(cfg, actor)
+            if index is None:
+                return None, False
+            principal = IntakePrincipal(cfg.organization, actor, "slack")
+            return index.page(principal, size=6, cursor=cursor), False
+        except (OSError, ValueError, sqlite3.Error):
+            return None, True
+
+    def _open_workflow_proposal(self, cfg: Settings, actor: str, view: str, handle: str) -> None:
+        from opentour_cell.pilot.source_intake import check_current_intake
+
+        _check(isinstance(handle, str) and re.fullmatch(r"[0-9a-f]{64}", handle))
+        principal = IntakePrincipal(cfg.organization, actor, "slack")
+
+        def resolve():
+            current = self.settings()
+            current.permission(actor, "inspect")
+            index = self._workflow_index(current, actor)
+            _check(index is not None)
+            assert index is not None
+            row = index.select(principal, handle)
+            source = "managed:" + row.proposal_ref
+            target = self._managed(current, actor, source)
+            intake = check_current_intake(
+                current.directory,
+                current.organization,
+                self.store.engagement_id,
+                target.dataset_revision,
+            )
+            _check(
+                target.revision == row.proposal_revision and intake["workflow"] == row.workflow_ref
+            )
+            return row, target
+
+        selected, target = resolve()
+        source = "managed:" + selected.proposal_ref
+
+        def authorize() -> None:
+            _check(resolve() == (selected, target))
+
+        if selected.action == "open_review":
+            _check(
+                actor == target.audit.get("release_reviewer")
+                and cfg.permission(actor, "review", target.dataset)["aggregate"]
+            )
+            self._evidence(
+                cfg,
+                actor,
+                view,
+                {"job": source, "revision": target.revision},
+                "",
+                authorize=authorize,
+            )
+        elif selected.action == "open_status":
+            self._home(cfg, actor, view, source, authorize=authorize)
+        elif selected.action == "open_receipt":
+            receipt = self._handoff_receipt(cfg, actor, target)
+            _check(receipt)
+            assert receipt is not None
+            pin = self._receipt_pin(actor, target.revision, receipt)
+            context = self.journal.context(
+                actor, cfg.channel, view, "handoff", source, target.revision
+            )
+
+            def authorize_receipt() -> None:
+                authorize()
+                _check(self._handoff_receipt(self.settings(), actor, target) == receipt)
+
+            self._show(
+                view,
+                self.views.handoff_modal(context, pin, receipt, target.audit),
+                dataset=target.dataset,
+                dataset_revision=target.dataset_revision,
+                audit=target.audit,
+                authorize=authorize_receipt,
+            )
+        else:
+            raise Refused()
+
+    def _publish_app_home(self, cfg: Settings, event: Json, *, cursor: str | None = None) -> None:
         actor = event["user"]
         _check(
             _slack_id(actor, "UW")
@@ -4581,7 +4816,12 @@ class Workbench:
             self.web.views_publish(user_id=actor, view=self.views.app_home_view())
             return
         token = self.journal.opaque("home", [actor, cfg.team, cfg.app, cfg.channel])
-        pending = self._pending_release(cfg, actor)
+        queue, queue_denied = self._workflow_page(cfg, actor, cursor)
+        if cursor and queue is None:
+            # A stale continuation can only reopen the first currently authorized page.
+            cursor = None
+            queue, queue_denied = self._workflow_page(cfg, actor, cursor)
+        pending = self._pending_release(cfg, actor) if queue is None and not queue_denied else None
         workflow_settings = False
         if cfg.live_workflow_ref or (cfg.starter_setup and cfg.starter_setup.slack_owner == actor):
             try:
@@ -4613,6 +4853,9 @@ class Workbench:
             decision_map_entry=map_entry,
             case_entry=case_entry,
             starter_score_entry=score_entry,
+            queue=queue,
+            queue_denied=queue_denied,
+            queue_continuation=cursor is not None,
         )
         navigation = (
             can_add_workflow
@@ -4626,7 +4869,12 @@ class Workbench:
                     "app_home",
                     authorize=(
                         lambda: _check(
-                            (not score_entry or self._starter_scores(actor)[0] == score_entry)
+                            (
+                                queue is None
+                                or self._workflow_page(self.settings(), actor, cursor)
+                                == (queue, False)
+                            )
+                            and (not score_entry or self._starter_scores(actor)[0] == score_entry)
                             and (not case_entry or self._case_entry(actor) == case_entry)
                             and (not map_entry or self._map_entry(actor) == map_entry)
                             and (
@@ -4636,7 +4884,8 @@ class Workbench:
                             and (live_summary is None or self._live_summary(actor) == live_summary)
                         )
                     )
-                    if readiness is not None
+                    if queue is not None
+                    or readiness is not None
                     or live_summary is not None
                     or verifier_entry
                     or map_entry
@@ -4670,6 +4919,31 @@ class Workbench:
             and len(body["actions"]) == 1
         )
         action = body["actions"][0]
+        if action.get("action_id") == "ot_app_queue_open":
+            opened = self.web.views_open(
+                trigger_id=body["trigger_id"], view=self.views.notice_modal("checking")
+            )
+            view_id = opened["view"]["id"]
+            try:
+                self.private_channel(cfg, actor)
+                self._open_workflow_proposal(cfg, actor, view_id, action.get("value"))
+            except (OSError, ValueError, KeyError, sqlite3.Error):
+                self._safe_notice(view_id)
+            return
+        if action.get("action_id") in {"ot_app_queue_next", "ot_app_queue_first"}:
+            self.private_channel(cfg, actor)
+            cursor = None
+            if action["action_id"] == "ot_app_queue_next":
+                cursor = action.get("value")
+                _check(isinstance(cursor, str) and re.fullmatch(r"[0-9a-f]{64}", cursor))
+            else:
+                _check(action.get("value") == "first")
+            self._publish_app_home(
+                self.settings(),
+                {"type": "app_home_opened", "tab": "home", "user": actor},
+                cursor=cursor,
+            )
+            return
         if action.get("action_id") == "ot_app_starter_score":
             self.private_channel(cfg, actor)
             version, items = self._starter_scores(actor)
