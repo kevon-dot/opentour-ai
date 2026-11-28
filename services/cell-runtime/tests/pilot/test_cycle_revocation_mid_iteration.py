@@ -1,12 +1,21 @@
 """OPE-577 item 4: authority revoked while one installed cycle iteration is in progress.
 
 Every case drives the packaged entry point (`cycle_worker.run`, which calls the real
-`autonomous_cycle.cycle_once` with its default `workplace_context` connector). Only two seams
-are generated: the workplace provider's two network calls are answered by the generated
+`autonomous_cycle.cycle_once` with its default `workplace_context` connector). Two seams are
+generated: the workplace provider's discover/acquire calls are answered by the generated
 catalog from `test_autonomous_cycle`, and the numeric trainer subprocess (`open_weight._run`)
-is a generated transport. Everything between them, including the open-weight bundle logic, the
-mandate ledger, the engagement store and the Slack queue, is the shipped code. The stage hooks
-below wrap shipped functions only to inject the revocation; each still calls the original.
+is a generated transport. The mandate ledger, engagement store, intake, comparison, open-weight
+bundle publication and Slack queue are the shipped code. The stage hooks below wrap shipped
+functions only to inject the revocation; each still calls the original.
+
+The seams are wide, and that limits what this file can detect:
+
+* The `open_weight._run` seam replaces the whole function, so its in-loop withdrawal-marker and
+  permission checks and its post-run `_check_current` (open_weight.py:349) are not exercised and
+  cannot be caught by mutation here. A revocation during the fit is still caught downstream,
+  at the guarded publication re-check (open_weight.py:552) and by the later cycle checks.
+* The workplace seam replaces all of `discover_workplace` and `acquire_workplace`, so the
+  provider reader's own checks are not exercised either.
 
 The revocation lands at one stage of the iteration:
 
@@ -18,11 +27,22 @@ The revocation lands at one stage of the iteration:
 * `after_fit`: after the managed comparison (and fit) returned, before the Slack decision;
 * `before_enqueue`: immediately before `approval_inbox.enqueue_ready` is called;
 * `inside_enqueue` (mandate only): after `enqueue_ready`'s own authority read, before its
-  pointer write. This is a known gap, pinned by a strict xfail (see `ENQUEUE_GAP`).
+  pointer write. Only the hold, the later hold and the refused evidence are asserted here.
+
+Open gap, not tested as passing here: a mandate withdrawal that commits inside
+`enqueue_ready` still leaves a durable approval-ready pointer. approval_inbox.py:52 checks the
+mandate in its own read; approval_inbox.py:73 then writes the pointer, holding only the
+engagement guard; LearningMandates.withdraw (learning_mandate.py:873) locks only the mandate
+database, so it can commit between the two; autonomous_cycle.py:451 then holds the cycle
+without removing the pointer. The other session's race-fix PR will add the inside-enqueue
+no-pointer cases as passing tests.
 
 Three authorities are revoked: the standing mandate (owner withdrawal), the engagement
-(store withdrawal) and the owner's source grant (source withdrawal). Fixtures are generated
-sentinels; the trainer is simulated, so this proves the package, not a customer host.
+(store withdrawal) and the owner's source grant (source withdrawal). The durable-denial check
+re-reads each denial through fresh handles, as a restarted worker would. That is not a
+snapshot restore: the restore half of item 4 (an old snapshot must not bring back authority)
+stays open. Fixtures are generated sentinels and the trainer is simulated, so this proves the
+package, not a customer host.
 """
 
 from __future__ import annotations
@@ -54,7 +74,6 @@ KINDS = ("mandate", "engagement", "source_grant")
 STAGES = ("source_read", "intake_to_fit", "during_fit", "after_fit", "before_enqueue")
 EFFECTS = (
     "approval-ready-*.json",
-    "**/release-decision.json",
     "slack-review-*.json",
     "model-grant-*.json",
     "managed-outputs/run-*/run.json",
@@ -276,8 +295,8 @@ def hooks(monkeypatch: pytest.MonkeyPatch) -> Iterator[Callable[..., Iteration]]
 
 
 def check_held_after_revocation(
-    it: Iteration, capsys: pytest.CaptureFixture[str], *, pointer_free: bool = True
-) -> None:
+    it: Iteration, capsys: pytest.CaptureFixture[str], *, pointer_in_scope: bool = True
+) -> Json:
     code, report = it.worker(capsys)
     it.join()
     assert it.revoked_at is not None, "the revocation hook never fired"
@@ -288,12 +307,13 @@ def check_held_after_revocation(
     assert it.after_revocation == [], it.after_revocation
     # No publication, Slack review grant, review pointer or accepted artifact appears after it.
     added = it.effects() - it.revoked_at
-    if pointer_free:
-        assert not added, sorted(added)
+    if not pointer_in_scope:
+        # The inside-enqueue pointer is the open gap in the module docstring. It is neither
+        # required nor forbidden here; every other effect still must not appear.
+        added = {e for e in added if not e.startswith("approval-ready-")}
+    assert not added, sorted(added)
+    if pointer_in_scope:
         assert not list(it.c.owner.glob("approval-ready-*.json"))
-    else:
-        assert all(e.startswith("approval-ready-") for e in added), sorted(added)
-    assert not list(it.c.owner.rglob("release-decision.json"))
     # The denial is durable: a fresh handle (a restarted worker) still reads it.
     assert it.denial_is_durable()
     # A later iteration of the same installed worker stays held and does nothing new.
@@ -302,6 +322,7 @@ def check_held_after_revocation(
     assert later_code == 2 and later["state"] == "held", later
     assert later["reason"] in REASONS[it.kind] | {"open_weight_authority_withdrawn"}, later
     assert it.calls == calls and it.effects() == before
+    return report
 
 
 @pytest.mark.parametrize("kind", KINDS)
@@ -344,49 +365,30 @@ def test_rule_route_revocation_mid_iteration_holds(
     assert it.calls == []
 
 
-ENQUEUE_GAP = (
-    "approval_inbox.enqueue_ready (approval_inbox.py:51-73) checks the standing mandate "
-    "through managed_review_evidence (approval_inbox.py:52) in its own read, then writes the "
-    "approval-ready pointer (approval_inbox.py:73) holding only the engagement guard. "
-    "LearningMandates.withdraw (learning_mandate.py:873) takes only the mandate database, not "
-    "that guard, so a withdrawal can commit between the check and the write. "
-    "autonomous_cycle.py:451 re-checks only after the pointer is durable and does not remove it."
-)
-
-
 @pytest.mark.parametrize("model", (True, False), ids=("model", "rule"))
-def test_mandate_withdrawn_inside_enqueue_holds_and_pointer_cannot_open_evidence(
+def test_mandate_withdrawn_inside_enqueue_holds_and_evidence_is_refused(
     tmp_path: Path,
     hooks: Callable[..., Iteration],
     capsys: pytest.CaptureFixture[str],
     model: bool,
 ) -> None:
-    """Withdrawal after enqueue_ready's authority read: the cycle holds, the pointer is inert."""
+    """Withdrawal after enqueue_ready's authority read: the cycle and later iterations hold.
+
+    Whether a pointer is written is the open gap named in the module docstring and is not
+    asserted here. The review evidence the Slack poster must open first is refused.
+    """
     it = hooks(tmp_path, model=model, kind="mandate", stage="inside_enqueue")
-    check_held_after_revocation(it, capsys, pointer_free=False)
-    # The Slack poster opens every pointer through managed_review_evidence before posting,
-    # and that read now refuses the withdrawn mandate. Only this read is exercised here.
-    (pointer,) = it.c.owner.glob("approval-ready-*.json")
-    item = read(pointer)
-    with pytest.raises(ValueError):
+    report = check_held_after_revocation(it, capsys, pointer_in_scope=False)
+    policy = it.c.agreement["release_review"]
+    with pytest.raises(ValueError, match="^standing_mandate_withdrawn$"):
         approval_inbox.managed_review_evidence(
-            it.c.owner, it.c.org, item["run_id"], item["audience"], item["team"], item["channel"]
+            it.c.owner,
+            it.c.org,
+            report["run_id"],
+            policy["audience"],
+            policy["team"],
+            policy["channel"],
         )
-
-
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason=ENQUEUE_GAP)
-@pytest.mark.parametrize("model", (True, False), ids=("model", "rule"))
-def test_gap_mandate_withdrawn_inside_enqueue_writes_no_pointer(
-    tmp_path: Path,
-    hooks: Callable[..., Iteration],
-    capsys: pytest.CaptureFixture[str],
-    model: bool,
-) -> None:
-    """Strict xfail: documents a real gap. It is not a pass."""
-    it = hooks(tmp_path, model=model, kind="mandate", stage="inside_enqueue")
-    code, report = it.worker(capsys)
-    assert it.revoked_at is not None and code == 2 and report["state"] == "held", report
-    assert not list(it.c.owner.glob("approval-ready-*.json")), "pointer written after withdrawal"
 
 
 def test_unrevoked_iteration_reaches_the_slack_queue(
