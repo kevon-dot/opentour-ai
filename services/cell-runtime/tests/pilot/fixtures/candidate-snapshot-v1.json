@@ -1,0 +1,412 @@
+{
+  "as_of": "2026-01-01T12:00:00Z",
+  "captured_at": "2026-01-01T12:00:00Z",
+  "evidence_tier": "digest_self_consistent_only",
+  "expected": {
+    "receipt": {
+      "counters": {
+        "disputed": "withheld",
+        "eligible": "withheld",
+        "pending": "withheld",
+        "quarantined": "withheld"
+      },
+      "reason_codes": {
+        "awaiting_outcome": "withheld",
+        "contradictory_corrections": "withheld",
+        "malformed_decision": "withheld",
+        "orphan_correction": "withheld",
+        "protected_partition": "withheld",
+        "starter_origin": "withheld"
+      }
+    },
+    "snapshot": {
+      "counters": {
+        "awaiting_decision": 1,
+        "disputed": 1,
+        "eligible": 3,
+        "live": {
+          "cases": 6,
+          "decisions": 7,
+          "disputed": 1,
+          "pending": 1,
+          "verified": 4
+        },
+        "pending": 1,
+        "quarantined": 1,
+        "starter": {
+          "cases": 1,
+          "decisions": 1,
+          "disputed": 0,
+          "pending": 0,
+          "verified": 1
+        }
+      },
+      "metrics": {
+        "independent_incumbent_error_groups": 1,
+        "post_simple_repair_residual_groups": {
+          "reason": "simple_repair_not_bound",
+          "state": "unavailable"
+        },
+        "wrong_automatic_decisions": {
+          "denominator": 3,
+          "numerator": 1,
+          "state": "available"
+        }
+      },
+      "reason_codes": {
+        "awaiting_outcome": 1,
+        "contradictory_corrections": 1,
+        "malformed_decision": 1,
+        "orphan_correction": 1,
+        "protected_partition": 1,
+        "starter_origin": 1
+      }
+    }
+  },
+  "fixture_kind": "generated",
+  "note": "Generated sentinel source pair for OPE-416. Not provider or customer evidence. L1 and L8 are two decisions on one case, so live totals count 7 decisions but 6 cases. min_reportable_cell is 3 (the floor). eligible is 3, but its breakdown holds the single protected case, so the whole eligible group is withheld (complementary suppression).",
+  "product_acceptance": "NOT_RUN",
+  "settings": {
+    "abstain_values": [
+      "REVIEW"
+    ],
+    "adjudicators": [
+      {
+        "actor_id": "generated-verifier-1",
+        "role": "verifier"
+      }
+    ],
+    "benchmark_ref": "generated-bench-1",
+    "benchmark_version": 1,
+    "engagement_epoch": 1,
+    "evaluation_policy_revision": "generated-eval-policy-1",
+    "feature_allowlist": [
+      "amount",
+      "gateway_status"
+    ],
+    "freshness_seconds": 86400,
+    "grant_epoch": 3,
+    "mapping": {
+      "correction": {
+        "case": "case_no",
+        "corrected_value": "final_action",
+        "correction_id": "cid",
+        "correction_time": "at",
+        "correction_version": "ver",
+        "decision_id": "ticket",
+        "decision_revision": "ticket_rev",
+        "provenance": "how",
+        "row_state": "state",
+        "status": "status",
+        "verifier": "by"
+      },
+      "decision": {
+        "case": "case_no",
+        "decision_id": "ticket",
+        "decision_revision": "ticket_rev",
+        "decision_time": "decided_at",
+        "entity": "customer",
+        "features": {
+          "amount": "amount_text",
+          "gateway_status": "gateway"
+        },
+        "features_available_at": "inputs_at",
+        "group": "thread",
+        "prediction": "action",
+        "row_state": "state"
+      }
+    },
+    "maturity_seconds": 600,
+    "min_reportable_cell": 3,
+    "policy_revision": "generated-policy-1",
+    "receipt_counters": [
+      "eligible",
+      "pending",
+      "quarantined",
+      "disputed"
+    ],
+    "schema": "opentour.pilot.learning-profile-settings.v1",
+    "settings_revision": 1,
+    "sources": [
+      {
+        "origin": "observed_decision",
+        "role": "decision",
+        "source_ref": "generated-dec-live"
+      },
+      {
+        "origin": "starter_generated",
+        "role": "decision",
+        "source_ref": "generated-dec-starter"
+      },
+      {
+        "origin": "independent_outcome",
+        "role": "correction",
+        "source_ref": "generated-outcomes"
+      }
+    ],
+    "split": {
+      "customers": [
+        "generated-cust-held"
+      ],
+      "mode": "heldout_customer"
+    },
+    "tenant": "generated-tenant-a",
+    "uses": [
+      "evaluate",
+      "inspect",
+      "train"
+    ],
+    "workflow_ref": "generated-wf-refund"
+  },
+  "source_pair": {
+    "generated-dec-live": [
+      {
+        "action": "DENY",
+        "amount_text": "amt L1",
+        "case_no": "case-L1",
+        "customer": "generated-cust-1",
+        "customer_age": "SENTINEL-PROTECTED-AGE-47",
+        "decided_at": "2026-01-01T10:00:00Z",
+        "gateway": "ok",
+        "inputs_at": "2026-01-01T10:00:00Z",
+        "state": "admitted",
+        "thread": "thr-L1",
+        "ticket": "L1",
+        "ticket_rev": 1
+      },
+      {
+        "action": "REFUND",
+        "amount_text": "amt L2",
+        "case_no": "case-L2",
+        "customer": "generated-cust-1",
+        "customer_age": "SENTINEL-PROTECTED-AGE-47",
+        "decided_at": "2026-01-01T10:00:00Z",
+        "gateway": "ok",
+        "inputs_at": "2026-01-01T10:00:00Z",
+        "state": "admitted",
+        "thread": "thr-L2",
+        "ticket": "L2",
+        "ticket_rev": 1
+      },
+      {
+        "action": "DENY",
+        "amount_text": "amt L3",
+        "case_no": "case-L3",
+        "customer": "generated-cust-1",
+        "customer_age": "SENTINEL-PROTECTED-AGE-47",
+        "decided_at": "2026-01-01T10:00:00Z",
+        "gateway": "ok",
+        "inputs_at": "2026-01-01T10:00:00Z",
+        "state": "admitted",
+        "thread": "thr-L3",
+        "ticket": "L3",
+        "ticket_rev": 1
+      },
+      {
+        "action": "DENY",
+        "amount_text": "amt L4",
+        "case_no": "case-L4",
+        "customer": "generated-cust-1",
+        "customer_age": "SENTINEL-PROTECTED-AGE-47",
+        "decided_at": "2026-01-01T10:00:00Z",
+        "gateway": "ok",
+        "inputs_at": "2026-01-01T10:00:00Z",
+        "state": "admitted",
+        "thread": "thr-L4",
+        "ticket": "L4",
+        "ticket_rev": 1
+      },
+      {
+        "action": "REFUND",
+        "amount_text": "amt L5",
+        "case_no": "case-L5",
+        "customer": "generated-cust-held",
+        "customer_age": "SENTINEL-PROTECTED-AGE-47",
+        "decided_at": "2026-01-01T10:00:00Z",
+        "gateway": "ok",
+        "inputs_at": "2026-01-01T10:00:00Z",
+        "state": "admitted",
+        "thread": "thr-L5",
+        "ticket": "L5",
+        "ticket_rev": 1
+      },
+      {
+        "action": "REVIEW",
+        "amount_text": "amt L6",
+        "case_no": "case-L6",
+        "customer": "generated-cust-1",
+        "customer_age": "SENTINEL-PROTECTED-AGE-47",
+        "decided_at": "2026-01-01T10:00:00Z",
+        "gateway": "ok",
+        "inputs_at": "2026-01-01T10:00:00Z",
+        "state": "admitted",
+        "thread": "thr-L6",
+        "ticket": "L6",
+        "ticket_rev": 1
+      },
+      {
+        "action": "DENY",
+        "amount_text": "amt L7",
+        "case_no": "case-L7",
+        "customer": "generated-cust-1",
+        "customer_age": "SENTINEL-PROTECTED-AGE-47",
+        "decided_at": "2026-01-01T10:00:00Z",
+        "gateway": "ok",
+        "inputs_at": "2026-01-01T10:00:00Z",
+        "state": "admitted",
+        "thread": "thr-L7",
+        "ticket": "L7",
+        "ticket_rev": "x"
+      },
+      {
+        "action": "DENY",
+        "amount_text": "amt L8",
+        "case_no": "case-L1",
+        "customer": "generated-cust-1",
+        "customer_age": "SENTINEL-PROTECTED-AGE-47",
+        "decided_at": "2026-01-01T10:02:00Z",
+        "gateway": "ok",
+        "inputs_at": "2026-01-01T10:02:00Z",
+        "state": "admitted",
+        "thread": "thr-L1",
+        "ticket": "L8",
+        "ticket_rev": 1
+      }
+    ],
+    "generated-dec-starter": [
+      {
+        "action": "DENY",
+        "amount_text": "amt S1",
+        "case_no": "case-S1",
+        "customer": "generated-cust-1",
+        "customer_age": "SENTINEL-PROTECTED-AGE-47",
+        "decided_at": "2026-01-01T09:00:00Z",
+        "gateway": "ok",
+        "inputs_at": "2026-01-01T09:00:00Z",
+        "state": "admitted",
+        "thread": "thr-S1",
+        "ticket": "S1",
+        "ticket_rev": 1
+      }
+    ],
+    "generated-outcomes": [
+      {
+        "at": "2026-01-01T10:05:00Z",
+        "by": "generated-verifier-1",
+        "case_no": "case-L1",
+        "cid": "c-L1",
+        "final_action": "REFUND",
+        "how": "independent_adjudication",
+        "state": "admitted",
+        "status": "final",
+        "ticket": "L1",
+        "ticket_rev": 1,
+        "ver": 1
+      },
+      {
+        "at": "2026-01-01T10:05:00Z",
+        "by": "generated-verifier-1",
+        "case_no": "case-L2",
+        "cid": "c-L2",
+        "final_action": "REFUND",
+        "how": "independent_adjudication",
+        "state": "admitted",
+        "status": "final",
+        "ticket": "L2",
+        "ticket_rev": 1,
+        "ver": 1
+      },
+      {
+        "at": "2026-01-01T10:05:00Z",
+        "by": "generated-verifier-1",
+        "case_no": "case-L4",
+        "cid": "c-L4a",
+        "final_action": "REFUND",
+        "how": "independent_adjudication",
+        "state": "admitted",
+        "status": "final",
+        "ticket": "L4",
+        "ticket_rev": 1,
+        "ver": 1
+      },
+      {
+        "at": "2026-01-01T10:06:00Z",
+        "by": "generated-verifier-1",
+        "case_no": "case-L4",
+        "cid": "c-L4b",
+        "final_action": "PARTIAL",
+        "how": "independent_adjudication",
+        "state": "admitted",
+        "status": "final",
+        "ticket": "L4",
+        "ticket_rev": 1,
+        "ver": 1
+      },
+      {
+        "at": "2026-01-01T10:05:00Z",
+        "by": "generated-verifier-1",
+        "case_no": "case-L5",
+        "cid": "c-L5",
+        "final_action": "REFUND",
+        "how": "independent_adjudication",
+        "state": "admitted",
+        "status": "final",
+        "ticket": "L5",
+        "ticket_rev": 1,
+        "ver": 1
+      },
+      {
+        "at": "2026-01-01T10:05:00Z",
+        "by": "generated-verifier-1",
+        "case_no": "case-L6",
+        "cid": "c-L6",
+        "final_action": "REFUND",
+        "how": "independent_adjudication",
+        "state": "admitted",
+        "status": "final",
+        "ticket": "L6",
+        "ticket_rev": 1,
+        "ver": 1
+      },
+      {
+        "at": "2026-01-01T09:05:00Z",
+        "by": "generated-verifier-1",
+        "case_no": "case-S1",
+        "cid": "c-S1",
+        "final_action": "REFUND",
+        "how": "independent_adjudication",
+        "state": "admitted",
+        "status": "final",
+        "ticket": "S1",
+        "ticket_rev": 1,
+        "ver": 1
+      },
+      {
+        "at": "2026-01-01T10:05:00Z",
+        "by": "generated-verifier-1",
+        "case_no": "case-NOPE",
+        "cid": "c-orphan",
+        "final_action": "REFUND",
+        "how": "independent_adjudication",
+        "state": "admitted",
+        "status": "final",
+        "ticket": "NOPE",
+        "ticket_rev": 1,
+        "ver": 1
+      },
+      {
+        "at": "2026-01-01T10:07:00Z",
+        "by": "generated-verifier-1",
+        "case_no": "case-L1",
+        "cid": "c-L8",
+        "final_action": "REFUND",
+        "how": "independent_adjudication",
+        "state": "admitted",
+        "status": "final",
+        "ticket": "L8",
+        "ticket_rev": 1,
+        "ver": 1
+      }
+    ]
+  }
+}
