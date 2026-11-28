@@ -31,6 +31,7 @@ from pathlib import Path
 from typing import Any
 
 from audit_fixtures import (
+    BINDING_MATERIALS,
     CONSUMED,
     OBSERVED_SNAPSHOT,
     baseline_records,
@@ -39,8 +40,7 @@ from audit_fixtures import (
     inputs_for,
     real_sample_records,
 )
-from opentour_training.evaluation.benchmark_audit.audit import audit, binding_digests
-from opentour_training.evaluation.benchmark_audit.ledger import AuditLedger
+from opentour_training.evaluation.benchmark_audit.audit import audit
 from opentour_training.evaluation.benchmark_audit.model import (
     AuditInputs,
     PopulationKind,
@@ -56,6 +56,8 @@ from opentour_training.evaluation.benchmark_audit.run_inventory import (
     GENERATED_KIND,
     INVENTORY_SCHEMA,
     MISSING_FOR_EVERY_RUN,
+    PSEUDONYMISATION,
+    UNKEYED_DIGEST_FIELDS,
     Measurement,
     RunSpec,
     decision_record,
@@ -64,6 +66,7 @@ from opentour_training.evaluation.benchmark_audit.run_inventory import (
     inventory_row,
     select_branch,
 )
+from opentour_training.evaluation.benchmark_audit.worker_store import WorkerAuditStore
 
 ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_OUTPUT = ROOT / "training/tests/evaluation/fixtures/ope526-run-inventory.json"
@@ -233,16 +236,22 @@ POPULATIONS: tuple[tuple[RunSpec, Callable[[], AuditInputs]], ...] = (
 )
 
 
-def _worker_bindings(inputs: AuditInputs) -> Any:
-    """What a worker recomputes now: split and label digests come from the records."""
-    c = inputs.current
-    return binding_digests(
-        inputs.records,
-        canonical_inputs=c.canonical_inputs,
-        source_revisions=c.source_revisions,
-        scoring_policy=c.scoring_policy,
-        answer_key=c.answer_key,
-    )
+def worker_release_check(name: str, inputs: AuditInputs, receipt: dict[str, Any]) -> Any:
+    """Issue the receipt into a fresh worker store and run the release check against it.
+
+    The store holds the population's current records and the material of every opaque binding,
+    so the check recomputes all six bindings itself. The store is recorded as generated.
+    """
+    benchmark = f"generated-benchmark-{name}"
+    with tempfile.TemporaryDirectory(prefix="ope526-worker-store-") as scratch:
+        directory = Path(scratch) / "store"
+        store = WorkerAuditStore.create(directory)
+        store.set_benchmark(
+            f"benchmark:{name}", benchmark, inputs.records,
+            evidence_kind="generated_sentinel", materials=BINDING_MATERIALS,
+        )  # fmt: skip
+        store.issue(f"issue:{name}", receipt, benchmark_id=benchmark)
+        return check_receipt_for_release(receipt["receipt_id"], store_directory=directory)
 
 
 def git_measurement(root: Path, clock: Callable[[], str]) -> Measurement:
@@ -281,11 +290,7 @@ def build_document(
         elapsed = (time.perf_counter() - started) * 1000
         check = None
         if receipt is not None:
-            ledger = AuditLedger()
-            ledger.issue(f"issue:{spec.name}", receipt)
-            check = check_receipt_for_release(
-                receipt["receipt_id"], ledger=ledger, current=_worker_bindings(inputs)
-            ).as_json()
+            check = worker_release_check(spec.name, inputs, receipt).as_json()
         row_measure = Measurement(clock(), measured.git_sha, measured.dirty)
         rows.append(
             inventory_row(
@@ -305,15 +310,18 @@ def build_document(
         "generated_at": measured.timestamp,
         "measured_git_sha": measured.git_sha,
         "dirty": measured.dirty,
-        "redaction": (
-            "No family id, label, label commitment or verifier identity is included; verifier "
-            "identities appear only as short digests."
-        ),
+        "redaction": PSEUDONYMISATION,
+        "unkeyed_digest_fields": dict(UNKEYED_DIGEST_FIELDS),
         "summary": {
             "attempted": len(rows),
             "completed": len(completed),
             "failed": len(rows) - len(completed),
-            "held": sum(1 for r in rows if r["held"]),
+            "verdict_not_evaluation_allowed": sum(
+                1 for r in rows if not r["verdict_allows_evaluation"]
+            ),
+            "release_held_or_refused": sum(
+                1 for r in rows if (r.get("release_check") or {}).get("outcome") != "admitted"
+            ),
             "evaluation_allowed": sum(
                 1 for r in completed if r["verdict"] == V.EVALUATION_ALLOWED.value
             ),
@@ -349,7 +357,8 @@ def build_document(
         "local_engineering_checks": [
             "audit verdict regressions over the hand-checked packs and mutations A-D",
             "rescore replay of identical inputs",
-            "worker-side release check of the receipt (refuses non-allowed, stale, superseded)",
+            "worker-side release check of the receipt, read from a worker store it opens itself "
+            "(refuses non-allowed, stale, superseded, copied or replaced store, broken chain)",
             "exposure guard fail-open fixes (PR #219, parallel lane)",
             "regeneration of this inventory",
         ],
@@ -360,12 +369,25 @@ def build_document(
                 "release_authority and release_outbox (services/cell-runtime) gate a human "
                 "release decision on repair runs, take no audit receipt and cannot import the "
                 "training package. candidate_staging (OPE-545) stages, does not release, and "
-                "reads a caller-supplied audit_verdict string."
+                "reads a caller-supplied audit_verdict string. comparison_packet (OPE-421, "
+                "services/cell-runtime) does consume opentour.benchmark-audit-receipt.v1, but "
+                "checks only that its digest and id are self-consistent and reads verdict, "
+                "status and bindings from the supplied document; it does not call this check "
+                "and cannot import the training package."
             ),
-            "interface_provided": (
+            "existing_receipt_consumers": [
+                {
+                    "module": "services/cell-runtime/src/opentour_cell/pilot/comparison_packet.py",
+                    "issue": "OPE-421",
+                    "checks": "receipt_digest_and_id_self_consistency_only",
+                    "uses_worker_release_check": False,
+                }
+            ],
+            "interface_provided": [
                 "opentour_training.evaluation.benchmark_audit.release_check."
-                "check_receipt_for_release"
-            ),
+                "check_receipt_for_release",
+                "opentour_training.evaluation.benchmark_audit.worker_store.WorkerAuditStore",
+            ],
         },
         "blocked": [
             {
@@ -375,6 +397,51 @@ def build_document(
             }
         ],
     }
+
+
+VOLATILE_ROW_KEYS = ("timestamp", "observed_audit_cpu_ms")
+
+
+def comparable(document: dict[str, Any]) -> dict[str, Any]:
+    """The document without wall-clock timestamps and CPU time; everything else must match."""
+    copy = json.loads(json.dumps(document))
+    copy.pop("generated_at", None)
+    for row in copy.get("runs", []):
+        for key in VOLATILE_ROW_KEYS:
+            row.pop(key, None)
+    return copy
+
+
+def regenerate_like(document: dict[str, Any]) -> dict[str, Any]:
+    """Rebuild the document at this checkout with the committed document's own measurement."""
+    measured = Measurement(
+        document["generated_at"], document["measured_git_sha"], document["dirty"]
+    )
+    return build_document(measured, utc_now)
+
+
+def verify_committed(root: Path, path: Path) -> list[str]:
+    """Git-backed checks of a committed inventory; needs full history (not a shallow clone).
+
+    The measured SHA must be an ancestor of HEAD and the parent of the last commit that changed
+    the file, and regenerating at HEAD must reproduce the file apart from timestamps and CPU ms.
+    """
+
+    def git(*args: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(["git", *args], cwd=root, capture_output=True, text=True)
+
+    document = json.loads(path.read_text())
+    sha = document["measured_git_sha"]
+    problems = []
+    if git("merge-base", "--is-ancestor", sha, "HEAD").returncode != 0:
+        problems.append("measured_sha_not_ancestor_of_head")
+    last = git("log", "-1", "--format=%H", "--", str(path.relative_to(root))).stdout.strip()
+    parent = git("rev-parse", f"{last}^").stdout.strip() if last else ""
+    if parent != sha:
+        problems.append("measured_sha_not_parent_of_commit_that_wrote_the_file")
+    if comparable(regenerate_like(document)) != comparable(document):
+        problems.append("regenerated_inventory_differs_from_committed")
+    return problems
 
 
 def write_document(document: dict[str, Any], output: Path) -> None:
@@ -397,7 +464,16 @@ def write_document(document: dict[str, Any], output: Path) -> None:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
+    parser.add_argument(
+        "--verify-committed",
+        action="store_true",
+        help="check the committed --output against git history and a regeneration; write nothing",
+    )
     args = parser.parse_args(argv)
+    if args.verify_committed:
+        problems = verify_committed(ROOT, args.output.resolve())
+        print(json.dumps({"output": str(args.output), "problems": problems}, sort_keys=True))
+        return 1 if problems else 0
     measured = git_measurement(ROOT, utc_now)
     document = build_document(measured, utc_now)
     write_document(document, args.output)

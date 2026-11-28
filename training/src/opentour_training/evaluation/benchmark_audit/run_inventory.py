@@ -1,12 +1,14 @@
-"""OPE-526 steps 1-4: redacted run inventory, comparable groups, branch choice, decision record.
+"""OPE-526 steps 1-4: pseudonymised run inventory, comparable groups, branch, decision record.
 
 Pure functions over audit inputs and the receipts ``audit()`` returned. They read receipts and
 inputs only; they never change a verdict and grant no authority. The document they build is
 evidence *about* runs, labelled with the fixture kind it was produced from.
 
-Redaction: no family id, label, label commitment or verifier identity is copied. Verifier
-identities are reduced to short digests and counts; only aggregate counts, digests and
-registered reason codes appear.
+Redaction: no family id, label, label commitment or verifier identity is copied verbatim. Some
+fields are *pseudonymised*, not redacted: verifier identities, the audit selection frame and the
+binding digests appear as unkeyed SHA-256 digests or prefixes (``UNKEYED_DIGEST_FIELDS``). Anyone
+who can guess an input can confirm it, so they are dictionary-attackable. The training package has
+no keyed pseudonymisation helper and no key custody for one; none is invented here.
 
 Evidence level: every run produced from the repository's generated sentinel fixtures is
 ``generated_fixture_evidence``. Such a run can never satisfy a real-population, provider or
@@ -36,6 +38,21 @@ EVIDENCE_NOTICE = (
     "provider or customer-evidence gates, and nothing here is an accuracy claim."
 )
 ROLES = ("baseline", "rerun", "mutation", "pack", "adverse")
+UNKEYED_DIGEST_FIELDS = {
+    "verifier.label_authority_digest": "sha256(canonical_json(name))[:12]",
+    "verifier.independent_source_digests": "sha256(canonical_json(name))[:12]",
+    "verifier.adjudicator_digests": "sha256(canonical_json(name))[:12]",
+    "sampling_frame.frame_digest": "sha256(canonical_json(sorted protected family ids)), full",
+    "inputs_and_configuration.binding_digests": "first 12 hex of each unkeyed binding digest",
+    "receipt.receipt_digest": "sha256 of the receipt body, full",
+}
+PSEUDONYMISATION = (
+    "pseudonymised_with_unkeyed_digests_dictionary_attackable: no family id, label, label "
+    "commitment or verifier identity is copied verbatim, but the fields in "
+    "unkeyed_digest_fields are unkeyed SHA-256 digests or prefixes that anyone who can guess "
+    "the input can confirm. No keyed pseudonymisation helper or key custody exists for this "
+    "output."
+)
 _PROTECTED_HIDDEN = (
     "final_label_digest", "adjudicator_label_digest", "independent_label_digest",
     "adjudicator_id", "independent_source", "unresolved",
@@ -154,6 +171,8 @@ def inventory_row(
             "evidence_label": EVIDENCE_LABEL,
             "evidence_origin_declared": p.evidence_origin,
             "evidence_origin_basis": "caller_asserted_in_preregistration",
+            # The run is a generated sentinel whatever the preregistration declares.
+            "declared_origin_contradicts_fixture_kind": p.evidence_origin != "generated",
             "real_population_gate_satisfied": False,
             "customer_scope": None,
         },
@@ -163,7 +182,7 @@ def inventory_row(
         return base | {
             "status": "failed",
             "failure": failure or "unknown",
-            "held": True,
+            "verdict_allows_evaluation": False,
             "verdict": None,
             "expectation_met": False,
             "missing_fields": ["receipt"],
@@ -181,7 +200,9 @@ def inventory_row(
     inference = receipt["inference_to_future_cases"]
     return base | {
         "status": "completed",
-        "held": receipt["verdict"] != Verdict.EVALUATION_ALLOWED.value,
+        # About the audit verdict only. Release is decided separately by ``release_check``,
+        # which never permits release in this revision.
+        "verdict_allows_evaluation": receipt["verdict"] == Verdict.EVALUATION_ALLOWED.value,
         "verdict": receipt["verdict"],
         "reason_codes": sorted({r["code"] for r in receipt["reasons"]}),
         "expectation_met": receipt["verdict"] == spec.expected_verdict,
@@ -268,6 +289,12 @@ def inventory_row(
             "broad_improvement_alert_permitted": claims["broad_improvement_alert_permitted"],
             "alerts_emitted": claims["overall_accuracy_alerts_emitted"]
             + claims["broad_improvement_alerts_emitted"],
+            # Present only once the receipt reports them (OPE-526 exposure fail-open, PR #219).
+            **{
+                k: claims[k]
+                for k in ("caller_asserted_dependencies", "customer_accuracy_alert_blocked_by")
+                if k in claims
+            },
         },
         "release_check": dict(release_check) if release_check is not None else None,
         "missing_fields": _missing(receipt, inputs),
@@ -325,7 +352,13 @@ def _unsafe(row: Mapping[str, Any]) -> list[str]:
 
 
 def select_branch(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
-    """Pick the first applicable step-2 branch. Unsafe effects precede the table."""
+    """Pick the first applicable step-2 branch, prioritizing unsafe effects and invalid evidence.
+
+    Order: unsafe effects, then table row 2 (disagreement, future-only field or cross-split
+    family in a baseline), then row 1 (missing audit, selective corrections, thin critical
+    slices), then row 3 (adequate). Deliberate mutations are expected to carry row-2 codes and
+    are reported by ``injected_findings`` instead.
+    """
     unsafe = {r["run_id"]: codes for r in rows if (codes := _unsafe(r))}
     if unsafe:
         return {
@@ -334,6 +367,17 @@ def select_branch(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
             "triggers": unsafe,
         }
     baselines = [r for r in rows if r["role"] == "baseline"]
+    leaks = {
+        r["run_id"]: sorted(set(r.get("reason_codes", ())) & ROW2_CODES)
+        for r in baselines
+        if set(r.get("reason_codes", ())) & ROW2_CODES
+    }
+    if leaks:
+        return {
+            "branch": "disagreement_or_leak",
+            "action": BRANCHES["disagreement_or_leak"],
+            "triggers": leaks,
+        }
     independent = [r for r in rows if r["evidence"]["fixture_kind"] != GENERATED_KIND]
     triggers: dict[str, Any] = {}
     if not independent:
@@ -351,17 +395,6 @@ def select_branch(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
             "branch": "missing_audit",
             "action": BRANCHES["missing_audit"],
             "triggers": triggers,
-        }
-    leaks = {
-        r["run_id"]: sorted(set(r.get("reason_codes", ())) & ROW2_CODES)
-        for r in baselines
-        if set(r.get("reason_codes", ())) & ROW2_CODES
-    }
-    if leaks:
-        return {
-            "branch": "disagreement_or_leak",
-            "action": BRANCHES["disagreement_or_leak"],
-            "triggers": leaks,
         }
     return {"branch": "adequate", "action": BRANCHES["adequate"], "triggers": {}}
 
@@ -397,7 +430,7 @@ def decision_record(
     if baseline is not None and baseline["role"] != "baseline":
         baseline = None
     reruns = [r for r in rows if r["role"] == "rerun" and r["rerun_of"] == baseline_population]
-    held = [r for r in rows if r["held"]]
+    held = [r for r in rows if not r["verdict_allows_evaluation"]]
     invalid_like = [r for r in rows if r["role"] in {"mutation", "pack", "adverse"}]
     ceiling = baseline["metric"]["ceiling"] if baseline and "metric" in baseline else 0.05
     alpha = (
@@ -463,8 +496,9 @@ def decision_record(
         "change_revision": measurement.git_sha,
         "change_revision_dirty": measurement.dirty,
         "change_under_test": (
-            "No benchmark or label change. This revision adds the run inventory and the "
-            "worker-side release check of the audit receipt."
+            "No benchmark or label change. This revision adds the run inventory, the worker "
+            "audit store (identity, hash-chained event log, benchmark state) and the "
+            "worker-side release check that reads the receipt from that store."
         ),
         "expected": expected,
         "observed": observed,
@@ -494,7 +528,8 @@ def decision_record(
             "independent evidence exists; the starter and fixture-agreement views stay "
             "available.",
             "The release check refuses or holds every receipt today, because receipts are "
-            "digest-consistent only and unsigned.",
+            "digest-consistent only, the issuer is unauthenticated and the worker event log is "
+            "unsigned.",
         ],
         "evidence_level": EVIDENCE_LABEL,
         "decision": "hold_for_specified_evidence",
