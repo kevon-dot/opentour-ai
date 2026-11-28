@@ -35,8 +35,8 @@ earlier revisions are not migrated (nothing is released); (G1) `LearningMandates
 read-only reservation lifecycle state (`grant` and `inspect` omit reserved/running/settled), so
 a child can still bind to a reservation whose fit was already claimed or settled; (G2) the
 reservation exposes only an opaque `residual_revision`, not its residual family set, so it is
-recorded but not bound to the root's family; (G3) the store identity is pinned on a ledger's
-first use, so a *fresh* variant ledger file trusts whichever mandate store it first sees, and
+recorded but not bound to the root's family; (G3) the store identity is pinned when an empty
+ledger is constructed with it, so a *fresh* ledger file trusts whichever store it is given, and
 two separate ledger files can bind one root to two reservations (a store-side binding needs a
 `learning_mandate` change); run one variant ledger per engagement directory. Nothing signs any
 of this.
@@ -602,10 +602,11 @@ class VariantLedger:
     """Durable, replay-safe store of root state, children, spend, experiments and manifests.
 
     `fit_authority` is the worker's own learning-mandate ledger. Without it, no training-mode
-    child can ever pass the fit gate. On first use the ledger pins that store's identity
-    (realpaths and device/inode of its directory and databases, organization, engagement and
-    scope) together with this ledger file's own identity; any later mismatch, on bind or on
-    admission, is `fit_authority_mismatch`. Run one variant ledger per engagement directory.
+    child can ever pass the fit gate. Constructing an empty ledger with it pins that store's
+    identity (realpaths and device/inode of its directory and databases, organization,
+    engagement and scope) together with this ledger file's own identity. A ledger with rows but
+    no pin is never pinned. Any mismatch or missing pin, on bind, admission or manifest, is
+    `fit_authority_mismatch`. Run one variant ledger per engagement directory.
     """
 
     def __init__(
@@ -627,6 +628,41 @@ class VariantLedger:
         finally:
             if self._shared is None:
                 db.close()
+        if fit_authority is not None:
+            self._pin_at_construction()
+
+    def _pin_at_construction(self) -> None:
+        """Pin the wired-in store now, whatever any later bind does (fail closed).
+
+        Only an empty, unpinned ledger is pinned. A ledger that already holds rows but no pin
+        is never pinned, so every later training use of it is `fit_authority_mismatch`.
+        """
+        authority_id = self._authority_identity()
+        with self._tx() as db:
+            pinned = db.execute("SELECT 1 FROM authority_pin WHERE slot=1").fetchone()
+            if pinned is not None or authority_id is None or self._has_rows(db):
+                return
+            auth = self._fit_authority
+            record = {
+                "organization": getattr(auth, "organization", None),
+                "engagement": getattr(auth, "engagement", None),
+                "directory": os.path.realpath(getattr(auth, "directory", "")),
+            }
+            db.execute(
+                "INSERT INTO authority_pin (slot, authority_identity, ledger_identity, record)"
+                " VALUES (1,?,?,?)",
+                (authority_id, self._ledger_identity(), json.dumps(record, sort_keys=True)),
+            )
+
+    @staticmethod
+    def _has_rows(db: sqlite3.Connection) -> bool:
+        return (
+            db.execute(
+                "SELECT 1 FROM children UNION ALL SELECT 1 FROM roots"
+                " UNION ALL SELECT 1 FROM experiments LIMIT 1"
+            ).fetchone()
+            is not None
+        )
 
     @contextmanager
     def _tx(self) -> Iterator[sqlite3.Connection]:
@@ -763,13 +799,18 @@ class VariantLedger:
                 )
             fit_reason: str | None = None
             if plan.mode == "training":
-                if fit is None or authority_id is None:
-                    mismatch = gate_status == FIT_AUTHORITY_MISMATCH
-                    fit_reason = FIT_AUTHORITY_MISMATCH if mismatch else "fit_gate_closed"
+                # A substituted store is reported as such, even when its reservation is closed.
+                substituted = gate_status == FIT_AUTHORITY_MISMATCH or (
+                    authority_id is not None and self._check_pin(db, authority_id) is not None
+                )
+                if substituted:
+                    fit_reason = FIT_AUTHORITY_MISMATCH
+                elif fit is None or authority_id is None:
+                    fit_reason = "fit_gate_closed"
                 elif not invalid_root and seed_block is None:
                     fit_reason = self._bind_experiment(db, plan, fit, authority_id)
-                    if fit_reason == FIT_AUTHORITY_MISMATCH and fit_info is not None:
-                        fit_info = {**fit_info, "status": FIT_AUTHORITY_MISMATCH}
+                if fit_reason == FIT_AUTHORITY_MISMATCH and fit_info is not None:
+                    fit_info = {**fit_info, "status": FIT_AUTHORITY_MISMATCH}
             for index, proposal in enumerate(plan.proposals):
                 if stopped:
                     not_attempted += 1
@@ -867,39 +908,26 @@ class VariantLedger:
             ["opentour.variants.ledger.v1", os.path.realpath(self._path), info.st_dev, info.st_ino]
         )
 
-    def _check_pin(
-        self, db: sqlite3.Connection, authority_id: str, *, create: bool = True
-    ) -> str | None:
-        """Pin the authority on first bind; afterwards any other store is a mismatch.
-
-        A missing pin is itself a mismatch once any experiment exists (the pin was cleared),
-        and admission never creates one.
-        """
-        mine = self._ledger_identity()
+    def _check_pin(self, db: sqlite3.Connection, authority_id: str | None) -> str | None:
+        """Compare with the pin made at construction. A missing pin is always a mismatch."""
+        if authority_id is None:
+            return FIT_AUTHORITY_MISMATCH
         row = db.execute(
             "SELECT authority_identity, ledger_identity FROM authority_pin WHERE slot=1"
         ).fetchone()
         if row is None:
-            if not create or db.execute("SELECT 1 FROM experiments LIMIT 1").fetchone():
-                return FIT_AUTHORITY_MISMATCH
-            auth = self._fit_authority
-            record = {
-                "organization": getattr(auth, "organization", None),
-                "engagement": getattr(auth, "engagement", None),
-                "directory": os.path.realpath(getattr(auth, "directory", "")),
-            }
-            db.execute(
-                "INSERT INTO authority_pin (slot, authority_identity, ledger_identity, record)"
-                " VALUES (1,?,?,?)",
-                (authority_id, mine, json.dumps(record, sort_keys=True)),
-            )
-            return None
+            return FIT_AUTHORITY_MISMATCH
+        mine = self._ledger_identity()
         return None if (row[0], row[1]) == (authority_id, mine) else FIT_AUTHORITY_MISMATCH
 
     def _read_reservation(
         self, reservation_id: str, actor: str
     ) -> tuple[str | None, Json | None, str | None]:
-        """Read one reservation read-only. Returns (why_closed, permission, authority_id)."""
+        """Read one reservation read-only. Returns (why_closed, permission, authority_id).
+
+        The authority identity is returned even when the reservation is closed, so callers
+        can report a substituted store as a mismatch rather than as an ordinary closure.
+        """
         if self._fit_authority is None:
             return "no_worker_fit_authority", None, None
         authority_id = self._authority_identity()
@@ -909,11 +937,11 @@ class VariantLedger:
             # Through the class, never an instance attribute the caller could have replaced.
             fit = LearningMandates.grant(self._fit_authority, reservation_id, actor=actor)
         except MandateError as exc:
-            return str(exc) or "fit_reservation_unavailable", None, None
+            return str(exc) or "fit_reservation_unavailable", None, authority_id
         if fit.get("reservation_id") != reservation_id:
-            return "fit_reservation_outside_training_scope", None, None
+            return "fit_reservation_outside_training_scope", None, authority_id
         if "train" not in fit.get("allowed_uses", ()):
-            return "fit_reservation_outside_training_scope", None, None
+            return "fit_reservation_outside_training_scope", None, authority_id
         return None, fit, authority_id
 
     def _resolve_fit_gate(self, plan: GenerationPlan) -> tuple[str | None, Json | None, str | None]:
@@ -1003,16 +1031,56 @@ class VariantLedger:
             return "fit_experiment_stale"
         experiment: Json = json.loads(found[1])
         why, fit, authority_id = self._read_reservation(str(rid), str(experiment["actor"]))
-        if why == FIT_AUTHORITY_MISMATCH:
-            return FIT_AUTHORITY_MISMATCH
-        if fit is None or authority_id is None:
+        if why == "no_worker_fit_authority":
             return "fit_gate_closed"
-        if (
-            self._check_pin(db, authority_id, create=False) is not None
-            or experiment.get("authority_identity") != authority_id
-        ):
+        if self._store_mismatch(db, authority_id, experiment):
             return FIT_AUTHORITY_MISMATCH
+        if fit is None:
+            return "fit_gate_closed"
         return None
+
+    def _store_mismatch(
+        self, db: sqlite3.Connection, authority_id: str | None, experiment: Json
+    ) -> bool:
+        """True unless this store is both the pinned one and the one the experiment recorded."""
+        return (
+            self._check_pin(db, authority_id) is not None
+            or experiment.get("authority_identity") != authority_id
+        )
+
+    def _refresh_experiments(self) -> set[str]:
+        """Re-read every in-flight experiment's reservation through the worker's ledger.
+
+        A closure reported by the pinned, recorded store is authoritative: the experiment is
+        persisted stale (`fit_gate_closed`, with the store's status) and its children handled as
+        on retraction. A reservation that cannot be verified here (no authority, or another
+        store) changes nothing durable; its id is returned so the caller can exclude it.
+        """
+        with self._tx() as db:
+            rows = db.execute(
+                "SELECT reservation_id, record FROM experiments WHERE state=?"
+                " ORDER BY reservation_id",
+                (EXPERIMENT_IN_FLIGHT,),
+            ).fetchall()
+        unverified: set[str] = set()
+        closed: dict[str, str] = {}
+        for rid, rec_json in rows:
+            experiment: Json = json.loads(rec_json)
+            why, fit, authority_id = self._read_reservation(str(rid), str(experiment["actor"]))
+            with self._tx() as db:
+                if why == "no_worker_fit_authority" or self._store_mismatch(
+                    db, authority_id, experiment
+                ):
+                    unverified.add(str(rid))
+                elif fit is None:
+                    closed[str(rid)] = str(why)
+        if closed:
+            with self._tx() as db:
+                for rid, status in sorted(closed.items()):
+                    self._stale_experiment(
+                        db, rid, "fit_gate_closed", exclude_root=None, gate_status=status
+                    )
+        return unverified
 
     @staticmethod
     def _duplicate_case(db: sqlite3.Connection, root: SeedRoot) -> tuple[str, Json | None] | None:
@@ -1398,57 +1466,82 @@ class VariantLedger:
         reservation) and admitted children are marked `fit_stale` and excluded from fit counts,
         with their disposition, reason and history left as they were.
         """
-        families: set[str] = set()
-        for rid, state, rec_json in db.execute(
-            "SELECT e.reservation_id, e.state, e.record FROM experiments e JOIN experiment_roots r"
+        for (rid,) in db.execute(
+            "SELECT e.reservation_id FROM experiments e JOIN experiment_roots r"
             " ON r.reservation_id=e.reservation_id WHERE r.root_ref=? AND e.state=?"
             " ORDER BY e.reservation_id",
             (root_ref, EXPERIMENT_IN_FLIGHT),
         ).fetchall():
-            rec: Json = json.loads(rec_json)
-            rec["history"] = [*rec.get("history", []), {"state": state, "reason": rec["reason"]}]
-            rec.update(state=EXPERIMENT_STALE, reason=why, stale_root_ref=root_ref)
-            reheld: list[str] = []
-            marked: list[str] = []
-            for child_id, disposition, child_why, family, child_json in db.execute(
-                "SELECT c.child_id, c.disposition, c.reason, c.family_id, c.record"
-                " FROM children c JOIN experiment_roots r ON r.root_ref=c.root_ref"
-                " WHERE r.reservation_id=? AND c.root_ref<>? AND c.mode='training'"
-                " AND c.disposition IN (?,?) ORDER BY c.seq",
-                (rid, root_ref, HELD, ADMITTED),
-            ).fetchall():
-                child: Json = json.loads(child_json)
-                if (child.get("fit_gate") or {}).get("reservation_id") != rid:
-                    continue
-                if disposition == HELD:
-                    child["prior_disposition"] = disposition
-                    child["prior_reason"] = child_why
-                    child["history"] = [
-                        *child.get("history", []),
-                        {
-                            "disposition": disposition,
-                            "reason": child_why,
-                            "plan_ref": child.get("plan_ref"),
-                        },
-                    ]
-                    self._update(db, child_id, REJECTED, "fit_experiment_stale", child)
-                    reheld.append(str(child_id))
-                elif not child.get("fit_stale"):
-                    child["fit_stale"] = {"reservation_id": rid, "reason": why}
-                    child["prior_weight"] = child.get("weight")
-                    child["weight"] = None
-                    db.execute(
-                        "UPDATE children SET record=? WHERE child_id=?",
-                        (json.dumps(child, sort_keys=True), child_id),
-                    )
-                    marked.append(str(child_id))
-                    families.add(str(family))
-            rec["reheld_child_ids"] = reheld
-            rec["stale_admitted_child_ids"] = marked
-            db.execute(
-                "UPDATE experiments SET state=?, reason=?, record=? WHERE reservation_id=?",
-                (EXPERIMENT_STALE, why, json.dumps(rec, sort_keys=True), rid),
-            )
+            self._stale_experiment(db, str(rid), why, exclude_root=root_ref)
+
+    def _stale_experiment(
+        self,
+        db: sqlite3.Connection,
+        rid: str,
+        why: str,
+        *,
+        exclude_root: str | None,
+        gate_status: str | None = None,
+    ) -> None:
+        """Mark one in-flight experiment stale and stop its children from feeding it.
+
+        `exclude_root` is a retracted root whose own children were already invalidated; with
+        None (a closed gate) every member root's children are handled.
+        """
+        found = db.execute(
+            "SELECT state, record FROM experiments WHERE reservation_id=?", (rid,)
+        ).fetchone()
+        if found is None or found[0] != EXPERIMENT_IN_FLIGHT:
+            return
+        rec: Json = json.loads(found[1])
+        rec["history"] = [*rec.get("history", []), {"state": found[0], "reason": rec["reason"]}]
+        rec.update(state=EXPERIMENT_STALE, reason=why)
+        if exclude_root is not None:
+            rec["stale_root_ref"] = exclude_root
+        if gate_status is not None:
+            rec["gate_status"] = gate_status
+        reheld: list[str] = []
+        marked: list[str] = []
+        families: set[str] = set()
+        for child_id, disposition, child_why, family, child_json in db.execute(
+            "SELECT c.child_id, c.disposition, c.reason, c.family_id, c.record"
+            " FROM children c JOIN experiment_roots r ON r.root_ref=c.root_ref"
+            " WHERE r.reservation_id=? AND c.root_ref<>? AND c.mode='training'"
+            " AND c.disposition IN (?,?) ORDER BY c.seq",
+            (rid, exclude_root or "", HELD, ADMITTED),
+        ).fetchall():
+            child: Json = json.loads(child_json)
+            if (child.get("fit_gate") or {}).get("reservation_id") != rid:
+                continue
+            if disposition == HELD:
+                child["prior_disposition"] = disposition
+                child["prior_reason"] = child_why
+                child["history"] = [
+                    *child.get("history", []),
+                    {
+                        "disposition": disposition,
+                        "reason": child_why,
+                        "plan_ref": child.get("plan_ref"),
+                    },
+                ]
+                self._update(db, child_id, REJECTED, "fit_experiment_stale", child)
+                reheld.append(str(child_id))
+            elif not child.get("fit_stale"):
+                child["fit_stale"] = {"reservation_id": rid, "reason": why}
+                child["prior_weight"] = child.get("weight")
+                child["weight"] = None
+                db.execute(
+                    "UPDATE children SET record=? WHERE child_id=?",
+                    (json.dumps(child, sort_keys=True), child_id),
+                )
+                marked.append(str(child_id))
+                families.add(str(family))
+        rec["reheld_child_ids"] = reheld
+        rec["stale_admitted_child_ids"] = marked
+        db.execute(
+            "UPDATE experiments SET state=?, reason=?, record=? WHERE reservation_id=?",
+            (EXPERIMENT_STALE, why, json.dumps(rec, sort_keys=True), rid),
+        )
         for family in sorted(families):
             self._reweigh(db, family)
 
@@ -1499,8 +1592,11 @@ class VariantLedger:
         Its `manifest_digest` is self-consistent only and unsigned (see `seal`).
 
         Family and mistake counts are derived from the ledger's own admitted roots and the
-        sealed split, never from caller-supplied roots.
+        sealed split, never from caller-supplied roots. A training manifest first re-reads
+        every bound reservation: a closed one stales its experiment (persisted), and one that
+        cannot be verified with this ledger's authority is excluded from fit counts.
         """
+        unverified = self._refresh_experiments() if mode == "training" else set()
         every = self.children()
         rows = [
             r
@@ -1525,7 +1621,21 @@ class VariantLedger:
         stale_admitted = sorted(
             r["child_id"] for r in rows if r["disposition"] == ADMITTED and r.get("fit_stale")
         )
-        fit_admitted = [r for r in rows if r["disposition"] == ADMITTED and not r.get("fit_stale")]
+        # Children of a reservation this ledger cannot verify now do not count either.
+        unverified_admitted = sorted(
+            r["child_id"]
+            for r in rows
+            if r["disposition"] == ADMITTED
+            and not r.get("fit_stale")
+            and (r.get("fit_gate") or {}).get("reservation_id") in unverified
+        )
+        fit_admitted = [
+            r
+            for r in rows
+            if r["disposition"] == ADMITTED
+            and not r.get("fit_stale")
+            and r["child_id"] not in unverified_admitted
+        ]
         by_state = Counter(r["disposition"] for r in rows)
         reasons = Counter(
             r["reason"] for r in rows if r["disposition"] in {REJECTED, QUARANTINED, INVALIDATED}
@@ -1543,6 +1653,8 @@ class VariantLedger:
             "admitted_count": len(fit_admitted),
             "stale_admitted_count": len(stale_admitted),
             "stale_admitted_child_ids": stale_admitted,
+            "unverified_admitted_count": len(unverified_admitted),
+            "unverified_admitted_child_ids": unverified_admitted,
             "preview_valid_count": by_state[PREVIEW_VALID],
             "held_count": by_state[HELD],
             "quarantined_count": by_state[QUARANTINED],
@@ -1592,6 +1704,9 @@ class VariantLedger:
             for e in (self.experiments() if mode == "training" else [])
             if scoped_roots & set(e["root_refs"])
         ]
+        body["unverified_experiments"] = sorted(
+            e["reservation_id"] for e in body["experiments"] if e["reservation_id"] in unverified
+        )
         body["trust"] = dict(TRUST)
         # Exactly what the "seal" is: a digest over this body, recomputable by anyone. Nothing
         # signs it and no key custody exists, so it proves self-consistency only.

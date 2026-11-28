@@ -12,6 +12,7 @@ import copy
 import dataclasses
 import inspect
 import json
+import os
 import shutil
 import sqlite3
 import time
@@ -1606,7 +1607,9 @@ def test_a_copied_mandate_store_cannot_stand_in_for_the_pinned_one(tmp_path: Pat
     late = ProposedChild("layout-v1", {"layout": "generated-late"}, "FREIGHT")
     original.run(plan((late,), fit_gate=gate, plan_ref="generated-plan-late"), VALIDATOR, now=NOW)
     assert original.children()[-1]["fit_gate"]["status"] == "standing_mandate_withdrawn"
-    assert manifest(original)["admitted_count"] == 1
+    # F3: the original is withdrawn, so its one honest admission is stale, not counted.
+    m = manifest(original)
+    assert (m["admitted_count"], m["stale_admitted_count"]) == (0, 1)
 
 
 def test_a_store_replaced_at_the_same_path_is_refused(tmp_path: Path) -> None:
@@ -1641,7 +1644,9 @@ def test_a_store_replaced_at_the_same_path_is_refused(tmp_path: Path) -> None:
         now=NOW,
     )
     assert recreated.children()[-1]["reason"] == "fit_authority_mismatch"
-    assert manifest(recreated)["admitted_count"] == 1
+    # F3: a substituted store cannot verify the honest admission, so it is not counted.
+    m = manifest(recreated)
+    assert (m["admitted_count"], m["unverified_admitted_count"]) == (0, 1)
 
 
 def test_an_instance_level_grant_override_is_refused(tmp_path: Path) -> None:
@@ -1715,7 +1720,10 @@ def test_a_rewritten_or_cleared_pin_cannot_hand_experiments_to_another_store(
     over_copy.run(plan((cleared,), fit_gate=gate, plan_ref="generated-plan-cl"), VALIDATOR, now=NOW)
     assert over_copy.children()[-1]["reason"] == "fit_authority_mismatch"
     assert _pinned(path) is None
-    assert manifest(over_copy)["admitted_count"] == 1
+    # F3: with the pin gone nothing can be verified, so even the honest admission is excluded.
+    m = manifest(over_copy)
+    assert (m["admitted_count"], m["unverified_admitted_count"]) == (0, 1)
+    assert _pinned(path) is None  # reading a manifest never re-pins either
 
 
 def test_one_ledger_file_refuses_another_engagement_and_a_copied_ledger(tmp_path: Path) -> None:
@@ -1854,8 +1862,23 @@ def test_a_never_differs_policy_revision_cannot_pass_the_revision_check() -> Non
             )
         },
         {"policy": dataclasses.replace(POLICY, decision_fields=list(POLICY.decision_fields))},
+        {"seal": dataclasses.replace(SEAL, digest=_NeverDiffers(SEAL.digest))},
+        {
+            "seal": SplitSeal(
+                {_NeverDiffers("generated-fam-1"): ("training",)}, SEAL.cases, SEAL.digest
+            )
+        },
     ],
-    ids=["root_field", "edit_value", "proposed_label", "recipe_id", "clause", "fields_list"],
+    ids=[
+        "root_field",
+        "edit_value",
+        "proposed_label",
+        "recipe_id",
+        "clause",
+        "fields_list",
+        "seal_digest",
+        "seal_family_key",
+    ],
 )
 def test_policy_root_and_edit_values_must_be_exact_types(change: dict[str, object]) -> None:
     """L1: every compared value is an exact str (or tuple of them)."""
@@ -1863,3 +1886,128 @@ def test_policy_root_and_edit_values_must_be_exact_types(change: dict[str, objec
     with pytest.raises(TrainingError):
         ledger.run(plan((PARAPHRASE,), mode="preview", fit_gate=None, **change), VALIDATOR, now=NOW)
     assert ledger.children() == []
+
+
+# ------------------------------------------- re-review of PR #225 at 4f04a9b (F1, F3, survivors)
+
+
+def test_a_ledger_whose_first_training_submit_was_closed_is_still_pinned(tmp_path: Path) -> None:
+    """F1 repro: pinned at construction, so a store copied before withdrawal cannot take over."""
+    world = _world(tmp_path, "mandates")
+    gate = FitGate(world.reserve(1), DELEGATE)
+    shutil.copytree(world.mandates.directory, tmp_path / "copy")
+    copied = LearningMandates(tmp_path / "copy", "generated-org", world.mandates.engagement)
+    world.mandates.withdraw(MANDATE, actor=OWNER)
+    path = tmp_path / "variants.sqlite3"
+    first = VariantLedger(path, fit_authority=world.mandates)
+    assert _pinned(path) is not None  # pinned before any bind
+    first.run(plan((PARAPHRASE,), mode="preview", fit_gate=None), VALIDATOR, now=NOW)
+    first.run(plan((LAYOUT,), fit_gate=gate, plan_ref="generated-plan-t"), VALIDATOR, now=NOW)
+    assert first.children()[-1]["reason"] == "fit_gate_closed"
+    restarted = VariantLedger(path, fit_authority=copied)
+    restarted.run(
+        plan((PARAPHRASE,), root(2), fit_gate=gate, plan_ref="generated-plan-r2"),
+        VALIDATOR,
+        now=NOW,
+    )
+    last = restarted.children()[-1]
+    assert (last["disposition"], last["reason"]) == (REJECTED, "fit_authority_mismatch")
+    assert manifest(restarted)["admitted_count"] == 0
+
+
+def test_a_ledger_with_rows_but_no_pin_is_never_pinned(tmp_path: Path) -> None:
+    """F1, fail-closed choice: rows written without an authority mean no later pin."""
+    world = _world(tmp_path, "mandates")
+    path = tmp_path / "variants.sqlite3"
+    VariantLedger(path).run(plan((PARAPHRASE,), mode="preview", fit_gate=None), VALIDATOR, now=NOW)
+    later = VariantLedger(path, fit_authority=world.mandates)
+    assert _pinned(path) is None
+    later.run(plan((LAYOUT,), fit_gate=FitGate(world.reserve(1), DELEGATE)), VALIDATOR, now=NOW)
+    assert later.children()[-1]["reason"] == "fit_authority_mismatch"
+    assert later.experiments() == []
+
+
+def test_withdrawal_after_admission_stales_the_experiment_in_the_manifest(tmp_path: Path) -> None:
+    """F3: the manifest re-reads each bound reservation; a closed one is not counted."""
+    world = FitWorld(tmp_path)
+    rid = world.reserve(1)
+    ledger = new_ledger(world=world)
+    ledger.run(plan((PARAPHRASE, NO_PO), fit_gate=FitGate(rid, DELEGATE)), VALIDATOR, now=NOW)
+    before = ledger.children()
+    assert manifest(ledger)["admitted_count"] == 2
+    world.mandates.withdraw(MANDATE, actor=OWNER)
+    m = manifest(ledger)
+    assert (m["admitted_count"], m["stale_admitted_count"]) == (0, 2)
+    assert m["final_weights"] == {} and m["unverified_experiments"] == []
+    assert m["experiments"] == [
+        {
+            "reservation_id": rid,
+            "state": "stale",
+            "reason": "fit_gate_closed",
+            "root_refs": ["generated-root-1"],
+        }
+    ]
+    (exp,) = ledger.experiments()
+    assert exp["gate_status"] == "standing_mandate_withdrawn"
+    assert exp["stale_admitted_child_ids"] == [c["child_id"] for c in before]
+    for was, now in zip(before, ledger.children(), strict=True):
+        assert (now["disposition"], now["reason"], now.get("history")) == (
+            was["disposition"],
+            was["reason"],
+            was.get("history"),
+        )
+        assert now["fit_stale"] == {"reservation_id": rid, "reason": "fit_gate_closed"}
+    assert manifest(ledger)["manifest_digest"] == m["manifest_digest"]  # recorded once
+
+
+def test_another_engagement_over_the_same_store_files_is_a_mismatch(tmp_path: Path) -> None:
+    """Identity covers engagement and scope, not just the files."""
+    world = _world(tmp_path, "mandates")
+    gate = FitGate(world.reserve(1), DELEGATE)
+    path = tmp_path / "variants.sqlite3"
+    ledger = new_ledger(path, world)
+    ledger.run(plan((PARAPHRASE,), fit_gate=gate), VALIDATOR, now=NOW)
+    held = ledger.submit(plan((NO_PO,), fit_gate=gate, plan_ref="generated-plan-held"), now=NOW)
+    other = LearningMandates(
+        world.mandates.directory, "generated-org", "generated-other-engagement", owner=OWNER
+    )
+    assert (other.path, other.directory) == (world.mandates.path, world.mandates.directory)
+    swapped = VariantLedger(path, fit_authority=other)
+    swapped.run(plan((LAYOUT,), fit_gate=gate, plan_ref="generated-plan-o"), VALIDATOR, now=NOW)
+    assert swapped.children()[-1]["reason"] == "fit_authority_mismatch"
+    assert swapped.validate(held.child_ids[0], AGREE_REVIEW) == REJECTED
+    assert swapped.children()[1]["reason"] == "fit_authority_mismatch"
+
+
+def test_a_replaced_training_store_file_is_a_mismatch(tmp_path: Path) -> None:
+    """Identity covers training.sqlite3: a same-content replacement is another store."""
+    world = _world(tmp_path, "mandates")
+    gate = FitGate(world.reserve(1), DELEGATE)
+    path = tmp_path / "variants.sqlite3"
+    new_ledger(path, world).run(plan((PARAPHRASE,), fit_gate=gate), VALIDATOR, now=NOW)
+    training = Path(world.mandates.directory) / "training.sqlite3"
+    snapshot = tmp_path / "training-snapshot.sqlite3"
+    shutil.copy2(training, snapshot)
+    os.replace(snapshot, training)  # same content, engagement and path; a different file
+    again = new_ledger(path, world)
+    again.run(plan((LAYOUT,), fit_gate=gate, plan_ref="generated-plan-t"), VALIDATOR, now=NOW)
+    assert again.children()[-1]["reason"] == "fit_authority_mismatch"
+
+
+def test_an_authority_whose_mandate_file_is_elsewhere_is_never_pinned(tmp_path: Path) -> None:
+    """A store whose mandate file is not inside its directory is no consistent identity."""
+    world = _world(tmp_path, "mandates")
+    rid = world.reserve(1)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir(mode=0o700)
+    shutil.copy2(world.mandates.path, elsewhere / "learning-mandates.sqlite3")
+    world.mandates.withdraw(MANDATE, actor=OWNER)  # the real store now refuses
+    vars(world.mandates)["path"] = elsewhere / "learning-mandates.sqlite3"
+    # The stray copy still answers, so only the consistency check stops it.
+    assert LearningMandates.grant(world.mandates, rid, actor=DELEGATE)["reservation_id"] == rid
+    path = tmp_path / "variants.sqlite3"
+    ledger = VariantLedger(path, fit_authority=world.mandates)
+    assert _pinned(path) is None
+    ledger.run(plan((PARAPHRASE,), fit_gate=FitGate(rid, DELEGATE)), VALIDATOR, now=NOW)
+    assert ledger.children()[-1]["reason"] == "fit_authority_mismatch"
+    assert manifest(ledger)["admitted_count"] == 0
