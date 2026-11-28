@@ -1194,15 +1194,15 @@ def test_case_id_stays_a_case_sensitive_row_key() -> None:
     assert conflicting["reason_code"] == "contradictory_labels"
 
 
-def _typed_pair(a: Any, b: Any) -> list[rr.DevelopmentCase]:
-    """Two grouped cases whose feature `n` differs only in type, with conflicting references."""
+def _typed_pair(a: Any, b: Any, ref_b: str = "b") -> list[rr.DevelopmentCase]:
+    """Two grouped cases whose feature `n` is `a` and `b`; references conflict by default."""
     return [
         replace(
             case("pa", "x", "b", "a", entity="Entity-P1", family="Family-P"),
             features={"bucket": "x", "n": a},
         ),
         replace(
-            case("pb", "x", "b", "b", entity="Entity-P2", family="Family-P"),
+            case("pb", "x", "b", ref_b, entity="Entity-P2", family="Family-P"),
             features={"bucket": "x", "n": b},
         ),
     ]
@@ -1225,9 +1225,9 @@ def _recipe_catalog() -> tuple[rr.Recipe, ...]:
 
 
 def _pinned_requests() -> list[tuple[str, rr.RoutingRequest]]:
-    """The 37 pinned fixtures: every outcome, reason code, next action, recipe rejection reason
+    """The 40 pinned fixtures: every outcome, reason code, next action, recipe rejection reason
     and authority hold decide() can produce, each refusal code raised by the functions that
-    test_every_code_the_router_can_emit_is_pinned reads, and each OPE-568 grouping and typing
+    test_every_code_the_router_can_emit_is_pinned reads, and each OPE-568 grouping and numeric
     shape."""
     cs = case("cs", "x", "b", "a", entity="generated-entity-cs", family="generated-family-cs")
     upper, lower = replace(cs, case_id="Case-1"), replace(cs, case_id="case-1")
@@ -1314,7 +1314,7 @@ def _pinned_requests() -> list[tuple[str, rr.RoutingRequest]]:
             "recipe_rejection_reasons",
             request(residual, recipes=_recipe_catalog(), mandate=mandate(max_fits=1)),
         ),
-        # Refusals raised by decide() itself, and the v4 feature typing.
+        # Refusals raised by decide() itself, and v4 feature canonicalisation (equal values).
         (
             "critical_slice_outside_permitted_feature",
             request(data_fix(), t=terms(critical_slices=("other:x",)), scheduling=scheduling()),
@@ -1323,6 +1323,9 @@ def _pinned_requests() -> list[tuple[str, rr.RoutingRequest]]:
         ("typed_bool_vs_int", request(residual + _typed_pair(True, 1))),
         ("typed_zero_vs_negative_zero", request(residual + _typed_pair(0.0, -0.0))),
         ("typed_same_value_conflict", request(residual + _typed_pair(1, 1))),
+        ("typed_int_vs_float_agree", request(residual + _typed_pair(1, 1.0, ref_b="a"))),
+        ("typed_str_vs_int", request(residual + _typed_pair("1", 1))),
+        ("typed_large_int_vs_neighbour", request(residual + _typed_pair(2**53 + 1, 2**53))),
         ("feature_tuple", request(_with_features({"bucket": "z", "n": (1, 2)}))),
         ("feature_nan", request(_with_features({"bucket": "z", "n": math.nan}))),
         ("feature_mixed_key", request(_with_features({"bucket": "z", 1: "a"}))),
@@ -1360,9 +1363,9 @@ def pinned_decisions() -> list[list[Any]]:
 # as merged for OPE-417 (main at 629cd0e), v3 the OPE-568 router (9ce7d49), v4 this one. A row
 # is never edited for any other reason.
 _DECISION_LEDGER = {
-    "repair-routing.decide.v2": "1d59ba305cc086b879d7ab4e603ea1455dbee106fb3ee255b05a5616e724e57d",
-    "repair-routing.decide.v3": "386872152fdd0c978fd5f32fd38b5b2e08a9c22f8ff1c3f758b883a5c1ad35c6",
-    "repair-routing.decide.v4": "839ae944fdca744cc095a601eeb93304c5a59e176d4f019f476f501ca2f13a75",
+    "repair-routing.decide.v2": "a6eac6805c749f68c74f91d7f3d7d2cc254cafb0d622969ffaeefb579b7aa199",
+    "repair-routing.decide.v3": "d5cf5afb32382dbb97ec2680cf22896344c3ab2d3170e9abdeb68c08c3197ce4",
+    "repair-routing.decide.v4": "7260575a0311c62a8af5e83951837568ff997078ec5bfee7b464e8e9ff4c7174",
 }
 
 
@@ -1395,7 +1398,6 @@ _STRUCTURAL = frozenset(
         "allowed_params",
         "assessed",
         "automatic",
-        "bool",
         "budget_estimate_seconds",
         "capability_receipt_ref",
         "case_id",
@@ -1405,16 +1407,15 @@ _STRUCTURAL = frozenset(
         "excluded_origin",
         "feature",
         "features",
-        "float",
         "group_id",
         "incumbent",
-        "int",
         "label",
         "list",
         "metric",
         "model_ref",
         "no_change",
         "none",
+        "number",
         "none_before_freeze",
         "observed",
         "protected_access",
@@ -1586,24 +1587,74 @@ def test_only_the_exact_current_router_revision_is_replayed_or_eligible(
     assert store.count() == 1
 
 
-@pytest.mark.parametrize(
-    ("a", "b"),
-    [(1, 1.0), (True, 1), (0.0, -0.0), ([1], [1.0]), ({"k": 1}, {"k": True})],
-    ids=["int_float", "bool_int", "zero_negative_zero", "nested_list", "nested_dict"],
-)
-def test_python_equal_features_of_different_types_are_different_evidence(a: Any, b: Any) -> None:
-    # 1 == 1.0, True == 1 and 0.0 == -0.0 in Python, but they are different values of different
-    # types (or signs), so the grouped pair is not identical evidence and cannot conflict.
+_PYTHON_EQUAL = [
+    (1, 1.0),
+    (True, 1),
+    (False, 0.0),
+    (0.0, -0.0),
+    (2**53, float(2**53)),
+    ([1], [1.0]),
+    ({"k": 1}, {"k": True}),
+]
+_PYTHON_EQUAL_IDS = [
+    "int_float",
+    "bool_int",
+    "false_zero_float",
+    "zero_negative_zero",
+    "large_int_float",
+    "nested_list",
+    "nested_dict",
+]
+
+
+@pytest.mark.parametrize(("a", "b"), _PYTHON_EQUAL, ids=_PYTHON_EQUAL_IDS)
+def test_python_equal_features_are_the_same_evidence(a: Any, b: Any) -> None:
+    # 1 == 1.0, True == 1 and 0.0 == -0.0 in Python. Two grouped cases that differ only by such
+    # a value are the same evidence, so conflicting references over them hold (fail closed)
+    # instead of passing as two independent observations.
     residual = independent_residual()
     assert a == b
+    held = rr.decide(request(residual + _typed_pair(a, b)))
+    assert (held["outcome"], held["reason_code"]) == ("request_evidence", "contradictory_labels")
+    # With agreeing references they are simply consistent evidence, not a contradiction.
+    agree = rr.decide(request(residual + _typed_pair(a, b, ref_b="a")))
+    assert (agree["outcome"], agree["reason_code"]) == (
+        "fit_eligible",
+        "independent_material_residual",
+    )
+
+
+@pytest.mark.parametrize(
+    ("a", "b"),
+    [
+        ("1", 1),
+        ("True", True),
+        ("1.0", "1"),
+        ("Generated", "generated"),
+        (2**53 + 1, 2**53),
+        (2**53 + 1, float(2**53)),
+        (0.1, 0.1 + 2e-17),
+    ],
+    ids=[
+        "str_int",
+        "str_bool",
+        "numeric_strings",
+        "case_variant_strings",
+        "large_int_neighbour",
+        "large_int_vs_float",
+        "float_neighbour",
+    ],
+)
+def test_values_python_does_not_equate_stay_different_evidence(a: Any, b: Any) -> None:
+    # Strings stay exact, and an int no float can represent keeps its own key instead of
+    # colliding with the nearest float.
+    residual = independent_residual()
+    assert a != b
     apart = rr.decide(request(residual + _typed_pair(a, b)))
     assert (apart["outcome"], apart["reason_code"]) == (
         "fit_eligible",
         "independent_material_residual",
     )
-    # The same value of the same type, with conflicting references, is a contradiction.
-    same = rr.decide(request(residual + _typed_pair(a, a)))
-    assert (same["outcome"], same["reason_code"]) == ("request_evidence", "contradictory_labels")
 
 
 def _nested(depth: int) -> Any:

@@ -21,6 +21,7 @@ from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from contextlib import closing
 from dataclasses import dataclass
+from fractions import Fraction
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -41,10 +42,11 @@ SCHEMA = "opentour.pilot.repair-routing.v1"
 # map instead of the entity plus features, so cases grouped only by family or by a transitive
 # chain now hold as contradictory_labels where v2 could route them onward.
 #
-# v4 (OPE-568 follow-up): feature maps are validated and keyed with exact types. A value that
-# is not None, bool, int, finite float, str, list or str-keyed dict (a tuple, a set, NaN, a
-# non-str key) is refused as invalid_feature_value or invalid_feature_key where v3 routed it,
-# or failed with an untyped ValueError or TypeError.
+# v4 (OPE-568 follow-up): feature maps are validated and keyed by value, so Python-equal
+# values are the same evidence: True and 1, 1 and 1.0, 0.0 and -0.0 now conflict where v3 kept
+# them apart. A value that is not None, bool, int, finite float, str, list or str-keyed dict (a
+# tuple, a set, NaN, a non-str key) is refused as invalid_feature_value or invalid_feature_key
+# where v3 routed it, or failed with an untyped ValueError or TypeError.
 ROUTER_REVISION = "repair-routing.decide.v4"
 OUTCOMES = ("keep_incumbent", "simple_repair", "request_evidence", "fit_eligible")
 _ORIGINS_COUNTED = ("live",)
@@ -311,24 +313,24 @@ _FEATURE_DEPTH = 16
 
 
 def _feature_value(value: Any, depth: int) -> Any:
-    """One feature value in a type-exact canonical form.
+    """One feature value in a canonical form where Python-equal values share one key.
 
-    Python equality merges ``1``, ``1.0`` and ``True``, and ``0.0`` with ``-0.0``; JSON keeps
-    them apart only by accident of encoding, and coerces a tuple into a list. Tagging each
-    value with its exact type makes "identical features" mean identical values of identical
-    types, and anything outside the JSON value types is refused rather than coerced.
+    ``True == 1 == 1.0`` and ``0.0 == -0.0`` in Python, and a case that differs from another
+    only by such a value is the same evidence, so conflicting references over it must hold
+    (fail closed) rather than pass as independent. Every bool, int and finite float becomes the
+    exact rational it denotes, so equal numbers share a key and an int no float can represent
+    keeps its own. Strings stay exact. Anything outside the JSON value types is refused
+    rather than coerced, and so is a non-finite float, which has no equal to share a key with.
     """
     _need(depth <= _FEATURE_DEPTH, "invalid_feature_value")
     kind = type(value)
     if value is None:
         return ["none"]
-    if kind is bool:
-        return ["bool", value]
-    if kind is int:
-        return ["int", value]
-    if kind is float:
-        _need(math.isfinite(value), "invalid_feature_value")
-        return ["float", value.hex()]
+    if kind in (bool, int, float):
+        if kind is float:
+            _need(math.isfinite(value), "invalid_feature_value")
+        exact = Fraction(value)
+        return ["number", exact.numerator, exact.denominator]
     if kind is str:
         return ["str", value]
     if kind is list:
@@ -579,8 +581,8 @@ def decide(request: RoutingRequest) -> Json:
     # A missing reference (None) counts as a disagreeing label here, so an unlabeled case that
     # shares only a family with a labeled sibling of identical features now holds as
     # contradictory_labels rather than unusable_labels. Both are holds; nothing is routed.
-    # Features compare with exact types (v4), so 1 and 1.0, True and 1, or 0.0 and -0.0 are
-    # different evidence, never a conflict.
+    # Features compare by value (v4): 1 and 1.0, True and 1, or 0.0 and -0.0 are the same
+    # evidence, so conflicting references over them hold here too.
     by_group: defaultdict[str, set[str | None]] = defaultdict(set)
     for c in window:
         by_group[digest([groups[c.case_id], _feature_map(c.features)])].add(c.reference)
