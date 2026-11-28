@@ -32,6 +32,54 @@ def _receipt(pointer: Json) -> str:
     return "approval-" + digest(pointer)[:40]
 
 
+WITHDRAWN = "approval_authority_withdrawn"
+
+
+def _held_marker(directory: Path, receipt: str) -> Path:
+    return directory / ("approval-held-" + receipt + ".json")
+
+
+def _discard(path: Path) -> None:
+    path.unlink(missing_ok=True)
+
+
+def _authority_withdrawn(directory: Path, organization: str, run_id: str) -> bool:
+    """Re-read the engagement and any standing mandate through fresh handles.
+
+    An unreadable or inconsistent authority counts as withdrawn. The mandate lock is never
+    held across the training database, so this cannot deadlock with a withdrawal.
+    """
+    from opentour_cell.pilot.learning_mandate import LearningMandates
+
+    try:
+        run_id = run_id.removeprefix("managed:")
+        _required(re.fullmatch(r"run-[0-9a-f]{32}", run_id))
+        work = directory / "managed-outputs" / run_id
+        run = _private_json(work / "run.json")
+        engagement = _private_json(work / "review.json")["engagement"]
+        fresh = LocalTrainingStore(directory / "training.sqlite3", organization, existing_only=True)
+        with fresh.engagement_guard(engagement_id=engagement, read_only=True):
+            pass
+        plan_path = directory / ("cycle-plan-" + run_id + ".json")
+        if os.path.lexists(plan_path):
+            plan = _private_json(plan_path)
+            delegation = plan["standing_delegation"]
+            _required(
+                run["plan_revision"] == digest(plan)
+                and plan["organization"] == organization
+                and plan["engagement"] == engagement
+                and run_id
+                == "run-"
+                + digest([organization, delegation["mandate_id"], delegation["run_id"]])[:32]
+            )
+            LearningMandates(directory, organization, engagement).check_run(
+                delegation["run_id"], actor=delegation["delegate"]
+            )
+    except (ValueError, KeyError, TypeError, OSError, sqlite3.Error):
+        return True
+    return False
+
+
 def enqueue_ready(
     directory: Path,
     organization: str,
@@ -70,8 +118,27 @@ def enqueue_ready(
         if "provider" in evidence["release_review"]:
             pointer["provider"] = frozen_provider
         receipt = _receipt(pointer)
-        _record(directory / ("approval-ready-" + receipt + ".json"), pointer)
-    return {"receipt": receipt, "state": "pending_review"}
+        path = directory / ("approval-ready-" + receipt + ".json")
+        _record(path, pointer)
+    # A mandate withdrawal takes only the mandate database, so it can commit between the
+    # authority read above and the write. Re-read both authorities after the pointer is
+    # durable; a withdrawn or unknown authority never leaves a deliverable pointer.
+    marker = _held_marker(directory, receipt)
+    if not os.path.lexists(marker) and not _authority_withdrawn(
+        directory, organization, pointer["run_id"]
+    ):
+        return {"receipt": receipt, "state": "pending_review"}
+    try:
+        _discard(path)
+        state = "removed"
+    except OSError:
+        # Fail closed: flush_approvals refuses any receipt with a held marker.
+        try:
+            _record(marker, pointer)
+            state = "marked"
+        except (OSError, ValueError):
+            state = "unremoved"
+    return {"receipt": receipt, "state": "held", "reason": WITHDRAWN, "pointer": state}
 
 
 def _read(cfg: Settings, receipt: str) -> Json:
@@ -132,6 +199,8 @@ def flush_approvals(app: Workbench) -> int:
     sent = 0
     for path in sorted(cfg.directory.glob("approval-ready-approval-*.json")):
         receipt = path.stem.removeprefix("approval-ready-")
+        if os.path.lexists(_held_marker(cfg.directory, receipt)):
+            continue
         with app.journal.db() as db:
             if db.execute("SELECT 1 FROM approval_posts WHERE receipt=?", (receipt,)).fetchone():
                 continue
@@ -175,6 +244,24 @@ def flush_approvals(app: Workbench) -> int:
                         (exposure, "approval_request", int(time.time())),
                     )
         except (ValueError, KeyError, OSError):
+            continue
+        # A mandate withdrawal never takes the evidence guard, so it can commit after the claim.
+        # Re-read both authorities through fresh handles immediately before the network call;
+        # a withdrawn or unknown authority releases the claim as held and nothing is sent.
+        # Residual: a withdrawal landing after this read can still produce one button-only
+        # post. Opening that button and recording any decision re-check the authority.
+        if _authority_withdrawn(current.directory, current.organization, item["run_id"]):
+            with app.journal.db() as db:
+                db.execute("BEGIN IMMEDIATE")
+                db.execute(
+                    "UPDATE approval_posts SET state='held' WHERE receipt=? AND state='claimed'",
+                    (receipt,),
+                )
+                db.execute(
+                    "UPDATE exposures SET status='withheld',completed=? "
+                    "WHERE id=? AND status='admitted'",
+                    (int(time.time()), exposure),
+                )
             continue
         # A provider might accept a message before its response is received. A claimed or
         # uncertain request is never retried, including after process death.
