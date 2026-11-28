@@ -137,17 +137,21 @@ too. Identifier-form revisions cannot reach an improvement packet, because the f
 must be 64-hex.
 
 ``previous_deployed_version`` is the revision deployed now, a compare-and-swap token the worker
-resolves, and is published verbatim (decision of the LOW-2 owner, cross-session review of
-1ff8bc8). It normally equals the incumbent revision, and does again after a rollback that
-restores the incumbent, so equality alone is not refused. It is refused, with
-``previous_deployed_version_equals_incumbent_revision`` and before any key lookup, only when it
-equals the raw incumbent revision (identifier or 64-hex form, both exact ``str``) AND
-``binding.fallback_digest`` does not: that is the one case in which publishing it would disclose
-a raw incumbent revision the packet does not already publish. When the fallback digest equals the
-incumbent (always on an improvement packet), the value is already in the packet and the
-refusal would protect nothing. Only exact equality is detected. A value merely derived from the
-incumbent (a prefix, a suffix, another case) is accepted, so on a hold with a distinct fallback
-the worker remains responsible for not deriving the token from the incumbent revision.
+resolves, and is published verbatim. That definition is a decision by the cross-session reviewer
+of 1ff8bc8 acting as owner-delegate, recorded on OPE-571. It normally equals the incumbent
+revision, and does again after a rollback that restores the incumbent, so equality alone is not
+refused. It is refused, with ``previous_deployed_version_equals_incumbent_revision`` and before
+any key lookup, only when it equals the raw incumbent revision (identifier or 64-hex form, both
+exact ``str``) AND ``binding.fallback_digest`` does not: that is the one case in which
+publishing it would disclose a raw incumbent revision the packet does not already publish. When
+the fallback digest equals the incumbent (always on an improvement packet), the value is already
+in the packet and the refusal would protect nothing. Consequence: on a hold with an
+identifier-form incumbent the fallback digest (64-hex) is always distinct, so a normal token
+equal to the incumbent is always refused there, and the worker must pass
+``previous_deployed_version=None`` on such a hold. Only exact equality is detected. A value
+merely derived from the incumbent (a prefix, a suffix, another case) is accepted, so on a hold
+with a distinct fallback the worker remains responsible for not deriving the token from the
+incumbent revision.
 
 Published digests that still cover raw names (recorded, not fixed here). ``comparison
 .evidence_revision`` and ``plan_revision`` are plain SHA-256 over the whole comparison and
@@ -166,15 +170,19 @@ under two keys yet differ between the inputs, and no 6-character fragment of an 
 word may be shared by three keys yet missing under every key for the other input. The only
 exceptions are ``comparison.evidence_revision`` and its ``protected_comparison`` evidence
 pointer (F4, above) and, for the incumbent on an improvement packet, ``binding.fallback_digest``
-(by contract, above). What this proves is limited to those two criteria over these fixtures: a
-value that mixes an unkeyed input into a hash that also covers a keyed one is caught only by a
-fixture in which the unkeyed input is the only one varied (hence the material-only fixture), and
-a leak spread over fragments shorter than six characters, or split into such fragments by
-punctuation, is not caught by the fragment check. A future field is caught only if it falls
-under one of these criteria, not whatever form it takes. The tests vary the comparison this
-module receives and hold ``plan_revision`` fixed, because this module copies that digest without
-being able to recompute it. A real re-plan with other names would change ``plan_revision`` too,
-so the F4 limit above applies to it unchanged.
+(by contract, above). What this proves is limited to those two criteria over these fixtures.
+Neither catches a hash over a keyed value and a raw name (for example a digest over the
+published keyed arm revision and the raw material names): it varies with the key and is uniform
+hex. What catches such a hash is the spy on this module's ``digest`` and ``canonical`` (F1),
+which flags any raw slice name reaching them, run on an improvement and a hold for every source
+of slice names (critical only, critical and material, material only); a mixed hash computed
+outside those functions is caught by none of these tests. The material-only differential fixture
+catches only a hash whose inputs are all unkeyed. A leak spread over fragments shorter than six
+characters, or split into such fragments by punctuation, is not caught by the fragment check. A
+future field is caught only if it falls under one of these criteria, not whatever form it takes.
+The tests vary the comparison this module receives and hold ``plan_revision`` fixed, because
+this module copies that digest without being able to recompute it. A real re-plan with other
+names would change ``plan_revision`` too, so the F4 limit above applies to it unchanged.
 
 Schema version (INFO-C, ruling of the cross-session reviewer of 1ff8bc8): no version bump now.
 The packet stays ``opentour.pilot.comparison-packet.v1`` although

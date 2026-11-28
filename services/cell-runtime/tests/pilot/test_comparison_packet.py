@@ -2321,16 +2321,19 @@ def test_stage_refuses_comparison_problems_before_any_key_lookup(runs, tmp_path,
 # ---------- F: lane-owner review of d7520b0 (key-free oracle, engagement, weak keys, holds)
 
 
-def named_hold(root, incumbent=None):
-    """A real named-slice run that the planner holds (the reviewer's probe-4 shape)."""
+def named_hold(root, incumbent=None, slices=None):
+    """A real named-slice run that the planner holds (the reviewer's probe-4 shape).
+
+    ``slices`` gives the slice terms; by default both names are critical."""
     dev, protected = rows("dev"), rows("protected")
     for r in dev + protected:
         r["slices"] = list(SLICE_NAMES)
+    slices = {"critical_slices": list(SLICE_NAMES)} if slices is None else slices
     comparison = compare(
         root,
         development=dev,
         protected=protected,
-        terms={**STRICT, "critical_slices": list(SLICE_NAMES), "minimum_verified_cases": 1000},
+        terms={**STRICT, **slices, "minimum_verified_cases": 1000},
         allowed_slices=list(SLICE_NAMES),
         incumbent=incumbent,
     )[0]
@@ -2419,19 +2422,44 @@ def test_unknown_declared_form_is_a_binding_mismatch(tmp_path, path):
     assert out.reason == "verdict_binding_mismatch" and empty(b.store), out
 
 
-def test_no_code_path_hashes_unsubstituted_terms(tmp_path, monkeypatch):
+# Every source of slice names: critical only, critical and material, material only. The spy
+# below is what catches a hash that mixes a keyed value with a raw name (for example a digest
+# over the published keyed arm revision and the raw material names, mutant P10): such a value
+# varies with the key and is uniform hex, so neither differential criterion (section D) sees it.
+NAME_SOURCES = {
+    "critical": {"critical_slices": list(SLICE_NAMES)},
+    "mixed": {"critical_slices": [SLICE_NAMES[0]], "material_slices": [SLICE_NAMES[1]]},
+    "material-only": {"material_slices": list(SLICE_NAMES)},
+}
+
+
+def named_improvement(root, source):
+    """A real named-slice improvement whose names come from ``NAME_SOURCES[source]``."""
+    return {
+        "critical": named_slice_run,
+        "mixed": named_material_run,
+        "material-only": named_material_only_run,
+    }[source](root)
+
+
+@pytest.mark.parametrize("source", sorted(NAME_SOURCES))
+def test_no_code_path_hashes_unsubstituted_terms(tmp_path, monkeypatch, source):
     """F1: spy on ``digest``, ``canonical`` (both the packet module's and the one ``digest``
     uses) and ``operating_point_digest`` across staging, holds, refusals, replay, dispatch and
-    the private view. No raw sentinel name may reach them, with exactly one recorded
-    exception: verifying the comparison's own ``evidence_revision`` seal, which by definition
-    hashes the whole comparison (see F4 in the module docstring). Raw ``terms`` never reach
-    them on their own, and ``operating_point_digest`` never sees a raw name at all."""
+    the private view, on an improvement and a hold for every source of slice names. No raw
+    sentinel name may reach them, with exactly one recorded exception: verifying the
+    comparison's own ``evidence_revision`` seal, which by definition hashes the whole
+    comparison (see F4 in the module docstring). Raw ``terms`` never reach them on their own,
+    and ``operating_point_digest`` never sees a raw name at all."""
     from opentour_cell.pilot import operating_point as op_mod
 
     for sub in ("w", "h"):
         (tmp_path / sub).mkdir(mode=0o700)
-    win = named_slice_run(tmp_path / "w")
-    hold = named_hold(tmp_path / "h")
+    win = named_improvement(tmp_path / "w", source)
+    hold = named_hold(tmp_path / "h", slices=NAME_SOURCES[source])
+    for c in (win, hold):
+        named = {k: v for k, v in c["terms"].items() if k in ("critical_slices", "material_slices")}
+        assert named == NAME_SOURCES[source], named
     seals = [{k: v for k, v in c.items() if k != "evidence_revision"} for c in (win, hold)]
     wb = Bundle(win, tmp_path / "wb")
     hb = live_bundle(hold, tmp_path / "hb")
@@ -2711,8 +2739,11 @@ def test_verdict_with_a_free_text_comparator_is_refused(tmp_path):
 #   keys for one input and absent under every key for the other input is flagged. It catches an
 #   unkeyed piece glued onto a keyed value of any form, without the token step.
 #
-# What this does NOT prove. A hash over a keyed input AND an unkeyed one is caught only by a
-# fixture that varies the unkeyed input alone (hence the material-only fixture). A leak spread
+# What this does NOT prove. Neither criterion catches a hash over a keyed value AND a raw name
+# (mutant P10: a digest over the published keyed arm revision and the raw material names); it
+# varies with the key and is uniform hex. The F1 spy (``test_no_code_path_hashes_unsubstituted_
+# terms``, over every name source) catches it when it goes through ``digest`` or ``canonical``.
+# The material-only fixture catches only a hash whose inputs are all unkeyed. A leak spread
 # over fragments shorter than six characters, or split by punctuation into such fragments, can
 # escape D5. Only these fixtures are covered. A future field is flagged only if it falls under
 # one of the two criteria, not whatever form it takes.
@@ -3376,6 +3407,35 @@ def test_previous_deployed_version_derived_from_the_incumbent_is_accepted(tmp_pa
     out = b.stage()
     assert out.status == "staged", (form, out)
     assert out.packet["binding"]["previous_deployed_version"] == previous and len(seen) == 1
+
+
+def test_identifier_incumbent_hold_needs_no_previous_version(tmp_path):
+    """INFO-3 consequence (module docstring): on a hold with an identifier-form incumbent the
+    fallback digest can never be the incumbent, because a fallback digest must be 64-hex. So a
+    normal CAS token equal to the incumbent is always refused there, and the worker must pass
+    ``previous_deployed_version=None``, which stages and publishes ``None``."""
+    comparison, b, seen = _pdv_bundle("hold-identifier-incumbent", tmp_path, None)
+    assert comparison["arms"]["incumbent"]["revision"] == INCUMBENT_ID
+    fallback_is_incumbent = context(comparison, fallback_digest=INCUMBENT_ID)
+    assert not fallback_is_incumbent.valid()  # the published-fallback case cannot arise here
+    b.ctx = context(
+        comparison, previous_deployed_version=INCUMBENT_ID, fallback_digest=INCUMBENT_ID
+    )
+    b.authority = Authority(b.ctx)
+    assert b.stage().reason == "invalid_packet_context" and seen == [] and empty(b.store)
+    for fallback in (digest("generated-fallback"), digest("generated-other-fallback")):
+        b.ctx = context(
+            comparison, previous_deployed_version=INCUMBENT_ID, fallback_digest=fallback
+        )
+        b.authority = Authority(b.ctx)
+        assert b.stage().reason == _PDV_REFUSAL and seen == [] and empty(b.store)
+    b.ctx = context(comparison, previous_deployed_version=None, fallback_digest=fallback)
+    b.authority = Authority(b.ctx)
+    out = b.stage()
+    assert out.status == "staged", out
+    assert out.packet["binding"]["previous_deployed_version"] is None and len(seen) == 1
+    kw = _replay_kw(comparison, "hold-identifier-incumbent")
+    assert cp.verify_packet(out.packet, comparison, b.receipt, b.verdict, b.ctx, **kw)
 
 
 def test_previous_deployed_version_must_be_an_exact_str(tmp_path):
