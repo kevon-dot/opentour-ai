@@ -6,7 +6,9 @@ Local and simulated only: no provider, protected set, ledger reservation or fit 
 from __future__ import annotations
 
 import ast
+import ctypes
 import glob
+import importlib.util
 import io
 import json
 import math
@@ -16,13 +18,14 @@ import sqlite3
 import subprocess
 import sys
 import threading
+from collections.abc import Callable, Mapping
 from contextlib import closing
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
 import pytest
-from opentour_cell.pilot import comparison_plan
+from opentour_cell.pilot import comparison_plan, operating_point, readout, simple_repair
 from opentour_cell.pilot import repair_routing as rr
 from opentour_cell.pilot.operating_point import canonical, digest
 from opentour_cell.pilot.simple_repair import RepairError, declared_rule
@@ -790,7 +793,8 @@ def test_replay_with_an_unchanged_authority_still_returns_one_evaluation(
 # opens no file, so it is watched separately: `os.listdir`, `os.scandir` and `glob.glob` (and
 # its `root_dir`/`dir_fd` form) each raise their own event, and `pathlib` iteration and globbing
 # go through the first two. Process creation and every `socket.*` event (creation, bind,
-# connect, name resolution, sends) are watched the same way.
+# connect, name resolution, sends) are watched the same way, and so is every `ctypes.*` event,
+# because a C function reached through ctypes can open and read a file under no `open` event.
 _WATCHED = frozenset(
     {
         "open",
@@ -809,11 +813,33 @@ _WATCHED = frozenset(
         "os.forkpty",
     }
 )
-_WATCHED_PREFIXES = ("socket.",)
+_WATCHED_PREFIXES = ("socket.", "ctypes.")
+# Reads on a descriptor raise no audit event, so a descriptor opened before the window could be
+# read inside it unobserved. These are wrapped like the probes below; each value is the position
+# and keyword of the descriptor being read from.
+_DESCRIPTOR_READS = {
+    "read": (0, "fd"),
+    "pread": (0, "fd"),
+    "readv": (0, "fd"),
+    "preadv": (0, "fd"),
+    "sendfile": (1, "in_fd"),
+    "copy_file_range": (0, "src"),
+    "splice": (0, "src"),
+}
 # Metadata probes raise no audit event, so these are wrapped for the duration of the window.
 # `os.path.exists` / `isfile` / `isdir` and `pathlib.Path.stat` / `.exists` call through them.
 _PROBES = ("stat", "lstat", "access")
 _WATCHING: list[tuple[str, str]] | None = None
+# Every sqlite connection created while a test in this module runs (see _track_connections), so
+# a window can also watch the ones opened before it. Tracking is per test: a connection another
+# module created, perhaps with an authorizer of its own, is never touched. These are strong
+# references because sqlite3.Connection takes no weak reference; the list goes with the test.
+_OPENED: list[sqlite3.Connection] | None = None
+
+
+@pytest.fixture(autouse=True)
+def _track_connections(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(sys.modules[__name__], "_OPENED", [])
 
 
 def _authorize(action: int, arg1: str | None, *_: object) -> int:
@@ -825,7 +851,24 @@ def _authorize(action: int, arg1: str | None, *_: object) -> int:
     return sqlite3.SQLITE_OK
 
 
+def _authorize_preopened(action: int, arg1: str | None, *_: object) -> int:
+    # Nothing routed inside the window has any business with a connection that was already
+    # open, so every statement prepared on one there is recorded: a SELECT, a write, an ATTACH.
+    # Installing an authorizer expires the connection's prepared statements, so a statement
+    # cached before the window is authorized again when it is reused inside it.
+    sink = _WATCHING
+    if sink is not None:
+        target = "<bound parameter>" if arg1 is None else arg1
+        sink.append(("sqlite3.preopened", f"{action}:{target}"))
+    return sqlite3.SQLITE_OK
+
+
 def _audit(event: str, args: tuple[object, ...]) -> None:
+    opened = _OPENED
+    if opened is not None and event == "sqlite3.connect/handle" and args:
+        connection = args[0]
+        if isinstance(connection, sqlite3.Connection):
+            opened.append(connection)
     sink = _WATCHING
     if sink is None:
         return
@@ -856,6 +899,16 @@ class _Access:
         patch.setattr(sys.modules[__name__], "_WATCHING", self.seen)
         for name in _PROBES:
             patch.setattr(os, name, self._probe("os." + name, getattr(os, name)))
+        for name, source in _DESCRIPTOR_READS.items():
+            if hasattr(os, name):
+                patch.setattr(os, name, self._descriptor("os." + name, source, getattr(os, name)))
+        # A connection opened earlier in this test reports every statement prepared on it in
+        # the window. Its authorizer stays installed afterwards, inert once `_WATCHING` is None.
+        for db in list(_OPENED or ()):
+            try:
+                db.set_authorizer(_authorize_preopened)
+            except sqlite3.ProgrammingError:
+                continue  # closed, or bound to another thread and so unusable from this one
         # A connection opened in the window reports any ATTACH through its authorizer.
         connect = sqlite3.connect
 
@@ -872,6 +925,16 @@ class _Access:
             return real(path, *args, **kw)
 
         return probe
+
+    def _descriptor(self, kind: str, source: tuple[int, str], real: Any) -> Any:
+        position, keyword = source
+
+        def read(*args: Any, **kw: Any) -> Any:
+            fd = args[position] if len(args) > position else kw.get(keyword, "?")
+            self.seen.append((kind, f"<fd {fd}>"))
+            return real(*args, **kw)
+
+        return read
 
     @property
     def kinds(self) -> set[str]:
@@ -891,15 +954,19 @@ def test_routing_opens_nothing_and_reads_no_protected_rows(
 ) -> None:
     # Acceptance 7, observed rather than read back from the receipt's own zero: inside the
     # window the decision makes none of the watched calls (file open, sqlite connect or ATTACH
-    # on a connection opened in the window, mmap, directory listing, os.stat / os.lstat /
-    # os.access probes, process creation, any socket event), and the durable path touches only
-    # the router's private evaluation journal and the directory that holds it.
+    # on a connection opened in the window, any statement on a connection opened earlier in
+    # the test, os.read and the other descriptor reads, mmap, directory listing, os.stat /
+    # os.lstat / os.access probes, process creation, any socket or ctypes event), and the
+    # durable path touches only the router's private evaluation journal and the directory that
+    # holds it.
     #
-    # What this does not see, so the test does not claim it: reads on a descriptor or sqlite
-    # connection that was already open before the window (including ATTACH on one, and a
-    # descriptor inherited from a parent process), metadata probes made from C code (such as
-    # DirEntry.stat or sqlite's own), any other syscall that raises no audit event, and
-    # protected content already resident in memory. It shows none of the watched calls ran.
+    # What this does not see, so the test does not claim it: a read through a Python file
+    # object or an mmap that was already open before the window (both read in C, under no
+    # event and through no wrapped function), a sqlite connection opened before this test
+    # began, a C function resolved through ctypes before the window, metadata probes made from
+    # C code (such as DirEntry.stat or sqlite's own), any other syscall that raises no audit
+    # event, and protected content already resident in memory. It shows none of the watched
+    # calls ran.
     sched = scheduling()
     req = request(data_fix(), scheduling=sched)
     with monkeypatch.context() as patch:
@@ -932,6 +999,8 @@ def test_routing_opens_nothing_and_reads_no_protected_rows(
         ("path_exists", "os.stat"),
         ("sqlite_attach", "sqlite3.attach"),
         ("sqlite_attach_bound", "sqlite3.attach"),
+        ("ctypes_dlopen", "ctypes.dlopen"),
+        ("ctypes_dlsym", "ctypes.dlsym"),
     ],
 )
 def test_the_monitor_catches_sockets_processes_probes_and_attach(
@@ -940,6 +1009,7 @@ def test_the_monitor_catches_sockets_processes_probes_and_attach(
     # Each of these reaches outside the process or the file system without opening a file.
     sentinel = tmp_path / "generated-protected.sqlite3"
     sqlite3.connect(sentinel).close()
+    library = ctypes.CDLL(None)  # loaded before the window; its symbols are resolved inside it
     real = comparison_plan.freeze_plan
     done: dict[str, object] = {}
 
@@ -964,6 +1034,10 @@ def test_the_monitor_catches_sockets_processes_probes_and_attach(
         elif how == "sqlite_attach":
             with closing(sqlite3.connect(":memory:")) as db:
                 db.execute(f"ATTACH DATABASE '{sentinel}' AS protected")
+        elif how == "ctypes_dlopen":
+            ctypes.CDLL(None)
+        elif how == "ctypes_dlsym":
+            assert library.getpid() == os.getpid()
         else:
             with closing(sqlite3.connect(":memory:")) as db:
                 db.execute("ATTACH DATABASE ? AS protected", (str(sentinel),))
@@ -1061,6 +1135,123 @@ def test_the_monitor_catches_every_directory_listing_route(
     assert any(
         kind == event and target.startswith(str(protected)) for kind, target in watched.seen
     ), watched.seen
+
+
+_HANDLE_ROUTES = [
+    *[(f"os_{name}", f"os.{name}") for name in _DESCRIPTOR_READS if hasattr(os, name)],
+    ("sqlite_select", "sqlite3.preopened"),
+    ("sqlite_attach", "sqlite3.preopened"),
+    ("sqlite_attach_bound", "sqlite3.preopened"),
+]
+
+
+@pytest.mark.parametrize(("how", "event"), _HANDLE_ROUTES)
+def test_the_monitor_catches_reads_through_handles_opened_before_the_window(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, how: str, event: str
+) -> None:
+    # L1 (OPE-417 review of #205): a descriptor or a sqlite connection opened before the window
+    # raises no `open` or `sqlite3.connect` event when it is used inside it, so a router handed
+    # one could read protected rows through it and still look like zero protected reads.
+    sentinel = tmp_path / "generated-protected-rows.jsonl"
+    sentinel.write_bytes(b'{"case_id":"generated-protected-1","label":"a"}\n')
+    protected_db = tmp_path / "generated-protected.sqlite3"
+    with closing(sqlite3.connect(protected_db)) as db:
+        db.execute("CREATE TABLE protected_rows(case_id TEXT, label TEXT)")
+        db.execute("INSERT INTO protected_rows VALUES('generated-protected-1', 'a')")
+        db.commit()
+    # Everything the router misuses below is opened here, before the window.
+    fd = os.open(sentinel, os.O_RDONLY)
+    copy_fd = os.open(tmp_path / "generated-copy", os.O_WRONLY | os.O_CREAT, 0o600)
+    pipe_r, pipe_w = os.pipe()
+    protected = sqlite3.connect(protected_db)
+    scratch = sqlite3.connect(":memory:")
+    real = comparison_plan.freeze_plan
+    done: dict[str, object] = {}
+
+    def leaky(**kw: Any) -> Any:
+        buffer = bytearray(64)
+        try:
+            if how == "os_read":
+                done["data"] = os.read(fd, 64)
+            elif how == "os_pread":
+                done["data"] = os.pread(fd, 64, 0)
+            elif how == "os_readv":
+                done["data"] = os.readv(fd, [buffer])
+            elif how == "os_preadv":
+                done["data"] = os.preadv(fd, [buffer], 0)
+            elif how == "os_sendfile":
+                done["data"] = os.sendfile(copy_fd, fd, 0, 64)
+            elif how == "os_copy_file_range":
+                done["data"] = os.copy_file_range(fd, copy_fd, 64)
+            elif how == "os_splice":
+                done["data"] = os.splice(fd, pipe_w, 64)
+            elif how == "sqlite_select":
+                done["data"] = protected.execute("SELECT label FROM protected_rows").fetchall()
+            elif how == "sqlite_attach":
+                scratch.execute(f"ATTACH DATABASE '{protected_db}' AS protected")
+                done["data"] = scratch.execute("SELECT * FROM protected.protected_rows").fetchall()
+            else:
+                scratch.execute("ATTACH DATABASE ? AS protected", (str(protected_db),))
+                done["data"] = scratch.execute("SELECT * FROM protected.protected_rows").fetchall()
+        except OSError as refused:
+            # Some file systems refuse a zero-copy route; the attempt is what must be seen.
+            done["data"] = refused
+        return real(**kw)
+
+    monkeypatch.setattr(comparison_plan, "freeze_plan", leaky)
+    req = request(data_fix(), scheduling=scheduling())
+    try:
+        with monkeypatch.context() as patch:
+            watched = _Access(patch)
+            rr.decide(req)
+    finally:
+        protected.close()
+        scratch.close()
+        for descriptor in (fd, copy_fd, pipe_r, pipe_w):
+            os.close(descriptor)
+    assert "data" in done
+    if how.startswith("os_"):
+        assert (event, f"<fd {fd}>") in watched.seen, watched.seen
+    elif how == "sqlite_select":
+        assert (event, f"{sqlite3.SQLITE_READ}:protected_rows") in watched.seen, watched.seen
+        assert done["data"] == [("a",)]
+    else:
+        target = str(protected_db) if how == "sqlite_attach" else "<bound parameter>"
+        assert (event, f"{sqlite3.SQLITE_ATTACH}:{target}") in watched.seen, watched.seen
+        assert done["data"] == [("generated-protected-1", "a")]
+
+
+def test_a_connection_opened_before_the_window_is_watched_only_inside_it(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # Positive control: the window adds no record outside itself, a closed connection or one
+    # bound to another thread is skipped rather than failing the window, and the routing
+    # decision itself prepares nothing on a connection that was open when it started.
+    db = sqlite3.connect(tmp_path / "generated-other.sqlite3")
+    db.execute("CREATE TABLE t(x)")
+    sqlite3.connect(":memory:").close()
+    opened, release = threading.Event(), threading.Event()
+
+    def hold_one_open() -> None:
+        with closing(sqlite3.connect(":memory:")) as mine:
+            mine.execute("SELECT 1")
+            opened.set()
+            release.wait(30)
+
+    worker = threading.Thread(target=hold_one_open)
+    worker.start()
+    try:
+        assert opened.wait(30)
+        with monkeypatch.context() as patch:
+            watched = _Access(patch)
+            rr.decide(request(data_fix(), scheduling=scheduling()))
+        assert watched.seen == []
+        db.execute("INSERT INTO t VALUES(1)")
+        assert watched.seen == []
+    finally:
+        release.set()
+        worker.join(30)
+        db.close()
 
 
 # OPE-568: grouped repair cases with identical features must agree. "Grouped" is the
@@ -1381,6 +1572,314 @@ def test_routing_outputs_cannot_change_without_a_router_revision_bump() -> None:
     # The digest carries no revision stamp, so a bump the fixtures cannot observe repeats the
     # previous row and fails here: the fixture set must grow to cover the change.
     assert len(set(_DECISION_LEDGER.values())) == len(_DECISION_LEDGER)
+
+
+# L2 (OPE-417 review of #205): ROUTER_REVISION is bumped by hand, and the ledger above sees only
+# what the pinned fixtures exercise: simple_repair.MAX_ROWS, for one, can change without moving
+# a single pinned decision. So the code is pinned too. Every module-level function, class,
+# constant and import that decide() and _body() can reach by name inside opentour_cell is
+# collected statically (this router, simple_repair, comparison_plan and the helpers they
+# import, but not the store), and its syntax tree is fingerprinted without docstrings, so
+# comments, docstrings and formatting never move the pin.
+_PACKAGE = "opentour_cell."
+_ROUTING_ROOTS = ((rr.__name__, "decide"), (rr.__name__, "_body"))
+# The stamp itself is left out: a row pins what the router does, not what it is called.
+_UNPINNED = frozenset({f"{rr.__name__}:ROUTER_REVISION"})
+_Bindings = dict[str, list[ast.stmt]]
+
+
+def _module_source(module: str, sources: Mapping[str, str]) -> str:
+    if module in sources:
+        return sources[module]
+    spec = importlib.util.find_spec(module)
+    assert spec is not None and spec.origin is not None, module
+    return Path(spec.origin).read_text()
+
+
+def _top_level(tree: ast.Module) -> _Bindings:
+    """Name -> the module-level statements that bind it, looking one level into if and try."""
+    bound: _Bindings = {}
+
+    def visit(body: list[ast.stmt]) -> None:
+        for stmt in body:
+            if isinstance(stmt, ast.If | ast.Try):
+                visit(stmt.body)
+                visit(stmt.orelse)
+                for handler in stmt.handlers if isinstance(stmt, ast.Try) else ():
+                    visit(handler.body)
+                visit(stmt.finalbody if isinstance(stmt, ast.Try) else [])
+                continue
+            if isinstance(stmt, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
+                names = [stmt.name]
+            elif isinstance(stmt, ast.Import | ast.ImportFrom):
+                names = [(alias.asname or alias.name).split(".")[0] for alias in stmt.names]
+            elif isinstance(stmt, ast.Assign | ast.AnnAssign | ast.AugAssign):
+                targets = stmt.targets if isinstance(stmt, ast.Assign) else [stmt.target]
+                names = [n.id for t in targets for n in ast.walk(t) if isinstance(n, ast.Name)]
+            else:
+                continue
+            for name in names:
+                bound.setdefault(name, []).append(stmt)
+
+    visit(tree.body)
+    return bound
+
+
+def _imported(module: str, stmt: ast.Import | ast.ImportFrom, name: str) -> tuple[str, str | None]:
+    """What `name`, bound by `stmt` in `module`, refers to: (module, attribute or None)."""
+    for alias in stmt.names:
+        if (alias.asname or alias.name).split(".")[0] != name:
+            continue
+        if isinstance(stmt, ast.Import):
+            return (alias.name if alias.asname else name, None)
+        base = stmt.module or ""
+        if stmt.level:
+            base = ".".join([*module.split(".")[: -stmt.level], *([base] if base else [])])
+        full = f"{base}.{alias.name}"
+        try:
+            is_module = full.startswith(_PACKAGE) and importlib.util.find_spec(full) is not None
+        except ModuleNotFoundError:
+            is_module = False
+        return (full, None) if is_module else (base, alias.name)
+    raise AssertionError(f"{module}: {name} is not bound by this import")
+
+
+def _reachable(sources: Mapping[str, str] | None = None) -> _Bindings:
+    """Everything decide() and _body() can reach by name inside opentour_cell, as module:name.
+
+    `sources` replaces a module's text, so a test can fingerprint an edited copy.
+    """
+    overrides = sources or {}
+    parsed: dict[str, _Bindings] = {}
+
+    def bindings(module: str) -> _Bindings:
+        if module not in parsed:
+            parsed[module] = _top_level(ast.parse(_module_source(module, overrides)))
+        return parsed[module]
+
+    def module_alias(module: str, name: str) -> str | None:
+        for stmt in bindings(module).get(name, ()):
+            if isinstance(stmt, ast.Import | ast.ImportFrom):
+                target, attribute = _imported(module, stmt, name)
+                if attribute is None and target.startswith(_PACKAGE):
+                    return target
+        return None
+
+    reached: _Bindings = {}
+    work = list(_ROUTING_ROOTS)
+    while work:
+        module, name = work.pop()
+        key = f"{module}:{name}"
+        if key in reached or key in _UNPINNED:
+            continue
+        statements = bindings(module).get(name)
+        assert statements, f"{key} is referenced but not bound at module level"
+        reached[key] = statements
+        for stmt in statements:
+            if isinstance(stmt, ast.Import | ast.ImportFrom):
+                target, attribute = _imported(module, stmt, name)
+                if attribute is not None and target.startswith(_PACKAGE):
+                    work.append((target, attribute))
+                continue
+            for node in ast.walk(stmt):
+                if isinstance(node, ast.Name) and node.id in bindings(module):
+                    work.append((module, node.id))
+                elif isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
+                    alias = module_alias(module, node.value.id)
+                    if alias is not None:
+                        work.append((alias, node.attr))
+    return reached
+
+
+def _without_docstring(body: list[ast.stmt]) -> list[ast.stmt]:
+    first = body[0] if body else None
+    if (
+        isinstance(first, ast.Expr)
+        and isinstance(first.value, ast.Constant)
+        and isinstance(first.value.value, str)
+    ):
+        return body[1:]
+    return body
+
+
+def _shape(node: object) -> object:
+    """Every field of every node, by name, with docstrings dropped: stable across formatting."""
+    if isinstance(node, ast.AST):
+        fields = []
+        for field in node._fields:
+            value = getattr(node, field, None)
+            if field == "body" and isinstance(
+                node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef
+            ):
+                value = _without_docstring(value)
+            fields.append([field, _shape(value)])
+        return [type(node).__name__, fields]
+    if isinstance(node, list):
+        return [_shape(item) for item in node]
+    return repr(node)
+
+
+def reachable_code_fingerprint(sources: Mapping[str, str] | None = None) -> str:
+    reached = _reachable(sources)
+    return digest([[key, [_shape(stmt) for stmt in reached[key]]] for key in sorted(reached)])
+
+
+# One row per router revision from v4, the revision current when this pin was added: the
+# fingerprint of the code decide() and _body() can reach as that revision ships it.
+#
+# When the test below fails, code the router can reach has changed. If the change can alter an
+# outcome, reason code, refusal or recorded body for any input, bump ROUTER_REVISION, add a
+# fixture to _pinned_requests() that observes it, and append a row here and to
+# _DECISION_LEDGER. If it cannot (a rename, a pure refactor, a change only other callers can
+# see), update this revision's row instead and say why in the pull request, so the reviewer
+# checks that claim. Either way the change is decided on, not missed.
+_REACHABLE_CODE = {
+    "repair-routing.decide.v4": "bf75ec93f3227f88ede4610826996ddabe752bef51a6b3413ec71bed7046dc9c",
+}
+
+
+def test_code_the_router_reaches_cannot_change_unnoticed() -> None:
+    assert list(_REACHABLE_CODE)[-1] == rr.ROUTER_REVISION, (
+        "ROUTER_REVISION changed: append its row to _REACHABLE_CODE"
+    )
+    assert reachable_code_fingerprint() == _REACHABLE_CODE[rr.ROUTER_REVISION], (
+        "code decide() or _body() can reach changed: see the note on _REACHABLE_CODE"
+    )
+
+
+def test_the_code_pin_covers_the_routing_dependencies_and_not_the_store() -> None:
+    # Guards the guard: a resolver that stopped following imports would pin almost nothing.
+    reached = set(_reachable())
+    router, rules, plans, points = (
+        m.__name__ for m in (rr, simple_repair, comparison_plan, operating_point)
+    )
+    expected = {f"{router}:{n}" for n in ("decide", "_body", "_preflight", "select_recipe")}
+    expected |= {f"{router}:{n}" for n in ("SCHEMA", "RoutingTerms", "DevelopmentCase")}
+    expected |= {
+        f"{rules}:{n}"
+        for n in (
+            "assess_development",
+            "apply_frozen_rule",
+            "validate_rule",
+            "decision",
+            "identifier",
+            "MAX_ROWS",
+            "RULE_VERSION",
+        )
+    }
+    expected |= {f"{plans}:freeze_plan", f"{plans}:PLAN", f"{points}:canonical"}
+    expected |= {f"{points}:digest", f"{readout.__name__}:evaluate_manifest"}
+    assert expected <= reached, sorted(expected - reached)
+    # The store, replay and current-eligibility paths are not the decision and keep their own
+    # guards; the revision stamp is what a row is keyed by, not part of it.
+    assert f"{router}:RepairRoutingStore" not in reached
+    assert f"{router}:ROUTER_REVISION" not in reached
+    assert f"{plans}:run_comparison" not in reached
+
+
+def _edited(module: Any, edit: Callable[[ast.Module], None]) -> dict[str, str]:
+    """`module`'s text after `edit` changes its syntax tree; ast.unparse drops the comments."""
+    assert module.__file__ is not None
+    tree = ast.parse(Path(module.__file__).read_text())
+    edit(tree)
+    return {module.__name__: ast.unparse(tree)}
+
+
+def _named(tree: ast.Module, *path: str) -> ast.FunctionDef | ast.ClassDef:
+    body: list[ast.stmt] = tree.body
+    found: ast.FunctionDef | ast.ClassDef | None = None
+    for name in path:
+        found = next(
+            node
+            for node in body
+            if isinstance(node, ast.FunctionDef | ast.ClassDef) and node.name == name
+        )
+        body = found.body
+    assert found is not None
+    return found
+
+
+def _append_pass(*path: str) -> Callable[[ast.Module], None]:
+    return lambda tree: _named(tree, *path).body.append(ast.Pass())
+
+
+def _assign(name: str, value: object) -> Callable[[ast.Module], None]:
+    def edit(tree: ast.Module) -> None:
+        (stmt,) = [
+            node
+            for node in tree.body
+            if isinstance(node, ast.Assign)
+            and any(isinstance(t, ast.Name) and t.id == name for t in node.targets)
+        ]
+        stmt.value = ast.Constant(value)
+
+    return edit
+
+
+def _redocument(*path: str) -> Callable[[ast.Module], None]:
+    def edit(tree: ast.Module) -> None:
+        node = _named(tree, *path)
+        docstring = ast.Expr(ast.Constant("Generated docstring; documentation only."))
+        node.body[: len(node.body) - len(_without_docstring(node.body))] = [docstring]
+
+    return edit
+
+
+@pytest.mark.parametrize(
+    ("module", "edit", "moves"),
+    [
+        (simple_repair, _assign("MAX_ROWS", 4_999), True),
+        (simple_repair, _assign("RULE_VERSION", "opentour.pilot.simple-rule.generated"), True),
+        (simple_repair, _append_pass("assess_development"), True),
+        (comparison_plan, _append_pass("freeze_plan"), True),
+        (operating_point, _append_pass("canonical"), True),
+        (readout, _append_pass("evaluate_manifest"), True),
+        (rr, _append_pass("decide"), True),
+        (rr, _append_pass("RoutingTerms", "validate"), True),
+        (simple_repair, lambda tree: None, False),
+        (simple_repair, _redocument("assess_development"), False),
+        (rr, _redocument("RoutingTerms"), False),
+        (comparison_plan, _append_pass("run_comparison"), False),
+        (rr, _append_pass("RepairRoutingStore", "count"), False),
+        (rr, _assign("ROUTER_REVISION", "repair-routing.decide.generated"), False),
+    ],
+    ids=[
+        "max_rows",
+        "rule_version",
+        "assess_development",
+        "freeze_plan",
+        "canonical",
+        "readout_two_hops_away",
+        "decide",
+        "terms_method",
+        "round_trip",
+        "docstring",
+        "class_docstring",
+        "unreachable_comparison",
+        "store_only",
+        "revision_stamp",
+    ],
+)
+def test_the_code_pin_moves_for_reachable_code_only(
+    module: Any, edit: Callable[[ast.Module], None], moves: bool
+) -> None:
+    pinned = _REACHABLE_CODE[rr.ROUTER_REVISION]
+    assert (reachable_code_fingerprint(_edited(module, edit)) != pinned) is moves
+
+
+def test_the_code_pin_sees_a_change_the_pinned_fixtures_cannot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The motivating gap: MAX_ROWS bounds every request and no pinned fixture comes near it, so
+    # the ledger does not move when it changes. The code pin does, and a comment does not.
+    pinned = _REACHABLE_CODE[rr.ROUTER_REVISION]
+    monkeypatch.setattr(simple_repair, "MAX_ROWS", simple_repair.MAX_ROWS - 1)
+    assert digest(pinned_decisions()) == _DECISION_LEDGER[rr.ROUTER_REVISION]
+    lowered = _edited(simple_repair, _assign("MAX_ROWS", simple_repair.MAX_ROWS))
+    assert reachable_code_fingerprint(lowered) != pinned
+    assert simple_repair.__file__ is not None
+    commented = Path(simple_repair.__file__).read_text() + "\n# generated comment only\n"
+    assert reachable_code_fingerprint({simple_repair.__name__: commented}) == pinned
 
 
 # The functions whose string literals are the router's emitted vocabulary.
