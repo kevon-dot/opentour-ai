@@ -13,6 +13,7 @@ from opentour_cell.pilot.workflow_index import (
     ProposalAccess,
     WorkflowIndex,
     WorkflowLabel,
+    WorkflowVisibility,
 )
 from test_workflow_benchmarks import ACTOR, HISTORY, STARTER
 
@@ -243,3 +244,25 @@ def test_current_authority_reloads_authorization_on_page_and_selection(index):
             )
             with pytest.raises(IntakeError, match="workflow_index_unavailable"):
                 read(ACTOR)
+
+
+def test_list_without_visible_proposals_requires_a_separate_current_workflow_grant(index):
+    api, grants, labels, proposals = index
+    grants.current = replace(grants.current, proposals=(proposals[0],))
+    assert [row.workflow_ref for row in api.page(ACTOR).rows] == [labels[0].scope.workflow_ref]
+    visibility = WorkflowVisibility(labels[1].scope, ACTOR.actor, 200)
+    grants.current = replace(
+        grants.current,
+        workflows=(replace(visibility, actor_ref="other"), replace(visibility, visible_until=150)),
+    )
+    assert len(api.page(ACTOR).rows) == 1
+    grants.current = replace(grants.current, workflows=(visibility,))
+    first = api.page(ACTOR, size=1)
+    directory = api.page(ACTOR, size=1, cursor=first.next_cursor)
+    (row,) = directory.rows
+    assert row.workflow_ref == labels[1].scope.workflow_ref
+    assert row.group == "waiting" and row.state == "no_visible_proposal"
+    assert row.proposal_ref is row.proposal_revision is row.action is row.selection is None
+    grants.current = replace(grants.current, workflows=())
+    with pytest.raises(IntakeError, match="workflow_index_unavailable"):
+        api.page(ACTOR, size=1, cursor=first.next_cursor)

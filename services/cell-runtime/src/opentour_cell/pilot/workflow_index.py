@@ -43,6 +43,15 @@ class ProposalAccess:
 
 
 @dataclass(frozen=True)
+class WorkflowVisibility:
+    """Independent permission to list a workflow without its proposal details."""
+
+    scope: BenchmarkScope
+    actor_ref: str
+    visible_until: int
+
+
+@dataclass(frozen=True)
 class IndexScope:
     actor: IntakePrincipal
     epoch: str
@@ -50,6 +59,7 @@ class IndexScope:
     valid_until: int
     labels: tuple[WorkflowLabel, ...]
     proposals: tuple[ProposalAccess, ...]
+    workflows: tuple[WorkflowVisibility, ...] = ()
 
 
 class IndexAuthority(Protocol):
@@ -83,8 +93,8 @@ class IndexRow:
     workflow_ref: str
     label: str
     aliases: tuple[str, ...]
-    proposal_ref: str
-    proposal_revision: str
+    proposal_ref: str | None
+    proposal_revision: str | None
     state: str
     deadline: int | None
     recorded_at: int
@@ -142,6 +152,7 @@ class WorkflowIndex:
         next_expiry = scope.valid_until
         rows = []
         seen = set()
+        listed_workflows = set()
         for grant in scope.proposals:
             label = labels.get(grant.scope)
             if label is None or grant.actor_ref != actor.actor:
@@ -222,6 +233,35 @@ class WorkflowIndex:
                     pin,
                 )
             )
+            listed_workflows.add(grant.scope)
+        for visibility in scope.workflows:
+            label = labels.get(visibility.scope)
+            if label is None or visibility.actor_ref != actor.actor:
+                continue
+            _check_timestamp(visibility.visible_until)
+            if (
+                now >= visibility.visible_until
+                or visibility.scope in listed_workflows
+                or not self.benchmarks.observed_workflow(visibility.scope)
+            ):
+                continue
+            next_expiry = min(next_expiry, visibility.visible_until)
+            rows.append(
+                IndexRow(
+                    visibility.scope.workflow_ref,
+                    label.label,
+                    label.aliases,
+                    None,
+                    None,
+                    "no_visible_proposal",
+                    None,
+                    0,
+                    "waiting",
+                    None,
+                    None,
+                )
+            )
+            listed_workflows.add(visibility.scope)
         groups = {"needs_you": 0, "waiting": 1, "recent": 2}
         rows.sort(
             key=lambda row: (
@@ -230,7 +270,7 @@ class WorkflowIndex:
                 if row.group == "needs_you" and row.deadline is not None
                 else -row.recorded_at,
                 row.workflow_ref,
-                row.proposal_ref,
+                row.proposal_ref or "",
             )
         )
         return tuple(rows), next_expiry
