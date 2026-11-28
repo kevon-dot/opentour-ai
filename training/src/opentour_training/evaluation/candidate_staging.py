@@ -38,6 +38,12 @@ provider, GPU, customer or real-EVE evidence exists here; a generated result can
 a provider or customer gate. The only authority implementation here is a
 sentinel HMAC registry; no identity provider is exercised. Protected-view and critical-slice
 facts (``protected_view_seq``, per-case slice tags) remain caller-supplied.
+
+Fresh confirmation of a changed choice is accepted only when the authority attests it, its issuer
+is registered with the confirmation-issuer kind (``CONFIRMATION_ISSUER_KIND``), and the view
+sequence it was issued at (``FreshConfirmation.issued_seq``, inside the attested body) predates
+the cohort's first protected readout (``StagingPacket.protected_view_seq``). A confirmation made
+after protected answers were viewed holds as ``confirmation_after_protected_view``.
 """
 
 from __future__ import annotations
@@ -71,6 +77,9 @@ CONTROLS: tuple[str, str] = (INCUMBENT, SIMPLE)
 INDEPENDENT_ISSUER_KINDS: frozenset[str] = frozenset(
     {"authenticated_human", "independent_verifier_service"}
 )
+# The only registered issuer kind that may confirm a changed choice. Verdict issuers
+# (``INDEPENDENT_ISSUER_KINDS``) and any other registered kind cannot.
+CONFIRMATION_ISSUER_KIND = "confirmation_issuer"
 INTERVAL_METHOD = "bounded_independent_family_hoeffding_v1"
 
 Outcome = Literal["eligible", "hold", "refused"]
@@ -88,6 +97,7 @@ HOLD_CODES: frozenset[str] = frozenset(
         "stale_identity",
         "selection_after_protected_view",
         "fresh_confirmation_required",
+        "confirmation_after_protected_view",
         "cost_cap_exceeded",
     }
 )
@@ -277,6 +287,9 @@ class FreshConfirmation:
     candidate_id: str = ""
     identity_digest: str = ""
     arm_id: str = ""
+    # View sequence the confirmation was issued at; it must predate the cohort's first protected
+    # readout. ``None`` (or any non-int) never confirms.
+    issued_seq: int | None = None
 
 
 def confirmation_body(c: FreshConfirmation) -> dict[str, Any]:
@@ -288,6 +301,7 @@ def confirmation_body(c: FreshConfirmation) -> dict[str, Any]:
         "candidate_id": c.candidate_id,
         "identity_digest": c.identity_digest,
         "arm_id": c.arm_id,
+        "issued_seq": c.issued_seq,
     }
 
 
@@ -296,7 +310,9 @@ class VerdictAuthority(Protocol):
 
     def verify_verdict(self, verdict: IndependentVerdict) -> bool: ...
 
-    def verify_confirmation(self, confirmation: FreshConfirmation) -> bool: ...
+    def verify_confirmation(self, confirmation: FreshConfirmation) -> bool:
+        """True only for an issuer of ``CONFIRMATION_ISSUER_KIND`` attesting the whole body."""
+        ...
 
 
 class HmacVerdictAuthority:
@@ -321,7 +337,7 @@ class HmacVerdictAuthority:
 
     def verify_confirmation(self, confirmation: FreshConfirmation) -> bool:
         entry = self._issuers.get(confirmation.actor_id)
-        if entry is None or not confirmation.attestation:
+        if entry is None or entry[0] != CONFIRMATION_ISSUER_KIND or not confirmation.attestation:
             return False
         return hmac.compare_digest(
             self.mac(entry[1], confirmation_body(confirmation)), confirmation.attestation
@@ -647,8 +663,19 @@ def evaluate(packet: StagingPacket, authority: VerdictAuthority | None = None) -
         reasons.add("selection_after_protected_view")
     if cand.selection_digest != bench.preregistered_selection_digest:
         fresh = packet.fresh_confirmation
+        issued_seq = None if fresh is None else fresh.issued_seq
+        # It must predate the cohort's first protected readout; a non-int never confirms.
+        late = (
+            type(issued_seq) is int
+            and packet.protected_view_seq is not None
+            and issued_seq >= packet.protected_view_seq
+        )
+        if late:
+            reasons.add("confirmation_after_protected_view")
         if (
             fresh is None
+            or type(issued_seq) is not int
+            or late
             or not fresh.authenticated
             or fresh.selection_digest != cand.selection_digest
             or fresh.manifest_digest != bench.digest

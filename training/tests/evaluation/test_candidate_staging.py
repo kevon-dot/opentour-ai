@@ -48,6 +48,7 @@ ISSUERS: dict[str, tuple[str, bytes]] = {
     "generated-trainer": ("independent_verifier_service", b"generated-key-5"),
     "generated-owner": ("authenticated_human", b"generated-key-6"),
     "generated-human": ("authenticated_human", b"generated-key-7"),
+    "generated-confirmer": ("confirmation_issuer", b"generated-key-8"),
 }
 AUTH = HmacVerdictAuthority(ISSUERS)
 
@@ -448,13 +449,14 @@ def test_f3_changed_choice_needs_fresh_confirmation_from_other_actor() -> None:
     assert "fresh_confirmation_required" in reasons(replace(p, candidate=changed))
     good = attest_confirmation(
         FreshConfirmation(
-            "generated-owner",
+            "generated-confirmer",
             True,
             changed.selection_digest,
             p.benchmark.digest,
             candidate_id=changed.candidate_id,
             identity_digest=changed.identity_digest,
             arm_id=TUNED,
+            issued_seq=24,
         )
     )
     assert evaluate(replace(p, candidate=changed, fresh_confirmation=good)).outcome == "eligible"
@@ -854,7 +856,7 @@ def test_i3_self_asserted_flags_are_inside_the_attested_bodies() -> None:
         assert not AUTH.verify_verdict(replace(att, attestation=other.attestation))  # cross-value
     assert verdict_body(replace(base, issuer_authenticated=False))["issuer_authenticated"] is False
 
-    conf = FreshConfirmation("generated-owner", False, SELECTION, packet().benchmark.digest)
+    conf = FreshConfirmation("generated-confirmer", False, SELECTION, packet().benchmark.digest)
     for start, flipped in ((False, True), (True, False)):
         att_c = attest_confirmation(replace(conf, authenticated=start))
         assert AUTH.verify_confirmation(att_c)
@@ -882,13 +884,14 @@ def _other_candidate_packet(p: StagingPacket, *, new_identity: bool) -> StagingP
 def _bound(c: CandidateRecord, p: StagingPacket) -> FreshConfirmation:
     return attest_confirmation(
         FreshConfirmation(
-            "generated-owner",
+            "generated-confirmer",
             True,
             c.selection_digest,
             p.benchmark.digest,
             candidate_id=c.candidate_id,
             identity_digest=c.identity_digest,
             arm_id=TUNED,
+            issued_seq=24,
         )
     )
 
@@ -905,9 +908,95 @@ def test_j1_confirmation_cannot_be_replayed_against_another_candidate() -> None:
         assert out.outcome == "hold" and "fresh_confirmation_required" in out.reasons
     # an unbound (legacy-shape) confirmation never confirms anything
     legacy = attest_confirmation(
-        FreshConfirmation("generated-owner", True, a.selection_digest, p.benchmark.digest)
+        FreshConfirmation(
+            "generated-confirmer", True, a.selection_digest, p.benchmark.digest, issued_seq=24
+        )
     )
     assert "fresh_confirmation_required" in reasons(replace(pa, fresh_confirmation=legacy))
     # binding fields are inside the attested body
     for field_name in ("candidate_id", "identity_digest", "arm_id"):
         assert field_name in confirmation_body(pa.fresh_confirmation)  # type: ignore[arg-type]
+
+
+# ------------------------------------------------------------ K: confirmation sequence and kind
+# Post-merge audit follow-up (2026-11-28): a confirmation carries the view sequence it was issued
+# at and must predate the cohort's first protected readout; only the confirmation-issuer kind
+# may confirm; an empty candidate id never matches an empty confirmation binding.
+
+
+def _confirmation(c: CandidateRecord, p: StagingPacket, **kw: object) -> FreshConfirmation:
+    base: dict[str, object] = {
+        "actor_id": "generated-confirmer",
+        "authenticated": True,
+        "selection_digest": c.selection_digest,
+        "manifest_digest": p.benchmark.digest,
+        "candidate_id": c.candidate_id,
+        "identity_digest": c.identity_digest,
+        "arm_id": TUNED,
+        "issued_seq": 24,  # the packet's first protected readout is at 25
+    }
+    return attest_confirmation(FreshConfirmation(**{**base, **kw}))  # type: ignore[arg-type]
+
+
+def test_k1_confirmation_must_predate_the_first_protected_readout() -> None:
+    p = packet()
+    assert p.protected_view_seq == 25
+    changed = replace(p.candidate, selection_digest="sha256:" + "6" * 64)
+    ok = replace(p, candidate=changed, fresh_confirmation=_confirmation(changed, p))
+    assert evaluate(ok).outcome == "eligible"
+    for seq in (25, 26, 10_000):  # at or after the first protected readout
+        late = replace(ok, fresh_confirmation=_confirmation(changed, p, issued_seq=seq))
+        out = evaluate(late)
+        assert out.outcome == "hold"
+        assert {"fresh_confirmation_required", "confirmation_after_protected_view"} <= set(
+            out.reasons
+        )
+    for missing in (None, True, "24", 24.0):  # no sequence, or not an int
+        bad = replace(ok, fresh_confirmation=_confirmation(changed, p, issued_seq=missing))
+        assert "fresh_confirmation_required" in reasons(bad)
+    tampered = replace(ok.fresh_confirmation, issued_seq=26)  # rewritten after attestation
+    assert not AUTH.verify_confirmation(tampered)  # type: ignore[arg-type]
+    rewound = replace(ok.fresh_confirmation, issued_seq=1)  # re-dated earlier, also unattested
+    assert "fresh_confirmation_required" in reasons(replace(ok, fresh_confirmation=rewound))
+    assert "issued_seq" in confirmation_body(ok.fresh_confirmation)  # type: ignore[arg-type]
+    # A cohort whose protected answers were never read: any sequenced confirmation predates it.
+    unviewed = replace(ok, protected_view_seq=None)
+    assert evaluate(unviewed).outcome == "eligible"
+    late_unviewed = replace(unviewed, fresh_confirmation=_confirmation(changed, p, issued_seq=99))
+    assert evaluate(late_unviewed).outcome == "eligible"
+
+
+@pytest.mark.parametrize(
+    "actor",
+    [
+        "generated-independent-verifier",  # independent_verifier_service
+        "generated-verifier-tuned",  # independent_verifier_service
+        "generated-owner",  # authenticated_human
+        "generated-human",  # authenticated_human
+    ],
+)
+def test_k2_verify_confirmation_requires_the_confirmation_issuer_kind(actor: str) -> None:
+    p = packet()
+    changed = replace(p.candidate, selection_digest="sha256:" + "6" * 64)
+    wrong_kind = _confirmation(changed, p, actor_id=actor)
+    assert ISSUERS[actor][0] != "confirmation_issuer"
+    assert not AUTH.verify_confirmation(wrong_kind)  # registered, valid MAC, wrong kind
+    out = evaluate(replace(p, candidate=changed, fresh_confirmation=wrong_kind))
+    assert out.outcome == "hold" and "fresh_confirmation_required" in out.reasons
+    right_kind = _confirmation(changed, p)
+    assert AUTH.verify_confirmation(right_kind)
+    assert evaluate(replace(p, candidate=changed, fresh_confirmation=right_kind)).outcome == (
+        "eligible"
+    )
+
+
+def test_k3_empty_candidate_id_never_matches_an_empty_confirmation_binding() -> None:
+    p = packet()
+    blank = replace(p.candidate, candidate_id="", selection_digest="sha256:" + "6" * 64)
+    conf = _confirmation(blank, p)
+    assert conf.candidate_id == blank.candidate_id == ""  # every other binding matches
+    out = evaluate(replace(p, candidate=blank, fresh_confirmation=conf))
+    assert out.outcome == "hold" and out.reasons == ("fresh_confirmation_required",)
+    named = replace(blank, candidate_id="generated-candidate-1")
+    good = replace(p, candidate=named, fresh_confirmation=_confirmation(named, p))
+    assert evaluate(good).outcome == "eligible"  # the same packet with a real id confirms
