@@ -8,6 +8,7 @@ import json
 import os
 import re
 import sqlite3
+import stat
 import time
 from collections.abc import Callable, Iterator
 from contextlib import closing, contextmanager
@@ -18,6 +19,7 @@ from typing import Any
 from opentour_cell.pilot import learning_runs as lr
 from opentour_cell.pilot.eve_exchange import digest
 from opentour_cell.pilot.repair_bundle import _private_directory, _read
+from opentour_cell.pilot.signed_records import PilotRecordRefused
 
 DISCOVERY_FILE = "eve-discovery-scope.json"
 SELECTION = "eve-learning-selection.json"
@@ -49,8 +51,6 @@ class EveScanService:
         fd = os.open(path, os.O_CREAT | os.O_NOFOLLOW | os.O_RDWR, 0o600)
         try:
             st = os.fstat(fd)
-            import stat
-
             _need(
                 stat.S_ISREG(st.st_mode)
                 and st.st_nlink == 1
@@ -66,11 +66,14 @@ class EveScanService:
                 binding TEXT PRIMARY KEY, state TEXT NOT NULL DEFAULT 'ready',
                 generation INTEGER NOT NULL DEFAULT 0, version INTEGER NOT NULL DEFAULT 0,
                 pending INTEGER NOT NULL DEFAULT 0, due REAL NOT NULL DEFAULT 0, source TEXT,
-                last_scan REAL, problem TEXT)""")
+                last_scan REAL, problem TEXT, source_scope TEXT)""")
             db.execute("""CREATE TABLE IF NOT EXISTS decisions(
                 binding TEXT NOT NULL, key TEXT NOT NULL, PRIMARY KEY(binding,key))""")
             db.execute("""CREATE TABLE IF NOT EXISTS seen(
                 binding TEXT NOT NULL, source TEXT NOT NULL, first_seen REAL NOT NULL,
+                PRIMARY KEY(binding,source))""")
+            db.execute("""CREATE TABLE IF NOT EXISTS proposals(
+                binding TEXT NOT NULL, source TEXT NOT NULL, reservation TEXT NOT NULL,
                 PRIMARY KEY(binding,source))""")
             yield db
 
@@ -132,18 +135,19 @@ class EveScanService:
 
     @contextmanager
     def current(self, actor: str, *, write: bool) -> Iterator[dict[str, Any]]:
-        grant = self.signed()
         authority = lr.LocalLearningRunGrant(self.directory / SELECTION)
         principal = authority.principal
         _need(
             principal.role == "owner"
             and principal.channel == "slack"
             and principal.tenant == self.organization
-            and principal.actor == actor == grant["reviewer"]
+            and principal.actor == actor
         )
         with authority.guard(principal, write=write) as scope:
+            grant = self.signed()
             _need(
-                scope.engagement_epoch == grant["engagement_id"]
+                actor == grant["reviewer"]
+                and scope.engagement_epoch == grant["engagement_id"]
                 and scope.workflow_ref == grant["workflow"]
                 and scope.mandate_id == grant["mandate_id"]
                 and "read" in scope.permissions
@@ -157,19 +161,72 @@ class EveScanService:
                 "authority_revision": digest(
                     [grant, scope.grant_revision, mandate.mandate_revision]
                 ),
-                "binding": digest(
-                    [
-                        grant[k]
-                        for k in ("tenant", "engagement_id", "workspace", "channel", "workflow")
-                    ]
-                ),
+                "binding": self.binding(grant),
+                "discovery_revision": digest(grant),
             }
+
+    @staticmethod
+    def binding(grant: dict[str, Any]) -> str:
+        return digest(
+            [
+                grant[k]
+                for k in (
+                    "tenant",
+                    "engagement_id",
+                    "workspace",
+                    "channel",
+                    "workflow",
+                    "reviewer",
+                    "mandate_id",
+                    "connection_revision",
+                )
+            ]
+        )
+
+    def check_proposal(self, spec: dict[str, Any], *, claim: bool) -> None:
+        """Called under the current native enrollment write guard, shared with Done for now."""
+        grant = self.signed()
+        _need(
+            all(
+                grant[k] == spec[k]
+                for k in (
+                    "tenant",
+                    "engagement_id",
+                    "workspace",
+                    "channel",
+                    "reviewer",
+                    "workflow",
+                    "mandate_id",
+                )
+            )
+        )
+        binding = self.binding(grant)
+        with self.db() as db:
+            row = self.row(db, {"binding": binding})
+            source = spec.get("source_snapshot")
+            _need(
+                row["state"] == "watching"
+                and row["source"] is not None
+                and row["source"] == source
+                and row["generation"] == spec.get("scan_generation")
+                and row["problem"] is None
+                and row["source_scope"] == digest(grant)
+            )
+            if claim:
+                db.execute(
+                    "INSERT OR IGNORE INTO proposals VALUES(?,?,?)",
+                    (binding, source, spec["reservation_ref"]),
+                )
+            claimed = db.execute(
+                "SELECT reservation FROM proposals WHERE binding=? AND source=?", (binding, source)
+            ).fetchone()
+            _need(claimed is None or claimed[0] == spec["reservation_ref"])
 
     @staticmethod
     def row(db: sqlite3.Connection, grant: dict[str, Any]) -> sqlite3.Row:
         db.execute("INSERT OR IGNORE INTO watch(binding) VALUES(?)", (grant["binding"],))
         row = db.execute("SELECT * FROM watch WHERE binding=?", (grant["binding"],)).fetchone()
-        assert row is not None
+        assert isinstance(row, sqlite3.Row)
         return row
 
     @staticmethod
@@ -291,8 +348,8 @@ class EveScanService:
                     )
                 db.execute(
                     """UPDATE watch SET state='watching',due=?,last_scan=?,problem=?,
-                              source=?,version=version+1 WHERE binding=?""",
-                    (now + interval, now, problem, source, g["binding"]),
+                              source=?,source_scope=?,version=version+1 WHERE binding=?""",
+                    (now + interval, now, problem, source, g["discovery_revision"], g["binding"]),
                 )
                 return self.project(self.row(db, g), g)
 
@@ -312,23 +369,40 @@ def discover_sources(
         and cfg["mandate_id"] == grant["mandate_id"]
         and agreement["connection_revision"] == grant["connection_revision"]
     )
-    cap = scope["max_rows_per_run"]
-    found = workplace_context.discover_workplace(
-        store,
-        connection,
-        max_total_rows=cap,
-        expected_connection_revision=grant["connection_revision"],
-    )
-    if found.get("state") != "ready":
-        if found.get("reason") == "workplace_resource_pair_missing":
+    # Native intake pins both the bounded catalog and the correction provenance.
+    # It performs source admission only. A fit is a separate, Slack-authorized operation.
+    try:
+        _, acquired, _ = autonomous_cycle._admit(
+            directory, cfg, store, ledger, scope, connection, workplace_context, agreement
+        )
+    except workplace_context.WorkplaceError as error:
+        if str(error) == "workplace_resource_pair_missing":
             return None
-        raise ValueError("source_unavailable")
-    # Admission collects a verified source snapshot and its correction provenance. Only the
-    # separate signed EVE plan and current Slack fit decision can enter the trainer.
-    _, acquired, _ = autonomous_cycle._admit(
-        directory, cfg, store, ledger, scope, connection, workplace_context, agreement
-    )
+        raise
     return str(acquired["snapshot_revision"])
+
+
+def installed(directory: Path) -> bool:
+    return os.path.lexists(directory / DISCOVERY_FILE) or os.path.lexists(
+        directory / "eve-discovery" / "scan.sqlite3"
+    )
+
+
+def scan_tick(directory: Path, organization: str, config: Path, interval: int) -> dict[str, Any]:
+    from opentour_cell.pilot.signed_records import GRANT_PURPOSE, MAX_CONFIG_BYTES, PilotVerifier
+
+    try:
+        verifier = PilotVerifier(_read(directory / "pilot-issuer-registry.json", MAX_CONFIG_BYTES))
+        selector = verifier.verify(_read(directory / DISCOVERY_FILE, 32768), GRANT_PURPOSE)
+        _need(
+            isinstance(selector.get("workspace"), str) and isinstance(selector.get("channel"), str)
+        )
+        service = EveScanService(
+            directory, organization, str(selector["workspace"]), str(selector["channel"])
+        )
+        return service.tick(config, interval)
+    except (OSError, KeyError, ValueError, sqlite3.Error, PilotRecordRefused):
+        return {"state": "held", "reason": "check_eve_discovery_authority"}
 
 
 def open_eve_scan_service(

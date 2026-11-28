@@ -40,6 +40,7 @@ def run(
     once: bool,
     stopped: threading.Event,
 ) -> int:
+    from opentour_cell.pilot import eve_scan
     from opentour_cell.pilot.autonomous_cycle import cycle_once
     from opentour_cell.pilot.eve_authority import SELECTION_FILE, renew_host_permit
     from opentour_cell.pilot.learning_runs import SCHEDULE_SELECTION
@@ -54,14 +55,18 @@ def run(
         raise ValueError("invalid_worker_configuration")
 
     def eve_installed() -> bool:
-        return os.path.lexists(directory / SELECTION_FILE) or os.path.lexists(
-            directory / "eve-exchange" / "controls.sqlite3"
+        return (
+            eve_scan.installed(directory)
+            or os.path.lexists(directory / SELECTION_FILE)
+            or os.path.lexists(directory / "eve-exchange" / "controls.sqlite3")
         )
 
     def scan_once() -> int:
         try:
             outcome: dict[str, Any]
-            if eve_installed():
+            if eve_scan.installed(directory):
+                outcome = eve_scan.scan_tick(directory, organization, config, interval)
+            elif eve_installed():
                 # On the EVE route every fit consumes its own Slack decision. The separate
                 # standing classifier schedule may admit work automatically and cannot run here.
                 outcome = {"state": "waiting_for_scan"}
@@ -121,7 +126,7 @@ def run(
             result = scan_once()
             if once:
                 return result
-            next_scan = time.monotonic() + interval
+            next_scan = time.monotonic() + (5 if eve_scan.installed(directory) else interval)
     finally:
         own_stop.set()
         if keeper is not None:

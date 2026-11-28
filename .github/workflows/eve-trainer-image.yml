@@ -10,6 +10,8 @@ on:
       - 'training/src/opentour_training/training/eve_sft.py'
       - 'training/src/opentour_training/training/eve_run.py'
       - 'training/src/opentour_training/training/eve_host.py'
+      - 'services/cell-runtime/src/opentour_cell/pilot/eve_scan.py'
+      - 'services/cell-runtime/tests/pilot/test*eve*.py'
       - 'services/cell-runtime/src/opentour_cell/pilot/eve_exchange.py'
       - 'services/cell-runtime/src/opentour_cell/pilot/eve_authority.py'
       - 'services/cell-runtime/src/opentour_cell/pilot/eve_learning_service.py'
@@ -38,8 +40,8 @@ jobs:
           uv pip install --python .venv/bin/python --only-binary :all: --require-hashes -r services/cell-runtime/integrations/slack/requirements.txt
           export PYTHONPATH=services/cell-runtime/src:packages/authority-journal/src:training/src
           export OPENTOUR_UV="$(command -v uv)"
-          .venv/bin/python -m pytest -q services/cell-runtime/tests/pilot/{test_eve_authority,test_eve_learning_service,test_slack_eve_controls,test_slack_adapter,test_slack_views,test_learning_runs,test_cycle_worker_host,test_home_readiness}.py training/tests/training/{test_eve_sft,test_eve_run}.py tests/contract/test_gpu_training_lock.py
-          .venv/bin/python -m pytest -q -o 'python_functions=qualified_eve_*' services/cell-runtime/tests/pilot/test_eve_learning_service.py
+          .venv/bin/python -m pytest -q services/cell-runtime/tests/pilot/{test_eve_authority,test_eve_learning_service,test_eve_scan,test_slack_eve_scan,test_slack_eve_controls,test_slack_adapter,test_slack_views,test_learning_runs,test_cycle_worker_host,test_home_readiness}.py training/tests/training/{test_eve_sft,test_eve_run}.py tests/contract/test_gpu_training_lock.py
+          .venv/bin/python -m pytest -q -o 'python_functions=qualified_eve_*' services/cell-runtime/tests/pilot/{test_eve_learning_service,test_slack_eve_scan}.py
           .venv/bin/python tools/build_slack_pilot_kit.py "$RUNNER_TEMP/opentour-slack.zip"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
