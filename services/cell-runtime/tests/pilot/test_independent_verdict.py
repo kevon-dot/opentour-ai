@@ -2334,6 +2334,184 @@ def test_v14_the_d11_seam_applies_a_registered_floor_and_refuses_a_laxer_policy(
     assert TEST_FLOOR.shortfalls({**at_floor, "max_missing": "5"}) == ["max_missing"]
 
 
+def test_v15_review_r5_a_scorer_defect_revokes_every_verdict_of_that_scorer_version(
+    tmp_path, registered_floor
+):
+    """Re-review L2/R5: after a per-key scorer_defect revocation, a sibling still authorized."""
+    ev = evaluator(tmp_path)
+    a = run(tmp_path, Scenario(CLEAN_WIN, prefix="a-"), ev=ev)
+    b = run(tmp_path, Scenario(CLEAN_WIN, prefix="b-"), ev=ev)
+    ev.revoke_verdict(a.verdict_key, reason="scorer_defect", issued_by=EVALUATOR)
+    assert ev.authorize(b.document, effect="improvement_alert")["authorized"] is True  # R5
+    r = ev.revoke_scope(
+        "scorer_version", iv.SCORER_VERSION, reason="scorer_defect", issued_by=EVALUATOR
+    )
+    assert not r.replayed and r.record["schema_version"] == iv.SCOPE_REVOCATION
+    assert r.record["issued_by_authenticated"] is False
+    assert ev.authorize(b.document, effect="improvement_alert") == {
+        "authorized": False,
+        "effect": "improvement_alert",
+        "reason": "verdict_revoked_by_scope",
+        "state": "revoked",
+    }
+    view = ev.read_verdict(b.verdict_key)
+    assert view["state"] == "revoked" and view["outcome"] == "stale"
+    assert view["reasons"] == [
+        "revocation_reason_scorer_defect",
+        "verdict_revoked_by_scope_scorer_version",
+    ]
+    assert view["revoked_scope"] == {"scope": "scorer_version", "value": iv.SCORER_VERSION}
+    assert not cp._verdict_ok(view) and not any(view["effects"].values())
+    # The revoked scorer never scores another claim, here or after a restart.
+    s = Scenario(CLEAN_WIN, prefix="c-")
+    replays = s.replays()
+    c = run(tmp_path, s, ev=evaluator(tmp_path), replays=replays)
+    assert c.outcome == "stale" and replays["candidate"].calls == []
+    assert list((tmp_path / "evaluator-custody" / "verdicts").glob("*.json")) != []
+    again = ev.revoke_scope(
+        "scorer_version", iv.SCORER_VERSION, reason="claim_corrected", issued_by="other-1"
+    )
+    assert again.replayed and again.record == r.record  # idempotent, first record final
+
+
+@pytest.mark.parametrize("scope", ["answer_key_digest", "audit_receipt_digest"])
+def test_v16_answer_key_and_audit_receipt_scopes_revoke_matching_verdicts_only(
+    tmp_path, registered_floor, scope
+):
+    ev = evaluator(tmp_path)
+    hit_s = Scenario(CLEAN_WIN, prefix="hit-")
+    miss_s = Scenario(CLEAN_WIN, prefix="miss-")
+    hit = run(tmp_path, hit_s, ev=ev)
+    miss = run(tmp_path, miss_s, ev=ev)
+    value = hit.document[scope]
+    assert value != miss.document[scope]
+    ev.revoke_scope(scope, value, reason="answer_key_defect", issued_by=EVALUATOR)
+    assert ev.authorize(hit.document, effect="improvement_alert")["reason"] == (
+        "verdict_revoked_by_scope"
+    )
+    assert ev.authorize(miss.document, effect="improvement_alert")["authorized"] is True
+    assert ev.read_verdict(miss.verdict_key) == miss.document
+    # The same population re-submitted under a new claim is refused before scoring.
+    replays = hit_s.replays()
+    again = run(tmp_path, hit_s, ev=ev, replays=replays, result_revision=sha("retry"))
+    assert again.outcome == "stale" and replays["candidate"].calls == []
+    assert again.document["reasons"][-1] == "verdict_revoked_by_scope_" + scope
+
+
+def test_v17_scope_revocations_are_sealed_validated_and_may_be_preemptive(tmp_path):
+    ev = evaluator(tmp_path)
+    v = run(tmp_path, Scenario(CLEAN_WIN), ev=ev)
+    for scope, value, reason in (
+        ("tenant", "generated-tenant-1", "invalid_revocation_scope"),
+        ("scorer_version", "has spaces", "invalid_revocation_scope_value"),
+        ("answer_key_digest", "not-a-digest", "invalid_revocation_scope_value"),
+        ("audit_receipt_digest", None, "invalid_revocation_scope_value"),
+    ):
+        with pytest.raises(iv.VerdictInputError, match="^" + reason + "$"):
+            ev.revoke_scope(scope, value, reason="scorer_defect", issued_by=EVALUATOR)
+    with pytest.raises(iv.VerdictInputError, match="invalid_revocation_reason"):
+        ev.revoke_scope("scorer_version", "x.v9", reason="free text", issued_by=EVALUATOR)
+    # A scope no verdict carries yet is recorded and harms nothing it does not name.
+    ev.revoke_scope(
+        "scorer_version", "a-future-scorer.v9", reason="scorer_defect", issued_by=EVALUATOR
+    )
+    assert ev.read_verdict(v.verdict_key) == v.document
+    folder = tmp_path / "evaluator-custody" / "revoked_scopes"
+    (path,) = list(folder.glob("*.json"))
+    good = path.read_bytes()
+    # Each seal layer on its own: a resealed digest without the key (only the HMAC catches it)
+    # and a keyed record with a stale digest (only the digest catches it).
+    only_hmac = json.loads(good)
+    only_hmac["record"]["reason"] = "claim_corrected"
+    body = {k: x for k, x in only_hmac["record"].items() if k != "revocation_digest"}
+    only_hmac["record"]["revocation_digest"] = digest(body)
+    only_digest = json.loads(good)
+    only_digest["record"]["reason"] = "claim_corrected"
+    only_digest["local_seal"] = ev._commit({"record": only_digest["record"]})
+    for forged in (only_hmac, only_digest):
+        path.write_text(json.dumps(forged))
+        with pytest.raises(iv.CustodyError, match="stored_scope_revocation_tampered"):
+            ev.read_verdict(v.verdict_key)
+    stored = json.loads(good)
+    # Pointed at the live scorer version and resealed without the key: refused.
+    stored["record"]["scope_value"] = iv.SCORER_VERSION
+    body = {k: x for k, x in stored["record"].items() if k != "revocation_digest"}
+    stored["record"]["revocation_digest"] = digest(body)
+    path.write_text(json.dumps(stored))
+    with pytest.raises(iv.CustodyError, match="stored_scope_revocation_tampered"):
+        ev.read_verdict(v.verdict_key)
+    # Keyed and sealed, but filed under another scope's name: refused.
+    stored["local_seal"] = ev._commit({"record": stored["record"]})
+    path.write_text(json.dumps(stored))
+    with pytest.raises(iv.CustodyError, match="stored_scope_revocation_tampered"):
+        ev.authorize(v.document, effect="improvement_alert")
+    path.write_text("[]")
+    with pytest.raises(iv.CustodyError, match="stored_scope_revocation_corrupt"):
+        ev.read_verdict(v.verdict_key)
+    path.write_bytes(good)
+    assert ev.read_verdict(v.verdict_key) == v.document
+
+
+def test_v18_one_correction_notice_per_scope_revoked_verdict_that_fired(tmp_path):
+    ev = evaluator(tmp_path)
+    v = run(tmp_path, Scenario(CLEAN_WIN), ev=ev)
+    with pytest.raises(iv.VerdictInputError, match="verdict_not_revoked"):
+        ev.correction_notice(v.verdict_key, watch_fired=True)
+    scope = ev.revoke_scope(
+        "scorer_version", iv.SCORER_VERSION, reason="scorer_defect", issued_by=EVALUATOR
+    )
+    n = ev.correction_notice(v.verdict_key, watch_fired=True)
+    assert n is not None and not n.replayed
+    assert n.document["revocation_digest"] == scope.record["revocation_digest"]
+    assert n.document["revoked_scope"] == {"scope": "scorer_version", "value": iv.SCORER_VERSION}
+    # A later key revocation of the same verdict neither unbinds nor duplicates the notice.
+    later = ev.revoke_verdict(
+        v.verdict_key, reason="scorer_defect", issued_by=EVALUATOR, watch_fired=True
+    )
+    assert later.notice is not None and later.notice.replayed
+    assert later.notice.document == n.document
+    restarted = evaluator(tmp_path).correction_notice(v.verdict_key, watch_fired=True)
+    assert restarted is not None and restarted.document == n.document
+    assert len(list((tmp_path / "evaluator-custody" / "notices").glob("*.json"))) == 1
+    # The other order: a notice bound to a key revocation survives a later scope revocation.
+    ev2 = evaluator(tmp_path / "second")
+    w = run(tmp_path / "second", Scenario(CLEAN_WIN), ev=ev2)
+    first = ev2.revoke_verdict(
+        w.verdict_key, reason="claim_corrected", issued_by=EVALUATOR, watch_fired=True
+    )
+    assert first.notice is not None
+    assert first.notice.document["revocation_digest"] == first.record["revocation_digest"]
+    ev2.revoke_scope(
+        "answer_key_digest",
+        w.document["answer_key_digest"],
+        reason="answer_key_defect",
+        issued_by=EVALUATOR,
+    )
+    kept = ev2.correction_notice(w.verdict_key, watch_fired=True)
+    assert kept is not None and kept.replayed and kept.document == first.notice.document
+
+
+def test_v19_documented_limits_deleting_a_revocation_restores_authority(tmp_path):
+    """INFO R2/R6/R7, pinned so the documentation stays true: these are known limits."""
+    ev = evaluator(tmp_path)
+    v = run(tmp_path, Scenario(CLEAN_WIN), ev=ev)
+    ev.revoke_verdict(v.verdict_key, reason="claim_corrected", issued_by="anyone-at-all")
+    scope = ev.revoke_scope(
+        "scorer_version", iv.SCORER_VERSION, reason="scorer_defect", issued_by="anyone-at-all"
+    )
+    assert scope.record["issued_by"] == "anyone-at-all"  # R6: a label, never authenticated
+    assert ev.read_verdict(v.verdict_key)["state"] == "revoked"
+    root = tmp_path / "evaluator-custody"
+    (root / "revocations" / (v.verdict_key + ".json")).unlink()
+    for path in (root / "revoked_scopes").glob("*.json"):
+        path.unlink()
+    # R2: whoever can delete files in custody restores the original verdict's authority.
+    assert ev.read_verdict(v.verdict_key) == v.document
+    doc = " ".join((iv.__doc__ or "").split())
+    assert "can also delete a revocation, and deleting it restores" in doc
+    assert "issued_by" in doc and "unauthenticated" in doc  # R6, R7
+
+
 def test_v10_consumer_check_refuses_forged_unknown_and_ineligible_documents(
     tmp_path, registered_floor
 ):

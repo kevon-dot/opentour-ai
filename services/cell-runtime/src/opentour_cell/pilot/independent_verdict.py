@@ -59,11 +59,18 @@ verdict key. From then on ``read_verdict``, ``evaluate`` and the consumer check 
 report the key as ``stale`` (state ``revoked``) and never as its original outcome, for the live
 verdict, archived generations and any re-issue alike. When the consumer says a watch already
 fired (``watch_fired=True``), exactly one correction-notice record exists for the key, across
-retries, restarts and concurrent callers. The revocation lives in the same custody directory as
-the verdict, so whoever can delete files there can also delete a revocation; that is the same
-``locally_keyed`` limit as every other record here. ``authorize`` is the check that sees a
-revocation; a consumer that checks only a document's plain digest (``comparison_packet``) does
-not, so a consumer must call ``authorize`` before acting.
+retries, restarts and concurrent callers. ``revoke_scope`` revokes by scope instead: every
+verdict, issued or future, scored by one scorer version or bound to one answer key or audit
+receipt, so a scorer defect is not revoked one key at a time.
+
+Known limits of revocation, kept on purpose and pinned by tests. The revocation lives in the
+same custody directory as the verdict, so whoever can delete files there can also delete a
+revocation, and deleting it restores the original verdict's authority; that is the same
+``locally_keyed`` limit as every other record here, and only separated custody (OPE-566) closes
+it. ``issued_by`` and ``evaluator_id`` are caller-chosen labels, unauthenticated: nothing here
+proves who revoked or who evaluated. ``authorize`` is the check that sees a revocation; a
+consumer that checks only a document's plain digest (``comparison_packet``) does not, so a
+consumer must call ``authorize`` before acting.
 
 The fresh-cohort register is per custody directory: any new claim (whatever ``selection_basis``
 the producer declares, since that basis is caller-asserted) is held when its cases or families
@@ -165,6 +172,9 @@ _TUNED_COMPARATORS = ("incumbent", "simple_repair")
 _SELECTION = ("frozen_before_readout", "after_protected_readout")
 _PAIR_FIELDS = ("comparable", "fixes", "new_errors", "unchanged_right", "unchanged_wrong")
 REVOCATION = "opentour.pilot.independent-verdict-revocation.v1"
+SCOPE_REVOCATION = "opentour.pilot.independent-verdict-scope-revocation.v1"
+# What a scope revocation can name, and where each value sits in a verdict document.
+REVOCATION_SCOPES = ("scorer_version", "answer_key_digest", "audit_receipt_digest")
 CORRECTION_NOTICE = "opentour.pilot.independent-verdict-correction-notice.v1"
 HELD_VIEW = "opentour.pilot.independent-verdict-held-view.v1"
 # Closed vocabulary: a revocation never carries free text.
@@ -1067,7 +1077,16 @@ class IndependentEvaluator:
         self.scorer = scorer or DecisionScorer()
         self.signer = signer
         self._root = root
-        for sub in ("", "verdicts", "predictions", "cohorts", "expired", "revocations", "notices"):
+        for sub in (
+            "",
+            "verdicts",
+            "predictions",
+            "cohorts",
+            "expired",
+            "revocations",
+            "revoked_scopes",
+            "notices",
+        ):
             (root / sub).mkdir(mode=0o700, parents=True, exist_ok=True)
             mode = (root / sub).stat().st_mode
             if (root / sub).is_symlink() or mode & 0o077:
@@ -1182,7 +1201,7 @@ class IndependentEvaluator:
             raise CustodyError("stored_revocation_tampered")
         return dict(record)
 
-    def _load_notice(self, key: str, revocation: Json) -> Json | None:
+    def _load_notice(self, key: str, applicable: list[Json]) -> Json | None:
         path = self._root / "notices" / (key + ".json")
         if not path.exists():
             return None
@@ -1199,7 +1218,8 @@ class IndependentEvaluator:
             and keyed
             and notice.get("schema_version") == CORRECTION_NOTICE
             and notice.get("verdict_key") == key
-            and notice.get("revocation_digest") == revocation["revocation_digest"]
+            # Bound to a revocation that applies to this key (a later one never unbinds it).
+            and notice.get("revocation_digest") in {r["revocation_digest"] for r in applicable}
         ):
             raise CustodyError("stored_correction_notice_tampered")
         return dict(notice)
@@ -1258,6 +1278,105 @@ class IndependentEvaluator:
         notice = self.correction_notice(key, watch_fired=watch_fired)
         return Revocation(record, notice, replayed)
 
+    @staticmethod
+    def _scope_file(scope: str, value: str) -> str:
+        return digest([SCOPE_REVOCATION, scope, value]) + ".json"
+
+    def _scope_records(self) -> list[Json]:
+        """Every sealed scope revocation in this custody, each checked like a key revocation."""
+        records = []
+        for path in sorted((self._root / "revoked_scopes").glob("*.json")):
+            try:
+                stored = json.loads(path.read_bytes())
+                record = stored["record"]
+                body = {k: v for k, v in record.items() if k != "revocation_digest"}
+                sealed = record["revocation_digest"] == digest(body)
+                keyed = hmac.compare_digest(stored["local_seal"], self._commit({"record": record}))
+                named = path.name == self._scope_file(record["scope"], record["scope_value"])
+            except (OSError, ValueError, KeyError, TypeError, AttributeError):
+                raise CustodyError("stored_scope_revocation_corrupt") from None
+            if not (
+                sealed
+                and keyed
+                and named
+                and record.get("schema_version") == SCOPE_REVOCATION
+                and record.get("scope") in REVOCATION_SCOPES
+            ):
+                raise CustodyError("stored_scope_revocation_tampered")
+            records.append(dict(record))
+        return records
+
+    @staticmethod
+    def _scope_values(document: Mapping[str, Any]) -> dict[str, Any]:
+        return {
+            "scorer_version": document["scorer"]["scorer_version"],
+            "answer_key_digest": document["answer_key_digest"],
+            "audit_receipt_digest": document["audit_receipt_digest"],
+        }
+
+    def _scope_hits(self, values: Mapping[str, Any]) -> list[Json]:
+        """Scope revocations matching any of these verdict values, in a fixed order."""
+        hits = [r for r in self._scope_records() if values.get(r["scope"]) == r["scope_value"]]
+        return sorted(hits, key=lambda r: str(r["revocation_digest"]))
+
+    def _governing(self, key: str) -> tuple[Json | None, list[Json]]:
+        """The key revocation (if any) and every scope revocation matching a verdict of ``key``."""
+        hits: dict[str, Json] = {}
+        for document in self._generations(key):
+            for record in self._scope_hits(self._scope_values(document)):
+                hits[record["revocation_digest"]] = record
+        return self._load_revocation(key), sorted(
+            hits.values(), key=lambda r: str(r["revocation_digest"])
+        )
+
+    def revoke_scope(self, scope: str, value: str, *, reason: str, issued_by: str) -> Revocation:
+        """Revoke every verdict, issued or future, whose ``scope`` equals ``value``.
+
+        ``scope`` is one of ``REVOCATION_SCOPES``: a scorer version (a scorer defect invalidates
+        every verdict it scored, not one key), an answer key digest or an audit receipt digest.
+        The record is sealed, write-once and idempotent like a key revocation, and it may name a
+        value no verdict here carries yet: it then refuses any verdict that later would. From then
+        on ``authorize`` refuses a matching verdict with ``verdict_revoked_by_scope``,
+        ``read_verdict`` reads it as revoked and ``evaluate`` never scores a matching claim.
+        ``issued_by`` is caller-asserted, as for ``revoke_verdict``.
+        """
+        if scope not in REVOCATION_SCOPES:
+            raise VerdictInputError("invalid_revocation_scope")
+        well_formed = (
+            isinstance(value, str) and _ID.fullmatch(value) is not None
+            if scope == "scorer_version"
+            else _is_sha(value)
+        )
+        if not well_formed:
+            raise VerdictInputError("invalid_revocation_scope_value")
+        if reason not in REVOCATION_REASONS:
+            raise VerdictInputError("invalid_revocation_reason")
+        if not isinstance(issued_by, str) or not _ID.fullmatch(issued_by):
+            raise VerdictInputError("invalid_revocation_issuer")
+        path = self._root / "revoked_scopes" / self._scope_file(scope, value)
+        replayed = path.exists()
+        if not replayed:
+            body: Json = {
+                "schema_version": SCOPE_REVOCATION,
+                "scope": scope,
+                "scope_value": value,
+                "reason": reason,
+                "issued_by": issued_by,
+                "issued_by_authenticated": False,
+                "evaluator_id": self.evaluator_id,
+                "revoked_at": int(time.time()),
+                "effect": "invalidates_outstanding_authority",
+                "evidence_tier": EVIDENCE_TIER,
+            }
+            sealed = {**body, "revocation_digest": digest(body)}
+            stored = {"record": sealed, "local_seal": self._commit({"record": sealed})}
+            replayed = not _write_once(path, json.dumps(stored, sort_keys=True).encode())
+        records = [
+            r for r in self._scope_records() if (r["scope"], r["scope_value"]) == (scope, value)
+        ]
+        assert len(records) == 1  # a lost race returns the first record
+        return Revocation(records[0], None, replayed)
+
     def correction_notice(self, key: str, *, watch_fired: bool) -> CorrectionNotice | None:
         """The one correction notice for a revoked verdict whose watch already fired.
 
@@ -1271,21 +1390,30 @@ class IndependentEvaluator:
             raise VerdictInputError("invalid_verdict_key")
         if type(watch_fired) is not bool:
             raise VerdictInputError("invalid_watch_fired_flag")
-        revocation = self._load_revocation(key)
-        if revocation is None:
+        key_record, scope_records = self._governing(key)
+        applicable = ([key_record] if key_record is not None else []) + scope_records
+        if not applicable:
             raise VerdictInputError("verdict_not_revoked")
-        existing = self._load_notice(key, revocation)
+        existing = self._load_notice(key, applicable)
         if existing is not None:
             return CorrectionNotice(existing, replayed=True)
         if not watch_fired:
             return None
+        # One notice per verdict key, whichever revocation (key or scope) reached it first.
+        revocation = applicable[0]
         body: Json = {
             "schema_version": CORRECTION_NOTICE,
-            "notice_id": "correction-"
-            + digest([CORRECTION_NOTICE, key, revocation["revocation_digest"]])[:32],
+            "notice_id": "correction-" + digest([CORRECTION_NOTICE, key])[:32],
             "verdict_key": key,
             "revocation_digest": revocation["revocation_digest"],
-            "revoked_verdict_digests": revocation["revoked_verdict_digests"],
+            "revoked_scope": (
+                {"scope": revocation["scope"], "value": revocation["scope_value"]}
+                if revocation["schema_version"] == SCOPE_REVOCATION
+                else None
+            ),
+            "revoked_verdict_digests": sorted(
+                {d["verdict_digest"] for d in self._generations(key)}
+            ),
             "reason": revocation["reason"],
             "evaluator_id": self.evaluator_id,
             "created_at": int(time.time()),
@@ -1294,7 +1422,7 @@ class IndependentEvaluator:
         stored = {"notice": sealed, "local_seal": self._commit({"notice": sealed})}
         path = self._root / "notices" / (key + ".json")
         created = _write_once(path, json.dumps(stored, sort_keys=True).encode())
-        notice = self._load_notice(key, revocation)
+        notice = self._load_notice(key, applicable)
         assert notice is not None
         return CorrectionNotice(notice, replayed=not created)
 
@@ -1323,6 +1451,20 @@ class IndependentEvaluator:
             },
         )
 
+    def _scope_revoked_view(self, key: str, revocation: Json) -> Json:
+        return self._held_view(
+            key,
+            "revoked",
+            [
+                "revocation_reason_" + revocation["reason"],
+                "verdict_revoked_by_scope_" + revocation["scope"],
+            ],
+            {
+                "revocation_digest": revocation["revocation_digest"],
+                "revoked_scope": {"scope": revocation["scope"], "value": revocation["scope_value"]},
+            },
+        )
+
     def read_verdict(self, key: str) -> Json:
         """What a consumer reads for ``key``: the issued document only while it is current.
 
@@ -1338,6 +1480,9 @@ class IndependentEvaluator:
         live = self._load_verdict(key)
         if live is None:
             raise VerdictInputError("verdict_unknown")
+        scoped = self._scope_hits(self._scope_values(live.document))
+        if scoped:
+            return self._scope_revoked_view(key, scoped[0])
         if int(time.time()) > live.document["not_after"]:
             return self._held_view(
                 key,
@@ -1377,6 +1522,8 @@ class IndependentEvaluator:
         stored = self._load_verdict(key)
         if stored is None:
             return refuse("verdict_unknown", "unknown")
+        if self._scope_hits(self._scope_values(stored.document)):
+            return refuse("verdict_revoked_by_scope", "revoked")
         if stored.document != dict(document):
             return refuse("verdict_document_mismatch", "unverified")
         if int(time.time()) > stored.document["not_after"]:
@@ -1463,6 +1610,17 @@ class IndependentEvaluator:
         if revocation is not None:
             # A revoked key is final: never re-scored, never re-issued, never its original state.
             return IndependentVerdict(self._revoked_view(revocation), None, replayed=True)
+        scoped = self._scope_hits(
+            {
+                "scorer_version": self.scorer.scorer_version,
+                "answer_key_digest": population.answer_key_digest,
+                "audit_receipt_digest": audit_receipt.get("receipt_digest"),
+            }
+        )
+        if scoped:
+            # A revoked scorer version, answer key or audit receipt never scores another claim.
+            view = self._scope_revoked_view(key, scoped[0])
+            return IndependentVerdict(view, None, replayed=True)
         existing = self._load_verdict(key)
         if existing is not None:
             stored = existing.document
