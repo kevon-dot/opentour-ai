@@ -6011,7 +6011,9 @@ class Workbench:
         }
         self._show(
             view,
-            self.views.scan_modal(token, scan.state, controls),
+            self.views.scan_modal(
+                token, scan.state, controls, source_unavailable=scan.source_unavailable
+            ),
             old_hash,
             authorize=lambda: _check(self._scan_status(cfg, actor) == scan),
         )

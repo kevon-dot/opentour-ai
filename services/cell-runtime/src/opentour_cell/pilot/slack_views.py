@@ -161,7 +161,9 @@ def _modal(
     return view
 
 
-def scan_modal(context: str, state: str, controls: Mapping[str, str]) -> Block:
+def scan_modal(
+    context: str, state: str, controls: Mapping[str, str], *, source_unavailable: bool = False
+) -> Block:
     states = {
         "ready": "Ready to scan",
         "watching": "Watching",
@@ -175,6 +177,8 @@ def scan_modal(context: str, state: str, controls: Mapping[str, str]) -> Block:
         "done_for_now": "Done for now",
     }
     blocks = [_section(states[state])]
+    if source_unavailable:
+        blocks.append(_section("Last scan could not read the source. Watching will retry."))
     if controls:
         blocks.append(
             _actions(*[_button(labels[a], "ot_eve_" + a, pin) for a, pin in controls.items()])

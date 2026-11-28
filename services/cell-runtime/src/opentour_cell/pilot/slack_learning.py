@@ -20,6 +20,7 @@ class ScanService(Protocol):
 class ScanStatus:
     state: str
     revision: str
+    source_unavailable: bool = False
 
     @classmethod
     def from_status(cls, result: dict[str, Any]) -> ScanStatus:
@@ -31,8 +32,9 @@ class ScanStatus:
             or not re.fullmatch(r"[0-9a-f]{64}", revision)
         ):
             raise ValueError("Scan access unavailable.")
-        # The private scanner can return source metadata. Only the state and its fence leave it.
-        return cls(state, revision)
+        return cls(
+            state, revision, state == "watching" and result.get("reason") == "source_unavailable"
+        )
 
     def controls(self) -> tuple[str, ...]:
         if self.state in {"ready", "parked"}:

@@ -217,6 +217,28 @@ def test_ineligible_or_held_scan_never_offers_work(installed, monkeypatch):
     assert "GENERATED PRIVATE ANSWER" not in str(h.slack.screens)
 
 
+@pytest.mark.parametrize(
+    ("state", "reason", "show_notice"),
+    [
+        ("watching", "source_unavailable", True),
+        ("watching", "source_unavailable: GENERATED PRIVATE PATH", False),
+        ("watching", {"error": "GENERATED PRIVATE PATH"}, False),
+        ("parked", "source_unavailable", False),
+    ],
+)
+def test_scan_error_projection_uses_only_known_watching_reason(
+    installed, monkeypatch, state, reason, show_notice
+):
+    h, scanner = installed
+    scanner.state = state
+    status = scanner.status(ACTOR)
+    status.update(reason=reason, detail="GENERATED PRIVATE PATH", source_revision="b" * 64)
+    monkeypatch.setattr(scanner, "status", lambda actor: status)
+    rendered = str(screen(h, h.launch()))
+    assert ("Last scan could not read the source. Watching will retry." in rendered) == show_notice
+    assert "GENERATED PRIVATE PATH" not in rendered and "b" * 64 not in rendered
+
+
 def test_signed_scan_before_fit_uses_durable_scanner_through_private_workbench(
     tmp_path,
     monkeypatch,
@@ -270,6 +292,19 @@ def test_signed_scan_before_fit_uses_durable_scanner_through_private_workbench(
     h.send("interactive", first)
     start = scan.status(ACTOR)
     assert start["state"] == "watching" and start["source_revision"] is None
+    config = site.directory / "cycle.json"
+    notice = "Last scan could not read the source. Watching will retry."
+    empty = scan.tick(config, 0, lambda *_: None)
+    assert empty["reason"] is None and notice not in str(screen(h, h.launch()))
+
+    def unreadable(*_args):
+        raise OSError("GENERATED PRIVATE SOURCE PATH")
+
+    failed = scan.tick(config, 0, unreadable)
+    assert failed["reason"] == "source_unavailable" and failed["state"] == "watching"
+    failed_view = screen(h, h.launch())
+    assert notice in str(failed_view) and "GENERATED PRIVATE SOURCE PATH" not in str(failed_view)
+    assert {"ot_eve_another_scan", "ot_eve_done_for_now"} <= set(buttons(failed_view))
     seen = []
 
     def discover(*_args):
@@ -286,6 +321,9 @@ def test_signed_scan_before_fit_uses_durable_scanner_through_private_workbench(
         and seen == ["batch-A"]
     )
     view = h.launch()
+    assert notice not in str(screen(h, view)) and result["source_revision"] not in str(
+        screen(h, view)
+    )
     done = press(h, view, "done_for_now")
     assert "Parked" in str(screen(h, view))
     scan = reopen()
