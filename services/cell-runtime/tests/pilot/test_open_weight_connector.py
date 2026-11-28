@@ -1046,3 +1046,55 @@ def test_w7_int_subclass_receipt_is_refused_and_cannot_change_the_hold_reason(
             call()
     assert connector.usage(forged) is None  # usage reports an unusable receipt as unknown
     assert connector.hold_reason(receipt) == "over_cap"
+
+
+# Review of #241. F3 (owner-delegate decision: round up): measured seconds are rounded up, so any
+# fraction of a second over the cap is ``over_cap``. F4 (owner-delegate decision: refuse before
+# spend): a negative maximum or a currency that is not an ISO-4217-shaped code is refused before
+# anything is journaled or run.
+@pytest.mark.parametrize("seconds", [60.001, 60.5, 60.999])
+def test_w8_a_fraction_of_a_second_over_the_cap_is_over_cap(
+    family: toy.Family, tmp_path: Path, seconds: float
+) -> None:
+    connector, _, receipt = _measured(family, tmp_path / "state", "generated-fraction", seconds)
+    _assert_ow_held(family, connector, receipt, "over_cap")
+    usage = connector.usage(receipt)
+    assert usage is not None and usage.seconds == 61  # rounded up, never down
+
+
+@pytest.mark.parametrize("seconds", [59.001, 59.999, 60.0])
+def test_w8_measured_seconds_up_to_the_cap_are_within(
+    family: toy.Family, tmp_path: Path, seconds: float
+) -> None:
+    connector, _, receipt = _measured(family, tmp_path / "state", "generated-within", seconds)
+    _assert_ow_released(family, connector, receipt)
+    usage = connector.usage(receipt)
+    assert usage is not None and usage.seconds == 60
+
+
+@pytest.mark.parametrize("limit", OW_MAXIMA)
+def test_w9_negative_intent_bound_is_refused_before_dispatch(
+    family: toy.Family, tmp_path: Path, limit: str
+) -> None:
+    connector = family.connector(tmp_path / "state")
+    intent = family.intent("generated-negative")
+    forged = replace(intent, bound=replace(intent.bound, **{limit: -1}))
+    payload = connector.serialize_development(forged, toy.TRAIN)
+    with pytest.raises(ValueError, match="^fit_bound_negative$"):
+        connector.submit(forged, payload)
+    assert not list((connector.root / "jobs").iterdir())
+
+
+@pytest.mark.parametrize("currency", ["", "usd", "US", "USDX", None])
+def test_w9_invalid_intent_currency_is_refused_before_dispatch(
+    family: toy.Family, tmp_path: Path, currency: object
+) -> None:
+    connector = family.connector(tmp_path / "state")
+    intent = family.intent("generated-currency")
+    forged = replace(intent, bound=replace(intent.bound, currency=currency))
+    payload = connector.serialize_development(forged, toy.TRAIN)
+    with pytest.raises(ValueError, match="^fit_bound_currency_invalid$"):
+        connector.submit(forged, payload)
+    with pytest.raises(ValueError, match="^fit_bound_currency_invalid$"):
+        owc.intent_digest(forged)
+    assert not list((connector.root / "jobs").iterdir())

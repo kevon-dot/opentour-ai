@@ -1290,16 +1290,33 @@ def test_h9_intent_bound_that_is_not_exactly_int_is_refused_before_dispatch(tmp_
     assert journal_text(connector) == ""
 
 
-@pytest.mark.parametrize("limit", ["maximum_seconds", "maximum_steps"])
-def test_h9_negative_intent_bound_is_cap_unverifiable(tmp_path, limit):
+@pytest.mark.parametrize(
+    "limit", ["maximum_minor_units", "maximum_seconds", "maximum_rows", "maximum_steps"]
+)
+def test_h9_negative_intent_bound_is_refused_before_dispatch(tmp_path, limit):
+    # Review of #241, F4 (owner-delegate decision: refuse before spend). A negative maximum used
+    # to dispatch and then be held as ``cap_unverifiable``; it is now refused on a direct
+    # ``submit`` that bypasses Preflight, before anything is journaled or sent.
     provider = FakeProvider()
     connector = managed.ManagedConnector(provider, SETTINGS, tmp_path / "state")
     intent = make_intent(bound=replace(BOUND, **{limit: -1}))
-    pre = mc.Preflight(connector, conformance.standard_grants(BINDING, intent))
-    receipt = connector.submit(intent, managed.serialize_rows(ROWS))
-    assert receipt.state is mc.JobState.COMPLETED
-    _assert_held(provider, connector, pre, receipt, "cap_unverifiable")
-    assert connector.usage(receipt).cap_status == "cap_unknown"
+    with pytest.raises(ValueError, match="^fit_bound_negative$"):
+        connector.submit(intent, managed.serialize_rows(ROWS))
+    assert provider.uploaded == [] and provider.executions == 0
+    assert journal_text(connector) == ""
+
+
+@pytest.mark.parametrize("currency", ["", "usd", "US", "USDX", " USD", None, 840])
+def test_h9_invalid_intent_currency_is_refused_before_dispatch(tmp_path, currency):
+    provider = FakeProvider()
+    connector = managed.ManagedConnector(provider, SETTINGS, tmp_path / "state")
+    intent = make_intent(bound=replace(BOUND, currency=currency))
+    with pytest.raises(ValueError, match="^fit_bound_currency_invalid$"):
+        connector.submit(intent, managed.serialize_rows(ROWS))
+    with pytest.raises(ValueError, match="^fit_bound_currency_invalid$"):
+        managed.intent_digest(intent)
+    assert provider.uploaded == [] and provider.executions == 0
+    assert journal_text(connector) == ""
 
 
 @pytest.mark.parametrize("journaled_cap", [True, 500.0, False, 0.0])

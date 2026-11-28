@@ -8,8 +8,9 @@ silently re-run: a retry needs a new fit intent and therefore a new reservation 
 
 Usage-vs-cap hold (OPE-508 decision, shared with the managed and customer-trainer routes through
 ``connector_ext.usage_hold``): the accepted event journals the intent's currency and all four
-maxima, and the completed event journals the measured usage (wall seconds, rows, steps, and zero
-incremental cost in the journaled currency, as before). A COMPLETED job is released only when that
+maxima, and the completed event journals the measured usage (wall seconds rounded up, so any
+fraction over the cap is over it; rows; steps; and zero incremental cost in the journaled currency,
+as before). A COMPLETED job is released only when that
 journaled usage is verifiably within that journaled cap; usage exactly at a maximum is accepted.
 Otherwise it is held as ``over_cap``, ``usage_unverifiable`` or ``cap_unverifiable``: ``collect``
 builds no candidate, and ``predict_for_replay``, ``promote`` and ``serve`` refuse its artifact
@@ -28,6 +29,7 @@ from __future__ import annotations
 import fcntl
 import hashlib
 import json
+import math
 import os
 import subprocess
 import sys
@@ -482,7 +484,8 @@ class OpenWeightConnector:
                 "artifact_sha256": artifact,
                 "currency": intent.bound.currency,
                 "minor_units": 0,  # measured zero incremental cost on the owner's machine
-                "seconds": max(0, int(self.clock() - started)),
+                # Rounded up: any fraction of a second over the cap is over the cap.
+                "seconds": max(0, math.ceil(self.clock() - started)),
                 "rows": len(rows),
                 "steps": self.profile.resource.max_steps,
             },

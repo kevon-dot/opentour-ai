@@ -2342,3 +2342,122 @@ def test_t7_int_subclass_receipt_is_refused_and_cannot_change_the_hold_reason(en
             call()
     assert transport.fetched == [] and transport.stops == []
     assert connector.hold_reason(done) == "over_cap"
+
+
+# ---- Review of #241 ----
+# F1 a receipt that reads COMPLETED before ``status`` journaled it (from ``lookup`` or
+#    ``Preflight.reconcile_fit``) still reports its hold: ``hold_reason`` and ``collect`` observe
+#    the job first
+# F2 the running-job guard compares only against the journaled cap: a journal without a cap, or
+#    with a lower one, stops a running job even when the caller's bound would allow its usage
+# F4 a negative maximum or an invalid currency is refused before anything is journaled or sent
+OVER = TrainerUsage("USD", 501, 1, 4, 1)
+
+
+def _live_completed(env, reported):
+    """A job the trainer finished, seen by a connector that has not journaled the outcome."""
+    env.dispatch()
+    env.trainer.run_pending()
+    transport = Observed(env.trainer, reported)
+    return env.make_connector(transport), transport
+
+
+def test_f1_lookup_receipt_reads_completed_and_reports_its_hold(env):
+    connector, transport = _live_completed(env, OVER)
+    receipt = connector.lookup(env.intent)
+    assert receipt.state is mc.JobState.COMPLETED
+    assert connector.hold_reason(receipt) == "over_cap"  # observed first, then journaled
+    assert connector.status(receipt).state is mc.JobState.COMPLETED
+    assert env.make_connector(env.trainer).hold_reason(receipt) == "over_cap"
+    assert transport.stops == [] and transport.fetched == []
+
+
+def test_f1_collect_on_a_lookup_receipt_reports_the_hold(env):
+    connector, transport = _live_completed(env, OVER)
+    receipt = connector.lookup(env.intent)
+    with pytest.raises(ValueError, match="^over_cap$"):
+        connector.collect(receipt)
+    assert transport.fetched == []
+
+
+def test_f1_reconcile_fit_receipt_reports_its_hold(env):
+    connector, transport = _live_completed(env, OVER)
+    preflight = env.make_preflight(connector)
+    receipt = preflight.reconcile_fit("training", env.intent)
+    assert receipt.state is mc.JobState.COMPLETED
+    assert connector.hold_reason(receipt) == "over_cap"
+    with pytest.raises(mc.CapabilityError, match="candidate_lineage_unverified"):
+        preflight.collect_candidate("training", receipt)
+    assert transport.fetched == []
+
+
+def test_f1_lookup_receipt_within_the_cap_reports_no_hold_and_is_released(env):
+    connector, transport = _live_completed(env, REFERENCE_USAGE)
+    receipt = connector.lookup(env.intent)
+    assert connector.hold_reason(receipt) is None
+    candidate = env.make_preflight(connector).collect_candidate("training", receipt)
+    assert connector.predict_for_replay(candidate, FROZEN) == EXPECTED
+
+
+def test_f1_hold_reason_of_a_live_job_is_none(env):
+    receipt = env.dispatch()
+    assert env.connector.hold_reason(receipt) is None  # observed: still queued
+    assert env.connector.status(receipt).state is mc.JobState.QUEUED
+
+
+class RunningWithin(Observed):
+    """A running job whose usage is within the caller's bound (LIMIT)."""
+
+    def poll(self, credential, job_id):
+        view = self.inner.poll(credential, job_id)
+        return replace(view, state="running", usage=REFERENCE_USAGE)
+
+
+@pytest.mark.parametrize(
+    "edit",
+    [
+        lambda record: record.pop("cap", None),  # an older journal: no cap recorded
+        lambda record: record["cap"].update(maximum_rows=REFERENCE_USAGE.rows - 1),
+        lambda record: record["cap"].update(currency="EUR"),
+    ],
+    ids=["no-cap", "lower-journaled-rows", "other-journaled-currency"],
+)
+def test_f2_running_guard_uses_only_the_journaled_cap(env, edit):
+    receipt = env.dispatch()
+
+    def corrupt(record):
+        if record.get("t") == "intent":
+            edit(record)
+
+    _rewrite_trainer_journal(env, corrupt)
+    transport = RunningWithin(env.trainer, None)
+    connector = env.make_connector(transport)
+    stopped = connector.status(receipt)
+    assert transport.stops == [receipt.job_ref]  # fails closed: the caller's bound is not used
+    assert stopped.state is mc.JobState.FAILED
+
+
+def test_f2_running_job_within_the_journaled_cap_is_not_stopped(env):
+    receipt = env.dispatch()
+    transport = RunningWithin(env.trainer, None)
+    connector = env.make_connector(transport)
+    assert connector.status(receipt).state is mc.JobState.RUNNING
+    assert transport.stops == []
+
+
+@pytest.mark.parametrize("limit", TRAINER_MAXIMA)
+def test_f4_negative_intent_bound_is_refused_before_dispatch(env, limit):
+    forged = replace(env.intent, bound=replace(LIMIT, **{limit: -1}))
+    with pytest.raises(ValueError, match="^fit_bound_negative$"):
+        env.connector.submit(forged, env.connector.serialize_development(forged, ROWS))
+    assert env.executions() == 0
+    assert '"intent"' not in _journal_path(env).read_text()
+
+
+@pytest.mark.parametrize("currency", ["", "usd", "US", "USDX", None])
+def test_f4_invalid_intent_currency_is_refused_before_dispatch(env, currency):
+    forged = replace(env.intent, bound=replace(LIMIT, currency=currency))
+    with pytest.raises(ValueError, match="^fit_bound_currency_invalid$"):
+        env.connector.submit(forged, env.connector.serialize_development(forged, ROWS))
+    assert env.executions() == 0
+    assert '"intent"' not in _journal_path(env).read_text()

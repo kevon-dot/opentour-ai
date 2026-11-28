@@ -961,13 +961,27 @@ class CustomTrainerConnector:
             return None  # only a COMPLETED job has a result to hold
         return usage_hold(entry.usage, entry.cap)
 
+    def _observed(self, job: mc.JobReceipt, token: str) -> _Entry:
+        """The journaled entry, after observing a job whose terminal state is not journaled yet.
+
+        ``lookup`` (and so ``Preflight.reconcile_fit``) can report a live COMPLETED state without
+        journaling it; observing as ``status`` does journals the terminal state with its usage, so
+        every path that reads a hold sees the same outcome.
+        """
+        entry = self._known(job, token)
+        if entry.state not in _TERMINAL:
+            self.status(job)
+            entry = self._known(job, token)
+        return entry
+
     def hold_reason(self, job: mc.JobReceipt) -> str | None:
         """The fixed reason a COMPLETED job's result is held, else ``None``.
 
-        One of ``over_cap``, ``usage_unverifiable`` or ``cap_unverifiable``. Read from the journal
-        only: the trainer is not contacted.
+        One of ``over_cap``, ``usage_unverifiable`` or ``cap_unverifiable``. A job whose terminal
+        state is not journaled yet is observed first (as ``status`` would); a settled job is read
+        from the journal only.
         """
-        return self._hold(self._known(job, _token(job.intent)))
+        return self._hold(self._observed(job, _token(job.intent)))
 
     @staticmethod
     def _same_job(view: TrainerView, token: str, entry: _Entry) -> None:
@@ -1058,6 +1072,9 @@ class CustomTrainerConnector:
         entry = self._known(job, token)
         if intent.binding.tenant in self.journal.read().fenced:
             raise ValueError("connector_fenced")
+        if entry.cancel_requested or entry.state == "canceled":
+            raise ValueError("job_canceled")
+        entry = self._observed(job, token)  # a receipt from ``lookup`` may not be journaled yet
         if entry.cancel_requested or entry.state == "canceled":
             raise ValueError("job_canceled")
         if entry.state != "completed":

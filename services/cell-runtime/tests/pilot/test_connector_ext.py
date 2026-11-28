@@ -116,6 +116,43 @@ def test_x1_a_maximum_that_is_not_exactly_int_is_refused(limit: str, value: obje
         ext.journal_bound(bound)
 
 
+# Review of #241, F4 (owner-delegate decision: refuse before spend).
+class SneakyStr(str):
+    """A ``str`` subclass that serializes like the plain string."""
+
+
+@pytest.mark.parametrize("limit", MAXIMA)
+@pytest.mark.parametrize("value", [-1, -(10**9)])
+def test_x1_a_negative_maximum_is_refused(limit: str, value: int) -> None:
+    bound = replace(BOUND, **{limit: value})
+    with pytest.raises(ValueError, match="^fit_bound_negative$"):
+        ext.require_exact_bound(bound)
+    with pytest.raises(ValueError, match="^fit_bound_negative$"):
+        ext.journal_bound(bound)
+
+
+@pytest.mark.parametrize("limit", MAXIMA)
+def test_x1_a_zero_maximum_is_accepted(limit: str) -> None:
+    ext.require_exact_bound(replace(BOUND, **{limit: 0}))
+
+
+@pytest.mark.parametrize(
+    "currency",
+    ["", "usd", "Usd", "US", "USDX", " USD", "USD ", "U5D", "ÜSD", None, 840, SneakyStr("USD")],
+)
+def test_x1_a_currency_that_is_not_an_iso_4217_shaped_code_is_refused(currency: object) -> None:
+    bound = replace(BOUND, currency=currency)
+    with pytest.raises(ValueError, match="^fit_bound_currency_invalid$"):
+        ext.require_exact_bound(bound)
+    with pytest.raises(ValueError, match="^fit_bound_currency_invalid$"):
+        ext.journal_bound(bound)
+
+
+@pytest.mark.parametrize("currency", ["USD", "EUR", "JPY", "XXX"])
+def test_x1_an_uppercase_three_letter_currency_is_accepted(currency: str) -> None:
+    ext.require_exact_bound(replace(BOUND, currency=currency))
+
+
 @pytest.mark.parametrize("limit", MAXIMA)
 def test_x2_usage_at_a_maximum_is_within_and_one_above_is_over(limit: str) -> None:
     used = DIMENSION[limit]

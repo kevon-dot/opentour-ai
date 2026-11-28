@@ -24,6 +24,7 @@ not exist in this project; until then, treat any received instance as unverified
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
@@ -135,7 +136,8 @@ class Fenceable(Protocol):
 # dispatch (``journal_bound``) and the usage at the terminal observation. Caller-supplied values are
 # never compared at release. An intent bound whose maxima are not exactly ``int`` is refused before
 # dispatch (``require_exact_bound``): an ``int`` subclass serializes like the plain int, so a digest
-# alone cannot tell them apart (OPE-508 L1).
+# alone cannot tell them apart (OPE-508 L1). A negative maximum or a currency that is not an
+# ISO-4217-shaped code is refused there too (review of #241, F4: refuse before spend).
 CAP_WITHIN = "within_cap"
 CAP_OVER = "over_cap"
 CAP_UNKNOWN = "cap_unknown"
@@ -143,6 +145,9 @@ HOLD_OVER_CAP = CAP_OVER
 HOLD_USAGE_UNVERIFIABLE = "usage_unverifiable"
 HOLD_CAP_UNVERIFIABLE = "cap_unverifiable"
 BOUND_NOT_EXACT_INT = "fit_bound_not_exact_int"
+BOUND_NEGATIVE = "fit_bound_negative"
+BOUND_CURRENCY_INVALID = "fit_bound_currency_invalid"
+_CURRENCY = re.compile(r"[A-Z]{3}")
 
 # (usage field, cap field) for every bounded dimension. Money also needs a matching currency.
 _DIMENSIONS = (
@@ -156,9 +161,23 @@ USAGE_FIELDS = frozenset({"currency", "minor_units", "seconds", "rows", "steps"}
 
 
 def require_exact_bound(bound: FitBound) -> None:
-    """Refuse a bound whose four maxima are not each exactly ``int`` (bool and subclasses too)."""
-    if any(type(getattr(bound, limit, None)) is not int for limit in _MAXIMA):
+    """Refuse, before anything is journaled or sent, a bound that is not exactly well formed.
+
+    Checked in this order, each with a fixed reason:
+    * ``fit_bound_not_exact_int``: a maximum is not exactly ``int`` (bool and subclasses too);
+    * ``fit_bound_negative``: a maximum is below zero (zero is accepted);
+    * ``fit_bound_currency_invalid``: the currency is not an exact ``str`` of three ASCII
+      uppercase letters (the ISO-4217 shape; whether the code is assigned is not checked).
+    """
+    maxima: list[object] = [getattr(bound, limit, None) for limit in _MAXIMA]
+    counts = [maximum for maximum in maxima if type(maximum) is int]
+    if len(counts) != len(maxima):
         raise ValueError(BOUND_NOT_EXACT_INT)
+    if any(count < 0 for count in counts):
+        raise ValueError(BOUND_NEGATIVE)
+    currency = getattr(bound, "currency", None)
+    if type(currency) is not str or _CURRENCY.fullmatch(currency) is None:
+        raise ValueError(BOUND_CURRENCY_INVALID)
 
 
 def journal_bound(bound: FitBound) -> dict[str, object]:

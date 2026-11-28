@@ -32,8 +32,9 @@ authenticated events (an HMAC or signature over each event, keyed outside the st
 Over-cap usage is a hard refusal. Every bounded dimension is compared against the cap journaled
 at dispatch (currency and all four maxima; never the caller's values at release), using the hold
 shared with the other routes (``connector_ext.usage_hold``). An intent bound whose maxima are not
-exactly ``int`` (bool and ``int`` subclasses included) is refused by ``intent_digest``, so it can
-neither dispatch nor be presented later in a receipt. A
+exactly ``int`` (bool and ``int`` subclasses included), is negative, or whose currency is not an
+ISO-4217-shaped code is refused by ``intent_digest`` (``connector_ext.require_exact_bound``), so it
+can neither dispatch, even through a direct ``submit``, nor be presented later in a receipt. A
 COMPLETED job with any verified dimension above its bound is held with the fixed reason
 ``over_cap``: ``collect`` builds no candidate, and ``handoff_reference`` and
 ``predict_for_replay`` never use its tuned-model id. Usage that cannot be shown to be within
