@@ -166,3 +166,16 @@ class RunTests(unittest.TestCase):
                 eve_sft.fit(args)
         self.assertTrue((self.output / "manifest.json").is_file())
         self.assertEqual(self.run.control("stop")["status"], "completed")
+
+    def test_process_lost_after_empty_reservation_can_settle_stop(self):
+        with self.run.worker():
+            self.run.start(self.settings)
+            with self.run.edit() as state:
+                self.run.boundary(state, 8, lambda: 1.0, 0, self.fail)
+            staged = self.directory / "staged"
+            staged.mkdir()
+            with patch.object(eve_sft.os, "replace", side_effect=SystemExit):
+                with self.assertRaises(SystemExit):
+                    eve_sft.publish_candidate(staged, self.output)
+        self.assertEqual(list(self.output.iterdir()), [])
+        self.assertEqual(self.run.control("stop")["status"], "stopped")

@@ -138,8 +138,13 @@ class Run:
                     self.reconcile_idle(state)
             self.expire(state)
             if action == "stop" and state["status"] not in {"completed", "stopped", "expired"}:
-                if state["status"] == "held" and Path(state["settings"]["output"]).exists():
-                    return self.summary(state)
+                if state["status"] == "held":
+                    output = Path(state["settings"]["output"])
+                    # A crash can leave an empty mkdir reservation before the candidate rename.
+                    if output.is_symlink() or (
+                        output.exists() and (not output.is_dir() or any(output.iterdir()))
+                    ):
+                        return self.summary(state)
                 state["status"] = "stopped" if idle or state["status"] == "paused" else "stopping"
             elif action == "pause" and state["status"] in {"running", "pausing", "resuming"}:
                 target = state["completed_steps"] if after_step is None else after_step
