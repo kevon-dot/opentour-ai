@@ -829,3 +829,31 @@ def test_adapters_import_no_network_provider_or_training_code():
     forbidden = {"socket", "ssl", "http", "urllib", "requests", "subprocess", "asyncio"}
     assert not {name.split(".")[0] for name in imported} & forbidden
     assert identity("a1")["attempt_id"] == "a1"
+
+
+def test_wa3_expired_grant_and_withdrawn_custody_return_no_restricted_fields(tmp_path):
+    from opentour_cell.pilot.custody import Closeout
+    from test_pilot_custody import START
+
+    capture, authority, adapter = worked(tmp_path)
+    importer = HistoricalImport(capture, lambda: NOW)
+    importer.ingest(HISTORY_ACTOR, WORKFLOW, pinned([d2_record()]))
+    current = authority.base
+    authority.base = replace(current, expires_at=NOW)
+    reads = (
+        lambda: capture.inspect("owner", WORKFLOW, "op-d1"),
+        lambda: capture.inspect_imports("owner", WORKFLOW),
+        lambda: capture.receipts("owner", WORKFLOW),
+        lambda: adapter.ingest_gateway(GATEWAY_ACTOR, WORKFLOW, page(fixture_w_gateway(), "new")),
+    )
+    for read in reads:
+        with pytest.raises(CaptureError):
+            read()
+    authority.base = current
+    assert capture.inspect("owner", WORKFLOW, "op-d1")["committed_decisions"] == 1
+    Closeout(capture.store.path.parent, capture.store.organization).withdraw(**START)
+    for read in reads:
+        with pytest.raises(CaptureError):
+            read()
+    with pytest.raises(CaptureError):
+        importer.ingest(HISTORY_ACTOR, WORKFLOW, pinned([d2_record(), d2_record()]))
