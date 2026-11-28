@@ -95,8 +95,12 @@ def _time(value: object, reason: str) -> datetime:
 
 
 def _ref(value: object, reason: str) -> str:
-    _need(isinstance(value, str) and _REF.fullmatch(value), reason)
-    return str(value)
+    # Exactly ``str``, returned as itself. A subclass whose buffer passes ``_REF`` can still
+    # tell a different story through ``__str__``/``__format__``, which is what names files and
+    # folders; it must never reach a path, a persisted record or a tenant folder.
+    text = value if type(value) is str else ""
+    _need(_REF.fullmatch(text), reason)
+    return text
 
 
 def _segments(path: str) -> tuple[str, ...]:

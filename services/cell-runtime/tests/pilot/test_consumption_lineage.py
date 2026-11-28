@@ -500,6 +500,53 @@ def test_non_str_times_are_invalid_time_not_type_errors(tmp_path: Path) -> None:
         assert isinstance(out, Denial) and out.reason == "invalid_time", type(bad)
 
 
+class _LyingRef(str):
+    """Its buffer passes the ref pattern; its ``__str__`` tells a different story."""
+
+    told: str
+
+    def __new__(cls, shown: str, told: str) -> "_LyingRef":
+        obj = super().__new__(cls, shown)
+        obj.told = told
+        return obj
+
+    def __str__(self) -> str:
+        return self.told
+
+
+def _tree(root: Path) -> list[str]:
+    return sorted(str(path.relative_to(root)) for path in root.rglob("*"))
+
+
+@pytest.mark.parametrize("told", ["bad ref!", "../../pwn", OTHER])
+@pytest.mark.parametrize("key", ["manifest_ref", "claim_refs", "tenant"])
+def test_lying_str_subclass_ref_is_refused_writes_nothing_and_wedges_nothing(
+    tmp_path: Path, key: str, told: str
+) -> None:
+    """LOW-3: a ref is exactly ``str`` and persisted as itself, never as ``str(value)``."""
+    # Two levels deep, so a "../../" escape would still land inside tmp_path and be seen.
+    store, grants = ManifestStore(tmp_path / "root" / "m"), Grants()
+    grants.set(OTHER)
+    reader = ConsumptionReader(store, grants)
+    store.put(manifest("a"))
+    before = _tree(tmp_path)
+    shown = {"manifest_ref": "b", "claim_refs": "claim-b", "tenant": TENANT}[key]
+    lying = _LyingRef(shown, told)
+    raw = manifest("b", **{key: [lying] if key == "claim_refs" else lying})
+    with pytest.raises(LineageError, match=f"^manifest_{key}$"):
+        store.put(raw)
+    assert _tree(tmp_path) == before  # no manifest, pin, temp file or folder anywhere
+    if key == "tenant":
+        with pytest.raises(LineageError, match="^manifest_tenant$"):
+            store.all(lying)  # the read side cannot be steered into another folder either
+    # The tenant is not wedged: it still reads, resolves and accepts the honest record.
+    assert [m["manifest_ref"] for m in store.all(TENANT)] == ["a"]
+    assert store.all(OTHER) == []
+    assert resolved(reader.resolve_claim(request(), "claim-a")).status == "resolved"
+    store.put(manifest("b"))
+    assert [m["manifest_ref"] for m in store.all(TENANT)] == ["a", "b"]
+
+
 def test_integrity_marker_is_inside_the_digested_receipt_body(tmp_path: Path) -> None:
     """NIT-2: editing the marker breaks the receipt's reader_digest."""
     _, _, reader = build(tmp_path, manifest("a"))
