@@ -467,7 +467,13 @@ class QualificationRecord:
 
     @property
     def qualified(self) -> bool:
-        return self.passed and self.tier is not EvidenceTier.FIXTURE
+        """Passed at SOFTWARE_QUALIFIED, the highest reachable tier.
+
+        Checked here as well as in ``__post_init__``: a record built with ``object.__new__``,
+        altered with ``object.__setattr__`` or unpickled skips construction, and must still never
+        report a witnessed tier as qualified.
+        """
+        return self.passed and self.tier is EvidenceTier.SOFTWARE_QUALIFIED
 
 
 def _witness_ref_ok(value: object, *, required: bool) -> bool:

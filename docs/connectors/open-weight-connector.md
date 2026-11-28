@@ -87,11 +87,14 @@ What a record above `FIXTURE` does enforce, at construction (`EVIDENCE_TIER_UNSU
     precedent), a caller-supplied string never stands in for provider attestation, and no provider-attestation
     verifier exists. An otherwise consistent claim is refused with `PROVIDER_WITNESS_UNSTRUCTURED` whatever
     `witness_ref` says.
+* `qualified` is true only for a record that passed at `SOFTWARE_QUALIFIED`. It re-checks the tier, so a record that
+  skipped construction (built with `object.__new__`, altered with `object.__setattr__`, or unpickled) never reports a
+  witnessed tier as qualified.
 
 What it does not establish:
 
 * `witness_ref` is an unverified opaque string. Its shape is checked; nobody confirms that a witness exists or what it saw.
-  It never raises a record above `SOFTWARE_QUALIFIED`.
+  However well formed, a `witness_ref` cannot lift a record above `SOFTWARE_QUALIFIED`.
 * What a model-family customer or provider witness would bind (its subject) is not decided. Both tiers stay unreachable
   until their verifiers and subjects exist.
 * Check outcomes, the revision and the digest are asserted by the caller. A record proves internal consistency, not that

@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import json
-from dataclasses import replace
+import pickle
+from dataclasses import fields, replace
 from pathlib import Path
 
 import pytest
@@ -540,6 +541,23 @@ def test_a_str_subclass_witness_ref_is_refused(tmp_path: Path) -> None:
         _claim(tmp_path, EvidenceTier.SOFTWARE_QUALIFIED, witness_ref=_PlainStrSubclass(""))
 
 
+# Edge whitespace and control characters that ``str.strip`` would silently remove (or that sit
+# inside the id). Only the pre-NFKC invisible check catches them at the edges (review F1).
+_EDGE_CONTROLS = [
+    "\t",
+    "\n",
+    "\v",
+    "\f",
+    "\r",
+    "\x1c",
+    "\x1d",
+    "\x1e",
+    "\x1f",
+    "\x85",
+    " ",
+    " ",
+]
+
 FIXTURE_NAME_VARIANTS = [
     "GeneratedFamily",
     "regenerated-x",
@@ -565,7 +583,12 @@ FIXTURE_NAME_VARIANTS = [
     "structural-pinned-profile\x00",  # control character
     "  ",
     "",
+    *(f"{ch}structural-pinned-profile" for ch in _EDGE_CONTROLS),
+    *(f"structural-pinned-profile{ch}" for ch in _EDGE_CONTROLS),
+    *(f"structural{ch}-pinned-profile" for ch in _EDGE_CONTROLS),
 ]
+# Clean printable ASCII only after NFKC, with no fixture token: fullwidth "acme" (review F2).
+NFKC_CLEAN_ID = "ａｃｍｅ-linear"
 
 
 @pytest.mark.parametrize("family_id", FIXTURE_NAME_VARIANTS)
@@ -608,6 +631,7 @@ def test_a_name_without_a_fixture_marker_keeps_software_qualified(
     [
         *FIXTURE_NAME_VARIANTS,
         *GENERATED_VARIANTS,
+        NFKC_CLEAN_ID,
         "structural-pinned-profile",
         "smollm2_135m_lora_v1",
         "acme-linear-v2",
@@ -626,3 +650,35 @@ def test_the_family_downgrade_matches_the_ope_509_trainer_downgrade(name: object
 def test_the_real_profiles_are_not_downgraded_by_the_name_rule() -> None:
     for name in ("smollm2_135m_lora_v1.family.json", "pythia_160m_neox_candidate.family.json"):
         assert not fam.load_profile(PROFILES / name).is_fixture
+
+
+def test_an_id_that_is_clean_only_after_nfkc_follows_the_trainer_rule(tmp_path: Path) -> None:
+    # Review F2: the NFKC step decides this id. #218 keeps it (no fixture token once folded), so
+    # the family rule must too; dropping NFKC would turn it into a fixture and break parity.
+    assert ctc.is_fixture_trainer(NFKC_CLEAN_ID) is False
+    assert fam.is_fixture_family_id(NFKC_CLEAN_ID) is False
+    family = toy.Family(tmp_path, "generated-toy-linear")
+    assert not replace(family.profile, family_id=NFKC_CLEAN_ID).is_fixture
+    assert _claim(tmp_path, EvidenceTier.SOFTWARE_QUALIFIED, family_id=NFKC_CLEAN_ID).qualified
+
+
+@pytest.mark.parametrize("tier", _WITNESSED_TIERS)
+def test_a_record_that_bypassed_construction_is_never_qualified_at_a_witnessed_tier(
+    tmp_path: Path, tier: EvidenceTier
+) -> None:
+    # Review F3: ``object.__new__``, ``object.__setattr__`` and unpickling all skip
+    # ``__post_init__``. ``qualified`` must still never report a witnessed tier as qualified.
+    valid = _claim(tmp_path, EvidenceTier.SOFTWARE_QUALIFIED, witness_ref="witness:acme-1")
+    assert valid.qualified
+    forged = object.__new__(fam.QualificationRecord)
+    for field in fields(valid):
+        object.__setattr__(forged, field.name, getattr(valid, field.name))
+    object.__setattr__(forged, "tier", tier)
+    assert forged.passed and forged.tier is tier
+    assert not forged.qualified
+    revived = pickle.loads(pickle.dumps(forged))
+    assert revived.passed and revived.tier is tier
+    assert not revived.qualified
+    tampered = _claim(tmp_path, EvidenceTier.SOFTWARE_QUALIFIED, witness_ref="witness:acme-1")
+    object.__setattr__(tampered, "tier", tier)
+    assert tampered.passed and not tampered.qualified
