@@ -195,3 +195,28 @@ def test_malformed_authority_timestamp_never_discloses(index, field, bad):
         api.page(ACTOR)
     with pytest.raises(IntakeError):
         api.select(ACTOR, pin)
+
+
+def test_concurrent_proposals_on_one_workflow_reopen_independently(index):
+    api, grants, labels, rows = index
+    first = rows[0]
+    second = replace(
+        first, proposal_ref="proposal-next", proposal_revision="frozen-v2", deadline=190
+    )
+    grants.current = replace(grants.current, proposals=(first, second))
+    earlier, later = api.page(ACTOR).rows
+    assert earlier.workflow_ref == later.workflow_ref == labels[0].scope.workflow_ref
+    assert (earlier.proposal_ref, later.proposal_ref) == (second.proposal_ref, first.proposal_ref)
+    assert earlier.selection != later.selection
+    restarted = WorkflowIndex(
+        WorkflowBenchmarks(api.benchmarks.path.parent), grants, clock=lambda: 150
+    )
+    assert restarted.select(ACTOR, later.selection) == later
+    grants.current = replace(grants.current, proposals=(first,))
+    with pytest.raises(IntakeError, match="workflow_index_unavailable"):
+        restarted.select(ACTOR, earlier.selection)
+    assert restarted.select(ACTOR, later.selection) == later
+    grants.current = replace(grants.current, proposals=())
+    assert restarted.page(ACTOR).rows == ()
+    with pytest.raises(IntakeError, match="workflow_index_unavailable"):
+        restarted.select(ACTOR, later.selection)
