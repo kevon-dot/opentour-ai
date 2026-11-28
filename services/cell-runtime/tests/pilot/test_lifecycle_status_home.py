@@ -95,6 +95,7 @@ def test_recipient_replay_and_restored_target_through_private_home(generated_tar
     for rejected in (
         replace(replay_record, payload=claim | {"recipient_ref": "other-recipient"}),
         replace(replay_record, payload=claim | {"release_ref": "release-" + "9" * 48}),
+        replace(replay_record, payload=claim | {"not_after": "2000-01-01T00:00:00Z"}),
         replace(replay_record, signer_role=lifecycle.ROLLBACK_ISSUER),
     ):
         authority.observe(directory, binding, "replay", lifecycle.REPLAY_PURPOSE, rejected)
@@ -150,6 +151,8 @@ def test_recipient_replay_and_restored_target_through_private_home(generated_tar
             observed_at=observed_at,
         ),
     )
+    assert rollback_claim["rollback_operation_receipt_ref"] == operation["action_ref"]
+    assert rollback_claim["serving_readback_ref"] != operation["action_ref"]
     rollback_record = lifecycle.VerifiedLifecycleRecord(
         rollback_claim, lifecycle.ROLLBACK_ISSUER, rollback_policy.observer_key_id
     )
@@ -158,6 +161,11 @@ def test_recipient_replay_and_restored_target_through_private_home(generated_tar
         replace(
             rollback_record,
             payload=rollback_claim | {"restored_version": sample.release.artifact_sha256},
+        ),
+        replace(
+            rollback_record,
+            payload=rollback_claim
+            | {"rollback_operation_receipt_ref": rollback_policy.authorization_ref},
         ),
         replace(rollback_record, key_id=replay_record.key_id),
     ):
