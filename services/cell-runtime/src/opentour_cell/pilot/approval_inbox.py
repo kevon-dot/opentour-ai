@@ -43,6 +43,20 @@ def _discard(path: Path) -> None:
     path.unlink(missing_ok=True)
 
 
+def _confirmation(directory: Path, receipt: str) -> Path:
+    return directory / ("approval-confirmed-" + receipt + ".json")
+
+
+def _confirmed(directory: Path, receipt: str) -> bool:
+    """Only a pointer that enqueue_ready confirmed after its fresh re-read is deliverable."""
+    try:
+        pointer = _private_json(directory / ("approval-ready-" + receipt + ".json"))
+        record = _private_json(_confirmation(directory, receipt))
+    except Exception:
+        return False
+    return record == {"receipt": receipt, "pointer_digest": digest(pointer)}
+
+
 def _journal_held(directory: Path, receipt: str) -> bool:
     """Read the Slack worker's own durable hold for this receipt. Unreadable counts as held."""
     path = directory / "slack-pilot.sqlite3"
@@ -106,9 +120,12 @@ def _authority_withdrawn(directory: Path, organization: str, run_id: str) -> boo
         run = _private_json(work / "run.json")
         review = _private_json(work / "review.json")
         engagement = review["engagement"]
-        # A fresh store refuses a withdrawn engagement or a committed closeout. The sealed
-        # intake below then pins this run to that same engagement.
-        LocalTrainingStore(directory / "training.sqlite3", organization, existing_only=True)
+        # A fresh store refuses a withdrawn engagement or a committed closeout, and its guard
+        # pins the store's own engagement id to this review. The sealed intake below pins the
+        # review to its grant.
+        fresh = LocalTrainingStore(directory / "training.sqlite3", organization, existing_only=True)
+        with fresh.engagement_guard(engagement_id=engagement, read_only=True):
+            pass
         bound = source_intake._BoundEngagement(
             directory / "training.sqlite3", organization, engagement
         )
@@ -171,13 +188,24 @@ def enqueue_ready(
     # A mandate withdrawal takes only the mandate database, so it can commit between the
     # authority read above and the write. Re-read both authorities after the pointer is
     # durable; a withdrawn or unknown authority never leaves a deliverable pointer.
-    marker = _held_marker(directory, receipt)
+    marker, confirmation = _held_marker(directory, receipt), _confirmation(directory, receipt)
     if (
         not os.path.lexists(marker)
         and not _journal_held(directory, receipt)
         and not _authority_withdrawn(directory, organization, pointer["run_id"])
     ):
-        return {"receipt": receipt, "state": "pending_review"}
+        # The confirmation names only the receipt and pointer digest. Without it, flush never
+        # delivers the pointer, so a hold whose every record write failed stays undelivered.
+        try:
+            _record(confirmation, {"receipt": receipt, "pointer_digest": digest(pointer)})
+        except Exception:
+            pass
+        else:
+            return {"receipt": receipt, "state": "pending_review"}
+    try:
+        _discard(confirmation)
+    except Exception:
+        pass
     try:
         _discard(path)
         state = "removed"
@@ -264,7 +292,7 @@ def _flush_one(app: Workbench, cfg: Settings, receipt: str, claim: Json) -> bool
     from opentour_cell.pilot.slack_adapter import _evidence_guard
 
     marker = _held_marker(cfg.directory, receipt)
-    if os.path.lexists(marker):
+    if os.path.lexists(marker) or not _confirmed(cfg.directory, receipt):
         return False
     with app.journal.db() as db:
         if db.execute("SELECT 1 FROM approval_posts WHERE receipt=?", (receipt,)).fetchone():
@@ -308,7 +336,8 @@ def _flush_one(app: Workbench, cfg: Settings, receipt: str, claim: Json) -> bool
                     "INSERT INTO exposures VALUES(?,?,'admitted',?,NULL)",
                     (exposure, "approval_request", int(time.time())),
                 )
-            claim["exposure"] = exposure
+                # Known before the commit, so any later failure releases this claim.
+                claim["exposure"] = exposure
     except (ValueError, KeyError, OSError):
         if "exposure" not in claim:
             return False
@@ -319,8 +348,10 @@ def _flush_one(app: Workbench, cfg: Settings, receipt: str, claim: Json) -> bool
     # or a withdrawn or unknown authority releases the claim as held and nothing is sent.
     # Residual: a withdrawal landing after this read can still produce one button-only
     # post. Opening that button and recording any decision re-check the authority.
-    if os.path.lexists(marker) or _authority_withdrawn(
-        current.directory, current.organization, item["run_id"]
+    if (
+        os.path.lexists(marker)
+        or not _confirmed(current.directory, receipt)
+        or _authority_withdrawn(current.directory, current.organization, item["run_id"])
     ):
         _release_claim(app, receipt, exposure, "held")
         claim.clear()

@@ -885,15 +885,22 @@ def test_journal_hold_refuses_delivery_without_a_marker(
     assert inbox.flush_approvals(h.app) == 1 and posted(h) == [(receipt, "posted")]
 
 
+@pytest.mark.parametrize("change", ("marker_written", "confirmation_removed"))
 def test_marker_written_after_claim_releases_the_claim(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, change: str
 ) -> None:
     c = cycled(tmp_path, monkeypatch)
     (path,) = c.owner.glob("approval-ready-*.json")
     receipt = path.stem.removeprefix("approval-ready-")
     h = cycle_inbox(c, tmp_path)
     held = c.owner / ("approval-held-" + receipt + ".json")
-    fired = after_claim(monkeypatch, h, receipt, lambda: save(held, {"receipt": receipt}))
+    confirmation = c.owner / ("approval-confirmed-" + receipt + ".json")
+    action = (
+        (lambda: save(held, {"receipt": receipt}))
+        if change == "marker_written"
+        else confirmation.unlink
+    )
+    fired = after_claim(monkeypatch, h, receipt, action)
     assert inbox.flush_approvals(h.app) == 0 and not h.slack.post and fired == [True]
     assert posted(h) == [(receipt, "held")] and not mandate_withdrawn(c)
 
@@ -908,7 +915,12 @@ def test_unexpected_flush_error_fails_closed_per_receipt(
     h = cycle_inbox(c, tmp_path)
     # A generated receipt that sorts before (or after) the real one; it never reaches Slack.
     other = "approval-" + ("0" if point == "before_claim" else "f") * 40
-    save(c.owner / ("approval-ready-" + other + ".json"), {"generated": "unreadable"})
+    bogus = {"generated": "unreadable"}
+    save(c.owner / ("approval-ready-" + other + ".json"), bogus)
+    save(
+        c.owner / ("approval-confirmed-" + other + ".json"),
+        {"receipt": other, "pointer_digest": digest(bogus)},
+    )
     target, seen = inbox._target, []
 
     def checked(app: Any, cfg: Any, value: str) -> Any:
@@ -951,3 +963,195 @@ def test_unreadable_journal_hold_counts_as_held(
     result = enqueue(c.owner, c.org, item)
     assert result.get("state") == "held" and result.get("reason") == HELD, result
     assert not path.exists() and not mandate_withdrawn(c)
+
+
+# --- OPE-577 re-review: engagement id pin, unconfirmed pointers, journal and claim safety. ---
+
+
+def rebind_engagement(directory: Path) -> None:
+    """The training store now names another engagement than the frozen review."""
+    with closing(sqlite3.connect(directory / "training.sqlite3")) as db, db:
+        db.execute("UPDATE engagement SET id='generated-other' WHERE singleton=1")
+
+
+@pytest.mark.parametrize("setup", ("cycle", "manual"))
+def test_engagement_id_rebound_before_the_fresh_reread_holds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, setup: str
+) -> None:
+    """J2: the store is rebound to another engagement just before enqueue's fresh re-read."""
+    if setup == "cycle":
+        c, item, path = queued(tmp_path, monkeypatch)
+        directory, org = c.owner, c.org
+    else:
+        # No standing mandate: only the fresh store's engagement id pin can notice it.
+        directory, org, item, path = manual_queued(tmp_path)
+    recheck = inbox._authority_withdrawn
+
+    def rebound_first(*args: Any) -> bool:
+        rebind_engagement(directory)
+        return bool(recheck(*args))
+
+    monkeypatch.setattr(inbox, "_authority_withdrawn", rebound_first)
+    result = enqueue(directory, org, item)
+    assert result.get("state") == "held" and result.get("reason") == HELD, result
+    assert not path.exists()
+
+
+@pytest.mark.parametrize("setup", ("cycle", "manual"))
+def test_engagement_id_rebound_after_enqueue_is_not_posted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, setup: str
+) -> None:
+    """J3: the store is rebound to another engagement after enqueue and before flush."""
+    if setup == "cycle":
+        c = cycled(tmp_path, monkeypatch)
+        directory, org = c.owner, c.org
+        h = cycle_inbox(c, tmp_path)
+    else:
+        h, _, _, _, _ = stage(tmp_path)
+        directory, org = h.path.parent, h.store.organization
+        opt_in(h)
+    (path,) = directory.glob("approval-ready-*.json")
+    receipt = path.stem.removeprefix("approval-ready-")
+    rebind_engagement(directory)
+    assert inbox._authority_withdrawn(directory, org, json.loads(path.read_text())["run_id"])
+    assert inbox.flush_approvals(h.app) == 0 and not h.slack.post
+    assert (receipt, "posted") not in posted(h)
+
+
+def refuse_writes(monkeypatch: Any, prefix: str) -> None:
+    write = inbox._record
+
+    def refusing(target: Path, value: Json, **kwargs: Any) -> None:
+        if target.name.startswith(prefix):
+            raise PermissionError(target.name)
+        write(target, value, **kwargs)
+
+    monkeypatch.setattr(inbox, "_record", refusing)
+
+
+def test_hold_with_no_journal_and_no_marker_is_never_delivered(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    c = cycled(tmp_path, monkeypatch)
+    (path,) = c.owner.glob("approval-ready-*.json")
+    item = json.loads(path.read_text())
+    receipt = path.stem.removeprefix("approval-ready-")
+    confirmation = c.owner / ("approval-confirmed-" + receipt + ".json")
+    # A first enqueue: no pointer, no confirmation and no Slack journal yet.
+    path.unlink()
+    confirmation.unlink()
+    assert not (c.owner / "slack-pilot.sqlite3").exists()
+    with monkeypatch.context() as m:
+        m.setattr(inbox, "_authority_withdrawn", lambda *_: True, raising=False)
+        m.setattr(inbox, "_discard", undeletable, raising=False)
+        refuse_writes(m, "approval-held-")
+        first = enqueue(c.owner, c.org, item)
+    assert first.get("state") == "held" and first.get("pointer") == "unremoved", first
+    assert path.exists() and not confirmation.exists()
+    assert not list(c.owner.glob("approval-held-*.json"))
+    # The worker later creates its journal; the unconfirmed pointer is still never posted.
+    h = cycle_inbox(c, tmp_path)
+    assert inbox.flush_approvals(h.app) == 0 and not h.slack.post and posted(h) == []
+    # Control: a fresh enqueue with current authority confirms it, and only then it posts.
+    assert enqueue(c.owner, c.org, item).get("state") == "pending_review"
+    assert inbox.flush_approvals(h.app) == 1 and posted(h) == [(receipt, "posted")]
+
+
+def test_hold_after_an_earlier_confirmation_withdraws_that_confirmation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    c = cycled(tmp_path, monkeypatch)
+    (path,) = c.owner.glob("approval-ready-*.json")
+    item = json.loads(path.read_text())
+    receipt = path.stem.removeprefix("approval-ready-")
+    confirmation = c.owner / ("approval-confirmed-" + receipt + ".json")
+    h = cycle_inbox(c, tmp_path)
+    discard = inbox._discard
+
+    def pointer_undeletable(target: Path) -> None:
+        if target.name.startswith("approval-ready-"):
+            raise PermissionError(target.name)
+        discard(target)
+
+    # Only the confirmation can be removed: no marker, no journal hold.
+    with monkeypatch.context() as m:
+        m.setattr(inbox, "_authority_withdrawn", lambda *_: True, raising=False)
+        m.setattr(inbox, "_discard", pointer_undeletable, raising=False)
+        m.setattr(inbox, "_hold_in_journal", lambda *_: False, raising=False)
+        refuse_writes(m, "approval-held-")
+        assert enqueue(c.owner, c.org, item).get("state") == "held"
+    assert path.exists() and not confirmation.exists()
+    assert inbox.flush_approvals(h.app) == 0 and not h.slack.post and posted(h) == []
+
+
+def test_unwritable_confirmation_holds_and_removes_the_pointer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    c, item, path = queued(tmp_path, monkeypatch)
+    receipt = path.stem.removeprefix("approval-ready-")
+    (c.owner / ("approval-confirmed-" + receipt + ".json")).unlink()
+    refuse_writes(monkeypatch, "approval-confirmed-")
+    result = enqueue(c.owner, c.org, item)
+    assert result.get("state") == "held" and result.get("reason") == HELD, result
+    assert not path.exists() and not mandate_withdrawn(c)
+
+
+def test_confirmation_must_match_the_pointer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    c = cycled(tmp_path, monkeypatch)
+    (path,) = c.owner.glob("approval-ready-*.json")
+    receipt = path.stem.removeprefix("approval-ready-")
+    confirmation = c.owner / ("approval-confirmed-" + receipt + ".json")
+    h = cycle_inbox(c, tmp_path)
+    genuine = read(confirmation)
+    save(confirmation, dict(genuine, pointer_digest="0" * 64))
+    assert inbox.flush_approvals(h.app) == 0 and not h.slack.post and posted(h) == []
+    # Control: the genuine confirmation was the only difference.
+    save(confirmation, genuine)
+    assert inbox.flush_approvals(h.app) == 1 and posted(h) == [(receipt, "posted")]
+
+
+@pytest.mark.parametrize("state", ("claimed", "posted"))
+def test_journal_hold_never_rewrites_a_claimed_or_posted_row(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, state: str
+) -> None:
+    c = cycled(tmp_path, monkeypatch)
+    (path,) = c.owner.glob("approval-ready-*.json")
+    item = json.loads(path.read_text())
+    receipt = path.stem.removeprefix("approval-ready-")
+    h = cycle_inbox(c, tmp_path)
+    assert inbox.flush_approvals(h.app) == 1
+    with h.app.journal.db() as db:
+        db.execute("UPDATE approval_posts SET state=? WHERE receipt=?", (state, receipt))
+        before = db.execute(
+            "SELECT state, ts, revision, exposure FROM approval_posts WHERE receipt=?",
+            (receipt,),
+        ).fetchone()
+    with monkeypatch.context() as m:
+        m.setattr(inbox, "_authority_withdrawn", lambda *_: True, raising=False)
+        m.setattr(inbox, "_discard", undeletable, raising=False)
+        refuse_writes(m, "approval-held-")
+        assert enqueue(c.owner, c.org, item).get("state") == "held"
+    with h.app.journal.db() as db:
+        after = db.execute(
+            "SELECT state, ts, revision, exposure FROM approval_posts WHERE receipt=?",
+            (receipt,),
+        ).fetchone()
+    assert tuple(after) == tuple(before) and before[0] == state
+
+
+def test_value_error_after_the_claim_releases_it_as_held(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    c = cycled(tmp_path, monkeypatch)
+    (path,) = c.owner.glob("approval-ready-*.json")
+    receipt = path.stem.removeprefix("approval-ready-")
+    h = cycle_inbox(c, tmp_path)
+
+    def fail() -> None:
+        raise ValueError("generated")
+
+    fired = after_claim(monkeypatch, h, receipt, fail)
+    assert inbox.flush_approvals(h.app) == 0 and not h.slack.post and fired == [True]
+    assert posted(h) == [(receipt, "held")]
