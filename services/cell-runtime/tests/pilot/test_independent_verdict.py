@@ -141,8 +141,11 @@ class Scenario:
         prefix="",
         family_prefix=None,
         family_of=None,
+        content_prefix=None,
     ):
         family_prefix = prefix if family_prefix is None else family_prefix
+        # A prefixed scenario is new decision content unless the test says otherwise.
+        content_prefix = prefix if content_prefix is None else content_prefix
         cases, labels = [], {}
         self.preds = {"candidate": {}, **{c: {} for c in comparators}}
         index = 0
@@ -160,7 +163,7 @@ class Scenario:
                         case_id,
                         f"{family_prefix}family-"
                         + (family_of(index) if family_of else f"{index // family_size:04d}"),
-                        {"case_ref": case_id, "text": f"generated-input-{index}"},
+                        {"case_ref": case_id, "text": f"generated-input-{content_prefix}{index}"},
                         tuple(slices),
                     )
                 )
@@ -1449,6 +1452,90 @@ def test_q1b_declared_basis_never_waives_the_fresh_cohort_gate(tmp_path):
     assert run(tmp_path, s, ev=ev).document == first.document
     assert run(tmp_path, Scenario(CLEAN_WIN, prefix="new-"), ev=ev).outcome == "verified_gain"
     assert "caller-asserted" in (iv.IndependentEvaluator._check_selection.__doc__ or "")
+
+
+def respelled(scenario, features_of):
+    """The same scenario with each case's features rewritten by ``features_of(case)``."""
+    cases = [
+        iv.DecisionCase(c.case_id, c.family_id, features_of(c), c.slices)
+        for c in scenario.population.cases
+    ]
+    labels = {c.case_id: scenario.population.truth(c.case_id) for c in cases}
+    scenario.population = iv.SealedPopulation(
+        cases, labels, label_set=(A, B), benchmark_digest=BENCHMARK
+    )
+    return scenario
+
+
+def test_q1c_review_m1_renamed_ids_over_scored_content_are_held(tmp_path):
+    """Re-review M1: renamed ids with identical decision text came back verified_gain."""
+    ev = evaluator(tmp_path)
+    assert run(tmp_path, Scenario(CLEAN_WIN), ev=ev).outcome == "verified_gain"
+    renamed = Scenario(CLEAN_WIN, prefix="renamed-", content_prefix="")
+    assert not {c.case_id for c in renamed.population.cases} & {
+        c.case_id for c in Scenario(CLEAN_WIN).population.cases
+    }
+    doc = held(
+        run(tmp_path, renamed, ev=ev, result_revision=sha("renamed")),
+        "inconclusive",
+        "decision_content_seen_in_scored_cohort",
+    )
+    assert "fresh_confirmation_cohort_required" not in doc["reasons"]  # ids did not overlap
+
+
+@pytest.mark.parametrize(
+    "respell",
+    [
+        # Feature names renamed, re-cased and re-spaced.
+        lambda c: {"case_ref": c.features["case_ref"], " TEXT ": c.features["text"]},
+        # Feature order reversed.
+        lambda c: dict(reversed(list(c.features.items()))),
+        # An extra reference field that carries the (renamed) id in another spelling.
+        lambda c: {**c.features, "source": "ref:" + c.case_id + ".json"},
+        # A field carrying the family id.
+        lambda c: {**c.features, "group": c.family_id},
+    ],
+    ids=["renamed_keys", "reordered", "id_in_reference_field", "family_id_field"],
+)
+def test_q1d_nothing_a_producer_can_rename_evades_the_content_register(tmp_path, respell):
+    ev = evaluator(tmp_path)
+    assert run(tmp_path, Scenario(CLEAN_WIN), ev=ev).outcome == "verified_gain"
+    moved = respelled(Scenario(CLEAN_WIN, prefix="moved-", content_prefix=""), respell)
+    held(
+        run(tmp_path, moved, ev=ev, result_revision=sha("moved")),
+        "inconclusive",
+        "decision_content_seen_in_scored_cohort",
+    )
+
+
+def test_q1e_decision_content_itself_is_not_normalised(tmp_path):
+    """Changed decision text is a new input, so it is a fresh cohort; ids still are not."""
+    ev = evaluator(tmp_path)
+    assert run(tmp_path, Scenario(CLEAN_WIN), ev=ev).outcome == "verified_gain"
+    for name, change in (("upper", str.upper), ("spaced", lambda t: t + " ")):
+        fresh = respelled(
+            Scenario(CLEAN_WIN, prefix=name + "-", content_prefix=""),
+            lambda c, change=change: {**c.features, "text": change(c.features["text"])},
+        )
+        assert run(tmp_path, fresh, ev=ev).outcome == "verified_gain"
+    a = Scenario(CLEAN_WIN).population.cases[0]
+    b = iv.DecisionCase("other-id", "other-family", {"text": a.features["text"]}, ())
+    assert iv.decision_content_digest(a) == iv.decision_content_digest(b)
+    assert iv.decision_content_digest(a) != iv.decision_content_digest(
+        iv.DecisionCase("other-id", "other-family", {"text": a.features["text"] + "!"}, ())
+    )
+
+
+def test_q1f_a_register_marker_without_content_is_corrupt(tmp_path):
+    ev = evaluator(tmp_path)
+    v = run(tmp_path, Scenario(CLEAN_WIN), ev=ev)
+    marker = tmp_path / "evaluator-custody" / "cohorts" / (v.verdict_key + ".json")
+    seen = json.loads(marker.read_bytes())
+    assert len(seen["contents"]) == 200
+    del seen["contents"]
+    marker.write_text(json.dumps(seen))
+    with pytest.raises(iv.CustodyError, match="cohort_register_corrupt"):
+        run(tmp_path, Scenario(CLEAN_WIN, prefix="next-"), ev=ev)
 
 
 def test_q2_newly_automated_without_an_error_ceiling_is_inconclusive_not_an_error(tmp_path):

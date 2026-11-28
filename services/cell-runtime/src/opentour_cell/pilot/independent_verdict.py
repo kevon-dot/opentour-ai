@@ -281,6 +281,29 @@ class SealedPopulation:
         )
 
 
+def decision_content_digest(case: DecisionCase) -> str:
+    """The id-free content of one decision-time input, for the fresh-cohort register.
+
+    Everything the producer can rename is left out: the case and family ids, feature names
+    (so renaming, re-casing or re-spacing a feature name changes nothing) and the order of the
+    features. Any feature value that contains the case or family id (a reference field such as
+    ``"case_ref": "case-0001"`` or ``"ref:case-0001"``) is left out too, since it renames with
+    the id. The remaining values are digested exactly as given, in sorted order: the decision
+    content itself is NOT normalised, so changing its whitespace or case is changing the input.
+
+    Limit: a producer who adds a new field carrying a per-case value that is not the case id
+    (for example a hash of it) changes every digest and evades this check. Binding the content
+    of a benchmark is the audit receipt's job (OPE-526), and that receipt is self-sealed here.
+    """
+    ids = (case.case_id, case.family_id)
+    values = sorted(
+        json.dumps(v, sort_keys=True, ensure_ascii=False)
+        for v in case.features.values()
+        if not (isinstance(v, str) and any(i in v for i in ids))
+    )
+    return digest(["opentour.pilot.decision-content.v1", values])
+
+
 @dataclass(frozen=True)
 class GatePolicy:
     """Preregistered decision rule, frozen before any outcome is opened."""
@@ -2032,26 +2055,46 @@ class IndependentEvaluator:
         reselected candidate declared ``frozen_before_readout`` is held exactly like one declared
         ``after_protected_readout``). The one marker skipped is the claim's own: an expired
         verdict being re-evaluated must not count its own earlier scoring as a prior readout.
+
+        Case and family ids are the producer's own names, so overlap is also checked on content:
+        each case's ``decision_content_digest`` (its decision-time feature values, with feature
+        names, ordering and id-carrying values left out) is registered, and any overlap with a
+        scored cohort holds as ``decision_content_seen_in_scored_cohort``.
+
+        This fails closed on purpose and has a cost: ANY second claim on an already scored
+        cohort is held, including legitimately preregistered siblings (for example a
+        ``simple_repair`` claim and an ``open_weight_fit`` claim frozen together on the same
+        population in one custody directory). The second one scored is held as inconclusive. No
+        registry of jointly preregistered claims exists to tell a sibling from a reselection,
+        so siblings need separate cohorts or separate custody until one does.
         """
         cases = {c.case_id for c in population.cases}
         families = {c.family_id for c in population.cases}
+        contents = {decision_content_digest(c) for c in population.cases}
+        id_overlap = content_overlap = False
         for path in sorted((self._root / "cohorts").glob("*.json")):
             if path.name == key + ".json":
                 continue
             try:
                 seen = json.loads(path.read_bytes())
-                overlap = cases & set(seen["cases"]) or families & set(seen["families"])
+                id_overlap = id_overlap or bool(
+                    cases & set(seen["cases"]) or families & set(seen["families"])
+                )
+                content_overlap = content_overlap or bool(contents & set(seen["contents"]))
             except (OSError, ValueError, KeyError, TypeError):
                 raise CustodyError("cohort_register_corrupt") from None
-            if overlap:
-                reasons.add("inconclusive", "fresh_confirmation_cohort_required")
-                return
+        if id_overlap:
+            reasons.add("inconclusive", "fresh_confirmation_cohort_required")
+        if content_overlap:
+            # Renamed ids, keys or ordering over decision content already scored here.
+            reasons.add("inconclusive", "decision_content_seen_in_scored_cohort")
 
     def _mark_viewed(self, key: str, population: SealedPopulation) -> None:
-        """Record exactly the cases and families a scored, issued verdict used."""
+        """Record the cases, families and id-free decision content a scored verdict used."""
         marker = {
             "cases": [c.case_id for c in population.cases],
             "families": sorted({c.family_id for c in population.cases}),
+            "contents": sorted({decision_content_digest(c) for c in population.cases}),
         }
         _write_once(self._root / "cohorts" / (key + ".json"), json.dumps(marker).encode())
 
