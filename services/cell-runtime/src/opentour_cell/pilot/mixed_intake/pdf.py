@@ -1696,24 +1696,34 @@ def _unit_square(ctm: tuple[float, ...]) -> tuple[float, float, float, float]:
     return (min(xs), min(ys), max(xs), max(ys))
 
 
-def _image_may_conceal(
-    image: tuple[float, float, float, float],
+def _images_may_conceal(
+    images: list[tuple[float, float, float, float]],
     page_box: tuple[float, float, float, float] | None,
     texts: list[tuple[float, float, float, float]],
+    deadline: Deadline,
 ) -> bool:
-    """Large images, and images over extracted text, may hide it; small clear ones may not."""
+    """Large images, and images over extracted text, may hide it; small clear ones may not.
+
+    Overlap is looked up through a grid (_BoxIndex), within _PAINT_BUDGET; a page over budget
+    is treated as concealing (it goes to review).
+    """
+    if not images:
+        return False
     if page_box is None:
         return True  # nothing to measure against: fail closed
     page_area = (page_box[2] - page_box[0]) * (page_box[3] - page_box[1])
-    left, bottom = max(image[0], page_box[0]), max(image[1], page_box[1])
-    right, top = min(image[2], page_box[2]), min(image[3], page_box[3])
-    covered = max(right - left, 0.0) * max(top - bottom, 0.0)
-    if page_area <= 0 or covered / page_area >= IMAGE_REVIEW_PAGE_FRACTION:
+    for image in images:
+        left, bottom = max(image[0], page_box[0]), max(image[1], page_box[1])
+        right, top = min(image[2], page_box[2]), min(image[3], page_box[3])
+        covered = max(right - left, 0.0) * max(top - bottom, 0.0)
+        if page_area <= 0 or covered / page_area >= IMAGE_REVIEW_PAGE_FRACTION:
+            return True
+    meter = _Meter(_PAINT_BUDGET, deadline)
+    try:
+        index = _BoxIndex(texts, meter)
+        return any(_overlap(texts[i], image) for image in images for i in index.query(image, meter))
+    except _OverBudget:
         return True
-    return any(
-        text[0] < image[2] and text[2] > image[0] and text[1] < image[3] and text[3] > image[1]
-        for text in texts
-    )
 
 
 # ------------------------------------------------------------------ vector paint
@@ -1727,19 +1737,106 @@ def _image_may_conceal(
 #   colour cannot be judged (a pattern, a shading, a colour space this reader does not read).
 #   A paint below the text is ignored where a later axis-aligned rectangle fill, still below
 #   the text, covers all of it there (a white card over a dark page);
-# - vector_paint_unchecked: more comparisons than _PAINT_BUDGET, which goes to review unchecked.
+# - vector_paint_unchecked: more grid visits and comparisons than _PAINT_BUDGET on one page,
+#   which goes to review unchecked (the deadline is checked as the budget is spent).
 # Stroke boxes are the segments widened by half the line width, plus each corner widened by its
 # miter length (miter joins, up to the miter limit) and each curve widened by the miter limit.
+# Stroked text (render modes 1, 2, 5, 6) paints its glyph box widened the same way, and an
+# annotation a viewer may draw paints its /Rect (or, for a Link with no appearance, its border).
+#
+# A paint's colour is known only when it is opaque (alpha 1) under a verified graphics state:
+# alpha, a soft mask or a blend mode composite it with whatever lies below, which is not
+# tracked. Text with alpha is composited over the paint below it before the contrast test. A
+# cover must also be opaque, verified and inside a known clip.
+#
+# Thin strokes (at most 1 pt wide after the CTM) are compared with the glyph box's ink
+# interior only (inset 1 pt at the sides, from 0.5 pt above the baseline to 0.8 of the em):
+# a ruled table grid drawn after the cell text runs along the cell edges and hides no glyph,
+# while a thin stroke through the letters still goes to review.
 _PAINT_BUDGET = 4_000_000
+_THIN_STROKE = 1.0
 _Box = tuple[float, float, float, float]
+_ON_TOP = 1 << 62  # painting order of annotations, drawn after the page content
 
 
 @dataclass(frozen=True)
 class _Painted:
     order: int  # painting order, shared with text shows
     box: _Box
-    colour: _RGB | None  # as seen over white paper (alpha applied); None: cannot be judged
-    exact: bool  # the box is exactly the painted area: an axis-aligned rectangle fill
+    colour: _RGB | None  # opaque colour; None: cannot be judged (pattern, alpha, blend, ...)
+    exact: bool  # an opaque axis-aligned rectangle fill inside a known clip: covers its box
+    thin: bool = False  # a stroke at most _THIN_STROKE wide (see above)
+    source: str = "paint"  # "paint" or "annotation", for the flag raised
+
+
+class _OverBudget(Exception):
+    """More work than the page's budget allows."""
+
+
+class _Meter:
+    """A work budget that also checks the deadline as it is spent."""
+
+    def __init__(self, budget: int, deadline: Deadline) -> None:
+        self.left, self.deadline, self.ticks = budget, deadline, 0
+
+    def spend(self, amount: int) -> None:
+        self.left -= amount
+        self.ticks += amount
+        if self.left < 0:
+            raise _OverBudget
+        if self.ticks >= 4096:
+            self.ticks = 0
+            self.deadline.check()
+
+
+class _BoxIndex:
+    """Boxes bucketed on a uniform grid, so an overlap query visits its neighbourhood only.
+
+    A box spanning more than _WIDE cells on an axis, or not finite, is kept in one list that
+    every query returns. Every cell visited and every candidate returned is charged to `meter`.
+    """
+
+    _CELL = 32.0
+    _WIDE = 64
+
+    def __init__(self, boxes: list[_Box], meter: _Meter) -> None:
+        self.cells: dict[tuple[int, int], list[int]] = {}
+        self.wide: list[int] = []
+        self.count = len(boxes)
+        for index, box in enumerate(boxes):
+            span = self._span(box)
+            if span is None:
+                self.wide.append(index)
+                meter.spend(1)
+                continue
+            x0, y0, x1, y1 = span
+            meter.spend((x1 - x0 + 1) * (y1 - y0 + 1))
+            for cx in range(x0, x1 + 1):
+                for cy in range(y0, y1 + 1):
+                    self.cells.setdefault((cx, cy), []).append(index)
+
+    def _span(self, box: _Box) -> tuple[int, int, int, int] | None:
+        if not all(math.isfinite(v) for v in box):
+            return None
+        x0, y0 = math.floor(box[0] / self._CELL), math.floor(box[1] / self._CELL)
+        x1, y1 = math.floor(box[2] / self._CELL), math.floor(box[3] / self._CELL)
+        if x1 - x0 > self._WIDE or y1 - y0 > self._WIDE:
+            return None
+        return x0, y0, x1, y1
+
+    def query(self, box: _Box, meter: _Meter) -> set[int]:
+        span = self._span(box)
+        if span is None:
+            meter.spend(self.count)
+            return set(range(self.count))
+        found = set(self.wide)
+        x0, y0, x1, y1 = span
+        meter.spend((x1 - x0 + 1) * (y1 - y0 + 1))
+        for cx in range(x0, x1 + 1):
+            for cy in range(y0, y1 + 1):
+                found.update(self.cells.get((cx, cy), ()))
+        meter.spend(len(found) + 1)
+        return found
 
 
 def _overlap(first: _Box, second: _Box) -> bool:
@@ -1807,47 +1904,77 @@ def _stroke_boxes(
     return boxes
 
 
+_TextPaint = tuple[_RGB | None, float]  # a colour the glyphs are painted in, and its alpha
+
+
+def _ink_interior(box: _Box) -> _Box:
+    """Where a glyph box's ink is (see the thin-stroke note above)."""
+    height = box[3] - box[1]
+    return (box[0] + 1.0, box[1] + 0.5, box[2] - 1.0, box[1] + 0.8 * height)
+
+
+def _seen_contrast(colour: _RGB, alpha: float, backdrop: _RGB) -> float:
+    """Contrast between text painted at `alpha` over `backdrop` and the backdrop itself."""
+    seen = (
+        alpha * colour[0] + (1.0 - alpha) * backdrop[0],
+        alpha * colour[1] + (1.0 - alpha) * backdrop[1],
+        alpha * colour[2] + (1.0 - alpha) * backdrop[2],
+    )
+    return _contrast(seen, backdrop)
+
+
 def _paint_flags(
-    texts: list[tuple[int, _Box, tuple[_RGB | None, ...]]], paints: list[_Painted]
+    texts: list[tuple[int, _Box, tuple[_TextPaint, ...]]],
+    paints: list[_Painted],
+    deadline: Deadline,
 ) -> set[str]:
     """Review flags for text painted over, or painted onto a background of its own colour."""
     flags: set[str] = set()
-    budget = _PAINT_BUDGET
-    covers = [paint for paint in paints if paint.exact]
-    for order, box, colours in texts:
-        budget -= len(paints)
-        if budget < 0:
-            return flags | {"vector_paint_unchecked"}
-        for paint in paints:
-            if not _overlap(paint.box, box):
-                continue
-            if paint.order > order:
-                flags.add("vector_paint_over_text")
-                continue
-            region = (
-                max(paint.box[0], box[0]),
-                max(paint.box[1], box[1]),
-                min(paint.box[2], box[2]),
-                min(paint.box[3], box[3]),
-            )
-            budget -= len(covers)
-            if any(
-                paint.order < cover.order < order
-                and cover.box[0] <= region[0]
-                and cover.box[1] <= region[1]
-                and region[2] <= cover.box[2]
-                and region[3] <= cover.box[3]
-                for cover in covers
-            ):
-                continue  # covered, below the text, by a later rectangle
-            if paint.colour is None:
-                flags.add("text_background_unverified")
-            elif not any(
-                colour is not None
-                and _contrast(colour, paint.colour) >= MIN_TEXT_CONTRAST_AGAINST_WHITE
-                for colour in colours
-            ):
-                flags.add("text_background_contrast_low")
+    meter = _Meter(_PAINT_BUDGET, deadline)
+    try:
+        index = _BoxIndex([paint.box for paint in paints], meter)
+        covers = [paint for paint in paints if paint.exact]
+        cover_index = _BoxIndex([cover.box for cover in covers], meter)
+        for order, box, colours in texts:
+            interior = _ink_interior(box)
+            for candidate in index.query(box, meter):
+                paint = paints[candidate]
+                target = interior if paint.thin else box
+                if paint.order == order or not _overlap(paint.box, target):
+                    continue  # its own stroke, or clear of the glyphs
+                if paint.order > order:
+                    flags.add(
+                        "annotation_over_text"
+                        if paint.source == "annotation"
+                        else "vector_paint_over_text"
+                    )
+                    continue
+                region = (
+                    max(paint.box[0], target[0]),
+                    max(paint.box[1], target[1]),
+                    min(paint.box[2], target[2]),
+                    min(paint.box[3], target[3]),
+                )
+                if any(
+                    paint.order < covers[i].order < order
+                    and covers[i].box[0] <= region[0]
+                    and covers[i].box[1] <= region[1]
+                    and region[2] <= covers[i].box[2]
+                    and region[3] <= covers[i].box[3]
+                    for i in cover_index.query(region, meter)
+                ):
+                    continue  # covered, below the text, by a later opaque rectangle
+                if paint.colour is None:
+                    flags.add("text_background_unverified")
+                elif not any(
+                    colour is not None
+                    and _seen_contrast(colour, alpha, paint.colour)
+                    >= MIN_TEXT_CONTRAST_AGAINST_WHITE
+                    for colour, alpha in colours
+                ):
+                    flags.add("text_background_contrast_low")
+    except _OverBudget:
+        flags.add("vector_paint_unchecked")
     return flags
 
 
@@ -1860,7 +1987,7 @@ def _fragments(
     font_metrics: dict[bytes, _Metrics] | None = None,
     colour_spaces: dict[bytes, int | None] | None = None,
     ext_states: dict[bytes, _ExtState] | None = None,
-    annotations: list[_Box] | None = None,
+    annotations: list[tuple[_Box, bool]] | None = None,
     replaced: frozenset[bytes] = frozenset(),
 ) -> tuple[list[_Fragment], set[str]]:
     """Return positioned fragments and the review flags the content stream earned.
@@ -1902,7 +2029,8 @@ def _fragments(
     curves: list[_Box] = []
     rect_only = True
     painted: list[_Painted] = []
-    shown: list[tuple[int, _Box, tuple[_RGB | None, ...]]] = []
+    shown: list[tuple[int, _Box, tuple[_TextPaint, ...]]] = []
+    pending_clip = False  # W or W* seen: the clip is set from the whole path when it is painted
     order = 0
 
     def device(x: float, y: float) -> tuple[float, float]:
@@ -1930,19 +2058,36 @@ def _fragments(
             ys = [p[1] for p in points] + [v for box in curves for v in (box[1], box[3])]
             if xs:
                 a, b, c, d, _, _ = gs.ctm
-                exact = rect_only and len(subpaths) == 1 and b == 0 and c == 0
+                colour = paint_colour(gs.fill, gs.fill_alpha)
+                exact = (
+                    rect_only
+                    and len(subpaths) == 1
+                    and b == 0
+                    and c == 0
+                    and colour is not None
+                    and not gs.clip_unknown
+                )
                 box = clipped((min(xs), min(ys), max(xs), max(ys)))
-                colour = _over_white(gs.fill, gs.fill_alpha)
                 painted.append(_Painted(order, box, colour, exact))
         if op in (b"S", b"s", b"B", b"B*", b"b", b"b*") and gs.stroke_alpha > 0 and points:
-            a, b, c, d, _, _ = gs.ctm
-            width = gs.line_width * max(math.hypot(a, b), math.hypot(c, d))
-            half = max(width / 2.0, 0.5)  # a zero width is the thinnest line a device draws
+            half, reach, thin = stroke_reach()
             miter = gs.miter_limit if gs.line_join == 0 else None
-            colour = _over_white(gs.stroke, gs.stroke_alpha)
+            colour = paint_colour(gs.stroke, gs.stroke_alpha)
             for box in _stroke_boxes(subpaths, closed, curves, half, miter):
-                painted.append(_Painted(order, clipped(box), colour, False))
+                painted.append(_Painted(order, clipped(box), colour, False, thin))
         order += 1
+
+    def paint_colour(rgb: _RGB | None, alpha: float) -> _RGB | None:
+        """An opaque paint's colour under a verified state; None otherwise (see above)."""
+        return None if rgb is None or alpha < 1.0 or gs.state_unverified else rgb
+
+    def stroke_reach() -> tuple[float, float, bool]:
+        """(half the CTM-scaled line width, the join reach factor, whether it is thin)."""
+        a, b, c, d, _, _ = gs.ctm
+        width = gs.line_width * max(math.hypot(a, b), math.hypot(c, d))
+        half = max(width / 2.0, 0.5)  # a zero width is the thinnest line a device draws
+        reach = max(gs.miter_limit, 1.0) if gs.line_join == 0 else 1.0
+        return half, reach, width <= _THIN_STROKE
 
     def move_line(tx: float, ty: float) -> None:
         """Td: Tlm = [1 0 0 1 tx ty] x Tlm, and Tm restarts at the new line start."""
@@ -2053,7 +2198,25 @@ def _fragments(
         ):
             marks.add("clip_region_present")
         text_boxes.append((left_end, ry, right_end, ry + glyph))
-        shown.append((order, (left_end, ry, right_end, ry + glyph), paints))
+        raw = (
+            ((gs.fill, gs.fill_alpha),)
+            if mode in (0.0, 4.0)
+            else ((gs.stroke, gs.stroke_alpha),)
+            if mode in (1.0, 5.0)
+            else ((gs.fill, gs.fill_alpha), (gs.stroke, gs.stroke_alpha))
+            if mode in (2.0, 6.0)
+            else ()
+        )
+        box = (left_end, ry, right_end, ry + glyph)
+        shown.append((order, box, raw))
+        if mode in (1.0, 2.0, 5.0, 6.0) and gs.stroke_alpha > 0:
+            # A stroked glyph paints past its box by half the line width (more at miter
+            # corners): a wide stroke blots out text drawn before it.
+            half, reach, thin = stroke_reach()
+            stroked = _widen(box, half * reach)
+            painted.append(
+                _Painted(order, clipped(stroked), paint_colour(gs.stroke, 1.0), False, thin)
+            )
         order += 1
         out.append(_Fragment(px, py, text, gs.size * abs(ctm[3] or 1.0), gs.font))
 
@@ -2261,9 +2424,14 @@ def _fragments(
             if closed:
                 closed[-1] = True
         elif op in (b"W", b"W*"):
-            clip_to_path()
+            # The clip is the whole path as it stands at the painting operator (PDF 8.5.4),
+            # not as it stood at W: `re W* re n` clips to the even-odd of both rectangles.
+            pending_clip = True
         elif op in _PAINT:
             paint_path(op)
+            if pending_clip:
+                clip_to_path()
+                pending_clip = False
             rects.clear()
             path_other = False
             subpaths.clear()
@@ -2324,17 +2492,17 @@ def _fragments(
         # An array or dictionary left open: the rest of the stream was read as its operands.
         marks.add("content_stream_unresolved")
     if out:
-        if any(_image_may_conceal(box, page_box, text_boxes) for box in image_boxes):
+        if _images_may_conceal(image_boxes, page_box, text_boxes, deadline):
             late.add("image_text_overlay_unverified")
         overprint = _page_overprint(glyph_boxes, deadline)
         if overprint is None:
             late.add("glyph_overprint_unchecked")
         elif overprint:
             late.add("glyph_overprint_suspected")
-        late |= _paint_flags(shown, painted)
-        if any(_overlap(note, box) for note in annotations or () for box in text_boxes):
-            # An annotation's appearance is drawn over the page content; it is not read here.
-            late.add("annotation_over_text")
+        # An annotation's appearance is drawn over the page content; it is not read here.
+        for note, thin in annotations or ():
+            painted.append(_Painted(_ON_TOP, note, None, False, thin, "annotation"))
+        late |= _paint_flags(shown, painted, deadline)
         marks |= late
     return out, marks
 
@@ -2799,20 +2967,38 @@ def _ext_states(resources: dict[str, object], doc: _Doc) -> dict[bytes, _ExtStat
 _ANNOTATION_HIDDEN = 2 | 32  # the Hidden and NoView annotation flags
 
 
-def _annotation_boxes(page: dict[str, object], doc: _Doc) -> tuple[list[_Box], bool]:
-    """(the /Rect of every annotation a viewer may draw on the page, whether any is unreadable).
+def _border_width(annot: dict[str, object], doc: _Doc) -> float | None:
+    """A Link's border width: /BS /W, else /Border's third entry, else 1; None if unreadable."""
+    if "BS" in annot:
+        style = doc.dict(annot["BS"])
+        width = doc.resolve((style or {}).get("W", 1)) if style is not None else None
+    elif "Border" in annot:
+        border = doc.resolve(annot["Border"])
+        width = doc.resolve(border[2]) if isinstance(border, list) and len(border) >= 3 else None
+    else:
+        width = 1
+    if not _is_number(width) or not math.isfinite(float(width)):  # type: ignore[arg-type]
+        return None
+    return max(float(width), 0.0)  # type: ignore[arg-type]
+
+
+def _annotation_boxes(page: dict[str, object], doc: _Doc) -> tuple[list[tuple[_Box, bool]], bool]:
+    """(what each annotation a viewer may draw paints, and whether it is a thin border; whether
+    any annotation is unreadable).
 
     Annotations are drawn over the page content from their appearance streams, which this
-    reader does not read. A Popup, a Link with no appearance stream and one flagged Hidden or
-    NoView draw nothing over the page; every other annotation is assumed to paint its /Rect.
-    An /Annots value, an annotation or a /Rect that cannot be read is unreadable.
+    reader does not read, so any annotation not flagged Hidden or NoView is taken to paint its
+    /Rect, whatever its subtype (a Popup with an appearance included). Two exceptions: a Popup
+    with no appearance draws nothing, and a Link with no appearance draws only its border, as
+    its /Rect edges widened by half the border width (thin when at most 1 pt wide). An
+    /Annots value, an annotation, its /F, /Rect or border that cannot be read is unreadable.
     """
     if "Annots" not in page:
         return [], False
     annots = doc.resolve(page["Annots"])
     if not isinstance(annots, list):
         return [], True
-    boxes: list[_Box] = []
+    boxes: list[tuple[_Box, bool]] = []
     unreadable = False
     for entry in annots:
         annot = doc.dict(entry)
@@ -2823,13 +3009,28 @@ def _annotation_boxes(page: dict[str, object], doc: _Doc) -> tuple[list[_Box], b
         subtype = doc.resolve(annot.get("Subtype"))
         if type(flags) is int and flags & _ANNOTATION_HIDDEN:
             continue
-        if subtype == "Popup" or (subtype == "Link" and "AP" not in annot):
+        appearance = "AP" in annot
+        if subtype == "Popup" and not appearance:
             continue
         box = _box(annot.get("Rect"), doc)
         if box is None or type(flags) is not int:
             unreadable = True
             continue
-        boxes.append(box)
+        if subtype == "Link" and not appearance:
+            width = _border_width(annot, doc)
+            if width is None:
+                unreadable = True
+            elif width > 0:
+                half, (x0, y0, x1, y1) = width / 2.0, box
+                for edge in (
+                    (x0, y0, x1, y0),
+                    (x0, y1, x1, y1),
+                    (x0, y0, x0, y1),
+                    (x1, y0, x1, y1),
+                ):
+                    boxes.append((_widen(edge, half), width <= _THIN_STROKE))
+            continue
+        boxes.append((box, False))
     return boxes, unreadable
 
 
