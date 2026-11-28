@@ -7,6 +7,11 @@ on:
       - .github/workflows/slack-journeys.yml
       - services/cell-runtime/**
       - packages/contracts/common/python-unit/**
+      - packages/authority-journal/**
+      - docs/pilot-*.md
+      - training/profiles/smollm2_135m_lora_v1*
+      - training/src/opentour_training/training/open_weight_worker.py
+      - tools/build_pilot_kit.py
       - tools/build_slack_pilot_kit.py
       - tools/ci/prepare.py
       - tools/toolchain.json
