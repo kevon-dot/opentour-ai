@@ -23,7 +23,7 @@ from opentour_cell.pilot.intake_mcp import HistoricalPair, IntakeError
 from opentour_cell.pilot.learning_mandate import LearningMandates
 from opentour_cell.pilot.operating_point import canonical, digest
 from opentour_cell.pilot.training import LocalTrainingStore
-from opentour_cell.pilot.workflow_benchmarks import BenchmarkIntake
+from opentour_cell.pilot.workflow_benchmarks import BenchmarkIntake, BenchmarkScope
 
 EXAMPLES = Path(__file__).resolve().parents[2] / "examples"
 
@@ -194,6 +194,21 @@ def test_actual_standing_mandate_freezes_and_scores_recorded_predictions_without
     plan = json.loads((output / "plan.json").read_text())
     assert record["definition_digest"] == plan["revision"]
     assert record["result_digest"] == digest(comparison)
+    scope = BenchmarkScope(
+        actor.tenant, producer.authority.store.engagement_id, status.workflow_ref
+    )
+    assert (
+        intake.benchmarks.match_scored_comparison(scope, 1, digest(comparison))
+        == status.benchmark.benchmark_ref
+    )
+    assert intake.benchmarks.match_scored_comparison(scope, 2, digest(comparison)) is None
+    assert intake.benchmarks.match_scored_comparison(scope, 1, "0" * 64) is None
+    assert (
+        intake.benchmarks.match_scored_comparison(
+            replace(scope, workflow_ref="other-workflow"), 1, digest(comparison)
+        )
+        is None
+    )
     assert comparison["protected_rows_evaluated"] == plan["protected_count"] == 4
     assert comparison["protected_membership_digest"] == plan["protected_membership_digest"]
     assert comparison["arms"]["incumbent"]["metrics"]["incorrect_automatic"] == 2

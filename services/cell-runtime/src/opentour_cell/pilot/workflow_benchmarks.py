@@ -510,6 +510,28 @@ class WorkflowBenchmarks:
                 "materialized": None if receipt is None else asdict(receipt),
             }
 
+    def match_scored_comparison(
+        self, scope: BenchmarkScope, version: int, result_revision: str
+    ) -> str | None:
+        """Bind a current private managed result to its exact frozen benchmark.
+
+        The caller must already hold the current private read grant for the
+        result and the independently verified intake identity for this scope.
+        The receipt gives no authority to read a result.
+        """
+        _require(type(version) is int and 0 < version < 2**63, "invalid_benchmark_version")
+        evidence = self.inspect(scope, version)
+        if evidence is None or evidence["benchmark_state"] != "scored":
+            return None
+        receipt = evidence["materialized"]
+        if (
+            receipt is None
+            or receipt["result_digest"] != result_revision
+            or receipt["result_ref"] != "protected-result-" + result_revision
+        ):
+            return None
+        return str(evidence["benchmark_ref"])
+
     def publish(
         self,
         tenant: str,
