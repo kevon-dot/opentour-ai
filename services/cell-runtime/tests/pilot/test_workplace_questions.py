@@ -11,7 +11,11 @@ from opentour_cell.pilot.intake_admission import AuthorizedSource, DurableIntake
 from opentour_cell.pilot.intake_mcp import IntakePrincipal
 from opentour_cell.pilot.operating_point import digest
 from opentour_cell.pilot.source_intake import check_current_intake
-from opentour_cell.pilot.workflow_benchmarks import BenchmarkIntake, MaterializedBenchmark
+from opentour_cell.pilot.workflow_benchmarks import (
+    BenchmarkIntake,
+    BenchmarkScope,
+    MaterializedBenchmark,
+)
 from test_app_home import click, publish
 from test_managed_slack import setup_workflow
 from test_reviewer_workflow import buttons, screen, supplied, text
@@ -259,9 +263,14 @@ def test_chart_selection_rechecks_frozen_receipt_and_named_grant(tmp_path, monke
     view = ask()
     pin = buttons(screen(h, view))["ot_result_open"]
     third = replace(HISTORY, source_revision="trace-v3", idempotency_key="history-v3")
-    benchmarks.submit_intake(principal, third)
+    # Admission commits before the child benchmark publication. Even while that
+    # publication is pending, the newer canonical admission fences the old chart.
+    benchmarks.intake.submit_intake(principal, third)
+    scope = BenchmarkScope(cfg.organization, h.store.engagement_id, intake["workflow"])
+    assert benchmarks.benchmarks.inspect(scope, 2)["benchmark_state"] == "scored"
     h.action(view, "ot_result_open", pin)
     assert screen(h, view).get("callback_id") != "ot_arm_chart"
+    assert screen(h, ask())["callback_id"] == "ot_query_hold"
     assert counts(h) == before
 
 

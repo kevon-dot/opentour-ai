@@ -22,6 +22,7 @@ from typing import Any, Protocol
 from opentour_cell.pilot.intake_admission import (
     DurableIntake,
     IntakeWork,
+    read_current_benchmark_run,
     require_readonly_snapshot,
 )
 from opentour_cell.pilot.intake_mcp import (
@@ -520,7 +521,11 @@ class WorkflowBenchmarks:
         The receipt gives no authority to read a result.
         """
         _require(type(version) is int and 0 < version < 2**63, "invalid_benchmark_version")
-        evidence = self.inspect(scope, version)
+        order = (self.path.parent, scope.tenant, scope.workflow_ref, scope.engagement_epoch)
+        current_run = read_current_benchmark_run(*order)
+        if current_run is None:
+            return None
+        evidence = self.inspect(scope, version, current_run=current_run)
         if evidence is None or evidence["benchmark_state"] != "scored":
             return None
         receipt = evidence["materialized"]
@@ -529,6 +534,8 @@ class WorkflowBenchmarks:
             or receipt["result_digest"] != result_revision
             or receipt["result_ref"] != "protected-result-" + result_revision
         ):
+            return None
+        if read_current_benchmark_run(*order) != current_run:
             return None
         return str(evidence["benchmark_ref"])
 
