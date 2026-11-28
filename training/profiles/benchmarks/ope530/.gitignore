@@ -1,0 +1,9 @@
+# Never commit staged weights, interpreters, wheels or work directories here.
+model-base/
+model-python/
+cpython-*/
+wheels/
+work-*/
+*.safetensors
+*.whl
+*.tmp
