@@ -106,6 +106,55 @@ def _preview(preview: Record) -> str:
     )
 
 
+def _change_forms(status: Record, csrf: str) -> str:
+    base = (
+        csrf
+        + _hidden("action", "preview")
+        + _hidden("expected_revision", status["revision"] or "initial")
+    )
+    result = "<h2>Historical source pair</h2>"
+    pairs = status.get("source_pairs", ())
+    if pairs:
+        options = ['<option value="" disabled selected>Choose a source pair</option>']
+        for pair in pairs:
+            label = f"{pair['workflow_label']} / {pair['correction_label']} · {pair['id'][:12]}"
+            options.append(f'<option value="{_text(pair["id"])}">{_text(label)}</option>')
+        operations = '<option value="save">Save settings</option>'
+        if status["revision"]:
+            operations += '<option value="renew">Renew mandate</option>'
+        result += (
+            '<form method="post">'
+            + base
+            + "<label>Workflow trace and independent correction resource"
+            + '<select name="source_pair" required>'
+            + "".join(options)
+            + "</select></label>"
+            + '<label>Operation<select name="operation">'
+            + operations
+            + "</select></label>"
+            + '<label>Policy JSON<textarea name="policy" rows="8" required></textarea></label>'
+            + "<p>Supply the mandate, agreement and currency for this source pair.</p>"
+            + '<button type="submit">Preview changes</button></form>'
+        )
+    else:
+        result += (
+            "<p>No eligible workflow trace and correction pair is available. "
+            "The data custodian can check the source connection and grant.</p>"
+        )
+    if status["revision"]:
+        result += (
+            '<h2>Pause or revoke this mandate</h2><form method="post">'
+            + base
+            + _hidden("policy", "")
+            + _hidden("source_pair", "")
+            + '<label>Operation<select name="operation">'
+            + '<option value="pause">Pause mandate</option>'
+            + '<option value="revoke">Revoke mandate</option>'
+            + '</select></label><button type="submit">Preview mandate change</button></form>'
+        )
+    return result
+
+
 def render_owner_setup(
     status: Record | None,
     *,
@@ -127,7 +176,7 @@ def render_owner_setup(
         content += _current(status)
         if receipt:
             content += (
-                f"<h2>Saved settings</h2><p>Action · {_text(receipt['action'])}. "
+                f"<h2>Saved settings</h2><p>State · {_text(receipt['state'])}. "
                 f"Saved revision · {_text(receipt['revision'])}.</p>"
             )
         if csrf_token and status.get("may_preview") is True:
@@ -143,28 +192,7 @@ def render_owner_setup(
                     + '<button type="submit">Submit signed settings</button></form>'
                 )
             else:
-                ops = "".join(
-                    f'<option value="{value}">{name}</option>'
-                    for value, name in (
-                        ("save", "Save settings"),
-                        ("renew", "Renew mandate"),
-                        ("pause", "Pause mandate"),
-                        ("revoke", "Revoke mandate"),
-                    )
-                )
-                content += (
-                    '<h2>Prepare a change</h2><form method="post">'
-                    + hidden
-                    + _hidden("action", "preview")
-                    + _hidden("expected_revision", status["revision"] or "initial")
-                    + '<label>Operation<select name="operation">'
-                    + ops
-                    + "</select></label>"
-                    + '<label>Policy JSON<textarea name="policy" rows="8"></textarea></label>'
-                    + "<p>A save or renewal requires a mandate, agreement, "
-                    + "connection filename and currency.</p>"
-                    + '<button type="submit">Preview changes</button></form>'
-                )
+                content += _change_forms(status, hidden)
     return (
         '<!doctype html><html lang="en"><head><meta charset="utf-8">'
         '<meta name="viewport" content="width=device-width,initial-scale=1">'
