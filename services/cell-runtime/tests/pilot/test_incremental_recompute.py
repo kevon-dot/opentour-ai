@@ -789,7 +789,7 @@ def test_registry_refuses_self_parenting() -> None:
     assert exc.value.code == "SELF_PARENT"
 
 
-@pytest.mark.parametrize("length", [2, 3])
+@pytest.mark.parametrize("length", [2, 3, 4, 50])
 def test_registry_refuses_lineage_cycles(length: int) -> None:
     names = [f"cycle-{i}" for i in range(length)]
     families = [
@@ -883,3 +883,52 @@ def test_corrupt_published_state_row_forces_bounded_rebuild(
     assert all("source_state_rewritten" in report.plan.reasons[f] for f in svc.registry.families)
     parity(svc)
     assert svc.run("w", now=1).plan.dirty == ()  # publish wrote a fresh row
+
+
+def published_state_row(svc: RecomputeService) -> dict[str, Any]:
+    row = svc.db.execute("select v from meta where k='published_state'").fetchone()
+    assert row is not None
+    loaded: dict[str, Any] = json.loads(row[0])
+    return loaded
+
+
+def assert_recovers_from_published_state(svc: RecomputeService, corrupt: str) -> None:
+    svc.db.execute("insert or replace into meta values('published_state',?)", (corrupt,))
+    report = svc.run("w", now=0)  # must not raise: a corrupt row is treated as rewritten
+    assert report.plan.mode == "bounded_full_rebuild"
+    assert all("source_state_rewritten" in report.plan.reasons[f] for f in svc.registry.families)
+    parity(svc)
+    assert svc.run("w", now=1).plan.dirty == ()  # publish wrote a fresh, valid row
+    parity(svc)
+
+
+def test_published_state_with_wrong_container_type_recovers(svc: RecomputeService) -> None:
+    raw = published_state_row(svc)
+    raw["values"] = []  # list, not object: SourceState.from_json raises AttributeError
+    assert_recovers_from_published_state(svc, json.dumps(raw))
+
+
+def test_published_state_failing_during_replay_recovers(svc: RecomputeService) -> None:
+    """A string revision only fails when a pending event on that field is replayed onto it."""
+    svc.submit([upsert("e1", 2, FREIGHT, 11)])
+    raw = published_state_row(svc)
+    raw["values"][FREIGHT.key()] = ["generated-not-a-revision", 1]
+    assert_recovers_from_published_state(svc, json.dumps(raw))
+
+
+def test_deeply_nested_published_state_recovers(svc: RecomputeService) -> None:
+    depth = 100_000  # beyond the JSON decoder's recursion limit: RecursionError
+    assert_recovers_from_published_state(svc, "[" * depth + "]" * depth)
+
+
+@pytest.mark.parametrize("where", ["value_entry", "top_level"])
+def test_published_state_outside_the_exact_shape_counts_as_rewritten(
+    svc: RecomputeService, where: str
+) -> None:
+    """Parses and replays to the live state, but is not what to_json writes: do not trust it."""
+    raw = published_state_row(svc)
+    if where == "value_entry":
+        raw["values"][FREIGHT.key()] = [*raw["values"][FREIGHT.key()], "generated-extra"]
+    else:
+        raw["generated-extra-key"] = []
+    assert_recovers_from_published_state(svc, json.dumps(raw))

@@ -160,6 +160,37 @@ class SourceState:
         )
 
 
+def _is_state_json(raw: object) -> bool:
+    """Exactly the shape ``SourceState.to_json`` writes; anything else is a corrupt row."""
+    if not isinstance(raw, dict) or set(raw) != {"values", "withdrawn", "merges", "grants"}:
+        return False
+    values, withdrawn, merges, grants = (
+        raw[k] for k in ("values", "withdrawn", "merges", "grants")
+    )
+
+    def is_str_list(items: object) -> bool:
+        return isinstance(items, list) and all(isinstance(i, str) for i in items)
+
+    def is_revision(rev: object) -> bool:
+        return isinstance(rev, int) and not isinstance(rev, bool)
+
+    return (
+        isinstance(values, dict)
+        and all(isinstance(v, list) and len(v) == 2 and is_revision(v[0]) for v in values.values())
+        and is_str_list(withdrawn)
+        and isinstance(merges, list)
+        and all(is_str_list(m) for m in merges)
+        and isinstance(grants, list)
+        and all(
+            isinstance(g, list)
+            and len(g) == 3
+            and is_str_list(g[:2])
+            and (g[2] is None or is_revision(g[2]))
+            for g in grants
+        )
+    )
+
+
 def apply_event(state: SourceState, event: ChangeEvent) -> SourceState:
     """Pure transition. A lower revision of the same field never overwrites a newer one."""
     values = dict(state.values)
@@ -569,13 +600,17 @@ class RecomputeService:
         row = self.db.execute("select v from meta where k='published_state'").fetchone()
         if row is None:
             return True
-        try:
-            expected = SourceState.from_json(json.loads(row[0]))
-        except (ValueError, KeyError, TypeError, IndexError):
-            return True  # corrupt row: nothing proves reuse is safe, so rebuild (and rewrite it)
-        for event in pending:
-            expected = apply_event(expected, event)
-        return canonical(expected.to_json()) != canonical(state.to_json())
+        try:  # parse, shape check and replay: any failure means the row cannot vouch for reuse
+            raw = json.loads(row[0])
+            if not _is_state_json(raw):
+                return True
+            expected = SourceState.from_json(raw)
+            for event in pending:
+                expected = apply_event(expected, event)
+            replayed = canonical(expected.to_json())
+        except Exception:  # corrupt row (incl. RecursionError): rebuild, publish rewrites it
+            return True
+        return replayed != canonical(state.to_json())
 
     def _put_registry(self) -> None:
         self.db.execute(
