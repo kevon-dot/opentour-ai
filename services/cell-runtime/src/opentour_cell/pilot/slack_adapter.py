@@ -57,6 +57,8 @@ if TYPE_CHECKING:
         LearningService,
         LearningStatus,
         Operation,
+        ScanService,
+        ScanStatus,
     )
     from opentour_cell.pilot.starter_evaluation_session import StarterEvaluationSession
     from opentour_cell.pilot.starter_map_confirmation import StarterCaseEntry, StarterCaseSession
@@ -106,6 +108,7 @@ LEARNING_CONTROLS: dict[str, Control] = {
     "ot_learning_resume": "resume",
     "ot_learning_stop": "stop",
 }
+SCAN_ACTIONS = {"ot_eve_start_scan", "ot_eve_another_scan", "ot_eve_done_for_now"}
 ACTIONS = {
     *LEARNING_CONTROLS,
     "ot_workflow_starter",
@@ -1229,6 +1232,7 @@ class Workbench:
         submit: Callable[[Callable[[], None]], Any] | None = None,
         *,
         learning_service: LearningService | None = None,
+        scan_service: ScanService | None = None,
         workflow_index_scope: Callable[
             [Settings, IntakePrincipal, tuple[ProposalAccess, ...]], IndexScope | None
         ]
@@ -1236,6 +1240,7 @@ class Workbench:
         lifecycle_authority: LifecycleAuthority | None = None,
     ):
         self.learning_service = learning_service
+        self.scan_service = scan_service
         self.learning_changed = threading.Event()
         self.workflow_index_scope = workflow_index_scope
         self.config = config
@@ -4987,6 +4992,11 @@ class Workbench:
         words = prompt.strip().split(maxsplit=1)
         command = words[0].casefold() if words else ""
         argument = words[1] if len(words) == 2 else ""
+        if not command:
+            scan = self._scan_status(cfg, actor)
+            if scan:
+                self._show_scan(cfg, actor, view, scan)
+                return
         if command in {"prompt", "agent"} and argument in {"", "repair"}:
             if argument == "repair":
                 _check(self._home_repair_access(cfg, actor))
@@ -5890,6 +5900,79 @@ class Workbench:
         else:
             raise Refused()
 
+    def _scan_status(self, cfg: Settings, actor: str) -> ScanStatus | None:
+        from opentour_cell.pilot.slack_learning import ScanStatus
+
+        if self.scan_service is None or actor != cfg.reviewer:
+            return None
+        try:
+            entry = cfg.permission(actor, "review")
+            _check("inspect" in entry["roles"] and entry["aggregate"] is True)
+            self.private_channel(cfg, actor)
+            status = ScanStatus.from_status(self.scan_service.status(actor))
+            _check(self.settings() == cfg)
+            return status
+        except Exception:
+            return None
+
+    def _scan_key(self, cfg: Settings, actor: str, action: str, revision: str) -> str:
+        return self.journal.opaque(
+            "eve_scan", [cfg.organization, cfg.team, cfg.channel, actor, action, revision]
+        )
+
+    def _show_scan(
+        self, cfg: Settings, actor: str, view: str, scan: ScanStatus, old_hash: str = ""
+    ) -> None:
+        token = self.journal.context(actor, cfg.channel, view, "eve_scan", revision=scan.revision)
+        controls = {
+            action: self._scan_key(cfg, actor, action, scan.revision) for action in scan.controls()
+        }
+        self._show(
+            view,
+            self.views.scan_modal(token, scan.state, controls),
+            old_hash,
+            authorize=lambda: _check(self._scan_status(cfg, actor) == scan),
+        )
+
+    def _scan_action(self, cfg: Settings, actor: str, body: Json, ctx: Json) -> None:
+        service = self.scan_service
+        obj, box, button = body["view"], body["container"], body["actions"][0]
+        _check(
+            service is not None
+            and body["type"] == "block_actions"
+            and obj["type"] == "modal"
+            and obj["callback_id"] == "ot_eve_scan"
+            and obj.get("app_id", cfg.app) == cfg.app
+            and obj.get("team_id", cfg.team) == cfg.team
+            and box["type"] == "view"
+            and box["view_id"] == obj["id"]
+            and box.get("channel_id", cfg.channel) == cfg.channel
+            and ctx["kind"] == "eve_scan"
+        )
+        assert service is not None
+        action = button["action_id"].removeprefix("ot_eve_")
+        key = self._scan_key(cfg, actor, action, ctx["revision"])
+        _check(button["value"] == key)
+        scan = self._scan_status(cfg, actor)
+        if scan is None:
+            self.journal.context(actor, cfg.channel, obj["id"], "scan_unavailable")
+            self._safe_notice(obj["id"], obj.get("hash", ""))
+            return
+        if scan.revision != ctx["revision"] or action not in scan.controls():
+            self._show_scan(cfg, actor, obj["id"], scan, obj.get("hash", ""))
+            return
+        try:
+            service.act(actor, action, scan.revision, key)
+        finally:
+            # A lost acknowledgement can follow a committed action. Read the durable state
+            # before presenting either the outcome or the same idempotent retry.
+            current = self._scan_status(cfg, actor)
+            if current is None:
+                self.journal.context(actor, cfg.channel, obj["id"], "scan_unavailable")
+                self._safe_notice(obj["id"], obj.get("hash", ""))
+            else:
+                self._show_scan(cfg, actor, obj["id"], current, obj.get("hash", ""))
+
     def _publish_app_home(self, cfg: Settings, event: Json, *, cursor: str | None = None) -> None:
         actor = event["user"]
         _check(
@@ -5928,6 +6011,7 @@ class Workbench:
         case_entry = self._case_entry(actor)
         score_entry, _ = self._starter_scores(actor)
         verifier_entry = self._verifier_entry(actor) if cfg.live_workflow_ref else ""
+        scan = self._scan_status(cfg, actor)
         layout = self.views.app_home_view(
             token,
             cfg.workspace_title,
@@ -5944,6 +6028,7 @@ class Workbench:
             decision_map_entry=map_entry,
             case_entry=case_entry,
             starter_score_entry=score_entry,
+            scan_entry=self._scan_key(cfg, actor, "open", scan.revision) if scan else "",
             queue=queue,
             queue_denied=queue_denied,
             queue_continuation=cursor is not None,
@@ -5966,6 +6051,7 @@ class Workbench:
                                 == (queue, False)
                             )
                             and (not score_entry or self._starter_scores(actor)[0] == score_entry)
+                            and (scan is None or self._scan_status(cfg, actor) == scan)
                             and (not case_entry or self._case_entry(actor) == case_entry)
                             and (not map_entry or self._map_entry(actor) == map_entry)
                             and (
@@ -5982,6 +6068,7 @@ class Workbench:
                     or map_entry
                     or case_entry
                     or score_entry
+                    or scan is not None
                     else None,
                 )
         except Exception:
@@ -6010,6 +6097,23 @@ class Workbench:
             and len(body["actions"]) == 1
         )
         action = body["actions"][0]
+        if action.get("action_id") == "ot_app_eve_scan":
+            box = body["container"]
+            _check(
+                box.get("view_id") == view["id"]
+                and view.get("app_id", cfg.app) == cfg.app
+                and view.get("team_id", cfg.team) == cfg.team
+            )
+            scan = self._scan_status(cfg, actor)
+            _check(
+                scan and action.get("value") == self._scan_key(cfg, actor, "open", scan.revision)
+            )
+            assert scan is not None
+            opened = self.web.views_open(
+                trigger_id=body["trigger_id"], view=self.views.notice_modal("checking")
+            )
+            self._show_scan(cfg, actor, opened["view"]["id"], scan)
+            return
         if action.get("action_id") == "ot_app_queue_open":
             opened = self.web.views_open(
                 trigger_id=body["trigger_id"], view=self.views.notice_modal("checking")
@@ -6298,6 +6402,13 @@ class Workbench:
                 if (
                     not submission
                     and len(actions) == 1
+                    and actions[0].get("action_id") in SCAN_ACTIONS
+                ):
+                    self._scan_action(cfg, actor, body, ctx)
+                    return
+                if (
+                    not submission
+                    and len(actions) == 1
                     and actions[0].get("action_id") in LEARNING_CONTROLS
                 ):
                     box = body.get("container", {})
@@ -6506,6 +6617,7 @@ def main(argv: list[str] | None = None) -> int:
         response = importlib.import_module("slack_sdk.socket_mode.response").SocketModeResponse
         from opentour_cell.pilot import slack_views
         from opentour_cell.pilot.eve_learning_service import open_eve_learning_service
+        from opentour_cell.pilot.eve_scan import open_eve_scan_service
         from opentour_cell.pilot.recipient_lifecycle_authority import open_lifecycle_authority
 
         bot = os.environ.get("SLACK_BOT_TOKEN", "")
@@ -6527,6 +6639,11 @@ def main(argv: list[str] | None = None) -> int:
                 else open_eve_learning_service(
                     cfg.directory, cfg.organization, cfg.team, cfg.channel
                 )
+            ),
+            scan_service=(
+                None
+                if args.flush_approvals or args.post_launcher
+                else open_eve_scan_service(cfg.directory, cfg.organization, cfg.team, cfg.channel)
             ),
             workflow_index_scope=open_workflow_index_scope
             if cfg.workflow_index_publication_file

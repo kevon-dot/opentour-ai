@@ -161,6 +161,28 @@ def _modal(
     return view
 
 
+def scan_modal(context: str, state: str, controls: Mapping[str, str]) -> Block:
+    states = {
+        "ready": "Ready to scan",
+        "watching": "Watching",
+        "scanning": "Scanning",
+        "parked": "Parked",
+        "held": "Scan held",
+    }
+    labels = {
+        "start_scan": "Start scan",
+        "another_scan": "Another scan",
+        "done_for_now": "Done for now",
+    }
+    blocks = [_section(states[state])]
+    if controls:
+        blocks.append(
+            _actions(*[_button(labels[a], "ot_eve_" + a, pin) for a, pin in controls.items()])
+        )
+    blocks.append(_actions(_button("Review results", "ot_readouts", "home")))
+    return _modal("Workflow scan", "ot_eve_scan", context, blocks)
+
+
 def notice_modal(kind: str) -> Block:
     """Non-interactive feedback, including before a grant or interaction context exists."""
     notices = {
@@ -2136,6 +2158,7 @@ def app_home_view(
     decision_map_entry: str = "",
     case_entry: str = "",
     starter_score_entry: str = "",
+    scan_entry: str = "",
     queue: IndexPage | None = None,
     queue_denied: bool = False,
     queue_continuation: bool = False,
@@ -2157,6 +2180,8 @@ def app_home_view(
         blocks.append(_section("Workflow queue access is unavailable."))
     if workflow:
         blocks.append(_section("Workflow · " + _display(workflow)))
+    if scan_entry:
+        blocks.append(_actions(_button("Open workflow scan", "ot_app_eve_scan", scan_entry)))
     nav = [
         _button("Browse data", "ot_app_data", "ot_app_data"),
         _button("Ask OpenTour", "ot_app_prompt", "ot_app_prompt"),
