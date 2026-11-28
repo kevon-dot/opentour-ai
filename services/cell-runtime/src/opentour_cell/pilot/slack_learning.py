@@ -15,6 +15,8 @@ class LearningScope:
     workspace: str
     actor: str
     workflow: str
+    dataset: str
+    dataset_revision: str
 
 
 @dataclass(frozen=True)

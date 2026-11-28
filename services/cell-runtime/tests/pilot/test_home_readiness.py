@@ -745,3 +745,19 @@ def test_learning_plan_from_home_start_reopen_refresh_and_cancel(ready, monkeypa
     assert "ot_learning_cancel" not in buttons(screen(h, view))
     assert worker.cancels == 1 and len(worker.starts) == 1
     assert worker.starts[0][0] == "evaluate_and_improve" and effects(h) == (0,) * 7
+
+    view = open_plan()
+    plan_action = buttons(screen(h, view))["ot_learning_status"]
+    original_status = worker.status
+
+    def revoke_before_disclosure(scope, run_ref):
+        result = original_status(scope, run_ref)
+        h.config["users"][ACTOR]["aggregate"] = False
+        h.save()
+        return result
+
+    monkeypatch.setattr(worker, "status", revoke_before_disclosure)
+    h.action(view, "ot_learning_status", plan_action)
+    assert screen(h, view).get("callback_id") != "ot_learning_run"
+    assert "run-1" not in json.dumps(screen(h, view))
+    assert len(worker.starts) == worker.cancels == 1

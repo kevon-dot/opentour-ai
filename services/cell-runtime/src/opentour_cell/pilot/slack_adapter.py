@@ -5384,10 +5384,20 @@ class Workbench:
         if service is None:
             return None
         cfg = self.settings()
-        cfg.permission(actor, "inspect")
-        with self._live_scope(actor, workflow):
+        with self._live_scope(actor, workflow) as (_, _, live):
+            _check(
+                live.can_inspect
+                and live.engagement_epoch == self.store.engagement_id
+                and cfg.permission(actor, "inspect", live.dataset_ref)["aggregate"]
+            )
             scope = LearningScope(
-                cfg.organization, self.store.engagement_id, cfg.team, actor, workflow
+                cfg.organization,
+                live.engagement_epoch,
+                cfg.team,
+                actor,
+                workflow,
+                live.dataset_ref,
+                live.dataset_revision,
             )
             plan = service.plan(scope)
             if plan is None:
@@ -5484,7 +5494,11 @@ class Workbench:
 
         def authorize_receipt() -> None:
             current = self._learning_plan(actor, workflow)
-            _check(current and current[0].current_run == receipt.run_ref)
+            _check(
+                current
+                and current[0].scope == plan.scope
+                and current[0].current_run == receipt.run_ref
+            )
             _check(service.status(plan.scope, receipt.run_ref) == receipt)
 
         self._show(
