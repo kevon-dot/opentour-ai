@@ -50,6 +50,7 @@ if TYPE_CHECKING:
     from opentour_cell.pilot.handoff_readback import HandoffReadback
     from opentour_cell.pilot.map_review import MapReviewService
     from opentour_cell.pilot.recipient_lifecycle import LifecycleAuthority
+    from opentour_cell.pilot.slack_learning import LearningPlan, LearningService, Operation
     from opentour_cell.pilot.starter_evaluation_session import StarterEvaluationSession
     from opentour_cell.pilot.starter_map_confirmation import StarterCaseEntry, StarterCaseSession
     from opentour_cell.pilot.verifier_form import VerifierForm
@@ -151,6 +152,11 @@ ACTIONS = {
     "ot_current_training",
     "ot_readiness_proof",
     "ot_training_scopes",
+    "ot_learning_preview",
+    "ot_learning_benchmark",
+    "ot_learning_improve",
+    "ot_learning_status",
+    "ot_learning_cancel",
     "ot_result_prev",
     "ot_result_next",
     "ot_repair_confirm",
@@ -1198,12 +1204,14 @@ class Workbench:
         views: Any,
         submit: Callable[[Callable[[], None]], Any] | None = None,
         *,
+        learning_service: LearningService | None = None,
         workflow_index_scope: Callable[
             [Settings, IntakePrincipal, tuple[ProposalAccess, ...]], IndexScope | None
         ]
         | None = None,
         lifecycle_authority: LifecycleAuthority | None = None,
     ):
+        self.learning_service = learning_service
         self.workflow_index_scope = workflow_index_scope
         self.config = config
         self.lifecycle_authority = lifecycle_authority
@@ -4166,16 +4174,25 @@ class Workbench:
             token = self.journal.context(
                 actor, cfg.channel, view, "current_training", revision=value
             )
+            learning = None if proof else self._learning_plan(actor, workflow)
             self._show(
                 view,
                 self.views.current_training_question(
-                    token, workflow, receipt, pin=value, proof=proof
+                    token,
+                    workflow,
+                    receipt,
+                    pin=value,
+                    proof=proof,
+                    learning_pin=learning[1] if learning else "",
                 ),
                 old_hash,
                 authorize=lambda: _check(
                     self._current_question(actor, StatusTopic.TRAINING) == selected_training
+                    and (proof or self._learning_plan(actor, workflow) == learning)
                 ),
             )
+        elif action.startswith("ot_learning_"):
+            self._learning_action(cfg, actor, view, ctx, action, value, old_hash)
         elif action == "ot_training_scopes":
             _check(ctx["kind"] == "current_training" and value == "scopes")
             self._regression_picker(cfg, actor, view, old_hash, topic=StatusTopic.TRAINING.value)
@@ -5356,6 +5373,125 @@ class Workbench:
             visible_until,
             "open_status",
             visible_until,
+        )
+
+    def _learning_plan(self, actor: str, workflow: str) -> tuple[LearningPlan, str] | None:
+        from dataclasses import asdict
+
+        from opentour_cell.pilot.slack_learning import LearningScope
+
+        service = self.learning_service
+        if service is None:
+            return None
+        cfg = self.settings()
+        cfg.permission(actor, "inspect")
+        with self._live_scope(actor, workflow):
+            scope = LearningScope(
+                cfg.organization, self.store.engagement_id, cfg.team, actor, workflow
+            )
+            plan = service.plan(scope)
+            if plan is None:
+                return None
+            _check(plan.scope == scope and plan.schedule in {"enabled", "paused", "off"})
+            _check(
+                type(plan.max_fits) is int
+                and plan.max_fits >= 0
+                and type(plan.spend_cap_cents) is int
+                and plan.spend_cap_cents >= 0
+                and type(plan.can_benchmark) is bool
+                and type(plan.can_improve) is bool
+                and (not plan.can_improve or plan.mandate_ref and plan.max_fits > 0)
+            )
+            return plan, self.journal.opaque("learning_plan", asdict(plan))
+
+    def _learning_action(
+        self,
+        cfg: Settings,
+        actor: str,
+        view: str,
+        ctx: Json,
+        action: str,
+        value: str,
+        old_hash: str,
+    ) -> None:
+        from opentour_cell.pilot.slack_learning import STATE_COPY
+
+        service = self.learning_service
+        _check(service is not None)
+        assert service is not None
+        selected = self._current_question(actor, StatusTopic.TRAINING)
+        _check(selected)
+        assert selected
+        workflow, current_pin, _ = selected
+        bound = self._learning_plan(actor, workflow)
+        _check(bound)
+        assert bound
+        plan, pin = bound
+        if action == "ot_learning_preview":
+            _check(
+                ctx["kind"] == "current_training"
+                and current_pin == ctx["revision"]
+                and value == pin
+            )
+            token = self.journal.context(actor, cfg.channel, view, "learning_plan", workflow, pin)
+            self._show(
+                view,
+                self.views.learning_plan_modal(token, plan, pin),
+                old_hash,
+                authorize=lambda: _check(self._learning_plan(actor, workflow) == bound),
+            )
+            return
+        _check(value == ctx["revision"])
+        if ctx["kind"] == "learning_plan":
+            _check(ctx["job"] == workflow and value == pin)
+            if action in {"ot_learning_benchmark", "ot_learning_improve"}:
+                improve = action == "ot_learning_improve"
+                _check(plan.can_improve if improve else plan.can_benchmark)
+                operation: Operation = "evaluate_and_improve" if improve else "benchmark_only"
+                key = self.journal.opaque(
+                    "learning_start", [plan.scope.__dict__, plan.plan_ref, operation]
+                )
+                receipt = service.start(plan.scope, plan.plan_ref, operation, key)
+            else:
+                _check(action == "ot_learning_status" and plan.current_run)
+                assert plan.current_run
+                receipt = service.status(plan.scope, plan.current_run)
+                _check(receipt.run_ref == plan.current_run)
+        else:
+            _check(
+                ctx["kind"] == "learning_run"
+                and action in {"ot_learning_status", "ot_learning_cancel"}
+            )
+            run_ref = ctx["job"]
+            _check(
+                plan.current_run == run_ref
+                and value == self.journal.opaque("learning_run", [plan.scope.__dict__, run_ref])
+            )
+            receipt = service.status(plan.scope, run_ref)
+            _check(receipt.run_ref == run_ref)
+            if action == "ot_learning_cancel":
+                _check(
+                    receipt.can_cancel is True
+                    and receipt.state in {"queued", "running", "verifying"}
+                )
+                receipt = service.cancel(plan.scope, run_ref)
+                _check(receipt.run_ref == run_ref)
+        _check(receipt.state in STATE_COPY and type(receipt.can_cancel) is bool)
+        run_pin = self.journal.opaque("learning_run", [plan.scope.__dict__, receipt.run_ref])
+        token = self.journal.context(
+            actor, cfg.channel, view, "learning_run", receipt.run_ref, run_pin
+        )
+
+        def authorize_receipt() -> None:
+            current = self._learning_plan(actor, workflow)
+            _check(current and current[0].current_run == receipt.run_ref)
+            _check(service.status(plan.scope, receipt.run_ref) == receipt)
+
+        self._show(
+            view,
+            self.views.learning_status_modal(token, receipt, run_pin),
+            old_hash,
+            authorize=authorize_receipt,
         )
 
     def _workflow_page(

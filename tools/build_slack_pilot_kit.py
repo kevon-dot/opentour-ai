@@ -85,6 +85,7 @@ MODULES = (
     "opentour_cell/pilot/local_decision_context.py",
     "opentour_cell/pilot/training_readiness.py",
     "opentour_cell/pilot/readiness_selection.py",
+    "opentour_cell/pilot/slack_learning.py",
     "opentour_cell/pilot/slack_views.py",
     "opentour_cell/pilot/status_questions.py",
     "opentour_cell/pilot/starter_setup.py",

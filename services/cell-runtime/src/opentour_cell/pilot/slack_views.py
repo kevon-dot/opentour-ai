@@ -25,6 +25,7 @@ from opentour_cell.pilot.text_classifier import (
 if TYPE_CHECKING:
     from opentour_cell.pilot.handoff_readback import HandoffReadback
     from opentour_cell.pilot.scoped_query_report import MonthlyInvoiceReport
+    from opentour_cell.pilot.slack_learning import LearningPlan, LearningStatus
     from opentour_cell.pilot.workflow_index import IndexPage
 
 from opentour_cell.pilot.training_data import EVALUATION_FIELDS, FIELD_NAMES
@@ -739,7 +740,13 @@ def weekly_question(context: str, workflow: str, facts: Mapping[str, Any], pin: 
 
 
 def current_training_question(
-    context: str, workflow: str, receipt: Mapping[str, Any] | None, *, pin: str, proof: bool
+    context: str,
+    workflow: str,
+    receipt: Mapping[str, Any] | None,
+    *,
+    pin: str,
+    proof: bool,
+    learning_pin: str = "",
 ) -> Block:
     blocks = [_section(f"Current workflow · {_ref(workflow)}")]
     if receipt is None:
@@ -759,6 +766,18 @@ def current_training_question(
                 _section(f"{families} independent {unit}. {answer.basis}"),
                 _section(answer.next_action),
             ]
+        )
+    if not proof and learning_pin:
+        blocks.append(
+            _actions(_button("Preview learning plan", "ot_learning_preview", learning_pin))
+        )
+    elif not proof:
+        blocks.append(
+            _section(
+                "Learning runs · Controls unavailable in this installation. "
+                "Ask the workflow owner to connect the worker’s authenticated learning-run service "
+                "to start a benchmark or improvement and track its status."
+            )
         )
     nav = [_button("Back to scopes", "ot_training_scopes", "scopes")]
     if receipt is not None:
@@ -908,6 +927,53 @@ def query_hold_modal(context: str, plan: ArmChart | WorkflowDiscovery | QueryHol
         "ot_query_hold",
         context,
         [_section(answer.finding), _section(answer.basis), _section(answer.next_action)],
+    )
+
+
+def learning_plan_modal(context: str, plan: LearningPlan, pin: str) -> Block:
+    blocks = [
+        _section(f"Workflow · {_ref(plan.scope.workflow)}\nModel route · {_ref(plan.model_route)}"),
+        _section(f"Frozen benchmark · {_ref(plan.benchmark_ref)}\nPlan · {_ref(plan.plan_ref)}"),
+        _section(
+            f"Mandate · {_ref(plan.mandate_ref) if plan.mandate_ref else 'unavailable'}\n"
+            f"Fit cap · {plan.max_fits} · Spend cap · {plan.spend_cap_cents} USD cents"
+        ),
+        _section(
+            f"Scheduled learning · {plan.schedule}. "
+            "The owner can change the schedule in private workflow settings."
+        ),
+    ]
+    controls = []
+    if plan.can_benchmark:
+        controls.append(_button("Run benchmark", "ot_learning_benchmark", pin))
+    if plan.can_improve:
+        controls.append(_button("Run improvement", "ot_learning_improve", pin))
+    else:
+        blocks.append(
+            _section("Improvement unavailable · Ask the owner to check training readiness.")
+        )
+    if plan.current_run:
+        controls.append(_button("View status", "ot_learning_status", pin))
+    if controls:
+        blocks.append(_actions(*controls))
+    return _modal("Learning plan", "ot_learning_plan", context, blocks)
+
+
+def learning_status_modal(context: str, receipt: LearningStatus, pin: str) -> Block:
+    from opentour_cell.pilot.slack_learning import STATE_COPY
+
+    controls = [_button("View status", "ot_learning_status", pin)]
+    if receipt.can_cancel and receipt.state in {"queued", "running", "verifying"}:
+        controls.append(_button("Cancel run", "ot_learning_cancel", pin))
+    return _modal(
+        "Learning run",
+        "ot_learning_run",
+        context,
+        [
+            _section(f"Run · {_ref(receipt.run_ref)}"),
+            _section(STATE_COPY[receipt.state]),
+            _actions(*controls),
+        ],
     )
 
 
