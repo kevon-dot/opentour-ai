@@ -5,12 +5,17 @@ or customer-evidence gate.
 """
 
 import copy
+import dataclasses
 import hashlib
+import inspect
 import json
+from collections.abc import Callable
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 import pytest
+from opentour_cell.pilot import consumption_lineage as lineage
 from opentour_cell.pilot.consumption_lineage import (
     OWNER,
     REVIEWER,
@@ -96,6 +101,26 @@ class Grants:
 
 def request(actor: Actor = OWNER_ACTOR, epoch: int = 3) -> Request:
     return Request(actor, WF, epoch, NOW)
+
+
+def at(value: str) -> datetime:
+    return datetime.fromisoformat(value[:-1] + "+00:00")
+
+
+# The production worker clock, captured before any test pins it.
+REAL_WORKER_NOW: Callable[[], datetime] | None = getattr(lineage, "_worker_now", None)
+
+
+@pytest.fixture(autouse=True)
+def worker_clock(monkeypatch: pytest.MonkeyPatch) -> Callable[[str], None]:
+    """Test-only seam: pin the worker's own clock (module attribute, never a parameter)."""
+
+    def pin(when: str) -> None:
+        moment = at(when)
+        monkeypatch.setattr(lineage, "_worker_now", lambda: moment, raising=False)
+
+    pin(NOW)
+    return pin
 
 
 def build(
@@ -350,6 +375,99 @@ def test_stale_epoch_and_expired_grant_are_denied(tmp_path: Path) -> None:
     grants.set(TENANT, expires_at="2026-01-01T11:00:00Z")
     expired = reader.resolve_claim(request(epoch=3), "claim-a")
     assert isinstance(expired, Denial) and expired.reason == "grant_expired"
+
+
+def test_past_request_time_cannot_skip_expiry_judged_on_worker_clock(
+    tmp_path: Path, worker_clock: Callable[[str], None]
+) -> None:
+    """MEDIUM: a caller back-dating ``request.now`` must not revive an expired grant."""
+    _, grants, reader = build(tmp_path, manifest("a"))
+    grants.set(TENANT, expires_at="2026-01-01T11:00:00Z")
+    worker_clock("2026-01-01T11:30:00Z")  # worker says: expired half an hour ago
+    for stale in ("2026-01-01T10:59:59Z", "2026-01-01T09:00:00Z", "2000-01-01T00:00:00Z"):
+        back_dated = Request(OWNER_ACTOR, WF, 3, stale)
+        for out in (
+            reader.resolve_claim(back_dated, "claim-a"),
+            reader.impact(back_dated, Change("refund-request", "amount", 9)),
+        ):
+            assert isinstance(out, Denial) and out.reason == "grant_expired", (stale, out)
+            assert "claim-a" not in json.dumps(out.receipt)
+
+
+def test_future_request_time_does_not_extend_a_grant(
+    tmp_path: Path, worker_clock: Callable[[str], None]
+) -> None:
+    _, grants, reader = build(tmp_path, manifest("a"))
+    grants.set(TENANT, expires_at="2026-01-01T11:00:00Z")
+    worker_clock("2026-01-01T11:30:00Z")
+    for ahead in ("2026-01-01T11:30:01Z", "2026-06-01T00:00:00Z", "2999-01-01T00:00:00Z"):
+        out = reader.resolve_claim(Request(OWNER_ACTOR, WF, 3, ahead), "claim-a")
+        assert isinstance(out, Denial) and out.reason == "grant_expired", (ahead, out)
+
+
+def test_caller_time_can_only_narrow_the_window(
+    tmp_path: Path, worker_clock: Callable[[str], None]
+) -> None:
+    _, grants, reader = build(tmp_path, manifest("a"))
+    grants.set(TENANT, expires_at="2026-01-01T11:00:00Z")
+    worker_clock("2026-01-01T10:00:00Z")  # worker: still valid for an hour
+    inside = Request(OWNER_ACTOR, WF, 3, "2026-01-01T10:00:00Z")
+    assert resolved(reader.resolve_claim(inside, "claim-a")).status == "resolved"
+    # A caller time at or past expiry shortens the window: refused although the worker is early.
+    for late in ("2026-01-01T11:00:00Z", "2026-01-01T12:00:00Z"):
+        out = reader.resolve_claim(Request(OWNER_ACTOR, WF, 3, late), "claim-a")
+        assert isinstance(out, Denial) and out.reason == "grant_expired", late
+    # Boundary on the worker clock itself: expiry is inclusive.
+    worker_clock("2026-01-01T11:00:00Z")
+    out = reader.resolve_claim(Request(OWNER_ACTOR, WF, 3, "2026-01-01T10:00:00Z"), "claim-a")
+    assert isinstance(out, Denial) and out.reason == "grant_expired"
+
+
+def test_production_entry_point_uses_the_real_worker_clock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No pin: the module's own clock decides, whatever time the caller sends."""
+    assert REAL_WORKER_NOW is not None, "worker clock seam missing"
+    monkeypatch.setattr(lineage, "_worker_now", REAL_WORKER_NOW)
+    before = datetime.now(UTC)
+    observed = REAL_WORKER_NOW()
+    assert observed.tzinfo is not None and before <= observed <= datetime.now(UTC)
+    _, grants, reader = build(tmp_path, manifest("a"))
+    # 2026-02-01 is in the past on any real clock running this suite; the caller claims January.
+    out = reader.resolve_claim(request(), "claim-a")
+    assert isinstance(out, Denial) and out.reason == "grant_expired"
+    later = (datetime.now(UTC) + timedelta(days=3650)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    grants.set(TENANT, expires_at=later)
+    assert resolved(reader.resolve_claim(request(), "claim-a")).status == "resolved"
+
+
+def test_worker_clock_is_not_reachable_from_the_production_entry_point() -> None:
+    # The seam is a private module attribute (checked as imported, before any pin) taking no
+    # arguments: nothing a caller passes through the reader or a request can reach it.
+    assert REAL_WORKER_NOW is not None and callable(REAL_WORKER_NOW)
+    assert list(inspect.signature(REAL_WORKER_NOW).parameters) == []
+    assert list(inspect.signature(ConsumptionReader).parameters) == ["store", "grants"]
+    assert [f.name for f in dataclasses.fields(Request)] == [
+        "actor",
+        "workflow_ref",
+        "grant_epoch",
+        "now",
+    ]
+    assert not any("clock" in name for name in dir(ConsumptionReader))
+    with pytest.raises(TypeError):
+        ConsumptionReader(None, None, clock=lambda: datetime.now(UTC))  # type: ignore[arg-type,call-arg]
+
+
+def test_receipts_state_the_pin_is_digest_self_consistent_only(tmp_path: Path) -> None:
+    """LOW: a plain sha256 pin is tamper evidence only; every reader receipt says so."""
+    _, _, reader = build(tmp_path, manifest("a"), manifest("p", partition="protected"))
+    for claim in ("claim-a", "claim-p", "claim-none"):
+        body = resolved(reader.resolve_claim(request(), claim)).to_json()
+        assert body["integrity"] == "digest_self_consistent_only", claim
+    got = impact(reader.impact(request(), Change("refund-request", "amount", 9))).to_json()
+    assert got["integrity"] == "digest_self_consistent_only"
+    for doc in (lineage.__doc__, ManifestStore.__doc__):
+        assert doc and "digest_self_consistent_only" in doc
 
 
 def test_foreign_tenant_gets_no_links_and_indistinguishable_from_unknown(tmp_path: Path) -> None:

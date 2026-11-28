@@ -14,6 +14,17 @@ gap for the coordinator, not a settled product decision): ``unknown`` means no r
 links the claim or consumer; ``hold`` means an edge exists but is unusable (an unrecorded
 dependency, or two manifests claiming the same claim). Neither is ever completed by a guess.
 
+Integrity: ``digest_self_consistent_only``. A manifest is pinned by a plain, unkeyed sha256
+of its own bytes. That is tamper evidence only (an edit of one file is noticed); it is not
+authentication, and anyone who can rewrite both the manifest and its pin can forge one. No
+signing or key-custody contract exists for this reader yet (OPE-566). Every reader receipt
+carries ``integrity: digest_self_consistent_only`` so no consumer reads more into it.
+
+Time authority: grant expiry is judged on the worker's own clock (``_worker_now``), never on
+a caller-supplied time. ``Request.now`` can only narrow the window: the grant is treated as
+expired once either clock reaches ``expires_at``, so back-dating cannot revive an expired
+grant and future-dating cannot extend one.
+
 Simulated and NOT proven: everything here is a reader over generated sentinel manifests in a
 local directory with an in-test grant lookup. It proves software behavior only. It establishes
 no provider, installed-witness, staged-packet (OPE-529) or customer evidence, and it does not
@@ -39,6 +50,7 @@ MANIFEST_SCHEMA = "opentour.pilot.consumed-field-manifest.v1"
 RESOLUTION_SCHEMA = "opentour.pilot.claim-resolution.v1"
 IMPACT_SCHEMA = "opentour.pilot.impact-set.v1"
 RECEIPT_SCHEMA = "opentour.pilot.lineage-receipt.v1"
+INTEGRITY = "digest_self_consistent_only"
 
 OWNER = "workflow_owner"
 REVIEWER = "reviewer"
@@ -219,17 +231,19 @@ def _body(manifest: Mapping[str, Any]) -> str:
 
 
 def _pin(body: str) -> str:
+    """Plain unkeyed sha256: ``digest_self_consistent_only`` (tamper evidence, not a seal)."""
     return hashlib.sha256(body.encode()).hexdigest()
 
 
 class ManifestStore:
     """Write-once, tenant-scoped manifest directory; survives restart by re-reading files.
 
-    Each manifest is stored under its tenant's own folder with a sidecar pin (sha256 of the
-    exact bytes) written first. Reads verify the pin, so an edit to the manifest file alone is
-    detected. This is tamper-EVIDENCE against edits of one file, not tamper-proofing: anyone
-    who can rewrite both the manifest and its pin can forge a manifest. Tenants never share
-    files, so one tenant's refs, corruption or writes cannot affect or probe another's.
+    Each manifest is stored under its tenant's own folder with a sidecar pin (plain sha256 of
+    the exact bytes) written first. Reads verify the pin, so an edit to the manifest file alone
+    is detected. Integrity is ``digest_self_consistent_only``: tamper evidence against an edit
+    of one file, not tamper-proofing or authentication. Anyone who can rewrite both the
+    manifest and its pin can forge a manifest. Tenants never share files, so one tenant's
+    refs, corruption or writes cannot affect or probe another's.
     """
 
     def __init__(self, directory: Path) -> None:
@@ -321,9 +335,23 @@ class GrantState:
 GrantLookup = Callable[[str, str], "GrantState | None"]
 
 
+def _worker_now() -> datetime:
+    """The worker's own clock: the only authority on whether a grant has expired.
+
+    Deliberately not a parameter of ``ConsumptionReader`` or a field of ``Request``, so no
+    caller of the production entry point can supply or replace it. Tests pin it by patching
+    this module attribute (a test-only seam).
+    """
+    return datetime.now(UTC)
+
+
 @dataclass(frozen=True)
 class Request:
-    """What the actor clicked: bound to the grant epoch observed at click time."""
+    """What the actor clicked: bound to the grant epoch observed at click time.
+
+    ``now`` is caller-supplied and untrusted. It may only make a grant expire sooner; expiry
+    itself is judged on the worker clock (``_worker_now``).
+    """
 
     actor: Actor
     workflow_ref: str
@@ -401,6 +429,7 @@ class Resolution:
             "inputs": [vars(link) for link in self.inputs],
             "unknown_dependencies": list(self.unknown_dependencies),
             "later_relationships": list(self.later_relationships),
+            "integrity": INTEGRITY,
         }
         return {**body, "reader_digest": digest(body)}
 
@@ -431,7 +460,12 @@ class ImpactSet:
         }
 
     def to_json(self) -> dict[str, Any]:
-        body = {"schema": IMPACT_SCHEMA, "status": self.status, **self.semantic()}
+        body = {
+            "schema": IMPACT_SCHEMA,
+            "status": self.status,
+            **self.semantic(),
+            "integrity": INTEGRITY,
+        }
         return {**body, "reader_digest": digest(body)}
 
     @property
@@ -460,9 +494,14 @@ class ConsumptionReader:
         if grant.revoked:
             return _denial(request, "grant_revoked", what)
         try:
-            expired = _time(request.now, "request_time") >= _time(grant.expires_at, "grant_time")
+            claimed = _time(request.now, "request_time")
+            expires = _time(grant.expires_at, "grant_time")
         except LineageError:
             return _denial(request, "invalid_time", what)
+        # The worker clock decides. A caller time can only narrow the window (take the later
+        # of the two instants), so back-dating cannot skip expiry and future-dating extends
+        # nothing.
+        expired = max(_worker_now(), claimed) >= expires
         if expired:
             return _denial(request, "grant_expired", what)
         if grant.grant_epoch != request.grant_epoch:
