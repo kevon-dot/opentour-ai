@@ -64,12 +64,13 @@ HELD_OUT = (
 
 
 def input_case(identifier: str, evidence: str, question: str) -> dict[str, Any]:
+    prompt = (
+        ("system", "Answer using only the supplied evidence."),
+        ("user", f"Evidence: {evidence}\nQuestion: {question}"),
+    )
     return {
         "case_ref": f"generated-{identifier}",
-        "messages": [
-            {"role": "system", "content": "Answer using only the supplied evidence."},
-            {"role": "user", "content": f"Evidence: {evidence}\nQuestion: {question}"},
-        ],
+        "messages": [{"role": role, "content": content} for role, content in prompt],
     }
 
 

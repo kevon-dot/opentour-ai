@@ -9,6 +9,10 @@ from unittest.mock import patch
 from opentour_training.training import eve_sft
 
 
+def question(text):
+    return [{"role": "user", "content": text}]
+
+
 class TextFixtureTokenizer:
     def apply_chat_template(self, messages, *, tokenize, add_generation_prompt):
         assert not tokenize
@@ -31,7 +35,8 @@ class TextFixtureTokenizer:
 class EveRehearsalTests(unittest.TestCase):
     def setUp(self):
         self.tokenizer = TextFixtureTokenizer()
-        self.messages = [{"role": "user", "content": "What does the snapshot show?"}]
+        self.messages = question("What does the snapshot show?")
+        self.held_messages = question("held question")
         self.row = {
             "case_ref": "dev-1",
             "family_ref": "dev-family",
@@ -41,7 +46,7 @@ class EveRehearsalTests(unittest.TestCase):
         self.protected = {
             "case_refs": ["held-1"],
             "family_refs": ["held-family"],
-            "prompt_digests": [eve_sft.digest([{"role": "user", "content": "held question"}])],
+            "prompt_digests": [eve_sft.digest(self.held_messages)],
         }
 
     def test_only_completion_and_eos_are_targets(self):
@@ -55,7 +60,7 @@ class EveRehearsalTests(unittest.TestCase):
         attempts = (
             {"case_ref": "held-1"},
             {"family_ref": "held-family"},
-            {"messages": [{"role": "user", "content": "held question"}]},
+            {"messages": self.held_messages},
         )
         for change in attempts:
             with self.subTest(change=change), self.assertRaisesRegex(ValueError, "protected"):
