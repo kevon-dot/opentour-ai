@@ -89,6 +89,11 @@ MODULES = (
     "opentour_cell/pilot/starter_score_inspection.py",
     "opentour_cell/pilot/starter_scoring.py",
     "opentour_cell/pilot/model_connector.py",
+    "opentour_cell/pilot/connector_ext.py",
+    "opentour_cell/pilot/repair_routing.py",
+    "opentour_cell/pilot/fit_dispatch.py",
+    "opentour_cell/pilot/mandate_fit_ledger.py",
+    "opentour_cell/pilot/learning_fit_dispatch.py",
     "opentour_cell/pilot/model_registry.py",
     "opentour_cell/pilot/guided_policy.py",
     "opentour_cell/pilot/guided_decision_map.py",
@@ -120,6 +125,7 @@ ASSETS = {
     "pilot-recipient-handoff-simulator.md": f"{CELL}/docs/pilot-recipient-handoff-simulator.md",
     "pilot-release-outbox.md": f"{CELL}/docs/pilot-release-outbox.md",
     "pilot-learning-mandate.md": f"{CELL}/docs/pilot-learning-mandate.md",
+    "pilot-fit-dispatch.md": f"{CELL}/docs/pilot-fit-dispatch.md",
     "pilot-learning-runs.md": f"{CELL}/docs/pilot-learning-runs.md",
     "templates/pilot-learning-mandate.template.json": (
         f"{CELL}/examples/pilot-learning-mandate.template.json"
