@@ -13,9 +13,12 @@ What the store establishes, and how:
   another directory no longer matches. The id is key-free and the store vouches for itself.
 * **Forward-only event log.** Every event is linked into a SHA-256 hash chain that starts from a
   genesis bound to the store id. The worker writes the chain head and event count to the head
-  file on every append. Reading the store recomputes the chain and compares it with the head, so
-  a dropped, reordered, edited or rolled-back event is detected. Appends refuse to write unless
-  the log on disk still matches the stored head. SQLite triggers refuse UPDATE and DELETE on the
+  file on every append. Reading the store recomputes the chain from the genesis and compares its
+  end and length with the head file. A log whose events were dropped, reordered, edited or
+  rolled back is refused, but only while the head file still describes the original log: a log
+  truncated, or edited and re-chained, together with a head file rewritten to match is not
+  detected (see "What it does NOT establish" below). Appends refuse to write unless the log on
+  disk still matches the stored head. SQLite triggers refuse UPDATE and DELETE on the
   log (defence in depth only: anyone with write access to the file can drop them).
 * **State.** Receipt status, successors, fences and reconciliation are replayed from the verified
   log with ``AuditLedger.replay``; nothing derived is stored.

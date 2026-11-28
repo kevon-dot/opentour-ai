@@ -13,6 +13,10 @@ The output path must end in ``.json`` (never ``.jsonl``). It is written whole to
 file and moved into place; it is never opened in append mode. Every row carries its run id,
 timestamp, measured git SHA and dirty flag. The SHA and flag describe the checkout measured,
 which is the commit *before* the one that adds this output.
+
+Both generation and ``--verify-committed`` refuse a dirty working tree (any modified, staged or
+untracked path, raised as ``DirtyWorkingTreeError``): the code that runs is the working tree, so
+only a clean tree makes "measured at HEAD" true.
 """
 
 from __future__ import annotations
@@ -254,16 +258,40 @@ def worker_release_check(name: str, inputs: AuditInputs, receipt: dict[str, Any]
         return check_receipt_for_release(receipt["receipt_id"], store_directory=directory)
 
 
-def git_measurement(root: Path, clock: Callable[[], str]) -> Measurement:
-    def git(*args: str) -> str:
-        return subprocess.run(
-            ["git", *args], cwd=root, check=True, capture_output=True, text=True
-        ).stdout
+def _git_stdout(root: Path, *args: str) -> str:
+    return subprocess.run(
+        ["git", *args], cwd=root, check=True, capture_output=True, text=True
+    ).stdout
 
+
+def dirty_paths(root: Path) -> tuple[str, ...]:
+    """Modified, staged and untracked (not ignored) paths, as ``git status --porcelain``."""
+    status = _git_stdout(root, "status", "--porcelain", "--untracked-files=all")
+    return tuple(line for line in status.splitlines() if line.strip())
+
+
+class DirtyWorkingTreeError(RuntimeError):
+    """The checkout has uncommitted changes, so the code that would run is not HEAD's."""
+
+    code = "working_tree_dirty"
+
+    def __init__(self, paths: tuple[str, ...]) -> None:
+        super().__init__(f"{self.code}: {len(paths)} uncommitted path(s)")
+        self.paths = paths
+
+
+def require_clean_tree(root: Path) -> None:
+    """Raise ``DirtyWorkingTreeError`` unless the working tree matches HEAD exactly."""
+    paths = dirty_paths(root)
+    if paths:
+        raise DirtyWorkingTreeError(paths)
+
+
+def git_measurement(root: Path, clock: Callable[[], str]) -> Measurement:
     return Measurement(
         timestamp=clock(),
-        git_sha=git("rev-parse", "HEAD").strip(),
-        dirty=bool(git("status", "--porcelain", "--untracked-files=all").strip()),
+        git_sha=_git_stdout(root, "rev-parse", "HEAD").strip(),
+        dirty=bool(dirty_paths(root)),
     )
 
 
@@ -425,19 +453,19 @@ def regenerate_like(document: dict[str, Any]) -> dict[str, Any]:
 def verify_committed(root: Path, path: Path) -> list[str]:
     """Git-backed checks of a committed inventory; needs full history (not a shallow clone).
 
-    Reads the blob committed at HEAD (``git show HEAD:<path>``), not the working-tree file, and
-    fails if the tracked file differs from it. The measured SHA must be an ancestor of HEAD and
-    the parent of the last commit that changed the file, and regenerating at HEAD must reproduce
-    the committed blob apart from timestamps and CPU ms.
+    Refuses a dirty working tree with ``DirtyWorkingTreeError`` before anything else: the
+    regeneration runs the working-tree code, so it only speaks for HEAD when the tree is clean.
+    Reads the blob committed at HEAD (``git show HEAD:<path>``). The measured SHA must be an
+    ancestor of HEAD and the parent of the last commit that changed the file, and regenerating
+    at HEAD must reproduce the committed blob apart from timestamps and CPU ms.
     """
 
     def git(*args: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run(["git", *args], cwd=root, capture_output=True, text=True)
 
+    require_clean_tree(root)
     relative = path.relative_to(root).as_posix()
     problems = []
-    if git("diff", "--quiet", "HEAD", "--", relative).returncode != 0:
-        problems.append("inventory_differs_from_committed_blob_in_working_tree")
     blob = git("show", f"HEAD:{relative}")
     if blob.returncode != 0:
         return [*problems, "inventory_not_committed_at_head"]
@@ -480,10 +508,15 @@ def main(argv: list[str] | None = None) -> int:
         help="check the committed --output against git history and a regeneration; write nothing",
     )
     args = parser.parse_args(argv)
-    if args.verify_committed:
-        problems = verify_committed(ROOT, args.output.resolve())
-        print(json.dumps({"output": str(args.output), "problems": problems}, sort_keys=True))
-        return 1 if problems else 0
+    try:
+        if args.verify_committed:
+            problems = verify_committed(ROOT, args.output.resolve())
+            print(json.dumps({"output": str(args.output), "problems": problems}, sort_keys=True))
+            return 1 if problems else 0
+        require_clean_tree(ROOT)
+    except DirtyWorkingTreeError as exc:
+        print(json.dumps({"error": exc.code, "paths": list(exc.paths)}, sort_keys=True))
+        return 1
     measured = git_measurement(ROOT, utc_now)
     document = build_document(measured, utc_now)
     write_document(document, args.output)

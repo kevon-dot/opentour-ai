@@ -14,11 +14,14 @@ from dataclasses import fields
 from pathlib import Path
 from typing import Any
 
+import ope526_run_inventory
 import pytest
 from ope526_run_inventory import (
     POPULATIONS,
+    DirtyWorkingTreeError,
     build_document,
     git_measurement,
+    require_clean_tree,
     verify_committed,
     write_document,
 )
@@ -364,26 +367,99 @@ def test_claim_provenance_fields_are_copied_when_the_receipt_reports_them() -> N
     assert isinstance(spec, RunSpec)
 
 
-def test_verify_committed_reads_the_committed_blob_and_refuses_a_dirty_tracked_file(
-    tmp_path: Path,
-) -> None:
-    """A throwaway repository holding a freshly built inventory; its measured SHA is absent."""
+def _dirty(repo: Path, change: str) -> str:
+    if change == "modified":
+        (repo / "tracked.txt").write_text("changed\n")
+        return "tracked.txt"
+    if change == "untracked":
+        (repo / "new.txt").write_text("new\n")
+        return "new.txt"
+    (repo / "staged.txt").write_text("staged\n")
+    _git(repo, "add", "staged.txt")
+    return "staged.txt"
+
+
+@pytest.mark.parametrize("change", ["modified", "untracked", "staged"])
+def test_require_clean_tree_refuses_any_uncommitted_path(tmp_path: Path, change: str) -> None:
     repo = _repo(tmp_path)
+    require_clean_tree(repo)  # a clean tree passes
+    path = _dirty(repo, change)
+    with pytest.raises(DirtyWorkingTreeError) as raised:
+        require_clean_tree(repo)
+    assert raised.value.code == "working_tree_dirty"
+    assert any(line.endswith(path) for line in raised.value.paths)
+
+
+@pytest.mark.parametrize("change", ["modified", "untracked", "staged"])
+def test_generator_refuses_a_dirty_tree_and_writes_nothing(
+    tmp_path: Path, change: str, monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:  # fmt: skip
+    repo = _repo(tmp_path)
+    _dirty(repo, change)
+    monkeypatch.setattr(ope526_run_inventory, "ROOT", repo)
+    output = tmp_path / "inventory.json"
+    assert ope526_run_inventory.main(["--output", str(output)]) == 1
+    assert not output.exists()
+    assert json.loads(capsys.readouterr().out)["error"] == "working_tree_dirty"
+
+
+def _committed_inventory(repo: Path, measured: Measurement) -> Path:
     target = repo / "fixtures" / "inventory.json"
-    target.parent.mkdir()
-    write_document(doc(), target)
+    target.parent.mkdir(exist_ok=True)
+    write_document(build_document(measured, clock), target)
     _git(repo, "add", "fixtures/inventory.json")
     _git(repo, "commit", "-q", "-m", "generated inventory")
+    return target
+
+
+def test_verify_committed_reads_the_committed_blob_and_refuses_a_dirty_tree(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch,
+) -> None:  # fmt: skip
+    """A throwaway repository holding a freshly built inventory; its measured SHA is absent."""
+    repo = _repo(tmp_path)
+    target = _committed_inventory(repo, MEASURED)
     clean = verify_committed(repo, target)
-    assert "inventory_differs_from_committed_blob_in_working_tree" not in clean
     assert "regenerated_inventory_differs_from_committed" not in clean
     assert "measured_sha_not_ancestor_of_head" in clean  # the measured commit is not in this repo
-    edited = json.loads(target.read_text())
+    committed_text = target.read_text()
+    edited = json.loads(committed_text)
     edited["runs"][0]["verdict"] = "claim_limited_to_named_population"
     target.write_text(json.dumps(edited))
-    dirty = verify_committed(repo, target)
-    assert "inventory_differs_from_committed_blob_in_working_tree" in dirty
-    # The comparison uses the committed blob, so the working-tree edit is not what is checked.
-    assert "regenerated_inventory_differs_from_committed" not in dirty
+    # L-a2: the regeneration runs working-tree code, so any uncommitted change is refused
+    # outright instead of being checked against HEAD's blob.
+    with pytest.raises(DirtyWorkingTreeError) as raised:
+        verify_committed(repo, target)
+    assert any(line.endswith("fixtures/inventory.json") for line in raised.value.paths)
+    monkeypatch.setattr(ope526_run_inventory, "ROOT", repo)
+    assert ope526_run_inventory.main(["--verify-committed", "--output", str(target)]) == 1
+    assert json.loads(capsys.readouterr().out)["error"] == "working_tree_dirty"
     _git(repo, "commit", "-q", "-am", "hand-edited inventory")
     assert "regenerated_inventory_differs_from_committed" in verify_committed(repo, target)
+    # A committed edit reverted only in the working tree is still refused, not passed.
+    target.write_text(committed_text)
+    with pytest.raises(DirtyWorkingTreeError):
+        verify_committed(repo, target)
+
+
+def test_verify_committed_requires_the_measured_sha_to_be_the_writing_commits_parent(
+    tmp_path: Path,
+) -> None:
+    """V3: an ancestor of HEAD that is not the parent of the writing commit is refused."""
+    repo = _repo(tmp_path)
+    measured_sha = _git(repo, "rev-parse", "HEAD").strip()
+    measured = Measurement("2026-01-01T00:00:00Z", measured_sha, False)
+    bound = _committed_inventory(repo, measured)
+    assert verify_committed(repo, bound) == []
+
+    (tmp_path / "second").mkdir()
+    repo2 = _repo(tmp_path / "second")
+    measured_sha = _git(repo2, "rev-parse", "HEAD").strip()
+    (repo2 / "later.txt").write_text("a commit between the measurement and the inventory\n")
+    _git(repo2, "add", "later.txt")
+    _git(repo2, "commit", "-q", "-m", "intervening commit")
+    measured = Measurement("2026-01-01T00:00:00Z", measured_sha, False)
+    unbound = _committed_inventory(repo2, measured)
+    assert verify_committed(repo2, unbound) == [
+        "measured_sha_not_parent_of_commit_that_wrote_the_file"
+    ]
