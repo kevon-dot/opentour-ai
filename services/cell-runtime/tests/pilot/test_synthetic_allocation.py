@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import dataclasses
 import inspect
+import os
+import shutil
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
@@ -491,9 +493,12 @@ def test_retracted_family_allocation_is_invalidated() -> None:
     plan = plan_of("p", 3)
     led.reserve("generated-budget", plan)
     led.commit("generated-budget", plan.allocation_id)
+    assert ("p0", "generated-root-p0", R1) in [x[:3] for x in led.live_lines("generated-budget")]
     before = led.status("generated-budget")
     led.retract_family("generated-budget", "p0", "generated-retraction")
-    assert ("p0", "generated-root-p0", R1) not in led.live_lines("generated-budget")
+    assert ("p0", "generated-root-p0", R1) not in [
+        x[:3] for x in led.live_lines("generated-budget")
+    ]
     assert len(led.live_lines("generated-budget")) == 2
     # committed spend is never refunded
     assert led.status("generated-budget")["used_spend"] == before["used_spend"] == 3
@@ -751,19 +756,37 @@ def test_budget_unit_cost_is_bound_and_immutable(tmp_path: Path) -> None:
 
 # V1-V5 (audit batch 2, MEDIUM): verification comes from OPE-516's worker record where one
 # exists; caller-asserted flags are labelled and can only narrow, never lift a hold.
+#
+# Fixture kind: generated. The OPE-516 ledger is a real file-backed ``VariantLedger``. Roots are
+# registered with a training-mode plan that has no proposals and no fit gate, and spend is made
+# with a preview-mode child, so the fixture works unchanged on OPE-516's current API and on
+# PR #225's ``FitGate(reservation_id, actor)`` API (neither path consults a fit gate).
 TV_POLICY = tv.Policy("generated-policy-r1", ("vendor_note",), ("vendor_note",), {})
 TV_GRANT = tv.Grant("generated-grant-1", True, True, True, budget=10, expires_at=1000)
+TV_GRANT_2 = replace(TV_GRANT, grant_ref="generated-grant-2")
 TV_RECIPE = tv.Recipe("generated-paraphrase", "r1", "paraphrase", frozenset({"vendor_note"}))
 TV_NOW = 100
 
 
-def tv_seal(*fids: str) -> tv.SplitSeal:
-    return tv.SplitSeal.from_rows([(f"generated-case-{f}", f, "training") for f in fids])
+def tv_seal(*fids: str, extra: tuple[tuple[str, str, str], ...] = ()) -> tv.SplitSeal:
+    return tv.SplitSeal.from_rows([*((f"generated-case-{f}", f, "training") for f in fids), *extra])
 
 
-def tv_register(
-    variants: tv.VariantLedger, fid: str, seal: tv.SplitSeal, cost: int | None = None
-) -> None:
+def tv_ledger(tmp: Path, name: str = "variants.db") -> Path:
+    path = tmp / name
+    tv.VariantLedger(path)
+    return path
+
+
+def tv_plan(
+    fid: str,
+    seal: tv.SplitSeal,
+    *,
+    mode: str = "training",
+    grant: tv.Grant = TV_GRANT,
+    proposals: tuple[tv.ProposedChild, ...] = (),
+    plan_ref: str = "",
+) -> tv.GenerationPlan:
     seed = tv.SeedRoot(
         root_ref=f"generated-root-{fid}",
         case_ref=f"generated-case-{fid}",
@@ -779,59 +802,103 @@ def tv_register(
         target_verifier_ref="generated-verifier",
         verifier_independent=True,
     )
-    proposals: tuple[tv.ProposedChild, ...] = ()
-    if cost is not None:
-        proposals = (
-            tv.ProposedChild(
-                TV_RECIPE.recipe_id, {"vendor_note": "generated haulage wording"}, "FREIGHT", cost
-            ),
-        )
-    variants.submit(
-        tv.GenerationPlan(
-            plan_ref=f"generated-plan-{fid}",
-            mode="training",
-            root=seed,
-            policy=TV_POLICY,
-            grant=TV_GRANT,
-            seal=seal,
-            recipes={TV_RECIPE.recipe_id: TV_RECIPE},
-            generator=tv.Generator("generated-generator", "r1"),
-            proposals=proposals,
-            fit_gate=tv.FitGate(True, "generated-gate"),
-            approved_validators=frozenset({"generated-validator"}),
-        ),
-        now=TV_NOW,
+    return tv.GenerationPlan(
+        plan_ref=plan_ref or f"generated-plan-{fid}-{mode}",
+        mode=mode,  # type: ignore[arg-type]
+        root=seed,
+        policy=TV_POLICY,
+        grant=grant,
+        seal=seal,
+        recipes={TV_RECIPE.recipe_id: TV_RECIPE},
+        generator=tv.Generator("generated-generator", "r1"),
+        proposals=proposals,
+        fit_gate=None,
+        approved_validators=frozenset({"generated-validator"}),
     )
 
 
-def scope(variants: tv.VariantLedger, seal: tv.SplitSeal) -> sa.VerificationScope:
-    return sa.VerificationScope(variants, seal, TV_POLICY.revision, TV_GRANT.grant_ref)
+def tv_register(
+    path: Path,
+    fid: str,
+    seal: tv.SplitSeal,
+    *,
+    mode: str = "training",
+    grant: tv.Grant = TV_GRANT,
+) -> None:
+    tv.VariantLedger(path).submit(tv_plan(fid, seal, mode=mode, grant=grant), now=TV_NOW)
 
 
-def test_verification_is_read_from_the_ope516_worker_record() -> None:
+def tv_spend(path: Path, fid: str, seal: tv.SplitSeal, cost: int, tag: str) -> None:
+    """Charge ``cost`` to the grant in OPE-516 through one preview child of ``fid``'s root."""
+    child = tv.ProposedChild(
+        TV_RECIPE.recipe_id, {"vendor_note": f"generated haulage wording {tag}"}, "FREIGHT", cost
+    )
+    plan = tv_plan(fid, seal, mode="preview", proposals=(child,), plan_ref=f"generated-spend-{tag}")
+    tv.VariantLedger(path).submit(plan, now=TV_NOW)
+
+
+def scope(
+    path: Path, seal: tv.SplitSeal, grant: tv.Grant = TV_GRANT, mode: str = "training"
+) -> sa.VerificationScope:
+    return sa.VerificationScope(path, seal, TV_POLICY.revision, grant.grant_ref, mode)
+
+
+def grant_budget(
+    led: AllocationLedger, path: Path, ref: str = "generated-budget", **kw: object
+) -> dict:
+    args: dict[str, object] = {
+        "grant": TV_GRANT,
+        "variants": path,
+        "now": TV_NOW,
+        "cap_units": 50,
+        "unit_cost": 1,
+    }
+    return led.open_budget_for_grant(ref, **{**args, **kw})  # type: ignore[arg-type]
+
+
+def code_of(fn: object, *args: object, **kw: object) -> str:
+    with pytest.raises(AllocationError) as err:
+        fn(*args, **kw)  # type: ignore[operator]
+    return err.value.code
+
+
+def test_verification_is_read_from_the_ope516_worker_record(tmp_path: Path) -> None:
     seal = tv_seal("a0", "b0")
-    variants = tv.VariantLedger()
-    tv_register(variants, "a0", seal)  # b0 is sealed but OPE-516 never registered a root
+    path = tv_ledger(tmp_path)
+    tv_register(path, "a0", seal)  # b0 is sealed but OPE-516 never registered a root
     fams = [family("a0"), family("b0")]
-    plan = allocate(fams, policy(), verified_by=scope(variants, seal))
+    plan = allocate(fams, policy(), verified_by=scope(path, seal))
     assert zero_by_reason(plan) == {
         "a0": ("eligible", 1),
         "b0": ("verification_uncorroborated", 0),
     }
     assert plan.verification_basis == sa.WORKER_RECORD
-    assert plan.as_record()["verification_grant_ref"] == TV_GRANT.grant_ref
-    assert len(plan.verification_ref) == 64
+    record = plan.as_record()
+    assert record["verification_grant_ref"] == TV_GRANT.grant_ref
+    assert record["verification_mode"] == "training"
+    assert len(plan.verification_ref) == 64 and len(plan.verification_scope) == 64
     bare = allocate(fams, policy())
     assert bare.verification_basis == sa.CALLER_ASSERTED
     assert bare.as_record()["verification_basis"] == "caller_asserted"
-    assert bare.allocation_id != plan.allocation_id
+    # Same lines, different verification: the id must still differ (tuple is in the id).
+    one = allocate([family("a0")], policy(), verified_by=scope(path, seal))
+    asserted = allocate([family("a0")], policy())
+    assert one.lines == asserted.lines and one.allocation_id != asserted.allocation_id
+    for change in (
+        {"verification_basis": sa.CALLER_ASSERTED},
+        {"verification_grant_ref": "generated-grant-2"},
+        {"verification_ref": "0" * 64},
+        {"verification_mode": "preview"},
+        {"verification_scope": "0" * 64},
+    ):
+        assert sa.plan_allocation_id(replace(one, **change)) != one.allocation_id  # type: ignore[arg-type]
 
 
-def test_caller_flags_cannot_lift_a_hold() -> None:
+def test_caller_flags_cannot_lift_a_hold(tmp_path: Path) -> None:
     seal = tv_seal("a0", "b0")
-    variants = tv.VariantLedger()
-    tv_register(variants, "a0", seal)
-    sc = scope(variants, seal)
+    path = tv_ledger(tmp_path)
+    tv_register(path, "a0", seal)
+    sc = scope(path, seal)
     # An uncorroborated family stays held however loudly the caller asserts verification.
     loud = family("b0", verification="verified", verifier_independent=True)
     held = allocate([loud], policy(), verified_by=sc)
@@ -847,40 +914,92 @@ def test_caller_flags_cannot_lift_a_hold() -> None:
     # The caller cannot widen a worker record: disputed still excludes a corroborated family.
     narrowed = allocate([family("a0", verification="disputed")], policy(), verified_by=sc)
     assert zero_by_reason(narrowed)["a0"] == ("disputed", 0)
-    # A root whose case is not sealed under this family is not corroborated by the family id.
+    # A root whose case is not the one OPE-516 stored is not corroborated by the family id.
     moved_root = RootInput(
         "generated-root-a0", "generated-digest-a0", (R1,), 0, "generated-case-b0"
     )
     moved = allocate([family("a0", roots=(moved_root,))], policy(), verified_by=sc)
     assert zero_by_reason(moved)["a0"][0] == "verification_uncorroborated"
     # OPE-516 retracts the root: the family is no longer corroborated.
-    variants.retract_root("generated-root-a0", "a0", "generated-reopen")
+    tv.VariantLedger(path).retract_root("generated-root-a0", "a0", "generated-reopen")
     gone = allocate([family("a0")], policy(), verified_by=sc)
     assert gone.status == "hold"
     assert zero_by_reason(gone)["a0"][0] == "verification_uncorroborated"
 
 
-def test_grant_budget_refuses_caller_asserted_plans() -> None:
+def test_grant_budget_refuses_caller_asserted_plans(tmp_path: Path) -> None:
     seal = tv_seal("a0")
-    variants = tv.VariantLedger()
-    tv_register(variants, "a0", seal)
+    path = tv_ledger(tmp_path)
+    tv_register(path, "a0", seal)
     led = AllocationLedger()
-    led.open_budget_for_grant(
-        "generated-budget", grant=TV_GRANT, variants=variants, now=TV_NOW, cap_units=5, unit_cost=1
-    )
+    grant_budget(led, path, cap_units=5)
     asserted = allocate([family("a0")], policy())
-    with pytest.raises(AllocationError) as err:
-        led.reserve("generated-budget", asserted)
-    assert err.value.code == "verification_uncorroborated"
-    other_scope = sa.VerificationScope(variants, seal, TV_POLICY.revision, "generated-grant-2")
+    assert code_of(led.reserve, "generated-budget", asserted) == "verification_uncorroborated"
+    other_scope = scope(path, seal, TV_GRANT_2)
     elsewhere = allocate([family("a0")], policy(), verified_by=other_scope)
     assert elsewhere.status == "hold"  # nothing registered under that grant
-    verified = allocate([family("a0")], policy(), verified_by=scope(variants, seal))
-    assert led.reserve("generated-budget", verified)["used_units"] == 1
-    fake = replace(scope(variants, seal), variants=object())
-    with pytest.raises(AllocationError) as err2:
-        allocate([family("a0")], policy(), verified_by=fake)
-    assert err2.value.code == "verification_source_invalid"
+    sc = scope(path, seal)
+    verified = allocate([family("a0")], policy(), verified_by=sc)
+    # The worker-record label alone is not enough: the reserve must re-read OPE-516 itself.
+    assert code_of(led.reserve, "generated-budget", verified) == "verification_uncorroborated"
+    assert (
+        code_of(led.reserve, "generated-budget", verified, verified_by=sc) == "grant_link_invalid"
+    )
+    assert led.reserve("generated-budget", verified, verified_by=sc, now=TV_NOW)["used_units"] == 1
+    for fake in (object(), tv.VariantLedger(), ":memory:", tmp_path / "missing.db"):
+        with pytest.raises(AllocationError) as err2:
+            allocate([family("a0")], policy(), verified_by=replace(sc, variants=fake))  # type: ignore[arg-type]
+        assert err2.value.code == "ledger_identity_invalid"
+
+
+# G1 (audit batch 2, MEDIUM): the allocation spend cap is narrowed to OPE-516's grant headroom.
+def test_grant_link_narrows_spend_cap_to_ope516_headroom(tmp_path: Path) -> None:
+    seal = tv_seal("a0", "b0", "c0")
+    path = tv_ledger(tmp_path)
+    for fid in ("a0", "b0", "c0"):
+        tv_register(path, fid, seal)
+    tv_spend(path, "a0", seal, 4, "g1")
+    variants = tv.VariantLedger(path)
+    assert variants.spent(TV_GRANT.grant_ref) == 4
+    assert sa.grant_headroom(TV_GRANT, variants, now=TV_NOW) == 6
+    led = AllocationLedger()
+    opened = grant_budget(led, path)
+    assert opened["cap_spend"] == 6 and opened["grant_ref"] == TV_GRANT.grant_ref
+    assert opened["authority"] == "ope516_grant"
+    assert grant_budget(led, path, "generated-budget-2", cap_spend=3)["cap_spend"] == 3
+    # Never wider than the grant.
+    assert grant_budget(led, path, "generated-budget-3", cap_spend=999)["cap_spend"] == 6
+    # Caps are per budget; the grant-wide headroom binds across all of them at reserve.
+    sc = scope(path, seal)
+    six = allocate(
+        [family("a0", recipes=(R1, R2, R3)), family("b0", recipes=(R1, R2, R3))],
+        policy(per_family_cap=3, per_root_cap=3, total_units=6, spend_ceiling=6),
+        verified_by=sc,
+    )
+    assert six.units == 6
+    assert led.reserve("generated-budget", six, verified_by=sc, now=TV_NOW)["used_spend"] == 6
+    one = allocate([family("c0")], policy(), verified_by=sc)
+    assert (
+        code_of(led.reserve, "generated-budget-2", one, verified_by=sc, now=TV_NOW)
+        == "grant_headroom_exceeded"
+    )
+    assert led.status("generated-budget-2")["used_units"] == 0
+    # A budget opened now sees the live reservations: nothing is left to open.
+    assert code_of(grant_budget, led, path, "generated-budget-4") == "grant_unavailable"
+    # Idempotent reopen keeps the stored cap.
+    assert grant_budget(led, path)["cap_spend"] == 6
+    assert code_of(grant_budget, led, path, unit_cost=2) == "budget_conflict"
+    for grant, now in (
+        (TV_GRANT, 1000),
+        (replace(TV_GRANT, generation_authorized=False), TV_NOW),
+        (replace(TV_GRANT, execution_location_approved=False), TV_NOW),
+        (replace(TV_GRANT, budget=4), TV_NOW),  # 4 already spent
+    ):
+        assert sa.grant_headroom(grant, variants, now=now) == 0
+        fresh = AllocationLedger()
+        assert code_of(grant_budget, fresh, path, grant=grant, now=now) == "grant_unavailable"
+    with pytest.raises(AllocationError, match="grant_link_invalid"):
+        sa.grant_headroom(replace(TV_GRANT, budget=True), variants, now=TV_NOW)
 
 
 def _t_root(**kw: object) -> RootInput:
@@ -971,50 +1090,6 @@ def test_record_identity_and_count_fields_are_not_coerced(
     with pytest.raises(AllocationError) as err2:
         family_from_record({**missing, "roots": [root]})
     assert err2.value.code == "input_invalid"
-
-
-# G1 (audit batch 2, MEDIUM): the allocation spend cap is narrowed to OPE-516's grant headroom.
-def open_for_grant(
-    led: AllocationLedger, ref: str, variants: tv.VariantLedger, **kw: object
-) -> dict:
-    args: dict[str, object] = {
-        "grant": TV_GRANT,
-        "variants": variants,
-        "now": TV_NOW,
-        "cap_units": 50,
-        "unit_cost": 1,
-    }
-    return led.open_budget_for_grant(ref, **{**args, **kw})  # type: ignore[arg-type]
-
-
-def test_grant_link_narrows_spend_cap_to_ope516_headroom() -> None:
-    seal = tv_seal("a0", "b0")
-    variants = tv.VariantLedger()
-    tv_register(variants, "a0", seal, cost=4)
-    assert variants.spent(TV_GRANT.grant_ref) == 4
-    assert sa.grant_headroom(TV_GRANT, variants, now=TV_NOW) == 6
-    led = AllocationLedger()
-    opened = open_for_grant(led, "generated-budget", variants)
-    assert opened["cap_spend"] == 6 and opened["grant_ref"] == TV_GRANT.grant_ref
-    assert open_for_grant(led, "generated-budget-2", variants, cap_spend=3)["cap_spend"] == 3
-    # Never wider than the grant.
-    assert open_for_grant(led, "generated-budget-3", variants, cap_spend=999)["cap_spend"] == 6
-    tv_register(variants, "b0", seal, cost=2)
-    # Idempotent reopen keeps the stored cap.
-    assert open_for_grant(led, "generated-budget", variants)["cap_spend"] == 6
-    with pytest.raises(AllocationError, match="budget_conflict"):
-        open_for_grant(led, "generated-budget", variants, unit_cost=2)
-    for grant, now in (
-        (TV_GRANT, 1000),
-        (replace(TV_GRANT, generation_authorized=False), TV_NOW),
-        (replace(TV_GRANT, execution_location_approved=False), TV_NOW),
-        (replace(TV_GRANT, budget=6), TV_NOW),  # 6 already spent
-    ):
-        assert sa.grant_headroom(grant, variants, now=now) == 0
-        with pytest.raises(AllocationError, match="grant_unavailable"):
-            open_for_grant(led, "generated-budget-x", variants, grant=grant, now=now)
-    with pytest.raises(AllocationError, match="grant_link_invalid"):
-        sa.grant_headroom(replace(TV_GRANT, budget=True), variants, now=TV_NOW)
 
 
 # S1 (acceptance): subdivide by model revision only when the owner's minimum is met.
@@ -1166,3 +1241,589 @@ def test_module_docstring_states_the_ope516_link_accurately() -> None:
     assert "correction lands" not in doc
     for phrase in ("open_budget_for_grant", "VariantLedger.manifest", "caller_asserted", "OPE-517"):
         assert phrase in doc
+
+
+# X* (cross-session review of a1bd58e, session_01CRHWYhLdLYHfPGfPzgxrPV): the reviewer's probes
+# P1-P9 re-created as tests. Each failed against a1bd58e. Generated fixtures; file-backed
+# OPE-516 and allocation ledgers in pytest's private tmp directory.
+def world(
+    tmp: Path, *fids: str, registered: tuple[str, ...] | None = None
+) -> tuple[Path, tv.SplitSeal]:
+    seal = tv_seal(*fids)
+    path = tv_ledger(tmp)
+    for fid in fids if registered is None else registered:
+        tv_register(path, fid, seal)
+    return path, seal
+
+
+# X1 / P1: relabelling a caller-asserted plan as worker-verified does not spend on a grant.
+def test_p1_relabelled_caller_plan_is_re_derived_and_refused(tmp_path: Path) -> None:
+    path, seal = world(tmp_path, "a0", "zz", registered=("a0",))
+    led = AllocationLedger(tmp_path / "alloc.db")
+    grant_budget(led, path)
+    sc = scope(path, seal)
+    p = allocate([family("zz")], policy())  # OPE-516 never registered zz
+    probe = replace(
+        p,
+        verification_basis=sa.WORKER_RECORD,
+        verification_grant_ref=TV_GRANT.grant_ref,
+        verification_ref="0" * 64,
+    )
+    probe = replace(probe, allocation_id=sa.plan_allocation_id(probe))
+    assert code_of(led.reserve, "generated-budget", probe, verified_by=sc, now=TV_NOW) == (
+        "verification_uncorroborated"
+    )
+    # Copy every verification label from an honest plan: the lines are still re-derived.
+    honest = allocate([family("a0")], policy(), verified_by=sc)
+    forged = replace(
+        p,
+        verification_basis=honest.verification_basis,
+        verification_grant_ref=honest.verification_grant_ref,
+        verification_ref=honest.verification_ref,
+        verification_mode=honest.verification_mode,
+        verification_scope=honest.verification_scope,
+    )
+    forged = replace(forged, allocation_id=sa.plan_allocation_id(forged))
+    with pytest.raises(AllocationError) as err:
+        led.reserve("generated-budget", forged, verified_by=sc, now=TV_NOW)
+    assert err.value.code == "verification_uncorroborated" and "root_not_live" in str(err.value)
+    stale = replace(honest, verification_ref="0" * 64)
+    stale = replace(stale, allocation_id=sa.plan_allocation_id(stale))
+    assert code_of(led.reserve, "generated-budget", stale, verified_by=sc, now=TV_NOW) == (
+        "verification_stale"
+    )
+    assert (
+        led.status("generated-budget")["used_units"] == 0
+        and led.live_lines("generated-budget") == []
+    )
+    assert led.reserve("generated-budget", honest, verified_by=sc, now=TV_NOW)["used_units"] == 1
+
+
+# X2 / P2: a separate ledger with an invented seed and seal cannot spend the real grant.
+def test_p2_other_ope516_ledger_cannot_spend_the_bound_grant(tmp_path: Path) -> None:
+    path, seal = world(tmp_path, "a0")
+    led = AllocationLedger()
+    grant_budget(led, path)
+    other_dir = tmp_path / "other"
+    other_dir.mkdir(mode=0o700)
+    invented = tv_seal("zz")
+    other = tv_ledger(other_dir)
+    tv_register(other, "zz", invented)
+    elsewhere = scope(other, invented)
+    plan = allocate([family("zz")], policy(), verified_by=elsewhere)
+    assert plan.verification_basis == sa.WORKER_RECORD and plan.units == 1  # planning only
+    assert code_of(led.reserve, "generated-budget", plan, verified_by=elsewhere, now=TV_NOW) == (
+        "ledger_identity_mismatch"
+    )
+    assert code_of(
+        led.reserve, "generated-budget", plan, verified_by=scope(path, invented), now=TV_NOW
+    ) == ("verification_scope_mismatch")
+    assert code_of(grant_budget, led, other, "generated-budget-b") == "ledger_identity_mismatch"
+    assert led.status("generated-budget")["used_units"] == 0
+
+
+# X3 / P2b: an inflated grant or an unidentifiable ledger never sets the cap.
+def test_p2b_inflated_grant_or_fresh_ledger_cannot_open_a_cap(tmp_path: Path) -> None:
+    path, _ = world(tmp_path, "a0")
+    led = AllocationLedger()
+    big = replace(TV_GRANT, budget=10**9)
+    assert code_of(grant_budget, led, path, grant=big, variants=tv.VariantLedger()) == (
+        "ledger_identity_invalid"
+    )
+    assert grant_budget(led, path)["cap_spend"] == 10
+    assert code_of(grant_budget, led, path, "generated-budget-2", grant=big) == "grant_conflict"
+    assert code_of(grant_budget, led, path, grant=big) == "grant_conflict"
+    assert led.status("generated-budget")["cap_spend"] == 10
+
+
+# X4 / P3: a copied ledger is not the bound ledger; retraction in the original is what counts.
+def test_p3_copied_ledger_is_refused_and_original_retraction_binds(tmp_path: Path) -> None:
+    path, seal = world(tmp_path, "a0", "b0")
+    led = AllocationLedger()
+    grant_budget(led, path, unit_cost=1)
+    copy = tmp_path / "copy.db"
+    shutil.copyfile(path, copy)
+    tv.VariantLedger(path).retract_root("generated-root-a0", "a0", "generated-reopen")
+    copied = allocate([family("a0")], policy(), verified_by=scope(copy, seal))
+    assert zero_by_reason(copied)["a0"] == ("eligible", 1)  # eligible against the copy only
+    assert code_of(
+        led.reserve, "generated-budget", copied, verified_by=scope(copy, seal), now=TV_NOW
+    ) == ("ledger_identity_mismatch")
+    assert code_of(
+        led.reserve, "generated-budget", copied, verified_by=scope(path, seal), now=TV_NOW
+    ) == ("verification_scope_mismatch")
+    original = allocate([family("a0")], policy(), verified_by=scope(path, seal))
+    assert zero_by_reason(original)["a0"] == ("verification_uncorroborated", 0)
+    # Reserved before a retraction: commit re-reads OPE-516 and refuses.
+    sc = scope(path, seal)
+    b0 = allocate([family("b0")], policy(), verified_by=sc)
+    led.reserve("generated-budget", b0, verified_by=sc, now=TV_NOW)
+    tv.VariantLedger(path).retract_root("generated-root-b0", "b0", "generated-reopen")
+    assert (
+        code_of(led.commit, "generated-budget", b0.allocation_id) == "verification_uncorroborated"
+    )
+    assert led.release("generated-budget", b0.allocation_id)["used_units"] == 0
+
+
+# X5 / P4 + P4c: a forged seal is refused; every root must be a live OPE-516 root of its family.
+def test_p4_forged_seal_and_unregistered_root_are_refused(tmp_path: Path) -> None:
+    extra = (("generated-case-a0x", "a0", "training"),)
+    seal = tv_seal("a0", extra=extra)
+    path = tv_ledger(tmp_path)
+    tv_register(path, "a0", seal)
+    forged = tv.SplitSeal(
+        seal.assignments, {**seal.cases, "generated-case-x": ("a0",)}, seal.digest
+    )
+    with pytest.raises(AllocationError) as err:
+        allocate([family("a0")], policy(), verified_by=scope(path, forged))
+    assert err.value.code == "verification_source_invalid" and "seal_digest" in str(err.value)
+    resealed = tv_seal("a0", extra=(*extra, ("generated-case-x", "a0", "training")))
+    other_seal = allocate([family("a0")], policy(), verified_by=scope(path, resealed))
+    assert zero_by_reason(other_seal)["a0"] == ("verification_uncorroborated", 0)
+    roots = (
+        RootInput("generated-root-a0", "generated-digest-a0", (R1, R2), 0, "generated-case-a0"),
+        RootInput("generated-root-a0x", "generated-digest-a0x", (R1, R2), 0, "generated-case-a0x"),
+    )
+    p = policy(per_family_cap=3, per_root_cap=2)
+    caller = allocate([family("a0", roots=roots)], p)
+    assert caller.units == 3  # the reviewer's P4c: three lines without the worker record
+    worker = allocate([family("a0", roots=roots)], p, verified_by=scope(path, seal))
+    assert zero_by_reason(worker)["a0"] == ("verification_uncorroborated", 0)
+    assert worker.units == 0
+
+
+# X6 (mutant: a sealed case listing other families): the case must be the one OPE-516 stored.
+def test_root_case_sealed_under_several_families_is_not_corroborated(tmp_path: Path) -> None:
+    shared = (
+        ("generated-case-shared", "a0", "training"),
+        ("generated-case-shared", "b0", "training"),
+    )
+    seal = tv_seal("a0", "b0", extra=shared)
+    assert seal.cases["generated-case-shared"] == ("a0", "b0")
+    path = tv_ledger(tmp_path)
+    tv_register(path, "a0", seal)
+    root = RootInput("generated-root-a0", "generated-digest-a0", (R1,), 0, "generated-case-shared")
+    plan = allocate([family("a0", roots=(root,))], policy(), verified_by=scope(path, seal))
+    assert zero_by_reason(plan)["a0"] == ("verification_uncorroborated", 0)
+    assert allocate([family("a0")], policy(), verified_by=scope(path, seal)).units == 1
+
+
+# X7 / P6: the grant headroom binds across budgets and re-reads OPE-516 spend at reserve.
+def test_p6_reservations_across_budgets_cannot_exceed_grant_headroom(tmp_path: Path) -> None:
+    path, seal = world(tmp_path, "a0", "b0", "c0")
+    led = AllocationLedger()
+    for ref in ("generated-budget", "generated-budget-2", "generated-budget-3"):
+        assert grant_budget(led, path, ref, unit_cost=5, cap_spend=10)["cap_spend"] == 10
+    sc = scope(path, seal)
+    pricey = policy(total_units=2, spend_ceiling=10, unit_cost=5)
+    two = allocate([family("a0"), family("b0")], pricey, verified_by=sc)
+    assert led.reserve("generated-budget", two, verified_by=sc, now=TV_NOW)["used_spend"] == 10
+    one = allocate([family("c0")], pricey, verified_by=sc)
+    for ref in ("generated-budget-2", "generated-budget-3"):
+        assert code_of(led.reserve, ref, one, verified_by=sc, now=TV_NOW) == (
+            "grant_headroom_exceeded"
+        )
+    # Recorded limit: OPE-516 cannot see these reservations and still accepts a cost-9 child.
+    tv_spend(path, "a0", seal, 9, "p6")
+    assert tv.VariantLedger(path).spent(TV_GRANT.grant_ref) == 9
+    # This ledger re-reads OPE-516 spend: freeing the reservation leaves 10 - 9 = 1 < 5.
+    led.release("generated-budget", two.allocation_id)
+    fresh = allocate([family("c0")], pricey, verified_by=sc)
+    assert code_of(led.reserve, "generated-budget-2", fresh, verified_by=sc, now=TV_NOW) == (
+        "grant_headroom_exceeded"
+    )
+    assert code_of(led.reserve, "generated-budget-2", fresh, verified_by=sc, now=1000) == (
+        "grant_unavailable"
+    )
+
+
+# X8 / P8: the ledger file's grant binding and caps cannot be changed by editing a column.
+def test_p8_edited_ledger_file_is_refused_or_still_bounded(tmp_path: Path) -> None:
+    path, seal = world(tmp_path, "a0", "b0")
+    db_path = tmp_path / "alloc.db"
+    grant_budget(AllocationLedger(db_path), path)
+
+    def edit(sql: str, *args: object) -> None:
+        db = sqlite3.connect(db_path)
+        db.execute(sql, args)
+        db.commit()
+        db.close()
+
+    def row() -> list[object]:
+        db = sqlite3.connect(db_path)
+        got = list(
+            db.execute(
+                "SELECT budget_ref, cap_units, cap_spend, unit_cost, grant_ref, ledger_id,"
+                " grant_digest FROM budget"
+            ).fetchone()
+        )
+        db.close()
+        return got
+
+    original = row()
+    asserted = allocate([family("a0")], policy())
+    edit("UPDATE budget SET grant_ref=''")
+    assert code_of(AllocationLedger(db_path).reserve, "generated-budget", asserted) == (
+        "ledger_integrity_failed"
+    )
+    edit("UPDATE budget SET grant_ref=?", original[4])
+    edit("UPDATE budget SET cap_spend=?", 10**9)
+    assert (
+        code_of(AllocationLedger(db_path).status, "generated-budget") == "ledger_integrity_failed"
+    )
+    # A deliberate same-uid edit that recomputes the row digest: downgrade is still detected.
+    plain = [*original[:4], "", "", ""]
+    edit(
+        "UPDATE budget SET grant_ref='', ledger_id='', grant_digest='', row_digest=?",
+        sa._budget_digest(*plain),
+    )
+    assert code_of(AllocationLedger(db_path).reserve, "generated-budget", asserted) == (
+        "ledger_integrity_failed"
+    )
+    # ...and a recomputed cap raise is still bounded by the pinned grant and OPE-516 spend.
+    raised = [*original[:2], 10**9, *original[3:]]
+    edit(
+        "UPDATE budget SET grant_ref=?, ledger_id=?, grant_digest=?, cap_spend=?, row_digest=?",
+        original[4],
+        original[5],
+        original[6],
+        10**9,
+        sa._budget_digest(*raised),
+    )
+    led = AllocationLedger(db_path)
+    assert led.status("generated-budget")["cap_spend"] == 10**9
+    sc = scope(path, seal)
+    eleven = allocate(
+        [
+            family("a0", recipes=tuple(f"simulated:r{i}" for i in range(6))),
+            family("b0", recipes=tuple(f"simulated:r{i}" for i in range(5))),
+        ],
+        policy(per_family_cap=6, per_root_cap=6, total_units=11, spend_ceiling=11),
+        verified_by=sc,
+    )
+    assert eleven.units == 11
+    assert code_of(led.reserve, "generated-budget", eleven, verified_by=sc, now=TV_NOW) == (
+        "grant_headroom_exceeded"
+    )
+    # Schema drift: an extra or missing column is not silently accepted.
+    edit("ALTER TABLE line ADD COLUMN generated_extra TEXT")
+    assert code_of(AllocationLedger, db_path) == "ledger_schema_outdated"
+
+
+# X9 / P9: every stored or read plan field is covered by the id; ROI is never claimed.
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"roi_claim": True},
+        {"ranking_basis": "cost_based"},
+        {"requests": ({"kind": "generated-forged"},)},
+        {"cell_scores": ((CELL_A, "999/1"),)},
+        {"stop_reasons": ("generated-forged",)},
+        {"decisions": ()},
+        {"detail": {"budget_units": 999}},
+        {"hold_reason": "generated-forged"},
+        {"policy_digest": "0" * 64},
+        {"verification_mode": "training"},
+    ],
+)
+def test_p9_first_reserve_cannot_store_fabricated_fields(change: dict[str, object]) -> None:
+    led = ledger(units=5, spend=5)
+    plan = plan_of("p", 2)
+    fabricated = replace(plan, **change)  # type: ignore[arg-type]
+    assert code_of(led.reserve, "generated-budget", fabricated) == sa.BINDING_MISMATCH
+    assert led.status("generated-budget")["used_units"] == 0
+
+
+def test_roi_claim_is_refused_even_with_a_recomputed_id() -> None:
+    led = ledger(units=5, spend=5)
+    claim = replace(plan_of("p", 2), roi_claim=True)
+    claim = replace(claim, allocation_id=sa.plan_allocation_id(claim))
+    assert code_of(led.reserve, "generated-budget", claim) == "plan_invalid"
+
+
+# X10 (finding 5): a preview-scope plan records its mode and never reserves on a grant budget.
+def test_preview_scope_is_recorded_and_cannot_reserve_on_a_grant(tmp_path: Path) -> None:
+    seal = tv_seal("a0")
+    path = tv_ledger(tmp_path)
+    tv_register(path, "a0", seal, mode="preview")
+    tv_register(path, "a0", seal)
+    led = AllocationLedger()
+    grant_budget(led, path)
+    pv = scope(path, seal, mode="preview")
+    preview = allocate([family("a0")], policy(), verified_by=pv)
+    assert preview.verification_mode == "preview" and preview.units == 1
+    assert preview.as_record()["verification_mode"] == "preview"
+    assert code_of(led.reserve, "generated-budget", preview, verified_by=pv, now=TV_NOW) == (
+        "verification_preview_only"
+    )
+    training = allocate([family("a0")], policy(), verified_by=scope(path, seal))
+    assert code_of(led.reserve, "generated-budget", training, verified_by=pv, now=TV_NOW) == (
+        "verification_preview_only"
+    )
+    assert led.status("generated-budget")["used_units"] == 0
+
+
+# X11 (finding 8): values beyond sqlite int64 are refused cleanly, never a raw OverflowError.
+def test_values_beyond_int64_are_refused_cleanly(tmp_path: Path) -> None:
+    huge = 2**63
+    for kw in ({"unit_cost": huge}, {"spend_ceiling": huge}, {"total_units": huge}):
+        assert code_of(allocate, [family("a")], policy(**kw)) == "policy_invalid"
+    assert code_of(allocate, [family("a")], policy(min_yield_milli=huge)) == "policy_invalid"
+    assert code_of(allocate, [family("a")], policy(critical_cells=((CELL_A, huge),))) == (
+        "policy_invalid"
+    )
+    led = AllocationLedger()
+    for kw in ({"cap_spend": huge}, {"cap_units": huge}, {"unit_cost": huge}):
+        args = {"cap_units": 1, "cap_spend": 1, "unit_cost": 1, **kw}
+        assert code_of(led.open_budget, "generated-budget", **args) == "budget_invalid"
+    path, _ = world(tmp_path, "a0")
+    assert code_of(grant_budget, led, path, grant=replace(TV_GRANT, budget=huge)) == (
+        "grant_link_invalid"
+    )
+    assert code_of(grant_budget, led, path, cap_spend=huge) == "budget_invalid"
+    top = sa.INT64_MAX
+    led.open_budget("generated-top", cap_units=1, cap_spend=top, unit_cost=top)
+    plan = allocate([family("a")], policy(total_units=1, spend_ceiling=top, unit_cost=top))
+    assert led.reserve("generated-top", plan)["used_spend"] == top
+
+
+# X12 (finding 9): a hand-built or homoglyph cohort is refused, not trusted.
+def test_hand_built_or_homoglyph_cohort_is_refused() -> None:
+    fake = sa.ConfirmationCohort(
+        cutoff=50,
+        maturity_window=10,
+        now=100,
+        independent=(),
+        repeat_entity=(),
+        immature=(),
+        excluded=(),
+        held_out=frozenset(),
+        frame_cases=frozenset({"generated-case-a0"}),
+        cohort_digest="0" * 64,
+    )
+    assert code_of(allocate, [family("a0")], policy(), holdout=fake) == "holdout_invalid"
+    real = cohort()
+    assert allocate([family("a0")], policy(), holdout=real).units == 1
+    for change in (
+        {"cohort_digest": "0" * 64},
+        {"held_out": real.held_out - {"generated-late-young"}},
+        {"held_out": frozenset()},
+        {"independent": ("generated-unheld",)},
+    ):
+        bad = replace(real, **change)  # type: ignore[arg-type]
+        assert code_of(allocate, [family("a0")], policy(), holdout=bad) == "holdout_invalid"
+    emptied = replace(real, held_out=frozenset(), independent=(), repeat_entity=(), immature=())
+    emptied = replace(emptied, cohort_digest=sa._cohort_digest(emptied))
+    assert code_of(allocate, [family("a0")], policy(), holdout=emptied) == "holdout_invalid"
+    cyrillic = case("generated-сase-a0", "generated-entity-9", 60)  # Cyrillic es in "case"
+    with pytest.raises(AllocationError) as err:
+        sa.confirmation_cohort(frame(), [cyrillic], cutoff=50, maturity_window=10, now=100)
+    assert err.value.code == "cohort_invalid" and "non_ascii_identity" in str(err.value)
+    # NFKC-folded (fullwidth) spellings are one identity, so leakage is still caught.
+    wide = case(
+        "generated-late-w", "generated-entity-9", 60, "ｇenerated-content-generated-case-b0"
+    )
+    folded = sa.confirmation_cohort(frame(), [wide], cutoff=50, maturity_window=10, now=100)
+    assert dict(folded.excluded) == {"generated-late-w": "leakage_duplicate"}
+
+
+# X13 (mutant: unnormalised held-out check): a respelled held-out case is still held out.
+def test_held_out_check_normalises_case_refs() -> None:
+    held = cohort()
+    respelled = RootInput("generated-root-r", "generated-d-r", (R1,), 0, " GENERATED-LATE-YOUNG")
+    plan = allocate([family("r", roots=(respelled,)), family("a0")], policy(), holdout=held)
+    assert zero_by_reason(plan)["r"] == ("confirmation_holdout", 0)
+
+
+# X14 (mutant: grant budget ignoring a verification_grant_ref mismatch).
+def test_grant_budget_refuses_a_plan_verified_under_another_grant(tmp_path: Path) -> None:
+    seal = tv_seal("a0")
+    path = tv_ledger(tmp_path)
+    tv_register(path, "a0", seal)
+    tv_register(path, "a0", seal, grant=TV_GRANT_2)
+    led = AllocationLedger()
+    grant_budget(led, path)
+    other = scope(path, seal, TV_GRANT_2)
+    plan = allocate([family("a0")], policy(), verified_by=other)
+    assert plan.units == 1 and plan.verification_grant_ref == TV_GRANT_2.grant_ref
+    for verified_by in (other, scope(path, seal)):
+        assert code_of(
+            led.reserve, "generated-budget", plan, verified_by=verified_by, now=TV_NOW
+        ) == ("verification_grant_mismatch")
+    relabelled = replace(plan, verification_grant_ref=TV_GRANT.grant_ref)
+    relabelled = replace(relabelled, allocation_id=sa.plan_allocation_id(relabelled))
+    assert code_of(led.reserve, "generated-budget", relabelled, verified_by=other, now=TV_NOW) == (
+        "verification_grant_mismatch"
+    )
+
+
+# X15 (mutant: reopening a grant budget ignoring grant_ref).
+def test_reopening_a_grant_budget_under_another_grant_conflicts(tmp_path: Path) -> None:
+    seal = tv_seal("a0")
+    path = tv_ledger(tmp_path)
+    tv_register(path, "a0", seal)
+    led = AllocationLedger()
+    grant_budget(led, path)
+    assert code_of(grant_budget, led, path, grant=TV_GRANT_2) == "budget_conflict"
+    assert led.status("generated-budget")["grant_ref"] == TV_GRANT.grant_ref
+    led.open_budget("generated-plain", cap_units=1, cap_spend=1, unit_cost=1)
+    assert code_of(grant_budget, led, path, "generated-plain") == "budget_conflict"
+    assert code_of(
+        led.open_budget, "generated-budget", cap_units=50, cap_spend=10, unit_cost=1
+    ) == ("budget_conflict")
+
+
+# X16 (reviewer ruling): planning budgets expose that their lines are planning records only.
+def test_status_and_live_lines_expose_authority_and_verification_basis(tmp_path: Path) -> None:
+    path, seal = world(tmp_path, "a0", "b0")
+    led = AllocationLedger()
+    led.open_budget("generated-plain", cap_units=5, cap_spend=5, unit_cost=1)
+    led.reserve("generated-plain", allocate([family("p0")], policy()))
+    plain = led.status("generated-plain")
+    assert plain["authority"] == "planning_record_only" and plain["grant_ref"] == ""
+    assert plain["verification_required"] == "none"
+    assert plain["lines_by_verification_basis"] == {sa.CALLER_ASSERTED: 1}
+    assert led.live_lines("generated-plain") == [
+        sa.LiveLine("p0", "generated-root-p0", R1, "", sa.CALLER_ASSERTED, sa.PLANNING_RECORD)
+    ]
+    grant_budget(led, path)
+    sc = scope(path, seal)
+    led.reserve(
+        "generated-budget",
+        allocate([family("a0")], policy(), verified_by=sc),
+        verified_by=sc,
+        now=TV_NOW,
+    )
+    bound = led.status("generated-budget")
+    assert bound["authority"] == sa.GRANT_AUTHORITY and bound["grant_ref"] == TV_GRANT.grant_ref
+    assert bound["verification_required"] == sa.WORKER_RECORD and len(bound["ledger_id"]) == 64
+    assert led.live_lines("generated-budget") == [
+        sa.LiveLine(
+            "a0", "generated-root-a0", R1, TV_GRANT.grant_ref, sa.WORKER_RECORD, sa.GRANT_AUTHORITY
+        )
+    ]
+    # A worker-record plan on a planning budget is still only a planning record.
+    led.open_budget("generated-plain-2", cap_units=5, cap_spend=5, unit_cost=1)
+    led.reserve("generated-plain-2", allocate([family("b0")], policy(), verified_by=sc))
+    assert led.live_lines("generated-plain-2")[0].authority == sa.PLANNING_RECORD
+
+
+# X17: the OPE-516 ledger must be a privately held, single-link regular file.
+def test_ope516_ledger_custody_is_checked(tmp_path: Path) -> None:
+    path, seal = world(tmp_path, "a0")
+    link = tmp_path / "link.db"
+    link.symlink_to(path)
+    hard = tmp_path / "hard.db"
+    for bad in (link,):
+        assert code_of(allocate, [family("a0")], policy(), verified_by=scope(bad, seal)) == (
+            "ledger_identity_invalid"
+        )
+    os.link(path, hard)
+    assert code_of(allocate, [family("a0")], policy(), verified_by=scope(path, seal)) == (
+        "ledger_identity_invalid"
+    )
+    hard.unlink()
+    path.chmod(0o664)
+    assert code_of(allocate, [family("a0")], policy(), verified_by=scope(path, seal)) == (
+        "ledger_identity_invalid"
+    )
+    path.chmod(0o600)
+    assert allocate([family("a0")], policy(), verified_by=scope(path, seal)).units == 1
+
+
+# X18: a grant-bound reserve needs the scope and the time; commit re-reads OPE-516.
+def test_grant_reserve_needs_scope_and_now_and_commit_rechecks(tmp_path: Path) -> None:
+    path, seal = world(tmp_path, "a0", "b0")
+    db_path = tmp_path / "alloc.db"
+    led = AllocationLedger(db_path)
+    grant_budget(led, path)
+    sc = scope(path, seal)
+    plan = allocate([family("a0")], policy(), verified_by=sc)
+    assert (
+        code_of(led.reserve, "generated-budget", plan, now=TV_NOW) == "verification_uncorroborated"
+    )
+    assert code_of(led.reserve, "generated-budget", plan, verified_by=sc, now=True) == (
+        "grant_link_invalid"
+    )
+    assert led.reserve("generated-budget", plan, verified_by=sc, now=TV_NOW)["replayed"] is False
+    # Replays are no-ops even after OPE-516 has moved on.
+    tv_spend(path, "b0", seal, 1, "x18")
+    assert led.reserve("generated-budget", plan, verified_by=sc, now=TV_NOW)["replayed"] is True
+    restarted = AllocationLedger(db_path)
+    assert restarted.commit("generated-budget", plan.allocation_id)["used_units"] == 1
+    assert restarted.live_lines("generated-budget")[0].authority == sa.GRANT_AUTHORITY
+
+
+# X19 (PR #225 4f04a9b): an admitted child of a stale fit experiment covers nothing.
+def test_covered_from_children_skips_fit_stale_admitted_children() -> None:
+    recipe = {"recipe_id": R1}
+    children = [
+        {"disposition": "admitted", "root_ref": "generated-root-a", "recipe": recipe},
+        {
+            "disposition": "admitted",
+            "root_ref": "generated-root-b",
+            "recipe": recipe,
+            "fit_stale": {"reservation_id": "fit-generated", "reason": "root_generated-reopen"},
+        },
+        {
+            "disposition": "admitted",
+            "root_ref": "generated-root-c",
+            "recipe": recipe,
+            "fit_stale": None,
+        },
+    ]
+    assert covered_from_children(children) == {
+        "generated-root-a": {R1: 1},
+        "generated-root-c": {R1: 1},
+    }
+
+
+# X20 (PR #225 4f04a9b): a grant-bound budget binds to OPE-516's own mandate-store pin.
+_PIN_SQL = (
+    "CREATE TABLE IF NOT EXISTS authority_pin (slot INTEGER PRIMARY KEY CHECK (slot = 1),"
+    " authority_identity TEXT NOT NULL, ledger_identity TEXT NOT NULL, record TEXT NOT NULL)"
+)
+
+
+def _set_fit_pin(path: Path, authority: str | None) -> None:
+    """Simulate OPE-516 pinning (or a same-uid edit replacing) its mandate-store identity."""
+    db = sqlite3.connect(path)
+    db.execute(_PIN_SQL)
+    db.execute("DELETE FROM authority_pin")
+    if authority is not None:
+        db.execute(
+            "INSERT INTO authority_pin VALUES (1, ?, 'generated-ledger-identity', '{}')",
+            (authority,),
+        )
+    db.commit()
+    db.close()
+
+
+def test_grant_budget_binds_to_the_ope516_mandate_store_pin(tmp_path: Path) -> None:
+    path, seal = world(tmp_path, "a0", "b0", "c0")
+    led = AllocationLedger()
+    grant_budget(led, path)  # no pin yet: the store is bound when OPE-516 first pins one
+    sc = scope(path, seal)
+    _set_fit_pin(path, "generated-store-1")
+    a0 = allocate([family("a0")], policy(), verified_by=sc)
+    led.reserve("generated-budget", a0, verified_by=sc, now=TV_NOW)
+    _set_fit_pin(path, "generated-store-2")  # substituted mandate store
+    b0 = allocate([family("b0")], policy(), verified_by=sc)
+    with pytest.raises(AllocationError) as err:
+        led.reserve("generated-budget", b0, verified_by=sc, now=TV_NOW)
+    assert err.value.code == "ledger_identity_mismatch" and "fit_authority_pin" in str(err.value)
+    assert code_of(led.commit, "generated-budget", a0.allocation_id) == "ledger_identity_mismatch"
+    _set_fit_pin(path, None)  # pin removed
+    c0 = allocate([family("c0")], policy(), verified_by=sc)
+    assert code_of(led.reserve, "generated-budget", c0, verified_by=sc, now=TV_NOW) == (
+        "ledger_identity_mismatch"
+    )
+    _set_fit_pin(path, "generated-store-1")
+    c0 = allocate([family("c0")], policy(), verified_by=sc)
+    assert led.reserve("generated-budget", c0, verified_by=sc, now=TV_NOW)["used_units"] == 2
+    assert led.commit("generated-budget", a0.allocation_id)["used_units"] == 2
+    # A pin present at open is bound at open.
+    fresh = AllocationLedger()
+    grant_budget(fresh, path)
+    _set_fit_pin(path, "generated-store-3")
+    assert code_of(grant_budget, fresh, path, "generated-budget-2") == "ledger_identity_mismatch"

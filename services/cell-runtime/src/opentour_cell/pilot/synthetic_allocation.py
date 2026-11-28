@@ -12,8 +12,9 @@ Rules enforced:
   refused whole (never rounded or partially filled), including under replay and concurrency.
 * A budget is bound to the run profile's ``unit_cost`` when it is opened. ``reserve`` charges
   ``units x bound unit_cost`` (never the plan's own line costs), recomputes the plan's
-  ``allocation_id`` from its content and requires a replay to match the stored plan exactly;
-  any mismatch is refused as ``plan_binding_mismatch``.
+  ``allocation_id`` from its whole record (every field that is stored or read) and requires a
+  replay to match the stored plan exactly; any mismatch is refused as ``plan_binding_mismatch``.
+  Every count, cap and cost is bounded to the sqlite int64 range and refused cleanly beyond it.
 * Only families that are verified by an independent verifier, in the real training partition,
   not disputed, not retracted, not protected-derived, not child-derived, not held out for
   confirmation and not in a policy conflict can receive allocation. Near-duplicate families
@@ -23,28 +24,88 @@ Rules enforced:
   return an explicit hold rather than an empty success.
 * Default spend is zero: an unset budget holds.
 
+Two kinds of budget (OPE-520 owner decision: caller-asserted allocations are planning records
+only; spend goes through the OPE-516 grant-bound budget).
+
+* ``open_budget`` opens a *planning* budget. It accepts caller-asserted plans, but
+  ``status()`` reports ``authority="planning_record_only"`` and every ``live_lines()`` row
+  carries ``authority="planning_record"``, an empty ``grant_ref`` and the plan's own unchecked
+  ``verification_basis`` label, so no consumer can mistake it for authorized spend.
+* ``open_budget_for_grant`` opens a *grant-bound* budget (``authority="ope516_grant"``). It binds
+  to one file-backed OPE-516 ``VariantLedger``: the resolved real path plus device and inode of
+  the sqlite file and of its directory, with private-custody checks modelled on
+  ``LearningMandates`` (regular file, not a symlink, one link, owned by this uid, not group- or
+  world-writable). ``reserve`` on it needs a ``VerificationScope`` and ``now`` and trusts no plan
+  field: it re-reads OPE-516 itself and refuses another or copied ledger
+  (``ledger_identity_mismatch``), a seal whose digest does not recompute, a manifest digest
+  that is not OPE-516's current one (``verification_stale``), preview mode, and any line whose
+  root is not a live OPE-516 root of that family, in that scope, with its stored case sealed
+  under that family alone. ``commit`` re-derives the same root liveness from the bound ledger.
+  Where the OPE-516 ledger pins its worker mandate store (``authority_pin``, PR #225: store
+  realpaths, device/inode, organization, engagement, scope and the ledger file's identity), the
+  budget also binds to that pin, read-only, from the first open, reserve or commit that sees it;
+  a later change or removal is ``ledger_identity_mismatch``. OPE-516's private identity
+  helpers are not called, and a ledger without the table binds to file identity only.
+
 Verification basis. ``FamilyInput.verification`` and ``verifier_independent`` are supplied by
 the caller. When ``allocate`` is given a ``VerificationScope`` it reads OPE-516's
-``VariantLedger.manifest`` itself and a family is eligible only if OPE-516 holds a live,
-training-sealed root for it and every one of its case refs is sealed under that family alone;
-the caller's flags can then only narrow eligibility, never widen it. Without a scope the plan
-is labelled ``verification_basis="caller_asserted"``, and a budget opened against an OPE-516
-grant refuses such a plan. OPE-516's own record of verification comes from its ``SeedRoot``
-flags and is unsigned; this is a worker record, not proof.
+``VariantLedger.manifest`` and the live roots of that scope itself; a family is eligible only if
+OPE-516 holds a live, training-sealed root for it, every one of its roots is such a root of
+that family, each root's case ref is the one OPE-516 stored and is sealed under that family
+alone; the caller's flags can then only narrow eligibility, never widen it. The plan records the
+basis, grant, manifest digest, mode and a scope digest (ledger identity, seal, policy revision,
+grant, mode). Without a scope the plan is labelled ``verification_basis="caller_asserted"`` and
+a grant-bound budget refuses it. OPE-516's own record of verification comes from its
+``SeedRoot`` flags and is unsigned; this is a worker record, not proof. ``VariantLedger`` has no
+public root listing, so live roots are read read-only from its ``roots``/``root_scopes`` tables
+with the same scope query ``VariantLedger.manifest`` uses, and must agree with the manifest's
+``independent_families`` (otherwise ``verification_source_invalid``).
 
-OPE-516 link (read-only import of ``training_variants``). ``open_budget_for_grant`` narrows the
-allocation spend cap to the grant's remaining headroom (``Grant.budget`` minus
-``VariantLedger.spent``) when the budget is opened. Open: that headroom is a snapshot; OPE-516
-spend made after the open is not re-checked at ``reserve``; the two modules' cost units are
-assumed equal ("use the same cost unit across the run") and no contract defines them.
-``covered_from_children`` reads OPE-516 children (disposition ``admitted`` only); OPE-516's
-``independent_family_count`` is not consumed, only its ``independent_families`` list.
+OPE-516 link (read-only import of ``training_variants``; nothing here writes OPE-516 state).
+
+* Spend cap of a grant-bound budget: ``min(cap_spend, Grant.budget - VariantLedger.spent - live
+  spend on every budget of that grant in this allocation ledger)``, at open and again at every
+  ``reserve`` with the caller's ``now`` (expiry and authorization flags re-checked). Live spend
+  is reserved, committed and spent-invalidated lines.
+* Reservations here do **not** reduce OPE-516's headroom: OPE-516's ``submit`` checks only its
+  own children's cost against the ``Grant`` it is handed, so it can still accept spend this
+  ledger has reserved. A line later generated through OPE-516 is then counted twice here (once
+  as a live line, once in ``VariantLedger.spent``), which is conservative, never permissive.
+  Closing this needs an OPE-516 change (it must read live reservations, and a generated child
+  must name the line it fulfils); this module does not edit OPE-516.
+* The ``Grant`` is caller-asserted in OPE-516 too: no worker record of the generation grant
+  exists, and ``LearningMandates`` carries no synthetic-generation budget. This ledger pins the
+  first ``Grant`` presented per ``grant_ref`` (with the bound ledger identity) and refuses any
+  other (``grant_conflict``); it cannot verify the first one.
+* Separate allocation-ledger files on one grant cannot see each other's reservations.
+* The two modules' cost units are assumed equal ("use the same cost unit across the run") and no
+  contract defines them. ``covered_from_children`` reads OPE-516 children (disposition
+  ``admitted`` only, never one marked ``fit_stale``); OPE-516's ``independent_family_count`` is
+  not consumed. Nothing here depends on ``LearningMandates`` reservation lifecycle state or on a
+  reservation's residual family set (neither is readable; #225 gaps G1/G2).
+
+Integrity limits (no key custody exists). Plan ids, budget and grant row digests and the cohort
+digest are plain SHA-256 over content: self-consistent only, unsigned. A process running as the
+same uid can edit either sqlite file and recompute them. What is detected: a one-column edit
+(caps, unit cost, ``grant_ref``), downgrading a grant-bound budget to a planning budget,
+schema drift (exact column sets), a forged seal or cohort whose digest does not recompute, and a
+hand-built cohort with nothing held out. Caps of a grant-bound budget are re-checked against the
+pinned grant and live OPE-516 spend at every reserve, so a recomputed cap edit still cannot
+exceed the grant's headroom; the pinned grant itself lives in this file.
 
 Simulated, not proven: every family, verification, cost and yield value is a generated
 sentinel input supplied by the caller. Tests prove software behavior only. Nothing here is
 provider, customer-evidence, fit-qualification or ROI evidence; with a fixed unit cost the
-ranking is count-based and ``roi_claim`` is always false. Plans carry no signature: a caller
-can still build a self-consistent plan, but it is charged at the bound unit cost.
+ranking is count-based and ``roi_claim`` is always false (``reserve`` refuses a plan claiming
+otherwise). Plans carry no signature: a caller can still build a self-consistent plan, but it is
+charged at the bound unit cost and, on a grant-bound budget, re-derived from OPE-516.
+
+Leakage exclusion in ``confirmation_cohort`` compares identities after NFKC, case, width,
+whitespace and invisible-character normalisation and refuses any identity that is not ASCII
+after it (the repo has no confusable-folding helper, so homoglyphs are refused, not folded). It
+does not detect near-duplicate content under different digests, nor two later-time cases that
+share a template or attachment absent from the frame; the cohort is caller-built and its digest
+is self-consistent only.
 
 Not implemented here (recorded gaps): the confirmation and repeat-entity *estimates* (this
 module partitions the cohort; the metric needs model outcomes and belongs to OPE-517);
@@ -55,15 +116,18 @@ and real-label requests (emitted as records only).
 from __future__ import annotations
 
 import hashlib
+import json
+import os
 import sqlite3
+import stat
 import unicodedata
 from collections import Counter
 from collections.abc import Iterable, Iterator, Mapping
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from fractions import Fraction
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 from opentour_cell.pilot.operating_point import canonical, digest
 from opentour_cell.pilot.training_variants import Grant, SplitSeal, VariantLedger
@@ -72,6 +136,8 @@ Json = dict[str, Any]
 PLAN_SCHEMA = "opentour.pilot.synthetic-allocation.v1"
 PROFILE_SCHEMA = "opentour.pilot.synthetic-allocation-profile.v1"
 COHORT_SCHEMA = "opentour.pilot.confirmation-cohort.v1"
+LEDGER_SCHEMA = "opentour.pilot.synthetic-allocation-ledger.v2"
+SEAL_SCHEMA = "opentour.variants.split-seal.v2"  # OPE-516's own SplitSeal.from_rows digest tag
 
 VERIFIED = "verified"
 TRAINING = "training"
@@ -79,6 +145,9 @@ SYNTHETIC_PREFIX = "var-"
 CALLER_ASSERTED = "caller_asserted"
 WORKER_RECORD = "ope516_variant_ledger"
 BINDING_MISMATCH = "plan_binding_mismatch"
+GRANT_AUTHORITY = "ope516_grant"  # a line on a grant-bound budget, re-derived from OPE-516
+PLANNING_RECORD = "planning_record"  # a line on a planning budget: never authorized spend
+INT64_MAX = 2**63 - 1  # sqlite INTEGER range; larger values are refused, never wrapped
 Cell = tuple[str, str]
 Stratum = tuple[str, ...]  # a cell, or a cell subdivided by model revision
 # Keys that must never reach the allocator: protected answers and scores are evaluator-only.
@@ -179,13 +248,30 @@ class AllocationPolicy:
             self.unit_cost,
             self.revision_min_support,
         )
-        if any(type(v) is not int or v < 0 for v in ints):
-            raise AllocationError("policy_invalid", "counts must be non-negative integers")
+        if not _int64(*ints):
+            raise AllocationError("policy_invalid", "counts must be int64 non-negative integers")
         if self.unit_cost < 1 or self.batch_size < 1:
             raise AllocationError("policy_invalid", "unit_cost and batch_size must be positive")
+        for opt in (self.min_yield_milli, self.observed_yield_milli):
+            if opt is not None and not _int64(opt):
+                raise AllocationError("policy_invalid", "yield values must be int64 or None")
+        if type(self.critical_cells) is not tuple or not all(
+            type(item) is tuple
+            and len(item) == 2
+            and _is_str_tuple(item[0])
+            and len(item[0]) == 2
+            and _int64(item[1])
+            for item in self.critical_cells
+        ):
+            raise AllocationError("policy_invalid", "critical_cells")
         if self.cost_basis not in ("fixed_unit", "measured"):
             raise AllocationError("policy_invalid", "cost_basis")
-        if not self.profile_revision or not self.seed:
+        if (
+            type(self.profile_revision) is not str
+            or type(self.seed) is not str
+            or not self.profile_revision
+            or not self.seed
+        ):
             raise AllocationError("policy_invalid", "profile_revision and seed are required")
 
 
@@ -230,6 +316,8 @@ class AllocationPlan:
     verification_grant_ref: str = ""
     verification_ref: str = ""  # OPE-516 manifest digest when verified from the worker record
     holdout_ref: str = ""  # confirmation cohort digest when one was held out
+    verification_mode: str = ""  # OPE-516 scope mode (training | preview) of the worker record
+    verification_scope: str = ""  # digest of ledger identity, seal, policy revision, grant, mode
 
     @property
     def units(self) -> int:
@@ -254,6 +342,8 @@ class AllocationPlan:
             "verification_basis": self.verification_basis,
             "verification_grant_ref": self.verification_grant_ref,
             "verification_ref": self.verification_ref,
+            "verification_mode": self.verification_mode,
+            "verification_scope": self.verification_scope,
             "holdout_ref": self.holdout_ref,
             "stop_reasons": list(self.stop_reasons),
             "cell_scores": [[list(c), s] for c, s in self.cell_scores],
@@ -270,13 +360,33 @@ class AllocationPlan:
 
 @dataclass(frozen=True)
 class VerificationScope:
-    """Where ``allocate`` reads verification from: one OPE-516 ledger manifest scope."""
+    """Where verification is read from: one scope of one file-backed OPE-516 ledger.
 
-    variants: VariantLedger
+    ``variants`` is the path of the OPE-516 ``VariantLedger`` sqlite file (an in-memory or
+    caller-held ledger object cannot be identified, so it is refused). The ledger is opened and
+    identified here; the caller never hands over a ledger object.
+    """
+
+    variants: str | Path
     seal: SplitSeal
     policy_revision: str
     grant_ref: str
     mode: str = "training"
+
+
+class LiveLine(NamedTuple):
+    """A live allocation line and the authority behind it.
+
+    Only ``authority == "ope516_grant"`` lines sit on a grant-bound budget and were re-derived
+    from OPE-516 at reserve; ``planning_record`` lines are planning records only.
+    """
+
+    family_id: str
+    root_ref: str
+    recipe_id: str
+    grant_ref: str
+    verification_basis: str
+    authority: str
 
 
 @dataclass(frozen=True)
@@ -349,6 +459,11 @@ def _hash(*parts: str) -> str:
 
 def _is_str_tuple(value: object) -> bool:
     return type(value) is tuple and all(type(x) is str for x in value)
+
+
+def _int64(*values: object) -> bool:
+    """Exact non-negative ``int`` within sqlite's INTEGER range (no bool, no float)."""
+    return all(type(v) is int and 0 <= v <= INT64_MAX for v in values)
 
 
 def _check_family(fam: object) -> FamilyInput:
@@ -460,12 +575,14 @@ def family_from_record(record: Mapping[str, Any]) -> FamilyInput:
 def covered_from_children(children: Iterable[Mapping[str, Any]]) -> dict[str, dict[str, int]]:
     """Per root, count admitted children by recipe id. Only ``admitted`` counts.
 
-    Held, preview, quarantined, rejected and invalidated children cover nothing, and a child's
-    own family claim is never used to group anything here.
+    Held, preview, quarantined, rejected and invalidated children cover nothing, nor does an
+    admitted child OPE-516 marked ``fit_stale`` (its fit experiment went stale when a co-member
+    root was retracted; OPE-516 excludes it from ``admitted_count`` and weights). A child's own
+    family claim is never used to group anything here.
     """
     out: dict[str, dict[str, int]] = {}
     for child in children:
-        if child.get("disposition") != "admitted":
+        if child.get("disposition") != "admitted" or child.get("fit_stale"):
             continue
         recipe = child.get("recipe") or {}
         root = str(child.get("root_ref", ""))
@@ -492,7 +609,7 @@ def confirmation_cohort(
     allocation whatever its classification. Cutoff and window are run-profile values.
     """
     for name, value in (("cutoff", cutoff), ("maturity_window", maturity_window), ("now", now)):
-        if type(value) is not int or value < 0:
+        if not _int64(value):
             raise AllocationError("cohort_invalid", name)
     frame_list = [_check_case(c) for c in frame]
     cand_list = sorted((_check_case(c) for c in candidates), key=lambda c: _norm(c.case_ref))
@@ -544,19 +661,7 @@ def confirmation_cohort(
         else:
             independent.append(case.case_ref)
     held = frozenset(_norm(c.case_ref) for c in cand_list if c.decided_at > cutoff)
-    body = [
-        COHORT_SCHEMA,
-        cutoff,
-        maturity_window,
-        now,
-        independent,
-        repeat,
-        [list(x) for x in immature],
-        [list(x) for x in excluded],
-        sorted(held),
-        sorted(f_cases),
-    ]
-    return ConfirmationCohort(
+    out = ConfirmationCohort(
         cutoff=cutoff,
         maturity_window=maturity_window,
         now=now,
@@ -566,8 +671,62 @@ def confirmation_cohort(
         excluded=tuple(excluded),
         held_out=held,
         frame_cases=frozenset(f_cases),
-        cohort_digest=digest(body),
+        cohort_digest="",
     )
+    return replace(out, cohort_digest=_cohort_digest(out))
+
+
+def _cohort_digest(cohort: ConfirmationCohort) -> str:
+    return digest(
+        [
+            COHORT_SCHEMA,
+            cohort.cutoff,
+            cohort.maturity_window,
+            cohort.now,
+            list(cohort.independent),
+            list(cohort.repeat_entity),
+            [list(x) for x in cohort.immature],
+            [list(x) for x in cohort.excluded],
+            sorted(cohort.held_out),
+            sorted(cohort.frame_cases),
+        ]
+    )
+
+
+def _check_holdout(cohort: object) -> ConfirmationCohort:
+    """Refuse a hand-built cohort that is not internally consistent.
+
+    The digest must recompute from the cohort's own content, something must be held out, and
+    every confirmation, repeat-entity and immature case must be in the held-out set. The digest
+    is self-consistent only (unsigned): a caller can still build a consistent cohort.
+    """
+    if type(cohort) is not ConfirmationCohort:
+        raise AllocationError("holdout_invalid", "type")
+    if (
+        type(cohort.held_out) is not frozenset
+        or type(cohort.frame_cases) is not frozenset
+        or not all(type(x) is str for x in cohort.held_out | cohort.frame_cases)
+        or not _is_str_tuple(cohort.independent)
+        or not _is_str_tuple(cohort.repeat_entity)
+        or type(cohort.immature) is not tuple
+        or not all(
+            type(x) is tuple and len(x) == 2 and type(x[0]) is str and _int64(x[1])
+            for x in cohort.immature
+        )
+        or type(cohort.excluded) is not tuple
+        or not all(type(x) is tuple and len(x) == 2 and _is_str_tuple(x) for x in cohort.excluded)
+        or not _int64(cohort.cutoff, cohort.maturity_window, cohort.now)
+        or type(cohort.cohort_digest) is not str
+    ):
+        raise AllocationError("holdout_invalid", "shape")
+    if not cohort.held_out:
+        raise AllocationError("holdout_invalid", "nothing_held_out")
+    members = [*cohort.independent, *cohort.repeat_entity, *(ref for ref, _ in cohort.immature)]
+    if any(_norm(ref) not in cohort.held_out for ref in members):
+        raise AllocationError("holdout_invalid", "partition_outside_held_out")
+    if _cohort_digest(cohort) != cohort.cohort_digest:
+        raise AllocationError("holdout_invalid", "cohort_digest")
+    return cohort
 
 
 def _check_case(case: object) -> CohortCase:
@@ -580,38 +739,212 @@ def _check_case(case: object) -> CohortCase:
         raise AllocationError("cohort_invalid", "identity fields must be str")
     if not _norm(case.case_ref) or not _is_str_tuple(case.attachment_digests):
         raise AllocationError("cohort_invalid", "case_ref or attachment_digests")
-    if type(case.decided_at) is not int or case.decided_at < 0:
+    identities = (
+        case.case_ref,
+        case.entity_ref,
+        case.content_digest,
+        case.template_ref,
+        *case.attachment_digests,
+    )
+    # No confusable-folding helper exists in this repo: a homoglyph is refused, never folded.
+    if not all(_norm(v).isascii() for v in identities):
+        raise AllocationError("cohort_invalid", "non_ascii_identity")
+    if not _int64(case.decided_at):
         raise AllocationError("cohort_invalid", "decided_at")
     return case
 
 
-def _corroboration(scope: VerificationScope) -> tuple[frozenset[str], Mapping[str, Any], str]:
-    """Read OPE-516's own manifest for this scope: (families, sealed cases, manifest digest)."""
+def _ledger_identity(path: object) -> tuple[str, Json]:
+    """Identify one file-backed OPE-516 ledger: real path plus device/inode of file and dir.
+
+    Custody checks follow ``LearningMandates``: the file is a regular, single-link file, not a
+    symlink, owned by this uid and not group- or world-writable; so is its directory. A copy has
+    another inode, and a ledger object or ``:memory:`` cannot be identified at all.
+    """
+    if not isinstance(path, str | Path) or str(path) in ("", ":memory:"):
+        raise AllocationError("ledger_identity_invalid", "a file-backed OPE-516 ledger path")
+    raw = Path(path)
+    try:
+        link = raw.lstat()
+        real = Path(os.path.realpath(raw))
+        info = real.stat()
+        dir_info = real.parent.stat()
+    except OSError as exc:
+        raise AllocationError("ledger_identity_invalid", "unreadable") from exc
+    uid = os.getuid()
+    if (
+        stat.S_ISLNK(link.st_mode)
+        or not stat.S_ISREG(info.st_mode)
+        or info.st_nlink != 1
+        or info.st_uid != uid
+        or info.st_mode & 0o022
+        or not stat.S_ISDIR(dir_info.st_mode)
+        or dir_info.st_uid != uid
+        or dir_info.st_mode & 0o022
+    ):
+        raise AllocationError("ledger_identity_invalid", "custody")
+    identity: Json = {
+        "path": str(real),
+        "dev": info.st_dev,
+        "ino": info.st_ino,
+        "dir_dev": dir_info.st_dev,
+        "dir_ino": dir_info.st_ino,
+    }
+    return digest(["opentour.pilot.ope516-ledger-identity.v1", identity]), identity
+
+
+def _check_seal(seal: object) -> SplitSeal:
+    """A seal is accepted only if OPE-516's own digest recomputes from its content."""
+    if type(seal) is not SplitSeal:
+        raise AllocationError("verification_source_invalid", "seal")
+    parts = (seal.assignments, seal.cases)
+    if type(seal.digest) is not str or not all(
+        isinstance(m, Mapping)
+        and all(
+            type(k) is str and _is_str_tuple(v) and list(v) == sorted(set(v)) and v
+            for k, v in m.items()
+        )
+        for m in parts
+    ):
+        raise AllocationError("verification_source_invalid", "seal_shape")
+    recomputed = digest([SEAL_SCHEMA, dict(seal.assignments), dict(seal.cases)])
+    if recomputed != seal.digest:
+        raise AllocationError("verification_source_invalid", "seal_digest")
+    return seal
+
+
+@dataclass(frozen=True)
+class _Corroboration:
+    """What OPE-516 itself holds for one scope, read by this module (never by the caller)."""
+
+    families: frozenset[str]
+    roots: Mapping[str, tuple[str, str]]  # live root_ref -> (family_id, stored case_ref)
+    cases: Mapping[str, tuple[str, ...]]  # digest-verified seal: case_ref -> families
+    manifest_digest: str
+    ledger_id: str
+    identity: Json
+    scope_digest: str
+    variants: VariantLedger
+    fit_pin: str  # digest of OPE-516's own mandate-store pin row, "" where none exists
+
+    def root_reason(self, family_id: str, root_ref: str, case_ref: str | None = None) -> str:
+        """Empty when ``root_ref`` is a live OPE-516 root of ``family_id`` sealed to it alone."""
+        found = self.roots.get(root_ref)
+        if family_id not in self.families or found is None or found[0] != family_id:
+            return "root_not_live_in_ope516"
+        if case_ref is not None and case_ref != found[1]:
+            return "case_ref_differs_from_ope516"
+        if tuple(self.cases.get(found[1], ())) != (family_id,):
+            return "case_not_sealed_to_family"
+        return ""
+
+
+def _fit_pin(db: sqlite3.Connection) -> str:
+    """Digest of OPE-516's ``authority_pin`` row, read-only; "" when the table or row is absent.
+
+    Where OPE-516 pins its worker mandate store (PR #225: realpaths and device/inode of the store
+    directory and databases, organization, engagement, scope, plus the variant ledger's own file
+    identity), a grant-bound budget binds to that pin too instead of inventing a second one.
+    OPE-516 revisions without the table have nothing to bind.
+    """
+    if not db.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='authority_pin'"
+    ).fetchone():
+        return ""
+    row = db.execute(
+        "SELECT authority_identity, ledger_identity FROM authority_pin WHERE slot=1"
+    ).fetchone()
+    return (
+        "" if row is None else digest(["opentour.pilot.ope516-fit-pin.v1", [str(v) for v in row]])
+    )
+
+
+def _read_fit_pin(real: Path) -> str:
+    db = sqlite3.connect(real.as_uri() + "?mode=ro", uri=True, timeout=30)
+    try:
+        return _fit_pin(db)
+    finally:
+        db.close()
+
+
+_LIVE_ROOTS_SQL = (
+    "SELECT r.root_ref, r.family_id, r.case_ref FROM roots r JOIN root_scopes s"
+    " ON s.root_ref=r.root_ref WHERE r.state='live' AND r.policy_revision=?"
+    " AND r.seal_digest=? AND s.mode=? AND s.grant_ref=?"
+)
+
+
+def _corroborate(scope: object) -> _Corroboration:
+    """Open the scope's OPE-516 ledger by path and read its manifest and live roots."""
     if (
         type(scope) is not VerificationScope
-        or type(scope.variants) is not VariantLedger
-        or type(scope.seal) is not SplitSeal
         or type(scope.policy_revision) is not str
         or type(scope.grant_ref) is not str
+        or not scope.grant_ref
         or scope.mode not in ("preview", "training")
     ):
         raise AllocationError("verification_source_invalid")
-    manifest = scope.variants.manifest(
-        seal=scope.seal,
-        policy_revision=scope.policy_revision,
-        grant_ref=scope.grant_ref,
-        mode="training" if scope.mode == "training" else "preview",
-    )
+    seal = _check_seal(scope.seal)
+    ledger_id, identity = _ledger_identity(scope.variants)
+    real = Path(identity["path"])
+    try:
+        variants = VariantLedger(real)
+        manifest = variants.manifest(
+            seal=seal,
+            policy_revision=scope.policy_revision,
+            grant_ref=scope.grant_ref,
+            mode="training" if scope.mode == "training" else "preview",
+        )
+        db = sqlite3.connect(real.as_uri() + "?mode=ro", uri=True, timeout=30)
+        try:
+            rows = db.execute(
+                _LIVE_ROOTS_SQL, (scope.policy_revision, seal.digest, scope.mode, scope.grant_ref)
+            ).fetchall()
+            fit_pin = _fit_pin(db)
+        finally:
+            db.close()
+    except (sqlite3.Error, OSError, ValueError) as exc:
+        raise AllocationError("verification_source_invalid", "ope516_ledger_unreadable") from exc
+    if _ledger_identity(real)[0] != ledger_id:  # replaced while being read
+        raise AllocationError("ledger_identity_mismatch", "changed_during_read")
+    if not all(type(v) is str for row in rows for v in row):
+        raise AllocationError("verification_source_invalid", "roots")
+    roots = {
+        str(ref): (str(fam), str(case))
+        for ref, fam, case in rows
+        if tuple(seal.assignments.get(fam, ())) == (TRAINING,)
+    }
     families = manifest.get("independent_families")
     if not isinstance(families, list) or not all(type(f) is str for f in families):
         raise AllocationError("verification_source_invalid", "independent_families")
-    return frozenset(families), scope.seal.cases, str(manifest["manifest_digest"])
+    if sorted({fam for fam, _ in roots.values()}) != sorted(families):
+        raise AllocationError("verification_source_invalid", "manifest_disagrees_with_roots")
+    mode = scope.mode
+    return _Corroboration(
+        families=frozenset(families),
+        roots=roots,
+        cases={k: tuple(v) for k, v in seal.cases.items()},
+        manifest_digest=str(manifest["manifest_digest"]),
+        ledger_id=ledger_id,
+        identity=identity,
+        scope_digest=digest(
+            [
+                "opentour.pilot.allocation-verification-scope.v1",
+                ledger_id,
+                seal.digest,
+                scope.policy_revision,
+                scope.grant_ref,
+                mode,
+            ]
+        ),
+        variants=variants,
+        fit_pin=fit_pin,
+    )
 
 
 def _classify(
     families: list[FamilyInput],
-    corroborated: frozenset[str] | None = None,
-    sealed_cases: Mapping[str, Any] | None = None,
+    corroboration: _Corroboration | None = None,
     holdout: ConfirmationCohort | None = None,
 ) -> tuple[dict[str, str], list[FamilyInput]]:
     """Independently validate grouping and eligibility. Returns reasons and eligible families."""
@@ -673,13 +1006,11 @@ def _classify(
             reason = "unverified"
         elif not fam.verifier_independent:
             reason = "verifier_not_independent"
-        elif corroborated is not None and (
-            fam.family_id not in corroborated
-            or any(
-                tuple((sealed_cases or {}).get(r.case_ref, ())) != (fam.family_id,)
-                for r in fam.roots
-            )
+        elif corroboration is not None and any(
+            corroboration.root_reason(fam.family_id, r.root_ref, r.case_ref) for r in fam.roots
         ):
+            # Every root must be a live OPE-516 root of this family, with the case OPE-516
+            # stored for it sealed under this family alone.
             reason = "verification_uncorroborated"
         elif fam.policy_conflict:
             reason = "policy_conflict"
@@ -756,42 +1087,16 @@ def _policy_digest(policy: AllocationPolicy) -> str:
     )
 
 
-def _derive_allocation_id(
-    *,
-    input_digest: str,
-    policy_digest: str,
-    control: bool,
-    match_units: int | None,
-    verification: tuple[str, str, str],
-    holdout_ref: str,
-    lines: Iterable[Line],
-) -> str:
-    """The allocation id commits to the plan's inputs, profile, verification basis and lines."""
-    return digest(
-        [
-            "synthetic-allocation.v2",
-            input_digest,
-            policy_digest,
-            control,
-            match_units,
-            list(verification),
-            holdout_ref,
-            _line_rows(lines),
-        ]
-    )
-
-
 def plan_allocation_id(plan: AllocationPlan) -> str:
-    """Recompute the id a plan's own content implies (``reserve`` refuses any other id)."""
-    return _derive_allocation_id(
-        input_digest=plan.input_digest,
-        policy_digest=plan.policy_digest,
-        control=plan.control,
-        match_units=plan.match_units,
-        verification=(plan.verification_basis, plan.verification_grant_ref, plan.verification_ref),
-        holdout_ref=plan.holdout_ref,
-        lines=plan.lines,
-    )
+    """The id a plan's whole record implies; ``reserve`` refuses any other id.
+
+    It covers every field ``as_record`` stores or ``reserve`` reads: status, lines, decisions,
+    requests, scores, ranking basis, stop reasons, detail, ROI flag, digests, verification
+    basis/grant/manifest/mode/scope and holdout. A plain digest, not a signature.
+    """
+    record = plan.as_record()
+    record.pop("allocation_id")
+    return digest(["synthetic-allocation.v3", record])
 
 
 def _frac(value: Fraction) -> str:
@@ -846,16 +1151,21 @@ def allocate(
         match_units is None or (type(match_units) is int and match_units >= 0)
     ):
         raise AllocationError("input_invalid", "control or match_units")
-    if holdout is not None and type(holdout) is not ConfirmationCohort:
-        raise AllocationError("input_invalid", "holdout")
+    if holdout is not None:
+        _check_holdout(holdout)
     fams = sorted(families, key=lambda f: str(getattr(f, "family_id", "")))
-    corroborated: frozenset[str] | None = None
-    sealed_cases: Mapping[str, Any] | None = None
-    verification = (CALLER_ASSERTED, "", "")
+    corroboration: _Corroboration | None = None
+    verification = (CALLER_ASSERTED, "", "", "", "")
     if verified_by is not None:
-        corroborated, sealed_cases, manifest_digest = _corroboration(verified_by)
-        verification = (WORKER_RECORD, verified_by.grant_ref, manifest_digest)
-    reasons, eligible = _classify(fams, corroborated, sealed_cases, holdout)
+        corroboration = _corroborate(verified_by)
+        verification = (
+            WORKER_RECORD,
+            verified_by.grant_ref,
+            corroboration.manifest_digest,
+            verified_by.mode,
+            corroboration.scope_digest,
+        )
+    reasons, eligible = _classify(fams, corroboration, holdout)
     in_digest = _input_digest(fams)
     pol_digest = _policy_digest(policy)
     holdout_ref = holdout.cohort_digest if holdout is not None else ""
@@ -868,16 +1178,8 @@ def allocate(
     basis = "cost_based" if policy.cost_basis == "measured" else "count_based"
     seed = policy.seed
 
-    def plan_id(lines: Iterable[Line]) -> str:
-        return _derive_allocation_id(
-            input_digest=in_digest,
-            policy_digest=pol_digest,
-            control=control,
-            match_units=match_units,
-            verification=verification,
-            holdout_ref=holdout_ref,
-            lines=lines,
-        )
+    def sealed(plan: AllocationPlan) -> AllocationPlan:
+        return replace(plan, allocation_id=plan_allocation_id(plan))
 
     def decisions_for(units: Mapping[str, int]) -> tuple[FamilyDecision, ...]:
         return tuple(
@@ -892,25 +1194,29 @@ def allocate(
         )
 
     def hold(reason: str, **detail: Any) -> AllocationPlan:
-        return AllocationPlan(
-            allocation_id=plan_id(()),
-            status="hold",
-            hold_reason=reason,
-            lines=(),
-            decisions=decisions_for({}),
-            requests=tuple(requests),
-            cell_scores=(),
-            ranking_basis=basis,
-            stop_reasons=(reason,),
-            policy_digest=pol_digest,
-            input_digest=in_digest,
-            control=control,
-            detail=dict(detail),
-            match_units=match_units,
-            verification_basis=verification[0],
-            verification_grant_ref=verification[1],
-            verification_ref=verification[2],
-            holdout_ref=holdout_ref,
+        return sealed(
+            AllocationPlan(
+                allocation_id="",
+                status="hold",
+                hold_reason=reason,
+                lines=(),
+                decisions=decisions_for({}),
+                requests=tuple(requests),
+                cell_scores=(),
+                ranking_basis=basis,
+                stop_reasons=(reason,),
+                policy_digest=pol_digest,
+                input_digest=in_digest,
+                control=control,
+                detail=dict(detail),
+                match_units=match_units,
+                verification_basis=verification[0],
+                verification_grant_ref=verification[1],
+                verification_ref=verification[2],
+                holdout_ref=holdout_ref,
+                verification_mode=verification[3],
+                verification_scope=verification[4],
+            )
         )
 
     if budget <= 0:
@@ -1029,77 +1335,173 @@ def allocate(
     if not lines:
         return hold("no_uncovered_transformations")
     stop = "budget_exhausted" if len(lines) >= limit else "capacity_exhausted"
-    return AllocationPlan(
-        allocation_id=plan_id(lines),
-        status="allocated",
-        hold_reason="",
-        lines=tuple(lines),
-        decisions=decisions_for(per_family),
-        requests=tuple(requests),
-        cell_scores=tuple((s, _frac(scores[s])) for s in sorted(scores)),
-        ranking_basis=basis,
-        stop_reasons=(stop,),
-        policy_digest=pol_digest,
-        input_digest=in_digest,
-        control=control,
-        detail={
-            "budget_units": budget,
-            "eligible_families": len(eligible),
-            "revision_split": revision_split,
-        },
-        match_units=match_units,
-        verification_basis=verification[0],
-        verification_grant_ref=verification[1],
-        verification_ref=verification[2],
-        holdout_ref=holdout_ref,
+    return sealed(
+        AllocationPlan(
+            allocation_id="",
+            status="allocated",
+            hold_reason="",
+            lines=tuple(lines),
+            decisions=decisions_for(per_family),
+            requests=tuple(requests),
+            cell_scores=tuple((s, _frac(scores[s])) for s in sorted(scores)),
+            ranking_basis=basis,
+            stop_reasons=(stop,),
+            policy_digest=pol_digest,
+            input_digest=in_digest,
+            control=control,
+            detail={
+                "budget_units": budget,
+                "eligible_families": len(eligible),
+                "revision_split": revision_split,
+            },
+            match_units=match_units,
+            verification_basis=verification[0],
+            verification_grant_ref=verification[1],
+            verification_ref=verification[2],
+            holdout_ref=holdout_ref,
+            verification_mode=verification[3],
+            verification_scope=verification[4],
+        )
     )
+
+
+def _check_grant(grant: object) -> Grant:
+    """Exact types on every ``Grant`` field; counts within the sqlite int64 range."""
+    if type(grant) is not Grant or type(grant.grant_ref) is not str or not grant.grant_ref:
+        raise AllocationError("grant_link_invalid")
+    flags = (
+        grant.generation_authorized,
+        grant.training_authorized,
+        grant.execution_location_approved,
+    )
+    if not all(type(f) is bool for f in flags):
+        raise AllocationError("grant_link_invalid", "flags must be bool")
+    if not _int64(grant.budget, grant.expires_at):
+        raise AllocationError("grant_link_invalid", "budget, expires_at and now must be int")
+    teachers = grant.approved_external_teachers
+    if type(teachers) is not frozenset or not all(type(t) is str for t in teachers):
+        raise AllocationError("grant_link_invalid", "approved_external_teachers")
+    return grant
+
+
+def _grant_record(grant: Grant) -> Json:
+    return {
+        "grant_ref": grant.grant_ref,
+        "generation_authorized": grant.generation_authorized,
+        "training_authorized": grant.training_authorized,
+        "execution_location_approved": grant.execution_location_approved,
+        "budget": grant.budget,
+        "expires_at": grant.expires_at,
+        "approved_external_teachers": sorted(grant.approved_external_teachers),
+    }
+
+
+def _record_headroom(record: Mapping[str, Any], spent: int, now: int) -> int:
+    """Mirror of OPE-516's seed gate: unauthorized, expired or unapproved authorizes nothing."""
+    if (
+        not (
+            record["generation_authorized"] is True
+            and record["training_authorized"] is True
+            and record["execution_location_approved"] is True
+        )
+        or now >= record["expires_at"]
+    ):
+        return 0
+    return max(0, int(record["budget"]) - spent)
 
 
 def grant_headroom(grant: Grant, variants: VariantLedger, *, now: int) -> int:
     """Spend OPE-516's grant still authorizes: ``Grant.budget - VariantLedger.spent``.
 
     An unauthorized, expired or location-unapproved grant authorizes nothing (mirrors OPE-516's
-    own seed gate). Read-only: this only calls OPE-516's public ``spent``.
+    own seed gate). Read-only: this only calls OPE-516's public ``spent``. It does not subtract
+    reservations held in an ``AllocationLedger`` (the ledger does that itself).
     """
-    if type(grant) is not Grant or type(variants) is not VariantLedger:
+    _check_grant(grant)
+    if type(variants) is not VariantLedger:
         raise AllocationError("grant_link_invalid")
-    if type(now) is not int or type(grant.budget) is not int or type(grant.expires_at) is not int:
+    if not _int64(now):
         raise AllocationError("grant_link_invalid", "budget, expires_at and now must be int")
-    if (
-        not (
-            grant.generation_authorized is True
-            and grant.training_authorized is True
-            and grant.execution_location_approved is True
-        )
-        or now >= grant.expires_at
-    ):
-        return 0
-    return max(0, grant.budget - variants.spent(grant.grant_ref))
+    return _record_headroom(_grant_record(grant), variants.spent(grant.grant_ref), now)
 
 
 _SCHEMA = (
+    "CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
     """CREATE TABLE IF NOT EXISTS budget (
         budget_ref TEXT PRIMARY KEY, cap_units INTEGER NOT NULL, cap_spend INTEGER NOT NULL,
-        unit_cost INTEGER NOT NULL, grant_ref TEXT NOT NULL)""",
+        unit_cost INTEGER NOT NULL, grant_ref TEXT NOT NULL, ledger_id TEXT NOT NULL,
+        grant_digest TEXT NOT NULL, row_digest TEXT NOT NULL)""",
+    """CREATE TABLE IF NOT EXISTS grant_pin (
+        grant_ref TEXT PRIMARY KEY, ledger_id TEXT NOT NULL, identity TEXT NOT NULL,
+        grant_record TEXT NOT NULL, grant_digest TEXT NOT NULL, fit_pin TEXT NOT NULL,
+        row_digest TEXT NOT NULL)""",
+    """CREATE TABLE IF NOT EXISTS grant_budget (
+        budget_ref TEXT PRIMARY KEY, grant_ref TEXT NOT NULL)""",
     """CREATE TABLE IF NOT EXISTS allocation (
         allocation_id TEXT NOT NULL, budget_ref TEXT NOT NULL, state TEXT NOT NULL,
         units INTEGER NOT NULL, spend INTEGER NOT NULL, record TEXT NOT NULL,
-        PRIMARY KEY (budget_ref, allocation_id))""",
+        scope TEXT NOT NULL, PRIMARY KEY (budget_ref, allocation_id))""",
     """CREATE TABLE IF NOT EXISTS line (
         budget_ref TEXT NOT NULL, root_ref TEXT NOT NULL, recipe_id TEXT NOT NULL,
         family_id TEXT NOT NULL, allocation_id TEXT NOT NULL, cost INTEGER NOT NULL,
-        state TEXT NOT NULL, PRIMARY KEY (root_ref, recipe_id))""",
+        state TEXT NOT NULL, grant_ref TEXT NOT NULL, verification_basis TEXT NOT NULL,
+        authority TEXT NOT NULL, PRIMARY KEY (root_ref, recipe_id))""",
     """CREATE TABLE IF NOT EXISTS retracted (
         family_id TEXT PRIMARY KEY, reason TEXT NOT NULL)""",
 )
+_TABLES = ("meta", "budget", "grant_pin", "grant_budget", "allocation", "line", "retracted")
 # Line states. reserved and committed count against the cap. A retraction frees an unspent
 # reservation (invalidated) but keeps committed spend counted (invalidated_spent): spend is
 # never refunded. released frees the cap (discarded unfinished selection).
 _COUNTED = ("reserved", "committed", "invalidated_spent")
 
 
-def _positive_ints(*values: object) -> bool:
-    return all(type(v) is int and v >= 0 for v in values)
+def _schema_shape(db: sqlite3.Connection) -> dict[str, list[tuple[Any, ...]]]:
+    """Exact column set (name, type, not-null, default, primary-key position) of every table."""
+    return {
+        table: [tuple(row[1:6]) for row in db.execute(f"PRAGMA table_info({table})")]
+        for table in _TABLES
+    }
+
+
+def _expected_shape() -> dict[str, list[tuple[Any, ...]]]:
+    db = sqlite3.connect(":memory:")
+    try:
+        for stmt in _SCHEMA:
+            db.execute(stmt)
+        return _schema_shape(db)
+    finally:
+        db.close()
+
+
+def _budget_digest(*fields: object) -> str:
+    return digest(["opentour.pilot.allocation-budget-row.v2", list(fields)])
+
+
+def _pin_digest(*fields: object) -> str:
+    return digest(["opentour.pilot.allocation-grant-pin.v1", list(fields)])
+
+
+def _check_budget_args(
+    budget_ref: object, cap_units: object, cap_spend: object, unit_cost: object
+) -> None:
+    if type(budget_ref) is not str or not budget_ref:
+        raise AllocationError("budget_invalid", "budget_ref")
+    if not _int64(cap_units, cap_spend, unit_cost) or unit_cost < 1:  # type: ignore[operator]
+        raise AllocationError("budget_invalid")
+
+
+@dataclass(frozen=True)
+class _Budget:
+    ref: str
+    cap_units: int
+    cap_spend: int
+    unit_cost: int
+    grant_ref: str
+    ledger_id: str
+    grant_digest: str
+    grant: Json | None  # pinned grant record (grant-bound budgets only)
+    identity: Json | None  # pinned OPE-516 ledger identity (grant-bound budgets only)
 
 
 class AllocationLedger:
@@ -1110,13 +1512,15 @@ class AllocationLedger:
         self._shared: sqlite3.Connection | None = None
         if self._path == ":memory:":
             self._shared = sqlite3.connect(":memory:", isolation_level=None)
-        with self._tx(begin=False) as db:
+        with self._tx() as db:
             for stmt in _SCHEMA:
                 db.execute(stmt)
-            columns = {row[1] for row in db.execute("PRAGMA table_info(budget)")}
-        if not {"unit_cost", "grant_ref"} <= columns:
-            # A ledger from an earlier revision has unbound budgets; it is not migrated.
-            raise AllocationError("ledger_schema_outdated", self._path)
+            db.execute("INSERT OR IGNORE INTO meta VALUES ('schema', ?)", (LEDGER_SCHEMA,))
+            version = db.execute("SELECT value FROM meta WHERE key='schema'").fetchone()
+            if _schema_shape(db) != _expected_shape() or version != (LEDGER_SCHEMA,):
+                # A ledger from an earlier revision (or an edited one) is not migrated; the
+                # transaction rolls back, so this check never alters it.
+                raise AllocationError("ledger_schema_outdated", self._path)
 
     @contextmanager
     def _tx(self, *, begin: bool = True) -> Iterator[sqlite3.Connection]:
@@ -1136,78 +1540,270 @@ class AllocationLedger:
             if self._shared is None:
                 db.close()
 
+    # -- integrity -----------------------------------------------------------------------
+
+    @staticmethod
+    def _load_pin(
+        db: sqlite3.Connection, grant_ref: str
+    ) -> tuple[str, Json, Json, str, str] | None:
+        row = db.execute(
+            "SELECT ledger_id, identity, grant_record, grant_digest, fit_pin, row_digest"
+            " FROM grant_pin WHERE grant_ref=?",
+            (grant_ref,),
+        ).fetchone()
+        if row is None:
+            return None
+        ledger_id, identity_text, record_text, grant_dg, fit_pin, row_dg = row
+        if row_dg != _pin_digest(
+            grant_ref, ledger_id, identity_text, record_text, grant_dg, fit_pin
+        ):
+            raise AllocationError("ledger_integrity_failed", f"grant_pin {grant_ref}")
+        try:
+            identity, record = json.loads(identity_text), json.loads(record_text)
+        except (TypeError, ValueError) as exc:
+            raise AllocationError("ledger_integrity_failed", f"grant_pin {grant_ref}") from exc
+        if (
+            digest(record) != grant_dg
+            or digest(["opentour.pilot.ope516-ledger-identity.v1", identity]) != ledger_id
+            or record.get("grant_ref") != grant_ref
+        ):
+            raise AllocationError("ledger_integrity_failed", f"grant_pin {grant_ref}")
+        return str(ledger_id), identity, record, str(grant_dg), str(fit_pin)
+
+    def _load_budget(self, db: sqlite3.Connection, budget_ref: str) -> _Budget:
+        """Read one budget and refuse it unless every integrity cross-check holds.
+
+        Grant-ness is carried by four places at once (``grant_ref``, ``ledger_id`` and
+        ``grant_digest`` columns, the ``grant_budget`` membership row and the pinned grant),
+        all covered by row digests; blanking one column does not make a planning budget.
+        """
+        row = db.execute(
+            "SELECT cap_units, cap_spend, unit_cost, grant_ref, ledger_id, grant_digest,"
+            " row_digest FROM budget WHERE budget_ref=?",
+            (budget_ref,),
+        ).fetchone()
+        if row is None:
+            raise AllocationError("budget_unknown", budget_ref)
+        cap_units, cap_spend, unit_cost, grant_ref, ledger_id, grant_dg, row_dg = row
+        if not _int64(cap_units, cap_spend, unit_cost) or unit_cost < 1:
+            raise AllocationError("ledger_integrity_failed", f"budget {budget_ref}")
+        fields = (budget_ref, cap_units, cap_spend, unit_cost, grant_ref, ledger_id, grant_dg)
+        if row_dg != _budget_digest(*fields):
+            raise AllocationError("ledger_integrity_failed", f"budget {budget_ref}")
+        if len({bool(grant_ref), bool(ledger_id), bool(grant_dg)}) != 1:
+            raise AllocationError("ledger_integrity_failed", f"budget {budget_ref} grant columns")
+        member = db.execute(
+            "SELECT grant_ref FROM grant_budget WHERE budget_ref=?", (budget_ref,)
+        ).fetchone()
+        authority = GRANT_AUTHORITY if grant_ref else PLANNING_RECORD
+        if (
+            (member is None) == bool(grant_ref)
+            or (member is not None and member[0] != grant_ref)
+            or db.execute(
+                "SELECT 1 FROM line WHERE budget_ref=? AND (authority<>? OR grant_ref<>?) LIMIT 1",
+                (budget_ref, authority, grant_ref),
+            ).fetchone()
+            or db.execute(
+                "SELECT 1 FROM allocation WHERE budget_ref=? AND (scope<>'')<>? LIMIT 1",
+                (budget_ref, bool(grant_ref)),
+            ).fetchone()
+        ):
+            raise AllocationError("ledger_integrity_failed", f"budget {budget_ref} grant binding")
+        grant: Json | None = None
+        identity: Json | None = None
+        if grant_ref:
+            pin = self._load_pin(db, grant_ref)
+            if pin is None or pin[0] != ledger_id or pin[3] != grant_dg:
+                raise AllocationError("ledger_integrity_failed", f"budget {budget_ref} grant pin")
+            identity, grant = pin[1], pin[2]
+        return _Budget(
+            budget_ref,
+            cap_units,
+            cap_spend,
+            unit_cost,
+            grant_ref,
+            ledger_id,
+            grant_dg,
+            grant,
+            identity,
+        )
+
+    def _bind_fit_pin(self, db: sqlite3.Connection, grant_ref: str, current: str) -> None:
+        """Hold OPE-516's mandate-store pin fixed once seen (first sight is trusted, as in #225).
+
+        A pin recorded here that OPE-516 no longer holds, or holds differently, is
+        ``ledger_identity_mismatch``. An OPE-516 ledger that pins its store only after this
+        budget opened is bound at the first reserve, open or commit that sees the pin.
+        """
+        pin = self._load_pin(db, grant_ref)
+        if pin is None:
+            raise AllocationError("ledger_integrity_failed", f"grant_pin {grant_ref}")
+        stored = pin[4]
+        if stored == current:
+            return
+        if stored:
+            raise AllocationError("ledger_identity_mismatch", f"{grant_ref} fit_authority_pin")
+        row = db.execute(
+            "SELECT ledger_id, identity, grant_record, grant_digest FROM grant_pin"
+            " WHERE grant_ref=?",
+            (grant_ref,),
+        ).fetchone()
+        db.execute(
+            "UPDATE grant_pin SET fit_pin=?, row_digest=? WHERE grant_ref=?",
+            (current, _pin_digest(grant_ref, *row, current), grant_ref),
+        )
+
+    def _put_budget(
+        self,
+        db: sqlite3.Connection,
+        budget_ref: str,
+        cap_units: int,
+        cap_spend: int,
+        unit_cost: int,
+        grant_ref: str = "",
+        ledger_id: str = "",
+        grant_dg: str = "",
+    ) -> None:
+        fields = (budget_ref, cap_units, cap_spend, unit_cost, grant_ref, ledger_id, grant_dg)
+        db.execute(
+            "INSERT INTO budget VALUES (?,?,?,?,?,?,?,?)", (*fields, _budget_digest(*fields))
+        )
+        if grant_ref:
+            db.execute("INSERT INTO grant_budget VALUES (?,?)", (budget_ref, grant_ref))
+
+    def _grant_live(self, db: sqlite3.Connection, grant_ref: str) -> int:
+        """Live spend on every budget of this grant in this ledger (summed in Python)."""
+        total = 0
+        for (ref,) in db.execute(
+            "SELECT budget_ref FROM grant_budget WHERE grant_ref=? ORDER BY budget_ref",
+            (grant_ref,),
+        ).fetchall():
+            self._load_budget(db, str(ref))
+            total += self._used(db, str(ref))[1]
+        return total
+
+    # -- budgets -------------------------------------------------------------------------
+
     def open_budget(
         self, budget_ref: str, *, cap_units: int, cap_spend: int, unit_cost: int
     ) -> None:
-        """Open a budget bound to the run profile's ``AllocationPolicy.unit_cost``. Immutable."""
-        self._open(budget_ref, cap_units, cap_spend, unit_cost, "")
+        """Open a *planning* budget bound to ``AllocationPolicy.unit_cost``. Immutable.
+
+        It accepts caller-asserted plans; nothing on it is authorized spend (see ``status``).
+        """
+        _check_budget_args(budget_ref, cap_units, cap_spend, unit_cost)
+        with self._tx() as db:
+            if db.execute("SELECT 1 FROM budget WHERE budget_ref=?", (budget_ref,)).fetchone():
+                b = self._load_budget(db, budget_ref)
+                if (b.cap_units, b.cap_spend, b.unit_cost, b.grant_ref) != (
+                    cap_units,
+                    cap_spend,
+                    unit_cost,
+                    "",
+                ):
+                    raise AllocationError("budget_conflict", budget_ref)
+                return
+            self._put_budget(db, budget_ref, cap_units, cap_spend, unit_cost)
 
     def open_budget_for_grant(
         self,
         budget_ref: str,
         *,
         grant: Grant,
-        variants: VariantLedger,
+        variants: str | Path,
         now: int,
         cap_units: int,
         unit_cost: int,
         cap_spend: int | None = None,
     ) -> Json:
-        """Open a budget whose spend cap cannot exceed the OPE-516 grant's current headroom.
+        """Open a budget bound to one OPE-516 ledger file and one pinned grant.
 
-        The cap is ``min(cap_spend, grant_headroom)`` at open time. Reopening the same budget
-        for the same grant, unit cost and unit cap is idempotent and keeps the stored cap.
-        Plans reserved against it must be verified from that grant's OPE-516 record.
+        ``variants`` is the path of the file-backed OPE-516 ``VariantLedger``. The first grant
+        presented for a ``grant_ref`` is pinned with that ledger's identity; any other grant
+        content (``grant_conflict``) or ledger (``ledger_identity_mismatch``) is refused later.
+        The cap is ``min(cap_spend, grant.budget - OPE-516 spent - live spend on every budget of
+        this grant here)``. Reopening the same budget for the same grant, ledger, unit cost and
+        unit cap is idempotent and keeps the stored cap.
         """
-        if type(grant) is not Grant or type(grant.grant_ref) is not str or not grant.grant_ref:
-            raise AllocationError("grant_link_invalid")
-        headroom = grant_headroom(grant, variants, now=now)
-        if cap_spend is not None and not _positive_ints(cap_spend):
+        _check_grant(grant)
+        if not _int64(now):
+            raise AllocationError("grant_link_invalid", "budget, expires_at and now must be int")
+        _check_budget_args(budget_ref, cap_units, 0, unit_cost)
+        if cap_spend is not None and not _int64(cap_spend):
             raise AllocationError("budget_invalid")
+        ledger_id, identity = _ledger_identity(variants)
+        record = _grant_record(grant)
+        grant_dg = digest(record)
+        try:
+            spent = VariantLedger(Path(identity["path"])).spent(grant.grant_ref)
+            fit_pin = _read_fit_pin(Path(identity["path"]))
+        except sqlite3.Error as exc:
+            raise AllocationError(
+                "verification_source_invalid", "ope516_ledger_unreadable"
+            ) from exc
         with self._tx() as db:
-            row = db.execute(
-                "SELECT cap_units, unit_cost, grant_ref FROM budget WHERE budget_ref=?",
-                (budget_ref,),
-            ).fetchone()
-            if row is not None:
-                if tuple(row) != (cap_units, unit_cost, grant.grant_ref):
+            pin = self._load_pin(db, grant.grant_ref)
+            if pin is None:
+                identity_text, record_text = canonical(identity), canonical(record)
+                db.execute(
+                    "INSERT INTO grant_pin VALUES (?,?,?,?,?,?,?)",
+                    (
+                        grant.grant_ref,
+                        ledger_id,
+                        identity_text,
+                        record_text,
+                        grant_dg,
+                        fit_pin,
+                        _pin_digest(
+                            grant.grant_ref,
+                            ledger_id,
+                            identity_text,
+                            record_text,
+                            grant_dg,
+                            fit_pin,
+                        ),
+                    ),
+                )
+            elif pin[0] != ledger_id:
+                raise AllocationError("ledger_identity_mismatch", grant.grant_ref)
+            elif pin[3] != grant_dg:
+                raise AllocationError("grant_conflict", grant.grant_ref)
+            else:
+                self._bind_fit_pin(db, grant.grant_ref, fit_pin)
+            if db.execute("SELECT 1 FROM budget WHERE budget_ref=?", (budget_ref,)).fetchone():
+                b = self._load_budget(db, budget_ref)
+                if (b.cap_units, b.unit_cost, b.grant_ref, b.ledger_id) != (
+                    cap_units,
+                    unit_cost,
+                    grant.grant_ref,
+                    ledger_id,
+                ):
                     raise AllocationError("budget_conflict", budget_ref)
                 return self._status(db, budget_ref)
-        effective = headroom if cap_spend is None else min(cap_spend, headroom)
-        if effective <= 0:
-            raise AllocationError("grant_unavailable", grant.grant_ref)
-        self._open(budget_ref, cap_units, effective, unit_cost, grant.grant_ref)
-        return self.status(budget_ref)
-
-    def _open(
-        self, budget_ref: str, cap_units: int, cap_spend: int, unit_cost: int, grant_ref: str
-    ) -> None:
-        if type(budget_ref) is not str or not budget_ref:
-            raise AllocationError("budget_invalid", "budget_ref")
-        if not _positive_ints(cap_units, cap_spend, unit_cost) or unit_cost < 1:
-            raise AllocationError("budget_invalid")
-        with self._tx() as db:
-            row = db.execute(
-                "SELECT cap_units, cap_spend, unit_cost, grant_ref FROM budget WHERE budget_ref=?",
-                (budget_ref,),
-            ).fetchone()
-            if row is None:
-                db.execute(
-                    "INSERT INTO budget VALUES (?,?,?,?,?)",
-                    (budget_ref, cap_units, cap_spend, unit_cost, grant_ref),
-                )
-            elif tuple(row) != (cap_units, cap_spend, unit_cost, grant_ref):
-                raise AllocationError("budget_conflict", budget_ref)
+            headroom = _record_headroom(record, spent, now) - self._grant_live(db, grant.grant_ref)
+            effective = headroom if cap_spend is None else min(cap_spend, headroom)
+            if effective <= 0:
+                raise AllocationError("grant_unavailable", grant.grant_ref)
+            self._put_budget(
+                db,
+                budget_ref,
+                cap_units,
+                effective,
+                unit_cost,
+                grant.grant_ref,
+                ledger_id,
+                grant_dg,
+            )
+            return self._status(db, budget_ref)
 
     @staticmethod
     def _used(db: sqlite3.Connection, budget_ref: str) -> tuple[int, int]:
         marks = ",".join("?" for _ in _COUNTED)
-        row = db.execute(
-            f"SELECT COUNT(*), COALESCE(SUM(cost),0) FROM line "  # noqa: S608
-            f"WHERE budget_ref=? AND state IN ({marks})",
+        rows = db.execute(
+            f"SELECT cost FROM line WHERE budget_ref=? AND state IN ({marks})",  # noqa: S608
             (budget_ref, *_COUNTED),
-        ).fetchone()
-        return int(row[0]), int(row[1])
+        ).fetchall()
+        return len(rows), sum(int(r[0]) for r in rows)
 
     @staticmethod
     def _state(db: sqlite3.Connection, budget_ref: str, allocation_id: str) -> str:
@@ -1219,42 +1815,65 @@ class AllocationLedger:
             raise AllocationError("allocation_unknown", allocation_id)
         return str(row[0])
 
+    # -- reserve / commit ----------------------------------------------------------------
+
     def reserve(
-        self, budget_ref: str, plan: AllocationPlan, *, _fail_after: int | None = None
+        self,
+        budget_ref: str,
+        plan: AllocationPlan,
+        *,
+        verified_by: VerificationScope | None = None,
+        now: int | None = None,
+        _fail_after: int | None = None,
     ) -> Json:
         """Atomically reserve a whole plan or refuse it. Replaying the same plan is a no-op.
 
         The charge is re-derived as ``units x the budget's bound unit_cost``. A line priced at
-        anything else, an ``allocation_id`` its content does not imply, or a replay whose
+        anything else, an ``allocation_id`` its whole record does not imply, or a replay whose
         content differs from the stored plan is refused as ``plan_binding_mismatch``.
+
+        On a grant-bound budget ``verified_by`` (the OPE-516 scope) and ``now`` are required and
+        no plan field is trusted: OPE-516 is re-read here (see ``_authorize_grant``), and the
+        grant-wide spend is re-checked against the pinned grant and live OPE-516 spend.
         ``_fail_after`` is a test hook that raises mid-insert to prove rollback.
         """
+        if type(plan) is not AllocationPlan:
+            raise AllocationError("plan_invalid", "plan")
         if plan.status != "allocated" or not plan.lines:
-            raise AllocationError("allocation_held", plan.hold_reason)
+            raise AllocationError("allocation_held", str(plan.hold_reason))
         if plan.control:
             raise AllocationError("control_not_reservable")
+        if type(plan.lines) is not tuple or not all(type(x) is Line for x in plan.lines):
+            raise AllocationError("plan_invalid", "lines")
         keys = {(x.root_ref, x.recipe_id) for x in plan.lines}
         if len(keys) != len(plan.lines) or any(
-            type(x.cost) is not int or x.cost < 1 for x in plan.lines
+            not _int64(x.cost) or x.cost < 1 for x in plan.lines
         ):
             raise AllocationError("plan_invalid", "lines must be unique with positive cost")
-        if plan_allocation_id(plan) != plan.allocation_id:
+        try:
+            implied = plan_allocation_id(plan)
+            record = canonical(plan.as_record())
+        except (TypeError, ValueError) as exc:
+            raise AllocationError("plan_invalid", "record") from exc
+        if implied != plan.allocation_id:
             raise AllocationError(BINDING_MISMATCH, "allocation_id")
-        record = canonical(plan.as_record())
+        if plan.roi_claim is not False:
+            raise AllocationError("plan_invalid", "roi_claim is always false here")
         with self._tx() as db:
-            cap = db.execute(
-                "SELECT cap_units, cap_spend, unit_cost, grant_ref FROM budget WHERE budget_ref=?",
-                (budget_ref,),
-            ).fetchone()
-            if cap is None:
-                raise AllocationError("budget_unknown", budget_ref)
-            cap_units, cap_spend, unit_cost, grant_ref = cap
+            budget = self._load_budget(db, budget_ref)
+            unit_cost = budget.unit_cost
             if any(x.cost != unit_cost for x in plan.lines):
                 raise AllocationError(BINDING_MISMATCH, f"unit_cost {unit_cost}")
-            if grant_ref and (
-                plan.verification_basis != WORKER_RECORD or plan.verification_grant_ref != grant_ref
-            ):
-                raise AllocationError("verification_uncorroborated", grant_ref)
+            grant_ref = budget.grant_ref
+            if grant_ref:
+                if plan.verification_basis != WORKER_RECORD:
+                    raise AllocationError("verification_uncorroborated", grant_ref)
+                if plan.verification_grant_ref != grant_ref:
+                    raise AllocationError("verification_grant_mismatch", grant_ref)
+                if plan.verification_mode == "preview":
+                    raise AllocationError("verification_preview_only", grant_ref)
+                if plan.verification_mode != TRAINING:
+                    raise AllocationError("verification_uncorroborated", "mode")
             prior = db.execute(
                 "SELECT state, record FROM allocation WHERE allocation_id=? AND budget_ref=?",
                 (plan.allocation_id, budget_ref),
@@ -1268,13 +1887,28 @@ class AllocationLedger:
                 raise AllocationError("family_retracted")
             charge = len(plan.lines) * unit_cost
             used_units, used_spend = self._used(db, budget_ref)
-            if used_units + len(plan.lines) > cap_units or used_spend + charge > cap_spend:
+            if (
+                used_units + len(plan.lines) > budget.cap_units
+                or used_spend + charge > budget.cap_spend
+            ):
                 raise AllocationError(
-                    "budget_exceeded", f"{used_units}+{len(plan.lines)}>{cap_units}"
+                    "budget_exceeded", f"{used_units}+{len(plan.lines)}>{budget.cap_units}"
                 )
+            scope_text = ""
+            if grant_ref:
+                scope_text = self._authorize_grant(db, budget, plan, verified_by, now, charge)
+            authority = GRANT_AUTHORITY if grant_ref else PLANNING_RECORD
             db.execute(
-                "INSERT OR REPLACE INTO allocation VALUES (?,?,?,?,?,?)",
-                (plan.allocation_id, budget_ref, "reserved", len(plan.lines), charge, record),
+                "INSERT OR REPLACE INTO allocation VALUES (?,?,?,?,?,?,?)",
+                (
+                    plan.allocation_id,
+                    budget_ref,
+                    "reserved",
+                    len(plan.lines),
+                    charge,
+                    record,
+                    scope_text,
+                ),
             )
             db.execute("DELETE FROM line WHERE state='released'")
             for index, line in enumerate(plan.lines):
@@ -1282,7 +1916,7 @@ class AllocationLedger:
                     raise RuntimeError("simulated crash")
                 try:
                     db.execute(
-                        "INSERT INTO line VALUES (?,?,?,?,?,?,?)",
+                        "INSERT INTO line VALUES (?,?,?,?,?,?,?,?,?,?)",
                         (
                             budget_ref,
                             line.root_ref,
@@ -1291,16 +1925,113 @@ class AllocationLedger:
                             plan.allocation_id,
                             unit_cost,
                             "reserved",
+                            grant_ref,
+                            str(plan.verification_basis),
+                            authority,
                         ),
                     )
                 except sqlite3.IntegrityError as exc:
                     raise AllocationError("line_already_allocated", line.root_ref) from exc
             return {"replayed": False, "state": "reserved", **self._status(db, budget_ref)}
 
+    def _authorize_grant(
+        self,
+        db: sqlite3.Connection,
+        budget: _Budget,
+        plan: AllocationPlan,
+        verified_by: VerificationScope | None,
+        now: int | None,
+        charge: int,
+    ) -> str:
+        """Re-derive a grant-bound plan from OPE-516 itself; return the scope to store."""
+        grant_ref = budget.grant_ref
+        if type(verified_by) is not VerificationScope:
+            raise AllocationError("verification_uncorroborated", "verified_by scope required")
+        if not _int64(now):
+            raise AllocationError("grant_link_invalid", "now")
+        assert now is not None and budget.grant is not None  # narrowed above / by _load_budget
+        if verified_by.grant_ref != grant_ref:
+            raise AllocationError("verification_grant_mismatch", grant_ref)
+        if verified_by.mode != TRAINING:
+            raise AllocationError("verification_preview_only", grant_ref)
+        corr = _corroborate(verified_by)
+        if corr.ledger_id != budget.ledger_id:
+            raise AllocationError("ledger_identity_mismatch", grant_ref)
+        self._bind_fit_pin(db, grant_ref, corr.fit_pin)
+        if plan.verification_scope != corr.scope_digest:
+            raise AllocationError("verification_scope_mismatch", grant_ref)
+        if plan.verification_ref != corr.manifest_digest:
+            raise AllocationError("verification_stale", "OPE-516 manifest changed since the plan")
+        for line in plan.lines:
+            why = corr.root_reason(line.family_id, line.root_ref)
+            if why:
+                raise AllocationError("verification_uncorroborated", f"{line.family_id}: {why}")
+        if _record_headroom(budget.grant, 0, now) == 0:
+            raise AllocationError("grant_unavailable", f"{grant_ref} expired or unauthorized")
+        headroom = _record_headroom(budget.grant, corr.variants.spent(grant_ref), now)
+        live = self._grant_live(db, grant_ref)
+        if live + charge > headroom:
+            raise AllocationError("grant_headroom_exceeded", f"{live}+{charge}>{headroom}")
+        seal = verified_by.seal
+        return canonical(
+            {
+                "policy_revision": verified_by.policy_revision,
+                "grant_ref": grant_ref,
+                "mode": verified_by.mode,
+                "seal": {
+                    "assignments": {k: list(v) for k, v in seal.assignments.items()},
+                    "cases": {k: list(v) for k, v in seal.cases.items()},
+                    "digest": seal.digest,
+                },
+            }
+        )
+
+    def _recheck_grant(self, db: sqlite3.Connection, budget: _Budget, allocation_id: str) -> None:
+        """At commit: every reserved line's root must still be live in the bound OPE-516 ledger."""
+        row = db.execute(
+            "SELECT scope FROM allocation WHERE allocation_id=? AND budget_ref=?",
+            (allocation_id, budget.ref),
+        ).fetchone()
+        assert budget.identity is not None  # grant-bound: pinned by _load_budget
+        try:
+            stored = json.loads(row[0])
+            seal = SplitSeal(
+                {k: tuple(v) for k, v in stored["seal"]["assignments"].items()},
+                {k: tuple(v) for k, v in stored["seal"]["cases"].items()},
+                stored["seal"]["digest"],
+            )
+            scope = VerificationScope(
+                budget.identity["path"],
+                seal,
+                stored["policy_revision"],
+                stored["grant_ref"],
+                stored["mode"],
+            )
+        except (TypeError, ValueError, KeyError, AttributeError) as exc:
+            raise AllocationError("ledger_integrity_failed", f"allocation {allocation_id}") from exc
+        if scope.grant_ref != budget.grant_ref or scope.mode != TRAINING:
+            raise AllocationError("ledger_integrity_failed", f"allocation {allocation_id}")
+        corr = _corroborate(scope)
+        if corr.ledger_id != budget.ledger_id:
+            raise AllocationError("ledger_identity_mismatch", budget.grant_ref)
+        self._bind_fit_pin(db, budget.grant_ref, corr.fit_pin)
+        for fam, root in db.execute(
+            "SELECT family_id, root_ref FROM line WHERE allocation_id=? AND budget_ref=?"
+            " AND state='reserved' ORDER BY family_id, root_ref",
+            (allocation_id, budget.ref),
+        ).fetchall():
+            why = corr.root_reason(str(fam), str(root))
+            if why:
+                raise AllocationError("verification_uncorroborated", f"{fam}: {why}")
+
     def commit(self, budget_ref: str, allocation_id: str) -> Json:
+        """Mark a reservation spent. On a grant-bound budget OPE-516 is re-read first."""
         with self._tx() as db:
+            budget = self._load_budget(db, budget_ref)
             state = self._state(db, budget_ref, allocation_id)
             if state == "reserved":
+                if budget.grant_ref:
+                    self._recheck_grant(db, budget, allocation_id)
                 db.execute(
                     "UPDATE allocation SET state='committed' "
                     "WHERE allocation_id=? AND budget_ref=?",
@@ -1318,6 +2049,7 @@ class AllocationLedger:
     def release(self, budget_ref: str, allocation_id: str) -> Json:
         """Discard an unfinished (reserved) selection; a committed one cannot be released."""
         with self._tx() as db:
+            self._load_budget(db, budget_ref)
             state = self._state(db, budget_ref, allocation_id)
             if state == "committed":
                 raise AllocationError("allocation_committed")
@@ -1346,35 +2078,47 @@ class AllocationLedger:
             )
             return self._status(db, budget_ref)
 
-    def live_lines(self, budget_ref: str) -> list[tuple[str, str, str]]:
-        """Lines usable downstream: reserved or committed, never invalidated or released."""
+    def live_lines(self, budget_ref: str) -> list[LiveLine]:
+        """Lines usable downstream (reserved or committed), each with its authority.
+
+        ``authority="planning_record"`` lines (planning budget, caller-asserted or unchecked
+        verification) are never authorized spend; only ``"ope516_grant"`` lines were re-derived
+        from OPE-516 at reserve.
+        """
         with self._tx(begin=False) as db:
+            self._load_budget(db, budget_ref)
             rows = db.execute(
-                "SELECT family_id, root_ref, recipe_id FROM line WHERE budget_ref=? "
-                "AND state IN ('reserved','committed') ORDER BY family_id, root_ref, recipe_id",
+                "SELECT family_id, root_ref, recipe_id, grant_ref, verification_basis, authority"
+                " FROM line WHERE budget_ref=? AND state IN ('reserved','committed')"
+                " ORDER BY family_id, root_ref, recipe_id",
                 (budget_ref,),
             ).fetchall()
-        return [(r[0], r[1], r[2]) for r in rows]
+        return [LiveLine(*(str(v) for v in r)) for r in rows]
 
     def status(self, budget_ref: str) -> Json:
         with self._tx(begin=False) as db:
             return self._status(db, budget_ref)
 
     def _status(self, db: sqlite3.Connection, budget_ref: str) -> Json:
-        cap = db.execute(
-            "SELECT cap_units, cap_spend, unit_cost, grant_ref FROM budget WHERE budget_ref=?",
-            (budget_ref,),
-        ).fetchone()
-        if cap is None:
-            raise AllocationError("budget_unknown", budget_ref)
+        b = self._load_budget(db, budget_ref)
         units, spend = self._used(db, budget_ref)
+        marks = ",".join("?" for _ in _COUNTED)
+        by_basis = db.execute(
+            f"SELECT verification_basis, COUNT(*) FROM line WHERE budget_ref=?"  # noqa: S608
+            f" AND state IN ({marks}) GROUP BY verification_basis ORDER BY verification_basis",
+            (budget_ref, *_COUNTED),
+        ).fetchall()
         return {
-            "cap_units": cap[0],
-            "cap_spend": cap[1],
-            "unit_cost": cap[2],
-            "grant_ref": cap[3],
+            "cap_units": b.cap_units,
+            "cap_spend": b.cap_spend,
+            "unit_cost": b.unit_cost,
+            "grant_ref": b.grant_ref,
+            "authority": GRANT_AUTHORITY if b.grant_ref else "planning_record_only",
+            "verification_required": WORKER_RECORD if b.grant_ref else "none",
+            "ledger_id": b.ledger_id,
+            "lines_by_verification_basis": {str(k): int(n) for k, n in by_basis},
             "used_units": units,
             "used_spend": spend,
-            "remaining_units": cap[0] - units,
-            "remaining_spend": cap[1] - spend,
+            "remaining_units": b.cap_units - units,
+            "remaining_spend": b.cap_spend - spend,
         }
