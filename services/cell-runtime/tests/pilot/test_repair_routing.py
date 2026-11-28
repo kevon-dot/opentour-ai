@@ -5,10 +5,13 @@ Local and simulated only: no provider, protected set, ledger reservation or fit 
 
 from __future__ import annotations
 
+import glob
 import io
+import os
 import sqlite3
 import sys
 import threading
+from contextlib import closing
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -778,8 +781,19 @@ def test_replay_with_an_unchanged_authority_still_returns_one_evaluation(
 # Observed through the interpreter's audit hook rather than by patching callables. Patching
 # `builtins.open`, `os.open` and `sqlite3.connect` leaves `io.open` and `pathlib.Path.open` /
 # `.read_text` / `.read_bytes` unobserved, so a read through any of those passed as zero
-# protected reads. The `open` audit event is raised underneath all of them.
-_WATCHED = "open", "sqlite3.connect", "mmap.__new__"
+# protected reads. The `open` audit event is raised underneath all of them. Directory listing
+# opens no file, so it is watched separately: `os.listdir`, `os.scandir` and `glob.glob` (and
+# its `root_dir`/`dir_fd` form) each raise their own event, and `pathlib` iteration and globbing
+# go through the first two.
+_WATCHED = (
+    "open",
+    "sqlite3.connect",
+    "mmap.__new__",
+    "os.listdir",
+    "os.scandir",
+    "glob.glob",
+    "glob.glob/2",
+)
 _WATCHING: list[tuple[str, str]] | None = None
 
 
@@ -789,6 +803,9 @@ def _audit(event: str, args: tuple[object, ...]) -> None:
         return
     try:
         target = str(args[0]) if args else ""
+        if event == "glob.glob/2" and args[2] is not None:
+            # (pathname, recursive, root_dir, dir_fd): a relative pattern names nothing alone.
+            target = os.path.join(str(args[2]), target)
     except Exception:  # pragma: no cover - a hook that raises would break the interpreter
         target = "<unprintable>"
     sink.append((event, target))
@@ -821,8 +838,8 @@ def test_routing_opens_nothing_and_reads_no_protected_rows(
     store: rr.RepairRoutingStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # Acceptance 7, observed rather than read back from the receipt's own zero: the decision
-    # performs no file, database or memory-mapping access at all, and the durable path touches
-    # exactly one file, the router's private evaluation journal.
+    # performs no file, database, memory-mapping or directory-listing access at all, and the
+    # durable path touches exactly one file, the router's private evaluation journal.
     #
     # What the audit hook still cannot see, so this test does not claim it: a raw read on a
     # descriptor that was already open before the window (including one inherited from a
@@ -880,9 +897,66 @@ def test_the_protected_read_monitor_catches_every_read_route(
     assert ("open", str(sentinel)) in watched.seen
 
 
+@pytest.mark.parametrize(
+    ("how", "event"),
+    [
+        ("os_listdir", "os.listdir"),
+        ("os_scandir", "os.scandir"),
+        ("glob_glob", "glob.glob"),
+        ("glob_glob_root_dir", "glob.glob/2"),
+        ("path_iterdir", "os.listdir"),
+        ("path_glob", "os.scandir"),
+    ],
+)
+def test_the_monitor_catches_every_directory_listing_route(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, how: str, event: str
+) -> None:
+    # Listing a protected directory opens no file, so the `open` event alone would let a router
+    # enumerate protected case ids unobserved. Each route must surface its own listing event.
+    protected = tmp_path / "generated-protected"
+    protected.mkdir()
+    (protected / "generated-protected-1.jsonl").write_text("{}\n")
+    real = comparison_plan.freeze_plan
+    listed: dict[str, object] = {}
+
+    def leaky(**kw: Any) -> Any:
+        if how == "os_listdir":
+            listed["names"] = os.listdir(protected)
+        elif how == "os_scandir":
+            with os.scandir(protected) as entries:
+                listed["names"] = [e.name for e in entries]
+        elif how == "glob_glob":
+            listed["names"] = glob.glob(str(protected / "*.jsonl"))
+        elif how == "glob_glob_root_dir":
+            listed["names"] = glob.glob("*.jsonl", root_dir=protected)
+        elif how == "path_iterdir":
+            listed["names"] = [p.name for p in protected.iterdir()]
+        else:
+            listed["names"] = [p.name for p in protected.glob("*.jsonl")]
+        return real(**kw)
+
+    monkeypatch.setattr(comparison_plan, "freeze_plan", leaky)
+    req = request(data_fix(), scheduling=scheduling())
+    with monkeypatch.context() as patch:
+        watched = _Access(patch)
+        rr.decide(req)
+    assert listed["names"]
+    assert any(
+        kind == event and target.startswith(str(protected)) for kind, target in watched.seen
+    ), watched.seen
+
+
 # OPE-568: grouped repair cases with identical features must agree. "Grouped" is the
 # independence grouping (entity OR family, transitive, case-blind); case_id stays a
 # case-sensitive row key.
+
+
+def family_conflict(family_b: str = "Family-G") -> list[rr.DevelopmentCase]:
+    """Two entities sharing only a family, identical features, conflicting references."""
+    return independent_residual() + [
+        case("ga", "x", "b", "a", entity="Entity-G1", family="Family-G"),
+        case("gb", "x", "b", "b", entity="Entity-G2", family=family_b),
+    ]
 
 
 @pytest.mark.parametrize("family_b", ["Family-G", "family-g"])
@@ -891,26 +965,25 @@ def test_grouped_cases_sharing_only_a_family_must_agree(
 ) -> None:
     # Different entities, one family (also by case variant), identical features, conflicting
     # references: one group, so a conflict the customer must resolve before routing.
-    cases = independent_residual() + [
-        case("ga", "x", "b", "a", entity="Entity-G1", family="Family-G"),
-        case("gb", "x", "b", "b", entity="Entity-G2", family=family_b),
-    ]
-    r = store.evaluate(request(cases))
+    r = store.evaluate(request(family_conflict(family_b)))
     assert (r["outcome"], r["reason_code"]) == ("request_evidence", "contradictory_labels")
     assert r["next_evidence"] == ["resolve_contradictory_labels"]
     assert r["residual_roots"] == [] and r["recipe_selection"] is None
 
 
-def test_transitively_grouped_cases_with_identical_features_must_agree(
-    store: rr.RepairRoutingStore,
-) -> None:
-    # t1 and t3 share neither entity nor family; t2 joins them into one group.
-    cases = independent_residual() + [
+def transitive_conflict() -> list[rr.DevelopmentCase]:
+    """t1 and t3 share neither entity nor family; t2 chains them into one group."""
+    return independent_residual() + [
         case("t1", "x", "b", "a", entity="generated-te1", family="generated-tf1"),
         case("t2", "w", "b", "a", entity="generated-te2", family="generated-tf1"),
         case("t3", "x", "b", "b", entity="generated-te2", family="generated-tf2"),
     ]
-    r = store.evaluate(request(cases))
+
+
+def test_transitively_grouped_cases_with_identical_features_must_agree(
+    store: rr.RepairRoutingStore,
+) -> None:
+    r = store.evaluate(request(transitive_conflict()))
     assert (r["outcome"], r["reason_code"]) == ("request_evidence", "contradictory_labels")
 
 
@@ -958,7 +1031,37 @@ def test_grouped_cases_matching_only_the_rule_feature_are_not_a_contradiction() 
     assert rr.decide(request(cases))["reason_code"] != "contradictory_labels"
 
 
+def unlabeled_family_sibling() -> list[rr.DevelopmentCase]:
+    """A labeled case and an unlabeled one sharing only a family, with identical features."""
+    return independent_residual() + [
+        case("na", "x", "b", "a", entity="Entity-N1", family="Family-N"),
+        case("nb", "x", "b", None, entity="Entity-N2", family="family-n"),
+    ]
+
+
+def test_an_unlabeled_grouped_sibling_holds_as_a_contradiction() -> None:
+    # A missing reference disagrees with a present one inside a group, so this now holds as
+    # contradictory_labels (checked first) rather than unusable_labels. Both are holds.
+    r = rr.decide(request(unlabeled_family_sibling()))
+    assert (r["outcome"], r["reason_code"]) == ("request_evidence", "contradictory_labels")
+    # Ungrouped, the same unlabeled row is not a contradiction, only an unusable label.
+    apart = independent_residual() + [
+        case("na", "x", "b", "a", entity="Entity-N1", family="Family-N1"),
+        case("nb", "x", "b", None, entity="Entity-N2", family="Family-N2"),
+    ]
+    r = rr.decide(request(apart))
+    assert (r["outcome"], r["reason_code"]) == ("request_evidence", "unusable_labels")
+
+
 def test_case_id_stays_a_case_sensitive_row_key() -> None:
+    """Case-variant ids are separate rows, while grouping stays case-blind (decision 2).
+
+    ``Case-1`` and ``case-1`` are two distinct development rows: case_id is a case-sensitive row
+    key and nothing deduplicates them by entity and features. The independence grouping that
+    the contradiction check keys on is case-blind, so the same two rows also fall into one group
+    and must agree. That overlap is intended by decision 2 on OPE-568, not a defect: the rows
+    stay countable as rows, and only their group membership is shared.
+    """
     base = independent_residual()
     row = case("cs", "x", "b", "a", entity="generated-entity-cs", family="generated-family-cs")
     upper, lower = replace(row, case_id="Case-1"), replace(row, case_id="case-1")
@@ -972,3 +1075,136 @@ def test_case_id_stays_a_case_sensitive_row_key() -> None:
         rr.decide(request(base + [upper, replace(row, case_id="Case-1")]))
     conflicting = rr.decide(request(base + [upper, replace(lower, reference="b")]))
     assert conflicting["reason_code"] == "contradictory_labels"
+
+
+def _pinned_requests() -> list[tuple[str, rr.RoutingRequest]]:
+    """A fixed fixture set spanning every outcome and each OPE-568 grouping shape."""
+    cs = case("cs", "x", "b", "a", entity="generated-entity-cs", family="generated-family-cs")
+    upper, lower = replace(cs, case_id="Case-1"), replace(cs, case_id="case-1")
+    second_feature = [
+        replace(
+            case("ka", "x", "b", "a", entity="Entity-K1", family="Family-K"),
+            features={"bucket": "x", "channel": "generated-p"},
+        ),
+        replace(
+            case("kb", "x", "b", "b", entity="Entity-K2", family="family-k"),
+            features={"bucket": "x", "channel": "generated-q"},
+        ),
+    ]
+    ungrouped = [
+        case("ua", "x", "b", "a", entity="generated-ue1", family="generated-uf1"),
+        case("ub", "x", "b", "b", entity="generated-ue2", family="generated-uf2"),
+    ]
+    empty = rr.ComparisonScheduling(
+        digest("generated-intake"), (), "generated-incumbent-1", "generated-audience"
+    )
+    return [
+        ("simple_repair", request(data_fix(), scheduling=scheduling())),
+        ("simple_repair_unscheduled", request(data_fix())),
+        ("simple_repair_empty_population", request(data_fix(), scheduling=empty)),
+        ("fit_eligible", request(independent_residual())),
+        ("same_entity_residual", request(same_entity_residual())),
+        ("correct_only", request(correct())),
+        (
+            "keep_incumbent",
+            request(
+                group("ok", 8, "y", "b", "b") + group("er", 1, "z", "b", "a"),
+                t=terms(max_wrong_automatic_bps=2_000),
+            ),
+        ),
+        ("slice_unobserved", request(data_fix(), t=terms(critical_slices=("bucket:q",)))),
+        ("family_conflict_exact", request(family_conflict())),
+        ("family_conflict_case_variant", request(family_conflict("family-g"))),
+        ("transitive_conflict", request(transitive_conflict())),
+        ("unlabeled_family_sibling", request(unlabeled_family_sibling())),
+        ("ungrouped_identical_features", request(independent_residual() + ungrouped)),
+        ("grouped_second_feature_differs", request(independent_residual() + second_feature)),
+        ("case_variant_ids_agree", request(independent_residual() + [upper, lower])),
+        (
+            "case_variant_ids_conflict",
+            request(independent_residual() + [upper, replace(lower, reference="b")]),
+        ),
+    ]
+
+
+def pinned_decisions() -> list[list[Any]]:
+    """Every pinned decision with its router_revision stamp removed.
+
+    The stamp is stripped so the digest moves only when an outcome, reason code or recorded
+    body moves, never merely because the constant was bumped.
+    """
+    out: list[list[Any]] = []
+    for name, req in _pinned_requests():
+        body = rr.decide(req)
+        body.pop("router_revision", None)
+        out.append([name, body])
+    return out
+
+
+# One row per router revision, oldest first, each recorded from that revision's decide() over
+# _pinned_requests(). APPEND a row when ROUTER_REVISION is bumped; never edit an existing row.
+# v2 is the router as merged for OPE-417, before OPE-568 changed the contradiction key.
+_DECISION_LEDGER = {
+    "repair-routing.decide.v2": "e6825cbb4091c45a978102e3648d61d06da4dd0c1bcc8a75b3c509c3d235453e",
+    "repair-routing.decide.v3": "6547db657dd34c21a924c7703d02abd0c186f2b6c3144cc46bc051d6288840f2",
+}
+
+
+def test_routing_outputs_cannot_change_without_a_router_revision_bump() -> None:
+    # A stored evaluation is refused on replay only when ROUTER_REVISION moved, so a change to
+    # routing outputs under an unchanged revision would silently replay stale decisions.
+    assert list(_DECISION_LEDGER)[-1] == rr.ROUTER_REVISION, (
+        "ROUTER_REVISION changed: append its row to _DECISION_LEDGER"
+    )
+    assert digest(pinned_decisions()) == _DECISION_LEDGER[rr.ROUTER_REVISION], (
+        "routing outputs changed on the pinned fixtures: bump ROUTER_REVISION and append a row"
+    )
+    # Every revision is a behaviour change the pinned set observes; a bump it cannot see means
+    # the fixture set must grow to cover the change.
+    assert len(set(_DECISION_LEDGER.values())) == len(_DECISION_LEDGER)
+
+
+_PREVIOUS_ROUTER_REVISION = "repair-routing.decide.v2"
+# What the v2 router decided for family_conflict(), recorded by running it (OPE-417 as merged).
+_V2_FAMILY_CONFLICT = {"outcome": "fit_eligible", "reason_code": "independent_material_residual"}
+
+
+def test_a_decision_stored_under_the_previous_revision_is_refused_not_reinterpreted(
+    store: rr.RepairRoutingStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # OPE-568 changes the outcome for a family-only conflict. A receipt the v2 router stored for
+    # it must not be replayed, and must not be silently re-decided over the durable record.
+    assert rr.ROUTER_REVISION == "repair-routing.decide.v3" != _PREVIOUS_ROUTER_REVISION
+    req = request(family_conflict())
+    with monkeypatch.context() as patch:
+        patch.setattr(rr, "ROUTER_REVISION", _PREVIOUS_ROUTER_REVISION)
+        written = store.evaluate(req)
+    assert written["router_revision"] == _PREVIOUS_ROUTER_REVISION
+    # Give the row the outcome the v2 router produced for this request: v2 keyed the check on
+    # entity plus features, so it missed the family-only conflict and routed the residual to fit.
+    old = {k: v for k, v in written.items() if k != "replayed"} | _V2_FAMILY_CONFLICT
+    with closing(sqlite3.connect(store.path)) as db, db:
+        db.execute("UPDATE evaluations SET body=?", (canonical(old),))
+    with closing(sqlite3.connect(store.path)) as db:
+        before = db.execute("SELECT * FROM evaluations").fetchall()
+
+    with pytest.raises(rr.RoutingError, match="EVALUATION_ROUTER_REVISION_CHANGED"):
+        store.evaluate(req)
+    assert store.count() == 1
+    with closing(sqlite3.connect(store.path)) as db:
+        assert db.execute("SELECT * FROM evaluations").fetchall() == before
+    # The durable record is kept exactly as the old router left it ...
+    kept = store.read(written["evaluation_id"])
+    assert kept is not None and kept["router_revision"] == _PREVIOUS_ROUTER_REVISION
+    assert {k: kept[k] for k in _V2_FAMILY_CONFLICT} == _V2_FAMILY_CONFLICT
+    # Nor does the eligibility read take the old router's fit_eligible as today's verdict.
+    eligibility = store.current_eligibility(
+        written["evaluation_id"], snapshot=req.snapshot, mandate=req.mandate
+    )
+    assert (eligibility["eligible"], eligibility["reason_code"]) == (
+        False,
+        "evaluation_router_revision_changed",
+    )
+    # ... and the current router, deciding afresh, holds the conflict instead.
+    fresh = rr.decide(req)
+    assert (fresh["outcome"], fresh["reason_code"]) == ("request_evidence", "contradictory_labels")

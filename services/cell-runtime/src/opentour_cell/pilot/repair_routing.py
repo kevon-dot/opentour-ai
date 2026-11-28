@@ -35,7 +35,11 @@ SCHEMA = "opentour.pilot.repair-routing.v1"
 # anything they call can alter the outcome, reason code or recorded body for some input. A stored
 # evaluation carrying an older value is refused, not re-decided: the record is durable and
 # immutable, and silently replacing it would destroy the evidence trail it exists to provide.
-ROUTER_REVISION = "repair-routing.decide.v2"
+#
+# v3 (OPE-568): the contradiction check keys on the independence group plus the full feature
+# map instead of the entity plus features, so cases grouped only by family or by a transitive
+# chain now hold as contradictory_labels where v2 could route them onward.
+ROUTER_REVISION = "repair-routing.decide.v3"
 OUTCOMES = ("keep_incumbent", "simple_repair", "request_evidence", "fit_eligible")
 _ORIGINS_COUNTED = ("live",)
 _DEV = "development"
@@ -858,7 +862,11 @@ class RepairRoutingStore:
         _need(receipt is not None, "evaluation_unavailable")
         assert receipt is not None
         reason = None
-        if receipt["outcome"] != "fit_eligible":
+        if receipt.get("router_revision") != ROUTER_REVISION:
+            # A receipt another router decided is not this router's verdict, so an old
+            # fit_eligible outcome is held rather than read as today's eligibility.
+            reason = "evaluation_router_revision_changed"
+        elif receipt["outcome"] != "fit_eligible":
             reason = "not_fit_eligible"
         elif not mandate.active:
             reason = "mandate_withdrawn_or_expired"
